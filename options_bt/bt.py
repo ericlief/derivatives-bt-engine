@@ -16,9 +16,9 @@ def setup_logger(log_file: str = None):
     """
     if log_file is None:
         # Create logs directory if it doesn't exist
-        os.makedirs('logs', exist_ok=True)
+        os.makedirs('../../logs', exist_ok=True)
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        log_file = f'logs/backtest_{timestamp}.log'
+        log_file = f'../logs/backtest_{timestamp}.log'
     
     # Configure logging
     logging.basicConfig(
@@ -770,151 +770,161 @@ def preprocess_options_data(options_chain: pd.DataFrame) -> pd.DataFrame:
         logger.info("Calculating days to expiration...")
         df['dte'] = (df['expire_date'] - df.index).dt.days
     
+    if 'c_size' in df.columns:
+        pass  # need to preprocess
+
+
     logger.info("Sample of preprocessed data:")
     logger.debug(str(df.head(5)))
 
     return df
 
-def load_backtest_data(spx_file_path: str, 
-                       options_chain_file_path: str, 
-                       vix_file_path: str,
-                       use_preprocessed: bool = False,
-                       save_preprocessed: bool = False) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def preprocess_spx_data(spx_data: pd.DataFrame) -> pd.DataFrame:
     """
-    Load and prepare SPX price data, options chain data, and VIX data for backtesting.
+    Clean and preprocess SPX price data.
     
     Args:
-        spx_file_path: Path to CSV file containing SPX price history
-        options_chain_file_path: Path to CSV file containing options chain data
-        vix_file_path: Path to CSV file containing VIX data
-        use_preprocessed: Whether to use preprocessed data files if available
+        spx_data: Raw SPX price DataFrame
+    
+    Returns:
+        Cleaned SPX price DataFrame
+    """
+    logger.info("Preprocessing SPX data...")
+    
+    # Make a copy to avoid modifying the original
+    df = spx_data.copy()
+    
+    # Normalize the DataFrame index if needed
+    try:
+        df.index = pd.DatetimeIndex([pd.Timestamp(idx).date() for idx in df.index])
+    except Exception as e:
+        logger.info(f"Index normalization skipped: {e}")
+    
+    # Ensure all numeric columns are properly typed
+    numeric_cols = ['open', 'high', 'low', 'close']
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    # Sort by date
+    df.sort_index(inplace=True)
+    
+    return df
+
+def preprocess_vix_data(vix_data: pd.DataFrame) -> pd.DataFrame:
+    """
+    Clean and preprocess VIX data.
+    
+    Args:
+        vix_data: Raw VIX DataFrame
+    
+    Returns:
+        Cleaned VIX DataFrame
+    """
+    logger.info("Preprocessing VIX data...")
+    
+    # Make a copy to avoid modifying the original
+    df = vix_data.copy()
+    
+    # Normalize the DataFrame index if needed
+    try:
+        df.index = pd.DatetimeIndex([pd.Timestamp(idx).date() for idx in df.index])
+    except Exception as e:
+        logger.info(f"Index normalization skipped: {e}")
+    
+    # Ensure all numeric columns are properly typed
+    numeric_cols = ['open', 'high', 'low', 'close']
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    # Sort by date
+    df.sort_index(inplace=True)
+    
+    return df
+
+def load_backtest_data(data_dir, use_preprocessed=True, save_preprocessed=True):
+    """
+    Load and preprocess data for backtesting from a standard data directory.
+    
+    Args:
+        data_dir: Path to directory containing the data files
+        use_preprocessed: Whether to use preprocessed data files
         save_preprocessed: Whether to save preprocessed data for future use
     
     Returns:
-        Tuple of (spx_data, options_chain_data, vix_data) DataFrames
+        tuple: (options_chain, spx_data, vix_data)
     """
-    # Define preprocessed file paths
-    spx_preprocessed_path = f"{os.path.splitext(spx_file_path)[0]}_preprocessed.pkl"
-    options_preprocessed_path = f"{os.path.splitext(options_chain_file_path)[0]}_preprocessed.pkl"
-    vix_preprocessed_path = f"{os.path.splitext(vix_file_path)[0]}_preprocessed.pkl"
+    # Define standard file names
+    raw_files = {
+        'options': os.path.join(data_dir, 'options.csv'),
+        'spx': os.path.join(data_dir, 'spx.csv'),
+        'vix': os.path.join(data_dir, 'vix.csv')
+    }
     
-    # Try to load preprocessed data if requested
-    if use_preprocessed:
-        try:
-            logger.info(f"Attempting to load preprocessed data...")
+    processed_files = {
+        'options': os.path.join(data_dir, 'options.pkl'),
+        'options_pivoted': os.path.join(data_dir, 'options_pivoted.pkl'),
+        'spx': os.path.join(data_dir, 'spx.pkl'),
+        'vix': os.path.join(data_dir, 'vix.pkl')
+    }
+    
+    try:
+        # Try to load preprocessed data if requested
+        if use_preprocessed:
+            if os.path.exists(processed_files['options_pivoted']):
+                logger.info("Loading pivoted options chain")
+                options_chain = pd.read_pickle(processed_files['options_pivoted'])
+                
+                if os.path.exists(processed_files['spx']) and os.path.exists(processed_files['vix']):
+                    logger.info("Loading preprocessed SPX and VIX data")
+                    spx_data = pd.read_pickle(processed_files['spx'])
+                    vix_data = pd.read_pickle(processed_files['vix'])
+                    return options_chain, spx_data, vix_data
             
-            if os.path.exists(spx_preprocessed_path) and os.path.exists(options_preprocessed_path) and os.path.exists(vix_preprocessed_path):
-                spx_data = pd.read_pickle(spx_preprocessed_path)
-                options_chain = pd.read_pickle(options_preprocessed_path)
-                vix_data = pd.read_pickle(vix_preprocessed_path)
+            elif all(os.path.exists(f) for f in [processed_files['options'], processed_files['spx'], processed_files['vix']]):
+                logger.info("Loading non-pivoted preprocessed data")
+                options_chain = pd.read_pickle(processed_files['options'])
+                spx_data = pd.read_pickle(processed_files['spx'])
+                vix_data = pd.read_pickle(processed_files['vix'])
                 
-                logger.info(f"Successfully loaded preprocessed data!")
-                logger.info(f"SPX data: {len(spx_data)} rows")
-                logger.info(f"Options chain: {len(options_chain)} rows")
-                logger.info(f"VIX data: {len(vix_data)} rows")
-                
-                return spx_data, options_chain, vix_data
-            else:
-                logger.info(f"Preprocessed data files not found. Loading from original sources.")
-        except Exception as e:
-            logger.info(f"Error loading preprocessed data: {e}")
-            logger.info(f"Loading from original sources instead.")
-    
-    # Load SPX data
-    spx_data = pd.read_csv(spx_file_path, index_col=0, parse_dates=True)
-    # Ensure index dates are normalized (no time component)
-    try:
-        spx_data.index = pd.DatetimeIndex(spx_data.index.date)
-    except AttributeError:
-        # Alternative approach if .date is not available
-        spx_data.index = pd.DatetimeIndex([pd.Timestamp(idx).date() for idx in spx_data.index])
-    
-    spx_data.sort_index(inplace=True)
-    
-    # Load options chain data
-    options_chain = pd.read_csv(options_chain_file_path, parse_dates=['quote_readtime', 'expire_date'], index_col=0)
-    
-    # Normalize the index to remove time components
-    try:
-        options_chain.index = pd.DatetimeIndex(options_chain.index.date)
-    except AttributeError:
-        # Alternative approach if .date is not available
-        options_chain.index = pd.DatetimeIndex([pd.Timestamp(idx).date() for idx in options_chain.index])
-    
-    # Normalize expire_date column
-    if 'expire_date' in options_chain.columns:
-        options_chain['expire_date'] = pd.to_datetime(options_chain['expire_date'])
-        options_chain['expire_date'] = options_chain['expire_date'].dt.normalize()
-    
-    # Normalize other date columns
-    date_cols = ['quote_readtime']
-    for col in date_cols:
-        if col in options_chain.columns:
-            options_chain[col] = pd.to_datetime(options_chain[col])
-            options_chain[col] = options_chain[col].dt.normalize()
-    
-    pd.set_option("display.max_columns", None)  # Show all columns
-    options_chain.sort_index(inplace=True)
-    
-    # Load VIX data
-    vix_data = pd.read_csv(vix_file_path, index_col=0, parse_dates=True)
-    # Ensure index dates are normalized (no time component)
-    try:
-        vix_data.index = pd.DatetimeIndex(vix_data.index.date)
-    except AttributeError:
-        # Alternative approach if .date is not available
-        vix_data.index = pd.DatetimeIndex([pd.Timestamp(idx).date() for idx in vix_data.index])
-    
-    vix_data.sort_index(inplace=True)
-    
-    logger.info(f"Loaded SPX data from {spx_file_path}: {len(spx_data)} rows")
-    logger.info(f"Loaded options chain data from {options_chain_file_path}: {len(options_chain)} rows")
-    logger.info(f"Loaded VIX data from {vix_file_path}: {len(vix_data)} rows")
-
-    # Print a sample of the loaded data
-    logger.info("\nSample of SPX data:")
-    logger.info(spx_data.head())
-    
-    logger.info("\nSample of options chain data:")
-    logger.info(options_chain.head())
-    
-    logger.info("\nSample of VIX data:")
-    logger.info(vix_data.head())
-
-    # Display date format information for debugging
-    logger.info("\nDate format information:")
-    logger.info(f"SPX index type: {type(spx_data.index[0])}")
-    if not options_chain.empty:
-        logger.info(f"Options chain index type: {type(options_chain.index[0])}")
-        if 'expire_date' in options_chain.columns:
-            logger.info(f"Options expire_date type: {type(options_chain['expire_date'].iloc[0])}")
-    
-    # Check date ranges and formats
-    logger.info(f"\nSPX date range: {spx_data.index.min()} to {spx_data.index.max()}")
-    if not options_chain.empty and 'expire_date' in options_chain.columns:
-        logger.info(f"Options chain date range: {options_chain.index.min()} to {options_chain.index.max()}")
-        logger.info(f"Expiration dates range: {options_chain['expire_date'].min()} to {options_chain['expire_date'].max()}")
-    
-    # VIX data date information
-    if not vix_data.empty:
-        logger.info(f"VIX date range: {vix_data.index.min()} to {vix_data.index.max()}")
-    
-    # Clean and preprocess the options data
-    options_chain = preprocess_options_data(options_chain)
-    logger.info(f"After preprocessing: {len(options_chain)} rows in options chain")
-    
-    # Save preprocessed data if requested
-    if save_preprocessed:
-        try:
-            logger.info(f"Saving preprocessed data for future use...")
-            spx_data.to_pickle(spx_preprocessed_path)
-            options_chain.to_pickle(options_preprocessed_path)
-            vix_data.to_pickle(vix_preprocessed_path)
-            logger.info(f"Preprocessed data saved successfully!")
-        except Exception as e:
-            logger.info(f"Error saving preprocessed data: {e}")
-    
-    return spx_data, options_chain, vix_data
+                # Pivot the options chain
+                logger.info("Pivoting options chain")
+                options_chain = prepare_options_chain(options_chain, processed_files['options_pivoted'], "default")
+                return options_chain, spx_data, vix_data
+        
+        # Load and preprocess original data
+        logger.info("Loading and preprocessing original data files")
+        options_chain = pd.read_csv(raw_files['options'], index_col=0, parse_dates=True)
+        spx_data = pd.read_csv(raw_files['spx'], index_col=0, parse_dates=True)
+        vix_data = pd.read_csv(raw_files['vix'], index_col=0, parse_dates=True)
+        
+        # Preprocess the data
+        options_chain = preprocess_options_data(options_chain)
+        spx_data = preprocess_spx_data(spx_data)
+        vix_data = preprocess_vix_data(vix_data)
+        
+        # Save preprocessed non-pivoted data if requested
+        if save_preprocessed:
+            options_chain.to_pickle(processed_files['options'])
+            spx_data.to_pickle(processed_files['spx'])
+            vix_data.to_pickle(processed_files['vix'])
+            logger.info("Saved preprocessed data files")
+        
+        # Pivot the options chain
+        logger.info("Pivoting options chain")
+        options_chain = prepare_options_chain(options_chain, processed_files['options_pivoted'], "default")
+        
+        logger.info(f"Loaded and preprocessed data:")
+        logger.info(f"- Options chain: {len(options_chain)} rows")
+        logger.info(f"- SPX data: {len(spx_data)} rows")
+        logger.info(f"- VIX data: {len(vix_data)} rows")
+        
+        return options_chain, spx_data, vix_data
+        
+    except Exception as e:
+        logger.error(f"Error loading data: {str(e)}")
+        raise
 
 def generate_trade_signals(spx_data: pd.DataFrame, 
                           options_chain: pd.DataFrame,
@@ -1125,26 +1135,47 @@ def prepare_options_chain(options_chain, data_dir, param_str):
         logger.info("Loading pivoted options chain from pickle")
         return pd.read_pickle(pickle_path)
     
-    # 1. Keep only necessary columns
-    needed_cols = ['strike', 'expire_date', 'p_last', 'c_last']
+    # Keep only necessary columns
+    needed_cols = [
+        'strike', 'expire_date', 'quote_readtime',
+        'p_delta', 'c_delta',
+        'p_bid', 'p_ask', 'c_bid', 'c_ask',
+        'p_last', 'c_last',
+        'p_iv', 'c_iv',  # Added IV fields
+        'p_size', 'c_size',  # Added size fields
+        'underlying_last'
+    ]
     options_chain = options_chain[needed_cols]
     
-    # 2. Reduce precision of numeric columns
-    options_chain['strike'] = options_chain['strike'].astype('float32')
-    options_chain['p_last'] = options_chain['p_last'].astype('float32')
-    options_chain['c_last'] = options_chain['c_last'].astype('float32')
+    # Reduce precision of numeric columns
+    float_cols = [
+        'strike',
+        'p_delta', 'c_delta',
+        'p_bid', 'p_ask', 'c_bid', 'c_ask',
+        'p_last', 'c_last',
+        'p_iv', 'c_iv',  # Added IV fields
+        # 'p_size', 'c_size',  # Need to convert as B X A now
+        'underlying_last'
+    ]
+    for col in float_cols:
+        options_chain.loc[:, col] = options_chain[col].astype('float16')
     
-    logger.info("Memory usage before pivot: {options_chain.memory_usage().sum() / 1024**2:.2f} MB")
+    logger.info(f"Memory usage before pivot: {options_chain.memory_usage().sum() / 1024**2:.2f} MB")
     
     logger.info("Pivoting options chain")
+    # pivoted_chain = options_chain.pivot_table(
+    #     index=['strike', 'expire_date'],
+    #     columns=options_chain.index.normalize(),
+    #     values=float_cols,
+    #     aggfunc='first'
+    # )
     pivoted_chain = options_chain.pivot_table(
         index=['strike', 'expire_date'],
-        columns=options_chain.index.normalize(),
-        values=['p_last', 'c_last'],
+        columns=options_chain.index,
+        values=needed_cols,  # Use needed_cols instead of float_cols
         aggfunc='first'
     )
-    
-    logger.info("Memory usage after pivot: {pivoted_chain.memory_usage().sum() / 1024**2:.2f} MB")
+    logger.info(f"Memory usage after pivot: {pivoted_chain.memory_usage().sum() / 1024**2:.2f} MB")
     
     # Save to pickle
     logger.info("Saving pivoted options chain to pickle")
@@ -1153,7 +1184,7 @@ def prepare_options_chain(options_chain, data_dir, param_str):
     
     return pivoted_chain
 
-def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_chain, param_str, results_dir="results"):
+def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_chain, param_str, results_dir="../results"):
     """
     Calculate and save mark-to-market (MTM) data for a backtest.
     
@@ -1164,7 +1195,7 @@ def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_
         trade_results: The backtest results containing trade data.
         options_chain: DataFrame containing options chain data.
         param_str: A string identifier for the parameter set used in the backtest.
-        results_dir: Directory where results will be saved. Defaults to "results".
+        results_dir: Directory where results will be saved. Defaults to "../results".
     
     Returns:
         None. Results are saved to a CSV file in the specified directory.
@@ -1172,7 +1203,6 @@ def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_
     # Ensure the results directory exists
     os.makedirs(results_dir, exist_ok=True)
     
-            
     logger.info(f"Pivoting options chain")
     # First pivot the options chain for faster lookups
     pivoted_chain = prepare_options_chain(options_chain, results_dir, param_str)
@@ -1218,9 +1248,7 @@ def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_
     
     return daily_df, max_drawdown_amount, max_drawdown_percentage
 
-def run_and_analyze_backtest(spx_file_path: str, 
-                            options_chain_file_path: str,
-                            vix_file_path: str,
+def run_and_analyze_backtest(data_dir: str, 
                             option_type: OptionType = OptionType.PUT,
                             position_side: PositionSide = PositionSide.SHORT,
                             start_date: str = None,
@@ -1264,10 +1292,8 @@ def run_and_analyze_backtest(spx_file_path: str,
     
     # Load data
     start_time = pd.Timestamp.now()
-    spx_data, options_chain, vix_data = load_backtest_data(
-        spx_file_path, 
-        options_chain_file_path,
-        vix_file_path,
+    options_chain, spx_data, vix_data = load_backtest_data(
+        data_dir,
         use_preprocessed=use_preprocessed,
         save_preprocessed=save_preprocessed
     )
@@ -1288,14 +1314,7 @@ def run_and_analyze_backtest(spx_file_path: str,
         date_range = "full_period"
         
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    param_str = f"{option_type.name}_{position_side.name}_start_{start_date}_end_{end_date}"
-    if delta_range:
-        param_str += f"_delta_{delta_range[0]}-{delta_range[1]}"
-    if delta_target:
-        param_str += f"_delta_{delta_target}"
-    if dte_range:
-        param_str += f"_dte_{dte_range[0]}-{dte_range[1]}"
-    param_str += f"_{early_close_str}_{date_range}_{timestamp}"
+    param_str = f"{option_type.name}_{position_side.name}_{delta_str}_{dte_str}_{early_close_str}_{date_range}"
     
     # Generate trade signals
     signal_time = pd.Timestamp.now()
@@ -1371,15 +1390,13 @@ def run_and_analyze_backtest(spx_file_path: str,
 if __name__ == "__main__":
     # Example file paths - update these to your actual file paths
     DATA_PATH = "/Users/liefe/Projects/ericlief/Fin/data/spx"
-    SPX_DATA_PATH = os.path.join(DATA_PATH, "spx-daily-1996-ohlc-cleaned.csv")
-    OPTIONS_CHAIN_PATH = os.path.join(DATA_PATH, "options_chain_preprocessed.csv") 
-    VIX_DATA_PATH = os.path.join(DATA_PATH, "vix.csv")
+    # SPX_DATA_PATH = os.path.join(DATA_PATH, "spx-daily-1996-ohlc-cleaned.csv")
+    # OPTIONS_CHAIN_PATH = os.path.join(DATA_PATH, "options_chain_preprocessed.csv") 
+    # VIX_DATA_PATH = os.path.join(DATA_PATH, "vix.csv")
     # The first time, process and save the data
     logger.info("First run: processing and saving data for future use...")
     short_put_results = run_and_analyze_backtest(
-        SPX_DATA_PATH,
-        OPTIONS_CHAIN_PATH,
-        VIX_DATA_PATH,
+        DATA_PATH,
         option_type=OptionType.PUT,
         position_side=PositionSide.SHORT,
         start_date="2020-01-01",
@@ -1397,9 +1414,7 @@ if __name__ == "__main__":
     # Subsequent runs can use the saved preprocessed data
     logger.info("\nSecond run: using preprocessed data...")
     long_call_results = run_and_analyze_backtest(
-        SPX_DATA_PATH,
-        OPTIONS_CHAIN_PATH,
-        VIX_DATA_PATH,
+        DATA_PATH,
         option_type=OptionType.CALL,
         position_side=PositionSide.LONG,
         start_date="2020-01-01",
@@ -1417,9 +1432,7 @@ if __name__ == "__main__":
     # Third run: early close example
     logger.info("\nThird run: early close strategy...")
     early_close_results = run_and_analyze_backtest(
-        SPX_DATA_PATH,
-        OPTIONS_CHAIN_PATH,
-        VIX_DATA_PATH,
+        data_dir=DATA_PATH,
         option_type=OptionType.PUT,
         position_side=PositionSide.SHORT,
         start_date="2020-01-01",
