@@ -1,0 +1,5 @@
+gspread
+requests
+websockets
+numpy
+pandas
