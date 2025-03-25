@@ -31,8 +31,7 @@ def setup_logger(log_file: str = None):
     )
     return logging.getLogger(__name__)
 
-# Create logger instance
-logger = setup_logger()
+# Create logger instancelogger = setup_logger()
 
 class OptionType(Enum):
     CALL = "call"
