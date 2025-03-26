@@ -3,3 +3,6 @@ requests
 websockets
 numpy
 pandas
+pyarrow
+dask
+

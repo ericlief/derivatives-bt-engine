@@ -1,3 +1,4 @@
+import sys
 import pandas as pd
 import numpy as np
 import os
@@ -5,6 +6,7 @@ from typing import Dict, List, Optional, Tuple, TypedDict, Union
 from enum import Enum, auto
 import logging
 from datetime import datetime
+import dask.dataframe as dd
 
 # Configure logging
 def setup_logger(log_file: str = None):
@@ -16,9 +18,9 @@ def setup_logger(log_file: str = None):
     """
     if log_file is None:
         # Create logs directory if it doesn't exist
-        os.makedirs('../../logs', exist_ok=True)
+        os.makedirs('logs', exist_ok=True)
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        log_file = f'../logs/backtest_{timestamp}.log'
+        log_file = f'logs/backtest_{timestamp}.log'
     
     # Configure logging
     logging.basicConfig(
@@ -31,7 +33,8 @@ def setup_logger(log_file: str = None):
     )
     return logging.getLogger(__name__)
 
-# Create logger instancelogger = setup_logger()
+# Create logger instance
+logger = setup_logger()
 
 class OptionType(Enum):
     CALL = "call"
@@ -930,7 +933,7 @@ def generate_trade_signals(spx_data: pd.DataFrame,
                           start_date: str = None,
                           end_date: str = None,
                           option_type: OptionType = OptionType.PUT,
-                          delta_target: float = -0.10,
+                          delta_target: float = -0.30,
                           delta_range: Tuple[float, float] = None,
                           dte_target: int = None,
                           dte_range: Tuple[int, int] = None) -> pd.DataFrame:
@@ -955,26 +958,135 @@ def generate_trade_signals(spx_data: pd.DataFrame,
     chain_df = options_chain.copy()
     
     # Filter by date range if provided
-    if start_date:
-        start_date = pd.to_datetime(start_date)
-        chain_df = chain_df[chain_df.index >= start_date]
-    if end_date:
-        end_date = pd.to_datetime(end_date)
-        chain_df = chain_df[chain_df.index <= end_date]
+    # if start_date:
+    #     start_date = pd.to_datetime(start_date)
+    #     chain_df = chain_df[chain_df.columns.get_level_values('date') >= start_date]
+    # if end_date:
+    #     end_date = pd.to_datetime(end_date)
+    #     chain_df = chain_df[chain_df.index.get_level_values('date') <= end_date]
     
-    # Calculate days to expiration if needed
-    if 'dte' not in chain_df.columns:
-        chain_df['dte'] = (chain_df['expire_date'] - chain_df.index).dt.days
+    
+    
+    # Filter using the date level of the MultiIndex columns
+    dates = chain_df.columns.get_level_values('date')
+
+    #  Convert to datetime if necessary
+    if pd.api.types.is_categorical_dtype(dates):
+        dates = pd.to_datetime(dates)
+
+    # Filter the date to the interval of interest
+    logger.info(f'Filtering date range: {start_date}-{end_date}')
+    start_date = pd.to_datetime(start_date)
+    end_date = pd.to_datetime(end_date)
+    interval_filter = dates[(dates >= start_date) & (dates <= end_date)]
+
+    # print(len(interval))
+    # print(len(set(interval)))
+
+    # Select the filtered columns
+    chain_df = chain_df.loc[:, (slice(None), interval_filter)]
+    print(chain_df)
+
+    print("Level Names: ", chain_df.columns.names)
+    # print(f"dte in df: {'dte' in filtered_df.columns.get_level_values(0)}")
+    # filtered_columns = date_level[(date_level >= start_date) & (date_level <= end_date)]
+    # non_date_cols = set(filtered_df.columns.get_level_values(0))
+
+    # Select the filtered columns
+    # filtered_df = chain_df.loc[:, (slice(None), filtered_columns)]
+
+    # Compute to see the result
+    # result = filtered_df.compute()
+    # print(result)
+
+    # # Calculate days to expiration if needed
+    # if 'dte' not in filtered_df:
+    #     chain_df['dte'] = (chain_df['expire_date'] - chain_df.index).dt.days
     
     # Filter by DTE based on whether we have a single value or range
     if dte_range is not None:
-        chain_df = chain_df[chain_df['dte'].between(dte_range[0], dte_range[1])]
+        logger.info(f'Getting dte range {dte_range}')
+        dte_values = chain_df.loc[:, ('dte', slice(None))]
+
+        print('dte vals', dte_values.describe())
+        print(f"NaN values in dte_values (before dropping nan): {dte_values.isna().sum().sum()}")
+        # Drop rows with NaN values in the 'dte' column before filtering
+        cleaned_dte = dte_values.dropna(how='all')
+        print(f"NaN values in dte_values (after dropping nan cols): {cleaned_dte.isna().sum().sum()}")
+
+        # Now filter the dte values within the desired range
+        # filtered_dte = cleaned_dte[(cleaned_dte >= 70) & (cleaned_dte <= 75)]
+        # print('cleaned nan prior', filtered_dte)
+
+        dte_mask = (dte_values >= dte_range[0]) & (dte_values <= dte_range[1])
+        filtered_dte = cleaned_dte[dte_mask]
+        # print('dte vals', dte_values.describe())
+        # print(f"NaN values in dte_values (before filtering): {dte_values.isna().sum().sum()}")
+        # filtered_cols = dte_mask.any(axis=0)
+        # print(f'filtered_col mask: {filtered_cols}')
+        # filtered_dates = dte_values[dte_mask]
+        # filtered_dte = dte_values.loc[:, filtered_cols]
+        # print("filtered col dte:", filtered_dte)
+        print(f"NaN values in dte_values (after filtering): {filtered_dte.isna().sum().sum()}")
+        filtered_dte = filtered_dte.dropna(how='all')
+        # valid_dates = valid_dates.dropna(axis=1)
+        print(f"NaN values in dte_values (after dropping nan): {filtered_dte.isna().sum().sum()}")
+        print("Filtered dte", filtered_dte)       
+        print(filtered_dte.describe())
+
+        filtered_dte = filtered_dte.dropna(axis=1, how='all')
+        # valid_dates = valid_dates.dropna(axis=1)
+        print(f"NaN values in dte_values (after dropping nan cols): {filtered_dte.isna().sum().sum()}")
+        print("Filtered dte", filtered_dte)      
+        print(filtered_dte.describe())
+
+        sys.exit()
+
+        # valid_dates = dte_values[dte_mask]
+        # print("dte mask", dte_mask)
+        # print("dte mask axis=0", dte_mask.any(axis=0))
+
+        # valid_dates = dte_values.columns.get_level_values(1)[dte_mask.any(axis=0)]
+        # print(valid_dates)
+
+
+
+        chain_df = chain_df.loc[:, ('dte', valid_dates)]
+        print(f"Filtered dates df: {chain_df.head()}")
+        # chain_df = chain_df.loc[:, (dte_mask, slice(None))]
     elif dte_target is not None:
-        chain_df = chain_df[chain_df['dte'] == dte_target]
+        logger.info(f'Getting dte target {dte_target}')
+
+        dte_values = chain_df.loc[:, ('dte', slice(None))]
+        print('dte vals', dte_values.describe())
+        print(f"NaN values in dte_values (before filtering): {dte_values.isna().sum().sum()}")
+
+        dte_mask = abs(dte_values - dte_target) < 1
+        print("dte mask", dte_mask)
+        # valid_dates = dte_values.columns.get_level_values(1)[dte_mask.any(axis=0)]
+        filtered_dates = dte_values[dte_mask]
+        # chain_df.loc[]
+        
+        print('filtered vals', dte_values[dte_mask])
+        # print("dte mask axis=0", dte_mask.any(axis=0))
+        
+        print(f"NaN values in dte_values (after filtering): {filtered_dates.isna().sum().sum()}")
+
+        valid_dates = filtered_dates.dropna(axis=0, how='all')
+        # valid_dates = valid_dates.dropna(axis=1)
+
+        print("valid dates", valid_dates)
+
+        chain_df = chain_df.loc[:, (slice(None), valid_dates)]
+        print(f"Filtered dates df: {chain_df.head()}")
+
+    else:
+        logger.error('Need to provide either <dte_target> or <dte_range>')
+        raise ValueError
     
     # Determine delta column based on option type
     delta_col = 'p_delta' if option_type == OptionType.PUT else 'c_delta'
-    
+
     # Filter by delta based on whether we have a target or range
     if delta_range is not None:
         # For puts, convert to negative range if needed
@@ -984,12 +1096,17 @@ def generate_trade_signals(spx_data: pd.DataFrame,
             min_delta, max_delta = delta_range
         
         # Filter by delta range
-        chain_df = chain_df[chain_df[delta_col].between(min_delta, max_delta)]
+        delta_mask = chain_df.columns.get_level_values(delta_col)
+        delta_mask = delta_mask.between(min_delta, max_delta)
+        chain_df = chain_df.loc[:, (delta_mask, slice(None))]
         
     elif delta_target is not None:
+
         # For target delta, find options with delta close to target
         target = delta_target if option_type == OptionType.PUT else abs(delta_target)
-        chain_df['delta_diff'] = abs(chain_df[delta_col] - target)
+        delta_mask = chain_df.columns.get_level_values(delta_col)
+        delta_diff = abs(delta_mask - target)
+        # chain_df['delta_diff'] = abs(chain_df[delta_col] - target)
         chain_df = chain_df[chain_df['delta_diff'] < 0.05]  # Within 0.05 of target
     
     # Sort by date and delta difference (if it exists)
@@ -1006,10 +1123,15 @@ def generate_trade_signals(spx_data: pd.DataFrame,
     
     return trade_signals
 
-def check_data_quality(options_chain: pd.DataFrame, spx_data: pd.DataFrame, vix_data: pd.DataFrame) -> None:
+def check_data_quality(options_chain, spx_data, vix_data):
     """
     Check data quality for all datasets (options chain, SPX data, and VIX data).
     Verifies required columns exist and checks for missing or invalid values.
+    
+    Args:
+        options_chain: DataFrame containing options chain data
+        spx_data: DataFrame containing SPX data
+        vix_data: DataFrame containing VIX data
     """
     datasets = {
         'Options Chain': {
@@ -1028,6 +1150,17 @@ def check_data_quality(options_chain: pd.DataFrame, spx_data: pd.DataFrame, vix_
 
     for dataset_name, dataset_info in datasets.items():
         df = dataset_info['df']
+        
+        logger.info(f"Type of dataframe: {type(df), df.head()}")
+        
+        # Skip checking if the DataFrame is a Dask DataFrame
+        # if isinstance(df, dd.DataFrame):
+        #     logger.info(f"Skipping data quality check for {dataset_name} (Dask DataFrame).")
+        #     continue
+        if len(df.columns) > 50:
+            logger.info("Skipping QA for Dask DataFrame")
+            continue
+
         required_cols = dataset_info['required_cols']
         
         logger.info(f"\nChecking {dataset_name} data quality...")
@@ -1037,7 +1170,7 @@ def check_data_quality(options_chain: pd.DataFrame, spx_data: pd.DataFrame, vix_
         for col in required_cols:
             if col in df.columns:
                 missing = df[col].isna().sum()
-                percent = (missing / len(df)) * 100
+                percent = (missing / len(df)) * 100 if len(df) > 0 else 0
                 logger.info(f"{col}: {missing} missing values ({percent:.2f}%)")
         
         # Check date ranges
@@ -1051,15 +1184,15 @@ def check_data_quality(options_chain: pd.DataFrame, spx_data: pd.DataFrame, vix_
             if col in df.columns:
                 # Count zero values (where the column is not NaN and the value is 0)
                 zero_values = ((df[col] == 0) & ~df[col].isna()).sum()
-                zero_percent = (zero_values / len(df)) * 100
+                zero_percent = (zero_values / len(df)) * 100 if len(df) > 0 else 0
                 
                 # Count negative values (where the column is not NaN and the value is negative)
                 negative_values = ((df[col] < 0) & ~df[col].isna()).sum()
-                negative_percent = (negative_values / len(df)) * 100
+                negative_percent = (negative_values / len(df)) * 100 if len(df) > 0 else 0
                 
                 # Count NaN values separately
                 nan_values = df[col].isna().sum()
-                nan_percent = (nan_values / len(df)) * 100
+                nan_percent = (nan_values / len(df)) * 100 if len(df) > 0 else 0
                 
                 logger.info(f"{col}: {zero_values} zeros ({zero_percent:.2f}%), {negative_values} negative ({negative_percent:.2f}%), {nan_values} NaN ({nan_percent:.2f}%)")
         
@@ -1124,62 +1257,104 @@ def calculate_daily_value(date, trade_results, pivoted_chain):
 
     return daily_value, daily_pnl, roi
 
-def prepare_options_chain(options_chain, data_dir, param_str):
+def pivot_options_chain(options_chain, needed_col):
     """
-    Prepare the options chain data with memory optimizations.
+    Pivot the options chain using Dask for better memory handling.
     """
-    pickle_path = os.path.join(data_dir, f"pivoted_options_{param_str}.pkl")
-    
-    if os.path.exists(pickle_path):
-        logger.info("Loading pivoted options chain from pickle")
-        return pd.read_pickle(pickle_path)
-    
-    # Keep only necessary columns
-    needed_cols = [
-        'strike', 'expire_date', 'quote_readtime',
-        'p_delta', 'c_delta',
-        'p_bid', 'p_ask', 'c_bid', 'c_ask',
-        'p_last', 'c_last',
-        'p_iv', 'c_iv',  # Added IV fields
-        'p_size', 'c_size',  # Added size fields
-        'underlying_last'
-    ]
-    options_chain = options_chain[needed_cols]
-    
     # Reduce precision of numeric columns
     float_cols = [
         'strike',
         'p_delta', 'c_delta',
         'p_bid', 'p_ask', 'c_bid', 'c_ask',
         'p_last', 'c_last',
-        'p_iv', 'c_iv',  # Added IV fields
-        # 'p_size', 'c_size',  # Need to convert as B X A now
+        'p_iv', 'c_iv',
         'underlying_last'
     ]
-    for col in float_cols:
-        options_chain.loc[:, col] = options_chain[col].astype('float16')
-    
+
+    logger.info(f"Starting pivot operation with DataFrame of shape {options_chain.shape}")
     logger.info(f"Memory usage before pivot: {options_chain.memory_usage().sum() / 1024**2:.2f} MB")
+
+    try:
+        # Get the index name before resetting
+        date_col = options_chain.index.name if options_chain.index.name else 'date'
+        logger.info(f"Using date column name: {date_col}")
+        
+        # Reset index to make the date a column with the specified name
+        options_chain = options_chain.reset_index(names=[date_col])
+        
+        # Ensure required columns exist
+        required_cols = ['strike', 'expire_date', date_col]
+        missing_cols = [col for col in required_cols if col not in options_chain.columns]
+        if missing_cols:
+            raise ValueError(f"Missing required columns: {missing_cols}")
+        
+        # Convert date column to categorical type for Dask pivot
+        options_chain[date_col] = options_chain[date_col].astype('category')
+        
+        # Convert to Dask DataFrame
+        logger.info("Converting to Dask DataFrame")
+        dask_df = dd.from_pandas(options_chain, npartitions=4)
+        
+        # Log the columns before pivot
+        logger.info(f"Columns before pivot: {dask_df.columns.tolist()}")
+        
+        # Pivot operation
+        logger.info("Starting pivot table operation with Dask")
+        pivoted_chain = dask_df.pivot_table(
+            index='strike', 
+            columns=date_col,
+            values=needed_col,
+            aggfunc='first'
+        )
+        
+        logger.info("Computing final result")
+        result = pivoted_chain.compute()
+        
+        # Log the final columns
+        logger.info(f"Final columns after pivot: {result.columns.tolist()[:10]}")
+        
+        logger.info(f"Pivot completed successfully. Result shape: {result.shape}")
+        logger.info(f"Memory usage after pivot: {result.memory_usage().sum() / 1024**2:.2f} MB")
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error during pivot operation: {str(e)}")
+        raise
+
+def prepare_options_chain(options_chain, path, param_str):
+    """
+    Prepare the options chain data with memory optimizations.
+    """
+ 
+    # Create the pickle file path
+    # pickle_path = os.path.join(data_dir, f"pivoted_options_{param_str}.pkl")
     
-    logger.info("Pivoting options chain")
-    # pivoted_chain = options_chain.pivot_table(
-    #     index=['strike', 'expire_date'],
-    #     columns=options_chain.index.normalize(),
-    #     values=float_cols,
-    #     aggfunc='first'
-    # )
-    pivoted_chain = options_chain.pivot_table(
-        index=['strike', 'expire_date'],
-        columns=options_chain.index,
-        values=needed_cols,  # Use needed_cols instead of float_cols
-        aggfunc='first'
-    )
-    logger.info(f"Memory usage after pivot: {pivoted_chain.memory_usage().sum() / 1024**2:.2f} MB")
+    if os.path.exists(path):
+        logger.info("Loading pivoted options chain from pickle")
+        return pd.read_pickle(path)
     
+    # Keep only necessary columns
+    needed_cols = [
+        'strike', 'expire_date', 'quote_readtime',
+        'p_delta', 'c_delta', 
+        'p_bid', 'p_ask', 'c_bid', 'c_ask',
+        'p_last', 'c_last',
+        'p_iv', 'c_iv',  # Added IV fields
+        'p_size', 'c_size',  # Added size fields
+        'underlying_last', 'dte'
+    ]
+    options_chain = options_chain[needed_cols]
+    
+    # Use the new pivot_options_chain function
+    logger.info("Pivoting options chain using Dask")
+    pivoted_chain = pivot_options_chain(options_chain, needed_cols)
+    
+    logger.info(pivoted_chain.head(2))
     # Save to pickle
     logger.info("Saving pivoted options chain to pickle")
-    pivoted_chain.to_pickle(pickle_path)
-    logger.info(f"Saved pivoted chain to {pickle_path}")
+    pivoted_chain.to_pickle(path)
+    logger.info(f"Saved pivoted chain to {path}")
     
     return pivoted_chain
 
@@ -1202,7 +1377,7 @@ def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_
     # Ensure the results directory exists
     os.makedirs(results_dir, exist_ok=True)
     
-    logger.info(f"Pivoting options chain")
+    logger.info(f"Preparing options chain")
     # First pivot the options chain for faster lookups
     pivoted_chain = prepare_options_chain(options_chain, results_dir, param_str)
     
@@ -1263,27 +1438,6 @@ def run_and_analyze_backtest(data_dir: str,
                             save_trades: bool = True) -> pd.DataFrame:
     """
     Load data, generate signals, run backtest and return results.
-    
-    Args:
-        spx_file_path: Path to CSV file containing SPX price history
-        options_chain_file_path: Path to CSV file containing options chain data
-        vix_file_path: Path to CSV file containing VIX data
-        option_type: Type of option to trade (PUT or CALL)
-        position_side: Whether to buy or sell options (LONG or SHORT)
-        start_date: Optional start date for filtering (e.g., "2010-01-01")
-        end_date: Optional end date for filtering (e.g., "2020-12-31")
-        delta_target: Target delta for option selection (single value)
-        delta_range: Range of delta values (min, max) as tuple
-        dte_target: Target days to expiration (single value)
-        dte_range: Range of DTE values (min, max) as tuple
-        initial_capital: Starting capital amount
-        early_close_days: If set, close positions this many days after entry instead of at expiration
-        use_preprocessed: Whether to use preprocessed data files if available
-        save_preprocessed: Whether to save preprocessed data for future use
-        save_trades: Whether to save trade results to CSV
-    
-    Returns:
-        DataFrame containing backtest results
     """
     # Store original string dates for filename
     start_date_str = start_date
@@ -1377,13 +1531,35 @@ def run_and_analyze_backtest(data_dir: str,
             logger.info(f"Sharpe Ratio: {sharpe:.2f}")
     
     # Save summary results to CSV
-    results_dir = 'results'
+    results_dir = '../results'  # Updated to be consistent with logs directory
     os.makedirs(results_dir, exist_ok=True)
     results_csv_path = os.path.join(results_dir, f"results_{param_str}_{timestamp}.csv")
     results.to_csv(results_csv_path, index=False)
     logger.info(f"Summary results saved to {results_csv_path}")
     
     return results
+
+def check_date_presence(pivoted_chain, date_to_check):
+    """
+    Check if a specific date is present in the pivoted DataFrame columns.
+    
+    Args:
+        pivoted_chain: The pivoted DataFrame with MultiIndex columns.
+        date_to_check: The date to check for presence in the columns.
+    
+    Returns:
+        bool: True if the date is present, False otherwise.
+    """
+    # Ensure the date is in the correct format
+    date_to_check = pd.to_datetime(date_to_check).normalize()
+    
+    # Access the second level of the MultiIndex (assuming it's the date)
+    date_level = pivoted_chain.columns.levels[1]
+    
+    # Check if the date is present
+    is_present = date_to_check in date_level
+    logger.info(f"Date {date_to_check} presence: {is_present}")
+    return is_present
 
 # Example usage:
 if __name__ == "__main__":
@@ -1393,6 +1569,7 @@ if __name__ == "__main__":
     # OPTIONS_CHAIN_PATH = os.path.join(DATA_PATH, "options_chain_preprocessed.csv") 
     # VIX_DATA_PATH = os.path.join(DATA_PATH, "vix.csv")
     # The first time, process and save the data
+    logger = setup_logger()
     logger.info("First run: processing and saving data for future use...")
     short_put_results = run_and_analyze_backtest(
         DATA_PATH,
@@ -1401,7 +1578,9 @@ if __name__ == "__main__":
         start_date="2020-01-01",
         end_date="2020-12-31",
         delta_range=(0.30, 0.35),  # Will be converted to negative for puts
-        dte_range=(28, 32),
+        dte_range=(28, 31),
+        # delta_target=.30,
+        # dte_target=10,
         initial_capital=100000,
         early_close_days=None,     # Hold until expiration
         use_preprocessed=True,    # Don't use preprocessed data the first time
