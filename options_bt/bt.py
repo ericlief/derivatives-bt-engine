@@ -865,34 +865,41 @@ def load_backtest_data(data_dir, use_preprocessed=True, save_preprocessed=True):
     }
     
     processed_files = {
-        'options': os.path.join(data_dir, 'options.pkl'),
-        'options_pivoted': os.path.join(data_dir, 'options_pivoted.pkl'),
-        'spx': os.path.join(data_dir, 'spx.pkl'),
-        'vix': os.path.join(data_dir, 'vix.pkl')
+        'options': os.path.join(data_dir, "options.pkl"),
+        'spx': os.path.join(data_dir, "spx.pkl"),
+        'vix': os.path.join(data_dir, "vix.pkl"),
+        'options_pivoted': os.path.join(data_dir, "options_pivoted.pkl"),
+        'chain_multi_index': os.path.join(data_dir, "chain_multi_index.pkl")  # Added new path
     }
     
     try:
         # Try to load preprocessed data if requested
         if use_preprocessed:
-            if os.path.exists(processed_files['options_pivoted']):
-                logger.info("Loading pivoted options chain")
-                options_chain = pd.read_pickle(processed_files['options_pivoted'])
-                
-                if os.path.exists(processed_files['spx']) and os.path.exists(processed_files['vix']):
-                    logger.info("Loading preprocessed SPX and VIX data")
-                    spx_data = pd.read_pickle(processed_files['spx'])
-                    vix_data = pd.read_pickle(processed_files['vix'])
-                    return options_chain, spx_data, vix_data
+            if os.path.exists(processed_files['chain_multi_index']):
+                logger.info("Loading MultiIndex options chain")
+                options_chain = pd.read_pickle(processed_files['chain_multi_index'])
+                spx_data = pd.read_pickle(processed_files['spx'])
+                vix_data = pd.read_pickle(processed_files['vix'])
+                return options_chain, spx_data, vix_data
             
             elif all(os.path.exists(f) for f in [processed_files['options'], processed_files['spx'], processed_files['vix']]):
-                logger.info("Loading non-pivoted preprocessed data")
+                logger.info("Loading simple-index preprocessed data")
                 options_chain = pd.read_pickle(processed_files['options'])
                 spx_data = pd.read_pickle(processed_files['spx'])
                 vix_data = pd.read_pickle(processed_files['vix'])
                 
-                # Pivot the options chain
-                logger.info("Pivoting options chain")
-                options_chain = prepare_options_chain(options_chain, processed_files['options_pivoted'], "default")
+                # First reset the index and rename it to 'date'
+                logger.info("Resetting and renaming index")
+                options_chain = options_chain.reset_index().rename(columns={'index': 'date'})
+                
+                # Now create the MultiIndex structure
+                logger.info("Creating MultiIndex structure")
+                options_chain = options_chain.set_index(['date', 'strike']).sort_index()
+                
+                # Save the MultiIndex version
+                logger.info("Saving MultiIndex options chain")
+                options_chain.to_pickle(processed_files['chain_multi_index'])
+                
                 return options_chain, spx_data, vix_data
         
         # Load and preprocess original data
@@ -976,8 +983,8 @@ def generate_trade_signals(spx_data: pd.DataFrame,
 
     # Filter the date to the interval of interest
     logger.info(f'Filtering date range: {start_date}-{end_date}')
-        start_date = pd.to_datetime(start_date)
-        end_date = pd.to_datetime(end_date)
+    start_date = pd.to_datetime(start_date)
+    end_date = pd.to_datetime(end_date)
     interval_filter = dates[(dates >= start_date) & (dates <= end_date)]
 
     # print(len(interval))
@@ -1053,9 +1060,9 @@ def generate_trade_signals(spx_data: pd.DataFrame,
 
         tile_mask = np.tile(dte_mask.values, [len(chain_df.columns.levels[0])])
         print("Tiled mask", tile_mask.shape)
-        indices = pd.MultiIndex.from_product(
-            [chain_df.columns.levels[0], chain_df.columns.levels()
-        )
+        # indices = pd.MultiIndex.from_product(
+        #     [chain_df.columns.levels[0], chain_df.columns.levels()
+        # )
          # dte_mask.dropna(how='all')
         # dte_mask.dropna(axis=1, how='all')
         # valid_strikes = dte_mask.any(axis=1)  # This will give you a boolean Series for strikes
