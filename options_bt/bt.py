@@ -976,8 +976,8 @@ def generate_trade_signals(spx_data: pd.DataFrame,
 
     # Filter the date to the interval of interest
     logger.info(f'Filtering date range: {start_date}-{end_date}')
-    start_date = pd.to_datetime(start_date)
-    end_date = pd.to_datetime(end_date)
+        start_date = pd.to_datetime(start_date)
+        end_date = pd.to_datetime(end_date)
     interval_filter = dates[(dates >= start_date) & (dates <= end_date)]
 
     # print(len(interval))
@@ -1053,6 +1053,9 @@ def generate_trade_signals(spx_data: pd.DataFrame,
 
         tile_mask = np.tile(dte_mask.values, [len(chain_df.columns.levels[0])])
         print("Tiled mask", tile_mask.shape)
+        indices = pd.MultiIndex.from_product(
+            [chain_df.columns.levels[0], chain_df.columns.levels()
+        )
          # dte_mask.dropna(how='all')
         # dte_mask.dropna(axis=1, how='all')
         # valid_strikes = dte_mask.any(axis=1)  # This will give you a boolean Series for strikes
@@ -1173,7 +1176,7 @@ def generate_trade_signals(spx_data: pd.DataFrame,
     
     # Determine delta column based on option type
     delta_col = 'p_delta' if option_type == OptionType.PUT else 'c_delta'
-
+    
     # Filter by delta based on whether we have a target or range
     if delta_range is not None:
         # For puts, convert to negative range if needed
@@ -1413,7 +1416,7 @@ def prepare_options_chain(options_chain, path, param_str):
     """
     Prepare the options chain data with memory optimizations.
     """
- 
+    
     # Create the pickle file path
     # pickle_path = os.path.join(data_dir, f"pivoted_options_{param_str}.pkl")
     
@@ -1424,7 +1427,7 @@ def prepare_options_chain(options_chain, path, param_str):
     # Keep only necessary columns
     needed_cols = [
         'strike', 'expire_date', 'quote_readtime',
-        'p_delta', 'c_delta', 
+        'p_delta', 'c_delta',
         'p_bid', 'p_ask', 'c_bid', 'c_ask',
         'p_last', 'c_last',
         'p_iv', 'c_iv',  # Added IV fields
