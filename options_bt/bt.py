@@ -1005,10 +1005,12 @@ def generate_trade_signals(spx_data: pd.DataFrame,
     
     # Filter by DTE based on whether we have a single value or range
     if dte_range is not None:
-        logger.info(f'Getting dte range {dte_range}')
+        logger.info(f'Getting dte initial range {dte_range}')
         dte_values = chain_df.loc[:, ('dte', slice(None))]
 
         print('dte vals', dte_values.describe())
+        print('original dte val shape', dte_values.shape)
+        print('dte levels', dte_values.columns.levels)
         print(f"NaN values in dte_values (before dropping nan): {dte_values.isna().sum().sum()}")
         # Drop rows with NaN values in the 'dte' column before filtering
         cleaned_dte = dte_values.dropna(how='all')
@@ -1019,6 +1021,44 @@ def generate_trade_signals(spx_data: pd.DataFrame,
         # print('cleaned nan prior', filtered_dte)
 
         dte_mask = (dte_values >= dte_range[0]) & (dte_values <= dte_range[1])
+        print("Got mask of shape:", dte_mask.shape)
+        print(dte_mask)
+        l1_cols = chain_df.columns.levels[0]
+        print("Cols", l1_cols)
+        print('levels in mask', dte_mask.columns.levels)
+        # dte_mask.columns = dte_mask.columns.droplevel(1)
+        # print(dte_mask)
+        # print('levels in mask', dte_mask.columns.levels)
+        dte_mask.columns = dte_mask.columns.droplevel(0)
+
+        print("drop levels mask", dte_mask)
+        # print('levels in mask', dte_mask.columns.levels)
+        # stats = dte_mask.apply(lambda c: sum(dte_mask[c]) )
+        stats = sum([r for c in dte_mask.columns for r in dte_mask[c]])
+        print("Number of True vals in original mask: ", stats)
+        # print(pd.api.types.is_bool(dte_mask))
+        l1_cols = chain_df.columns.levels[0]
+        # print('red mask', chain_df
+        full_mask = pd.concat({k: dte_mask for k in l1_cols}, axis=1)
+        print("Broadcast mask", full_mask)
+        print("Broadcast mask shape", full_mask.shape)
+        print(full_mask.columns.levels)
+        stats = sum([r for c in chain_df.columns for r in full_mask[c]])
+        print("Number of True vals in full broadcast mask: ", stats)
+        stats = sum([r for c in chain_df.columns for r in full_mask[c] 
+                     if 'dte' in c ])
+        print("Number of True vals in DTE partition: ", stats)
+        print("Number of True vals in DTE partition: ", full_mask.loc[:, ('dte', slice(None))].sum().sum())
+
+
+        tile_mask = np.tile(dte_mask.values, [len(chain_df.columns.levels[0])])
+        print("Tiled mask", tile_mask.shape)
+         # dte_mask.dropna(how='all')
+        # dte_mask.dropna(axis=1, how='all')
+        # valid_strikes = dte_mask.any(axis=1)  # This will give you a boolean Series for strikes
+        # print("Valid strikes mask:", valid_strikes.shape)
+        # print('mask', valid_strikes)
+
         filtered_dte = cleaned_dte[dte_mask]
         # print('dte vals', dte_values.describe())
         # print(f"NaN values in dte_values (before filtering): {dte_values.isna().sum().sum()}")
@@ -1039,8 +1079,8 @@ def generate_trade_signals(spx_data: pd.DataFrame,
         print(f"NaN values in dte_values (after dropping nan cols): {filtered_dte.isna().sum().sum()}")
         print("Filtered dte", filtered_dte)      
         print(filtered_dte.describe())
-
-        sys.exit()
+        
+        print("Example values", filtered_dte.loc[:, ('dte', '2020-01-21')])
 
         # valid_dates = dte_values[dte_mask]
         # print("dte mask", dte_mask)
@@ -1048,12 +1088,59 @@ def generate_trade_signals(spx_data: pd.DataFrame,
 
         # valid_dates = dte_values.columns.get_level_values(1)[dte_mask.any(axis=0)]
         # print(valid_dates)
+        # chain_df = chain_df.loc[:, ('dte', valid_dates)]
+        # valid_dates = chain_df.columns.get_level_values(1)[dte_mask.any(axis=0)]
+        # print(f"Valid dates: {valid_dates}")    
+        # Filter the chain_df based on valid dates
+        print(f"Shape of chain_df before filtering: {chain_df.shape}")
+        print(f"NaN values in filtered chain_df: {chain_df.isna().sum().sum()}")
+        print(chain_df.describe())
+        chain_df.dropna(how='all')
+        chain_df.dropna(axis=1, how='all')
 
+        print(f"Shape of chain_df after dropping nan: {chain_df.shape}")
+        print(f"NaN values in filtered chain_df: {chain_df.isna().sum().sum()}")
+        print(chain_df.describe())
+        # chain_df = chain_df.loc[:, (slice(None), valid_dates)]
+        # chain_df = chain_df.loc[:, dte_mask.any(axis=0)]
+        # Expand the mask to match the shape of chain_df
+        # This assumes that the mask should apply to all columns in chain_df
+        # expanded_mask = np.zeros_like(chain_df, dtype=bool)
+        # expanded_mask[:, :dte_mask.shape[1]] = dte_mask
 
+        # Use np.where to apply the expanded mask to all fields
+        # broadcasted_mask = np.where(expanded_mask, chain_df, np.nan)
 
-        chain_df = chain_df.loc[:, ('dte', valid_dates)]
-        print(f"Filtered dates df: {chain_df.head()}")
-        # chain_df = chain_df.loc[:, (dte_mask, slice(None))]
+        # Convert the result back to a DataFrame
+        # filtered_chain = pd.DataFrame(broadcasted_mask, index=chain_df.index, columns=chain_df.columns)
+        filtered_chain = chain_df.where(full_mask)
+        # print(f"Shape of chain_df before broadcasting: {filtered_chain.shape}")
+
+        # # Drop columns and rows that are all NaN
+        # filtered_chain = filtered_chain.dropna(how='all')
+        # filtered_chain = filtered_chain.dropna(axis=1, how='all')
+
+        # # Debugging output
+        # print(f"Filtered chain after dropping NaNs: {filtered_chain.head()}")
+        # print(f"Shape of filtered_chain after dropping NaNs: {filtered_chain.shape}")
+
+        print(f"Shape of chain_df after filtering: {filtered_chain.shape}")
+        print(f"Full dte-filtered chain dates: {filtered_chain.head()}")
+        # print(chain_df.describe())
+
+        # # print(f"NaN values in df (before dropping nan): {chain_df.isna().sum().sum()}")
+        # chain_df = chain_df.dropna(how='all')
+        # chain_df = chain_df.dropna(axis=1, how='all')
+        # print(f"NaN values in df (after dropping nan): {chain_df.isna().sum().sum()}")
+        # print(f"Shape of chain_df after cleaning: {chain_df.shape}")
+        # print(chain_df.describe())
+
+        #  # print(f"Full dte-filtered chain dates: {chain_df.head()}")
+        # # print(chain_df.describe())
+        filtered_chain.to_pickle("results/signals.pkl")
+
+        sys.exit()
+
     elif dte_target is not None:
         logger.info(f'Getting dte target {dte_target}')
 
