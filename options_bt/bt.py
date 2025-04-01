@@ -123,7 +123,7 @@ def get_closing_data(position: Position,
         Tuple of (closing_price, underlying_close)
     """
     # If no close_date, this is an expiration - use underlying price directly
-    if 'close_date' not in position or position['close_date'] is None:
+    if 'close_date' not in position or not position['close_date']:
         if position['expire_date'] not in spx_data.index:
             return None, None
             
@@ -357,12 +357,8 @@ def create_trade_from_signal(trade_signal, underlying_price: float, entry_price:
         return None
     
     # Validate expire_date exists and is not None
-    if not hasattr(trade_signal, 'expire_date'):
-        logger.error(f"No expire_date field in trade signal on {trade_signal.Index}")
-        return None
-    
-    if trade_signal.expire_date is None:
-        logger.error(f"expire_date is None for trade signal on {trade_signal.Index}")
+    if not trade_signal.expire_date:
+        logger.error(f"expire_date is missing for trade signal on {trade_signal.Index}")
         return None
     
     # Validate expire_date is a valid date
@@ -935,53 +931,47 @@ def load_backtest_data(data_dir, use_preprocessed=True, save_preprocessed=True):
         logger.error(f"Error loading data: {str(e)}")
         raise
 
-def generate_trade_signals(spx_data: pd.DataFrame, 
-                          options_chain: pd.DataFrame,
-                          start_date: str = None,
-                          end_date: str = None,
-                          option_type: OptionType = OptionType.PUT,
-                          delta_target: float = -0.30,
-                          delta_range: Tuple[float, float] = None,
-                          dte_target: int = None,
-                          dte_range: Tuple[int, int] = None) -> pd.DataFrame:
-    """
-    Generate trade signals based on delta target/range and days to expiration.
+def generate_trade_signals(
+    spx_data: pd.DataFrame,
+    options_chain: pd.DataFrame,
+    option_type: OptionType,
+    delta_target: float,
+    delta_range: Tuple[float, float],
+    dte_target: int,
+    dte_range: Tuple[int, int],
+    start_date: str = None,
+    end_date: str = None,
+) -> pd.DataFrame:
     
-    Args:
-        spx_data: DataFrame containing SPX price history
-        options_chain: DataFrame containing full options chain data with MultiIndex (date, strike)
-        start_date: Optional start date for filtering (e.g., "2010-01-01")
-        end_date: Optional end date for filtering (e.g., "2020-12-31")
-        option_type: Type of option (PUT or CALL)
-        delta_target: Target delta for option selection (single value)
-        delta_range: Range of delta values (min, max) as tuple
-        dte_target: Target days to expiration (single value)
-        dte_range: Range of DTE values (min, max) as tuple
-    
-    Returns:
-        DataFrame containing trade signals
-    """
     # Create a copy of the options chain to avoid modifying the original
     chain_df = options_chain.copy()
     
-    # Filter by date range if provided
+    # Filter by DATE range if provided
     if start_date:
         start_date = pd.to_datetime(start_date)
         chain_df = chain_df[chain_df.index.get_level_values('date') >= start_date]
     if end_date:
         end_date = pd.to_datetime(end_date)
         chain_df = chain_df[chain_df.index.get_level_values('date') <= end_date]
-    
-    # Filter by DTE based on whether we have a single value or range
-    if dte_range is not None:
+        logger.info('Sorting for date range')
+        logger.info('Sample chain')
+        logger.info(chain_df.head())
+
+    # Filter by DTE based on whether we have a single value or ran
+    if dte_range:
         logger.info(f'Getting dte initial range {dte_range}')
         dte_mask = (chain_df['dte'] >= dte_range[0]) & (chain_df['dte'] <= dte_range[1])
         chain_df = chain_df[dte_mask]
-        
-    elif dte_target is not None:
+        logger.info('Filtering for dte range')
+        logger.info('Sample chain')
+        logger.info(chain_df.head())
+    elif dte_target:
         logger.info(f'Getting dte target {dte_target}')
         dte_mask = abs(chain_df['dte'] - dte_target) < 1
         chain_df = chain_df[dte_mask]
+        logger.info('Filtering for dte target')
+        logger.info('Sample chain')
+        logger.info(chain_df.head())
     else:
         logger.error('Need to provide either <dte_target> or <dte_range>')
         raise ValueError
@@ -989,39 +979,51 @@ def generate_trade_signals(spx_data: pd.DataFrame,
     # Determine delta column based on option type
     delta_col = 'p_delta' if option_type == OptionType.PUT else 'c_delta'
     
-    # Filter by delta based on whether we have a target or range
-    if delta_range is not None:
-        # For puts, convert to negative range if needed
+    # Filter by delta parameters
+    if delta_range:
+        # Handle range case
         if option_type == OptionType.PUT and delta_range[0] > 0:
             min_delta, max_delta = -delta_range[1], -delta_range[0]
         else:
             min_delta, max_delta = delta_range
         
-        # Filter by delta range
         delta_mask = chain_df[delta_col].between(min_delta, max_delta)
         chain_df = chain_df[delta_mask]
-        # Simple sort within the range, no abs() needed
-        chain_df = chain_df.sort_values([delta_col])
-        
-    elif delta_target is not None:
-        # For target delta, find options with delta close to target
+        # Sort by delta value, think should increase for calls  0.30, 0.32, ... and decrease for puts  -.30, -.32, ...
+        chain_df = chain_df.sort_values(delta_col, ascending=(option_type == OptionType.CALL))
+        logger.info(f'Filtering and sorting for delta range {delta_range}')
+        logger.info('Sample chain')
+        logger.info(chain_df.head())
+
+    elif delta_target:
+        # Handle target case
         target = delta_target if option_type == OptionType.PUT else abs(delta_target)
         delta_diff = abs(chain_df[delta_col] - target)
-        chain_df = chain_df[delta_diff < 0.05]  # Within 0.05 of target
-        # Here we want to sort by absolute difference from target
-        chain_df = chain_df.sort_values([delta_col], key=lambda x: abs(x - target))
+        chain_df = chain_df[delta_diff < 0.05]
+
+        # Add and sort by delta_diff, ascending: .001, .002
+        chain_df = chain_df.assign(delta_diff=delta_diff).sort_values('delta_diff')
+        logger.info('Filtering and sorting for delta difference in delta target')
+        logger.info('Sample chain')
+        logger.info(chain_df.head())
+    else:
+        logger.error('Need to provide either delta_target or delta_range')
+        raise ValueError
     
     # Sort by date and delta difference (if it exists)
-    if 'delta_diff' in chain_df.columns:
-        chain_df = chain_df.sort_values('delta_diff')
+    # if 'delta_diff' in chain_df.columns:
+    #     chain_df = chain_df.sort_values('delta_diff')
     
     # Group by date and get the best option for each date
     trade_signals = chain_df.groupby(level='date').first()
-    
+    logger.info('Grouping by level=date.firsrt()')
+
     logger.info(f"Generated {len(trade_signals)} trade signals")
     # Print the head of the trade signals DataFrame to show a sample of the generated signals
     logger.info("\nSample of trade signals:")
     logger.info(trade_signals.head())
+
+    sys.exit()
     
     return trade_signals
 
