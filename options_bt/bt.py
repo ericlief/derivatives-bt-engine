@@ -953,23 +953,21 @@ def generate_trade_signals(
     if end_date:
         end_date = pd.to_datetime(end_date)
         chain_df = chain_df[chain_df.index.get_level_values('date') <= end_date]
-        logger.info('Sorting for date range')
+        logger.info(f'Sorting for date range: {start_date}-{end_date}')
         logger.info('Sample chain')
         logger.info(chain_df.head())
 
     # Filter by DTE based on whether we have a single value or ran
     if dte_range:
-        logger.info(f'Getting dte initial range {dte_range}')
         dte_mask = (chain_df['dte'] >= dte_range[0]) & (chain_df['dte'] <= dte_range[1])
         chain_df = chain_df[dte_mask]
-        logger.info('Filtering for dte range')
+        logger.info(f'Filtering for dte range: {dte_range}')
         logger.info('Sample chain')
         logger.info(chain_df.head())
     elif dte_target:
-        logger.info(f'Getting dte target {dte_target}')
         dte_mask = abs(chain_df['dte'] - dte_target) < 1
         chain_df = chain_df[dte_mask]
-        logger.info('Filtering for dte target')
+        logger.info(f'Filtering for dte target: {dte_target}')
         logger.info('Sample chain')
         logger.info(chain_df.head())
     else:
@@ -990,8 +988,10 @@ def generate_trade_signals(
         delta_mask = chain_df[delta_col].between(min_delta, max_delta)
         chain_df = chain_df[delta_mask]
         # Sort by delta value, think should increase for calls  0.30, 0.32, ... and decrease for puts  -.30, -.32, ...
-        chain_df = chain_df.sort_values(delta_col, ascending=(option_type == OptionType.CALL))
-        logger.info(f'Filtering and sorting for delta range {delta_range}')
+        ascending = (option_type == OptionType.CALL)
+        chain_df = chain_df.sort_values(delta_col, ascending=ascending)
+        logger.info(f"Filtering and sorting in {'ascending' if ascending else 'descending'} order")
+        logger.info(f'for delta range {delta_range} for OptionType={option_type.value} -> delta col={delta_col}')
         logger.info('Sample chain')
         logger.info(chain_df.head())
 
@@ -1003,7 +1003,7 @@ def generate_trade_signals(
 
         # Add and sort by delta_diff, ascending: .001, .002
         chain_df = chain_df.assign(delta_diff=delta_diff).sort_values('delta_diff')
-        logger.info('Filtering and sorting for delta difference in delta target')
+        logger.info(f'Filtering and sorting for delta difference in delta target={target} for OptionType={option_type}/delta col={delta_col}')
         logger.info('Sample chain')
         logger.info(chain_df.head())
     else:
@@ -1016,14 +1016,14 @@ def generate_trade_signals(
     
     # Group by date and get the best option for each date
     trade_signals = chain_df.groupby(level='date').first()
-    logger.info('Grouping by level=date.firsrt()')
+    logger.info('Grouping by level=date.first()')
 
     logger.info(f"Generated {len(trade_signals)} trade signals")
     # Print the head of the trade signals DataFrame to show a sample of the generated signals
     logger.info("\nSample of trade signals:")
     logger.info(trade_signals.head())
 
-    sys.exit()
+    # sys.exit()
     
     return trade_signals
 
@@ -1262,7 +1262,7 @@ def prepare_options_chain(options_chain, path, param_str):
     
     return pivoted_chain
 
-def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_chain, param_str, results_dir="../results"):
+def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_chain_multi_index, param_str, results_dir="../results"):
     """
     Calculate and save mark-to-market (MTM) data for a backtest.
     
@@ -1271,19 +1271,15 @@ def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_
         end_date: The ending date for the MTM calculation period.
         initial_capital: The initial capital amount at the start of the backtest.
         trade_results: The backtest results containing trade data.
-        options_chain: DataFrame containing options chain data.
+        options_chain_multi_index: DataFrame containing options chain data with MultiIndex.
         param_str: A string identifier for the parameter set used in the backtest.
         results_dir: Directory where results will be saved. Defaults to "../results".
     
     Returns:
-        None. Results are saved to a CSV file in the specified directory.
+        tuple: (daily_df, max_drawdown_amount, max_drawdown_percentage)
     """
     # Ensure the results directory exists
     os.makedirs(results_dir, exist_ok=True)
-    
-    logger.info(f"Preparing options chain")
-    # First pivot the options chain for faster lookups
-    pivoted_chain = prepare_options_chain(options_chain, results_dir, param_str)
     
     # Initialize variables
     peak_capital = initial_capital
@@ -1293,7 +1289,7 @@ def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_
     # Simulate daily portfolio value updates
     for date in pd.date_range(start=start_date, end=end_date):
         # Calculate the portfolio value, daily P&L, and ROI for the current date
-        _, daily_pnl, roi = calculate_daily_value(date, trade_results, pivoted_chain)
+        daily_value, daily_pnl, roi = calculate_daily_value(date, trade_results, options_chain_multi_index)
         
         current_capital += daily_pnl  # Update current capital with daily P&L
         
@@ -1349,7 +1345,7 @@ def run_and_analyze_backtest(data_dir: str,
     
     # Load data
     start_time = pd.Timestamp.now()
-    options_chain, spx_data, vix_data = load_backtest_data(
+    options_chain, options_chain_multi_index, spx_data, vix_data = load_backtest_data(
         data_dir,
         use_preprocessed=use_preprocessed,
         save_preprocessed=save_preprocessed
@@ -1378,13 +1374,13 @@ def run_and_analyze_backtest(data_dir: str,
     trade_signals = generate_trade_signals(
         spx_data, 
         options_chain,
-        start_date=start_date,
-        end_date=end_date,
         option_type=option_type,
         delta_target=delta_target,
         delta_range=delta_range,
         dte_target=dte_target,
-        dte_range=dte_range
+        dte_range=dte_range,
+        start_date=start_date,
+        end_date=end_date,
     )
     signal_generation_time = (pd.Timestamp.now() - signal_time).total_seconds()
     logger.info(f"Signal generation completed in {signal_generation_time:.2f} seconds")
@@ -1410,8 +1406,11 @@ def run_and_analyze_backtest(data_dir: str,
     logger.info(f"Backtest execution completed in {backtest_execution_time:.2f} seconds")
     logger.info(f"Total time: {total_time:.2f} seconds")
     
-    # Call the MTM function
-    daily_df, max_drawdown, max_drawdown_pct = calculate_mtm(start_date, end_date, initial_capital, results, options_chain, param_str)
+    # Call the MTM function with the MultiIndex version
+    daily_df, max_drawdown, max_drawdown_pct = calculate_mtm(
+        start_date, end_date, initial_capital, results, 
+        options_chain_multi_index, param_str
+    )
             
     # Print summary statistics
     logger.info("\nBacktest Results Summary:")
@@ -1467,6 +1466,11 @@ def check_date_presence(pivoted_chain, date_to_check):
 
 # Example usage:
 if __name__ == "__main__":
+
+    pd.set_option('display.max_columns', None)
+    # pd.set_option('display.max_rows', None)
+    pd.set_option('display.max_colwidth', None)
+
     # Example file paths - update these to your actual file paths
     DATA_PATH = "/Users/liefe/Projects/ericlief/Fin/data/spx"
     # SPX_DATA_PATH = os.path.join(DATA_PATH, "spx-daily-1996-ohlc-cleaned.csv")
