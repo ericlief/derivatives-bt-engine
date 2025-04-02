@@ -851,9 +851,8 @@ def load_backtest_data(data_dir, use_preprocessed=True, save_preprocessed=True):
         save_preprocessed: Whether to save preprocessed data for future use
     
     Returns:
-        tuple: (options_chain, spx_data, vix_data)
+        tuple: (options_chain, options_chain_multi_index, spx_data, vix_data)
     """
-    # Define standard file names
     raw_files = {
         'options': os.path.join(data_dir, 'options.csv'),
         'spx': os.path.join(data_dir, 'spx.csv'),
@@ -864,68 +863,64 @@ def load_backtest_data(data_dir, use_preprocessed=True, save_preprocessed=True):
         'options': os.path.join(data_dir, "options.pkl"),
         'spx': os.path.join(data_dir, "spx.pkl"),
         'vix': os.path.join(data_dir, "vix.pkl"),
-        'options_pivoted': os.path.join(data_dir, "options_pivoted.pkl"),
-        'chain_multi_index': os.path.join(data_dir, "chain_multi_index.pkl")  # Added new path
+        'chain_multi_index': os.path.join(data_dir, "chain_multi_index.pkl")
     }
     
     try:
+        options_chain = None
+        options_chain_multi_index = None
+        
         # Try to load preprocessed data if requested
         if use_preprocessed:
+            # Load MultiIndex options chain if it exists
             if os.path.exists(processed_files['chain_multi_index']):
                 logger.info("Loading MultiIndex options chain")
-                options_chain = pd.read_pickle(processed_files['chain_multi_index'])
-                spx_data = pd.read_pickle(processed_files['spx'])
-                vix_data = pd.read_pickle(processed_files['vix'])
-                return options_chain, spx_data, vix_data
+                options_chain_multi_index = pd.read_pickle(processed_files['chain_multi_index'])
             
-            elif all(os.path.exists(f) for f in [processed_files['options'], processed_files['spx'], processed_files['vix']]):
-                logger.info("Loading simple-index preprocessed data")
+            # Load normal options chain if it exists
+            if os.path.exists(processed_files['options']):
+                logger.info("Loading normal options chain")
                 options_chain = pd.read_pickle(processed_files['options'])
+            
+            # Load SPX and VIX data
+            if os.path.exists(processed_files['spx']) and os.path.exists(processed_files['vix']):
                 spx_data = pd.read_pickle(processed_files['spx'])
                 vix_data = pd.read_pickle(processed_files['vix'])
-                
-                # First reset the index and rename it to 'date'
-                logger.info("Resetting and renaming index")
-                options_chain = options_chain.reset_index().rename(columns={'index': 'date'})
-                
-                # Now create the MultiIndex structure
+        
+        # If either chain is missing, load and process raw data
+        if options_chain is None or options_chain_multi_index is None:
+            logger.info("Loading and preprocessing original data files")
+            raw_options = pd.read_csv(raw_files['options'], index_col=0, parse_dates=True)
+            spx_data = pd.read_csv(raw_files['spx'], index_col=0, parse_dates=True)
+            vix_data = pd.read_csv(raw_files['vix'], index_col=0, parse_dates=True)
+            
+            # Preprocess the data
+            options_chain = preprocess_options_data(raw_options)
+            spx_data = preprocess_spx_data(spx_data)
+            vix_data = preprocess_vix_data(vix_data)
+            
+            # Create MultiIndex version if needed
+            if options_chain_multi_index is None:
                 logger.info("Creating MultiIndex structure")
-                options_chain = options_chain.set_index(['date', 'strike']).sort_index()
-                
-                # Save the MultiIndex version
-                logger.info("Saving MultiIndex options chain")
-                options_chain.to_pickle(processed_files['chain_multi_index'])
-                
-                return options_chain, spx_data, vix_data
-        
-        # Load and preprocess original data
-        logger.info("Loading and preprocessing original data files")
-        options_chain = pd.read_csv(raw_files['options'], index_col=0, parse_dates=True)
-        spx_data = pd.read_csv(raw_files['spx'], index_col=0, parse_dates=True)
-        vix_data = pd.read_csv(raw_files['vix'], index_col=0, parse_dates=True)
-        
-        # Preprocess the data
-        options_chain = preprocess_options_data(options_chain)
-        spx_data = preprocess_spx_data(spx_data)
-        vix_data = preprocess_vix_data(vix_data)
-        
-        # Save preprocessed non-pivoted data if requested
-        if save_preprocessed:
-            options_chain.to_pickle(processed_files['options'])
-            spx_data.to_pickle(processed_files['spx'])
-            vix_data.to_pickle(processed_files['vix'])
-            logger.info("Saved preprocessed data files")
-        
-        # Pivot the options chain
-        logger.info("Pivoting options chain")
-        options_chain = prepare_options_chain(options_chain, processed_files['options_pivoted'], "default")
+                options_chain_multi_index = options_chain.reset_index().rename(columns={'index': 'date'})
+                options_chain_multi_index = options_chain_multi_index.set_index(['date', 'strike']).sort_index()
+            
+            # Save preprocessed data if requested
+            if save_preprocessed:
+                if options_chain is not None:
+                    options_chain.to_pickle(processed_files['options'])
+                options_chain_multi_index.to_pickle(processed_files['chain_multi_index'])
+                spx_data.to_pickle(processed_files['spx'])
+                vix_data.to_pickle(processed_files['vix'])
+                logger.info("Saved preprocessed data files")
         
         logger.info(f"Loaded and preprocessed data:")
-        logger.info(f"- Options chain: {len(options_chain)} rows")
+        logger.info(f"- Normal options chain: {len(options_chain)} rows")
+        logger.info(f"- MultiIndex options chain: {len(options_chain_multi_index)} rows")
         logger.info(f"- SPX data: {len(spx_data)} rows")
         logger.info(f"- VIX data: {len(vix_data)} rows")
         
-        return options_chain, spx_data, vix_data
+        return options_chain, options_chain_multi_index, spx_data, vix_data
         
     except Exception as e:
         logger.error(f"Error loading data: {str(e)}")
@@ -1323,19 +1318,19 @@ def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_
     return daily_df, max_drawdown_amount, max_drawdown_percentage
 
 def run_and_analyze_backtest(data_dir: str, 
-                            option_type: OptionType = OptionType.PUT,
-                            position_side: PositionSide = PositionSide.SHORT,
-                            start_date: str = None,
-                            end_date: str = None,
-                            delta_target: float = None,
-                            delta_range: Tuple[float, float] = None,
-                            dte_target: int = None,
-                            dte_range: Tuple[int, int] = None,
-                            initial_capital: float = 100000,
-                            early_close_days: Optional[int] = None,
-                            use_preprocessed: bool = False,
-                            save_preprocessed: bool = False,
-                            save_trades: bool = True) -> pd.DataFrame:
+                           option_type: OptionType = OptionType.PUT,
+                           position_side: PositionSide = PositionSide.SHORT,
+                           start_date: str = None,
+                           end_date: str = None,
+                           delta_target: float = None,
+                           delta_range: Tuple[float, float] = None,
+                           dte_target: int = None,
+                           dte_range: Tuple[int, int] = None,
+                           initial_capital: float = 100000,
+                           early_close_days: Optional[int] = None,
+                           use_preprocessed: bool = False,
+                           save_preprocessed: bool = False,
+                           save_trades: bool = True) -> pd.DataFrame:
     """
     Load data, generate signals, run backtest and return results.
     """
