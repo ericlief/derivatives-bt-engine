@@ -1127,67 +1127,131 @@ def check_data_quality(options_chain, spx_data, vix_data):
     
     logger.info("\n=== End Data Quality Check ===\n")
 
-def calculate_daily_value(date, trade_results, pivoted_chain):
+def calculate_daily_value(date, trade_results, options_chain_multi_index):
     """
-    Calculates the daily portfolio value and ROI for a given date based on open positions.
-
-    Parameters:
-    - date (datetime): The date for which to calculate the portfolio value and ROI.
-    - trade_results (DataFrame): DataFrame containing the backtest results, including trade data.
-    - pivoted_chain (DataFrame): Pivoted DataFrame containing options chain data for faster lookups.
-
-    Returns:
-    - tuple: A tuple containing the daily portfolio value, daily P&L, and ROI.
-    """
-    daily_value = 0
-    total_capital_used = 0
-    daily_pnl = 0
-        
-    # logger.info(f"Pivotingoptions chain")
-
-    # # First pivot the options chain for faster lookups
-    # pivoted_chain = options_chain.pivot_table(
-    #     index=['strike', 'expire_date'],
-    #     columns=options_chain.index.normalize(),
-    #     values=['p_last', 'c_last'],
-    #     aggfunc='first'
-    # )
-    # logger.info(f"Pivoted options chain {pivoted_chain.head(2)}")
+    Calculate the daily market value of open positions and margin requirements.
     
-    date = date.normalize()
-    logger.info("Getting MTM daily value for {date}")
+    Returns:
+        tuple: (position_value, margin_requirement)
+    """
+    position_value = 0
+    margin_requirement = 0
+    
+    date = pd.Timestamp(date).normalize()
+    logger.info(f"Getting position values for {date}")
+    
     for trade in trade_results.itertuples():
         if trade.entry_date <= date <= trade.exit_date:
             last_field = 'p_last' if 'put' in trade.option_type else 'c_last'
             
-            if date not in pivoted_chain.columns.levels[1]:
-                # Find nearest date (faster with columns)
-                available_dates = pivoted_chain.columns.levels[1]
-                nearest_date = available_dates[available_dates <= date][-1]
-                logger.info(f"Found date {nearest_date} before target date {date}.")
-                date = nearest_date
-            
             try:
-                market_value = round(pivoted_chain.loc[(trade.strike, trade.expire_date), (last_field, date)] * 100, 2)
-                logger.info(f"Got daily price data for {last_field} on {date}")
-                daily_value += market_value
-                total_capital_used += trade.capital_used
+                # Check if the date exists in the MultiIndex
+                if date not in options_chain_multi_index.index.get_level_values(0):
+                    # Find the nearest date
+                    available_dates = options_chain_multi_index.index.get_level_values(0)
+                    nearest_date = available_dates[available_dates <= date][-1]
+                    logger.info(f"Found nearest date {nearest_date} before target date {date}.")
+                    date = nearest_date
                 
-                # Calculate P&L based on position side
+                # Get the price data using MultiIndex
+                price_data = options_chain_multi_index.loc[(date, trade.strike)]
+                price_data = price_data.loc[price_data['expire_date']==trade.expire_date]
+                logger.info('Got price data from date={date}/tstrike={strike}')
+                logger.info(price_data)
+                if isinstance(price_data, pd.Series):
+                    market_value = round(price_data[last_field] * 100, 2)
+                else:
+                    # If multiple matches, take the first one
+                    market_value = round(price_data[last_field].iloc[0] * 100, 2)
+                
+                # logger.info(f"Got daily market value for price={round(price_data[last_field], 2)}, {last_field}={market_value} on {date}")
+                
+                # Add to position value based on position side
                 if "long" in trade.position_side.lower():
-                    daily_pnl += market_value - trade.entry_price * 100
+                    position_value += market_value
+                    # For long positions, margin is typically the purchase price
+                    margin_requirement += trade.capital_used
                 elif "short" in trade.position_side.lower():
-                    daily_pnl += trade.entry_price * 100 - market_value
+                    position_value -= market_value  # Short positions are negative value
+                    # For short positions, margin requirements are typically higher
+                    margin_requirement += trade.capital_used
                 else:
                     logger.error("Position side not recognized")
-                    
+                
             except KeyError:
-                logger.warning(f"No data for strike {trade.strike}, expiration {trade.expire_date}")
+                logger.warning(f"No data for strike {trade.strike} on {date}")
+                continue
+            except Exception as e:
+                logger.error(f"Error calculating daily value: {str(e)}")
                 continue
 
-    roi = (daily_pnl / total_capital_used) if total_capital_used else 0
+    return position_value, margin_requirement
 
-    return daily_value, daily_pnl, roi
+def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_chain_multi_index, param_str, results_dir="results"):
+    """
+    Calculate and save mark-to-market (MTM) data for a backtest.
+    """
+    # Ensure the results directory exists
+    os.makedirs(results_dir, exist_ok=True)
+    
+    # Initialize tracking variables
+    peak_capital = initial_capital
+    current_capital = initial_capital
+    daily_data = []
+    previous_position_value = 0  # Initial position value is zero
+    
+    # Convert dates if they're strings
+    start_date = pd.Timestamp(start_date)
+    end_date = pd.Timestamp(end_date)
+
+    for date in pd.date_range(start=start_date, end=end_date):
+        # Get current position value and margin requirements
+        position_value, margin_requirement = calculate_daily_value(date, trade_results, options_chain_multi_index)
+        
+        # Calculate daily P&L as the change in position value
+        daily_pnl = position_value - previous_position_value
+        
+        # Update portfolio value correctly
+        portfolio_value = current_capital - margin_requirement + position_value
+        current_capital = portfolio_value  # Update current capital for next iteration
+        
+        # Update previous position value for next day's calculation
+        previous_position_value = position_value
+        
+        # Calculate drawdown
+        drawdown_amount = max(0, peak_capital - portfolio_value)
+        drawdown_pct = (drawdown_amount / peak_capital * 100) if peak_capital > 0 else 0
+        
+        # Update peak capital if portfolio value is higher
+        if portfolio_value > peak_capital:
+            peak_capital = portfolio_value
+        
+        # Calculate ROI for the day
+        daily_roi = (daily_pnl / margin_requirement * 100) if margin_requirement > 0 else 0
+        
+        # Store daily data
+        daily_data.append({
+            'Date': date,
+            'Portfolio Value': portfolio_value,
+            'Position Value': position_value,
+            'Margin Requirement': margin_requirement,
+            'Daily P&L': daily_pnl,
+            'Drawdown ($)': drawdown_amount,
+            'Drawdown (%)': drawdown_pct,
+            'ROI (%)': daily_roi
+        })
+
+    # Create DataFrame and calculate metrics
+    daily_df = pd.DataFrame(daily_data)
+    max_drawdown_amount = daily_df['Drawdown ($)'].max()
+    max_drawdown_percentage = daily_df['Drawdown (%)'].max()
+    
+    # Save results
+    mtm_csv_path = os.path.join(results_dir, f"mtm_{param_str}.csv")
+    daily_df.to_csv(mtm_csv_path, index=False)
+    logger.info(f"MTM results saved to {mtm_csv_path}")
+    
+    return daily_df, max_drawdown_amount, max_drawdown_percentage
 
 def pivot_options_chain(options_chain, needed_col):
     """
@@ -1290,65 +1354,7 @@ def prepare_options_chain(options_chain, path, param_str):
     
     return pivoted_chain
 
-def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_chain_multi_index, param_str, results_dir="../results"):
-    """
-    Calculate and save mark-to-market (MTM) data for a backtest.
-    
-    Args:
-        start_date: The starting date for the MTM calculation period.
-        end_date: The ending date for the MTM calculation period.
-        initial_capital: The initial capital amount at the start of the backtest.
-        trade_results: The backtest results containing trade data.
-        options_chain_multi_index: DataFrame containing options chain data with MultiIndex.
-        param_str: A string identifier for the parameter set used in the backtest.
-        results_dir: Directory where results will be saved. Defaults to "../results".
-    
-    Returns:
-        tuple: (daily_df, max_drawdown_amount, max_drawdown_percentage)
-    """
-    # Ensure the results directory exists
-    os.makedirs(results_dir, exist_ok=True)
-    
-    # Initialize variables
-    peak_capital = initial_capital
-    current_capital = initial_capital
-    daily_data = []
 
-    # Simulate daily portfolio value updates
-    for date in pd.date_range(start=start_date, end=end_date):
-        # Calculate the portfolio value, daily P&L, and ROI for the current date
-        daily_value, daily_pnl, roi = calculate_daily_value(date, trade_results, options_chain_multi_index)
-        
-        current_capital += daily_pnl  # Update current capital with daily P&L
-        
-        # Calculate drawdown in dollars
-        drawdown_amount = peak_capital - current_capital
-        
-        # Update peak capital if current capital is higher
-        if current_capital > peak_capital:
-            peak_capital = current_capital
-        
-        # Store daily data
-        daily_data.append({
-            'Date': date,
-            'Portfolio Value': current_capital,
-            'Drawdown ($)': drawdown_amount,
-            'Drawdown (%)': - drawdown_amount / peak_capital,
-            'PnL': daily_pnl,
-            'ROI': roi
-        })
-
-    # Calculate maximum drawdown percentage
-    max_drawdown_amount = daily_df['Drawdown ($)'].max()
-    max_drawdown_percentage = - (max_drawdown_amount / peak_capital) * 100
-
-    # Save daily MTM data to CSV
-    mtm_csv_path = os.path.join(results_dir, f"mtm_{param_str}.csv")
-    daily_df = pd.DataFrame(daily_data)
-    daily_df.to_csv(mtm_csv_path, index=False)
-    logger.info(f"MTM results saved to {mtm_csv_path}")
-    
-    return daily_df, max_drawdown_amount, max_drawdown_percentage
 
 def run_and_analyze_backtest(data_dir: str, 
                            option_type: OptionType = OptionType.PUT,
@@ -1462,7 +1468,7 @@ def run_and_analyze_backtest(data_dir: str,
             logger.info(f"Sharpe Ratio: {sharpe:.2f}")
     
     # Save summary results to CSV
-    results_dir = '../results'  # Updated to be consistent with logs directory
+    results_dir = 'results'  # Updated to be consistent with logs directory
     os.makedirs(results_dir, exist_ok=True)
     results_csv_path = os.path.join(results_dir, f"results_{param_str}_{timestamp}.csv")
     results.to_csv(results_csv_path, index=False)
