@@ -943,7 +943,7 @@ def generate_trade_signals(
     Generate trade signals based on the provided parameters. These are not the actual trades,
     but rather potential trades filtered for the desired criteria. The DataFrame should have a 
     pd.DateTime index
-
+    
     Args:
         spx_data: DataFrame containing underlying price data
         options_chain: DataFrame containing options chain data
@@ -954,7 +954,7 @@ def generate_trade_signals(
         dte_range: Range of days to expiration to consider
         start_date: Start date for the trade signals
         end_date: End date for the trade signals
-
+    
     Returns:
         DataFrame containing the generated trade signals
     """
@@ -1127,63 +1127,91 @@ def check_data_quality(options_chain, spx_data, vix_data):
     
     logger.info("\n=== End Data Quality Check ===\n")
 
-def calculate_daily_value(date, trade_results, options_chain_multi_index):
+def calculate_daily_value(trade, date, options_chain_multi_index):
     """
     Calculate the daily market value of open positions and margin requirements.
     
     Returns:
         tuple: (position_value, margin_requirement)
     """
-    position_value = 0
-    margin_requirement = 0
+    # position_value = 0
+    # margin_requirement = 0
     
-    date = pd.Timestamp(date).normalize()
-    logger.info(f"Getting position values for {date}")
+    # date = pd.Timestamp(date).normalize()
+    # logger.info(f"Getting position values for {date}")
     
-    for trade in trade_results.itertuples():
-        if trade.entry_date <= date <= trade.exit_date:
-            last_field = 'p_last' if 'put' in trade.option_type else 'c_last'
+    # for trade in trade_results.itertuples():
+       
+    # if trade.entry_date <= date <= trade.exit_date:
+    last_field = 'p_last' if 'put' in trade.option_type else 'c_last'
             
-            try:
-                # Check if the date exists in the MultiIndex
-                if date not in options_chain_multi_index.index.get_level_values(0):
-                    # Find the nearest date
-                    available_dates = options_chain_multi_index.index.get_level_values(0)
-                    nearest_date = available_dates[available_dates <= date][-1]
-                    logger.info(f"Found nearest date {nearest_date} before target date {date}.")
-                    date = nearest_date
-                
-                # Get the price data using MultiIndex
-                price_data = options_chain_multi_index.loc[(date, trade.strike)]
-                price_data = price_data.loc[price_data['expire_date']==trade.expire_date]
-                logger.info('Got price data from date={date}/tstrike={strike}')
-                logger.info(price_data)
-                if isinstance(price_data, pd.Series):
-                    market_value = round(price_data[last_field] * 100, 2)
-                else:
-                    # If multiple matches, take the first one
-                    market_value = round(price_data[last_field].iloc[0] * 100, 2)
+    try:
+        # Check if the date exists in the MultiIndex
+        if date not in options_chain_multi_index.index.get_level_values(0):
+            # Find the nearest date
+            available_dates = options_chain_multi_index.index.get_level_values(0)
+            nearest_date = available_dates[available_dates <= date][-1]
+            logger.info(f"Found nearest date {nearest_date} before target date {date}.")
+            date = nearest_date
+        
+        # Get the price data using MultiIndex
+        price_data = options_chain_multi_index.loc[(date, trade.strike)]
+        price_data = price_data.loc[price_data['expire_date']==trade.expire_date]  # filter by expiry
+
+        # Use intrinsic value if early closure
+        if trade.exit_date < trade.expire_date:
+            bid_col = 'p_bid' if 'put' in trade.option_type.lower() else "c_bid"
+            ask_col = 'p_ask' if 'put' in trade.option_type.lower() else "c_ask"
+            bid = price_data[bid_col].iloc[0] 
+            ask = price_data[ask_col].iloc[0] 
+            mid = bid + ask / 2
+            market_value = round(100 * mid, 2)
+            logger.info(f'Calculated mid value on date={date} for strike={trade.strike} and value={market_value}')
+        
+        # Expiration, so use intrinsic value
+        elif trade.exit_date == trade.expire_date:
+            underlying_last = price_data['underlying_last'].iloc[0]
+            if 'put' in trade.option_type.lower():
+                close = max(0, trade.strike - underlying_last)
+            else:
+                close = max(0, underlying_last - trade.strike)
+            market_value = round(close * 100, 2)
+            logger.info(f'Calculated intrinsic value on date={date} for strike={trade.strike} and value={market_value}')
+
+        else:
+            logger.error(f'Could not determine intrinsic value for expiration: {date}')
+            return 0
+        
+        if "short" in trade.position_side.lower():
+            # For short positions, negate the market value
+            market_value = -market_value
+
+        return market_value
+    
+                # else:
+                #     # If multiple matches, take the first one
+                #     market_value = round(price_data[last_field].iloc[0] * 100, 2)
                 
                 # logger.info(f"Got daily market value for price={round(price_data[last_field], 2)}, {last_field}={market_value} on {date}")
                 
-                # Add to position value based on position side
-                if "long" in trade.position_side.lower():
-                    position_value += market_value
-                    # For long positions, margin is typically the purchase price
-                    margin_requirement += trade.capital_used
-                elif "short" in trade.position_side.lower():
-                    position_value -= market_value  # Short positions are negative value
-                    # For short positions, margin requirements are typically higher
-                    margin_requirement += trade.capital_used
-                else:
-                    logger.error("Position side not recognized")
+                # # Add to position value based on position side
+                # if "long" in trade.position_side.lower():
+                #     position_value += market_value
+                #     # For long positions, margin is typically the purchase price
+                #     margin_requirement += trade.capital_used
+                # elif "short" in trade.position_side.lower():
+                #     position_value -= market_value  # Short positions are negative value
+                #     # For short positions, margin requirements are typically higher
+                #     margin_requirement += trade.capital_used
+                # else:
+                #     logger.error("Position side not recognized")
                 
-            except KeyError:
-                logger.warning(f"No data for strike {trade.strike} on {date}")
-                continue
-            except Exception as e:
-                logger.error(f"Error calculating daily value: {str(e)}")
-                continue
+    except KeyError:
+        logger.warning(f"No data for strike {trade.strike} on {date}")
+        # continue
+    except Exception as e:
+        logger.error(f"Error calculating daily value: {str(e)}")
+        # continue
 
     return position_value, margin_requirement
 
@@ -1196,50 +1224,72 @@ def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_
     
     # Initialize tracking variables
     peak_capital = initial_capital
-    current_capital = initial_capital
+    net_liquidity = initial_capital
     daily_data = []
     previous_position_value = 0  # Initial position value is zero
     
-    # Convert dates if they're strings
-    start_date = pd.Timestamp(start_date)
-    end_date = pd.Timestamp(end_date)
+    # Iterate through each trade 
+    for trade in trade_results.itertuples():
+        # logger.info(f'Calculating MTM for trade: {trade.option_type}|{trade.entry_date}|{trade.strike}|{trade.expire_date}->{position_value}')
 
-    for date in pd.date_range(start=start_date, end=end_date):
-        # Get current position value and margin requirements
-        position_value, margin_requirement = calculate_daily_value(date, trade_results, options_chain_multi_index)
+        start_date = pd.Timestamp(trade.entry_date).normalize()
+        end_date = pd.Timestamp(trade.exit_date).normalize()
+        position_value = None
+        # TODO:
+        # Will need to modify with maintenance margin reqs for each trade type
+        margin_requirement = trade.capital_used 
+
+        # Iterate through the dates held and calculate MTM value
+        for date in pd.date_range(start=start_date, end=end_date):
+            date = pd.Timestamp(date).normalize()
+            position_value = calculate_daily_value(trade, date, options_chain_multi_index)
+            # logger.info(f'Got position value for trade: {trade.option_type}|{trade.entry_date}|{trade.strike}|{trade.expire_date}')
+            # logger.info(type(position_value))
+            # logger.info(position_value)
+            
+            # Get current position value and margin requirements
+            # position_value, margin_requirement = calculate_daily_value(date, trade_results, options_chain_multi_index)
+            
+            # Calculate daily P&L as the change in position value
+            daily_pnl = round(position_value - previous_position_value, 2) if previous_position_value else round(position_value - trade.entry_price * 100, 2)
+            total_pnl = round(position_value - trade.entry_price * 100, 2)
+            # Update portfolio value correctly
+            net_liquidity += daily_pnl
+            # portfolio_value = current_capital - margin_requirement + position_value
+            # current_capital = portfolio_value  # Update current capital for next iteration
         
-        # Calculate daily P&L as the change in position value
-        daily_pnl = position_value - previous_position_value
+            # Update previous position value for next day's calculation
+            previous_position_value = position_value
         
-        # Update portfolio value correctly
-        portfolio_value = current_capital - margin_requirement + position_value
-        current_capital = portfolio_value  # Update current capital for next iteration
+            # Calculate drawdown
+            # drawdown_amount = max(0, peak_capital - portfolio_value)
+            drawdown_amount = round(peak_capital - net_liquidity, 2)
+            drawdown_pct = (drawdown_amount / peak_capital * 100) if peak_capital > 0 else 0
         
-        # Update previous position value for next day's calculation
-        previous_position_value = position_value
-        
-        # Calculate drawdown
-        drawdown_amount = max(0, peak_capital - portfolio_value)
-        drawdown_pct = (drawdown_amount / peak_capital * 100) if peak_capital > 0 else 0
-        
-        # Update peak capital if portfolio value is higher
-        if portfolio_value > peak_capital:
-            peak_capital = portfolio_value
-        
-        # Calculate ROI for the day
-        daily_roi = (daily_pnl / margin_requirement * 100) if margin_requirement > 0 else 0
-        
-        # Store daily data
-        daily_data.append({
-            'Date': date,
-            'Portfolio Value': portfolio_value,
-            'Position Value': position_value,
-            'Margin Requirement': margin_requirement,
-            'Daily P&L': daily_pnl,
-            'Drawdown ($)': drawdown_amount,
-            'Drawdown (%)': drawdown_pct,
-            'ROI (%)': daily_roi
-        })
+            # Update peak capital if portfolio value is higher
+            if net_liquidity > peak_capital:
+                peak_capital = net_liquidity
+            
+            # Calculate ROI for the day
+            daily_roi = round(daily_pnl / margin_requirement * 100, 2) if margin_requirement > 0 else 0
+            tota_roi = round(total_pnl / margin_requirement * 100, 2) if margin_requirement > 0 else 0
+            
+            logger.info(f'Stats for trade: daily pnl: {daily_pnl}, daily roi{daily_roi}')
+
+            # Store daily data
+            
+            daily_data.append({
+                'Date': date,
+                'Net Liquidity': net_liquidity,
+                'Position Value': position_value,
+                'Margin Requirement': margin_requirement,
+                'Daily P&L': daily_pnl,
+                'Total P&L': total_pnl,
+                'Drawdown ($)': drawdown_amount,
+                'Drawdown (%)': drawdown_pct,
+                'ROI (%)': daily_roi,
+                'Total ROI': tota_roi
+            })
 
     # Create DataFrame and calculate metrics
     daily_df = pd.DataFrame(daily_data)
@@ -1266,10 +1316,10 @@ def pivot_options_chain(options_chain, needed_col):
         'p_iv', 'c_iv',
         'underlying_last'
     ]
-
+    
     logger.info(f"Starting pivot operation with DataFrame of shape {options_chain.shape}")
     logger.info(f"Memory usage before pivot: {options_chain.memory_usage().sum() / 1024**2:.2f} MB")
-
+    
     try:
         # Get the index name before resetting
         date_col = options_chain.index.name if options_chain.index.name else 'date'
@@ -1300,8 +1350,8 @@ def pivot_options_chain(options_chain, needed_col):
             index='strike', 
             columns=date_col,
             values=needed_col,
-            aggfunc='first'
-        )
+        aggfunc='first'
+    )
         
         logger.info("Computing final result")
         result = pivoted_chain.compute()
@@ -1357,19 +1407,19 @@ def prepare_options_chain(options_chain, path, param_str):
 
 
 def run_and_analyze_backtest(data_dir: str, 
-                           option_type: OptionType = OptionType.PUT,
-                           position_side: PositionSide = PositionSide.SHORT,
-                           start_date: str = None,
-                           end_date: str = None,
-                           delta_target: float = None,
-                           delta_range: Tuple[float, float] = None,
-                           dte_target: int = None,
-                           dte_range: Tuple[int, int] = None,
-                           initial_capital: float = 100000,
-                           early_close_days: Optional[int] = None,
-                           use_preprocessed: bool = False,
-                           save_preprocessed: bool = False,
-                           save_trades: bool = True) -> pd.DataFrame:
+                            option_type: OptionType = OptionType.PUT,
+                            position_side: PositionSide = PositionSide.SHORT,
+                            start_date: str = None,
+                            end_date: str = None,
+                            delta_target: float = None,
+                            delta_range: Tuple[float, float] = None,
+                            dte_target: int = None,
+                            dte_range: Tuple[int, int] = None,
+                            initial_capital: float = 100000,
+                            early_close_days: Optional[int] = None,
+                            use_preprocessed: bool = False,
+                            save_preprocessed: bool = False,
+                            save_trades: bool = True) -> pd.DataFrame:
     """
     Load data, generate signals, run backtest and return results.
     """
