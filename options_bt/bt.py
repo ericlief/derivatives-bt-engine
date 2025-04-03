@@ -284,6 +284,7 @@ def close_position(position: Position,
         logger.warning("Skipping trade due to missing close data")
         return current_capital, None
     
+    # TODO pass in the position named dict instead when possible 
     pnl = calculate_option_pnl(underlying_close, strike, entry_price, option_type, position['position_side'])
     margin_released = position['margin_required']
     capital_change = margin_released + pnl
@@ -484,7 +485,7 @@ def run_backtest(trade_signals_df: pd.DataFrame,
         # Skip if we can't access the trade date
         try:
             trade_date = trade_signal.Index
-            logger.info(f"Processing potential trade for date {trade_date} and capital {capital}")
+            logger.info(f"Processing potential trade for date {trade_date} and capital {capital:.2f}")
         except Exception as e:
             logger.error(f"Error accessing trade date: {e} - skipping")
             skipped_trades += 1
@@ -595,8 +596,8 @@ def run_backtest(trade_signals_df: pd.DataFrame,
             
             # Calculate current drawdown as percentage
             if peak_capital > 0:  # Avoid division by zero
-                current_drawdown = - round((peak_capital - current_capital) / peak_capital * 100, 2)
-                max_drawdown = max(max_drawdown, current_drawdown)
+                current_drawdown = round((current_capital - peak_capital) / peak_capital * 100, 2)
+                max_drawdown = min(max_drawdown, current_drawdown)
             
             # Update the last_position_close_date to the actual exit date, not expiration date
             last_position_close_date = trade_result['exit_date']
@@ -628,13 +629,14 @@ def run_backtest(trade_signals_df: pd.DataFrame,
         
         # Calculate drawdown for each trade
         results_df['peak_capital'] = results_df['total_capital'].cummax().round(2)
-        results_df['drawdown_pct'] = ((results_df['peak_capital'] - results_df['total_capital']) / results_df['peak_capital'] * 100).round(2)
+        results_df['drawdown'] = (results_df['total_capital']-results_df['peak_capital']).round(2)
+        results_df['drawdown_pct'] = (results_df['drawdown'] / results_df['peak_capital'] * 100).round(2)
         
         # Calculate trade statistics once
         total_trades = len(results_df)
         winning_trades = (results_df['pnl'] > 0).sum()
         win_rate = winning_trades / total_trades
-        max_drawdown = results_df['drawdown_pct'].max()
+        max_drawdown = results_df['drawdown_pct'].min()
         
         # Log all statistics
         logger.info(f"Processed {total_trades_considered} potential trades:")
@@ -937,6 +939,25 @@ def generate_trade_signals(
     start_date: str = None,
     end_date: str = None,
 ) -> pd.DataFrame:
+    """
+    Generate trade signals based on the provided parameters. These are not the actual trades,
+    but rather potential trades filtered for the desired criteria. The DataFrame should have a 
+    pd.DateTime index
+
+    Args:
+        spx_data: DataFrame containing underlying price data
+        options_chain: DataFrame containing options chain data
+        option_type: Type of option strategy to trade (PUT or CALL)
+        delta_target: Target delta value for the trade
+        delta_range: Range of delta values to consider
+        dte_target: Target days to expiration for the trade
+        dte_range: Range of days to expiration to consider
+        start_date: Start date for the trade signals
+        end_date: End date for the trade signals
+
+    Returns:
+        DataFrame containing the generated trade signals
+    """
     
     # Create a copy of the options chain to avoid modifying the original
     chain_df = options_chain.copy()
@@ -944,10 +965,14 @@ def generate_trade_signals(
     # Filter by DATE range if provided
     if start_date:
         start_date = pd.to_datetime(start_date)
-        chain_df = chain_df[chain_df.index.get_level_values('date') >= start_date]
+        # chain_df = chain_df[chain_df.index.get_level_values('date') >= start_date]
+        chain_df = chain_df[chain_df.index >= start_date]
+
+    
     if end_date:
         end_date = pd.to_datetime(end_date)
-        chain_df = chain_df[chain_df.index.get_level_values('date') <= end_date]
+        # chain_df = chain_df[chain_df.index.get_level_values('date') <= end_date]
+        chain_df = chain_df[chain_df.index <= end_date]
         logger.info(f'Sorting for date range: {start_date}-{end_date}')
         logger.info('Sample chain')
         logger.info(chain_df.head())
@@ -1010,9 +1035,9 @@ def generate_trade_signals(
     #     chain_df = chain_df.sort_values('delta_diff')
     
     # Group by date and get the best option for each date
-    trade_signals = chain_df.groupby(level='date').first()
-    logger.info('Grouping by level=date.first()')
-
+    # trade_signals = chain_df.groupby(level='date').first()
+    # logger.info('Grouping by level=date.first()')
+    trade_signals = chain_df.sort_index()
     logger.info(f"Generated {len(trade_signals)} trade signals")
     # Print the head of the trade signals DataFrame to show a sample of the generated signals
     logger.info("\nSample of trade signals:")
@@ -1104,7 +1129,15 @@ def check_data_quality(options_chain, spx_data, vix_data):
 
 def calculate_daily_value(date, trade_results, pivoted_chain):
     """
-    Calculate the daily portfolio value and ROI for a given date based on open positions.
+    Calculates the daily portfolio value and ROI for a given date based on open positions.
+
+    Parameters:
+    - date (datetime): The date for which to calculate the portfolio value and ROI.
+    - trade_results (DataFrame): DataFrame containing the backtest results, including trade data.
+    - pivoted_chain (DataFrame): Pivoted DataFrame containing options chain data for faster lookups.
+
+    Returns:
+    - tuple: A tuple containing the daily portfolio value, daily P&L, and ROI.
     """
     daily_value = 0
     total_capital_used = 0
