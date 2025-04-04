@@ -1158,18 +1158,8 @@ def calculate_daily_value(trade, date, options_chain_multi_index):
         price_data = options_chain_multi_index.loc[(date, trade.strike)]
         price_data = price_data.loc[price_data['expire_date']==trade.expire_date]  # filter by expiry
 
-        # Use intrinsic value if early closure
-        if trade.exit_date < trade.expire_date:
-            bid_col = 'p_bid' if 'put' in trade.option_type.lower() else "c_bid"
-            ask_col = 'p_ask' if 'put' in trade.option_type.lower() else "c_ask"
-            bid = price_data[bid_col].iloc[0] 
-            ask = price_data[ask_col].iloc[0] 
-            mid = bid + ask / 2
-            market_value = round(100 * mid, 2)
-            logger.info(f'Calculated mid value on date={date} for strike={trade.strike} and value={market_value}')
-        
         # Expiration, so use intrinsic value
-        elif trade.exit_date == trade.expire_date:
+        if date == trade.expire_date:
             underlying_last = price_data['underlying_last'].iloc[0]
             if 'put' in trade.option_type.lower():
                 close = max(0, trade.strike - underlying_last)
@@ -1178,9 +1168,16 @@ def calculate_daily_value(trade, date, options_chain_multi_index):
             market_value = round(close * 100, 2)
             logger.info(f'Calculated intrinsic value on date={date} for strike={trade.strike} and value={market_value}')
 
+        # Either MTM daily or early closure, so calculate mid point of bid/ask quote
         else:
-            logger.error(f'Could not determine intrinsic value for expiration: {date}')
-            return 0
+            bid_col = 'p_bid' if 'put' in trade.option_type.lower() else "c_bid"
+            ask_col = 'p_ask' if 'put' in trade.option_type.lower() else "c_ask"
+            bid = price_data[bid_col].iloc[0] 
+            ask = price_data[ask_col].iloc[0] 
+            mid = (bid + ask) / 2
+            market_value = round(100 * mid, 2)
+            logger.info(f'Calculated mid value on date={date} for strike={trade.strike}, bid={bid}, ask={ask}, mid={mid}, value={market_value}')
+        
         
         if "short" in trade.position_side.lower():
             # For short positions, negate the market value
@@ -1216,6 +1213,126 @@ def calculate_daily_value(trade, date, options_chain_multi_index):
     return position_value, margin_requirement
 
 def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_chain_multi_index, param_str, results_dir="results"):
+    """
+    Calculate and save mark-to-market (MTM) data for a backtest.
+    """
+    # Ensure the results directory exists
+    os.makedirs(results_dir, exist_ok=True)
+    
+    # Initialize tracking variables
+    peak_capital = initial_capital
+    net_liquidity = initial_capital
+    daily_data = []
+    
+    # Convert string dates to timestamps if they're strings
+    start_date = pd.Timestamp(start_date).normalize() if start_date else options_chain_multi_index.index.get_level_values(0).min()
+    end_date = pd.Timestamp(end_date).normalize() if end_date else options_chain_multi_index.index.get_level_values(0).max()
+    
+    # Dictionary to track position values for each active trade
+    active_trades = {}  # (entry_date, strike, option_type) -> (position_value, margin_requirement)
+    
+    # Process each date in the backtest period
+    for date in pd.date_range(start=start_date, end=end_date):
+        date = pd.Timestamp(date).normalize()
+        daily_pnl = 0
+        daily_margin_requirement = 0
+        daily_position_value = 0
+        
+        # First, check for any trades that start on this date
+        for trade in trade_results.itertuples():
+            trade_start = pd.Timestamp(trade.entry_date).normalize()
+            trade_end = pd.Timestamp(trade.exit_date).normalize()
+            trade_id = (trade.entry_date, trade.strike, trade.option_type)
+            
+            # Handle existing trades
+            if trade_id in active_trades:
+                current_value = calculate_daily_value(trade, date, options_chain_multi_index)
+                prev_value = active_trades[trade_id]['position_value']
+                
+                # If trade closes today
+                if trade_end == date:
+                    net_liquidity += active_trades[trade_id]['margin_requirement']  # Release margin
+                    if "short" in trade.position_side.lower():
+                        # For shorts: we keep the premium we received (already in net_liquidity)
+                        # and the liability goes away (current_value approaches zero)
+                        net_liquidity -= current_value  # Remove final liability
+                    del active_trades[trade_id]
+                else:
+                    # Regular daily update
+                    active_trades[trade_id]['position_value'] = current_value
+                    daily_position_value += current_value
+                    daily_margin_requirement += active_trades[trade_id]['margin_requirement']
+            
+            # Handle new trades
+            elif trade_start == date:
+                position_value = calculate_daily_value(trade, date, options_chain_multi_index)
+                active_trades[trade_id] = {
+                    'trade': trade,
+                    'position_value': position_value,
+                    'margin_requirement': trade.capital_used
+                }
+                if "short" in trade.position_side.lower():
+                    # For new shorts: add premium received to liquidity
+                    net_liquidity += trade.entry_price * 100
+                daily_position_value += position_value
+                daily_margin_requirement += trade.capital_used
+
+        # Net liquidity includes:
+        # 1. Previous liquidity (includes premiums received)
+        # 2. Current position values (negative for shorts)
+        # 3. Margin requirements
+        net_liquidity = net_liquidity + daily_position_value - daily_margin_requirement
+        
+        # Calculate daily P&L as the change in position value
+        daily_pnl = daily_position_value - daily_margin_requirement
+        
+        # Calculate drawdown
+        drawdown_amount = round(peak_capital - net_liquidity, 2)
+        drawdown_pct = (drawdown_amount / peak_capital * 100) if peak_capital > 0 else 0
+        
+        # Update peak capital if portfolio value is higher
+        if net_liquidity > peak_capital:
+            peak_capital = net_liquidity
+        
+        # Calculate daily ROI
+        daily_roi = round(daily_pnl / daily_margin_requirement * 100, 2) if daily_margin_requirement > 0 else 0
+        
+        logger.info(f'Date: {date}, Daily P&L: ${daily_pnl:.2f}, ROI: {daily_roi:.2f}%, '
+                   f'Net Liquidity: ${net_liquidity:.2f}, Active Positions: {len(active_trades)}')
+        
+        # Store daily data
+        daily_data.append({
+            'Date': date,
+            'Net Liquidity': net_liquidity,
+            'Position Value': daily_position_value,
+            'Margin Requirement': daily_margin_requirement,
+            'Daily P&L': daily_pnl,
+            'Total P&L': sum(round(active_trades[trade_id]['position_value'] - 
+                                     active_trades[trade_id]['trade'].entry_price * 100, 2) 
+                               for trade_id in active_trades),
+            'Drawdown ($)': drawdown_amount,
+            'Drawdown (%)': drawdown_pct,
+            'ROI (%)': daily_roi,
+            'Total ROI': round(sum(round(active_trades[trade_id]['position_value'] - 
+                                           active_trades[trade_id]['trade'].entry_price * 100, 2) 
+                                     for trade_id in active_trades) / 
+                                 daily_margin_requirement * 100, 2) if daily_margin_requirement > 0 else 0,
+            'Active Positions': len(active_trades)
+        })
+    
+    # Create DataFrame and calculate metrics
+    daily_df = pd.DataFrame(daily_data)
+    max_drawdown_amount = daily_df['Drawdown ($)'].max()
+    max_drawdown_percentage = daily_df['Drawdown (%)'].max()
+    
+    # Save results
+    mtm_csv_path = os.path.join(results_dir, f"mtm_{param_str}.csv")
+    daily_df.to_csv(mtm_csv_path, index=False)
+    logger.info(f"MTM results saved to {mtm_csv_path}")
+    
+    return daily_df, max_drawdown_amount, max_drawdown_percentage
+
+def old_calculate_mtm(start_date, end_date, initial_capital, trade_results, options_chain_multi_index, param_str, results_dir="results"):
     """
     Calculate and save mark-to-market (MTM) data for a backtest.
     """
