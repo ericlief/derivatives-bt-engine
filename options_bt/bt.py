@@ -476,10 +476,10 @@ def run_backtest(trade_signals_df: pd.DataFrame,
     last_position_close_date = None
     
     # Sort trade signals by date to ensure chronological processing
-    sorted_trade_signals_df = trade_signals_df.sort_index()
+    # sorted_trade_signals_df = trade_signals_df.sort_index()
     
     # For itertuples with DatetimeIndex, we need to access the date via Index attribute
-    for trade_signal in sorted_trade_signals_df.itertuples():
+    for trade_signal in trade_signals_df.itertuples():
         total_trades_considered += 1
         
         # Skip if we can't access the trade date
@@ -1009,21 +1009,32 @@ def generate_trade_signals(
         chain_df = chain_df[delta_mask]
         # Sort by delta value, think should increase for calls  0.30, 0.32, ... and decrease for puts  -.30, -.32, ...
         ascending = (option_type == OptionType.CALL)
-        chain_df = chain_df.sort_values(delta_col, ascending=ascending)
+        logger.info(f"Filtering and sorting in {'ascending' if ascending else 'descending'} order")
+        logger.info(f'for delta range {delta_range} for OptionType={option_type.value} -> delta col={delta_col}')
+        chain_df = chain_df.reset_index().sort_values('index', delta_col, ascending=ascending)
+        trade_signals = chain_df.set_index('index')
         logger.info(f"Filtering and sorting in {'ascending' if ascending else 'descending'} order")
         logger.info(f'for delta range {delta_range} for OptionType={option_type.value} -> delta col={delta_col}')
         logger.info('Sample chain')
         logger.info(chain_df.head())
 
     elif delta_target:
+        logger.info(f'Filtering for delta_target={delta_target}')
         # Handle target case
         target = delta_target if option_type == OptionType.PUT else abs(delta_target)
         delta_diff = abs(chain_df[delta_col] - target)
-        chain_df = chain_df[delta_diff < 0.05]
+        chain_df = chain_df.assign(delta_diff=delta_diff)
+        # logger.info(f'Delta diff size: {delta_diff.size}')
+        chain_df = chain_df[chain_df.delta_diff < 0.05]
 
+        # logger.info(f'Delta diff size: {delta_diff.size}')
+        
         # Add and sort by delta_diff, ascending: .001, .002
-        chain_df = chain_df.assign(delta_diff=delta_diff).sort_values('delta_diff')
+        # chain_df = chain_df.assign(delta_diff=delta_diff).sort_values('delta_diff')
         logger.info(f'Filtering and sorting for delta difference in delta target={target} for OptionType={option_type}/delta col={delta_col}')
+        
+        chain_df = chain_df.reset_index().sort_values('index', 'delta_diff', ascending=ascending)
+        trade_signals = chain_df.set_index('index')
         logger.info('Sample chain')
         logger.info(chain_df.head())
     else:
@@ -1037,7 +1048,8 @@ def generate_trade_signals(
     # Group by date and get the best option for each date
     # trade_signals = chain_df.groupby(level='date').first()
     # logger.info('Grouping by level=date.first()')
-    trade_signals = chain_df.sort_index()
+    # trade_signals = chain_df.sort_index()
+
     logger.info(f"Generated {len(trade_signals)} trade signals")
     # Print the head of the trade signals DataFrame to show a sample of the generated signals
     logger.info("\nSample of trade signals:")
@@ -1210,7 +1222,7 @@ def calculate_daily_value(trade, date, options_chain_multi_index):
         logger.error(f"Error calculating daily value: {str(e)}")
         # continue
 
-    return position_value, margin_requirement
+    return None
 
 def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_chain_multi_index, param_str, results_dir="results"):
     """
@@ -1219,17 +1231,32 @@ def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_
     # Ensure the results directory exists
     os.makedirs(results_dir, exist_ok=True)
     
-    # Initialize tracking variables
-    peak_capital = initial_capital
-    net_liquidity = initial_capital
-    daily_data = []
-    
     # Convert string dates to timestamps if they're strings
     start_date = pd.Timestamp(start_date).normalize() if start_date else options_chain_multi_index.index.get_level_values(0).min()
-    end_date = pd.Timestamp(end_date).normalize() if end_date else options_chain_multi_index.index.get_level_values(0).max()
+    initial_end_date = pd.Timestamp(end_date).normalize() if end_date else options_chain_multi_index.index.get_level_values(0).max()
     
-    # Dictionary to track position values for each active trade
-    active_trades = {}  # (entry_date, strike, option_type) -> (position_value, margin_requirement)
+    # Find the latest exit date for trades that opened within our range
+    latest_exit = initial_end_date
+    for trade in trade_results.itertuples():
+        trade_start = pd.Timestamp(trade.entry_date).normalize()
+        trade_end = pd.Timestamp(trade.exit_date).normalize()
+        if start_date <= trade_start <= initial_end_date:  # Trade opened in our range
+            latest_exit = max(latest_exit, trade_end)
+    
+    # Use the later of initial_end_date or latest_exit
+    end_date = latest_exit
+    
+    logger.info(f"Adjusting MTM end date from {initial_end_date} to {end_date} to include all trade exits")
+    
+    # Initialize tracking variables
+    peak_capital = initial_capital
+    net_liquidity = initial_capital  # This tracks cash + position values
+    options_bp = initial_capital     # This tracks available buying power for new trades
+    cumulative_pnl = 0              # Track cumulative P&L
+    daily_data = []
+    
+    # Dictionary to track active trades
+    active_trades = {}  # (entry_date, strike, option_type) -> {'position_value': value, 'margin_requirement': margin}
     
     # Process each date in the backtest period
     for date in pd.date_range(start=start_date, end=end_date):
@@ -1237,177 +1264,109 @@ def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_
         daily_pnl = 0
         daily_margin_requirement = 0
         daily_position_value = 0
-        
+        logger.info(f'Processing date: {date}')
         # First, check for any trades that start on this date
         for trade in trade_results.itertuples():
             trade_start = pd.Timestamp(trade.entry_date).normalize()
             trade_end = pd.Timestamp(trade.exit_date).normalize()
             trade_id = (trade.entry_date, trade.strike, trade.option_type)
-            
+            logger.info(f'Processing trade: {trade_id}')
+
             # Handle existing trades
             if trade_id in active_trades:
+
                 current_value = calculate_daily_value(trade, date, options_chain_multi_index)
                 prev_value = active_trades[trade_id]['position_value']
-                
+                # Calculate daily P&L for this trade
+                daily_pnl += current_value - prev_value
+                logger.info(f'Daily PnL = Cur value - Prev value = {current_value} - {prev_value} = {daily_pnl}')
+
                 # If trade closes today
                 if trade_end == date:
-                    net_liquidity += active_trades[trade_id]['margin_requirement']  # Release margin
-                    if "short" in trade.position_side.lower():
-                        # For shorts: we keep the premium we received (already in net_liquidity)
-                        # and the liability goes away (current_value approaches zero)
-                        net_liquidity -= current_value  # Remove final liability
+                    logger.info('Closing trade: {trade_id}')
+             
+                    options_bp += active_trades[trade_id]['margin_requirement']  # Release margin back to BP
                     del active_trades[trade_id]
+                    
                 else:
-                    # Regular daily update
+                    logger.info(f'Updating existing trade {trade_id}')
                     active_trades[trade_id]['position_value'] = current_value
                     daily_position_value += current_value
                     daily_margin_requirement += active_trades[trade_id]['margin_requirement']
             
             # Handle new trades
             elif trade_start == date:
+                logger.info(f'Opening new trade: {trade_id}')
                 position_value = calculate_daily_value(trade, date, options_chain_multi_index)
                 active_trades[trade_id] = {
-                    'trade': trade,
                     'position_value': position_value,
                     'margin_requirement': trade.capital_used
                 }
-                if "short" in trade.position_side.lower():
-                    # For new shorts: add premium received to liquidity
-                    net_liquidity += trade.entry_price * 100
-                daily_position_value += position_value
+                # if "short" in trade.position_side.lower():
+                # For new shorts: add premium received to net liquidity
+                entry_price = round(trade.entry_price * 100, 2)
+                daily_pnl += entry_price + position_value
+                logger.info(f'{position_value} + {entry_price} -> Daily PnL: {entry_price + position_value}')
+                # net_liquidity += daily_pnl
+                # daily_pnl += position_value 
                 daily_margin_requirement += trade.capital_used
+                options_bp -= trade.capital_used
+                logger.info(f'BP: {options_bp}')
 
-        # Net liquidity includes:
-        # 1. Previous liquidity (includes premiums received)
-        # 2. Current position values (negative for shorts)
-        # 3. Margin requirements
-        net_liquidity = net_liquidity + daily_position_value - daily_margin_requirement
+  # Reduce BP by margin requirement
+            
+            # else:
+            #     logger.error('No trade/Trade not recognized')
+
+            logger.info(f'Net Liquidity: {net_liquidity}')
+            logger.info(f'Net Daily PnL: {daily_pnl}')
+
+        # Update cumulative P&L
+        cumulative_pnl += daily_pnl
         
-        # Calculate daily P&L as the change in position value
-        daily_pnl = daily_position_value - daily_margin_requirement
+        # Update net liquidity with daily P&L
+        net_liquidity += daily_pnl
         
         # Calculate drawdown
         drawdown_amount = round(peak_capital - net_liquidity, 2)
         drawdown_pct = (drawdown_amount / peak_capital * 100) if peak_capital > 0 else 0
         
-        # Update peak capital if portfolio value is higher
+        # Update peak capital if net liquidity is higher
         if net_liquidity > peak_capital:
             peak_capital = net_liquidity
         
-        # Calculate daily ROI
+        # Calculate ROI metrics
         daily_roi = round(daily_pnl / daily_margin_requirement * 100, 2) if daily_margin_requirement > 0 else 0
+        total_roi = round((net_liquidity - initial_capital) / initial_capital * 100, 2)
         
-        logger.info(f'Date: {date}, Daily P&L: ${daily_pnl:.2f}, ROI: {daily_roi:.2f}%, '
-                   f'Net Liquidity: ${net_liquidity:.2f}, Active Positions: {len(active_trades)}')
-        
-        # Store daily data
+        # Store daily data with expanded metrics
         daily_data.append({
             'Date': date,
-            'Net Liquidity': net_liquidity,
-            'Position Value': daily_position_value,
-            'Margin Requirement': daily_margin_requirement,
-            'Daily P&L': daily_pnl,
-            'Total P&L': sum(round(active_trades[trade_id]['position_value'] - 
-                                     active_trades[trade_id]['trade'].entry_price * 100, 2) 
-                               for trade_id in active_trades),
-            'Drawdown ($)': drawdown_amount,
-            'Drawdown (%)': drawdown_pct,
-            'ROI (%)': daily_roi,
-            'Total ROI': round(sum(round(active_trades[trade_id]['position_value'] - 
-                                           active_trades[trade_id]['trade'].entry_price * 100, 2) 
-                                     for trade_id in active_trades) / 
-                                 daily_margin_requirement * 100, 2) if daily_margin_requirement > 0 else 0,
-            'Active Positions': len(active_trades)
+            'Net Liquidity': round(net_liquidity, 2),
+            'Options BP': round(options_bp, 2),
+            'Position Value': round(daily_position_value, 2),
+            'Margin Requirement': round(daily_margin_requirement, 2),
+            'Daily P&L': round(daily_pnl, 2),
+            'Cumulative P&L': round(cumulative_pnl, 2),
+            'Total P&L': round(net_liquidity - initial_capital, 2),
+            'Drawdown ($)': round(drawdown_amount, 2),
+            'Drawdown (%)': round(drawdown_pct, 2),
+            'Daily ROI (%)': daily_roi,
+            'Total ROI (%)': total_roi,
+            'Active Positions': len(active_trades),
+            'Peak Capital': round(peak_capital, 2),
+            'Margin Utilization (%)': round(daily_margin_requirement / initial_capital * 100, 2)
         })
-    
-    # Create DataFrame and calculate metrics
-    daily_df = pd.DataFrame(daily_data)
-    max_drawdown_amount = daily_df['Drawdown ($)'].max()
-    max_drawdown_percentage = daily_df['Drawdown (%)'].max()
-    
-    # Save results
-    mtm_csv_path = os.path.join(results_dir, f"mtm_{param_str}.csv")
-    daily_df.to_csv(mtm_csv_path, index=False)
-    logger.info(f"MTM results saved to {mtm_csv_path}")
-    
-    return daily_df, max_drawdown_amount, max_drawdown_percentage
-
-def old_calculate_mtm(start_date, end_date, initial_capital, trade_results, options_chain_multi_index, param_str, results_dir="results"):
-    """
-    Calculate and save mark-to-market (MTM) data for a backtest.
-    """
-    # Ensure the results directory exists
-    os.makedirs(results_dir, exist_ok=True)
-    
-    # Initialize tracking variables
-    peak_capital = initial_capital
-    net_liquidity = initial_capital
-    daily_data = []
-    previous_position_value = 0  # Initial position value is zero
-    
-    # Iterate through each trade 
-    for trade in trade_results.itertuples():
-        # logger.info(f'Calculating MTM for trade: {trade.option_type}|{trade.entry_date}|{trade.strike}|{trade.expire_date}->{position_value}')
-
-        start_date = pd.Timestamp(trade.entry_date).normalize()
-        end_date = pd.Timestamp(trade.exit_date).normalize()
-        position_value = None
-        # TODO:
-        # Will need to modify with maintenance margin reqs for each trade type
-        margin_requirement = trade.capital_used 
-
-        # Iterate through the dates held and calculate MTM value
-        for date in pd.date_range(start=start_date, end=end_date):
-            date = pd.Timestamp(date).normalize()
-            position_value = calculate_daily_value(trade, date, options_chain_multi_index)
-            # logger.info(f'Got position value for trade: {trade.option_type}|{trade.entry_date}|{trade.strike}|{trade.expire_date}')
-            # logger.info(type(position_value))
-            # logger.info(position_value)
-            
-            # Get current position value and margin requirements
-            # position_value, margin_requirement = calculate_daily_value(date, trade_results, options_chain_multi_index)
-            
-            # Calculate daily P&L as the change in position value
-            daily_pnl = round(position_value - previous_position_value, 2) if previous_position_value else round(position_value - trade.entry_price * 100, 2)
-            total_pnl = round(position_value - trade.entry_price * 100, 2)
-            # Update portfolio value correctly
-            net_liquidity += daily_pnl
-            # portfolio_value = current_capital - margin_requirement + position_value
-            # current_capital = portfolio_value  # Update current capital for next iteration
         
-            # Update previous position value for next day's calculation
-            previous_position_value = position_value
-        
-            # Calculate drawdown
-            # drawdown_amount = max(0, peak_capital - portfolio_value)
-            drawdown_amount = round(peak_capital - net_liquidity, 2)
-            drawdown_pct = (drawdown_amount / peak_capital * 100) if peak_capital > 0 else 0
-        
-            # Update peak capital if portfolio value is higher
-            if net_liquidity > peak_capital:
-                peak_capital = net_liquidity
-            
-            # Calculate ROI for the day
-            daily_roi = round(daily_pnl / margin_requirement * 100, 2) if margin_requirement > 0 else 0
-            tota_roi = round(total_pnl / margin_requirement * 100, 2) if margin_requirement > 0 else 0
-            
-            logger.info(f'Stats for trade: daily pnl: {daily_pnl}, daily roi{daily_roi}')
-
-            # Store daily data
-            
-            daily_data.append({
-                'Date': date,
-                'Net Liquidity': net_liquidity,
-                'Position Value': position_value,
-                'Margin Requirement': margin_requirement,
-                'Daily P&L': daily_pnl,
-                'Total P&L': total_pnl,
-                'Drawdown ($)': drawdown_amount,
-                'Drawdown (%)': drawdown_pct,
-                'ROI (%)': daily_roi,
-                'Total ROI': tota_roi
-            })
-
+        # Log daily summary
+        logger.info(f'Date: {date}')
+        logger.info(f'  Daily P&L: ${daily_pnl:.2f}')
+        logger.info(f'  Cumulative P&L: ${cumulative_pnl:.2f}')
+        logger.info(f'  Daily ROI: {daily_roi:.2f}%')
+        logger.info(f'  Net Liquidity: ${net_liquidity:.2f}')
+        logger.info(f'  Options BP: ${options_bp:.2f}')
+        logger.info(f'  Active Positions: {len(active_trades)}')
+    
     # Create DataFrame and calculate metrics
     daily_df = pd.DataFrame(daily_data)
     max_drawdown_amount = daily_df['Drawdown ($)'].max()
