@@ -22,16 +22,28 @@ def setup_logger(log_file: str = None):
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         log_file = f'logs/backtest_{timestamp}.log'
     
-    # Configure logging
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler(log_file),
-            logging.StreamHandler()  # Also print to console
-        ]
-    )
-    return logging.getLogger(__name__)
+    # Create a logger
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.DEBUG)  # Set the logger to the lowest level
+
+    # Create file handler for all messages, including DEBUG
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setLevel(logging.DEBUG)  # Log all messages to the file
+
+    # Create console handler for INFO and above
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)  # Log only INFO and above to the console
+
+    # Create a formatter and set it for both handlers
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    file_handler.setFormatter(formatter)
+    console_handler.setFormatter(formatter)
+
+    # Add the handlers to the logger
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+
+    return logger
 
 # Create logger instance
 logger = setup_logger()
@@ -1011,7 +1023,8 @@ def generate_trade_signals(
         ascending = (option_type == OptionType.CALL)
         logger.info(f"Filtering and sorting in {'ascending' if ascending else 'descending'} order")
         logger.info(f'for delta range {delta_range} for OptionType={option_type.value} -> delta col={delta_col}')
-        chain_df = chain_df.reset_index().sort_values('index', delta_col, ascending=ascending)
+        chain_df = chain_df.reset_index().sort_values(by=['index', delta_col],
+                                                     ascending=[True, ascending])
         trade_signals = chain_df.set_index('index')
         logger.info(f"Filtering and sorting in {'ascending' if ascending else 'descending'} order")
         logger.info(f'for delta range {delta_range} for OptionType={option_type.value} -> delta col={delta_col}')
@@ -1033,7 +1046,8 @@ def generate_trade_signals(
         # chain_df = chain_df.assign(delta_diff=delta_diff).sort_values('delta_diff')
         logger.info(f'Filtering and sorting for delta difference in delta target={target} for OptionType={option_type}/delta col={delta_col}')
         
-        chain_df = chain_df.reset_index().sort_values('index', 'delta_diff', ascending=ascending)
+        chain_df = chain_df.reset_index().sort_values(by=['index', 'delta_diff'], 
+                                                      ascending=[True, True])
         trade_signals = chain_df.set_index('index')
         logger.info('Sample chain')
         logger.info(chain_df.head())
