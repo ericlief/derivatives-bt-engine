@@ -173,7 +173,7 @@ def get_closing_data(position: Position,
         if not (pd.isna(bid) or pd.isna(ask) or bid <= 0 or ask <= 0):
             spread_pct = (ask - bid) / ((bid + ask) / 2)
             if spread_pct <= 0.20:  # Found valid prices with acceptable spread
-                logger.info(f"Using prices from {idx} for close date {close_date}")
+                logger.debug(f"Using prices from {idx} for close date {close_date}")
                 return round((bid + ask) / 2, 2), underlying_close
     
     # If we get here, no valid prices were found
@@ -343,11 +343,8 @@ def create_trade_from_signal(trade_signal, underlying_price: float, entry_price:
         entry_price: Option entry price (mid of bid/ask)
         option_type: Type of option (PUT or CALL)
         position_side: Whether buying or selling the option
-    
-    Returns:
-        Position dictionary or None if validation fails
     """
-    logger.info(f"Creating trade from signal for date: {trade_signal.Index}")
+    logger.debug(f"Creating trade from signal for date: {trade_signal.Index}")
     
     # Get bid/ask fields based on option type
     bid_field = "p_bid" if option_type == OptionType.PUT else "c_bid"
@@ -412,6 +409,11 @@ def create_trade_from_signal(trade_signal, underlying_price: float, entry_price:
     # Calculate DTE
     entry_dte = (trade_signal.expire_date - trade_signal.Index).days
     
+    # Adjust entry price sign based on position side
+    # For long positions, entry price should be negative (cash outflow)
+    # For short positions, entry price should be positive (cash inflow)
+    signed_entry_price = -entry_price if position_side == PositionSide.LONG else entry_price
+    
     # Create the position with data
     position: Position = {
         'entry_date': entry_date,
@@ -422,8 +424,8 @@ def create_trade_from_signal(trade_signal, underlying_price: float, entry_price:
         'position_side': position_side.value,
         'bid': bid,
         'ask': ask,
-        'entry_price': round(entry_price, 2),
-        'margin_required': calculate_option_margin(underlying_price, entry_price, position_side),
+        'entry_price': round(signed_entry_price, 2),  # Use the signed entry price
+        'margin_required': calculate_option_margin(underlying_price, abs(entry_price), position_side),  # Use absolute entry price for margin
         'close_date': None,
         'entry_delta': round(entry_delta, 2) if entry_delta is not None else None,
         'entry_dte': entry_dte
@@ -497,7 +499,7 @@ def run_backtest(trade_signals_df: pd.DataFrame,
         # Skip if we can't access the trade date
         try:
             trade_date = trade_signal.Index
-            logger.info(f"Processing potential trade for date {trade_date} and capital {capital:.2f}")
+            logger.debug(f"Processing potential trade for date {trade_date} and capital {capital:.2f}")
         except Exception as e:
             logger.error(f"Error accessing trade date: {e} - skipping")
             skipped_trades += 1
@@ -586,7 +588,7 @@ def run_backtest(trade_signals_df: pd.DataFrame,
                 if test_date in spx_data.index:
                     open_position['close_date'] = test_date
                     close_date_found = True
-                    logger.info(f"Setting early close date to {test_date} ({early_close_days} days after entry)")
+                    logger.debug(f"Setting early close date to {test_date} ({early_close_days} days after entry)")
                     break
                 test_date += pd.Timedelta(days=1)
             
@@ -613,20 +615,20 @@ def run_backtest(trade_signals_df: pd.DataFrame,
             
             # Update the last_position_close_date to the actual exit date, not expiration date
             last_position_close_date = trade_result['exit_date']
-            logger.info(f"Closed position opened on {open_position['entry_date']}, closed on {last_position_close_date}, result: ${trade_result['pnl']:.2f}")
-            logger.info(f"Current capital: ${current_capital:.2f}, current drawdown: {current_drawdown:.2f}%, max drawdown: {max_drawdown:.2f}%")
+            logger.debug(f"Closed position opened on {open_position['entry_date']}, closed on {last_position_close_date}, result: ${trade_result['pnl']:.2f}")
+            logger.debug(f"Current capital: ${current_capital:.2f}, current drawdown: {current_drawdown:.2f}%, max drawdown: {max_drawdown:.2f}%")
         else:
             # If close_position returned None, the trade was skipped due to missing data
             logger.warning(f"Trade on {open_position['entry_date']} was skipped due to missing closing data")
             
             # IMPORTANT FIX: Restore the capital that was reserved for this trade since it was skipped
             capital += open_position['margin_required']
-            logger.info(f"Restored capital: ${open_position['margin_required']:.2f}, new balance: ${capital:.2f}")
+            logger.debug(f"Restored capital: ${open_position['margin_required']:.2f}, new balance: ${capital:.2f}")
             
             # In this case, we use the original expiration date to sequence future trades
             # because we don't have valid close data
             last_position_close_date = open_position['expire_date']
-            logger.info(f"Using expiration date {last_position_close_date} for sequencing next trade")
+            logger.debug(f"Using expiration date {last_position_close_date} for sequencing next trade")
             
             skipped_trades += 1
         
@@ -985,23 +987,23 @@ def generate_trade_signals(
         end_date = pd.to_datetime(end_date)
         # chain_df = chain_df[chain_df.index.get_level_values('date') <= end_date]
         chain_df = chain_df[chain_df.index <= end_date]
-        logger.info(f'Sorting for date range: {start_date}-{end_date}')
-        logger.info('Sample chain')
-        logger.info(chain_df.head())
+        logger.debug(f'Sorting for date range: {start_date}-{end_date}')
+        logger.debug('Sample chain')
+        logger.debug(chain_df.head())
 
     # Filter by DTE based on whether we have a single value or ran
     if dte_range:
         dte_mask = (chain_df['dte'] >= dte_range[0]) & (chain_df['dte'] <= dte_range[1])
         chain_df = chain_df[dte_mask]
-        logger.info(f'Filtering for dte range: {dte_range}')
-        logger.info('Sample chain')
-        logger.info(chain_df.head())
+        logger.debug(f'Filtering for dte range: {dte_range}')
+        logger.debug('Sample chain')
+        logger.debug(chain_df.head())
     elif dte_target:
         dte_mask = abs(chain_df['dte'] - dte_target) < 1
         chain_df = chain_df[dte_mask]
-        logger.info(f'Filtering for dte target: {dte_target}')
-        logger.info('Sample chain')
-        logger.info(chain_df.head())
+        logger.debug(f'Filtering for dte target: {dte_target}')
+        logger.debug('Sample chain')
+        logger.debug(chain_df.head())
     else:
         logger.error('Need to provide either <dte_target> or <dte_range>')
         raise ValueError
@@ -1021,36 +1023,36 @@ def generate_trade_signals(
         chain_df = chain_df[delta_mask]
         # Sort by delta value, think should increase for calls  0.30, 0.32, ... and decrease for puts  -.30, -.32, ...
         ascending = (option_type == OptionType.CALL)
-        logger.info(f"Filtering and sorting in {'ascending' if ascending else 'descending'} order")
-        logger.info(f'for delta range {delta_range} for OptionType={option_type.value} -> delta col={delta_col}')
+        logger.debug(f"Filtering and sorting in {'ascending' if ascending else 'descending'} order")
+        logger.debug(f'for delta range {delta_range} for OptionType={option_type.value} -> delta col={delta_col}')
         chain_df = chain_df.reset_index().sort_values(by=['index', delta_col],
                                                      ascending=[True, ascending])
         trade_signals = chain_df.set_index('index')
-        logger.info(f"Filtering and sorting in {'ascending' if ascending else 'descending'} order")
-        logger.info(f'for delta range {delta_range} for OptionType={option_type.value} -> delta col={delta_col}')
-        logger.info('Sample chain')
-        logger.info(chain_df.head())
+        logger.debug(f"Filtering and sorting in {'ascending' if ascending else 'descending'} order")
+        logger.debug(f'for delta range {delta_range} for OptionType={option_type.value} -> delta col={delta_col}')
+        logger.debug('Sample chain')
+        logger.debug(chain_df.head())
 
     elif delta_target:
-        logger.info(f'Filtering for delta_target={delta_target}')
+        logger.debug(f'Filtering for delta_target={delta_target}')
         # Handle target case
         target = delta_target if option_type == OptionType.PUT else abs(delta_target)
         delta_diff = abs(chain_df[delta_col] - target)
         chain_df = chain_df.assign(delta_diff=delta_diff)
-        # logger.info(f'Delta diff size: {delta_diff.size}')
+        # logger.debug(f'Delta diff size: {delta_diff.size}')
         chain_df = chain_df[chain_df.delta_diff < 0.05]
 
-        # logger.info(f'Delta diff size: {delta_diff.size}')
+        # logger.debug(f'Delta diff size: {delta_diff.size}')
         
         # Add and sort by delta_diff, ascending: .001, .002
         # chain_df = chain_df.assign(delta_diff=delta_diff).sort_values('delta_diff')
-        logger.info(f'Filtering and sorting for delta difference in delta target={target} for OptionType={option_type}/delta col={delta_col}')
+        logger.debug(f'Filtering and sorting for delta difference in delta target={target} for OptionType={option_type}/delta col={delta_col}')
         
         chain_df = chain_df.reset_index().sort_values(by=['index', 'delta_diff'], 
                                                       ascending=[True, True])
         trade_signals = chain_df.set_index('index')
-        logger.info('Sample chain')
-        logger.info(chain_df.head())
+        logger.debug('Sample chain')
+        logger.debug(chain_df.head())
     else:
         logger.error('Need to provide either delta_target or delta_range')
         raise ValueError
@@ -1061,7 +1063,7 @@ def generate_trade_signals(
     
     # Group by date and get the best option for each date
     # trade_signals = chain_df.groupby(level='date').first()
-    # logger.info('Grouping by level=date.first()')
+    # logger.debug('Grouping by level=date.first()')
     # trade_signals = chain_df.sort_index()
 
     logger.info(f"Generated {len(trade_signals)} trade signals")
@@ -1101,7 +1103,7 @@ def check_data_quality(options_chain, spx_data, vix_data):
     for dataset_name, dataset_info in datasets.items():
         df = dataset_info['df']
         
-        logger.info(f"Type of dataframe: {type(df), df.head()}")
+        logger.debug(f"Type of dataframe: {type(df), df.head()}")
         
         # Skip checking if the DataFrame is a Dask DataFrame
         # if isinstance(df, dd.DataFrame):
@@ -1177,7 +1179,7 @@ def calculate_daily_value(trade, date, options_chain_multi_index):
             # Find the nearest date
             available_dates = options_chain_multi_index.index.get_level_values(0)
             nearest_date = available_dates[available_dates <= date][-1]
-            logger.info(f"Found nearest date {nearest_date} before target date {date}.")
+            logger.debug(f"Found nearest date {nearest_date} before target date {date}.")
             date = nearest_date
         
         # Get the price data using MultiIndex
@@ -1192,7 +1194,7 @@ def calculate_daily_value(trade, date, options_chain_multi_index):
             else:
                 close = max(0, underlying_last - trade.strike)
             market_value = round(close * 100, 2)
-            logger.info(f'Calculated intrinsic value on date={date} for strike={trade.strike} and value={market_value}')
+            logger.debug(f'Calculated intrinsic value on date={date} for strike={trade.strike} and value={market_value}')
 
         # Either MTM daily or early closure, so calculate mid point of bid/ask quote
         else:
@@ -1202,7 +1204,7 @@ def calculate_daily_value(trade, date, options_chain_multi_index):
             ask = price_data[ask_col].iloc[0] 
             mid = (bid + ask) / 2
             market_value = round(100 * mid, 2)
-            logger.info(f'Calculated mid value on date={date} for strike={trade.strike}, bid={bid}, ask={ask}, mid={mid}, value={market_value}')
+            logger.debug(f'Calculated mid value on date={date} for strike={trade.strike}, bid={bid}, ask={ask}, mid={mid}, value={market_value}')
         
         
         if "short" in trade.position_side.lower():
@@ -1215,7 +1217,7 @@ def calculate_daily_value(trade, date, options_chain_multi_index):
                 #     # If multiple matches, take the first one
                 #     market_value = round(price_data[last_field].iloc[0] * 100, 2)
                 
-                # logger.info(f"Got daily market value for price={round(price_data[last_field], 2)}, {last_field}={market_value} on {date}")
+                # logger.debug(f"Got daily market value for price={round(price_data[last_field], 2)}, {last_field}={market_value} on {date}")
                 
                 # # Add to position value based on position side
                 # if "long" in trade.position_side.lower():
@@ -1260,7 +1262,7 @@ def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_
     # Use the later of initial_end_date or latest_exit
     end_date = latest_exit
     
-    logger.info(f"Adjusting MTM end date from {initial_end_date} to {end_date} to include all trade exits")
+    logger.debug(f"Adjusting MTM end date from {initial_end_date} to {end_date} to include all trade exits")
     
     # Initialize tracking variables
     peak_capital = initial_capital
@@ -1278,13 +1280,13 @@ def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_
         daily_pnl = 0
         daily_margin_requirement = 0
         daily_position_value = 0
-        logger.info(f'Processing date: {date}')
+        logger.debug(f'Processing date: {date}')
         # First, check for any trades that start on this date
         for trade in trade_results.itertuples():
             trade_start = pd.Timestamp(trade.entry_date).normalize()
             trade_end = pd.Timestamp(trade.exit_date).normalize()
             trade_id = (trade.entry_date, trade.strike, trade.option_type)
-            logger.info(f'Processing trade: {trade_id}')
+            logger.debug(f'Processing trade: {trade_id}')
 
             # Handle existing trades
             if trade_id in active_trades:
@@ -1293,24 +1295,24 @@ def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_
                 prev_value = active_trades[trade_id]['position_value']
                 # Calculate daily P&L for this trade
                 daily_pnl += current_value - prev_value
-                logger.info(f'Daily PnL = Cur value - Prev value = {current_value} - {prev_value} = {daily_pnl}')
+                logger.debug(f'Daily PnL = Cur value - Prev value = {current_value} - {prev_value} = {daily_pnl}')
 
                 # If trade closes today
                 if trade_end == date:
-                    logger.info('Closing trade: {trade_id}')
+                    logger.debug('Closing trade: {trade_id}')
              
                     options_bp += active_trades[trade_id]['margin_requirement']  # Release margin back to BP
                     del active_trades[trade_id]
                     
                 else:
-                    logger.info(f'Updating existing trade {trade_id}')
+                    logger.debug(f'Updating existing trade {trade_id}')
                     active_trades[trade_id]['position_value'] = current_value
                     daily_position_value += current_value
                     daily_margin_requirement += active_trades[trade_id]['margin_requirement']
             
             # Handle new trades
             elif trade_start == date:
-                logger.info(f'Opening new trade: {trade_id}')
+                logger.debug(f'Opening new trade: {trade_id}')
                 position_value = calculate_daily_value(trade, date, options_chain_multi_index)
                 active_trades[trade_id] = {
                     'position_value': position_value,
@@ -1320,20 +1322,20 @@ def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_
                 # For new shorts: add premium received to net liquidity
                 entry_price = round(trade.entry_price * 100, 2)
                 daily_pnl += entry_price + position_value
-                logger.info(f'{position_value} + {entry_price} -> Daily PnL: {entry_price + position_value}')
+                logger.debug(f'{position_value} + {entry_price} -> Daily PnL: {entry_price + position_value}')
                 # net_liquidity += daily_pnl
                 # daily_pnl += position_value 
                 daily_margin_requirement += trade.capital_used
                 options_bp -= trade.capital_used
-                logger.info(f'BP: {options_bp}')
+                logger.debug(f'BP: {options_bp}')
 
   # Reduce BP by margin requirement
             
             # else:
             #     logger.error('No trade/Trade not recognized')
 
-            logger.info(f'Net Liquidity: {net_liquidity}')
-            logger.info(f'Net Daily PnL: {daily_pnl}')
+            logger.debug(f'Net Liquidity: {net_liquidity}')
+            logger.debug(f'Net Daily PnL: {daily_pnl}')
 
         # Update cumulative P&L
         cumulative_pnl += daily_pnl
@@ -1373,13 +1375,13 @@ def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_
         })
         
         # Log daily summary
-        logger.info(f'Date: {date}')
-        logger.info(f'  Daily P&L: ${daily_pnl:.2f}')
-        logger.info(f'  Cumulative P&L: ${cumulative_pnl:.2f}')
-        logger.info(f'  Daily ROI: {daily_roi:.2f}%')
-        logger.info(f'  Net Liquidity: ${net_liquidity:.2f}')
-        logger.info(f'  Options BP: ${options_bp:.2f}')
-        logger.info(f'  Active Positions: {len(active_trades)}')
+        logger.debug(f'Date: {date}')
+        logger.debug(f'  Daily P&L: ${daily_pnl:.2f}')
+        logger.debug(f'  Cumulative P&L: ${cumulative_pnl:.2f}')
+        logger.debug(f'  Daily ROI: {daily_roi:.2f}%')
+        logger.debug(f'  Net Liquidity: ${net_liquidity:.2f}')
+        logger.debug(f'  Options BP: ${options_bp:.2f}')
+        logger.debug(f'  Active Positions: {len(active_trades)}')
     
     # Create DataFrame and calculate metrics
     daily_df = pd.DataFrame(daily_data)
@@ -1407,13 +1409,13 @@ def pivot_options_chain(options_chain, needed_col):
         'underlying_last'
     ]
     
-    logger.info(f"Starting pivot operation with DataFrame of shape {options_chain.shape}")
-    logger.info(f"Memory usage before pivot: {options_chain.memory_usage().sum() / 1024**2:.2f} MB")
+    logger.debug(f"Starting pivot operation with DataFrame of shape {options_chain.shape}")
+    logger.debug(f"Memory usage before pivot: {options_chain.memory_usage().sum() / 1024**2:.2f} MB")
     
     try:
         # Get the index name before resetting
         date_col = options_chain.index.name if options_chain.index.name else 'date'
-        logger.info(f"Using date column name: {date_col}")
+        logger.debug(f"Using date column name: {date_col}")
         
         # Reset index to make the date a column with the specified name
         options_chain = options_chain.reset_index(names=[date_col])
@@ -1428,14 +1430,14 @@ def pivot_options_chain(options_chain, needed_col):
         options_chain[date_col] = options_chain[date_col].astype('category')
         
         # Convert to Dask DataFrame
-        logger.info("Converting to Dask DataFrame")
+        logger.debug("Converting to Dask DataFrame")
         dask_df = dd.from_pandas(options_chain, npartitions=4)
         
         # Log the columns before pivot
-        logger.info(f"Columns before pivot: {dask_df.columns.tolist()}")
+        logger.debug(f"Columns before pivot: {dask_df.columns.tolist()}")
         
         # Pivot operation
-        logger.info("Starting pivot table operation with Dask")
+        logger.debug("Starting pivot table operation with Dask")
         pivoted_chain = dask_df.pivot_table(
             index='strike', 
             columns=date_col,
@@ -1443,14 +1445,14 @@ def pivot_options_chain(options_chain, needed_col):
         aggfunc='first'
     )
         
-        logger.info("Computing final result")
+        logger.debug("Computing final result")
         result = pivoted_chain.compute()
         
         # Log the final columns
-        logger.info(f"Final columns after pivot: {result.columns.tolist()[:10]}")
+        logger.debug(f"Final columns after pivot: {result.columns.tolist()[:10]}")
         
-        logger.info(f"Pivot completed successfully. Result shape: {result.shape}")
-        logger.info(f"Memory usage after pivot: {result.memory_usage().sum() / 1024**2:.2f} MB")
+        logger.debug(f"Pivot completed successfully. Result shape: {result.shape}")
+        logger.debug(f"Memory usage after pivot: {result.memory_usage().sum() / 1024**2:.2f} MB")
         
         return result
         
@@ -1467,7 +1469,7 @@ def prepare_options_chain(options_chain, path, param_str):
     # pickle_path = os.path.join(data_dir, f"pivoted_options_{param_str}.pkl")
     
     if os.path.exists(path):
-        logger.info("Loading pivoted options chain from pickle")
+        logger.debug("Loading pivoted options chain from pickle")
         return pd.read_pickle(path)
     
     # Keep only necessary columns
@@ -1483,14 +1485,14 @@ def prepare_options_chain(options_chain, path, param_str):
     options_chain = options_chain[needed_cols]
     
     # Use the new pivot_options_chain function
-    logger.info("Pivoting options chain using Dask")
+    logger.debug("Pivoting options chain using Dask")
     pivoted_chain = pivot_options_chain(options_chain, needed_cols)
     
-    logger.info(pivoted_chain.head(2))
+    logger.debug(pivoted_chain.head(2))
     # Save to pickle
-    logger.info("Saving pivoted options chain to pickle")
+    logger.debug("Saving pivoted options chain to pickle")
     pivoted_chain.to_pickle(path)
-    logger.info(f"Saved pivoted chain to {path}")
+    logger.debug(f"Saved pivoted chain to {path}")
     
     return pivoted_chain
 
