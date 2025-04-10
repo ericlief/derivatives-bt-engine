@@ -120,6 +120,61 @@ def calculate_option_margin(underlying_price: float, entry_price: float,
 
         return round(margin_required, 2)
 
+def calculate_intrinsic_value(underlying_price: float, strike: float, option_type: Union[OptionType, str]) -> float:
+    """
+    Calculate intrinsic value for an option.
+    
+    Args:
+        underlying_price: Current price of underlying asset
+        strike: Option strike price
+        option_type: Type of option (PUT or CALL)
+    
+    Returns:
+        Intrinsic value of the option
+    """
+    if isinstance(option_type, str):
+        is_put = option_type.lower() == "put"
+    else:
+        is_put = option_type == OptionType.PUT
+        
+    if is_put:
+        return max(0, strike - underlying_price)
+    else:  # CALL
+        return max(0, underlying_price - strike)
+
+def calculate_midpoint_price(bid: float, ask: float) -> Optional[float]:
+    """
+    Calculate the midpoint price between bid and ask, with validation.
+    
+    Args:
+        bid: Bid price
+        ask: Ask price
+    
+    Returns:
+        Midpoint price if valid, None if invalid prices
+    """
+    if pd.isna(bid) or pd.isna(ask):
+        logger.error(f"Invalid bid/ask prices: bid={bid}, ask={ask} (NaN values)")
+        return None
+        
+    if bid < 0 or ask < 0:  # Only reject negative values, allow zeros
+        logger.error(f"Invalid bid/ask prices: bid={bid}, ask={ask} (negative values)")
+        return None
+        
+    # If both prices are zero, the midpoint is zero
+    if bid == 0 and ask == 0:
+        logger.debug(f"Both bid and ask are zero, returning midpoint of 0")
+        return 0.0
+        
+    # Calculate spread percentage only if at least one price is non-zero
+    if bid > 0 or ask > 0:
+        spread_pct = (ask - bid) / ((bid + ask) / 2) if (bid + ask) > 0 else float('inf')
+        if spread_pct > 0.20:  # Spread too wide
+            logger.error(f"Bid-ask spread too wide: bid={bid}, ask={ask}, spread={spread_pct:.2%}")
+            return None
+        
+    return round((bid + ask) / 2, 2)
+
 def get_closing_data(position: Position,
                     full_chain_df: pd.DataFrame, 
                     spx_data: pd.DataFrame) -> Tuple[Optional[float], Optional[float]]:
@@ -134,18 +189,14 @@ def get_closing_data(position: Position,
     Returns:
         Tuple of (closing_price, underlying_close)
     """
+    
     # If no close_date, this is an expiration - use underlying price directly
     if 'close_date' not in position or not position['close_date']:
         if position['expire_date'] not in spx_data.index:
             return None, None
             
         underlying_close = spx_data.loc[position['expire_date'], 'close']
-        
-        # Calculate intrinsic value
-        if position['option_type'] in [OptionType.PUT, "put"]:
-            close_price = max(0, position['strike'] - underlying_close)
-        else:  # CALL
-            close_price = max(0, underlying_close - position['strike'])
+        close_price = calculate_intrinsic_value(underlying_close, position['strike'], position['option_type'])
         return close_price, underlying_close
     
     # Early close - get data from close_date forward (up to 5 days)
@@ -170,70 +221,40 @@ def get_closing_data(position: Position,
         ask = row[ask_col]
         underlying_close = row['underlying_last']
         
-        if not (pd.isna(bid) or pd.isna(ask) or bid <= 0 or ask <= 0):
-            spread_pct = (ask - bid) / ((bid + ask) / 2)
-            if spread_pct <= 0.20:  # Found valid prices with acceptable spread
-                logger.debug(f"Using prices from {idx} for close date {close_date}")
-                return round((bid + ask) / 2, 2), underlying_close
+        mid_price = calculate_midpoint_price(bid, ask)
+        if mid_price is not None:
+            logger.debug(f"Using prices from {idx} for close date {close_date}")
+            return mid_price, underlying_close
     
-    # If we get here, no valid prices were found
+    # If we get here, no valid prices were found within 5 days
+    logger.error(f"No valid closing prices found within 5 days of {close_date}. Strike: {position['strike']}, "
+                f"Type: {position['option_type']}, Expire: {position['expire_date']}. "
+                f"Last bid/ask seen: {bid}/{ask}")
     return None, None
 
-def calculate_option_pnl(underlying_close: float, strike: float, entry_price: float, 
-                      option_type: Union[OptionType, str], position_side: Union[PositionSide, str]) -> float:
+def calculate_option_pnl(position: Position, underlying_close: float) -> float:
     """
     Calculate P&L for option position.
     
     Args:
+        position: Position dictionary containing trade details
         underlying_close: Closing price of underlying at expiration
-        strike: Option strike price
-        entry_price: Option entry price
-        option_type: Type of option (PUT or CALL) - can be enum or string
-        position_side: Whether position is LONG or SHORT - can be enum or string
     
     Returns:
         P&L in dollars
     """
-    # Convert strings to enums if needed
-    if isinstance(option_type, str):
-        option_type = OptionType.PUT if option_type.lower() == "put" else OptionType.CALL
-        
-    if isinstance(position_side, str):
-        position_side = PositionSide.LONG if position_side.lower() == "long" else PositionSide.SHORT
+    # entry_price is already signed based on position side in create_trade_from_signal
+    # Calculate intrinsic value at expiration
+    intrinsic_value = calculate_intrinsic_value(underlying_close, position['strike'], position['option_type'])
     
-    # For short positions (selling options)
-    if position_side == PositionSide.SHORT:
-        if option_type == OptionType.PUT:
-            if underlying_close > strike:
-                # Put expires worthless, keep full premium
-                return entry_price * 100
-            else:
-                # Put assigned, loss on price difference
-                return (underlying_close - strike + entry_price) * 100
-        else:  # CALL
-            if underlying_close < strike:
-                # Call expires worthless, keep full premium
-                return entry_price * 100
-            else:
-                # Call assigned, loss on price difference
-                return (strike - underlying_close + entry_price) * 100
+    # P&L is the difference between intrinsic value and entry price
+    # entry_price is already signed (negative for long, positive for short)
+    # For long positions: P&L = intrinsic_value + entry_price (entry_price is negative)
+    # For short positions: P&L = -intrinsic_value + entry_price (entry_price is positive)
+    pnl = (intrinsic_value if position['position_side'] == PositionSide.LONG.value 
+           else -intrinsic_value) + position['entry_price']
     
-    # For long positions (buying options)
-    else:  # PositionSide.LONG
-        if option_type == OptionType.PUT:
-            if underlying_close > strike:
-                # Put expires worthless, lose premium
-                return -entry_price * 100
-            else:
-                # Put has value, profit on price difference
-                return (strike - underlying_close - entry_price) * 100
-        else:  # CALL
-            if underlying_close < strike:
-                # Call expires worthless, lose premium
-                return -entry_price * 100
-            else:
-                # Call has value, profit on price difference
-                return (underlying_close - strike - entry_price) * 100
+    return pnl * 100  # Convert to dollars
 
 def close_position(position: Position, 
                   full_chain_df: pd.DataFrame, 
@@ -252,11 +273,6 @@ def close_position(position: Position,
         Tuple of (new_total_capital, trade_result)
         If closing data is unavailable, returns (current_capital, None) to indicate the trade should be skipped
     """
-    # Debug: log position details to help diagnose issues
-    # logger.debug("\nClosing position details:")
-    # for k, v in position.items():
-    #     logger.debug(f"  {k}: {v}, type: {type(v)}")
-    
     # Define minimum valid date for validation
     min_valid_date = pd.Timestamp('1990-01-01')  # Arbitrary date well after 1970
     
@@ -285,10 +301,6 @@ def close_position(position: Position,
         logger.error(f"Close date {close_date} is before entry date {entry_date} - skipping trade")
         return current_capital, None
     
-    strike = position['strike']
-    entry_price = position['entry_price']
-    option_type = position['option_type']
-    
     close_price, underlying_close = get_closing_data(position, full_chain_df, underlying_price_history)
     
     # If get_closing_data returned None values, we should skip this trade
@@ -296,8 +308,7 @@ def close_position(position: Position,
         logger.warning("Skipping trade due to missing close data")
         return current_capital, None
     
-    # TODO pass in the position named dict instead when possible 
-    pnl = calculate_option_pnl(underlying_close, strike, entry_price, option_type, position['position_side'])
+    pnl = calculate_option_pnl(position, underlying_close)
     margin_released = position['margin_required']
     capital_change = margin_released + pnl
     total_capital_after = current_capital + capital_change
@@ -311,8 +322,8 @@ def close_position(position: Position,
         return current_capital, None
     
     trade_result: TradeResult = {
-        'option_type': option_type.value if isinstance(option_type, OptionType) else option_type,
-        'position_side': position['position_side'].value if isinstance(position['position_side'], PositionSide) else position['position_side'],
+        'option_type': position['option_type'],
+        'position_side': position['position_side'],
         'entry_date': entry_date,
         'exit_date': close_date,
         'expire_date': position['expire_date'],
@@ -321,8 +332,8 @@ def close_position(position: Position,
         'days_held': days_held,
         'underlying_entry': position['underlying_last'],
         'underlying_exit': underlying_close,
-        'strike': strike, 
-        'entry_price': round(entry_price, 2),
+        'strike': position['strike'], 
+        'entry_price': round(position['entry_price'], 2),
         'exit_price': round(close_price, 2),
         'pnl': round(pnl, 2),
         'capital_used': margin_released,
@@ -541,10 +552,10 @@ def run_backtest(trade_signals_df: pd.DataFrame,
             ask = getattr(trade_signal, ask_field, 0)
             
             # Calculate midpoint of bid-ask spread for entry price
-            entry_price = round((bid + ask) / 2, 2)
+            entry_price = calculate_midpoint_price(bid, ask)
             
             # Skip if we have invalid entry price
-            if pd.isna(entry_price) or entry_price <= 0:
+            if entry_price is None:
                 logger.warning(f"Invalid entry price calculated from bid={bid}, ask={ask} for {trade_date} - skipping")
                 skipped_trades += 1
                 continue
@@ -1155,24 +1166,20 @@ def check_data_quality(options_chain, spx_data, vix_data):
     
     logger.info("\n=== End Data Quality Check ===\n")
 
-def calculate_daily_value(trade, date, options_chain_multi_index):
+def calculate_daily_value(trade, date, options_chain_multi_index, spx_data, use_spx_close: bool = True):
     """
     Calculate the daily market value of open positions and margin requirements.
     
+    Args:
+        trade: Trade result containing position details
+        date: Date to calculate value for
+        options_chain_multi_index: MultiIndex DataFrame with option chain data
+        spx_data: DataFrame containing SPX closing prices
+        use_spx_close: Whether to use SPX close price (True) or underlying_last from options data (False)
+    
     Returns:
-        tuple: (position_value, margin_requirement)
+        Market value of the position
     """
-    # position_value = 0
-    # margin_requirement = 0
-    
-    # date = pd.Timestamp(date).normalize()
-    # logger.info(f"Getting position values for {date}")
-    
-    # for trade in trade_results.itertuples():
-       
-    # if trade.entry_date <= date <= trade.exit_date:
-    last_field = 'p_last' if 'put' in trade.option_type else 'c_last'
-            
     try:
         # Check if the date exists in the MultiIndex
         if date not in options_chain_multi_index.index.get_level_values(0):
@@ -1184,15 +1191,22 @@ def calculate_daily_value(trade, date, options_chain_multi_index):
         
         # Get the price data using MultiIndex
         price_data = options_chain_multi_index.loc[(date, trade.strike)]
-        price_data = price_data.loc[price_data['expire_date']==trade.expire_date]  # filter by expiry
+        price_data = price_data.loc[price_data['expire_date']==trade.expire_date]
 
         # Expiration, so use intrinsic value
         if date == trade.expire_date:
-            underlying_last = price_data['underlying_last'].iloc[0]
-            if 'put' in trade.option_type.lower():
-                close = max(0, trade.strike - underlying_last)
+            # Get underlying price based on source preference
+            if use_spx_close:
+                if date not in spx_data.index:
+                    logger.error(f"No SPX close price available for {date}")
+                    return None
+                underlying_price = spx_data.loc[date, 'close']
+                logger.debug(f"Using SPX close price: {underlying_price}")
             else:
-                close = max(0, underlying_last - trade.strike)
+                underlying_price = price_data['underlying_last'].iloc[0]
+                logger.debug(f"Using options chain underlying_last: {underlying_price}")
+
+            close = calculate_intrinsic_value(underlying_price, trade.strike, trade.option_type)
             market_value = round(close * 100, 2)
             logger.debug(f'Calculated intrinsic value on date={date} for strike={trade.strike} and value={market_value}')
 
@@ -1202,47 +1216,29 @@ def calculate_daily_value(trade, date, options_chain_multi_index):
             ask_col = 'p_ask' if 'put' in trade.option_type.lower() else "c_ask"
             bid = price_data[bid_col].iloc[0] 
             ask = price_data[ask_col].iloc[0] 
-            mid = (bid + ask) / 2
+            mid = calculate_midpoint_price(bid, ask)
+            if mid is None:
+                logger.warning(f"Invalid bid/ask prices on {date} for strike {trade.strike}: bid={bid}, ask={ask}")
+                return None
             market_value = round(100 * mid, 2)
             logger.debug(f'Calculated mid value on date={date} for strike={trade.strike}, bid={bid}, ask={ask}, mid={mid}, value={market_value}')
-        
-        
-        if "short" in trade.position_side.lower():
-            # For short positions, negate the market value
-            market_value = -market_value
 
-        return market_value
+        return market_value if not "short" in trade.position_side.lower() else -market_value
     
-                # else:
-                #     # If multiple matches, take the first one
-                #     market_value = round(price_data[last_field].iloc[0] * 100, 2)
-                
-                # logger.debug(f"Got daily market value for price={round(price_data[last_field], 2)}, {last_field}={market_value} on {date}")
-                
-                # # Add to position value based on position side
-                # if "long" in trade.position_side.lower():
-                #     position_value += market_value
-                #     # For long positions, margin is typically the purchase price
-                #     margin_requirement += trade.capital_used
-                # elif "short" in trade.position_side.lower():
-                #     position_value -= market_value  # Short positions are negative value
-                #     # For short positions, margin requirements are typically higher
-                #     margin_requirement += trade.capital_used
-                # else:
-                #     logger.error("Position side not recognized")
-                
     except KeyError:
         logger.warning(f"No data for strike {trade.strike} on {date}")
-        # continue
     except Exception as e:
         logger.error(f"Error calculating daily value: {str(e)}")
-        # continue
 
     return None
 
-def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_chain_multi_index, param_str, results_dir="results"):
+def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_chain_multi_index, spx_data, param_str, use_spx_close: bool = True, results_dir="results"):
     """
     Calculate and save mark-to-market (MTM) data for a backtest.
+    
+    Args:
+        ... (existing args) ...
+        use_spx_close: Whether to use SPX close price (True) or underlying_last from options data (False)
     """
     # Ensure the results directory exists
     os.makedirs(results_dir, exist_ok=True)
@@ -1290,52 +1286,39 @@ def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_
 
             # Handle existing trades
             if trade_id in active_trades:
-
-                current_value = calculate_daily_value(trade, date, options_chain_multi_index)
+                current_value = calculate_daily_value(trade, date, options_chain_multi_index, spx_data, use_spx_close)
                 prev_value = active_trades[trade_id]['position_value']
                 # Calculate daily P&L for this trade
-                daily_pnl += current_value - prev_value
+                daily_pnl += current_value - prev_value if current_value is not None else 0
                 logger.debug(f'Daily PnL = Cur value - Prev value = {current_value} - {prev_value} = {daily_pnl}')
 
                 # If trade closes today
                 if trade_end == date:
                     logger.debug('Closing trade: {trade_id}')
-             
                     options_bp += active_trades[trade_id]['margin_requirement']  # Release margin back to BP
                     del active_trades[trade_id]
-                    
                 else:
                     logger.debug(f'Updating existing trade {trade_id}')
-                    active_trades[trade_id]['position_value'] = current_value
-                    daily_position_value += current_value
-                    daily_margin_requirement += active_trades[trade_id]['margin_requirement']
+                    if current_value is not None:
+                        active_trades[trade_id]['position_value'] = current_value
+                        daily_position_value += current_value
+                        daily_margin_requirement += active_trades[trade_id]['margin_requirement']
             
             # Handle new trades
             elif trade_start == date:
                 logger.debug(f'Opening new trade: {trade_id}')
-                position_value = calculate_daily_value(trade, date, options_chain_multi_index)
-                active_trades[trade_id] = {
-                    'position_value': position_value,
-                    'margin_requirement': trade.capital_used
-                }
-                # if "short" in trade.position_side.lower():
-                # For new shorts: add premium received to net liquidity
-                entry_price = round(trade.entry_price * 100, 2)
-                daily_pnl += entry_price + position_value
-                logger.debug(f'{position_value} + {entry_price} -> Daily PnL: {entry_price + position_value}')
-                # net_liquidity += daily_pnl
-                # daily_pnl += position_value 
-                daily_margin_requirement += trade.capital_used
-                options_bp -= trade.capital_used
-                logger.debug(f'BP: {options_bp}')
-
-  # Reduce BP by margin requirement
-            
-            # else:
-            #     logger.error('No trade/Trade not recognized')
-
-            logger.debug(f'Net Liquidity: {net_liquidity}')
-            logger.debug(f'Net Daily PnL: {daily_pnl}')
+                position_value = calculate_daily_value(trade, date, options_chain_multi_index, spx_data, use_spx_close)
+                if position_value is not None:
+                    active_trades[trade_id] = {
+                        'position_value': position_value,
+                        'margin_requirement': trade.capital_used
+                    }
+                    entry_price = round(trade.entry_price * 100, 2)
+                    daily_pnl += entry_price + position_value
+                    logger.debug(f'{position_value} + {entry_price} -> Daily PnL: {entry_price + position_value}')
+                    daily_margin_requirement += trade.capital_used
+                    options_bp -= trade.capital_used
+                    logger.debug(f'BP: {options_bp}')
 
         # Update cumulative P&L
         cumulative_pnl += daily_pnl
@@ -1511,9 +1494,15 @@ def run_and_analyze_backtest(data_dir: str,
                             early_close_days: Optional[int] = None,
                             use_preprocessed: bool = False,
                             save_preprocessed: bool = False,
-                            save_trades: bool = True) -> pd.DataFrame:
+                            save_trades: bool = True,
+                            use_spx_close: bool = True) -> pd.DataFrame:
     """
     Load data, generate signals, run backtest and return results.
+    
+    Args:
+        ... (existing args) ...
+        use_spx_close: Whether to use SPX close price (True) or underlying_last from options data (False)
+                      for calculating daily values and P&L
     """
     # Store original string dates for filename
     start_date_str = start_date
@@ -1582,10 +1571,11 @@ def run_and_analyze_backtest(data_dir: str,
     logger.info(f"Backtest execution completed in {backtest_execution_time:.2f} seconds")
     logger.info(f"Total time: {total_time:.2f} seconds")
     
-    # Call the MTM function with the MultiIndex version
+    # Call the MTM function with the MultiIndex version and use_spx_close parameter
     daily_df, max_drawdown, max_drawdown_pct = calculate_mtm(
         start_date, end_date, initial_capital, results, 
-        options_chain_multi_index, param_str
+        options_chain_multi_index, spx_data, param_str,
+        use_spx_close=use_spx_close
     )
             
     # Print summary statistics
@@ -1654,7 +1644,7 @@ if __name__ == "__main__":
     # VIX_DATA_PATH = os.path.join(DATA_PATH, "vix.csv")
     # The first time, process and save the data
     logger = setup_logger()
-    logger.info("First run: processing and saving data for future use...")
+    logger.info("First run: PUT with underlying SPX intrinsic value calc")
     short_put_results = run_and_analyze_backtest(
         DATA_PATH,
         option_type=OptionType.PUT,
@@ -1669,10 +1659,32 @@ if __name__ == "__main__":
         early_close_days=None,     # Hold until expiration
         use_preprocessed=True,    # Don't use preprocessed data the first time
         save_preprocessed=True,    # Save the preprocessed data for future use
-        save_trades=True           # Save trade results to CSV
+        save_trades=True,           # Save trade results to CSV
+        use_spx_close=True
     )
     print(short_put_results)
     
+    logger.info("First run: PUT with option underlying last intrinsic value calc")
+    short_put_results = run_and_analyze_backtest(
+        DATA_PATH,
+        option_type=OptionType.PUT,
+        position_side=PositionSide.SHORT,
+        start_date="2020-01-01",
+        end_date="2020-12-31",
+        delta_range=(0.30, 0.35),  # Will be converted to negative for puts
+        dte_range=(28, 31),
+        # delta_target=.30,
+        # dte_target=10,
+        initial_capital=100000,
+        early_close_days=None,     # Hold until expiration
+        use_preprocessed=True,    # Don't use preprocessed data the first time
+        save_preprocessed=True,    # Save the preprocessed data for future use
+        save_trades=True,           # Save trade results to CSV
+        use_spx_close=False
+    )
+    print(short_put_results)
+    
+
     # Subsequent runs can use the saved preprocessed data
     logger.info("\nSecond run: using preprocessed data...")
     long_call_results = run_and_analyze_backtest(
@@ -1687,7 +1699,8 @@ if __name__ == "__main__":
         early_close_days=None,    # Hold until expiration
         use_preprocessed=True,    # Use the saved preprocessed data
         save_preprocessed=False,  # No need to save again
-        save_trades=True          # Save trade results to CSV
+        save_trades=True,          # Save trade results to CSV
+        use_spx_close=True
     )
     print(long_call_results)
     
@@ -1705,6 +1718,7 @@ if __name__ == "__main__":
         early_close_days=14,      # Close positions after 14 days (approximately half DTE)
         use_preprocessed=True,    # Use the saved preprocessed data
         save_preprocessed=False,  # No need to save again
-        save_trades=True          # Save trade results to CSV
+        save_trades=True,          # Save trade results to CSV
+        use_spx_close=True
     )
     print(early_close_results)
