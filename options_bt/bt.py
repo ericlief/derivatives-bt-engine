@@ -1241,7 +1241,11 @@ def calculate_daily_value(trade, date, options_chain_multi_index, spx_data, use_
 
 def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_chain_multi_index, spx_data, param_str, use_spx_close: bool = True, results_dir="results"):
     """
-    Calculate and save mark-to-market (MTM) data for a backtest using vectorized operations.
+    Calculate and save mark-to-market (MTM) data for a backtest.
+    
+    Args:
+        ... (existing args) ...
+        use_spx_close: Whether to use SPX close price (True) or underlying_last from options data (False)
     """
     # Ensure the results directory exists
     os.makedirs(results_dir, exist_ok=True)
@@ -1250,127 +1254,133 @@ def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_
     start_date = pd.Timestamp(start_date).normalize() if start_date else options_chain_multi_index.index.get_level_values(0).min()
     initial_end_date = pd.Timestamp(end_date).normalize() if end_date else options_chain_multi_index.index.get_level_values(0).max()
     
-    # Find the latest exit date efficiently using vectorized operations
-    if not trade_results.empty:
-        latest_exit = max(
-            initial_end_date,
-            trade_results[
-                (pd.to_datetime(trade_results['entry_date']) >= start_date) & 
-                (pd.to_datetime(trade_results['entry_date']) <= initial_end_date)
-            ]['exit_date'].max()
-        )
-    else:
-        latest_exit = initial_end_date
+    # Find the latest exit date for trades that opened within our range
+    latest_exit = initial_end_date
+    for trade in trade_results.itertuples():
+        trade_start = pd.Timestamp(trade.entry_date).normalize()
+        trade_end = pd.Timestamp(trade.exit_date).normalize()
+        if start_date <= trade_start <= initial_end_date:  # Trade opened in our range
+            latest_exit = max(latest_exit, trade_end)
     
+    # Use the later of initial_end_date or latest_exit
     end_date = latest_exit
+    
     logger.debug(f"Adjusting MTM end date from {initial_end_date} to {end_date} to include all trade exits")
     
-    # Create DataFrame with all dates
-    dates = pd.date_range(start=start_date, end=end_date)
-    daily_df = pd.DataFrame(index=dates)
+    # Initialize tracking variables
+    peak_capital = initial_capital
+    net_liquidity = initial_capital  # This tracks cash + position values
+    options_bp = initial_capital     # This tracks available buying power for new trades
+    cumulative_pnl = 0              # Track cumulative P&L
+    daily_data = []
     
-    # Initialize tracking arrays for vectorized operations
-    daily_df['Net Liquidity'] = initial_capital
-    daily_df['Options BP'] = initial_capital
-    daily_df['Position Value'] = 0.0
-    daily_df['Margin Requirement'] = 0.0
-    daily_df['Daily P&L'] = 0.0
-    daily_df['Cumulative P&L'] = 0.0
-    daily_df['Active Positions'] = 0
+    # Dictionary to track active trades
+    active_trades = {}  # (entry_date, strike, option_type) -> {'position_value': value, 'margin_requirement': margin}
     
-    # Convert trade_results to more efficient structure
-    trade_data = pd.DataFrame({
-        'entry_date': pd.to_datetime(trade_results['entry_date']).dt.normalize(),
-        'exit_date': pd.to_datetime(trade_results['exit_date']).dt.normalize(),
-        'expire_date': pd.to_datetime(trade_results['expire_date']).dt.normalize(),
-        'strike': trade_results['strike'],
-        'option_type': trade_results['option_type'],
-        'position_side': trade_results['position_side'],
-        'entry_price': trade_results['entry_price'],
-        'capital_used': trade_results['capital_used']
-    })
-    
-    # Process each date
-    active_trades = {}  # Still need this for position tracking
-    
-    for date in dates:
+    # Process each date in the backtest period
+    for date in pd.date_range(start=start_date, end=end_date):
+        date = pd.Timestamp(date).normalize()
         daily_pnl = 0
         daily_margin_requirement = 0
         daily_position_value = 0
-        
-        # Process existing trades
-        for trade_id, trade_info in list(active_trades.items()):
-            current_value = calculate_daily_value(
-                trade_info['trade'], 
-                date, 
-                options_chain_multi_index, 
-                spx_data, 
-                use_spx_close
-            )
+        logger.debug(f'Processing date: {date}')
+        # First, check for any trades that start on this date
+        for trade in trade_results.itertuples():
+            trade_start = pd.Timestamp(trade.entry_date).normalize()
+            trade_end = pd.Timestamp(trade.exit_date).normalize()
+            trade_id = (trade.expire_date, trade.strike, trade.option_type)
             
-            if current_value is not None:
-                daily_pnl += current_value - trade_info['position_value']
-                
-                # Check if trade closes today
-                if trade_info['exit_date'] == date:
-                    daily_df.at[date, 'Options BP'] += trade_info['margin_requirement']
+
+            # Handle existing trades
+            if trade_id in active_trades:
+                logger.debug(f'Processing active trade: {trade_id}')
+                current_value = calculate_daily_value(trade, date, options_chain_multi_index, spx_data, use_spx_close)
+                prev_value = active_trades[trade_id]['position_value']
+                # Calculate daily P&L for this trade
+                daily_pnl += current_value - prev_value if current_value is not None else 0
+                logger.debug(f'Daily PnL = Cur value - Prev value = {current_value} - {prev_value} = {daily_pnl}')
+
+                # If trade closes today
+                if trade_end == date:
+                    logger.debug('Closing trade: {trade_id}')
+                    options_bp += active_trades[trade_id]['margin_requirement']  # Release margin back to BP
                     del active_trades[trade_id]
                 else:
-                    trade_info['position_value'] = current_value
-                    daily_position_value += current_value
-                    daily_margin_requirement += trade_info['margin_requirement']
-        
-        # Process new trades efficiently
-        new_trades = trade_data[trade_data['entry_date'] == date]
-        for _, trade in new_trades.iterrows():
-            trade_id = (trade['expire_date'], trade['strike'], trade['option_type'])
-            position_value = calculate_daily_value(trade, date, options_chain_multi_index, spx_data, use_spx_close)
+                    logger.debug(f'Updating existing trade {trade_id}')
+                    if current_value is not None:
+                        active_trades[trade_id]['position_value'] = current_value
+                        daily_position_value += current_value  # Only add once
+                        daily_margin_requirement += active_trades[trade_id]['margin_requirement']
             
-            if position_value is not None:
-                active_trades[trade_id] = {
-                    'trade': trade,
-                    'position_value': position_value,
-                    'margin_requirement': trade['capital_used'],
-                    'exit_date': trade['exit_date']
-                }
-                entry_price = round(trade['entry_price'] * 100, 2)
-                daily_position_value += position_value
-                daily_pnl += entry_price + position_value
-                daily_margin_requirement += trade['capital_used']
-                daily_df.at[date, 'Options BP'] -= trade['capital_used']
+            # Handle new trades
+            elif trade_start == date:
+                logger.debug(f'Opening new trade: {trade_id}')
+                position_value = calculate_daily_value(trade, date, options_chain_multi_index, spx_data, use_spx_close)
+                if position_value is not None:
+                    active_trades[trade_id] = {
+                        'position_value': position_value,
+                        'margin_requirement': trade.capital_used
+                    }
+                    entry_price = round(trade.entry_price * 100, 2)
+                    daily_position_value += position_value
+                    daily_pnl += entry_price + position_value
+                    logger.debug(f'{position_value} + {entry_price} -> Daily PnL: {entry_price + position_value}')
+                    daily_margin_requirement += trade.capital_used
+                    options_bp -= trade.capital_used
+                    logger.debug(f'BP: {options_bp}')
+
+        # Update cumulative P&L
+        cumulative_pnl += daily_pnl
         
-        # Update daily metrics efficiently
-        daily_df.at[date, 'Daily P&L'] = daily_pnl
-        daily_df.at[date, 'Position Value'] = daily_position_value
-        daily_df.at[date, 'Margin Requirement'] = daily_margin_requirement
-        daily_df.at[date, 'Active Positions'] = len(active_trades)
+        # Update net liquidity with daily P&L
+        net_liquidity += daily_pnl
+            # Update peak capital if net liquidity is higher
+        if net_liquidity > peak_capital:
+            peak_capital = net_liquidity
+        # Calculate drawdown
+        drawdown_amount = - max(0, round(peak_capital - net_liquidity, 2))
+        drawdown_pct = (drawdown_amount / peak_capital * 100) if peak_capital > 0 else 0
+
+        # Calculate ROI metrics
+        daily_roi = round(daily_pnl / daily_margin_requirement * 100, 2) if daily_margin_requirement > 0 else 0
+        total_roi = round((net_liquidity - initial_capital) / initial_capital * 100, 2)
         
-        if date != dates[0]:
-            daily_df.at[date, 'Net Liquidity'] = daily_df.at[dates[dates.get_loc(date)-1], 'Net Liquidity'] + daily_pnl
-        else:
-            daily_df.at[date, 'Net Liquidity'] = initial_capital + daily_pnl
-            
-    # Vectorized calculations for derived metrics
-    daily_df['Cumulative P&L'] = daily_df['Daily P&L'].cumsum()
-    daily_df['Peak Capital'] = daily_df['Net Liquidity'].cummax()
-    daily_df['Drawdown ($)'] = daily_df['Net Liquidity'] - daily_df['Peak Capital']
-    daily_df['Drawdown (%)'] = (daily_df['Drawdown ($)'] / daily_df['Peak Capital'] * 100).round(2)
-    daily_df['Daily ROI (%)'] = (daily_df['Daily P&L'] / daily_df['Margin Requirement'] * 100).round(2)
-    daily_df['Total ROI (%)'] = ((daily_df['Net Liquidity'] - initial_capital) / initial_capital * 100).round(2)
-    daily_df['Margin Utilization (%)'] = (daily_df['Margin Requirement'] / initial_capital * 100).round(2)
+        # Store daily data with expanded metrics
+        daily_data.append({
+            'Date': date,
+            'Net Liquidity': round(net_liquidity, 2),
+            'Options BP': round(options_bp, 2),
+            'Position Value': round(daily_position_value, 2),
+            'Margin Requirement': round(daily_margin_requirement, 2),
+            'Daily P&L': round(daily_pnl, 2),
+            'Cumulative P&L': round(cumulative_pnl, 2),
+            'Drawdown ($)': round(drawdown_amount, 2),
+            'Drawdown (%)': round(drawdown_pct, 2),
+            'Daily ROI (%)': daily_roi,
+            'Total ROI (%)': total_roi,
+            'Active Positions': len(active_trades),
+            'Peak Capital': round(peak_capital, 2),
+            'Margin Utilization (%)': round(daily_margin_requirement / initial_capital * 100, 2)
+        })
+        
+        # Log daily summary
+        logger.debug(f'Date: {date}')
+        logger.debug(f'  Daily P&L: ${daily_pnl:.2f}')
+        logger.debug(f'  Cumulative P&L: ${cumulative_pnl:.2f}')
+        logger.debug(f'  Daily ROI: {daily_roi:.2f}%')
+        logger.debug(f'  Net Liquidity: ${net_liquidity:.2f}')
+        logger.debug(f'  Options BP: ${options_bp:.2f}')
+        logger.debug(f'  Active Positions: {len(active_trades)}')
     
-    # Round numeric columns
-    numeric_cols = ['Net Liquidity', 'Options BP', 'Position Value', 'Margin Requirement', 
-                   'Daily P&L', 'Cumulative P&L', 'Drawdown ($)', 'Peak Capital']
-    daily_df[numeric_cols] = daily_df[numeric_cols].round(2)
+    # Create DataFrame and calculate metrics
+    daily_df = pd.DataFrame(daily_data)
+    max_drawdown_amount = daily_df['Drawdown ($)'].max()
+    max_drawdown_percentage = daily_df['Drawdown (%)'].max()
     
     # Save results
     mtm_csv_path = os.path.join(results_dir, f"mtm_{param_str}.csv")
-    daily_df.to_csv(mtm_csv_path, index=True)
+    daily_df.to_csv(mtm_csv_path, index=False)
     logger.info(f"MTM results saved to {mtm_csv_path}")
-    
-    max_drawdown_amount = abs(daily_df['Drawdown ($)'].min())
-    max_drawdown_percentage = abs(daily_df['Drawdown (%)'].min())
     
     return daily_df, max_drawdown_amount, max_drawdown_percentage
 
