@@ -24,6 +24,11 @@ def setup_logger(log_file: str = None):
     
     # Create a logger
     logger = logging.getLogger(__name__)
+    
+    # Return existing logger if it already has handlers
+    if logger.handlers:
+        return logger
+        
     logger.setLevel(logging.DEBUG)  # Set the logger to the lowest level
 
     # Create file handler for all messages, including DEBUG
@@ -170,8 +175,8 @@ def calculate_midpoint_price(bid: float, ask: float) -> Optional[float]:
     if bid > 0 or ask > 0:
         spread_pct = (ask - bid) / ((bid + ask) / 2) if (bid + ask) > 0 else float('inf')
         if spread_pct > 0.20:  # Spread too wide
-            logger.error(f"Bid-ask spread too wide: bid={bid}, ask={ask}, spread={spread_pct:.2%}")
-            return None
+            logger.warning(f"Bid-ask spread too wide: bid={bid}, ask={ask}, spread={spread_pct:.2%}")
+            # TODO Not sure if we can use some alternative valuation
         
     return round((bid + ask) / 2, 2)
 
@@ -460,7 +465,7 @@ def execute_trade(trade: Position, available_capital: float) -> Tuple[Optional[P
         logger.warning(f"Insufficient capital (${available_capital}) for trade on {trade['entry_date']}, requires ${trade['margin_required']}")
         return None, available_capital
 
-def run_backtest(trade_signals_df: pd.DataFrame, 
+def execute_backtest_trades(trade_signals_df: pd.DataFrame, 
                 full_chain_df: pd.DataFrame, 
                 spx_data: pd.DataFrame,
                 option_type: OptionType = OptionType.PUT,
@@ -1045,9 +1050,11 @@ def generate_trade_signals(
         logger.debug(chain_df.head())
 
     elif delta_target:
-        logger.debug(f'Filtering for delta_target={delta_target}')
         # Handle target case
-        target = delta_target if option_type == OptionType.PUT else abs(delta_target)
+        # target = delta_target if option_type == OptionType.PUT else abs(delta_target)
+        target = -abs(delta_target) if option_type == OptionType.PUT else abs(delta_target)
+        logger.debug(f'Filtering for delta_target={delta_target}')
+
         delta_diff = abs(chain_df[delta_col] - target)
         chain_df = chain_df.assign(delta_diff=delta_diff)
         # logger.debug(f'Delta diff size: {delta_diff.size}')
@@ -1234,11 +1241,7 @@ def calculate_daily_value(trade, date, options_chain_multi_index, spx_data, use_
 
 def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_chain_multi_index, spx_data, param_str, use_spx_close: bool = True, results_dir="results"):
     """
-    Calculate and save mark-to-market (MTM) data for a backtest.
-    
-    Args:
-        ... (existing args) ...
-        use_spx_close: Whether to use SPX close price (True) or underlying_last from options data (False)
+    Calculate and save mark-to-market (MTM) data for a backtest using vectorized operations.
     """
     # Ensure the results directory exists
     os.makedirs(results_dir, exist_ok=True)
@@ -1247,134 +1250,127 @@ def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_
     start_date = pd.Timestamp(start_date).normalize() if start_date else options_chain_multi_index.index.get_level_values(0).min()
     initial_end_date = pd.Timestamp(end_date).normalize() if end_date else options_chain_multi_index.index.get_level_values(0).max()
     
-    # Find the latest exit date for trades that opened within our range
-    latest_exit = initial_end_date
-    for trade in trade_results.itertuples():
-        trade_start = pd.Timestamp(trade.entry_date).normalize()
-        trade_end = pd.Timestamp(trade.exit_date).normalize()
-        if start_date <= trade_start <= initial_end_date:  # Trade opened in our range
-            latest_exit = max(latest_exit, trade_end)
+    # Find the latest exit date efficiently using vectorized operations
+    if not trade_results.empty:
+        latest_exit = max(
+            initial_end_date,
+            trade_results[
+                (pd.to_datetime(trade_results['entry_date']) >= start_date) & 
+                (pd.to_datetime(trade_results['entry_date']) <= initial_end_date)
+            ]['exit_date'].max()
+        )
+    else:
+        latest_exit = initial_end_date
     
-    # Use the later of initial_end_date or latest_exit
     end_date = latest_exit
-    
     logger.debug(f"Adjusting MTM end date from {initial_end_date} to {end_date} to include all trade exits")
     
-    # Initialize tracking variables
-    peak_capital = initial_capital
-    net_liquidity = initial_capital  # This tracks cash + position values
-    options_bp = initial_capital     # This tracks available buying power for new trades
-    cumulative_pnl = 0              # Track cumulative P&L
-    daily_data = []
+    # Create DataFrame with all dates
+    dates = pd.date_range(start=start_date, end=end_date)
+    daily_df = pd.DataFrame(index=dates)
     
-    # Dictionary to track active trades
-    active_trades = {}  # (entry_date, strike, option_type) -> {'position_value': value, 'margin_requirement': margin}
+    # Initialize tracking arrays for vectorized operations
+    daily_df['Net Liquidity'] = initial_capital
+    daily_df['Options BP'] = initial_capital
+    daily_df['Position Value'] = 0.0
+    daily_df['Margin Requirement'] = 0.0
+    daily_df['Daily P&L'] = 0.0
+    daily_df['Cumulative P&L'] = 0.0
+    daily_df['Active Positions'] = 0
     
-    # Process each date in the backtest period
-    for date in pd.date_range(start=start_date, end=end_date):
-        date = pd.Timestamp(date).normalize()
+    # Convert trade_results to more efficient structure
+    trade_data = pd.DataFrame({
+        'entry_date': pd.to_datetime(trade_results['entry_date']).dt.normalize(),
+        'exit_date': pd.to_datetime(trade_results['exit_date']).dt.normalize(),
+        'expire_date': pd.to_datetime(trade_results['expire_date']).dt.normalize(),
+        'strike': trade_results['strike'],
+        'option_type': trade_results['option_type'],
+        'position_side': trade_results['position_side'],
+        'entry_price': trade_results['entry_price'],
+        'capital_used': trade_results['capital_used']
+    })
+    
+    # Process each date
+    active_trades = {}  # Still need this for position tracking
+    
+    for date in dates:
         daily_pnl = 0
         daily_margin_requirement = 0
         daily_position_value = 0
-        logger.debug(f'Processing date: {date}')
-        # First, check for any trades that start on this date
-        for trade in trade_results.itertuples():
-            trade_start = pd.Timestamp(trade.entry_date).normalize()
-            trade_end = pd.Timestamp(trade.exit_date).normalize()
-            trade_id = (trade.entry_date, trade.strike, trade.option_type)
-            logger.debug(f'Processing trade: {trade_id}')
-
-            # Handle existing trades
-            if trade_id in active_trades:
-                current_value = calculate_daily_value(trade, date, options_chain_multi_index, spx_data, use_spx_close)
-                prev_value = active_trades[trade_id]['position_value']
-                # Calculate daily P&L for this trade
-                daily_pnl += current_value - prev_value if current_value is not None else 0
-                logger.debug(f'Daily PnL = Cur value - Prev value = {current_value} - {prev_value} = {daily_pnl}')
-
-                # If trade closes today
-                if trade_end == date:
-                    logger.debug('Closing trade: {trade_id}')
-                    options_bp += active_trades[trade_id]['margin_requirement']  # Release margin back to BP
+        
+        # Process existing trades
+        for trade_id, trade_info in list(active_trades.items()):
+            current_value = calculate_daily_value(
+                trade_info['trade'], 
+                date, 
+                options_chain_multi_index, 
+                spx_data, 
+                use_spx_close
+            )
+            
+            if current_value is not None:
+                daily_pnl += current_value - trade_info['position_value']
+                
+                # Check if trade closes today
+                if trade_info['exit_date'] == date:
+                    daily_df.at[date, 'Options BP'] += trade_info['margin_requirement']
                     del active_trades[trade_id]
                 else:
-                    logger.debug(f'Updating existing trade {trade_id}')
-                    if current_value is not None:
-                        active_trades[trade_id]['position_value'] = current_value
-                        daily_position_value += current_value
-                        daily_margin_requirement += active_trades[trade_id]['margin_requirement']
+                    trade_info['position_value'] = current_value
+                    daily_position_value += current_value
+                    daily_margin_requirement += trade_info['margin_requirement']
+        
+        # Process new trades efficiently
+        new_trades = trade_data[trade_data['entry_date'] == date]
+        for _, trade in new_trades.iterrows():
+            trade_id = (trade['expire_date'], trade['strike'], trade['option_type'])
+            position_value = calculate_daily_value(trade, date, options_chain_multi_index, spx_data, use_spx_close)
             
-            # Handle new trades
-            elif trade_start == date:
-                logger.debug(f'Opening new trade: {trade_id}')
-                position_value = calculate_daily_value(trade, date, options_chain_multi_index, spx_data, use_spx_close)
-                if position_value is not None:
-                    active_trades[trade_id] = {
-                        'position_value': position_value,
-                        'margin_requirement': trade.capital_used
-                    }
-                    entry_price = round(trade.entry_price * 100, 2)
-                    daily_pnl += entry_price + position_value
-                    logger.debug(f'{position_value} + {entry_price} -> Daily PnL: {entry_price + position_value}')
-                    daily_margin_requirement += trade.capital_used
-                    options_bp -= trade.capital_used
-                    logger.debug(f'BP: {options_bp}')
-
-        # Update cumulative P&L
-        cumulative_pnl += daily_pnl
+            if position_value is not None:
+                active_trades[trade_id] = {
+                    'trade': trade,
+                    'position_value': position_value,
+                    'margin_requirement': trade['capital_used'],
+                    'exit_date': trade['exit_date']
+                }
+                entry_price = round(trade['entry_price'] * 100, 2)
+                daily_position_value += position_value
+                daily_pnl += entry_price + position_value
+                daily_margin_requirement += trade['capital_used']
+                daily_df.at[date, 'Options BP'] -= trade['capital_used']
         
-        # Update net liquidity with daily P&L
-        net_liquidity += daily_pnl
+        # Update daily metrics efficiently
+        daily_df.at[date, 'Daily P&L'] = daily_pnl
+        daily_df.at[date, 'Position Value'] = daily_position_value
+        daily_df.at[date, 'Margin Requirement'] = daily_margin_requirement
+        daily_df.at[date, 'Active Positions'] = len(active_trades)
         
-        # Calculate drawdown
-        drawdown_amount = round(peak_capital - net_liquidity, 2)
-        drawdown_pct = (drawdown_amount / peak_capital * 100) if peak_capital > 0 else 0
-        
-        # Update peak capital if net liquidity is higher
-        if net_liquidity > peak_capital:
-            peak_capital = net_liquidity
-        
-        # Calculate ROI metrics
-        daily_roi = round(daily_pnl / daily_margin_requirement * 100, 2) if daily_margin_requirement > 0 else 0
-        total_roi = round((net_liquidity - initial_capital) / initial_capital * 100, 2)
-        
-        # Store daily data with expanded metrics
-        daily_data.append({
-            'Date': date,
-            'Net Liquidity': round(net_liquidity, 2),
-            'Options BP': round(options_bp, 2),
-            'Position Value': round(daily_position_value, 2),
-            'Margin Requirement': round(daily_margin_requirement, 2),
-            'Daily P&L': round(daily_pnl, 2),
-            'Cumulative P&L': round(cumulative_pnl, 2),
-            'Total P&L': round(net_liquidity - initial_capital, 2),
-            'Drawdown ($)': round(drawdown_amount, 2),
-            'Drawdown (%)': round(drawdown_pct, 2),
-            'Daily ROI (%)': daily_roi,
-            'Total ROI (%)': total_roi,
-            'Active Positions': len(active_trades),
-            'Peak Capital': round(peak_capital, 2),
-            'Margin Utilization (%)': round(daily_margin_requirement / initial_capital * 100, 2)
-        })
-        
-        # Log daily summary
-        logger.debug(f'Date: {date}')
-        logger.debug(f'  Daily P&L: ${daily_pnl:.2f}')
-        logger.debug(f'  Cumulative P&L: ${cumulative_pnl:.2f}')
-        logger.debug(f'  Daily ROI: {daily_roi:.2f}%')
-        logger.debug(f'  Net Liquidity: ${net_liquidity:.2f}')
-        logger.debug(f'  Options BP: ${options_bp:.2f}')
-        logger.debug(f'  Active Positions: {len(active_trades)}')
+        if date != dates[0]:
+            daily_df.at[date, 'Net Liquidity'] = daily_df.at[dates[dates.get_loc(date)-1], 'Net Liquidity'] + daily_pnl
+        else:
+            daily_df.at[date, 'Net Liquidity'] = initial_capital + daily_pnl
+            
+    # Vectorized calculations for derived metrics
+    daily_df['Cumulative P&L'] = daily_df['Daily P&L'].cumsum()
+    daily_df['Peak Capital'] = daily_df['Net Liquidity'].cummax()
+    daily_df['Drawdown ($)'] = daily_df['Net Liquidity'] - daily_df['Peak Capital']
+    daily_df['Drawdown (%)'] = (daily_df['Drawdown ($)'] / daily_df['Peak Capital'] * 100).round(2)
+    daily_df['Daily ROI (%)'] = (daily_df['Daily P&L'] / daily_df['Margin Requirement'] * 100).round(2)
+    daily_df['Total ROI (%)'] = ((daily_df['Net Liquidity'] - initial_capital) / initial_capital * 100).round(2)
+    daily_df['Margin Utilization (%)'] = (daily_df['Margin Requirement'] / initial_capital * 100).round(2)
     
-    # Create DataFrame and calculate metrics
-    daily_df = pd.DataFrame(daily_data)
-    max_drawdown_amount = daily_df['Drawdown ($)'].max()
-    max_drawdown_percentage = daily_df['Drawdown (%)'].max()
+    # Round numeric columns
+    numeric_cols = ['Net Liquidity', 'Options BP', 'Position Value', 'Margin Requirement', 
+                   'Daily P&L', 'Cumulative P&L', 'Drawdown ($)', 'Peak Capital']
+    daily_df[numeric_cols] = daily_df[numeric_cols].round(2)
     
     # Save results
     mtm_csv_path = os.path.join(results_dir, f"mtm_{param_str}.csv")
-    daily_df.to_csv(mtm_csv_path, index=False)
+    daily_df.to_csv(mtm_csv_path, index=True)
     logger.info(f"MTM results saved to {mtm_csv_path}")
+    
+    max_drawdown_amount = abs(daily_df['Drawdown ($)'].min())
+    max_drawdown_percentage = abs(daily_df['Drawdown (%)'].min())
     
     return daily_df, max_drawdown_amount, max_drawdown_percentage
 
@@ -1481,39 +1477,67 @@ def prepare_options_chain(options_chain, path, param_str):
 
 
 
-def run_and_analyze_backtest(data_dir: str, 
-                            option_type: OptionType = OptionType.PUT,
-                            position_side: PositionSide = PositionSide.SHORT,
-                            start_date: str = None,
-                            end_date: str = None,
-                            delta_target: float = None,
-                            delta_range: Tuple[float, float] = None,
-                            dte_target: int = None,
-                            dte_range: Tuple[int, int] = None,
-                            initial_capital: float = 100000,
-                            early_close_days: Optional[int] = None,
-                            use_preprocessed: bool = False,
-                            save_preprocessed: bool = False,
-                            save_trades: bool = True,
-                            use_spx_close: bool = True) -> pd.DataFrame:
+def run_backtest(
+    spx_file_path: str,
+    options_chain_file_path: str,
+    option_type: OptionType = OptionType.PUT,
+    position_side: PositionSide = PositionSide.SHORT,
+    delta_target: float = None,
+    use_spx_close: bool = True,
+    **kwargs
+) -> pd.DataFrame:
     """
     Load data, generate signals, run backtest and return results.
     
     Args:
-        ... (existing args) ...
-        use_spx_close: Whether to use SPX close price (True) or underlying_last from options data (False)
-                      for calculating daily values and P&L
+        spx_file_path: Path to SPX data file
+        options_chain_file_path: Path to options chain data file
+        option_type: Type of option to trade (PUT or CALL)
+        position_side: Position side (LONG or SHORT)
+        delta_target: Target delta value
+        use_spx_close: Whether to use SPX close price (True) or underlying_last (False)
+        **kwargs: Additional arguments including:
+            - start_date: Start date for backtest
+            - end_date: End date for backtest
+            - dte_target: Target DTE value
+            - dte_range: Tuple of (min_dte, max_dte)
+            - delta_range: Tuple of (min_delta, max_delta)
+            - initial_capital: Starting capital amount
+            - early_close_days: Days to hold before early close
+            - use_preprocessed: Whether to use preprocessed data
+            - save_preprocessed: Whether to save preprocessed data
+            - save_trades: Whether to save trade results
+            - data_dir: Directory containing data files
     """
+    # Set default values for all kwargs
+    defaults = {
+        'start_date': None,
+        'end_date': None,
+        'dte_target': None,
+        'dte_range': None,
+        'delta_range': None,
+        'initial_capital': 100000,
+        'early_close_days': None,
+        'use_preprocessed': True,
+        'save_preprocessed': True,
+        'save_trades': True,
+        'data_dir': os.path.dirname(spx_file_path)
+    }
+    
+    # Update defaults with provided kwargs
+    for key, value in kwargs.items():
+        defaults[key] = value
+    
     # Store original string dates for filename
-    start_date_str = start_date
-    end_date_str = end_date
+    start_date_str = defaults['start_date']
+    end_date_str = defaults['end_date']
     
     # Load data
     start_time = pd.Timestamp.now()
     options_chain, options_chain_multi_index, spx_data, vix_data = load_backtest_data(
-        data_dir,
-        use_preprocessed=use_preprocessed,
-        save_preprocessed=save_preprocessed
+        defaults['data_dir'],
+        use_preprocessed=defaults['use_preprocessed'],
+        save_preprocessed=defaults['save_preprocessed']
     )
     load_time = (pd.Timestamp.now() - start_time).total_seconds()
     logger.info(f"Data loading and preprocessing completed in {load_time:.2f} seconds")
@@ -1521,18 +1545,19 @@ def run_and_analyze_backtest(data_dir: str,
     # Check data quality
     check_data_quality(options_chain, spx_data, vix_data)
 
-    delta_str = f"delta_{delta_target}" if delta_target else f"delta_{delta_range[0]}-{delta_range[1]}"
-    dte_str = f"dte_{dte_target}" if dte_target else f"dte_{dte_range[0]}-{dte_range[1]}"
-    early_close_str = f"early_{early_close_days}" if early_close_days else "full_term"
+    # Safely handle optional parameters for filename construction
+    delta_str = (f"delta_{delta_target}" if delta_target else 
+                f"delta_{defaults['delta_range'][0]}-{defaults['delta_range'][1]}" 
+                if defaults['delta_range'] else "delta_any")
     
-    # Format date range for filename using original string dates
-    if start_date_str and end_date_str:
-        date_range = f"{start_date_str.replace('-', '')}-{end_date_str.replace('-', '')}"
-    else:
-        date_range = "full_period"
-        
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    param_str = f"{option_type.name}_{position_side.name}_{delta_str}_{dte_str}_{early_close_str}_{date_range}"
+    dte_str = (f"dte_{defaults['dte_target']}" if defaults['dte_target'] else 
+               f"dte_{defaults['dte_range'][0]}-{defaults['dte_range'][1]}" 
+               if defaults['dte_range'] else "dte_any")
+               
+    early_close_str = (f"early_{defaults['early_close_days']}" 
+                      if defaults['early_close_days'] else "full_term")
+    
+    param_str = f"{option_type.name}_{position_side.name}_{delta_str}_{dte_str}_{early_close_str}_{start_date_str}-{end_date_str}"
     
     # Generate trade signals
     signal_time = pd.Timestamp.now()
@@ -1541,11 +1566,11 @@ def run_and_analyze_backtest(data_dir: str,
         options_chain,
         option_type=option_type,
         delta_target=delta_target,
-        delta_range=delta_range,
-        dte_target=dte_target,
-        dte_range=dte_range,
-        start_date=start_date,
-        end_date=end_date,
+        delta_range=defaults['delta_range'],
+        dte_target=defaults['dte_target'],
+        dte_range=defaults['dte_range'],
+        start_date=defaults['start_date'],
+        end_date=defaults['end_date']
     )
     signal_generation_time = (pd.Timestamp.now() - signal_time).total_seconds()
     logger.info(f"Signal generation completed in {signal_generation_time:.2f} seconds")
@@ -1557,14 +1582,14 @@ def run_and_analyze_backtest(data_dir: str,
     # Run backtest
     backtest_time = pd.Timestamp.now()
     logger.info(f"Running backtest for params:\t{param_str}")
-    results = run_backtest(
+    results = execute_backtest_trades(
         trade_signals,
         options_chain,
         spx_data,
         option_type=option_type,
         position_side=position_side,
-        initial_capital=initial_capital,
-        early_close_days=early_close_days
+        initial_capital=defaults['initial_capital'],
+        early_close_days=defaults['early_close_days']
     )
     backtest_execution_time = (pd.Timestamp.now() - backtest_time).total_seconds()
     total_time = (pd.Timestamp.now() - start_time).total_seconds()
@@ -1573,7 +1598,7 @@ def run_and_analyze_backtest(data_dir: str,
     
     # Call the MTM function with the MultiIndex version and use_spx_close parameter
     daily_df, max_drawdown, max_drawdown_pct = calculate_mtm(
-        start_date, end_date, initial_capital, results, 
+        defaults['start_date'], defaults['end_date'], defaults['initial_capital'], results, 
         options_chain_multi_index, spx_data, param_str,
         use_spx_close=use_spx_close
     )
@@ -1584,9 +1609,9 @@ def run_and_analyze_backtest(data_dir: str,
     logger.info(f"Win rate: {(results['pnl'] > 0).mean():.2%}")
     logger.info(f"Average P&L: ${results['pnl'].mean():.2f}")
     logger.info(f"Total P&L: ${results['pnl'].sum():.2f}")
-    logger.info(f"Initial capital: ${initial_capital:.2f}")
+    logger.info(f"Initial capital: ${defaults['initial_capital']:.2f}")
     logger.info(f"Final capital: ${results['total_capital'].iloc[-1]:.2f}")
-    logger.info(f"Return on initial capital: {(results['total_capital'].iloc[-1] / initial_capital - 1):.2%}")
+    logger.info(f"Return on initial capital: {(results['total_capital'].iloc[-1] / defaults['initial_capital'] - 1):.2%}")
     logger.info(f"Average days held: {results['days_held'].mean():.1f}")
     logger.info(f"Average return on margin: {results['return_on_margin'].mean():.2f}%")
     logger.info(f"Maximum drawdown: ${max_drawdown:.2f} ({max_drawdown_pct:.2f}%)")
@@ -1600,11 +1625,12 @@ def run_and_analyze_backtest(data_dir: str,
             logger.info(f"Sharpe Ratio: {sharpe:.2f}")
     
     # Save summary results to CSV
-    results_dir = 'results'  # Updated to be consistent with logs directory
-    os.makedirs(results_dir, exist_ok=True)
-    results_csv_path = os.path.join(results_dir, f"results_{param_str}_{timestamp}.csv")
-    results.to_csv(results_csv_path, index=False)
-    logger.info(f"Summary results saved to {results_csv_path}")
+    if defaults['save_trades']:
+        results_dir = 'results'  # Updated to be consistent with logs directory
+        os.makedirs(results_dir, exist_ok=True)
+        results_csv_path = os.path.join(results_dir, f"results_{param_str}_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv")
+        results.to_csv(results_csv_path, index=False)
+        logger.info(f"Summary results saved to {results_csv_path}")
     
     return results
 
@@ -1632,93 +1658,29 @@ def check_date_presence(pivoted_chain, date_to_check):
 
 # Example usage:
 if __name__ == "__main__":
-
     pd.set_option('display.max_columns', None)
-    # pd.set_option('display.max_rows', None)
     pd.set_option('display.max_colwidth', None)
 
-    # Example file paths - update these to your actual file paths
-    DATA_PATH = "/Users/liefe/Projects/ericlief/Fin/data/spx"
-    # SPX_DATA_PATH = os.path.join(DATA_PATH, "spx-daily-1996-ohlc-cleaned.csv")
-    # OPTIONS_CHAIN_PATH = os.path.join(DATA_PATH, "options_chain_preprocessed.csv") 
-    # VIX_DATA_PATH = os.path.join(DATA_PATH, "vix.csv")
-    # The first time, process and save the data
-    logger = setup_logger()
-    logger.info("First run: PUT with underlying SPX intrinsic value calc")
-    short_put_results = run_and_analyze_backtest(
-        DATA_PATH,
+    # Example file paths
+    DATA_PATH = os.path.join(os.path.dirname(__file__), "..", "data")
+    results = run_backtest(
+        spx_file_path=os.path.join(DATA_PATH, "spx_2018_2023.csv"),
+        options_chain_file_path=os.path.join(DATA_PATH, "spx_options_2018_2023.csv"),
         option_type=OptionType.PUT,
         position_side=PositionSide.SHORT,
-        start_date="2020-01-01",
-        end_date="2020-12-31",
-        delta_range=(0.30, 0.35),  # Will be converted to negative for puts
-        dte_range=(28, 31),
-        # delta_target=.30,
-        # dte_target=10,
-        initial_capital=100000,
-        early_close_days=None,     # Hold until expiration
-        use_preprocessed=True,    # Don't use preprocessed data the first time
-        save_preprocessed=True,    # Save the preprocessed data for future use
-        save_trades=True,           # Save trade results to CSV
-        use_spx_close=True
-    )
-    print(short_put_results)
-    
-    logger.info("First run: PUT with option underlying last intrinsic value calc")
-    short_put_results = run_and_analyze_backtest(
-        DATA_PATH,
-        option_type=OptionType.PUT,
-        position_side=PositionSide.SHORT,
-        start_date="2020-01-01",
-        end_date="2020-12-31",
-        delta_range=(0.30, 0.35),  # Will be converted to negative for puts
-        dte_range=(28, 31),
-        # delta_target=.30,
-        # dte_target=10,
-        initial_capital=100000,
-        early_close_days=None,     # Hold until expiration
-        use_preprocessed=True,    # Don't use preprocessed data the first time
-        save_preprocessed=True,    # Save the preprocessed data for future use
-        save_trades=True,           # Save trade results to CSV
-        use_spx_close=False
-    )
-    print(short_put_results)
-    
-
-    # Subsequent runs can use the saved preprocessed data
-    logger.info("\nSecond run: using preprocessed data...")
-    long_call_results = run_and_analyze_backtest(
-        DATA_PATH,
-        option_type=OptionType.CALL,
-        position_side=PositionSide.LONG,
-        start_date="2020-01-01",
-        end_date="2020-12-31",
         delta_target=0.30,
-        dte_range=(28, 32),
-        initial_capital=100000,
-        early_close_days=None,    # Hold until expiration
-        use_preprocessed=True,    # Use the saved preprocessed data
-        save_preprocessed=False,  # No need to save again
-        save_trades=True,          # Save trade results to CSV
-        use_spx_close=True
+        use_spx_close=True,
+        **{
+            'start_date': "2020-01-01",
+            'end_date': "2020-12-31",
+            'dte_range': (28, 31),
+            'initial_capital': 100000,
+            'early_close_days': None,
+            'use_preprocessed': True,
+            'save_preprocessed': True,
+            'save_trades': True
+        }
     )
-    print(long_call_results)
-    
-    # Third run: early close example
-    logger.info("\nThird run: early close strategy...")
-    early_close_results = run_and_analyze_backtest(
-        data_dir=DATA_PATH,
-        option_type=OptionType.PUT,
-        position_side=PositionSide.SHORT,
-        start_date="2020-01-01",
-        end_date="2020-06-30",
-        delta_range=(0.20, 0.25),
-        dte_range=(40, 45),
-        initial_capital=100000,
-        early_close_days=14,      # Close positions after 14 days (approximately half DTE)
-        use_preprocessed=True,    # Use the saved preprocessed data
-        save_preprocessed=False,  # No need to save again
-        save_trades=True,          # Save trade results to CSV
-        use_spx_close=True
-    )
-    print(early_close_results)
+    print("\nBasic example results:")
+    print(results)
+    print("\nFor more examples, see test_backtest.py")

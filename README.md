@@ -40,10 +40,10 @@ pip install pandas numpy
 ### Basic Example
 
 ```python
-from options_bt.bt import run_and_analyze_backtest, OptionType, PositionSide
+from options_bt.bt import run_backtest, OptionType, PositionSide
 
 # Run a backtest for short puts
-results = run_and_analyze_backtest(
+results = run_backtest(
     spx_file_path="path/to/spx_data.csv",
     options_chain_file_path="path/to/options_chain.csv",
     vix_file_path="path/to/vix_data.csv",
