@@ -6,7 +6,11 @@ from typing import Dict, List, Optional, Tuple, TypedDict, Union
 from enum import Enum, auto
 import logging
 from datetime import datetime
-import dask.dataframe as dd
+import time
+# import dask.dataframe as dd  # Commented out Dask import
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+import json
 
 # Configure logging
 def setup_logger(log_file: str = None):
@@ -873,7 +877,7 @@ def preprocess_vix_data(vix_data: pd.DataFrame) -> pd.DataFrame:
     
     return df
 
-def load_backtest_data(data_dir, use_preprocessed=True, save_preprocessed=True):
+def load_backtest_data(data_dir, use_preprocessed=True, save_preprocessed=True, options_file="options.csv"):
     """
     Load and preprocess data for backtesting from a standard data directory.
     
@@ -881,12 +885,13 @@ def load_backtest_data(data_dir, use_preprocessed=True, save_preprocessed=True):
         data_dir: Path to directory containing the data files
         use_preprocessed: Whether to use preprocessed data files
         save_preprocessed: Whether to save preprocessed data for future use
+        options_file: Name of the options data file (default: options.csv)
     
     Returns:
         tuple: (options_chain, options_chain_multi_index, spx_data, vix_data)
     """
     raw_files = {
-        'options': os.path.join(data_dir, 'options.csv'),
+        'options': os.path.join(data_dir, options_file),
         'spx': os.path.join(data_dir, 'spx.csv'),
         'vix': os.path.join(data_dir, 'vix.csv')
     }
@@ -995,19 +1000,16 @@ def generate_trade_signals(
     # Filter by DATE range if provided
     if start_date:
         start_date = pd.to_datetime(start_date)
-        # chain_df = chain_df[chain_df.index.get_level_values('date') >= start_date]
         chain_df = chain_df[chain_df.index >= start_date]
-
     
     if end_date:
         end_date = pd.to_datetime(end_date)
-        # chain_df = chain_df[chain_df.index.get_level_values('date') <= end_date]
         chain_df = chain_df[chain_df.index <= end_date]
         logger.debug(f'Sorting for date range: {start_date}-{end_date}')
         logger.debug('Sample chain')
         logger.debug(chain_df.head())
 
-    # Filter by DTE based on whether we have a single value or ran
+    # Filter by DTE based on whether we have a single value or range
     if dte_range:
         dte_mask = (chain_df['dte'] >= dte_range[0]) & (chain_df['dte'] <= dte_range[1])
         chain_df = chain_df[dte_mask]
@@ -1030,66 +1032,62 @@ def generate_trade_signals(
     # Filter by delta parameters
     if delta_range:
         # Handle range case
-        if option_type == OptionType.PUT and delta_range[0] > 0:
-            min_delta, max_delta = -delta_range[1], -delta_range[0]
+        if option_type == OptionType.PUT:
+            # For puts, we want negative deltas, so convert positive input to negative
+            min_delta = -abs(delta_range[1])  # More negative (further OTM)
+            max_delta = -abs(delta_range[0])  # Less negative (closer to ATM)
         else:
-            min_delta, max_delta = delta_range
+            # For calls, we want positive deltas
+            min_delta = abs(delta_range[0])  # Less positive (closer to ATM)
+            max_delta = abs(delta_range[1])  # More positive (further OTM)
         
+        logger.debug(f'Filtering for delta range: {min_delta} to {max_delta} for {option_type.value}')
         delta_mask = chain_df[delta_col].between(min_delta, max_delta)
         chain_df = chain_df[delta_mask]
-        # Sort by delta value, think should increase for calls  0.30, 0.32, ... and decrease for puts  -.30, -.32, ...
-        ascending = (option_type == OptionType.CALL)
-        logger.debug(f"Filtering and sorting in {'ascending' if ascending else 'descending'} order")
-        logger.debug(f'for delta range {delta_range} for OptionType={option_type.value} -> delta col={delta_col}')
+        
+        # Sort by delta value
+        ascending = (option_type == OptionType.CALL)  # Ascending for calls, descending for puts
         chain_df = chain_df.reset_index().sort_values(by=['index', delta_col],
                                                      ascending=[True, ascending])
         trade_signals = chain_df.set_index('index')
-        logger.debug(f"Filtering and sorting in {'ascending' if ascending else 'descending'} order")
-        logger.debug(f'for delta range {delta_range} for OptionType={option_type.value} -> delta col={delta_col}')
-        logger.debug('Sample chain')
+        logger.debug('Sample chain after delta filtering')
         logger.debug(chain_df.head())
 
     elif delta_target:
         # Handle target case
-        # target = delta_target if option_type == OptionType.PUT else abs(delta_target)
-        target = -abs(delta_target) if option_type == OptionType.PUT else abs(delta_target)
-        logger.debug(f'Filtering for delta_target={delta_target}')
+        if option_type == OptionType.PUT:
+            # logger.debug(f'Got put {option_type}')
+            # For puts, we want negative deltas
+            target = -abs(delta_target)
+            # For puts, we want to find options with deltas closest to the target (more negative)
+            ascending = False
+            # logger.debug(f'Got put {option_type}, delta={target}, ascending={ascending}')
 
+        else:
+# For calls, we want positive deltas
+            target = abs(delta_target)
+            # For calls, we want to find options with deltas closest to the target (more positive)
+            ascending = True
+            # logger.debug(f'Got call {option_type}, delta={target}, ascending={ascending}')
+
+
+        logger.debug(f'Filtering for delta target: {target} for {option_type.value}')
         delta_diff = abs(chain_df[delta_col] - target)
         chain_df = chain_df.assign(delta_diff=delta_diff)
-        # logger.debug(f'Delta diff size: {delta_diff.size}')
-        chain_df = chain_df[chain_df.delta_diff < 0.05]
-
-        # logger.debug(f'Delta diff size: {delta_diff.size}')
         
-        # Add and sort by delta_diff, ascending: .001, .002
-        # chain_df = chain_df.assign(delta_diff=delta_diff).sort_values('delta_diff')
-        logger.debug(f'Filtering and sorting for delta difference in delta target={target} for OptionType={option_type}/delta col={delta_col}')
-        
-        chain_df = chain_df.reset_index().sort_values(by=['index', 'delta_diff'], 
-                                                      ascending=[True, True])
+        # Sort by delta difference and delta value
+        chain_df = chain_df.reset_index().sort_values(by=['index', 'delta_diff', delta_col],
+                                                     ascending=[True, True, ascending])
         trade_signals = chain_df.set_index('index')
-        logger.debug('Sample chain')
+        logger.debug('Sample chain after delta target filtering')
         logger.debug(chain_df.head())
     else:
         logger.error('Need to provide either delta_target or delta_range')
         raise ValueError
     
-    # Sort by date and delta difference (if it exists)
-    # if 'delta_diff' in chain_df.columns:
-    #     chain_df = chain_df.sort_values('delta_diff')
-    
-    # Group by date and get the best option for each date
-    # trade_signals = chain_df.groupby(level='date').first()
-    # logger.debug('Grouping by level=date.first()')
-    # trade_signals = chain_df.sort_index()
-
     logger.info(f"Generated {len(trade_signals)} trade signals")
-    # Print the head of the trade signals DataFrame to show a sample of the generated signals
     logger.info("\nSample of trade signals:")
     logger.info(trade_signals.head())
-
-    # sys.exit()
     
     return trade_signals
 
@@ -1374,8 +1372,8 @@ def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_
     
     # Create DataFrame and calculate metrics
     daily_df = pd.DataFrame(daily_data)
-    max_drawdown_amount = daily_df['Drawdown ($)'].max()
-    max_drawdown_percentage = daily_df['Drawdown (%)'].max()
+    max_drawdown_amount = daily_df['Drawdown ($)'].min()
+    max_drawdown_percentage = daily_df['Drawdown (%)'].min()
     
     # Save results
     mtm_csv_path = os.path.join(results_dir, f"mtm_{param_str}.csv")
@@ -1419,31 +1417,31 @@ def pivot_options_chain(options_chain, needed_col):
         options_chain[date_col] = options_chain[date_col].astype('category')
         
         # Convert to Dask DataFrame
-        logger.debug("Converting to Dask DataFrame")
-        dask_df = dd.from_pandas(options_chain, npartitions=4)
+        # logger.debug("Converting to Dask DataFrame")
+        # dask_df = dd.from_pandas(options_chain, npartitions=4)
         
         # Log the columns before pivot
-        logger.debug(f"Columns before pivot: {dask_df.columns.tolist()}")
+        logger.debug(f"Columns before pivot: {options_chain.columns.tolist()}")
         
         # Pivot operation
-        logger.debug("Starting pivot table operation with Dask")
-        pivoted_chain = dask_df.pivot_table(
+        logger.debug("Starting pivot table operation")
+        pivoted_chain = options_chain.pivot_table(
             index='strike', 
             columns=date_col,
             values=needed_col,
-        aggfunc='first'
-    )
+            aggfunc='first'
+        )
         
-        logger.debug("Computing final result")
-        result = pivoted_chain.compute()
+        # logger.debug("Computing final result")
+        # result = pivoted_chain.compute()
         
         # Log the final columns
-        logger.debug(f"Final columns after pivot: {result.columns.tolist()[:10]}")
+        logger.debug(f"Final columns after pivot: {pivoted_chain.columns.tolist()[:10]}")
         
-        logger.debug(f"Pivot completed successfully. Result shape: {result.shape}")
-        logger.debug(f"Memory usage after pivot: {result.memory_usage().sum() / 1024**2:.2f} MB")
+        logger.debug(f"Pivot completed successfully. Result shape: {pivoted_chain.shape}")
+        logger.debug(f"Memory usage after pivot: {pivoted_chain.memory_usage().sum() / 1024**2:.2f} MB")
         
-        return result
+        return pivoted_chain
         
     except Exception as e:
         logger.error(f"Error during pivot operation: {str(e)}")
@@ -1485,143 +1483,238 @@ def prepare_options_chain(options_chain, path, param_str):
     
     return pivoted_chain
 
-
+def log_to_google_sheets(results_df: pd.DataFrame, param_str: str, daily_df: pd.DataFrame = None):
+    """
+    Log backtest results to Google Sheets.
+    
+    Args:
+        results_df: DataFrame containing trade results
+        param_str: String describing the backtest parameters
+        daily_df: Optional DataFrame containing daily MTM data
+    """
+    try:
+        # Set up credentials
+        scope = ['https://spreadsheets.google.com/feeds',
+                'https://www.googleapis.com/auth/drive']
+        
+        # Load credentials from environment variable or file
+        creds_json = os.getenv('GOOGLE_CREDS_JSON')
+        if creds_json:
+            creds_dict = json.loads(creds_json)
+        else:
+            creds_path = os.path.join(os.path.dirname(__file__), 'credentials.json')
+            with open(creds_path, 'r') as f:
+                creds_dict = json.load(f)
+        
+        credentials = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        gc = gspread.authorize(credentials)
+        
+        # Open the spreadsheet
+        spreadsheet = gc.open('Options Backtest Results')
+        
+        # Create a new worksheet for this backtest
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        worksheet_name = f"Backtest_{timestamp}"
+        worksheet = spreadsheet.add_worksheet(title=worksheet_name, rows=1000, cols=20)
+        
+        # Write summary statistics
+        summary_data = [
+            ['Backtest Summary', ''],
+            ['Timestamp', datetime.now().strftime('%Y-%m-%d %H:%M:%S')],
+            ['Parameters', param_str],
+            ['Total Trades', len(results_df)],
+            ['Win Rate', f"{(results_df['pnl'] > 0).mean():.2%}"],
+            ['Average P&L', f"${results_df['pnl'].mean():.2f}"],
+            ['Total P&L', f"${results_df['pnl'].sum():.2f}"],
+            ['Initial Capital', f"${results_df['total_capital'].iloc[0]:.2f}"],
+            ['Final Capital', f"${results_df['total_capital'].iloc[-1]:.2f}"],
+            ['Return on Capital', f"{(results_df['total_capital'].iloc[-1] / results_df['total_capital'].iloc[0] - 1):.2%}"],
+            ['Average Days Held', f"{results_df['days_held'].mean():.1f}"],
+            ['Average Return on Margin', f"{results_df['return_on_margin'].mean():.2f}%"],
+            ['Maximum Drawdown', f"${results_df['drawdown'].min():.2f} ({results_df['drawdown_pct'].min():.2f}%)"],
+            ['', ''],
+            ['Trade Results', '']
+        ]
+        
+        # Write summary data
+        worksheet.update('A1', summary_data)
+        
+        # Write trade results
+        if not results_df.empty:
+            # Prepare trade results data
+            trade_results = results_df[[
+                'entry_date', 'exit_date', 'strike', 'option_type', 
+                'position_side', 'entry_price', 'exit_price', 'pnl',
+                'days_held', 'return_on_margin'
+            ]].copy()
+            
+            # Format dates
+            trade_results['entry_date'] = trade_results['entry_date'].dt.strftime('%Y-%m-%d')
+            trade_results['exit_date'] = trade_results['exit_date'].dt.strftime('%Y-%m-%d')
+            
+            # Write headers
+            worksheet.update('A15', [trade_results.columns.tolist()])
+            # Write data
+            worksheet.update('A16', trade_results.values.tolist())
+        
+        # Write daily MTM data if available
+        if daily_df is not None:
+            # Add a separator
+            worksheet.update(f'A{len(results_df) + 20}', [['', ''], ['Daily MTM Data', '']])
+            
+            # Prepare daily data
+            daily_data = daily_df[[
+                'Date', 'Net Liquidity', 'Position Value', 
+                'Daily P&L', 'Cumulative P&L', 'Drawdown (%)'
+            ]].copy()
+            
+            # Format dates
+            daily_data['Date'] = daily_data['Date'].dt.strftime('%Y-%m-%d')
+            
+            # Write headers
+            worksheet.update(f'A{len(results_df) + 22}', [daily_data.columns.tolist()])
+            # Write data
+            worksheet.update(f'A{len(results_df) + 23}', daily_data.values.tolist())
+        
+        logger.info(f"Results logged to Google Sheets in worksheet: {worksheet_name}")
+        
+    except Exception as e:
+        logger.error(f"Error logging to Google Sheets: {str(e)}")
+        raise
 
 def run_backtest(
     spx_file_path: str,
     options_chain_file_path: str,
-    option_type: OptionType = OptionType.PUT,
-    position_side: PositionSide = PositionSide.SHORT,
-    delta_target: float = None,
-    use_spx_close: bool = True,
-    **kwargs
+    option_type: OptionType,
+    position_side: PositionSide,
+    delta_target: float,
+    use_spx_close: bool = False,
+    start_date: str = None,
+    end_date: str = None,
+    dte_range: tuple = (28, 31),
+    initial_capital: float = 100000,
+    early_close_days: int = None,
+    use_preprocessed: bool = True,
+    save_preprocessed: bool = True,
+    save_trades: bool = True,
+    preloaded_data: dict = None,
+    log_to_sheets: bool = True,
+    max_margin_utilization: float = 0.80  # New parameter: maximum margin utilization (80% default)
 ) -> pd.DataFrame:
     """
-    Load data, generate signals, run backtest and return results.
+    Run a backtest with the given parameters.
     
     Args:
-        spx_file_path: Path to SPX data file
-        options_chain_file_path: Path to options chain data file
-        option_type: Type of option to trade (PUT or CALL)
-        position_side: Position side (LONG or SHORT)
-        delta_target: Target delta value
-        use_spx_close: Whether to use SPX close price (True) or underlying_last (False)
-        **kwargs: Additional arguments including:
-            - start_date: Start date for backtest
-            - end_date: End date for backtest
-            - dte_target: Target DTE value
-            - dte_range: Tuple of (min_dte, max_dte)
-            - delta_range: Tuple of (min_delta, max_delta)
-            - initial_capital: Starting capital amount
-            - early_close_days: Days to hold before early close
-            - use_preprocessed: Whether to use preprocessed data
-            - save_preprocessed: Whether to save preprocessed data
-            - save_trades: Whether to save trade results
-            - data_dir: Directory containing data files
+        ... (existing args) ...
+        max_margin_utilization: Maximum percentage of capital that can be used for margin (0.0 to 1.0)
     """
-    # Set default values for all kwargs
-    defaults = {
-        'start_date': None,
-        'end_date': None,
-        'dte_target': None,
-        'dte_range': None,
-        'delta_range': None,
-        'initial_capital': 100000,
-        'early_close_days': None,
-        'use_preprocessed': True,
-        'save_preprocessed': True,
-        'save_trades': True,
-        'data_dir': os.path.dirname(spx_file_path)
-    }
+    start_time = time.time()
+    logger.info(f"Starting backtest at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
-    # Update defaults with provided kwargs
-    for key, value in kwargs.items():
-        defaults[key] = value
+    # Load data if not preloaded
+    if preloaded_data is None:
+        data_loading_start = time.time()
+        options_chain, options_chain_multi_index, spx_data, vix_data = load_backtest_data(
+            data_dir=os.path.dirname(spx_file_path),
+            use_preprocessed=use_preprocessed,
+            save_preprocessed=save_preprocessed,
+            options_file=os.path.basename(options_chain_file_path)
+        )
+        data_loading_time = time.time() - data_loading_start
+        logger.info(f"Data loading and preprocessing completed in {data_loading_time:.2f} seconds")
+    else:
+        spx_data = preloaded_data['spx_data']
+        options_chain = preloaded_data['options_data']
+        options_chain_multi_index = preloaded_data['options_data_multi']
+        vix_data = preloaded_data['vix_data']
+        data_loading_time = 0
+        logger.info("Using pre-loaded data")
     
-    # Store original string dates for filename
-    start_date_str = defaults['start_date']
-    end_date_str = defaults['end_date']
-    
-    # Load data
-    start_time = pd.Timestamp.now()
-    options_chain, options_chain_multi_index, spx_data, vix_data = load_backtest_data(
-        defaults['data_dir'],
-        use_preprocessed=defaults['use_preprocessed'],
-        save_preprocessed=defaults['save_preprocessed']
-    )
-    load_time = (pd.Timestamp.now() - start_time).total_seconds()
-    logger.info(f"Data loading and preprocessing completed in {load_time:.2f} seconds")
-    
-    # Check data quality
-    check_data_quality(options_chain, spx_data, vix_data)
-
-    # Safely handle optional parameters for filename construction
-    delta_str = (f"delta_{delta_target}" if delta_target else 
-                f"delta_{defaults['delta_range'][0]}-{defaults['delta_range'][1]}" 
-                if defaults['delta_range'] else "delta_any")
-    
-    dte_str = (f"dte_{defaults['dte_target']}" if defaults['dte_target'] else 
-               f"dte_{defaults['dte_range'][0]}-{defaults['dte_range'][1]}" 
-               if defaults['dte_range'] else "dte_any")
-               
-    early_close_str = (f"early_{defaults['early_close_days']}" 
-                      if defaults['early_close_days'] else "full_term")
-    
-    param_str = f"{option_type.name}_{position_side.name}_{delta_str}_{dte_str}_{early_close_str}_{start_date_str}-{end_date_str}"
+    # Calculate maximum allowed margin based on initial capital
+    max_allowed_margin = initial_capital * max_margin_utilization
+    logger.info(f"Maximum allowed margin: ${max_allowed_margin:.2f} ({max_margin_utilization:.0%} of capital)")
     
     # Generate trade signals
-    signal_time = pd.Timestamp.now()
+    signal_start = time.time()
     trade_signals = generate_trade_signals(
         spx_data, 
         options_chain,
         option_type=option_type,
         delta_target=delta_target,
-        delta_range=defaults['delta_range'],
-        dte_target=defaults['dte_target'],
-        dte_range=defaults['dte_range'],
-        start_date=defaults['start_date'],
-        end_date=defaults['end_date']
+        delta_range=None,
+        dte_target=dte_range[0],
+        dte_range=dte_range,
+        start_date=start_date,
+        end_date=end_date
     )
-    signal_generation_time = (pd.Timestamp.now() - signal_time).total_seconds()
-    logger.info(f"Signal generation completed in {signal_generation_time:.2f} seconds")
+    signal_time = time.time() - signal_start
+    logger.info(f"Signal generation completed in {signal_time:.2f} seconds")
     
     if trade_signals.empty:
         logger.warning("No trade signals generated with the current parameters.")
-        return pd.DataFrame()  # Return empty DataFrame if no signals
+        return pd.DataFrame()
     
-    # Run backtest
-    backtest_time = pd.Timestamp.now()
-    logger.info(f"Running backtest for params:\t{param_str}")
+    # Pre-calculate margin requirements for all signals
+    logger.info("Calculating margin requirements for trade signals...")
+    trade_signals['margin_required'] = trade_signals.apply(
+        lambda row: calculate_option_margin(
+            row['underlying_last'],
+            (row['p_bid'] + row['p_ask']) / 2 if option_type == OptionType.PUT else (row['c_bid'] + row['c_ask']) / 2,
+            position_side
+        ),
+        axis=1
+    )
+    
+    # Filter out trades that would exceed margin limits
+    valid_signals = trade_signals[trade_signals['margin_required'] <= max_allowed_margin]
+    filtered_count = len(trade_signals) - len(valid_signals)
+    if filtered_count > 0:
+        logger.warning(f"Filtered out {filtered_count} trades due to margin requirements")
+        logger.info(f"Average margin requirement for filtered trades: ${trade_signals['margin_required'].mean():.2f}")
+        logger.info(f"Maximum margin requirement for filtered trades: ${trade_signals['margin_required'].max():.2f}")
+    
+    # Run backtest with valid signals
+    backtest_start = time.time()
+    logger.info(f"Running backtest with {len(valid_signals)} valid trades")
     results = execute_backtest_trades(
-        trade_signals,
+        valid_signals,
         options_chain,
         spx_data,
         option_type=option_type,
         position_side=position_side,
-        initial_capital=defaults['initial_capital'],
-        early_close_days=defaults['early_close_days']
+        initial_capital=initial_capital,
+        early_close_days=early_close_days
     )
-    backtest_execution_time = (pd.Timestamp.now() - backtest_time).total_seconds()
-    total_time = (pd.Timestamp.now() - start_time).total_seconds()
-    logger.info(f"Backtest execution completed in {backtest_execution_time:.2f} seconds")
-    logger.info(f"Total time: {total_time:.2f} seconds")
+    backtest_time = time.time() - backtest_start
+    logger.info(f"Backtest execution completed in {backtest_time:.2f} seconds")
     
-    # Call the MTM function with the MultiIndex version and use_spx_close parameter
+    # Calculate MTM
+    mtm_start = time.time()
     daily_df, max_drawdown, max_drawdown_pct = calculate_mtm(
-        defaults['start_date'], defaults['end_date'], defaults['initial_capital'], results, 
+        start_date, end_date, initial_capital, results, 
         options_chain_multi_index, spx_data, param_str,
         use_spx_close=use_spx_close
     )
-            
+    mtm_time = time.time() - mtm_start
+    logger.info(f"MTM calculation completed in {mtm_time:.2f} seconds")
+    
+    # Add margin utilization metrics to results
+    if not results.empty:
+        results['margin_utilization'] = results['capital_used'] / initial_capital
+        avg_margin_util = results['margin_utilization'].mean()
+        max_margin_util = results['margin_utilization'].max()
+        logger.info(f"Average margin utilization: {avg_margin_util:.2%}")
+        logger.info(f"Maximum margin utilization: {max_margin_util:.2%}")
+    
     # Print summary statistics
     logger.info("\nBacktest Results Summary:")
     logger.info(f"Total trades: {len(results)}")
     logger.info(f"Win rate: {(results['pnl'] > 0).mean():.2%}")
     logger.info(f"Average P&L: ${results['pnl'].mean():.2f}")
     logger.info(f"Total P&L: ${results['pnl'].sum():.2f}")
-    logger.info(f"Initial capital: ${defaults['initial_capital']:.2f}")
+    logger.info(f"Initial capital: ${initial_capital:.2f}")
     logger.info(f"Final capital: ${results['total_capital'].iloc[-1]:.2f}")
-    logger.info(f"Return on initial capital: {(results['total_capital'].iloc[-1] / defaults['initial_capital'] - 1):.2%}")
+    logger.info(f"Return on initial capital: {(results['total_capital'].iloc[-1] / initial_capital - 1):.2%}")
     logger.info(f"Average days held: {results['days_held'].mean():.1f}")
     logger.info(f"Average return on margin: {results['return_on_margin'].mean():.2f}%")
     logger.info(f"Maximum drawdown: ${max_drawdown:.2f} ({max_drawdown_pct:.2f}%)")
@@ -1631,16 +1724,108 @@ def run_backtest(
     if len(results) > 1:
         returns = np.diff(results['total_capital'].values) / results['total_capital'].values[:-1]
         if len(returns) > 0 and np.std(returns) > 0:
-            sharpe = np.mean(returns) / np.std(returns) * np.sqrt(252)  # Annualize by multiplying by sqrt(252)
+            sharpe = np.mean(returns) / np.std(returns) * np.sqrt(252)
             logger.info(f"Sharpe Ratio: {sharpe:.2f}")
     
     # Save summary results to CSV
-    if defaults['save_trades']:
-        results_dir = 'results'  # Updated to be consistent with logs directory
+    if save_trades:
+        save_start = time.time()
+        results_dir = 'results'
         os.makedirs(results_dir, exist_ok=True)
-        results_csv_path = os.path.join(results_dir, f"results_{param_str}_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv")
-        results.to_csv(results_csv_path, index=False)
-        logger.info(f"Summary results saved to {results_csv_path}")
+        trades_csv_path = os.path.join(results_dir, f"trades_{param_str}_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv")
+        results.to_csv(trades_csv_path, index=False)
+        save_time = time.time() - save_start
+        logger.info(f"Trades saved to {trades_csv_path} in {save_time:.2f} seconds")
+    
+    # Calculate total time
+    total_time = time.time() - start_time
+    logger.info(f"\nTotal execution time: {total_time:.2f} seconds")
+    logger.info(f"Breakdown:")
+    logger.info(f"- Data loading: {data_loading_time:.2f} seconds ({data_loading_time/total_time*100:.1f}%)")
+    logger.info(f"- Signal generation: {signal_time:.2f} seconds ({signal_time/total_time*100:.1f}%)")
+    logger.info(f"- Backtest execution: {backtest_time:.2f} seconds ({backtest_time/total_time*100:.1f}%)")
+    logger.info(f"- MTM calculation: {mtm_time:.2f} seconds ({mtm_time/total_time*100:.1f}%)")
+    logger.info(f"- Results saving: {save_time:.2f} seconds ({save_time/total_time*100:.1f}%)")
+    
+    # Log to Google Sheets if enabled
+    if log_to_sheets and not results.empty:
+        try:
+            log_to_google_sheets(results, param_str, daily_df)
+        except Exception as e:
+            logger.error(f"Failed to log to Google Sheets: {str(e)}")
+    
+    return results
+
+def run_multiple_backtests(
+    spx_file_path: str,
+    options_chain_file_path: str,
+    hyperparameter_sets: list,
+    use_preprocessed: bool = True,
+    save_preprocessed: bool = True
+) -> dict:
+    """
+    Run multiple backtests with different hyperparameters using the same loaded data.
+    
+    Args:
+        spx_file_path: Path to SPX data file
+        options_chain_file_path: Path to options chain data file
+        hyperparameter_sets: List of dictionaries containing hyperparameter sets
+        use_preprocessed: Whether to use preprocessed data
+        save_preprocessed: Whether to save preprocessed data
+        
+    Returns:
+        Dictionary containing results for each hyperparameter set
+    """
+    # Load data once
+    logger.info("Loading data for multiple backtests...")
+    data_loading_start = time.time()
+    options_chain, options_chain_multi_index, spx_data, vix_data = load_backtest_data(
+        data_dir=os.path.dirname(spx_file_path),
+        use_preprocessed=use_preprocessed,
+        save_preprocessed=save_preprocessed,
+        options_file=os.path.basename(options_chain_file_path)
+    )
+    data_loading_time = time.time() - data_loading_start
+    logger.info(f"Data loading completed in {data_loading_time:.2f} seconds")
+    
+    # Check data quality once
+    check_data_quality(options_chain, spx_data, vix_data)
+    
+    preloaded_data = {
+        'spx_data': spx_data,
+        'options_data': options_chain,
+        'options_data_multi': options_chain_multi_index,
+        'vix_data': vix_data
+    }
+    
+    results = {}
+    total_start_time = time.time()
+    
+    for i, params in enumerate(hyperparameter_sets, 1):
+        logger.info(f"\nRunning backtest {i}/{len(hyperparameter_sets)} with parameters:")
+        for key, value in params.items():
+            logger.info(f"  {key}: {value}")
+        
+        start_time = time.time()
+        result = run_backtest(
+            spx_file_path=spx_file_path,
+            options_chain_file_path=options_chain_file_path,
+            preloaded_data=preloaded_data,
+            **params
+        )
+        execution_time = time.time() - start_time
+        
+        results[f"backtest_{i}"] = {
+            'params': params,
+            'results': result,
+            'execution_time': execution_time
+        }
+        
+        logger.info(f"Backtest {i} completed in {execution_time:.2f} seconds")
+    
+    total_time = time.time() - total_start_time
+    logger.info(f"\nAll backtests completed in {total_time:.2f} seconds")
+    logger.info(f"Average time per backtest: {total_time/len(hyperparameter_sets):.2f} seconds")
     
     return results
 
@@ -1672,7 +1857,7 @@ if __name__ == "__main__":
     pd.set_option('display.max_colwidth', None)
 
     # Example file paths
-    DATA_PATH = os.path.join(os.path.dirname(__file__), "..", "data")
+    # DATA_PATH = os.path.join(os.path.dirname(__file__), "..", "data")
     results = run_backtest(
         spx_file_path=os.path.join(DATA_PATH, "spx_2018_2023.csv"),
         options_chain_file_path=os.path.join(DATA_PATH, "spx_options_2018_2023.csv"),
@@ -1694,3 +1879,36 @@ if __name__ == "__main__":
     print("\nBasic example results:")
     print(results)
     print("\nFor more examples, see test_backtest.py")
+
+    # Example hyperparameter sets
+    hyperparameter_sets = [
+        {
+            'option_type': OptionType.PUT,
+            'position_side': PositionSide.SHORT,
+            'delta_target': 0.30,
+            'use_spx_close': True,
+            'start_date': "2020-01-01",
+            'end_date': "2020-12-31",
+            'dte_range': (28, 31),
+            'initial_capital': 100000,
+            'early_close_days': None
+        },
+        {
+            'option_type': OptionType.PUT,
+            'position_side': PositionSide.SHORT,
+            'delta_target': 0.25,
+            'use_spx_close': True,
+            'start_date': "2020-01-01",
+            'end_date': "2020-12-31",
+            'dte_range': (28, 31),
+            'initial_capital': 100000,
+            'early_close_days': 5
+        }
+    ]
+
+    # Run multiple backtests
+    results = run_multiple_backtests(
+        spx_file_path="/Users/liefe/Data/spx/spx_2018_2023.csv",
+        options_chain_file_path="/Users/liefe/Data/spx/spx_options_2018_2023.csv",
+        hyperparameter_sets=hyperparameter_sets
+    )

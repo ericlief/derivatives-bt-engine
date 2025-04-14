@@ -6,3 +6,4 @@ pandas
 pyarrow
 dask
 
+oauth2client==4.1.3

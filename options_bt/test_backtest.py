@@ -1,6 +1,6 @@
 import os
 import pandas as pd
-from options_bt.bt import run_backtest, OptionType, PositionSide, setup_logger
+from options_bt.bt import run_backtest, OptionType, PositionSide, setup_logger, load_backtest_data
 
 # Create logger instance
 logger = setup_logger()
@@ -11,9 +11,17 @@ def run_test_suite():
     pd.set_option('display.max_colwidth', None)
 
     # Set up data paths
-    DATA_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), "Data", "spx")
+    DATA_PATH = "/Users/liefe/Data/spx"
     SPX_FILE = os.path.join(DATA_PATH, "spx_2018_2023.csv")
     OPTIONS_FILE = os.path.join(DATA_PATH, "spx_options_2018_2023.csv")
+
+    # Load data
+    options_chain, options_chain_multi_index, spx_data, vix_data = load_backtest_data(
+        DATA_PATH,
+        use_preprocessed=True,
+        save_preprocessed=True,
+        options_file="spx_options_2018_2023.csv"
+    )
 
     # Test 1: PUT strategy using SPX close for intrinsic value
     logger.info("\nTest 1: PUT strategy with SPX close price")

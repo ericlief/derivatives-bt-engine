@@ -11,7 +11,8 @@ def run_test_suite():
     pd.set_option('display.max_colwidth', None)
 
     # Set up data paths
-    DATA_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), "Data", "spx")
+    # DATA_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), "Data", "spx")
+    DATA_PATH = "/Users/liefe/Data/spx"
     SPX_FILE = os.path.join(DATA_PATH, "spx_2018_2023.csv")
     OPTIONS_FILE = os.path.join(DATA_PATH, "spx_options_2018_2023.csv")
 

@@ -4,4 +4,6 @@ logs
 data
 results
 nbs
-.DS_Store
+*.profile
+*.out
+*.prof
