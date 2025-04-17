@@ -86,7 +86,7 @@ def run_test_suite():
            {
             'option_type': OptionType.PUT,
             'position_side': PositionSide.SHORT,
-            'delta_target': 0.80,
+            'delta_target': 0.90,
             'use_spx_close': True,
             'start_date': "2020-01-01",
             'end_date': "2020-12-31",

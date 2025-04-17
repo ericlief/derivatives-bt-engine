@@ -452,21 +452,25 @@ def create_trade_from_signal(trade_signal, underlying_price: float, entry_price:
     }
     return position
 
-def execute_trade(trade: Position, available_capital: float) -> Tuple[Optional[Position], float]:
+def execute_trade(trade: Position, available_capital: float, leverage: float = 4.0) -> Tuple[Optional[Position], float]:
     """
-    Attempt to execute a trade given available capital.
+    Attempt to execute a trade given available capital and leverage.
     
     Args:
         trade: Position to be executed
         available_capital: Available capital for the trade
+        leverage: Leverage multiplier for margin requirements
     
     Returns:
         Tuple of (position if executed or None, remaining capital)
     """
-    if available_capital >= trade['margin_required']:
-        return trade, available_capital - trade['margin_required']
+    # Calculate effective margin requirement with leverage
+    effective_margin = trade['margin_required'] / leverage
+    
+    if available_capital >= effective_margin:
+        return trade, available_capital - effective_margin
     else:
-        logger.warning(f"Insufficient capital (${available_capital}) for trade on {trade['entry_date']}, requires ${trade['margin_required']}")
+        logger.warning(f"Insufficient capital (${available_capital}) for trade on {trade['entry_date']}, requires ${effective_margin:.2f} with {leverage}x leverage")
         return None, available_capital
 
 def execute_backtest_trades(trade_signals_df: pd.DataFrame, 
@@ -475,7 +479,8 @@ def execute_backtest_trades(trade_signals_df: pd.DataFrame,
                 option_type: OptionType = OptionType.PUT,
                 position_side: PositionSide = PositionSide.SHORT,
                 initial_capital: float = 100000,
-                early_close_days: Optional[int] = None) -> pd.DataFrame:
+                early_close_days: Optional[int] = None,
+                leverage: float = 4.0) -> pd.DataFrame:
     """
     Run backtest with sequential trades with access to full option chain data.
     
@@ -487,9 +492,7 @@ def execute_backtest_trades(trade_signals_df: pd.DataFrame,
         position_side: Whether buying or selling options (LONG or SHORT)
         initial_capital: Starting capital amount
         early_close_days: If set, close positions this many days after entry instead of at expiration
-    
-    Returns:
-        DataFrame containing backtest results
+        leverage: Leverage multiplier for margin requirements
     """
     results: List[TradeResult] = []
     capital = initial_capital
@@ -583,7 +586,7 @@ def execute_backtest_trades(trade_signals_df: pd.DataFrame,
             continue
         
         # Execute the trade if we have sufficient capital
-        executed_position, capital = execute_trade(new_trade, capital)
+        executed_position, capital = execute_trade(new_trade, capital, leverage)
         
         # Check if trade was successfully executed
         if executed_position is None:
@@ -1237,13 +1240,14 @@ def calculate_daily_value(trade, date, options_chain_multi_index, spx_data, use_
 
     return None
 
-def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_chain_multi_index, spx_data, param_str, use_spx_close: bool = True, results_dir="results"):
+def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_chain_multi_index, spx_data, param_str, use_spx_close: bool = True, results_dir="results", leverage: float = 4.0):
     """
     Calculate and save mark-to-market (MTM) data for a backtest.
     
     Args:
         ... (existing args) ...
         use_spx_close: Whether to use SPX close price (True) or underlying_last from options data (False)
+        leverage: Leverage multiplier for margin requirements
     """
     # Ensure the results directory exists
     os.makedirs(results_dir, exist_ok=True)
@@ -1324,7 +1328,7 @@ def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_
                     daily_pnl += entry_price + position_value
                     logger.debug(f'{position_value} + {entry_price} -> Daily PnL: {entry_price + position_value}')
                     daily_margin_requirement += trade.capital_used
-                    options_bp -= trade.capital_used
+                    options_bp -= trade.capital_used / leverage  # Account for leverage in BP reduction
                     logger.debug(f'BP: {options_bp}')
 
         # Update cumulative P&L
@@ -1599,7 +1603,8 @@ def run_backtest(
     save_trades: bool = True,
     preloaded_data: dict = None,
     log_to_sheets: bool = True,
-    max_margin_utilization: float = 0.80  # New parameter: maximum margin utilization (80% default)
+    max_margin_utilization: float = 0.80,  # Maximum percentage of capital that can be used for margin
+    leverage: float = 4.0  # New parameter: leverage multiplier (e.g. 4.0 for 4x leverage)
 ) -> pd.DataFrame:
     """
     Run a backtest with the given parameters.
@@ -1607,6 +1612,7 @@ def run_backtest(
     Args:
         ... (existing args) ...
         max_margin_utilization: Maximum percentage of capital that can be used for margin (0.0 to 1.0)
+        leverage: Leverage multiplier for margin requirements (e.g. 4.0 for 4x leverage)
     """
     start_time = time.time()
     logger.info(f"Starting backtest at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -1630,9 +1636,9 @@ def run_backtest(
         data_loading_time = 0
         logger.info("Using pre-loaded data")
     
-    # Calculate maximum allowed margin based on initial capital
-    max_allowed_margin = initial_capital * max_margin_utilization
-    logger.info(f"Maximum allowed margin: ${max_allowed_margin:.2f} ({max_margin_utilization:.0%} of capital)")
+    # Calculate maximum allowed margin based on initial capital and leverage
+    max_allowed_margin = initial_capital * max_margin_utilization * leverage
+    logger.info(f"Maximum allowed margin: ${max_allowed_margin:.2f} ({max_margin_utilization:.0%} of capital with {leverage}x leverage)")
     
     # Generate trade signals
     signal_start = time.time()
@@ -1683,17 +1689,25 @@ def run_backtest(
         option_type=option_type,
         position_side=position_side,
         initial_capital=initial_capital,
-        early_close_days=early_close_days
+        early_close_days=early_close_days,
+        leverage=leverage
     )
     backtest_time = time.time() - backtest_start
     logger.info(f"Backtest execution completed in {backtest_time:.2f} seconds")
     
     # Calculate MTM
     mtm_start = time.time()
+    param_str = f"{option_type.value}_{position_side.value}_delta{delta_target}_dte{dte_range[0]}-{dte_range[1]}"
     daily_df, max_drawdown, max_drawdown_pct = calculate_mtm(
-        start_date, end_date, initial_capital, results, 
-        options_chain_multi_index, spx_data, param_str,
-        use_spx_close=use_spx_close
+        start_date=start_date,
+        end_date=end_date,
+        initial_capital=initial_capital,
+        trade_results=results,
+        options_chain_multi_index=options_chain_multi_index,
+        spx_data=spx_data,
+        param_str=param_str,
+        use_spx_close=use_spx_close,
+        leverage=leverage
     )
     mtm_time = time.time() - mtm_start
     logger.info(f"MTM calculation completed in {mtm_time:.2f} seconds")
