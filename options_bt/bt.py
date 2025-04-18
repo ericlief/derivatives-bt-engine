@@ -99,15 +99,19 @@ class TradeResult(TypedDict):
 
 def calculate_option_margin(underlying_price: float, entry_price: float, 
                            position_side: Union[PositionSide, str],
-                           margin_req_percent: float = 0.20) -> float:
+                           strike: float,
+                           option_type: Union[OptionType, str],
+                           margin_req_percent: float = 0.15) -> float:
     """
-    Calculate required margin for option position.
+    Calculate required margin for option position using IB's formula for Index Options.
     
     Args:
         underlying_price: Current price of underlying asset
         entry_price: Option premium (mid of bid/ask)
         position_side: Whether position is LONG or SHORT
-        margin_req_percent: Margin requirement percentage (default 0.20 for index options)
+        strike: Option strike price
+        option_type: Type of option (PUT or CALL)
+        margin_req_percent: Margin requirement percentage (default 0.15 for IB)
     
     Returns:
         Required margin in dollars
@@ -120,11 +124,25 @@ def calculate_option_margin(underlying_price: float, entry_price: float,
     if position_side == PositionSide.LONG:
         return round(entry_price * 100, 2)  # Convert to dollars
     
-    # For short positions, use the more complex calculation
+    # For short positions, use IB's formula for Index Options
     else:  # PositionSide.SHORT
-        margin_required = max(
-            underlying_price * margin_req_percent,  # Percentage of underlying
-            entry_price + (underlying_price * 0.10)  # Premium + additional percentage
+        # Calculate out-of-the-money amount
+        if option_type == OptionType.PUT:
+            # For puts: OTM when strike > underlying, ITM when strike <= underlying
+            otm_amount = max(0, underlying_price - strike)
+        else:  # CALL
+            # For calls: OTM when strike >= underlying, ITM when strike < underlying
+            otm_amount = max(0, strike - underlying_price)
+        
+        # IB's margin formula for Index Options
+        margin_required = (
+            entry_price +  # Option price
+            max(
+                # First term: 15% of underlying price minus OTM amount
+                (margin_req_percent * underlying_price - otm_amount),
+                # Second term: 10% of underlying price
+                (0.10 * underlying_price)
+            )
         ) * 100  # Convert to dollars
 
         return round(margin_required, 2)
@@ -232,7 +250,7 @@ def get_closing_data(position: Position,
         
         mid_price = calculate_midpoint_price(bid, ask)
         if mid_price is not None:
-            logger.debug(f"Using prices from {idx} for close date {close_date}")
+            logger.debug(f"Using prices from {idx} for close date {close_date}, mid_price={mid_price}, underlying_close={underlying_close}")
             return mid_price, underlying_close
     
     # If we get here, no valid prices were found within 5 days
@@ -241,29 +259,20 @@ def get_closing_data(position: Position,
                 f"Last bid/ask seen: {bid}/{ask}")
     return None, None
 
-def calculate_option_pnl(position: Position, underlying_close: float) -> float:
+def calculate_option_pnl(position: Position, closing_price: float) -> float:
     """
     Calculate P&L for option position.
     
     Args:
         position: Position dictionary containing trade details
-        underlying_close: Closing price of underlying at expiration
+        closing_price: Closing price of the option at closure
     
     Returns:
         P&L in dollars
     """
-    # entry_price is already signed based on position side in create_trade_from_signal
-    # Calculate intrinsic value at expiration
-    intrinsic_value = calculate_intrinsic_value(underlying_close, position['strike'], position['option_type'])
-    
-    # P&L is the difference between intrinsic value and entry price
-    # entry_price is already signed (negative for long, positive for short)
-    # For long positions: P&L = intrinsic_value + entry_price (entry_price is negative)
-    # For short positions: P&L = -intrinsic_value + entry_price (entry_price is positive)
-    pnl = (intrinsic_value if position['position_side'] == PositionSide.LONG.value 
-           else -intrinsic_value) + position['entry_price']
-    
-    return pnl * 100  # Convert to dollars
+    # Calculate P&L using entry and closing prices (signed)
+    pnl = position['entry_price'] + closing_price
+    return pnl * 100 if 'short' in position['position_side'] else max(0, pnl * 100) # Convert to dollars
 
 def close_position(position: Position, 
                   full_chain_df: pd.DataFrame, 
@@ -317,7 +326,9 @@ def close_position(position: Position,
         logger.warning("Skipping trade due to missing close data")
         return current_capital, None
     
-    pnl = calculate_option_pnl(position, underlying_close)
+    # Handle sign for credit/debit prices (i.e. short vs. long)
+    signed_close_price = close_price if 'long' in position['position_side'] else -close_price
+    pnl = calculate_option_pnl(position, signed_close_price)
     margin_released = position['margin_required']
     capital_change = margin_released + pnl
     total_capital_after = current_capital + capital_change
@@ -445,7 +456,7 @@ def create_trade_from_signal(trade_signal, underlying_price: float, entry_price:
         'bid': bid,
         'ask': ask,
         'entry_price': round(signed_entry_price, 2),  # Use the signed entry price
-        'margin_required': calculate_option_margin(underlying_price, abs(entry_price), position_side),  # Use absolute entry price for margin
+        'margin_required': calculate_option_margin(underlying_price, abs(entry_price), position_side, trade_signal.strike, option_type),  # Use absolute entry price for margin
         'close_date': None,
         'entry_delta': round(entry_delta, 2) if entry_delta is not None else None,
         'entry_dte': entry_dte
@@ -468,6 +479,10 @@ def execute_trade(trade: Position, available_capital: float, leverage: float = 4
     effective_margin = trade['margin_required'] / leverage
     
     if available_capital >= effective_margin:
+        # Deduct the premium from available capital for long positions
+        if trade['position_side'] == PositionSide.LONG.value:
+            available_capital -= abs(trade['entry_price']) * 100  # Deduct premium (convert to dollars)
+        
         return trade, available_capital - effective_margin
     else:
         logger.warning(f"Insufficient capital (${available_capital}) for trade on {trade['entry_date']}, requires ${effective_margin:.2f} with {leverage}x leverage")
@@ -480,7 +495,7 @@ def execute_backtest_trades(trade_signals_df: pd.DataFrame,
                 position_side: PositionSide = PositionSide.SHORT,
                 initial_capital: float = 100000,
                 early_close_days: Optional[int] = None,
-                leverage: float = 4.0) -> pd.DataFrame:
+                leverage: float = 1.0) -> pd.DataFrame:
     """
     Run backtest with sequential trades with access to full option chain data.
     
@@ -522,9 +537,9 @@ def execute_backtest_trades(trade_signals_df: pd.DataFrame,
         # Skip if we can't access the trade date
         try:
             trade_date = trade_signal.Index
-            logger.debug(f"Processing potential trade for date {trade_date} and capital {capital:.2f}")
+            # logger.debug(f"Processing potential trade for date {trade_date} and capital {capital:.2f}")
         except Exception as e:
-            logger.error(f"Error accessing trade date: {e} - skipping")
+            logger.error(f"Error {e} accessing trade date: {trade_date} - skipping")
             skipped_trades += 1
             continue
         
@@ -1194,7 +1209,7 @@ def calculate_daily_value(trade, date, options_chain_multi_index, spx_data, use_
             # Find the nearest date
             available_dates = options_chain_multi_index.index.get_level_values(0)
             nearest_date = available_dates[available_dates <= date][-1]
-            logger.debug(f"Found nearest date {nearest_date} before target date {date}.")
+            # logger.debug(f"Found nearest date {nearest_date} before target date {date}.")
             date = nearest_date
         
         # Get the price data using MultiIndex
@@ -1209,14 +1224,14 @@ def calculate_daily_value(trade, date, options_chain_multi_index, spx_data, use_
                     logger.error(f"No SPX close price available for {date}")
                     return None
                 underlying_price = spx_data.loc[date, 'close']
-                logger.debug(f"Using SPX close price: {underlying_price}")
+                # logger.debug(f"Using SPX close price: {underlying_price}")
             else:
                 underlying_price = price_data['underlying_last'].iloc[0]
-                logger.debug(f"Using options chain underlying_last: {underlying_price}")
+                # logger.debug(f"Using options chain underlying_last: {underlying_price}")
 
             close = calculate_intrinsic_value(underlying_price, trade.strike, trade.option_type)
             market_value = round(close * 100, 2)
-            logger.debug(f'Calculated intrinsic value on date={date} for strike={trade.strike} and value={market_value}')
+            # logger.debug(f'Calculated intrinsic value on date={date} for strike={trade.strike} and value={market_value}')
 
         # Either MTM daily or early closure, so calculate mid point of bid/ask quote
         else:
@@ -1229,7 +1244,7 @@ def calculate_daily_value(trade, date, options_chain_multi_index, spx_data, use_
                 logger.warning(f"Invalid bid/ask prices on {date} for strike {trade.strike}: bid={bid}, ask={ask}")
                 return None
             market_value = round(100 * mid, 2)
-            logger.debug(f'Calculated mid value on date={date} for strike={trade.strike}, bid={bid}, ask={ask}, mid={mid}, value={market_value}')
+            # logger.debug(f'Calculated mid value on date={date} for strike={trade.strike}, bid={bid}, ask={ask}, mid={mid}, value={market_value}')
 
         return market_value if not "short" in trade.position_side.lower() else -market_value
     
@@ -1240,7 +1255,7 @@ def calculate_daily_value(trade, date, options_chain_multi_index, spx_data, use_
 
     return None
 
-def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_chain_multi_index, spx_data, param_str, use_spx_close: bool = True, results_dir="results", leverage: float = 4.0):
+def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_chain_multi_index, spx_data, param_str, use_spx_close: bool = True, results_dir="results", leverage: float = 1.0):
     """
     Calculate and save mark-to-market (MTM) data for a backtest.
     
@@ -1285,7 +1300,7 @@ def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_
         daily_pnl = 0
         daily_margin_requirement = 0
         daily_position_value = 0
-        logger.debug(f'Processing date: {date}')
+        # logger.debug(f'Processing date: {date}')
         # First, check for any trades that start on this date
         for trade in trade_results.itertuples():
             trade_start = pd.Timestamp(trade.entry_date).normalize()
@@ -1295,20 +1310,20 @@ def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_
 
             # Handle existing trades
             if trade_id in active_trades:
-                logger.debug(f'Processing active trade: {trade_id}')
+                # logger.debug(f'Processing active trade: {trade_id}')
                 current_value = calculate_daily_value(trade, date, options_chain_multi_index, spx_data, use_spx_close)
                 prev_value = active_trades[trade_id]['position_value']
                 # Calculate daily P&L for this trade
                 daily_pnl += current_value - prev_value if current_value is not None else 0
-                logger.debug(f'Daily PnL = Cur value - Prev value = {current_value} - {prev_value} = {daily_pnl}')
+                # logger.debug(f'Daily PnL = Cur value - Prev value = {current_value} - {prev_value} = {daily_pnl}')
 
                 # If trade closes today
                 if trade_end == date:
-                    logger.debug('Closing trade: {trade_id}')
+                    # logger.debug('Closing trade: {trade_id}')
                     options_bp += active_trades[trade_id]['margin_requirement']  # Release margin back to BP
                     del active_trades[trade_id]
                 else:
-                    logger.debug(f'Updating existing trade {trade_id}')
+                    # logger.debug(f'Updating existing trade {trade_id}')
                     if current_value is not None:
                         active_trades[trade_id]['position_value'] = current_value
                         daily_position_value += current_value  # Only add once
@@ -1316,7 +1331,7 @@ def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_
             
             # Handle new trades
             elif trade_start == date:
-                logger.debug(f'Opening new trade: {trade_id}')
+                # logger.debug(f'Opening new trade: {trade_id}')
                 position_value = calculate_daily_value(trade, date, options_chain_multi_index, spx_data, use_spx_close)
                 if position_value is not None:
                     active_trades[trade_id] = {
@@ -1326,10 +1341,10 @@ def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_
                     entry_price = round(trade.entry_price * 100, 2)
                     daily_position_value += position_value
                     daily_pnl += entry_price + position_value
-                    logger.debug(f'{position_value} + {entry_price} -> Daily PnL: {entry_price + position_value}')
+                    # logger.debug(f'{position_value} + {entry_price} -> Daily PnL: {entry_price + position_value}')
                     daily_margin_requirement += trade.capital_used
                     options_bp -= trade.capital_used / leverage  # Account for leverage in BP reduction
-                    logger.debug(f'BP: {options_bp}')
+                    # logger.debug(f'BP: {options_bp}')
 
         # Update cumulative P&L
         cumulative_pnl += daily_pnl
@@ -1604,7 +1619,7 @@ def run_backtest(
     preloaded_data: dict = None,
     log_to_sheets: bool = True,
     max_margin_utilization: float = 0.80,  # Maximum percentage of capital that can be used for margin
-    leverage: float = 4.0  # New parameter: leverage multiplier (e.g. 4.0 for 4x leverage)
+    leverage: float = 1.0  # New parameter: leverage multiplier (e.g. 4.0 for 4x leverage)
 ) -> pd.DataFrame:
     """
     Run a backtest with the given parameters.
@@ -1666,7 +1681,9 @@ def run_backtest(
         lambda row: calculate_option_margin(
             row['underlying_last'],
             (row['p_bid'] + row['p_ask']) / 2 if option_type == OptionType.PUT else (row['c_bid'] + row['c_ask']) / 2,
-            position_side
+            position_side,
+            row['strike'],
+            option_type
         ),
         axis=1
     )

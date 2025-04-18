@@ -39,61 +39,61 @@ def run_test_suite():
             'initial_capital': 100000,
             'early_close_days': 5
         },
-        {
-            'option_type': OptionType.PUT,
-            'position_side': PositionSide.SHORT,
-            'delta_target': 0.50,
-            'use_spx_close': True,
-            'start_date': "2020-01-01",
-            'end_date': "2020-12-31",
-            'dte_range': (28, 31),
-            'initial_capital': 100000,
-            'early_close_days': None
-        },
-        {
-            'option_type': OptionType.PUT,
-            'position_side': PositionSide.SHORT,
-            'delta_target': 0.60,
-            'use_spx_close': True,
-            'start_date': "2020-01-01",
-            'end_date': "2020-12-31",
-            'dte_range': (28, 31),
-            'initial_capital': 100000,
-            'early_close_days': None
-        },
-        {
-            'option_type': OptionType.PUT,
-            'position_side': PositionSide.SHORT,
-            'delta_target': 0.70,
-            'use_spx_close': True,
-            'start_date': "2020-01-01",
-            'end_date': "2020-12-31",
-            'dte_range': (28, 31),
-            'initial_capital': 100000,
-            'early_close_days': None
-        },
-        {
-            'option_type': OptionType.PUT,
-            'position_side': PositionSide.SHORT,
-            'delta_target': 0.80,
-            'use_spx_close': True,
-            'start_date': "2020-01-01",
-            'end_date': "2020-12-31",
-            'dte_range': (28, 31),
-            'initial_capital': 100000,
-            'early_close_days': None
-        },
-           {
-            'option_type': OptionType.PUT,
-            'position_side': PositionSide.SHORT,
-            'delta_target': 0.90,
-            'use_spx_close': True,
-            'start_date': "2020-01-01",
-            'end_date': "2020-12-31",
-            'dte_range': (28, 31),
-            'initial_capital': 100000,
-            'early_close_days': None
-        }
+        # {
+        #     'option_type': OptionType.PUT,
+        #     'position_side': PositionSide.SHORT,
+        #     'delta_target': 0.50,
+        #     'use_spx_close': True,
+        #     'start_date': "2020-01-01",
+        #     'end_date': "2020-12-31",
+        #     'dte_range': (28, 31),
+        #     'initial_capital': 100000,
+        #     'early_close_days': None
+        # },
+        # {
+        #     'option_type': OptionType.PUT,
+        #     'position_side': PositionSide.SHORT,
+        #     'delta_target': 0.60,
+        #     'use_spx_close': True,
+        #     'start_date': "2020-01-01",
+        #     'end_date': "2020-12-31",
+        #     'dte_range': (28, 31),
+        #     'initial_capital': 100000,
+        #     'early_close_days': None
+        # },
+        # {
+        #     'option_type': OptionType.PUT,
+        #     'position_side': PositionSide.SHORT,
+        #     'delta_target': 0.70,
+        #     'use_spx_close': True,
+        #     'start_date': "2020-01-01",
+        #     'end_date': "2020-12-31",
+        #     'dte_range': (28, 31),
+        #     'initial_capital': 100000,
+        #     'early_close_days': None
+        # },
+        # {
+        #     'option_type': OptionType.PUT,
+        #     'position_side': PositionSide.SHORT,
+        #     'delta_target': 0.80,
+        #     'use_spx_close': True,
+        #     'start_date': "2020-01-01",
+        #     'end_date': "2020-12-31",
+        #     'dte_range': (28, 31),
+        #     'initial_capital': 100000,
+        #     'early_close_days': None
+        # },
+        #    {
+        #     'option_type': OptionType.PUT,
+        #     'position_side': PositionSide.SHORT,
+        #     'delta_target': 0.90,
+        #     'use_spx_close': True,
+        #     'start_date': "2020-01-01",
+        #     'end_date': "2020-12-31",
+        #     'dte_range': (28, 31),
+        #     'initial_capital': 100000,
+        #     'early_close_days': None
+        # }
 
     ]
 
