@@ -7,3 +7,6 @@ nbs
 *.profile
 *.out
 *.prof
+*.egg-info
+*.DS_Store
+*__pycache__
