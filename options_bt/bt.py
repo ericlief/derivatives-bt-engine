@@ -66,6 +66,7 @@ class PositionSide(Enum):
     SHORT = "short"  # Selling/writing options
 
 class Position(TypedDict):
+    trade_id: int
     entry_date: pd.Timestamp
     expire_date: pd.Timestamp
     underlying_last: float
@@ -272,12 +273,12 @@ def calculate_option_pnl(position: Position, closing_price: float) -> float:
     """
     # Calculate P&L using entry and closing prices (signed)
     pnl = position['entry_price'] + closing_price
-    return pnl * 100 if 'short' in position['position_side'] else max(0, pnl * 100) # Convert to dollars
+    return pnl * 100 if position['position_side'] == PositionSide.SHORT.value else max(0, pnl * 100) # Convert to dollars
 
 def close_position(position: Position, 
                   full_chain_df: pd.DataFrame, 
                   underlying_price_history: pd.DataFrame,
-                  current_capital: float) -> Tuple[float, Optional[TradeResult]]:
+                  cash: float) -> Tuple[float, Optional[TradeResult]]:
     """
     Close an open option position and calculate results.
     
@@ -285,7 +286,7 @@ def close_position(position: Position,
         position: Position containing trade details
         full_chain_df: DataFrame containing full option chain data
         underlying_price_history: DataFrame containing underlying price data
-        current_capital: Current total capital before closing position
+        cash: Current total cash before closing position
     
     Returns:
         Tuple of (new_total_capital, trade_result)
@@ -298,7 +299,7 @@ def close_position(position: Position,
     entry_date = position['entry_date']
     if not isinstance(entry_date, pd.Timestamp) or entry_date <= min_valid_date:
         logger.error(f"Invalid entry date: {entry_date} - skipping trade")
-        return current_capital, None
+        return cash, None
     
     # Get close date with validation
     if 'close_date' in position and position['close_date'] is not None:
@@ -307,31 +308,31 @@ def close_position(position: Position,
         close_date = position['expire_date']
     else:
         logger.error("Both close_date and expire_date are None in position - skipping trade")
-        return current_capital, None
+        return cash, None
     
     # Validate close_date
     if not isinstance(close_date, pd.Timestamp) or close_date <= min_valid_date:
         logger.error(f"Invalid close date: {close_date} - skipping trade")
-        return current_capital, None
+        return cash, None
     
     # Ensure close_date is not before entry_date
     if close_date < entry_date:
         logger.error(f"Close date {close_date} is before entry date {entry_date} - skipping trade")
-        return current_capital, None
+        return cash, None
     
     close_price, underlying_close = get_closing_data(position, full_chain_df, underlying_price_history)
     
     # If get_closing_data returned None values, we should skip this trade
     if close_price is None or underlying_close is None:
         logger.warning("Skipping trade due to missing close data")
-        return current_capital, None
+        return cash, None
     
     # Handle sign for credit/debit prices (i.e. short vs. long)
-    signed_close_price = close_price if 'long' in position['position_side'] else -close_price
+    signed_close_price = close_price if position['position_side'] == PositionSide.LONG.value else -close_price
     pnl = calculate_option_pnl(position, signed_close_price)
     margin_released = position['margin_required']
     capital_change = margin_released + pnl
-    total_capital_after = current_capital + capital_change
+    total_capital_after = cash + capital_change
     
     # Calculate days held - dates should already be normalized
     days_held = (close_date - entry_date).days
@@ -463,30 +464,26 @@ def create_trade_from_signal(trade_signal, underlying_price: float, entry_price:
     }
     return position
 
-def execute_trade(trade: Position, available_capital: float, leverage: float = 4.0) -> Tuple[Optional[Position], float]:
-    """
-    Attempt to execute a trade given available capital and leverage.
-    
-    Args:
-        trade: Position to be executed
-        available_capital: Available capital for the trade
-        leverage: Leverage multiplier for margin requirements
-    
-    Returns:
-        Tuple of (position if executed or None, remaining capital)
-    """
+def execute_trade(trade: Position, cash: float, options_bp: float, leverage: float = 4.0) -> Tuple[Optional[Position], float]:
     # Calculate effective margin requirement with leverage
     effective_margin = trade['margin_required'] / leverage
     
-    if available_capital >= effective_margin:
-        # Deduct the premium from available capital for long positions
-        if trade['position_side'] == PositionSide.LONG.value:
-            available_capital -= abs(trade['entry_price']) * 100  # Deduct premium (convert to dollars)
-        
-        return trade, available_capital - effective_margin
-    else:
-        logger.warning(f"Insufficient capital (${available_capital}) for trade on {trade['entry_date']}, requires ${effective_margin:.2f} with {leverage}x leverage")
-        return None, available_capital
+    if trade['position_side'] == PositionSide.LONG.value:  # Using enum for long position
+        # For long positions, check if there is enough cash to buy the option
+        if cash >= abs(trade['entry_price']) * 100:  # Cash needed to buy the option
+            cash -= abs(trade['entry_price']) * 100  # Deduct premium (convert to dollars)
+            return trade, cash
+        else:
+            logger.warning(f"Insufficient cash (${cash}) to buy option on {trade['entry_date']}. Required: ${abs(trade['entry_price']) * 100:.2f}")
+            return None, cash
+
+    elif trade['position_side'] == PositionSide.SHORT.value:  # Using enum for short position
+        # For short positions, check if buying power is sufficient
+        if options_bp >= effective_margin:
+            return trade, cash  # No cash adjustment needed for short positions
+        else:
+            logger.warning(f"Insufficient buying power (${options_bp}) for trade on {trade['entry_date']}. Requires: ${effective_margin:.2f} with {leverage}x leverage")
+            return None, cash
 
 def execute_backtest_trades(trade_signals_df: pd.DataFrame, 
                 full_chain_df: pd.DataFrame, 
@@ -510,13 +507,13 @@ def execute_backtest_trades(trade_signals_df: pd.DataFrame,
         leverage: Leverage multiplier for margin requirements
     """
     results: List[TradeResult] = []
-    capital = initial_capital
+    cash = initial_capital  # Initialize cash with the initial capital
     open_position: Optional[Position] = None
     total_trades_considered = 0
     skipped_trades = 0
     
-    # Track highest capital for drawdown calculation
-    peak_capital = round(initial_capital, 2)
+    # Track highest liquidity for drawdown calculation
+    peak_liquidity = round(initial_capital, 2)  # Change from peak_capital to peak_liquidity
     current_drawdown = 0.0
     max_drawdown = 0.0
     
@@ -526,7 +523,7 @@ def execute_backtest_trades(trade_signals_df: pd.DataFrame,
     
     # Keep track of the last position's actual close date, not expiration date
     last_position_close_date = None
-    
+    trade_id = 0
     # Sort trade signals by date to ensure chronological processing
     # sorted_trade_signals_df = trade_signals_df.sort_index()
     
@@ -599,13 +596,15 @@ def execute_backtest_trades(trade_signals_df: pd.DataFrame,
             logger.warning(f"Failed to create trade for {trade_date} - skipping")
             skipped_trades += 1
             continue
-        
+        else:
+            trade_id += 1
+            new_trade['trade_id'] = trade_id
         # Execute the trade if we have sufficient capital
-        executed_position, capital = execute_trade(new_trade, capital, leverage)
+        executed_position, cash = execute_trade(new_trade, cash, options_bp, leverage)
         
         # Check if trade was successfully executed
         if executed_position is None:
-            logger.warning(f"Insufficient capital (${capital}) for trade on {trade_date} - skipping")
+            logger.warning(f"Insufficient cash (${cash}) for trade on {trade_date} - skipping")
             skipped_trades += 1
             continue
             
@@ -634,34 +633,40 @@ def execute_backtest_trades(trade_signals_df: pd.DataFrame,
                 logger.warning(f"Couldn't find valid early close date, using expiration date")
         
         # Close the position at expiration or early close date
-        capital, trade_result = close_position(open_position, full_chain_df, spx_data, capital)
+        cash, trade_result = close_position(open_position, full_chain_df, spx_data, cash)
         
         # Process the trade result
         if trade_result is not None:
             # Add the result to our list
             results.append(trade_result)
             
-            # Update peak capital and calculate drawdown
+            # Update peak liquidity and calculate drawdown
             current_capital = trade_result['total_capital']
-            if current_capital > peak_capital:
-                peak_capital = current_capital
+            if current_capital > peak_liquidity:
+                peak_liquidity = current_capital
             
             # Calculate current drawdown as percentage
-            if peak_capital > 0:  # Avoid division by zero
-                current_drawdown = round((current_capital - peak_capital) / peak_capital * 100, 2)
+            if peak_liquidity > 0:  # Avoid division by zero
+                current_drawdown = round((current_capital - peak_liquidity) / peak_liquidity * 100, 2)
                 max_drawdown = min(max_drawdown, current_drawdown)
             
             # Update the last_position_close_date to the actual exit date, not expiration date
             last_position_close_date = trade_result['exit_date']
             logger.debug(f"Closed position opened on {open_position['entry_date']}, closed on {last_position_close_date}, result: ${trade_result['pnl']:.2f}")
             logger.debug(f"Current capital: ${current_capital:.2f}, current drawdown: {current_drawdown:.2f}%, max drawdown: {max_drawdown:.2f}%")
+            
+            # Calculate net liquidity
+            net_liquidity = calculate_net_liquidity(cash, [open_position])
+            
+            # Log or use net_liquidity as needed
+            logger.info(f"Net liquidity after trade: ${net_liquidity:.2f}")
         else:
             # If close_position returned None, the trade was skipped due to missing data
             logger.warning(f"Trade on {open_position['entry_date']} was skipped due to missing closing data")
             
-            # IMPORTANT FIX: Restore the capital that was reserved for this trade since it was skipped
-            capital += open_position['margin_required']
-            logger.debug(f"Restored capital: ${open_position['margin_required']:.2f}, new balance: ${capital:.2f}")
+            # Restore the buying power that was reserved for this trade since it was skipped
+            options_bp += open_position['margin_required']  # Add back the margin required for the trade
+            logger.debug(f"Restored buying power: ${open_position['margin_required']:.2f}, new BP: ${options_bp:.2f}")
             
             # In this case, we use the original expiration date to sequence future trades
             # because we don't have valid close data
@@ -680,9 +685,9 @@ def execute_backtest_trades(trade_signals_df: pd.DataFrame,
         results_df['cumulative_pnl'] = results_df['pnl'].cumsum().round(2)
         
         # Calculate drawdown for each trade
-        results_df['peak_capital'] = results_df['total_capital'].cummax().round(2)
-        results_df['drawdown'] = (results_df['total_capital']-results_df['peak_capital']).round(2)
-        results_df['drawdown_pct'] = (results_df['drawdown'] / results_df['peak_capital'] * 100).round(2)
+        results_df['peak_liquidity'] = results_df['total_capital'].cummax().round(2)
+        results_df['drawdown'] = (results_df['total_capital']-results_df['peak_liquidity']).round(2)
+        results_df['drawdown_pct'] = (results_df['drawdown'] / results_df['peak_liquidity'] * 100).round(2)
         
         # Calculate trade statistics once
         total_trades = len(results_df)
@@ -1235,8 +1240,8 @@ def calculate_daily_value(trade, date, options_chain_multi_index, spx_data, use_
 
         # Either MTM daily or early closure, so calculate mid point of bid/ask quote
         else:
-            bid_col = 'p_bid' if 'put' in trade.option_type.lower() else "c_bid"
-            ask_col = 'p_ask' if 'put' in trade.option_type.lower() else "c_ask"
+            bid_col = 'p_bid' if trade.option_type == OptionType.PUT.value else "c_bid"
+            ask_col = 'p_ask' if trade.option_type == OptionType.PUT.value else "c_ask"
             bid = price_data[bid_col].iloc[0] 
             ask = price_data[ask_col].iloc[0] 
             mid = calculate_midpoint_price(bid, ask)
@@ -1285,8 +1290,8 @@ def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_
     logger.debug(f"Adjusting MTM end date from {initial_end_date} to {end_date} to include all trade exits")
     
     # Initialize tracking variables
-    peak_capital = initial_capital
-    net_liquidity = initial_capital  # This tracks cash + position values
+    peak_liquidity = initial_capital  # Change from peak_capital to peak_liquidity
+    net_liquidity = initial_capital  # Change from capital to net_liquidity
     options_bp = initial_capital     # This tracks available buying power for new trades
     cumulative_pnl = 0              # Track cumulative P&L
     daily_data = []
@@ -1351,12 +1356,12 @@ def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_
         
         # Update net liquidity with daily P&L
         net_liquidity += daily_pnl
-            # Update peak capital if net liquidity is higher
-        if net_liquidity > peak_capital:
-            peak_capital = net_liquidity
+            # Update peak liquidity if net liquidity is higher
+        if net_liquidity > peak_liquidity:
+            peak_liquidity = net_liquidity
         # Calculate drawdown
-        drawdown_amount = - max(0, round(peak_capital - net_liquidity, 2))
-        drawdown_pct = (drawdown_amount / peak_capital * 100) if peak_capital > 0 else 0
+        drawdown_amount = - max(0, round(peak_liquidity - net_liquidity, 2))
+        drawdown_pct = (drawdown_amount / peak_liquidity * 100) if peak_liquidity > 0 else 0
 
         # Calculate ROI metrics
         daily_roi = round(daily_pnl / daily_margin_requirement * 100, 2) if daily_margin_requirement > 0 else 0
@@ -1376,7 +1381,7 @@ def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_
             'Daily ROI (%)': daily_roi,
             'Total ROI (%)': total_roi,
             'Active Positions': len(active_trades),
-            'Peak Capital': round(peak_capital, 2),
+            'Peak Liquidity': round(peak_liquidity, 2),
             'Margin Utilization (%)': round(daily_margin_requirement / initial_capital * 100, 2)
         })
         
@@ -1881,6 +1886,25 @@ def check_date_presence(pivoted_chain, date_to_check):
     is_present = date_to_check in date_level
     logger.info(f"Date {date_to_check} presence: {is_present}")
     return is_present
+
+def calculate_net_liquidity(cash: float, open_positions: List[Position]) -> float:
+    """
+    Calculate the net liquidity based on cash and open positions.
+    
+    Args:
+        cash: Current cash available in the account
+        open_positions: List of open positions
+    
+    Returns:
+        Net liquidity value
+    """
+    total_value = cash
+    for position in open_positions:
+        # Calculate market value of each position
+        market_value = calculate_intrinsic_value(position['underlying_last'], position['strike'], position['option_type'])
+        total_value += market_value * 100  # Convert to dollars
+    
+    return total_value
 
 # Example usage:
 if __name__ == "__main__":
