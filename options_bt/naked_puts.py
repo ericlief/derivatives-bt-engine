@@ -11,7 +11,7 @@ def run_test_suite():
     pd.set_option('display.max_colwidth', None)
 
     # Set up data paths
-    DATA_PATH = "/Users/liefe/Data/spx"
+    DATA_PATH = "/Users/liefe/Data/spx"    
     SPX_FILE = os.path.join(DATA_PATH, "spx_2018_2023.csv")
     OPTIONS_FILE = os.path.join(DATA_PATH, "spx_options_2018_2023.csv")
 
@@ -23,22 +23,24 @@ def run_test_suite():
             'delta_target': 0.30,
             'use_spx_close': True,
             'start_date': "2020-01-01",
-            'end_date': "2020-12-31",
-            'dte_range': (28, 31),
+            'end_date': "2020-2-28",
+            'dte_range': (41, 45),
             'initial_capital': 100000,
-            'early_close_days': None
+            'early_close_days': None,
+            'max_positions': 1
         },
-        {
-            'option_type': OptionType.PUT,
-            'position_side': PositionSide.SHORT,
-            'delta_target': 0.40,
-            'use_spx_close': True,
-            'start_date': "2020-01-01",
-            'end_date': "2020-12-31",
-            'dte_range': (28, 31),
-            'initial_capital': 100000,
-            'early_close_days': 5
-        },
+        # {
+        #     'option_type': OptionType.PUT,
+        #     'position_side': PositionSide.SHORT,
+        #     'delta_target': 0.30,
+        #     'use_spx_close': True,
+        #     'start_date': "2020-01-01",
+        #     'end_date': "2020-12-31",
+        #     'dte_range': (41, 45),
+        #     'initial_capital': 100000,
+        #     'early_close_days': 30,
+        #     'max_positions': 1
+        # },
         # {
         #     'option_type': OptionType.PUT,
         #     'position_side': PositionSide.SHORT,
