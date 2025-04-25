@@ -658,7 +658,7 @@ def execute_backtest_trades(trades: pd.DataFrame,
         else:
             skipped_trades += 1
     
-    # Close remaining positions
+    # Close any remaining open positions at their expiration
     for pos in open_positions:
         result = close_position(pos, full_chain_df, underlying_price_history, options_bp)
         if result:
@@ -672,11 +672,26 @@ def execute_backtest_trades(trades: pd.DataFrame,
     
     results_df = pd.DataFrame(trade_results)
     
-    # Calculate cumulative metrics
+    # Calculate cumulative metrics based on PnL
     results_df['cumulative_pnl'] = results_df['pnl'].cumsum()
-    results_df['peak_capital'] = results_df['cash'].cummax()
-    results_df['drawdown'] = results_df['cash'] - results_df['peak_capital']
+    results_df['capital'] = initial_capital + results_df['cumulative_pnl']  # Track actual capital based on cumulative PnL
+    results_df['peak_capital'] = results_df['capital'].cummax()
+    results_df['drawdown'] = results_df['capital'] - results_df['peak_capital']
     results_df['drawdown_pct'] = round(results_df['drawdown'] / results_df['peak_capital'] * 100, 2)
+    
+    # Log statistics
+    total_trades = len(results_df)
+    winning_trades = (results_df['pnl'] > 0).sum()
+    win_rate = winning_trades / total_trades if total_trades > 0 else 0
+    
+    logger.info(f"\nBacktest Results:")
+    logger.info(f"Total trades executed: {total_trades}")
+    logger.info(f"Winning trades: {winning_trades}")
+    logger.info(f"Win rate: {win_rate:.2%}")
+    logger.info(f"Initial capital: ${initial_capital:,.2f}")
+    logger.info(f"Total P&L: ${results_df['cumulative_pnl'].iloc[-1]:,.2f}")
+    logger.info(f"Final capital: ${results_df['capital'].iloc[-1]:,.2f}")
+    logger.info(f"Final buying power: ${options_bp:,.2f}")
     
     return results_df
 
