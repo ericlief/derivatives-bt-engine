@@ -75,11 +75,11 @@ class Position(TypedDict):
     position_side: str
     bid: float
     ask: float
-    entry_price: float
+    premium: float  # Snapshot of the premium at entry
     margin_required: float
+    entry_delta: float
+    entry_dte: int
     close_date: Optional[pd.Timestamp]  # Optional field
-    entry_delta: Optional[float]        # Optional field
-    entry_dte: Optional[int]           # Optional field
 
 class TradeResult(TypedDict):
     trade_id: int
@@ -287,25 +287,24 @@ def get_closing_data(position: Position,
                 f"Last bid/ask seen: {bid}/{ask}")
     return None, None, None
 
-def calculate_option_pnl(position: Position, closing_price: float) -> float:
+def calculate_option_pnl(entry_price, closing_price: float) -> float:
     """
     Calculate P&L for option position.
     
     Args:
-        position: Position dictionary containing trade details
-        closing_price: Closing price of the option at closure
+        entry price: Entry price of the options (signed)
+        closing_price: Closing price of the option (signed)
     
     Returns:
         P&L in dollars
     """
     # Calculate P&L using entry and closing prices (signed)
-    pnl = position['entry_price'] + closing_price
-    return pnl * 100 if position['position_side'] in [PositionSide.SHORT, PositionSide.SHORT.value, 'short'] else max(0, pnl * 100) # Convert to dollars
+    pnl = entry_price + closing_price
+    return pnl * 100 if entry_price > 0 else max(0, pnl * 100) # clamp loss to zero if LONG
 
 def close_position(position: Position, 
                   full_chain_df: pd.DataFrame, 
                   underlying_price_history: pd.DataFrame,
-                  cash: float,
                   option_bp: float) -> Optional[TradeResult]:
     """
     Close an open option position and calculate results.
@@ -314,13 +313,11 @@ def close_position(position: Position,
         position: Position containing trade details
         full_chain_df: DataFrame containing full option chain data
         underlying_price_history: DataFrame containing underlying price data
-        cash: Current total cash before closing position
         option_bp: Current buying power before closing position
     
     Returns:
         TradeResult if successful, None if closing data is unavailable
     """
-
     close_reason = None
 
     # Define minimum valid date for validation
@@ -363,19 +360,18 @@ def close_position(position: Position,
         logger.warning("Skipping trade due to missing close data")
         return None
     
-    logger.debug(f'Calculated close_price: {close_price}')
     # Handle sign for credit/debit prices (i.e. short vs. long)
     signed_close_price = abs(close_price) if position['position_side'] in [PositionSide.LONG, PositionSide.LONG.value, 'long'] else -close_price
-    logger.debug(f'and signed_close_price: {signed_close_price}')
-
-    # Calculate P&L
-    pnl = calculate_option_pnl(position, signed_close_price)
-    logger.debug(f'calculated pnl: {pnl}')
     
-    # Update cash based on P&L
-    logger.debug(f'Updating cash: {cash}')
-    cash += 100 * signed_close_price  # convert to dollars
-    logger.debug(f'+ {100 * signed_close_price} = {cash}')
+    logger.debug(f'Premium: {position["premium"]}, Close_price: {signed_close_price}')
+
+    # Calculate P&L using the premium from entry
+    pnl = calculate_option_pnl(position['premium'], signed_close_price)
+    logger.debug(f'Calculated pnl: {pnl}')
+    
+    # Calculate final cash using entry cash and exit price only (avoid double counting premium)
+    cash = position['entry_cash'] + (signed_close_price * 100)  # Convert to dollars
+    logger.debug(f'Final cash: entry_cash + exit_price = {position["entry_cash"]} + {signed_close_price * 100} = {cash}')
     
     # Restore buying power for short positions
     req_margin = position['margin_required']
@@ -400,13 +396,13 @@ def close_position(position: Position,
         'expire_date': position['expire_date'],
         'entry_delta': round(position['entry_delta'], 2),
         'exit_delta': round(exit_delta, 2),
-        'entry_dte': position.get('entry_dte', None),
+        'entry_dte': position['entry_dte'],
         'days_held': days_held,
         'underlying_entry': position['underlying_last'],
         'underlying_exit': underlying_close,
         'strike': position['strike'], 
-        'entry_price': round(position['entry_price'], 2),
-        'exit_price': round(close_price, 2),
+        'entry_price': round(position['premium'], 2),
+        'exit_price': round(signed_close_price, 2),
         'pnl': round(pnl, 2),
         'capital_used': req_margin,
         'cash': round(cash, 2),
@@ -512,17 +508,19 @@ def create_trade_from_signal(trade_signal, underlying_price: float, entry_price:
         'position_side': position_side.value,
         'bid': bid,
         'ask': ask,
-        'entry_price': round(signed_entry_price, 2),  # Use the signed entry price
+        'premium': signed_entry_price,
         'margin_required': init_margin,
         'close_date': None,
         'entry_delta': round(entry_delta, 2) if entry_delta is not None else None,
-        'entry_dte': entry_dte
+        'entry_dte': entry_dte,
+        'entry_cash': 0
     }
     return position
 
 def execute_trade(trade: Position, cash: float, option_bp: float, leverage: float = 4.0) -> Tuple[Optional[Position], float, float]:
     
-    entry_price = abs(trade['entry_price'])
+    # Unsign here for comparison
+    entry_price = abs(trade['premium'])
     # Calculate effective margin requirement with leverage
     effective_margin = trade['margin_required'] / leverage
     
@@ -531,10 +529,10 @@ def execute_trade(trade: Position, cash: float, option_bp: float, leverage: floa
         # For long positions, check if there is enough cash to buy the option
         if cash >= entry_price * 100:  # Cash needed to buy the option
             cash -= entry_price * 100  # Deduct premium (convert to dollars)
-            # There is no BP reduction?
+            trade['entry_cash'] = cash  # Store cash snapshot at entry
             return trade, cash, option_bp
         else:
-            logger.warning(f"Insufficient cash (${cash}) to buy option on {trade['entry_date']}. Required: ${abs(trade['entry_price']) * 100:.2f}")
+            logger.warning(f"Insufficient cash (${cash}) to buy option on {trade['entry_date']}. Required: ${abs(trade['premium']) * 100:.2f}")
             return None, cash, option_bp
 
     # Open SHORT position
@@ -543,7 +541,8 @@ def execute_trade(trade: Position, cash: float, option_bp: float, leverage: floa
         if option_bp >= effective_margin:
             option_bp -= effective_margin
             cash += entry_price * 100  # Credit premium
-            return trade, cash, option_bp  # No cash adjustment needed for short positions
+            trade['entry_cash'] = cash  # Store cash snapshot at entry
+            return trade, cash, option_bp
         else:
             logger.warning(f"Insufficient buying power (${option_bp}) for trade on {trade['entry_date']}. Requires: ${effective_margin:.2f} with {leverage}x leverage")
             return None, cash, option_bp
@@ -565,18 +564,6 @@ def execute_backtest_trades(trades: pd.DataFrame,
                            ) -> pd.DataFrame:
     """
     Execute a series of trades and track results.
-    
-    Args:
-        trades: DataFrame containing filtered trade signals
-        full_chain_df: DataFrame containing full option chain data
-        underlying_price_history: DataFrame containing underlying price data
-        initial_capital: Starting capital for the backtest
-        max_positions: Maximum number of simultaneous positions allowed
-        leverage: Leverage ratio for margin calculations
-        position_side: Whether positions are LONG or SHORT
-    
-    Returns:
-        DataFrame containing trade results and performance metrics
     """
     cash = initial_capital
     options_bp = initial_capital
@@ -584,13 +571,13 @@ def execute_backtest_trades(trades: pd.DataFrame,
     trade_results: List[TradeResult] = []
     skipped_trades = 0
     total_trades = len(trades)
-    trade_counter = 1  # Initialize trade counter
+    trade_counter = 1
     
-    # Sort trades by entry date (index)
+    # Sort trades by entry date
     trades = trades.sort_index()
     
     for _, trade_signal in trades.iterrows():
-        current_date = trade_signal.name  # Using index as the date
+        current_date = trade_signal.name
         
         # First, check if any open positions need to be closed
         positions_to_remove = []
@@ -600,14 +587,14 @@ def execute_backtest_trades(trades: pd.DataFrame,
                 ('expire_date' in pos and pos['expire_date'] is not None and current_date >= pos['expire_date'])):
                 
                 logger.debug(f'Closing position: {pos}')
-                result = close_position(pos, full_chain_df, underlying_price_history, cash, options_bp)
+                result = close_position(pos, full_chain_df, underlying_price_history, options_bp)
                 if result:
-                    trade_results.append(result)
                     # Update cash and BP from the trade result
                     cash = result['cash']
                     options_bp = result['option_bp']
                     positions_to_remove.append(pos)
                     logger.debug(f"Closed position - Cash: ${cash:.2f}, BP: ${options_bp:.2f}")
+                    trade_results.append(result)
         
         # Remove closed positions
         for pos in positions_to_remove:
@@ -637,6 +624,11 @@ def execute_backtest_trades(trades: pd.DataFrame,
             continue
         
         # Create Position from trade signal
+        entry_price = calculate_midpoint_price(
+                trade_signal['p_bid'] if option_type in [OptionType.PUT, OptionType.PUT.value, 'put'] else trade_signal['c_bid'],
+                trade_signal['p_ask'] if option_type in [OptionType.PUT, OptionType.PUT.value, 'put'] else trade_signal['c_ask']
+            )
+        
         position = Position(
             trade_id=trade_counter,
             entry_date=current_date,
@@ -647,10 +639,7 @@ def execute_backtest_trades(trades: pd.DataFrame,
             position_side=position_side,
             bid=trade_signal['p_bid'] if option_type in [OptionType.PUT, OptionType.PUT.value, 'put'] else trade_signal['c_bid'],
             ask=trade_signal['p_ask'] if option_type in [OptionType.PUT, OptionType.PUT.value, 'put'] else trade_signal['c_ask'],
-            entry_price=calculate_midpoint_price(
-                trade_signal['p_bid'] if option_type in [OptionType.PUT, OptionType.PUT.value, 'put'] else trade_signal['c_bid'],
-                trade_signal['p_ask'] if option_type in [OptionType.PUT, OptionType.PUT.value, 'put'] else trade_signal['c_ask']
-            ),
+            premium=entry_price if position_side in [PositionSide.SHORT.value, PositionSide.SHORT, 'short'] else -entry_price,
             margin_required=trade_signal['margin_required'] if 'margin_required' in trade_signal else 0,
             close_date=current_date + pd.Timedelta(days=early_close_days) if early_close_days is not None else None,
             entry_delta=trade_signal['p_delta'] if option_type in [OptionType.PUT, OptionType.PUT.value, 'put'] else trade_signal['c_delta'],
@@ -658,11 +647,8 @@ def execute_backtest_trades(trades: pd.DataFrame,
         )
             
         # Try to execute the new trade
-        executed_trade, new_cash, new_bp = execute_trade(position, cash, options_bp, leverage)
+        executed_trade, cash, options_bp = execute_trade(position, cash, options_bp, leverage)
         if executed_trade:
-            # Update cash and BP only if the trade was successful
-            cash = new_cash
-            options_bp = new_bp
             executed_trade['trade_id'] = trade_counter
             open_positions.append(executed_trade)
             trade_counter += 1  # Increment counter only for successful trades
@@ -672,16 +658,14 @@ def execute_backtest_trades(trades: pd.DataFrame,
         else:
             skipped_trades += 1
     
-    # Close any remaining open positions at their expiration
+    # Close remaining positions
     for pos in open_positions:
-        result = close_position(pos, full_chain_df, underlying_price_history, cash, options_bp)
+        result = close_position(pos, full_chain_df, underlying_price_history, options_bp)
         if result:
             trade_results.append(result)
-            # Update final cash and BP from the trade result
             cash = result['cash']
             options_bp = result['option_bp']
     
-    # Convert results to DataFrame
     if not trade_results:
         logger.warning("No trades were executed successfully")
         return pd.DataFrame()
@@ -690,26 +674,10 @@ def execute_backtest_trades(trades: pd.DataFrame,
     
     # Calculate cumulative metrics
     results_df['cumulative_pnl'] = results_df['pnl'].cumsum()
-    
-    # Calculate drawdown based on cash
     results_df['peak_capital'] = results_df['cash'].cummax()
-    results_df['drawdown'] = results_df['cash'] - results_df['peak_capital']  # should be negative
+    results_df['drawdown'] = results_df['cash'] - results_df['peak_capital']
     results_df['drawdown_pct'] = round(results_df['drawdown'] / results_df['peak_capital'] * 100, 2)
     
-    # Log statistics
-    total_trades = len(results_df)
-    winning_trades = (results_df['pnl'] > 0).sum()
-    win_rate = winning_trades / total_trades if total_trades > 0 else 0
-    
-    logger.info(f"\nBacktest Results:")
-    logger.info(f"Total trades executed: {total_trades}")
-    logger.info(f"Winning trades: {winning_trades}")
-    logger.info(f"Win rate: {win_rate:.2%}")
-    logger.info(f"Initial capital: ${initial_capital:,.2f}")
-    logger.info(f"Total P&L: ${results_df['cumulative_pnl'].iloc[-1]:,.2f}")
-    logger.info(f"Final capital: ${results_df['cash'].iloc[-1]:,.2f}")
-    logger.info(f"Final buying power: ${options_bp:,.2f}")
-
     return results_df
 
 def preprocess_options_data(options_chain: pd.DataFrame) -> pd.DataFrame:
