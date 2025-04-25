@@ -98,7 +98,6 @@ class TradeResult(TypedDict):
     entry_price: float
     exit_price: float
     pnl: float
-    cash: float
     option_bp: float
     return_on_margin: float
     close_reason: str
@@ -1855,6 +1854,16 @@ def run_backtest(
             log_to_google_sheets(trade_results, param_str, daily_df)
         except Exception as e:
             logger.error(f"Failed to log to Google Sheets: {str(e)}")
+    
+    # Log combined results
+    logger.info(f"Final Trade and MTM Results:")
+    logger.info(f"Total trades executed: {len(results_df)}")
+    logger.info(f"Winning trades: {(results_df['pnl'] > 0).sum()}")
+    logger.info(f"Win rate: {((results_df['pnl'] > 0).sum() / len(results_df)):.2%}")
+    logger.info(f"Total P&L: ${results_df['cumulative_pnl'].iloc[-1]:.2f}")
+    logger.info(f"Final capital: ${results_df['capital'].iloc[-1]:.2f}")
+    logger.info(f"Return on initial capital: {(results_df['capital'].iloc[-1] / initial_capital - 1):.2%}")
+    logger.info(f"Maximum drawdown: ${max_drawdown:.2f} ({max_drawdown_pct:.2f}%)")
     
     return trade_results
 
