@@ -679,8 +679,8 @@ def execute_backtest_trades(trades: pd.DataFrame,
     results_df['drawdown_pct'] = round(results_df['drawdown'] / results_df['peak_capital'] * 100, 2)
     
     # Log statistics
-    total_trades = len(results_df)
-    winning_trades = (results_df['pnl'] > 0).sum()
+    total_trades = len(trade_results)  # Change from results_df to trade_results
+    winning_trades = (trade_results['pnl'] > 0).sum()  # Change from results_df to trade_results
     win_rate = winning_trades / total_trades if total_trades > 0 else 0
     
     logger.info(f"\nBacktest Results:")
@@ -688,8 +688,8 @@ def execute_backtest_trades(trades: pd.DataFrame,
     logger.info(f"Winning trades: {winning_trades}")
     logger.info(f"Win rate: {win_rate:.2%}")
     logger.info(f"Initial capital: ${initial_capital:,.2f}")
-    logger.info(f"Total P&L: ${results_df['cumulative_pnl'].iloc[-1]:,.2f}")
-    logger.info(f"Final capital: ${results_df['capital'].iloc[-1]:,.2f}")
+    logger.info(f"Total P&L: ${trade_results['cumulative_pnl'].iloc[-1]:,.2f}")  # Change from results_df to trade_results
+    logger.info(f"Final capital: ${trade_results['cash'].iloc[-1]:,.2f}")  # Change from results_df to trade_results
     logger.info(f"Final buying power: ${options_bp:,.2f}")
     
     return results_df
@@ -1800,18 +1800,6 @@ def run_backtest(
         logger.info(f"Average margin utilization: {avg_margin_util:.2%}")
         logger.info(f"Maximum margin utilization: {max_margin_util:.2%}")
     
-    # Print summary statistics
-    logger.info("\nBacktest Results Summary:")
-    logger.info(f"Total trades: {len(trade_results)}")
-    logger.info(f"Win rate: {(trade_results['pnl'] > 0).mean():.2%}")
-    logger.info(f"Average P&L: ${trade_results['pnl'].mean():.2f}")
-    logger.info(f"Total P&L: ${trade_results['pnl'].sum():.2f}")
-    logger.info(f"Initial capital: ${initial_capital:.2f}")
-    logger.info(f"Final capital: ${trade_results['cash'].iloc[-1]:.2f}")
-    logger.info(f"Return on initial capital: {(trade_results['cash'].iloc[-1] / initial_capital - 1):.2%}")
-    logger.info(f"Average days held: {trade_results['days_held'].mean():.1f}")
-    logger.info(f"Average return on margin: {trade_results['return_on_margin'].mean():.2f}%")
-    logger.info(f"Maximum drawdown: ${max_drawdown:.2f} ({max_drawdown_pct:.2f}%)")
     
     # Calculate Sharpe Ratio without risk-free rate
     sharpe = None
@@ -1838,6 +1826,7 @@ def run_backtest(
         logger.info(f"Trades saved to {trades_csv_path} in {save_time:.2f} seconds")
         logger.info(f"MTM results saved to {mtm_csv_path}")
     
+
     # Calculate total time
     total_time = time.time() - start_time
     logger.info(f"\nTotal execution time: {total_time:.2f} seconds")
@@ -1848,23 +1837,25 @@ def run_backtest(
     logger.info(f"- MTM calculation: {mtm_time:.2f} seconds ({mtm_time/total_time*100:.1f}%)")
     logger.info(f"- Results saving: {save_time:.2f} seconds ({save_time/total_time*100:.1f}%)")
     
+    # Log combined results
+    logger.info(f"\nBacktest Results Summary:")
+    logger.info(f"Total trades executed: {len(trade_results)}")  # Updated to trade_results
+    logger.info(f"Winning trades: {(trade_results['pnl'] > 0).sum()}")  # Updated to trade_results
+    logger.info(f"Win rate: {((trade_results['pnl'] > 0).sum() / len(trade_results)):.2%}")  # Updated to trade_results
+    logger.info(f"Total P&L: ${trade_results['cumulative_pnl'].iloc[-1]:,.2f}")  # Updated to trade_results
+    logger.info(f"Final capital: ${trade_results['cash'].iloc[-1]:,.2f}")  # Updated to trade_results
+    logger.info(f"Return on initial capital: {(trade_results['cash'].iloc[-1] / initial_capital - 1):.2%}")  # Updated to trade_results
+    logger.info(f"Average days held: {trade_results['days_held'].mean():.1f}")
+    logger.info(f"Average return on margin: {trade_results['return_on_margin'].mean():.2f}%")
+    logger.info(f"Maximum drawdown: ${max_drawdown:.2f} ({max_drawdown_pct:.2f}%)")
+    
     # Log to Google Sheets if enabled
     if log_to_sheets and not trade_results.empty:
         try:
             log_to_google_sheets(trade_results, param_str, daily_df)
         except Exception as e:
             logger.error(f"Failed to log to Google Sheets: {str(e)}")
-    
-    # Log combined results
-    logger.info(f"Final Trade and MTM Results:")
-    logger.info(f"Total trades executed: {len(results_df)}")
-    logger.info(f"Winning trades: {(results_df['pnl'] > 0).sum()}")
-    logger.info(f"Win rate: {((results_df['pnl'] > 0).sum() / len(results_df)):.2%}")
-    logger.info(f"Total P&L: ${results_df['cumulative_pnl'].iloc[-1]:.2f}")
-    logger.info(f"Final capital: ${results_df['capital'].iloc[-1]:.2f}")
-    logger.info(f"Return on initial capital: {(results_df['capital'].iloc[-1] / initial_capital - 1):.2%}")
-    logger.info(f"Maximum drawdown: ${max_drawdown:.2f} ({max_drawdown_pct:.2f}%)")
-    
+
     return trade_results
 
 def run_multiple_backtests(
