@@ -404,7 +404,6 @@ def close_position(position: Position,
         'exit_price': round(signed_close_price, 2),
         'pnl': round(pnl, 2),
         'capital_used': req_margin,
-        'cash': round(cash, 2),
         'option_bp': round(option_bp, 2),
         'return_on_margin': round(pnl / position['margin_required'] * 100, 2) if position['margin_required'] > 0 else 0,
         'close_reason': close_reason
@@ -675,22 +674,22 @@ def execute_backtest_trades(trades: pd.DataFrame,
     results_df['cumulative_pnl'] = results_df['pnl'].cumsum()
     results_df['capital'] = initial_capital + results_df['cumulative_pnl']  # Track actual capital based on cumulative PnL
     results_df['peak_capital'] = results_df['capital'].cummax()
-    results_df['drawdown'] = results_df['capital'] - results_df['peak_capital']
-    results_df['drawdown_pct'] = round(results_df['drawdown'] / results_df['peak_capital'] * 100, 2)
+    # results_df['drawdown'] = results_df['capital'] - results_df['peak_capital']
+    # results_df['drawdown_pct'] = round(results_df['drawdown'] / results_df['peak_capital'] * 100, 2)
     
-    # Log statistics
-    total_trades = len(trade_results)  # Change from results_df to trade_results
-    winning_trades = (trade_results['pnl'] > 0).sum()  # Change from results_df to trade_results
-    win_rate = winning_trades / total_trades if total_trades > 0 else 0
+    # # Log statistics
+    # total_trades = len(trade_results)  # Change from results_df to trade_results
+    # winning_trades = (trade_results['pnl'] > 0).sum()  # Change from results_df to trade_results
+    # win_rate = winning_trades / total_trades if total_trades > 0 else 0
     
-    logger.info(f"\nBacktest Results:")
-    logger.info(f"Total trades executed: {total_trades}")
-    logger.info(f"Winning trades: {winning_trades}")
-    logger.info(f"Win rate: {win_rate:.2%}")
-    logger.info(f"Initial capital: ${initial_capital:,.2f}")
-    logger.info(f"Total P&L: ${trade_results['cumulative_pnl'].iloc[-1]:,.2f}")  # Change from results_df to trade_results
-    logger.info(f"Final capital: ${trade_results['cash'].iloc[-1]:,.2f}")  # Change from results_df to trade_results
-    logger.info(f"Final buying power: ${options_bp:,.2f}")
+    # logger.info(f"\nBacktest Results:")
+    # logger.info(f"Total trades executed: {total_trades}")
+    # logger.info(f"Winning trades: {winning_trades}")
+    # logger.info(f"Win rate: {win_rate:.2%}")
+    # logger.info(f"Initial capital: ${initial_capital:,.2f}")
+    # logger.info(f"Total P&L: ${trade_results['cumulative_pnl'].iloc[-1]:,.2f}")  # Change from results_df to trade_results
+    # logger.info(f"Final capital: ${trade_results['cash'].iloc[-1]:,.2f}")  # Change from results_df to trade_results
+    # logger.info(f"Final buying power: ${options_bp:,.2f}")
     
     return results_df
 
