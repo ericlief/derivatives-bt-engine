@@ -22,8 +22,8 @@ def run_test_suite():
             'position_side': PositionSide.SHORT,
             'delta_target': 0.30,
             'use_spx_close': True,
-            'start_date': "2020-01-01",
-            'end_date': "2020-2-28",
+            'start_date': "2011-01-01",
+            'end_date': "2011-12-31",
             'dte_range': (41, 45),
             'initial_capital': 100000,
             'early_close_days': None,
@@ -122,7 +122,7 @@ def run_test_suite():
             logger.info(f"Total trades: {len(result_df)}")
             logger.info(f"Win rate: {(result_df['pnl'] > 0).mean():.2%}")
             logger.info(f"Total P&L: ${result_df['pnl'].sum():.2f}")
-            logger.info(f"Return on capital: {(result_df['total_capital'].iloc[-1] / params['initial_capital'] - 1):.2%}")
+            logger.info(f"Return on capital: {(result_df['cash'].iloc[-1] / params['initial_capital'] - 1):.2%}")
             logger.info(f"Average days held: {result_df['days_held'].mean():.1f}")
             logger.info(f"Average return on margin: {result_df['return_on_margin'].mean():.2f}%")
         else:
@@ -131,3 +131,4 @@ def run_test_suite():
 if __name__ == "__main__":
     run_test_suite()
     
+ 

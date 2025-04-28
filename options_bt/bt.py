@@ -102,6 +102,178 @@ class TradeResult(TypedDict):
     return_on_margin: float
     close_reason: str
 
+def is_put(trade):
+    """
+    Checks if the option type is a PUT.
+
+    Args:
+        trade (Position or OptionType): The trade to check.
+
+    Returns:
+        bool: True if the option type is a PUT, False otherwise.
+    """
+    if isinstance(trade, Position):
+        option_type = trade['option_type']
+    elif isinstance(trade, OptionType):
+        option_type = trade
+    else:
+        logger.error(f'Need to pass either a Position or OptionType to is_put func, got {type(trade)}')
+        raise TypeError(f'Need to pass either a Position or OptionType arg to is_put func, got {type(trade)}')
+        # return None
+
+    return option_type in [OptionType.PUT, OptionType.PUT.value, "put"]
+
+def is_call(trade):
+    """
+    Checks if the option type is a CALL.
+
+    Args:
+        trade (Position or OptionType): The trade to check.
+
+    Returns:
+        bool: True if the option type is a CALL, False otherwise.
+    """
+    if isinstance(trade, Position):
+        option_type = trade['option_type']
+    elif isinstance(trade, OptionType):
+        option_type = trade
+    else:
+        logger.error(f'Need to pass either a Position or OptionType to is_call func, got {type(trade)}')
+        raise TypeError(f'Need to pass either a Position or OptionType arg to is_call func, got {type(trade)}')
+        # return None
+
+    return option_type in [OptionType.CALL, OptionType.CALL.value, "call"]
+
+
+def is_short(trade: Union[Position, PositionSide]):
+    """
+    Check if the position is short.
+
+    Args:
+        trade (Position or PositionSide): The trade to check.
+
+    Returns:
+        bool: True if the position is short, False otherwise.
+    """
+    if isinstance(trade, Position):
+        position_side = trade['position_side']
+    elif isinstance(trade, PositionSide):
+        position_side = trade
+    else:
+        logger.error(f'Need to pass either a Position or PositionSide arg to is_short func, got {type(trade)}')
+        raise TypeError(f'Need to pass either a Position or PositionSide arg to is_short func, got {type(trade)}')
+        # return None
+    
+    return position_side in [PositionSide.SHORT, PositionSide.SHORT.value, 'short']
+
+def is_long(trade: Union[Position, PositionSide]):
+    """
+    Check if the position is long.
+
+    Args:
+        trade (Position or PositionSide): The trade to check.
+
+    Returns:
+        bool: True if the position is long, False otherwise.
+    """
+    if isinstance(trade, Position):
+        position_side = trade['position_side']
+    elif isinstance(trade, PositionSide):
+        position_side = trade
+    else:
+        logger.error(f'Need to pass either a Position or PositionSide arg to is_long func, got {type(trade)}')
+        raise TypeError(f'Need to pass either a Position or PositionSide arg to is_long func, got {type(trade)}')
+        # return None
+    return position_side in [PositionSide.LONG, PositionSide.LONG.value, 'long']
+
+                    
+                    # Validate closing/exit price sign 
+                    exit_price = trade.exit_price
+                    try:
+                        if is_long(trade.position_side):
+                            assert exit_price >= 0 
+                        else:
+                            assert is_short(trade.position_side)
+                            assert exit_price <= 0      
+                    except AssertionError as e:
+                        if is_long(trade.position_side):
+                            exit_price = abs(exit_price)
+                        else:
+                            exit_price = -abs(exit_price)
+
+def get_signed_entry_price(trade: Union[Position, pd.Series]) -> float:
+    """
+    Adjusts the entry price based on the position side.
+
+    Args:
+        entry_price (float): The entry price of the trade.
+
+    Returns:
+        float: The signed entry price adjusted for position side.
+    """
+    if isinstance(trade, Position):
+        position_side = trade['position_side']
+        entry_price = trade['premium']
+    elif isinstance(trade, pd.Series):
+        position_side = trade.position_side
+        entry_price = trade.entry
+    else:
+        logger.error(f'Need to pass either a Position or pd.Series arg, got {type(trade)}')
+        raise TypeError(f'Need to pass either a Position or pd.Series, got {type(trade)}')
+        # return None
+    
+    # Validate sign of entry price acc. to PositionSide
+    try:
+        if is_long(position_side):
+            assert entry_price <= 0  # debit premium, buy to open (BTO)
+        elif is_short(position_side):
+            assert entry_price >= 0  # credit premium, sell to open (STO)
+        else:
+            raise ValueError(f'Unrecognized PositionSide, got {trade} of type: {type(position_side)}')
+    except AssertionError:
+        logger.debug(f'Fixing sign of entry price {entry_price} for {trade}')
+        if is_long(position_side):
+            entry_price = -abs(entry_price)
+        else:
+            entry_price = abs(entry_price)
+    return entry_price
+
+def get_signed_exit_price(trade: Union[Position, pd.Series]) -> float:
+    """
+    Adjusts the entry price based on the position side.
+
+    Args:
+        entry_price (float): The entry price of the trade.
+
+    Returns:
+        float: The signed entry price adjusted for position side.
+    """
+    if isinstance(trade, Position):
+        position_side = trade['position_side']
+        entry_price = trade['premium']
+    elif isinstance(trade, pd.Series):
+        position_side = trade.position_side
+        entry_price = trade.entry
+    else:
+        logger.error(f'Need to pass either a Position or pd.Series arg, got {type(trade)}')
+        raise TypeError(f'Need to pass either a Position or pd.Series, got {type(trade)}')
+        # return None
+    
+    # Validate sign of entry price acc. to PositionSide
+    try:
+        if is_long(position_side):
+            assert entry_price >= 0  # sell to close (STC)
+        elif is_short(position_side):
+            assert entry_price <= 0  # buy to close (BTC)
+        else:
+            raise ValueError(f'Unrecognized PositionSide, got {trade} of type: {type(position_side)}')
+    except AssertionError:
+        logger.debug(f'Fixing sign of entry price {entry_price} for {trade}')
+        if is_long(position_side):
+            entry_price = -abs(entry_price)
+        else:
+            entry_price = abs(entry_price)
+    return entry_price
 
 def calculate_margin(underlying_price: float, entry_price: float, 
                            position_side: Union[PositionSide, str],
@@ -123,12 +295,12 @@ def calculate_margin(underlying_price: float, entry_price: float,
         Required margin in dollars
     """
     # Convert string to enum if needed
-    if isinstance(position_side, str):
-        position_side = PositionSide.LONG if position_side.lower() == "long" else PositionSide.SHORT
+    # if isinstance(position_side, str):
+    #     position_side = PositionSide.LONG if position_side.lower() == "long" else PositionSide.SHORT
     
     # For long positions, margin is just the cost of the option
     # There is no margin req for Long positions
-    if position_side in [PositionSide.LONG, PositionSide.LONG.value, 'long']:
+    if is_long(position_side):
         # return round(entry_price * 100, 2)  # Convert to dollars
         return 0
     
@@ -168,7 +340,7 @@ def calculate_intrinsic_value(underlying_price: float, strike: float, option_typ
         Intrinsic value of the option
     """
 
-    is_put = option_type in [OptionType.PUT, OptionType.PUT.value, "put"]
+    # is_put = option_type in [OptionType.PUT, OptionType.PUT.value, "put"]
     # if isinstance(option_type, str):
     #     is_put = option_type in [OptionType.PUT, OptionType.PUT.value, "put"]
     # else:
@@ -178,7 +350,7 @@ def calculate_intrinsic_value(underlying_price: float, strike: float, option_typ
     logger.debug(f'{max(0, strike - underlying_price) if is_put else max(0, underlying_price - strike)}')
 
     
-    if is_put:
+    if is_put(option_type):
         return max(0, strike - underlying_price)
     else:  # CALL
         return max(0, underlying_price - strike)
@@ -369,7 +541,7 @@ def close_position(position: Position,
     logger.debug(f'Calculated pnl: {pnl}')
     
     # Calculate final cash using entry cash and exit price only (avoid double counting premium)
-    cash = position['entry_cash'] + (signed_close_price * 100)  # Convert to dollars
+    cash = position['premium'] + (signed_close_price * 100)  # Convert to dollars
     logger.debug(f'Final cash: entry_cash + exit_price = {position["entry_cash"]} + {signed_close_price * 100} = {cash}')
     
     # Restore buying power for short positions
@@ -491,7 +663,7 @@ def create_trade_from_signal(trade_signal, underlying_price: float, entry_price:
     # Adjust entry price sign based on position side
     # For long positions, entry price should be negative (cash outflow)
     # For short positions, entry price should be positive (cash inflow)
-    signed_entry_price = -entry_price if position_side in [PositionSide.LONG, PositionSide.LONG.value, 'long'] else entry_price
+    signed_entry_price = -entry_price if is_long(position_side) else entry_price
     
     # Calculate initial margin
     init_margin = calculate_margin(underlying_price, abs(entry_price), position_side, trade_signal.strike, option_type)  # Use absolute entry price for margin
@@ -527,7 +699,7 @@ def execute_trade(trade: Position, cash: float, option_bp: float, leverage: floa
         # For long positions, check if there is enough cash to buy the option
         if cash >= entry_price * 100:  # Cash needed to buy the option
             cash -= entry_price * 100  # Deduct premium (convert to dollars)
-            trade['entry_cash'] = cash  # Store cash snapshot at entry
+            # trade['entry_cash'] = cash  # Store cash snapshot at entry
             return trade, cash, option_bp
         else:
             logger.warning(f"Insufficient cash (${cash}) to buy option on {trade['entry_date']}. Required: ${abs(trade['premium']) * 100:.2f}")
@@ -538,8 +710,8 @@ def execute_trade(trade: Position, cash: float, option_bp: float, leverage: floa
         # For short positions, check if buying power is sufficient
         if option_bp >= effective_margin:
             option_bp -= effective_margin
-            cash += entry_price * 100  # Credit premium
-            trade['entry_cash'] = cash  # Store cash snapshot at entry
+            # cash += entry_price * 100  # Credit premium
+            # trade['entry_cash'] = cash  # Store cash snapshot at entry
             return trade, cash, option_bp
         else:
             logger.warning(f"Insufficient buying power (${option_bp}) for trade on {trade['entry_date']}. Requires: ${effective_margin:.2f} with {leverage}x leverage")
@@ -588,7 +760,7 @@ def execute_backtest_trades(trades: pd.DataFrame,
                 result = close_position(pos, full_chain_df, underlying_price_history, options_bp)
                 if result:
                     # Update cash and BP from the trade result
-                    cash = result['cash']
+                    # cash = result['cash']
                     options_bp = result['option_bp']
                     positions_to_remove.append(pos)
                     logger.debug(f"Closed position - Cash: ${cash:.2f}, BP: ${options_bp:.2f}")
@@ -661,7 +833,7 @@ def execute_backtest_trades(trades: pd.DataFrame,
         result = close_position(pos, full_chain_df, underlying_price_history, options_bp)
         if result:
             trade_results.append(result)
-            cash = result['cash']
+            # cash = result['cash']
             options_bp = result['option_bp']
     
     if not trade_results:
@@ -1237,13 +1409,13 @@ def calculate_daily_value(trade, date, options_chain_multi_index, spx_data, use_
         
         # Validate sign of value according to PositionSide
         try:
-            if trade.position_side in [PositionSide.LONG, PositionSide.LONG.value, 'long']:
+            if is_long(trade.position_side):
                 assert market_value >= 0 
             else:
-                assert trade.position_side in [PositionSide.SHORT, PositionSide.SHORT.value, 'short']
+                assert is_short(trade.position_side)
                 assert market_value <= 0      
         except AssertionError as e:
-            if trade.position_side in [PositionSide.LONG, PositionSide.LONG.value, 'long']:
+            if is_long(trade.position_side):
                 market_value = abs(market_value)
             else:
                 market_value = -abs(market_value)
@@ -1260,6 +1432,18 @@ def calculate_daily_value(trade, date, options_chain_multi_index, spx_data, use_
 def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_chain_multi_index, spx_data, param_str, use_spx_close: bool = True, results_dir="results", leverage: float = 1.0):
     """
     Calculate and save mark-to-market (MTM) data for a backtest.
+
+    Args:
+        start_date (str or pd.Timestamp): The start date of the backtest period.
+        end_date (str or pd.Timestamp): The end date of the backtest period.
+        initial_capital (float): The initial capital for the backtest.
+        trade_results (pd.DataFrame): DataFrame containing trade results.
+        options_chain_multi_index (pd.MultiIndex): MultiIndex for the options chain data.
+        spx_data (pd.DataFrame): DataFrame containing S&P 500 data.
+        param_str (str): A string of parameters for the backtest.
+        use_spx_close (bool, optional): Flag to use S&P 500 close price. Defaults to True.
+        results_dir (str, optional): Directory to save the results. Defaults to "results".
+        leverage (float, optional): Leverage factor for the backtest. Defaults to 1.0.
     """
     # Ensure the results directory exists
     os.makedirs(results_dir, exist_ok=True)
@@ -1327,16 +1511,18 @@ def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_
                     # Validate closing/exit price sign 
                     exit_price = trade.exit_price
                     try:
-                        if trade.position_side in [PositionSide.LONG, PositionSide.LONG.value, 'long']:
+                        if is_long(trade.position_side):
                             assert exit_price >= 0 
                         else:
-                            assert trade.position_side in [PositionSide.SHORT, PositionSide.SHORT.value, 'short']
+                            assert is_short(trade.position_side)
                             assert exit_price <= 0      
                     except AssertionError as e:
-                        if trade.position_side in [PositionSide.LONG, PositionSide.LONG.value, 'long']:
+                        if is_long(trade.position_side):
                             exit_price = abs(exit_price)
                         else:
                             exit_price = -abs(exit_price)
+
+
                     logger.debug(f'exit price: {exit_price}')
                     logger.debug(f'daily cash before: {daily_cash_flow}')
                     # Accumulate this to cash reserves
@@ -1366,13 +1552,13 @@ def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_
 
                     # Validate sign of entry price acc. to PositionSide
                     try:
-                        if trade.position_side in [PositionSide.LONG, PositionSide.LONG.value, 'long']:
+                        if is_long(trade.position_side):
                             assert entry_price > 0 
                         else:
-                            assert trade.position_side in [PositionSide.SHORT, PositionSide.SHORT.value, 'short']
+                            assert is_short(trade.position_side)
                             assert entry_price < 0      
                     except AssertionError as e:
-                        if trade.position_side in [PositionSide.LONG, PositionSide.LONG.value, 'long']:
+                        if is_long(trade.position_side):
                             entry_price = -abs(entry_price)
                         else:
                             entry_price = abs(entry_price)
