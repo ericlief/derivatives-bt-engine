@@ -69,13 +69,15 @@ class Position(TypedDict):
     trade_id: int
     entry_date: pd.Timestamp
     expire_date: pd.Timestamp
-    underlying_last: float
+    underlying_entry: float
+    underlying_exit: float
     strike: float
     option_type: str
     position_side: str
     bid: float
     ask: float
-    premium: float  # Snapshot of the premium at entry
+    entry_price: float  # Snapshot of the premium at entry
+    exit_price: float
     margin_required: float
     entry_delta: float
     entry_dte: int
@@ -112,7 +114,7 @@ def is_put(trade):
     Returns:
         bool: True if the option type is a PUT, False otherwise.
     """
-    if isinstance(trade, Position):
+    if isinstance(trade, dict) and 'option_type' in trade:
         option_type = trade['option_type']
     elif isinstance(trade, OptionType):
         option_type = trade
@@ -133,7 +135,7 @@ def is_call(trade):
     Returns:
         bool: True if the option type is a CALL, False otherwise.
     """
-    if isinstance(trade, Position):
+    if isinstance(trade, dict) and 'option_type' in trade:
         option_type = trade['option_type']
     elif isinstance(trade, OptionType):
         option_type = trade
@@ -145,7 +147,7 @@ def is_call(trade):
     return option_type in [OptionType.CALL, OptionType.CALL.value, "call"]
 
 
-def is_short(trade: Union[Position, PositionSide]):
+def is_short(trade: Union[Position, PositionSide, pd.Series, str]):
     """
     Check if the position is short.
 
@@ -155,9 +157,13 @@ def is_short(trade: Union[Position, PositionSide]):
     Returns:
         bool: True if the position is short, False otherwise.
     """
-    if isinstance(trade, Position):
+    if isinstance(trade, dict) and 'position_side' in trade:
         position_side = trade['position_side']
     elif isinstance(trade, PositionSide):
+        position_side = trade
+    elif isinstance(trade, pd.Series) and 'position_side' in trade:  
+        position_side = trade.position_side
+    elif isinstance(trade, str):
         position_side = trade
     else:
         logger.error(f'Need to pass either a Position or PositionSide arg to is_short func, got {type(trade)}')
@@ -166,7 +172,7 @@ def is_short(trade: Union[Position, PositionSide]):
     
     return position_side in [PositionSide.SHORT, PositionSide.SHORT.value, 'short']
 
-def is_long(trade: Union[Position, PositionSide]):
+def is_long(trade: Union[Position, PositionSide, pd.Series, str]):
     """
     Check if the position is long.
 
@@ -176,9 +182,13 @@ def is_long(trade: Union[Position, PositionSide]):
     Returns:
         bool: True if the position is long, False otherwise.
     """
-    if isinstance(trade, Position):
+    if isinstance(trade, dict) and 'position_side' in trade:
         position_side = trade['position_side']
     elif isinstance(trade, PositionSide):
+        position_side = trade
+    elif isinstance(trade, pd.Series) and 'position_side' in trade:  
+        position_side = trade.position_side
+    elif isinstance(trade, str):
         position_side = trade
     else:
         logger.error(f'Need to pass either a Position or PositionSide arg to is_long func, got {type(trade)}')
@@ -186,37 +196,22 @@ def is_long(trade: Union[Position, PositionSide]):
         # return None
     return position_side in [PositionSide.LONG, PositionSide.LONG.value, 'long']
 
-                    
-                    # Validate closing/exit price sign 
-                    exit_price = trade.exit_price
-                    try:
-                        if is_long(trade.position_side):
-                            assert exit_price >= 0 
-                        else:
-                            assert is_short(trade.position_side)
-                            assert exit_price <= 0      
-                    except AssertionError as e:
-                        if is_long(trade.position_side):
-                            exit_price = abs(exit_price)
-                        else:
-                            exit_price = -abs(exit_price)
-
 def get_signed_entry_price(trade: Union[Position, pd.Series]) -> float:
     """
-    Adjusts the entry price based on the position side.
+    Adjusts the premium based on the position side.
 
     Args:
-        entry_price (float): The entry price of the trade.
+        trade (Union[Position, pd.Series]): The trade object containing position details or a pandas Series.
 
     Returns:
         float: The signed entry price adjusted for position side.
     """
-    if isinstance(trade, Position):
+    if isinstance(trade, dict) and 'position_side' in trade and 'entry_price' in trade:
         position_side = trade['position_side']
-        entry_price = trade['premium']
-    elif isinstance(trade, pd.Series):
+        entry_price = trade['entry_price']
+    elif isinstance(trade, pd.Series) and 'position_side' in trade and 'entry_price' in trade:   # Union of pd.Series and TradeResult
         position_side = trade.position_side
-        entry_price = trade.entry
+        entry_price = trade.entry_price
     else:
         logger.error(f'Need to pass either a Position or pd.Series arg, got {type(trade)}')
         raise TypeError(f'Need to pass either a Position or pd.Series, got {type(trade)}')
@@ -240,7 +235,7 @@ def get_signed_entry_price(trade: Union[Position, pd.Series]) -> float:
 
 def get_signed_exit_price(trade: Union[Position, pd.Series]) -> float:
     """
-    Adjusts the entry price based on the position side.
+    Adjusts the close price based on the position side.
 
     Args:
         entry_price (float): The entry price of the trade.
@@ -248,12 +243,12 @@ def get_signed_exit_price(trade: Union[Position, pd.Series]) -> float:
     Returns:
         float: The signed entry price adjusted for position side.
     """
-    if isinstance(trade, Position):
+    if isinstance(trade, dict) and 'position_side' in trade and 'exit_price' in trade:
         position_side = trade['position_side']
-        entry_price = trade['premium']
-    elif isinstance(trade, pd.Series):
+        exit_price = trade['exit_price']
+    elif isinstance(trade, pd.Series) and 'position_side' in trade and 'exit_price' in trade:   # Union of pd.Series and TradeResult
         position_side = trade.position_side
-        entry_price = trade.entry
+        exit_price = trade.exit_price
     else:
         logger.error(f'Need to pass either a Position or pd.Series arg, got {type(trade)}')
         raise TypeError(f'Need to pass either a Position or pd.Series, got {type(trade)}')
@@ -262,18 +257,18 @@ def get_signed_exit_price(trade: Union[Position, pd.Series]) -> float:
     # Validate sign of entry price acc. to PositionSide
     try:
         if is_long(position_side):
-            assert entry_price >= 0  # sell to close (STC)
+            assert exit_price >= 0  # sell to close (STC)
         elif is_short(position_side):
-            assert entry_price <= 0  # buy to close (BTC)
+            assert exit_price <= 0  # buy to close (BTC)
         else:
             raise ValueError(f'Unrecognized PositionSide, got {trade} of type: {type(position_side)}')
     except AssertionError:
-        logger.debug(f'Fixing sign of entry price {entry_price} for {trade}')
+        logger.debug(f'Fixing sign of exit price {exit_price} for {trade}')
         if is_long(position_side):
-            entry_price = -abs(entry_price)
+            exit_price = abs(exit_price)
         else:
-            entry_price = abs(entry_price)
-    return entry_price
+            exit_price = -abs(exit_price)
+    return exit_price
 
 def calculate_margin(underlying_price: float, entry_price: float, 
                            position_side: Union[PositionSide, str],
@@ -347,7 +342,7 @@ def calculate_intrinsic_value(underlying_price: float, strike: float, option_typ
     #     is_put = option_type == OptionType.PUT
     
     logger.debug(f'Expiration. Calculating intrinsic value for {option_type}, strike={strike}, underlying={underlying_price}, is_put:{is_put}')
-    logger.debug(f'{max(0, strike - underlying_price) if is_put else max(0, underlying_price - strike)}')
+    logger.debug(f'{max(0, strike - underlying_price) if is_put(option_type) else max(0, underlying_price - strike)}')
 
     
     if is_put(option_type):
@@ -388,40 +383,49 @@ def calculate_midpoint_price(bid: float, ask: float) -> Optional[float]:
         
     return round((bid + ask) / 2, 2)
 
-def get_closing_data(position: Position,
-                    full_chain_df: pd.DataFrame, 
-                    spx_data: pd.DataFrame) -> Tuple[Optional[float], Optional[float]]:
+def get_closing_data(
+    position: Position,
+    full_chain_df: pd.DataFrame, 
+    spx_data: pd.DataFrame
+) -> Optional[Position]:
     """
-    Get closing price data for option position.
+    Get closing price data for an option position.
     
     Args:
-        position: Position containing trade details
-        full_chain_df: DataFrame containing full option chain data
-        spx_data: DataFrame containing underlying price data
+        position (Position): Position containing trade details.
+        full_chain_df (pd.DataFrame): DataFrame containing full option chain data.
+        spx_data (pd.DataFrame): DataFrame containing underlying price data.
     
     Returns:
-        Tuple of (closing_price, underlying_close, exit_delta)
+        Optional[Position]: The updated position object with closing price and other relevant data, or None if no valid closing data is found.
     """
-    
-    delta_col = "p_delta" if position['option_type'] in [OptionType.PUT, OptionType.PUT.value, "put"] else "c_delta"
-
-    # If no close_date, this is an expiration .
-    # Calculate intrinsic value, i.e. use underlying price directly
+  
+    expire_date = position['expire_date']
+    # If no close_date, this is an expiration.
     if 'close_date' not in position or not position['close_date']:
-        if position['expire_date'] not in spx_data.index:
-            return None, None
-        expire_date = position['expire_date']
+        if expire_date not in spx_data.index:
+            logger.warning(f"No valid closing data found for position with expire date {expire_date}. Returning None.")
+            return position  # Return None if no valid closing data is found
+        
+        # Get underlying (e.g. SPX) at close
         underlying_close = spx_data.loc[expire_date, 'close']
-        close_price = calculate_intrinsic_value(underlying_close, position['strike'], position['option_type'])
+        position['underlying_exit'] = underlying_close
+        position['exit_price'] = calculate_intrinsic_value(underlying_close, position['strike'], position['option_type'])
+        position['exit_price'] = get_signed_exit_price(position)
+
+        # Get delta value at expiration
+        delta_col = "p_delta" if is_put(position) else 'c_delta'
         filtered_df = full_chain_df[
-            (full_chain_df.index == expire_date) &
-            (full_chain_df['expire_date'] == expire_date) &
-            (full_chain_df['strike'] == position['strike'])
-        ]
+                (full_chain_df.index == expire_date) &
+                (full_chain_df['expire_date'] == expire_date) &
+                (full_chain_df['strike'] == position['strike'])
+            ]
+        
         if not filtered_df.empty:
-            exit_delta = round(filtered_df[delta_col].iloc[0], 2)
-    
-        return close_price, underlying_close, exit_delta
+            exit_delta = round(filtered_df[delta_col].iloc[0], 2)      
+            position['exit_delta'] = exit_delta
+
+        return position
     
     # Early close - get data from close_date forward (up to 5 days)
     close_date = position['close_date']
@@ -434,44 +438,43 @@ def get_closing_data(position: Position,
     ].sort_index()  # Sort by date to try closest dates first
     
     if filtered_df.empty:
-        return None, None, None
+        logger.warning(f"No valid prices found within 5 days of close date {close_date}. Returning None.")
+        return position  # Return unchanged position if no valid prices were found within 5 days
         
-    bid_col = "p_bid" if position['option_type'] in [OptionType.PUT, OptionType.PUT.value, "put"] else "c_bid"
-    ask_col = "p_ask" if position['option_type'] in [OptionType.PUT, OptionType.PUT.value, "put"] else "c_ask"
-    
-    logger.debug(f'{position['option_type']}: {bid_col}-{ask_col}')
+    bid_col = "p_bid" if is_put(position) else "c_bid"
+    ask_col = "p_ask" if is_put(position) else "c_ask"
+    delta_col = "p_delta" if is_put(position) else 'c_delta'
 
     # Try each date in the filtered data until we find valid prices
     for idx, row in filtered_df.iterrows():
         bid = row[bid_col]
         ask = row[ask_col]
         underlying_close = row['underlying_last']
-        exit_delta = round(row[delta_col], 2)
+        position['underlying_exit'] = underlying_close
+        position['exit_delta'] = round(row[delta_col], 2)
         mid_price = calculate_midpoint_price(bid, ask)
         if mid_price is not None:
-            logger.debug(f"Using prices from {idx} for close date {close_date}, mid_price={mid_price}, underlying_close={underlying_close}")
-            return mid_price, underlying_close, exit_delta
+            position['exit_price'] = mid_price
+            position['exit_price'] = get_signed_exit_price(position)
+            return position
     
     # If we get here, no valid prices were found within 5 days
-    logger.error(f"No valid closing prices found within 5 days of {close_date}. Strike: {position['strike']}, "
-                f"Type: {position['option_type']}, Expire: {position['expire_date']}. "
-                f"Last bid/ask seen: {bid}/{ask}")
-    return None, None, None
+    logger.error(f"No valid closing prices found for position with strike {position['strike']} and expire date {position['expire_date']}. Returning None.")
+    return position  # Return None if no valid closing prices were found
 
-def calculate_option_pnl(entry_price, closing_price: float) -> float:
+def calculate_option_pnl(position: PositionSide) -> float:
     """
     Calculate P&L for option position.
     
     Args:
-        entry price: Entry price of the options (signed)
-        closing_price: Closing price of the option (signed)
+        position: Position
     
     Returns:
         P&L in dollars
     """
     # Calculate P&L using entry and closing prices (signed)
-    pnl = entry_price + closing_price
-    return pnl * 100 if entry_price > 0 else max(0, pnl * 100) # clamp loss to zero if LONG
+    pnl = position['entry_price'] + position['exit_price']
+    return pnl * 100 if is_put(position) else max(0, pnl * 100) # clamp loss to zero if LONG
 
 def close_position(position: Position, 
                   full_chain_df: pd.DataFrame, 
@@ -491,10 +494,10 @@ def close_position(position: Position,
     """
     close_reason = None
 
-    # Define minimum valid date for validation
+    # # Define minimum valid date for validation
     min_valid_date = pd.Timestamp('1990-01-01')  # Arbitrary date well after 1970
     
-    # Validate entry_date
+    # # Validate entry_date
     entry_date = position['entry_date']
     if not isinstance(entry_date, pd.Timestamp) or entry_date <= min_valid_date:
         logger.error(f"Invalid entry date: {entry_date} - skipping trade")
@@ -519,39 +522,38 @@ def close_position(position: Position,
         return None
     
     # Ensure close_date is not before entry_date
-    if close_date < entry_date:
-        logger.error(f"Close date {close_date} is before entry date {entry_date} - skipping trade")
+    if close_date < position['entry_date']:
+        logger.error(f"Close date {close_date} is before entry date {position['entry_date']} - skipping trade")
         return None
     
     # Get closing prices
-    close_price, underlying_close, exit_delta = get_closing_data(position, full_chain_df, underlying_price_history)
+    position = get_closing_data(position, full_chain_df, underlying_price_history)
     
     # If get_closing_data returned None values, we should skip this trade
-    if close_price is None or underlying_close is None:
+    if position['exit_price'] is None:
         logger.warning("Skipping trade due to missing close data")
         return None
     
     # Handle sign for credit/debit prices (i.e. short vs. long)
-    signed_close_price = abs(close_price) if position['position_side'] in [PositionSide.LONG, PositionSide.LONG.value, 'long'] else -close_price
-    
-    logger.debug(f'Premium: {position["premium"]}, Close_price: {signed_close_price}')
+    # signed_exit_price = abs(exit_price) if position['position_side'] in [PositionSide.LONG, PositionSide.LONG.value, 'long'] else -exit_price
+    # logger.debug(f'Premium: {position["premium"]}, Exit_price: {signed_exit_price}')
 
     # Calculate P&L using the premium from entry
-    pnl = calculate_option_pnl(position['premium'], signed_close_price)
+    pnl = calculate_option_pnl(position)
     logger.debug(f'Calculated pnl: {pnl}')
     
     # Calculate final cash using entry cash and exit price only (avoid double counting premium)
-    cash = position['premium'] + (signed_close_price * 100)  # Convert to dollars
-    logger.debug(f'Final cash: entry_cash + exit_price = {position["entry_cash"]} + {signed_close_price * 100} = {cash}')
+    cash = (position['entry_price'] + position['exit_price']) * 100  # Convert to dollars
+    logger.debug(f'Final cash: entry_cash + exit_price = {position["entry_price"]} + {position["exit_price"]} = {cash}')
     
     # Restore buying power for short positions
     req_margin = position['margin_required']
-    if position['position_side'] in [PositionSide.SHORT, PositionSide.SHORT.value, 'short']:
+    if is_short(position):
         option_bp += req_margin
         logger.debug(f"Restored buying power ${req_margin:.2f} for closed short position")
     
     # Calculate days held - dates should already be normalized
-    days_held = (close_date - entry_date).days
+    days_held = (close_date - position['entry_date']).days
    
     # Safety check for negative days
     if days_held < 0:
@@ -562,51 +564,78 @@ def close_position(position: Position,
         'trade_id': position['trade_id'],
         'option_type': position['option_type'].value if isinstance(position['option_type'], Enum) else str(position['option_type']),
         'position_side': position['position_side'].value if isinstance(position['position_side'], Enum) else str(position['position_side']),
-        'entry_date': entry_date,
+        'entry_date': position['entry_date'],
         'exit_date': close_date,
         'expire_date': position['expire_date'],
         'entry_delta': round(position['entry_delta'], 2),
-        'exit_delta': round(exit_delta, 2),
+        'exit_delta': round(position['exit_delta'], 2),
         'entry_dte': position['entry_dte'],
         'days_held': days_held,
-        'underlying_entry': position['underlying_last'],
-        'underlying_exit': underlying_close,
+        'underlying_entry': position['underlying_entry'],
+        'underlying_exit': position['underlying_exit'],
         'strike': position['strike'], 
-        'entry_price': round(position['premium'], 2),
-        'exit_price': round(signed_close_price, 2),
+        'entry_price': round(position['entry_price'], 2),
+        'exit_price': round(position['exit_price'], 2),
         'pnl': round(pnl, 2),
         'capital_used': req_margin,
         'option_bp': round(option_bp, 2),
         'return_on_margin': round(pnl / position['margin_required'] * 100, 2) if position['margin_required'] > 0 else 0,
         'close_reason': close_reason
     }
-    
     return trade_result
 
-def create_trade_from_signal(trade_signal, underlying_price: float, entry_price: float, 
-                            option_type: OptionType, position_side: PositionSide) -> Optional[Position]:
+def create_trade_from_signal(
+    trade_signal: pd.Series,  # Assuming trade_signal is a pandas Series
+    option_type: OptionType,
+    position_side: PositionSide,
+    delta_target: float,
+    entry_date: pd.Timestamp,  # Assuming entry_date is a pandas Timestamp
+    early_close_days: Optional[int] = None  # Optional parameter
+) -> Optional[Position]:
     """
-    Create a Position from a signal row
-    
+    Creates a Position object from a given trade signal.
+
+    This function takes a trade signal, along with other parameters, and attempts to create a Position object. It checks the trade signal's delta against a target delta and ensures the entry date is valid.
+
     Args:
-        trade_signal: Row from trades DataFrame (as namedtuple)
-        underlying_price: Price of underlying asset
-        entry_price: Option entry price (mid of bid/ask)
-        option_type: Type of option (PUT or CALL)
-        position_side: Whether buying or selling the option
+        trade_signal (pd.Series): A row from the trades DataFrame, containing information about the trade signal.
+        trade_counter (int): A counter for the number of trades.
+        option_type (OptionType): The type of option (PUT or CALL).
+        position_side (PositionSide): The side of the position (BUY or SELL).
+        delta_target (float): The target delta for the trade.
+        entry_date (pd.Timestamp): The date of entry into the trade.
+        early_close_days (Optional[int]): The number of days before expiration to close the trade early. Defaults to None.
+
+    Returns:
+        Optional[Position]: A Position object if the trade is valid, otherwise None.
     """
-    logger.debug(f"Creating trade from signal for date: {trade_signal.Index}")
+    logger.debug(f"Creating trade from signal for date: {entry_date}")
     
-    # Get bid/ask fields based on option type
-    bid_field = "p_bid" if option_type in [OptionType.PUT, OptionType.PUT.value, "put"] else "c_bid"
-    ask_field = "p_ask" if option_type in [OptionType.PUT, OptionType.PUT.value, "put"] else "c_ask"
+    # Check if this trade meets our delta criteria before attempting execution
+    delta_col = "p_delta" if is_put(option_type) else "c_delta"
+    trade_delta = trade_signal[delta_col]
     
-    # Validate trade_signal.Index is a valid date
-    if not hasattr(trade_signal, 'Index'):
-        logger.error("No Index field in trade signal")
+    # For puts, we want negative deltas, so convert positive input to negative
+    if is_put(option_type):
+        target_delta = -abs(delta_target)
+        delta_diff = abs(trade_delta - target_delta)
+    else:
+        target_delta = abs(delta_target)
+        delta_diff = abs(trade_delta - target_delta)
+    
+    # Skip trades that are too far from our target delta
+    if delta_diff > 0.05:  # Allow 5% deviation from target delta
+        logger.debug(f"Skipping trade with delta {trade_delta:.2f} (target: {target_delta:.2f}, diff: {delta_diff:.2f})")
+        skipped_trades += 1
         return None
+    
+
+    # Validate trade_signal.Index is a valid date
+    # if not hasattr(trade_signal, 'Index'):
+    #     logger.error("No Index field in trade signal")
+    #     return None
         
-    entry_date = trade_signal.Index
+    # entry_date = trade_signal.Index
     min_valid_date = pd.Timestamp('1990-01-01')  # Arbitrary date well after 1970
     
     if not isinstance(entry_date, pd.Timestamp):
@@ -618,12 +647,12 @@ def create_trade_from_signal(trade_signal, underlying_price: float, entry_price:
         return None
     
     # Validate expire_date exists and is not None
-    if not trade_signal.expire_date:
+    if not trade_signal['expire_date']:
         logger.error(f"expire_date is missing for trade signal on {trade_signal.Index}")
         return None
     
     # Validate expire_date is a valid date
-    expire_date = trade_signal.expire_date
+    expire_date = trade_signal['expire_date']
     
     if not isinstance(expire_date, pd.Timestamp):
         logger.error(f"Expire date {expire_date} is not a Timestamp")
@@ -643,74 +672,82 @@ def create_trade_from_signal(trade_signal, underlying_price: float, entry_price:
         return None
     
     # Get bid and ask values
+    # Get bid/ask fields based on option type
+    bid_field = "p_bid" if is_put(option_type) else "c_bid"
+    ask_field = "p_ask" if is_put(option_type) else "c_ask"
     bid = getattr(trade_signal, bid_field, 0)
     ask = getattr(trade_signal, ask_field, 0)
-    
-    # Validate bid-ask spread isn't too wide (indicating low liquidity)
-    if bid > 0 and ask > 0:
-        spread_pct = (ask - bid) / ((bid + ask) / 2)
-        if spread_pct > 0.15:  # 15% spread is quite wide
-            logger.error(f"Bid-ask spread too wide ({spread_pct:.1%}) on {entry_date}, indicating low liquidity")
-            return None
-    
-    # Get delta value based on option type
-    delta_field = "p_delta" if option_type in [OptionType.PUT, OptionType.PUT.value, "put"] else "c_delta"
-    entry_delta = getattr(trade_signal, delta_field, None)
-    
-    # Calculate DTE
-    entry_dte = (trade_signal.expire_date - trade_signal.Index).days
-    
+    entry_price = calculate_midpoint_price(bid, ask)
+    if entry_price is None:
+        return None
     # Adjust entry price sign based on position side
     # For long positions, entry price should be negative (cash outflow)
     # For short positions, entry price should be positive (cash inflow)
     signed_entry_price = -entry_price if is_long(position_side) else entry_price
+
+    # Calculate DTE
+    entry_dte = (trade_signal.expire_date - entry_date).days
     
+    
+    # Create Position from trade signal
+ 
     # Calculate initial margin
+    underlying_price = trade_signal['underlying_last']
     init_margin = calculate_margin(underlying_price, abs(entry_price), position_side, trade_signal.strike, option_type)  # Use absolute entry price for margin
     
-    # Create the position with data
-    position: Position = {
-        'entry_date': entry_date,
-        'expire_date': expire_date,
-        'underlying_last': underlying_price,
-        'strike': trade_signal.strike,
-        'option_type': option_type.value,
-        'position_side': position_side.value,
-        'bid': bid,
-        'ask': ask,
-        'premium': signed_entry_price,
-        'margin_required': init_margin,
-        'close_date': None,
-        'entry_delta': round(entry_delta, 2) if entry_delta is not None else None,
-        'entry_dte': entry_dte,
-        'entry_cash': 0
-    }
+    # Create the position with date    
+    position = Position(
+        trade_id=None,
+        entry_date=entry_date,
+        expire_date=trade_signal['expire_date'],
+        underlying_entry=underlying_price,
+        strike=trade_signal['strike'],
+        option_type=option_type,
+        position_side=position_side,
+        bid=bid,
+        ask=ask,
+        entry_price=signed_entry_price,
+        margin_required=trade_signal['margin_required'] if 'margin_required' in trade_signal else 0,
+        entry_delta=trade_delta,
+        entry_dte=trade_signal['dte'] if 'dte' in trade_signal else entry_dte,
+        close_date=entry_date + pd.Timedelta(days=early_close_days) if early_close_days is not None else None,
+    )
     return position
 
 def execute_trade(trade: Position, cash: float, option_bp: float, leverage: float = 4.0) -> Tuple[Optional[Position], float, float]:
+    """
+    Execute a trade with the given position, cash, option buying power, and leverage.
     
-    # Unsign here for comparison
-    entry_price = abs(trade['premium'])
+    Args:
+        trade: Position containing trade details
+        cash: Current cash available
+        option_bp: Current buying power for options
+        leverage: Leverage for the trade (default: 4.0)
+    
+    Returns:
+        Tuple of (trade, cash, option_bp) if successful, None if trade cannot be executed
+    """
+    # Use premium directly
+    premium = abs(trade['entry_price']) * 100
     # Calculate effective margin requirement with leverage
     effective_margin = trade['margin_required'] / leverage
     
     # Open LONG position
-    if trade['position_side'] in [PositionSide.LONG, PositionSide.LONG.value, 'long']:
+    if is_long(trade):
         # For long positions, check if there is enough cash to buy the option
-        if cash >= entry_price * 100:  # Cash needed to buy the option
-            cash -= entry_price * 100  # Deduct premium (convert to dollars)
-            # trade['entry_cash'] = cash  # Store cash snapshot at entry
+        if cash >= premium:  # Cash needed to buy the option
+            cash -= premium  # Deduct premium (convert to dollars)
             return trade, cash, option_bp
         else:
             logger.warning(f"Insufficient cash (${cash}) to buy option on {trade['entry_date']}. Required: ${abs(trade['premium']) * 100:.2f}")
             return None, cash, option_bp
 
     # Open SHORT position
-    elif trade['position_side'] in [PositionSide.SHORT, PositionSide.SHORT.value, 'short']:
+    elif is_short(trade):
         # For short positions, check if buying power is sufficient
         if option_bp >= effective_margin:
             option_bp -= effective_margin
-            # cash += entry_price * 100  # Credit premium
+            cash += premium  # Credit premium
             # trade['entry_cash'] = cash  # Store cash snapshot at entry
             return trade, cash, option_bp
         else:
@@ -775,49 +812,13 @@ def execute_backtest_trades(trades: pd.DataFrame,
             skipped_trades += 1
             continue
         
-        # Check if this trade meets our delta criteria before attempting execution
-        delta_col = "p_delta" if option_type in [OptionType.PUT, OptionType.PUT.value, "put"] else "c_delta"
-        trade_delta = trade_signal[delta_col]
-        
-        # For puts, we want negative deltas, so convert positive input to negative
-        if option_type in [OptionType.PUT, OptionType.PUT.value, "put"]:
-            target_delta = -abs(delta_target)
-            delta_diff = abs(trade_delta - target_delta)
-        else:
-            target_delta = abs(delta_target)
-            delta_diff = abs(trade_delta - target_delta)
-        
-        # Skip trades that are too far from our target delta
-        if delta_diff > 0.05:  # Allow 5% deviation from target delta
-            logger.debug(f"Skipping trade with delta {trade_delta:.2f} (target: {target_delta:.2f}, diff: {delta_diff:.2f})")
-            skipped_trades += 1
-            continue
-        
-        # Create Position from trade signal
-        entry_price = calculate_midpoint_price(
-                trade_signal['p_bid'] if option_type in [OptionType.PUT, OptionType.PUT.value, 'put'] else trade_signal['c_bid'],
-                trade_signal['p_ask'] if option_type in [OptionType.PUT, OptionType.PUT.value, 'put'] else trade_signal['c_ask']
-            )
-        
-        position = Position(
-            trade_id=trade_counter,
-            entry_date=current_date,
-            expire_date=trade_signal['expire_date'],
-            underlying_last=trade_signal['underlying_last'],
-            strike=trade_signal['strike'],
-            option_type=option_type,
-            position_side=position_side,
-            bid=trade_signal['p_bid'] if option_type in [OptionType.PUT, OptionType.PUT.value, 'put'] else trade_signal['c_bid'],
-            ask=trade_signal['p_ask'] if option_type in [OptionType.PUT, OptionType.PUT.value, 'put'] else trade_signal['c_ask'],
-            premium=entry_price if position_side in [PositionSide.SHORT.value, PositionSide.SHORT, 'short'] else -entry_price,
-            margin_required=trade_signal['margin_required'] if 'margin_required' in trade_signal else 0,
-            close_date=current_date + pd.Timedelta(days=early_close_days) if early_close_days is not None else None,
-            entry_delta=trade_signal['p_delta'] if option_type in [OptionType.PUT, OptionType.PUT.value, 'put'] else trade_signal['c_delta'],
-            entry_dte=trade_signal['dte'] if 'dte' in trade_signal else None
-        )
-            
+        # Create new trade from signal
+        new_trade = create_trade_from_signal(trade_signal, option_type, position_side, delta_target, current_date, early_close_days)
+        # Make sure we store signed price
+        # position['premium'] = get_signed_premium(position)    
+
         # Try to execute the new trade
-        executed_trade, cash, options_bp = execute_trade(position, cash, options_bp, leverage)
+        executed_trade, cash, options_bp = execute_trade(new_trade, cash, options_bp, leverage)
         if executed_trade:
             executed_trade['trade_id'] = trade_counter
             open_positions.append(executed_trade)
@@ -1409,13 +1410,13 @@ def calculate_daily_value(trade, date, options_chain_multi_index, spx_data, use_
         
         # Validate sign of value according to PositionSide
         try:
-            if is_long(trade.position_side):
+            if is_long(trade):
                 assert market_value >= 0 
             else:
-                assert is_short(trade.position_side)
+                assert is_short(trade)
                 assert market_value <= 0      
         except AssertionError as e:
-            if is_long(trade.position_side):
+            if is_long(trade):
                 market_value = abs(market_value)
             else:
                 market_value = -abs(market_value)
@@ -1486,7 +1487,7 @@ def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_
         
         logger.debug(f'Processing date: {date}')
         # First, check for any trades that start on this date
-        for trade in trade_results.itertuples():
+        for _, trade in trade_results.iterrows():
             trade_start = pd.Timestamp(trade.entry_date).normalize()
             trade_end = pd.Timestamp(trade.exit_date).normalize()
             trade_id = (trade.expire_date, trade.strike, trade.option_type)
@@ -1505,24 +1506,11 @@ def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_
                 if trade_end == date:
                     logger.debug(f'Closing trade: {trade_id}')
                     # Release margin back to BP for short positions
-                    if trade.position_side in [PositionSide.SHORT, PositionSide.SHORT.value, 'short']:
+                    if is_short(trade):
                         option_bp += active_trades[trade_id]['margin_requirement']
                     
                     # Validate closing/exit price sign 
-                    exit_price = trade.exit_price
-                    try:
-                        if is_long(trade.position_side):
-                            assert exit_price >= 0 
-                        else:
-                            assert is_short(trade.position_side)
-                            assert exit_price <= 0      
-                    except AssertionError as e:
-                        if is_long(trade.position_side):
-                            exit_price = abs(exit_price)
-                        else:
-                            exit_price = -abs(exit_price)
-
-
+                    exit_price = get_signed_exit_price(trade)
                     logger.debug(f'exit price: {exit_price}')
                     logger.debug(f'daily cash before: {daily_cash_flow}')
                     # Accumulate this to cash reserves
@@ -1548,20 +1536,8 @@ def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_
                         'margin_requirement': trade.capital_used
                     }
                     
-                    entry_price = round(trade.entry_price * 100, 2)  # in dollars
-
-                    # Validate sign of entry price acc. to PositionSide
-                    try:
-                        if is_long(trade.position_side):
-                            assert entry_price > 0 
-                        else:
-                            assert is_short(trade.position_side)
-                            assert entry_price < 0      
-                    except AssertionError as e:
-                        if is_long(trade.position_side):
-                            entry_price = -abs(entry_price)
-                        else:
-                            entry_price = abs(entry_price)
+                    entry_price = get_signed_entry_price(trade)
+                    entry_price = round(entry_price * 100, 2)  # in dollars
 
                     # Accumulate entry price to cash flow (signed based on position side)
                     logger.debug(f'entry price: {entry_price}')
@@ -1575,7 +1551,7 @@ def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_
                     daily_margin_requirement += req_margin
                     
                     # For short positions, reduce BP
-                    if trade.position_side in [PositionSide.SHORT, PositionSide.SHORT.value, 'short']:
+                    if is_short(trade):
                         option_bp -= req_margin / leverage  # Account for leverage in BP reduction
                     
                     logger.debug(f'Position Value: {position_value}, Entry Premium: {entry_price}')
@@ -1989,7 +1965,7 @@ def run_backtest(
     # Calculate Sharpe Ratio without risk-free rate
     sharpe = None
     if len(trade_results) > 1:
-        returns = np.diff(trade_results['cash'].values) / trade_results['cash'].values[:-1]
+        returns = np.diff(trade_results['capital'].values) / trade_results['capital'].values[:-1]
         if len(returns) > 0 and np.std(returns) > 0:
             sharpe = np.mean(returns) / np.std(returns) * np.sqrt(252)
             logger.info(f"Sharpe Ratio: {sharpe:.2f}")
@@ -2028,8 +2004,8 @@ def run_backtest(
     logger.info(f"Winning trades: {(trade_results['pnl'] > 0).sum()}")  # Updated to trade_results
     logger.info(f"Win rate: {((trade_results['pnl'] > 0).sum() / len(trade_results)):.2%}")  # Updated to trade_results
     logger.info(f"Total P&L: ${trade_results['cumulative_pnl'].iloc[-1]:,.2f}")  # Updated to trade_results
-    logger.info(f"Final capital: ${trade_results['cash'].iloc[-1]:,.2f}")  # Updated to trade_results
-    logger.info(f"Return on initial capital: {(trade_results['cash'].iloc[-1] / initial_capital - 1):.2%}")  # Updated to trade_results
+    logger.info(f"Final capital: ${trade_results['capital'].iloc[-1]:,.2f}")  # Updated to trade_results
+    logger.info(f"Return on initial capital: {(trade_results['capital'].iloc[-1] / initial_capital - 1):.2%}")  # Updated to trade_results
     logger.info(f"Average days held: {trade_results['days_held'].mean():.1f}")
     logger.info(f"Average return on margin: {trade_results['return_on_margin'].mean():.2f}%")
     logger.info(f"Maximum drawdown: ${max_drawdown:.2f} ({max_drawdown_pct:.2f}%)")
@@ -2171,7 +2147,7 @@ def calculate_net_liq(cash: float, open_positions: List[Position]) -> float:
     total_value = cash
     for position in open_positions:
         # Calculate market value of each position
-        market_value = calculate_intrinsic_value(position['underlying_last'], position['strike'], position['option_type'])
+        market_value = calculate_intrinsic_value(position['underlying_entry'], position['strike'], position['option_type'])
         total_value += market_value * 100  # Convert to dollars
     
     return total_value

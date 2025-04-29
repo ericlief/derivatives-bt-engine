@@ -122,7 +122,7 @@ def run_test_suite():
             logger.info(f"Total trades: {len(result_df)}")
             logger.info(f"Win rate: {(result_df['pnl'] > 0).mean():.2%}")
             logger.info(f"Total P&L: ${result_df['pnl'].sum():.2f}")
-            logger.info(f"Return on capital: {(result_df['cash'].iloc[-1] / params['initial_capital'] - 1):.2%}")
+            logger.info(f"Return on capital: {(result_df['capital'].iloc[-1] / params['initial_capital'] - 1):.2%}")
             logger.info(f"Average days held: {result_df['days_held'].mean():.1f}")
             logger.info(f"Average return on margin: {result_df['return_on_margin'].mean():.2f}%")
         else:
