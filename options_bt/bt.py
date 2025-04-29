@@ -99,17 +99,18 @@ class TradeResult(TypedDict):
     strike: float
     entry_price: float
     exit_price: float
-    pnl: float
     option_bp: float
     return_on_margin: float
     close_reason: str
+    pnl: float
 
-def is_put(trade):
+
+def is_put(trade: Union[Position, OptionType, str]) -> bool:
     """
     Checks if the option type is a PUT.
 
     Args:
-        trade (Position or OptionType): The trade to check.
+        trade (Union[Position, OptionType, str]): The trade to check. Can be a Position dictionary, an OptionType enum, or a string.
 
     Returns:
         bool: True if the option type is a PUT, False otherwise.
@@ -118,19 +119,20 @@ def is_put(trade):
         option_type = trade['option_type']
     elif isinstance(trade, OptionType):
         option_type = trade
+    elif isinstance(trade, str):
+        option_type = trade
     else:
-        logger.error(f'Need to pass either a Position or OptionType to is_put func, got {type(trade)}')
-        raise TypeError(f'Need to pass either a Position or OptionType arg to is_put func, got {type(trade)}')
-        # return None
+        logger.error(f'Invalid argument type passed to is_put func: {type(trade)}')
+        raise TypeError(f'Invalid argument type passed to is_put func: {type(trade)}')
 
     return option_type in [OptionType.PUT, OptionType.PUT.value, "put"]
 
-def is_call(trade):
+def is_call(trade: Union[Position, OptionType, str]) -> bool:
     """
     Checks if the option type is a CALL.
 
     Args:
-        trade (Position or OptionType): The trade to check.
+        trade (Union[Position, OptionType, str]): The trade to check. Can be a Position dictionary, an OptionType enum, or a string.
 
     Returns:
         bool: True if the option type is a CALL, False otherwise.
@@ -139,20 +141,20 @@ def is_call(trade):
         option_type = trade['option_type']
     elif isinstance(trade, OptionType):
         option_type = trade
+    elif isinstance(trade, str):
+        option_type = trade
     else:
-        logger.error(f'Need to pass either a Position or OptionType to is_call func, got {type(trade)}')
-        raise TypeError(f'Need to pass either a Position or OptionType arg to is_call func, got {type(trade)}')
-        # return None
+        logger.error(f'Invalid argument type passed to is_call func: {type(trade)}')
+        raise TypeError(f'Invalid argument type passed to is_call func: {type(trade)}')
 
     return option_type in [OptionType.CALL, OptionType.CALL.value, "call"]
 
-
-def is_short(trade: Union[Position, PositionSide, pd.Series, str]):
+def is_short(trade: Union[Position, PositionSide, pd.Series, str]) -> bool:
     """
-    Check if the position is short.
+    Checks if the position is short.
 
     Args:
-        trade (Position or PositionSide): The trade to check.
+        trade (Union[Position, PositionSide, pd.Series, str]): The trade to check. Can be a Position dictionary, a PositionSide enum, a pandas Series, or a string.
 
     Returns:
         bool: True if the position is short, False otherwise.
@@ -168,16 +170,15 @@ def is_short(trade: Union[Position, PositionSide, pd.Series, str]):
     else:
         logger.error(f'Need to pass either a Position or PositionSide arg to is_short func, got {type(trade)}')
         raise TypeError(f'Need to pass either a Position or PositionSide arg to is_short func, got {type(trade)}')
-        # return None
     
     return position_side in [PositionSide.SHORT, PositionSide.SHORT.value, 'short']
 
-def is_long(trade: Union[Position, PositionSide, pd.Series, str]):
+def is_long(trade: Union[Position, PositionSide, pd.Series, str]) -> bool:
     """
-    Check if the position is long.
+    Checks if the position is long.
 
     Args:
-        trade (Position or PositionSide): The trade to check.
+        trade (Union[Position, PositionSide, pd.Series, str]): The trade to check. Can be a Position dictionary, a PositionSide enum, a pandas Series, or a string.
 
     Returns:
         bool: True if the position is long, False otherwise.
@@ -193,12 +194,12 @@ def is_long(trade: Union[Position, PositionSide, pd.Series, str]):
     else:
         logger.error(f'Need to pass either a Position or PositionSide arg to is_long func, got {type(trade)}')
         raise TypeError(f'Need to pass either a Position or PositionSide arg to is_long func, got {type(trade)}')
-        # return None
+    
     return position_side in [PositionSide.LONG, PositionSide.LONG.value, 'long']
 
 def get_signed_entry_price(trade: Union[Position, pd.Series]) -> float:
     """
-    Adjusts the premium based on the position side.
+    Adjusts the entry price based on the position side.
 
     Args:
         trade (Union[Position, pd.Series]): The trade object containing position details or a pandas Series.
@@ -209,13 +210,12 @@ def get_signed_entry_price(trade: Union[Position, pd.Series]) -> float:
     if isinstance(trade, dict) and 'position_side' in trade and 'entry_price' in trade:
         position_side = trade['position_side']
         entry_price = trade['entry_price']
-    elif isinstance(trade, pd.Series) and 'position_side' in trade and 'entry_price' in trade:   # Union of pd.Series and TradeResult
+    elif isinstance(trade, pd.Series) and 'position_side' in trade and 'entry_price' in trade:
         position_side = trade.position_side
         entry_price = trade.entry_price
     else:
         logger.error(f'Need to pass either a Position or pd.Series arg, got {type(trade)}')
         raise TypeError(f'Need to pass either a Position or pd.Series, got {type(trade)}')
-        # return None
     
     # Validate sign of entry price acc. to PositionSide
     try:
@@ -235,13 +235,13 @@ def get_signed_entry_price(trade: Union[Position, pd.Series]) -> float:
 
 def get_signed_exit_price(trade: Union[Position, pd.Series]) -> float:
     """
-    Adjusts the close price based on the position side.
+    Adjusts the exit price based on the position side.
 
     Args:
-        entry_price (float): The entry price of the trade.
+        trade (Union[Position, pd.Series]): The trade object containing position details or a pandas Series.
 
     Returns:
-        float: The signed entry price adjusted for position side.
+        float: The signed exit price adjusted for position side.
     """
     if isinstance(trade, dict) and 'position_side' in trade and 'exit_price' in trade:
         position_side = trade['position_side']
@@ -341,8 +341,8 @@ def calculate_intrinsic_value(underlying_price: float, strike: float, option_typ
     # else:
     #     is_put = option_type == OptionType.PUT
     
-    logger.debug(f'Expiration. Calculating intrinsic value for {option_type}, strike={strike}, underlying={underlying_price}, is_put:{is_put}')
-    logger.debug(f'{max(0, strike - underlying_price) if is_put(option_type) else max(0, underlying_price - strike)}')
+    logger.debug(f'Expiration. Calculating intrinsic value for {option_type}, strike={strike}, underlying={underlying_price}')
+    logger.debug(f'IV: {max(0, strike - underlying_price) if is_put(option_type) else max(0, underlying_price - strike)}')
 
     
     if is_put(option_type):
@@ -446,7 +446,7 @@ def get_closing_data(
     delta_col = "p_delta" if is_put(position) else 'c_delta'
 
     # Try each date in the filtered data until we find valid prices
-    for idx, row in filtered_df.iterrows():
+    for _, row in filtered_df.iterrows():
         bid = row[bid_col]
         ask = row[ask_col]
         underlying_close = row['underlying_last']
@@ -474,7 +474,7 @@ def calculate_option_pnl(position: PositionSide) -> float:
     """
     # Calculate P&L using entry and closing prices (signed)
     pnl = position['entry_price'] + position['exit_price']
-    return pnl * 100 if is_put(position) else max(0, pnl * 100) # clamp loss to zero if LONG
+    return pnl * 100 if is_short(position) else max(0, pnl * 100) # clamp loss to zero if LONG
 
 def close_position(position: Position, 
                   full_chain_df: pd.DataFrame, 
@@ -544,7 +544,7 @@ def close_position(position: Position,
     
     # Calculate final cash using entry cash and exit price only (avoid double counting premium)
     cash = (position['entry_price'] + position['exit_price']) * 100  # Convert to dollars
-    logger.debug(f'Final cash: entry_cash + exit_price = {position["entry_price"]} + {position["exit_price"]} = {cash}')
+    logger.debug(f'pnl = entry_cash + exit_price: {position["entry_price"]} + {position["exit_price"]} = {cash}')
     
     # Restore buying power for short positions
     req_margin = position['margin_required']
@@ -576,11 +576,11 @@ def close_position(position: Position,
         'strike': position['strike'], 
         'entry_price': round(position['entry_price'], 2),
         'exit_price': round(position['exit_price'], 2),
-        'pnl': round(pnl, 2),
         'capital_used': req_margin,
         'option_bp': round(option_bp, 2),
         'return_on_margin': round(pnl / position['margin_required'] * 100, 2) if position['margin_required'] > 0 else 0,
-        'close_reason': close_reason
+        'close_reason': close_reason,
+        'pnl': round(pnl, 2)
     }
     return trade_result
 
@@ -823,9 +823,9 @@ def execute_backtest_trades(trades: pd.DataFrame,
             executed_trade['trade_id'] = trade_counter
             open_positions.append(executed_trade)
             trade_counter += 1  # Increment counter only for successful trades
-            logger.debug(f'Opened position: {executed_trade}'
-                         f'Cash: ${cash:.2f}, BP: ${options_bp:.2f}'
-                         f'signal: {trade_signal}')
+            logger.debug(f'Opened position: {executed_trade}')
+            logger.debug(f'Cash: ${cash:.2f}, BP: ${options_bp:.2f}')
+            # logger.debug(f'signal: {trade_signal}')
         else:
             skipped_trades += 1
     
@@ -1938,12 +1938,12 @@ def run_backtest(
     
     # Calculate MTM
     mtm_start = time.time()
-    param_str = f"{option_type.value}_{position_side.value}_delta{delta_target}_dte{dte_range[0]}-{dte_range[1]}"
+    param_str = f"{option_type.value}_{position_side.value}_delta{delta_target}_dte{dte_range[0]}-{dte_range[1]}_date{start_date}_{end_date}"
     daily_df, max_drawdown, max_drawdown_pct = calculate_mtm(
         start_date=start_date,
         end_date=end_date,
         initial_capital=initial_capital,
-        trade_results= trade_results,
+        trade_results=trade_results,
         options_chain_multi_index=options_chain_multi_index,
         spx_data=spx_data,
         param_str=param_str,
@@ -1976,12 +1976,30 @@ def run_backtest(
         results_dir = 'results'
         os.makedirs(results_dir, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # Save trades
         trades_csv_path = os.path.join(results_dir, f"trades_{param_str}_{timestamp}.csv")
         trade_results.to_csv(trades_csv_path, index=False)
         
         # Save MTM results with same timestamp
         mtm_csv_path = os.path.join(results_dir, f"mtm_{param_str}_{timestamp}.csv")
         daily_df.to_csv(mtm_csv_path, index=False)
+        
+        # Create results file for logging summary
+        results_file_path = os.path.join(results_dir, f"backtest_results_{timestamp}.txt")
+        with open(results_file_path, 'w') as results_file:
+            results_file.write("Backtest Results Summary:\n")
+            results_file.write(f"Total trades executed: {len(trade_results)}\n")
+            results_file.write(f"Winning trades: {(trade_results['pnl'] > 0).sum()}\n")
+            results_file.write(f"Win rate: {((trade_results['pnl'] > 0).sum() / len(trade_results)):.2%}\n")
+            results_file.write(f"Total P&L: ${trade_results['cumulative_pnl'].iloc[-1]:,.2f}\n")
+            results_file.write(f"Final capital: ${trade_results['capital'].iloc[-1]:,.2f}\n")
+            results_file.write(f"Return on initial capital: {(trade_results['capital'].iloc[-1] / initial_capital - 1):.2%}\n")
+            results_file.write(f"Average days held: {trade_results['days_held'].mean():.1f}\n")
+            results_file.write(f"Average return on margin: {trade_results['return_on_margin'].mean():.2f}%\n")
+            results_file.write(f"Maximum drawdown: ${max_drawdown:.2f} ({max_drawdown_pct:.2f}%)\n")
+
+        logger.info(f"Results saved to {results_file_path}")
         
         save_time = time.time() - save_start
         logger.info(f"Trades saved to {trades_csv_path} in {save_time:.2f} seconds")
