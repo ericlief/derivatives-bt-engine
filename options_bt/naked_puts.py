@@ -20,13 +20,15 @@ def run_test_suite():
         {
             'option_type': OptionType.PUT,
             'position_side': PositionSide.SHORT,
-            'delta_target': 0.30,
+            'delta_range': (0.30, 0.40),
             'use_spx_close': True,
             'start_date': "2011-01-01",
             'end_date': "2011-12-31",
-            'dte_range': (41, 45),
+            # 'dte_range': (41, 45),
+            'dte_target': 45,
             'initial_capital': 100000,
             'early_close_days': None,
+            'quantity': 1,
             'max_positions': 1
         },
         # {

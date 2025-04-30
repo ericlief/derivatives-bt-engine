@@ -67,6 +67,7 @@ class PositionSide(Enum):
 
 class Position(TypedDict):
     trade_id: int
+    quantity: int
     entry_date: pd.Timestamp
     expire_date: pd.Timestamp
     underlying_entry: float
@@ -85,6 +86,7 @@ class Position(TypedDict):
 
 class TradeResult(TypedDict):
     trade_id: int
+    quantity: int
     option_type: str
     position_side: str
     entry_date: pd.Timestamp
@@ -474,7 +476,7 @@ def calculate_option_pnl(position: PositionSide) -> float:
     """
     # Calculate P&L using entry and closing prices (signed)
     pnl = position['entry_price'] + position['exit_price']
-    return pnl * 100 if is_short(position) else max(0, pnl * 100) # clamp loss to zero if LONG
+    return pnl * 100 * position['quantity'] if is_short(position) else max(0, pnl * 100 * position['quantity']) # clamp loss to zero if LONG
 
 def close_position(position: Position, 
                   full_chain_df: pd.DataFrame, 
@@ -543,7 +545,7 @@ def close_position(position: Position,
     logger.debug(f'Calculated pnl: {pnl}')
     
     # Calculate final cash using entry cash and exit price only (avoid double counting premium)
-    cash = (position['entry_price'] + position['exit_price']) * 100  # Convert to dollars
+    cash = (position['entry_price'] + position['exit_price']) * 100 * position['quantity']  # Convert to dollars
     logger.debug(f'pnl = entry_cash + exit_price: {position["entry_price"]} + {position["exit_price"]} = {cash}')
     
     # Restore buying power for short positions
@@ -562,6 +564,7 @@ def close_position(position: Position,
     
     trade_result: TradeResult = {
         'trade_id': position['trade_id'],
+        'quantity': position['quantity'],
         'option_type': position['option_type'].value if isinstance(position['option_type'], Enum) else str(position['option_type']),
         'position_side': position['position_side'].value if isinstance(position['position_side'], Enum) else str(position['position_side']),
         'entry_date': position['entry_date'],
@@ -590,7 +593,8 @@ def create_trade_from_signal(
     position_side: PositionSide,
     delta_target: float,
     entry_date: pd.Timestamp,  # Assuming entry_date is a pandas Timestamp
-    early_close_days: Optional[int] = None  # Optional parameter
+    early_close_days: Optional[int] = None,  # Optional parameter
+    delta_range: Tuple[float, float] = None  # Add delta_range here
 ) -> Optional[Position]:
     """
     Creates a Position object from a given trade signal.
@@ -605,6 +609,7 @@ def create_trade_from_signal(
         delta_target (float): The target delta for the trade.
         entry_date (pd.Timestamp): The date of entry into the trade.
         early_close_days (Optional[int]): The number of days before expiration to close the trade early. Defaults to None.
+        delta_range (Tuple[float, float]): The range of delta values to consider.
 
     Returns:
         Optional[Position]: A Position object if the trade is valid, otherwise None.
@@ -617,14 +622,29 @@ def create_trade_from_signal(
     
     # For puts, we want negative deltas, so convert positive input to negative
     if is_put(option_type):
-        target_delta = -abs(delta_target)
-        delta_diff = abs(trade_delta - target_delta)
+        target_delta = -abs(delta_target) if delta_target is not None else None
+        delta_diff = abs(trade_delta - target_delta) if target_delta is not None else None
     else:
-        target_delta = abs(delta_target)
-        delta_diff = abs(trade_delta - target_delta)
-    
+        target_delta = abs(delta_target) if delta_target is not None else None
+        delta_diff = abs(trade_delta - target_delta) if target_delta is not None else None
+
+    # Check if delta_range is provided and filter accordingly
+    if delta_range:
+        if is_put(option_type):
+            min_delta = -abs(delta_range[1])  # More negative (further OTM)
+            max_delta = -abs(delta_range[0])  # Less negative (closer to ATM)
+        else:
+            min_delta = abs(delta_range[0])  # Less positive (closer to ATM)
+            max_delta = abs(delta_range[1])  # More positive (further OTM)
+
+        # Check if trade_delta is within the delta range
+        if not (min_delta <= trade_delta <= max_delta):
+            logger.debug(f"Skipping trade with delta {trade_delta:.2f} (not in range: {min_delta:.2f} to {max_delta:.2f})")
+            skipped_trades += 1
+            return None
+
     # Skip trades that are too far from our target delta
-    if delta_diff > 0.05:  # Allow 5% deviation from target delta
+    if delta_diff is not None and delta_diff > 0.05:  # Allow 5% deviation from target delta
         logger.debug(f"Skipping trade with delta {trade_delta:.2f} (target: {target_delta:.2f}, diff: {delta_diff:.2f})")
         skipped_trades += 1
         return None
@@ -698,6 +718,7 @@ def create_trade_from_signal(
     # Create the position with date    
     position = Position(
         trade_id=None,
+        quantity=1,  # Added quantity field
         entry_date=entry_date,
         expire_date=trade_signal['expire_date'],
         underlying_entry=underlying_price,
@@ -714,7 +735,11 @@ def create_trade_from_signal(
     )
     return position
 
-def execute_trade(trade: Position, cash: float, option_bp: float, leverage: float = 4.0) -> Tuple[Optional[Position], float, float]:
+def execute_trade(trade: Position, 
+                cash: float, 
+                option_bp: float, 
+                leverage: float = 4.0, 
+                quantity: int = 1) -> Tuple[Optional[Position], float, float]:
     """
     Execute a trade with the given position, cash, option buying power, and leverage.
     
@@ -723,12 +748,13 @@ def execute_trade(trade: Position, cash: float, option_bp: float, leverage: floa
         cash: Current cash available
         option_bp: Current buying power for options
         leverage: Leverage for the trade (default: 4.0)
+        quantity: Number of contracts to trade (default: 1)
     
     Returns:
         Tuple of (trade, cash, option_bp) if successful, None if trade cannot be executed
     """
     # Use premium directly
-    premium = abs(trade['entry_price']) * 100
+    premium = abs(trade['entry_price']) * 100 * quantity  # Adjusted for quantity
     # Calculate effective margin requirement with leverage
     effective_margin = trade['margin_required'] / leverage
     
@@ -748,10 +774,9 @@ def execute_trade(trade: Position, cash: float, option_bp: float, leverage: floa
         if option_bp >= effective_margin:
             option_bp -= effective_margin
             cash += premium  # Credit premium
-            # trade['entry_cash'] = cash  # Store cash snapshot at entry
             return trade, cash, option_bp
         else:
-            logger.warning(f"Insufficient buying power (${option_bp}) for trade on {trade['entry_date']}. Requires: ${effective_margin:.2f} with {leverage}x leverage")
+            logger.warning(f"Insufficient buying power (${option_bp}) for trade on {trade['entry_date']}. Requires: ${effective_margin:.2f}")
             return None, cash, option_bp
 
     else:
@@ -767,7 +792,9 @@ def execute_backtest_trades(trades: pd.DataFrame,
                             max_positions: int = 1,
                             leverage: float = 1.0,
                             early_close_days: int = None,
-                            delta_target: float = None
+                            delta_target: float = None,
+                            delta_range: Tuple[float, float] = None,
+                            quantity: int = 1
                            ) -> pd.DataFrame:
     """
     Execute a series of trades and track results.
@@ -813,12 +840,12 @@ def execute_backtest_trades(trades: pd.DataFrame,
             continue
         
         # Create new trade from signal
-        new_trade = create_trade_from_signal(trade_signal, option_type, position_side, delta_target, current_date, early_close_days)
+        new_trade = create_trade_from_signal(trade_signal, option_type, position_side, delta_target, current_date, early_close_days, delta_range)  # Pass delta_range here
         # Make sure we store signed price
         # position['premium'] = get_signed_premium(position)    
 
         # Try to execute the new trade
-        executed_trade, cash, options_bp = execute_trade(new_trade, cash, options_bp, leverage)
+        executed_trade, cash, options_bp = execute_trade(new_trade, cash, options_bp, leverage, quantity=1)
         if executed_trade:
             executed_trade['trade_id'] = trade_counter
             open_positions.append(executed_trade)
@@ -1210,14 +1237,12 @@ def generate_trade_signals(
     if delta_range:
         # Handle range case
         if option_type in [OptionType.PUT, OptionType.PUT.value, "put"]:
-            # For puts, we want negative deltas, so convert positive input to negative
             min_delta = -abs(delta_range[1])  # More negative (further OTM)
             max_delta = -abs(delta_range[0])  # Less negative (closer to ATM)
         else:
-            # For calls, we want positive deltas
             min_delta = abs(delta_range[0])  # Less positive (closer to ATM)
             max_delta = abs(delta_range[1])  # More positive (further OTM)
-        
+
         logger.debug(f'Filtering for delta range: {min_delta} to {max_delta} for {option_type.value}')
         delta_mask = chain_df[delta_col].between(min_delta, max_delta)
         chain_df = chain_df[delta_mask]
@@ -1351,16 +1376,16 @@ def check_data_quality(options_chain, spx_data, vix_data):
     
     logger.info("\n=== End Data Quality Check ===\n")
 
-def calculate_daily_value(trade, date, options_chain_multi_index, spx_data, use_spx_close: bool = True):
+def calculate_daily_value(trade: pd.Series, date: pd.Timestamp, options_chain_multi_index: pd.MultiIndex, spx_data: pd.DataFrame, use_spx_close: bool = True):
     """
     Calculate the daily market value of open positions and margin requirements.
     
     Args:
-        trade: Trade result containing position details
-        date: Date to calculate value for
-        options_chain_multi_index: MultiIndex DataFrame with option chain data
-        spx_data: DataFrame containing SPX closing prices
-        use_spx_close: Whether to use SPX close price (True) or underlying_last from options data (False)
+        trade (pd.Series): Trade result containing trade results.
+        date (pd.Timestamp): Date to calculate value for.
+        options_chain_multi_index (pd.MultiIndex): MultiIndex DataFrame with option chain data.
+        spx_data (pd.DataFrame): DataFrame containing SPX closing prices.
+        use_spx_close (bool, optional): Whether to use SPX close price (True) or underlying_last from options data (False).
     
     Returns:
         Market value of the position
@@ -1392,7 +1417,7 @@ def calculate_daily_value(trade, date, options_chain_multi_index, spx_data, use_
                 # logger.debug(f"Using options chain underlying_last: {underlying_price}")
 
             close = calculate_intrinsic_value(underlying_price, trade.strike, trade.option_type)
-            market_value = round(close * 100, 2)
+            market_value = round(close * 100 * trade.quantity, 2)
             # logger.debug(f'Calculated intrinsic value on date={date} for strike={trade.strike} and value={market_value}')
 
         # Either MTM daily or early closure, so calculate mid point of bid/ask quote
@@ -1405,7 +1430,7 @@ def calculate_daily_value(trade, date, options_chain_multi_index, spx_data, use_
             if mid is None:
                 logger.warning(f"Invalid bid/ask prices on {date} for strike {trade.strike}: bid={bid}, ask={ask}")
                 return None
-            market_value = round(100 * mid, 2)
+            market_value = round(mid * 100 * trade.quantity, 2)
             # logger.debug(f'Calculated mid value on date={date} for strike={trade.strike}, bid={bid}, ask={ask}, mid={mid}, value={market_value}')
         
         # Validate sign of value according to PositionSide
@@ -1720,104 +1745,7 @@ def prepare_options_chain(options_chain, path, param_str):
     
     return pivoted_chain
 
-def log_to_google_sheets(results_df: pd.DataFrame, param_str: str, daily_df: pd.DataFrame = None):
-    """
-    Log backtest results to Google Sheets.
-    
-    Args:
-        results_df: DataFrame containing trade results
-        param_str: String describing the backtest parameters
-        daily_df: Optional DataFrame containing daily MTM data
-    """
-    try:
-        # Set up credentials
-        scope = ['https://spreadsheets.google.com/feeds',
-                'https://www.googleapis.com/auth/drive']
-        
-        # Load credentials from environment variable or file
-        creds_json = os.getenv('GOOGLE_CREDS_JSON')
-        if creds_json:
-            creds_dict = json.loads(creds_json)
-        else:
-            creds_path = os.path.join(os.path.dirname(__file__), 'credentials.json')
-            with open(creds_path, 'r') as f:
-                creds_dict = json.load(f)
-        
-        credentials = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-        gc = gspread.authorize(credentials)
-        
-        # Open the spreadsheet
-        spreadsheet = gc.open('Options Backtest Results')
-        
-        # Create a new worksheet for this backtest
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        worksheet_name = f"Backtest_{timestamp}"
-        worksheet = spreadsheet.add_worksheet(title=worksheet_name, rows=1000, cols=20)
-        
-        # Write summary statistics
-        summary_data = [
-            ['Backtest Summary', ''],
-            ['Timestamp', datetime.now().strftime('%Y-%m-%d %H:%M:%S')],
-            ['Parameters', param_str],
-            ['Total Trades', len(results_df)],
-            ['Win Rate', f"{(results_df['pnl'] > 0).mean():.2%}"],
-            ['Average P&L', f"${results_df['pnl'].mean():.2f}"],
-            ['Total P&L', f"${results_df['pnl'].sum():.2f}"],
-            ['Initial Capital', f"${results_df['cash'].iloc[0]:.2f}"],
-            ['Final Capital', f"${results_df['cash'].iloc[-1]:.2f}"],
-            ['Return on Capital', f"{(results_df['cash'].iloc[-1] / results_df['cash'].iloc[0] - 1):.2%}"],
-            ['Average Days Held', f"{results_df['days_held'].mean():.1f}"],
-            ['Average Return on Margin', f"{results_df['return_on_margin'].mean():.2f}%"],
-            ['Maximum Drawdown', f"${results_df['drawdown'].min():.2f} ({results_df['drawdown_pct'].min():.2f}%)"],
-            ['', ''],
-            ['Trade Results', '']
-        ]
-        
-        # Write summary data
-        worksheet.update('A1', summary_data)
-        
-        # Write trade results
-        if not results_df.empty:
-            # Prepare trade results data
-            trade_results = results_df[[
-                'entry_date', 'exit_date', 'strike', 'option_type', 
-                'position_side', 'entry_price', 'exit_price', 'pnl',
-                'days_held', 'return_on_margin'
-            ]].copy()
-            
-            # Format dates
-            trade_results['entry_date'] = trade_results['entry_date'].dt.strftime('%Y-%m-%d')
-            trade_results['exit_date'] = trade_results['exit_date'].dt.strftime('%Y-%m-%d')
-            
-            # Write headers
-            worksheet.update('A15', [trade_results.columns.tolist()])
-            # Write data
-            worksheet.update('A16', trade_results.values.tolist())
-        
-        # Write daily MTM data if available
-        if daily_df is not None:
-            # Add a separator
-            worksheet.update(f'A{len(results_df) + 20}', [['', ''], ['Daily MTM Data', '']])
-            
-            # Prepare daily data
-            daily_data = daily_df[[
-                'Date', 'Net Liquidity', 'Position Value', 
-                'Daily P&L', 'Cumulative P&L', 'Drawdown (%)'
-            ]].copy()
-            
-            # Format dates
-            daily_data['Date'] = daily_data['Date'].dt.strftime('%Y-%m-%d')
-            
-            # Write headers
-            worksheet.update(f'A{len(results_df) + 22}', [daily_data.columns.tolist()])
-            # Write data
-            worksheet.update(f'A{len(results_df) + 23}', daily_data.values.tolist())
-        
-        logger.info(f"Results logged to Google Sheets in worksheet: {worksheet_name}")
-        
-    except Exception as e:
-        logger.error(f"Error logging to Google Sheets: {str(e)}")
-        raise
+
 
 def run_backtest(
     *,
@@ -1825,11 +1753,13 @@ def run_backtest(
     options_chain_file_path: str,
     option_type: OptionType,
     position_side: PositionSide,
-    delta_target: float,
+    delta_target: float = None,  # Optional target for delta
+    delta_range: tuple = (28, 31),  # Range for delta
+    dte_target: int = None,  # Optional target for days to expiration
+    dte_range: tuple = (28, 31),  # Range for days to expiration
     use_spx_close: bool = False,
     start_date: str = None,
     end_date: str = None,
-    dte_range: tuple = (28, 31),
     initial_capital: float = 100000,
     early_close_days: int = None,
     use_preprocessed: bool = True,
@@ -1837,19 +1767,20 @@ def run_backtest(
     save_trades: bool = True,
     preloaded_data: dict = None,
     log_to_sheets: bool = True,
-    max_margin_utilization: float = 0.80,  # Maximum percentage of capital that can be used for margin
-    leverage: float = 1.0,  # New parameter: leverage multiplier (e.g. 4.0 for 4x leverage)
-    max_positions: int = 1  # Maximum number of simultaneous positions allowed
+    max_margin_utilization: float = 0.80,
+    leverage: float = 1.0,
+    max_positions: int = 1,
+    quantity: int = 1  # Add quantity parameter
 ) -> pd.DataFrame:
-    """
-    Run a backtest with the given parameters.
     
-    Args:
-        ... (existing args) ...
-        max_margin_utilization: Maximum percentage of capital that can be used for margin (0.0 to 1.0)
-        leverage: Leverage multiplier for margin requirements (e.g. 4.0 for 4x leverage)
-        max_positions: Maximum number of simultaneous positions allowed (default: 1)
-    """
+
+    # Validation for delta and dte parameters
+    if delta_target is None and delta_range is None:
+        raise ValueError("You must provide either 'delta_target' or 'delta_range'.")
+    
+    if dte_target is None and dte_range is None:
+        raise ValueError("You must provide either 'dte_target' or 'dte_range'.")
+    
     start_time = time.time()
     logger.info(f"Starting backtest at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
@@ -1884,8 +1815,8 @@ def run_backtest(
         options_chain,
         option_type=option_type,
         delta_target=delta_target,
-        delta_range=None,
-        dte_target=dte_range[0],
+        delta_range=delta_range,
+        dte_target=dte_target,
         dte_range=dte_range,
         start_date=start_date,
         end_date=end_date
@@ -1906,7 +1837,7 @@ def run_backtest(
             position_side,
             row['strike'],
             option_type
-        ),
+        ) * quantity,  # Multiply by quantity
         axis=1
     )
     
@@ -1931,14 +1862,15 @@ def run_backtest(
         max_positions=max_positions,
         leverage=leverage,
         early_close_days=early_close_days,
-        delta_target=delta_target  # Pass delta_target through
+        delta_target=delta_target,  # Pass delta_target through
+        delta_range=delta_range  # Pass delta_range through
     )
     backtest_time = time.time() - backtest_start
     logger.info(f"Backtest execution completed in {backtest_time:.2f} seconds")
     
     # Calculate MTM
     mtm_start = time.time()
-    param_str = f"{option_type.value}_{position_side.value}_delta{delta_target}_dte{dte_range[0]}-{dte_range[1]}_date{start_date}_{end_date}"
+    param_str = f"{option_type.value}_{position_side.value}_{f'{delta_range[0]}:{delta_range[1]}' if delta_range else delta_target}_{f'{dte_range[0]}:{dte_range[1]}' if dte_range else dte_target}_{start_date}:{end_date}"
     daily_df, max_drawdown, max_drawdown_pct = calculate_mtm(
         start_date=start_date,
         end_date=end_date,
@@ -1986,7 +1918,7 @@ def run_backtest(
         daily_df.to_csv(mtm_csv_path, index=False)
         
         # Create results file for logging summary
-        results_file_path = os.path.join(results_dir, f"backtest_results_{timestamp}.txt")
+        results_file_path = os.path.join(results_dir, f"backtest_results_{param_str}_{timestamp}.txt")
         with open(results_file_path, 'w') as results_file:
             results_file.write("Backtest Results Summary:\n")
             results_file.write(f"Total trades executed: {len(trade_results)}\n")
@@ -2102,8 +2034,12 @@ def run_multiple_backtests(
             'options_chain_file_path': options_chain_file_path,
             'option_type': params['option_type'],
             'position_side': params['position_side'],
-            'delta_target': params['delta_target'],
-            'preloaded_data': preloaded_data
+            'delta_target': params.get('delta_target'),  # Use .get() to avoid KeyError
+            'delta_range': params.get('delta_range'),    # Include delta_range
+            'dte_target': params.get('dte_target'),      # Include dte_target
+            'dte_range': params.get('dte_range'),        # Include dte_range
+            'preloaded_data': preloaded_data,
+            'quantity': params.get('quantity', 1)  # Include quantity, default to 1 if not specified
         }
         
         # Add optional parameters from params
@@ -2190,6 +2126,7 @@ if __name__ == "__main__":
         position_side=PositionSide.SHORT,
         delta_target=0.30,
         use_spx_close=True,
+        quantity=5,  # Specify the quantity here
         **{
             'start_date': "2020-01-01",
             'end_date': "2020-12-31",
