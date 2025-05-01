@@ -101,6 +101,7 @@ class TradeResult(TypedDict):
     strike: float
     entry_price: float
     exit_price: float
+    capital_used: float  
     option_bp: float
     return_on_margin: float
     close_reason: str
@@ -486,20 +487,26 @@ def close_position(position: Position,
     Close an open option position and calculate results.
     
     Args:
-        position: Position containing trade details
-        full_chain_df: DataFrame containing full option chain data
-        underlying_price_history: DataFrame containing underlying price data
-        option_bp: Current buying power before closing position
+        position: Position containing trade details.
+        full_chain_df: DataFrame containing full option chain data.
+        underlying_price_history: DataFrame containing underlying price data.
+        option_bp: Current buying power before closing position.
     
     Returns:
-        TradeResult if successful, None if closing data is unavailable
+        TradeResult if successful, None if closing data is unavailable.
+
+    Note:
+        This function does not track cash flow explicitly due to the complexities 
+        involved in managing multiple simultaneous trades. Instead, it updates 
+        the buying power (options_bp) to reflect the profit and loss (P&L) 
+        from closed trades and restores margin held for short positions. 
+        As a result, the cash flow is implicitly represented through the 
+        adjustments made to the buying power.
     """
     close_reason = None
-
-    # # Define minimum valid date for validation
     min_valid_date = pd.Timestamp('1990-01-01')  # Arbitrary date well after 1970
     
-    # # Validate entry_date
+    # Validate entry_date
     entry_date = position['entry_date']
     if not isinstance(entry_date, pd.Timestamp) or entry_date <= min_valid_date:
         logger.error(f"Invalid entry date: {entry_date} - skipping trade")
@@ -536,24 +543,18 @@ def close_position(position: Position,
         logger.warning("Skipping trade due to missing close data")
         return None
     
-    # Handle sign for credit/debit prices (i.e. short vs. long)
-    # signed_exit_price = abs(exit_price) if position['position_side'] in [PositionSide.LONG, PositionSide.LONG.value, 'long'] else -exit_price
-    # logger.debug(f'Premium: {position["premium"]}, Exit_price: {signed_exit_price}')
-
     # Calculate P&L using the premium from entry
     pnl = calculate_option_pnl(position)
     logger.debug(f'Calculated pnl: {pnl}')
     
-    # Calculate final cash using entry cash and exit price only (avoid double counting premium)
-    cash = (position['entry_price'] + position['exit_price']) * 100 * position['quantity']  # Convert to dollars
-    logger.debug(f'pnl = entry_cash + exit_price: {position["entry_price"]} + {position["exit_price"]} = {cash}')
-    
+    # Update buying power to reflect the P&L from the closed trade
+    option_bp += pnl  # Adjust buying power based on the realized P&L
+
     # Restore buying power for short positions
     req_margin = position['margin_required']
     if is_short(position):
-        option_bp += req_margin
-        logger.debug(f"Restored buying power ${req_margin:.2f} for closed short position")
-    
+        option_bp += req_margin  # Restore margin for short positions
+
     # Calculate days held - dates should already be normalized
     days_held = (close_date - position['entry_date']).days
    
@@ -579,8 +580,8 @@ def close_position(position: Position,
         'strike': position['strike'], 
         'entry_price': round(position['entry_price'], 2),
         'exit_price': round(position['exit_price'], 2),
-        'capital_used': req_margin,
-        'option_bp': round(option_bp, 2),
+        'capital_used': position['margin_required'],  # Keep this as is
+        'option_bp': round(option_bp, 2),  # Updated buying power
         'return_on_margin': round(pnl / position['margin_required'] * 100, 2) if position['margin_required'] > 0 else 0,
         'close_reason': close_reason,
         'pnl': round(pnl, 2)
@@ -810,9 +811,11 @@ def execute_backtest_trades(trades: pd.DataFrame,
     # Sort trades by entry date
     trades = trades.sort_index()
     
-    for _, trade_signal in trades.iterrows():
+    for i, trade_signal in trades.iterrows():
         current_date = trade_signal.name
         
+        logger.debug(f'Trade signal {i}, {trade_signal.name}, Delta {trade_signal.p_delta}')
+
         # First, check if any open positions need to be closed
         positions_to_remove = []
         for pos in open_positions:
@@ -845,7 +848,7 @@ def execute_backtest_trades(trades: pd.DataFrame,
         # position['premium'] = get_signed_premium(position)    
 
         # Try to execute the new trade
-        executed_trade, cash, options_bp = execute_trade(new_trade, cash, options_bp, leverage, quantity=1)
+        executed_trade, cash, options_bp = execute_trade(new_trade, cash, options_bp, leverage, quantity)
         if executed_trade:
             executed_trade['trade_id'] = trade_counter
             open_positions.append(executed_trade)
@@ -1210,49 +1213,61 @@ def generate_trade_signals(
         end_date = pd.to_datetime(end_date)
         chain_df = chain_df[chain_df.index <= end_date]
         logger.debug(f'Sorting for date range: {start_date}-{end_date}')
-        logger.debug('Sample chain')
+        logger.debug(f'Sample chain of length: {len(chain_df)}')
         logger.debug(chain_df.head())
 
+    delta_col = 'p_delta' if is_put(option_type) else 'c_delta'
+    logger.debug(f'Initial delta distribution')
+    logger.debug(chain_df[delta_col].describe())
+    
     # Filter by DTE based on whether we have a single value or range
     if dte_range:
         dte_mask = (chain_df['dte'] >= dte_range[0]) & (chain_df['dte'] <= dte_range[1])
         chain_df = chain_df[dte_mask]
+        logger.debug(chain_df['dte'].describe())
         logger.debug(f'Filtering for dte range: {dte_range}')
-        logger.debug('Sample chain')
+        logger.debug(f'Sample chain of length: {len(chain_df)}')
         logger.debug(chain_df.head())
+        logger.debug(chain_df['dte'].describe())
+
     elif dte_target:
+        logger.debug(chain_df['dte'].describe())
         dte_mask = abs(chain_df['dte'] - dte_target) < 1
         chain_df = chain_df[dte_mask]
         logger.debug(f'Filtering for dte target: {dte_target}')
         logger.debug('Sample chain')
         logger.debug(chain_df.head())
+        logger.debug(chain_df['dte'].describe())
+
     else:
         logger.error('Need to provide either <dte_target> or <dte_range>')
         raise ValueError
     
     # Determine delta column based on option type
-    delta_col = 'p_delta' if option_type in [OptionType.PUT, OptionType.PUT.value, "put"] else 'c_delta'
+    delta_col = 'p_delta' if is_put(option_type) else 'c_delta'
     
     # Filter by delta parameters
     if delta_range:
         # Handle range case
-        if option_type in [OptionType.PUT, OptionType.PUT.value, "put"]:
+        if is_put(option_type):
             min_delta = -abs(delta_range[1])  # More negative (further OTM)
             max_delta = -abs(delta_range[0])  # Less negative (closer to ATM)
         else:
             min_delta = abs(delta_range[0])  # Less positive (closer to ATM)
             max_delta = abs(delta_range[1])  # More positive (further OTM)
 
+        logger.debug(chain_df[delta_col].describe())
         logger.debug(f'Filtering for delta range: {min_delta} to {max_delta} for {option_type.value}')
         delta_mask = chain_df[delta_col].between(min_delta, max_delta)
         chain_df = chain_df[delta_mask]
-        
+        logger.debug(chain_df[delta_col].describe())
+
         # Sort by delta value
-        ascending = (option_type == OptionType.CALL)  # Ascending for calls, descending for puts
+        ascending = is_call(option_type) #  == OptionType.CALL)  # Ascending for calls, descending for puts
         chain_df = chain_df.reset_index().sort_values(by=['index', delta_col],
                                                      ascending=[True, ascending])
         trade_signals = chain_df.set_index('index')
-        logger.debug('Sample chain after delta filtering')
+        logger.debug(f'Sample chain of length: {len(chain_df)}')
         logger.debug(chain_df.head())
 
     elif delta_target:
@@ -1281,7 +1296,7 @@ def generate_trade_signals(
         chain_df = chain_df.reset_index().sort_values(by=['index', 'delta_diff', delta_col],
                                                      ascending=[True, True, ascending])
         trade_signals = chain_df.set_index('index')
-        logger.debug('Sample chain after delta target filtering')
+        logger.debug(f'Sample chain of length: {len(chain_df)}')
         logger.debug(chain_df.head())
     else:
         logger.error('Need to provide either delta_target or delta_range')
@@ -1530,6 +1545,8 @@ def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_
                 # Close trade
                 if trade_end == date:
                     logger.debug(f'Closing trade: {trade_id}')
+
+
                     # Release margin back to BP for short positions
                     if is_short(trade):
                         option_bp += active_trades[trade_id]['margin_requirement']
@@ -1539,7 +1556,7 @@ def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_
                     logger.debug(f'exit price: {exit_price}')
                     logger.debug(f'daily cash before: {daily_cash_flow}')
                     # Accumulate this to cash reserves
-                    daily_cash_flow += exit_price * 100  # Premium in dollars
+                    daily_cash_flow += exit_price * 100 * trade.quantity  # Premium in dollars
                     logger.debug(f'daily cash after: {daily_cash_flow}')
 
                     del active_trades[trade_id]
@@ -1562,7 +1579,7 @@ def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_
                     }
                     
                     entry_price = get_signed_entry_price(trade)
-                    entry_price = round(entry_price * 100, 2)  # in dollars
+                    entry_price = round(entry_price * 100 * trade.quantity, 2)  # in dollars
 
                     # Accumulate entry price to cash flow (signed based on position side)
                     logger.debug(f'entry price: {entry_price}')
