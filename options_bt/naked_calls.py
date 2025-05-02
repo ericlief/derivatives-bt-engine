@@ -53,19 +53,19 @@ def run_test_suite():
             'early_close_days': 30,
             'max_positions': 2
         },
-           {
-            'option_type': OptionType.CALL,
-            'position_side': PositionSide.SHORT,
-            'delta_target': 0.75,
-            'use_spx_close': True,
-            'start_date': "2020-01-01",
-            'end_date': "2020-12-31",
-            'dte_range': (42, 45),
-            'initial_capital': 100000,
-            'early_close_days': 30,
-            'max_positions': 2,
-            'leverage': 2.0
-        },
+        #    {
+        #     'option_type': OptionType.CALL,
+        #     'position_side': PositionSide.SHORT,
+        #     'delta_target': 0.75,
+        #     'use_spx_close': True,
+        #     'start_date': "2020-01-01",
+        #     'end_date': "2020-12-31",
+        #     'dte_range': (42, 45),
+        #     'initial_capital': 100000,
+        #     'early_close_days': 30,
+        #     'max_positions': 2,
+        #     'leverage': 2.0
+        # },
     ]
 
     # Run all tests using run_multiple_backtests

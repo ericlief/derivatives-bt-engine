@@ -120,6 +120,8 @@ def is_put(trade: Union[Position, OptionType, str]) -> bool:
     """
     if isinstance(trade, dict) and 'option_type' in trade:
         option_type = trade['option_type']
+    elif isinstance(trade, pd.Series) and 'option_type' in trade:  
+        option_type = trade.option_type
     elif isinstance(trade, OptionType):
         option_type = trade
     elif isinstance(trade, str):
@@ -142,6 +144,8 @@ def is_call(trade: Union[Position, OptionType, str]) -> bool:
     """
     if isinstance(trade, dict) and 'option_type' in trade:
         option_type = trade['option_type']
+    elif isinstance(trade, pd.Series) and 'option_type' in trade:  
+        option_type = trade.option_type
     elif isinstance(trade, OptionType):
         option_type = trade
     elif isinstance(trade, str):
@@ -476,7 +480,7 @@ def calculate_option_pnl(position: PositionSide) -> float:
         P&L in dollars
     """
     # Calculate P&L using entry and closing prices (signed)
-    pnl = position['entry_price'] + position['exit_price']
+    pnl = get_signed_entry_price(position) + get_signed_exit_price(position)
     return pnl * 100 * position['quantity'] if is_short(position) else max(0, pnl * 100 * position['quantity']) # clamp loss to zero if LONG
 
 def close_position(position: Position, 
@@ -498,7 +502,7 @@ def close_position(position: Position,
     Note:
         This function does not track cash flow explicitly due to the complexities 
         involved in managing multiple simultaneous trades. Instead, it updates 
-        the buying power (options_bp) to reflect the profit and loss (P&L) 
+        the buying power (option_bp) to reflect the profit and loss (P&L) 
         from closed trades and restores margin held for short positions. 
         As a result, the cash flow is implicitly represented through the 
         adjustments made to the buying power.
@@ -548,7 +552,7 @@ def close_position(position: Position,
     logger.debug(f'Calculated pnl: {pnl}')
     
     # Update buying power to reflect the P&L from the closed trade
-    option_bp += pnl  # Adjust buying power based on the realized P&L
+    option_bp += get_signed_exit_price(position) * 100 * position['quantity']  # Adjust buying power based on the realized P&L
 
     # Restore buying power for short positions
     req_margin = position['margin_required']
@@ -590,6 +594,7 @@ def close_position(position: Position,
 
 def create_trade_from_signal(
     trade_signal: pd.Series,  # Assuming trade_signal is a pandas Series
+    quantity: int,
     option_type: OptionType,
     position_side: PositionSide,
     delta_target: float,
@@ -719,7 +724,7 @@ def create_trade_from_signal(
     # Create the position with date    
     position = Position(
         trade_id=None,
-        quantity=1,  # Added quantity field
+        quantity=quantity,  # Added quantity field
         entry_date=entry_date,
         expire_date=trade_signal['expire_date'],
         underlying_entry=underlying_price,
@@ -737,53 +742,50 @@ def create_trade_from_signal(
     return position
 
 def execute_trade(trade: Position, 
-                cash: float, 
-                option_bp: float, 
-                leverage: float = 4.0, 
-                quantity: int = 1) -> Tuple[Optional[Position], float, float]:
+                  option_bp: float, 
+                  leverage: float = 4.0, 
+                  ) -> Tuple[Optional[Position], float, float]:
     """
     Execute a trade with the given position, cash, option buying power, and leverage.
     
     Args:
         trade: Position containing trade details
-        cash: Current cash available
         option_bp: Current buying power for options
         leverage: Leverage for the trade (default: 4.0)
-        quantity: Number of contracts to trade (default: 1)
     
     Returns:
         Tuple of (trade, cash, option_bp) if successful, None if trade cannot be executed
     """
     # Use premium directly
-    premium = abs(trade['entry_price']) * 100 * quantity  # Adjusted for quantity
+    premium = abs(trade['entry_price']) * 100 * trade['quantity']  # Adjusted for quantity
     # Calculate effective margin requirement with leverage
     effective_margin = trade['margin_required'] / leverage
     
     # Open LONG position
     if is_long(trade):
-        # For long positions, check if there is enough cash to buy the option
-        if cash >= premium:  # Cash needed to buy the option
-            cash -= premium  # Deduct premium (convert to dollars)
-            return trade, cash, option_bp
+        # For long positions, check if there is enough buying power to buy the option
+        if option_bp >= premium:  # Check against buying power
+            # cash -= premium  # Deduct premium from cash
+            option_bp -= premium  # Deduct premium from buying power
+            return trade, option_bp
         else:
-            logger.warning(f"Insufficient cash (${cash}) to buy option on {trade['entry_date']}. Required: ${abs(trade['premium']) * 100:.2f}")
-            return None, cash, option_bp
+            logger.warning(f"Insufficient buying power (${option_bp}) to buy option on {trade['entry_date']}. Required: ${premium:.2f}")
+            return None, option_bp
 
     # Open SHORT position
     elif is_short(trade):
         # For short positions, check if buying power is sufficient
         if option_bp >= effective_margin:
+            option_bp += premium
             option_bp -= effective_margin
-            cash += premium  # Credit premium
-            return trade, cash, option_bp
+            # cash += premium  # Credit premium to cash
+            return trade, option_bp
         else:
-            logger.warning(f"Insufficient buying power (${option_bp}) for trade on {trade['entry_date']}. Requires: ${effective_margin:.2f}")
-            return None, cash, option_bp
+            logger.warning(f"Insufficient buying power (${option_bp}) to open short position on {trade['entry_date']}. Required: ${effective_margin:.2f}")
+            return None, option_bp
 
-    else:
-        logger.error('Position side not recognized')
-        return None, cash, option_bp
-    
+    return None, option_bp  # Return None if trade type is not recognized
+
 def execute_backtest_trades(trades: pd.DataFrame,
                             full_chain_df: pd.DataFrame, 
                             underlying_price_history: pd.DataFrame,
@@ -800,8 +802,8 @@ def execute_backtest_trades(trades: pd.DataFrame,
     """
     Execute a series of trades and track results.
     """
-    cash = initial_capital
-    options_bp = initial_capital
+    # cash = initial_capital
+    option_bp = initial_capital
     open_positions: List[Position] = []
     trade_results: List[TradeResult] = []
     skipped_trades = 0
@@ -824,13 +826,13 @@ def execute_backtest_trades(trades: pd.DataFrame,
                 ('expire_date' in pos and pos['expire_date'] is not None and current_date >= pos['expire_date'])):
                 
                 logger.debug(f'Closing position: {pos}')
-                result = close_position(pos, full_chain_df, underlying_price_history, options_bp)
+                result = close_position(pos, full_chain_df, underlying_price_history, option_bp)
                 if result:
                     # Update cash and BP from the trade result
                     # cash = result['cash']
-                    options_bp = result['option_bp']
+                    option_bp = result['option_bp']
                     positions_to_remove.append(pos)
-                    logger.debug(f"Closed position - Cash: ${cash:.2f}, BP: ${options_bp:.2f}")
+                    logger.debug(f"Closed position - BP: ${option_bp:.2f}")
                     trade_results.append(result)
         
         # Remove closed positions
@@ -843,29 +845,29 @@ def execute_backtest_trades(trades: pd.DataFrame,
             continue
         
         # Create new trade from signal
-        new_trade = create_trade_from_signal(trade_signal, option_type, position_side, delta_target, current_date, early_close_days, delta_range)  # Pass delta_range here
+        new_trade = create_trade_from_signal(trade_signal, quantity, option_type, position_side, delta_target, current_date, early_close_days, delta_range)  # Pass delta_range here
         # Make sure we store signed price
         # position['premium'] = get_signed_premium(position)    
 
         # Try to execute the new trade
-        executed_trade, cash, options_bp = execute_trade(new_trade, cash, options_bp, leverage, quantity)
+        executed_trade, option_bp = execute_trade(new_trade, option_bp, leverage)
         if executed_trade:
             executed_trade['trade_id'] = trade_counter
             open_positions.append(executed_trade)
             trade_counter += 1  # Increment counter only for successful trades
             logger.debug(f'Opened position: {executed_trade}')
-            logger.debug(f'Cash: ${cash:.2f}, BP: ${options_bp:.2f}')
+            logger.debug(f'BP: ${option_bp:.2f}')
             # logger.debug(f'signal: {trade_signal}')
         else:
             skipped_trades += 1
     
     # Close any remaining open positions at their expiration
     for pos in open_positions:
-        result = close_position(pos, full_chain_df, underlying_price_history, options_bp)
+        result = close_position(pos, full_chain_df, underlying_price_history, option_bp)
         if result:
             trade_results.append(result)
             # cash = result['cash']
-            options_bp = result['option_bp']
+            option_bp = result['option_bp']
     
     if not trade_results:
         logger.warning("No trades were executed successfully")
@@ -877,7 +879,10 @@ def execute_backtest_trades(trades: pd.DataFrame,
     results_df['cumulative_pnl'] = results_df['pnl'].cumsum()
     results_df['capital'] = initial_capital + results_df['cumulative_pnl']  # Track actual capital based on cumulative PnL
     results_df['peak_capital'] = results_df['capital'].cummax()
-    # results_df['drawdown'] = results_df['capital'] - results_df['peak_capital']
+
+
+
+    # results_df['drawdown'] = results_df['final capital'] - results_df['peak_capital']
     # results_df['drawdown_pct'] = round(results_df['drawdown'] / results_df['peak_capital'] * 100, 2)
     
     # # Log statistics
@@ -892,7 +897,7 @@ def execute_backtest_trades(trades: pd.DataFrame,
     # logger.info(f"Initial capital: ${initial_capital:,.2f}")
     # logger.info(f"Total P&L: ${trade_results['cumulative_pnl'].iloc[-1]:,.2f}")  # Change from results_df to trade_results
     # logger.info(f"Final capital: ${trade_results['cash'].iloc[-1]:,.2f}")  # Change from results_df to trade_results
-    # logger.info(f"Final buying power: ${options_bp:,.2f}")
+    # logger.info(f"Final buying power: ${option_bp:,.2f}")
     
     return results_df
 
@@ -1437,8 +1442,8 @@ def calculate_daily_value(trade: pd.Series, date: pd.Timestamp, options_chain_mu
 
         # Either MTM daily or early closure, so calculate mid point of bid/ask quote
         else:
-            bid_col = 'p_bid' if trade.option_type in [OptionType.PUT, OptionType.PUT.value, "put"] else "c_bid"
-            ask_col = 'p_ask' if trade.option_type in [OptionType.PUT, OptionType.PUT.value, "put"] else "c_ask"
+            bid_col = 'p_bid' if is_put(trade) else "c_bid"
+            ask_col = 'p_ask' if is_put(trade) else "c_ask"
             bid = price_data[bid_col].iloc[0] 
             ask = price_data[ask_col].iloc[0] 
             mid = calculate_midpoint_price(bid, ask)
@@ -1504,7 +1509,8 @@ def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_
     # Use the later of initial_end_date or latest_exit
     end_date = latest_exit
     
-    logger.debug(f"Adjusting MTM end date from {initial_end_date} to {end_date} to include all trade exits")
+    if initial_end_date != end_date:
+        logger.debug(f"Adjusting MTM end date from {initial_end_date} to {end_date} to include all trade exits")
     
     # Initialize tracking variables
     cash = initial_capital
@@ -1539,82 +1545,100 @@ def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_
                 prev_value = active_trades[trade_id]['position_value']
                 
                 # Calculate daily P&L for this trade
-                daily_pnl += current_value - prev_value if current_value is not None else 0
+                daily_pnl += round(current_value - prev_value, 2) if current_value is not None else 0
                 logger.debug(f'Daily PnL = Cur value - Prev value = {current_value} - {prev_value} = {daily_pnl}')
 
                 # Close trade
                 if trade_end == date:
                     logger.debug(f'Closing trade: {trade_id}')
 
-
                     # Release margin back to BP for short positions
                     if is_short(trade):
+                        logger.debug(f'BP before: {option_bp}')
                         option_bp += active_trades[trade_id]['margin_requirement']
-                    
+                        logger.debug(f"BP after margin release of {active_trades[trade_id]['margin_requirement']}: {option_bp}")
+
                     # Validate closing/exit price sign 
                     exit_price = get_signed_exit_price(trade)
-                    logger.debug(f'exit price: {exit_price}')
-                    logger.debug(f'daily cash before: {daily_cash_flow}')
+                    premium = round(exit_price * 100 * trade.quantity, 2)  # Premium in dollars
+                    logger.debug(f'Premium exit: {premium}')
+                    logger.debug(f'daily cash effect, before: {daily_cash_flow} | BP {option_bp}')
                     # Accumulate this to cash reserves
-                    daily_cash_flow += exit_price * 100 * trade.quantity  # Premium in dollars
-                    logger.debug(f'daily cash after: {daily_cash_flow}')
+                    # daily_cash_flow += premium  # Already signed in the trade
+                    # option_bp += premium  # Already signed in the trade
+                    daily_cash_flow = round(daily_cash_flow + premium, 2)
+                    option_bp = round(option_bp + premium, 2)
+                    logger.debug(f'daily cash effect, after: {daily_cash_flow} | BP {option_bp}')
 
                     del active_trades[trade_id]
+
                 # Update trade
                 else:
                     logger.debug(f'Updating existing trade {trade_id}')
                     if current_value is not None:
                         active_trades[trade_id]['position_value'] = current_value
-                        daily_position_value += current_value  # Only add once
+                        daily_position_value = round(daily_position_value + current_value, 2)  # Only add once
                         daily_margin_requirement += active_trades[trade_id]['margin_requirement']
             
             # Handle new trades
             elif trade_start == date:
                 logger.debug(f'Opening new trade: {trade_id}')
-                position_value = calculate_daily_value(trade, date, options_chain_multi_index, spx_data, use_spx_close)
+                # position_value = calculate_daily_value(trade, date, options_chain_multi_index, spx_data, use_spx_close)
+                entry_price = get_signed_entry_price(trade)
+                position_value = -round(entry_price * 100 * trade.quantity, 2)
                 if position_value is not None:
                     active_trades[trade_id] = {
                         'position_value': position_value,
                         'margin_requirement': trade.capital_used
                     }
                     
-                    entry_price = get_signed_entry_price(trade)
-                    entry_price = round(entry_price * 100 * trade.quantity, 2)  # in dollars
+                    # entry_price = get_signed_entry_price(trade)
+                    premium = round(entry_price * 100 * trade.quantity, 2)  # total premium dollars
 
                     # Accumulate entry price to cash flow (signed based on position side)
-                    logger.debug(f'entry price: {entry_price}')
-                    logger.debug(f'daily cash before: {daily_cash_flow}')
-                    daily_cash_flow += entry_price  # Already signed in the trade
-                    logger.debug(f'daily cash after: {daily_cash_flow}')
+                    logger.debug(f'Premium at entry: {premium}')
+                    logger.debug(f'Daily cash before: {daily_cash_flow}, BP before: {option_bp}')
+                    # daily_cash_flow += premium  # Already signed in the trade
+                    # option_bp += premium  # Already signed in the trade
+                    daily_cash_flow = round(daily_cash_flow + premium, 2)
+                    option_bp = round(option_bp + premium, 2)
 
-                    # Update position value and margin
-                    daily_position_value += position_value
                     req_margin = trade.capital_used
                     daily_margin_requirement += req_margin
                     
                     # For short positions, reduce BP
                     if is_short(trade):
-                        option_bp -= req_margin / leverage  # Account for leverage in BP reduction
-                    
-                    logger.debug(f'Position Value: {position_value}, Entry Premium: {entry_price}')
-                    logger.debug(f'Option BP: {option_bp}, Cash: {cash}')
+                        option_bp = round(option_bp - req_margin / leverage, 2)  # Account for leverage in BP reductio
+                        logger.debug(f'Margin reduced for short, BP now: {option_bp}')
 
+                    # Update position value and margin
+                    daily_position_value = round(daily_position_value + position_value, 2)
+                    logger.debug(f'Daily Position Value: {position_value}')
+ 
         # Update cumulative P&L
-        cumulative_pnl += daily_pnl
+        cumulative_pnl = round(cumulative_pnl + daily_pnl, 2)
         
-        # Update cash with daily premium flows
-        cash += daily_cash_flow
+        # Update cash with any daily premium flows
+        # NB: there is no change in daily cash or BP due to unrealized pnl for equity and index options, only for certain futures
+        cash  = round(cash + daily_cash_flow, 2)
         
         # Calculate net liquidation value
-        net_liq = cash + daily_position_value
-        
+        net_liq = round(cash + daily_position_value, 2)
+
+        # daily drift persists but final seems ok
+        drift = abs(net_liq - (initial_capital + cumulative_pnl))
+        if 1 < drift < 5:
+            logger.warning(f'FLOATING ERR DRIFT under $5: Net Liq = {net_liq} != Initial Cap + Cum PnL = {initial_capital + cumulative_pnl}')
+        else:
+            assert drift <= 5, f'FLOATING ERR DRIFT above $5: Net Liq = {net_liq} != Initial Cap + Cum PnL = {initial_capital + cumulative_pnl}'
+
         # Update peak liquidity if net liquidation value is higher
         if net_liq > peak_liquidity:
             peak_liquidity = net_liq
             
         # Calculate drawdown
         drawdown_amount = - max(0, round(peak_liquidity - net_liq, 2))
-        drawdown_pct = (drawdown_amount / peak_liquidity * 100) if peak_liquidity > 0 else 0
+        drawdown_pct = round(drawdown_amount / peak_liquidity * 100, 2) if peak_liquidity > 0 else 0
 
         # Calculate ROI metrics
         daily_roi = round(daily_pnl / daily_margin_requirement * 100, 2) if daily_margin_requirement > 0 else 0
@@ -1624,7 +1648,7 @@ def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_
         daily_data.append({
             'Date': date,
             'Net Liquidity': round(net_liq, 2),
-            'Options BP': round(option_bp, 2),
+            'BP': round(option_bp, 2),
             'Cash': cash,
             'Position Value': round(daily_position_value, 2),
             'Margin Requirement': round(daily_margin_requirement, 2),
@@ -1646,7 +1670,7 @@ def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_
         logger.debug(f'  Daily ROI: {daily_roi:.2f}%')
         logger.debug(f'  Cash: {cash:.2f}')
         logger.debug(f'  Net Liquidity: ${net_liq:.2f}')
-        logger.debug(f'  Options BP: ${option_bp:.2f}')
+        logger.debug(f'  BP: ${option_bp:.2f}')
         logger.debug(f'  Active Positions: {len(active_trades)}')
     
     # Create DataFrame and calculate metrics
@@ -1846,11 +1870,11 @@ def run_backtest(
         return pd.DataFrame()
     
     # Pre-calculate margin requirements for all signals
-    logger.info(f"Calculating margin requirements for trade signals for {option_type} | {position_side}...")
+    logger.info(f"Calculating margin requirements for trade signals for {quantity} | {option_type} | {position_side}...")
     trade_signals['margin_required'] = trade_signals.apply(
         lambda row: calculate_margin(
             row['underlying_last'],
-            (row['p_bid'] + row['p_ask']) / 2 if option_type in [OptionType.PUT, OptionType.PUT.value, "put"] else (row['c_bid'] + row['c_ask']) / 2,
+            (row['p_bid'] + row['p_ask']) / 2 if is_put(option_type) else (row['c_bid'] + row['c_ask']) / 2,
             position_side,
             row['strike'],
             option_type
@@ -1880,11 +1904,17 @@ def run_backtest(
         leverage=leverage,
         early_close_days=early_close_days,
         delta_target=delta_target,  # Pass delta_target through
-        delta_range=delta_range  # Pass delta_range through
+        delta_range=delta_range,  # Pass delta_range through
+        quantity=quantity
     )
     backtest_time = time.time() - backtest_start
     logger.info(f"Backtest execution completed in {backtest_time:.2f} seconds")
-    
+    	
+    # NB: cumulative_pnl is the sum of realized profits/losses across all closed trades.
+	# It starts from initial_capital and accumulates only closed P&L (not unrealized)
+    # Thus (option_bp) matches the analytical P&L (cumulative_pnl + initial_capital):
+    assert abs(trade_results['capital'].iloc[-1] - trade_results['option_bp'].iloc[-1]) < 1e-6, f'Final capital: {trade_results['capital'].iloc[-1]} | BP: {trade_results['option_bp'].iloc[-1]}'
+
     # Calculate MTM
     mtm_start = time.time()
     param_str = f"{option_type.value}_{position_side.value}_{f'{delta_range[0]}:{delta_range[1]}' if delta_range else delta_target}_{f'{dte_range[0]}:{dte_range[1]}' if dte_range else dte_target}_{start_date}:{end_date}"
@@ -1902,6 +1932,20 @@ def run_backtest(
     mtm_time = time.time() - mtm_start
     logger.info(f"MTM calculation completed in {mtm_time:.2f} seconds")
     
+
+    # # Final assertions for accounting consistency
+    # total_realized_pnl = trade_results.apply(
+    #     lambda t: get_signed_exit_price(t) * 100 * t.quantity + get_signed_entry_price(t) * 100 * t.quantity, axis=1
+    # ).sum()
+
+    # # Tolerance to handle floating point drift
+    # tolerance = 0.01  
+    # assert abs(cash - total_realized_pnl) < tolerance, (
+    #     f"Mismatch: Final cash = {cash:.2f}, but realized PnL = {total_realized_pnl:.2f}"
+    # )
+    # # Sanity check: ending equity = cash + unrealized positions
+    # ending_equity = cash + sum(t['position_value'] for t in active_trades.values())
+
     # Add margin utilization metrics totrade_results
     if not trade_results.empty:
         trade_results['margin_utilization'] = round(trade_results['capital_used'] / initial_capital, 2)
@@ -1977,12 +2021,20 @@ def run_backtest(
     logger.info(f"Average return on margin: {trade_results['return_on_margin'].mean():.2f}%")
     logger.info(f"Maximum drawdown: ${max_drawdown:.2f} ({max_drawdown_pct:.2f}%)")
     
+
+
     # Log to Google Sheets if enabled
     if log_to_sheets and not trade_results.empty:
         try:
             log_to_google_sheets(trade_results, param_str, daily_df)
         except Exception as e:
             logger.error(f"Failed to log to Google Sheets: {str(e)}")
+
+    # Final assertion
+    assert abs(trade_results['option_bp'].iloc[-1] - daily_df['BP'].iloc[-1]) < 1e-6, f'Final trade BP: {trade_results['option_bp'].iloc[-1]} | MTM BP: {daily_df['BP'].iloc[-1]}'
+    assert abs(daily_df['BP'].iloc[-1] - daily_df['Cash'].iloc[-1]) < 1e-6, f'MTM BP: {daily_df['BP'].iloc[-1]} | Cash: {daily_df['Cash'].iloc[-1]}'
+    assert abs(daily_df['Net Liquidity'].iloc[-1] - daily_df['Cash'].iloc[-1]) < 1e-6, f'MTM Net Liquidity: {daily_df['Net Liquidity'].iloc[-1]} | Cash: {daily_df['Cash'].iloc[-1]}'
+
 
     return trade_results
 
