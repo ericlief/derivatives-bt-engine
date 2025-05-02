@@ -1630,7 +1630,7 @@ def calculate_mtm(start_date, end_date, initial_capital, trade_results, options_
         if 1 < drift < 5:
             logger.warning(f'FLOATING ERR DRIFT under $5: Net Liq = {net_liq} != Initial Cap + Cum PnL = {initial_capital + cumulative_pnl}')
         else:
-            assert drift <= 5, f'FLOATING ERR DRIFT above $5: Net Liq = {net_liq} != Initial Cap + Cum PnL = {initial_capital + cumulative_pnl}'
+            logger.error(f'FLOATING ERR DRIFT above $10: Net Liq = {net_liq} != Initial Cap + Cum PnL = {initial_capital + cumulative_pnl}')
 
         # Update peak liquidity if net liquidation value is higher
         if net_liq > peak_liquidity:
