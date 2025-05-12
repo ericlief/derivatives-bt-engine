@@ -22,7 +22,7 @@ def run_test_suite():
         {
             'option_type': OptionType.CALL,
             'position_side': PositionSide.LONG,
-            'delta_target': 0.30,
+            'delta_target': 0.75,
             'use_spx_close': True,
             'start_date': "2020-01-01",
             'end_date': "2020-12-31",
