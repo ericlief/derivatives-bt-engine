@@ -353,6 +353,137 @@ def calculate_margin(underlying_price: float, entry_price: float,
 
         return round(margin_required, 2)
 
+def calculate_margin_for_spread(leg_group: pd.DataFrame,
+                                ) -> float:
+    """
+    Calculate margin required for a spread position.
+    
+    Args:
+        leg_group (pd.DataFrame): DataFrame containing leg details for a spread.
+        spread_type (SpreadType): Type of spread (DIAGONAL, STRAIGHT, SPREAD, etc.)
+    Returns: 
+        Margin required for the spread
+    """
+    spread_type = leg_group.iloc[0]['spread_type']
+    
+    # For diagonal spreads, margin depends on whether it's a long or short diagonal spread
+    if spread_type == SpreadType.DIAGONAL:
+        legs = list(leg_group.itertuples())
+        if len(legs) != 2:
+            raise ValueError("Diagonal spreads must have exactly 2 legs")
+            
+        # Sort legs by expiration date
+        legs.sort(key=lambda x: x.expire_date)
+        front_leg = legs[0]  # Near-term leg
+        back_leg = legs[1]   # Far-term leg
+        
+        # For long diagonal spreads (buy back month, sell front month)
+        if is_long(back_leg.position_side) and is_short(front_leg.position_side):
+            # Calculate the width of the spread
+            width = abs(back_leg.strike - front_leg.strike)
+            # For long diagonals, margin is typically the width of the spread
+            return width * 100
+            
+        # For short diagonal spreads (sell back month, buy front month)
+        elif is_short(back_leg.position_side) and is_long(front_leg.position_side):
+            # Calculate the width of the spread
+            width = abs(back_leg.strike - front_leg.strike)
+            # For short diagonals, margin is typically the width of the spread
+            return width * 100
+            
+        else:
+            # If legs are not properly paired, calculate margin for each leg
+            total_margin = 0
+            for leg in legs:
+                leg_margin = calculate_margin(
+                    leg.underlying_last,
+                    leg.p_bid if is_put(leg.option_type) else leg.c_bid,
+                    leg.position_side,
+                    leg.strike,
+                    leg.option_type
+                )
+                total_margin += leg_margin
+            return total_margin
+    
+    # For vertical spreads, margin is always the width of the spread
+    elif spread_type == SpreadType.VERTICAL:
+        legs = list(leg_group.itertuples())
+        if len(legs) != 2:
+            raise ValueError("Vertical spreads must have exactly 2 legs")
+            
+        # Calculate the width of the spread
+        strikes = sorted([leg.strike for leg in legs])
+        width = abs(strikes[1] - strikes[0])
+        return width * 100  # Convert to dollars
+    
+    # For calendar spreads, margin depends on whether it's a long or short calendar spread
+    elif spread_type == SpreadType.CALENDAR:
+        legs = list(leg_group.itertuples())
+        if len(legs) != 2:
+            raise ValueError("Calendar spreads must have exactly 2 legs")
+            
+        # Sort legs by expiration date
+        legs.sort(key=lambda x: x.expire_date)
+        front_leg = legs[0]  # Near-term leg
+        back_leg = legs[1]   # Far-term leg
+        
+        # For long calendar spreads (buy back month, sell front month)
+        if is_long(back_leg.position_side) and is_short(front_leg.position_side):
+            # Margin is typically the width of the spread
+            width = abs(back_leg.strike - front_leg.strike)
+            return width * 100
+            
+        # For short calendar spreads (sell back month, buy front month)
+        elif is_short(back_leg.position_side) and is_long(front_leg.position_side):
+            # Margin is typically the width of the spread
+            width = abs(back_leg.strike - front_leg.strike)
+            return width * 100
+            
+        else:
+            # If legs are not properly paired, calculate margin for each leg
+            total_margin = 0
+            for leg in legs:
+                leg_margin = calculate_margin(
+                    leg.underlying_last,
+                    leg.p_bid if is_put(leg.option_type) else leg.c_bid,
+                    leg.position_side,
+                    leg.strike,
+                    leg.option_type
+                )
+                total_margin += leg_margin
+            return total_margin
+    
+    # For iron condors, margin is typically the width of the wider spread
+    elif spread_type == SpreadType.IRON_CONDOR:
+        # Get all strikes and sort them
+        strikes = sorted([leg.strike for leg in leg_group.itertuples()])
+        # Calculate width of put spread and call spread
+        put_width = abs(strikes[1] - strikes[0])  # Width of put spread
+        call_width = abs(strikes[3] - strikes[2])  # Width of call spread
+        # Return the wider of the two spreads
+        return max(put_width, call_width) * 100  # Convert to dollars
+    
+    # For butterflies, margin is typically the width of the spread
+    elif spread_type == SpreadType.BUTTERFLY:
+        # Get the strikes and calculate the width
+        strikes = sorted([leg.strike for leg in leg_group.itertuples()])
+        width = abs(max(strikes) - min(strikes))
+        return width * 100  # Convert to dollars
+    
+    # For single legs or unknown spread types, calculate margin for each leg
+    else:
+        total_margin = 0
+        for leg in leg_group.itertuples():
+            leg_margin = calculate_margin(
+                leg.underlying_last,
+                leg.p_bid if is_put(leg.option_type) else leg.c_bid,
+                leg.position_side,
+                leg.strike,
+                leg.option_type
+            )
+            total_margin += leg_margin
+        return total_margin
+
 def calculate_intrinsic_value(underlying_price: float, strike: float, option_type: Union[OptionType, str]) -> float:
     """
     Calculate intrinsic value for an option.
@@ -693,7 +824,7 @@ def create_trade_from_signal(
                 return None
 
     # Skip trades that are too far from our target delta
-    if delta_diff is not None and delta_diff > 0.05:  # Allow 5% deviation from target delta
+    if delta_diff is not None and delta_diff > abs(target_delta) * 0.20:  # Allow 20% deviation from target delta
         logger.debug(f"Skipping trade with delta {trade_delta:.2f} (target: {target_delta:.2f}, diff: {delta_diff:.2f})")
         skipped_trades += 1
         return None
@@ -869,7 +1000,6 @@ def execute_backtest_trades(trades: pd.DataFrame,
     Returns:
         DataFrame of trade results
     """
-    # cash = initial_capital
     option_bp = initial_capital
     open_positions: List[Position] = []
     trade_results: List[TradeResult] = []
@@ -886,19 +1016,17 @@ def execute_backtest_trades(trades: pd.DataFrame,
         # Convert positions to a list for processing
         positions_list = trades.to_dict('records')
         
-        # Group positions by date for processing in chronological order
+        # Group positions by spread_id and date for processing in chronological order
         from collections import defaultdict
-        date_positions = defaultdict(list)
+        spread_positions = defaultdict(list)
         for pos in positions_list:
-            date_positions[pos['entry_date']].append(pos)
+            spread_positions[(pos['spread_id'], pos['entry_date'])].append(pos)
         
-        # Sort dates
-        sorted_dates = sorted(date_positions.keys())
-        
-        # Process each date's positions
-        for current_date in sorted_dates:
-            day_positions = date_positions[current_date]
-            
+        # Sort by date
+        sorted_spreads = sorted(spread_positions.keys(), key=lambda x: x[1])
+        logger.debug(f'Sorted spreads {sorted_spreads}')
+        # Process each spread's positions
+        for (spread_id, current_date), spread_legs in sorted_spreads:
             # First, check if any open positions need to be closed
             positions_to_remove = []
             for pos in open_positions:
@@ -918,18 +1046,28 @@ def execute_backtest_trades(trades: pd.DataFrame,
             for pos in positions_to_remove:
                 open_positions.remove(pos)
             
-            # Get all positions for the current date
-            for position in day_positions:
-                # Try to execute the position
+            # Skip if we've reached max positions
+            if len(open_positions) >= max_positions:
+                skipped_trades += 1
+                continue
+            
+            # Execute all legs of the spread together
+            spread_executed = True
+            for position in spread_legs:
                 position['trade_id'] = trade_counter
                 executed_position, option_bp = execute_trade(position, option_bp, leverage)
                 if executed_position:
                     open_positions.append(executed_position)
-                    trade_counter += 1
-                    logger.debug(f'Opened position: {executed_position}')
-                    logger.debug(f'BP: ${option_bp:.2f}')
+                    logger.debug(f'Opened spread leg: {executed_position}')
                 else:
-                    skipped_trades += 1
+                    spread_executed = False
+                    break
+            
+            if spread_executed:
+                trade_counter += 1
+                logger.debug(f'BP: ${option_bp:.2f}')
+            else:
+                skipped_trades += 1
     else:
         # Traditional single-leg processing
         trades = trades.sort_index()
@@ -949,8 +1087,6 @@ def execute_backtest_trades(trades: pd.DataFrame,
                     logger.debug(f'Closing position: {pos}')
                     result = close_position(pos, full_chain_df, underlying_price_history, option_bp)
                     if result:
-                        # Update cash and BP from the trade result
-                        # cash = result['cash']
                         option_bp = result['option_bp']
                         positions_to_remove.append(pos)
                         logger.debug(f"Closed position - BP: ${option_bp:.2f}")
@@ -976,7 +1112,6 @@ def execute_backtest_trades(trades: pd.DataFrame,
                 trade_counter += 1  # Increment counter only for successful trades
                 logger.debug(f'Opened position: {executed_trade}')
                 logger.debug(f'BP: ${option_bp:.2f}')
-                # logger.debug(f'signal: {trade_signal}')
             else:
                 skipped_trades += 1
     
@@ -985,7 +1120,6 @@ def execute_backtest_trades(trades: pd.DataFrame,
         result = close_position(pos, full_chain_df, underlying_price_history, option_bp)
         if result:
             trade_results.append(result)
-            # cash = result['cash']
             option_bp = result['option_bp']
     
     if not trade_results:
@@ -1384,22 +1518,20 @@ def generate_trade_signals(
         chain_df = chain_df[delta_mask]
         logger.debug(chain_df[delta_col].describe())
 
-        # Sort by delta value
-        ascending = is_call(option_type) #  == OptionType.CALL)  # Ascending for calls, descending for puts
-        chain_df = chain_df.reset_index().sort_values(by=['index', delta_col],
-                                                     ascending=[True, ascending])
-        trade_signals = chain_df.set_index('index')
+        # Sort by delta value while maintaining the date index
+        ascending = is_call(option_type)  # Ascending for calls, descending for puts
+        chain_df = chain_df.sort_values(by=[delta_col], ascending=ascending)
+        trade_signals = chain_df
         logger.debug(f'Sample chain of length: {len(chain_df)}')
         logger.debug(chain_df.head())
 
     elif delta_target:
         # Handle target case
-        if option_type in [OptionType.PUT, OptionType.PUT.value, "put"]:
+        if is_put(option_type):
             # For puts, we want negative deltas
             target = -abs(delta_target)
             # For puts, we want to find options with deltas closest to the target (more negative)
             ascending = False
-
         else:
             # For calls, we want positive deltas
             target = abs(delta_target)
@@ -1410,10 +1542,13 @@ def generate_trade_signals(
         delta_diff = abs(chain_df[delta_col] - target)
         chain_df = chain_df.assign(delta_diff=delta_diff)
         
-        # Sort by delta difference and delta value
-        chain_df = chain_df.reset_index().sort_values(by=['index', 'delta_diff', delta_col],
-                                                     ascending=[True, True, ascending])
-        trade_signals = chain_df.set_index('index')
+        # Filter out options that are too far from target delta (20% tolerance)
+        max_delta_diff = abs(target) * 0.20  # 20% tolerance
+        chain_df = chain_df[chain_df['delta_diff'] <= max_delta_diff]
+        
+        # Sort by delta difference and delta value while maintaining the date index
+        chain_df = chain_df.sort_values(by=['delta_diff', delta_col], ascending=[True, ascending])
+        trade_signals = chain_df
         logger.debug(f'Sample chain of length: {len(chain_df)}')
         logger.debug(chain_df.head())
     else:
@@ -2017,7 +2152,8 @@ def run_backtest(
         # Use the generated leg positions as trade signals
         # by converting list of positions to a DataFrame
         if leg_positions:
-            valid_signals = pd.DataFrame(leg_positions)
+            trade_signals = pd.DataFrame(leg_positions)
+            logger.debug(f'Leg positions created: {trade_signals}')
         else:
             logger.warning("No valid spread positions generated")
             return pd.DataFrame()
@@ -2046,16 +2182,27 @@ def run_backtest(
         
         # Pre-calculate margin requirements for all signals
         logger.info(f"Calculating margin requirements for trade signals for {quantity} | {option_type} | {position_side}...")
-        trade_signals['margin_required'] = trade_signals.apply(
-            lambda row: calculate_margin(
-                row['underlying_last'],
-                (row['p_bid'] + row['p_ask']) / 2 if is_put(option_type) else (row['c_bid'] + row['c_ask']) / 2,
-                position_side,
-                row['strike'],
-                option_type
-            ) * quantity,  # Multiply by quantity
-            axis=1
-        )
+        
+        # Handle all spread types
+        if is_spread:
+            for group_id, group in trade_signals.groupby('group_id'):
+                margin_required = calculate_margin_for_spread(group)
+                trade_signals.loc[group.index, 'margin_required'] = margin_required
+                # logger.debug(f'Calculated margin required for group {group_id}: {margin_required}')
+
+        # Single leg
+        else:
+            trade_signals['margin_required'] = trade_signals.apply(
+                lambda row: calculate_margin(
+                    row['underlying_last'],
+                    (row['p_bid'] + row['p_ask']) / 2 if is_put(row['option_type']) else (row['c_bid'] + row['c_ask']) / 2,
+                    row['position_side'],
+                    row['strike'],
+                    row['option_type']
+                ) * quantity,  # Multiply by quantity
+                axis=1
+            )
+        
         
         # Filter out trades that would exceed margin limits
         valid_signals = trade_signals[trade_signals['margin_required'] <= max_allowed_margin]
@@ -2317,6 +2464,10 @@ def generate_spread_signals(
             logger.warning(f"No signals generated for leg {i+1} with config: {leg_config}")
             return pd.DataFrame()
         
+        # Store the index name before adding columns
+        index_name = leg_df.index.name
+        
+        # Add leg-specific columns
         leg_df['leg_number'] = i + 1
         leg_df['position_side'] = position_side.value if isinstance(position_side, Enum) else position_side
         leg_df['option_type'] = option_type.value if isinstance(option_type, Enum) else option_type
@@ -2325,6 +2476,9 @@ def generate_spread_signals(
         if delta_range:
             leg_df['delta_range_min'] = delta_range[0]
             leg_df['delta_range_max'] = delta_range[1]
+        
+        # Restore the index name
+        leg_df.index.name = index_name
         
         leg_signals.append(leg_df)
     
@@ -2364,16 +2518,25 @@ def _pair_vertical_spread_legs(leg_signals: List[pd.DataFrame], spread_type: Spr
     logger.debug("Pairing vertical spread legs...")
     
     # Extract the two legs
-    leg1 = leg_signals[0].copy().reset_index()
-    leg2 = leg_signals[1].copy().reset_index()
+    leg1 = leg_signals[0].copy()
+    leg2 = leg_signals[1].copy()
     
-    # Set index name to make it clear
-    leg1 = leg1.rename(columns={"index": "date"})
-    leg2 = leg2.rename(columns={"index": "date"})
+    # Convert index to datetime if it's not already
+    leg1.index = pd.to_datetime(leg1.index)
+    leg2.index = pd.to_datetime(leg2.index)
+    
+    # Store index name and ensure it's not None
+    index_name = leg1.index.name or 'date'
+    leg1.index.name = index_name
+    leg2.index.name = index_name
+    
+    # Reset index to make date a column
+    leg1 = leg1.reset_index()
+    leg2 = leg2.reset_index()
     
     # Rename columns to distinguish between legs
-    leg1_cols = {col: f"leg1_{col}" for col in leg1.columns if col != "date" and col != "expire_date"}
-    leg2_cols = {col: f"leg2_{col}" for col in leg2.columns if col != "date" and col != "expire_date"}
+    leg1_cols = {col: f"leg1_{col}" for col in leg1.columns if col != index_name and col != "expire_date"}
+    leg2_cols = {col: f"leg2_{col}" for col in leg2.columns if col != index_name and col != "expire_date"}
     
     leg1 = leg1.rename(columns=leg1_cols)
     leg2 = leg2.rename(columns=leg2_cols)
@@ -2383,7 +2546,7 @@ def _pair_vertical_spread_legs(leg_signals: List[pd.DataFrame], spread_type: Spr
     paired = pd.merge(
         leg1,
         leg2,
-        on=["date", "expire_date"],
+        on=[index_name, "expire_date"],
         how="inner"
     )
     logger.debug(f"Paired vertical spread legs: {paired.head()}")
@@ -2433,6 +2596,9 @@ def _pair_vertical_spread_legs(leg_signals: List[pd.DataFrame], spread_type: Spr
     else:
         paired["spread_price"] = paired["leg2_price"] - paired["leg1_price"]
     
+    # Set the index back to the date column
+    paired = paired.set_index(index_name)
+    
     logger.debug(f"Paired {len(paired)} valid vertical spreads")
     logger.debug(paired.head())
     
@@ -2455,16 +2621,25 @@ def _pair_calendar_spread_legs(leg_signals: List[pd.DataFrame], spread_type: Spr
     logger.debug("Pairing calendar spread legs...")
     
     # Extract the two legs
-    leg1 = leg_signals[0].copy().reset_index()  # Front month (near-term expiration)
-    leg2 = leg_signals[1].copy().reset_index()  # Back month (far-term expiration)
+    leg1 = leg_signals[0].copy()  # Front month (near-term expiration)
+    leg2 = leg_signals[1].copy()  # Back month (far-term expiration)
     
-    # Set index name to make it clear
-    leg1 = leg1.rename(columns={"index": "date"})
-    leg2 = leg2.rename(columns={"index": "date"})
+    # Convert index to datetime if it's not already
+    leg1.index = pd.to_datetime(leg1.index)
+    leg2.index = pd.to_datetime(leg2.index)
+    
+    # Store index name and ensure it's not None
+    index_name = leg1.index.name or 'date'
+    leg1.index.name = index_name
+    leg2.index.name = index_name
+    
+    # Reset index to make date a column
+    leg1 = leg1.reset_index()
+    leg2 = leg2.reset_index()
     
     # Rename columns to distinguish between legs
-    leg1_cols = {col: f"leg1_{col}" for col in leg1.columns if col != "date"}
-    leg2_cols = {col: f"leg2_{col}" for col in leg2.columns if col != "date"}
+    leg1_cols = {col: f"leg1_{col}" for col in leg1.columns if col != index_name}
+    leg2_cols = {col: f"leg2_{col}" for col in leg2.columns if col != index_name}
     
     leg1 = leg1.rename(columns=leg1_cols)
     leg2 = leg2.rename(columns=leg2_cols)
@@ -2474,7 +2649,7 @@ def _pair_calendar_spread_legs(leg_signals: List[pd.DataFrame], spread_type: Spr
     paired = pd.merge(
         leg1,
         leg2,
-        on=["date"],
+        on=[index_name],
         how="inner"
     )
     logger.debug(f"Paired calendar spread legs: {paired.head()}")
@@ -2515,6 +2690,9 @@ def _pair_calendar_spread_legs(leg_signals: List[pd.DataFrame], spread_type: Spr
     else:
         paired["spread_price"] = paired["leg1_price"] - paired["leg2_price"]
     
+    # Set the index back to the date column
+    paired = paired.set_index(index_name)
+    
     logger.debug(f"Paired {len(paired)} valid calendar spreads")
     
     return paired
@@ -2536,16 +2714,25 @@ def _pair_diagonal_spread_legs(leg_signals: List[pd.DataFrame], spread_type: Spr
     logger.debug("Pairing diagonal spread legs...")
     
     # Extract the two legs
-    leg1 = leg_signals[0].copy().reset_index()  # Front month, first strike
-    leg2 = leg_signals[1].copy().reset_index()  # Back month, second strike
+    leg1 = leg_signals[0].copy()  # Front month, first strike
+    leg2 = leg_signals[1].copy()  # Back month, second strike
     
-    # Set index name to make it clear
-    leg1 = leg1.rename(columns={"index": "date"})
-    leg2 = leg2.rename(columns={"index": "date"})
+    # Convert index to datetime if it's not already
+    leg1.index = pd.to_datetime(leg1.index)
+    leg2.index = pd.to_datetime(leg2.index)
+    
+    # Store index name and ensure it's not None
+    index_name = leg1.index.name or 'date'
+    leg1.index.name = index_name
+    leg2.index.name = index_name
+    
+    # Reset index to make date a column
+    leg1 = leg1.reset_index()
+    leg2 = leg2.reset_index()
     
     # Rename columns to distinguish between legs
-    leg1_cols = {col: f"leg1_{col}" for col in leg1.columns if col != "date"}
-    leg2_cols = {col: f"leg2_{col}" for col in leg2.columns if col != "date"}
+    leg1_cols = {col: f"leg1_{col}" for col in leg1.columns if col != index_name}
+    leg2_cols = {col: f"leg2_{col}" for col in leg2.columns if col != index_name}
     
     leg1 = leg1.rename(columns=leg1_cols)
     leg2 = leg2.rename(columns=leg2_cols)
@@ -2554,42 +2741,19 @@ def _pair_diagonal_spread_legs(leg_signals: List[pd.DataFrame], spread_type: Spr
     paired = pd.merge(
         leg1,
         leg2,
-        on=["date"],
+        on=[index_name],
         how="inner"
     )
     logger.debug(f"Paired diagonal spread legs: {paired.head()}")
     
     # Filter for valid diagonal spread criteria
-    # Ensure strikes are different
-    paired = paired[paired["leg1_strike"] != paired["leg2_strike"]]
-    
     # Ensure expirations are different and in the correct order
     paired = paired[paired["leg1_expire_date"] < paired["leg2_expire_date"]]
     
-    # Apply specific rules based on option type
-    # For puts in a diagonal put spread
-    if is_put(leg_signals[0].iloc[0]["option_type"]):
-        # If short front leg, typically want lower strike in back month
-        if is_short(leg_signals[0].iloc[0]["position_side"]):
-            paired = paired[paired["leg1_strike"] > paired["leg2_strike"]]
-        # If long front leg, typically want higher strike in back month
-        else:
-            paired = paired[paired["leg1_strike"] < paired["leg2_strike"]]
-    # For calls in a diagonal call spread
-    else:
-        # If short front leg, typically want higher strike in back month
-        if is_short(leg_signals[0].iloc[0]["position_side"]):
-            paired = paired[paired["leg1_strike"] < paired["leg2_strike"]]
-        # If long front leg, typically want lower strike in back month
-        else:
-            paired = paired[paired["leg1_strike"] > paired["leg2_strike"]]
-    
     # Add spread information
     paired["spread_type"] = spread_type.value
-    
-    # Calculate spread width
-    paired["strike_width"] = abs(paired["leg1_strike"] - paired["leg2_strike"])
     paired["time_width"] = paired.apply(lambda row: pd.Timedelta(row["leg2_expire_date"] - row["leg1_expire_date"]).days, axis=1)
+    paired["strike_width"] = abs(paired["leg1_strike"] - paired["leg2_strike"])
     
     # Calculate leg prices
     paired["leg1_price"] = paired.apply(
@@ -2609,12 +2773,15 @@ def _pair_diagonal_spread_legs(leg_signals: List[pd.DataFrame], spread_type: Spr
     )
     
     # Calculate net spread price
-    # Default diagonal spread (short front month, long back month)
+    # For standard diagonal spreads (short front month, long back month)
     if is_short(leg_signals[0].iloc[0]["position_side"]) and is_long(leg_signals[1].iloc[0]["position_side"]):
-        paired["spread_price"] = paired["leg1_price"] - paired["leg2_price"]
-    # Reverse diagonal spread (long front month, short back month)
-    else:
         paired["spread_price"] = paired["leg2_price"] - paired["leg1_price"]
+    # For reverse diagonal spreads (long front month, short back month)
+    else:
+        paired["spread_price"] = paired["leg1_price"] - paired["leg2_price"]
+    
+    # Set the index back to the date column
+    paired = paired.set_index(index_name)
     
     logger.debug(f"Paired {len(paired)} valid diagonal spreads")
     
@@ -2640,6 +2807,11 @@ def _pair_butterfly_spread_legs(leg_signals: List[pd.DataFrame], spread_type: Sp
     leg1 = leg_signals[0].copy().reset_index()  # Lower strike
     leg2 = leg_signals[1].copy().reset_index()  # Middle strike (2x quantity)
     leg3 = leg_signals[2].copy().reset_index()  # Higher strike
+    
+    # Convert date columns to pandas Timestamps
+    leg1['date'] = pd.to_datetime(leg1['date'])
+    leg2['date'] = pd.to_datetime(leg2['date'])
+    leg3['date'] = pd.to_datetime(leg3['date'])
     
     # Set index name to make it clear
     leg1 = leg1.rename(columns={"index": "date"})
@@ -2738,6 +2910,12 @@ def _pair_iron_condor_spread_legs(leg_signals: List[pd.DataFrame], spread_type: 
     put_leg2 = leg_signals[1].copy().reset_index()  # Higher put strike (short)
     call_leg1 = leg_signals[2].copy().reset_index()  # Lower call strike (short)
     call_leg2 = leg_signals[3].copy().reset_index()  # Higher call strike (long)
+    
+    # Convert date columns to pandas Timestamps
+    put_leg1['date'] = pd.to_datetime(put_leg1['date'])
+    put_leg2['date'] = pd.to_datetime(put_leg2['date'])
+    call_leg1['date'] = pd.to_datetime(call_leg1['date'])
+    call_leg2['date'] = pd.to_datetime(call_leg2['date'])
     
     # Set index name to make it clear
     put_leg1 = put_leg1.rename(columns={"index": "date"})
@@ -3037,51 +3215,75 @@ def create_spread_positions(
     if spread_signals.empty:
         logger.warning(f"No valid spread signals to process")
         return leg_positions
+    
     logger.debug(f'Creating spread positions for {spread_type}')
     
     # Process spread signals to create individual leg positions
-    for _, spread_signal in spread_signals.iterrows():
-        spread_date = spread_signal.name if hasattr(spread_signal, 'name') else spread_signal['date']
-        
+    for spread_signal in spread_signals.itertuples():
+
+        logger.debug(f'Processing spread signal: {spread_signal}')
+
+        # Convert spread_date to pandas Timestamp
+        # spread_date = pd.to_datetime(spread_signal.name if hasattr(spread_signal, 'name') else spread_signal['date'])
+        spread_date = spread_signal.Index
         # Create positions for each leg of the spread
         spread_legs = []
         for i, leg_config in enumerate(legs_config):
             leg_number = i + 1
             leg_prefix = f"leg{leg_number}_"
-            
+            strike_attr = f"{leg_prefix}strike" 
+
             # Ensure all required leg fields exist
-            if f"{leg_prefix}strike" not in spread_signal:
+            if not hasattr(spread_signal, strike_attr):
                 logger.warning(f"Missing strike for leg {leg_number} in spread signal")
                 break
                 
             # Extract leg-specific data from the spread signal
             try:
-                leg_strike = spread_signal[f"{leg_prefix}strike"]
+                leg_strike = getattr(spread_signal, strike_attr)
                 leg_option_type = leg_config['option_type']
                 leg_position_side = leg_config['position_side']
                 leg_quantity = leg_config.get('ratio', 1) * quantity  # Apply the base quantity
                 
                 # Calculate days to expiration properly
-                if f"{leg_prefix}dte" in spread_signal:
-                    dte_value = spread_signal[f"{leg_prefix}dte"]
+                dte_atrr = f"{leg_prefix}dte"
+                if hasattr(spread_signal, dte_atrr):
+                    dte_value = spread_signal.getattr(dte_atrr)
                 else:
                     # Calculate dte using proper timedelta operations
-                    delta = pd.Timedelta(spread_signal['expire_date'] - spread_date)
+                    expire_date = pd.to_datetime(spread_signal.expire_date)
+                    delta = pd.Timedelta(expire_date - spread_date)
                     dte_value = delta.days
                 
                 # Create a simplified signal for this leg
+                # leg_signal = pd.Series({
+                #     'strike': leg_strike,
+                #     'expire_date': pd.to_datetime(spread_signal['expire_date']),
+                #     'underlying_last': spread_signal.get(f"{leg_prefix}underlying_last", spread_signal.get('underlying_last')),
+                #     'p_bid': spread_signal.get(f"{leg_prefix}p_bid", 0),
+                #     'p_ask': spread_signal.get(f"{leg_prefix}p_ask", 0),
+                #     'c_bid': spread_signal.get(f"{leg_prefix}c_bid", 0),
+                #     'c_ask': spread_signal.get(f"{leg_prefix}c_ask", 0),
+                #     'p_delta': spread_signal.get(f"{leg_prefix}p_delta", 0),
+                #     'c_delta': spread_signal.get(f"{leg_prefix}c_delta", 0),
+                #     'dte': dte_value,
+                # }, name=spread_date)
                 leg_signal = pd.Series({
                     'strike': leg_strike,
-                    'expire_date': spread_signal['expire_date'],
-                    'underlying_last': spread_signal.get(f"{leg_prefix}underlying_last", spread_signal.get('underlying_last')),
-                    'p_bid': spread_signal.get(f"{leg_prefix}p_bid", 0),
-                    'p_ask': spread_signal.get(f"{leg_prefix}p_ask", 0),
-                    'c_bid': spread_signal.get(f"{leg_prefix}c_bid", 0),
-                    'c_ask': spread_signal.get(f"{leg_prefix}c_ask", 0),
-                    'p_delta': spread_signal.get(f"{leg_prefix}p_delta", 0),
-                    'c_delta': spread_signal.get(f"{leg_prefix}c_delta", 0),
+                    'expire_date': pd.to_datetime(getattr(spread_signal, 'expire_date')),
+                    'underlying_last': getattr(spread_signal, f"{leg_prefix}underlying_last", 
+                                               getattr(spread_signal, 'underlying_last', np.nan)),
+                    'p_bid': getattr(spread_signal, f"{leg_prefix}p_bid", 0),
+                    'p_ask': getattr(spread_signal, f"{leg_prefix}p_ask", 0),
+                    'c_bid': getattr(spread_signal, f"{leg_prefix}c_bid", 0),
+                    'c_ask': getattr(spread_signal, f"{leg_prefix}c_ask", 0),
+                    'p_delta': getattr(spread_signal, f"{leg_prefix}p_delta", 0),
+                    'c_delta': getattr(spread_signal, f"{leg_prefix}c_delta", 0),
                     'dte': dte_value,
                 }, name=spread_date)
+                
+                if pd.isna(leg_signal['underlying_last']):
+                    logger.warning(f"Missing underlying_last for {leg_prefix} on {spread_date}. Defaulting to NaN.")
                 
                 # Create the leg position
                 position = create_trade_from_signal(
