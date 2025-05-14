@@ -1,25 +1,26 @@
 import sys
-import pandas as pd
-import numpy as np
 import os
 from typing import Dict, List, Optional, Tuple, TypedDict, Union
 from enum import Enum 
+
 import logging
 from datetime import datetime
 import time
 # import dask.dataframe as dd  # Commented out Dask import
+import pandas as pd
+import numpy as np
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-import json
-from options_bt.enums import OptionType, PositionSide, SpreadType, Position, TradeResult
-from options_bt.schemas import (
+ 
+from options_bt.domain.enums import OptionType, PositionSide, SpreadType, Position, TradeResult
+from options_bt.domain.schemas import (
     OPTIONS_CHAIN_SCHEMA,
     TRADE_SIGNALS_SCHEMA,
     POSITION_SCHEMA,
     TRADE_RESULTS_SCHEMA,
     validate_dataframe_schema,
     standardize_dataframe,
-    add_spread_fields
+    add_spread_fields   
 )
 
 # Configure logging
@@ -1971,7 +1972,7 @@ def run_backtest(
     # Spread-specific parameters
     spread_type: SpreadType = None,
     legs_config: List[Dict] = None,
-    # spread_signals: pd.DataFrame = None,  # Pre-generated spread signals
+    spread_signals: pd.DataFrame = None,  # Pre-generated spread signals
     trade_signals: pd.DataFrame = None,   # Pre-generated trade signals for single legs
 ) -> pd.DataFrame:
     """
@@ -2028,17 +2029,13 @@ def run_backtest(
     logger.info(f"Maximum allowed margin: ${max_allowed_margin:.2f} ({max_margin_utilization:.0%} of capital with {leverage}x leverage)")
     logger.info(f"Maximum simultaneous positions: {max_positions}")
     
-    # Use passed trade signals based on backtest type or generate them
+    # Generate trade signals based on backtest type
     signal_start = time.time()
-    if trade_signals is not None and not trade_signals.empty:
-        logger.debug("Using provided trade signals from multiple_backtest.py")
     
-        
-    else:
-        logger.debug("Generating trade signals")
-        
-        # Generate multiple legs spread signals
-        if is_spread:
+    # All spread types
+    if is_spread:
+        # Use spread signals if provided, otherwise generate them
+        if spread_signals is None:
             trade_signals = generate_spread_signals(
                 options_chain=options_chain,
                 spread_type=spread_type,
@@ -2049,28 +2046,38 @@ def run_backtest(
                 dte_target=dte_target,
                 spx_data=spx_data
             )
-        
+        else:
+            trade_signals = spread_signals
             
-        # # Create spread positions using the helper function
-        # leg_positions = create_spread_positions(
-        #     spread_signals=trade_signals,
-        #     spread_type=spread_type,
-        #     legs_config=legs_config,
-        #     early_close_days=early_close_days,
-        #     quantity=quantity
-        # )
+        if trade_signals.empty:
+            logger.warning("No spread signals generated with the current parameters.")
+            return pd.DataFrame()
+            
+        # Create spread positions using the helper function
+        leg_positions = create_spread_positions(
+            spread_signals=trade_signals,
+            spread_type=spread_type,
+            legs_config=legs_config,
+            early_close_days=early_close_days,
+            quantity=quantity
+        )
         
         # Use the generated leg positions as trade signals
         # by converting list of positions to a DataFrame
-        # if leg_positions:
-        #     trade_signals = pd.DataFrame(leg_positions)
-        #     logger.debug(f'Leg positions created: {trade_signals}')
-        # else:
-        #     logger.warning("No valid spread positions generated")
-        #     return pd.DataFrame()
-
-        # Generate normal single-leg signals
+        if leg_positions:
+            trade_signals = pd.DataFrame(leg_positions)
+            logger.debug(f'Leg positions created: {trade_signals}')
         else:
+            logger.warning("No valid spread positions generated")
+            return pd.DataFrame()
+
+    # Single legs
+    else:
+        # Use trade signals if provided, otherwise generate them
+        if trade_signals is not None and not trade_signals.empty:
+            logger.debug("Using provided trade signals")
+        else:
+            # Generate normal single-leg signals
             trade_signals = generate_trade_signals(
                 spx_data, 
                 options_chain,
@@ -2084,7 +2091,7 @@ def run_backtest(
             )
         
         if trade_signals.empty:
-            logger.warning("No trade signals generated with the current parameters. Try again!")
+            logger.warning("No trade signals generated with the current parameters.")
             return pd.DataFrame()
         
 
@@ -2104,10 +2111,10 @@ def run_backtest(
         trade_signals['margin_required'] = trade_signals.apply(
             lambda row: calculate_margin(
                 row['underlying_last'],
-                (row['p_bid'] + row['p_ask']) / 2 if is_put(row['option_type']) else (row['c_bid'] + row['c_ask']) / 2,
-                row['position_side'],
+                (row['p_bid'] + row['p_ask']) / 2 if is_put(option_type) else (row['c_bid'] + row['c_ask']) / 2,
+                position_side,
                 row['strike'],
-                row['option_type']
+                option_type
             ) * quantity,  # Multiply by quantity
             axis=1
         )
@@ -3276,8 +3283,7 @@ def prepare_backtest_params(
     
     # Add specific parameters based on backtest type
     if is_spread:
-
-        # Generate spread signals. These will contain multiple legs per row
+        # Generate spread signals
         spread_signals = generate_spread_signals(
             options_chain=options_chain,
             spread_type=params['spread_type'],
@@ -3296,7 +3302,7 @@ def prepare_backtest_params(
             'legs_config': params['legs_config'],
         })
     else:
-        # Generate single-leg trade signals, one trade per row
+        # Generate single-leg trade signals
         trade_signals = generate_trade_signals(
             spx_data=spx_data,
             options_chain=options_chain,

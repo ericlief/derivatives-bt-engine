@@ -10,10 +10,9 @@ logger = logging.getLogger(__name__)
 @dataclass
 class Spread:
     """Class representing a multi-leg option spread."""
-    spread_id: Optional[int] = None
+    spread_id: int
     spread_type: SpreadType
     legs: List[Position] = field(default_factory=list)
-    entry_date: Optional[pd.Timestamp] = None
     leg_ratios: Dict[int, float] = field(default_factory=dict)  # Maps leg number to ratio
     spread_price: Optional[float] = None
     

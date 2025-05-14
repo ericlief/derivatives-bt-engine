@@ -1,9 +1,12 @@
+from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional, Dict, Union, List, NamedTuple
-from __future__ import annotations
+
 import pandas as pd
 import numpy as np
+
 import logging
+
 from options_bt.domain.enums import OptionType, PositionSide
 
 logger = logging.getLogger(__name__)
@@ -11,18 +14,18 @@ logger = logging.getLogger(__name__)
 @dataclass
 class Position:
     """Core option position. Represents a single option contract position."""
-    trade_id: Optional[int] = None
-    quantity: int = 1
+    trade_id: int 
+    quantity: int
     option_type: Union[OptionType, str]
     position_side: Union[PositionSide, str]
     strike: float
     expire_date: pd.Timestamp
 
     # Entry state
-    entry_date: Optional[pd.Timestamp] = None
-    entry_price: Optional[float] = None
-    entry_delta: Optional[float] = None
-    underlying_entry: Optional[float] = None
+    entry_date: pd.Timestamp
+    entry_price: float
+    entry_delta: float
+    entry_dte: int
     margin_required: Optional[float] = None  # Store margin requirement
 
     # Exit state (filled when closed)
@@ -31,8 +34,7 @@ class Position:
     exit_delta: Optional[float] = None
     underlying_exit: Optional[float] = None
 
-    # Days to expiration
-    entry_dte: Optional[int] = None
+    # Closure state
     close_date: Optional[pd.Timestamp] = None  # For early closure
 
     def __post_init__(self):

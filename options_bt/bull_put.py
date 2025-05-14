@@ -1,7 +1,7 @@
 import os
 import pandas as pd
 from options_bt.bt import run_multiple_backtests, setup_logger
-from options_bt.enums import OptionType, PositionSide, SpreadType, TradeResult
+from options_bt.domain.enums import OptionType, PositionSide
 
 # Create logger instance
 logger = setup_logger()
