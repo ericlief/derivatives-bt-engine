@@ -1,6 +1,7 @@
 import os
 import pandas as pd
-from options_bt.bt import run_multiple_backtests, OptionType, PositionSide, setup_logger, SpreadType
+from options_bt.bt import run_multiple_backtests, setup_logger
+from options_bt.enums import OptionType, PositionSide, SpreadType, TradeResult
 
 # Create logger instance
 logger = setup_logger()
@@ -61,13 +62,13 @@ def run_test_suite():
                 {
                     'option_type': OptionType.PUT,
                     'position_side': PositionSide.SHORT,
-                    'delta_target': 0.75,  # Short put with 0.30 delta
+                    'delta_target': 0.75,
                     'ratio': 1
                 },
                 {
                     'option_type': OptionType.PUT,
                     'position_side': PositionSide.LONG,
-                    'delta_target': 0.65,  # Long put with 0.15 delta (further OTM)
+                    'delta_target': 0.65,
                     'ratio': 1
                 }
             ],

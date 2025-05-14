@@ -11,6 +11,16 @@ import time
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import json
+from options_bt.enums import OptionType, PositionSide, SpreadType, Position, TradeResult
+from options_bt.schemas import (
+    OPTIONS_CHAIN_SCHEMA,
+    TRADE_SIGNALS_SCHEMA,
+    POSITION_SCHEMA,
+    TRADE_RESULTS_SCHEMA,
+    validate_dataframe_schema,
+    standardize_dataframe,
+    add_spread_fields
+)
 
 # Configure logging
 def setup_logger(log_file: str = None):
@@ -34,7 +44,7 @@ def setup_logger(log_file: str = None):
         return logger
         
     logger.setLevel(logging.DEBUG)  # Set the logger to the lowest level
-
+    
     # Create file handler for all messages, including DEBUG
     file_handler = logging.FileHandler(log_file)
     file_handler.setLevel(logging.DEBUG)  # Log all messages to the file
@@ -51,94 +61,29 @@ def setup_logger(log_file: str = None):
     
     # Apply the filter to the console handler
     console_handler.addFilter(InfoFilter())
-
+    
     # Create a formatter and set it for both handlers
     formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
     file_handler.setFormatter(formatter)
     console_handler.setFormatter(formatter)
-
+    
     # Add the handlers to the logger
     logger.addHandler(file_handler)
     logger.addHandler(console_handler)
-
+    
     return logger
 
 # Create logger instance
 logger = setup_logger()
 
-class OptionType(Enum):
-    CALL = "call"
-    PUT = "put"
-
-class PositionSide(Enum):
-    LONG = "long"  # Buying options
-    SHORT = "short"  # Selling/writing options
-
-class SpreadType(Enum):
-    NONE = "none"      # Single leg position
-    VERTICAL = "vertical"  # Vertical spread (same expiration, different strikes)
-    CALENDAR = "calendar"  # Calendar spread (same strike, different expirations)
-    DIAGONAL = "diagonal"  # Diagonal spread (different strikes, different expirations)
-    IRON_CONDOR = "iron_condor"  # Iron condor (4 legs)
-    BUTTERFLY = "butterfly"  # Butterfly spread (3 legs)
-
-class Position(TypedDict):
-    trade_id: int
-    quantity: int
-    entry_date: pd.Timestamp
-    expire_date: pd.Timestamp
-    underlying_entry: float
-    underlying_exit: float
-    strike: float
-    option_type: str
-    position_side: str
-    bid: float
-    ask: float
-    entry_price: float  # Snapshot of the premium at entry
-    exit_price: float
-    margin_required: float
-    entry_delta: float
-    entry_dte: int
-    close_date: Optional[pd.Timestamp]  # Optional field
-    spread_type: Optional[str]  # Type of spread (NONE for single legs)
-    spread_id: Optional[int]  # ID to group legs of the same spread
-    leg_number: Optional[int]  # Position of this leg in the spread (1, 2, 3, 4)
-    leg_ratio: Optional[float]  # Ratio for this leg (e.g., 1 for most legs, 2 for ratio spreads)
-
-class TradeResult(TypedDict):
-    trade_id: int
-    quantity: int
-    option_type: str
-    position_side: str
-    entry_date: pd.Timestamp
-    exit_date: pd.Timestamp
-    expire_date: pd.Timestamp
-    entry_delta: float
-    exit_delta: float
-    entry_dte: Optional[int]
-    days_held: int
-    underlying_entry: float
-    underlying_exit: float
-    strike: float
-    entry_price: float
-    exit_price: float
-    capital_used: float  
-    option_bp: float
-    return_on_margin: float
-    close_reason: str
-    pnl: float
-    spread_type: Optional[str]  # Type of spread (NONE for single legs)
-    spread_id: Optional[int]  # ID to group legs of the same spread
-    leg_number: Optional[int]  # Position of this leg in the spread
-
 
 def is_put(trade: Union[Position, OptionType, str]) -> bool:
     """
     Checks if the option type is a PUT.
-
+    
     Args:
         trade (Union[Position, OptionType, str]): The trade to check. Can be a Position dictionary, an OptionType enum, or a string.
-
+        
     Returns:
         bool: True if the option type is a PUT, False otherwise.
     """
@@ -159,10 +104,10 @@ def is_put(trade: Union[Position, OptionType, str]) -> bool:
 def is_call(trade: Union[Position, OptionType, str]) -> bool:
     """
     Checks if the option type is a CALL.
-
+    
     Args:
         trade (Union[Position, OptionType, str]): The trade to check. Can be a Position dictionary, an OptionType enum, or a string.
-
+        
     Returns:
         bool: True if the option type is a CALL, False otherwise.
     """
@@ -180,7 +125,7 @@ def is_call(trade: Union[Position, OptionType, str]) -> bool:
 
     return option_type in [OptionType.CALL, OptionType.CALL.value, "call"]
 
-def is_short(trade: Union[Position, PositionSide, pd.Series, str]) -> bool:
+def is_short(trade: Union['Position', PositionSide, pd.Series, str]) -> bool:
     """
     Checks if the position is short.
 
@@ -204,15 +149,15 @@ def is_short(trade: Union[Position, PositionSide, pd.Series, str]) -> bool:
     
     return position_side in [PositionSide.SHORT, PositionSide.SHORT.value, 'short']
 
-def is_long(trade: Union[Position, PositionSide, pd.Series, str]) -> bool:
+def is_long(trade: Union['Position', PositionSide, pd.Series, str]) -> bool:
     """
-    Checks if the position is long.
-
+    Check if a trade is a long position.
+    
     Args:
-        trade (Union[Position, PositionSide, pd.Series, str]): The trade to check. Can be a Position dictionary, a PositionSide enum, a pandas Series, or a string.
-
+        trade: Position, PositionSide enum, pandas Series, or string ('long'/'short')
+        
     Returns:
-        bool: True if the position is long, False otherwise.
+        bool: True if long position, False otherwise
     """
     if isinstance(trade, dict) and 'position_side' in trade:
         position_side = trade['position_side']
@@ -228,7 +173,28 @@ def is_long(trade: Union[Position, PositionSide, pd.Series, str]) -> bool:
     
     return position_side in [PositionSide.LONG, PositionSide.LONG.value, 'long']
 
-def get_signed_entry_price(trade: Union[Position, pd.Series]) -> float:
+def is_spread_type(trade: Union[dict, SpreadType, pd.Series, str, pd.DataFrame], spread_type: SpreadType) -> bool:
+    """
+    Check if a trade's spread type matches the given SpreadType.
+    
+    Args:
+        trade: dict, SpreadType enum, pandas Series, string spread type, or DataFrame
+        spread_type: SpreadType enum to check against
+        
+    Returns:
+        bool: True if spread types match, False otherwise
+    """
+    if isinstance(trade, SpreadType):
+        return trade == spread_type
+    elif isinstance(trade, str):
+        return trade.lower() == spread_type.value
+    elif isinstance(trade, pd.DataFrame):
+        return trade.iloc[0]['spread_type'].lower() == spread_type.value
+    elif isinstance(trade, (dict, pd.Series)):
+        return trade['spread_type'].lower() == spread_type.value
+    return False
+
+def get_signed_entry_price(trade: Union['Position', pd.Series]) -> float:
     """
     Adjusts the entry price based on the position side.
 
@@ -264,7 +230,7 @@ def get_signed_entry_price(trade: Union[Position, pd.Series]) -> float:
             entry_price = abs(entry_price)
     return entry_price
 
-def get_signed_exit_price(trade: Union[Position, pd.Series]) -> float:
+def get_signed_exit_price(trade: Union['Position', pd.Series]) -> float:
     """
     Adjusts the exit price based on the position side.
 
@@ -353,136 +319,75 @@ def calculate_margin(underlying_price: float, entry_price: float,
 
         return round(margin_required, 2)
 
-def calculate_margin_for_spread(leg_group: pd.DataFrame,
-                                ) -> float:
+def calculate_margin_for_spread(leg_group: pd.DataFrame) -> float:
     """
-    Calculate margin required for a spread position.
+    Calculate margin requirement for a spread position.
     
     Args:
-        leg_group (pd.DataFrame): DataFrame containing leg details for a spread.
-        spread_type (SpreadType): Type of spread (DIAGONAL, STRAIGHT, SPREAD, etc.)
-    Returns: 
-        Margin required for the spread
+        leg_group: DataFrame containing the legs of the spread
+        
+    Returns:
+        float: Total margin required for the spread
     """
-    spread_type = leg_group.iloc[0]['spread_type']
+    # logger.debug(f'Calculating margin for spread type: {leg_group.iloc[0]["spread_type"]}')
     
     # For diagonal spreads, margin depends on whether it's a long or short diagonal spread
-    if spread_type == SpreadType.DIAGONAL:
-        legs = list(leg_group.itertuples())
-        if len(legs) != 2:
-            raise ValueError("Diagonal spreads must have exactly 2 legs")
-            
-        # Sort legs by expiration date
-        legs.sort(key=lambda x: x.expire_date)
-        front_leg = legs[0]  # Near-term leg
-        back_leg = legs[1]   # Far-term leg
-        
-        # For long diagonal spreads (buy back month, sell front month)
-        if is_long(back_leg.position_side) and is_short(front_leg.position_side):
-            # Calculate the width of the spread
-            width = abs(back_leg.strike - front_leg.strike)
-            # For long diagonals, margin is typically the width of the spread
-            return width * 100
-            
-        # For short diagonal spreads (sell back month, buy front month)
-        elif is_short(back_leg.position_side) and is_long(front_leg.position_side):
-            # Calculate the width of the spread
-            width = abs(back_leg.strike - front_leg.strike)
-            # For short diagonals, margin is typically the width of the spread
-            return width * 100
-            
-        else:
-            # If legs are not properly paired, calculate margin for each leg
-            total_margin = 0
-            for leg in legs:
-                leg_margin = calculate_margin(
-                    leg.underlying_last,
-                    leg.p_bid if is_put(leg.option_type) else leg.c_bid,
-                    leg.position_side,
-                    leg.strike,
-                    leg.option_type
-                )
-                total_margin += leg_margin
-            return total_margin
-    
-    # For vertical spreads, margin is always the width of the spread
-    elif spread_type == SpreadType.VERTICAL:
-        legs = list(leg_group.itertuples())
-        if len(legs) != 2:
-            raise ValueError("Vertical spreads must have exactly 2 legs")
-            
-        # Calculate the width of the spread
-        strikes = sorted([leg.strike for leg in legs])
-        width = abs(strikes[1] - strikes[0])
-        return width * 100  # Convert to dollars
-    
-    # For calendar spreads, margin depends on whether it's a long or short calendar spread
-    elif spread_type == SpreadType.CALENDAR:
-        legs = list(leg_group.itertuples())
-        if len(legs) != 2:
-            raise ValueError("Calendar spreads must have exactly 2 legs")
-            
-        # Sort legs by expiration date
-        legs.sort(key=lambda x: x.expire_date)
-        front_leg = legs[0]  # Near-term leg
-        back_leg = legs[1]   # Far-term leg
-        
-        # For long calendar spreads (buy back month, sell front month)
-        if is_long(back_leg.position_side) and is_short(front_leg.position_side):
-            # Margin is typically the width of the spread
-            width = abs(back_leg.strike - front_leg.strike)
-            return width * 100
-            
-        # For short calendar spreads (sell back month, buy front month)
-        elif is_short(back_leg.position_side) and is_long(front_leg.position_side):
-            # Margin is typically the width of the spread
-            width = abs(back_leg.strike - front_leg.strike)
-            return width * 100
-            
-        else:
-            # If legs are not properly paired, calculate margin for each leg
-            total_margin = 0
-            for leg in legs:
-                leg_margin = calculate_margin(
-                    leg.underlying_last,
-                    leg.p_bid if is_put(leg.option_type) else leg.c_bid,
-                    leg.position_side,
-                    leg.strike,
-                    leg.option_type
-                )
-                total_margin += leg_margin
-            return total_margin
-    
-    # For iron condors, margin is typically the width of the wider spread
-    elif spread_type == SpreadType.IRON_CONDOR:
-        # Get all strikes and sort them
-        strikes = sorted([leg.strike for leg in leg_group.itertuples()])
-        # Calculate width of put spread and call spread
-        put_width = abs(strikes[1] - strikes[0])  # Width of put spread
-        call_width = abs(strikes[3] - strikes[2])  # Width of call spread
-        # Return the wider of the two spreads
-        return max(put_width, call_width) * 100  # Convert to dollars
-    
-    # For butterflies, margin is typically the width of the spread
-    elif spread_type == SpreadType.BUTTERFLY:
-        # Get the strikes and calculate the width
-        strikes = sorted([leg.strike for leg in leg_group.itertuples()])
-        width = abs(max(strikes) - min(strikes))
-        return width * 100  # Convert to dollars
-    
-    # For single legs or unknown spread types, calculate margin for each leg
-    else:
+    if is_spread_type(leg_group, SpreadType.DIAGONAL):
         total_margin = 0
         for leg in leg_group.itertuples():
             leg_margin = calculate_margin(
-                leg.underlying_last,
-                leg.p_bid if is_put(leg.option_type) else leg.c_bid,
+                leg.underlying_entry,
+                leg.entry_price,
                 leg.position_side,
                 leg.strike,
-                leg.option_type
+                leg.option_type,
+                leg.expiration
             )
             total_margin += leg_margin
         return total_margin
+    
+    # For vertical spreads, margin is the width of the spread
+    elif is_spread_type(leg_group, SpreadType.VERTICAL):
+        legs = list(leg_group.itertuples())
+        if len(legs) != 2:
+            raise ValueError(f"Vertical spread must have exactly 2 legs, got {len(legs)}")
+        strikes = sorted([leg.strike for leg in legs])
+        return abs(strikes[1] - strikes[0]) * 100
+    
+    # For calendar spreads, margin is the width of the spread
+    elif is_spread_type(leg_group, SpreadType.CALENDAR):
+        legs = list(leg_group.itertuples())
+        if len(legs) != 2:
+            raise ValueError(f"Calendar spread must have exactly 2 legs, got {len(legs)}")
+        strikes = sorted([leg.strike for leg in legs])
+        return abs(strikes[1] - strikes[0]) * 100
+    
+    # For iron condors, margin is the width of the put spread plus the width of the call spread
+    elif is_spread_type(leg_group, SpreadType.IRON_CONDOR):
+        legs = list(leg_group.itertuples())
+        if len(legs) != 4:
+            raise ValueError(f"Iron condor must have exactly 4 legs, got {len(legs)}")
+        
+        # Sort legs by strike price
+        legs.sort(key=lambda x: x.strike)
+        strikes = sorted([leg.strike for leg in legs])
+        
+        # Calculate width of put spread (first two legs) and call spread (last two legs)
+        put_spread_width = abs(strikes[1] - strikes[0])
+        call_spread_width = abs(strikes[3] - strikes[2])
+        
+        return (put_spread_width + call_spread_width) * 100
+    
+    # For butterflies, margin is the width of the spread
+    elif is_spread_type(leg_group, SpreadType.BUTTERFLY):
+        legs = list(leg_group.itertuples())
+        if len(legs) != 3:
+            raise ValueError(f"Butterfly spread must have exactly 3 legs, got {len(legs)}")
+        strikes = sorted([leg.strike for leg in legs])
+        return abs(strikes[2] - strikes[0]) * 100
+    
+    else:
+        raise ValueError(f"Unsupported spread type: {leg_group.iloc[0]['spread_type']}")
 
 def calculate_intrinsic_value(underlying_price: float, strike: float, option_type: Union[OptionType, str]) -> float:
     """
@@ -534,10 +439,10 @@ def calculate_midpoint_price(bid: float, ask: float) -> Optional[float]:
     return (bid + ask) / 2
 
 def get_closing_data(
-    position: Position,
+    position: 'Position',
     full_chain_df: pd.DataFrame, 
     spx_data: pd.DataFrame
-) -> Optional[Position]:
+) -> Optional['Position']:
     """
     Get closing price data for an option position.
     
@@ -612,7 +517,7 @@ def get_closing_data(
     logger.error(f"No valid closing prices found for position with strike {position['strike']} and expire date {position['expire_date']}. Returning None.")
     return position  # Return None if no valid closing prices were found
 
-def calculate_option_pnl(position: PositionSide) -> float:
+def calculate_option_pnl(position: 'PositionSide') -> float:
     """
     Calculate P&L for option position.
     
@@ -645,10 +550,7 @@ def close_position(position: Position,
     Note:
         This function does not track cash flow explicitly due to the complexities 
         involved in managing multiple simultaneous trades. Instead, it updates 
-        the buying power (option_bp) to reflect the profit and loss (P&L) 
-        from closed trades and restores margin held for short positions. 
-        As a result, the cash flow is implicitly represented through the 
-        adjustments made to the buying power.
+        option buying power based on margin requirements.
     """
     close_reason = None
     min_valid_date = pd.Timestamp('1990-01-01')  # Arbitrary date well after 1970
@@ -695,14 +597,14 @@ def close_position(position: Position,
     logger.debug(f'Calculated pnl: {pnl}')
     
     # Update buying power to reflect the P&L from the closed trade
-    option_bp += get_signed_exit_price(position) * 100 * position['quantity']  # Adjust buying power based on the realized P&L
+    exit_price = get_signed_exit_price(position)
+    premium = exit_price * 100 * position['quantity']  # Premium in dollars
+    option_bp += premium  # Add/subtract exit premium (already signed)
 
-    # Restore buying power for short positions
-    req_margin = position['margin_required']
+    # Restore margin for short positions
     if is_short(position):
-        option_bp += req_margin  # Restore margin for short positions
+        option_bp += position['margin_required']  # Restore full margin requirement
 
-    # Close the position
     # Calculate days held (time between close date and entry)
     days_held = pd.Timedelta(close_date - position['entry_date']).days
     
@@ -767,7 +669,7 @@ def create_trade_from_signal(
     entry_date: pd.Timestamp,  # Assuming entry_date is a pandas Timestamp
     early_close_days: Optional[int] = None,  # Optional parameter
     delta_range: Tuple[float, float] = None  # Add delta_range here
-) -> Optional[Position]:
+) -> Optional['Position']:
     """
     Creates a Position object from a given trade signal.
 
@@ -786,7 +688,8 @@ def create_trade_from_signal(
     Returns:
         Optional[Position]: A Position object if the trade is valid, otherwise None.
     """
-    logger.debug(f"Creating trade from signal for date: {entry_date}")
+
+    # logger.debug(f"Creating trade from signal for date: {entry_date}")
     
     # Initialize skipped_trades counter
     skipped_trades = 0
@@ -933,8 +836,15 @@ def execute_trade(trade: Position,
     Returns:
         Tuple of (trade, cash, option_bp) if successful, None if trade cannot be executed
     """
-    # Use premium directly
-    premium = abs(trade['entry_price']) * 100 * trade['quantity']  # Adjusted for quantity
+    # Use spread price for spreads, individual leg price for single legs
+    if trade.get('spread_type') and trade.get('spread_type') != SpreadType.NONE.value:
+        if pd.isna(trade.get('spread_price')):
+            logger.error(f"Missing spread_price for spread {trade.get('spread_id')} leg {trade.get('leg_number')} on {trade['entry_date']}")
+            return None, option_bp
+        premium = abs(trade['spread_price']) * 100 * trade['quantity']  # Use spread price for spreads
+    else:
+        premium = abs(trade['entry_price']) * 100 * trade['quantity']  # Use individual leg price for single legs
+
     # Calculate effective margin requirement with leverage
     effective_margin = trade['margin_required'] / leverage
     
@@ -942,7 +852,6 @@ def execute_trade(trade: Position,
     if is_long(trade):
         # For long positions, check if there is enough buying power to buy the option
         if option_bp >= premium:  # Check against buying power
-            # cash -= premium  # Deduct premium from cash
             option_bp -= premium  # Deduct premium from buying power
             return trade, option_bp
         else:
@@ -953,12 +862,11 @@ def execute_trade(trade: Position,
     elif is_short(trade):
         # For short positions, check if buying power is sufficient
         if option_bp >= effective_margin:
-            option_bp += premium
-            option_bp -= effective_margin
-            # cash += premium  # Credit premium to cash
+            option_bp += premium  # Credit premium
+            option_bp -= effective_margin  # Reserve margin
             return trade, option_bp
         else:
-            logger.warning(f"Insufficient buying power (${option_bp}) to open short position on {trade['entry_date']}. Required: ${effective_margin:.2f}")
+            logger.warning(f"Insufficient buying power (${option_bp}) to sell option on {trade['entry_date']}. Required margin: ${effective_margin:.2f}")
             return None, option_bp
 
     return None, option_bp  # Return None if trade type is not recognized
@@ -977,56 +885,46 @@ def execute_backtest_trades(trades: pd.DataFrame,
                             quantity: int = 1
                            ) -> pd.DataFrame:
     """
-    Execute a series of trades and track results.
-    
-    This function can handle both single-leg positions and multi-leg spreads.
-    For single-leg positions, it takes trade signals and creates positions.
-    For spreads, it can take pre-created positions directly.
+    Execute trades based on signals.
     
     Args:
-        trades: DataFrame containing either trade signals or pre-created positions
-        full_chain_df: Full options chain data
-        underlying_price_history: Underlying price history
-        option_type: Option type for single-leg positions (ignored for spreads)
-        position_side: Position side for single-leg positions (ignored for spreads)
-        initial_capital: Initial capital
-        max_positions: Maximum number of positions allowed
-        leverage: Leverage multiplier
-        early_close_days: Days before expiration to close positions
-        delta_target: Target delta for single-leg positions
-        delta_range: Delta range for single-leg positions
-        quantity: Quantity of contracts
+        trades: DataFrame containing trade signals
+        full_chain_df: DataFrame containing the full options chain
+        underlying_price_history: DataFrame containing the underlying price history
+        option_type: Type of option (call/put)
+        position_side: Side of the position (long/short)
+        initial_capital: Initial capital to start with
+        max_positions: Maximum number of positions to hold at once
+        leverage: Leverage to use for margin calculations
+        early_close_days: Number of days before expiration to close positions
+        delta_target: Target delta for the position
+        delta_range: Range of acceptable deltas
+        quantity: Number of contracts to trade
         
     Returns:
-        DataFrame of trade results
+        DataFrame containing trade results
     """
+    # Initialize variables
+    trade_counter = 0
     option_bp = initial_capital
-    open_positions: List[Position] = []
-    trade_results: List[TradeResult] = []
+    open_positions = []
+    trade_results = []
     skipped_trades = 0
-    total_trades = len(trades)
-    trade_counter = 1
     
-    # Check if trades are already positions (for spreads)
-    is_spread_positions = all(col in trades.columns for col in ['spread_type', 'spread_id']) if not trades.empty else False
+    # Check if we're dealing with spreads
+    is_spread = 'spread_type' in trades.columns and trades['spread_type'].iloc[0] != SpreadType.NONE
     
-    # Sort trades by entry date
-    if is_spread_positions:
+    if is_spread:
         # For spreads, we already have positions with dates
-        # Convert positions to a list for processing
-        positions_list = trades.to_dict('records')
-        
         # Group positions by spread_id and date for processing in chronological order
-        from collections import defaultdict
-        spread_positions = defaultdict(list)
-        for pos in positions_list:
-            spread_positions[(pos['spread_id'], pos['entry_date'])].append(pos)
+        spread_groups = trades.groupby(['spread_id', 'entry_date'])
         
-        # Sort by date
-        sorted_spreads = sorted(spread_positions.keys(), key=lambda x: x[1])
+        # Sort groups by date
+        sorted_spreads = sorted(spread_groups, key=lambda x: x[0][1])
         logger.debug(f'Sorted spreads {sorted_spreads}')
+        
         # Process each spread's positions
-        for (spread_id, current_date), spread_legs in sorted_spreads:
+        for (spread_id, current_date), group in sorted_spreads:
             # First, check if any open positions need to be closed
             positions_to_remove = []
             for pos in open_positions:
@@ -1053,17 +951,30 @@ def execute_backtest_trades(trades: pd.DataFrame,
             
             # Execute all legs of the spread together
             spread_executed = True
-            for position in spread_legs:
-                position['trade_id'] = trade_counter
-                executed_position, option_bp = execute_trade(position, option_bp, leverage)
+            spread_positions = []
+            
+            # First leg will check BP for the entire spread
+            first_leg = True
+            for position in group.itertuples():
+                position_dict = position._asdict()
+                position_dict['trade_id'] = trade_counter
+                if first_leg:
+                    # First leg checks BP for entire spread
+                    executed_position, option_bp = execute_trade(position_dict, option_bp, leverage)
+                    first_leg = False
+                else:
+                    # Other legs don't affect BP
+                    executed_position = position_dict.copy()
+                
                 if executed_position:
-                    open_positions.append(executed_position)
-                    logger.debug(f'Opened spread leg: {executed_position}')
+                    spread_positions.append(executed_position)
+                    logger.debug(f'Prepared spread leg: {executed_position}')
                 else:
                     spread_executed = False
                     break
             
             if spread_executed:
+                open_positions.extend(spread_positions)
                 trade_counter += 1
                 logger.debug(f'BP: ${option_bp:.2f}')
             else:
@@ -1103,7 +1014,7 @@ def execute_backtest_trades(trades: pd.DataFrame,
             
             # Create new trade from signal
             new_trade = create_trade_from_signal(trade_signal, quantity, option_type, position_side, delta_target, current_date, early_close_days, delta_range)
-
+            
             # Try to execute the new trade
             executed_trade, option_bp = execute_trade(new_trade, option_bp, leverage)
             if executed_trade:
@@ -2120,6 +2031,7 @@ def run_backtest(
     # Generate trade signals based on backtest type
     signal_start = time.time()
     
+    # All spread types
     if is_spread:
         # Use spread signals if provided, otherwise generate them
         if spread_signals is None:
@@ -2157,7 +2069,8 @@ def run_backtest(
         else:
             logger.warning("No valid spread positions generated")
             return pd.DataFrame()
-        
+
+    # Single legs
     else:
         # Use trade signals if provided, otherwise generate them
         if trade_signals is not None and not trade_signals.empty:
@@ -2180,38 +2093,40 @@ def run_backtest(
             logger.warning("No trade signals generated with the current parameters.")
             return pd.DataFrame()
         
-        # Pre-calculate margin requirements for all signals
-        logger.info(f"Calculating margin requirements for trade signals for {quantity} | {option_type} | {position_side}...")
-        
-        # Handle all spread types
-        if is_spread:
-            for group_id, group in trade_signals.groupby('group_id'):
-                margin_required = calculate_margin_for_spread(group)
-                trade_signals.loc[group.index, 'margin_required'] = margin_required
-                # logger.debug(f'Calculated margin required for group {group_id}: {margin_required}')
 
-        # Single leg
-        else:
-            trade_signals['margin_required'] = trade_signals.apply(
-                lambda row: calculate_margin(
-                    row['underlying_last'],
-                    (row['p_bid'] + row['p_ask']) / 2 if is_put(row['option_type']) else (row['c_bid'] + row['c_ask']) / 2,
-                    row['position_side'],
-                    row['strike'],
-                    row['option_type']
-                ) * quantity,  # Multiply by quantity
-                axis=1
-            )
-        
-        
-        # Filter out trades that would exceed margin limits
-        valid_signals = trade_signals[trade_signals['margin_required'] <= max_allowed_margin]
-        filtered_count = len(trade_signals) - len(valid_signals)
-        if filtered_count > 0:
-            logger.warning(f"Filtered out {filtered_count} trades due to margin requirements")
-            logger.info(f"Average margin requirement for filtered trades: ${trade_signals['margin_required'].mean():.2f}")
-            logger.info(f"Maximum margin requirement for filtered trades: ${trade_signals['margin_required'].max():.2f}")
+    # Pre-calculate margin requirements for all signals
+    logger.info(f"Calculating margin requirements for trade signals for {quantity} | {option_type if option_type else spread_type} | {delta_target if delta_target else delta_range}")
     
+    # Handle all spread types
+    if is_spread:
+        # Calculate margins per spread group and ensure proper alignment
+        margins = trade_signals.groupby('spread_id').apply(calculate_margin_for_spread)
+        trade_signals['margin_required'] = trade_signals['spread_id'].map(margins)
+        logger.debug(f'Calculated margins for {len(margins)} spread groups')
+        logger.debug(f'First few margins: {margins.head()}')
+
+    # Single leg
+    else:
+        trade_signals['margin_required'] = trade_signals.apply(
+            lambda row: calculate_margin(
+                row['underlying_last'],
+                (row['p_bid'] + row['p_ask']) / 2 if is_put(row['option_type']) else (row['c_bid'] + row['c_ask']) / 2,
+                row['position_side'],
+                row['strike'],
+                row['option_type']
+            ) * quantity,  # Multiply by quantity
+            axis=1
+        )
+    
+    
+    # Filter out trades that would exceed margin limits
+    valid_signals = trade_signals[trade_signals['margin_required'] <= max_allowed_margin]
+    filtered_count = len(trade_signals) - len(valid_signals)
+    if filtered_count > 0:
+        logger.warning(f"Filtered out {filtered_count} trades due to margin requirements")
+        logger.info(f"Average margin requirement for filtered trades: ${trade_signals['margin_required'].mean():.2f}")
+        logger.info(f"Maximum margin requirement for filtered trades: ${trade_signals['margin_required'].max():.2f}")
+
     signal_time = time.time() - signal_start
     logger.info(f"Signal generation completed in {signal_time:.2f} seconds")
     
@@ -2380,7 +2295,7 @@ def check_date_presence(pivoted_chain, date_to_check):
     logger.info(f"Date {date_to_check} presence: {is_present}")
     return is_present
 
-def calculate_net_liq(cash: float, open_positions: List[Position]) -> float:
+def calculate_net_liq(cash: float, open_positions: List['Position']) -> float:
     """
     Calculate the net liquidity based on cash and open positions.
     
@@ -3194,7 +3109,7 @@ def create_spread_positions(
     legs_config: List[Dict],
     early_close_days: Optional[int] = None,
     quantity: int = 1
-) -> List[Position]:
+) -> List['Position']:
     """
     Create individual leg positions from spread signals.
     
@@ -3221,7 +3136,7 @@ def create_spread_positions(
     # Process spread signals to create individual leg positions
     for spread_signal in spread_signals.itertuples():
 
-        logger.debug(f'Processing spread signal: {spread_signal}')
+        # logger.debug(f'Processing spread signal: {spread_signal}')
 
         # Convert spread_date to pandas Timestamp
         # spread_date = pd.to_datetime(spread_signal.name if hasattr(spread_signal, 'name') else spread_signal['date'])
@@ -3248,7 +3163,7 @@ def create_spread_positions(
                 # Calculate days to expiration properly
                 dte_atrr = f"{leg_prefix}dte"
                 if hasattr(spread_signal, dte_atrr):
-                    dte_value = spread_signal.getattr(dte_atrr)
+                    dte_value = getattr(spread_signal, dte_atrr)
                 else:
                     # Calculate dte using proper timedelta operations
                     expire_date = pd.to_datetime(spread_signal.expire_date)
@@ -3303,6 +3218,8 @@ def create_spread_positions(
                     position['spread_id'] = spread_counter
                     position['leg_number'] = leg_number
                     position['leg_ratio'] = leg_config.get('ratio', 1)
+                    # Add the total spread price to each leg
+                    position['spread_price'] = getattr(spread_signal, 'spread_price', 0)
                     
                     spread_legs.append(position)
                 else:
@@ -3499,3 +3416,9 @@ def run_multiple_backtests(
     logger.info(f"Average time per backtest: {total_time/len(hyperparameter_sets):.2f} seconds")
     
     return results
+
+def validate_dataframe_schema(df: pd.DataFrame, schema: dict, name: str = "") -> bool:
+    """
+    Validate that a DataFrame conforms to the specified schema.
+    """
+    return validate_dataframe_schema(df, schema, name)
