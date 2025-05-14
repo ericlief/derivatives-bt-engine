@@ -712,8 +712,8 @@ def create_trade_from_signal(
     if delta_range:
         if is_put(option_type):
             # For puts, more negative delta means more ITM
-            min_delta = -abs(delta_range[0])  # Less negative (more OTM)
-            max_delta = -abs(delta_range[1])  # More negative (more ITM)
+            min_delta = -abs(delta_range[1])  #  More negative (more ITM)
+            max_delta = -abs(delta_range[0])  # Less negative (more OTM)
             if not (min_delta <= trade_delta <= max_delta):
                 logger.debug(f"Skipping trade with delta {trade_delta:.2f} (not in range: {min_delta:.2f} to {max_delta:.2f})")
                 skipped_trades += 1
@@ -1418,8 +1418,8 @@ def generate_trade_signals(
     if delta_range:
         # Handle range case
         if is_put(option_type):
-            min_delta = -abs(delta_range[0])  # Less negative (more OTM)
-            max_delta = -abs(delta_range[1])  # More negative (more ITM)
+            min_delta = -abs(delta_range[1])  # More negative (more ITM)
+            max_delta = -abs(delta_range[0])  # Less negative (more OTM)
         else:
             min_delta = abs(delta_range[0])  # Less positive (more OTM)
             max_delta = abs(delta_range[1])  # More positive (more ITM)
@@ -2135,8 +2135,7 @@ def run_backtest(
     backtest_start = time.time()
     logger.info(f"Running backtest with {len(valid_signals)} valid trades")
     
-    # For spread positions, valid_signals is already a DataFrame of positions
-    # For single legs, we still need to execute the backtest
+    # For spread positions, valid_signals contains all legs per row
     trade_results = execute_backtest_trades(
         valid_signals,
         options_chain,
@@ -2165,6 +2164,7 @@ def run_backtest(
     assert abs(trade_results['capital'].iloc[-1] - trade_results['option_bp'].iloc[-1]) < 1e-6, f'Final capital: {trade_results["capital"].iloc[-1]} | BP: {trade_results["option_bp"].iloc[-1]}'
 
     # Calculate MTM
+    logger.info(f"Running MTM calculation")
     mtm_start = time.time()
     # Generate parameter string based on backtest type
     if is_spread:
