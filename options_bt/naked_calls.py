@@ -1,6 +1,7 @@
 import os
 import pandas as pd
-from options_bt.bt import run_multiple_backtests, OptionType, PositionSide, setup_logger
+from options_bt.bt import run_multiple_backtests, setup_logger
+from options_bt.domain.enums import OptionType, PositionSide
 
 # Create logger instance
 logger = setup_logger()
@@ -51,7 +52,7 @@ def run_test_suite():
             'dte_range': (42, 45),
             'initial_capital': 200000,
             'early_close_days': 30,
-            'max_positions': 2
+            'max_positions': 1
         },
         #    {
         #     'option_type': OptionType.CALL,

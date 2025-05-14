@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import os
 from typing import Dict, List, Optional, Tuple, TypedDict, Union
-from enum import Enum, auto
+from enum import Enum 
 import logging
 from datetime import datetime
 import time
@@ -1971,7 +1971,7 @@ def run_backtest(
     # Spread-specific parameters
     spread_type: SpreadType = None,
     legs_config: List[Dict] = None,
-    spread_signals: pd.DataFrame = None,  # Pre-generated spread signals
+    # spread_signals: pd.DataFrame = None,  # Pre-generated spread signals
     trade_signals: pd.DataFrame = None,   # Pre-generated trade signals for single legs
 ) -> pd.DataFrame:
     """
@@ -2028,13 +2028,17 @@ def run_backtest(
     logger.info(f"Maximum allowed margin: ${max_allowed_margin:.2f} ({max_margin_utilization:.0%} of capital with {leverage}x leverage)")
     logger.info(f"Maximum simultaneous positions: {max_positions}")
     
-    # Generate trade signals based on backtest type
+    # Use passed trade signals based on backtest type or generate them
     signal_start = time.time()
+    if trade_signals is not None and not trade_signals.empty:
+        logger.debug("Using provided trade signals from multiple_backtest.py")
     
-    # All spread types
-    if is_spread:
-        # Use spread signals if provided, otherwise generate them
-        if spread_signals is None:
+        
+    else:
+        logger.debug("Generating trade signals")
+        
+        # Generate multiple legs spread signals
+        if is_spread:
             trade_signals = generate_spread_signals(
                 options_chain=options_chain,
                 spread_type=spread_type,
@@ -2045,38 +2049,28 @@ def run_backtest(
                 dte_target=dte_target,
                 spx_data=spx_data
             )
-        else:
-            trade_signals = spread_signals
+        
             
-        if trade_signals.empty:
-            logger.warning("No spread signals generated with the current parameters.")
-            return pd.DataFrame()
-            
-        # Create spread positions using the helper function
-        leg_positions = create_spread_positions(
-            spread_signals=trade_signals,
-            spread_type=spread_type,
-            legs_config=legs_config,
-            early_close_days=early_close_days,
-            quantity=quantity
-        )
+        # # Create spread positions using the helper function
+        # leg_positions = create_spread_positions(
+        #     spread_signals=trade_signals,
+        #     spread_type=spread_type,
+        #     legs_config=legs_config,
+        #     early_close_days=early_close_days,
+        #     quantity=quantity
+        # )
         
         # Use the generated leg positions as trade signals
         # by converting list of positions to a DataFrame
-        if leg_positions:
-            trade_signals = pd.DataFrame(leg_positions)
-            logger.debug(f'Leg positions created: {trade_signals}')
-        else:
-            logger.warning("No valid spread positions generated")
-            return pd.DataFrame()
+        # if leg_positions:
+        #     trade_signals = pd.DataFrame(leg_positions)
+        #     logger.debug(f'Leg positions created: {trade_signals}')
+        # else:
+        #     logger.warning("No valid spread positions generated")
+        #     return pd.DataFrame()
 
-    # Single legs
-    else:
-        # Use trade signals if provided, otherwise generate them
-        if trade_signals is not None and not trade_signals.empty:
-            logger.debug("Using provided trade signals")
+        # Generate normal single-leg signals
         else:
-            # Generate normal single-leg signals
             trade_signals = generate_trade_signals(
                 spx_data, 
                 options_chain,
@@ -2090,7 +2084,7 @@ def run_backtest(
             )
         
         if trade_signals.empty:
-            logger.warning("No trade signals generated with the current parameters.")
+            logger.warning("No trade signals generated with the current parameters. Try again!")
             return pd.DataFrame()
         
 
@@ -2363,6 +2357,7 @@ def generate_spread_signals(
             logger.error(f"Leg {i+1} must have either delta_target or delta_range specified")
             return pd.DataFrame()
         
+        # Filter options chain for the 
         leg_df = generate_trade_signals(
             spx_data=spx_data,  # Pass SPX data if available
             options_chain=options_chain,
@@ -3281,7 +3276,8 @@ def prepare_backtest_params(
     
     # Add specific parameters based on backtest type
     if is_spread:
-        # Generate spread signals
+
+        # Generate spread signals. These will contain multiple legs per row
         spread_signals = generate_spread_signals(
             options_chain=options_chain,
             spread_type=params['spread_type'],
@@ -3300,7 +3296,7 @@ def prepare_backtest_params(
             'legs_config': params['legs_config'],
         })
     else:
-        # Generate single-leg trade signals
+        # Generate single-leg trade signals, one trade per row
         trade_signals = generate_trade_signals(
             spx_data=spx_data,
             options_chain=options_chain,
