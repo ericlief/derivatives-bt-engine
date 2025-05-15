@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict
+from functools import cached_property
 import pandas as pd
 import logging
 from options_bt.domain.enums import SpreadType
@@ -63,12 +64,14 @@ class Spread:
                 raise ValueError("Iron condor must have exactly 4 legs")
             # Additional iron condor validations would go here
 
-    def calculate_margin(self, leverage: float = 1.0) -> float:
-        """Calculate total margin requirement for the spread."""
-        if self.spread_type == SpreadType.NONE:
-            return sum(leg.calculate_margin(leverage) for leg in self.legs)
-            
-        # For defined risk spreads, margin is the maximum possible loss
+    @cached_property
+    def net_price(self) -> float:
+        """Calculate the net price of the spread."""
+        return sum(leg.get_signed_entry_price * self.leg_ratios[i] for i, leg in enumerate(self.legs))
+
+    @cached_property
+    def max_risk(self) -> float:
+        """Calculate maximum risk for defined-risk spreads."""
         if self.spread_type == SpreadType.VERTICAL:
             strikes = sorted([leg.strike for leg in self.legs])
             return abs(strikes[1] - strikes[0]) * 100
@@ -83,12 +86,21 @@ class Spread:
             legs = sorted(self.legs, key=lambda x: x.strike)
             return abs(legs[2].strike - legs[0].strike) * 100
             
-        # For undefined risk spreads, sum individual margins
-        return sum(leg.calculate_margin(leverage) for leg in self.legs)
+        return None  # For undefined risk spreads
 
-    def calculate_spread_price(self) -> float:
-        """Calculate the net price of the spread."""
-        return sum(leg.entry_price * self.leg_ratios[i] for i, leg in enumerate(self.legs))
+    @cached_property
+    def margin_required(self) -> float:
+        """Calculate total margin requirement for the spread."""
+        if self.spread_type == SpreadType.NONE:
+            return sum(leg.calculate_margin() for leg in self.legs)
+            
+        # For defined risk spreads, use max_risk
+        max_risk = self.max_risk
+        if max_risk is not None:
+            return max_risk
+            
+        # For undefined risk spreads, sum individual margins
+        return sum(leg.calculate_margin() for leg in self.legs)
 
     def calculate_pnl(self) -> float:
         """Calculate total P&L for the spread."""
@@ -99,9 +111,8 @@ class Spread:
         return {
             'spread_type': self.spread_type.value,
             'spread_id': self.spread_id,
-            'entry_date': self.entry_date,
             'legs': [leg.to_dict() for leg in self.legs],
             'leg_ratios': self.leg_ratios,
-            'spread_price': self.spread_price or self.calculate_spread_price(),
-            'margin_required': self.calculate_margin()
+            'spread_price': self.spread_price or self.net_price,
+            'margin_required': self.margin_required
         } 

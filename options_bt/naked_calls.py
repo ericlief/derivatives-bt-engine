@@ -1,8 +1,16 @@
-import os
+from typing import Dict, List, Optional, Tuple, Union
+import logging
+from datetime import datetime
 import pandas as pd
-from options_bt.bt import run_multiple_backtests, setup_logger
-from options_bt.domain.enums import OptionType, PositionSide
 
+from options_bt.bt import run_multiple_backtests, setup_logger
+from options_bt.domain.enums import OptionType, PositionSide, SpreadType, TradeResult
+from options_bt.domain.trade_manager import TradeManager
+from options_bt.domain.position import Position
+from options_bt.domain.spread import Spread
+from options_bt.domain.backtester import Backtester
+from options_bt.domain.dataloader import DataLoader
+ 
 # Create logger instance
 logger = setup_logger()
  
@@ -15,88 +23,110 @@ def run_test_suite():
 
     # Set up data paths
     DATA_PATH = "/Users/liefe/Data/spx"
-    SPX_FILE = os.path.join(DATA_PATH, "spx_2018_2023.csv")
-    OPTIONS_FILE = os.path.join(DATA_PATH, "spx_options_2018_2023.csv")
+    OPTIONS_FILE = "options_chain_preprocessed.csv"
 
-    # Define hyperparameter sets for different tests
-    hyperparameter_sets = [
-        # {
-        #     'option_type': OptionType.CALL,
-        #     'position_side': PositionSide.SHORT,
-        #     'delta_target': 0.75,
-        #     'use_spx_close': True,
-        #     'start_date': "2020-01-01",
-        #     'end_date': "2020-3-31",
-        #     'dte_range': (42, 45),
-        #     'initial_capital': 100000,
-        #     'early_close_days': None
-        # },
-        # {
-        #     'option_type': OptionType.CALL,
-        #     'position_side': PositionSide.SHORT,
-        #     'delta_target': 0.75,
-        #     'use_spx_close': True,
-        #     'start_date': "2020-01-01",
-        #     'end_date': "2020-3-31",
-        #     'dte_range': (42, 45),
-        #     'initial_capital': 100000,
-        #     'early_close_days': 30
-        # },
-        {
-            'option_type': OptionType.CALL,
-            'position_side': PositionSide.SHORT,
-            'delta_target': 0.75,
-            'use_spx_close': True,
-            'start_date': "2020-01-01",
-            'end_date': "2020-12-31",
-            'dte_range': (42, 45),
-            'initial_capital': 200000,
-            'early_close_days': 30,
-            'max_positions': 1
-        },
-        #    {
-        #     'option_type': OptionType.CALL,
-        #     'position_side': PositionSide.SHORT,
-        #     'delta_target': 0.75,
-        #     'use_spx_close': True,
-        #     'start_date': "2020-01-01",
-        #     'end_date': "2020-12-31",
-        #     'dte_range': (42, 45),
-        #     'initial_capital': 100000,
-        #     'early_close_days': 30,
-        #     'max_positions': 2,
-        #     'leverage': 2.0
-        # },
-    ]
+    dl = DataLoader(data_dir=DATA_PATH, options_file=OPTIONS_FILE, use_preprocessed=True, save_preprocessed=False)
+    options_chain, options_chain_multi_index, spx_data, vix_data = dl.load_data()
+    # print(dl.__dict__)
+    # Check data quality once
+    # check_data_quality(options_chain, spx_data, vix_data)
+    
+    preloaded_data = {
+        'spx_data': spx_data,
+        'options_data': options_chain,
+        'options_data_multi': options_chain_multi_index,
+        'vix_data': vix_data
+    }
+    
+    # backtester = Backtester(
+    #     data=data,
+    #     initial_capital=100000,
+    #     leverage=1.0,
+    #     max_positions=1,
+    #     max_margin_utilization=0.80,
+    #     save_trades=True,
+    #     log_to_sheets=True
+    # )
+    
+    # # Define hyperparameter sets for different tests
+    # hyperparameter_sets = [
+    #     # {
+    #     #     'option_type': OptionType.CALL,
+    #     #     'position_side': PositionSide.SHORT,
+    #     #     'delta_target': 0.75,
+    #     #     'use_spx_close': True,
+    #     #     'start_date': "2020-01-01",
+    #     #     'end_date': "2020-3-31",
+    #     #     'dte_range': (42, 45),
+    #     #     'initial_capital': 100000,
+    #     #     'early_close_days': None
+    #     # },
+    #     # {
+    #     #     'option_type': OptionType.CALL,
+    #     #     'position_side': PositionSide.SHORT,
+    #     #     'delta_target': 0.75,
+    #     #     'use_spx_close': True,
+    #     #     'start_date': "2020-01-01",
+    #     #     'end_date': "2020-3-31",
+    #     #     'dte_range': (42, 45),
+    #     #     'initial_capital': 100000,
+    #     #     'early_close_days': 30
+    #     # },
+    #     {
+    #         'option_type': OptionType.CALL,
+    #         'position_side': PositionSide.SHORT,
+    #         'delta_target': 0.75,
+    #         'use_spx_close': True,
+    #         'start_date': "2020-01-01",
+    #         'end_date': "2020-12-31",
+    #         'dte_range': (42, 45),
+    #         'initial_capital': 200000,
+    #         'early_close_days': 30,
+    #         'max_positions': 1
+    #     },
+    #     #    {
+    #     #     'option_type': OptionType.CALL,
+    #     #     'position_side': PositionSide.SHORT,
+    #     #     'delta_target': 0.75,
+    #     #     'use_spx_close': True,
+    #     #     'start_date': "2020-01-01",
+    #     #     'end_date': "2020-12-31",
+    #     #     'dte_range': (42, 45),
+    #     #     'initial_capital': 100000,
+    #     #     'early_close_days': 30,
+    #     #     'max_positions': 2,
+    #     #     'leverage': 2.0
+    #     # },
+    # ]
 
-    # Run all tests using run_multiple_backtests
-    logger.info("\nRunning multiple backtests with different configurations...")
-    results = run_multiple_backtests(
-        spx_file_path=SPX_FILE,
-        options_chain_file_path=OPTIONS_FILE,
-        hyperparameter_sets=hyperparameter_sets
-    )
+    # # Run all tests using run_multiple_backtests
+    # logger.info("\nRunning multiple backtests with different configurations...")
+    # results = backtester.run_multiple_backtests(
+    #     spx_file_path=SPX_FILE,
+    #     options_chain_file_path=OPTIONS_FILE,
+    #     hyperparameter_sets=hyperparameter_sets
+    # )
 
-    # Print results summary
-    logger.info("\nTest Results Summary:")
-    for test_id, test_data in results.items():
-        params = test_data['params']
-        result_df = test_data['results']
-        execution_time = test_data['execution_time']
+    # # Print results summary
+    # logger.info("\nTest Results Summary:")
+    # for test_id, test_data in results.items():
+    #     params = test_data['params']
+    #     result_df = test_data['results']
+    #     execution_time = test_data['execution_time']
         
-        logger.info(f"\n{test_id}:")
-        logger.info(f"Parameters: {params}")
-        logger.info(f"Execution time: {execution_time:.2f} seconds")
+    #     logger.info(f"\n{test_id}:")
+    #     logger.info(f"Parameters: {params}")
+    #     logger.info(f"Execution time: {execution_time:.2f} seconds")
         
-        if not result_df.empty:
-            logger.info(f"Total trades: {len(result_df)}")
-            logger.info(f"Win rate: {(result_df['pnl'] > 0).mean():.2%}")
-            logger.info(f"Total P&L: ${result_df['pnl'].sum():.2f}")
-            logger.info(f"Return on capital: {(result_df['capital'].iloc[-1] / params['initial_capital'] - 1):.2%}")
-            logger.info(f"Average days held: {result_df['days_held'].mean():.1f}")
-            logger.info(f"Average return on margin: {result_df['return_on_margin'].mean():.2f}%")
-        else:
-            logger.warning("No trades executed for this configuration")
+    #     if not result_df.empty:
+    #         logger.info(f"Total trades: {len(result_df)}")
+    #         logger.info(f"Win rate: {(result_df['pnl'] > 0).mean():.2%}")
+    #         logger.info(f"Total P&L: ${result_df['pnl'].sum():.2f}")
+    #         logger.info(f"Return on capital: {(result_df['capital'].iloc[-1] / params['initial_capital'] - 1):.2%}")
+    #         logger.info(f"Average days held: {result_df['days_held'].mean():.1f}")
+    #         logger.info(f"Average return on margin: {result_df['return_on_margin'].mean():.2f}%")
+    #     else:
+    #         logger.warning("No trades executed for this configuration")
 
 if __name__ == "__main__":
     run_test_suite()

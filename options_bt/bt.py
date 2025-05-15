@@ -1,6 +1,6 @@
 import sys
 import os
-from typing import Dict, List, Optional, Tuple, TypedDict, Union
+from typing import Dict, List, NamedTuple, Optional, Tuple, TypedDict, Union
 from enum import Enum 
 
 import logging
@@ -12,7 +12,10 @@ import numpy as np
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
  
-from options_bt.domain.enums import OptionType, PositionSide, SpreadType, Position, TradeResult
+from options_bt.domain.enums import OptionType, PositionSide, SpreadType, TradeResult
+from options_bt.domain.spread import Spread
+from options_bt.domain.trade import TradeResult   
+from options_bt.domain.position import Position
 from options_bt.domain.schemas import (
     OPTIONS_CHAIN_SCHEMA,
     TRADE_SIGNALS_SCHEMA,
@@ -88,8 +91,8 @@ def is_put(trade: Union[Position, OptionType, str]) -> bool:
     Returns:
         bool: True if the option type is a PUT, False otherwise.
     """
-    if isinstance(trade, dict) and 'option_type' in trade:
-        option_type = trade['option_type']
+    if isinstance(trade, Position):
+        option_type = trade.option_type
     elif isinstance(trade, pd.Series) and 'option_type' in trade:  
         option_type = trade.option_type
     elif isinstance(trade, OptionType):
@@ -112,8 +115,8 @@ def is_call(trade: Union[Position, OptionType, str]) -> bool:
     Returns:
         bool: True if the option type is a CALL, False otherwise.
     """
-    if isinstance(trade, dict) and 'option_type' in trade:
-        option_type = trade['option_type']
+    if isinstance(trade, Position):
+        option_type = trade.option_type
     elif isinstance(trade, pd.Series) and 'option_type' in trade:  
         option_type = trade.option_type
     elif isinstance(trade, OptionType):
@@ -126,7 +129,7 @@ def is_call(trade: Union[Position, OptionType, str]) -> bool:
 
     return option_type in [OptionType.CALL, OptionType.CALL.value, "call"]
 
-def is_short(trade: Union['Position', PositionSide, pd.Series, str]) -> bool:
+def is_short(trade: Union[Position, PositionSide, pd.Series, str]) -> bool:
     """
     Checks if the position is short.
 
@@ -136,8 +139,8 @@ def is_short(trade: Union['Position', PositionSide, pd.Series, str]) -> bool:
     Returns:
         bool: True if the position is short, False otherwise.
     """
-    if isinstance(trade, dict) and 'position_side' in trade:
-        position_side = trade['position_side']
+    if isinstance(trade, Position):
+        position_side = trade.position_side
     elif isinstance(trade, PositionSide):
         position_side = trade
     elif isinstance(trade, pd.Series) and 'position_side' in trade:  
@@ -150,7 +153,7 @@ def is_short(trade: Union['Position', PositionSide, pd.Series, str]) -> bool:
     
     return position_side in [PositionSide.SHORT, PositionSide.SHORT.value, 'short']
 
-def is_long(trade: Union['Position', PositionSide, pd.Series, str]) -> bool:
+def is_long(trade: Union[Position, PositionSide, pd.Series, str]) -> bool:
     """
     Check if a trade is a long position.
     
@@ -160,8 +163,8 @@ def is_long(trade: Union['Position', PositionSide, pd.Series, str]) -> bool:
     Returns:
         bool: True if long position, False otherwise
     """
-    if isinstance(trade, dict) and 'position_side' in trade:
-        position_side = trade['position_side']
+    if isinstance(trade, Position):
+        position_side = trade.position_side
     elif isinstance(trade, PositionSide):
         position_side = trade
     elif isinstance(trade, pd.Series) and 'position_side' in trade:  
@@ -195,7 +198,7 @@ def is_spread_type(trade: Union[dict, SpreadType, pd.Series, str, pd.DataFrame],
         return trade['spread_type'].lower() == spread_type.value
     return False
 
-def get_signed_entry_price(trade: Union['Position', pd.Series]) -> float:
+def get_signed_entry_price(trade: Union[Position, pd.Series]) -> float:
     """
     Adjusts the entry price based on the position side.
 
@@ -205,33 +208,33 @@ def get_signed_entry_price(trade: Union['Position', pd.Series]) -> float:
     Returns:
         float: The signed entry price adjusted for position side.
     """
-    if isinstance(trade, dict) and 'position_side' in trade and 'entry_price' in trade:
-        position_side = trade['position_side']
-        entry_price = trade['entry_price']
-    elif isinstance(trade, pd.Series) and 'position_side' in trade and 'entry_price' in trade:
-        position_side = trade.position_side
+    if isinstance(trade, Position):
         entry_price = trade.entry_price
+        is_position_long = trade.is_long()
+        is_position_short = trade.is_short()
+    elif isinstance(trade, pd.Series) and 'position_side' in trade and 'entry_price' in trade:
+        entry_price = trade.entry_price
+        is_position_long = is_long(trade)
+        is_position_short = is_short(trade)
     else:
         logger.error(f'Need to pass either a Position or pd.Series arg, got {type(trade)}')
         raise TypeError(f'Need to pass either a Position or pd.Series, got {type(trade)}')
     
     # Validate sign of entry price acc. to PositionSide
     try:
-        if is_long(position_side):
+        if is_position_long:
             assert entry_price <= 0  # debit premium, buy to open (BTO)
-        elif is_short(position_side):
+        elif is_position_short:
             assert entry_price >= 0  # credit premium, sell to open (STO)
         else:
-            raise ValueError(f'Unrecognized PositionSide, got {trade} of type: {type(position_side)}')
+            raise ValueError('Position side must be either LONG or SHORT')
     except AssertionError:
         logger.debug(f'Fixing sign of entry price {entry_price} for {trade}')
-        if is_long(position_side):
-            entry_price = -abs(entry_price)
-        else:
-            entry_price = abs(entry_price)
+        entry_price = -abs(entry_price) if is_position_long else abs(entry_price)
+    
     return entry_price
 
-def get_signed_exit_price(trade: Union['Position', pd.Series]) -> float:
+def get_signed_exit_price(trade: Union[Position, pd.Series]) -> float:
     """
     Adjusts the exit price based on the position side.
 
@@ -241,31 +244,30 @@ def get_signed_exit_price(trade: Union['Position', pd.Series]) -> float:
     Returns:
         float: The signed exit price adjusted for position side.
     """
-    if isinstance(trade, dict) and 'position_side' in trade and 'exit_price' in trade:
-        position_side = trade['position_side']
-        exit_price = trade['exit_price']
-    elif isinstance(trade, pd.Series) and 'position_side' in trade and 'exit_price' in trade:   # Union of pd.Series and TradeResult
-        position_side = trade.position_side
+    if isinstance(trade, Position):
         exit_price = trade.exit_price
+        is_position_long = trade.is_long()
+        is_position_short = trade.is_short()
+    elif isinstance(trade, pd.Series) and 'position_side' in trade and 'exit_price' in trade:
+        exit_price = trade.exit_price
+        is_position_long = is_long(trade)
+        is_position_short = is_short(trade)
     else:
         logger.error(f'Need to pass either a Position or pd.Series arg, got {type(trade)}')
         raise TypeError(f'Need to pass either a Position or pd.Series, got {type(trade)}')
-        # return None
     
-    # Validate sign of entry price acc. to PositionSide
+    # Validate sign of exit price acc. to PositionSide
     try:
-        if is_long(position_side):
+        if is_position_long:
             assert exit_price >= 0  # sell to close (STC)
-        elif is_short(position_side):
+        elif is_position_short:
             assert exit_price <= 0  # buy to close (BTC)
         else:
-            raise ValueError(f'Unrecognized PositionSide, got {trade} of type: {type(position_side)}')
+            raise ValueError('Position side must be either LONG or SHORT')
     except AssertionError:
         logger.debug(f'Fixing sign of exit price {exit_price} for {trade}')
-        if is_long(position_side):
-            exit_price = abs(exit_price)
-        else:
-            exit_price = -abs(exit_price)
+        exit_price = abs(exit_price) if is_position_long else -abs(exit_price)
+    
     return exit_price
 
 def calculate_margin(underlying_price: float, entry_price: float, 
@@ -518,7 +520,7 @@ def get_closing_data(
     logger.error(f"No valid closing prices found for position with strike {position['strike']} and expire date {position['expire_date']}. Returning None.")
     return position  # Return None if no valid closing prices were found
 
-def calculate_option_pnl(position: 'PositionSide') -> float:
+def calculate_option_pnl(position: 'Position') -> float:
     """
     Calculate P&L for option position.
     
@@ -530,7 +532,7 @@ def calculate_option_pnl(position: 'PositionSide') -> float:
     """
     # Calculate P&L using entry and closing prices (signed)
     pnl = get_signed_entry_price(position) + get_signed_exit_price(position)
-    return pnl * 100 * position['quantity'] if is_short(position) else max(0, pnl * 100 * position['quantity']) # clamp loss to zero if LONG
+    return pnl * 100 * position.quantity if position.is_short() else max(0, pnl * 100 * position.quantity) # clamp loss to zero if LONG
 
 def close_position(position: Position, 
                   full_chain_df: pd.DataFrame, 
@@ -557,18 +559,18 @@ def close_position(position: Position,
     min_valid_date = pd.Timestamp('1990-01-01')  # Arbitrary date well after 1970
     
     # Validate entry_date
-    entry_date = position['entry_date']
+    entry_date = position.entry_date
     if not isinstance(entry_date, pd.Timestamp) or entry_date <= min_valid_date:
         logger.error(f"Invalid entry date: {entry_date} - skipping trade")
         return None
     
     # Early closure, get close date with validation
-    if 'close_date' in position and position['close_date'] is not None:
+    if position.close_date is not None:
         close_reason = 'early closure'
-        close_date = position['close_date']
-    elif 'expire_date' in position and position['expire_date'] is not None:
+        close_date = position.close_date
+    elif position.expire_date is not None:
         close_reason = 'expired'
-        close_date = position['expire_date']
+        close_date = position.expire_date
     else:
         logger.error("Both close_date and expire_date are None in position - skipping trade")
         return None
@@ -581,15 +583,15 @@ def close_position(position: Position,
         return None
     
     # Ensure close_date is not before entry_date
-    if close_date < position['entry_date']:
-        logger.error(f"Close date {close_date} is before entry date {position['entry_date']} - skipping trade")
+    if close_date < position.entry_date:
+        logger.error(f"Close date {close_date} is before entry date {position.entry_date} - skipping trade")
         return None
     
     # Get closing prices
     position = get_closing_data(position, full_chain_df, underlying_price_history)
     
     # If get_closing_data returned None values, we should skip this trade
-    if position['exit_price'] is None:
+    if position.exit_price is None:
         logger.warning("Skipping trade due to missing close data")
         return None
     
@@ -599,15 +601,15 @@ def close_position(position: Position,
     
     # Update buying power to reflect the P&L from the closed trade
     exit_price = get_signed_exit_price(position)
-    premium = exit_price * 100 * position['quantity']  # Premium in dollars
+    premium = exit_price * 100 * position.quantity  # Premium in dollars
     option_bp += premium  # Add/subtract exit premium (already signed)
 
     # Restore margin for short positions
-    if is_short(position):
-        option_bp += position['margin_required']  # Restore full margin requirement
+    if position.is_short():
+        option_bp += position.margin_required  # Restore full margin requirement
 
     # Calculate days held (time between close date and entry)
-    days_held = pd.Timedelta(close_date - position['entry_date']).days
+    days_held = pd.Timedelta(close_date - position.entry_date).days
     
     # Safety check for negative days
     if days_held < 0:
@@ -616,25 +618,25 @@ def close_position(position: Position,
     
     # Prepare the trade result with all relevant information
     trade_result: TradeResult = {
-        'trade_id': position['trade_id'],
-        'quantity': position['quantity'],
-        'option_type': position['option_type'].value if isinstance(position['option_type'], Enum) else str(position['option_type']),
-        'position_side': position['position_side'].value if isinstance(position['position_side'], Enum) else str(position['position_side']),
-        'entry_date': position['entry_date'],
+        'trade_id': position.trade_id,
+        'quantity': position.quantity,
+        'option_type': position.option_type.value if isinstance(position.option_type, Enum) else str(position.option_type),
+        'position_side': position.position_side.value if isinstance(position.position_side, Enum) else str(position.position_side),
+        'entry_date': position.entry_date,
         'exit_date': close_date,
-        'expire_date': position['expire_date'],
-        'entry_delta': round(position['entry_delta'], 2),
-        'exit_delta': round(position['exit_delta'], 2),
-        'entry_dte': position['entry_dte'],
+        'expire_date': position.expire_date,
+        'entry_delta': round(position.entry_delta, 2),
+        'exit_delta': round(position.exit_delta, 2),
+        'entry_dte': position.entry_dte,
         'days_held': days_held,
-        'underlying_entry': position['underlying_entry'],
-        'underlying_exit': position['underlying_exit'],
-        'strike': position['strike'], 
-        'entry_price': round(position['entry_price'], 2),
-        'exit_price': round(position['exit_price'], 2),
-        'capital_used': position['margin_required'],  # Keep this as is
+        'underlying_entry': position.underlying_entry,
+        'underlying_exit': position.underlying_exit,
+        'strike': position.strike, 
+        'entry_price': round(position.entry_price, 2),
+        'exit_price': round(position.exit_price, 2),
+        'capital_used': position.margin_required,  # Keep this as is
         'option_bp': round(option_bp, 2),  # Updated buying power
-        'return_on_margin': round(pnl / position['margin_required'] * 100, 2) if position['margin_required'] > 0 else 0,
+        'return_on_margin': round(pnl / position.margin_required * 100, 2) if position.margin_required > 0 else 0,
         'close_reason': close_reason,
         'pnl': round(pnl, 2),
         'spread_type': position.get('spread_type', SpreadType.NONE.value),
@@ -662,14 +664,15 @@ def is_bid_ask_spread_reasonable(bid: float, ask: float, max_spread_percent: flo
     return spread_percent <= max_spread_percent
 
 def create_trade_from_signal(
-    trade_signal: pd.Series,  # Assuming trade_signal is a pandas Series
+    trade_signal: NamedTuple,  # Assuming trade_signal is a from Pandas itertuples
     quantity: int,
     option_type: OptionType,
     position_side: PositionSide,
     delta_target: float,
     entry_date: pd.Timestamp,  # Assuming entry_date is a pandas Timestamp
-    early_close_days: Optional[int] = None,  # Optional parameter
-    delta_range: Tuple[float, float] = None  # Add delta_range here
+    early_close_days: Optional[int] = None,  # Optional parameter for early closure
+    delta_range: Optional[Tuple[float, float]] = None,  # Optional parameter for delta range
+    # INSERT_YOUR_REWRITE_HERE
 ) -> Optional['Position']:
     """
     Creates a Position object from a given trade signal.
@@ -677,14 +680,15 @@ def create_trade_from_signal(
     This function takes a trade signal, along with other parameters, and attempts to create a Position object. It checks the trade signal's delta against a target delta and ensures the entry date is valid.
 
     Args:
-        trade_signal (pd.Series): A row from the trades DataFrame, containing information about the trade signal.
+        trade_signal (NamedTuple): A named tuple representing a trade signal, containing information about the trade.
         trade_counter (int): A counter for the number of trades.
         option_type (OptionType): The type of option (PUT or CALL).
         position_side (PositionSide): The side of the position (BUY or SELL).
         delta_target (float): The target delta for the trade.
         entry_date (pd.Timestamp): The date of entry into the trade.
         early_close_days (Optional[int]): The number of days before expiration to close the trade early. Defaults to None.
-        delta_range (Tuple[float, float]): The range of delta values to consider.
+        delta_range (Optional[Tuple[float, float]]): The range of delta values to consider. Defaults to None.
+        trade_counter (Optional[int]): A counter for the number of trades. Defaults to None.
 
     Returns:
         Optional[Position]: A Position object if the trade is valid, otherwise None.
@@ -697,41 +701,42 @@ def create_trade_from_signal(
     
     # Check if this trade meets our delta criteria before attempting execution
     delta_col = "p_delta" if is_put(option_type) else "c_delta"
-    trade_delta = trade_signal[delta_col]
+    trade_delta = getattr(trade_signal, delta_col)  # Use getattr() as a function
     
-    # For puts, we want negative deltas, so convert positive input to negative
-    if is_put(option_type):
-        target_delta = -abs(delta_target) if delta_target is not None else None
-        # For puts, we want to compare the actual values since more negative means more ITM
-        delta_diff = abs(trade_delta - target_delta) if target_delta is not None else None
-    else:
-        target_delta = abs(delta_target) if delta_target is not None else None
-        delta_diff = abs(trade_delta - target_delta) if target_delta is not None else None
+    # # For puts, we want negative deltas, so convert positive input to negative
+    # if is_put(option_type):
+    #     target_delta = -abs(delta_target) if delta_target is not None else None
+    #     # For puts, we want to compare the actual values since more negative means more ITM
+    #     delta_diff = abs(trade_delta - target_delta) if target_delta is not None else None
+    # else:
+    #     target_delta = abs(delta_target) if delta_target is not None else None
+    #     delta_diff = abs(trade_delta - target_delta) if target_delta is not None else None
 
-    # Check if delta_range is provided and filter accordingly
-    if delta_range:
-        if is_put(option_type):
-            # For puts, more negative delta means more ITM
-            min_delta = -abs(delta_range[1])  #  More negative (more ITM)
-            max_delta = -abs(delta_range[0])  # Less negative (more OTM)
-            if not (min_delta <= trade_delta <= max_delta):
-                logger.debug(f"Skipping trade with delta {trade_delta:.2f} (not in range: {min_delta:.2f} to {max_delta:.2f})")
-                skipped_trades += 1
-                return None
-        else:
-            # For calls, higher positive delta means more ITM
-            min_delta = abs(delta_range[0])  # Less positive (more OTM)
-            max_delta = abs(delta_range[1])  # More positive (more ITM)
-            if not (min_delta <= trade_delta <= max_delta):
-                logger.debug(f"Skipping trade with delta {trade_delta:.2f} (not in range: {min_delta:.2f} to {max_delta:.2f})")
-                skipped_trades += 1
-                return None
 
-    # Skip trades that are too far from our target delta
-    if delta_diff is not None and delta_diff > abs(target_delta) * 0.20:  # Allow 20% deviation from target delta
-        logger.debug(f"Skipping trade with delta {trade_delta:.2f} (target: {target_delta:.2f}, diff: {delta_diff:.2f})")
-        skipped_trades += 1
-        return None
+    # # Check if delta_range is provided and filter accordingly
+    # if delta_range:
+    #     if is_put(option_type):
+    #         # For puts, more negative delta means more ITM
+    #         min_delta = -abs(delta_range[1])  #  More negative (more ITM)
+    #         max_delta = -abs(delta_range[0])  # Less negative (more OTM)
+    #         if not (min_delta <= trade_delta <= max_delta):
+    #             logger.debug(f"Skipping trade with delta {trade_delta:.2f} (not in range: {min_delta:.2f} to {max_delta:.2f})")
+    #             skipped_trades += 1
+    #             return None
+    #     else:
+    #         # For calls, higher positive delta means more ITM
+    #         min_delta = abs(delta_range[0])  # Less positive (more OTM)
+    #         max_delta = abs(delta_range[1])  # More positive (more ITM)
+    #         if not (min_delta <= trade_delta <= max_delta):
+    #             logger.debug(f"Skipping trade with delta {trade_delta:.2f} (not in range: {min_delta:.2f} to {max_delta:.2f})")
+    #             skipped_trades += 1
+    #             return None
+
+    # # Skip trades that are too far from our target delta
+    # if delta_diff is not None and delta_diff > abs(target_delta) * 0.20:  # Allow 20% deviation from target delta
+    #     logger.debug(f"Skipping trade with delta {trade_delta:.2f} (target: {target_delta:.2f}, diff: {delta_diff:.2f})")
+    #     skipped_trades += 1
+    #     return None
 
     # Validate trade_signal.Index is a valid date
     min_valid_date = pd.Timestamp('1990-01-01')  # Arbitrary date well after 1970
@@ -745,12 +750,12 @@ def create_trade_from_signal(
         return None
     
     # Validate expire_date exists and is not None
-    if not trade_signal['expire_date']:
+    if not trade_signal.expire_date:
         logger.error(f"expire_date is missing for trade signal on {trade_signal.Index}")
         return None
     
     # Validate expire_date is a valid date
-    expire_date = trade_signal['expire_date']
+    expire_date = trade_signal.expire_date
     
     if not isinstance(expire_date, pd.Timestamp):
         logger.error(f"Expire date {expire_date} is not a Timestamp")
@@ -771,19 +776,21 @@ def create_trade_from_signal(
     
     # Get bid and ask values
     # Get bid/ask fields based on option type
-    bid_field = "p_bid" if is_put(option_type) else "c_bid"
-    ask_field = "p_ask" if is_put(option_type) else "c_ask"
-    bid = getattr(trade_signal, bid_field, 0)
-    ask = getattr(trade_signal, ask_field, 0)
+    # bid_field = "p_bid" if is_put(option_type) else "c_bid"
+    # ask_field = "p_ask" if is_put(option_type) else "c_ask"
+    # bid = getattr(trade_signal, bid_field, 0)
+    # ask = getattr(trade_signal, ask_field, 0)
     
     # Check if bid-ask spread is reasonable
-    if not is_bid_ask_spread_reasonable(bid, ask):
-        logger.debug(f"Skipping trade with unreasonable bid-ask spread: bid={bid}, ask={ask}")
-        skipped_trades += 1
-        return None
+    # if not is_bid_ask_spread_reasonable(bid, ask):
+    #     logger.debug(f"Skipping trade_signal with unreasonable bid-ask spread: bid={bid}, ask={ask}")
+    #     skipped_trade_signals += 1
+    #     return None
         
-    entry_price = calculate_midpoint_price(bid, ask)
+    # entry_price = calculate_midpoint_price(bid, ask)
+    entry_price = trade_signal.midpoint_price
     if entry_price is None:
+        logger.error(f"Missing midpoint price for trade signal on {trade_signal.Index}")
         return None
     # Adjust entry price sign based on position side
     # For long positions, entry price should be negative (cash outflow)
@@ -795,32 +802,27 @@ def create_trade_from_signal(
     
     # Create Position from trade signal
     # Calculate initial margin
-    underlying_price = trade_signal['underlying_last']
-    init_margin = calculate_margin(underlying_price, abs(entry_price), position_side, trade_signal.strike, option_type)  # Use absolute entry price for margin
-    
+    underlying_price = trade_signal.underlying_last
+    # init_margin = calculate_margin(underlying_price, abs(entry_price), position_side, trade_signal.strike, option_type)  # Use absolute entry price for margin
+    init_margin = trade_signal.margin_required
+
     # Create the position with date    
-    position = Position(
+    trade = Position(
         trade_id=None,
         quantity=quantity,  # Added quantity field
-        entry_date=entry_date,
-        expire_date=trade_signal['expire_date'],
-        underlying_entry=underlying_price,
-        strike=trade_signal['strike'],
         option_type=option_type,
         position_side=position_side,
-        bid=bid,
-        ask=ask,
+        strike=trade_signal.strike,
+        expire_date=trade_signal.expire_date,
+        entry_date=entry_date,
         entry_price=signed_entry_price,
-        margin_required=trade_signal['margin_required'] if 'margin_required' in trade_signal else 0,
         entry_delta=trade_delta,
-        entry_dte=trade_signal['dte'] if 'dte' in trade_signal else entry_dte,
+        entry_dte=trade_signal.dte if hasattr(trade_signal, 'dte') else entry_dte,
+        underlying_entry=underlying_price,
+        margin_required=trade_signal.margin_required if hasattr(trade_signal, 'margin_required') else 0,
         close_date=entry_date + pd.Timedelta(days=early_close_days) if early_close_days is not None else None,
-        spread_type=SpreadType.NONE.value,  # Default to NONE for single legs
-        spread_id=None,  # Default to None for single legs
-        leg_number=None,  # Default to None for single legs
-        leg_ratio=None,  # Default to None for single legs
     )
-    return position
+    return trade
 
 def execute_trade(trade: Position, 
                   option_bp: float, 
@@ -837,42 +839,46 @@ def execute_trade(trade: Position,
     Returns:
         Tuple of (trade, cash, option_bp) if successful, None if trade cannot be executed
     """
+
     # Use spread price for spreads, individual leg price for single legs
-    if trade.get('spread_type') and trade.get('spread_type') != SpreadType.NONE.value:
-        if pd.isna(trade.get('spread_price')):
-            logger.error(f"Missing spread_price for spread {trade.get('spread_id')} leg {trade.get('leg_number')} on {trade['entry_date']}")
+    if isinstance(trade, Spread) and hasattr(trade, 'spread_type') and trade.spread_type != SpreadType.NONE.value:
+        if pd.isna(trade.spread_price):
+            logger.error(f"Missing spread_price for spread {trade.spread_id} leg {trade.leg_number} on {trade.entry_date}")
             return None, option_bp
-        premium = abs(trade['spread_price']) * 100 * trade['quantity']  # Use spread price for spreads
+        premium = abs(trade.spread_price) * 100 * trade.quantity  # Use spread price for spreads
     else:
-        premium = abs(trade['entry_price']) * 100 * trade['quantity']  # Use individual leg price for single legs
+        premium = abs(trade.entry_price) * 100 * trade.quantity  # Use individual leg price for single legs
 
     # Calculate effective margin requirement with leverage
-    effective_margin = trade['margin_required'] / leverage
+    effective_margin = trade.margin_required / leverage
+    if effective_margin is None or effective_margin <= 0:
+        logger.error(f"Invalid margin requirement for trade on {trade.entry_date}")
+        return None, option_bp
     
     # Open LONG position
-    if is_long(trade):
+    if trade.is_long:  # Remove parentheses - it's a property
         # For long positions, check if there is enough buying power to buy the option
         if option_bp >= premium:  # Check against buying power
             option_bp -= premium  # Deduct premium from buying power
             return trade, option_bp
         else:
-            logger.warning(f"Insufficient buying power (${option_bp}) to buy option on {trade['entry_date']}. Required: ${premium:.2f}")
+            logger.warning(f"Insufficient buying power (${option_bp}) to buy option on {trade.entry_date}. Required: ${premium:.2f}")
             return None, option_bp
 
     # Open SHORT position
-    elif is_short(trade):
+    elif trade.is_short:  # Remove parentheses - it's a property
         # For short positions, check if buying power is sufficient
         if option_bp >= effective_margin:
             option_bp += premium  # Credit premium
             option_bp -= effective_margin  # Reserve margin
             return trade, option_bp
         else:
-            logger.warning(f"Insufficient buying power (${option_bp}) to sell option on {trade['entry_date']}. Required margin: ${effective_margin:.2f}")
+            logger.warning(f"Insufficient buying power (${option_bp}) to sell option on {trade.entry_date}. Required margin: ${effective_margin:.2f}")
             return None, option_bp
 
     return None, option_bp  # Return None if trade type is not recognized
 
-def execute_backtest_trades(trades: pd.DataFrame,
+def execute_backtest_trades(trade_signals: pd.DataFrame,
                             full_chain_df: pd.DataFrame, 
                             underlying_price_history: pd.DataFrame,
                             option_type: OptionType = None,
@@ -889,7 +895,7 @@ def execute_backtest_trades(trades: pd.DataFrame,
     Execute trades based on signals.
     
     Args:
-        trades: DataFrame containing trade signals
+        trade_signals: DataFrame containing trade signals
         full_chain_df: DataFrame containing the full options chain
         underlying_price_history: DataFrame containing the underlying price history
         option_type: Type of option (call/put)
@@ -913,132 +919,204 @@ def execute_backtest_trades(trades: pd.DataFrame,
     skipped_trades = 0
     
     # Check if we're dealing with spreads
-    is_spread = 'spread_type' in trades.columns and trades['spread_type'].iloc[0] != SpreadType.NONE
+    is_spread = 'spread_type' in trade_signals.columns and trade_signals['spread_type'].iloc[0] != SpreadType.NONE
     
-    if is_spread:
-        # For spreads, we already have positions with dates
-        # Group positions by spread_id and date for processing in chronological order
-        spread_groups = trades.groupby(['spread_id', 'entry_date'])
+    for trade_signal in trade_signals.itertuples():
+        current_date = trade_signal.Index
         
-        # Sort groups by date
-        sorted_spreads = sorted(spread_groups, key=lambda x: x[0][1])
-        logger.debug(f'Sorted spreads {sorted_spreads}')
-        
-        # Process each spread's positions
-        for (spread_id, current_date), group in sorted_spreads:
-            # First, check if any open positions need to be closed
-            positions_to_remove = []
-            for pos in open_positions:
-                # Close position if we're on/past the close_date or expire_date
-                if (('close_date' in pos and pos['close_date'] is not None and current_date >= pos['close_date']) or
-                    ('expire_date' in pos and pos['expire_date'] is not None and current_date >= pos['expire_date'])):
-                    
-                    logger.debug(f'Closing position: {pos}')
-                    result = close_position(pos, full_chain_df, underlying_price_history, option_bp)
-                    if result:
-                        option_bp = result['option_bp']
-                        positions_to_remove.append(pos)
-                        logger.debug(f"Closed position - BP: ${option_bp:.2f}")
-                        trade_results.append(result)
-            
-            # Remove closed positions
-            for pos in positions_to_remove:
-                open_positions.remove(pos)
-            
-            # Skip if we've reached max positions
-            if len(open_positions) >= max_positions:
-                skipped_trades += 1
-                continue
-            
-            # Execute all legs of the spread together
-            spread_executed = True
-            spread_positions = []
-            
-            # First leg will check BP for the entire spread
-            first_leg = True
-            for position in group.itertuples():
-                position_dict = position._asdict()
-                position_dict['trade_id'] = trade_counter
-                if first_leg:
-                    # First leg checks BP for entire spread
-                    executed_position, option_bp = execute_trade(position_dict, option_bp, leverage)
-                    first_leg = False
-                else:
-                    # Other legs don't affect BP
-                    executed_position = position_dict.copy()
-                
-                if executed_position:
-                    spread_positions.append(executed_position)
-                    logger.debug(f'Prepared spread leg: {executed_position}')
-                else:
-                    spread_executed = False
-                    break
-            
-            if spread_executed:
-                open_positions.extend(spread_positions)
-                trade_counter += 1
-                logger.debug(f'BP: ${option_bp:.2f}')
-            else:
-                skipped_trades += 1
-    else:
-        # Traditional single-leg processing
-        trades = trades.sort_index()
-        
-        for i, trade_signal in trades.iterrows():
-            current_date = trade_signal.name
-            
-            logger.debug(f'Trade signal {i}, {trade_signal.name}, Delta {trade_signal.p_delta}')
+        # First, check if any open positions need to be closed
+        positions_to_remove = []
+        for pos in open_positions:
 
-            # First, check if any open positions need to be closed
-            positions_to_remove = []
-            for pos in open_positions:
-                # Close position if we're on/past the close_date or expire_date
-                if (('close_date' in pos and pos['close_date'] is not None and current_date >= pos['close_date']) or
-                    ('expire_date' in pos and pos['expire_date'] is not None and current_date >= pos['expire_date'])):
-                    
-                    logger.debug(f'Closing position: {pos}')
-                    result = close_position(pos, full_chain_df, underlying_price_history, option_bp)
-                    if result:
-                        option_bp = result['option_bp']
-                        positions_to_remove.append(pos)
-                        logger.debug(f"Closed position - BP: ${option_bp:.2f}")
-                        trade_results.append(result)
-            
-            # Remove closed positions
-            for pos in positions_to_remove:
-                open_positions.remove(pos)
-            
-            # Skip if we've reached max positions
-            if len(open_positions) >= max_positions:
-                skipped_trades += 1
-                continue
-            
-            # Create new trade from signal
-            new_trade = create_trade_from_signal(trade_signal, quantity, option_type, position_side, delta_target, current_date, early_close_days, delta_range)
-            
-            # Try to execute the new trade
-            executed_trade, option_bp = execute_trade(new_trade, option_bp, leverage)
+            # Close position if we're on/past the close_date or expire_date
+            if ((pos.close_date is not None and current_date >= pos.close_date) or
+                (pos.expire_date is not None and current_date >= pos.expire_date)):
+                
+                logger.debug(f'Closing position: {pos}')
+                result = close_position(pos, full_chain_df, underlying_price_history, option_bp)
+                if result:
+                    option_bp = result['option_bp']
+                    positions_to_remove.append(pos)
+                    logger.debug(f"Closed position - BP: ${option_bp:.2f}")
+                    trade_results.append(result)
+    
+        # Remove closed positions
+        for pos in positions_to_remove:
+            open_positions.remove(pos)
+    
+        # Skip if we've reached max positions
+        if len(open_positions) >= max_positions:
+            skipped_trades += 1
+            continue
+
+        # Create new trade from signal
+        trade = create_trade_from_signal(trade_signal, quantity, option_type, position_side, delta_target, current_date, early_close_days, delta_range)
+        
+        # Try to execute the new trade if it was created successfully
+        if trade is not None:
+            executed_trade, option_bp = execute_trade(trade, option_bp, leverage)
             if executed_trade:
-                executed_trade['trade_id'] = trade_counter
+                executed_trade.trade_id = trade_counter
                 open_positions.append(executed_trade)
                 trade_counter += 1  # Increment counter only for successful trades
                 logger.debug(f'Opened position: {executed_trade}')
                 logger.debug(f'BP: ${option_bp:.2f}')
             else:
                 skipped_trades += 1
-    
+        else:
+            logger.debug("Skipping trade - invalid signal")
+            skipped_trades += 1
+
     # Close any remaining open positions at their expiration
     for pos in open_positions:
         result = close_position(pos, full_chain_df, underlying_price_history, option_bp)
         if result:
             trade_results.append(result)
             option_bp = result['option_bp']
-    
+
     if not trade_results:
         logger.warning("No trades were executed successfully")
         return pd.DataFrame()
-    
+
     results_df = pd.DataFrame(trade_results)
+    
+
+
+
+
+
+
+
+
+
+
+
+
+
+    # if is_spread:
+    #     # For spreads, we already have positions with dates
+    #     # Group positions by spread_id and date for processing in chronological order
+    #     spread_groups = trades.groupby(['spread_id', 'entry_date'])
+        
+    #     # Sort groups by date
+    #     sorted_spreads = sorted(spread_groups, key=lambda x: x[0][1])
+    #     logger.debug(f'Sorted spreads {sorted_spreads}')
+        
+    #     # Process each spread's positions
+    #     for (spread_id, current_date), group in sorted_spreads:
+    #         # First, check if any open positions need to be closed
+    #         positions_to_remove = []
+    #         for pos in open_positions:
+    #             # Close position if we're on/past the close_date or expire_date
+    #             if (('close_date' in pos and pos['close_date'] is not None and current_date >= pos['close_date']) or
+    #                 ('expire_date' in pos and pos['expire_date'] is not None and current_date >= pos['expire_date'])):
+                    
+    #                 logger.debug(f'Closing position: {pos}')
+    #                 result = close_position(pos, full_chain_df, underlying_price_history, option_bp)
+    #                 if result:
+    #                     option_bp = result['option_bp']
+    #                     positions_to_remove.append(pos)
+    #                     logger.debug(f"Closed position - BP: ${option_bp:.2f}")
+    #                     trade_results.append(result)
+            
+    #         # Remove closed positions
+    #         for pos in positions_to_remove:
+    #             open_positions.remove(pos)
+            
+    #         # Skip if we've reached max positions
+    #         if len(open_positions) >= max_positions:
+    #             skipped_trades += 1
+    #             continue
+            
+    #         # Execute all legs of the spread together
+    #         spread_executed = True
+    #         spread_positions = []
+            
+    #         # First leg will check BP for the entire spread
+    #         first_leg = True
+    #         for position in group.itertuples():
+    #             position_dict = position._asdict()
+    #             position_dict['trade_id'] = trade_counter
+    #             if first_leg:
+    #                 # First leg checks BP for entire spread
+    #                 executed_position, option_bp = execute_trade(position_dict, option_bp, leverage)
+    #                 first_leg = False
+    #             else:
+    #                 # Other legs don't affect BP
+    #                 executed_position = position_dict.copy()
+                
+    #             if executed_position:
+    #                 spread_positions.append(executed_position)
+    #                 logger.debug(f'Prepared spread leg: {executed_position}')
+    #             else:
+    #                 spread_executed = False
+    #                 break
+            
+    #         if spread_executed:
+    #             open_positions.extend(spread_positions)
+    #             trade_counter += 1
+    #             logger.debug(f'BP: ${option_bp:.2f}')
+    #         else:
+    #             skipped_trades += 1
+    # else:
+    #     # Traditional single-leg processing
+    #     trades = trades.sort_index()
+        
+    #     for i, trade_signal in trades.iterrows():
+    #         current_date = trade_signal.name
+            
+    #         logger.debug(f'Trade signal {i}, {trade_signal.name}, Delta {trade_signal.p_delta}')
+
+    #         # First, check if any open positions need to be closed
+    #         positions_to_remove = []
+    #         for pos in open_positions:
+    #             # Close position if we're on/past the close_date or expire_date
+    #             if (('close_date' in pos and pos['close_date'] is not None and current_date >= pos['close_date']) or
+    #                 ('expire_date' in pos and pos['expire_date'] is not None and current_date >= pos['expire_date'])):
+                    
+    #                 logger.debug(f'Closing position: {pos}')
+    #                 result = close_position(pos, full_chain_df, underlying_price_history, option_bp)
+    #                 if result:
+    #                     option_bp = result['option_bp']
+    #                     positions_to_remove.append(pos)
+    #                     logger.debug(f"Closed position - BP: ${option_bp:.2f}")
+    #                     trade_results.append(result)
+            
+    #         # Remove closed positions
+    #         for pos in positions_to_remove:
+    #             open_positions.remove(pos)
+            
+    #         # Skip if we've reached max positions
+    #         if len(open_positions) >= max_positions:
+    #             skipped_trades += 1
+    #             continue
+            
+    #         # Create new trade from signal
+    #         new_trade = create_trade_from_signal(trade_signal, quantity, option_type, position_side, delta_target, current_date, early_close_days, delta_range)
+            
+    #         # Try to execute the new trade
+    #         executed_trade, option_bp = execute_trade(new_trade, option_bp, leverage)
+    #         if executed_trade:
+    #             executed_trade['trade_id'] = trade_counter
+    #             open_positions.append(executed_trade)
+    #             trade_counter += 1  # Increment counter only for successful trades
+    #             logger.debug(f'Opened position: {executed_trade}')
+    #             logger.debug(f'BP: ${option_bp:.2f}')
+    #         else:
+    #             skipped_trades += 1
+    
+    # # Close any remaining open positions at their expiration
+    # for pos in open_positions:
+    #     result = close_position(pos, full_chain_df, underlying_price_history, option_bp)
+    #     if result:
+    #         trade_results.append(result)
+    #         option_bp = result['option_bp']
+    
+    # if not trade_results:
+    #     logger.warning("No trades were executed successfully")
+    #     return pd.DataFrame()
+    
+    # results_df = pd.DataFrame(trade_results)
     
     # Calculate cumulative metrics based on PnL
     results_df['cumulative_pnl'] = results_df['pnl'].cumsum()
@@ -1367,11 +1445,17 @@ def generate_trade_signals(
         logger.debug(f'Sample chain of length: {len(chain_df)}')
         logger.debug(chain_df.head())
 
-    # Filter out options with unreasonable bid-ask spreads
-    bid_col = 'p_bid' if is_put(option_type) else 'c_bid'
-    ask_col = 'p_ask' if is_put(option_type) else 'c_ask'
+    # Remove columns that are not needed
+    prefix = 'p_' if is_put(option_type) else 'c_'
+    cols = chain_df.columns
+    needed_cols = [col for col in cols if col.startswith(prefix)]
+    needed_cols.extend(['strike', 'dte', 'underlying_last', 'expire_date', 'strike_distance', 'strike_distance_pct'])
+    chain_df = chain_df[needed_cols]
     
+
     # Filter out options with zero or negative bids/asks
+    bid_col = f'{prefix}bid'
+    ask_col = f'{prefix}ask'
     chain_df = chain_df[
         (chain_df[bid_col] > 0) & 
         (chain_df[ask_col] > 0)
@@ -1384,9 +1468,11 @@ def generate_trade_signals(
     logger.debug(f'After spread filtering: {len(chain_df)} options remaining')
     logger.debug(chain_df['spread_percent'].describe())
 
-    delta_col = 'p_delta' if is_put(option_type) else 'c_delta'
-    logger.debug(f'Initial delta distribution')
-    logger.debug(chain_df[delta_col].describe())
+    # Precompute midpoint price for each row
+    chain_df['midpoint_price'] = chain_df.apply(
+        lambda row: calculate_midpoint_price(row[bid_col], row[ask_col]),   
+        axis=1  
+    )
     
     # Filter by DTE based on whether we have a single value or range
     if dte_range:
@@ -1411,10 +1497,11 @@ def generate_trade_signals(
         logger.error('Need to provide either <dte_target> or <dte_range>')
         raise ValueError
     
-    # Determine delta column based on option type
+    # Filter by delta parameters        
     delta_col = 'p_delta' if is_put(option_type) else 'c_delta'
+    logger.debug(f'Initial delta distribution')
+    logger.debug(chain_df[delta_col].describe())
     
-    # Filter by delta parameters
     if delta_range:
         # Handle range case
         if is_put(option_type):
