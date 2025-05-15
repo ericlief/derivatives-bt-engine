@@ -16,10 +16,7 @@ class Backtester:
     """Class to manage backtest execution."""
     
     def __init__(self, 
-                 initial_capital: float = 100000.0,
-                 leverage: float = 1.0,
-                 max_positions: int = 1,
-                 max_margin_utilization: float = 0.80,
+                 data: Dict,
                  save_trades: bool = True,
                  log_to_sheets: bool = True):
         """
@@ -33,26 +30,24 @@ class Backtester:
             save_trades: Whether to save trade results
             log_to_sheets: Whether to log results to Google Sheets
         """
-        self.initial_capital = initial_capital
-        self.leverage = leverage
-        self.max_positions = max_positions
-        self.max_margin_utilization = max_margin_utilization
+        self.data = data
         self.save_trades = save_trades
         self.log_to_sheets = log_to_sheets
-        
-        # Initialize trade manager
-        self.trade_manager = TradeManager(initial_capital=initial_capital, leverage=leverage)
-        
+
         # Track execution times
         self.execution_times = {}
-    
+
+        # Results (clear between runs?)
+        self.results: Dict[str, pd.DataFrame] = {}
+
     def run_backtest(
         self,
         *,
-        spx_file_path: str,
-        options_chain_file_path: str,
-        option_type: Optional[OptionType] = None,
-        position_side: Optional[PositionSide] = None,
+
+        # Hyperparameters
+        quantity: int = 1,
+        option_type: OptionType,
+        position_side: PositionSide = None,
         delta_target: Optional[float] = None,
         delta_range: Optional[Tuple[float, float]] = None,
         dte_target: Optional[int] = None,
@@ -61,36 +56,30 @@ class Backtester:
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
         early_close_days: Optional[int] = None,
-        use_preprocessed: bool = True,
-        save_preprocessed: bool = True,
-        preloaded_data: Optional[Dict] = None,
-        quantity: int = 1,
+        max_positions: Optional[int] = 1,
         # Spread-specific parameters
         spread_type: Optional[SpreadType] = None,
         legs_config: Optional[List[Dict]] = None,
         spread_signals: Optional[pd.DataFrame] = None,
         trade_signals: Optional[pd.DataFrame] = None,
+        # Capital parameters
+        initial_capital: float = 100000.0,
+        leverage: float = 1.0,
+        # Data parameters (default preloaded)
+        data: Optional[Dict] = None
     ) -> pd.DataFrame:
         """Execute a backtest with the given parameters."""
         start_time = time.time()
         logger.info(f"Starting backtest at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         
-        # Load data if not preloaded
-        if preloaded_data is None:
-            data_loading_start = time.time()
-            options_chain, options_chain_multi_index, spx_data, vix_data = self._load_data(
-                spx_file_path=spx_file_path,
-                options_chain_file_path=options_chain_file_path,
-                use_preprocessed=use_preprocessed,
-                save_preprocessed=save_preprocessed
-            )
-            self.execution_times['data_loading'] = time.time() - data_loading_start
-        else:
-            options_chain = preloaded_data['options_data']
-            options_chain_multi_index = preloaded_data['options_data_multi']
-            spx_data = preloaded_data['spx_data']
-            vix_data = preloaded_data['vix_data']
-            self.execution_times['data_loading'] = 0
+         
+        options_chain = self.data['options_data']
+        options_chain_multi_index = self.data['options_data_multi']
+        spx_data = self.data['spx_data']
+        vix_data = self.data['vix_data']
+     
+        # Initialize trade manager
+        self.trade_manager = TradeManager(initial_capital=initial_capital, leverage=leverage)
         
         # Generate or validate signals
         signal_start = time.time()
@@ -119,6 +108,7 @@ class Backtester:
                 start_date=start_date,
                 end_date=end_date
             )
+        
         self.execution_times['signal_generation'] = time.time() - signal_start
         
         if signals.empty:
@@ -171,45 +161,20 @@ class Backtester:
     
     def run_multiple_backtests(
         self,
-        spx_file_path: str,
-        options_chain_file_path: str,
-        hyperparameter_sets: List[Dict],
-        use_preprocessed: bool = True,
-        save_preprocessed: bool = True
+        hyperparameter_sets: List[Dict]
+  
     ) -> Dict:
         """Run multiple backtests with different parameters using the same data."""
-        # Load data once
-        logger.info("Loading data for multiple backtests...")
-        data_loading_start = time.time()
-        options_chain, options_chain_multi_index, spx_data, vix_data = self._load_data(
-            spx_file_path=spx_file_path,
-            options_chain_file_path=options_chain_file_path,
-            use_preprocessed=use_preprocessed,
-            save_preprocessed=save_preprocessed
-        )
-        data_loading_time = time.time() - data_loading_start
-        
-        preloaded_data = {
-            'spx_data': spx_data,
-            'options_data': options_chain,
-            'options_data_multi': options_chain_multi_index,
-            'vix_data': vix_data
-        }
-        
-        results = {}
-        total_start_time = time.time()
+  
+ 
         
         for i, params in enumerate(hyperparameter_sets, 1):
-            logger.info(f"\nRunning backtest {i}/{len(hyperparameter_sets)}")
+
+            logger.info(f"Running backtest {i}/{len(hyperparameter_sets)} ({i / len(hyperparameter_sets):.0%})")            
             start_time = time.time()
             
-            # Add preloaded data to params
-            params['preloaded_data'] = preloaded_data
-            params['spx_file_path'] = spx_file_path
-            params['options_chain_file_path'] = options_chain_file_path
-            
             # Run backtest
-            result = self.run_backtest(**params)
+            results = self.run_backtest(**params)
             execution_time = time.time() - start_time
             
             results[f"backtest_{i}"] = {
@@ -220,18 +185,13 @@ class Backtester:
             
             logger.info(f"Backtest {i} completed in {execution_time:.2f} seconds")
         
-        total_time = time.time() - total_start_time
+        total_time = time.time() - start_time     
         logger.info(f"\nAll backtests completed in {total_time:.2f} seconds")
         logger.info(f"Average time per backtest: {total_time/len(hyperparameter_sets):.2f} seconds")
         
         return results
     
-    def _load_data(self, spx_file_path: str, options_chain_file_path: str, 
-                   use_preprocessed: bool, save_preprocessed: bool):
-        """Load and preprocess data."""
-        # Implementation of data loading logic here
-        pass
-    
+
     def _prepare_spread_signals(self, spread_type: SpreadType, legs_config: List[Dict],
                               spread_signals: Optional[pd.DataFrame], **kwargs):
         """Prepare spread signals for backtest."""
@@ -265,3 +225,13 @@ class Backtester:
         for phase, time_taken in self.execution_times.items():
             percentage = time_taken/total_time*100
             logger.info(f"- {phase}: {time_taken:.2f} seconds ({percentage:.1f}%)") 
+
+    def generate_param_template(self) -> Dict:
+        return {
+            "option_type": OptionType.PUT,
+            "position_side": PositionSide.SHORT,
+            "delta_target": 0.30,
+            "dte_target": 30,
+            "quantity": 1,
+            "early_close_days": 5,
+    }

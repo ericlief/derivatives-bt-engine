@@ -31,62 +31,62 @@ class DataLoader:
     def __post_init__(self):
         """Initialize file paths after instance creation"""
         self.raw_files = {
-            'options': os.path.join(self.data_dir, self.options_file),
-            'spx': os.path.join(self.data_dir, 'spx.csv'),
+            'option_chain': os.path.join(self.data_dir, self.options_file),
+            'underlying': os.path.join(self.data_dir, 'spx.csv'),
             'vix': os.path.join(self.data_dir, 'vix.csv')
         }
         self.processed_files = {
-                'options': os.path.join(self.data_dir, "options.pkl"),
-                'spx': os.path.join(self.data_dir, "spx.pkl"),
+                'option_chain': os.path.join(self.data_dir, "options.pkl"),
+                'underlying': os.path.join(self.data_dir, "spx.pkl"),
                 'vix': os.path.join(self.data_dir, "vix.pkl"),
-                'chain_multi_index': os.path.join(self.data_dir, "chain_multi_index.pkl")
+                'option_chain_multi_index': os.path.join(self.data_dir, "chain_multi_index.pkl")
             }
 
     @cached_property
-    def options_chain(self) -> pd.DataFrame:
+    def option_chain(self) -> pd.DataFrame:
         """Lazy load and cache the options chain data"""
         if self.use_preprocessed:
-            data = self._load_pickle(self.processed_files['options'])
+            data = self._load_pickle(self.processed_files['option_chain'])
             if data is not None:
                 return data
         
-        raw_options = pd.read_csv(self.raw_files['options'], index_col=0, parse_dates=True)
-        processed_data = self._preprocess_options_data(raw_options)
+        raw_options = pd.read_csv(self.raw_files['option_chain'], index_col=0, parse_dates=True)
+        processed_data = self._preprocess_option_chain(raw_options)
         
         if self.save_preprocessed:
-            self._save_pickle(processed_data, self.processed_files['options'])
+            self._save_pickle(processed_data, self.processed_files['option_chain'])
             
         return processed_data
 
     @cached_property
-    def options_chain_multi_index(self) -> pd.DataFrame:
+    def option_chain_multi_index(self) -> pd.DataFrame:
         """Lazy load and cache the multi-index options chain"""
         if self.use_preprocessed:
-            data = self._load_pickle(self.processed_files['chain_multi_index'])
+            data = self._load_pickle(self.processed_files['option_chain_multi_index'])
             if data is not None:
                 return data
         
-        multi_index = self.options_chain.reset_index().rename(columns={'index': 'date'})
+        multi_index = self.option_chain.reset_index().rename(columns={'index': 'date'})
         multi_index = multi_index.set_index(['date', 'strike']).sort_index()
         
         if self.save_preprocessed:
-            self._save_pickle(multi_index, self.processed_files['chain_multi_index'])
+            self._save_pickle(multi_index, self.processed_files['option_chain_multi_index'])
             
         return multi_index
 
     @cached_property
-    def spx_data(self) -> pd.DataFrame:
+    def underlying_data(self) -> pd.DataFrame:
         """Lazy load and cache the SPX data"""
         if self.use_preprocessed:
-            data = self._load_pickle(self.processed_files['spx'])
+            data = self._load_pickle(self.processed_files['underlying'])
             if data is not None:
                 return data
         
-        raw_spx = pd.read_csv(self.raw_files['spx'], index_col=0, parse_dates=True)
-        processed_data = self._preprocess_spx_data(raw_spx)
+        raw_underlying = pd.read_csv(self.raw_files['underlying'], index_col=0, parse_dates=True)
+        processed_data = self._preprocess_underlying(raw_underlying)
         
         if self.save_preprocessed:
-            self._save_pickle(processed_data, self.processed_files['spx'])
+            self._save_pickle(processed_data, self.processed_files['underlying'])
             
         return processed_data
 
@@ -111,28 +111,28 @@ class DataLoader:
         Load and return all data at once. Maintains backward compatibility.
         
         Returns:
-            tuple: (options_chain, options_chain_multi_index, spx_data, vix_data)
+            tuple: (options_chain, options_chain_multi_index, underlying_data, vix_data)
         """
         data_loading_start = time.time()
         
         try:
             # Access properties to trigger lazy loading
-            options_chain = self.options_chain
-            options_chain_multi_index = self.options_chain_multi_index
-            spx_data = self.spx_data
-            vix_data = self.vix_data
+            option_chain = self.option_chain
+            option_chain_multi_index = self.option_chain_multi_index
+            underlying = self.underlying_data
+            vix = self.vix_data
             
             logger.info(f"Loaded and preprocessed data:")
-            logger.info(f"- Normal options chain: {len(options_chain)} rows")
-            logger.info(f"- MultiIndex options chain: {len(options_chain_multi_index)} rows")
-            logger.info(f"- SPX data: {len(spx_data)} rows")
-            logger.info(f"- VIX data: {len(vix_data)} rows")
+            logger.info(f"- Normal options chain: {len(option_chain)} rows")
+            logger.info(f"- MultiIndex options chain: {len(option_chain_multi_index)} rows")
+            logger.info(f"- Underlying data: {len(underlying)} rows")
+            logger.info(f"- VIX data: {len(vix)} rows")
             
             data_loading_time = time.time() - data_loading_start
             logger.info(f"Data loading completed in {data_loading_time:.2f} seconds")
-            self._check_data_quality(options_chain, spx_data, vix_data)
+            self._check_data_quality(option_chain, underlying, vix)
 
-            return options_chain, options_chain_multi_index, spx_data, vix_data
+            return option_chain, option_chain_multi_index, underlying, vix
             
         except Exception as e:
             logger.error(f"Error loading data: {str(e)}")
@@ -155,7 +155,7 @@ class DataLoader:
         except Exception as e:
             logger.error(f"Failed to save data to {file_path}: {str(e)}")
 
-    def _preprocess_options_data(self, options_chain: pd.DataFrame) -> pd.DataFrame:
+    def _preprocess_option_chain(self, options_chain: pd.DataFrame) -> pd.DataFrame:
         """
         Clean and preprocess options data to catch and fix common issues.
         
@@ -277,17 +277,17 @@ class DataLoader:
 
         return df
     
-    def _preprocess_spx_data(self, spx_data: pd.DataFrame) -> pd.DataFrame:
+    def _preprocess_underlying(self, spx_data: pd.DataFrame) -> pd.DataFrame:
         """
-        Clean and preprocess SPX price data.
+        Clean and preprocess underlying price data.
         
         Args:
-            spx_data: Raw SPX price DataFrame
+            spx_data: Raw underlying price DataFrame
         
         Returns:
-            Cleaned SPX price DataFrame
+            Cleaned underlying price DataFrame
         """
-        logger.info("Preprocessing SPX data...")
+        logger.info("Preprocessing underlying data...")
         
         # Make a copy to avoid modifying the original
         df = spx_data.copy()
@@ -341,27 +341,27 @@ class DataLoader:
         
         return df
     
-    def _check_data_quality(self, options_chain, spx_data, vix_data):
+    def _check_data_quality(self, option_chain, underlying, vix):
         """
         Check data quality for all datasets (options chain, SPX data, and VIX data).
         Verifies required columns exist and checks for missing or invalid values.
         
         Args:
-            options_chain: DataFrame containing options chain data
-            spx_data: DataFrame containing SPX data
-            vix_data: DataFrame containing VIX data
+            option_chain: DataFrame containing options chain data
+            underlying: DataFrame containing SPX data
+            vix: DataFrame containing VIX data
         """
         datasets = {
-            'Options Chain': {
-                'df': options_chain,
+            'Option Chain': {
+                'df': option_chain,
                 'required_cols': ['expire_date', 'strike', 'p_bid', 'p_ask', 'c_bid', 'c_ask', 'underlying_last']
             },
-            'SPX': {
-                'df': spx_data,
+            'Underlying': {
+                'df': underlying,
                 'required_cols': ['close', 'open', 'high', 'low']
             },
             'VIX': {
-                'df': vix_data,
+                'df': vix,
                 'required_cols': ['close']
             }
         }
