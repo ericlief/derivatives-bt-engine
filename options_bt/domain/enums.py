@@ -113,34 +113,9 @@ class SpreadType(Enum):
             return value == spread_type
         elif isinstance(value, str):
             return value.lower() == spread_type.value
-        elif isinstance(value, pd.DataFrame):
+        elif isinstance(value, pd.DataFrame) and 'spread_type' in value.columns:
             return value.iloc[0]['spread_type'].lower() == spread_type.value
-        elif isinstance(value, pd.Series):
+        elif isinstance(value, pd.Series) and 'spread_type' in value:
             return value['spread_type'].lower() == spread_type.value
         return False
  
-class TradeResult(TypedDict):
-    trade_id: int
-    quantity: int
-    option_type: str
-    position_side: str
-    entry_date: pd.Timestamp
-    exit_date: pd.Timestamp
-    expire_date: pd.Timestamp
-    entry_delta: float
-    exit_delta: float
-    entry_dte: Optional[int]
-    days_held: int
-    underlying_entry: float
-    underlying_exit: float
-    strike: float
-    entry_price: float
-    exit_price: float
-    capital_used: float  
-    option_bp: float
-    return_on_margin: float
-    close_reason: str
-    pnl: float
-    spread_type: Optional[str]  # Type of spread (NONE for single legs)
-    spread_id: Optional[int]  # ID to group legs of the same spread
-    leg_number: Optional[int]  # Position of this leg in the spread 

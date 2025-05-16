@@ -11,9 +11,9 @@ import numpy as np
 import logging
 
 from options_bt.domain.enums import OptionType, PositionSide
-from options_bt.bt import run_multiple_backtests, setup_logger
+from options_bt.utils.logger import setup_logger
 
-# from options_bt.bt import is_put, is_call
+# Create logger instance
 logger = setup_logger()
 
 @dataclass
@@ -111,7 +111,7 @@ class DataLoader:
         Load and return all data at once. Maintains backward compatibility.
         
         Returns:
-            tuple: (options_chain, options_chain_multi_index, underlying_data, vix_data)
+            dict: {'option_chain': option_chain, 'option_chain_multi_index': option_chain_multi_index, 'underlying': underlying, 'vix': vix}
         """
         data_loading_start = time.time()
         
@@ -132,7 +132,7 @@ class DataLoader:
             logger.info(f"Data loading completed in {data_loading_time:.2f} seconds")
             self._check_data_quality(option_chain, underlying, vix)
 
-            return option_chain, option_chain_multi_index, underlying, vix
+            return {'option_chain': option_chain, 'option_chain_multi_index': option_chain_multi_index, 'underlying': underlying, 'vix': vix}
             
         except Exception as e:
             logger.error(f"Error loading data: {str(e)}")

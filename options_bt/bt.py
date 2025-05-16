@@ -12,10 +12,10 @@ import numpy as np
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
  
-from options_bt.domain.enums import OptionType, PositionSide, SpreadType, TradeResult
+from options_bt.domain.enums import *  
 from options_bt.domain.spread import Spread
-from options_bt.domain.trade import TradeResult   
-from options_bt.domain.position import Position
+from options_bt.domain.option_trade import OptionTrade   
+from options_bt.domain.option_position import OptionPosition
 from options_bt.domain.schemas import (
     OPTIONS_CHAIN_SCHEMA,
     TRADE_SIGNALS_SCHEMA,
@@ -25,250 +25,13 @@ from options_bt.domain.schemas import (
     standardize_dataframe,
     add_spread_fields   
 )
-
-# Configure logging
-def setup_logger(log_file: str = None):
-    """
-    Set up logging configuration.
-    
-    Args:
-        log_file: Optional path to log file. If None, uses default name with timestamp.
-    """
-    if log_file is None:
-        # Create logs directory if it doesn't exist
-        os.makedirs('logs', exist_ok=True)
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        log_file = f'logs/backtest_{timestamp}.log'
-    
-    # Create a logger
-    logger = logging.getLogger(__name__)
-    
-    # Return existing logger if it already has handlers
-    if logger.handlers:
-        return logger
-        
-    logger.setLevel(logging.DEBUG)  # Set the logger to the lowest level
-    
-    # Create file handler for all messages, including DEBUG
-    file_handler = logging.FileHandler(log_file)
-    file_handler.setLevel(logging.DEBUG)  # Log all messages to the file
-
-    # Create console handler for INFO level only
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.INFO)  # Set to INFO level first
-    
-    # Create a filter to only allow INFO level messages (but not WARNING or ERROR)
-    class InfoFilter(logging.Filter):
-        def filter(self, record):
-            # Only allow INFO and CRITICAL levels to console (skip WARNING and ERROR)
-            return record.levelno == logging.INFO or record.levelno == logging.CRITICAL
-    
-    # Apply the filter to the console handler
-    console_handler.addFilter(InfoFilter())
-    
-    # Create a formatter and set it for both handlers
-    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-    file_handler.setFormatter(formatter)
-    console_handler.setFormatter(formatter)
-    
-    # Add the handlers to the logger
-    logger.addHandler(file_handler)
-    logger.addHandler(console_handler)
-    
-    return logger
+from options_bt.utils.logger import setup_logger
 
 # Create logger instance
 logger = setup_logger()
 
 
-def is_put(trade: Union[Position, OptionType, str]) -> bool:
-    """
-    Checks if the option type is a PUT.
-    
-    Args:
-        trade (Union[Position, OptionType, str]): The trade to check. Can be a Position dictionary, an OptionType enum, or a string.
-        
-    Returns:
-        bool: True if the option type is a PUT, False otherwise.
-    """
-    if isinstance(trade, Position):
-        option_type = trade.option_type
-    elif isinstance(trade, pd.Series) and 'option_type' in trade:  
-        option_type = trade.option_type
-    elif isinstance(trade, OptionType):
-        option_type = trade
-    elif isinstance(trade, str):
-        option_type = trade
-    else:
-        logger.error(f'Invalid argument type passed to is_put func: {type(trade)}')
-        raise TypeError(f'Invalid argument type passed to is_put func: {type(trade)}')
 
-    return option_type in [OptionType.PUT, OptionType.PUT.value, "put"]
-
-def is_call(trade: Union[Position, OptionType, str]) -> bool:
-    """
-    Checks if the option type is a CALL.
-    
-    Args:
-        trade (Union[Position, OptionType, str]): The trade to check. Can be a Position dictionary, an OptionType enum, or a string.
-        
-    Returns:
-        bool: True if the option type is a CALL, False otherwise.
-    """
-    if isinstance(trade, Position):
-        option_type = trade.option_type
-    elif isinstance(trade, pd.Series) and 'option_type' in trade:  
-        option_type = trade.option_type
-    elif isinstance(trade, OptionType):
-        option_type = trade
-    elif isinstance(trade, str):
-        option_type = trade
-    else:
-        logger.error(f'Invalid argument type passed to is_call func: {type(trade)}')
-        raise TypeError(f'Invalid argument type passed to is_call func: {type(trade)}')
-
-    return option_type in [OptionType.CALL, OptionType.CALL.value, "call"]
-
-def is_short(trade: Union[Position, PositionSide, pd.Series, str]) -> bool:
-    """
-    Checks if the position is short.
-
-    Args:
-        trade (Union[Position, PositionSide, pd.Series, str]): The trade to check. Can be a Position dictionary, a PositionSide enum, a pandas Series, or a string.
-
-    Returns:
-        bool: True if the position is short, False otherwise.
-    """
-    if isinstance(trade, Position):
-        position_side = trade.position_side
-    elif isinstance(trade, PositionSide):
-        position_side = trade
-    elif isinstance(trade, pd.Series) and 'position_side' in trade:  
-        position_side = trade.position_side
-    elif isinstance(trade, str):
-        position_side = trade
-    else:
-        logger.error(f'Need to pass either a Position or PositionSide arg to is_short func, got {type(trade)}')
-        raise TypeError(f'Need to pass either a Position or PositionSide arg to is_short func, got {type(trade)}')
-    
-    return position_side in [PositionSide.SHORT, PositionSide.SHORT.value, 'short']
-
-def is_long(trade: Union[Position, PositionSide, pd.Series, str]) -> bool:
-    """
-    Check if a trade is a long position.
-    
-    Args:
-        trade: Position, PositionSide enum, pandas Series, or string ('long'/'short')
-        
-    Returns:
-        bool: True if long position, False otherwise
-    """
-    if isinstance(trade, Position):
-        position_side = trade.position_side
-    elif isinstance(trade, PositionSide):
-        position_side = trade
-    elif isinstance(trade, pd.Series) and 'position_side' in trade:  
-        position_side = trade.position_side
-    elif isinstance(trade, str):
-        position_side = trade
-    else:
-        logger.error(f'Need to pass either a Position or PositionSide arg to is_long func, got {type(trade)}')
-        raise TypeError(f'Need to pass either a Position or PositionSide arg to is_long func, got {type(trade)}')
-    
-    return position_side in [PositionSide.LONG, PositionSide.LONG.value, 'long']
-
-def is_spread_type(trade: Union[dict, SpreadType, pd.Series, str, pd.DataFrame], spread_type: SpreadType) -> bool:
-    """
-    Check if a trade's spread type matches the given SpreadType.
-    
-    Args:
-        trade: dict, SpreadType enum, pandas Series, string spread type, or DataFrame
-        spread_type: SpreadType enum to check against
-        
-    Returns:
-        bool: True if spread types match, False otherwise
-    """
-    if isinstance(trade, SpreadType):
-        return trade == spread_type
-    elif isinstance(trade, str):
-        return trade.lower() == spread_type.value
-    elif isinstance(trade, pd.DataFrame):
-        return trade.iloc[0]['spread_type'].lower() == spread_type.value
-    elif isinstance(trade, (dict, pd.Series)):
-        return trade['spread_type'].lower() == spread_type.value
-    return False
-
-def get_signed_entry_price(trade: Union[Position, pd.Series]) -> float:
-    """
-    Adjusts the entry price based on the position side.
-
-    Args:
-        trade (Union[Position, pd.Series]): The trade object containing position details or a pandas Series.
-
-    Returns:
-        float: The signed entry price adjusted for position side.
-    """
-    if isinstance(trade, Position):
-        entry_price = trade.entry_price
-        is_position_long = trade.is_long()
-        is_position_short = trade.is_short()
-    elif isinstance(trade, pd.Series) and 'position_side' in trade and 'entry_price' in trade:
-        entry_price = trade.entry_price
-        is_position_long = is_long(trade)
-        is_position_short = is_short(trade)
-    else:
-        logger.error(f'Need to pass either a Position or pd.Series arg, got {type(trade)}')
-        raise TypeError(f'Need to pass either a Position or pd.Series, got {type(trade)}')
-    
-    # Validate sign of entry price acc. to PositionSide
-    try:
-        if is_position_long:
-            assert entry_price <= 0  # debit premium, buy to open (BTO)
-        elif is_position_short:
-            assert entry_price >= 0  # credit premium, sell to open (STO)
-        else:
-            raise ValueError('Position side must be either LONG or SHORT')
-    except AssertionError:
-        logger.debug(f'Fixing sign of entry price {entry_price} for {trade}')
-        entry_price = -abs(entry_price) if is_position_long else abs(entry_price)
-    
-    return entry_price
-
-def get_signed_exit_price(trade: Union[Position, pd.Series]) -> float:
-    """
-    Adjusts the exit price based on the position side.
-
-    Args:
-        trade (Union[Position, pd.Series]): The trade object containing position details or a pandas Series.
-
-    Returns:
-        float: The signed exit price adjusted for position side.
-    """
-    if isinstance(trade, Position):
-        exit_price = trade.exit_price
-        is_position_long = trade.is_long()
-        is_position_short = trade.is_short()
-    elif isinstance(trade, pd.Series) and 'position_side' in trade and 'exit_price' in trade:
-        exit_price = trade.exit_price
-        is_position_long = is_long(trade)
-        is_position_short = is_short(trade)
-    else:
-        logger.error(f'Need to pass either a Position or pd.Series arg, got {type(trade)}')
-        raise TypeError(f'Need to pass either a Position or pd.Series, got {type(trade)}')
-    
-    # Validate sign of exit price acc. to PositionSide
-    try:
-        if is_position_long:
-            assert exit_price >= 0  # sell to close (STC)
-        elif is_position_short:
-            assert exit_price <= 0  # buy to close (BTC)
-        else:
-            raise ValueError('Position side must be either LONG or SHORT')
-    except AssertionError:
-        logger.debug(f'Fixing sign of exit price {exit_price} for {trade}')
-        exit_price = abs(exit_price) if is_position_long else -abs(exit_price)
-    
-    return exit_price
 
 def calculate_margin(underlying_price: float, entry_price: float, 
                            position_side: Union[PositionSide, str],
@@ -3005,192 +2768,192 @@ def _pair_iron_condor_spread_legs(leg_signals: List[pd.DataFrame], spread_type: 
     
     return paired
 
-def run_spread_backtest(
-    *,
-    spx_file_path: str,
-    options_chain_file_path: str,
-    spread_type: SpreadType,
-    legs_config: List[Dict],
-    spread_signals: Optional[pd.DataFrame] = None,
-    use_spx_close: bool = False,
-    start_date: str = None,
-    end_date: str = None,
-    initial_capital: float = 100000,
-    early_close_days: int = None,
-    use_preprocessed: bool = True,
-    save_preprocessed: bool = True,
-    save_trades: bool = True,
-    preloaded_data: dict = None,
-    log_to_sheets: bool = True,
-    max_margin_utilization: float = 0.80,
-    leverage: float = 1.0,
-    max_positions: int = 1,
-    dte_range: Tuple[int, int] = None,
-    dte_target: int = None,
-) -> pd.DataFrame:
-    """
-    Execute a backtest for spread trading strategies.
+# def run_spread_backtest(
+#     *,
+#     spx_file_path: str,
+#     options_chain_file_path: str,
+#     spread_type: SpreadType,
+#     legs_config: List[Dict],
+#     spread_signals: Optional[pd.DataFrame] = None,
+#     use_spx_close: bool = False,
+#     start_date: str = None,
+#     end_date: str = None,
+#     initial_capital: float = 100000,
+#     early_close_days: int = None,
+#     use_preprocessed: bool = True,
+#     save_preprocessed: bool = True,
+#     save_trades: bool = True,
+#     preloaded_data: dict = None,
+#     log_to_sheets: bool = True,
+#     max_margin_utilization: float = 0.80,
+#     leverage: float = 1.0,
+#     max_positions: int = 1,
+#     dte_range: Tuple[int, int] = None,
+#     dte_target: int = None,
+# ) -> pd.DataFrame:
+#     """
+#     Execute a backtest for spread trading strategies.
     
-    Args:
-        spx_file_path: Path to the SPX data file
-        options_chain_file_path: Path to the options chain data file
-        spread_type: Type of spread to trade
-        legs_config: Configuration for each leg of the spread
-        spread_signals: Pre-generated spread signals (optional)
-        use_spx_close: Whether to use SPX close price for valuations
-        start_date: Start date for the backtest
-        end_date: End date for the backtest
-        initial_capital: Initial capital for the backtest
-        early_close_days: Days before expiration to close positions
-        use_preprocessed: Whether to use preprocessed data
-        save_preprocessed: Whether to save preprocessed data
-        save_trades: Whether to save trade results
-        preloaded_data: Pre-loaded data for the backtest
-        log_to_sheets: Whether to log results to Google Sheets
-        max_margin_utilization: Maximum margin utilization
-        leverage: Leverage multiplier
-        max_positions: Maximum number of positions allowed
-        dte_range: Range of days to expiration to consider
-        dte_target: Target days to expiration
+#     Args:
+#         spx_file_path: Path to the SPX data file
+#         options_chain_file_path: Path to the options chain data file
+#         spread_type: Type of spread to trade
+#         legs_config: Configuration for each leg of the spread
+#         spread_signals: Pre-generated spread signals (optional)
+#         use_spx_close: Whether to use SPX close price for valuations
+#         start_date: Start date for the backtest
+#         end_date: End date for the backtest
+#         initial_capital: Initial capital for the backtest
+#         early_close_days: Days before expiration to close positions
+#         use_preprocessed: Whether to use preprocessed data
+#         save_preprocessed: Whether to save preprocessed data
+#         save_trades: Whether to save trade results
+#         preloaded_data: Pre-loaded data for the backtest
+#         log_to_sheets: Whether to log results to Google Sheets
+#         max_margin_utilization: Maximum margin utilization
+#         leverage: Leverage multiplier
+#         max_positions: Maximum number of positions allowed
+#         dte_range: Range of days to expiration to consider
+#         dte_target: Target days to expiration
         
-    Returns:
-        DataFrame of trade results
-    """
+#     Returns:
+#         DataFrame of trade results
+#     """
     
-    start_time = time.time()
-    logger.info(f"Starting spread backtest at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+#     start_time = time.time()
+#     logger.info(f"Starting spread backtest at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
-    # Load data if not preloaded
-    if preloaded_data is None:
-        data_loading_start = time.time()
-        options_chain, options_chain_multi_index, spx_data, vix_data = load_backtest_data(
-            data_dir=os.path.dirname(spx_file_path),
-            use_preprocessed=use_preprocessed,
-            save_preprocessed=save_preprocessed,
-            options_file=os.path.basename(options_chain_file_path)
-        )
-        data_loading_time = time.time() - data_loading_start
-        logger.info(f"Data loading and preprocessing completed in {data_loading_time:.2f} seconds")
-    else:
-        spx_data = preloaded_data['spx_data']
-        options_chain = preloaded_data['options_data']
-        options_chain_multi_index = preloaded_data['options_data_multi']
-        vix_data = preloaded_data['vix_data']
-        data_loading_time = 0
-        logger.info("Using pre-loaded data")
+#     # Load data if not preloaded
+#     if preloaded_data is None:
+#         data_loading_start = time.time()
+#         options_chain, options_chain_multi_index, spx_data, vix_data = load_backtest_data(
+#             data_dir=os.path.dirname(spx_file_path),
+#             use_preprocessed=use_preprocessed,
+#             save_preprocessed=save_preprocessed,
+#             options_file=os.path.basename(options_chain_file_path)
+#         )
+#         data_loading_time = time.time() - data_loading_start
+#         logger.info(f"Data loading and preprocessing completed in {data_loading_time:.2f} seconds")
+#     else:
+#         spx_data = preloaded_data['spx_data']
+#         options_chain = preloaded_data['options_data']
+#         options_chain_multi_index = preloaded_data['options_data_multi']
+#         vix_data = preloaded_data['vix_data']
+#         data_loading_time = 0
+#         logger.info("Using pre-loaded data")
     
-    # Generate spread signals if not provided
-    if spread_signals is None:
-        signal_start = time.time()
-        spread_signals = generate_spread_signals(
-            options_chain=options_chain,
-            spread_type=spread_type,
-            legs_config=legs_config,
-            start_date=start_date,
-            end_date=end_date,
-            dte_range=dte_range,
-            dte_target=dte_target,
-            spx_data=spx_data
-        )
-        signal_time = time.time() - signal_start
-        logger.info(f"Spread signal generation completed in {signal_time:.2f} seconds")
+#     # Generate spread signals if not provided
+#     if spread_signals is None:
+#         signal_start = time.time()
+#         spread_signals = generate_spread_signals(
+#             options_chain=options_chain,
+#             spread_type=spread_type,
+#             legs_config=legs_config,
+#             start_date=start_date,
+#             end_date=end_date,
+#             dte_range=dte_range,
+#             dte_target=dte_target,
+#             spx_data=spx_data
+#         )
+#         signal_time = time.time() - signal_start
+#         logger.info(f"Spread signal generation completed in {signal_time:.2f} seconds")
     
-    if spread_signals.empty:
-        logger.warning("No spread signals generated with the current parameters.")
-        return pd.DataFrame()
+#     if spread_signals.empty:
+#         logger.warning("No spread signals generated with the current parameters.")
+#         return pd.DataFrame()
     
-    # Execute the backtest
-    # For now, we'll use a simplified approach that treats each leg separately
-    # Future iterations could have more sophisticated spread-specific logic
+#     # Execute the backtest
+#     # For now, we'll use a simplified approach that treats each leg separately
+#     # Future iterations could have more sophisticated spread-specific logic
     
-    trade_results_list = []
-    spread_counter = 1
+#     trade_results_list = []
+#     spread_counter = 1
     
-    # Process spread signals and create individual leg positions
-    for _, spread_signal in spread_signals.iterrows():
-        spread_date = spread_signal.name if hasattr(spread_signal, 'name') else spread_signal['date']
+#     # Process spread signals and create individual leg positions
+#     for _, spread_signal in spread_signals.iterrows():
+#         spread_date = spread_signal.name if hasattr(spread_signal, 'name') else spread_signal['date']
         
-        # Create positions for each leg of the spread
-        leg_positions = []
-        for i, leg_config in enumerate(legs_config):
-            leg_number = i + 1
-            leg_prefix = f"leg{leg_number}_"
+#         # Create positions for each leg of the spread
+#         leg_positions = []
+#         for i, leg_config in enumerate(legs_config):
+#             leg_number = i + 1
+#             leg_prefix = f"leg{leg_number}_"
             
-            # Extract leg-specific data from the spread signal
-            leg_strike = spread_signal[f"{leg_prefix}strike"]
-            leg_option_type = leg_config['option_type']
-            leg_position_side = leg_config['position_side']
-            leg_quantity = leg_config.get('ratio', 1)
+#             # Extract leg-specific data from the spread signal
+#             leg_strike = spread_signal[f"{leg_prefix}strike"]
+#             leg_option_type = leg_config['option_type']
+#             leg_position_side = leg_config['position_side']
+#             leg_quantity = leg_config.get('ratio', 1)
             
-            # Calculate days to expiration properly
-            if f"{leg_prefix}dte" in spread_signal:
-                dte_value = spread_signal[f"{leg_prefix}dte"]
-            else:
-                # Calculate dte using proper timedelta operations
-                delta = pd.Timedelta(spread_signal['expire_date'] - spread_date)
-                dte_value = delta.days
+#             # Calculate days to expiration properly
+#             if f"{leg_prefix}dte" in spread_signal:
+#                 dte_value = spread_signal[f"{leg_prefix}dte"]
+#             else:
+#                 # Calculate dte using proper timedelta operations
+#                 delta = pd.Timedelta(spread_signal['expire_date'] - spread_date)
+#                 dte_value = delta.days
             
-            # Create a simplified signal for this leg
-            leg_signal = pd.Series({
-                'strike': leg_strike,
-                'expire_date': spread_signal['expire_date'],
-                'underlying_last': spread_signal.get(f"{leg_prefix}underlying_last", spread_signal.get('underlying_last')),
-                'p_bid': spread_signal.get(f"{leg_prefix}p_bid", 0),
-                'p_ask': spread_signal.get(f"{leg_prefix}p_ask", 0),
-                'c_bid': spread_signal.get(f"{leg_prefix}c_bid", 0),
-                'c_ask': spread_signal.get(f"{leg_prefix}c_ask", 0),
-                'p_delta': spread_signal.get(f"{leg_prefix}p_delta", 0),
-                'c_delta': spread_signal.get(f"{leg_prefix}c_delta", 0),
-                'dte': dte_value,
-            }, name=spread_date)
+#             # Create a simplified signal for this leg
+#             leg_signal = pd.Series({
+#                 'strike': leg_strike,
+#                 'expire_date': spread_signal['expire_date'],
+#                 'underlying_last': spread_signal.get(f"{leg_prefix}underlying_last", spread_signal.get('underlying_last')),
+#                 'p_bid': spread_signal.get(f"{leg_prefix}p_bid", 0),
+#                 'p_ask': spread_signal.get(f"{leg_prefix}p_ask", 0),
+#                 'c_bid': spread_signal.get(f"{leg_prefix}c_bid", 0),
+#                 'c_ask': spread_signal.get(f"{leg_prefix}c_ask", 0),
+#                 'p_delta': spread_signal.get(f"{leg_prefix}p_delta", 0),
+#                 'c_delta': spread_signal.get(f"{leg_prefix}c_delta", 0),
+#                 'dte': dte_value,
+#             }, name=spread_date)
             
-            # Create the leg position
-            position = create_trade_from_signal(
-                leg_signal,
-                leg_quantity,
-                leg_option_type,
-                leg_position_side,
-                leg_config.get('delta_target'),  # Pass the leg's delta_target
-                spread_date,
-                early_close_days,
-                leg_config.get('delta_range')    # Pass the leg's delta_range
-            )
+#             # Create the leg position
+#             position = create_trade_from_signal(
+#                 leg_signal,
+#                 leg_quantity,
+#                 leg_option_type,
+#                 leg_position_side,
+#                 leg_config.get('delta_target'),  # Pass the leg's delta_target
+#                 spread_date,
+#                 early_close_days,
+#                 leg_config.get('delta_range')    # Pass the leg's delta_range
+#             )
             
-            if position:
-                # Add spread-specific information
-                position['spread_type'] = spread_type.value
-                position['spread_id'] = spread_counter
-                position['leg_number'] = leg_number
-                position['leg_ratio'] = leg_quantity
+#             if position:
+#                 # Add spread-specific information
+#                 position['spread_type'] = spread_type.value
+#                 position['spread_id'] = spread_counter
+#                 position['leg_number'] = leg_number
+#                 position['leg_ratio'] = leg_quantity
                 
-                leg_positions.append(position)
-            else:
-                # If any leg can't be created, skip this spread
-                logger.warning(f"Could not create leg {leg_number} for spread on {spread_date}")
-                break
+#                 leg_positions.append(position)
+#             else:
+#                 # If any leg can't be created, skip this spread
+#                 logger.warning(f"Could not create leg {leg_number} for spread on {spread_date}")
+#                 break
         
-        # If all legs were created, add to the list of positions to trade
-        if len(leg_positions) == len(legs_config):
-            trade_results_list.extend(leg_positions)
-            spread_counter += 1
+#         # If all legs were created, add to the list of positions to trade
+#         if len(leg_positions) == len(legs_config):
+#             trade_results_list.extend(leg_positions)
+#             spread_counter += 1
     
-    # Execute the backtest with the leg positions
-    # This will need additional logic in the execute_backtest_trades function
-    # to handle the spread logic correctly
+#     # Execute the backtest with the leg positions
+#     # This will need additional logic in the execute_backtest_trades function
+#     # to handle the spread logic correctly
     
-    # For now, this is a placeholder
-    # Replace with spread-specific backtest execution when implemented
-    # trade_results = execute_backtest_trades_for_spreads(...)
+#     # For now, this is a placeholder
+#     # Replace with spread-specific backtest execution when implemented
+#     # trade_results = execute_backtest_trades_for_spreads(...)
     
-    logger.info(f"Created {len(trade_results_list)} leg positions for {spread_counter-1} spreads")
+#     logger.info(f"Created {len(trade_results_list)} leg positions for {spread_counter-1} spreads")
     
-    # Calculate total time
-    total_time = time.time() - start_time
-    logger.info(f"\nTotal execution time: {total_time:.2f} seconds")
+#     # Calculate total time
+#     total_time = time.time() - start_time
+#     logger.info(f"\nTotal execution time: {total_time:.2f} seconds")
     
-    # Return placeholder empty DataFrame
-    # Replace with actual results when spread execution is implemented
-    return pd.DataFrame(trade_results_list)
+#     # Return placeholder empty DataFrame
+#     # Replace with actual results when spread execution is implemented
+#     return pd.DataFrame(trade_results_list)
 
 def create_spread_positions(
     spread_signals: pd.DataFrame,

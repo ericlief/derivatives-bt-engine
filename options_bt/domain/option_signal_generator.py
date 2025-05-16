@@ -10,21 +10,24 @@ import numpy as np
 
 import logging
 
-from options_bt.domain.enums import OptionType, PositionSide
-from options_bt.bt import run_multiple_backtests, setup_logger
-from options_bt.domain.signal_generator import SignalGenerator
+from options_bt.domain.enums import *  
+from options_bt.domain.base_signal_generator import BaseSignalGenerator
+from options_bt.utils.logger import setup_logger
 
-# from options_bt.bt import is_put, is_call
+# Create logger instance
 logger = setup_logger()
 
-class OptionSignalGenerator(SignalGenerator):
+class OptionSignalGenerator(BaseSignalGenerator):
     """Class to generate signals for trading."""
     
-    def __init__(self, data: Dict):
-        super().__init__(data)
-        self.data = data
+    def __init__(self, config: Dict):
+        super().__init__(config)
+        self.dte_range = config['dte_range']
+        self.dte_target = config['dte_target']
+        self.delta_range = config['delta_range']
+        self.delta_target = config['delta_target']
     
-    def generate_trade_signals(
+    def generate_single_leg_signals(
         self,
         spx_data: pd.DataFrame,
         options_chain: pd.DataFrame,

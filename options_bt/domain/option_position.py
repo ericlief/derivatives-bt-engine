@@ -6,14 +6,15 @@ from functools import cached_property
 import pandas as pd
 import numpy as np
 
-import logging
+from options_bt.domain.enums import *  
+from options_bt.domain.base_position import BasePosition
+from options_bt.utils.logger import setup_logger
 
-from options_bt.domain.enums import OptionType, PositionSide
-# from options_bt.bt import is_put, is_call
-logger = logging.getLogger(__name__)
+# Create logger instance
+logger = setup_logger()
 
 @dataclass
-class Position:
+class OptionPosition(BasePosition):
     """Core option position. Represents a single option contract position."""
     trade_id: int 
     quantity: int

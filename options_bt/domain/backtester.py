@@ -7,10 +7,12 @@ import os
 
 from options_bt.domain.enums import OptionType, PositionSide, SpreadType, TradeResult
 from options_bt.domain.trade_manager import TradeManager
-from options_bt.domain.position import Position
+from options_bt.domain.option_position import Position
 from options_bt.domain.spread import Spread
+from options_bt.utils.logger import setup_logger
 
-logger = logging.getLogger(__name__)
+# Create logger instance
+logger = setup_logger()
 
 class Backtester:
     """Class to manage backtest execution."""
@@ -30,7 +32,11 @@ class Backtester:
             save_trades: Whether to save trade results
             log_to_sheets: Whether to log results to Google Sheets
         """
-        self.data = data
+
+        self.options_chain = self.data['options_chain']
+        self.options_chain_multi_index = self.data['options_data_multi']
+        self.underlying = self.data['underlying']
+        self.vix = self.data['vix']
         self.save_trades = save_trades
         self.log_to_sheets = log_to_sheets
 
@@ -73,14 +79,11 @@ class Backtester:
         logger.info(f"Starting backtest at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         
          
-        options_chain = self.data['options_data']
-        options_chain_multi_index = self.data['options_data_multi']
-        spx_data = self.data['spx_data']
-        vix_data = self.data['vix_data']
+         
      
         # Initialize trade manager
         self.trade_manager = TradeManager(initial_capital=initial_capital, leverage=leverage)
-        
+        self.signal_generator = OptionSignalGenerator(data=self.data, config=config)    
         # Generate or validate signals
         signal_start = time.time()
         if spread_type:
@@ -192,16 +195,7 @@ class Backtester:
         return results
     
 
-    def _prepare_spread_signals(self, spread_type: SpreadType, legs_config: List[Dict],
-                              spread_signals: Optional[pd.DataFrame], **kwargs):
-        """Prepare spread signals for backtest."""
-        # Implementation of spread signal preparation here
-        pass
-    
-    def _prepare_trade_signals(self, trade_signals: Optional[pd.DataFrame], **kwargs):
-        """Prepare trade signals for backtest."""
-        # Implementation of trade signal preparation here
-        pass
+ 
     
     def _execute_backtest(self, signals: pd.DataFrame, **kwargs):
         """Execute the backtest using the trade manager."""
@@ -235,3 +229,89 @@ class Backtester:
             "quantity": 1,
             "early_close_days": 5,
     }
+
+    def _prepare_backtest_params(
+        self,
+        params: Dict,
+   
+        preloaded_data: Dict
+    ) -> Dict:
+        """
+        Prepare the appropriate parameters for run_backtest based on whether 
+        this is a spread or single-leg backtest.
+        
+        Args:
+            params: Dictionary of backtest parameters
+            spx_file_path: Path to SPX data file
+            options_chain_file_path: Path to options chain file
+            options_chain: Options chain DataFrame
+            spx_data: SPX data DataFrame
+            preloaded_data: Dictionary of preloaded data
+            
+        Returns:
+            Dictionary of parameters to pass to run_backtest
+        """
+        # Check if this is a spread backtest
+        is_spread = 'spread_type' in params and 'legs_config' in params
+        
+        # Common parameters that apply to both types
+        backtest_params = {
+            'spx_file_path': spx_file_path,
+            'options_chain_file_path': options_chain_file_path,
+            'preloaded_data': preloaded_data,
+            'dte_range': params.get('dte_range'),
+            'dte_target': params.get('dte_target'),
+            'start_date': params.get('start_date'),
+            'end_date': params.get('end_date'),
+            'quantity': params.get('quantity', 1),
+        }
+        
+        # Add specific parameters based on backtest type
+        if is_spread:
+            # Generate spread signals
+            spread_signals = generate_spread_signals(
+                options_chain=options_chain,
+                spread_type=params['spread_type'],
+                legs_config=params['legs_config'],
+                start_date=params.get('start_date'),
+                end_date=params.get('end_date'),
+                dte_range=params.get('dte_range'),
+                dte_target=params.get('dte_target'),
+                spx_data=spx_data
+            )
+            
+            # Add spread-specific parameters
+            backtest_params.update({
+                'spread_signals': spread_signals,
+                'spread_type': params['spread_type'],
+                'legs_config': params['legs_config'],
+            })
+        else:
+            # Generate single-leg trade signals
+            trade_signals = generate_trade_signals(
+                spx_data=spx_data,
+                options_chain=options_chain,
+                option_type=params['option_type'],
+                delta_target=params.get('delta_target'),
+                delta_range=params.get('delta_range'),
+                dte_target=params.get('dte_target'),
+                dte_range=params.get('dte_range'),
+                start_date=params.get('start_date'),
+                end_date=params.get('end_date')
+            )
+            
+            # Add single-leg specific parameters
+            backtest_params.update({
+                'option_type': params['option_type'],
+                'position_side': params['position_side'],
+                'delta_target': params.get('delta_target'),
+                'delta_range': params.get('delta_range'),
+                'trade_signals': trade_signals  # Add generated signals
+            })
+        
+        # Add any remaining parameters from the original params
+        for k, v in params.items():
+            if k not in backtest_params:
+                backtest_params[k] = v
+                
+        return backtest_params

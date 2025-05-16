@@ -3,10 +3,11 @@ import pandas as pd
 import logging
 from options_bt.domain.enums import OptionType, PositionSide, SpreadType, TradeResult
 from options_bt.domain.spread import Spread
-from options_bt.domain.trade import TradeResult   
-from options_bt.domain.position import Position
+from options_bt.domain.option_trade import TradeResult   
+from options_bt.domain.option_position import Position
+from options_bt.bt import setup_logger
 
-logger = logging.getLogger(__name__)
+logger = setup_logger()
 
 class TradeManager:
     """Class to manage trade creation and execution."""
@@ -18,7 +19,7 @@ class TradeManager:
         self.trade_counter = 0
         self.open_positions: List[Position] = []
     
-    def create_trade_from_signal(
+    def build_trade_from_signal(
         self,
         trade_signal: NamedTuple,
         quantity: int,
@@ -151,4 +152,5 @@ class TradeManager:
                 return None, self.option_bp
 
         return None, self.option_bp 
+    
     

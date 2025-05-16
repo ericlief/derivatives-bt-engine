@@ -4,16 +4,18 @@ from functools import cached_property
 import pandas as pd
 import logging
 from options_bt.domain.enums import SpreadType
-from options_bt.domain.position import Position
+from options_bt.domain.option_position import OptionPosition    
+from options_bt.utils.logger import setup_logger
 
-logger = logging.getLogger(__name__)
+# Create logger instance
+logger = setup_logger()
 
 @dataclass
 class Spread:
     """Class representing a multi-leg option spread."""
     spread_id: int
     spread_type: SpreadType
-    legs: List[Position] = field(default_factory=list)
+    legs: List[OptionPosition] = field(default_factory=list)
     leg_ratios: Dict[int, float] = field(default_factory=dict)  # Maps leg number to ratio
     spread_price: Optional[float] = None
     

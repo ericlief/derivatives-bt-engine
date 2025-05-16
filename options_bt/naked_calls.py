@@ -1,16 +1,11 @@
-from typing import Dict, List, Optional, Tuple, Union
-import logging
-from datetime import datetime
 import pandas as pd
 
-from options_bt.bt import run_multiple_backtests, setup_logger
-from options_bt.domain.enums import OptionType, PositionSide, SpreadType, TradeResult
-from options_bt.domain.trade_manager import TradeManager
-from options_bt.domain.position import Position
-from options_bt.domain.spread import Spread
-from options_bt.domain.backtester import Backtester
+from options_bt.utils.logger import setup_logger
+from options_bt.domain.enums import *  
+from options_bt.domain.backtester import Backtester 
 from options_bt.domain.dataloader import DataLoader
  
+
 # Create logger instance
 logger = setup_logger()
  
@@ -26,20 +21,20 @@ def run_test_suite():
     OPTIONS_FILE = "options_chain_preprocessed.csv"
 
     dl = DataLoader(data_dir=DATA_PATH, options_file=OPTIONS_FILE, use_preprocessed=True, save_preprocessed=False)
-    options_chain, options_chain_multi_index, spx_data, vix_data = dl.load_data()
+    data = dl.load_data()
     # print(dl.__dict__)
     # Check data quality once
     # check_data_quality(options_chain, spx_data, vix_data)
     
-    preloaded_data = {
-        'spx_data': spx_data,
-        'options_data': options_chain,
-        'options_data_multi': options_chain_multi_index,
-        'vix_data': vix_data
-    }
+    # preloaded_data = {
+    #     'spx_data': spx_data,
+    #     'options_data': options_chain,
+    #     'options_data_multi': options_chain_multi_index,
+    #     'vix_data': vix_data
+    # }
     
     backtester = Backtester(
-        data=preloaded_data,
+        data=data,
         save_trades=True,
         log_to_sheets=True
     )

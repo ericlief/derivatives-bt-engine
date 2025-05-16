@@ -1,6 +1,6 @@
 import os
 import pandas as pd
-from options_bt.bt import run_multiple_backtests, setup_logger
+from options_bt.utils.logger import setup_logger
 from options_bt.domain.enums import OptionType, PositionSide
 
 # Create logger instance
