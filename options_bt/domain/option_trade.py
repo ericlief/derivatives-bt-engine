@@ -1,9 +1,12 @@
+from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional, Dict, Union
 import pandas as pd
 from options_bt.domain.enums import *  
 from options_bt.domain.base_trade import BaseTrade
-from options_bt.utils.logger import setup_logger
+from options_bt.bt import setup_logger      
+
+from options_bt.domain.option_position import OptionPosition
 
 logger = setup_logger()
 
@@ -38,35 +41,56 @@ class OptionTrade(BaseTrade):
     spread_id: Optional[int] = None
     leg_number: Optional[int] = None
 
-    # @classmethod
-    # def from_position(cls, position: Position, **kwargs) -> 'TradeResult':
-    #     """Create TradeResult from a Position object."""
-    #     return cls(
-    #         trade_id=position.trade_id,
-    #         quantity=position.quantity,
-    #         option_type=position.option_type,
-    #         position_side=position.position_side,
-    #         entry_date=position.entry_date,
-    #         exit_date=position.close_date or position.expire_date,
-    #         expire_date=position.expire_date,
-    #         entry_delta=position.entry_delta,
-    #         exit_delta=position.exit_delta,
-    #         entry_dte=position.entry_dte,
-    #         days_held=(position.close_date or position.expire_date - position.entry_date).days,
-    #         underlying_entry=position.underlying_entry,
-    #         underlying_exit=position.underlying_exit,
-    #         strike=position.strike,
-    #         entry_price=position.entry_price,
-    #         exit_price=position.exit_price,
-    #         capital_used=position.margin_required,
-    #         option_bp=kwargs.get('option_bp', 0),
-    #         return_on_margin=kwargs.get('return_on_margin', 0),
-    #         close_reason=kwargs.get('close_reason', 'expired'),
-    #         pnl=position.calculate_pnl(),
-    #         spread_type=kwargs.get('spread_type', SpreadType.NONE.value),
-    #         spread_id=kwargs.get('spread_id'),
-    #         leg_number=kwargs.get('leg_number')
-    #     )
+    @classmethod
+    def from_position(cls, position: OptionPosition, exit_data: Dict) -> OptionTrade:
+        """
+        Create a trade from a position and exit data.
+        
+        Args:
+            position: The option position
+            exit_data: Dictionary containing exit information:
+                - exit_date: When the position was closed
+                - exit_price: Exit price
+                - exit_delta: Delta at exit
+                - underlying_exit: Underlying price at exit
+                - close_reason: Why the position was closed ('expired' or 'early closure')
+        """
+        # Validate required exit data
+        required_fields = ['exit_date', 'exit_price', 'exit_delta', 'underlying_exit']
+        missing_fields = [f for f in required_fields if f not in exit_data]
+        if missing_fields:
+            raise ValueError(f"Missing required exit data fields: {missing_fields}")
+            
+        exit_date = pd.Timestamp(exit_data['exit_date'])
+        days_held = (exit_date - position.entry_date).days
+        
+        return cls(
+            trade_id=position.trade_id,
+            quantity=position.quantity,
+            option_type=position.option_type,
+            position_side=position.position_side,
+            entry_date=position.entry_date,
+            exit_date=exit_date,
+            expire_date=position.expire_date,
+            entry_delta=position.entry_delta,
+            exit_delta=exit_data['exit_delta'],
+            entry_dte=position.entry_dte,
+            days_held=days_held,
+            underlying_entry=position.underlying_entry,
+            underlying_exit=exit_data['underlying_exit'],
+            strike=position.strike,
+            entry_price=position.entry_price,
+            exit_price=exit_data['exit_price'],
+            capital_used=position.margin_required,
+            option_bp=exit_data.get('option_bp', 0),  # Optional
+            return_on_margin=exit_data.get('return_on_margin') or  # Use provided or calculate
+                (position.calculate_pnl() / position.margin_required * 100 if position.margin_required > 0 else 0),
+            close_reason=exit_data.get('close_reason', 'expired' if exit_date == position.expire_date else 'early closure'),
+            pnl=exit_data.get('pnl') or position.calculate_pnl(),  # Use provided or calculate
+            spread_type=getattr(position, 'spread_type', SpreadType.NONE.value),
+            spread_id=getattr(position, 'spread_id', None),
+            leg_number=getattr(position, 'leg_number', None)
+        )
 
     def to_dict(self) -> Dict:
         """Convert to dictionary for DataFrame creation."""

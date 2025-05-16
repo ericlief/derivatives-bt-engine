@@ -1,23 +1,23 @@
 from typing import Optional, Dict, Union, List, NamedTuple, Tuple
 import pandas as pd
 import logging
-from options_bt.domain.enums import OptionType, PositionSide, SpreadType, TradeResult
+from options_bt.domain.enums import OptionType, PositionSide, SpreadType 
 from options_bt.domain.spread import Spread
-from options_bt.domain.option_trade import TradeResult   
-from options_bt.domain.option_position import Position
-from options_bt.bt import setup_logger
+from options_bt.domain.option_position import OptionPosition
+from options_bt.utils.logger import setup_logger
 
 logger = setup_logger()
 
 class TradeManager:
     """Class to manage trade creation and execution."""
     
-    def __init__(self, initial_capital: float = 100000.0, leverage: float = 1.0):
+    def __init__(self, initial_capital: float = 100000.0, leverage: float = 1.0, max_margin_utilization: float = 0.80):
         self.initial_capital = initial_capital
         self.leverage = leverage
         self.option_bp = initial_capital
+        self.max_margin_utilization = max_margin_utilization
         self.trade_counter = 0
-        self.open_positions: List[Position] = []
+        self.open_positions: List[OptionPosition] = []
     
     def build_trade_from_signal(
         self,
@@ -29,9 +29,9 @@ class TradeManager:
         entry_date: pd.Timestamp,
         early_close_days: Optional[int] = None,
         delta_range: Optional[Tuple[float, float]] = None,
-    ) -> Optional[Position]:
+    ) -> Optional[OptionPosition]:
         """
-        Creates a Position object from a given trade signal.
+        Creates a OptionPosition object from a given trade signal.
         
         Args:
             trade_signal: Named tuple from pandas itertuples containing signal data
@@ -44,7 +44,7 @@ class TradeManager:
             delta_range: Optional range of acceptable deltas
             
         Returns:
-            Optional[Position]: Created position if valid, None otherwise
+            Optional[OptionPosition]: Created position if valid, None otherwise
         """
         # Validate entry date
         min_valid_date = pd.Timestamp('1990-01-01')
@@ -84,7 +84,7 @@ class TradeManager:
         entry_dte = pd.Timedelta(trade_signal.expire_date - entry_date).days
         
         # Create the position
-        position = Position(
+        position = OptionPosition(
             trade_id=self.trade_counter,
             quantity=quantity,
             option_type=option_type,
@@ -102,7 +102,7 @@ class TradeManager:
         
         return position
     
-    def execute_trade(self, trade: Position) -> Tuple[Optional[Position], float]:
+    def execute_trade(self, trade: OptionPosition) -> Tuple[Optional[OptionPosition], float]:
         """
         Execute a trade with the current buying power and leverage.
         

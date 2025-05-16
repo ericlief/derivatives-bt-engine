@@ -1,8 +1,6 @@
 from dataclasses import dataclass
 from typing import Optional, Dict, Union
 import pandas as pd
-from options_bt.domain.option_position import Position
-from options_bt.domain.spread import Spread
 from options_bt.domain.enums import OptionType, PositionSide, SpreadType
 from options_bt.utils.logger import setup_logger
 

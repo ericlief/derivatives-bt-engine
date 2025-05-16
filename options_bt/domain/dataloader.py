@@ -155,12 +155,12 @@ class DataLoader:
         except Exception as e:
             logger.error(f"Failed to save data to {file_path}: {str(e)}")
 
-    def _preprocess_option_chain(self, options_chain: pd.DataFrame) -> pd.DataFrame:
+    def _preprocess_option_chain(self, option_chain: pd.DataFrame) -> pd.DataFrame:
         """
         Clean and preprocess options data to catch and fix common issues.
         
         Args:
-            options_chain: Raw options chain DataFrame
+            option_chain: Raw options chain DataFrame
         
         Returns:
             Cleaned options chain DataFrame
@@ -168,7 +168,7 @@ class DataLoader:
         logger.info("Preprocessing options chain data...")
         
         # Make a copy to avoid modifying the original
-        df = options_chain.copy()
+        df = option_chain.copy()
         
         # Normalize the DataFrame index if needed - more efficient approach
         try:

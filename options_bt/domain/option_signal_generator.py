@@ -22,22 +22,36 @@ class OptionSignalGenerator(BaseSignalGenerator):
     
     def __init__(self, config: Dict):
         super().__init__(config)
-        self.dte_range = config['dte_range']
-        self.dte_target = config['dte_target']
-        self.delta_range = config['delta_range']
-        self.delta_target = config['delta_target']
+     
     
     def generate_single_leg_signals(
         self,
-        spx_data: pd.DataFrame,
-        options_chain: pd.DataFrame,
-        option_type: OptionType,
-        delta_target: float,
-        delta_range: Tuple[float, float],
-        dte_target: int,
-        dte_range: Tuple[int, int],
-        start_date: str = None,
-        end_date: str = None,
+        config: Dict
+        # *,
+        # # Hyperparameters
+        # quantity: int = 1,
+        # option_type: OptionType,
+        # position_side: PositionSide = None,
+        # delta_target: Optional[float] = None,
+        # delta_range: Optional[Tuple[float, float]] = None,
+        # dte_target: Optional[int] = None,
+        # dte_range: Optional[Tuple[int, int]] = None,
+        # use_spx_close: bool = False,
+        # start_date: Optional[str] = None,
+        # end_date: Optional[str] = None,
+        # early_close_days: Optional[int] = None,
+        # max_positions: Optional[int] = 1,
+        # # Spread-specific parameters
+        # spread_type: Optional[SpreadType] = None,
+        # legs_config: Optional[List[Dict]] = None,
+        # spread_signals: Optional[pd.DataFrame] = None,
+        # trade_signals: Optional[pd.DataFrame] = None,
+        # # Capital parameters
+        # initial_capital: float = 100000.0,
+        # leverage: float = 1.0,
+        # # Data parameters (default preloaded)
+        # data: Optional[Dict] = None
+         
     ) -> pd.DataFrame:
         """
         Generate trade signals based on the provided parameters. These are not the actual trades,
@@ -192,20 +206,21 @@ class OptionSignalGenerator(BaseSignalGenerator):
         return trade_signals
     
     def generate_spread_signals(
-        options_chain: pd.DataFrame,
+        self,
+        option_chain: pd.DataFrame,
+        underlying: pd.DataFrame,
         spread_type: SpreadType,
         legs_config: List[Dict],
         start_date: str = None,
         end_date: str = None,
         dte_range: Tuple[int, int] = None,
-        dte_target: int = None,
-        spx_data: pd.DataFrame = None,
     ) -> pd.DataFrame:
         """
         Generate trade signals for option spreads by pairing legs according to the specified spread type.
         
         Args:
-            options_chain: DataFrame containing options chain data
+            option_chain: DataFrame containing options chain data
+            underlying: DataFrame containing underlying price data
             spread_type: Type of spread to generate
             legs_config: List of configurations for each leg of the spread
                 Each leg config should have:
@@ -217,7 +232,6 @@ class OptionSignalGenerator(BaseSignalGenerator):
             end_date: End date for the trade signals
             dte_range: Range of days to expiration to consider
             dte_target: Target days to expiration for the trade
-            spx_data: DataFrame containing SPX price data (optional)
         
         Returns:
             DataFrame containing the generated spread signals with legs paired by date

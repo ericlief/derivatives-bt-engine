@@ -2,7 +2,7 @@ from enum import Enum
 from typing import TypedDict, Optional, Union
 import pandas as pd
 
-class OptionType(Enum):
+class OptionType(str,Enum):
     """Option type enumeration."""
     CALL = "call"
     PUT = "put"
@@ -45,7 +45,7 @@ class OptionType(Enum):
             return value.lower() == "call"
         return False
 
-class PositionSide(Enum):
+class PositionSide(str, Enum):
     """Position side enumeration."""
     LONG = "long"  # Buying options
     SHORT = "short"  # Selling/writing options
@@ -88,7 +88,7 @@ class PositionSide(Enum):
             return value.lower() == "short"
         return False
 
-class SpreadType(Enum):
+class SpreadType(str, Enum):
     """Spread type enumeration."""
     NONE = "none"      # Single leg position
     VERTICAL = "vertical"  # Vertical spread (same expiration, different strikes)
@@ -119,3 +119,21 @@ class SpreadType(Enum):
             return value['spread_type'].lower() == spread_type.value
         return False
  
+class BaseStrategyType(str, Enum):
+    """Base class for strategy types."""
+    pass
+    
+
+class OptionStrategyType(BaseStrategyType):
+    """Option strategy type enumeration."""
+    SHORT_PUT = "short_put"
+    LONG_PUT = "long_put"
+    SHORT_CALL = "short_call"
+    LONG_CALL = "long_call"
+    BULL_PUT_CREDIT_SPREAD = "bull_put_credit_spread"
+    BEAR_PUT_CREDIT_SPREAD = "bear_put_credit_spread"
+    BULL_CALL_CREDIT_SPREAD = "bull_call_credit_spread"
+    BEAR_CALL_CREDIT_SPREAD = "bear_call_credit_spread"
+    CUSTOM_STRATEGY = "custom_strategy"
+    IRON_CONDOR = "iron_condor"
+    BUTTERFLY = "butterfly"

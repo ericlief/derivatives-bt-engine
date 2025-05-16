@@ -5,10 +5,12 @@ import time
 from datetime import datetime
 import os
 
-from options_bt.domain.enums import OptionType, PositionSide, SpreadType, TradeResult
-from options_bt.domain.trade_manager import TradeManager
-from options_bt.domain.option_position import Position
+from options_bt.domain.enums import OptionType, PositionSide, SpreadType 
+from options_bt.domain.option_position import OptionPosition
 from options_bt.domain.spread import Spread
+from options_bt.domain.option_trade import OptionTrade
+from options_bt.domain.option_signal_generator import OptionSignalGenerator
+from options_bt.domain.trade_manager import TradeManager
 from options_bt.utils.logger import setup_logger
 
 # Create logger instance
@@ -33,85 +35,79 @@ class Backtester:
             log_to_sheets: Whether to log results to Google Sheets
         """
 
-        self.options_chain = self.data['options_chain']
-        self.options_chain_multi_index = self.data['options_data_multi']
-        self.underlying = self.data['underlying']
-        self.vix = self.data['vix']
+        self.option_chain = data['option_chain']
+        self.option_chain_multi_index = data['option_chain_multi_index']
+        self.underlying = data['underlying']
+        self.vix = data['vix']
         self.save_trades = save_trades
         self.log_to_sheets = log_to_sheets
 
-        # Track execution times
-        self.execution_times = {}
+        # # Track execution times
+        # self.execution_times = {}
 
         # Results (clear between runs?)
-        self.results: Dict[str, pd.DataFrame] = {}
+        # self.results: Dict[str, pd.DataFrame] = {}
 
     def run_backtest(
         self,
         *,
-
-        # Hyperparameters
         quantity: int = 1,
-        option_type: OptionType,
+        option_type: OptionType = None,
         position_side: PositionSide = None,
-        delta_target: Optional[float] = None,
-        delta_range: Optional[Tuple[float, float]] = None,
-        dte_target: Optional[int] = None,
-        dte_range: Optional[Tuple[int, int]] = None,
+        delta_target: float = None,  # Optional target for delta
+        delta_range: tuple = None,  # Range for delta
+        dte_target: int = None,  # Optional target for days to expiration
+        dte_range: tuple = None,  # Range for days to expiration
         use_spx_close: bool = False,
-        start_date: Optional[str] = None,
-        end_date: Optional[str] = None,
-        early_close_days: Optional[int] = None,
-        max_positions: Optional[int] = 1,
-        # Spread-specific parameters
-        spread_type: Optional[SpreadType] = None,
-        legs_config: Optional[List[Dict]] = None,
-        spread_signals: Optional[pd.DataFrame] = None,
-        trade_signals: Optional[pd.DataFrame] = None,
-        # Capital parameters
-        initial_capital: float = 100000.0,
+        start_date: str = None,
+        end_date: str = None,
+        initial_capital: float = 100000,
+        early_close_days: int = None,
+        max_margin_utilization: float = 0.80,
         leverage: float = 1.0,
-        # Data parameters (default preloaded)
-        data: Optional[Dict] = None
+        max_positions: int = 1,
+        # Spread-specific parameters
+        spread_type: SpreadType = None,
+        legs_config: List[Dict] = None,
+        spread_signals: pd.DataFrame = None,  # Pre-generated spread signals
+        trade_signals: pd.DataFrame = None,   # Pre-generated trade signals for single legs
     ) -> pd.DataFrame:
         """Execute a backtest with the given parameters."""
         start_time = time.time()
         logger.info(f"Starting backtest at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         
-         
-         
      
         # Initialize trade manager
-        self.trade_manager = TradeManager(initial_capital=initial_capital, leverage=leverage)
-        self.signal_generator = OptionSignalGenerator(data=self.data, config=config)    
+        trade_manager = TradeManager(initial_capital=config['initial_capital'], leverage=config['leverage'], max_margin_utilization=config['max_margin_utilization'])
+        signal_generator = OptionSignalGenerator(**config)    
         # Generate or validate signals
         signal_start = time.time()
-        if spread_type:
+        if config['spread_type']:
             signals = self._prepare_spread_signals(
                 spread_type=spread_type,
                 legs_config=legs_config,
                 spread_signals=spread_signals,
-                options_chain=options_chain,
+                option_chain=self.option_chain,
                 start_date=start_date,
                 end_date=end_date,
                 dte_range=dte_range,
                 dte_target=dte_target,
-                spx_data=spx_data
+                spx_data=self.underlying
             )
         else:
-            signals = self._prepare_trade_signals(
-                trade_signals=trade_signals,
-                options_chain=options_chain,
-                spx_data=spx_data,
-                option_type=option_type,
-                delta_target=delta_target,
-                delta_range=delta_range,
-                dte_target=dte_target,
-                dte_range=dte_range,
-                start_date=start_date,
-                end_date=end_date
-            )
-        
+            # signals = self._prepare_trade_signals(
+            #     trade_signals=trade_signals,
+            #     option_chain=self.option_chain,
+            #     spx_data=self.underlying,
+            #     option_type=option_type,
+            #     delta_target=delta_target,
+            #     delta_range=delta_range,
+            #     dte_target=dte_target,
+            #     dte_range=dte_range,
+            #     start_date=start_date,
+            #     end_date=end_date
+            # )
+            option
         self.execution_times['signal_generation'] = time.time() - signal_start
         
         if signals.empty:
@@ -122,8 +118,8 @@ class Backtester:
         backtest_start = time.time()
         trade_results = self._execute_backtest(
             signals=signals,
-            options_chain=options_chain,
-            spx_data=spx_data,
+            option_chain=self.option_chain,
+            spx_data=self.underlying,
             option_type=option_type,
             position_side=position_side,
             early_close_days=early_close_days,
@@ -175,14 +171,22 @@ class Backtester:
 
             logger.info(f"Running backtest {i}/{len(hyperparameter_sets)} ({i / len(hyperparameter_sets):.0%})")            
             start_time = time.time()
-            
+            # Prepare parameters for this backtest
+            # params = prepare_backtest_params(
+            #     params=params,
+            #     spx_file_path=spx_file_path,
+            #     options_chain_file_path=options_chain_file_path,
+            #     options_chain=options_chain,
+            #     spx_data=spx_data,
+            #     preloaded_data=preloaded_data
+            # )
             # Run backtest
             results = self.run_backtest(**params)
             execution_time = time.time() - start_time
             
             results[f"backtest_{i}"] = {
                 'params': params,
-                'results': result,
+                'results': results,
                 'execution_time': execution_time
             }
             
@@ -242,11 +246,6 @@ class Backtester:
         
         Args:
             params: Dictionary of backtest parameters
-            spx_file_path: Path to SPX data file
-            options_chain_file_path: Path to options chain file
-            options_chain: Options chain DataFrame
-            spx_data: SPX data DataFrame
-            preloaded_data: Dictionary of preloaded data
             
         Returns:
             Dictionary of parameters to pass to run_backtest
@@ -256,9 +255,6 @@ class Backtester:
         
         # Common parameters that apply to both types
         backtest_params = {
-            'spx_file_path': spx_file_path,
-            'options_chain_file_path': options_chain_file_path,
-            'preloaded_data': preloaded_data,
             'dte_range': params.get('dte_range'),
             'dte_target': params.get('dte_target'),
             'start_date': params.get('start_date'),
@@ -269,15 +265,14 @@ class Backtester:
         # Add specific parameters based on backtest type
         if is_spread:
             # Generate spread signals
-            spread_signals = generate_spread_signals(
-                options_chain=options_chain,
+            spread_signals = self._generate_spread_signals(
                 spread_type=params['spread_type'],
                 legs_config=params['legs_config'],
                 start_date=params.get('start_date'),
                 end_date=params.get('end_date'),
                 dte_range=params.get('dte_range'),
                 dte_target=params.get('dte_target'),
-                spx_data=spx_data
+                spx_data=self.underlying
             )
             
             # Add spread-specific parameters
@@ -288,9 +283,9 @@ class Backtester:
             })
         else:
             # Generate single-leg trade signals
-            trade_signals = generate_trade_signals(
-                spx_data=spx_data,
-                options_chain=options_chain,
+            trade_signals = self._generate_trade_signals(
+                spx_data=self.underlying,
+                option_chain=self.option_chain,
                 option_type=params['option_type'],
                 delta_target=params.get('delta_target'),
                 delta_range=params.get('delta_range'),

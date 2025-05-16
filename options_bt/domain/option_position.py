@@ -16,28 +16,25 @@ logger = setup_logger()
 @dataclass
 class OptionPosition(BasePosition):
     """Core option position. Represents a single option contract position."""
+    # Required parameters (no defaults)
     trade_id: int 
     quantity: int
     option_type: Union[OptionType, str]
     position_side: Union[PositionSide, str]
     strike: float
     expire_date: pd.Timestamp
-
-    # Entry state
     entry_date: pd.Timestamp
     entry_price: float
     entry_delta: float
     entry_dte: int
     underlying_entry: float
-    margin_required: Optional[float] = None  # Store margin requirement
 
-    # Exit state (filled when closed)
+    # Optional parameters (with defaults)
+    margin_required: Optional[float] = None  # Store margin requirement
     exit_date: Optional[pd.Timestamp] = None
     exit_price: Optional[float] = None
     exit_delta: Optional[float] = None
     underlying_exit: Optional[float] = None
-
-    # Closure state
     close_date: Optional[pd.Timestamp] = None  # For early closure
 
     def __post_init__(self):
@@ -71,15 +68,16 @@ class OptionPosition(BasePosition):
         """Check if position is short."""
         return self.position_side in [PositionSide.SHORT, PositionSide.SHORT.value, "short"]
 
+    def is_closed(self) -> bool:
+        """Check if position is closed based on exit information."""
+        return (self.exit_date is not None or  # Normal exit
+                self.close_date is not None or  # Early closure
+                (self.expire_date is not None and pd.Timestamp.now() >= self.expire_date))  # Expired
+
     @property
     def is_open(self) -> bool:
         """Check if position is currently open."""
-        return self.entry_date is not None and self.exit_date is None
-
-    @property
-    def is_closed(self) -> bool:
-        """Check if position is closed."""
-        return self.exit_date is not None
+        return not self.is_closed()
 
     @cached_property
     def get_signed_entry_price(self) -> float:
@@ -151,15 +149,23 @@ class OptionPosition(BasePosition):
         
         return round(margin / leverage, 2)
 
-    def calculate_pnl(self) -> float:
-        """Calculate P&L for the position."""
-        if not self.entry_price or not self.exit_price:
+    def calculate_pnl(self, exit_price: Optional[float] = None) -> float:
+        """
+        Calculate P&L for the position.
+        
+        Args:
+            exit_price: Optional exit price. If not provided, returns 0 (unrealized P&L).
+        """
+        if exit_price is None:
             return 0
             
         # Get correctly signed prices
         entry = self.get_signed_entry_price
-        exit = self.get_signed_exit_price
-        pnl = entry + exit  # Signs are already correct from the get_signed methods
+        # For long positions, exit price should be positive (credit/STC)
+        # For short positions, exit price should be negative (debit/BTC)
+        signed_exit = abs(exit_price) if self.is_long else -abs(exit_price)
+        
+        pnl = entry + signed_exit  # Signs are already correct
         
         # For long positions, clamp loss to zero
         if self.is_long:
@@ -369,7 +375,7 @@ class OptionPosition(BasePosition):
         option_type: OptionType,
         expire_date: pd.Timestamp,
         is_credit: bool = True
-    ) -> List[Position]:
+    ) -> List[ OptionPosition]:
         """
         Factory method to create a vertical spread.
         
@@ -407,7 +413,7 @@ class OptionPosition(BasePosition):
         put_strikes: List[float],
         call_strikes: List[float],
         expire_date: pd.Timestamp
-    ) -> List['Position']:
+    ) -> List[' OptionPosition']:
         """
         Factory method to create an iron condor.
         
