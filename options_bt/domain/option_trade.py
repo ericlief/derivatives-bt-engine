@@ -10,7 +10,7 @@ from options_bt.domain.option_position import OptionPosition
 
 logger = setup_logger()
 
-@dataclass
+@dataclass(kw_only=True)
 class OptionTrade(BaseTrade):
     """
     Represents a completed trade with entry and exit details.
@@ -37,7 +37,7 @@ class OptionTrade(BaseTrade):
     return_on_margin: float
     close_reason: str
     pnl: float
-    spread_type: Optional[str] = SpreadType.NONE.value
+    spread_type: Optional[str] = OptionSpreadType.NONE.value
     spread_id: Optional[int] = None
     leg_number: Optional[int] = None
 

@@ -1,7 +1,7 @@
 from typing import Optional, Dict, Union, List, NamedTuple, Tuple
 import pandas as pd
 import logging
-from options_bt.domain.enums import OptionType, PositionSide, SpreadType 
+from options_bt.domain.enums import *
 from options_bt.domain.spread import Spread
 from options_bt.domain.option_position import OptionPosition
 from options_bt.utils.logger import setup_logger
@@ -11,11 +11,13 @@ logger = setup_logger()
 class TradeManager:
     """Class to manage trade creation and execution."""
     
-    def __init__(self, initial_capital: float = 100000.0, leverage: float = 1.0, max_margin_utilization: float = 0.80):
+    def __init__(self, initial_capital: float = 100000.0, leverage: float = 1.0, max_margin_utilization: float = 0.80, 
+                 max_positions: int = 1, early_close_days: Optional[int] = None, use_underlying_close: bool = False):
         self.initial_capital = initial_capital
         self.leverage = leverage
         self.option_bp = initial_capital
         self.max_margin_utilization = max_margin_utilization
+        self.max_positions = max_positions
         self.trade_counter = 0
         self.open_positions: List[OptionPosition] = []
     
@@ -25,10 +27,8 @@ class TradeManager:
         quantity: int,
         option_type: OptionType,
         position_side: PositionSide,
-        delta_target: float,
         entry_date: pd.Timestamp,
         early_close_days: Optional[int] = None,
-        delta_range: Optional[Tuple[float, float]] = None,
     ) -> Optional[OptionPosition]:
         """
         Creates a OptionPosition object from a given trade signal.
@@ -116,7 +116,7 @@ class TradeManager:
             return None, self.option_bp
             
         # Use spread price for spreads, individual leg price for single legs
-        if isinstance(trade, Spread) and trade.spread_type != SpreadType.NONE.value:
+        if isinstance(trade, Spread) and trade.spread_type != OptionSpreadType.NONE.value:
             if pd.isna(trade.spread_price):
                 logger.error(f"Missing spread_price for spread {trade.spread_id} leg {trade.leg_number}")
                 return None, self.option_bp

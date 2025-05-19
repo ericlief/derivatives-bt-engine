@@ -1,13 +1,13 @@
 from dataclasses import dataclass
 from typing import Optional, Dict, Union
 import pandas as pd
-from options_bt.domain.enums import OptionType, PositionSide, SpreadType
-from options_bt.utils.logger import setup_logger
+from options_bt.domain.enums import *
+from options_bt.utils.logger import setup_logger    
 
 # Create logger instance
 logger = setup_logger()
 
-@dataclass
+@dataclass(kw_only=True)
 class BaseTrade:
     """
     Represents a completed trade with entry and exit details.
@@ -34,6 +34,6 @@ class BaseTrade:
     return_on_margin: float
     close_reason: str
     pnl: float
-    spread_type: Optional[str] = SpreadType.NONE.value
+    spread_type: Optional[str] = OptionSpreadType.NONE.value
     spread_id: Optional[int] = None
     leg_number: Optional[int] = None

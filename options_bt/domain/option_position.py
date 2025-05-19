@@ -15,34 +15,32 @@ logger = setup_logger()
 
 @dataclass
 class OptionPosition(BasePosition):
-    """Core option position. Represents a single option contract position."""
+    """Core option position. Represents a single 'open' option contract position."""
     # Required parameters (no defaults)
-    trade_id: int 
-    quantity: int
+
     option_type: Union[OptionType, str]
-    position_side: Union[PositionSide, str]
     strike: float
     expire_date: pd.Timestamp
     entry_date: pd.Timestamp
-    entry_price: float
     entry_delta: float
     entry_dte: int
     underlying_entry: float
 
     # Optional parameters (with defaults)
     margin_required: Optional[float] = None  # Store margin requirement
-    exit_date: Optional[pd.Timestamp] = None
-    exit_price: Optional[float] = None
-    exit_delta: Optional[float] = None
-    underlying_exit: Optional[float] = None
+
+    # Should go into Trade class
+    # exit_date: Optional[pd.Timestamp] = None
+    # exit_price: Optional[float] = None
+    # exit_delta: Optional[float] = None
+    # underlying_exit: Optional[float] = None
     close_date: Optional[pd.Timestamp] = None  # For early closure
 
     def __post_init__(self):
         """Validate and convert types after initialization."""
         if isinstance(self.option_type, str):
             self.option_type = OptionType(self.option_type.lower())
-        if isinstance(self.position_side, str):
-            self.position_side = PositionSide(self.position_side.lower())
+      
         
         # Calculate margin required based on entry price and underlying entry
         # if self.entry_price is not None and self.underlying_entry is not None:
@@ -70,9 +68,9 @@ class OptionPosition(BasePosition):
 
     def is_closed(self) -> bool:
         """Check if position is closed based on exit information."""
-        return (self.exit_date is not None or  # Normal exit
-                self.close_date is not None or  # Early closure
-                (self.expire_date is not None and pd.Timestamp.now() >= self.expire_date))  # Expired
+        pass
+        # return (self.exit_date is not None or  # Normal exit
+        #         (self.expire_date is not None and pd.Timestamp.now() >= self.expire_date))  # Expired
 
     @property
     def is_open(self) -> bool:

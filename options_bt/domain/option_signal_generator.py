@@ -8,135 +8,126 @@ from functools import cached_property
 import pandas as pd
 import numpy as np
 
-import logging
-
 from options_bt.domain.enums import *  
 from options_bt.domain.base_signal_generator import BaseSignalGenerator
+from options_bt.domain.single_leg_option_strategy_config import SingleLegOptionStrategyConfig
+from options_bt.domain.multi_leg_option_strategy_config import MultiLegOptionStrategyConfig
 from options_bt.utils.logger import setup_logger
 
 # Create logger instance
 logger = setup_logger()
 
+@dataclass
 class OptionSignalGenerator(BaseSignalGenerator):
     """Class to generate signals for trading."""
+
+    option_chain: pd.DataFrame
+    underlying: pd.DataFrame
+    config: Union[SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig]
     
-    def __init__(self, config: Dict):
-        super().__init__(config)
-     
-    
-    def generate_single_leg_signals(
-        self,
-        config: Dict
-        # *,
-        # # Hyperparameters
-        # quantity: int = 1,
-        # option_type: OptionType,
-        # position_side: PositionSide = None,
-        # delta_target: Optional[float] = None,
-        # delta_range: Optional[Tuple[float, float]] = None,
-        # dte_target: Optional[int] = None,
-        # dte_range: Optional[Tuple[int, int]] = None,
-        # use_spx_close: bool = False,
-        # start_date: Optional[str] = None,
-        # end_date: Optional[str] = None,
-        # early_close_days: Optional[int] = None,
-        # max_positions: Optional[int] = 1,
-        # # Spread-specific parameters
-        # spread_type: Optional[SpreadType] = None,
-        # legs_config: Optional[List[Dict]] = None,
-        # spread_signals: Optional[pd.DataFrame] = None,
-        # trade_signals: Optional[pd.DataFrame] = None,
-        # # Capital parameters
-        # initial_capital: float = 100000.0,
-        # leverage: float = 1.0,
-        # # Data parameters (default preloaded)
-        # data: Optional[Dict] = None
-         
-    ) -> pd.DataFrame:
+    # def __init__(self, 
+    #              option_chain: pd.DataFrame,
+    #              underlying: pd.DataFrame,
+    #              config: Union[SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig]):
+    #     super().__init__(config=config)
+        
+        
+    def __post_init__(self):
+        super().__init__(config=self.config)
+        logger.info(f"Config type: {type(self.config)}")
+        logger.info(f"Config: {self.config.leg}")
+        if isinstance(self.config, (SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig)):
+            self.strategy = self.config.strategy
+            self.option_type = self.config.leg.option_type
+            self.position_side = self.config.leg.position_side
+            self.delta_target = self.config.leg.delta_target
+            self.delta_range = self.config.leg.delta_range
+            self.dte_target = self.config.leg.dte_target
+            self.dte_range = self.config.leg.dte_range
+            self.quantity = self.config.quantity if self.config.quantity else 1
+            self.early_close_days = self.config.early_close_days
+            self.use_underlying_close = self.config.use_underlying_close
+        else:
+            raise ValueError("Invalid config type")
+        # Add multi-leg config extra parameters
+        if isinstance(self.config, MultiLegOptionStrategyConfig):
+            self.legs_config = self.config.legs_config
+            self.spread_type = self.config.spread_type
+            self.quantity = self.config.quantity
+            self.ratio = self.config.ratio
+        
+      
+            
+    def generate_single_leg_signals(self) -> pd.DataFrame:
         """
         Generate trade signals based on the provided parameters. These are not the actual trades,
         but rather potential trades filtered for the desired criteria. The DataFrame should have a 
         pd.DateTime index
-        
-        Args:
-            spx_data: DataFrame containing underlying price data
-            options_chain: DataFrame containing options chain data
-            option_type: Type of option strategy to trade (PUT or CALL)
-            delta_target: Target delta value for the trade
-            delta_range: Range of delta values to consider
-            dte_target: Target days to expiration for the trade
-            dte_range: Range of days to expiration to consider
-            start_date: Start date for the trade signals
-            end_date: End date for the trade signals
+       
         
         Returns:
             DataFrame containing the generated trade signals
         """
-
-        logger.debug(f'Generating trade signals for {option_type}|{delta_target if delta_target else delta_range}|{dte_target if dte_target else dte_range}|{start_date if start_date else "all"}|{end_date if end_date else "all"}')
-        
-        # Create a copy of the options chain to avoid modifying the original
-        chain_df = options_chain.copy()
+           
+        logger.debug(f'Generating trade signals for {self.option_type}|{self.delta_target if self.delta_target else self.delta_range}|{self.dte_target if self.dte_target else self.dte_range}|{self.start_date if self.start_date else "all"}|{self.end_date if self.end_date else "all"}')
         
         # Filter by DATE range if provided
-        if start_date:
-            start_date = pd.to_datetime(start_date)
-            chain_df = chain_df[chain_df.index >= start_date]
-        
-        if end_date:
-            end_date = pd.to_datetime(end_date)
-            chain_df = chain_df[chain_df.index <= end_date]
-            logger.debug(f'Sorting for date range: {start_date}-{end_date}')
-            logger.debug(f'Sample chain of length: {len(chain_df)}')
-            logger.debug(chain_df.head())
+        option_chain_df = self.option_chain
+        start_date = pd.to_datetime(self.start_date) if self.start_date else option_chain_df.index.min()
+        option_chain_df = option_chain_df[option_chain_df.index >= start_date]
+        end_date = pd.to_datetime(self.end_date) if self.end_date else option_chain_df.index.max()
+        option_chain_df = option_chain_df[option_chain_df.index <= end_date]
+        logger.debug(f'Sorting for date range: {start_date}-{end_date}')
+        logger.debug(f'Sample chain of length: {len(option_chain_df)}')
+        logger.debug(option_chain_df.head())
 
         # Remove columns that are not needed
-        prefix = 'p_' if is_put(option_type) else 'c_'
-        cols = chain_df.columns
+        prefix = 'p_' if OptionType.is_put(self.option_type) else 'c_'
+        cols = option_chain_df.columns
         needed_cols = [col for col in cols if col.startswith(prefix)]
         needed_cols.extend(['strike', 'dte', 'underlying_last', 'expire_date', 'strike_distance', 'strike_distance_pct'])
-        chain_df = chain_df[needed_cols]
+        option_chain_df = option_chain_df[needed_cols]
         
 
         # Filter out options with zero or negative bids/asks
         bid_col = f'{prefix}bid'
         ask_col = f'{prefix}ask'
-        chain_df = chain_df[
-            (chain_df[bid_col] > 0) & 
-            (chain_df[ask_col] > 0)
+        option_chain_df = option_chain_df[
+            (option_chain_df[bid_col] > 0) & 
+            (option_chain_df[ask_col] > 0)
         ]
         
         # Filter out options with unreasonable spreads (50% max)
-        chain_df['spread_percent'] = ((chain_df[ask_col] - chain_df[bid_col]) / chain_df[bid_col]) * 100
-        chain_df = chain_df[chain_df['spread_percent'] <= 50.0]  # Max 50% spread
+        option_chain_df['spread_percent'] = ((option_chain_df[ask_col] - option_chain_df[bid_col]) / option_chain_df[bid_col]) * 100
+        option_chain_df = option_chain_df[option_chain_df['spread_percent'] <= 50.0]  # Max 50% spread
         
-        logger.debug(f'After spread filtering: {len(chain_df)} options remaining')
-        logger.debug(chain_df['spread_percent'].describe())
+        logger.debug(f'After spread filtering: {len(option_chain_df)} options remaining')
+        logger.debug(option_chain_df['spread_percent'].describe())
 
         # Precompute midpoint price for each row
-        chain_df['midpoint_price'] = chain_df.apply(
+        option_chain_df['midpoint_price'] = option_chain_df.apply(
             lambda row: calculate_midpoint_price(row[bid_col], row[ask_col]),   
             axis=1  
         )
         
         # Filter by DTE based on whether we have a single value or range
         if dte_range:
-            dte_mask = (chain_df['dte'] >= dte_range[0]) & (chain_df['dte'] <= dte_range[1])
-            chain_df = chain_df[dte_mask]
-            logger.debug(chain_df['dte'].describe())
+            dte_mask = (option_chain_df['dte'] >= dte_range[0]) & (option_chain_df['dte'] <= dte_range[1])
+            option_chain_df = option_chain_df[dte_mask]
+            logger.debug(option_chain_df['dte'].describe())
             logger.debug(f'Filtering for dte range: {dte_range}')
-            logger.debug(f'Sample chain of length: {len(chain_df)}')
-            logger.debug(chain_df.head())
-            logger.debug(chain_df['dte'].describe())
+            logger.debug(f'Sample chain of length: {len(option_chain_df)}')
+            logger.debug(option_chain_df.head())
+            logger.debug(option_chain_df['dte'].describe())
 
         elif dte_target:
-            logger.debug(chain_df['dte'].describe())
-            dte_mask = abs(chain_df['dte'] - dte_target) < 1
-            chain_df = chain_df[dte_mask]
+            logger.debug(option_chain_df['dte'].describe())
+            dte_mask = abs(option_chain_df['dte'] - dte_target) < 1
+            option_chain_df = option_chain_df[dte_mask]
             logger.debug(f'Filtering for dte target: {dte_target}')
             logger.debug('Sample chain')
-            logger.debug(chain_df.head())
-            logger.debug(chain_df['dte'].describe())
+            logger.debug(option_chain_df.head())
+            logger.debug(option_chain_df['dte'].describe())
 
         else:
             logger.error('Need to provide either <dte_target> or <dte_range>')
@@ -145,7 +136,7 @@ class OptionSignalGenerator(BaseSignalGenerator):
         # Filter by delta parameters        
         delta_col = 'p_delta' if is_put(option_type) else 'c_delta'
         logger.debug(f'Initial delta distribution')
-        logger.debug(chain_df[delta_col].describe())
+        logger.debug(option_chain_df[delta_col].describe())
         
         if delta_range:
             # Handle range case
@@ -156,18 +147,18 @@ class OptionSignalGenerator(BaseSignalGenerator):
                 min_delta = abs(delta_range[0])  # Less positive (more OTM)
                 max_delta = abs(delta_range[1])  # More positive (more ITM)
 
-            logger.debug(chain_df[delta_col].describe())
+            logger.debug(option_chain_df[delta_col].describe())
             logger.debug(f'Filtering for delta range: {min_delta} to {max_delta} for {option_type.value}')
-            delta_mask = chain_df[delta_col].between(min_delta, max_delta)
-            chain_df = chain_df[delta_mask]
-            logger.debug(chain_df[delta_col].describe())
+            delta_mask = option_chain_df[delta_col].between(min_delta, max_delta)
+            option_chain_df = option_chain_df[delta_mask]
+            logger.debug(option_chain_df[delta_col].describe())
 
             # Sort by delta value while maintaining the date index
             ascending = is_call(option_type)  # Ascending for calls, descending for puts
-            chain_df = chain_df.sort_values(by=[delta_col], ascending=ascending)
-            trade_signals = chain_df
-            logger.debug(f'Sample chain of length: {len(chain_df)}')
-            logger.debug(chain_df.head())
+            option_chain_df = option_chain_df.sort_values(by=[delta_col], ascending=ascending)
+            trade_signals = option_chain_df
+            logger.debug(f'Sample chain of length: {len(option_chain_df)}')
+            logger.debug(option_chain_df.head())
 
         elif delta_target:
             # Handle target case
@@ -183,18 +174,18 @@ class OptionSignalGenerator(BaseSignalGenerator):
                 ascending = True
 
             logger.debug(f'Filtering for delta target: {target} for {option_type.value}')
-            delta_diff = abs(chain_df[delta_col] - target)
-            chain_df = chain_df.assign(delta_diff=delta_diff)
+            delta_diff = abs(option_chain_df[delta_col] - target)
+            option_chain_df = option_chain_df.assign(delta_diff=delta_diff)
             
             # Filter out options that are too far from target delta (20% tolerance)
             max_delta_diff = abs(target) * 0.20  # 20% tolerance
-            chain_df = chain_df[chain_df['delta_diff'] <= max_delta_diff]
+            option_chain_df = option_chain_df[option_chain_df['delta_diff'] <= max_delta_diff]
             
             # Sort by delta difference and delta value while maintaining the date index
-            chain_df = chain_df.sort_values(by=['delta_diff', delta_col], ascending=[True, ascending])
-            trade_signals = chain_df
-            logger.debug(f'Sample chain of length: {len(chain_df)}')
-            logger.debug(chain_df.head())
+            option_chain_df = option_chain_df.sort_values(by=['delta_diff', delta_col], ascending=[True, ascending])
+            trade_signals = option_chain_df
+            logger.debug(f'Sample chain of length: {len(option_chain_df)}')
+            logger.debug(option_chain_df.head())
         else:
             logger.error('Need to provide either delta_target or delta_range')
             raise ValueError
@@ -205,7 +196,7 @@ class OptionSignalGenerator(BaseSignalGenerator):
         
         return trade_signals
     
-    def generate_spread_signals(
+    def generate_multi_leg_signals(
         self,
         option_chain: pd.DataFrame,
         underlying: pd.DataFrame,
@@ -256,8 +247,8 @@ class OptionSignalGenerator(BaseSignalGenerator):
             
             # Filter options chain for the 
             leg_df = generate_trade_signals(
-                spx_data=spx_data,  # Pass SPX data if available
-                options_chain=options_chain,
+                underlying=underlying,  # Pass SPX data if available
+                option_chain=option_chain,
                 option_type=option_type,
                 delta_target=delta_target,
                 delta_range=delta_range,
@@ -807,3 +798,14 @@ class OptionSignalGenerator(BaseSignalGenerator):
         logger.debug(f"Paired {len(paired)} valid iron condor spreads")
         
         return paired
+
+    def fetch_data(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:    
+        """
+        Fetch data for a given symbol from Yahoo Finance.
+        
+        Args:
+            symbol: The symbol of the stock to fetch data for
+            start_date: The start date of the data to fetch
+        """
+        data = "download_data(symbol, start_date, end_date)"
+        return data

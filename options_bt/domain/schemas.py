@@ -8,7 +8,7 @@ DataFrames to match these schemas.
 
 from typing import Dict, List, Optional, TypedDict, Union
 import pandas as pd
-from .enums import SpreadType
+from .enums import *
 import logging
 
 logger = logging.getLogger(__name__)
@@ -208,7 +208,7 @@ def standardize_dataframe(df: pd.DataFrame, schema: Dict, name: str = "") -> pd.
         logger.error(f"Error standardizing {name}: {str(e)}")
         return df
 
-def add_spread_fields(df: pd.DataFrame, spread_type: SpreadType = None) -> pd.DataFrame:
+def add_spread_fields(df: pd.DataFrame, spread_type: OptionSpreadType = None) -> pd.DataFrame:
     """
     Add spread-specific fields to a DataFrame if they don't exist.
     

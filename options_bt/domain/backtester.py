@@ -4,17 +4,40 @@ import logging
 import time
 from datetime import datetime
 import os
+from enum import Enum
 
-from options_bt.domain.enums import OptionType, PositionSide, SpreadType 
-from options_bt.domain.option_position import OptionPosition
-from options_bt.domain.spread import Spread
-from options_bt.domain.option_trade import OptionTrade
+from options_bt.domain.enums import *
+from options_bt.domain.single_leg_option_strategy_config import SingleLegOptionStrategyConfig
+from options_bt.domain.multi_leg_option_strategy_config import MultiLegOptionStrategyConfig
 from options_bt.domain.option_signal_generator import OptionSignalGenerator
 from options_bt.domain.trade_manager import TradeManager
+from options_bt.domain.option_position import OptionPosition     
+from options_bt.domain.option_trade import OptionTrade
+from options_bt.domain.spread import Spread
 from options_bt.utils.logger import setup_logger
 
 # Create logger instance
 logger = setup_logger()
+
+class PositionSide(str, Enum):
+    """Position side enumeration."""
+    LONG = "long"  # Buying options
+    SHORT = "short"  # Selling/writing options
+
+    @staticmethod
+    def is_long(value: Union['PositionSide', str]) -> bool:
+        """
+        Check if the value represents a LONG position.
+        
+        Args:
+            value: Can be PositionSide enum or string
+            
+        Returns:
+            bool: True if LONG, False otherwise
+        """
+        if isinstance(value, str):
+            return value.lower() == "long"
+        return value == PositionSide.LONG
 
 class Backtester:
     """Class to manage backtest execution."""
@@ -48,66 +71,37 @@ class Backtester:
         # Results (clear between runs?)
         # self.results: Dict[str, pd.DataFrame] = {}
 
-    def run_backtest(
+    def run(
         self,
-        *,
-        quantity: int = 1,
-        option_type: OptionType = None,
-        position_side: PositionSide = None,
-        delta_target: float = None,  # Optional target for delta
-        delta_range: tuple = None,  # Range for delta
-        dte_target: int = None,  # Optional target for days to expiration
-        dte_range: tuple = None,  # Range for days to expiration
-        use_spx_close: bool = False,
-        start_date: str = None,
-        end_date: str = None,
-        initial_capital: float = 100000,
-        early_close_days: int = None,
-        max_margin_utilization: float = 0.80,
-        leverage: float = 1.0,
-        max_positions: int = 1,
-        # Spread-specific parameters
-        spread_type: SpreadType = None,
-        legs_config: List[Dict] = None,
-        spread_signals: pd.DataFrame = None,  # Pre-generated spread signals
-        trade_signals: pd.DataFrame = None,   # Pre-generated trade signals for single legs
+        config: Union[SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig]
+        
     ) -> pd.DataFrame:
         """Execute a backtest with the given parameters."""
         start_time = time.time()
         logger.info(f"Starting backtest at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         
-     
+        # Logic for early close days
+        # leg_early_close = leg.early_close_days if leg.early_close_days is not None else strategy.early_close_days
+        
         # Initialize trade manager
-        trade_manager = TradeManager(initial_capital=config['initial_capital'], leverage=config['leverage'], max_margin_utilization=config['max_margin_utilization'])
-        signal_generator = OptionSignalGenerator(**config)    
+        trade_manager = TradeManager(
+            initial_capital=config.initial_capital, 
+            leverage=config.leverage, 
+            max_margin_utilization=config.max_margin_utilization,
+            max_positions=config.max_positions,
+            early_close_days=config.early_close_days,
+            use_underlying_close=config.use_underlying_close
+        )
+        signal_generator = OptionSignalGenerator(option_chain=self.option_chain.copy(), underlying=self.underlying.copy(), config=config)    
         # Generate or validate signals
         signal_start = time.time()
-        if config['spread_type']:
-            signals = self._prepare_spread_signals(
-                spread_type=spread_type,
-                legs_config=legs_config,
-                spread_signals=spread_signals,
-                option_chain=self.option_chain,
-                start_date=start_date,
-                end_date=end_date,
-                dte_range=dte_range,
-                dte_target=dte_target,
-                spx_data=self.underlying
-            )
+        if isinstance(config, SingleLegOptionStrategyConfig):
+            signals = signal_generator.generate_single_leg_signals()
+        elif isinstance(config, MultiLegOptionStrategyConfig):
+            signals = signal_generator.generate_multi_leg_signals()
         else:
-            # signals = self._prepare_trade_signals(
-            #     trade_signals=trade_signals,
-            #     option_chain=self.option_chain,
-            #     spx_data=self.underlying,
-            #     option_type=option_type,
-            #     delta_target=delta_target,
-            #     delta_range=delta_range,
-            #     dte_target=dte_target,
-            #     dte_range=dte_range,
-            #     start_date=start_date,
-            #     end_date=end_date
-            # )
-            option
+            raise ValueError("Invalid config type")
+        
         self.execution_times['signal_generation'] = time.time() - signal_start
         
         if signals.empty:
@@ -120,12 +114,12 @@ class Backtester:
             signals=signals,
             option_chain=self.option_chain,
             spx_data=self.underlying,
-            option_type=option_type,
-            position_side=position_side,
-            early_close_days=early_close_days,
-            delta_target=delta_target,
-            delta_range=delta_range,
-            quantity=quantity
+            option_type=config.leg.option_type,
+            position_side=config.leg.position_side,
+            early_close_days=config.early_close_days,
+            delta_target=config.leg.delta_target,
+            delta_range=config.leg.delta_range,
+            quantity=config.quantity
         )
         self.execution_times['backtest_execution'] = time.time() - backtest_start
         
@@ -139,15 +133,15 @@ class Backtester:
             self._save_results(
                 trade_results=trade_results,
                 param_str=self._generate_param_string(
-                    spread_type=spread_type,
-                    option_type=option_type,
-                    position_side=position_side,
-                    delta_target=delta_target,
-                    delta_range=delta_range,
-                    dte_target=dte_target,
-                    dte_range=dte_range,
-                    start_date=start_date,
-                    end_date=end_date
+                    spread_type=config.spread_type,
+                    option_type=config.option_type,
+                    position_side=config.position_side,
+                    delta_target=config.delta_target,
+                    delta_range=config.delta_range,
+                    dte_target=config.dte_target,
+                    dte_range=config.dte_range,
+                    start_date=config.start_date,
+                    end_date=config.end_date
                 )
             )
             self.execution_times['saving'] = time.time() - save_start
@@ -160,16 +154,16 @@ class Backtester:
     
     def run_multiple_backtests(
         self,
-        hyperparameter_sets: List[Dict]
+        configs: List[Union[SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig]]
   
     ) -> Dict:
         """Run multiple backtests with different parameters using the same data."""
   
  
         
-        for i, params in enumerate(hyperparameter_sets, 1):
+        for i, config in enumerate(configs, 1):
 
-            logger.info(f"Running backtest {i}/{len(hyperparameter_sets)} ({i / len(hyperparameter_sets):.0%})")            
+            logger.info(f"Running backtest {i}/{len(configs)} ({i / len(config):.0%})")            
             start_time = time.time()
             # Prepare parameters for this backtest
             # params = prepare_backtest_params(
@@ -181,22 +175,22 @@ class Backtester:
             #     preloaded_data=preloaded_data
             # )
             # Run backtest
-            results = self.run_backtest(**params)
+            results = self.run_backtest(config)
             execution_time = time.time() - start_time
             
-            results[f"backtest_{i}"] = {
-                'params': params,
-                'results': results,
-                'execution_time': execution_time
-            }
+        #     results[f"backtest_{i}"] = {
+        #         'params': params,
+        #         'results': results,
+        #         'execution_time': execution_time
+        #     }
             
-            logger.info(f"Backtest {i} completed in {execution_time:.2f} seconds")
+        #     logger.info(f"Backtest {i} completed in {execution_time:.2f} seconds")
         
-        total_time = time.time() - start_time     
-        logger.info(f"\nAll backtests completed in {total_time:.2f} seconds")
-        logger.info(f"Average time per backtest: {total_time/len(hyperparameter_sets):.2f} seconds")
+        # total_time = time.time() - start_time     
+        # logger.info(f"\nAll backtests completed in {total_time:.2f} seconds")
+        # logger.info(f"Average time per backtest: {total_time/len(hyperparameter_sets):.2f} seconds")
         
-        return results
+        # return results
     
 
  
@@ -310,3 +304,56 @@ class Backtester:
                 backtest_params[k] = v
                 
         return backtest_params
+    
+@staticmethod
+def calculate_margin(underlying_price: float, entry_price: float, 
+                           position_side: Union[PositionSide, str],
+                           strike: float,
+                           option_type: Union[OptionType, str],
+                           margin_req_percent: float = 0.15) -> float:
+    """
+    Calculate required margin for option position using IB's formula for Index Options.
+    
+    Args:
+        underlying_price (float): Current price of the underlying asset.
+        entry_price (float): Option premium, which is the mid of the bid and ask prices.
+        position_side (Union[PositionSide, str]): Indicates whether the position is LONG or SHORT.
+        strike (float): The strike price of the option.
+        option_type (Union[OptionType, str]): The type of the option, which can be PUT or CALL.
+        margin_req_percent (float, optional): The margin requirement percentage. Defaults to 0.15, which is the value for Interactive Brokers.
+    
+    Returns:
+        float: The required margin in dollars.
+    """
+    # Convert string to enum if needed
+    # if isinstance(position_side, str):
+    #     position_side = PositionSide.LONG if position_side.lower() == "long" else PositionSide.SHORT
+    
+    # For long positions, margin is just the cost of the option
+    # There is no margin req for Long positions
+    if PositionSide.is_long(position_side):
+        # return round(entry_price * 100, 2)  # Convert to dollars
+        return 0
+    
+    # For short positions, use IB's formula for Index Options
+    else:  # PositionSide.SHORT
+        # Calculate out-of-the-money amount
+        if OptionType.is_put(option_type): 
+            # For puts: OTM when strike > underlying, ITM when strike <= underlying
+            otm_amount = max(0, underlying_price - strike)
+        else:  # CALL
+            # For calls: OTM when strike >= underlying, ITM when strike < underlying
+            otm_amount = max(0, strike - underlying_price)
+        
+        # IB's margin formula for Index Options
+        margin_required = (
+            entry_price +  # Option price
+            max(
+                # First term: 15% of underlying price minus OTM amount
+                (margin_req_percent * underlying_price - otm_amount),
+                # Second term: 10% of underlying price
+                (0.10 * underlying_price)
+            )
+        ) * 100  # Convert to dollars
+
+        return round(margin_required, 2)

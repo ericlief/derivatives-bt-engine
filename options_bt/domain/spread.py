@@ -3,7 +3,7 @@ from typing import List, Optional, Dict
 from functools import cached_property
 import pandas as pd
 import logging
-from options_bt.domain.enums import SpreadType
+from options_bt.domain.enums import *
 from options_bt.domain.option_position import OptionPosition    
 from options_bt.utils.logger import setup_logger
 
@@ -12,9 +12,9 @@ logger = setup_logger()
 
 @dataclass
 class Spread:
-    """Class representing a multi-leg option spread."""
+    """Class representing a multi-leg option spread.""" 
     spread_id: int
-    spread_type: SpreadType
+    spread_type: OptionSpreadType
     legs: List[OptionPosition] = field(default_factory=list)
     leg_ratios: Dict[int, float] = field(default_factory=dict)  # Maps leg number to ratio
     spread_price: Optional[float] = None
@@ -22,7 +22,7 @@ class Spread:
     def __post_init__(self):
         """Validate spread configuration after initialization."""
         if isinstance(self.spread_type, str):
-            self.spread_type = SpreadType(self.spread_type.lower())
+            self.spread_type = OptionSpreadType(self.spread_type.lower())
             
         # Set default leg ratios if not provided
         if not self.leg_ratios:
@@ -32,7 +32,7 @@ class Spread:
 
     def validate_spread(self):
         """Validate spread configuration based on type."""
-        if self.spread_type == SpreadType.VERTICAL:
+        if self.spread_type == OptionSpreadType.VERTICAL:
             if len(self.legs) != 2:
                 raise ValueError("Vertical spread must have exactly 2 legs")
             # Validate strikes and sides
@@ -41,7 +41,7 @@ class Spread:
             if self.legs[0].position_side == self.legs[1].position_side:
                 raise ValueError("Vertical spread legs must have opposite sides")
                 
-        elif self.spread_type == SpreadType.CALENDAR:
+        elif self.spread_type == OptionSpreadType.CALENDAR:
             if len(self.legs) != 2:
                 raise ValueError("Calendar spread must have exactly 2 legs")
             # Validate expiration dates and strikes
@@ -50,7 +50,7 @@ class Spread:
             if self.legs[0].strike != self.legs[1].strike:
                 raise ValueError("Calendar spread legs must have same strike")
                 
-        elif self.spread_type == SpreadType.BUTTERFLY:
+        elif self.spread_type == OptionSpreadType.BUTTERFLY:
             if len(self.legs) != 3:
                 raise ValueError("Butterfly spread must have exactly 3 legs")
             # Validate strikes and ratios
@@ -61,7 +61,7 @@ class Spread:
             if self.leg_ratios != {0: 1.0, 1: 2.0, 2: 1.0}:
                 raise ValueError("Butterfly spread must have 1:2:1 ratio")
                 
-        elif self.spread_type == SpreadType.IRON_CONDOR:
+        elif self.spread_type == OptionSpreadType.IRON_CONDOR:
             if len(self.legs) != 4:
                 raise ValueError("Iron condor must have exactly 4 legs")
             # Additional iron condor validations would go here
@@ -71,29 +71,29 @@ class Spread:
         """Calculate the net price of the spread."""
         return sum(leg.get_signed_entry_price * self.leg_ratios[i] for i, leg in enumerate(self.legs))
 
-    @cached_property
+    @cached_property    
     def max_risk(self) -> float:
         """Calculate maximum risk for defined-risk spreads."""
-        if self.spread_type == SpreadType.VERTICAL:
+        if self.spread_type == OptionSpreadType.VERTICAL:
             strikes = sorted([leg.strike for leg in self.legs])
             return abs(strikes[1] - strikes[0]) * 100
             
-        elif self.spread_type == SpreadType.IRON_CONDOR:
+        elif self.spread_type == OptionSpreadType.IRON_CONDOR:
             legs = sorted(self.legs, key=lambda x: x.strike)
             put_spread_width = abs(legs[1].strike - legs[0].strike)
             call_spread_width = abs(legs[3].strike - legs[2].strike)
             return max(put_spread_width, call_spread_width) * 100
             
-        elif self.spread_type == SpreadType.BUTTERFLY:
+        elif self.spread_type == OptionSpreadType.BUTTERFLY:
             legs = sorted(self.legs, key=lambda x: x.strike)
             return abs(legs[2].strike - legs[0].strike) * 100
             
         return None  # For undefined risk spreads
 
     @cached_property
-    def margin_required(self) -> float:
+    def margin_required(self) -> float: 
         """Calculate total margin requirement for the spread."""
-        if self.spread_type == SpreadType.NONE:
+        if self.spread_type == OptionSpreadType.NONE:
             return sum(leg.calculate_margin() for leg in self.legs)
             
         # For defined risk spreads, use max_risk
