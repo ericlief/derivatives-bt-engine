@@ -18,7 +18,7 @@ logger = setup_logger()
 @dataclass(kw_only=True)
 class BasePosition(ABC):
     """Base class for any trading position."""
-    trade_id: int
+    trade_id: Optional[int] = None
     quantity: int
     position_side: Optional[Union[PositionSide, str]] = None
     entry_date: pd.Timestamp
@@ -445,6 +445,125 @@ class SingleLegOptionPosition(BaseOptionPosition):
     #         return abs(self.exit_price) if self.is_long else -abs(self.exit_price)
             
     #     return self.exit_price
+    @staticmethod
+    def construct_from_signal(
+            trade_signal: NamedTuple,
+            entry_date: pd.Timestamp,
+            position_side: PositionSide,    
+            option_type: OptionType,
+            quantity: int,  
+            early_close_days: int,
+        ) -> Optional[SingleLegOptionPosition]:
+            """
+                Creates a OptionPosition object from a given trade signal.
+                
+                Args:       
+                    trade_signal: NamedTuple,
+                    entry_date: pd.Timestamp,
+                    position_side: PositionSide,    
+                    option_type: OptionType,
+                    quantity: int,  
+                    early_close_days: int,
+
+                
+                Example config:
+                    config = SingleLegOptionStrategyConfig(
+                        strategy=OptionStrategy.SHORT_CALL,
+                        quantity=1,
+                        initial_capital=100000,
+                        leverage=1.0,
+                        start_date="2020-01-01",
+                        end_date="2020-12-31",
+                        use_underlying_close=False,
+                        early_close_days=30,
+                        max_margin_utilization=0.80,
+                        max_positions=1,
+                        # Define the leg of the strategy
+                        leg=OptionLegConfig(
+                            option_type=OptionType.CALL,
+                            position_side=PositionSide.SHORT,
+                            delta_target=0.75,
+                            dte_range=(42, 45),
+                            )
+            Returns:
+                Optional[SingleLegOptionPosition]: Created position if valid, None otherwise
+            """     
+            # is_spread = isinstance(self.config, MultiLegOptionStrategyConfig)
+            # Validate entry date
+            min_valid_date = pd.Timestamp('1990-01-01')
+            if not isinstance(entry_date, pd.Timestamp) or entry_date <= min_valid_date:
+                logger.error(f"Invalid entry date {entry_date}")
+                return None
+                
+            # Validate expire_date exists and is valid
+            if not trade_signal.expire_date:
+                logger.error(f"expire_date is missing for trade signal on {trade_signal.Index}")
+                return None
+                
+            expire_date = trade_signal.expire_date
+            if not isinstance(expire_date, pd.Timestamp) or expire_date <= min_valid_date:
+                logger.error(f"Invalid expire date {expire_date}")
+                return None
+            
+            if expire_date <= entry_date:
+                logger.error(f"Expire date {expire_date} is not after entry date {entry_date}")
+                return None
+            
+            # Validate strike value
+            if not hasattr(trade_signal, 'strike') or pd.isna(trade_signal.strike):
+                logger.error(f"Missing strike value in trade signal on {trade_signal.Index}")
+                return None
+            
+            # Get entry price (already validated in signal generation)
+            entry_price = trade_signal.midpoint_price if trade_signal.midpoint_price is not None else trade_signal.spread_price
+            if entry_price is None:
+                logger.error(f"Missing midpoint price for trade signal on {trade_signal.Index}")
+                return None
+                
+            # Adjust entry price sign based on position side
+            signed_entry_price = -entry_price if PositionSide.is_long(position_side) else entry_price
+
+            # Calculate DTE
+            entry_dte = trade_signal.dte if hasattr(trade_signal, 'dte') else pd.Timedelta(trade_signal.expire_date - entry_date).days
+            
+            # Get margin required from signal if available, otherwise use config
+            margin_required = trade_signal.margin_required if hasattr(trade_signal, 'margin_required') else None
+            
+            # Create the position
+            position = SingleLegOptionPosition(
+                trade_id=None,
+                quantity=quantity,
+                option_type=option_type,
+                position_side=position_side,
+                strike=trade_signal.strike,
+                entry_date=entry_date,
+                expire_date=trade_signal.expire_date,
+                entry_price=signed_entry_price,
+                entry_delta=trade_signal.p_delta if OptionType.is_put(option_type) else trade_signal.c_delta,
+                entry_dte=entry_dte,
+                underlying_entry=trade_signal.underlying_last,
+                margin_required=margin_required,
+                close_date=entry_date + pd.Timedelta(days=early_close_days) if early_close_days is not None else None,
+            )
+
+            # if is_spread:
+            #     position = MultiLegOptionPosition(
+            #         trade_id=self.trade_counter,
+            #         quantity=quantity,
+            #         option_type=option_type,
+            #         position_side=position_side,
+            #         strike=trade_signal.strike,
+            #         expire_date=trade_signal.expire_date,
+            #     entry_date=entry_date,
+            #     entry_price=signed_entry_price,
+            #     entry_delta=trade_signal.p_delta if OptionType.is_put(option_type) else trade_signal.c_delta,
+            #     entry_dte=trade_signal.dte if hasattr(trade_signal, 'dte') else entry_dte,
+            #     underlying_entry=trade_signal.underlying_last,
+            #     margin_required=trade_signal.margin_required if hasattr(trade_signal, 'margin_required') else 0,
+            #     close_date=entry_date + pd.Timedelta(days=early_close_days) if early_close_days is not None else None,
+            # )
+            
+            return position
 
     @staticmethod
     def calculate_margin(quantity: int,
@@ -1109,7 +1228,7 @@ class TestOptionPositions(unittest.TestCase):
             position_side=PositionSide.LONG,
             entry_date=pd.Timestamp('2023-01-01'),
             entry_price=5.0,
-            strike=100.0,
+            strike=4000.0,
             expire_date=pd.Timestamp('2023-12-31'),
             entry_delta=0.5,
             entry_dte=30,
@@ -1217,5 +1336,28 @@ class TestOptionPositions(unittest.TestCase):
     #     pnl = self.multi_leg.calculate_pnl(exit_price=4.0)  # Example exit price
     #     self.assertIsInstance(pnl, float)  # Check if P&L is a float
 
+    def test_close_position(self):
+        """Test closing a position."""
+        trade_result = self.single_leg_long.close_position(option_chain=self.data['option_chain'],
+                                                          underlying_price_history=self.data['underlying_price_history'],
+                                                          option_bp=10000)
+        transaction = trade_result.transactions[0]
+        self.assertIsInstance(trade_result, OptionTradeResult)
+        self.assertEqual(trade_result.pnl, 1000.0)
+        self.assertEqual(trade_result.quantity, 10)
+        self.assertEqual(transaction['option_type'], OptionType.CALL)
+        self.assertEqual(transaction['position_side'], PositionSide.LONG)
+        self.assertEqual(transaction['entry_date'], pd.Timestamp('2023-01-01'))
+        self.assertEqual(transaction['exit_date'], pd.Timestamp('2023-01-01'))
+        self.assertEqual(transaction['expire_date'], pd.Timestamp('2023-12-31'))
+        self.assertEqual(transaction['entry_delta'], 0.5)
+        self.assertEqual(transaction['exit_delta'], 0.5)
+        self.assertEqual(transaction['entry_dte'], 30)
+        self.assertEqual(transaction['days_held'], 0)
+        self.assertEqual(transaction['underlying_entry'], 95.0)
+        self.assertEqual(transaction['underlying_exit'], 105.0)
+        self.assertEqual(transaction['strike'], 100.0)
+        self.assertEqual(transaction['entry_price'], 5.0)
+        
 if __name__ == '__main__':
     unittest.main()

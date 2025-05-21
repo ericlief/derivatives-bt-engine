@@ -88,7 +88,6 @@ class OptionSignalGenerator(BaseSignalGenerator):
         needed_cols.extend(['strike', 'dte', 'underlying_last', 'expire_date', 'strike_distance', 'strike_distance_pct'])
         option_chain_df = option_chain_df[needed_cols]
         
-
         # Filter out options with zero or negative bids/asks
         bid_col = f'{prefix}bid'
         ask_col = f'{prefix}ask'
@@ -173,7 +172,7 @@ class OptionSignalGenerator(BaseSignalGenerator):
                 # For calls, we want to find options with deltas closest to the target (more positive)
                 ascending = True
 
-            logger.debug(f'Filtering for delta target: {target} for {option_type.value}')
+            logger.debug(f'Filtering for delta target: {target} for {self.option_type.value}')
             delta_diff = abs(option_chain_df[delta_col] - target)
             option_chain_df = option_chain_df.assign(delta_diff=delta_diff)
             

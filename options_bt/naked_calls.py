@@ -61,7 +61,7 @@ def run_test_suite():
             
     )
 
-    result = backtester.run_backtest(config)
+    result = backtester.run(config)
     print(result)
     # Define hyperparameter sets for different tests
     # hyperparameter_sets = [
