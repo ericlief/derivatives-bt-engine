@@ -4,7 +4,7 @@ from options_bt.utils.logger import setup_logger
 from options_bt.domain.enums import *  
 from options_bt.domain.backtester import Backtester 
 from options_bt.domain.dataloader import DataLoader
-from options_bt.domain.single_leg_option_strategy_config import SingleLegOptionStrategyConfig
+from options_bt.domain.strategy_config import SingleLegOptionStrategyConfig
 from options_bt.domain.option_leg_config import OptionLegConfig
 
 # Create logger instance

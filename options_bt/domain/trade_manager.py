@@ -2,9 +2,10 @@ from typing import Optional, Dict, Union, List, NamedTuple, Tuple
 import pandas as pd
 import logging
 from options_bt.domain.enums import *
-from options_bt.domain.spread import Spread
-from options_bt.domain.option_position import OptionPosition
+from options_bt.domain.position import SingleLegOptionPosition, MultiLegOptionPosition
 from options_bt.utils.logger import setup_logger
+from options_bt.utils.price_utils import PriceUtils
+from options_bt.domain.strategy_config import SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig
 
 logger = setup_logger()
 
@@ -24,28 +25,43 @@ class TradeManager:
     def build_trade_from_signal(
         self,
         trade_signal: NamedTuple,
-        quantity: int,
-        option_type: OptionType,
-        position_side: PositionSide,
         entry_date: pd.Timestamp,
-        early_close_days: Optional[int] = None,
-    ) -> Optional[OptionPosition]:
+        config: Union[SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig]
+    ) -> Optional[SingleLegOptionPosition]:
         """
         Creates a OptionPosition object from a given trade signal.
         
-        Args:
-            trade_signal: Named tuple from pandas itertuples containing signal data
-            quantity: Number of contracts
-            option_type: Type of option (PUT/CALL)
-            position_side: Side of position (LONG/SHORT)
-            delta_target: Target delta for the trade
-            entry_date: Entry date for the trade
-            early_close_days: Optional days before expiration to close
-            delta_range: Optional range of acceptable deltas
+        Args:       
+            trade_signal: NamedTuple,
+            config: Union[SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig],
+            entry_date: pd.Timestamp,
+            early_close_days: Optional[int] = None,
+            delta_range: Optional[Tuple[float, float]] = None
+
             
+            Example config:
+                config = SingleLegOptionStrategyConfig(
+                    strategy=OptionStrategy.SHORT_CALL,
+                    quantity=1,
+                    initial_capital=100000,
+                    leverage=1.0,
+                    start_date="2020-01-01",
+                    end_date="2020-12-31",
+                    use_underlying_close=False,
+                    early_close_days=30,
+                    max_margin_utilization=0.80,
+                    max_positions=1,
+                    # Define the leg of the strategy
+                    leg=OptionLegConfig(
+                        option_type=OptionType.CALL,
+                        position_side=PositionSide.SHORT,
+                        delta_target=0.75,
+                        dte_range=(42, 45),
+                        )
         Returns:
             Optional[OptionPosition]: Created position if valid, None otherwise
         """
+        is_spread = isinstance(config, MultiLegOptionStrategyConfig)
         # Validate entry date
         min_valid_date = pd.Timestamp('1990-01-01')
         if not isinstance(entry_date, pd.Timestamp) or entry_date <= min_valid_date:
@@ -61,7 +77,7 @@ class TradeManager:
         if not isinstance(expire_date, pd.Timestamp) or expire_date <= min_valid_date:
             logger.error(f"Invalid expire date {expire_date}")
             return None
-            
+        
         if expire_date <= entry_date:
             logger.error(f"Expire date {expire_date} is not after entry date {entry_date}")
             return None
@@ -72,37 +88,58 @@ class TradeManager:
             return None
         
         # Get entry price (already validated in signal generation)
-        entry_price = trade_signal.midpoint_price
+        entry_price = trade_signal.midpoint_price if trade_signal.midpoint_price is not None else trade_signal.spread_price
         if entry_price is None:
             logger.error(f"Missing midpoint price for trade signal on {trade_signal.Index}")
             return None
             
         # Adjust entry price sign based on position side
-        signed_entry_price = -entry_price if PositionSide.is_long(position_side) else entry_price
+        signed_entry_price = -entry_price if PositionSide.is_long(config.position_side) and is_spread else spentry_price
 
         # Calculate DTE
-        entry_dte = pd.Timedelta(trade_signal.expire_date - entry_date).days
+        entry_dte = trade_signal.dte if hasattr(trade_signal, 'dte') else pd.Timedelta(trade_signal.expire_date - entry_date).days
+        
+        # Get margin required from signal if available, otherwise use config
+        # TODO: Add margin required to signal with util method
+        margin_required = trade_signal.margin_required if hasattr(trade_signal, 'margin_required') else None
         
         # Create the position
-        position = OptionPosition(
+        position = SingleLegOptionPosition(
             trade_id=self.trade_counter,
-            quantity=quantity,
-            option_type=option_type,
-            position_side=position_side,
+            quantity=config.quantity,
+            option_type=config.leg.option_type,
+            position_side=config.position_side,
             strike=trade_signal.strike,
-            expire_date=trade_signal.expire_date,
             entry_date=entry_date,
+            expire_date=trade_signal.expire_date,
             entry_price=signed_entry_price,
-            entry_delta=trade_signal.p_delta if OptionType.is_put(option_type) else trade_signal.c_delta,
-            entry_dte=trade_signal.dte if hasattr(trade_signal, 'dte') else entry_dte,
+            entry_delta=trade_signal.p_delta if OptionType.is_put(config.leg.option_type) else trade_signal.c_delta,
+            entry_dte=entry_dte,
             underlying_entry=trade_signal.underlying_last,
-            margin_required=trade_signal.margin_required if hasattr(trade_signal, 'margin_required') else 0,
+            margin_required=margin_required,
             close_date=entry_date + pd.Timedelta(days=early_close_days) if early_close_days is not None else None,
         )
+
+        # if is_spread:
+        #     position = MultiLegOptionPosition(
+        #         trade_id=self.trade_counter,
+        #         quantity=quantity,
+        #         option_type=option_type,
+        #         position_side=position_side,
+        #         strike=trade_signal.strike,
+        #         expire_date=trade_signal.expire_date,
+        #     entry_date=entry_date,
+        #     entry_price=signed_entry_price,
+        #     entry_delta=trade_signal.p_delta if OptionType.is_put(option_type) else trade_signal.c_delta,
+        #     entry_dte=trade_signal.dte if hasattr(trade_signal, 'dte') else entry_dte,
+        #     underlying_entry=trade_signal.underlying_last,
+        #     margin_required=trade_signal.margin_required if hasattr(trade_signal, 'margin_required') else 0,
+        #     close_date=entry_date + pd.Timedelta(days=early_close_days) if early_close_days is not None else None,
+        # )
         
         return position
     
-    def execute_trade(self, trade: OptionPosition) -> Tuple[Optional[OptionPosition], float]:
+    def execute_trade(self, trade: SingleLegOptionPosition) -> Tuple[Optional[SingleLegOptionPosition], float]:
         """
         Execute a trade with the current buying power and leverage.
         

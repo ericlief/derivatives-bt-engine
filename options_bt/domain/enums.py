@@ -1,3 +1,4 @@
+from __future__ import annotations
 from enum import Enum
 from typing import TypedDict, Optional, Union
 import pandas as pd
@@ -8,7 +9,7 @@ class OptionType(str, Enum):
     PUT = "put"
 
     @staticmethod
-    def is_put(value: Union['OptionType', str, pd.Series]) -> bool:
+    def is_put(value: Union[OptionType, str, pd.Series]) -> bool:
         """
         Check if the value represents a PUT option.
         
@@ -27,7 +28,7 @@ class OptionType(str, Enum):
         return False
 
     @staticmethod
-    def is_call(value: Union['OptionType', str, pd.Series]) -> bool:
+    def is_call(value: Union[OptionType, str, pd.Series]) -> bool:
         """
         Check if the value represents a CALL option.
         
@@ -51,7 +52,7 @@ class PositionSide(str, Enum):
     SHORT = "short"  # Selling/writing options
 
     @staticmethod
-    def is_long(value: Union['PositionSide', str, pd.Series']) -> bool:
+    def is_long(value: Union[PositionSide, str, pd.Series]) -> bool:
         """
         Check if the value represents a LONG position.
         
@@ -69,8 +70,9 @@ class PositionSide(str, Enum):
             return value.lower() == "long"
         return False
 
+
     @staticmethod
-    def is_short(value: Union['PositionSide', str, pd.Series']) -> bool:
+    def is_short(value: Union[PositionSide, str, pd.Series]) -> bool:
         """
         Check if the value represents a SHORT position.
         
@@ -98,7 +100,7 @@ class OptionSpreadType(str, Enum):
     BUTTERFLY = "butterfly"  # Butterfly spread (3 legs)
 
     @staticmethod
-    def is_spread_type(value: Union['OptionSpreadType', str, pd.Series, pd.DataFrame], spread_type: 'OptionSpreadType') -> bool:
+    def is_spread_type(value: Union[OptionSpreadType, str, pd.Series, pd.DataFrame], spread_type: OptionSpreadType) -> bool:
         """
         Check if a value matches the given spread type.
         
@@ -118,7 +120,7 @@ class OptionSpreadType(str, Enum):
         elif isinstance(value, pd.Series) and 'spread_type' in value:
             return value['spread_type'].lower() == spread_type.value
         return False
-        
+
 class BaseStrategy(str, Enum):
     """Base class for strategy types."""
     pass

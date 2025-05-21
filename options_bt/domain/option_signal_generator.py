@@ -10,9 +10,9 @@ import numpy as np
 
 from options_bt.domain.enums import *  
 from options_bt.domain.base_signal_generator import BaseSignalGenerator
-from options_bt.domain.single_leg_option_strategy_config import SingleLegOptionStrategyConfig
-from options_bt.domain.multi_leg_option_strategy_config import MultiLegOptionStrategyConfig
+from options_bt.domain.strategy_config import SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig
 from options_bt.utils.logger import setup_logger
+from options_bt.utils.price_utils import PriceUtils
 
 # Create logger instance
 logger = setup_logger()
@@ -106,25 +106,25 @@ class OptionSignalGenerator(BaseSignalGenerator):
 
         # Precompute midpoint price for each row
         option_chain_df['midpoint_price'] = option_chain_df.apply(
-            lambda row: calculate_midpoint_price(row[bid_col], row[ask_col]),   
+            lambda row: PriceUtils.calculate_midpoint_price(row[bid_col], row[ask_col]),   
             axis=1  
         )
         
         # Filter by DTE based on whether we have a single value or range
-        if dte_range:
-            dte_mask = (option_chain_df['dte'] >= dte_range[0]) & (option_chain_df['dte'] <= dte_range[1])
+        if self.dte_range:
+            dte_mask = (option_chain_df['dte'] >= self.dte_range[0]) & (option_chain_df['dte'] <= self.dte_range[1])
             option_chain_df = option_chain_df[dte_mask]
             logger.debug(option_chain_df['dte'].describe())
-            logger.debug(f'Filtering for dte range: {dte_range}')
+            logger.debug(f'Filtering for dte range: {self.dte_range}')
             logger.debug(f'Sample chain of length: {len(option_chain_df)}')
             logger.debug(option_chain_df.head())
             logger.debug(option_chain_df['dte'].describe())
 
-        elif dte_target:
+        elif self.dte_target:
             logger.debug(option_chain_df['dte'].describe())
-            dte_mask = abs(option_chain_df['dte'] - dte_target) < 1
+            dte_mask = abs(option_chain_df['dte'] - self.dte_target) < 1
             option_chain_df = option_chain_df[dte_mask]
-            logger.debug(f'Filtering for dte target: {dte_target}')
+            logger.debug(f'Filtering for dte target: {self.dte_target}')
             logger.debug('Sample chain')
             logger.debug(option_chain_df.head())
             logger.debug(option_chain_df['dte'].describe())
@@ -134,18 +134,18 @@ class OptionSignalGenerator(BaseSignalGenerator):
             raise ValueError
         
         # Filter by delta parameters        
-        delta_col = 'p_delta' if is_put(option_type) else 'c_delta'
+        delta_col = 'p_delta' if OptionType.is_put(self.option_type) else 'c_delta'
         logger.debug(f'Initial delta distribution')
         logger.debug(option_chain_df[delta_col].describe())
         
-        if delta_range:
+        if self.delta_range:    
             # Handle range case
-            if is_put(option_type):
-                min_delta = -abs(delta_range[1])  # More negative (more ITM)
-                max_delta = -abs(delta_range[0])  # Less negative (more OTM)
+            if OptionType.is_put(self.option_type):
+                min_delta = -abs(self.delta_range[1])  # More negative (more ITM)
+                max_delta = -abs(self.delta_range[0])  # Less negative (more OTM)
             else:
-                min_delta = abs(delta_range[0])  # Less positive (more OTM)
-                max_delta = abs(delta_range[1])  # More positive (more ITM)
+                min_delta = abs(self.delta_range[0])  # Less positive (more OTM)
+                max_delta = abs(self.delta_range[1])  # More positive (more ITM)
 
             logger.debug(option_chain_df[delta_col].describe())
             logger.debug(f'Filtering for delta range: {min_delta} to {max_delta} for {option_type.value}')
@@ -154,22 +154,22 @@ class OptionSignalGenerator(BaseSignalGenerator):
             logger.debug(option_chain_df[delta_col].describe())
 
             # Sort by delta value while maintaining the date index
-            ascending = is_call(option_type)  # Ascending for calls, descending for puts
+            ascending = OptionType.is_call(self.option_type)  # Ascending for calls, descending for puts
             option_chain_df = option_chain_df.sort_values(by=[delta_col], ascending=ascending)
             trade_signals = option_chain_df
             logger.debug(f'Sample chain of length: {len(option_chain_df)}')
             logger.debug(option_chain_df.head())
 
-        elif delta_target:
+        elif self.delta_target:
             # Handle target case
-            if is_put(option_type):
+            if OptionType.is_put(self.option_type):
                 # For puts, we want negative deltas
-                target = -abs(delta_target)
+                target = -abs(self.delta_target)
                 # For puts, we want to find options with deltas closest to the target (more negative)
                 ascending = False
             else:
                 # For calls, we want positive deltas
-                target = abs(delta_target)
+                target = abs(self.delta_target)
                 # For calls, we want to find options with deltas closest to the target (more positive)
                 ascending = True
 
@@ -200,7 +200,7 @@ class OptionSignalGenerator(BaseSignalGenerator):
         self,
         option_chain: pd.DataFrame,
         underlying: pd.DataFrame,
-        spread_type: SpreadType,
+        spread_type: OptionSpreadType,
         legs_config: List[Dict],
         start_date: str = None,
         end_date: str = None,
@@ -229,7 +229,7 @@ class OptionSignalGenerator(BaseSignalGenerator):
         """
         logger.info(f"Generating {spread_type.value} spread signals...")
         
-        if spread_type == SpreadType.NONE:
+        if spread_type == OptionSpreadType.NONE:
             raise ValueError("Use generate_trade_signals for single-leg positions")
         
         # Generate signals for each leg separately
@@ -246,14 +246,14 @@ class OptionSignalGenerator(BaseSignalGenerator):
                 return pd.DataFrame()
             
             # Filter options chain for the 
-            leg_df = generate_trade_signals(
+            leg_df = self.generate_trade_signals(
                 underlying=underlying,  # Pass SPX data if available
                 option_chain=option_chain,
                 option_type=option_type,
                 delta_target=delta_target,
                 delta_range=delta_range,
-                dte_target=dte_target,
-                dte_range=dte_range,
+                dte_target=self.dte_target, 
+                dte_range=self.dte_range,
                 start_date=start_date,
                 end_date=end_date,
             )
@@ -286,20 +286,20 @@ class OptionSignalGenerator(BaseSignalGenerator):
             return pd.DataFrame()
         
         # Create spread signals based on the spread type
-        if spread_type == SpreadType.VERTICAL:
-            return _pair_vertical_spread_legs(leg_signals, spread_type)
-        elif spread_type == SpreadType.CALENDAR:
-            return _pair_calendar_spread_legs(leg_signals, spread_type)
-        elif spread_type == SpreadType.DIAGONAL:
-            return _pair_diagonal_spread_legs(leg_signals, spread_type)
-        elif spread_type == SpreadType.BUTTERFLY:
-            return _pair_butterfly_spread_legs(leg_signals, spread_type)
-        elif spread_type == SpreadType.IRON_CONDOR:
-            return _pair_iron_condor_spread_legs(leg_signals, spread_type)
+        if spread_type == OptionSpreadType.VERTICAL:
+            return self._pair_vertical_spread_legs(leg_signals, spread_type)
+        elif spread_type == OptionSpreadType.CALENDAR:
+            return self._pair_calendar_spread_legs(leg_signals, spread_type)
+        elif spread_type == OptionSpreadType.DIAGONAL:
+            return self._pair_diagonal_spread_legs(leg_signals, spread_type)
+        elif spread_type == OptionSpreadType.BUTTERFLY:
+            return self._pair_butterfly_spread_legs(leg_signals, spread_type)
+        elif spread_type == OptionSpreadType.IRON_CONDOR:
+            return self._pair_iron_condor_spread_legs(leg_signals, spread_type)
         else:
             raise ValueError(f"Unsupported spread type: {spread_type}")
 
-    def _pair_vertical_spread_legs(leg_signals: List[pd.DataFrame], spread_type: SpreadType) -> pd.DataFrame:
+    def _pair_vertical_spread_legs(self, leg_signals: List[pd.DataFrame], spread_type: OptionSpreadType) -> pd.DataFrame:
         """
         Pair legs for vertical spreads (same expiration, different strikes).
         
@@ -352,14 +352,14 @@ class OptionSignalGenerator(BaseSignalGenerator):
         # Filter for valid vertical spread criteria
         # For example, ensure the strikes are different
         if len(paired) > 0:
-            if spread_type == SpreadType.VERTICAL:
+            if spread_type == OptionSpreadType.VERTICAL:
                 paired = paired[paired["leg1_strike"] != paired["leg2_strike"]]
                 
                 # For put vertical spreads, leg1 strike should be higher than leg2 strike for a credit spread
-                if is_put(leg_signals[0].iloc[0]["option_type"]) and is_short(leg_signals[0].iloc[0]["position_side"]):
+                if OptionType.is_put(leg_signals[0].iloc[0]["option_type"]) and PositionSide.is_short(leg_signals[0].iloc[0]["position_side"]):
                     paired = paired[paired["leg1_strike"] > paired["leg2_strike"]]
                 # For call vertical spreads, leg1 strike should be lower than leg2 strike for a credit spread
-                elif is_call(leg_signals[0].iloc[0]["option_type"]) and is_short(leg_signals[0].iloc[0]["position_side"]):
+                elif OptionType.is_call(leg_signals[0].iloc[0]["option_type"]) and PositionSide.is_short(leg_signals[0].iloc[0]["position_side"]):
                     paired = paired[paired["leg1_strike"] < paired["leg2_strike"]]
         
         # Add spread information
@@ -371,24 +371,24 @@ class OptionSignalGenerator(BaseSignalGenerator):
         # Calculate spread price (add code to adjust based on position side)
         # For a credit spread, we want to sell the first leg and buy the second leg
         paired["leg1_price"] = paired.apply(
-            lambda row: calculate_midpoint_price(
-                row["leg1_p_bid"] if is_put(leg_signals[0].iloc[0]["option_type"]) else row["leg1_c_bid"],
-                row["leg1_p_ask"] if is_put(leg_signals[0].iloc[0]["option_type"]) else row["leg1_c_ask"]
+            lambda row: PriceUtils.calculate_midpoint_price(
+                row["leg1_p_bid"] if OptionType.is_put(leg_signals[0].iloc[0]["option_type"]) else row["leg1_c_bid"],
+                row["leg1_p_ask"] if OptionType.is_put(leg_signals[0].iloc[0]["option_type"]) else row["leg1_c_ask"]
             ),
             axis=1
         )
         
         paired["leg2_price"] = paired.apply(
-            lambda row: calculate_midpoint_price(
-                row["leg2_p_bid"] if is_put(leg_signals[1].iloc[0]["option_type"]) else row["leg2_c_bid"],
-                row["leg2_p_ask"] if is_put(leg_signals[1].iloc[0]["option_type"]) else row["leg2_c_ask"]
+            lambda row: PriceUtils.calculate_midpoint_price(
+                row["leg2_p_bid"] if OptionType.is_put(leg_signals[1].iloc[0]["option_type"]) else row["leg2_c_bid"],
+                row["leg2_p_ask"] if OptionType.is_put(leg_signals[1].iloc[0]["option_type"]) else row["leg2_c_ask"]
             ),
             axis=1
         )
         
         # Calculate net spread price (credit if positive, debit if negative)
         # For credit spreads (short first leg, long second leg)
-        if is_short(leg_signals[0].iloc[0]["position_side"]) and is_long(leg_signals[1].iloc[0]["position_side"]):
+        if PositionSide.is_short(leg_signals[0].iloc[0]["position_side"]) and PositionSide.is_long(leg_signals[1].iloc[0]["position_side"]):
             paired["spread_price"] = paired["leg1_price"] - paired["leg2_price"]
         # For debit spreads (long first leg, short second leg)
         else:
@@ -402,7 +402,7 @@ class OptionSignalGenerator(BaseSignalGenerator):
         
         return paired
 
-    def _pair_calendar_spread_legs(leg_signals: List[pd.DataFrame], spread_type: SpreadType) -> pd.DataFrame:
+    def _pair_calendar_spread_legs(self, leg_signals: List[pd.DataFrame], spread_type: OptionSpreadType) -> pd.DataFrame:
         """
         Pair legs for calendar spreads (same strike, different expirations).
         
@@ -465,24 +465,24 @@ class OptionSignalGenerator(BaseSignalGenerator):
         
         # Calculate leg prices
         paired["leg1_price"] = paired.apply(
-            lambda row: calculate_midpoint_price(
-                row["leg1_p_bid"] if is_put(leg_signals[0].iloc[0]["option_type"]) else row["leg1_c_bid"],
-                row["leg1_p_ask"] if is_put(leg_signals[0].iloc[0]["option_type"]) else row["leg1_c_ask"]
+            lambda row: PriceUtils.calculate_midpoint_price(
+                row["leg1_p_bid"] if OptionType.is_put(leg_signals[0].iloc[0]["option_type"]) else row["leg1_c_bid"],
+                row["leg1_p_ask"] if OptionType.is_put(leg_signals[0].iloc[0]["option_type"]) else row["leg1_c_ask"]
             ),
             axis=1
         )
         
         paired["leg2_price"] = paired.apply(
-            lambda row: calculate_midpoint_price(
-                row["leg2_p_bid"] if is_put(leg_signals[1].iloc[0]["option_type"]) else row["leg2_c_bid"],
-                row["leg2_p_ask"] if is_put(leg_signals[1].iloc[0]["option_type"]) else row["leg2_c_ask"]
+            lambda row: PriceUtils.calculate_midpoint_price(
+                row["leg2_p_bid"] if OptionType.is_put(leg_signals[1].iloc[0]["option_type"]) else row["leg2_c_bid"],
+                row["leg2_p_ask"] if OptionType.is_put(leg_signals[1].iloc[0]["option_type"]) else row["leg2_c_ask"]
             ),
             axis=1
         )
         
         # Calculate net spread price (usually a debit for a standard calendar)
         # For standard calendar spreads (short front month, long back month)
-        if is_short(leg_signals[0].iloc[0]["position_side"]) and is_long(leg_signals[1].iloc[0]["position_side"]):
+        if PositionSide.is_short(leg_signals[0].iloc[0]["position_side"]) and PositionSide.is_long(leg_signals[1].iloc[0]["position_side"]):
             paired["spread_price"] = paired["leg2_price"] - paired["leg1_price"]
         # For reverse calendar spreads (long front month, short back month)
         else:
@@ -495,7 +495,7 @@ class OptionSignalGenerator(BaseSignalGenerator):
         
         return paired
 
-    def _pair_diagonal_spread_legs(leg_signals: List[pd.DataFrame], spread_type: SpreadType) -> pd.DataFrame:
+    def _pair_diagonal_spread_legs(self, leg_signals: List[pd.DataFrame], spread_type: OptionSpreadType) -> pd.DataFrame:
         """
         Pair legs for diagonal spreads (different strikes, different expirations).
         
@@ -555,24 +555,24 @@ class OptionSignalGenerator(BaseSignalGenerator):
         
         # Calculate leg prices
         paired["leg1_price"] = paired.apply(
-            lambda row: calculate_midpoint_price(
-                row["leg1_p_bid"] if is_put(leg_signals[0].iloc[0]["option_type"]) else row["leg1_c_bid"],
-                row["leg1_p_ask"] if is_put(leg_signals[0].iloc[0]["option_type"]) else row["leg1_c_ask"]
+            lambda row: PriceUtils.calculate_midpoint_price(
+                row["leg1_p_bid"] if OptionType.is_put(leg_signals[0].iloc[0]["option_type"]) else row["leg1_c_bid"],
+                row["leg1_p_ask"] if OptionType.is_put(leg_signals[0].iloc[0]["option_type"]) else row["leg1_c_ask"]
             ),
             axis=1
         )
         
         paired["leg2_price"] = paired.apply(
-            lambda row: calculate_midpoint_price(
-                row["leg2_p_bid"] if is_put(leg_signals[1].iloc[0]["option_type"]) else row["leg2_c_bid"],
-                row["leg2_p_ask"] if is_put(leg_signals[1].iloc[0]["option_type"]) else row["leg2_c_ask"]
+            lambda row: PriceUtils.calculate_midpoint_price(
+                row["leg2_p_bid"] if OptionType.is_put(leg_signals[1].iloc[0]["option_type"]) else row["leg2_c_bid"],
+                row["leg2_p_ask"] if OptionType.is_put(leg_signals[1].iloc[0]["option_type"]) else row["leg2_c_ask"]
             ),
             axis=1
         )
         
         # Calculate net spread price
         # For standard diagonal spreads (short front month, long back month)
-        if is_short(leg_signals[0].iloc[0]["position_side"]) and is_long(leg_signals[1].iloc[0]["position_side"]):
+        if PositionSide.is_short(leg_signals[0].iloc[0]["position_side"]) and PositionSide.is_long(leg_signals[1].iloc[0]["position_side"]):
             paired["spread_price"] = paired["leg2_price"] - paired["leg1_price"]
         # For reverse diagonal spreads (long front month, short back month)
         else:
@@ -585,7 +585,7 @@ class OptionSignalGenerator(BaseSignalGenerator):
         
         return paired
 
-    def _pair_butterfly_spread_legs(leg_signals: List[pd.DataFrame], spread_type: SpreadType) -> pd.DataFrame:
+    def _pair_butterfly_spread_legs(self, leg_signals: List[pd.DataFrame], spread_type: OptionSpreadType) -> pd.DataFrame:
         """
         Pair legs for butterfly spreads (3 strikes, same expiration).
         
@@ -652,32 +652,32 @@ class OptionSignalGenerator(BaseSignalGenerator):
         
         # Calculate leg prices
         paired["leg1_price"] = paired.apply(
-            lambda row: calculate_midpoint_price(
-                row["leg1_p_bid"] if is_put(leg_signals[0].iloc[0]["option_type"]) else row["leg1_c_bid"],
-                row["leg1_p_ask"] if is_put(leg_signals[0].iloc[0]["option_type"]) else row["leg1_c_ask"]
+            lambda row: PriceUtils.calculate_midpoint_price(
+                row["leg1_p_bid"] if OptionType.is_put(leg_signals[0].iloc[0]["option_type"]) else row["leg1_c_bid"],
+                row["leg1_p_ask"] if OptionType.is_put(leg_signals[0].iloc[0]["option_type"]) else row["leg1_c_ask"]
             ),
             axis=1
         )
         
         paired["leg2_price"] = paired.apply(
-            lambda row: calculate_midpoint_price(
-                row["leg2_p_bid"] if is_put(leg_signals[1].iloc[0]["option_type"]) else row["leg2_c_bid"],
-                row["leg2_p_ask"] if is_put(leg_signals[1].iloc[0]["option_type"]) else row["leg2_c_ask"]
+            lambda row: PriceUtils.calculate_midpoint_price(
+                row["leg2_p_bid"] if OptionType.is_put(leg_signals[1].iloc[0]["option_type"]) else row["leg2_c_bid"],
+                row["leg2_p_ask"] if OptionType.is_put(leg_signals[1].iloc[0]["option_type"]) else row["leg2_c_ask"]
             ),
             axis=1
         )
         
         paired["leg3_price"] = paired.apply(
-            lambda row: calculate_midpoint_price(
-                row["leg3_p_bid"] if is_put(leg_signals[2].iloc[0]["option_type"]) else row["leg3_c_bid"],
-                row["leg3_p_ask"] if is_put(leg_signals[2].iloc[0]["option_type"]) else row["leg3_c_ask"]
+            lambda row: PriceUtils.calculate_midpoint_price(
+                row["leg3_p_bid"] if OptionType.is_put(leg_signals[2].iloc[0]["option_type"]) else row["leg3_c_bid"],
+                row["leg3_p_ask"] if OptionType.is_put(leg_signals[2].iloc[0]["option_type"]) else row["leg3_c_ask"]
             ),
             axis=1
         )
         
         # Calculate net spread price
         # Long butterfly: buy wing options, sell 2x middle option
-        if is_long(leg_signals[0].iloc[0]["position_side"]):
+        if PositionSide.is_long(leg_signals[0].iloc[0]["position_side"]):
             paired["spread_price"] = paired["leg1_price"] - 2 * paired["leg2_price"] + paired["leg3_price"]
         # Short butterfly: sell wing options, buy 2x middle option
         else:
@@ -687,7 +687,7 @@ class OptionSignalGenerator(BaseSignalGenerator):
         
         return paired
 
-    def _pair_iron_condor_spread_legs(leg_signals: List[pd.DataFrame], spread_type: SpreadType) -> pd.DataFrame:
+    def _pair_iron_condor_spread_legs(self, leg_signals: List[pd.DataFrame], spread_type: OptionSpreadType) -> pd.DataFrame:
         """
         Pair legs for iron condor spreads (4 strikes, same expiration).
         
@@ -756,7 +756,7 @@ class OptionSignalGenerator(BaseSignalGenerator):
         
         # Calculate leg prices
         paired["put_leg1_price"] = paired.apply(
-            lambda row: calculate_midpoint_price(
+            lambda row: PriceUtils.calculate_midpoint_price(
                 row["put_leg1_p_bid"],
                 row["put_leg1_p_ask"]
             ),
@@ -764,7 +764,7 @@ class OptionSignalGenerator(BaseSignalGenerator):
         )
         
         paired["put_leg2_price"] = paired.apply(
-            lambda row: calculate_midpoint_price(
+            lambda row: PriceUtils.calculate_midpoint_price(
                 row["put_leg2_p_bid"],
                 row["put_leg2_p_ask"]
             ),
@@ -772,7 +772,7 @@ class OptionSignalGenerator(BaseSignalGenerator):
         )
         
         paired["call_leg1_price"] = paired.apply(
-            lambda row: calculate_midpoint_price(
+            lambda row: PriceUtils.calculate_midpoint_price(
                 row["call_leg1_c_bid"],
                 row["call_leg1_c_ask"]
             ),
@@ -780,7 +780,7 @@ class OptionSignalGenerator(BaseSignalGenerator):
         )
         
         paired["call_leg2_price"] = paired.apply(
-            lambda row: calculate_midpoint_price(
+            lambda row: PriceUtils.calculate_midpoint_price(
                 row["call_leg2_c_bid"],
                 row["call_leg2_c_ask"]
             ),

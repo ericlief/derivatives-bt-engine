@@ -1,8 +1,36 @@
+from options_bt.domain.enums import *
 from dataclasses import dataclass
-from typing import Optional, Tuple, List    
-from options_bt.domain.enums import OptionSpreadType
+from typing import Optional, List
+from abc import ABC, abstractmethod
 from options_bt.domain.option_leg_config import OptionLegConfig
-from options_bt.domain.base_option_strategy_config import BaseOptionStrategyConfig
+from typing import List
+
+
+@dataclass
+class BaseStrategyConfig(ABC):
+    """Configuration for a trading strategy."""
+    strategy: BaseStrategy
+    quantity: int = 1
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    max_positions: int = 1
+    initial_capital: float = 100000
+    leverage: float = 1
+    max_margin_utilization: float = 0.80
+ 
+@dataclass(kw_only=True)
+class BaseOptionStrategyConfig(BaseStrategyConfig, ABC):
+    strategy: OptionStrategy
+    use_underlying_close: bool = False
+    early_close_days: Optional[int] = None
+
+@dataclass(kw_only=True)
+class SingleLegOptionStrategyConfig(BaseOptionStrategyConfig):
+    """Configuration for an option strategy."""
+
+    # leg: OptionLegConfig = field(default_factory=OptionLegConfig)
+    leg: OptionLegConfig 
+
 
 @dataclass(kw_only=True)
 class MultiLegOptionStrategyConfig(BaseOptionStrategyConfig):
