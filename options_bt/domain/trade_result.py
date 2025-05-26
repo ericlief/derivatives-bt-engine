@@ -22,13 +22,12 @@ class BaseTradeResult:
     # entry details 
     opened: pd.Timestamp
     closed: pd.Timestamp
-
-    # trade records 
-    transactions: List[dict]
+    days_held: Optional[int]
 
     # results
     bp: float    # Available buying power after trade
     pnl: float
+    capital_used: float
     return_on_margin: float 
 
     def __post_init__(self):
@@ -46,7 +45,7 @@ class OptionTradeResult(BaseTradeResult):
     """
     # metadata
     option_strategy: Optional[Union[OptionStrategy, str]]
-    closed_reason: Optional[str]
+    close_reason: Optional[str]
     premium: float
     fees: float
 
@@ -103,33 +102,24 @@ class OptionTradeResult(BaseTradeResult):
 
     def to_dict(self) -> Dict:
         """Convert to dictionary for DataFrame creation."""
-        return {
+
+        results = {
+            'option_strategy': self.option_strategy,
             'trade_id': self.trade_id,
             'quantity': self.quantity,
-            'option_type': self.option_type.value if isinstance(self.option_type, OptionType) else self.option_type,
-            'position_side': self.position_side.value if isinstance(self.position_side, PositionSide) else self.position_side,
-            'entry_date': self.entry_date,
-            'exit_date': self.exit_date,
-            'expire_date': self.expire_date,
-            'entry_delta': self.entry_delta,
-            'exit_delta': self.exit_delta,
-            'entry_dte': self.entry_dte,
+            'opened': self.opened,
+            'closed': self.closed,
             'days_held': self.days_held,
-            'underlying_entry': self.underlying_entry,
-            'underlying_exit': self.underlying_exit,
-            'strike': self.strike,
-            'entry_price': self.entry_price,
-            'exit_price': self.exit_price,
-            'capital_used': self.capital_used,
-            'option_bp': self.option_bp,
-            'return_on_margin': self.return_on_margin,
             'close_reason': self.close_reason,
+            'premium': self.premium,
+            'fees': self.fees,
+            'bp': self.bp,
             'pnl': self.pnl,
-            'spread_type': self.spread_type,
-            'spread_id': self.spread_id,
-            'leg_number': self.leg_number
+            'capital_used': self.capital_used,
+            'return_on_margin': self.return_on_margin,
         }
-
+        return results 
+    
     @classmethod
     def from_dataframe_row(cls, row: pd.Series) -> 'OptionTradeResult':
         """Create TradeResult from a DataFrame row."""

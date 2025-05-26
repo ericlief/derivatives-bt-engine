@@ -41,8 +41,8 @@ def run_test_suite():
     )
 
     config = SingleLegOptionStrategyConfig(
-        strategy=OptionStrategy.SHORT_CALL,
         quantity=1,
+        option_strategy=OptionStrategy.SHORT_CALL,
         initial_capital=100000,
         leverage=1.0,
         start_date="2020-01-01",

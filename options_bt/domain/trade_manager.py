@@ -3,6 +3,7 @@ import pandas as pd
 import logging
 from options_bt.domain.enums import *
 from options_bt.domain.position import SingleLegOptionPosition, MultiLegOptionPosition
+from options_bt.domain.trade_result import OptionTradeResult
 from options_bt.utils.logger import setup_logger
 from options_bt.utils.price_utils import PriceUtils
 from options_bt.domain.strategy_config import SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig
@@ -22,60 +23,60 @@ class TradeManager:
         self.trade_counter = 0
         self.open_positions: List[Union[SingleLegOptionPosition, MultiLegOptionPosition]] = []
     
-    def execute_trade(self, trade: Union[SingleLegOptionPosition, MultiLegOptionPosition]) -> Optional[SingleLegOptionPosition]:
+    def _execute_trade(self, position: Union[SingleLegOptionPosition, MultiLegOptionPosition]) -> Optional[SingleLegOptionPosition]:
         """
         Execute a trade with the current buying power and leverage, updating the option buying power state (option_bp)
         
         Args:
-            trade: Position to execute
+            position: Position to execute
             
         Returns:
-            Executed trade if successful, None otherwise
+            Executed position if successful, None otherwise
         """
-        # if trade is None:
-        #     return None, self.option_bp
 
-        # Use spread price for spreads, individual leg price for single legs
-        if isinstance(trade, MultiLegOptionPosition) and trade.spread_type != OptionSpreadType.NONE.value:
-            if pd.isna(trade.spread_price):
-                logger.error(f"Missing spread_price for spread {trade.spread_id} leg {trade.leg_number}")
+        if isinstance(position, MultiLegOptionPosition) and position.spread_type != OptionSpreadType.NONE:
+            if pd.isna(position.spread_price):
+                logger.error(f"Missing spread_price for spread {position.spread_id} leg {position.leg_number}")
                 return None
-            premium = abs(trade.spread_price) * 100 * trade.quantity
-        else:
-            premium = abs(trade.entry_price) * 100 * trade.quantity
 
-        # Calculate effective margin requirement with leverage
-        effective_margin = trade.margin_required  
+        # Retrieve absolute premium regardless of position type
+        premium = position.signed_premium
+
+        # Validate margin requirement
+        effective_margin = position.margin_required  
         if effective_margin is None or effective_margin <= 0:
-            logger.error(f"Invalid margin requirement for trade on {trade.entry_date}")
+            logger.error(f"Invalid margin requirement for position on {position.entry_date}")
             return None 
         
         # Open LONG position
-        if trade.is_long:
+        if position.is_long:
             # Check if enough buying power to buy the option
             if self.option_bp >= premium:
                 self.option_bp -= premium  # Deduct premium
-                return trade 
+                return position 
             else:
                 logger.warning(f"Insufficient buying power (${self.option_bp}) to buy option. Required: ${premium:.2f}")
                 return None 
 
         # Open SHORT position
-        elif trade.is_short:
+        elif position.is_short:
             # Check if enough buying power for margin
             if self.option_bp >= effective_margin:
                 self.option_bp += premium  # Credit premium
                 self.option_bp -= effective_margin  # Reserve margin
-                return trade
+                return position
             else:
                 logger.warning(f"Insufficient buying power (${self.option_bp}) to sell option. Required margin: ${effective_margin:.2f}")
                 return None
 
         return None
     
+
     def construct_and_execute_trades_from_signals(self,
                          trade_signals: pd.DataFrame,
-                        ) -> pd.DataFrame:
+                         option_chain: pd.DataFrame,
+                         underlying_price_history: pd.DataFrame
+                        ) -> Dict:  
         """
         Construct and execute trades based on signals.
         
@@ -83,75 +84,46 @@ class TradeManager:
             trade_signals: DataFrame containing trade signals
             config: Union[SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig]
         Returns:
-            DataFrame containing trade results
+            Dictionary containing trade results and transactions
         """
         # Initialize variables
         trade_counter = 0
-        option_bp = self.option_bp
-        open_positions = []
-        trade_results = []
+        all_trade_results = []
+        all_transactions = []
         skipped_trades = 0
-        
-        # Check if we're dealing with spreads
-        # is_spread = 'spread_type' in trade_signals.columns and trade_signals['spread_type'].iloc[0] != SpreadType.NONE
-        
+        # Iterate through each trade signal
         for trade_signal in trade_signals.itertuples():
             current_date = trade_signal.Index
-            
-            # First, check if any open positions need to be closed
-            positions_to_remove = []
-            for pos in open_positions:
 
-                # Close position if we're on/past the close_date or expire_date
-                if ((pos.close_date is not None and current_date >= pos.close_date) or
-                    (pos.expire_date is not None and current_date >= pos.expire_date)):
-                    
-                    logger.debug(f'Closing position: {pos}')
-                    result = pos.close_position(option_chain=self.option_chain, underlying_price_history=self.underlying, option_bp=option_bp)
-                    if result:
-                        option_bp = result.bp
-                        positions_to_remove.append(pos)
-                        logger.debug(f"Closed position - BP: ${option_bp:.2f}")
-                        trade_results.append(result)
-        
-            # Remove closed positions
-            for pos in positions_to_remove:
-                open_positions.remove(pos)
-        
-            # Skip if we've reached max positions
-            if len(open_positions) >= self.max_positions:
+            # Close any expired positions
+            trade_results, transactions = self._close_expired_positions(option_chain=option_chain, 
+                                                                        underlying_price_history=underlying_price_history,
+                                                                        current_date=current_date)
+            # Aggregate trade results and transactions
+            all_trade_results.extend(trade_results)
+            all_transactions.extend(transactions)
+
+            # Skip if we've reached max open positions
+            if len(self.open_positions) >= self.max_positions:
                 skipped_trades += 1
                 continue
 
-            # Create new trade from signal
-            if isinstance(self.config, SingleLegOptionStrategyConfig):
-                candidate_position = SingleLegOptionPosition.construct_from_signal(
-                    trade_signal=trade_signal, 
-                    entry_date=current_date, 
-                    position_side=self.config.leg.position_side, 
-                    option_type=self.config.leg.option_type, 
-                    quantity=self.config.quantity, 
-                    early_close_days=self.config.early_close_days
-                )
-            else:
-                candidate_position = MultiLegOptionPosition.construct_from_signal(
-                    trade_signal=trade_signal, 
-                    entry_date=current_date, 
-                    position_side=self.config.leg.position_side, 
-                    option_type=self.config.leg.option_type, 
-                    quantity=self.config.quantity, 
-                    early_close_days=self.config.early_close_days   
-                )   
+            # Construct a new position from the trade signal    
+            candidate_position = self.construct_position_from_signal(trade_signal, current_date=current_date)  
 
             # Try to execute the new trade if it was created successfully
             if candidate_position is not None:
-                executed_trade = self.execute_trade(candidate_position)
+                logger.debug(f'Executing trade: {candidate_position}')
+                logger.debug(f'BP: ${self.option_bp:.2f}')
+
+                # Execute the trade and update the option buying power
+                executed_trade = self._execute_trade(candidate_position)
                 if executed_trade:
                     executed_trade.trade_id = trade_counter
-                    open_positions.append(executed_trade)
+                    self.open_positions.append(executed_trade)
                     trade_counter += 1  # Increment counter only for successful trades
-                    logger.debug(f'Opened position: {executed_trade}')
-                    logger.debug(f'BP: ${option_bp:.2f}')
+                    logger.debug(f'Successfully executed trade: {executed_trade}')
+                    logger.debug(f'BP: ${self.option_bp:.2f}')
                 else:
                     skipped_trades += 1
             else:
@@ -159,30 +131,100 @@ class TradeManager:
                 skipped_trades += 1
 
         # Close any remaining open positions at their expiration
-        for pos in open_positions:
-            result = pos.close(pos, full_chain_df, underlying_price_history, option_bp)
-            if result:
-                trade_results.append(result)
-                option_bp = result['option_bp']
+        # for pos in open_positions:
+        #     result = pos.close(option_chain=self.option_chain, underlying_price_history=self.underlying, option_bp=option_bp)
+        #     if result:
+        #         trade_results.append(result)
+        #         option_bp = result['option_bp']
 
-        if not trade_results:
+        # Close any remaining open positions at their expiration
+        trade_results, transactions = self._close_expired_positions(option_chain=option_chain, 
+                                                                    underlying_price_history=underlying_price_history,
+                                                                    current_date=current_date)
+        all_trade_results.extend(trade_results)
+        all_transactions.extend(transactions)
+
+        if trade_results is None:
             logger.warning("No trades were executed successfully")
-            return pd.DataFrame()
+            return {'trade_results': pd.DataFrame(), 
+                    'transactions': pd.DataFrame()}
 
-        results_df = pd.DataFrame(trade_results)
+        return {'trade_results': pd.DataFrame(all_trade_results), 
+                'transactions': pd.DataFrame(all_transactions)}
+
+    def _close_expired_positions(self,
+                                 option_chain: pd.DataFrame,
+                                 underlying_price_history: pd.DataFrame,
+                                 current_date: pd.Timestamp) -> List[Optional[OptionTradeResult]]:
+        """
+        Close all open positions that have reached their expiration or close date, and update the option buying power accordingly.
         
+        Args:
+            current_date: The current date to check against the positions' expiration and close dates.
+        """
+        # First, check if any open positions need to be closed
+        positions_to_remove = []
+        trade_results = []
+        transactions = []
+        for pos in self.open_positions:
 
+            # Close position if we're on/past the close_date or expire_date
+            if ((pos.close_date is not None and current_date >= pos.close_date) or
+                (pos.expire_date is not None and current_date >= pos.expire_date)):
+                
+                logger.debug(f'Closing position: {pos}')
+                result, transaction = pos.close(option_chain=option_chain, 
+                                                underlying_price_history=underlying_price_history,
+                                                option_bp=self.option_bp)
+                if result:  
+                    # Update buying power
+                    self.option_bp = result['bp']
+                    positions_to_remove.append(pos)
+                    logger.debug(f"Closed position - BP: ${self.option_bp:.2f}")
+                    trade_results.append(result)
+                    transactions.append(transaction)    
+        # Remove closed positions
+        for pos in positions_to_remove:
+            self.open_positions.remove(pos)
 
+        return trade_results, transactions
 
-
-
-
-
-
-
-
-
-
+    def construct_position_from_signal(self, trade_signal: pd.Series, 
+                                       current_date: pd.Timestamp) -> Optional[Union[SingleLegOptionPosition, MultiLegOptionPosition]]:
+        """
+        Creates a new position based on the provided trade signal.
+        
+        This method takes a trade signal as input and constructs a new position object. 
+        The type of position created depends on the configuration of the trade manager.
+        Args:
+            trade_signal (pd.Series): The trade signal to use for constructing the position. 
+                                        This signal should contain all necessary information for creating a position, 
+                                        such as entry date, position side, option type, quantity, and early close days.
+            current_date (pd.Timestamp): The current date to use for constructing the position.
+        Returns:
+            Optional[Union[SingleLegOptionPosition, MultiLegOptionPosition]]: A new position object if the signal is valid, otherwise None.
+        """
+        
+        # Construct new position from signal
+        if isinstance(self.config, SingleLegOptionStrategyConfig):
+            return SingleLegOptionPosition.construct_from_signal(
+                trade_signal=trade_signal, 
+                option_strategy=self.config.option_strategy,
+                entry_date=current_date, 
+                position_side=self.config.leg.position_side, 
+                option_type=self.config.leg.option_type, 
+                quantity=self.config.quantity, 
+                early_close_days=self.config.early_close_days
+            )
+        else:
+            return MultiLegOptionPosition.construct_from_signal(
+                trade_signal=trade_signal, 
+                entry_date=current_date, 
+                position_side=self.config.leg.position_side, 
+                option_type=self.config.leg.option_type, 
+                quantity=self.config.quantity, 
+                early_close_days=self.config.early_close_days   
+            )   
 
         # if is_spread:
         #     # For spreads, we already have positions with dates
@@ -494,7 +536,7 @@ class TradeManager:
             
     #         position.underlying_exit = underlying_close
     #         position.exit_price = calculate_intrinsic_value(underlying_close, position.strike, position.option_type)
-    #         position.exit_price = get_signed_exit_price(position)
+    #         position.exit_price = signed_entry_price(position)
 
     #         # Get delta value at expiration
     #         delta_col = "p_delta" if is_put(position) else 'c_delta'
@@ -538,7 +580,7 @@ class TradeManager:
     #         mid_price = calculate_midpoint_price(bid, ask)
     #         if mid_price is not None:
     #             position.exit_price = mid_price
-    #             position.exit_price = get_signed_exit_price(position)
+    #             position.exit_price = signed_entry_price(position)
     #             return position
         
     #     # If we get here, no valid prices were found within 5 days

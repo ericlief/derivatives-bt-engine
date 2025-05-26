@@ -9,7 +9,6 @@ from typing import List
 @dataclass
 class BaseStrategyConfig(ABC):
     """Configuration for a trading strategy."""
-    strategy: BaseStrategy
     quantity: int = 1
     start_date: Optional[str] = None
     end_date: Optional[str] = None
@@ -20,7 +19,7 @@ class BaseStrategyConfig(ABC):
  
 @dataclass(kw_only=True)
 class BaseOptionStrategyConfig(BaseStrategyConfig, ABC):
-    strategy: OptionStrategy
+    option_strategy: OptionStrategy
     use_underlying_close: bool = False
     early_close_days: Optional[int] = None
 

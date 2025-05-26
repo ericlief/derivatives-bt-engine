@@ -33,28 +33,29 @@ class PriceUtils:
             
         return (bid + ask) / 2
     
-
-    def get_signed_entry_price(self, entry_price: float, position_side: PositionSide) -> float:
+    @staticmethod
+    def get_signed_entry_price(entry_price: float, position_side: PositionSide) -> float:
         """
         Get the entry price with correct sign based on position side.
         - Long positions should have positive entry price (credit/STC)
         - Short positions should have negative entry price (debit/BTC)
         """
         if not entry_price:
-            logger.warning(f"No entry price for position {self.trade_id}")
+            logger.warning(f"No entry price for position")
             return None
             
         
         return abs(entry_price) if PositionSide.is_short(position_side) else -abs(entry_price)
     
-    def get_signed_exit_price(self, exit_price: float, position_side: PositionSide) -> float:
+    @staticmethod
+    def get_signed_exit_price(exit_price: float, position_side: PositionSide) -> float:
         """
         Get the exit price with correct sign based on position side.
         - Long positions should have positive exit price (credit/STC)
         - Short positions should have negative exit price (debit/BTC)
         """
-        if not exit_price:
-            logger.warning(f"No exit price for position {self.trade_id}")
+        if exit_price is None:  # because exit may be zero for OTM options
+            logger.warning(f"No exit price for position")
             return None
             
         

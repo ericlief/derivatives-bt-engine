@@ -3,9 +3,7 @@ from dataclasses import dataclass
 from typing import Optional, Dict, Union, List, NamedTuple, Tuple
 from functools import cached_property
 from abc import ABC, abstractmethod
-import unittest
 import pandas as pd
-import numpy as np
 
 from options_bt.domain.dataloader import DataLoader
 from options_bt.domain.enums import *
@@ -24,6 +22,7 @@ class BasePosition(ABC):
     entry_date: pd.Timestamp
     entry_price: float
     margin_required: Optional[float] = None
+    fees: Optional[float] = None   # added 
 
     def __post_init__(self):
         """Validate and convert types after initialization."""
@@ -32,22 +31,6 @@ class BasePosition(ABC):
         if isinstance(self.entry_date, str):
             self.entry_date = pd.Timestamp(self.entry_date)
 
-
-    # @abstractmethod
-    # @cached_property
-    # def margin_required(self) -> float: 
-    #     """Calculate total margin requirement for the position."""
-    #     pass
-   
-    # @abstractmethod
-    # def is_closed(self) -> bool:
-    #     """Check if position is closed. Must be implemented by subclasses."""
-    #     pass
-    
-    @abstractmethod
-    def calculate_pnl(self, exit_price: Optional[float] = None) -> float:
-        """Calculate profit and loss for the position."""
-        pass
  
     @cached_property
     def signed_entry_price(self) -> float:
@@ -56,26 +39,33 @@ class BasePosition(ABC):
         - Long positions should have negative entry price (debit/BTO)
         - Short positions should have positive entry price (credit/STO)
         """
-        if not self.entry_price:
-            logger.warning(f"No entry price for position {self.trade_id}")
-            return None
-            
-        # try:
-        #     if self.is_long:
-        #         assert self.entry_price <= 0  # debit premium, buy to open (BTO)
-        #     elif self.is_short:
-        #         assert self.entry_price >= 0  # credit premium, sell to open (STO)
-        # except AssertionError:
-            # logger.debug(f'Fixing sign of entry price {self.entry_price}')
+       
         return -abs(self.entry_price) if self.is_long else abs(self.entry_price)
-            
-        # return self.entry_price
 
+    @cached_property
+    def signed_exit_price(self) -> float:
+        """
+        Get the exit price with correct sign based on position side.
+        - Long positions should have positive exit price (credit/STC)
+        - Short positions should have negative exit price (debit/BTC)
+        """
+
+        return abs(self.exit_price) if self.is_long else -abs(self.exit_price)
     
     @abstractmethod
-    def calculate_margin(quantity, 
-                         margin_req_percent: float = 0.15, 
-                         leverage: float = 1.0) -> float:
+    def calculate_pnl(self, exit_price: Optional[float] = None) -> float:
+        """Calculate profit and loss for the position."""
+        pass
+ 
+    @abstractmethod
+    def close(self) -> Optional[Union[Tuple[Dict, Dict], BaseTradeResult]]:
+        """
+        Close this position and calculate results.  
+        """
+        pass 
+    
+    @abstractmethod
+    def calculate_margin(self, leverage: float = 1.0) -> float:
         """Calculate margin requirement for the position."""
         pass
 
@@ -83,7 +73,7 @@ class BasePosition(ABC):
 class BaseOptionPosition(BasePosition, ABC):
     """Abstract base class for any option position."""
     # Required parameters (no defaults)
-  
+    option_strategy: OptionStrategy
     expire_date: pd.Timestamp
     entry_dte: int
     underlying_entry: float
@@ -91,9 +81,9 @@ class BaseOptionPosition(BasePosition, ABC):
 
     # Should go into Trade class
     # exit_date: Optional[pd.Timestamp] = None
-    # exit_price: Optional[float] = None
-    # exit_delta: Optional[float] = None
-    # underlying_exit: Optional[float] = None
+    exit_price: Optional[float] = None
+    exit_delta: Optional[float] = None
+    underlying_exit: Optional[float] = None
     close_date: Optional[pd.Timestamp] = None  # For early closure
 
     def __post_init__(self):
@@ -107,12 +97,11 @@ class BaseOptionPosition(BasePosition, ABC):
         if isinstance(self.expire_date, str):
             self.expire_date = pd.Timestamp(self.expire_date)   
 
+        if isinstance(self.option_strategy, str):
+            self.option_strategy=OptionStrategy(self.option_strategy)
         # Calculate margin required based on entry price and underlying entry
         # if self.entry_price is not None and self.underlying_entry is not None:
         #     self.margin_required = self.calculate_margin()
-
-
-
 
     @cached_property
     def is_put(self) -> bool:
@@ -144,113 +133,144 @@ class BaseOptionPosition(BasePosition, ABC):
     # def is_open(self) -> bool:
     #     """Check if position is currently open."""
     #     return not self.is_closed()
-
+    @abstractmethod
+    def is_ITM(sefl, underlying_price) -> bool:
+        pass
+   
     @cached_property
-    def get_signed_entry_price(self) -> float:
+    def premium(self) -> float:
         """
-        Get the entry price with correct sign based on position side.
-        - Long positions should have negative entry price (debit/BTO)
-        - Short positions should have positive entry price (credit/STO)
+        Get the signed premium for the position.
         """
-        if not self.entry_price:
-            return 0
-            
-        try:
-            if self.is_long:
-                assert self.entry_price <= 0  # debit premium, buy to open (BTO)
-            elif self.is_short:
-                assert self.entry_price >= 0  # credit premium, sell to open (STO)
-        except AssertionError:
-            logger.debug(f'Fixing sign of entry price {self.entry_price}')
-            return -abs(self.entry_price) if self.is_long else abs(self.entry_price)
-            
-        return self.entry_price
-
+        return self.entry_price * 100 * self.quantity
+    
     @cached_property
-    def get_signed_exit_price(self) -> float:
+    def signed_premium(self) -> float:
         """
-        Get the exit price with correct sign based on position side.
-        - Long positions should have positive exit price (credit/STC)
-        - Short positions should have negative exit price (debit/BTC)
+        Get the signed premium for the position.
         """
-        if not self.exit_price:
-            return 0
-            
-        try:
-            if self.is_long:
-                assert self.exit_price >= 0  # sell to close (STC)
-            elif self.is_short:
-                assert self.exit_price <= 0  # buy to close (BTC)
-        except AssertionError:
-            logger.debug(f'Fixing sign of exit price {self.exit_price}')
-            return abs(self.exit_price) if self.is_long else -abs(self.exit_price)
-            
-        return self.exit_price
+        return -self.premium if self.is_long else self.premium
 
-    def calculate_margin(self, leverage: float = 1.0) -> float:
-        """Calculate margin requirement for the position."""
-        if not self.entry_price or not self.underlying_entry:
-            return 0
-
-        if self.is_long:
-            return 0  # No margin required for long positions
+    @staticmethod
+    def calculate_margin(quantity: int,
+                         option_type: Union[OptionType, str],
+                         position_side: Union[PositionSide, str],
+                         underlying_price: float, 
+                         entry_price: float, 
+                         strike: float,
+                         leverage: float = 1.0,
+                         margin_req_percent: float = 0.15) -> float:
+        """
+        Calculate required margin for option position using IB's formula for Index Options.
         
-        # For short positions, use IB's formula
-        margin_req_percent = 0.15  # 15% for index options
+        Formula: premium + max(15% × underlying - OTM amount, 10% × underlying)
         
-        # Calculate out-of-the-money amount
-        if self.is_put:
-            otm_amount = max(0, self.underlying_entry - self.strike)
-        else:  # Call
-            otm_amount = max(0, self.strike - self.underlying_entry)
+        Args:
+            quantity: Number of contracts
+            option_type: PUT or CALL
+            position_side: LONG or SHORT
+            underlying_price: Current price of the underlying asset
+            entry_price: Option premium (mid of bid/ask)
+            strike: Strike price of the option
+            leverage: Leverage multiplier (default 1.0)
+            margin_req_percent: Margin requirement percentage (default 15% for index options)
         
-        # IB's margin formula
+        Returns:
+            float: Required margin in dollars
+        """
+        # No margin required for long positions
+        if PositionSide.is_long(position_side):
+            return 0.0
+        
+        # For short positions, calculate OTM amount based on option type
+        if OptionType.is_put(option_type):
+            otm_amount = max(0, underlying_price - strike)  # OTM when underlying > strike
+        else:  # CALL
+            otm_amount = max(0, strike - underlying_price)  # OTM when strike > underlying
+        
+        # Calculate margin using IB's formula
         margin = (
-            abs(self.entry_price) +  # Option price
+            entry_price +  # Premium
             max(
-                (margin_req_percent * self.underlying_entry - otm_amount),
-                (0.10 * self.underlying_entry)
+                (margin_req_percent * underlying_price - otm_amount),  # 15% of underlying minus OTM amount
+                (0.10 * underlying_price)  # Minimum 10% of underlying
             )
-        ) * 100 * self.quantity  # Convert to dollars
+        ) * 100 * quantity  # Convert to dollars (100 shares per contract)
         
         return round(margin / leverage, 2)
 
-    def calculate_pnl(self, exit_price: Optional[float] = None) -> float:
+    def calculate_position_margin(self, leverage: float = 1.0) -> float:
+        """Calculate margin requirement for the position using instance variables."""
+        if not self.entry_price or not self.underlying_entry:
+            return 0.0
+
+        return self.calculate_margin(
+            quantity=self.quantity,
+            option_type=self.option_type,
+            position_side=self.position_side,
+            underlying_price=self.underlying_entry,
+            entry_price=abs(self.entry_price),  # Use absolute value since sign is handled by position side
+            strike=self.strike,
+            leverage=leverage
+        )
+
+    def calculate_pnl(self, exit_price: Optional[float]=None, underlying_exit: Optional[float]=None, close_reason='expired',  commission: float = 1.78, exercise_fee: float=5.0) -> Optional[float]:
         """
-        Calculate P&L for the position.
+        Calculate P&L for the position considering all parameters.
         
         Args:
-            exit_price: Optional exit price. If not provided, returns 0 (unrealized P&L).
+            exit_price (Optional[float]): Exit price of the option. If None, returns None.
+            underlying_exit (Optional[float]): Exit price of the underlying asset. If None, returns None.
+            close_reason (str): Reason for closing the position (e.g., 'expired', 'early closure').
+            commission (float, optional): Transaction fees per contract. Defaults to 1.78.
+            exercise_fee (float, optional): Exercise fee for ITM options per contract. Defaults to 5.00.
+            
+        Returns:
+            Optional[float]: P&L amount in dollars, or None if exit_price or underlying_exit is None.
         """
-        if exit_price is None:
-            return 0
             
         # Get correctly signed prices
-        entry = self.get_signed_entry_price
-        # For long positions, exit price should be positive (credit/STC)
-        # For short positions, exit price should be negative (debit/BTC)
-        signed_exit = abs(exit_price) if self.is_long else -abs(exit_price)
+        signed_entry_price = self.signed_entry_price
+        if (exit_price is None and self.exit_price is None) and (underlying_exit is None and self.underlying_exit is None):
+            logger.warning('Need to provide either option or underlying exit price for pnl calculation')
+            return None
         
-        pnl = entry + signed_exit  # Signs are already correct
+     
+        # Expiration, get intrinsic value if not provided as exit_price  
+        if close_reason == 'expired':
+            if underlying_exit is None and self.underlying_exit is None:
+                logger.warning("Could not complete pnl calculation with intrinsic value due to lack of underlying close")
+                return None
+            underlying_exit = self.underlying_exit if self.underlying_exit else underlying_exit
+            exit_price = self.calculate_intrinsic_value(underlying_exit)
+            signed_exit_price = PriceUtils.get_signed_exit_price(exit_price, self.position_side)
         
-        # For long positions, clamp loss to zero
-        if self.is_long:
-            return max(0, pnl * 100 * self.quantity)
-        return pnl * 100 * self.quantity
+        # Early closure, use option exit price
+        else:
+            # For long positions, exit price should be positive (credit/STC)
+            # For short positions, exit price should be negative (debit/BTC)
+            signed_exit_price = self.signed_exit_price if self.exit_price is not None else PriceUtils.get_signed_exit_price(exit_price, self.position_side)
+            
+        # Calculate PnL
+        pnl = (signed_exit_price + signed_entry_price) * 100 * self.quantity
+        
+        # Subtract fees
+        fees = commission if commission else 0
+        if close_reason == 'expired' and self.is_ITM(underlying_exit): # ITM
+            fees += exercise_fee if exercise_fee else 0  # exercise fee
+        fees = round(fees * self.quantity, 2)
+         # fees *= self.quantity
+        logger.debug(f'Calculating pnl with fees: {fees} for {self.quantity} {'ITM' if self.is_ITM(underlying_exit) and close_reason == "expired" else 'OTM'} contracts')
+        
+        # Calculate P&L
+        pnl -= fees
+        
+        return round(pnl, 2)
 
     @abstractmethod
-    def close_position(self) -> Optional[BaseTradeResult]:
-        """
-        Close this position and calculate results.
-        """
-        pass 
-    
-    @staticmethod
     def calculate_intrinsic_value(self, underlying_price: float) -> float:
         """Calculate intrinsic value at expiration."""
         pass    
-
-
 
     @classmethod
     def create_vertical_spread(
@@ -259,7 +279,7 @@ class BaseOptionPosition(BasePosition, ABC):
         option_type: OptionType,
         expire_date: pd.Timestamp,
         is_credit: bool = True
-    ) -> List[ OptionPosition]:
+    ) -> List['OptionPosition']:
         """
         Factory method to create a vertical spread.
         
@@ -297,7 +317,7 @@ class BaseOptionPosition(BasePosition, ABC):
         put_strikes: List[float],
         call_strikes: List[float],
         expire_date: pd.Timestamp
-    ) -> List[' OptionPosition']:
+    ) -> List['OptionPosition']:
         """
         Factory method to create an iron condor.
         
@@ -385,8 +405,8 @@ class SingleLegOptionPosition(BaseOptionPosition):
             self.expire_date = pd.Timestamp(self.expire_date)   
 
         # Calculate margin required based on entry price and underlying entry
-        if self.entry_price is not None and self.underlying_entry is not None:
-            self.margin_required = self.calculate_margin( self.quantity, self.option_type, self.position_side, self.underlying_entry, self.entry_price, self.strike )
+        if self.entry_price is not None and self.underlying_entry is not None and self.margin_required is None:
+            self.margin_required = self.calculate_position_margin()
 
     @cached_property
     def is_put(self) -> bool:
@@ -426,7 +446,7 @@ class SingleLegOptionPosition(BaseOptionPosition):
    
 
     # @cached_property
-    # def get_signed_exit_price(self) -> float:
+    # def signed_entry_price(self) -> float:
     #     """
     #     Get the exit price with correct sign based on position side.
     #     - Long positions should have positive exit price (credit/STC)
@@ -448,6 +468,7 @@ class SingleLegOptionPosition(BaseOptionPosition):
     @staticmethod
     def construct_from_signal(
             trade_signal: NamedTuple,
+            option_strategy: OptionStrategy,
             entry_date: pd.Timestamp,
             position_side: PositionSide,    
             option_type: OptionType,
@@ -527,11 +548,12 @@ class SingleLegOptionPosition(BaseOptionPosition):
             entry_dte = trade_signal.dte if hasattr(trade_signal, 'dte') else pd.Timedelta(trade_signal.expire_date - entry_date).days
             
             # Get margin required from signal if available, otherwise use config
-            margin_required = trade_signal.margin_required if hasattr(trade_signal, 'margin_required') else None
+            margin_required = trade_signal.margin_required if hasattr(trade_signal, 'margin_required') else logger.warning(f"Missing margin required for trade signal on {trade_signal.Index}")
             
             # Create the position
             position = SingleLegOptionPosition(
                 trade_id=None,
+                option_strategy=option_strategy,
                 quantity=quantity,
                 option_type=option_type,
                 position_side=position_side,
@@ -565,117 +587,10 @@ class SingleLegOptionPosition(BaseOptionPosition):
             
             return position
 
-    @staticmethod
-    def calculate_margin(quantity: int,
-                         option_type: Union[OptionType, str],
-                         position_side: Union[PositionSide, str],
-                         underlying_price: float, 
-                         entry_price: float, 
-                         strike: float,
-                         leverage: float = 1.0,
-                         margin_req_percent: float = 0.15) -> float:
-        """
-        Calculate required margin for option position using IB's formula for Index Options.
-        
-        Args:
-            underlying_price (float): Current price of the underlying asset.
-            entry_price (float): Option premium, which is the mid of the bid and ask prices.
-            position_side (Union[PositionSide, str]): Indicates whether the position is LONG or SHORT.
-            strike (float): The strike price of the option.
-            option_type (Union[OptionType, str]): The type of the option, which can be PUT or CALL.
-            margin_req_percent (float, optional): The margin requirement percentage. Defaults to 0.15, which is the value for Interactive Brokers.
-        
-        Returns:
-            float: The required margin in dollars.
-        """
-        # Convert string to enum if needed
-        # if isinstance(position_side, str):
-        #     position_side = PositionSide.LONG if position_side.lower() == "long" else PositionSide.SHORT
-        
-        # For long positions, margin is just the cost of the option
-        # There is no margin req for Long positions
-        if PositionSide.is_long(position_side):
-            # return round(entry_price * 100, 2)  # Convert to dollars
-            return 0
-        
-        # For short positions, use IB's formula for Index Options
-        else:  # PositionSide.SHORT
-            # Calculate out-of-the-money amount
-            if OptionType.is_put(option_type): 
-                # For puts: OTM when strike > underlying, ITM when strike <= underlying
-                otm_amount = max(0, underlying_price - strike)
-            else:  # CALL
-                # For calls: OTM when strike >= underlying, ITM when strike < underlying
-                otm_amount = max(0, strike - underlying_price)
-            
-            # IB's margin formula for Index Options
-            margin_required = (
-                entry_price +  # Option price
-                max(
-                    # First term: 15% of underlying price minus OTM amount
-                    (margin_req_percent * underlying_price - otm_amount),
-                    # Second term: 10% of underlying price
-                    (0.10 * underlying_price)
-                )
-            ) * 100 * quantity  # Convert to dollars
-
-            return round(margin_required/leverage, 2)   
-        
-    # def calculate_margin(self, leverage: float = 1.0) -> float:
-    #     """Calculate margin requirement for the position."""
-    #     if not self.entry_price or not self.underlying_entry:
-    #         return 0
-
-    #     if self.is_long:
-    #         return 0  # No margin required for long positions
-        
-    #     # For short positions, use IB's formula
-    #     margin_req_percent = 0.15  # 15% for index options
-        
-    #     # Calculate out-of-the-money amount
-    #     if self.is_put:
-    #         otm_amount = max(0, self.underlying_entry - self.strike)
-    #     else:  # Call
-    #         otm_amount = max(0, self.strike - self.underlying_entry)
-        
-    #     # IB's margin formula
-    #     margin = (
-    #         abs(self.entry_price) +  # Option price
-    #         max(
-    #             (margin_req_percent * self.underlying_entry - otm_amount),
-    #             (0.10 * self.underlying_entry)
-    #         )
-    #     ) * 100 * self.quantity  # Convert to dollars
-        
-    #     return round(margin / leverage, 2)
-
-    def calculate_pnl(self, exit_price: Optional[float] = None, fees: float = 0.00) -> Optional[float]:
-        """
-        Calculate P&L for the position.
-        
-        Args:
-            exit_price: Optional exit price. If not provided, returns None (unrealized P&L).
-        """
-        if exit_price is None:
-            return None
-            
-        # Get correctly signed prices
-        entry = self.get_signed_entry_price
-        # For long positions, exit price should be positive (credit/STC)
-        # For short positions, exit price should be negative (debit/BTC)
-        signed_exit = abs(exit_price) if self.is_long else -abs(exit_price)
-        
-        pnl = entry + signed_exit - fees  # Signs are already correct
-        
-        # For long positions, clamp loss to zero
-        if self.is_long:
-            return max(0, pnl * 100 * self.quantity)
-        return pnl * 100 * self.quantity
-
-    def close_position(self, 
-                      option_chain: pd.DataFrame, 
-                      underlying_price_history: pd.DataFrame,
-                      option_bp: float) -> Optional[OptionTradeResult]:
+    def close(self, 
+            option_chain: pd.DataFrame, 
+            underlying_price_history: pd.DataFrame,
+            option_bp: float) -> Optional[Tuple[Dict, Dict]]:
         """
         Close this position and calculate results.
         
@@ -720,33 +635,30 @@ class SingleLegOptionPosition(BaseOptionPosition):
         
         # Get closing data
         closing_data = self._get_closing_data(option_chain, underlying_price_history)
-        if closing_data is None:
+        if closing_data['exit_price'] is None or closing_data['underlying_exit'] is None:
             logger.warning("Skipping trade due to missing close data")
             return None
             
         # Update position with closing data
-        exit_price = PriceUtils.get_signed_exit_price(closing_data['exit_price'], self.position_side)
-        exit_delta = closing_data['exit_delta']
-        underlying_exit = closing_data['underlying_exit']
-        
-       
-        
-        # Update buying power
-        premium = self.get_signed_exit_price * 100 * self.quantity
-        option_bp += premium  # Add/subtract exit premium (already signed)
-
+        self.exit_price = closing_data['exit_price']
+        # self.exit_price = PriceUtils.get_signed_exit_price(exit_price=closing_data['exit_price'], 
+        #                                               position_side=self.position_side)   
+        self.exit_delta = closing_data['exit_delta']
+        self.underlying_exit = closing_data['underlying_exit']
+        logger.debug(f'Exit price: {self.exit_price}')
+        # Add or subtract closing price/premium from buying power
+        option_bp += self.signed_exit_price * self.quantity * 100  # Add/subtract exit premium  
+        logger.debug(f'Option BP: {option_bp}')
         # Restore margin for short positions
         if self.is_short:
             option_bp += self.margin_required
 
-        fees = 1.78 # per option contract at Tastyworks
-        if close_reason == 'expired' and self.is_ITM(underlying_exit):
-            fees += 5.00 # exercise fee
-        fees *= self.quantity
-
-        # Calculate P&L
-        pnl = self.calculate_pnl(exit_price, fees)
+        
+        pnl = self.calculate_pnl(close_reason=close_reason)
         logger.debug(f'Calculated pnl: {pnl}')
+
+        # Deduct fees from buying power
+        option_bp -= self.fees if self.fees is not None else 0 # Deduct fees from buying power 
 
         # Calculate days held
         days_held = pd.Timedelta(close_date - self.entry_date).days
@@ -754,6 +666,8 @@ class SingleLegOptionPosition(BaseOptionPosition):
             logger.error(f"Calculated negative days held ({days_held}) - skipping trade")
             return None
     
+        logger.debug(f'ready to return result {pnl}')
+
          # Prepare trade result
         transaction =  {
             'trade_id': self.trade_id,
@@ -773,26 +687,26 @@ class SingleLegOptionPosition(BaseOptionPosition):
             'entry_price': round(self.entry_price, 2),
             'exit_price': round(self.exit_price, 2),
             'capital_used': self.margin_required,
-            'option_bp': round(option_bp, 2),
+            'bp': round(option_bp, 2),
             'return_on_margin': round(pnl / self.margin_required * 100, 2) if self.margin_required > 0 else 0,
-            'close_reason': close_reason,
             'pnl': round(pnl, 2),
         }
         trade_result = OptionTradeResult(
+            option_strategy=self.option_strategy,
             trade_id=self.trade_id,
             quantity=self.quantity,
             opened=self.entry_date,
             closed=close_date,
-            option_strategy=self.option_strategy,
-            closed_reason=close_reason,
-            premium=premium,
-            fees=fees,
-            pnl=pnl,
-            bp=option_bp,
-            return_on_margin=pnl / self.margin_required * 100,
-            transactions=[transaction] 
+            days_held=days_held,
+            close_reason=close_reason,
+            premium=round(self.premium, 2),
+            fees=round(self.fees, 2),
+            pnl=round(pnl, 2),
+            bp=round(option_bp, 2),
+            capital_used=round(self.margin_required, 2),
+            return_on_margin=round(pnl / self.margin_required * 100, 2),
         )
-        return trade_result
+        return trade_result.to_dict(), transaction
         
        
 
@@ -813,10 +727,14 @@ class SingleLegOptionPosition(BaseOptionPosition):
             
             # Get underlying price at close
             underlying_close = underlying_price_history.loc[self.expire_date, 'close']
+
+            logger.info(f'Expiration - underlying close: {underlying_close}')
             
             # Calculate intrinsic value at expiration
-            exit_price = self._calculate_intrinsic_value(underlying_close)
+            exit_price = self.calculate_intrinsic_value(underlying_close)
             exit_price = -abs(exit_price) if self.is_long else abs(exit_price)
+
+            logger.info(f'Expiration {self.expire_date} - strike {self.strike} - exit price: {exit_price}')
 
             # Get delta value at expiration
             delta_col = "p_delta" if self.is_put else 'c_delta'
@@ -825,9 +743,13 @@ class SingleLegOptionPosition(BaseOptionPosition):
                 (option_chain['expire_date'] == self.expire_date) &
                 (option_chain['strike'] == self.strike)
             ]
-            
+        
+            logger.debug(f'filtered_df: {filtered_df}')
+
             exit_delta = round(filtered_df[delta_col].iloc[0], 2) if not filtered_df.empty else None
 
+            logger.debug(f'ready to return result {underlying_close}, {exit_price}, {exit_delta}')
+            
             return {
                 'underlying_exit': underlying_close,
                 'exit_price': exit_price,
@@ -851,11 +773,14 @@ class SingleLegOptionPosition(BaseOptionPosition):
         delta_col = "p_delta" if self.is_put else 'c_delta'
 
         # Try each date until we find valid prices
-        for _, row in filtered_df.iterrows():
-            bid = row[bid_col]
-            ask = row[ask_col]
-            underlying_close = row['underlying_last']
-            exit_delta = round(row[delta_col], 2)
+        for row in filtered_df.itertuples():
+            date = row.Index
+            bid = getattr(row, bid_col)
+            ask = getattr(row, ask_col)
+            underlying_close = underlying_price_history.loc[date, 'close']   # added underlying data here
+            if underlying_close.empty or underlying_close is None:
+                underlying_close = row.underlying_last
+            exit_delta = round(getattr(row, delta_col), 2)
             
             mid_price = PriceUtils.calculate_midpoint_price(bid, ask)
             if mid_price is not None:
@@ -868,92 +793,22 @@ class SingleLegOptionPosition(BaseOptionPosition):
         logger.error(f"No valid closing prices found for strike {self.strike} and expire date {self.expire_date}")
         return None
 
-    def intrinsic_value(self, underlying_price: float) -> float:
+    def calculate_intrinsic_value(self, underlying_price: float) -> float:
         """Calculate intrinsic value at expiration."""
+        logger.info(f'Calculating intrinsic value for {self.strike} and {underlying_price}-> {max(0, self.strike - underlying_price) if self.is_put else max(0, underlying_price - self.strike)}')
         if self.is_put:
             return max(0, self.strike - underlying_price)
-        else:  # Call
+        else:  # Call        
             return max(0, underlying_price - self.strike)
 
-    # def _calculate_midpoint_price(self, bid: float, ask: float) -> Optional[float]:
-    #     """Calculate midpoint price with validation."""
-    #     if bid <= 0 or ask <= 0:
-    #         return None
-            
-    #     spread_pct = ((ask - bid) / bid) * 100
-    #     if spread_pct > 50.0:  # Spread too wide
-    #         logger.warning(f"Bid-ask spread too wide: bid={bid}, ask={ask}, spread={spread_pct:.2f}%")
-    #         return None
-            
-    #     return (bid + ask) / 2
-
-    # @classmethod
-    # def create_vertical_spread(
-    #     cls,
-    #     strikes: List[float],
-    #     option_type: OptionType,
-    #     expire_date: pd.Timestamp,
-    #     is_credit: bool = True
-    # ) -> List[ OptionPosition]:
-    #     """
-    #     Factory method to create a vertical spread.
-        
-    #     Args:
-    #         strikes: [short_strike, long_strike]
-    #         option_type: PUT or CALL
-    #         expire_date: Expiration date
-    #         is_credit: If True, creates credit spread (default)
-    #     """
-    #     if len(strikes) != 2:
-    #         raise ValueError("Vertical spread requires exactly 2 strikes")
-
-    #     # For credit spreads:
-    #     # PUT: Sell higher strike, buy lower strike
-    #     # CALL: Sell lower strike, buy higher strike
-    #     if is_credit:
-    #         if option_type == OptionType.PUT:
-    #             short_strike, long_strike = max(strikes), min(strikes)
-    #         else:  # CALL
-    #             short_strike, long_strike = min(strikes), max(strikes)
-    #     else:  # Debit spreads are opposite
-    #         if option_type == OptionType.PUT:
-    #             short_strike, long_strike = min(strikes), max(strikes)
-    #         else:  # CALL
-    #             short_strike, long_strike = max(strikes), min(strikes)
-
-    #     return [
-    #         cls(strike=short_strike, option_type=option_type, position_side=PositionSide.SHORT, expire_date=expire_date),
-    #         cls(strike=long_strike, option_type=option_type, position_side=PositionSide.LONG, expire_date=expire_date)
-    #     ]
-
-    # @classmethod
-    # def create_iron_condor(
-    #     cls,
-    #     put_strikes: List[float],
-    #     call_strikes: List[float],
-    #     expire_date: pd.Timestamp
-    # ) -> List[' OptionPosition']:
-    #     """
-    #     Factory method to create an iron condor.
-        
-    #     Args:
-    #         put_strikes: [long_put_strike, short_put_strike]
-    #         call_strikes: [short_call_strike, long_call_strike]
-    #         expire_date: Expiration date
-    #     """
-    #     if len(put_strikes) != 2 or len(call_strikes) != 2:
-    #         raise ValueError("Iron condor requires exactly 2 strikes for puts and 2 for calls")
-
-    #     put_spread = cls.create_vertical_spread(put_strikes, OptionType.PUT, expire_date, is_credit=True)
-    #     call_spread = cls.create_vertical_spread(call_strikes, OptionType.CALL, expire_date, is_credit=True)
-    #     return put_spread + call_spread
+ 
 
     def to_dict(self) -> Dict:
         """Convert position to dictionary format."""
         return {
             'trade_id': self.trade_id,
             'quantity': self.quantity,
-            'entry_date': self.entry_date,
+            'opened': self.entry_date,
             'expire_date': self.expire_date,
             'underlying_entry': self.underlying_entry,
             'underlying_exit': self.underlying_exit,
@@ -968,6 +823,45 @@ class SingleLegOptionPosition(BaseOptionPosition):
             'close_date': self.close_date,
             'margin_required': self.margin_required
         }
+
+ # trade result
+        # transaction =  {
+        #     'trade_id': self.trade_id,
+        #     'quantity': self.quantity,
+        #     'option_type': self.option_type.value,
+        #     'position_side': self.position_side.value,
+        #     'entry_date': self.entry_date,
+        #     'exit_date': close_date,
+        #     'expire_date': self.expire_date,
+        #     'entry_delta': round(self.entry_delta, 2),
+        #     'exit_delta': round(self.exit_delta, 2),
+        #     'entry_dte': self.entry_dte,
+        #     'days_held': days_held,
+        #     'underlying_entry': self.underlying_entry,
+        #     'underlying_exit': self.underlying_exit,
+        #     'strike': self.strike,
+        #     'entry_price': round(self.entry_price, 2),
+        #     'exit_price': round(self.exit_price, 2),
+        #     'capital_used': self.margin_required,
+        #     'option_bp': round(option_bp, 2),
+        #     'return_on_margin': round(pnl / self.margin_required * 100, 2) if self.margin_required > 0 else 0,
+        #     'close_reason': close_reason,
+        #     'pnl': round(pnl, 2),
+        # }
+        # trade_result = OptionTradeResult(
+        #     trade_id=self.trade_id,
+        #     quantity=self.quantity,
+        #     opened=self.entry_date,
+        #     closed=close_date,
+        #     option_strategy=self.option_strategy,
+        #     closed_reason=close_reason,
+        #     premium=premium,
+        #     fees=fees,
+        #     pnl=pnl,
+        #     bp=option_bp,
+        #     return_on_margin=pnl / self.margin_required * 100,
+        #     transactions=[transaction] 
+
 
     # def from_row(self, row: NamedTuple, quantity: int, option_type: OptionType, position_side: PositionSide, delta_target: float, entry_date: pd.Timestamp, early_close_days: int, delta_range: Tuple[float, float] = None) -> Position:
     #     trade_id = row.trade_id
@@ -1110,7 +1004,7 @@ class MultiLegOptionPosition(BaseOptionPosition):
     def margin_required(self) -> float: 
         """Calculate total margin requirement for the spread."""
         if self.spread_type == OptionSpreadType.NONE:
-            return sum(leg.calculate_margin() for leg in self.legs)
+            return sum(leg.calculate_position_margin() for leg in self.legs)
             
         # For defined risk spreads, use max_risk
         max_risk = self.max_risk
@@ -1118,7 +1012,7 @@ class MultiLegOptionPosition(BaseOptionPosition):
             return max_risk
             
         # For undefined risk spreads, sum individual margins
-        return sum(leg.calculate_margin() for leg in self.legs)
+        return sum(leg.calculate_position_margin() for leg in self.legs)
 
     def calculate_pnl(self, exit_price: float) -> float:
         """Calculate total P&L for the spread."""
@@ -1207,157 +1101,3 @@ class MultiLegOptionPosition(BaseOptionPosition):
         #     raise ValueError(f"Unsupported spread type: {spread_type}")
     
 
-class TestOptionPositions(unittest.TestCase):
-
-    def setUp(self):
-
-        # Set up data paths
-        DATA_PATH = "/Users/liefe/Data/spx"
-        OPTIONS_FILE = "options_chain_preprocessed.csv"
-
-        self.dl = DataLoader(data_dir=DATA_PATH, options_file=OPTIONS_FILE, use_preprocessed=True, save_preprocessed=False)
-        self.data = self.dl.load_data()
-
-
-        """Set up test data for the tests."""
-        # Sample data for a single leg option position
-        self.single_leg_long = SingleLegOptionPosition(
-            trade_id=1,
-            quantity=10,
-            option_type=OptionType.CALL,
-            position_side=PositionSide.LONG,
-            entry_date=pd.Timestamp('2023-01-01'),
-            entry_price=5.0,
-            strike=4000.0,
-            expire_date=pd.Timestamp('2023-12-31'),
-            entry_delta=0.5,
-            entry_dte=30,
-            underlying_entry=95.0
-        )
-        self.single_leg_short = SingleLegOptionPosition(
-            trade_id=1,
-            quantity=10,
-            option_type=OptionType.PUT,
-            position_side=PositionSide.SHORT,
-            entry_date=pd.Timestamp('2023-01-01'),
-            entry_price=5.0,
-            strike=100.0,
-            expire_date=pd.Timestamp('2023-12-31'),
-            entry_delta=0.5,
-            entry_dte=30,
-            underlying_entry=95.0
-        )
-        # Sample data for a multi-leg option position
-        self.multi_leg = MultiLegOptionPosition(
-            trade_id=2,
-            quantity=5,
-            position_side=PositionSide.SHORT,
-            entry_date=pd.Timestamp('2023-01-01'),
-            entry_price=3.0,
-            spread_id=1,
-            spread_type=OptionSpreadType.VERTICAL,
-            legs=[
-                SingleLegOptionPosition(
-                    trade_id=3,
-                    quantity=5,
-                    option_type=OptionType.CALL,
-                    position_side=PositionSide.SHORT,
-                    entry_date=pd.Timestamp('2023-01-01'),
-                    entry_price=3.0,
-                    strike=100.0,
-                    expire_date=pd.Timestamp('2023-12-31'),
-                    entry_delta=0.5,
-                    entry_dte=30,
-                    underlying_entry=95.0
-                ),
-                SingleLegOptionPosition(
-                    trade_id=4,
-                    quantity=5,
-                    option_type=OptionType.CALL,
-                    position_side=PositionSide.LONG,
-                    entry_date=pd.Timestamp('2023-01-01'),
-                    entry_price=2.0,
-                    strike=105.0,
-                    expire_date=pd.Timestamp('2023-12-31'),
-                    entry_delta=0.4,
-                    entry_dte=30,
-                    underlying_entry=95.0
-                )
-            ],
-            leg_ratios={0: 1, 1: 1}
-        )
-
-    def test_single_leg_margin(self):
-        """Test margin calculation for a single leg option position."""
-        margin = self.single_leg_long.calculate_margin(quantity=self.single_leg_long.quantity,
-                                                  option_type=self.single_leg_long.option_type,
-                                                  position_side=self.single_leg_long.position_side,
-                                                  underlying_price=self.single_leg_long.underlying_entry,
-                                                  entry_price=self.single_leg_long.entry_price,
-                                                  strike=self.single_leg_long.strike )
-        self.assertEqual(margin, 0)  # Assuming long position has no margin
-        margin = self.single_leg_short.calculate_margin(quantity=self.single_leg_short.quantity,
-                                                  option_type=self.single_leg_short.option_type,
-                                                  position_side=self.single_leg_short.position_side,
-                                                  underlying_price=self.single_leg_short.underlying_entry,
-                                                  entry_price=self.single_leg_short.entry_price,
-                                                  strike=self.single_leg_short.strike )
-        self.assertEqual(margin, 19250)   
-    # def test_multi_leg_margin(self):
-    #     """Test margin calculation for a multi-leg option position."""
-    #     margin = self.multi_leg.calculate_margin(quantity=self.multi_leg.quantity)
-    #     self.assertIsInstance(margin, float)  # Check if margin is a float
-
-    def test_single_leg_pnl(self):
-        """Test P&L calculation for a single leg option position."""
-        pnl = self.single_leg_long.calculate_pnl(exit_price=6.0)  # Example exit price
-        self.assertEqual(pnl, 1000.0)  # Assuming entry price was 5.0 and quantity is 10
-        pnl = self.single_leg_short.calculate_pnl(exit_price=10.0)  # Example exit price
-        self.assertEqual(pnl, -5000.0)  # Assuming entry price was 5.0 and quantity is 10
-
-    def test_instance_vars(self):
-        self.assertEqual(self.single_leg_long.position_side, PositionSide.LONG)
-        self.assertEqual(self.single_leg_short.position_side, PositionSide.SHORT)
-        # self.assertEqual(self.multi_leg.position_side, PositionSide.SHORT)  
-        self.assertEqual(self.single_leg_long.is_put, False)        
-        self.assertEqual(self.single_leg_short.is_put, True)
-        self.assertEqual(self.single_leg_long.is_call, True)
-        self.assertEqual(self.single_leg_short.is_call, False)
-        self.assertEqual(self.single_leg_long.is_long, True)
-        self.assertEqual(self.single_leg_short.is_long, False)
-    
-    def test_intrinsic_value(self):
-        self.assertEqual(self.single_leg_long.intrinsic_value(underlying_price=105), 5)
-        self.assertEqual(self.single_leg_long.intrinsic_value(underlying_price=95), 0)
-        self.assertEqual(self.single_leg_short.intrinsic_value(underlying_price=105), 0)
-        self.assertEqual(self.single_leg_short.intrinsic_value(underlying_price=95), 5)
-    # def test_multi_leg_pnl(self):
-    #     """Test P&L calculation for a multi-leg option position."""
-    #     pnl = self.multi_leg.calculate_pnl(exit_price=4.0)  # Example exit price
-    #     self.assertIsInstance(pnl, float)  # Check if P&L is a float
-
-    def test_close_position(self):
-        """Test closing a position."""
-        trade_result = self.single_leg_long.close_position(option_chain=self.data['option_chain'],
-                                                          underlying_price_history=self.data['underlying_price_history'],
-                                                          option_bp=10000)
-        transaction = trade_result.transactions[0]
-        self.assertIsInstance(trade_result, OptionTradeResult)
-        self.assertEqual(trade_result.pnl, 1000.0)
-        self.assertEqual(trade_result.quantity, 10)
-        self.assertEqual(transaction['option_type'], OptionType.CALL)
-        self.assertEqual(transaction['position_side'], PositionSide.LONG)
-        self.assertEqual(transaction['entry_date'], pd.Timestamp('2023-01-01'))
-        self.assertEqual(transaction['exit_date'], pd.Timestamp('2023-01-01'))
-        self.assertEqual(transaction['expire_date'], pd.Timestamp('2023-12-31'))
-        self.assertEqual(transaction['entry_delta'], 0.5)
-        self.assertEqual(transaction['exit_delta'], 0.5)
-        self.assertEqual(transaction['entry_dte'], 30)
-        self.assertEqual(transaction['days_held'], 0)
-        self.assertEqual(transaction['underlying_entry'], 95.0)
-        self.assertEqual(transaction['underlying_exit'], 105.0)
-        self.assertEqual(transaction['strike'], 100.0)
-        self.assertEqual(transaction['entry_price'], 5.0)
-        
-if __name__ == '__main__':
-    unittest.main()

@@ -37,7 +37,7 @@ class OptionSignalGenerator(BaseSignalGenerator):
         logger.info(f"Config type: {type(self.config)}")
         logger.info(f"Config: {self.config.leg}")
         if isinstance(self.config, (SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig)):
-            self.strategy = self.config.strategy
+            self.option_strategy = self.config.option_strategy
             self.option_type = self.config.leg.option_type
             self.position_side = self.config.leg.position_side
             self.delta_target = self.config.leg.delta_target
