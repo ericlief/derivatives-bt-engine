@@ -1,0 +1,870 @@
+# tests/domain/test_position.py
+import unittest
+import pandas as pd
+import numpy as np
+from options_bt.domain.position import SingleLegOptionPosition, MultiLegOptionPosition
+from options_bt.domain.enums import OptionType, PositionSide, OptionStrategy, OptionSpreadType
+from options_bt.domain.dataloader import DataLoader
+from options_bt.domain.trade_result import OptionTradeResult
+from scipy.stats import norm
+
+
+class TestOptionPositions(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        """Print test parameters once at the start of the test suite."""
+        print("\n=== Test Configuration ===")
+        print("Test Period: January 2023")
+        print("\nBlack-Scholes Parameters:")
+        print("- Risk-free rate: 5%")
+        print("- Volatility: 30%")
+        print("- Days to expiry: 30")
+        print("\nPrice Path:")
+        print("- Initial: 95.0")
+        print("- Final: 105.0")
+        print("- Strike: 100.0")
+        print("\nTest Cases:")
+        print("- ATM/ITM/OTM options")
+        print("- Long and short positions")
+        print("- Calls and puts")
+        print("- Margin calculations")
+        print("- PnL calculations")
+        print("- Early closure and expiration")
+        print("=" * 30 + "\n")
+
+    def setUp(self):
+        """Set up test data with mock data instead of real files."""
+        # Create mock option chain data for all relevant dates
+        start_date = pd.Timestamp('2023-01-01')
+        end_date = pd.Timestamp('2023-01-31')  # Shortened to just January since all our tests use January dates
+        dates = pd.date_range(start=start_date, end=end_date, freq='D')
+        
+        # Parameters for Black-Scholes
+        r = 0.05  # 5% risk-free rate
+        sigma = 0.3  # 30% volatility
+        strike = 100.0
+        
+        # Generate varying underlying prices (slight upward trend with noise)
+        np.random.seed(42)  # For reproducibility
+        base_price = 95.0
+        price_changes = np.random.normal(0.05, 0.5, len(dates)).cumsum()  # Random walk with upward drift
+        underlying_prices = base_price + price_changes
+        
+        # Ensure we have specific price points for testing
+        price_series = pd.Series(underlying_prices, index=dates)
+        price_series.loc['2023-01-31'] = 105.0  # Set expiration date price for ITM tests
+        underlying_prices = price_series.values
+        
+        # Create option chain data with Black-Scholes prices and greeks
+        option_chain_data = []
+        for i, date in enumerate(dates):
+            current_price = underlying_prices[i]
+            days_to_expiry = (end_date - date).days
+            T = max(0, days_to_expiry / 365)  # Time to expiry in years
+            
+            # Calculate Black-Scholes prices and deltas
+            call_price, call_delta = self.black_scholes(
+                S=current_price, 
+                K=strike, 
+                T=T, 
+                r=r, 
+                sigma=sigma, 
+                option_type='call'
+            )
+            put_price, put_delta = self.black_scholes(
+                S=current_price, 
+                K=strike, 
+                T=T, 
+                r=r, 
+                sigma=sigma, 
+                option_type='put'
+            )
+            
+            # Add bid-ask spread that widens for further dates and lower liquidity
+            base_spread = 0.05 + (T * 0.1) + (abs(call_delta - 0.5) * 0.1)
+            
+            option_chain_data.append({
+                'underlying_last': current_price,
+                'p_bid': max(0.01, put_price - base_spread),
+                'p_ask': put_price + base_spread,
+                'c_bid': max(0.01, call_price - base_spread),
+                'c_ask': call_price + base_spread,
+                'p_delta': put_delta,
+                'c_delta': call_delta,
+                'strike': strike,
+                'expire_date': end_date
+            })
+
+        # Create DataFrames with Black-Scholes prices
+        self.data = {
+            'option_chain': pd.DataFrame(option_chain_data, index=dates),
+            'underlying_price_history': pd.DataFrame({
+                'close': underlying_prices
+            }, index=dates)
+        }
+
+        # Create test positions
+        self.single_leg_long = SingleLegOptionPosition(
+            trade_id=1,
+            option_strategy=OptionStrategy.LONG_CALL,
+            quantity=1,
+            option_type=OptionType.CALL,
+            position_side=PositionSide.LONG,
+            entry_date=pd.Timestamp('2023-01-01'),
+            entry_price=5.0,
+            strike=100.0,
+            expire_date=pd.Timestamp('2023-01-31'),
+            entry_delta=0.5,
+            entry_dte=30,
+            underlying_entry=95.0
+        )
+
+        self.single_leg_short = SingleLegOptionPosition(
+            trade_id=2,
+            option_strategy=OptionStrategy.SHORT_PUT,
+            quantity=1,
+            option_type=OptionType.PUT,
+            position_side=PositionSide.SHORT,
+            entry_date=pd.Timestamp('2023-01-01'),
+            entry_price=5.0,
+            strike=100.0,
+            expire_date=pd.Timestamp('2023-01-31'),
+            entry_delta=-0.5,
+            entry_dte=30,
+            underlying_entry=95.0
+        )
+
+    def black_scholes(self, S, K, T, r, sigma, option_type='call'):
+        """Calculate Black-Scholes option price and delta.
+        
+        Args:
+            S: Current stock price
+            K: Strike price
+            T: Time to expiration in years
+            r: Risk-free interest rate
+            sigma: Volatility
+            option_type: 'call' or 'put'
+        
+        Returns:
+            tuple: (price, delta)
+        """
+        if T <= 0:
+            # Handle expiration
+            if option_type == 'call':
+                return max(0, S - K), 1.0 if S > K else 0.0
+            else:
+                return max(0, K - S), -1.0 if S < K else 0.0
+                
+        d1 = (np.log(S/K) + (r + sigma**2/2)*T) / (sigma*np.sqrt(T))
+        d2 = d1 - sigma*np.sqrt(T)
+        
+        if option_type == 'call':
+            price = S*norm.cdf(d1) - K*np.exp(-r*T)*norm.cdf(d2)
+            delta = norm.cdf(d1)
+        else:
+            price = K*np.exp(-r*T)*norm.cdf(-d2) - S*norm.cdf(-d1)
+            delta = -norm.cdf(-d1)
+            
+        return price, delta
+
+    def test_single_leg_margin(self):
+        """Test margin calculation for a single leg option position."""
+        # Test cases with different underlying prices and strikes
+        test_cases = [
+            # Short call scenarios
+            (100.0, 90.0, OptionType.CALL, PositionSide.SHORT),  # ITM short call
+            (100.0, 100.0, OptionType.CALL, PositionSide.SHORT), # ATM short call
+            (100.0, 110.0, OptionType.CALL, PositionSide.SHORT), # OTM short call
+        ]
+        
+        for underlying_price, strike, option_type, position_side in test_cases:
+            with self.subTest(msg=f"{option_type} {position_side} - Strike: {strike}"):
+                # Calculate option price using Black-Scholes
+                entry_price, delta = self.black_scholes(
+                    S=underlying_price,
+                    K=strike,
+                    T=30/365,  # 30 days
+                    r=0.05,    # 5% risk-free rate
+                    sigma=0.3, # 30% volatility
+                    option_type='call' if option_type == OptionType.CALL else 'put'
+                )
+                
+                print(f"\nTesting {option_type} {position_side}:")
+                print(f"Entry Price: {entry_price:.4f}")
+                print(f"Delta: {delta:.4f}")
+                
+                # Calculate margin using class method
+                margin = SingleLegOptionPosition.calculate_margin(
+                    quantity=1,
+                    option_type=option_type,
+                    position_side=position_side,
+                    underlying_price=underlying_price,
+                    entry_price=entry_price,
+                    strike=strike
+                )
+                
+                # Calculate expected margin
+                if option_type == OptionType.PUT:
+                    otm_amount = max(0, underlying_price - strike)
+                else:  # CALL
+                    otm_amount = max(0, strike - underlying_price)
+                
+                expected_margin = (
+                    entry_price +  # Option price
+                    max(
+                        (0.15 * underlying_price - otm_amount),  # 15% of underlying minus OTM amount
+                        (0.10 * underlying_price)  # 10% of underlying
+                    )
+                ) * 100  # Convert to dollars
+                
+                print(f"OTM Amount: {otm_amount:.2f}")
+                print(f"Calculated Margin: {margin:.2f}")
+                print(f"Expected Margin: {expected_margin:.2f}")
+                
+                self.assertEqual(margin, round(expected_margin, 2),
+                    f"Margin mismatch for {option_type} {position_side} with strike {strike}")
+
+    def test_single_leg_pnl(self):
+        """Test P&L calculation for a single leg option position."""
+        # Calculate entry and exit prices using Black-Scholes
+        underlying_price = 100.0
+        strike = 100.0
+        entry_price, _ = self.black_scholes(
+            S=underlying_price,
+            K=strike,
+            T=30/365,  # 30 days
+            r=0.05,    # 5% risk-free rate
+            sigma=0.3, # 30% volatility
+            option_type='call'
+        )
+        
+        # Calculate exit price with higher underlying
+        exit_price, _ = self.black_scholes(
+            S=underlying_price * 1.05,  # 5% increase in underlying
+            K=strike,
+            T=29/365,  # 29 days (1 day later)
+            r=0.05,
+            sigma=0.3,
+            option_type='call'
+        )
+        
+        # Test long call profit
+        pnl = self.single_leg_long.calculate_pnl(exit_price=exit_price)
+        expected_profit = (exit_price - entry_price) * 100 * self.single_leg_long.quantity
+        self.assertEqual(pnl, expected_profit)
+
+        # Test short put loss
+        entry_price, _ = self.black_scholes(
+            S=underlying_price,
+            K=strike,
+            T=30/365,
+            r=0.05,
+            sigma=0.3,
+            option_type='put'
+        )
+        
+        # Calculate exit price with lower underlying
+        exit_price, _ = self.black_scholes(
+            S=underlying_price * 0.95,  # 5% decrease in underlying
+            K=strike,
+            T=29/365,
+            r=0.05,
+            sigma=0.3,
+            option_type='put'
+        )
+        
+        pnl = self.single_leg_short.calculate_pnl(exit_price=exit_price)
+        expected_loss = (entry_price - exit_price) * 100 * self.single_leg_short.quantity
+        self.assertEqual(pnl, expected_loss)
+
+    def test_instance_vars(self):
+        self.assertEqual(self.single_leg_long.position_side, PositionSide.LONG)
+        self.assertEqual(self.single_leg_short.position_side, PositionSide.SHORT)
+        # self.assertEqual(self.multi_leg.position_side, PositionSide.SHORT)  
+        self.assertEqual(self.single_leg_long.is_put, False)        
+        self.assertEqual(self.single_leg_short.is_put, True)
+        self.assertEqual(self.single_leg_long.is_call, True)
+        self.assertEqual(self.single_leg_short.is_call, False)
+        self.assertEqual(self.single_leg_long.is_long, True)
+        self.assertEqual(self.single_leg_short.is_long, False)
+    
+    def test_calculate_intrinsic_value(self):
+        self.assertEqual(self.single_leg_long.calculate_intrinsic_value(underlying_price=105), 5)
+        self.assertEqual(self.single_leg_long.calculate_intrinsic_value(underlying_price=95), 0)
+        self.assertEqual(self.single_leg_short.calculate_intrinsic_value(underlying_price=105), 0)
+        self.assertEqual(self.single_leg_short.calculate_intrinsic_value(underlying_price=95), 5)
+    # def test_multi_leg_pnl(self):
+    #     """Test P&L calculation for a multi-leg option position."""
+    #     pnl = self.multi_leg.calculate_pnl(exit_price=4.0)  # Example exit price
+    #     self.assertIsInstance(pnl, float)  # Check if P&L is a float
+
+    def test_close_position(self):
+        """Test closing a position."""
+        # Create a position with proper margin_required
+        position = SingleLegOptionPosition(
+            option_strategy=OptionStrategy.LONG_CALL,
+            trade_id=1,
+            quantity=10,
+            option_type=OptionType.CALL,
+            position_side=PositionSide.LONG,
+            entry_date=pd.Timestamp('2023-01-01'),
+            entry_price=self.single_leg_long.entry_price,
+            strike=100.0,
+            expire_date=pd.Timestamp('2023-01-31'),
+            entry_delta=0.5,
+            entry_dte=30,
+            underlying_entry=95.0,
+            margin_required=1000.0  # Add margin required to avoid division by zero
+        )
+        
+        trade_result, transaction = position.close(
+            option_chain=self.data['option_chain'],
+            underlying_price_history=self.data['underlying_price_history'],
+            option_bp=10000
+        )
+        self.assertIsInstance(trade_result, dict)
+        self.assertEqual(transaction['quantity'], 10)
+        self.assertEqual(transaction['option_type'], OptionType.CALL.value)
+        self.assertEqual(transaction['position_side'], PositionSide.LONG.value)
+        self.assertEqual(transaction['entry_date'], pd.Timestamp('2023-01-01'))
+        self.assertEqual(transaction['expire_date'], pd.Timestamp('2023-01-31'))
+        self.assertEqual(transaction['entry_delta'], 0.5)
+        self.assertEqual(transaction['days_held'], 30)  # Full period
+        self.assertEqual(transaction['underlying_entry'], 95.0)
+        self.assertEqual(transaction['strike'], 100.0)
+        self.assertEqual(transaction['capital_used'], 1000.0)
+
+    def test_signed_prices(self):
+        """Test signed entry and exit prices."""
+        # Long position tests
+        entry_price = self.single_leg_long.entry_price
+        self.assertEqual(self.single_leg_long.signed_entry_price, -abs(entry_price))  # BTO should be negative
+        
+        # Short position tests
+        entry_price = self.single_leg_short.entry_price
+        self.assertEqual(self.single_leg_short.signed_entry_price, abs(entry_price))  # STO should be positive
+
+    def test_premium_calculations(self):
+        """Test premium calculations."""
+        # Test long call premium (quantity * price * 100)
+        expected_premium = self.single_leg_long.entry_price * 100 * self.single_leg_long.quantity
+        self.assertEqual(self.single_leg_long.premium, expected_premium)
+        self.assertEqual(self.single_leg_long.signed_premium, -expected_premium)  # Long premium should be negative
+
+        # Test short put premium
+        expected_premium = self.single_leg_short.entry_price * 100 * self.single_leg_short.quantity
+        self.assertEqual(self.single_leg_short.premium, expected_premium)
+        self.assertEqual(self.single_leg_short.signed_premium, expected_premium)  # Short premium should be positive
+
+    def test_pnl_with_fees(self):
+        """Test P&L calculations including fees."""
+        test_cases = [
+            # (entry_price, exit_price, quantity, position_side, option_type, expected_pnl)
+            (5.0, 6.0, 1, PositionSide.LONG, OptionType.CALL, 98.22),  # Long call profit
+            (5.0, 4.0, 1, PositionSide.LONG, OptionType.CALL, -178.0),  # Long call loss
+            (5.0, 4.0, 1, PositionSide.SHORT, OptionType.PUT, 98.22),   # Short put profit
+            (5.0, 6.0, 1, PositionSide.SHORT, OptionType.PUT, -178.0),  # Short put loss
+            # Test with multiple contracts
+            (5.0, 6.0, 2, PositionSide.LONG, OptionType.CALL, 196.44),  # 2 contracts
+            (5.0, 4.0, 3, PositionSide.SHORT, OptionType.PUT, 294.66),  # 3 contracts
+        ]
+
+        for entry_price, exit_price, quantity, position_side, option_type, expected_pnl in test_cases:
+            # Create test position
+            position = SingleLegOptionPosition(
+                trade_id=1,
+                option_strategy=OptionStrategy.LONG_CALL if position_side == PositionSide.LONG else OptionStrategy.SHORT_CALL,
+                quantity=quantity,
+                option_type=option_type,
+                position_side=position_side,
+                entry_date=pd.Timestamp('2023-01-01'),
+                entry_price=entry_price,
+                strike=100.0,
+                expire_date=pd.Timestamp('2023-01-31'),
+                entry_delta=0.5,
+                entry_dte=30,
+                underlying_entry=95.0
+            )
+            
+            # Calculate fees (1.78 per contract)
+            fees = 1.78 * quantity
+            
+            # Calculate PnL with fees
+            pnl = position.calculate_pnl(exit_price=exit_price, fees=fees)
+            
+            # Verify PnL calculation
+            self.assertEqual(round(pnl, 2), expected_pnl,
+                f"PnL mismatch for {option_type.value} {position_side.value} with {quantity} contracts:\n"
+                f"Expected: {expected_pnl}, Got: {round(pnl, 2)}\n"
+                f"Entry: {entry_price}, Exit: {exit_price}, Fees: {fees}")
+
+    def test_margin_requirements(self):
+        """Test margin requirement calculations using IB's formula."""
+        # Test cases with different moneyness levels
+        test_cases = [
+            # (underlying, strike, option_type, position_side, entry_price, expected_margin)
+            (100.0, 100.0, OptionType.CALL, PositionSide.SHORT, 5.0, 2000.0),  # ATM call
+            (100.0, 90.0, OptionType.CALL, PositionSide.SHORT, 12.0, 2700.0),  # ITM call
+            (100.0, 110.0, OptionType.CALL, PositionSide.SHORT, 2.0, 1700.0),  # OTM call
+            (100.0, 100.0, OptionType.PUT, PositionSide.SHORT, 5.0, 2000.0),   # ATM put
+            (100.0, 110.0, OptionType.PUT, PositionSide.SHORT, 12.0, 2700.0),  # ITM put
+            (100.0, 90.0, OptionType.PUT, PositionSide.SHORT, 2.0, 1700.0),    # OTM put
+            # Test long positions (should have no margin requirement)
+            (100.0, 100.0, OptionType.CALL, PositionSide.LONG, 5.0, 0.0),
+            (100.0, 100.0, OptionType.PUT, PositionSide.LONG, 5.0, 0.0),
+        ]
+
+        for underlying, strike, option_type, position_side, entry_price, expected_margin in test_cases:
+            # Calculate margin using class method
+            margin = SingleLegOptionPosition.calculate_margin(
+                quantity=1,
+                option_type=option_type,
+                position_side=position_side,
+                underlying_price=underlying,
+                entry_price=entry_price,
+                strike=strike,
+                leverage=1.0
+            )
+            
+            # Verify margin calculation
+            self.assertEqual(margin, expected_margin,
+                f"Margin mismatch for {option_type.value} {position_side.value} with strike {strike}:\n"
+                f"Expected: {expected_margin}, Got: {margin}\n"
+                f"Underlying: {underlying}, Entry Price: {entry_price}")
+
+            # Also test using instance method for consistency
+            position = SingleLegOptionPosition(
+                trade_id=1,
+                option_strategy=OptionStrategy.LONG_CALL if position_side == PositionSide.LONG else OptionStrategy.SHORT_CALL,
+                quantity=1,
+                option_type=option_type,
+                position_side=position_side,
+                entry_date=pd.Timestamp('2023-01-01'),
+                entry_price=entry_price,
+                strike=strike,
+                expire_date=pd.Timestamp('2023-01-31'),
+                entry_delta=0.5,
+                entry_dte=30,
+                underlying_entry=underlying
+            )
+            
+            instance_margin = position.calculate_position_margin(leverage=1.0)
+            self.assertEqual(instance_margin, expected_margin,
+                f"Instance margin mismatch for {option_type.value} {position_side.value} with strike {strike}:\n"
+                f"Expected: {expected_margin}, Got: {instance_margin}\n"
+                f"Underlying: {underlying}, Entry Price: {entry_price}")
+
+    def test_close_validation(self):
+        """Test position closing validation edge cases."""
+        # Test invalid entry date
+        invalid_position = SingleLegOptionPosition(
+            trade_id=1,
+            option_strategy=OptionStrategy.LONG_CALL,
+            quantity=1,
+            option_type=OptionType.CALL,
+            position_side=PositionSide.LONG,
+            entry_date=pd.Timestamp('1970-01-01'),  # Invalid date
+            entry_price=5.0,
+            strike=100.0,
+            expire_date=pd.Timestamp('2023-01-31'),
+            entry_delta=0.5,
+            entry_dte=30,
+            underlying_entry=95.0
+        )
+        
+        result = invalid_position.close(
+            option_chain=pd.DataFrame(),
+            underlying_price_history=pd.DataFrame(),
+            option_bp=10000
+        )
+        self.assertIsNone(result)
+
+        # Test missing expiration and close dates
+        no_dates_position = SingleLegOptionPosition(
+            trade_id=1,
+            option_strategy=OptionStrategy.LONG_CALL,
+            quantity=1,
+            option_type=OptionType.CALL,
+            position_side=PositionSide.LONG,
+            entry_date=pd.Timestamp('2023-01-01'),
+            entry_price=5.0,
+            strike=100.0,
+            expire_date=None,
+            entry_delta=0.5,
+            entry_dte=30,
+            underlying_entry=95.0
+        )
+        
+        result = no_dates_position.close(
+            option_chain=pd.DataFrame(),
+            underlying_price_history=pd.DataFrame(),
+            option_bp=10000
+        )
+        self.assertIsNone(result)
+
+    def test_close_scenarios(self):
+        """Test different position closure scenarios."""
+        # Test early closure
+        early_close_position = SingleLegOptionPosition(
+            option_strategy=OptionStrategy.LONG_CALL,
+            trade_id=1,
+            quantity=1,
+            option_type=OptionType.CALL,
+            position_side=PositionSide.LONG,
+            entry_date=pd.Timestamp('2023-01-01'),
+            entry_price=self.single_leg_long.entry_price,
+            strike=100.0,
+            expire_date=pd.Timestamp('2023-03-31'),
+            entry_delta=0.5,
+            entry_dte=90,
+            underlying_entry=95.0,
+            close_date=pd.Timestamp('2023-02-01')  # Close 30 days early
+        )
+        
+        result = early_close_position.close(
+            option_chain=self.data['option_chain'],
+            underlying_price_history=self.data['underlying_price_history'],
+            option_bp=10000
+        )
+        self.assertIsNotNone(result)
+        trade_result, transaction = result
+        self.assertEqual(transaction['close_reason'], 'early closure')
+        self.assertEqual(transaction['days_held'], 31)  # Jan 1 to Feb 1
+
+        # Test expiration closure for ITM option
+        itm_expire_position = SingleLegOptionPosition(
+            option_strategy=OptionStrategy.LONG_CALL,
+            trade_id=2,
+            quantity=1,
+            option_type=OptionType.CALL,
+            position_side=PositionSide.LONG,
+            entry_date=pd.Timestamp('2023-01-01'),
+            entry_price=self.single_leg_long.entry_price,
+            strike=100.0,
+            expire_date=pd.Timestamp('2023-01-31'),
+            entry_delta=0.5,
+            entry_dte=30,
+            underlying_entry=95.0,
+            margin_required=1000.0  # Add margin required to avoid division by zero
+        )
+        
+        result = itm_expire_position.close(
+            option_chain=self.data['option_chain'],
+            underlying_price_history=self.data['underlying_price_history'],
+            option_bp=10000
+        )
+        self.assertIsNotNone(result)
+        trade_result, transaction = result
+        self.assertEqual(transaction['close_reason'], 'expired')
+        self.assertEqual(transaction['days_held'], 30)  # Full 30 days to expiration
+
+        # Test expiration closure for OTM option
+        otm_expire_position = SingleLegOptionPosition(
+            option_strategy=OptionStrategy.LONG_PUT,
+            trade_id=3,
+            quantity=1,
+            option_type=OptionType.PUT,
+            position_side=PositionSide.LONG,
+            entry_date=pd.Timestamp('2023-01-01'),
+            entry_price=self.single_leg_long.entry_price,
+            strike=90.0,  # OTM put
+            expire_date=pd.Timestamp('2023-01-31'),
+            entry_delta=-0.3,
+            entry_dte=30,
+            underlying_entry=95.0,
+            margin_required=1000.0  # Add margin required to avoid division by zero
+        )
+        
+        result = otm_expire_position.close(
+            option_chain=self.data['option_chain'],
+            underlying_price_history=self.data['underlying_price_history'],
+            option_bp=10000
+        )
+        self.assertIsNotNone(result)
+        trade_result, transaction = result
+        self.assertEqual(transaction['close_reason'], 'expired')
+        self.assertEqual(transaction['days_held'], 30)
+        self.assertEqual(transaction['pnl'], 0)  # OTM option should expire worthless
+
+    def test_invalid_close_dates(self):
+        """Test invalid closure date scenarios."""
+        # Test close date before entry date
+        invalid_close_position = SingleLegOptionPosition(
+            option_strategy=OptionStrategy.LONG_CALL,
+            trade_id=1,
+            quantity=1,
+            option_type=OptionType.CALL,
+            position_side=PositionSide.LONG,
+            entry_date=pd.Timestamp('2023-02-01'),
+            entry_price=5.0,
+            strike=100.0,
+            expire_date=pd.Timestamp('2023-03-31'),
+            entry_delta=0.5,
+            entry_dte=60,
+            underlying_entry=95.0,
+            close_date=pd.Timestamp('2023-01-01')  # Close date before entry
+        )
+        
+        result = invalid_close_position.close(
+            option_chain=self.data['option_chain'],
+            underlying_price_history=self.data['underlying_price_history'],
+            option_bp=10000
+        )
+        self.assertIsNone(result)  # Should return None for invalid close date
+
+        # Test expire date before entry date
+        invalid_expire_position = SingleLegOptionPosition(
+            option_strategy=OptionStrategy.LONG_CALL,
+            trade_id=1,
+            quantity=1,
+            option_type=OptionType.CALL,
+            position_side=PositionSide.LONG,
+            entry_date=pd.Timestamp('2023-02-01'),
+            entry_price=5.0,
+            strike=100.0,
+            expire_date=pd.Timestamp('2023-01-31'),  # Expire before entry
+            entry_delta=0.5,
+            entry_dte=60,
+            underlying_entry=95.0
+        )
+        
+        result = invalid_expire_position.close(
+            option_chain=self.data['option_chain'],
+            underlying_price_history=self.data['underlying_price_history'],
+            option_bp=10000
+        )
+        self.assertIsNone(result)  # Should return None for invalid expire date
+
+    def test_exercise_fees(self):
+        """Test that exercise fees are correctly applied for ITM options at expiration."""
+        # Test ITM call at expiration (should include exercise fee)
+        itm_call = SingleLegOptionPosition(
+            option_strategy=OptionStrategy.LONG_CALL,
+            trade_id=1,
+            quantity=2,
+            option_type=OptionType.CALL,
+            position_side=PositionSide.LONG,
+            entry_date=pd.Timestamp('2023-01-01'),
+            entry_price=self.single_leg_long.entry_price,
+            strike=90.0,  # ITM call (underlying at 95)
+            expire_date=pd.Timestamp('2023-01-31'),
+            entry_delta=0.7,
+            entry_dte=30,
+            underlying_entry=95.0,
+            margin_required=1000.0  # Add margin required to avoid division by zero
+        )
+        
+        result = itm_call.close(
+            option_chain=self.data['option_chain'],
+            underlying_price_history=self.data['underlying_price_history'],
+            option_bp=10000
+        )
+        self.assertIsNotNone(result)
+        trade_result, transaction = result
+        # Should include base fee (1.78 per contract) plus exercise fee (5.00 per contract)
+        expected_fees = (1.78 * 2) + (5.00 * 2)  # 2 contracts
+        self.assertEqual(trade_result['fees'], expected_fees)
+
+        # Test ITM put at expiration (should include exercise fee)
+        itm_put = SingleLegOptionPosition(
+            option_strategy=OptionStrategy.LONG_PUT,
+            trade_id=2,
+            quantity=2,
+            option_type=OptionType.PUT,
+            position_side=PositionSide.LONG,
+            entry_date=pd.Timestamp('2023-01-01'),
+            entry_price=self.single_leg_long.entry_price,
+            strike=100.0,  # ITM put (underlying at 95)
+            expire_date=pd.Timestamp('2023-01-31'),
+            entry_delta=-0.7,
+            entry_dte=30,
+            underlying_entry=95.0,
+            margin_required=1000.0  # Add margin required to avoid division by zero
+        )
+        
+        result = itm_put.close(
+            option_chain=self.data['option_chain'],
+            underlying_price_history=self.data['underlying_price_history'],
+            option_bp=10000
+        )
+        self.assertIsNotNone(result)
+        trade_result, transaction = result
+        # Should include base fee (1.78 per contract) plus exercise fee (5.00 per contract)
+        expected_fees = (1.78 * 2) + (5.00 * 2)  # 2 contracts
+        self.assertEqual(trade_result['fees'], expected_fees)
+
+    def test_buying_power_updates(self):
+        """Test that buying power is correctly updated during position closure."""
+        initial_bp = 10000
+        
+        # Test long position closure (should add exit premium to BP)
+        long_pos = SingleLegOptionPosition(
+            option_strategy=OptionStrategy.LONG_CALL,
+            trade_id=1,
+            quantity=1,
+            option_type=OptionType.CALL,
+            position_side=PositionSide.LONG,
+            entry_date=pd.Timestamp('2023-01-01'),
+            entry_price=5.0,
+            strike=100.0,
+            expire_date=pd.Timestamp('2023-01-31'),
+            entry_delta=0.5,
+            entry_dte=30,
+            underlying_entry=95.0
+        )
+        
+        result = long_pos.close(
+            option_chain=self.data['option_chain'],
+            underlying_price_history=self.data['underlying_price_history'],
+            option_bp=initial_bp
+        )
+        self.assertIsNotNone(result)
+        trade_result, transaction = result
+        # BP should increase by exit premium and decrease by fees
+        self.assertGreater(transaction['bp'], initial_bp)
+
+        # Test short position closure (should subtract exit premium from BP and return margin)
+        short_pos = SingleLegOptionPosition(
+            option_strategy=OptionStrategy.SHORT_CALL,
+            trade_id=2,
+            quantity=1,
+            option_type=OptionType.CALL,
+            position_side=PositionSide.SHORT,
+            entry_date=pd.Timestamp('2023-01-01'),
+            entry_price=5.0,
+            strike=100.0,
+            expire_date=pd.Timestamp('2023-01-31'),
+            entry_delta=0.5,
+            entry_dte=30,
+            underlying_entry=95.0
+        )
+        
+        initial_bp = 10000
+        result = short_pos.close(
+            option_chain=self.data['option_chain'],
+            underlying_price_history=self.data['underlying_price_history'],
+            option_bp=initial_bp
+        )
+        self.assertIsNotNone(result)
+        trade_result, transaction = result
+        # BP should decrease by exit premium, increase by margin return, and decrease by fees
+        final_bp = transaction['bp']
+        self.assertNotEqual(final_bp, initial_bp)  # BP should change
+        self.assertTrue(
+            final_bp > initial_bp - (abs(transaction['exit_price']) * 100) + transaction['capital_used'] - trade_result['fees']
+        )
+
+    def test_margin_required_property(self):
+        """Test the margin_required property calculation."""
+        # Test long call - should have no margin requirement
+        long_call = SingleLegOptionPosition(
+            option_strategy=OptionStrategy.LONG_CALL,
+            trade_id=1,
+            quantity=1,
+            option_type=OptionType.CALL,
+            position_side=PositionSide.LONG,
+            entry_date=pd.Timestamp('2023-01-01'),
+            entry_price=5.0,
+            strike=100.0,
+            expire_date=pd.Timestamp('2023-01-31'),
+            entry_delta=0.5,
+            entry_dte=30,
+            underlying_entry=100.0
+        )
+        self.assertEqual(long_call.margin_required, 0)
+
+        # Test short put - should use IB's formula
+        short_put = SingleLegOptionPosition(
+            option_strategy=OptionStrategy.SHORT_PUT,
+            trade_id=2,
+            quantity=1,
+            option_type=OptionType.PUT,
+            position_side=PositionSide.SHORT,
+            entry_date=pd.Timestamp('2023-01-01'),
+            entry_price=5.0,
+            strike=100.0,
+            expire_date=pd.Timestamp('2023-01-31'),
+            entry_delta=-0.5,
+            entry_dte=30,
+            underlying_entry=100.0
+        )
+        
+        # Calculate expected margin using IB's formula
+        otm_amount = max(0, short_put.underlying_entry - short_put.strike)
+        expected_margin = (
+            short_put.entry_price +
+            max(
+                (0.15 * short_put.underlying_entry - otm_amount),
+                (0.10 * short_put.underlying_entry)
+            )
+        ) * 100 * short_put.quantity
+        
+        self.assertEqual(short_put.margin_required, round(expected_margin, 2))
+
+        # Test short call - should use IB's formula
+        short_call = SingleLegOptionPosition(
+            option_strategy=OptionStrategy.SHORT_CALL,
+            trade_id=3,
+            quantity=1,
+            option_type=OptionType.CALL,
+            position_side=PositionSide.SHORT,
+            entry_date=pd.Timestamp('2023-01-01'),
+            entry_price=5.0,
+            strike=100.0,
+            expire_date=pd.Timestamp('2023-01-31'),
+            entry_delta=0.5,
+            entry_dte=30,
+            underlying_entry=100.0
+        )
+        
+        # Calculate expected margin using IB's formula
+        otm_amount = max(0, short_call.strike - short_call.underlying_entry)
+        expected_margin = (
+            short_call.entry_price +
+            max(
+                (0.15 * short_call.underlying_entry - otm_amount),
+                (0.10 * short_call.underlying_entry)
+            )
+        ) * 100 * short_call.quantity
+        
+        self.assertEqual(short_call.margin_required, round(expected_margin, 2))
+
+        # Test margin for different moneyness levels
+        test_cases = [
+            # (underlying, strike, option_type, expected_otm)
+            (100.0, 90.0, OptionType.PUT, 10.0),   # OTM put
+            (100.0, 110.0, OptionType.PUT, 0.0),   # ITM put
+            (100.0, 90.0, OptionType.CALL, 0.0),   # ITM call
+            (100.0, 110.0, OptionType.CALL, 10.0), # OTM call
+        ]
+
+        for underlying, strike, option_type, expected_otm in test_cases:
+            position = SingleLegOptionPosition(
+                option_strategy=OptionStrategy.SHORT_CALL if option_type == OptionType.CALL else OptionStrategy.SHORT_PUT,
+                trade_id=4,
+                quantity=1,
+                option_type=option_type,
+                position_side=PositionSide.SHORT,
+                entry_date=pd.Timestamp('2023-01-01'),
+                entry_price=5.0,
+                strike=strike,
+                expire_date=pd.Timestamp('2023-01-31'),
+                entry_delta=0.5 if option_type == OptionType.CALL else -0.5,
+                entry_dte=30,
+                underlying_entry=underlying
+            )
+
+            # Calculate expected margin
+            expected_margin = (
+                position.entry_price +
+                max(
+                    (0.15 * underlying - expected_otm),
+                    (0.10 * underlying)
+                )
+            ) * 100 * position.quantity
+
+            self.assertEqual(position.margin_required, round(expected_margin, 2),
+                f"Margin mismatch for {option_type} with strike {strike} and underlying {underlying}")
+
+if __name__ == '__main__':
+    unittest.main()

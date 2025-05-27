@@ -32,7 +32,7 @@ class BasePosition(ABC):
             self.entry_date = pd.Timestamp(self.entry_date)
 
  
-    @cached_property
+    @property
     def signed_entry_price(self) -> float:
         """
         Get the entry price with correct sign based on position side.
@@ -42,7 +42,7 @@ class BasePosition(ABC):
        
         return -abs(self.entry_price) if self.is_long else abs(self.entry_price)
 
-    @cached_property
+    @property
     def signed_exit_price(self) -> float:
         """
         Get the exit price with correct sign based on position side.
@@ -201,6 +201,7 @@ class BaseOptionPosition(BasePosition, ABC):
 
     def calculate_position_margin(self, leverage: float = 1.0) -> float:
         """Calculate margin requirement for the position using instance variables."""
+        
         if not self.entry_price or not self.underlying_entry:
             return 0.0
 
@@ -219,8 +220,8 @@ class BaseOptionPosition(BasePosition, ABC):
         Calculate P&L for the position considering all parameters.
         
         Args:
-            exit_price (Optional[float]): Exit price of the option. If None, returns None.
-            underlying_exit (Optional[float]): Exit price of the underlying asset. If None, returns None.
+            exit_price (Optional[float]): Exit price of the option (needed for early closure)
+            underlying_exit (Optional[float]): Exit price of the underlying asset (needed for expiration).
             close_reason (str): Reason for closing the position (e.g., 'expired', 'early closure').
             commission (float, optional): Transaction fees per contract. Defaults to 1.78.
             exercise_fee (float, optional): Exercise fee for ITM options per contract. Defaults to 5.00.
@@ -234,33 +235,64 @@ class BaseOptionPosition(BasePosition, ABC):
         if (exit_price is None and self.exit_price is None) and (underlying_exit is None and self.underlying_exit is None):
             logger.warning('Need to provide either option or underlying exit price for pnl calculation')
             return None
-        
      
-        # Expiration, get intrinsic value if not provided as exit_price  
+        # Expiration, get intrinsic value using underlying exit if it has not already been calculated 
         if close_reason == 'expired':
-            if underlying_exit is None and self.underlying_exit is None:
+            if underlying_exit is None:
+                underlying_exit = self.underlying_exit  # Use instance variable if not provided
+            if underlying_exit is None:
                 logger.warning("Could not complete pnl calculation with intrinsic value due to lack of underlying close")
                 return None
-            underlying_exit = self.underlying_exit if self.underlying_exit else underlying_exit
-            exit_price = self.calculate_intrinsic_value(underlying_exit)
-            signed_exit_price = PriceUtils.get_signed_exit_price(exit_price, self.position_side)
-        
-        # Early closure, use option exit price
-        else:
-            # For long positions, exit price should be positive (credit/STC)
-            # For short positions, exit price should be negative (debit/BTC)
-            signed_exit_price = self.signed_exit_price if self.exit_price is not None else PriceUtils.get_signed_exit_price(exit_price, self.position_side)
+
+            logger.debug(f'Retrieving data for expiration for {self.option_type}, {self.expire_date}')
             
+            # Check if self.exit_price has already been set
+            if self.exit_price is None:  # Only calculate if self.exit_price is not already set
+                exit_price = self.calculate_intrinsic_value(underlying_exit)
+                logger.debug(f'Calculated exit price: {exit_price}')
+                self.exit_price = exit_price
+                self.underlying_exit = underlying_exit
+            else:
+                exit_price = self.exit_price  # Use the instance variable if it has been set
+
+            signed_exit_price = self.signed_exit_price
+            logger.debug(f'self exit price: {self.exit_price}')
+            logger.debug(f'signed self exit price: {self.signed_exit_price}')
+
+            logger.debug(f'Exit price for {self.option_strategy}|{self.underlying_exit}: {signed_exit_price}')
+
+        # Early closure, use option exit price
+        elif close_reason == 'early closure':
+            if self.exit_price is not None or exit_price is not None:
+                logger.debug(f'Calculating pnl for early closure for {self.option_type}, {self.expire_date, {exit_price}}')
+                # For long positions, exit price should be positive (credit/STC)
+                # For short positions, exit price should be negative (debit/BTC)
+                signed_exit_price = self.signed_exit_price if self.exit_price is not None else PriceUtils.get_signed_exit_price(exit_price, self.position_side)
+
+            else:
+                logger.debug(f'Need to provide exit_price for early closure (pnl) {self.option_type}, {self.expire_date, {exit_price}}')
+                return None
+           
+        else:
+            logger.debug(f'Invalid close reason {close_reason}') 
+            return None
+        
         # Calculate PnL
         pnl = (signed_exit_price + signed_entry_price) * 100 * self.quantity
         
         # Subtract fees
         fees = commission if commission else 0
-        if close_reason == 'expired' and self.is_ITM(underlying_exit): # ITM
-            fees += exercise_fee if exercise_fee else 0  # exercise fee
+        if close_reason == 'expired': 
+            if underlying_exit is not None or self.underlying_exit is not None:
+                if self.is_ITM(underlying_exit): # ITM
+                    fees += exercise_fee if exercise_fee else 0  # exercise fee
+                    logger.debug(f'Calculating pnl with fees: {fees} for {self.quantity} {'ITM' if self.is_ITM(underlying_exit) and close_reason == "expired" else 'OTM'} contracts')
+
+            else: 
+                logger.debug(f'On expiration but not able to calculate intrinsic value. Perhaps an early closure on expiration day {self.option_strategy}')
         fees = round(fees * self.quantity, 2)
+        self.fees = fees
          # fees *= self.quantity
-        logger.debug(f'Calculating pnl with fees: {fees} for {self.quantity} {'ITM' if self.is_ITM(underlying_exit) and close_reason == "expired" else 'OTM'} contracts')
         
         # Calculate P&L
         pnl -= fees
@@ -429,7 +461,18 @@ class SingleLegOptionPosition(BaseOptionPosition):
         return self.position_side in [PositionSide.SHORT, PositionSide.SHORT.value, "short"]
 
     def is_ITM(self, underlying_price: float) -> bool:
-        """Check if position is in the money."""
+        """
+        Determine if the position is in the money (ITM) based on the current underlying price.
+
+        Args:
+            underlying_price (float): The current price of the underlying asset.
+
+        Returns:
+            bool: True if the position is in the money, False otherwise.
+        """
+        if underlying_price is None:
+            logger.error(f'Cannot determine if ITM for {self.option_strategy} because underlying price is None')
+            raise ValueError("Underlying price must be provided to determine if the position is in the money (ITM).")
         return self.is_put and underlying_price <= self.strike or self.is_call and underlying_price >= self.strike
 
     def is_closed(self) -> bool:
@@ -633,19 +676,20 @@ class SingleLegOptionPosition(BaseOptionPosition):
             logger.error(f"Close date {close_date} is before entry date {self.entry_date} - skipping trade")
             return None
         
-        # Get closing data
-        closing_data = self._get_closing_data(option_chain, underlying_price_history)
-        if closing_data['exit_price'] is None or closing_data['underlying_exit'] is None:
-            logger.warning("Skipping trade due to missing close data")
-            return None
+        # Update class with closing data
+        self._update_closing_data(option_chain, underlying_price_history)
+        # if self.exit_price is None or self.underlying_exit is None:
+        #     logger.warning("Skipping trade due to missing close data")
+        #     return None
             
-        # Update position with closing data
-        self.exit_price = closing_data['exit_price']
-        # self.exit_price = PriceUtils.get_signed_exit_price(exit_price=closing_data['exit_price'], 
-        #                                               position_side=self.position_side)   
-        self.exit_delta = closing_data['exit_delta']
-        self.underlying_exit = closing_data['underlying_exit']
-        logger.debug(f'Exit price: {self.exit_price}')
+        # # Update position with closing data
+        # self.exit_price = closing_data['exit_price']
+        # # self.exit_price = PriceUtils.get_signed_exit_price(exit_price=closing_data['exit_price'], 
+        # #                                               position_side=self.position_side)   
+        # self.exit_delta = closing_data['exit_delta']
+        # self.underlying_exit = closing_data['underlying_exit']
+        logger.debug(f'Exit price: {self.exit_price} | Underlying close: {self.underlying_exit}')
+
         # Add or subtract closing price/premium from buying power
         option_bp += self.signed_exit_price * self.quantity * 100  # Add/subtract exit premium  
         logger.debug(f'Option BP: {option_bp}')
@@ -710,20 +754,26 @@ class SingleLegOptionPosition(BaseOptionPosition):
         
        
 
-    def _get_closing_data(self, option_chain: pd.DataFrame, underlying_price_history: pd.DataFrame) -> Optional[Dict]:
+    def _update_closing_data(self, option_chain: pd.DataFrame, underlying_price_history: pd.DataFrame):
         """
-        Get closing price data for this position.
+        Update the instance with closing price data for the position.
+
+        This method retrieves the closing price data based on the current position's 
+        expiration date or close date. It updates the instance variables for 
+        underlying_exit, exit_price, and exit_delta if valid data is found.
+
         Args:
-            option_chain: DataFrame containing full option chain data.
-            underlying_price_history: DataFrame containing underlying price data.
+            option_chain (pd.DataFrame): DataFrame containing the full option chain data.
+            underlying_price_history (pd.DataFrame): DataFrame containing historical prices of the underlying asset.
+
         Returns:
-            Optional[Dict]: Dictionary with closing data if successful, None if no valid data found.
+            None: This method updates the instance variables with closing data if found, and does not return any value.
         """
         # If no close_date, this is an expiration
         if not self.close_date:
             if self.expire_date not in underlying_price_history.index:
-                logger.warning(f"No valid closing data found for position with expire date {self.expire_date}")
-                return None
+                logger.error(f"No valid (expiration) closing prices found for strike {self.strike} and expire date {self.expire_date}")
+                raise ValueError(f"No valid closing data found for position with expire date {self.expire_date}")
             
             # Get underlying price at close
             underlying_close = underlying_price_history.loc[self.expire_date, 'close']
@@ -732,7 +782,7 @@ class SingleLegOptionPosition(BaseOptionPosition):
             
             # Calculate intrinsic value at expiration
             exit_price = self.calculate_intrinsic_value(underlying_close)
-            exit_price = -abs(exit_price) if self.is_long else abs(exit_price)
+            # exit_price = -abs(exit_price) if self.is_long else abs(exit_price)  # WTF?
 
             logger.info(f'Expiration {self.expire_date} - strike {self.strike} - exit price: {exit_price}')
 
@@ -748,13 +798,13 @@ class SingleLegOptionPosition(BaseOptionPosition):
 
             exit_delta = round(filtered_df[delta_col].iloc[0], 2) if not filtered_df.empty else None
 
-            logger.debug(f'ready to return result {underlying_close}, {exit_price}, {exit_delta}')
-            
-            return {
-                'underlying_exit': underlying_close,
-                'exit_price': exit_price,
-                'exit_delta': exit_delta
-            }
+            # Update instance variables only if exit_price and exit_delta are valid
+            if exit_price is not None and exit_delta is not None:
+                self.underlying_exit = underlying_close
+                self.exit_price = exit_price
+                self.exit_delta = exit_delta
+
+            return  # No need to return anything
         
         # Early close - get data from close_date forward (up to 5 days)
         date_range = pd.date_range(self.close_date, self.close_date + pd.Timedelta(days=5))
@@ -778,31 +828,47 @@ class SingleLegOptionPosition(BaseOptionPosition):
             bid = getattr(row, bid_col)
             ask = getattr(row, ask_col)
             underlying_close = underlying_price_history.loc[date, 'close']   # added underlying data here
-            if underlying_close.empty or underlying_close is None:
-                underlying_close = row.underlying_last
+            # Use last close in options data if available 
+            if underlying_close is None:
+                if hasattr(row, 'underlying_last'):
+                    underlying_close = row.underlying_last
+                else:
+                    logger.error(f'Cannot get closing data because no underlying available for {self.option_strategy}')
+                    return None
             exit_delta = round(getattr(row, delta_col), 2)
             
             mid_price = PriceUtils.calculate_midpoint_price(bid, ask)
             if mid_price is not None:
-                return {
-                    'underlying_exit': underlying_close,
-                    'exit_price': mid_price,
-                    'exit_delta': exit_delta
-                }
+                # Update instance variables only if mid_price is valid
+                self.underlying_exit = underlying_close
+                self.exit_price = mid_price
+                self.exit_delta = exit_delta
+                
+                return  # No need to return anything
         
-        logger.error(f"No valid closing prices found for strike {self.strike} and expire date {self.expire_date}")
-        return None
-
+        logger.error(f"No valid (early close) closing prices found for strike {self.strike} and expire date {self.expire_date}")
+        raise ValueError(f"No valid closing data found for position with expire date {self.expire_date}")
+ 
     def calculate_intrinsic_value(self, underlying_price: float) -> float:
         """Calculate intrinsic value at expiration."""
-        logger.info(f'Calculating intrinsic value for {self.strike} and {underlying_price}-> {max(0, self.strike - underlying_price) if self.is_put else max(0, underlying_price - self.strike)}')
+        
         if self.is_put:
-            return max(0, self.strike - underlying_price)
+            iv = max(0, self.strike - underlying_price)
         else:  # Call        
-            return max(0, underlying_price - self.strike)
-
- 
-
+            iv = max(0, underlying_price - self.strike)
+        
+        logger.info(f'Calculated intrinsic value for {self.strike} and {underlying_price}->{iv}')
+        return iv
+    
+    def reset(self):
+        """Reset the position state for testing."""
+        self.exit_price = None
+        self.exit_delta = None
+        self.underlying_exit = None
+        self.close_date = None
+        # Reset any other relevant state variables
+        return self
+    
     def to_dict(self) -> Dict:
         """Convert position to dictionary format."""
         return {
