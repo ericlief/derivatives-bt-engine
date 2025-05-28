@@ -22,7 +22,10 @@ class TradeManager:
         self.max_positions = config.max_positions
         self.trade_counter = 0
         self.open_positions: List[Union[SingleLegOptionPosition, MultiLegOptionPosition]] = []
-    
+
+        logger.info(f'TradeManager instantiated')
+        logger.info(f'Init Cap: {self.initial_capital} | BP: {self.option_bp} | Trades: {self.trade_counter}')
+
     def _execute_trade(self, position: Union[SingleLegOptionPosition, MultiLegOptionPosition]) -> Optional[SingleLegOptionPosition]:
         """
         Execute a trade with the current buying power and leverage, updating the option buying power state (option_bp)
@@ -34,6 +37,9 @@ class TradeManager:
             Executed position if successful, None otherwise
         """
 
+        logger.debug(f'In `execute_trade` | BP {self.option_bp}')
+        logger.info(f'Init Cap: {self.initial_capital} | BP: {self.option_bp} | Trades: {self.trade_counter}')
+
         if isinstance(position, MultiLegOptionPosition) and position.spread_type != OptionSpreadType.NONE:
             if pd.isna(position.spread_price):
                 logger.error(f"Missing spread_price for spread {position.spread_id} leg {position.leg_number}")
@@ -44,15 +50,17 @@ class TradeManager:
 
         # Validate margin requirement
         effective_margin = position.margin_required  
-        if effective_margin is None or effective_margin <= 0:
-            logger.error(f"Invalid margin requirement for position on {position.entry_date}")
+        if effective_margin is None or effective_margin <= 0 and position.position_side == PositionSide.SHORT:
+            logger.error(f"Null or invalid margin requirement for short position on {position.entry_date}")
             return None 
         
         # Open LONG position
         if position.is_long:
             # Check if enough buying power to buy the option
             if self.option_bp >= premium:
+                logger.debug(f'Executing long trade. BP: {self.option_bp}')
                 self.option_bp -= premium  # Deduct premium
+                logger.debug(f'After premium update. BP: {self.option_bp}')
                 return position 
             else:
                 logger.warning(f"Insufficient buying power (${self.option_bp}) to buy option. Required: ${premium:.2f}")
@@ -62,8 +70,13 @@ class TradeManager:
         elif position.is_short:
             # Check if enough buying power for margin
             if self.option_bp >= effective_margin:
+                logger.debug(f'Executing short trade. BP: {self.option_bp}')
+
                 self.option_bp += premium  # Credit premium
                 self.option_bp -= effective_margin  # Reserve margin
+                logger.debug(f'After premium and margin update. BP: {self.option_bp}')
+                logger.info(f'Init Cap: {self.initial_capital} | BP: {self.option_bp} | Trades: {self.trade_counter}')
+
                 return position
             else:
                 logger.warning(f"Insufficient buying power (${self.option_bp}) to sell option. Required margin: ${effective_margin:.2f}")
@@ -94,7 +107,7 @@ class TradeManager:
         # Iterate through each trade signal
         for trade_signal in trade_signals.itertuples():
             current_date = trade_signal.Index
-
+            logger.debug(f'Processing date: {current_date}')
             # Close any expired positions
             trade_results, transactions = self._close_expired_positions(option_chain=option_chain, 
                                                                         underlying_price_history=underlying_price_history,
@@ -140,7 +153,8 @@ class TradeManager:
         # Close any remaining open positions at their expiration
         trade_results, transactions = self._close_expired_positions(option_chain=option_chain, 
                                                                     underlying_price_history=underlying_price_history,
-                                                                    current_date=current_date)
+                                                                    current_date=current_date,
+                                                                    close_all=True)
         all_trade_results.extend(trade_results)
         all_transactions.extend(transactions)
 
@@ -155,7 +169,8 @@ class TradeManager:
     def _close_expired_positions(self,
                                  option_chain: pd.DataFrame,
                                  underlying_price_history: pd.DataFrame,
-                                 current_date: pd.Timestamp) -> List[Optional[OptionTradeResult]]:
+                                 current_date: pd.Timestamp,
+                                 close_all=False) -> List[Optional[OptionTradeResult]]:
         """
         Close all open positions that have reached their expiration or close date, and update the option buying power accordingly.
         
@@ -170,7 +185,8 @@ class TradeManager:
 
             # Close position if we're on/past the close_date or expire_date
             if ((pos.close_date is not None and current_date >= pos.close_date) or
-                (pos.expire_date is not None and current_date >= pos.expire_date)):
+                (pos.expire_date is not None and current_date >= pos.expire_date) or
+                close_all):
                 
                 logger.debug(f'Closing position: {pos}')
                 result, transaction = pos.close(option_chain=option_chain, 

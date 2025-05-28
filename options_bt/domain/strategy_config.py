@@ -30,7 +30,29 @@ class SingleLegOptionStrategyConfig(BaseOptionStrategyConfig):
     # leg: OptionLegConfig = field(default_factory=OptionLegConfig)
     leg: OptionLegConfig 
 
-
+    def __post_init__(self):
+        """
+        Option strategy types for single leg:
+        SHORT_PUT = "short_put"
+        LONG_PUT = "long_put"
+        SHORT_CALL = "short_call"
+        LONG_CALL = "long_call"
+        """
+        if self.option_strategy == OptionStrategy.LONG_CALL:
+            if self.leg.option_type != OptionType.CALL or self.leg.position_side != PositionSide.LONG:
+                raise ValueError(f"Option strategy {self.option_strategy} requires one long call leg")
+        elif self.option_strategy == OptionStrategy.LONG_PUT:
+            if self.leg.option_type != OptionType.PUT or self.leg.position_side != PositionSide.LONG:
+                raise ValueError(f"Option strategy {self.option_strategy} requires one long put leg")
+        elif self.option_strategy == OptionStrategy.SHORT_CALL:
+            if self.leg.option_type != OptionType.CALL or self.leg.position_side != PositionSide.SHORT:
+                raise ValueError(f"Option strategy {self.option_strategy} requires one short call leg")        
+        elif self.option_strategy == OptionStrategy.SHORT_PUT:
+            if self.leg.option_type != OptionType.PUT or self.leg.position_side != PositionSide.SHORT:
+                raise ValueError(f"Option strategy {self.option_strategy} requires one short put leg")
+        else:
+            raise ValueError("Unknown single-leg option strategy")
+        
 @dataclass(kw_only=True)
 class MultiLegOptionStrategyConfig(BaseOptionStrategyConfig):
     spread_type: OptionSpreadType

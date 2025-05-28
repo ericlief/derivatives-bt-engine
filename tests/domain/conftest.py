@@ -28,7 +28,7 @@ def mock_data():
     dates = pd.date_range(start=start_date, end=end_date, freq='D')
 
     # Generate varying underlying prices (slight upward trend with noise)
-    # np.random.seed(42)  # For reproducibility
+    np.random.seed(42)  # For reproducibility
     base_price = 95.0
     price_changes = np.random.normal(0.5, 0.5, len(dates)).cumsum()  # Random walk with upward drift
     underlying_prices = base_price + price_changes
@@ -72,9 +72,9 @@ def mock_data():
             )
             calls.append(call_price)
             puts.append(put_price)
-            print('underly', underlying_prices[i])
-            print('call', call_price, call_delta)
-            print('put', put_price, put_delta)
+            # print('underly', underlying_prices[i])
+            # print('call', call_price, call_delta)
+            # print('put', put_price, put_delta)
             # Add bid-ask spread that widens for further dates and lower liquidity
             
             base_spread = 0.05 + (T * 0.1) + (abs(call_delta - 0.5) * 0.1)
@@ -120,10 +120,10 @@ def black_scholes(S, K, T, r, sigma, option_type='call'):
         
     return price, delta
 
-@pytest.fixture
+@pytest.fixture(scope='module')
 def mock_backtester(mocker):
     return mocker.patch('options_bt.domain.backtester.Backtester', autospec=True)
 
-@pytest.fixture
+@pytest.fixture(scope='module')
 def mock_option_signal_generator(mocker):
     return mocker.patch('options_bt.domain.option_signal_generator.OptionSignalGenerator', autospec=True)

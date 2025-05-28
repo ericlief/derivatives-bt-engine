@@ -168,7 +168,7 @@ class DataLoader:
         logger.info("Preprocessing options chain data...")
         
         # Make a copy to avoid modifying the original
-        df = option_chain.copy()
+        df = options_chain.copy()
         
         # Normalize the DataFrame index if needed - more efficient approach
         try:

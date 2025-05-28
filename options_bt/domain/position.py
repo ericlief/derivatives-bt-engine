@@ -611,6 +611,8 @@ class SingleLegOptionPosition(BaseOptionPosition):
                 close_date=entry_date + pd.Timedelta(days=early_close_days) if early_close_days is not None else None,
             )
 
+            logger.debug(f'Constructing position from symbol')
+            logger.debug(f'{option_strategy} | Premium: {position.premium}')
             # if is_spread:
             #     position = MultiLegOptionPosition(
             #         trade_id=self.trade_counter,
@@ -696,13 +698,16 @@ class SingleLegOptionPosition(BaseOptionPosition):
         # Restore margin for short positions
         if self.is_short:
             option_bp += self.margin_required
+            logger.debug(f'Updated BP with margin: {option_bp}')
 
         
         pnl = self.calculate_pnl(close_reason=close_reason)
         logger.debug(f'Calculated pnl: {pnl}')
 
         # Deduct fees from buying power
+        logger.debug(f'Deducting fees from BP: {option_bp}')
         option_bp -= self.fees if self.fees is not None else 0 # Deduct fees from buying power 
+        logger.debug(f'Deducted fees from BP: {option_bp}')
 
         # Calculate days held
         days_held = pd.Timedelta(close_date - self.entry_date).days
@@ -710,7 +715,7 @@ class SingleLegOptionPosition(BaseOptionPosition):
             logger.error(f"Calculated negative days held ({days_held}) - skipping trade")
             return None
     
-        logger.debug(f'ready to return result {pnl}')
+        logger.debug(f'ready to return result. PnL: {pnl}')
 
          # Prepare trade result
         transaction =  {
@@ -736,7 +741,7 @@ class SingleLegOptionPosition(BaseOptionPosition):
             'pnl': round(pnl, 2),
         }
         trade_result = OptionTradeResult(
-            option_strategy=self.option_strategy,
+            option_strategy=self.option_strategy.value,
             trade_id=self.trade_id,
             quantity=self.quantity,
             opened=self.entry_date,
