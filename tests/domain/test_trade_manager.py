@@ -59,6 +59,36 @@ def basic_filter_signals(config, signals):
             )
     return signals
 
+def validate_results(tm, results):
+    
+    assert 'trade_results' in results
+    assert 'transactions' in results
+    trade_results = results['trade_results']
+    transactions = results['transactions']
+    assert not trade_results.empty
+    assert not transactions.empty
+
+    init_cap = tm.initial_capital
+    logger.debug(f'Init cap: {init_cap}')   
+    trade_results['cum_pnl'] = round(trade_results['pnl'].cumsum(), 2)
+    total_pnl = trade_results['cum_pnl'].iloc[-1]
+    logger.debug(f'Total pnl {total_pnl}')
+    total_fees = trade_results['fees'].sum()
+    logger.debug(f'Total fees {total_fees}')
+    trade_results['capital'] = round(init_cap + trade_results['cum_pnl'], 2)  # Track actual capital based on cumulative PnL
+    final_cap = trade_results['capital'].iloc[-1]
+    logger.debug(f'Final cap: {final_cap}')
+    final_bp = tm.option_bp
+    # Check BP
+    assert final_bp == init_cap + total_pnl  # - total_fees
+    # Check cap
+    assert final_cap == final_bp
+
+
+     # For debugging
+    logger.info(trade_results.head())
+    logger.info(transactions.head())
+
 def test_construct_trades_long_call(setup):
 
     config = SingleLegOptionStrategyConfig(
@@ -88,24 +118,12 @@ def test_construct_trades_long_call(setup):
     tm = TradeManager(config)
     logger.info(f'Setup for {config.option_strategy} strategy , BP: {tm.option_bp}, Init Cap: {tm.initial_capital}')
     results = tm.construct_and_execute_trades_from_signals(signals, option_chain, underlying)
-    assert 'trade_results' in results
-    assert 'transactions' in results
-    trade_results = results['trade_results']
-    transactions = results['transactions']
-    assert not trade_results.empty
-    assert not transactions.empty
+    
+    # Validate
+    validate_results(tm, results)
+ 
 
-    trade_results['cum_pnl'] = round(trade_results['pnl'].cumsum(), 2)
-    total_pnl = trade_results['cum_pnl'].iloc[-1]
-    logger.debug(f'Total pnl {total_pnl}')
-    total_fees = trade_results['fees'].sum()
-    logger.debug(f'Total fees {total_fees}')
-    # Check BP
-    assert tm.option_bp == tm.initial_capital + total_pnl  # - total_fees
 
-    # For debugging
-    logger.info(trade_results.head())
-    logger.info(transactions.head())
 # @pytest.fixture(scope="module")
 def test_construct_trades_short_call(setup):
 
@@ -137,21 +155,7 @@ def test_construct_trades_short_call(setup):
     # max_allowed_margin = config.max_margin_utilization * config.initial_capital * config.leverage
 
     results = tm.construct_and_execute_trades_from_signals(signals, option_chain, underlying)
-    assert 'trade_results' in results
-    assert 'transactions' in results
-    trade_results = results['trade_results']
-    transactions = results['transactions']
-    assert not trade_results.empty
-    assert not transactions.empty
-
-    trade_results['cum_pnl'] = round(trade_results['pnl'].cumsum(), 2)
-    total_pnl = trade_results['cum_pnl'].iloc[-1]
-    logger.debug(f'Total pnl {total_pnl}')
-    total_fees = trade_results['fees'].sum()
-    logger.debug(f'Total fees {total_fees}')
-    # Check BP
-    assert tm.option_bp == tm.initial_capital + total_pnl  # - total_fees
-
-    # For debugging
-    logger.info(trade_results.head())
-    logger.info(transactions.head())
+    
+    # Validate
+    validate_results(tm, results)
+ 

@@ -82,10 +82,11 @@ class OptionSignalGenerator(BaseSignalGenerator):
         logger.debug(option_chain_df.head())
 
         # Remove columns that are not needed
-        prefix = 'p_' if OptionType.is_put(self.option_type) else 'c_'
+        is_put = OptionType.is_put(self.option_type)
+        prefix = 'p_' if is_put else 'c_'
         cols = option_chain_df.columns
         needed_cols = [col for col in cols if col.startswith(prefix)]
-        needed_cols.extend(['strike', 'dte', 'underlying_last', 'expire_date', 'strike_distance', 'strike_distance_pct'])
+        needed_cols.extend(['strike', 'dte', 'underlying_last', 'expire_date'])
         option_chain_df = option_chain_df[needed_cols]
         
         # Filter out options with zero or negative bids/asks
@@ -133,13 +134,13 @@ class OptionSignalGenerator(BaseSignalGenerator):
             raise ValueError
         
         # Filter by delta parameters        
-        delta_col = 'p_delta' if OptionType.is_put(self.option_type) else 'c_delta'
+        delta_col = prefix + 'delta'
         logger.debug(f'Initial delta distribution')
         logger.debug(option_chain_df[delta_col].describe())
         
         if self.delta_range:    
             # Handle range case
-            if OptionType.is_put(self.option_type):
+            if is_put:
                 min_delta = -abs(self.delta_range[1])  # More negative (more ITM)
                 max_delta = -abs(self.delta_range[0])  # Less negative (more OTM)
             else:
@@ -147,21 +148,27 @@ class OptionSignalGenerator(BaseSignalGenerator):
                 max_delta = abs(self.delta_range[1])  # More positive (more ITM)
 
             logger.debug(option_chain_df[delta_col].describe())
-            logger.debug(f'Filtering for delta range: {min_delta} to {max_delta} for {option_type.value}')
+            logger.debug(f'Filtering for delta range: {min_delta} to {max_delta} for {'put' if is_put else 'call'}')
             delta_mask = option_chain_df[delta_col].between(min_delta, max_delta)
             option_chain_df = option_chain_df[delta_mask]
             logger.debug(option_chain_df[delta_col].describe())
 
-            # Sort by delta value while maintaining the date index
-            ascending = OptionType.is_call(self.option_type)  # Ascending for calls, descending for puts
-            option_chain_df = option_chain_df.sort_values(by=[delta_col], ascending=ascending)
+            # Reset the index to turn the date index into a column
+            option_chain_df = option_chain_df.reset_index()
+
+            # Sort by the new date column and then by 'delta_col'
+            option_chain_df = option_chain_df.sort_values(by=['index', delta_col], ascending=[True, True], kind='mergesort')
+
+            # Set the index back to the date column if needed
+            option_chain_df = option_chain_df.set_index('index')
+
             trade_signals = option_chain_df
             logger.debug(f'Sample chain of length: {len(option_chain_df)}')
             logger.debug(option_chain_df.head())
 
         elif self.delta_target:
             # Handle target case
-            if OptionType.is_put(self.option_type):
+            if is_put:
                 # For puts, we want negative deltas
                 target = -abs(self.delta_target)
                 # For puts, we want to find options with deltas closest to the target (more negative)
@@ -181,7 +188,10 @@ class OptionSignalGenerator(BaseSignalGenerator):
             option_chain_df = option_chain_df[option_chain_df['delta_diff'] <= max_delta_diff]
             
             # Sort by delta difference and delta value while maintaining the date index
-            option_chain_df = option_chain_df.sort_values(by=['delta_diff', delta_col], ascending=[True, ascending])
+            # option_chain_df = option_chain_df.sort_values(by=['delta_diff', delta_col], ascending=[True, ascending])
+            option_chain_df = option_chain_df.reset_index()
+            option_chain_df = option_chain_df.sort_values(by=['index', delta_diff], ascending=[True, True], kind='mergesort')
+            option_chain_df = option_chain_df.set_index('index')
             trade_signals = option_chain_df
             logger.debug(f'Sample chain of length: {len(option_chain_df)}')
             logger.debug(option_chain_df.head())

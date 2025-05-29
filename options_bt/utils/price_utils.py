@@ -9,6 +9,7 @@ class PriceUtils:
     @staticmethod
     def get_price(option_chain: pd.DataFrame, option_type: OptionType, strike: float, expiration: pd.Timestamp) -> float:
         """Get the price of an option from an option chain."""
+       
         return option_chain.loc[(option_chain['option_type'] == option_type) & (option_chain['strike'] == strike) & (option_chain['expiration'] == expiration), 'price'].values[0]
 
     @staticmethod
@@ -60,3 +61,15 @@ class PriceUtils:
             
         
         return abs(exit_price) if PositionSide.is_long(position_side) else -abs(exit_price)
+
+    @staticmethod
+    def calculate_intrinsic_value(strike: float, underlying_price: float, option_type: OptionType) -> float:
+        """Calculate intrinsic value at expiration."""
+        
+        if OptionType.is_put(option_type):
+            iv = max(0, strike - underlying_price)
+        else:  # Call        
+            iv = max(0, underlying_price - strike)
+        
+        logger.info(f'Calculated intrinsic value for {strike} and {underlying_price} -> {iv}')
+        return iv

@@ -1,6 +1,6 @@
 from __future__ import annotations
 from enum import Enum
-from typing import TypedDict, Optional, Union
+from typing import TypedDict, Optional, Union, NamedTuple
 import pandas as pd
 
 class OptionType(str, Enum):
@@ -23,6 +23,8 @@ class OptionType(str, Enum):
             return value == OptionType.PUT
         elif isinstance(value, pd.Series) and 'option_type' in value:
             return value.option_type in [OptionType.PUT, OptionType.PUT.value, "put"]
+        elif hasattr(value, 'option_type'):  # Check for NamedTuple or similar
+            return value.option_type in [OptionType.PUT, OptionType.PUT.value, "put"]
         elif isinstance(value, str):
             return value.lower() == "put"
         return False
@@ -41,6 +43,8 @@ class OptionType(str, Enum):
         if isinstance(value, OptionType):
             return value == OptionType.CALL
         elif isinstance(value, pd.Series) and 'option_type' in value:
+            return value.option_type in [OptionType.CALL, OptionType.CALL.value, "call"]
+        elif hasattr(value, 'option_type'):  # Check for NamedTuple or similar
             return value.option_type in [OptionType.CALL, OptionType.CALL.value, "call"]
         elif isinstance(value, str):
             return value.lower() == "call"
@@ -66,10 +70,11 @@ class PositionSide(str, Enum):
             return value == PositionSide.LONG
         elif isinstance(value, pd.Series) and 'position_side' in value:
             return value.position_side in [PositionSide.LONG, PositionSide.LONG.value, "long"]
+        elif hasattr(value, 'position_side'):  # Check for NamedTuple or similar
+            return value.position_side in [PositionSide.LONG, PositionSide.LONG.value, "long"]
         elif isinstance(value, str):
             return value.lower() == "long"
         return False
-
 
     @staticmethod
     def is_short(value: Union[PositionSide, str, pd.Series]) -> bool:
@@ -85,6 +90,8 @@ class PositionSide(str, Enum):
         if isinstance(value, PositionSide):
             return value == PositionSide.SHORT
         elif isinstance(value, pd.Series) and 'position_side' in value:
+            return value.position_side in [PositionSide.SHORT, PositionSide.SHORT.value, "short"]
+        elif hasattr(value, 'position_side'):  # Check for NamedTuple or similar
             return value.position_side in [PositionSide.SHORT, PositionSide.SHORT.value, "short"]
         elif isinstance(value, str):
             return value.lower() == "short"

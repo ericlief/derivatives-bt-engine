@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from typing import List, Optional, Dict, Union
 import pandas as pd
 from options_bt.domain.enums import *  
-from options_bt.bt import setup_logger      
+from options_bt.utils.logger import setup_logger      
 
 # from options_bt.domain.position import SingleLegOptionPosition
 

@@ -34,7 +34,7 @@ def run_test_suite():
     #     'vix_data': vix_data
     # }
     
-    backtester = Backtester(
+    bt = Backtester(
         data=data,
         save_trades=True,
         log_to_sheets=True
@@ -55,14 +55,29 @@ def run_test_suite():
         leg=OptionLegConfig(
             option_type=OptionType.CALL,
             position_side=PositionSide.SHORT,
+            # delta_range=(0.65, 0.75),
             delta_target=0.75,
-            dte_range=(42, 45),
+            dte_range=(40, 45),
             )
             
     )
 
-    result = backtester.run(config)
-    print(result)
+    results = bt.run(config)
+    trade_results = results['trade_results']
+    transactions = results['transactions']
+
+    print('Finished backtest')
+    print('Trade results: ')
+    print(trade_results.head())
+    print('Transactions:')
+    print(transactions.head())
+    print()
+    # MTM
+    print('Calculating MTM')
+    mtm_res = bt.calculate_mtm(results, config=config)
+    print(f'MTM results:')
+    print(mtm_res.head())
+
     # Define hyperparameter sets for different tests
     # hyperparameter_sets = [
         # {

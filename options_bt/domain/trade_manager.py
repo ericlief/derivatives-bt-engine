@@ -100,14 +100,13 @@ class TradeManager:
             Dictionary containing trade results and transactions
         """
         # Initialize variables
-        trade_counter = 0
         all_trade_results = []
         all_transactions = []
         skipped_trades = 0
         # Iterate through each trade signal
         for trade_signal in trade_signals.itertuples():
             current_date = trade_signal.Index
-            logger.debug(f'Processing date: {current_date}')
+            # logger.debug(f'Processing date: {current_date}')
             # Close any expired positions
             trade_results, transactions = self._close_expired_positions(option_chain=option_chain, 
                                                                         underlying_price_history=underlying_price_history,
@@ -132,9 +131,9 @@ class TradeManager:
                 # Execute the trade and update the option buying power
                 executed_trade = self._execute_trade(candidate_position)
                 if executed_trade:
-                    executed_trade.trade_id = trade_counter
+                    executed_trade.trade_id = self.trade_counter
                     self.open_positions.append(executed_trade)
-                    trade_counter += 1  # Increment counter only for successful trades
+                    self.trade_counter += 1  # Increment counter only for successful trades
                     logger.debug(f'Successfully executed trade: {executed_trade}')
                     logger.debug(f'BP: ${self.option_bp:.2f}')
                 else:
