@@ -299,6 +299,11 @@ class Backtester:
                     # results_file.write(f"Maximum drawdown: ${daily_df['max_drawdown'].iloc[-1]:,.2f} ({daily_df['max_drawdown_pct'].iloc[-1]:.2f}%)\n")
                     results_file.write(f"Maximum drawdown: ${max_drawdown_amount:.2f} ({max_drawdown_percentage:.2f}%)\n")
         
+            # Final assertion
+            assert abs(trade_results['bp'].iloc[-1] - daily_df['BP'].iloc[-1]) < 1e-6, f'Final trade BP: {trade_results["bp"].iloc[-1]} | MTM BP: {daily_df["BP"].iloc[-1]}'
+            assert abs(daily_df['BP'].iloc[-1] - daily_df['Cash'].iloc[-1]) < 1e-6, f'MTM BP: {daily_df["BP"].iloc[-1]} | Cash: {daily_df["Cash"].iloc[-1]}'
+            assert abs(daily_df['Net Liquidity'].iloc[-1] - daily_df['Cash'].iloc[-1]) < 1e-6, f'MTM Net Liquidity: {daily_df["Net Liquidity"].iloc[-1]} | Cash: {daily_df["Cash"].iloc[-1]}'
+            
         return daily_df
     
     def _calculate_mtm(

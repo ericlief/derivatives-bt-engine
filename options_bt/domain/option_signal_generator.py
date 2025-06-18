@@ -190,7 +190,7 @@ class OptionSignalGenerator(BaseSignalGenerator):
             # Sort by delta difference and delta value while maintaining the date index
             # option_chain_df = option_chain_df.sort_values(by=['delta_diff', delta_col], ascending=[True, ascending])
             option_chain_df = option_chain_df.reset_index()
-            option_chain_df = option_chain_df.sort_values(by=['index', delta_diff], ascending=[True, True], kind='mergesort')
+            option_chain_df = option_chain_df.sort_values(by=['index', 'delta_diff'], ascending=[True, True], kind='mergesort')
             option_chain_df = option_chain_df.set_index('index')
             trade_signals = option_chain_df
             logger.debug(f'Sample chain of length: {len(option_chain_df)}')
