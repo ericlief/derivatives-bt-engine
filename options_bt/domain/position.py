@@ -286,7 +286,7 @@ class BaseOptionPosition(BasePosition, ABC):
             if underlying_exit is not None or self.underlying_exit is not None:
                 if self.is_ITM(underlying_exit): # ITM
                     fees += exercise_fee if exercise_fee else 0  # exercise fee
-                    logger.debug(f'Calculating pnl with fees: {fees} for {self.quantity} {'ITM' if self.is_ITM(underlying_exit) and close_reason == "expired" else 'OTM'} contracts')
+                    logger.debug(f'Calculating pnl with fees: {fees} for {self.quantity} {"ITM" if self.is_ITM(underlying_exit) and close_reason == "expired" else "OTM"} contracts')
 
             else: 
                 logger.debug(f'On expiration but not able to calculate intrinsic value. Perhaps an early closure on expiration day {self.option_strategy}')

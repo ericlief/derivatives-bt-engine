@@ -148,7 +148,7 @@ class OptionSignalGenerator(BaseSignalGenerator):
                 max_delta = abs(self.delta_range[1])  # More positive (more ITM)
 
             logger.debug(option_chain_df[delta_col].describe())
-            logger.debug(f'Filtering for delta range: {min_delta} to {max_delta} for {'put' if is_put else 'call'}')
+            logger.debug(f'Filtering for delta range: {min_delta} to {max_delta} for {"put" if is_put else "call"}')
             delta_mask = option_chain_df[delta_col].between(min_delta, max_delta)
             option_chain_df = option_chain_df[delta_mask]
             logger.debug(option_chain_df[delta_col].describe())

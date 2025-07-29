@@ -7,6 +7,12 @@ setup(
     install_requires=[
         "pandas",
         "numpy",
-        "dask",
+        "matplotlib",
+        "ipykernel",
+        "pytest",
+        "oauth2client==4.1.3",
+        "gspread",
+        "requests",
+        "websockets",
     ],
 ) 

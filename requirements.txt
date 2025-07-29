@@ -4,6 +4,10 @@ websockets
 numpy
 pandas
 pyarrow
-dask
+# dask
+ipykernel
+matplotlib
 
+# Testing
+pytest
 oauth2client==4.1.3
