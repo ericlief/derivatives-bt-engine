@@ -21,9 +21,9 @@ logger = setup_logger()
 class OptionSignalGenerator(BaseSignalGenerator):
     """Class to generate signals for trading."""
 
+    config: Union[SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig]
     option_chain: pd.DataFrame
     underlying: pd.DataFrame
-    config: Union[SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig]
     
     # def __init__(self, 
     #              option_chain: pd.DataFrame,
@@ -34,55 +34,59 @@ class OptionSignalGenerator(BaseSignalGenerator):
         
     def __post_init__(self):
         super().__init__(config=self.config)
-        logger.info(f"Config type: {type(self.config)}")
-        logger.info(f"Config: {self.config.leg}")
-        if isinstance(self.config, (SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig)):
-            self.option_strategy = self.config.option_strategy
-            self.option_type = self.config.leg.option_type
-            self.position_side = self.config.leg.position_side
-            self.delta_target = self.config.leg.delta_target
-            self.delta_range = self.config.leg.delta_range
-            self.dte_target = self.config.leg.dte_target
-            self.dte_range = self.config.leg.dte_range
-            self.quantity = self.config.quantity if self.config.quantity else 1
-            self.early_close_days = self.config.early_close_days
-            self.use_underlying_close = self.config.use_underlying_close
-        else:
-            raise ValueError("Invalid config type")
-        # Add multi-leg config extra parameters
-        if isinstance(self.config, MultiLegOptionStrategyConfig):
-            self.legs_config = self.config.legs_config
-            self.spread_type = self.config.spread_type
-            self.quantity = self.config.quantity
-            self.ratio = self.config.ratio
         
-      
+        if not isinstance(self.config, (SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig)):
+            raise ValueError("Invalid config type")
+
+        logger.info(f"Config: {self.config}")
             
-    def generate_single_leg_signals(self) -> pd.DataFrame:
+    def generate_single_leg_signals(
+        self,
+        option_type: OptionType,
+        position_side: PositionSide,
+        delta_target: Optional[float] = None,
+        delta_range: Optional[Tuple[float, float]] = None,
+        dte_target: Optional[int] = None,
+        dte_range: Optional[Tuple[int, int]] = None,
+        early_close_days: Optional[int] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None
+    ) -> pd.DataFrame:
         """
         Generate trade signals based on the provided parameters. These are not the actual trades,
         but rather potential trades filtered for the desired criteria. The DataFrame should have a 
         pd.DateTime index
        
         
+        Args:
+            option_type: Type of option (call or put)
+            position_side: Position side (long or short)
+            delta_target: Target delta for the option
+            delta_range: Range of deltas for filtering
+            dte_target: Target days to expiration
+            dte_range: Range of days to expiration
+            early_close_days: Days to close early
+            start_date: Start date for filtering
+            end_date: End date for filtering
+        
         Returns:
             DataFrame containing the generated trade signals
         """
            
-        logger.debug(f'Generating trade signals for {self.option_type}|{self.delta_target if self.delta_target else self.delta_range}|{self.dte_target if self.dte_target else self.dte_range}|{self.start_date if self.start_date else "all"}|{self.end_date if self.end_date else "all"}')
+        logger.debug(f'Generating trade signals for {option_type}|{delta_target if delta_target else delta_range}|{dte_target if dte_target else dte_range}|{start_date if start_date else "all"}|{end_date if end_date else "all"}')
         
         # Filter by DATE range if provided
-        option_chain_df = self.option_chain
-        start_date = pd.to_datetime(self.start_date) if self.start_date else option_chain_df.index.min()
+        option_chain_df = self.option_chain  # Accessing instance variable if needed
+        start_date = pd.to_datetime(start_date) if start_date else option_chain_df.index.min()
         option_chain_df = option_chain_df[option_chain_df.index >= start_date]
-        end_date = pd.to_datetime(self.end_date) if self.end_date else option_chain_df.index.max()
+        end_date = pd.to_datetime(end_date) if end_date else option_chain_df.index.max()
         option_chain_df = option_chain_df[option_chain_df.index <= end_date]
         logger.debug(f'Sorting for date range: {start_date}-{end_date}')
         logger.debug(f'Sample chain of length: {len(option_chain_df)}')
         logger.debug(option_chain_df.head())
 
         # Remove columns that are not needed
-        is_put = OptionType.is_put(self.option_type)
+        is_put = OptionType.is_put(option_type)
         prefix = 'p_' if is_put else 'c_'
         cols = option_chain_df.columns
         needed_cols = [col for col in cols if col.startswith(prefix)]
@@ -111,20 +115,20 @@ class OptionSignalGenerator(BaseSignalGenerator):
         )
         
         # Filter by DTE based on whether we have a single value or range
-        if self.dte_range:
-            dte_mask = (option_chain_df['dte'] >= self.dte_range[0]) & (option_chain_df['dte'] <= self.dte_range[1])
+        if dte_range:
+            dte_mask = (option_chain_df['dte'] >= dte_range[0]) & (option_chain_df['dte'] <= dte_range[1])
             option_chain_df = option_chain_df[dte_mask]
             logger.debug(option_chain_df['dte'].describe())
-            logger.debug(f'Filtering for dte range: {self.dte_range}')
+            logger.debug(f'Filtering for dte range: {dte_range}')
             logger.debug(f'Sample chain of length: {len(option_chain_df)}')
             logger.debug(option_chain_df.head())
             logger.debug(option_chain_df['dte'].describe())
 
-        elif self.dte_target:
+        elif dte_target:
             logger.debug(option_chain_df['dte'].describe())
-            dte_mask = abs(option_chain_df['dte'] - self.dte_target) < 1
+            dte_mask = abs(option_chain_df['dte'] - dte_target) < 1
             option_chain_df = option_chain_df[dte_mask]
-            logger.debug(f'Filtering for dte target: {self.dte_target}')
+            logger.debug(f'Filtering for dte target: {dte_target}')
             logger.debug('Sample chain')
             logger.debug(option_chain_df.head())
             logger.debug(option_chain_df['dte'].describe())
@@ -138,14 +142,14 @@ class OptionSignalGenerator(BaseSignalGenerator):
         logger.debug(f'Initial delta distribution')
         logger.debug(option_chain_df[delta_col].describe())
         
-        if self.delta_range:    
+        if delta_range:    
             # Handle range case
             if is_put:
-                min_delta = -abs(self.delta_range[1])  # More negative (more ITM)
-                max_delta = -abs(self.delta_range[0])  # Less negative (more OTM)
+                min_delta = -abs(delta_range[1])  # More negative (more ITM)
+                max_delta = -abs(delta_range[0])  # Less negative (more OTM)
             else:
-                min_delta = abs(self.delta_range[0])  # Less positive (more OTM)
-                max_delta = abs(self.delta_range[1])  # More positive (more ITM)
+                min_delta = abs(delta_range[0])  # Less positive (more OTM)
+                max_delta = abs(delta_range[1])  # More positive (more ITM)
 
             logger.debug(option_chain_df[delta_col].describe())
             logger.debug(f'Filtering for delta range: {min_delta} to {max_delta} for {"put" if is_put else "call"}')
@@ -166,20 +170,20 @@ class OptionSignalGenerator(BaseSignalGenerator):
             logger.debug(f'Sample chain of length: {len(option_chain_df)}')
             logger.debug(option_chain_df.head())
 
-        elif self.delta_target:
+        elif delta_target:
             # Handle target case
             if is_put:
                 # For puts, we want negative deltas
-                target = -abs(self.delta_target)
+                target = -abs(delta_target)
                 # For puts, we want to find options with deltas closest to the target (more negative)
                 ascending = False
             else:
                 # For calls, we want positive deltas
-                target = abs(self.delta_target)
+                target = abs(delta_target)
                 # For calls, we want to find options with deltas closest to the target (more positive)
                 ascending = True
 
-            logger.debug(f'Filtering for delta target: {target} for {self.option_type.value}')
+            logger.debug(f'Filtering for delta target: {target} for {option_type.value}')
             delta_diff = abs(option_chain_df[delta_col] - target)
             option_chain_df = option_chain_df.assign(delta_diff=delta_diff)
             
@@ -205,16 +209,7 @@ class OptionSignalGenerator(BaseSignalGenerator):
         
         return trade_signals
     
-    def generate_multi_leg_signals(
-        self,
-        option_chain: pd.DataFrame,
-        underlying: pd.DataFrame,
-        spread_type: OptionSpreadType,
-        legs_config: List[Dict],
-        start_date: str = None,
-        end_date: str = None,
-        dte_range: Tuple[int, int] = None,
-    ) -> pd.DataFrame:
+    def generate_multi_leg_signals(self) -> pd.DataFrame:
         """
         Generate trade signals for option spreads by pairing legs according to the specified spread type.
         
@@ -236,33 +231,38 @@ class OptionSignalGenerator(BaseSignalGenerator):
         Returns:
             DataFrame containing the generated spread signals with legs paired by date
         """
-        logger.info(f"Generating {spread_type.value} spread signals...")
+        logger.info(f"Generating {self.config.spread_type.value} spread signals...")
         
-        if spread_type == OptionSpreadType.NONE:
+        if self.config.spread_type == OptionSpreadType.NONE:
             raise ValueError("Use generate_trade_signals for single-leg positions")
         
         # Generate signals for each leg separately
         leg_signals = []
-        for i, leg_config in enumerate(legs_config):
-            option_type = leg_config['option_type']
-            position_side = leg_config['position_side']
-            delta_target = leg_config.get('delta_target')
-            delta_range = leg_config.get('delta_range')
-            
-            # Ensure either delta_target or delta_range is provided
+        for i, leg_config in enumerate(self.config.legs):
+            option_type = leg_config.option_type
+            position_side = leg_config.position_side
+            delta_target = leg_config.delta_target
+            delta_range = leg_config.delta_range
             if delta_target is None and delta_range is None:
                 logger.error(f"Leg {i+1} must have either delta_target or delta_range specified")
                 return pd.DataFrame()
-            
+            dte_target = leg_config.dte_target
+            dte_range = leg_config.dte_range
+            if dte_target is None and dte_range is None:
+                logger.error(f"Leg {i+1} must have either dte_target or dte_range specified")
+                return pd.DataFrame()
+            start_date = self.config.start_date
+            end_date = self.config.end_date
+ 
+   
             # Filter options chain for the 
-            leg_df = self.generate_trade_signals(
-                underlying=underlying,  # Pass SPX data if available
-                option_chain=option_chain,
+            leg_df = self.generate_single_leg_signals(
                 option_type=option_type,
+                position_side=position_side,
                 delta_target=delta_target,
                 delta_range=delta_range,
-                dte_target=self.dte_target, 
-                dte_range=self.dte_range,
+                dte_target=dte_target, 
+                dte_range=dte_range,
                 start_date=start_date,
                 end_date=end_date,
             )
@@ -278,7 +278,7 @@ class OptionSignalGenerator(BaseSignalGenerator):
             leg_df['leg_number'] = i + 1
             leg_df['position_side'] = position_side.value if isinstance(position_side, Enum) else position_side
             leg_df['option_type'] = option_type.value if isinstance(option_type, Enum) else option_type
-            leg_df['leg_ratio'] = leg_config.get('ratio', 1)
+            leg_df['leg_ratio'] = getattr(leg_config, 'ratio', 1)
             leg_df['delta_target'] = delta_target
             if delta_range:
                 leg_df['delta_range_min'] = delta_range[0]
@@ -291,22 +291,22 @@ class OptionSignalGenerator(BaseSignalGenerator):
         
         # No valid signals for one or more legs
         if any(df.empty for df in leg_signals):
-            logger.warning("One or more legs returned no signals")
+            logger.error("One or more legs returned no signals")
             return pd.DataFrame()
         
         # Create spread signals based on the spread type
-        if spread_type == OptionSpreadType.VERTICAL:
-            return self._pair_vertical_spread_legs(leg_signals, spread_type)
-        elif spread_type == OptionSpreadType.CALENDAR:
-            return self._pair_calendar_spread_legs(leg_signals, spread_type)
-        elif spread_type == OptionSpreadType.DIAGONAL:
-            return self._pair_diagonal_spread_legs(leg_signals, spread_type)
-        elif spread_type == OptionSpreadType.BUTTERFLY:
-            return self._pair_butterfly_spread_legs(leg_signals, spread_type)
-        elif spread_type == OptionSpreadType.IRON_CONDOR:
-            return self._pair_iron_condor_spread_legs(leg_signals, spread_type)
+        if self.config.spread_type == OptionSpreadType.VERTICAL:
+            return self._pair_vertical_spread_legs(leg_signals, self.config.spread_type)
+        elif self.config.spread_type == OptionSpreadType.CALENDAR:
+            return self._pair_calendar_spread_legs(leg_signals, self.config.spread_type)
+        elif self.config.spread_type == OptionSpreadType.DIAGONAL:
+            return self._pair_diagonal_spread_legs(leg_signals, self.config.spread_type)
+        elif self.config.spread_type == OptionSpreadType.BUTTERFLY:
+            return self._pair_butterfly_spread_legs(leg_signals, self.config.spread_type)
+        elif self.config.spread_type == OptionSpreadType.IRON_CONDOR:
+            return self._pair_iron_condor_spread_legs(leg_signals, self.config.spread_type)
         else:
-            raise ValueError(f"Unsupported spread type: {spread_type}")
+            raise ValueError(f"Unsupported spread type: {self.config.spread_type}")
 
     def _pair_vertical_spread_legs(self, leg_signals: List[pd.DataFrame], spread_type: OptionSpreadType) -> pd.DataFrame:
         """

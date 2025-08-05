@@ -75,7 +75,17 @@ class Backtester:
         # Generate or validate signals
         signal_start = time.time()
         if isinstance(config, SingleLegOptionStrategyConfig):
-            signals = signal_generator.generate_single_leg_signals()
+            signals = signal_generator.generate_single_leg_signals(
+                option_type=config.leg.option_type,
+                position_side=config.leg.position_side,
+                delta_target=config.leg.delta_target,
+                delta_range=config.leg.delta_range,
+                dte_target=config.leg.dte_target,
+                dte_range=config.leg.dte_range,
+                early_close_days=config.leg.early_close_days,
+                start_date=config.start_date,
+                end_date=config.end_date
+            )
         elif isinstance(config, MultiLegOptionStrategyConfig):
             signals = signal_generator.generate_multi_leg_signals()
         else:
@@ -227,13 +237,13 @@ class Backtester:
         # logger.info(f"Average time per backtest: {total_time/len(hyperparameter_sets):.2f} seconds")
         
         # return results
-    def calculate_mtm(self, results: dict, config: Union[SingleLegOptionPosition, MultiLegOptionPosition]) -> pd.DataFrame:
+    def calculate_mtm(self, results: dict, config: Union[SingleLegOptionPosition, MultiLegOptionStrategyConfig]) -> pd.DataFrame:
         """
         Calculate MTM and log the results.
         
         Args:
             results: Dict of trade results and transations DataFrames  
-            config: Union[SingleLegOptionPosition, MultiLegOptionPosition]
+            config: Union[SingleLegOptionPosition, MultiLegOptionStrategyConfig]
                 The configuration of the option position
         Returns:
             DataFrame: The calculated MTM
@@ -374,17 +384,16 @@ class Backtester:
                 # Handle existing trades
                 if trade_id in active_trades:
                     logger.debug(f'Processing active trade: {trade_id}')
-                    current_value = self.calculate_daily_value(trade, date, use_underlying_close)
-                    prev_value = active_trades[trade_id]['position_value']
-                    
+        
                     # Calculate daily P&L for this trade
-                    daily_pnl += round(current_value - prev_value, 2) if current_value is not None else 0
-                    logger.debug(f'Daily PnL = Cur value - Prev value = {current_value} - {prev_value} = {daily_pnl}')
+                    # daily_pnl += round(current_value - prev_value, 2) if current_value is not None else 0
+                    # logger.debug(f'Daily PnL = Cur value - Prev value = {current_value} - {prev_value} = {daily_pnl}')
 
                     # Close trade
                     if trade_end == date:
                         logger.debug(f'Closing trade: {trade_id}')
 
+  
                         # Release margin back to BP for short positions
                         if PositionSide.is_short(trade):
                             logger.debug(f'BP before: {option_bp}')
@@ -393,9 +402,17 @@ class Backtester:
 
                         # Validate closing/exit price sign 
                         exit_price = PriceUtils.get_signed_exit_price(trade.exit_price, trade.position_side)
+                        #TODO: check if this is correct and quantity should be multiplied here
                         exit_premium = round(exit_price * 100 * trade.quantity, 2)  # Premium in dollars
                         logger.debug(f'Premium exit: {exit_premium}')
                         logger.debug(f'daily cash effect, before: {daily_cash_flow} | BP {option_bp}')
+                        
+                        prev_value = active_trades[trade_id]['position_value']
+                        current_value = exit_premium  # ?
+                        daily_pnl += round(current_value - prev_value, 2) if current_value is not None else 0
+                        logger.debug(f'On close Daily PnL = Cur value - Prev value = {current_value} - {prev_value} = {daily_pnl}')
+
+                        
                         # Accumulate this to cash reserves
                         # daily_cash_flow += premium  # Already signed in the trade
                         # option_bp += premium  # Already signed in the trade
@@ -404,14 +421,15 @@ class Backtester:
                         commission = 1.78
                         fees = 0
                         # ITM
-                        early_closure = False
+                        # early_closure = False
                         exercise_fee = 0
-                        if trade.exit_date < trade.entry_date:
-                            early_closure = True
+                        if date < trade.expire_date:
+                            # early_closure = True
                             exercise_fee += 5
 
                         fees += commission + exercise_fee
                         fees = round(fees * trade.quantity, 2)
+                        # realized_pnl = exit_premium +- fees
                         daily_cash_flow = round(daily_cash_flow + exit_premium - fees, 2)
                         option_bp = round(option_bp + exit_premium - fees, 2)
                         logger.debug(f'daily cash effect, after: {daily_cash_flow} | BP {option_bp}')
@@ -421,6 +439,11 @@ class Backtester:
                     # Update trade
                     else:
                         logger.debug(f'Updating existing trade {trade_id}')
+                        current_value = self.calculate_daily_value(trade, date, use_underlying_close)
+                        prev_value = active_trades[trade_id]['position_value']
+                        daily_pnl += round(current_value - prev_value, 2) if current_value is not None else 0
+                        logger.debug(f'Daily PnL = Cur value - Prev value = {current_value} - {prev_value} = {daily_pnl}')
+
                         if current_value is not None:
                             active_trades[trade_id]['position_value'] = current_value
                             daily_position_value = round(daily_position_value + current_value, 2)  # Only add once
@@ -443,7 +466,7 @@ class Backtester:
 
                         # Accumulate entry price to cash flow (signed based on position side)
                         logger.debug(f'Premium at entry: {premium}')
-                        logger.debug(f'Daily cash before: {daily_cash_flow}, BP before: {option_bp}')
+                        logger.debug(f'Daily cash flow before: {daily_cash_flow}, BP before: {option_bp}')
                         # daily_cash_flow += premium  # Already signed in the trade
                         # option_bp += premium  # Already signed in the trade
                         daily_cash_flow = round(daily_cash_flow + premium, 2)
@@ -454,7 +477,7 @@ class Backtester:
                         
                         # For short positions, reduce BP
                         if PositionSide.is_short(trade):
-                            option_bp = round(option_bp - req_margin / leverage, 2)  # Account for leverage in BP reductio
+                            option_bp = round(option_bp - req_margin / leverage, 2)  # Account for leverage in BP reduction
                             logger.debug(f'Margin reduced for short, BP now: {option_bp}')
 
                         # Update position value and margin
@@ -467,14 +490,19 @@ class Backtester:
             # Update cash with any daily premium flows
             # NB: there is no change in daily cash or BP due to unrealized pnl for equity and index options, only for certain futures
             cash  = round(cash + daily_cash_flow, 2)
-            
+            logger.debug(f'{date}: Cash: {cash}') 
             # Calculate net liquidation value
             net_liq = round(cash + daily_position_value, 2)
+            logger.debug(f'{date}: Net Liquidity: {net_liq}')
 
             # daily drift persists but final seems ok
             drift = abs(net_liq - (initial_capital + cumulative_pnl))
-            if 1 < drift < 5:
+            if drift < 1:
+                pass  # No log, or maybe info-level for perfect match
+            elif 1 <= drift < 5:
                 logger.warning(f'FLOATING ERR DRIFT under $5: Net Liq = {net_liq} != Initial Cap + Cum PnL = {initial_capital + cumulative_pnl}')
+            elif 5 <= drift < 10:
+                logger.warning(f'FLOATING ERR DRIFT under $10: Net Liq = {net_liq} != Initial Cap + Cum PnL = {initial_capital + cumulative_pnl}')
             else:
                 logger.error(f'FLOATING ERR DRIFT above $10: Net Liq = {net_liq} != Initial Cap + Cum PnL = {initial_capital + cumulative_pnl}')
 

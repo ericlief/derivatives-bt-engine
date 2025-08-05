@@ -62,7 +62,7 @@ class MultiLegOptionStrategyConfig(BaseOptionStrategyConfig):
     def __post_init__(self):
         # Validate legs configuration
         for leg in self.legs:
-            if 'option_type' not in leg or 'position_side' not in leg:
+            if not hasattr(leg, 'option_type') or not hasattr(leg, 'position_side'):
                 raise ValueError("Each leg must have 'option_type' and 'position_side' defined")
    
         # Not sure if we should derive ratio form leg quantity here or in the leg config
