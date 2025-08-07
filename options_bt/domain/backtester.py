@@ -96,7 +96,6 @@ class Backtester:
             return pd.DataFrame()
 
         # Pre-calculate margin requirements for all signals
-        logger.info(f"Calculating margin requirements for trade signals for {config.quantity} | {config.leg.option_type if config.leg.option_type else config.spread_type} | {config.leg.delta_target if config.leg.delta_target else config.leg.delta_range}")
         is_spread = isinstance(config, MultiLegOptionStrategyConfig)
         max_allowed_margin = config.max_margin_utilization * config.initial_capital * config.leverage
         logger.info(f"Maximum allowed margin: ${max_allowed_margin:.2f} ({config.max_margin_utilization:.0%} of capital with {config.leverage}x leverage)")
@@ -104,16 +103,20 @@ class Backtester:
         
         # Handle all spread types
         if is_spread:
-            pass
-            # TODO: Implement margin calculation for spreads
             # Calculate margins per spread group and ensure proper alignment
-            # margins = trade_signals.groupby('spread_id').apply(SingleLegOptionStrategyConfig.calculate_margin_for_spread)
-            # trade_signals['margin_required'] = trade_signals['spread_id'].map(margins)
-            # logger.debug(f'Calculated margins for {len(margins)} spread groups')
-            # logger.debug(f'First few margins: {margins.head()}')
+            # margins = signals.groupby('spread_id').apply(SingleLegOptionStrategyConfig.calculate_margin_for_spread)
+            logger.info(f"Calculating margin requirements for multileg trade signals for {config.quantity} | {config.option_strategy} | {config.spread_type}")
+            if 'spread_width' not in signals:
+                logger.warning(f"Spread width not found in multileg signals. Calculating.")
+                signals['spread_width'] = abs(signals["leg1_strike"] - signals["leg2_strike"])
 
+            signals['margin_required'] = round(signals['spread_width'] * config.quantity * 100, 2)
+            logger.debug(f'Calculated margins for {len(signals)} spread groups')
+            logger.debug(f'First few margins: {signals.head()}')
+        
         # Single leg
         else:
+            logger.info(f"Calculating margin requirements for single leg trade signals for {config.quantity} | {config.option_strategy} | {config.leg.option_type} | {config.leg.delta_target if config.leg.delta_target else config.leg.delta_range}")
             signals['margin_required'] = signals.apply(
                 lambda row: SingleLegOptionPosition.calculate_margin(
                     quantity=config.quantity,

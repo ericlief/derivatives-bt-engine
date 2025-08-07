@@ -145,3 +145,5 @@ class OptionStrategy(BaseStrategy):
     CUSTOM_STRATEGY = "custom strategy"
     IRON_CONDOR = "iron condor"
     BUTTERFLY = "butterfly"
+    STRADDLE = "straddle"
+    STRANGLE = "strangle"

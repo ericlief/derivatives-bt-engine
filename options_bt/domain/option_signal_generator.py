@@ -308,6 +308,27 @@ class OptionSignalGenerator(BaseSignalGenerator):
         else:
             raise ValueError(f"Unsupported spread type: {self.config.spread_type}")
 
+    def generate_straddle_signals(self, strike_price: float, expiration_date: str) -> pd.DataFrame:
+        #TODO Finish
+        # 
+        call_signals = self.generate_single_leg_signals(
+            option_type=OptionType.CALL,
+            position_side=PositionSide.LONG,
+            # other parameters as needed
+        )
+        
+        put_signals = self.generate_single_leg_signals(
+            option_type=OptionType.PUT,
+            position_side=PositionSide.LONG,
+            # other parameters as needed
+        )
+        
+        # Combine call_signals and put_signals into a single DataFrame
+        # Logic to merge or concatenate the DataFrames as needed
+        combined_signals = pd.concat([call_signals, put_signals], axis=0)
+        
+        return combined_signals
+
     def _pair_vertical_spread_legs(self, leg_signals: List[pd.DataFrame], spread_type: OptionSpreadType) -> pd.DataFrame:
         """
         Pair legs for vertical spreads (same expiration, different strikes).
