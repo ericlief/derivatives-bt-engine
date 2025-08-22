@@ -379,11 +379,23 @@ class OptionSignalGenerator(BaseSignalGenerator):
         )
 
         # Drop duplicate col
-        if 'leg2_underlying_last' in paired.columns:
-            paired.drop(['leg2_underlying_last'], inplace=True)
-            # Use column assignment instead of rename for reliability
-            paired['underlying_last'] = paired['leg1_underlying_last']
-            paired.drop('leg1_underlying_last', axis=1, inplace=True)
+        print("Columns before drop:", paired.columns.tolist())
+
+        # Find the actual column names
+        leg1_underlying = [col for col in paired.columns if col.startswith('leg1_') and 'underlying' in col]
+        leg2_underlying = [col for col in paired.columns if col.startswith('leg2_') and 'underlying' in col]
+
+        print("leg1_underlying columns:", leg1_underlying)
+        print("leg2_underlying columns:", leg2_underlying)
+
+        if leg2_underlying and leg1_underlying:
+            # Use the string, not the list
+            paired.drop(leg2_underlying[0], axis=1, inplace=True)
+            paired['underlying_last'] = paired[leg1_underlying[0]]
+            paired.drop(leg1_underlying[0], axis=1, inplace=True)
+            print("Successfully handled underlying columns")
+        else:
+            print("ERROR: Could not find underlying columns!")
 
         logger.debug(f"Paired vertical spread legs: {paired.head()}")
         
