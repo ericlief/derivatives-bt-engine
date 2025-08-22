@@ -45,18 +45,18 @@ class TradeManager:
                 logger.error(f"Missing spread_price for spread {position.spread_id} leg {position.leg_number}")
                 return None
 
-        # Retrieve absolute premium regardless of position type
-        premium = position.signed_premium
 
         # Validate margin requirement
         effective_margin = position.margin_required  
         if effective_margin is None or effective_margin <= 0 and position.position_side == PositionSide.SHORT:
             logger.error(f"Null or invalid margin requirement for short position on {position.entry_date}")
             return None 
+                # Retrieve absolute premium regardless of position type
         
+        premium = abs(position.signed_premium)
+
         # Open LONG position
-        if position.is_long:
-            # Check if enough buying power to buy the option
+        if position.is_long:            # Check if enough buying power to buy the option
             if self.option_bp >= premium:
                 logger.debug(f'Executing long trade. BP: {self.option_bp}')
                 self.option_bp -= premium  # Deduct premium
@@ -234,11 +234,8 @@ class TradeManager:
         else:
             return MultiLegOptionPosition.construct_from_signal(
                 trade_signal=trade_signal, 
+                config=self.config,
                 entry_date=current_date, 
-                position_side=self.config.leg.position_side, 
-                option_type=self.config.leg.option_type, 
-                quantity=self.config.quantity, 
-                early_close_days=self.config.early_close_days   
             )   
 
         # if is_spread:

@@ -110,6 +110,15 @@ class Backtester:
                 logger.warning(f"Spread width not found in multileg signals. Calculating.")
                 signals['spread_width'] = abs(signals["leg1_strike"] - signals["leg2_strike"])
 
+            # Filter out trades with excessive spread width if max_spread_width is set
+            if config.max_spread_width is not None:
+                original_count = len(signals)
+                signals = signals[signals['spread_width'] <= config.max_spread_width]
+                filtered_count = original_count - len(signals)
+                if filtered_count > 0:
+                    logger.warning(f"Filtered out {filtered_count} trades due to excessive spread width (> {config.max_spread_width} points)")
+            logger.info(f"Maximum spread width in trades: {signals['spread_width'].max() if len(signals) > 0 else 'N/A'} points")
+
             signals['margin_required'] = round(signals['spread_width'] * config.quantity * 100, 2)
             logger.debug(f'Calculated margins for {len(signals)} spread groups')
             logger.debug(f'First few margins: {signals.head()}')
@@ -137,13 +146,17 @@ class Backtester:
         filtered_count = len(signals) - len(valid_signals)
         if filtered_count > 0:
             logger.warning(f"Filtered out {filtered_count} trades due to margin requirements")
-            logger.info(f"Average margin requirement for filtered trades: ${signals['margin_required'].mean():.2f}")
-            logger.info(f"Maximum margin requirement for filtered trades: ${signals['margin_required'].max():.2f}")
+        logger.info(f"Average margin requirement for trades: ${valid_signals['margin_required'].mean():.2f}")
+        logger.info(f"Maximum margin requirement for trades: ${valid_signals['margin_required'].max():.2f}")
         logger.info(f"Total valid signals: {len(valid_signals)}")
+        logger.info("Minimum margin sample:")
+        logger.info(valid_signals.sort_values(by="margin_required", ascending=True).head())
+        logger.info("Maximum margin sample:")
+        logger.info(valid_signals.sort_values(by="margin_required", ascending=True).tail())
 
         # Execute trades
         backtest_start = time.time()
-        results_transactions_dict = trade_manager.construct_and_execute_trades_from_signals(signals, 
+        results_transactions_dict = trade_manager.construct_and_execute_trades_from_signals(valid_signals, 
                                                                                 option_chain=self.option_chain, 
                                                                                 underlying_price_history=self.underlying)
         self.execution_times['backtest_execution'] = time.time() - backtest_start

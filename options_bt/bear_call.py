@@ -1,6 +1,4 @@
-from re import L
 import pandas as pd
-
 from options_bt.utils.logger import setup_logger
 from options_bt.domain.enums import *  
 from options_bt.domain.backtester import Backtester 
@@ -19,7 +17,7 @@ def run_test_suite():
     pd.set_option('display.max_colwidth', None)
 
     # Set up data paths
-    DATA_PATH = "/Users/liefe/Data/spx"
+    DATA_PATH = "/Users/liefe/data/spx"
     OPTIONS_FILE = "options_chain_preprocessed.csv"
 
     dl = DataLoader(data_dir=DATA_PATH, options_file=OPTIONS_FILE, use_preprocessed=True, save_preprocessed=False)
@@ -45,7 +43,7 @@ def run_test_suite():
         quantity=1,
         option_strategy=OptionStrategy.BEAR_CALL_CREDIT_SPREAD,
         spread_type=OptionSpreadType.VERTICAL,
-        ratio=1.0,
+        # leg_ratio=1.0,
         initial_capital=100000,
         leverage=1.0,
         start_date="2020-01-01",
@@ -54,6 +52,7 @@ def run_test_suite():
         early_close_days=30,
         max_margin_utilization=0.80,
         max_positions=1,
+        max_spread_width=100,
         # Define the leg of the strategy
         legs=[
             OptionLegConfig(
@@ -184,7 +183,7 @@ def run_test_suite():
     #     logger.info(f"Parameters: {params}")
     #     logger.info(f"Execution time: {execution_time:.2f} seconds")
         
-    #     if not result_df.empty:
+    #     if not result_df.empty:c
     #         logger.info(f"Total trades: {len(result_df)}")
     #         logger.info(f"Win rate: {(result_df['pnl'] > 0).mean():.2%}")
     #         logger.info(f"Total P&L: ${result_df['pnl'].sum():.2f}")

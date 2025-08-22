@@ -1,6 +1,6 @@
 from options_bt.domain.enums import *
 from dataclasses import dataclass
-from typing import Optional, List
+from typing import Optional, List, Dict
 from abc import ABC, abstractmethod
 from options_bt.domain.option_leg_config import OptionLegConfig
 from typing import List
@@ -57,8 +57,9 @@ class SingleLegOptionStrategyConfig(BaseOptionStrategyConfig):
 class MultiLegOptionStrategyConfig(BaseOptionStrategyConfig):
     spread_type: OptionSpreadType
     legs: List[OptionLegConfig]
-    ratio: float = 1.0
-    
+    leg_ratios: Dict[int, float] = None
+    max_spread_width: Optional[float] = None  # Maximum spread width in points (e.g., 50 for SPX means max $5000 margin)
+
     def __post_init__(self):
         # Validate legs configuration
         for leg in self.legs:
@@ -66,7 +67,10 @@ class MultiLegOptionStrategyConfig(BaseOptionStrategyConfig):
                 raise ValueError("Each leg must have 'option_type' and 'position_side' defined")
    
         # Not sure if we should derive ratio form leg quantity here or in the leg config
-        
+         # Set default leg ratios if not provided
+        if not self.leg_ratios:
+            self.leg_ratios = {i: 1.0 for i in range(len(self.legs))}
+            
         # Validate spread type
         if self.spread_type not in [OptionSpreadType.VERTICAL, OptionSpreadType.CALENDAR, OptionSpreadType.DIAGONAL, OptionSpreadType.IRON_CONDOR, OptionSpreadType.BUTTERFLY]:
             raise ValueError("Invalid spread type. Supported types are: vertical, calendar, diagonal, iron_condor, butterfly")

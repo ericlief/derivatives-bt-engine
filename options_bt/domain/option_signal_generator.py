@@ -360,11 +360,11 @@ class OptionSignalGenerator(BaseSignalGenerator):
         
         # Reset index to make date a column
         leg1 = leg1.reset_index()
-        leg2 = leg2.reset_index()
+        leg2 = leg2.reset_index()   
         
         # Rename columns to distinguish between legs
-        leg1_cols = {col: f"leg1_{col}" for col in leg1.columns if col != index_name and col != "expire_date"}
-        leg2_cols = {col: f"leg2_{col}" for col in leg2.columns if col != index_name and col != "expire_date"}
+        leg1_cols = {col: f"leg1_{col}" for col in leg1.columns if col != index_name and col not in ["expire_date"]}
+        leg2_cols = {col: f"leg2_{col}" for col in leg2.columns if col != index_name and col not in ["expire_date"]}
         
         leg1 = leg1.rename(columns=leg1_cols)
         leg2 = leg2.rename(columns=leg2_cols)
@@ -377,6 +377,14 @@ class OptionSignalGenerator(BaseSignalGenerator):
             on=[index_name, "expire_date"],
             how="inner"
         )
+
+        # Drop duplicate col
+        if 'leg2_underlying_last' in paired.columns:
+            paired.drop(['leg2_underlying_last'], inplace=True)
+            # Use column assignment instead of rename for reliability
+            paired['underlying_last'] = paired['leg1_underlying_last']
+            paired.drop('leg1_underlying_last', axis=1, inplace=True)
+
         logger.debug(f"Paired vertical spread legs: {paired.head()}")
         
         # Filter for valid vertical spread criteria
@@ -397,6 +405,15 @@ class OptionSignalGenerator(BaseSignalGenerator):
         
         # Calculate spread metrics
         paired["spread_width"] = abs(paired["leg1_strike"] - paired["leg2_strike"])
+        
+        # Filter out spreads with excessive width if max_spread_width is set
+        if hasattr(self.config, 'max_spread_width') and self.config.max_spread_width is not None:
+            original_count = len(paired)
+            paired = paired[paired["spread_width"] <= self.config.max_spread_width]
+            filtered_count = original_count - len(paired)
+            if filtered_count > 0:
+                logger.info(f"Filtered out {filtered_count} spreads due to excessive width (> {self.config.max_spread_width} points)")
+                logger.debug(f"Maximum spread width in remaining spreads: {paired['spread_width'].max() if len(paired) > 0 else 'N/A'} points")
         
         # Calculate spread price (add code to adjust based on position side)
         # For a credit spread, we want to sell the first leg and buy the second leg
@@ -582,6 +599,15 @@ class OptionSignalGenerator(BaseSignalGenerator):
         paired["spread_type"] = spread_type.value
         paired["time_width"] = paired.apply(lambda row: pd.Timedelta(row["leg2_expire_date"] - row["leg1_expire_date"]).days, axis=1)
         paired["strike_width"] = abs(paired["leg1_strike"] - paired["leg2_strike"])
+        
+        # Filter out spreads with excessive strike width if max_spread_width is set
+        if hasattr(self.config, 'max_spread_width') and self.config.max_spread_width is not None:
+            original_count = len(paired)
+            paired = paired[paired["strike_width"] <= self.config.max_spread_width]
+            filtered_count = original_count - len(paired)
+            if filtered_count > 0:
+                logger.info(f"Filtered out {filtered_count} diagonal spreads due to excessive strike width (> {self.config.max_spread_width} points)")
+                logger.debug(f"Maximum strike width in remaining diagonal spreads: {paired['strike_width'].max() if len(paired) > 0 else 'N/A'} points")
         
         # Calculate leg prices
         paired["leg1_price"] = paired.apply(
@@ -783,6 +809,19 @@ class OptionSignalGenerator(BaseSignalGenerator):
         paired["put_width"] = paired["put_leg2_strike"] - paired["put_leg1_strike"]
         paired["call_width"] = paired["call_leg2_strike"] - paired["call_leg1_strike"]
         paired["middle_width"] = paired["call_leg1_strike"] - paired["put_leg2_strike"]
+        
+        # Filter out spreads with excessive width if max_spread_width is set
+        if hasattr(self.config, 'max_spread_width') and self.config.max_spread_width is not None:
+            original_count = len(paired)
+            paired = paired[
+                (paired["put_width"] <= self.config.max_spread_width) & 
+                (paired["call_width"] <= self.config.max_spread_width)
+            ]
+            filtered_count = original_count - len(paired)
+            if filtered_count > 0:
+                logger.info(f"Filtered out {filtered_count} iron condor spreads due to excessive width (> {self.config.max_spread_width} points)")
+                logger.debug(f"Maximum put width in remaining spreads: {paired['put_width'].max() if len(paired) > 0 else 'N/A'} points")
+                logger.debug(f"Maximum call width in remaining spreads: {paired['call_width'].max() if len(paired) > 0 else 'N/A'} points")
         
         # Calculate leg prices
         paired["put_leg1_price"] = paired.apply(
