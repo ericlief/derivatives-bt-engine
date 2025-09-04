@@ -147,3 +147,9 @@ class OptionStrategy(BaseStrategy):
     BUTTERFLY = "butterfly"
     STRADDLE = "straddle"
     STRANGLE = "strangle"
+
+class TradeSelectionMethod(str, Enum):
+    """Trade selection method enumeration."""
+    PREMIUM_FIRST = "premium first"
+    DELTA_FIRST = "delta first"
+    WEIGHTED = "weighted"

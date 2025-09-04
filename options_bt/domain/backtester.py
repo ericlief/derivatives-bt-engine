@@ -117,9 +117,41 @@ class Backtester:
                 filtered_count = original_count - len(signals)
                 if filtered_count > 0:
                     logger.warning(f"Filtered out {filtered_count} trades due to excessive spread width (> {config.max_spread_width} points)")
-            logger.info(f"Maximum spread width in trades: {signals['spread_width'].max() if len(signals) > 0 else 'N/A'} points")
+                logger.info(f"Maximum spread width in trades: {signals['spread_width'].max() if len(signals) > 0 else 'N/A'} points")
 
-            signals['margin_required'] = round(signals['spread_width'] * config.quantity * 100, 2)
+            # Filter out trades with excessive spread width if max_spread_width is set
+            if config.max_trade_loss is not None:
+                if signals.empty: # No signals left after previous filters
+                    logger.warning("No signals to filter for max_trade_loss after previous filters.")
+                else:
+                    original_count_loss = len(signals)
+                    # For a credit spread, max loss = (spread_width * 100) - (spread_price * 100)
+                    # For a debit spread, max loss = spread_price * 100
+                    # Assuming 'spread_price' is already signed (positive for credit, negative for debit)
+                    # So, max loss is always (spread_width * 100 * quantity) - (spread_price * 100 * quantity) for credit spreads
+                    # And max loss is (spread_price * 100 * quantity) for debit spreads (where spread_price is abs)
+
+                    original_count = len(signals)
+                    if config.option_strategy in [OptionStrategy.BULL_PUT_CREDIT_SPREAD, OptionStrategy.BEAR_CALL_CREDIT_SPREAD]:
+                        signals['max_trade_loss'] = signals['spread_width'] * config.quantity * 100  
+                    elif config.option_strategy in [OptionStrategy.BULL_CALL_DEBIT_SPREAD, OptionStrategy.BEAR_PUT_DEBIT_SPREAD]:
+                        signals['max_trade_loss'] = abs(signals['spread_price']) * config.quantity * 100  
+                    else:
+                        logger.warning(f"Max trade loss filter not precisely applicable for strategy {config.option_strategy}. Using spread_width as proxy.")
+                        signals['max_trade_loss'] = signals['spread_width'] * config.quantity * 100 # Fallback
+           
+                    signals = signals[signals['max_trade_loss'] <= config.max_trade_loss]
+                    
+                    filtered_count = original_count - len(signals)
+                    if filtered_count > 0:
+                        logger.warning(f"Filtered out {filtered_count} trades due to excessive spread width ({config.max_spread_width} points) and max allowed trade loss (${config.max_trade_loss})")
+                        logger.info(f"Maximum spread width in trades: {signals['spread_width'].max() if len(signals) > 0 else 'N/A'} points")
+                        logger.info(f"Maximum trade loss: ${signals['max_trade_loss'].max() if len(signals) > 0 else 'N/A'}")
+
+
+            # Ensure 'margin_required' is calculated for spreads before trade selection
+            if 'margin_required' not in signals.columns: # If not already calculated by MultiLegOptionPosition
+                signals['margin_required'] = round(signals['spread_width'] * config.quantity * 100, 2)
             logger.debug(f'Calculated margins for {len(signals)} spread groups')
             logger.debug(f'First few margins: {signals.head()}')
         
@@ -149,6 +181,14 @@ class Backtester:
         logger.info(f"Average margin requirement for trades: ${valid_signals['margin_required'].mean():.2f}")
         logger.info(f"Maximum margin requirement for trades: ${valid_signals['margin_required'].max():.2f}")
         logger.info(f"Total valid signals: {len(valid_signals)}")
+
+        # if config.trade_selection_method == TradeSelectionMethod.MARGIN_FIRST:
+        #     valid_signals = valid_signals.sort_values(by=['margin_required', 'delta_difference'])
+
+        
+        
+        
+        
         logger.info("Minimum margin sample:")
         logger.info(valid_signals.sort_values(by="margin_required", ascending=True).head())
         logger.info("Maximum margin sample:")

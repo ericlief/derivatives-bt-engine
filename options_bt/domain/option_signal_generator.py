@@ -160,13 +160,23 @@ class OptionSignalGenerator(BaseSignalGenerator):
             # Reset the index to turn the date index into a column
             option_chain_df = option_chain_df.reset_index()
 
-            # Sort by the new date column and then by 'delta_col'
-            option_chain_df = option_chain_df.sort_values(by=['index', delta_col], ascending=[True, True], kind='mergesort')
+            # Sort by the new date column and then by 'delta_col' or 'midpoint_price' depending on config preferences
+            # For long positions: better delta match first, then lower price (less cost)
+            # For short positions: better delta match first, then higher price (more premium)
+            logger.info(f'Sorting according to trade strategy {self.config.trade_selection_method}:')
+            logger.info(option_chain_df.head())
+            if self.config.trade_selection_method == TradeSelectionMethod.DELTA_FIRST:
+                option_chain_df = option_chain_df.sort_values(by=['index', delta_col, 'midpoint_price'], ascending=[True, True, True if PositionSide.is_long(position_side) else False], kind='mergesort')
+            # Sort by the new date column and then by 'midpoint -> premium'
+            elif self.config.trade_selection_method == TradeSelectionMethod.PREMIUM_FIRST:   
+                option_chain_df = option_chain_df.sort_values(by=['index', 'midpoint_price', delta_col], ascending=[True, True if PositionSide.is_long(position_side) else False, True], kind='mergesort')
+            else:
+                logger.error('Cannot sort signal df because trade strategy default not defined')
 
             # Set the index back to the date column if needed
             option_chain_df = option_chain_df.set_index('index')
 
-            trade_signals = option_chain_df
+            
             logger.debug(f'Sample chain of length: {len(option_chain_df)}')
             logger.debug(option_chain_df.head())
 
@@ -176,38 +186,54 @@ class OptionSignalGenerator(BaseSignalGenerator):
                 # For puts, we want negative deltas
                 target = -abs(delta_target)
                 # For puts, we want to find options with deltas closest to the target (more negative)
-                ascending = False
+                # ascending = False
             else:
                 # For calls, we want positive deltas
                 target = abs(delta_target)
                 # For calls, we want to find options with deltas closest to the target (more positive)
-                ascending = True
+                # ascending = True
 
             logger.debug(f'Filtering for delta target: {target} for {option_type.value}')
             delta_diff = abs(option_chain_df[delta_col] - target)
             option_chain_df = option_chain_df.assign(delta_diff=delta_diff)
             
             # Filter out options that are too far from target delta (20% tolerance)
-            max_delta_diff = abs(target) * 0.20  # 20% tolerance
+            max_delta_diff = abs(target) * 0.05  # 5% tolerance
             option_chain_df = option_chain_df[option_chain_df['delta_diff'] <= max_delta_diff]
             
             # Sort by delta difference and delta value while maintaining the date index
+            # For long positions: better delta match first, then lower price (less cost)
+            # For short positions: better delta match first, then higher price (more premium)
             # option_chain_df = option_chain_df.sort_values(by=['delta_diff', delta_col], ascending=[True, ascending])
+            logger.info(f'Sorting according to trade strategy {self.config.trade_selection_method} for {position_side}')
+            logger.info(option_chain_df.head())
             option_chain_df = option_chain_df.reset_index()
-            option_chain_df = option_chain_df.sort_values(by=['index', 'delta_diff'], ascending=[True, True], kind='mergesort')
+            if self.config.trade_selection_method == TradeSelectionMethod.DELTA_FIRST:
+                option_chain_df = option_chain_df.sort_values(by=['index', 'delta_diff', 'midpoint_price'], ascending=[True, True, True if PositionSide.is_long(position_side) else False], kind='mergesort')
+            
+            # Sort by the new date column and then by 'midpoint -> premium'
+            elif self.config.trade_selection_method == TradeSelectionMethod.PREMIUM_FIRST:
+                option_chain_df = option_chain_df.sort_values(by=['index', 'midpoint_price', 'delta_diff'], ascending=[True, True if PositionSide.is_long(position_side) else False, True], kind='mergesort')
+
+            elif self.config.trade_selection_method == TradeSelectionMethod.WEIGHTED:
+                option_chain_df['weighted_trade_score'] = self.config.premium_weight * option_chain_df['midpoint_price'] / option_chain_df['midpoint_price'].max() + \
+                    self.config.delta_weight * option_chain_df['delta_diff'] / option_chain_df['delta_diff'].max()
+
+            else:
+                logger.error('Cannot sort signal df because trade strategy default not defined')
+            # option_chain_df = option_chain_df.sort_values(by=['index', 'delta_diff'], ascending=[True, True], kind='mergesort')
             option_chain_df = option_chain_df.set_index('index')
-            trade_signals = option_chain_df
             logger.debug(f'Sample chain of length: {len(option_chain_df)}')
             logger.debug(option_chain_df.head())
         else:
             logger.error('Need to provide either delta_target or delta_range')
             raise ValueError
         
-        logger.info(f"Generated {len(trade_signals)} trade signals")
+        logger.info(f"Generated {len(option_chain_df)} trade signals")
         logger.info("\nSample of trade signals:")
-        logger.info(trade_signals.head())
+        logger.info(option_chain_df.head())
         
-        return trade_signals
+        return option_chain_df
     
     def generate_multi_leg_signals(self) -> pd.DataFrame:
         """

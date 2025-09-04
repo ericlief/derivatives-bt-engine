@@ -42,7 +42,7 @@ class BasePosition(ABC):
         - Short positions should have positive entry price (credit/STO)
         """
        
-        return -abs(self.entry_price) if self.is_long else abs(self.entry_price)
+        return -abs(self.entry_price) if PositionSide.is_long(self.position_side) else abs(self.entry_price)
 
     @property
     def signed_exit_price(self) -> float:
@@ -52,7 +52,7 @@ class BasePosition(ABC):
         - Short positions should have negative exit price (debit/BTC)
         """
 
-        return abs(self.exit_price) if self.is_long else -abs(self.exit_price)
+        return abs(self.exit_price) if PositionSide.is_long(self.position_side) else -abs(self.exit_price)
     
     @abstractmethod
     def calculate_pnl(self, exit_price: Optional[float] = None) -> float:
@@ -928,6 +928,7 @@ class MultiLegOptionPosition(BaseOptionPosition):
             self.leg_ratios = {i: 1.0 for i in range(len(self.legs))}
         
         # Check if all legs have the same expiration date
+        print(f'legs: {self.legs}')
         is_same = False
         init_expire_date = self.legs[0].expire_date
         for leg in self.legs[1:]:
@@ -954,8 +955,8 @@ class MultiLegOptionPosition(BaseOptionPosition):
         self.entry_dte = self.legs[0].entry_dte if is_same else None
         
         # Determine position side based on total entry price, assuming SHORT if total premium is positive
-        total_entry_price = self.spread_price  #sum(leg.signed_entry_price * self.leg_ratios[i] for i, leg in enumerate(self.legs))
-        self.position_side = PositionSide.LONG if total_entry_price > 0 else PositionSide.SHORT
+        # total_entry_price = self.spread_price  #sum(leg.signed_entry_price * self.leg_ratios[i] for i, leg in enumerate(self.legs))
+        self.position_side = PositionSide.LONG if self.entry_price > 0 else PositionSide.SHORT
         
         # Assuming same underlying entry price for all legs
         self.underlying_entry = self.legs[0].underlying_entry
@@ -969,6 +970,10 @@ class MultiLegOptionPosition(BaseOptionPosition):
             total_delta = sum(leg.entry_delta * self.leg_ratios.get(i, 1.0) for i, leg in enumerate(self.legs))
             total_ratio = sum(self.leg_ratios.get(i, 1.0) for i in range(len(self.legs)))
             self.entry_delta = total_delta / total_ratio if total_ratio > 0 else 0.0
+
+        print(self.entry_price)
+        print(self.spread_price)
+        assert abs(round(self.entry_price, 2)) == abs(round(self.spread_price, 2))
 
         # Validate spread configuration
         self.validate_spread()
@@ -1075,7 +1080,7 @@ class MultiLegOptionPosition(BaseOptionPosition):
     @cached_property
     def spread_price(self) -> float:
         """Calculate the net price of the spread."""
-        return sum(leg.get_signed_entry_price * self.leg_ratios[i] for i, leg in enumerate(self.legs))
+        return sum(leg.signed_entry_price * self.leg_ratios[i] for i, leg in enumerate(self.legs)) # * self.quantity * 100  
 
     @cached_property    
     def max_risk(self) -> float:
@@ -1211,48 +1216,49 @@ class MultiLegOptionPosition(BaseOptionPosition):
             # Retrieve and construct legs for the spread
             n_legs = len(config.legs)
             legs = []
-            for i in range(n_legs, 1):
+            for i in range(n_legs):
                 # Get keys
-                leg_n = f"leg{i}_"
+                leg_n = f"leg{i+1}_"
                 option_type = config.legs[i].option_type
+                position_side = config.legs[i].position_side
+
+                # Strike
+                strike_str = leg_n + 'strike'
+                # Direct attribute access (more reliable with NamedTuple)
+                strike = getattr(trade_signal, strike_str)
+                if strike is None or pd.isna(strike):
+                    logger.error(f"Missing strike value/s in trade signal on {trade_signal.Index}")
+                    return None
+
+                # Delta
                 type_prefix = "p_" if OptionType.is_put(option_type) else "c_"
                 prefix = leg_n + type_prefix
-                # Strike
-                strike_str = prefix + 'strike'
-                # Direct attribute access (more reliable with NamedTuple)
-                try:
-                    strike_value = trade_signal.__getattribute__(strike_str)
-                    if pd.isna(strike_value):
-                        logger.error(f"Missing strike value/s in trade signal on {trade_signal.Index}")
-                        return None
-                except AttributeError:
-                    logger.error(f"Missing strike attribute '{strike_str}' in trade signal on {trade_signal.Index}")
-                    return None
-                # Delta
                 delta_str = prefix + 'delta'
-                if not hasattr(trade_signal, delta_str) or pd.isna(getattr(trade_signal, delta_str)):
+                entry_delta = getattr(trade_signal, delta_str)
+                if entry_delta is None or pd.isna(entry_date):
                     logger.error(f"Missing delta value/s in trade signal on {trade_signal.Index}")
                     return None
-                entry_delta = getattr(trade_signal, delta_str)
+
                 # DTE
                 dte_str = leg_n + 'dte'
-                if not hasattr(trade_signal, dte_str) or pd.isna(getattr(trade_signal, dte_str)):
+                entry_dte = getattr(trade_signal, dte_str)
+                if entry_dte is None or pd.isna(entry_dte):
                     logger.error(f"Missing dte value/s in trade signal on {trade_signal.Index}")
                     return None
-                entry_dte = getattr(trade_signal, dte_str)
+                
                 # Entry price (midpoint_price)
                 price_str = leg_n + 'midpoint_price'
-                if not hasattr(trade_signal, price_str) or pd.isna(getattr(trade_signal, price_str)):
+                entry_price = getattr(trade_signal, price_str)
+                if entry_price is None or pd.isna(entry_price):
                     logger.error(f"Missing midpoint price value/s in trade signal on {trade_signal.Index}")
                     return None
-                entry_price = getattr(trade_signal, price_str)
 
                 position = SingleLegOptionPosition(
                     option_strategy=config.option_strategy,
                     quantity=config.quantity,
                     option_type=option_type,
                     position_side=position_side,
-                    strike=strike_value,
+                    strike=strike,
                     entry_date=entry_date,
                     expire_date=trade_signal.expire_date,
                     entry_price=abs(entry_price),  # Store positive price, use signed accessors

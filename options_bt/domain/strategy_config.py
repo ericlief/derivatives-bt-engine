@@ -22,6 +22,10 @@ class BaseOptionStrategyConfig(BaseStrategyConfig, ABC):
     option_strategy: OptionStrategy
     use_underlying_close: bool = False
     early_close_days: Optional[int] = None
+    trade_selection_method: Optional[TradeSelectionMethod] = TradeSelectionMethod.DELTA_FIRST
+    delta_weight: float = 0.5
+    premium_weight: float = 0.5
+   
 
 @dataclass(kw_only=True)
 class SingleLegOptionStrategyConfig(BaseOptionStrategyConfig):
@@ -59,7 +63,8 @@ class MultiLegOptionStrategyConfig(BaseOptionStrategyConfig):
     legs: List[OptionLegConfig]
     leg_ratios: Dict[int, float] = None
     max_spread_width: Optional[float] = None  # Maximum spread width in points (e.g., 50 for SPX means max $5000 margin)
-
+    max_trade_loss: Optional[float] = None # Position-based risk management (e.g. $500)
+    
     def __post_init__(self):
         # Validate legs configuration
         for leg in self.legs:
