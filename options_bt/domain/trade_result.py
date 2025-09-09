@@ -25,10 +25,10 @@ class BaseTradeResult:
     days_held: Optional[int]
 
     # results
-    bp: float    # Available buying power after trade
+    bp_effect: float    # Available buying power after trade
     pnl: float
     capital_used: float
-    return_on_margin: float 
+    roi: float 
 
     def __post_init__(self):
         if self.closed:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
+from datetime import date
 from typing import Optional, Dict, Union, List, NamedTuple, Tuple
 from functools import cached_property
 from abc import ABC, abstractmethod
@@ -19,13 +20,15 @@ logger = setup_logger()
 class BasePosition(ABC):
     """Base class for any trading position."""
     trade_id: Optional[int] = None
+    transaction_id: Optional[int] = None
     quantity: int
     position_side: Optional[Union[PositionSide, str]] = None
     entry_date: pd.Timestamp
     entry_price: float
     margin_required: Optional[float] = None
     fees: Optional[float] = None   # added 
-
+    pnl: Optional[float] = None
+    
     def __post_init__(self):
         """Validate and convert types after initialization."""
         if isinstance(self.position_side, str):
@@ -294,13 +297,18 @@ class BaseOptionPosition(BasePosition, ABC):
 
             else: 
                 logger.debug(f'On expiration but not able to calculate intrinsic value. Perhaps an early closure on expiration day {self.option_strategy}')
+                return None
+        
         fees = round(fees * self.quantity, 2)
-        self.fees = fees
+        self.fees = fees  # Should we return instead?
+        logger.info(f"Calculated fees for transaction: {self.transaction_id}|{self.option_strategy}{self.option_type}: {self.fees}")
          # fees *= self.quantity
         
         # Calculate P&L
         pnl -= fees
-        
+        # self.pnl = pnl    ???
+        logger.info(f"Calculated pnl for {self.option_strategy}{self.option_type}: {self.pnl}")
+
         return round(pnl, 2)
 
     @abstractmethod
@@ -311,7 +319,8 @@ class BaseOptionPosition(BasePosition, ABC):
     def close(self, 
             option_chain: pd.DataFrame, 
             underlying_price_history: pd.DataFrame,
-            option_bp: float) -> Optional[Tuple[Dict, Dict]]:
+            #option_bp: float
+    )-> Optional[Tuple[Dict, Dict]]:
         """
         Close this position and calculate results.
         
@@ -323,6 +332,8 @@ class BaseOptionPosition(BasePosition, ABC):
         Returns:
             Optional[Tuple[Dict, Dict]]: Tuple of (trade_result_dict, transaction_dict) if successful, None if closing data is unavailable.
         """
+        logger.info(f"Closing trade {self.trade_id}|{self.transaction_id}: {self.option_strategy}|{self.option_type}|{self.position_side}")
+        bp_effect = 0
         close_reason = None
         min_valid_date = pd.Timestamp('1990-01-01')  # Arbitrary date well after 1970
 
@@ -368,21 +379,21 @@ class BaseOptionPosition(BasePosition, ABC):
         logger.debug(f'Exit price: {self.exit_price} | Underlying close: {self.underlying_exit}')
 
         # Add or subtract closing price/premium from buying power
-        option_bp += self.signed_exit_price * self.quantity * 100  # Add/subtract exit premium  
-        logger.debug(f'Option BP: {option_bp}')
+        bp_effect += self.signed_exit_price * self.quantity * 100  # Add/subtract exit premium  
+        logger.debug(f'BP Effect: {bp_effect}')
         # Restore margin for short positions
         if self.is_short:
-            option_bp += self.margin_required
-            logger.debug(f'Updated BP with margin: {option_bp}')
+            bp_effect += self.margin_required
+            logger.debug(f'Updated BP with margin: {bp_effect}')
 
         
         pnl = self.calculate_pnl(option_chain=option_chain, underlying_price_history=underlying_price_history, close_reason=close_reason)
         logger.debug(f'Calculated pnl: {pnl}')
 
         # Deduct fees from buying power
-        logger.debug(f'Deducting fees from BP: {option_bp}')
-        option_bp -= self.fees if self.fees is not None else 0 # Deduct fees from buying power 
-        logger.debug(f'Deducted fees from BP: {option_bp}')
+        logger.debug(f'Deducting fees from BP: {bp_effect}')
+        bp_effect -= self.fees if self.fees is not None else 0 # Deduct fees from buying power 
+        logger.debug(f'Deducted fees from BP: {bp_effect}')
 
         # Calculate days held
         days_held = pd.Timedelta(close_date - self.entry_date).days
@@ -394,12 +405,16 @@ class BaseOptionPosition(BasePosition, ABC):
 
          # Prepare trade result
         transaction =  {
+
+            'transaction_id': self.transaction_id,
             'trade_id': self.trade_id,
+            'date': self.entry_date,
+            'type': type,
             'quantity': self.quantity,
             'option_type': self.option_type.value if isinstance(self.option_type, OptionType) else self.option_type,
             'position_side': self.position_side.value if isinstance(self.position_side, PositionSide) else self.position_side,
-            'entry_date': self.entry_date,
-            'exit_date': close_date,
+           
+            # 'exit_date': close_date,
             'expire_date': self.expire_date,
             'entry_delta': round(self.entry_delta, 2),
             'exit_delta': round(self.exit_delta, 2),
@@ -408,16 +423,17 @@ class BaseOptionPosition(BasePosition, ABC):
             'underlying_entry': self.underlying_entry,
             'underlying_exit': self.underlying_exit,
             'strike': self.strike,
-            'entry_price': round(self.entry_price, 2),
-            'exit_price': round(self.exit_price, 2),
+            'price': round(self.entry_price, 2),
+            # 'entry_price': round(self.entry_price, 2),
+            # 'exit_price': round(self.exit_price, 2),
             'capital_used': self.margin_required,
-            'bp': round(option_bp, 2),
-            'return_on_margin': round(pnl / self.margin_required * 100, 2) if self.margin_required > 0 else 0,
-            'pnl': round(pnl, 2),
+            'bp_effect': round(bp_effect, 2),
+            # 'pnl': round(pnl, 2),
+            'fees': round(self.fees, 2),
         }
         trade_result = OptionTradeResult(
-            option_strategy=self.option_strategy.value if isinstance(self.option_strategy, OptionStrategy) else self.option_strategy,
             trade_id=self.trade_id,
+            option_strategy=self.option_strategy.value if isinstance(self.option_strategy, OptionStrategy) else self.option_strategy,
             quantity=self.quantity,
             opened=self.entry_date,
             closed=close_date,
@@ -426,9 +442,9 @@ class BaseOptionPosition(BasePosition, ABC):
             premium=round(self.premium, 2),
             fees=round(self.fees, 2),
             pnl=round(pnl, 2),
-            bp=round(option_bp, 2),
+            bp_effect=round(option_bp, 2),
             capital_used=round(self.margin_required, 2),
-            return_on_margin=round(pnl / self.margin_required * 100, 2) if self.margin_required is not None and self.margin_required != 0 else 0,
+            roi=(pnl / self.margin_required * 100, 2) if self.margin_required is not None and self.margin_required != 0 else 0,
         )
         return trade_result.to_dict(), transaction
 
@@ -527,6 +543,69 @@ class BaseOptionPosition(BasePosition, ABC):
             'close_date': self.close_date,
             'margin_required': self.margin_required
         }
+
+    def create_transaction(position: BaseOptionPosition, date: date, type=None)->dict:
+        """
+        Create a transaction dictionary for an option position.
+
+        Args:
+            position (BaseOptionPosition): The option position for which to create the transaction.
+            date (date): The date of the transaction.
+            type (str, optional): The type of transaction ('open' or 'close').
+
+        Returns:
+            dict: A dictionary containing transaction details.
+        """
+        
+        days_held = (date - position.entry_date).days
+
+        if type.lower() == 'open':
+            if position.is_long():
+                operation = 'BTO'
+                effect = 'debit'
+            else:
+                operation = 'STO'
+                effect = 'credit'
+        elif type.lower() == 'close':
+            if position.is_long(): 
+                operation = 'BTC'
+                effect = 'debit'
+            else:
+                operation = 'STC'
+                effect = 'credit'
+        else:
+            logger.error('Undefined operation type')
+            operation = 'UNDEF'
+
+        position_side = position.option_type.value if isinstance(position.option_type, OptionType) else position.option_type
+ 
+        return  {
+                'transaction_id': position.transaction_id,
+                'trade_id': position.trade_id,
+                'date': date,
+                'type': operation,
+                'option_type': position.option_type.value if isinstance(position.option_type, OptionType) else position.option_type,
+                'position_side': position_side,
+                # 'exit_date': close_date,
+                'expire_date': position.expire_date,
+                'entry_delta': round(position.entry_delta, 2),
+                'exit_delta': round(position.exit_delta, 2),
+                'entry_dte': position.entry_dte,
+                'days_held': days_held,
+                'underlying_entry': position.underlying_entry,
+                'underlying_exit': position.underlying_exit,
+                'strike': position.strike,
+                'price': round(position.entry_price, 2) if type.lower() == 'open' else round(position.exit_price, 2),
+                # 'entry_price': round(self.entry_price, 2),
+                # 'exit_price': round(self.exit_price, 2),
+                'effect': effect,
+                'bp_effect': round(position.bp_effect, 2),
+                # 'pnl': round(pnl, 2),
+                'fees': round(position.fees, 2),
+            }
+
+
+
 
 @dataclass(kw_only=True)
 class SingleLegOptionPosition(BaseOptionPosition):
@@ -1119,11 +1198,24 @@ class MultiLegOptionPosition(BaseOptionPosition):
         """Calculate total P&L for the spread."""
         total_pnl = 0.0
         total_fees = 0.0
+        
+        # Calculate spread exit price from individual legs' exit prices
+        if self.spread_type == OptionSpreadType.VERTICAL:
+            self._calculate_vertical_spread_exit_price()
+        elif self.spread_type == OptionSpreadType.CALENDAR:
+            self._calculate_calendar_spread_exit_price()
+        elif self.spread_type == OptionSpreadType.IRON_CONDOR:
+            self._calculate_iron_condor_exit_price()
+        elif self.spread_type == OptionSpreadType.BUTTERFLY:
+            self._calculate_butterfly_spread_exit_price()
+        else:
+            self._calculate_simple_spread_exit_price()
+        
+        # Set underlying exit to the first leg's underlying exit (they should be the same)
+        if self.legs and hasattr(self.legs[0], 'underlying_exit'):
+            self.underlying_exit = self.legs[0].underlying_exit
+        
         for i, leg in enumerate(self.legs):
-            # Ensure leg's exit data is up-to-date before calculating PnL
-            if not leg._update_single_leg_closing_data(option_chain, underlying_price_history):
-                return None  # Cannot calculate PnL if a leg's closing data is missing
-            
             # Pass the leg's determined exit_price and underlying_exit to its PnL calculation
             leg_pnl = leg.calculate_pnl(option_chain=option_chain, underlying_price_history=underlying_price_history, close_reason=close_reason, commission=commission, exercise_fee=exercise_fee)
             if leg_pnl is not None:
@@ -1552,23 +1644,23 @@ class MultiLegOptionPosition(BaseOptionPosition):
             )
             
             if leg_trade_result_dict is None or leg_transaction_dict is None:
-                logger.warning(f"Skipping spread closure due to missing closing data for leg {i+1}")
+                logger.error(f"Skipping spread closure due to missing closing data for leg {i+1}")
                 return None
             
             all_trade_results.append(leg_trade_result_dict)
             all_transactions.append(leg_transaction_dict)
 
         # After all legs are closed, update the spread's overall PnL and fees
-        # We call calculate_pnl directly to ensure internal state (`self.fees`) is updated 
-        # and to get the correct spread_pnl value.
-        # The close_reason should be consistent across legs, so we can pick from the first transaction.
-        spread_close_reason = all_trade_results[0]['close_reason'] if all_trade_results else 'expired'
-        spread_pnl = self.calculate_pnl(
-            option_chain=option_chain,
-            underlying_price_history=underlying_price_history,
-            close_reason=spread_close_reason
-        )
+        # Calculate spread exit price from individual legs' exit prices with proper ratios
+        # self.exit_price = sum(leg.signed_exit_price * self.leg_ratios[i] for i, leg in enumerate(self.legs))
         
+        # Set underlying exit to the first leg's underlying exit (they should be the same)
+        if self.legs and hasattr(self.legs[0], 'underlying_exit'):
+            self.underlying_exit = self.legs[0].underlying_exit
+        
+        # Calculate spread PnL from individual legs with proper ratios
+        # spread_pnl = sum((leg.signed_exit_price - leg.signed_entry_price) * self.leg_ratios[i] for i, leg in enumerate(self.legs)) * 100 * self.quantity
+        spread_pnl = sum(trade_result.pnl for trade_result in all_trade_results) # * self.quantity
         if spread_pnl is None:
             logger.error("Failed to calculate spread PnL during closure.")
             return None
@@ -1579,8 +1671,11 @@ class MultiLegOptionPosition(BaseOptionPosition):
             spread_capital_used = sum(leg_res['capital_used'] for leg_res in all_transactions)
 
         # Calculate return on margin for the spread
-        return_on_margin = round(spread_pnl / spread_capital_used * 100, 2) if spread_capital_used > 0 else 0
+        # return_on_margin = round(spread_pnl / spread_capital_used * 100, 2) if spread_capital_used > 0 else 0
         
+
+
+
         # Adjust the overall option_bp based on the spread's net entry and exit values
         # The initial option_bp parameter is the global buying power from the backtester.
         # We need to adjust it by the net effect of the spread's close.
@@ -1594,36 +1689,39 @@ class MultiLegOptionPosition(BaseOptionPosition):
         adjusted_option_bp -= self.fees if self.fees is not None else 0 # Deduct total fees
 
         # Determine the close_date for the spread (e.g., the latest close date of its legs)
-        spread_close_date = self.close_date if self.close_date else self.expire_date # Prioritize explicit close_date, then expire_date
-        if not spread_close_date and all_transactions:
+        close_date = self.close_date if self.close_date else self.expire_date # Prioritize explicit close_date, then expire_date
+        if not close_date and all_transactions:
             # Fallback to the close_date of the first leg if no explicit spread close_date
-            spread_close_date = all_transactions[0]['exit_date']
+            close_date = all_transactions[0]['exit_date']
         
-        if not spread_close_date:
+        if not close_date:
             logger.error(f"Could not determine close date for spread {self.trade_id}")
             return None
 
         # Calculate days_held for the spread
-        spread_days_held = (spread_close_date - self.entry_date).days if self.entry_date else None
-        if spread_days_held is not None and spread_days_held < 0: # Handle potential negative days held
-            logger.warning(f"Calculated negative days held ({spread_days_held}) for spread {self.trade_id}")
-            spread_days_held = 0 # Or handle as an error if appropriate
+        days_held = (close_date - self.entry_date).days if self.entry_date else None
+        if days_held is not None and days_held < 0: # Handle potential negative days held
+            logger.warning(f"Calculated negative days held ({days_held}) for spread {self.trade_id}")
+            days_held = 0 # Or handle as an error if appropriate
+
+        # Get close reason from first leg (should be same for all legs)
+        close_reason = all_trade_results[0]['close_reason']
 
         # Construct the aggregated trade result for the spread
         aggregated_trade_result = OptionTradeResult(
-            option_strategy=self.option_strategy.value if isinstance(self.option_strategy, OptionStrategy) else self.option_strategy,
             trade_id=self.trade_id,
+            option_strategy=self.option_strategy.value if isinstance(self.option_strategy, OptionStrategy) else self.option_strategy,
             quantity=self.quantity,
             opened=self.entry_date,
-            closed=spread_close_date,
-            days_held=spread_days_held,
-            close_reason=spread_close_reason,
+            closed=close_date,
+            days_held=days_held,
+            close_reason=close_reason,
             premium=round(self.premium, 2),
             fees=round(self.fees, 2),
-            pnl=round(spread_pnl, 2),
-            bp=round(adjusted_option_bp, 2),
-            capital_used=round(spread_capital_used, 2),
-            return_on_margin=return_on_margin,
+            pnl=round(pnl, 2),
+            bp_effect=round(option_bp, 2),
+            capital_used=round(self.margin_required, 2),
+            roi=(pnl / self.margin_required * 100, 2) if self.margin_required is not None and self.margin_required != 0 else 0,
         ).to_dict()
         
         return aggregated_trade_result, all_transactions
@@ -1634,7 +1732,7 @@ class MultiLegOptionPosition(BaseOptionPosition):
             config: MultiLegOptionStrategyConfig,
             entry_date: pd.Timestamp,
         ) -> Optional[SingleLegOptionPosition]:
-            """
+            f"""
                 Creates a OptionPosition object from a given trade signal.
                 
                 Args:       
@@ -1647,24 +1745,42 @@ class MultiLegOptionPosition(BaseOptionPosition):
 
                 
                 Example config:
-                    config = SingleLegOptionStrategyConfig(
-                        strategy=OptionStrategy.SHORT_CALL,
-                        quantity=1,
-                        initial_capital=100000,
-                        leverage=1.0,
-                        start_date="2020-01-01",
-                        end_date="2020-12-31",
-                        use_underlying_close=False,
-                        early_close_days=30,
-                        max_margin_utilization=0.80,
-                        max_positions=1,
-                        # Define the leg of the strategy
-                        leg=OptionLegConfig(
-                            option_type=OptionType.CALL,
-                            position_side=PositionSide.SHORT,
-                            delta_target=0.75,
-                            dte_range=(42, 45),
-                            )
+
+                MultiLegOptionStrategyConfig(
+                    quantity=1,
+                    option_strategy=OptionStrategy.BULL_PUT_CREDIT_SPREAD,
+                    spread_type=OptionSpreadType.VERTICAL,
+                    leg_ratio={0: 1.0, 1: 2.0, 2: 2.0, 3: 1.0},
+                    initial_capital=100000,
+                    leverage=1.0,
+                    start_date="2020-01-01",
+                    end_date="2020-12-31",
+                    use_underlying_close=False,
+                    early_close_days=30,
+                    max_margin_utilization=0.80,
+                    max_positions=1,
+                    max_spread_width=100,
+                    max_trade_loss=5000.00,
+                    trade_selection_method=TradeSelectionMethod.PREMIUM_FIRST,
+                    
+                    # Define the leg of the strategy
+                    legs=[
+                        OptionLegConfig(
+                        option_type=OptionType.PUT,
+                        position_side=PositionSide.SHORT,
+                        # delta_range=(0.65, 0.75), # one 
+                        delta_target=0.75,          # or another
+                        dte_range=(40, 45),
+                        ),
+                        OptionLegConfig(
+                        option_type=OptionType.PUT,
+                        position_side=PositionSide.LONG,
+                        # delta_range=(0.65, 0.75), # one 
+                        delta_target=0.55,          # or another
+                        dte_range=(40, 45),
+                        )
+                    ],
+            )
             Returns:
                 Optional[SingleLegOptionPosition]: Created position if valid, None otherwise
             """     
@@ -1695,6 +1811,7 @@ class MultiLegOptionPosition(BaseOptionPosition):
             for i in range(n_legs):
                 # Get keys
                 leg_n = f"leg{i+1}_"
+                quantity = config.quantity * config.leg_ratio[i]
                 option_type = config.legs[i].option_type
                 position_side = config.legs[i].position_side
 
@@ -1731,7 +1848,7 @@ class MultiLegOptionPosition(BaseOptionPosition):
 
                 position = SingleLegOptionPosition(
                     option_strategy=config.option_strategy,
-                    quantity=1, # Individual legs should always have a quantity of 1, as the overall spread quantity is handled by MultiLegOptionPosition
+                    quantity=quantity, # Individual legs should always have a quantity of 1, as the overall spread quantity is handled by MultiLegOptionPosition
                     option_type=option_type,
                     position_side=position_side,
                     strike=strike,

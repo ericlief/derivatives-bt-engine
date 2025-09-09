@@ -21,6 +21,7 @@ class TradeManager:
         self.max_margin_utilization = config.max_margin_utilization
         self.max_positions = config.max_positions
         self.trade_counter = 0
+        self.transaction_counter = 0
         self.open_positions: List[Union[SingleLegOptionPosition, MultiLegOptionPosition]] = []
 
         logger.info(f'TradeManager instantiated')
@@ -130,11 +131,26 @@ class TradeManager:
 
                 # Execute the trade and update the option buying power
                 executed_trade = self._execute_trade(candidate_position)
-                if executed_trade:
+                if executed_trade is not None:
                     executed_trade.trade_id = self.trade_counter
+                    if isinstance(executed_trade, MultiLegOptionPosition):
+                        for leg in executed_trade.legs:
+                            leg.trade_id = self.trade_counter
+                            leg.transaction_id = self.transaction_counter
+                            transaction = executed_trade.create_transaction(current_date, leg, 'open')
+                            self.transaction_counter += 1
+                    else:
+                        executed_trade.transaction_id = self.transaction_counter
+                        self.transaction_counter += 1
+
                     self.open_positions.append(executed_trade)
+
+                     # Prepare trade result
+                    transaction = executed_trade.create_transaction(current_date, executed_trade, 'open')
+                    all_transactions.append(transaction)
                     self.trade_counter += 1  # Increment counter only for successful trades
-                    logger.debug(f'Successfully executed trade: {executed_trade}')
+                    
+                    logger.debug(f'Successfully executed trade: {executed_trade.trade_id}')
                     logger.debug(f'BP: ${self.option_bp:.2f}')
                 else:
                     skipped_trades += 1
@@ -187,7 +203,7 @@ class TradeManager:
                 (pos.expire_date is not None and current_date >= pos.expire_date) or
                 close_all):
                 
-                logger.debug(f'Closing position: {pos}')
+                logger.debug(f'Closing position: {pos.trade_id}')
                 result, transaction = pos.close(option_chain=option_chain, 
                                                 underlying_price_history=underlying_price_history,
                                                 option_bp=self.option_bp)
@@ -195,7 +211,7 @@ class TradeManager:
                     # Update buying power
                     self.option_bp = result['bp']
                     positions_to_remove.append(pos)
-                    logger.debug(f"Closed position - BP: ${self.option_bp:.2f}")
+                    logger.debug(f"Closed position {pos.transaction_id} - BP: ${self.option_bp:.2f}")
                     trade_results.append(result)
                     transactions.append(transaction)    
         # Remove closed positions
