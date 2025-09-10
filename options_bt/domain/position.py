@@ -66,18 +66,16 @@ class BasePosition(ABC):
     def close(self, 
             option_chain: pd.DataFrame, 
             underlying_price_history: pd.DataFrame,
-            # option_bp: float
-    ) -> Optional[Tuple[Dict, Dict, float]]:
+    ) -> Optional[Tuple[BaseTradeResult, Dict, float]]:
         """
         Close this position and calculate results.
         
         Args:
             option_chain: pd.DataFrame,
             underlying_price_history: pd.DataFrame,
-            XXX option_bp: float
         
         Returns:
-            Optional[Tuple[Dict, Dict, float]]: Tuple of (trade_result_dict, transaction_dict, bp_effect) if successful, None if closing data is unavailable.
+            Optional[Tuple[BaseTradeResult, Dict, float]]: Tuple of (trade_result_dict, transaction_dict, bp_effect) if successful, None if closing data is unavailable.
         """
         pass 
     
@@ -161,16 +159,16 @@ class BaseOptionPosition(BasePosition, ABC):
     @cached_property
     def premium(self) -> float:
         """
-        Get the signed premium for the position.
+        Get the unsigned premium for the position.
         """
-        return self.entry_price * 100 * self.quantity
+        pass
     
     @cached_property
     def signed_premium(self) -> float:
         """
         Get the signed premium for the position.
         """
-        return -self.premium if self.is_long else self.premium
+        return -abs(self.premium) if self.is_long else abs(self.premium)
 
     @staticmethod
     def calculate_margin(quantity: int,
@@ -580,7 +578,12 @@ class SingleLegOptionPosition(BaseOptionPosition):
     #     """Check if position is currently open."""
     #     return not self.is_closed()
 
-   
+    @cached_property
+    def premium(self) -> float:
+        """
+        Get the unsigned premium for the position.
+        """
+        return self.entry_price * self.quantity * 100
 
     # @cached_property
     # def signed_entry_price(self) -> float:
@@ -873,20 +876,18 @@ class SingleLegOptionPosition(BaseOptionPosition):
     def close(self, 
             option_chain: pd.DataFrame, 
             underlying_price_history: pd.DataFrame,
-            # option_bp: float
-    ) -> Optional[Tuple[Dict, Dict, float]]:
+    ) -> Optional[Tuple[OptionTradeResult, Dict, float]]:
         """
         Close this single-leg position and calculate results.
         
         Args:
             option_chain: pd.DataFrame, 
             underlying_price_history: pd.DataFrame,
-            XXX option_bp: float
         
         Returns:
-            Optional[Tuple[Dict, Dict, float]]: Tuple of (trade_result_dict, transaction_dict, bp_effect) if successful, None if closing data is unavailable.
+            Optional[Tuple[OptionTradeResult, Dict, float]]: Tuple of (trade_result_dict, transaction_dict, bp_effect) if successful, None if closing data is unavailable.
         """
-        logger.info(f"Closing trade {self.trade_id}|{self.transaction_id}: {self.option_strategy}|{self.option_type}|{self.position_side}")
+        logger.info(f"Closing trade #{self.trade_id}|Trans #{self.transaction_id}|{self.option_strategy}|{self.option_type}|{self.position_side}")
         bp_effect = 0
         close_reason = None
         min_valid_date = pd.Timestamp('1990-01-01')  # Arbitrary date well after 1970
@@ -907,7 +908,7 @@ class SingleLegOptionPosition(BaseOptionPosition):
             logger.error("Both close_date and expire_date are None - skipping trade")
             return None
         
-        logger.debug(f'Closing {self.trade_id}')
+        # logger.debug(f'Closing {self.trade_id}')
         logger.info(f'Date: {close_date} - Close Reason: {close_reason}')
 
         # Validate close_date
@@ -933,12 +934,13 @@ class SingleLegOptionPosition(BaseOptionPosition):
         logger.debug(f'Exit price: {self.exit_price} | Underlying close: {self.underlying_exit}')
 
         # Add or subtract closing price/premium from buying power
-        bp_effect += self.signed_exit_price * self.quantity * 100  # Add/subtract exit premium  
+        bp_effect += round(self.signed_exit_price * self.quantity * 100, 2)  # Add/subtract exit premium  
         logger.debug(f'BP Effect: {bp_effect}')
+        
         # Restore margin for short positions
         if self.is_short:
             bp_effect += self.margin_required
-            logger.debug(f'Updated BP with margin: {bp_effect}')
+            logger.debug(f'Updated BP with margin requirement of {self.margin_required}: {bp_effect}')
 
         
         pnl = self.calculate_pnl(option_chain=option_chain, underlying_price_history=underlying_price_history, close_reason=close_reason)
@@ -976,7 +978,7 @@ class SingleLegOptionPosition(BaseOptionPosition):
             capital_used=round(self.margin_required, 2),
             roi=(pnl / self.margin_required * 100, 2) if self.margin_required is not None and self.margin_required != 0 else 0,
         )
-        return trade_result.to_dict(), transaction, bp_effect
+        return trade_result, transaction, bp_effect
 
 @dataclass(kw_only=True)
 class MultiLegOptionPosition(BaseOptionPosition):
@@ -1048,9 +1050,8 @@ class MultiLegOptionPosition(BaseOptionPosition):
             total_ratio = sum(self.leg_ratios.get(i, 1.0) for i in range(len(self.legs)))
             self.entry_delta = total_delta / total_ratio if total_ratio > 0 else 0.0
 
-        print(self.entry_price)
-        print(self.spread_price)
-        assert abs(round(self.entry_price, 2)) == abs(round(self.spread_price, 2))
+        logger.info(f'Creating spread with price: {self.signed_entry_price}')
+        assert abs(round(self.signed_entry_price, 2)) == abs(round(self.spread_price, 2))
 
         # Validate spread configuration
         self.validate_spread()
@@ -1157,7 +1158,11 @@ class MultiLegOptionPosition(BaseOptionPosition):
     @cached_property
     def spread_price(self) -> float:
         """Calculate the net price of the spread."""
-        return sum(leg.signed_entry_price * self.leg_ratios[i] for i, leg in enumerate(self.legs)) # * self.quantity * 100  
+        
+        spread_price = sum(leg.signed_entry_price * self.leg_ratios[i] for i, leg in enumerate(self.legs))
+        # assert self.signed_entry_price == spread_price
+
+        return round(spread_price, 2)
 
     @cached_property    
     def max_risk(self) -> float:
@@ -1177,6 +1182,11 @@ class MultiLegOptionPosition(BaseOptionPosition):
             return abs(legs[2].strike - legs[0].strike) * 100
             
         return None  # For undefined risk spreads
+
+    @cached_property
+    def premium(self) -> float:
+        # dollars, includes per-leg quantities; ignore self.quantity here
+        return round(100 * sum(leg.signed_entry_price * leg.quantity for leg in self.legs), 2)
 
     @cached_property
     def margin_required(self) -> float: 
@@ -1370,6 +1380,7 @@ class MultiLegOptionPosition(BaseOptionPosition):
                     entry_delta=entry_delta,
                     entry_dte=entry_dte,
                     underlying_entry=trade_signal.underlying_last,
+                    margin_required=margin_required,
                     close_date=entry_date + pd.Timedelta(days=config.early_close_days) if config.early_close_days is not None else None,
                 )
 
@@ -1622,29 +1633,29 @@ class MultiLegOptionPosition(BaseOptionPosition):
         Args:
             option_chain: pd.DataFrame,
             underlying_price_history: pd.DataFrame,
-            XXX option_bp: float
         
         Returns:
-            Optional[Tuple[Dict, List[Dict], float]]: Tuple of (trade_result_dict, list_of_transaction_dicts, total_bp_effect) if successful, None if closing data is unavailable.
+            Optional[Tuple[OptionTradeResult, List[Dict], float]]: Tuple of (trade_result_dict, list_of_transaction_dicts, total_bp_effect) if successful, None if closing data is unavailable.
         """
-        all_transactions = []
         all_trade_results = []
+        all_transactions = []
         total_bp_effect = 0.0
         
+        logger.debug(f'Closing spread {self.trade_id}')
         # Close each leg individually and collect results
         for i, leg in enumerate(self.legs):
             # Each leg's close method returns (trade_result, transaction, bp_effect)
-            leg_trade_result_dict, leg_transaction_dict, leg_bp_effect = leg.close(
+            leg_trade_result, leg_transaction_dict, leg_bp_effect = leg.close(
                 option_chain=option_chain,
                 underlying_price_history=underlying_price_history,
                 # option_bp=option_bp  # Pass the current BP to each leg
             )
             
-            if leg_trade_result_dict is None or leg_transaction_dict is None:
+            if leg_trade_result is None or leg_transaction_dict is None:
                 logger.error(f"Skipping spread closure due to missing closing data for leg {i+1}")
                 return None
             
-            all_trade_results.append(leg_trade_result_dict)
+            all_trade_results.append(leg_trade_result)
             all_transactions.append(leg_transaction_dict)
             total_bp_effect += leg_bp_effect
 
@@ -1658,7 +1669,7 @@ class MultiLegOptionPosition(BaseOptionPosition):
         
         # Calculate spread PnL from individual legs with proper ratios
         # spread_pnl = sum((leg.signed_exit_price - leg.signed_entry_price) * self.leg_ratios[i] for i, leg in enumerate(self.legs)) * 100 * self.quantity
-        spread_pnl = sum(trade_result.pnl for trade_result in all_trade_results) # * self.quantity
+        spread_pnl = round(sum(trade_result.pnl for trade_result in all_trade_results), 2)   # * self.quantity
         if spread_pnl is None:
             logger.error("Failed to calculate spread PnL during closure.")
             return None
@@ -1666,13 +1677,12 @@ class MultiLegOptionPosition(BaseOptionPosition):
         # The total capital used for the spread is its margin required (already a cached_property)
         spread_capital_used = self.margin_required
         if spread_capital_used is None: # Fallback if margin_required is not yet set
-            spread_capital_used = sum(leg_res['capital_used'] for leg_res in all_transactions)
+            spread_capital_used = round(sum(leg_res.capital_used for leg_res in all_trade_results), 2)
 
         # Calculate return on margin for the spread
         # return_on_margin = round(spread_pnl / spread_capital_used * 100, 2) if spread_capital_used > 0 else 0
         
-
-
+        all_fees = round(sum(res.fees for res in all_trade_results), 2)
 
         # The total_bp_effect is already calculated from individual legs above
         # No need for additional manual calculation since each leg handles its own bp_effect
@@ -1688,13 +1698,13 @@ class MultiLegOptionPosition(BaseOptionPosition):
             return None
 
         # Calculate days_held for the spread
-        days_held = (close_date - self.entry_date).days if self.entry_date else None
-        if days_held is not None and days_held < 0: # Handle potential negative days held
+        days_held = (close_date.date() - self.entry_date.date()).days
+        if days_held < 0:
             logger.warning(f"Calculated negative days held ({days_held}) for spread {self.trade_id}")
             days_held = 0 # Or handle as an error if appropriate
 
         # Get close reason from first leg (should be same for all legs)
-        close_reason = all_trade_results[0]['close_reason']
+        close_reason = all_trade_results[0].close_reason
 
         # Construct the aggregated trade result for the spread
         aggregated_trade_result = OptionTradeResult(
@@ -1706,12 +1716,12 @@ class MultiLegOptionPosition(BaseOptionPosition):
             days_held=days_held,
             close_reason=close_reason,
             premium=round(self.premium, 2),
-            fees=round(self.fees, 2),
-            pnl=round(spread_pnl, 2),
+            fees=all_fees,
+            pnl=spread_pnl,
             bp=None,
             capital_used=round(self.margin_required, 2),
             roi=(spread_pnl / self.margin_required * 100, 2) if self.margin_required is not None and self.margin_required != 0 else 0,
-        ).to_dict()
+        )
         
         return aggregated_trade_result, all_transactions, total_bp_effect
     
@@ -1800,7 +1810,7 @@ class MultiLegOptionPosition(BaseOptionPosition):
             for i in range(n_legs):
                 # Get keys
                 leg_n = f"leg{i+1}_"
-                quantity = config.quantity * config.leg_ratios[i]
+                quantity = config.quantity * config.leg_ratios[i]  # effective quantity
                 option_type = config.legs[i].option_type
                 position_side = config.legs[i].position_side
 
@@ -1849,11 +1859,12 @@ class MultiLegOptionPosition(BaseOptionPosition):
                     underlying_entry=trade_signal.underlying_last,
                     close_date=entry_date + pd.Timedelta(days=config.early_close_days) if config.early_close_days is not None else None,
                 )
+                logger.debug(f'Created leg {i+1} of potential spread | Price: {position.signed_entry_price}')
 
                 legs.append(position)
 
             # Get entry price (already validated in signal generation)
-            entry_price = trade_signal.spread_price
+            entry_price = round(trade_signal.spread_price, 2)
             if entry_price is None:
                 logger.error(f"Missing spread price for trade signal on {trade_signal.Index}")
                 return None
@@ -1893,8 +1904,8 @@ class MultiLegOptionPosition(BaseOptionPosition):
                 close_date=entry_date + pd.Timedelta(days=config.early_close_days) if config.early_close_days is not None else None,
             )
 
-            logger.debug(f'Constructing spread position from symbol')
-            logger.debug(f'{config.option_strategy} | Premium: {position.premium}')
+            logger.debug(f'Constructing potential spread position from symbol')
+            logger.debug(f'{config.option_strategy} | Price: {position.spread_price} | Premium: {position.premium}')
             # if is_spread:
             #     position = MultiLegOptionPosition(
             #         trade_id=self.trade_counter,

@@ -138,12 +138,14 @@ class TradeManager:
                             leg.trade_id = self.trade_counter
                             leg.transaction_id = self.transaction_counter
                             transaction = executed_trade.create_transaction(leg, current_date, 'open', self.option_bp)
+                            all_transactions.append(transaction)
                             self.transaction_counter += 1
                     else:
                         executed_trade.transaction_id = self.transaction_counter
                         self.transaction_counter += 1
                         transaction = executed_trade.create_transaction(executed_trade, current_date, 'open', self.option_bp)
                         all_transactions.append(transaction)
+                        self.transaction_counter += 1
 
                     self.open_positions.append(executed_trade)
 
@@ -214,7 +216,7 @@ class TradeManager:
                     if result:  
                         # Update buying power with aggregated bp_effect
                         self.option_bp += total_bp_effect
-                        result['bp'] = self.option_bp
+                        result.bp = self.option_bp
                         positions_to_remove.append(pos)
                         logger.debug(f"Closed multi-leg position {pos.trade_id} - Total BP Effect: ${total_bp_effect:.2f} - New BP: ${self.option_bp:.2f}")
                         trade_results.append(result)
@@ -227,7 +229,7 @@ class TradeManager:
                     if result:  
                         # Update buying power with the calculated bp_effect
                         self.option_bp += bp_effect
-                        result['bp'] = self.option_bp
+                        result.bp = self.option_bp
                         positions_to_remove.append(pos)
                         logger.debug(f"Closed position {pos.transaction_id} - BP Effect: ${bp_effect:.2f} - New BP: ${self.option_bp:.2f}")
                         trade_results.append(result)
