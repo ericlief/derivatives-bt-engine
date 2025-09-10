@@ -25,7 +25,7 @@ class BaseTradeResult:
     days_held: Optional[int]
 
     # results
-    bp_effect: float    # Available buying power after trade
+    bp: float    # Available buying power after trade
     pnl: float
     capital_used: float
     roi: float 
@@ -116,7 +116,7 @@ class OptionTradeResult(BaseTradeResult):
             'bp': self.bp,
             'pnl': self.pnl,
             'capital_used': self.capital_used,
-            'return_on_margin': self.return_on_margin,
+            'roi': self.roi,
         }
         return results 
     

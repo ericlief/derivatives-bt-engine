@@ -129,7 +129,7 @@ class TradeManager:
                 logger.debug(f'Executing trade: {candidate_position}')
                 logger.debug(f'BP: ${self.option_bp:.2f}')
 
-                # Execute the trade and update the option buying power
+                # Execute the trade and create transactions and trades
                 executed_trade = self._execute_trade(candidate_position)
                 if executed_trade is not None:
                     executed_trade.trade_id = self.trade_counter
@@ -137,17 +137,18 @@ class TradeManager:
                         for leg in executed_trade.legs:
                             leg.trade_id = self.trade_counter
                             leg.transaction_id = self.transaction_counter
-                            transaction = executed_trade.create_transaction(current_date, leg, 'open')
+                            transaction = executed_trade.create_transaction(leg, current_date, 'open', self.option_bp)
                             self.transaction_counter += 1
                     else:
                         executed_trade.transaction_id = self.transaction_counter
                         self.transaction_counter += 1
+                        transaction = executed_trade.create_transaction(executed_trade, current_date, 'open', self.option_bp)
+                        all_transactions.append(transaction)
 
                     self.open_positions.append(executed_trade)
 
                      # Prepare trade result
-                    transaction = executed_trade.create_transaction(current_date, executed_trade, 'open')
-                    all_transactions.append(transaction)
+                    # transaction = executed_trade.create_transaction(executed_trade, current_date, 'open')
                     self.trade_counter += 1  # Increment counter only for successful trades
                     
                     logger.debug(f'Successfully executed trade: {executed_trade.trade_id}')
@@ -204,16 +205,33 @@ class TradeManager:
                 close_all):
                 
                 logger.debug(f'Closing position: {pos.trade_id}')
-                result, transaction = pos.close(option_chain=option_chain, 
-                                                underlying_price_history=underlying_price_history,
-                                                option_bp=self.option_bp)
-                if result:  
-                    # Update buying power
-                    self.option_bp = result['bp']
-                    positions_to_remove.append(pos)
-                    logger.debug(f"Closed position {pos.transaction_id} - BP: ${self.option_bp:.2f}")
-                    trade_results.append(result)
-                    transactions.append(transaction)    
+                
+                if isinstance(pos, MultiLegOptionPosition):
+                    # For multi-leg positions, use the spread's close method which handles all legs
+                    result, leg_transactions, total_bp_effect = pos.close(option_chain=option_chain, 
+                                                                         underlying_price_history=underlying_price_history)                    
+                                                                         
+                    if result:  
+                        # Update buying power with aggregated bp_effect
+                        self.option_bp += total_bp_effect
+                        result['bp'] = self.option_bp
+                        positions_to_remove.append(pos)
+                        logger.debug(f"Closed multi-leg position {pos.trade_id} - Total BP Effect: ${total_bp_effect:.2f} - New BP: ${self.option_bp:.2f}")
+                        trade_results.append(result)
+                        transactions.extend(leg_transactions)
+                else:
+                    # Single leg position
+                    result, transaction, bp_effect = pos.close(option_chain=option_chain, 
+                                                    underlying_price_history=underlying_price_history)
+                                                    # option_bp=self.option_bp)
+                    if result:  
+                        # Update buying power with the calculated bp_effect
+                        self.option_bp += bp_effect
+                        result['bp'] = self.option_bp
+                        positions_to_remove.append(pos)
+                        logger.debug(f"Closed position {pos.transaction_id} - BP Effect: ${bp_effect:.2f} - New BP: ${self.option_bp:.2f}")
+                        trade_results.append(result)
+                        transactions.append(transaction)    
         # Remove closed positions
         for pos in positions_to_remove:
             self.open_positions.remove(pos)
