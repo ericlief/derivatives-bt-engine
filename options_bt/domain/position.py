@@ -27,7 +27,7 @@ class BasePosition(ABC):
     entry_price: float
     margin_required: Optional[float] = None
     fees: Optional[float] = None   # added 
-    pnl: Optional[float] = None
+    # pnl: Optional[float] = None
     
     def __post_init__(self):
         """Validate and convert types after initialization."""
@@ -44,7 +44,8 @@ class BasePosition(ABC):
         - Long positions should have negative entry price (debit/BTO)
         - Short positions should have positive entry price (credit/STO)
         """
-       
+        if hasattr(self, 'legs') and self.legs:
+            return self.spread_price
         return -abs(self.entry_price) if PositionSide.is_long(self.position_side) else abs(self.entry_price)
 
     @property
@@ -328,7 +329,7 @@ class BaseOptionPosition(BasePosition, ABC):
         # Calculate P&L
         pnl -= fees
         # self.pnl = pnl    ???
-        logger.info(f"Calculated pnl for {self.option_strategy}{self.option_type}: {self.pnl}")
+        logger.info(f"Calculated pnl for {self.option_strategy}{self.option_type}: {pnl}")
 
         return round(pnl, 2)
 
@@ -490,7 +491,7 @@ class BaseOptionPosition(BasePosition, ABC):
                 'strike': position.strike,
                 'price': price,
                 'effect': effect,
-                'bp_effect': round(bp_effect, 2) if bp_effect is not None else None,
+                'bp_effect': round(bp_effect, 2) if bp_effect is not None else '',
                 'fees': round(position.fees, 2) if position.fees is not None else 0
             }
 
@@ -529,8 +530,9 @@ class SingleLegOptionPosition(BaseOptionPosition):
             self.expire_date = pd.Timestamp(self.expire_date)   
 
         # Calculate margin required based on entry price and underlying entry
-        if self.entry_price is not None and self.underlying_entry is not None and self.margin_required is None:
-            self.margin_required = self.calculate_position_margin()
+        # NOTE: This is not needed anymore since we are using the margin required from the signal it should not compute margin for indiv spread legs
+        # if self.entry_price is not None and self.underlying_entry is not None and self.margin_required is None:
+        #     self.margin_required = self.calculate_position_margin()
 
     @cached_property
     def is_put(self) -> bool:
@@ -887,7 +889,7 @@ class SingleLegOptionPosition(BaseOptionPosition):
         Returns:
             Optional[Tuple[OptionTradeResult, Dict, float]]: Tuple of (trade_result_dict, transaction_dict, bp_effect) if successful, None if closing data is unavailable.
         """
-        logger.info(f"Closing trade #{self.trade_id}|Trans #{self.transaction_id}|{self.option_strategy}|{self.option_type}|{self.position_side}")
+        logger.info(f"Closing Trade #{self.trade_id}|Trans #{self.transaction_id}|{self.option_strategy}|{self.option_type}|{self.position_side}")
         bp_effect = 0
         close_reason = None
         min_valid_date = pd.Timestamp('1990-01-01')  # Arbitrary date well after 1970
@@ -937,9 +939,9 @@ class SingleLegOptionPosition(BaseOptionPosition):
         bp_effect += round(self.signed_exit_price * self.quantity * 100, 2)  # Add/subtract exit premium  
         logger.debug(f'BP Effect: {bp_effect}')
         
-        # Restore margin for short positions
+        # Restore margin for short positions only if single legs
         if self.is_short:
-            bp_effect += self.margin_required
+            bp_effect += self.margin_required if self.margin_required is not None else 0
             logger.debug(f'Updated BP with margin requirement of {self.margin_required}: {bp_effect}')
 
         
@@ -975,7 +977,7 @@ class SingleLegOptionPosition(BaseOptionPosition):
             fees=round(self.fees, 2),
             pnl=round(pnl, 2),
             bp=None,
-            capital_used=round(self.margin_required, 2),
+            capital_used=round(self.margin_required, 2) if self.margin_required is not None else None,
             roi=(pnl / self.margin_required * 100, 2) if self.margin_required is not None and self.margin_required != 0 else 0,
         )
         return trade_result, transaction, bp_effect
@@ -1050,7 +1052,9 @@ class MultiLegOptionPosition(BaseOptionPosition):
             total_ratio = sum(self.leg_ratios.get(i, 1.0) for i in range(len(self.legs)))
             self.entry_delta = total_delta / total_ratio if total_ratio > 0 else 0.0
 
-        logger.info(f'Creating spread with price: {self.signed_entry_price}')
+        logger.info(f'Creating spread with signed entryprice: {self.signed_entry_price}')
+        logger.info(f'Creating spread with spread price: {self.spread_price}')
+
         assert abs(round(self.signed_entry_price, 2)) == abs(round(self.spread_price, 2))
 
         # Validate spread configuration
@@ -1376,7 +1380,7 @@ class MultiLegOptionPosition(BaseOptionPosition):
                     strike=strike,
                     entry_date=entry_date,
                     expire_date=trade_signal.expire_date,
-                    entry_price=round(abs(entry_price), 2), # Store positive price, use signed accessors
+                    entry_price=abs(entry_price),
                     entry_delta=entry_delta,
                     entry_dte=entry_dte,
                     underlying_entry=trade_signal.underlying_last,
@@ -1673,7 +1677,8 @@ class MultiLegOptionPosition(BaseOptionPosition):
         if spread_pnl is None:
             logger.error("Failed to calculate spread PnL during closure.")
             return None
-            
+        logger.debug(f'Calculated spread PnL: {spread_pnl}')
+
         # The total capital used for the spread is its margin required (already a cached_property)
         spread_capital_used = self.margin_required
         if spread_capital_used is None: # Fallback if margin_required is not yet set
@@ -1720,7 +1725,7 @@ class MultiLegOptionPosition(BaseOptionPosition):
             pnl=spread_pnl,
             bp=None,
             capital_used=round(self.margin_required, 2),
-            roi=(spread_pnl / self.margin_required * 100, 2) if self.margin_required is not None and self.margin_required != 0 else 0,
+            roi=round(spread_pnl / self.margin_required * 100, 2) if self.margin_required is not None and self.margin_required != 0 else 0,
         )
         
         return aggregated_trade_result, all_transactions, total_bp_effect

@@ -25,6 +25,7 @@ class BaseTradeResult:
     days_held: Optional[int]
 
     # results
+    fees: float
     bp: float    # Available buying power after trade
     pnl: float
     capital_used: float
@@ -47,7 +48,6 @@ class OptionTradeResult(BaseTradeResult):
     option_strategy: Optional[Union[OptionStrategy, str]]
     close_reason: Optional[str]
     premium: float
-    fees: float
 
     # @classmethod
     # def from_position(cls, position: OptionPosition, exit_data: Dict) -> OptionTrade:
@@ -114,9 +114,9 @@ class OptionTradeResult(BaseTradeResult):
             'premium': self.premium,
             'fees': self.fees,
             'bp': self.bp,
-            'pnl': self.pnl,
             'capital_used': self.capital_used,
             'roi': self.roi,
+            'pnl': self.pnl,
         }
         return results 
     

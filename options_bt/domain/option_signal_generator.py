@@ -453,8 +453,7 @@ class OptionSignalGenerator(BaseSignalGenerator):
                 logger.info(f"Filtered out {filtered_count} spreads due to excessive width (> {self.config.max_spread_width} points)")
                 logger.debug(f"Maximum spread width in remaining spreads: {paired['spread_width'].max() if len(paired) > 0 else 'N/A'} points")
         
-        # Calculate spread price (add code to adjust based on position side)
-        # For a credit spread, we want to sell the first leg and buy the second leg
+        # Calculate leg prices
         paired["leg1_price"] = paired.apply(
             lambda row: PriceUtils.calculate_midpoint_price(
                 row["leg1_p_bid"] if OptionType.is_put(leg_signals[0].iloc[0]["option_type"]) else row["leg1_c_bid"],
@@ -471,13 +470,17 @@ class OptionSignalGenerator(BaseSignalGenerator):
             axis=1
         )
         
-        # Calculate net spread price (credit if positive, debit if negative)
-        # For credit spreads (short first leg, long second leg)
-        if PositionSide.is_short(leg_signals[0].iloc[0]["position_side"]) and PositionSide.is_long(leg_signals[1].iloc[0]["position_side"]):
-            paired["spread_price"] = paired["leg1_price"] - paired["leg2_price"]
-        # For debit spreads (long first leg, short second leg)
-        else:
-            paired["spread_price"] = paired["leg2_price"] - paired["leg1_price"]
+        side1 = 1 if PositionSide.is_short(leg_signals[0].iloc[0]["position_side"]) else -1
+        side2 = 1 if PositionSide.is_short(leg_signals[1].iloc[0]["position_side"]) else -1
+        paired["spread_price"] = side1 * paired["leg1_price"] + side2 * paired["leg2_price"]
+        
+        # # Calculate net spread price (credit if positive, debit if negative)
+        # # For credit spreads (short first leg, long second leg)
+        # if PositionSide.is_short(leg_signals[0].iloc[0]["position_side"]) and PositionSide.is_long(leg_signals[1].iloc[0]["position_side"]):
+        #     paired["spread_price"] = paired["leg1_price"] - paired["leg2_price"]
+        # # For debit spreads (long first leg, short second leg)
+        # else:
+        #     paired["spread_price"] = paired["leg2_price"] - paired["leg1_price"]
         
         # Set the index back to the date column
         paired = paired.set_index(index_name)

@@ -5,6 +5,9 @@ from options_bt.domain.backtester import Backtester
 from options_bt.domain.dataloader import DataLoader
 from options_bt.domain.strategy_config import SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig
 from options_bt.domain.option_leg_config import OptionLegConfig
+from google.oauth2.service_account import Credentials
+import os
+import gspread
 
 # Create logger instance
 logger = setup_logger()
@@ -48,7 +51,7 @@ def run_test_suite():
         max_margin_utilization=0.80,
         max_positions=1,
         max_spread_width=100,
-        max_trade_loss=5000.00,
+        max_trade_loss=10000.00,
         trade_selection_method=TradeSelectionMethod.DELTA_FIRST,
         # Define the leg of the strategy
         legs=[
@@ -82,7 +85,7 @@ def run_test_suite():
         max_margin_utilization=0.80,
         max_positions=1,
         max_spread_width=100,
-        max_trade_loss=5000.00,
+        max_trade_loss=10000.00,
         trade_selection_method=TradeSelectionMethod.PREMIUM_FIRST,
         
         # Define the leg of the strategy

@@ -14,6 +14,7 @@ from options_bt.domain.trade_manager import TradeManager
 from options_bt.domain.position import SingleLegOptionPosition     
 from options_bt.domain.trade_result import OptionTradeResult
 from options_bt.domain.position import MultiLegOptionPosition
+from options_bt.gspread_utils import google_auth, log_to_google_sheets
 from options_bt.utils.logger import setup_logger
 from options_bt.utils.price_utils import PriceUtils
 
@@ -194,6 +195,7 @@ class Backtester:
         logger.info("Maximum margin sample:")
         logger.info(valid_signals.sort_values(by="margin_required", ascending=True).tail())
 
+        logger.info(f"Total signals: {len(valid_signals)} | Date Range: {valid_signals.index.min()} to {valid_signals.index.max()}")
         # Execute trades
         backtest_start = time.time()
         results_transactions_dict = trade_manager.construct_and_execute_trades_from_signals(valid_signals, 
@@ -206,55 +208,65 @@ class Backtester:
             logger.warning("No trades were executed successfully")
             return pd.DataFrame()
         
+        
+        # Calculate cumulative metrics based on PnL
+        trade_results['cumulative_pnl'] = round(trade_results['pnl'].cumsum(), 2)
+        trade_results['capital'] = round(config.initial_capital + trade_results['cumulative_pnl'], 2)  # Track actual capital based on cumulative PnL
+        trade_results['peak_capital'] = round(trade_results['capital'].cummax(), 2)
+        
         # Calculate margin utilization
         trade_results['margin_utilization'] = round(trade_results['capital_used'] / config.initial_capital, 2)
         trade_results['avg_margin_util'] = round(trade_results['margin_utilization'].mean(), 2)
         trade_results['max_margin_util'] = round(trade_results['margin_utilization'].max(), 2       )
         logger.info(f"Average margin utilization: {trade_results['avg_margin_util'].iloc[0]:.2%}")
         logger.info(f"Maximum margin utilization: {trade_results['max_margin_util'].iloc[0]:.2%}")
-        # Calculate cumulative metrics based on PnL
-        trade_results['cumulative_pnl'] = round(trade_results['pnl'].cumsum(), 2)
-        trade_results['capital'] = round(config.initial_capital + trade_results['cumulative_pnl'], 2)  # Track actual capital based on cumulative PnL
-        trade_results['peak_capital'] = round(trade_results['capital'].cummax(), 2)
         
         # Calculate Sharpe Ratio without risk-free rate
         sharpe = None
         if len(trade_results) > 1:
+            # If you want to keep trade-to-trade returns:
+            avg_trade_days = trade_results['days_held'].mean()  # Average days per trade
+            annualization_factor = np.sqrt(252 / avg_trade_days)
             returns = np.diff(trade_results['capital'].values) / trade_results['capital'].values[:-1]
             if len(returns) > 0 and np.std(returns) > 0:
-                sharpe = np.mean(returns) / np.std(returns) * np.sqrt(252)
+                sharpe = np.mean(returns) / np.std(returns) * annualization_factor
                 logger.info(f"Sharpe Ratio: {sharpe:.2f}")
 
         # Save results if requested
         # Generate parameter string based on backtest type
-        if is_spread:
-            param_str = f"{config.spread_type.value}_spread_{f'{config.legs[0].dte_range[0]}:{config.legs[0].dte_range[1]}' if config.legs[0].dte_range else config.legs[0].dte_target}_{config.start_date}:{config.end_date}"
-        else:
-            param_str = f"{config.leg.option_type.value}_{config.leg.position_side.value}_{f'{config.leg.delta_range[0]}:{config.leg.delta_range[1]}' if config.leg.delta_range else config.leg.delta_target}_{f'{config.leg.dte_range[0]}:{config.leg.dte_range[1]}' if config.leg.dte_range else config.leg.dte_target}_{config.start_date}:{config.end_date}"
-        
+        param_str = self._generate_param_string(config)
+
+        # Log execution times
+        total_time = time.time() - start_time
+        self._log_execution_summary(total_time)
+
+
+        # Calculate MTM
+        results = {
+            'trade_results': trade_results,
+            'transactions': transactions
+        }
+        # self.calculate_mtm(results, config) 
+        results = self.calculate_simple_drawdown(results, config)
+
         if self.save_trades:
             save_start = time.time()
             self._save_results(
-                config=config,
-                trade_results=trade_results,
-                transactions=transactions,
+                results,
+                config,
                 param_str=param_str
             )
             self.execution_times['saving'] = time.time() - save_start
             
-        # Log execution times
-        total_time = time.time() - start_time
-        self._log_execution_summary(total_time)
-        
+
+    
         # NB: cumulative_pnl is the sum of realized profits/losses across all closed trades.
         # It starts from initial_capital and accumulates only closed P&L (not unrealized)
         # Thus (option_bp) matches the analytical P&L (cumulative_pnl + initial_capital):
         assert abs(trade_results['capital'].iloc[-1] - trade_results['bp'].iloc[-1]) < 1e-6, f'Final capital: {trade_results["capital"].iloc[-1]} | BP: {trade_results["bp"].iloc[-1]}'
 
-        return {
-            'trade_results': trade_results,
-            'transactions': transactions
-        }
+
+        return results
     
     def run_multiple_backtests(
         self,
@@ -397,8 +409,8 @@ class Backtester:
         transactions = results['transactions']
 
         # Date range for executed trades
-        start_date = transactions['entry_date'].iloc[0]
-        end_date = transactions['exit_date'].iloc[-1]
+        start_date = trade_results['opened'].iloc[0]
+        end_date = trade_results['closed'].iloc[-1]
         # for trade in trade_results.itertuples():
         #     trade_start = pd.Timestamp(trade.entry_date).normalize()
         #     trade_end = pd.Timestamp(trade.exit_date).normalize()
@@ -432,9 +444,9 @@ class Backtester:
             
             logger.debug(f'Processing date: {date}')
             # First, check for any trades that start on this date
-            for trade in transactions.itertuples():
-                trade_start = pd.Timestamp(trade.entry_date).normalize()
-                trade_end = pd.Timestamp(trade.exit_date).normalize()
+            for trade in trade_results.itertuples():
+                trade_start = pd.Timestamp(trade.opened).normalize()
+                trade_end = pd.Timestamp(trade.closed).normalize()
                 trade_id = (trade.expire_date, trade.strike, trade.option_type)
 
                 # Handle existing trades
@@ -690,17 +702,39 @@ class Backtester:
         return None
 
     def _generate_param_string(self, config):
-        """Generate parameter string based on backtest type."""
+        """
+        Generate a parameter string based on backtest configuration type.
+        
+        Creates a unique identifier string that captures the key parameters
+        of the backtest configuration for use in file naming and result tracking.
+        
+        Args:
+            config (Union[SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig]): 
+                The configuration object containing strategy parameters
+                
+        Returns:
+            str: A formatted parameter string containing strategy type, 
+                 delta/DTE ranges or targets, and date range
+                 
+        Examples:
+            For MultiLeg: "VERTICAL_spread_40:45_2020-01-01:2020-12-31"
+            For SingleLeg: "PUT_SHORT_0.65:0.75_30:35_2020-01-01:2020-12-31"
+        """
 
         if isinstance(config, MultiLegOptionStrategyConfig):
-            spread_type = config.spread_type
-            return f"{spread_type.value}_spread_{f'{config.dte_range[0]}:{config.dte_range[1]}' if config.dte_range else config.dte_target}_{config.start_date}:{config.end_date}"
+            param_str = f"{config.spread_type.value}_spread_{f'{config.legs[0].dte_range[0]}:{config.legs[0].dte_range[1]}' if config.legs[0].dte_range else config.legs[0].dte_target}_{config.start_date}:{config.end_date}"
         else:
-            return f"{config.leg.option_type.value}_{config.leg.position_side.value}_{f'{config.leg.delta_range[0]}:{config.leg.delta_range[1]}' if config.leg.delta_range else config.leg.delta_target}_{f'{config.leg.dte_range[0]}:{config.leg.dte_range[1]}' if config.leg.dte_range else config.leg.dte_target}_{config.start_date}:{config.end_date}"
+            param_str = f"{config.leg.option_type.value}_{config.leg.position_side.value}_{f'{config.leg.delta_range[0]}:{config.leg.delta_range[1]}' if config.leg.delta_range else config.leg.delta_target}_{f'{config.leg.dte_range[0]}:{config.leg.dte_range[1]}' if config.leg.dte_range else config.leg.dte_target}_{config.start_date}:{config.end_date}"
+        
+        return param_str.upper()
 
  
-    def _save_results(self, config: Union[SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig], trade_results: pd.DataFrame, transactions: pd.DataFrame=None, mtm_df: pd.DataFrame=None, param_str: str="default"):
+    def _save_results(self, results: dict, config: Union[SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig], param_str: str="default"):
         """Save trade results and transactions to a CSV file."""
+
+        trade_results = results['trade_results']
+        transactions = results['transactions']
+        stats = results['stats']
 
         # Save trades
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -711,6 +745,44 @@ class Backtester:
         if transactions is not None and not transactions.empty:
             transactions_csv_path = os.path.join(self.results_dir, f"transactions_{param_str}_{timestamp}.csv")
             transactions.to_csv(transactions_csv_path, index=False)
+        
+        stats_csv_path = os.path.join(self.results_dir, f"stats_{param_str}_{timestamp}.csv")
+
+        with open(stats_csv_path, 'w') as results_file:
+                # results_file.write("Backtest Results Summary:\n")
+                results_file.write(f"Total trades executed: {len(trade_results)}\n")
+                results_file.write(f"Winning trades: {(trade_results['pnl'] > 0).sum()}\n")
+                results_file.write(f"Win rate: {((trade_results['pnl'] > 0).sum() / len(trade_results)):.2%}\n")
+                results_file.write(f"Total P&L: ${trade_results['cumulative_pnl'].iloc[-1]:.2f}\n")
+                results_file.write(f"Final capital: ${trade_results['capital'].iloc[-1]:.2f}\n")
+                results_file.write(f"Return on initial capital: {(trade_results['capital'].iloc[-1] / config.initial_capital - 1):.2%}\n")
+                results_file.write(f"Average days held: {trade_results['days_held'].mean():.1f}\n")
+                results_file.write(f"Average roi {trade_results['roi'].mean():.2f}%\n")
+                results_file.write(f"Max Profit {trade_results['pnl'].max():.2f}\n")
+                results_file.write(f"Max Loss {trade_results['pnl'].min():.2f}\n")
+
+                # Add execution times
+                if hasattr(self, 'execution_times') and self.execution_times:
+                    results_file.write("\nExecution Times:\n")
+                    for phase, time_taken in self.execution_times.items():
+                        results_file.write(f"{phase.replace('_', ' ').title()}: {time_taken:.2f}s\n")
+                    
+                    total_execution_time = sum(self.execution_times.values())
+                    results_file.write(f"Total execution time: {total_execution_time:.2f}s\n")
+
+                if stats is not None and not stats.empty:
+                    max_drawdown_amount = stats['Drawdown ($)'].min()
+                    max_drawdown_percentage = stats['Drawdown (%)'].min()    
+                    results_file.write(f"Maximum drawdown: ${max_drawdown_amount:.2f} ({max_drawdown_percentage:.2f}%)\n")
+                    
+                    # Add peak and duration stats
+                    if 'drawdown_analysis' in results:
+                        dd_analysis = results['drawdown_analysis']
+                        results_file.write(f"Peak capital: ${dd_analysis['peak_capital']:.2f}\n")
+                        results_file.write(f"Trough capital: ${dd_analysis['trough_capital']:.2f}\n")
+                        results_file.write(f"Drawdown duration: {dd_analysis['drawdown_duration']} trades\n")
+        
+        log_to_google_sheets(results, config=config, param_str=param_str)
 
         # Save MTM results with same timestamp
         # if mtm_df is not None and not mtm_df.empty:
@@ -745,3 +817,42 @@ class Backtester:
         logger.info(f"Other Operations: {other_time:.2f} seconds")
         logger.info("-" * 30)
         logger.info(f"Total Time: {total_time:.2f} seconds")
+
+    def calculate_simple_drawdown(self, results, config):
+        trade_results = results['trade_results']
+        
+        # Calculate running capital and drawdown
+        capital = trade_results['capital'].values
+        running_max = np.maximum.accumulate(capital)
+        drawdown = (capital - running_max) / running_max
+        
+        # Find peak-to-trough drawdown periods
+        max_drawdown = np.min(drawdown)
+        max_drawdown_idx = np.argmin(drawdown)
+        
+        # Find the peak before the max drawdown
+        peak_idx = np.argmax(capital[:max_drawdown_idx])
+        
+        logger.info(f"Maximum Drawdown: {max_drawdown:.2%}")
+        logger.info(f"Peak Capital: ${capital[peak_idx]:.2f}")
+        logger.info(f"Trough Capital: ${capital[max_drawdown_idx]:.2f}")
+        logger.info(f"Drawdown Duration: {max_drawdown_idx - peak_idx} trades")
+        
+        # Create stats DataFrame (similar to your existing format)
+        stats = pd.DataFrame({
+            'Drawdown ($)': (capital - running_max),
+            'Drawdown (%)': drawdown * 100,
+            'Capital': capital,
+            'Running Max': running_max
+        })
+        
+        # Add drawdown to results
+        results['stats'] = stats
+        results['drawdown_analysis'] = {
+            'max_drawdown': max_drawdown,
+            'peak_capital': capital[peak_idx],
+            'trough_capital': capital[max_drawdown_idx],
+            'drawdown_duration': max_drawdown_idx - peak_idx
+        }
+        
+        return results

@@ -11,3 +11,4 @@ matplotlib
 # Testing
 pytest
 oauth2client==4.1.3
+python-dotenv
