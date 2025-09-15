@@ -1,12 +1,9 @@
 from typing import Optional, Dict, Union, List, NamedTuple, Tuple
-from numpy import isin
 import pandas as pd
-import logging
 from options_bt.domain.enums import *
 from options_bt.domain.position import SingleLegOptionPosition, MultiLegOptionPosition
 from options_bt.domain.trade_result import OptionTradeResult
 from options_bt.utils.logger import setup_logger
-from options_bt.utils.price_utils import PriceUtils
 from options_bt.domain.strategy_config import SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig
 
 logger = setup_logger()
@@ -14,7 +11,7 @@ logger = setup_logger()
 class TradeManager:
     """Class to manage trade creation and execution."""
     
-    def __init__(self, config: Union[SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig]):
+    def __init__(self, config: Union[SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig], vix: Optional[pd.DataFrame] = None):
         self.config: Union[SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig] = config
         self.initial_capital: float = config.initial_capital
         self.leverage: float = config.leverage
@@ -24,9 +21,12 @@ class TradeManager:
         self.trade_counter: int = 1
         self.transaction_counter: int = 1
         self.open_positions: List[Union[SingleLegOptionPosition, MultiLegOptionPosition]] = []
+        self.vix: Optional[pd.DataFrame] = vix
 
         logger.info(f'TradeManager instantiated')
         logger.info(f'Init Cap: {self.initial_capital} | BP: {self.option_bp} | Trades: {self.trade_counter}')
+        logger.info(f'Using vix range: {self.config.vix_range}')
+        logger.info(f'VIX sample: {self.vix.head() if self.vix is not None else "N/A"}')
 
     def _execute_trade(self, position: Union[SingleLegOptionPosition, MultiLegOptionPosition]) -> Optional[Tuple[SingleLegOptionPosition, float]]:
         """
@@ -128,7 +128,25 @@ class TradeManager:
             if len(self.open_positions) >= self.max_positions:
                 skipped_trades += 1
                 continue
+            
+            # VIX gating (skip trade if outside range or missing)
+            if getattr(self.config, 'vix_range', None) is not None:
+                vix_close = None
+                if isinstance(self.vix, pd.DataFrame) and not self.vix.empty and current_date in self.vix.index:
+                    row = self.vix.loc[current_date]
+                    try:
+                        vix_close = float(row['close'] if 'close' in row else float(row))
+                    except Exception:
+                        vix_close = None
+                    
+                lo, hi = self.config.vix_range
+                if vix_close is None or not (lo <= vix_close <= hi):
+                    logger.debug(f'Skipping trade on {current_date} due to VIX range ({lo}:{hi}): {vix_close}')
+                    skipped_trades += 1
+                    continue
+                logger.debug(f'Daily VIX on {current_date} within trading range ({lo}:{hi}): {vix_close}')
 
+             
             # Construct a new position from the trade signal    
             candidate_position = self.construct_position_from_signal(trade_signal, current_date=current_date)  
 

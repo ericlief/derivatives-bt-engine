@@ -71,7 +71,7 @@ class Backtester:
         # leg_early_close = leg.early_close_days if leg.early_close_days is not None else strategy.early_close_days
         
         # Initialize trade manager
-        trade_manager = TradeManager(config=config)
+        trade_manager = TradeManager(config=config, vix=self.vix)
         signal_generator = OptionSignalGenerator(option_chain=self.option_chain.copy(), underlying=self.underlying.copy(), config=config)    
         # Generate or validate signals
         signal_start = time.time()
@@ -384,6 +384,12 @@ class Backtester:
             assert abs(daily_df['Net Liquidity'].iloc[-1] - daily_df['Cash'].iloc[-1]) < 1e-6, f'MTM Net Liquidity: {daily_df["Net Liquidity"].iloc[-1]} | Cash: {daily_df["Cash"].iloc[-1]}'
             
         return daily_df
+    
+    def daily_vix(self, config: Union[SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig]) -> pd.DataFrame:
+        """
+        Calculate daily VIX data.
+        """
+        return self.vix.loc[config.start_date:config.end_date]
     
     def _calculate_mtm(
         self, 

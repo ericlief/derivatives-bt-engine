@@ -20,7 +20,7 @@ def run_test_suite():
     DATA_PATH = "/Users/liefe/data/spx"
     OPTIONS_FILE = "options_chain_preprocessed.csv"
 
-    dl = DataLoader(data_dir=DATA_PATH, options_file=OPTIONS_FILE, use_preprocessed=True, save_preprocessed=False)
+    dl = DataLoader(data_dir=DATA_PATH, options_file=OPTIONS_FILE, vix_file="vix.csv", use_preprocessed=True, save_preprocessed=False)
     data = dl.load_data()
     # print(dl.__dict__)
     # Check data quality once
@@ -50,6 +50,7 @@ def run_test_suite():
         max_spread_width=100,
         max_trade_loss=10000.00,
         trade_selection_method=TradeSelectionMethod.DELTA_FIRST,
+        vix_range=(10, 20),
         # Define the leg of the strategy
         legs=[
             OptionLegConfig(
@@ -67,44 +68,45 @@ def run_test_suite():
             dte_range=(40, 45),
             )
         ],
-        ),
-        MultiLegOptionStrategyConfig(
-        quantity=1,
-        option_strategy=OptionStrategy.BULL_PUT_CREDIT_SPREAD,
-        spread_type=OptionSpreadType.VERTICAL,
-        # leg_ratio={0: 1.0, 1: 2.0, 2: 2.0, 3: 1.0},   
-        initial_capital=100000,
-        leverage=1.0,
-        start_date="2020-01-01",
-        end_date="2020-12-31",
-        use_underlying_close=False,
-        early_close_days=30,
-        max_margin_utilization=0.80,
-        max_positions=1,
-        max_spread_width=100,
-        max_trade_loss=10000.00,
-        trade_selection_method=TradeSelectionMethod.PREMIUM_FIRST,
-        
-        # Define the leg of the strategy
-        legs=[
-            OptionLegConfig(
-            option_type=OptionType.PUT,
-            position_side=PositionSide.SHORT,
-            # delta_range=(0.65, 0.75),
-            delta_target=0.75,
-            dte_range=(40, 45),
-            ),
-            OptionLegConfig(
-            option_type=OptionType.PUT,
-            position_side=PositionSide.LONG,
-            # delta_range=(0.65, 0.75),
-            delta_target=0.55,
-            dte_range=(40, 45),
-            )
-        ],
-    
         ),
     ]
+    #     MultiLegOptionStrategyConfig(
+    #     quantity=1,
+    #     option_strategy=OptionStrategy.BULL_PUT_CREDIT_SPREAD,
+    #     spread_type=OptionSpreadType.VERTICAL,
+    #     # leg_ratio={0: 1.0, 1: 2.0, 2: 2.0, 3: 1.0},   
+    #     initial_capital=100000,
+    #     leverage=1.0,
+    #     start_date="2020-01-01",
+    #     end_date="2020-12-31",
+    #     use_underlying_close=False,
+    #     early_close_days=30,
+    #     max_margin_utilization=0.80,
+    #     max_positions=1,
+    #     max_spread_width=100,
+    #     max_trade_loss=10000.00,
+    #     trade_selection_method=TradeSelectionMethod.PREMIUM_FIRST,
+        
+    #     # Define the leg of the strategy
+    #     legs=[
+    #         OptionLegConfig(
+    #         option_type=OptionType.PUT,
+    #         position_side=PositionSide.SHORT,
+    #         # delta_range=(0.65, 0.75),
+    #         delta_target=0.75,
+    #         dte_range=(40, 45),
+    #         ),
+    #         OptionLegConfig(
+    #         option_type=OptionType.PUT,
+    #         position_side=PositionSide.LONG,
+    #         # delta_range=(0.65, 0.75),
+    #         delta_target=0.55,
+    #         dte_range=(40, 45),
+    #         )
+    #     ],
+    
+    #     ),
+    # ]
     for i, config in enumerate(configs):
 
         bt = Backtester(

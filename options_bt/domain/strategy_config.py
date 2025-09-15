@@ -4,6 +4,7 @@ from typing import Optional, List, Dict
 from abc import ABC, abstractmethod
 from options_bt.domain.option_leg_config import OptionLegConfig
 from typing import List
+from typing import Optional, Tuple
 
 
 @dataclass
@@ -16,7 +17,8 @@ class BaseStrategyConfig(ABC):
     initial_capital: float = 100000
     leverage: float = 1
     max_margin_utilization: float = 0.80
- 
+    vix_range: Optional[Tuple[float, float]] = None
+
 @dataclass(kw_only=True)
 class BaseOptionStrategyConfig(BaseStrategyConfig, ABC):
     option_strategy: OptionStrategy

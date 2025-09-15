@@ -192,7 +192,7 @@ def log_to_google_sheets(results: dict,
             getattr(config, 'max_spread_width', ''),
             getattr(config, 'max_trade_loss', ''),
             param_str,
-            getattr(config, 'use_vix', ''),
+            getattr(config, 'vix_range', ''),
             getattr(config, 'use_iv', ''),
             '',  # SL
             '',  # TP
