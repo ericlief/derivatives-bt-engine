@@ -14,7 +14,7 @@ from options_bt.domain.trade_manager import TradeManager
 from options_bt.domain.position import SingleLegOptionPosition     
 from options_bt.domain.trade_result import OptionTradeResult
 from options_bt.domain.position import MultiLegOptionPosition
-from options_bt.gspread_utils import google_auth, log_to_google_sheets
+from options_bt.utils.gspread_utils import log_to_google_sheets
 from options_bt.utils.logger import setup_logger
 from options_bt.utils.price_utils import PriceUtils
 
@@ -239,6 +239,7 @@ class Backtester:
         # Log execution times
         total_time = time.time() - start_time
         self._log_execution_summary(total_time)
+        self.execution_times['total'] = round(total_time, 2)
 
 
         # Calculate MTM
@@ -782,6 +783,8 @@ class Backtester:
                         results_file.write(f"Trough capital: ${dd_analysis['trough_capital']:.2f}\n")
                         results_file.write(f"Drawdown duration: {dd_analysis['drawdown_duration']} trades\n")
         
+        results['execution_times'] = self.execution_times
+        results['total_execution_time'] = round(sum(self.execution_times.values()), 2)
         log_to_google_sheets(results, config=config, param_str=param_str)
 
         # Save MTM results with same timestamp

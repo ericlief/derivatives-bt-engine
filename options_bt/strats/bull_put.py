@@ -5,9 +5,6 @@ from options_bt.domain.backtester import Backtester
 from options_bt.domain.dataloader import DataLoader
 from options_bt.domain.strategy_config import SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig
 from options_bt.domain.option_leg_config import OptionLegConfig
-from google.oauth2.service_account import Credentials
-import os
-import gspread
 
 # Create logger instance
 logger = setup_logger()

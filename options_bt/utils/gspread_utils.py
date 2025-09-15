@@ -1,8 +1,10 @@
+import json
 import os
 from typing import Union
 import gspread
 from google.oauth2.service_account import Credentials
 from datetime import datetime
+import pandas as pd
 import numpy as np
 from options_bt.domain.strategy_config import MultiLegOptionStrategyConfig, SingleLegOptionStrategyConfig
 from options_bt.utils.logger import setup_logger
@@ -59,7 +61,8 @@ def flatten_for_sheet(value):
     """Convert lists, tuples, numpy types into safe Google Sheets values."""
     value = convert_numpy_types(value)
     if isinstance(value, (list, tuple)):
-        return ", ".join(map(str, value)) if value else "N/A"
+        # return ", ".join(map(str, value)) if value else "N/A"
+        return json.dumps(value)
     return value
 
 def log_to_google_sheets(results: dict, 
@@ -93,14 +96,24 @@ def log_to_google_sheets(results: dict,
             worksheet = spreadsheet.add_worksheet(title='SPX', rows=1000, cols=20)
             logger.info("New worksheet created")
             # Add headers if new worksheet
+            # headers = [
+            #     'Timestamp', 'Strategy', 'Start', 'End', 'Period', 'Quantity', 'DTE_Target', 'DTE_Range', 'Delta_Target', 'Delta_Range',
+            #     'Total_PnL', 'Initial_Capital', 'Final_Capital', 'Return_Pct', 'Avg_Days_Held',
+            #     'Avg_ROI', 'Max_Profit', 'Max_Loss', 'Win_Rate', 'Winning_Trades', 'Total_Trades', 
+            #     'Max_Drawdown_USD', 'Max_Drawdown_Pct', 'Peak_Capital', 'Trough_Capital', 
+            #     'Drawdown_Duration', 'Execution_Time', 'Max_Positions', 'Early_Close', 
+            #     'Leverage', 'Max_Margin', 'Max_Spread_Width', 'Max_Trade_Loss', 
+            #     'Param_String', 'Use_VIX', 'Use_IV', 'SL', 'TP', 'Average_Premium', "Trade_Selection"
+            # ]
             headers = [
-                'Timestamp', 'Strategy', 'Start', 'End', 'Period', 'Quantity', 'DTE_Target', 'DTE_Range', 'Delta_Target', 'Delta_Range',
-                'Total_PnL', 'Initial_Capital', 'Final_Capital', 'Return_Pct', 'Avg_Days_Held',
-                'Avg_ROI', 'Max_Profit', 'Max_Loss', 'Win_Rate', 'Winning_Trades', 'Total_Trades', 
-                'Max_Drawdown_$', 'Max_Drawdown_%', 'Peak_Capital', 'Trough_Capital', 
-                'Drawdown_Duration', 'Execution_Time', 'Max_Positions', 'Early_Close', 
-                'Leverage', 'Max_Margin', 'Max_Spread_Width', 'Max_Trade_Loss', 
-                'Param_String', 'Use_VIX', 'Use_IV', 'SL', 'TP', 'Average_Premium', "Trade_Selection"
+                        "timestamp", "strategy", "start", "end", "period", "quantity",
+                        "dte_target", "dte_range", "delta_target", "delta_range",
+                        "total_pnl", "initial_capital", "final_capital", "return_pct", "avg_days_held",
+                        "avg_roi", "max_profit", "max_loss", "win_rate", "winning_trades", "total_trades",
+                        "max_drawdown_usd", "max_drawdown_pct", "peak_capital", "trough_capital",
+                        "drawdown_duration", "execution_time", "max_positions", "early_close",
+                        "leverage", "max_margin", "max_spread_width", "max_trade_loss",
+                        "param_string", "use_vix", "use_iv", "sl", "tp", "average_premium", "trade_selection"
             ]
             logger.info("Adding headers...")
             header_response = worksheet.append_row(headers)
@@ -116,17 +129,45 @@ def log_to_google_sheets(results: dict,
         # Prepare data row
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         
+        def _json_or_blank(value):
+            v = convert_numpy_types(value)
+
+            def norm(x):
+                x = convert_numpy_types(x)
+                return None if x in (None, 'N/A') else x
+
+            # If list/tuple container
+            if isinstance(v, (list, tuple)):
+                vals = []
+                for x in v:
+                    x = norm(x)
+                    if isinstance(x, tuple):
+                        x = list(x)
+                    vals.append(x)
+                return '' if all(x is None for x in vals) else json.dumps(vals)
+
+            # Scalar
+            v = norm(v)
+            return '' if v is None else v
+
+        def _get_leg_field_json(config, field_name):
+            if hasattr(config, 'legs'):
+                vals = [getattr(leg, field_name, None) for leg in config.legs]
+                return _json_or_blank(vals)
+            leg = getattr(config, 'leg', None)
+            return _json_or_blank(getattr(leg, field_name, None)) if leg else ''
+
         row_data = [
             timestamp,
             config.option_strategy.value,
             config.start_date,
             config.end_date,
-            round(np.datetime(config.end_date) - np.datetime(config.start_date), 2),
+            round((pd.to_datetime(config.end_date) - pd.to_datetime(config.start_date)).days, 2),
             config.quantity,
-            [leg.dte_target if leg.dte_target is not None else 'N/A' for leg in config.legs] if hasattr(config, 'legs') else getattr(config.leg, 'dte_target', 'N/A'),
-            [leg.dte_range if leg.dte_range is not None else 'N/A' for leg in config.legs] if hasattr(config, 'legs') else getattr(config.leg, 'dte_range', 'N/A'),
-            [leg.delta_target if leg.delta_target is not None else 'N/A' for leg in config.legs] if hasattr(config, 'legs') else getattr(config.leg, 'delta_target', 'N/A'),
-            [leg.delta_range if leg.delta_range is not None else 'N/A' for leg in config.legs] if hasattr(config, 'legs') else getattr(config.leg, 'delta_range', 'N/A'),
+            _get_leg_field_json(config, 'dte_target'),
+            _get_leg_field_json(config, 'dte_range'),
+            _get_leg_field_json(config, 'delta_target'),
+            _get_leg_field_json(config, 'delta_range'),
             round(results_df['cumulative_pnl'].iloc[-1], 2),
             config.initial_capital,
             round(results_df['capital'].iloc[-1], 2),
@@ -143,18 +184,18 @@ def log_to_google_sheets(results: dict,
             round(drawdown_analysis.get('peak_capital', 0), 2),
             round(drawdown_analysis.get('trough_capital', 0), 2),
             convert_numpy_types(drawdown_analysis.get('drawdown_duration', 0)),
-            "N/A",  # Execution_Time
-            getattr(config, 'max_positions', 'N/A'),
-            getattr(config, 'early_close_days', 'N/A'),
-            getattr(config, 'leverage', 'N/A'),
-            getattr(config, 'max_margin_utilization', 'N/A'),
-            getattr(config, 'max_spread_width', 'N/A'),
-            getattr(config, 'max_trade_loss', 'N/A'),
+            results.get('total_execution_time', ''),  # Execution_Time
+            getattr(config, 'max_positions', ''),
+            getattr(config, 'early_close_days', ''),
+            getattr(config, 'leverage', ''),
+            getattr(config, 'max_margin_utilization', ''),
+            getattr(config, 'max_spread_width', ''),
+            getattr(config, 'max_trade_loss', ''),
             param_str,
-            getattr(config, 'use_vix', 'N/A'),
-            getattr(config, 'use_iv', 'N/A'),
-            'N/A',  # SL
-            'N/A',  # TP
+            getattr(config, 'use_vix', ''),
+            getattr(config, 'use_iv', ''),
+            '',  # SL
+            '',  # TP
             round(results_df['premium'].mean(), 2),
             config.trade_selection_method.value
         ]
