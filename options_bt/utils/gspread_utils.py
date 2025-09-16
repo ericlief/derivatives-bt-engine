@@ -113,7 +113,7 @@ def log_to_google_sheets(results: dict,
                         "max_drawdown_usd", "max_drawdown_pct", "peak_capital", "trough_capital",
                         "drawdown_duration", "execution_time", "max_positions", "early_close",
                         "leverage", "max_margin", "max_spread_width", "max_trade_loss",
-                        "param_string", "use_vix", "use_iv", "sl", "tp", "average_premium", "trade_selection"
+                        "param_string", "use_vix", "vix_max" "use_iv", "sl", "tp", "average_premium", "trade_selection"
             ]
             logger.info("Adding headers...")
             header_response = worksheet.append_row(headers)
@@ -193,6 +193,7 @@ def log_to_google_sheets(results: dict,
             getattr(config, 'max_trade_loss', ''),
             param_str,
             getattr(config, 'vix_range', ''),
+            getattr(config, 'vix_max', ''),
             getattr(config, 'use_iv', ''),
             '',  # SL
             '',  # TP

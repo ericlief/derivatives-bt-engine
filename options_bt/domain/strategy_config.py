@@ -18,7 +18,8 @@ class BaseStrategyConfig(ABC):
     leverage: float = 1
     max_margin_utilization: float = 0.80
     vix_range: Optional[Tuple[float, float]] = None
-
+    vix_max: Optional[float] = None
+    
 @dataclass(kw_only=True)
 class BaseOptionStrategyConfig(BaseStrategyConfig, ABC):
     option_strategy: OptionStrategy

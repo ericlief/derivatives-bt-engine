@@ -112,103 +112,132 @@ class TradeManager:
         all_trade_results = []
         all_transactions = []
         skipped_trades = 0
-        # Iterate through each trade signal
-        for trade_signal in trade_signals.itertuples():
-            current_date = trade_signal.Index
-            # logger.debug(f'Processing date: {current_date}')
-            # Close any expired positions
-            trade_results, transactions = self._close_expired_positions(option_chain=option_chain, 
-                                                                        underlying_price_history=underlying_price_history,
-                                                                        current_date=current_date)
-            # Aggregate trade results and transactions
-            all_trade_results.extend(trade_results)
-            all_transactions.extend(transactions)
+        start = trade_signals.index.min()
+        end = trade_signals.index.max()
+        dates = pd.date_range(start, end)
 
-            # Skip if we've reached max open positions
-            if len(self.open_positions) >= self.max_positions:
-                skipped_trades += 1
-                continue
-            
+        # Iterate through each trade signal
+        # for trade_signal in trade_signals.itertuples():
+        for date in dates:
+            current_date = date
+            logger.debug(f'Processing date: {current_date}')
+
+            if current_date in trade_signals.index:
+                trade_signal = trade_signals.loc[[current_date]] # force to df
+            else:
+                trade_signal = None
+
             # VIX gating (skip trade if outside range or missing)
-            if getattr(self.config, 'vix_range', None) is not None:
-                vix_close = None
+            vix_close_value = None
+            early_closure = False
+
+            if self.config.vix_range is not None or self.config.vix_max is not None:
                 if isinstance(self.vix, pd.DataFrame) and not self.vix.empty and current_date in self.vix.index:
                     row = self.vix.loc[current_date]
                     try:
-                        vix_close = float(row['close'] if 'close' in row else float(row))
+                        vix_close_value = float(row['close'] if 'close' in row else float(row))
                     except Exception:
-                        vix_close = None
+                        vix_close_value = None
+                        
+                if vix_close_value is not None:
+                    # Check vix_max for early exit
+                    if self.config.vix_max is not None and vix_close_value > self.config.vix_max:
+                        early_closure = True
+                        logger.debug(f'VIX {vix_close_value} exceeds max {self.config.vix_max}, closing positions')
                     
-                lo, hi = self.config.vix_range
-                if vix_close is None or not (lo <= vix_close <= hi):
-                    logger.debug(f'Skipping trade on {current_date} due to VIX range ({lo}:{hi}): {vix_close}')
-                    skipped_trades += 1
-                    continue
-                logger.debug(f'Daily VIX on {current_date} within trading range ({lo}:{hi}): {vix_close}')
+                    # Check vix_range for trade entry
+                    if self.config.vix_range is not None:
+                        lo, hi = self.config.vix_range
+                        if not (lo <= vix_close_value <= hi):
+                            skipped_trades += 1
+                            logger.debug(f'Skipping trade date {current_date} due to VIX {vix_close_value} outside range {lo}-{hi}')
+                            continue
 
-             
-            # Construct a new position from the trade signal    
-            candidate_position = self.construct_position_from_signal(trade_signal, current_date=current_date)  
+            # Close any expired positions
+            trade_results, transactions = self._close_expired_positions(
+                option_chain=option_chain, 
+                underlying_price_history=underlying_price_history,
+                current_date=current_date,
+                early_closure=early_closure  # Pass the boolean flag
+            )
+            # only aggregate results of close was successfull
+            if trade_results is not None:
+                # Aggregate trade results and transactions
+                all_trade_results.extend(trade_results)
+                all_transactions.extend(transactions)
 
-            # Try to execute the new trade if it was created successfully
-            if candidate_position is not None:
-                logger.debug(f'BP: ${self.option_bp:.2f}')
-                logger.debug(f'Executing trade: {candidate_position}')
-                
-                # Execute the trade and create transactions and trades
-                executed_trade, bp_effect = self._execute_trade(candidate_position)
-                if executed_trade is not None:
-                    self.option_bp += bp_effect  # apply once for the spread
-                    executed_trade.trade_id = self.trade_counter
-                    logger.debug(f'Successfully executed trade {executed_trade.trade_id} | BP: ${self.option_bp:.2f}')
-           
-                    if isinstance(executed_trade, MultiLegOptionPosition):
-                        for i, leg in enumerate(executed_trade.legs):
-                            leg_bp = bp_effect if i == 0 else None
-                            transaction = executed_trade.create_transaction(leg, current_date, 'open', leg_bp)
-                            all_transactions.append(transaction)
-                            leg.trade_id = self.trade_counter
-                            leg.transaction_id = self.transaction_counter
-                            self.transaction_counter += 1
-                    else:
-                        executed_trade.transaction_id = self.transaction_counter
-                        transaction = executed_trade.create_transaction(executed_trade, current_date, 'open', bp_effect)
-                        all_transactions.append(transaction)
-                        self.transaction_counter += 1
-
-                    self.open_positions.append(executed_trade)
-
-                     # Prepare trade result
-                    # transaction = executed_trade.create_transaction(executed_trade, current_date, 'open')
-                    self.trade_counter += 1  # Increment counter only for successful trades
-                    
-                    logger.debug(f'Successfully executed trade: {executed_trade.trade_id}')
-                    logger.debug(f'BP: ${self.option_bp:.2f}')
-                else:
-                    skipped_trades += 1
             else:
-                logger.debug("Skipping trade - invalid signal")
-                skipped_trades += 1
+                logger.error("Failed to close some trades")
+             
+            # Construct a new position from the trade signal if possible on the current date
+            if trade_signal is not None:    
+                for trade in trade_signal.itertuples():
+                    # Skip if we've reached max open positions
+                    if len(self.open_positions) >= self.max_positions:
+                        skipped_trades += 1
+                        logger.debug(f'Skipping trade date {current_date} due to max {self.max_positions} positions. Current positions: {len(self.open_positions)}')
+                        break
+                    
+                    # Attempt trade 
+                    candidate_position = self.construct_position_from_signal(trade, current_date=current_date)
+                      # Try to execute the new trade if it was created successfully
+                    if candidate_position is not None:
+                        logger.debug(f'BP: ${self.option_bp:.2f}')
+                        logger.debug(f'Executing trade: {candidate_position}')
+                        
+                        # Execute the trade and create transactions and trades
+                        executed_trade, bp_effect = self._execute_trade(candidate_position)
+                        if executed_trade is not None:
+                            self.option_bp += bp_effect  # apply once for the spread
+                            executed_trade.trade_id = self.trade_counter
+                            logger.debug(f'Successfully executed trade {executed_trade.trade_id} | BP: ${self.option_bp:.2f}')
+                            # Handle spread
+                            if isinstance(executed_trade, MultiLegOptionPosition):
+                                for i, leg in enumerate(executed_trade.legs):
+                                    leg_bp = bp_effect if i == 0 else None
+                                    leg.trade_id = self.trade_counter  # update before creating transaction
+                                    leg.transaction_id = self.transaction_counter # ''
+                                    transaction = executed_trade.create_transaction(leg, current_date, 'open', leg_bp)
+                                    all_transactions.append(transaction)
+                                 
+                                    self.transaction_counter += 1
+                            # Single leg
+                            else:
+                                executed_trade.transaction_id = self.transaction_counter
+                                transaction = executed_trade.create_transaction(executed_trade, current_date, 'open', bp_effect)
+                                all_transactions.append(transaction)
+                                self.transaction_counter += 1
 
-        # Close any remaining open positions at their expiration
-        # for pos in open_positions:
-        #     result = pos.close(option_chain=self.option_chain, underlying_price_history=self.underlying, option_bp=option_bp)
-        #     if result:
-        #         trade_results.append(result)
-        #         option_bp = result['option_bp']
+                            self.open_positions.append(executed_trade)
+
+                            # Prepare trade result
+                            # transaction = executed_trade.create_transaction(executed_trade, current_date, 'open')
+                            self.trade_counter += 1  # Increment counter only for successful trades
+                            
+                            logger.debug(f'Successfully executed trade: {executed_trade.trade_id}')
+                            logger.debug(f'BP: ${self.option_bp:.2f}')
+                            
+                        else:
+                            skipped_trades += 1
+                    else:
+                        logger.debug("Skipping trade - invalid signal")
+                        skipped_trades += 1
+            
 
         # Close any remaining open positions at their expiration
         trade_results, transactions = self._close_expired_positions(option_chain=option_chain, 
                                                                     underlying_price_history=underlying_price_history,
                                                                     current_date=current_date,
                                                                     close_all=True)
-        all_trade_results.extend(trade_results)
-        all_transactions.extend(transactions)
+    
 
-        if trade_results is None:
-            logger.warning("No trades were executed successfully")
-            return {'trade_results': pd.DataFrame(), 
-                    'transactions': pd.DataFrame()}
+        if trade_results is not None:
+            all_trade_results.extend(trade_results)
+            all_transactions.extend(transactions)
+
+
+        else:
+            logger.error("Failed to close some trades")
 
         return {'trade_results': pd.DataFrame(all_trade_results), 
                 'transactions': pd.DataFrame(all_transactions)}
@@ -217,6 +246,7 @@ class TradeManager:
                                  option_chain: pd.DataFrame,
                                  underlying_price_history: pd.DataFrame,
                                  current_date: pd.Timestamp,
+                                 early_closure=False,
                                  close_all=False) -> List[Optional[OptionTradeResult]]:
         """
         Close all open positions that have reached their expiration or close date, and update the option buying power accordingly.
@@ -230,14 +260,29 @@ class TradeManager:
         transactions = []
         for pos in self.open_positions:
 
+            # Handle positions with expiration or close date beyond backtest end date
+            if close_all:
+                current_date = pos.close_date if pos.close_date is not None else pos.expire_date
+
             # Close position if we're on/past the close_date or expire_date
             if ((pos.close_date is not None and current_date >= pos.close_date) or
                 (pos.expire_date is not None and current_date >= pos.expire_date) or
-                close_all):
-                
+                early_closure):
+
                 logger.debug(f'Closing position: {pos.trade_id}')
                 
                 if isinstance(pos, MultiLegOptionPosition):
+
+                    # Set early close date if not set for all legs (e.g. for VIX early closure)
+                    if early_closure:
+                        for leg in pos.legs:
+                            leg.close_date = current_date
+
+                    # Assign new transaction IDs for each leg close before closing
+                    for leg in pos.legs:
+                        leg.transaction_id = self.transaction_counter
+                        self.transaction_counter += 1
+
                     # For multi-leg positions, use the spread's close method which handles all legs
                     result, leg_transactions, total_bp_effect = pos.close(option_chain=option_chain, 
                                                                          underlying_price_history=underlying_price_history)                    
@@ -248,24 +293,41 @@ class TradeManager:
                         # Restore margin since we bypassed bp updates for individual legs
                         if pos.margin_required is not None:
                             self.option_bp += pos.margin_required
-                        result.bp = self.option_bp
+                        result.bp = round(self.option_bp, 2)
                         positions_to_remove.append(pos)
                         logger.debug(f"Closed multi-leg position {pos.trade_id} - Total BP Effect: ${total_bp_effect:.2f} - New BP: ${self.option_bp:.2f}")
                         trade_results.append(result)
                         transactions.extend(leg_transactions)
+                    
+                    else:
+                        logger.error('Unable to close one or more positions due to incomplete closing data')
+                        return None, None
+                
+                # Single leg position
                 else:
-                    # Single leg position
+                    if early_closure:
+                        pos.close_date = current_date
+                    
+                    # Assign new transaction ID for the close before closing
+                    pos.transaction_id = self.transaction_counter
+                    self.transaction_counter += 1
+
                     result, transaction, bp_effect = pos.close(option_chain=option_chain, 
                                                     underlying_price_history=underlying_price_history)
-                                                    # option_bp=self.option_bp)
+
                     if result:  
                         # Update buying power with the calculated bp_effect
                         self.option_bp += bp_effect
-                        result.bp = self.option_bp
+                        result.bp = round(self.option_bp, 2)
                         positions_to_remove.append(pos)
                         logger.debug(f"Closed position {pos.transaction_id} - BP Effect: ${bp_effect:.2f} - New BP: ${self.option_bp:.2f}")
                         trade_results.append(result)
                         transactions.append(transaction)    
+                    
+                    else:
+                        logger.error('Unable to close one or more positions due to incomplete closing data')
+                        return None, None
+
         # Remove closed positions
         for pos in positions_to_remove:
             self.open_positions.remove(pos)

@@ -44,13 +44,15 @@ def run_test_suite():
         start_date="2020-01-01",
         end_date="2020-12-31",
         use_underlying_close=False,
-        early_close_days=30,
+        # early_close_days=30,
         max_margin_utilization=0.80,
         max_positions=1,
         max_spread_width=100,
         max_trade_loss=10000.00,
         trade_selection_method=TradeSelectionMethod.DELTA_FIRST,
-        vix_range=(10, 20),
+        vix_range=(8, 25),
+        vix_max=25,
+
         # Define the leg of the strategy
         legs=[
             OptionLegConfig(

@@ -897,7 +897,7 @@ class SingleLegOptionPosition(BaseOptionPosition):
         # Validate entry_date
         if self.entry_date <= min_valid_date:
             logger.error(f"Invalid entry date: {self.entry_date} - skipping trade")
-            return None
+            return None, None, None
         
         # Early closure, get close date with validation
         if self.close_date is not None:
@@ -908,7 +908,7 @@ class SingleLegOptionPosition(BaseOptionPosition):
             close_date = self.expire_date
         else:
             logger.error("Both close_date and expire_date are None - skipping trade")
-            return None
+            return None, None, None
         
         # logger.debug(f'Closing {self.trade_id}')
         logger.info(f'Date: {close_date} - Close Reason: {close_reason}')
@@ -916,22 +916,22 @@ class SingleLegOptionPosition(BaseOptionPosition):
         # Validate close_date
         if not isinstance(close_date, pd.Timestamp) or close_date <= min_valid_date:
             logger.error(f"Invalid close date: {close_date} - skipping trade")
-            return None
+            return None, None, None
         
         # Ensure close_date is not before entry_date
         if close_date < self.entry_date:
             logger.error(f"Close date {close_date} is before entry date {self.entry_date} - skipping trade")
-            return None
+            return None, None, None
         
         # Update class with closing data
         if not self._update_closing_data(option_chain, underlying_price_history):
             logger.error("Skipping trade due to missing close data")
-            return None
+            return None, None, None
             
         # Validate that we have the required exit data
         if self.exit_price is None or self.underlying_exit is None:
             logger.warning("Skipping trade due to missing exit data after update")
-            return None
+            return None, None, None
             
         logger.debug(f'Exit price: {self.exit_price} | Underlying close: {self.underlying_exit}')
 
@@ -957,7 +957,7 @@ class SingleLegOptionPosition(BaseOptionPosition):
         days_held = pd.Timedelta(close_date - self.entry_date).days
         if days_held < 0:
             logger.error(f"Calculated negative days held ({days_held}) - skipping trade")
-            return None
+            return None, None, None
     
         logger.debug(f'ready to return result. PnL: {pnl}')
 
@@ -1657,7 +1657,7 @@ class MultiLegOptionPosition(BaseOptionPosition):
             
             if leg_trade_result is None or leg_transaction_dict is None:
                 logger.error(f"Skipping spread closure due to missing closing data for leg {i+1}")
-                return None
+                return None, None, None
             
             all_trade_results.append(leg_trade_result)
             all_transactions.append(leg_transaction_dict)
@@ -1676,7 +1676,7 @@ class MultiLegOptionPosition(BaseOptionPosition):
         spread_pnl = round(sum(trade_result.pnl for trade_result in all_trade_results), 2)   # * self.quantity
         if spread_pnl is None:
             logger.error("Failed to calculate spread PnL during closure.")
-            return None
+            return None, None, None
         logger.debug(f'Calculated spread PnL: {spread_pnl}')
 
         # The total capital used for the spread is its margin required (already a cached_property)
@@ -1700,7 +1700,7 @@ class MultiLegOptionPosition(BaseOptionPosition):
         
         if not close_date:
             logger.error(f"Could not determine close date for spread {self.trade_id}")
-            return None
+            return None, None, None
 
         # Calculate days_held for the spread
         days_held = (close_date.date() - self.entry_date.date()).days
