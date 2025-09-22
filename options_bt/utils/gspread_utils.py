@@ -113,7 +113,7 @@ def log_to_google_sheets(results: dict,
                         "max_drawdown_usd", "max_drawdown_pct", "peak_capital", "trough_capital",
                         "drawdown_duration", "execution_time", "max_positions", "early_close",
                         "leverage", "max_margin", "max_spread_width", "max_trade_loss",
-                        "param_string", "use_vix", "vix_max" "use_iv", "sl", "tp", "average_premium", "trade_selection"
+                        "param_string", "use_vix", "vix_max", "use_iv", "sl", "tp", "average_premium", "trade_selection"
             ]
             logger.info("Adding headers...")
             header_response = worksheet.append_row(headers)
@@ -205,6 +205,16 @@ def log_to_google_sheets(results: dict,
         logger.info(f"Prepared row data with {len(row_data)} columns")
         logger.info(f"Row data: {row_data}")
         
+        # Sanity check: headers vs row length
+        try:
+            expected_cols = len(headers)  # if we just created the sheet in this run
+        except NameError:
+            # existing sheet: read header row to get the true column count
+            expected_cols = len(worksheet.row_values(1))
+
+        if len(row_data) != expected_cols:
+            raise ValueError(f"Header/row length mismatch: expected {expected_cols}, got {len(row_data)}")
+
         # Append the row
         logger.info("Appending row to worksheet...")
         response = worksheet.append_row(row_data)

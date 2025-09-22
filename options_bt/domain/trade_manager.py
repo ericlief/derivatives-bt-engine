@@ -112,6 +112,8 @@ class TradeManager:
         all_trade_results = []
         all_transactions = []
         skipped_trades = 0
+        if trade_signals is None or trade_signals.empty:
+            return {'trade_results': pd.DataFrame(), 'transactions': pd.DataFrame()}
         start = trade_signals.index.min()
         end = trade_signals.index.max()
         dates = pd.date_range(start, end)
@@ -138,37 +140,43 @@ class TradeManager:
                         vix_close_value = float(row['close'] if 'close' in row else float(row))
                     except Exception:
                         vix_close_value = None
-                        
+                    logger.debug(f'VIX daily value {vix_close_value}')
+
                 if vix_close_value is not None:
                     # Check vix_max for early exit
                     if self.config.vix_max is not None and vix_close_value > self.config.vix_max:
                         early_closure = True
-                        logger.debug(f'VIX {vix_close_value} exceeds max {self.config.vix_max}, closing positions')
-                    
-                    # Check vix_range for trade entry
-                    if self.config.vix_range is not None:
-                        lo, hi = self.config.vix_range
-                        if not (lo <= vix_close_value <= hi):
-                            skipped_trades += 1
-                            logger.debug(f'Skipping trade date {current_date} due to VIX {vix_close_value} outside range {lo}-{hi}')
-                            continue
+                        logger.debug(f'VIX {vix_close_value} exceeds max {self.config.vix_max}')
 
             # Close any expired positions
-            trade_results, transactions = self._close_expired_positions(
-                option_chain=option_chain, 
-                underlying_price_history=underlying_price_history,
-                current_date=current_date,
-                early_closure=early_closure  # Pass the boolean flag
-            )
-            # only aggregate results of close was successfull
-            if trade_results is not None:
-                # Aggregate trade results and transactions
-                all_trade_results.extend(trade_results)
-                all_transactions.extend(transactions)
+            n_open_positions = len(self.open_positions)
+            if n_open_positions > 0:    
+                if early_closure:
+                    logger.debug(f'VIX early closure for {n_open_positions} open positions')        
+                    
+                trade_results, transactions = self._close_expired_positions(
+                    option_chain=option_chain, 
+                    underlying_price_history=underlying_price_history,
+                    current_date=current_date,
+                    early_closure=early_closure  # Pass the boolean flag
+                )
+                # only aggregate results of close was successfull
+                if trade_results is not None:
+                    # Aggregate trade results and transactions
+                    all_trade_results.extend(trade_results)
+                    all_transactions.extend(transactions)
 
-            else:
-                logger.error("Failed to close some trades")
-             
+                else:
+                    logger.error("Failed to close some trades")
+            
+            # Check vix_range for trade entry
+            if vix_close_value is not None and self.config.vix_range is not None:
+                lo, hi = self.config.vix_range
+                if not (lo <= vix_close_value <= hi):
+                    skipped_trades += 1
+                    logger.debug(f'Skipping trade date {current_date} due to VIX {vix_close_value} outside range {lo}-{hi}')
+                    continue
+
             # Construct a new position from the trade signal if possible on the current date
             if trade_signal is not None:    
                 for trade in trade_signal.itertuples():

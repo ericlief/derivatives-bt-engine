@@ -752,22 +752,36 @@ class SingleLegOptionPosition(BaseOptionPosition):
         
         # If no close_date, this is an expiration
         if not self.close_date:
-            if self.expire_date not in underlying_price_history.index:
-                logger.error(f"No valid (expiration) closing prices found for strike {self.strike} and expire date {self.expire_date}")
-                raise ValueError(f"No valid closing data found for position with expire date {self.expire_date}")
-            
-            # Get underlying price at close
-            underlying_close = underlying_price_history.loc[self.expire_date, 'close']
+            # 1) Try underlying history close
+            if self.expire_date in underlying_price_history.index:
+                underlying_close = underlying_price_history.loc[self.expire_date, 'close']
+            else:
+                logger.warning(f"No underlying close for {self.expire_date}; falling back to option chain 'underlying_last'")
+                # 2) Try option chain rows on the same calendar date (and expiry)
+                oc_same_day = option_chain[
+                    (option_chain.index == self.expire_date) &
+                    (option_chain['expire_date'] == self.expire_date)
+                ].sort_index()
 
+                if not oc_same_day.empty and 'underlying_last' in oc_same_day:
+                    underlying_close = float(oc_same_day['underlying_last'].iloc[0])
+                else:
+                    # 3) Try nearest prior chain row for this expiry
+                    oc_exp = option_chain[option_chain['expire_date'] == self.expire_date].sort_index()
+                    prior = oc_exp[oc_exp.index <= self.expire_date].tail(1)
+                    if not prior.empty and 'underlying_last' in prior:
+                        underlying_close = float(prior['underlying_last'].iloc[0])
+                    else:
+                        logger.error(f"No valid (expiration) closing prices found for strike {self.strike} and expire date {self.expire_date}")
+                        return False
+            
             logger.info(f'Expiration - underlying close: {underlying_close}')
             
             # Calculate intrinsic value at expiration
             exit_price = self.calculate_intrinsic_value(underlying_close)
-            # exit_price = -abs(exit_price) if self.is_long else abs(exit_price)  # WTF?
-
             logger.info(f'Expiration {self.expire_date} - strike {self.strike} - exit price: {exit_price}')
 
-            # Get delta value at expiration
+            # Get delta value at expiration (best-effort from chain on the day)
             delta_col = "p_delta" if self.is_put else 'c_delta'
             filtered_df = option_chain[
                 (option_chain.index == self.expire_date) &
@@ -779,58 +793,13 @@ class SingleLegOptionPosition(BaseOptionPosition):
 
             exit_delta = round(filtered_df[delta_col].iloc[0], 2) if not filtered_df.empty else None
 
-            # Update instance variables only if exit_price and exit_delta are valid
-            if exit_price is not None and exit_delta is not None:
+            if exit_price is not None:
                 self.underlying_exit = underlying_close
                 self.exit_price = exit_price
                 self.exit_delta = exit_delta
                 return True  # Successfully updated
 
             return False  # Failed to update
-        
-        # Early close - get data from close_date forward (up to 5 days)
-        date_range = pd.date_range(self.close_date, self.close_date + pd.Timedelta(days=5))
-        filtered_df = option_chain[
-            (option_chain.index.isin(date_range)) & 
-            (option_chain['expire_date'] == self.expire_date) &
-            (option_chain['strike'] == self.strike)    
-        ].sort_index()
-        
-        if filtered_df.empty:
-            logger.warning(f"No valid prices found within 5 days of close date {self.close_date}")
-            return False
-            
-        bid_col = "p_bid" if self.is_put else "c_bid"
-        ask_col = "p_ask" if self.is_put else "c_ask"
-        delta_col = "p_delta" if self.is_put else 'c_delta'
-
-        # Try each date until we find valid prices
-        for row in filtered_df.itertuples():
-            date = row.Index
-            bid = getattr(row, bid_col)
-            ask = getattr(row, ask_col)
-            underlying_close = underlying_price_history.loc[date, 'close']   # added underlying data here
-            # Use last close in options data if available 
-            if underlying_close is None:
-                if hasattr(row, 'underlying_last'):
-                    underlying_close = row.underlying_last
-                else:
-                    logger.error(f'Cannot get closing data because no underlying available for {self.option_strategy}')
-                    return False
-            exit_delta = round(getattr(row, delta_col), 2)
-            
-            mid_price = PriceUtils.calculate_midpoint_price(bid, ask)
-            if mid_price is not None:
-                # Update instance variables only if mid_price is valid
-                self.underlying_exit = underlying_close
-                self.exit_price = mid_price
-                self.exit_delta = exit_delta
-                
-                return True  # Successfully updated
-        
-        logger.error(f"No valid (early close) closing prices found for strike {self.strike} and expire date {self.expire_date}")
-        return False  # Failed to update
-
    
     
  

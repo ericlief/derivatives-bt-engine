@@ -30,13 +30,13 @@ def setup_logger(log_file: str = None):
 
     # Create console handler for INFO level only
     console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.INFO)  # Set to INFO level first
+    console_handler.setLevel(logging.DEBUG)  # Set to INFO level first
     
     # Create a filter to only allow INFO level messages (but not WARNING or ERROR)
     class InfoFilter(logging.Filter):
         def filter(self, record):
             # Only allow INFO and CRITICAL levels to console (skip WARNING and ERROR)
-            return record.levelno == logging.INFO or record.levelno == logging.CRITICAL
+            return record.levelno == logging.DEBUG or record.levelno == logging.CRITICAL
     
     # Apply the filter to the console handler
     console_handler.addFilter(InfoFilter())

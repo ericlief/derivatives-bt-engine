@@ -423,7 +423,7 @@ class OptionSignalGenerator(BaseSignalGenerator):
         else:
             print("ERROR: Could not find underlying columns!")
 
-        logger.debug(f"Paired vertical spread legs: {paired.head()}")
+        logger.debug(f"Paired {len(paired)} vertical spread legs: {paired.head()}")
         
         # Filter for valid vertical spread criteria
         # For example, ensure the strikes are different

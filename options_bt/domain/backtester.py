@@ -57,6 +57,10 @@ class Backtester:
         """Create the results directory if it does not exist."""
         
         os.makedirs(self.results_dir, exist_ok=True)
+        logger.info(f'Instantiated Backtester with following data: ')
+        logger.info(f'Options chain: {not self.option_chain.empty}')
+        logger.info(f'Underlying: {not self.underlying.empty}')
+        logger.info(f'VIX: {not self.vix.empty}')
 
     def run(
         self,
@@ -71,7 +75,7 @@ class Backtester:
         # leg_early_close = leg.early_close_days if leg.early_close_days is not None else strategy.early_close_days
         
         # Initialize trade manager
-        trade_manager = TradeManager(config=config)
+        trade_manager = TradeManager(config=config, vix=self.vix)
         signal_generator = OptionSignalGenerator(option_chain=self.option_chain.copy(), underlying=self.underlying.copy(), config=config)    
         # Generate or validate signals
         signal_start = time.time()
@@ -94,7 +98,8 @@ class Backtester:
         
         if signals.empty:
             logger.warning("No valid signals generated")
-            return pd.DataFrame()
+            return {'trade_results': pd.DataFrame(), 'transactions': pd.DataFrame()}
+
 
         # Pre-calculate margin requirements for all signals
         is_spread = isinstance(config, MultiLegOptionStrategyConfig)
@@ -114,42 +119,34 @@ class Backtester:
             # Filter out trades with excessive spread width if max_spread_width is set
             if config.max_spread_width is not None:
                 original_count = len(signals)
+                logger.debug(f'Number of signals before filtering {original_count}')
                 signals = signals[signals['spread_width'] <= config.max_spread_width]
                 filtered_count = original_count - len(signals)
                 if filtered_count > 0:
                     logger.warning(f"Filtered out {filtered_count} trades due to excessive spread width (> {config.max_spread_width} points)")
                 logger.info(f"Maximum spread width in trades: {signals['spread_width'].max() if len(signals) > 0 else 'N/A'} points")
 
-            # Filter out trades with excessive spread width if max_spread_width is set
+            # Filter out trades with excessive max trade loss if max_trade_loss is set
             if config.max_trade_loss is not None:
-                if signals.empty: # No signals left after previous filters
+                if signals.empty:
                     logger.warning("No signals to filter for max_trade_loss after previous filters.")
                 else:
-                    original_count_loss = len(signals)
-                    # For a credit spread, max loss = (spread_width * 100) - (spread_price * 100)
-                    # For a debit spread, max loss = spread_price * 100
-                    # Assuming 'spread_price' is already signed (positive for credit, negative for debit)
-                    # So, max loss is always (spread_width * 100 * quantity) - (spread_price * 100 * quantity) for credit spreads
-                    # And max loss is (spread_price * 100 * quantity) for debit spreads (where spread_price is abs)
-
                     original_count = len(signals)
                     if config.option_strategy in [OptionStrategy.BULL_PUT_CREDIT_SPREAD, OptionStrategy.BEAR_CALL_CREDIT_SPREAD]:
-                        signals['max_trade_loss'] = signals['spread_width'] * config.quantity * 100  
+                        # For credit spreads: max loss = (spread_width - credit) * 100 * qty
+                        credit = signals['spread_price'].clip(lower=0)  # ensure non-negative credit
+                        signals['max_trade_loss'] = (signals['spread_width'] - credit) * config.quantity * 100
                     elif config.option_strategy in [OptionStrategy.BULL_CALL_DEBIT_SPREAD, OptionStrategy.BEAR_PUT_DEBIT_SPREAD]:
-                        signals['max_trade_loss'] = abs(signals['spread_price']) * config.quantity * 100  
+                        signals['max_trade_loss'] = (signals['spread_price'].abs()) * config.quantity * 100
                     else:
-                        logger.warning(f"Max trade loss filter not precisely applicable for strategy {config.option_strategy}. Using spread_width as proxy.")
-                        signals['max_trade_loss'] = signals['spread_width'] * config.quantity * 100 # Fallback
-           
+                        signals['max_trade_loss'] = signals['spread_width'] * config.quantity * 100  # fallback
+
                     signals = signals[signals['max_trade_loss'] <= config.max_trade_loss]
-                    
                     filtered_count = original_count - len(signals)
                     if filtered_count > 0:
-                        logger.warning(f"Filtered out {filtered_count} trades due to excessive spread width ({config.max_spread_width} points) and max allowed trade loss (${config.max_trade_loss})")
-                        logger.info(f"Maximum spread width in trades: {signals['spread_width'].max() if len(signals) > 0 else 'N/A'} points")
-                        logger.info(f"Maximum trade loss: ${signals['max_trade_loss'].max() if len(signals) > 0 else 'N/A'}")
-
-
+                        logger.warning(f"Filtered out {filtered_count} trades due to max allowed trade loss (${config.max_trade_loss})")
+                    logger.info(f"Maximum trade loss: ${signals['max_trade_loss'].max() if len(signals) > 0 else 'N/A'}")
+           
             # Ensure 'margin_required' is calculated for spreads before trade selection
             if 'margin_required' not in signals.columns: # If not already calculated by MultiLegOptionPosition
                 signals['margin_required'] = round(signals['spread_width'] * config.quantity * 100, 2)
@@ -196,6 +193,9 @@ class Backtester:
         logger.info(valid_signals.sort_values(by="margin_required", ascending=True).tail())
 
         logger.info(f"Total signals: {len(valid_signals)} | Date Range: {valid_signals.index.min()} to {valid_signals.index.max()}")
+        if valid_signals.empty:
+            logger.info("No valid signals; skipping trade execution.")
+            return {'trade_results': pd.DataFrame(), 'transactions': pd.DataFrame()}
         # Execute trades
         backtest_start = time.time()
         results_transactions_dict = trade_manager.construct_and_execute_trades_from_signals(valid_signals, 
@@ -206,7 +206,7 @@ class Backtester:
         transactions = results_transactions_dict['transactions']
         if trade_results.empty:
             logger.warning("No trades were executed successfully")
-            return pd.DataFrame()
+            return {'trade_results': pd.DataFrame(), 'transactions': pd.DataFrame()}
         
         
         # Calculate cumulative metrics based on PnL
@@ -247,8 +247,12 @@ class Backtester:
             'trade_results': trade_results,
             'transactions': transactions
         }
+
+        print(results['trade_results'])
+        
         # self.calculate_mtm(results, config) 
-        results = self.calculate_simple_drawdown(results, config)
+        if not results['trade_results'].empty:
+            results = self.calculate_simple_drawdown(results, config)
 
         if self.save_trades:
             save_start = time.time()
@@ -834,7 +838,10 @@ class Backtester:
         max_drawdown_idx = np.argmin(drawdown)
         
         # Find the peak before the max drawdown
-        peak_idx = np.argmax(capital[:max_drawdown_idx])
+        if max_drawdown_idx > 0:
+            peak_idx = np.argmax(capital[:max_drawdown_idx])
+        else:
+            peak_idx = 0  # If max drawdown is at the first trade, peak is also the first trade
         
         logger.info(f"Maximum Drawdown: {max_drawdown:.2%}")
         logger.info(f"Peak Capital: ${capital[peak_idx]:.2f}")

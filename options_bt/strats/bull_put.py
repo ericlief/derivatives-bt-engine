@@ -19,8 +19,9 @@ def run_test_suite():
     # Set up data paths
     DATA_PATH = "/Users/liefe/data/spx"
     OPTIONS_FILE = "options_chain_preprocessed.csv"
+    VIX_FILE = "vix.csv"
 
-    dl = DataLoader(data_dir=DATA_PATH, options_file=OPTIONS_FILE, vix_file="vix.csv", use_preprocessed=True, save_preprocessed=False)
+    dl = DataLoader(data_dir=DATA_PATH, options_file=OPTIONS_FILE, vix_file=VIX_FILE, use_preprocessed=True, save_preprocessed=False)
     data = dl.load_data()
     # print(dl.__dict__)
     # Check data quality once
@@ -48,7 +49,7 @@ def run_test_suite():
         max_margin_utilization=0.80,
         max_positions=1,
         max_spread_width=100,
-        max_trade_loss=10000.00,
+        max_trade_loss=7500.00,
         trade_selection_method=TradeSelectionMethod.DELTA_FIRST,
         vix_range=(8, 25),
         vix_max=25,
@@ -59,15 +60,17 @@ def run_test_suite():
             option_type=OptionType.PUT,
             position_side=PositionSide.SHORT,
             # delta_range=(0.65, 0.75),
-            delta_target=0.75,
-            dte_range=(40, 45),
+            delta_target=0.60,
+            # dte_range=(40, 45),
+            dte_target=35,
             ),
             OptionLegConfig(
             option_type=OptionType.PUT,
             position_side=PositionSide.LONG,
             # delta_range=(0.65, 0.75),
-            delta_target=0.55,
-            dte_range=(40, 45),
+            delta_target=0.50,
+            # dte_range=(40, 45),
+            dte_target=35,
             )
         ],
         ),
@@ -110,6 +113,7 @@ def run_test_suite():
     #     ),
     # ]
     for i, config in enumerate(configs):
+
 
         bt = Backtester(
             data=data,
