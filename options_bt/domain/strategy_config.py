@@ -67,7 +67,8 @@ class MultiLegOptionStrategyConfig(BaseOptionStrategyConfig):
     leg_ratios: Dict[int, float] = None
     max_spread_width: Optional[float] = None  # Maximum spread width in points (e.g., 50 for SPX means max $5000 margin)
     max_trade_loss: Optional[float] = None # Position-based risk management (e.g. $500)
-    
+    premium_ratio: Optional[float] = None # Only trades with 1/3 of width, etc.
+
     def __post_init__(self):
         # Validate legs configuration
         for leg in self.legs:

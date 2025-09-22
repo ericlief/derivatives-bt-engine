@@ -83,20 +83,21 @@ def log_to_google_sheets(results: dict,
         logger.info("Authentication successful")
         
         logger.info("Opening spreadsheet...")
-        spreadsheet = gc.open('options_bt_results')
+        spreadsheet = gc.open('spx_options_bt_results')
         logger.info("Spreadsheet opened successfully")
         
         # Try to get existing worksheet, create if doesn't exist
         try:
-            logger.info("Getting SPX worksheet...")
-            worksheet = spreadsheet.worksheet('SPX')
-            logger.info("SPX worksheet found")
+            strat = '_'.join(config.option_strategy.value.upper().split())
+            logger.info(f"Getting {strat} worksheet...")
+            worksheet = spreadsheet.worksheet(strat)
+            logger.info(f"{strat} worksheet found")
         except Exception as e:
-            logger.info(f"SPX worksheet not found, creating new one: {e}")
-            worksheet = spreadsheet.add_worksheet(title='SPX', rows=1000, cols=20)
+            logger.info(f"{strat} worksheet not found, creating new one: {e}")
+            worksheet = spreadsheet.add_worksheet(title=strat, rows=1000, cols=20)
             logger.info("New worksheet created")
             # Add headers if new worksheet
-            # headers = [
+            # headers = [a
             #     'Timestamp', 'Strategy', 'Start', 'End', 'Period', 'Quantity', 'DTE_Target', 'DTE_Range', 'Delta_Target', 'Delta_Range',
             #     'Total_PnL', 'Initial_Capital', 'Final_Capital', 'Return_Pct', 'Avg_Days_Held',
             #     'Avg_ROI', 'Max_Profit', 'Max_Loss', 'Win_Rate', 'Winning_Trades', 'Total_Trades', 
@@ -113,7 +114,7 @@ def log_to_google_sheets(results: dict,
                         "max_drawdown_usd", "max_drawdown_pct", "peak_capital", "trough_capital",
                         "drawdown_duration", "execution_time", "max_positions", "early_close",
                         "leverage", "max_margin", "max_spread_width", "max_trade_loss",
-                        "param_string", "use_vix", "vix_max", "use_iv", "sl", "tp", "average_premium", "trade_selection"
+                        "param_string", "vix_range", "vix_max", "use_iv", "sl", "tp", "average_premium", "trade_selection", "premium_ratio"
             ]
             logger.info("Adding headers...")
             header_response = worksheet.append_row(headers)
@@ -198,7 +199,8 @@ def log_to_google_sheets(results: dict,
             '',  # SL
             '',  # TP
             round(results_df['premium'].mean(), 2),
-            config.trade_selection_method.value
+            config.trade_selection_method.value,
+            getattr(config, 'premium_ratio', ''),
         ]
         
         row_data = [flatten_for_sheet(convert_numpy_types(obj)) for obj in row_data]

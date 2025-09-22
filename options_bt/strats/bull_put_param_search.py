@@ -33,7 +33,9 @@ class GridSearchBacktester:
         combos = product_dict(param_grid)
         # print(f"Total combos (unfiltered): {len(combos)}")
         OFFSET = 0.10
-        combos = product_dict({'short_delta_target': [0.20, 0.30, 0.40, 0.50, 0.60, 0.70], 'dte_target': [30,35,40,45]})
+        # combos = product_dict({'short_delta_target': [0.20, 0.30, 0.40, 0.50, 0.60, 0.70], 'dte_target': [30,35,40,45]})
+        # combos = product_dict({'short_delta_target': [0.20, 0.30, 0.40, 0.50, 0.60, 0.70], 'dte_target': [30,35,40,45]})
+
         for c in combos:
             c['long_delta_target'] = max(0.05, round(c['short_delta_target'] - OFFSET, 2))
 
@@ -93,9 +95,10 @@ def make_bull_put_config(combo):
         max_positions=1,
         max_spread_width=combo.get('max_spread_width', 100),
         max_trade_loss=combo.get('max_trade_loss', 7500),
-        trade_selection_method=combo.get('trade_selection_method', TradeSelectionMethod.DELTA_FIRST),
+        trade_selection_method=combo.get('trade_selection_method', TradeSelectionMethod.PREMIUM_FIRST),
         vix_range=combo.get('vix_range', None),
         vix_max=combo.get('vix_max', None),
+        premium_ratio=0.33,
         legs=[
             OptionLegConfig(
                 option_type=OptionType.PUT,
@@ -130,20 +133,22 @@ def run_grid():
         # 'max_spread_width': [50, 75, 100],
         # 'max_trade_loss': [2500, 5000, 7500],
         # 'trade_selection_method': [TradeSelectionMethod.DELTA_FIRST, TradeSelectionMethod.PREMIUM_FIRST],
-        # 'vix_range': [(8, 22), (8, 26), (8, 30)],
-        # 'vix_max': [22, 24, 26, 28],
+        'vix_range': [(8, 22), (8, 26), (8, 30), None],
+        'vix_max': [22, 24, 26, 28, None],
         # 'dte_range': [(40, 45)],
         # 'early_close_days': [20, 30],  # optional
 
         # Focused sweep
-        'short_delta_target': [0.30, 0.40, 0.50, 0.60, 0.70],
+        # 'short_delta_target': [0.30, 0.40, 0.50, 0.60, 0.70],
+        'short_delta_target': [0.60],
         # 'long_delta_target': [0.45, 0.50],
-        'dte_target': [30, 35, 40, 45],
+        # 'dte_target': [30, 35, 40, 45],
+        'dte_target': [35],        
     }
 
     
-    # results_df = runner.run(param_grid=param_grid, make_config=make_bull_put_config, top_k=10)  # pass list of dicts too
-    # print(results_df.sort_values('total_pnl', ascending=False).head(20))
+    results_df = runner.run(param_grid=param_grid, make_config=make_bull_put_config, top_k=10)  # pass list of dicts too
+    print(results_df.sort_values('total_pnl', ascending=False).head(20))
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     keys = list(param_grid.keys())
@@ -151,9 +156,10 @@ def run_grid():
           for v in param_grid.values()]
     param_list = [f"{k}_{v}" for k, v in zip(keys, values)]
     param_str = "__".join(param_list)
-    # csv_path = os.path.join(bt.results_dir, f"backtest_summary_{timestamp}.csv")
-    # results_df.to_csv(csv_path, index=False)
+    csv_path = os.path.join(bt.results_dir, f"backtest_summary_{timestamp}_{param_str}.csv")  
+    results_df.to_csv(csv_path, index=False)
     print(param_list)
+
 if __name__ == "__main__":
     run_grid()
     

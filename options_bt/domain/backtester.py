@@ -147,6 +147,12 @@ class Backtester:
                         logger.warning(f"Filtered out {filtered_count} trades due to max allowed trade loss (${config.max_trade_loss})")
                     logger.info(f"Maximum trade loss: ${signals['max_trade_loss'].max() if len(signals) > 0 else 'N/A'}")
            
+
+            if config.premium_ratio is not None:
+                premium = signals['spread_price'].clip(lower=0)
+                signals['premium_ratio'] = round(premium / signals['spread_width'], 2)
+                signals = signals[signals['premium_ratio'] <= config.premium_ratio]
+                
             # Ensure 'margin_required' is calculated for spreads before trade selection
             if 'margin_required' not in signals.columns: # If not already calculated by MultiLegOptionPosition
                 signals['margin_required'] = round(signals['spread_width'] * config.quantity * 100, 2)
