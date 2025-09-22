@@ -149,14 +149,20 @@ class Backtester:
            
 
             if config.premium_ratio is not None:
+                original_count = len(signals)
                 premium = signals['spread_price'].clip(lower=0)
                 signals['premium_ratio'] = round(premium / signals['spread_width'], 2)
-                signals = signals[signals['premium_ratio'] <= config.premium_ratio]
-                
+                signals = signals[signals['premium_ratio'] >= config.premium_ratio]
+                filtered_count = original_count - len(signals)
+                if filtered_count > 0:
+                    logger.warning(f"Filtered out {filtered_count} trades due to premium ratio ({config.premium_ratio})")
+                logger.info(f"Minimum: {signals['premium_ratio'].min() if len(signals) > 0 else 'N/A'}")
+                logger.info(f"Maximum: {signals['premium_ratio'].max() if len(signals) > 0 else 'N/A'}")
+
             # Ensure 'margin_required' is calculated for spreads before trade selection
             if 'margin_required' not in signals.columns: # If not already calculated by MultiLegOptionPosition
                 signals['margin_required'] = round(signals['spread_width'] * config.quantity * 100, 2)
-            logger.debug(f'Calculated margins for {len(signals)} spread groups')
+                logger.debug(f'Calculated margins for {len(signals)} spread groups')    
             logger.debug(f'First few margins: {signals.head()}')
         
         # Single leg

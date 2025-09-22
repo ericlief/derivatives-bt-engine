@@ -42,6 +42,7 @@ class GridSearchBacktester:
         print(f"Total combos: {len(combos)}")
         print(combos[:25])
 
+        # For DEBUG
         # if True:
         #     return  
 
@@ -133,8 +134,10 @@ def run_grid():
         # 'max_spread_width': [50, 75, 100],
         # 'max_trade_loss': [2500, 5000, 7500],
         # 'trade_selection_method': [TradeSelectionMethod.DELTA_FIRST, TradeSelectionMethod.PREMIUM_FIRST],
-        'vix_range': [(8, 22), (8, 26), (8, 30), None],
-        'vix_max': [22, 24, 26, 28, None],
+        # 'vix_range': [(8, 22), (8, 26), (8, 30), None],
+        # 'vix_max': [22, 24, 26, 28, None],
+        # 'vix_max': [22, 24, 26, 28, None],
+
         # 'dte_range': [(40, 45)],
         # 'early_close_days': [20, 30],  # optional
 
@@ -147,7 +150,11 @@ def run_grid():
     }
 
     
-    results_df = runner.run(param_grid=param_grid, make_config=make_bull_put_config, top_k=10)  # pass list of dicts too
+    results_df = runner.run(
+        param_grid=param_grid, 
+        make_config=make_bull_put_config, 
+        # top_k=10
+      )  # pass list of dicts too
     print(results_df.sort_values('total_pnl', ascending=False).head(20))
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

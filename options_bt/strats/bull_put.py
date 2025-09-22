@@ -52,8 +52,8 @@ def run_test_suite():
         max_trade_loss=7500.00,
         # trade_selection_method=TradeSelectionMethod.DELTA_FIRST,
         trade_selection_method=TradeSelectionMethod.PREMIUM_FIRST,
-        # vix_range=(8, 25),
-        # vix_max=25,
+        vix_range=None,
+        vix_max=None, 
         premium_ratio=0.33,
 
         # Define the leg of the strategy
