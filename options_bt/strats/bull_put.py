@@ -53,7 +53,7 @@ def run_test_suite():
         # trade_selection_method=TradeSelectionMethod.DELTA_FIRST,
         trade_selection_method=TradeSelectionMethod.PREMIUM_FIRST,
         vix_range=None,
-        vix_max=None, 
+        vix_max=25, 
         premium_ratio=0.33,
 
         # Define the leg of the strategy

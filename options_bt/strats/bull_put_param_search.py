@@ -1,5 +1,6 @@
 from datetime import datetime
 import os
+import time
 import pandas as pd
 from options_bt.utils.logger import setup_logger
 from options_bt.domain.enums import *
@@ -20,9 +21,18 @@ def product_dict(param_grid: Dict[str, Iterable[Any]]) -> List[Dict[str, Any]]:
     return [dict(zip(keys, combo)) for combo in itertools.product(*vals)]
 
 class GridSearchBacktester:
-    def __init__(self, backtester, log_each_to_sheets: bool = False):
+    def __init__(self, 
+                backtester: Backtester,
+                log_each_to_sheets: bool = False,
+                periods: Optional[List[int]] = [1],
+                start_date: Optional[str] = "2020-01-01",
+                end_date: Optional[str] = "2020-12-31"
+    ):
         self.bt = backtester
         self.log_each_to_sheets = log_each_to_sheets
+        self.periods = periods
+        self.start_date = start_date
+        self.end_date = end_date
 
     def run(
         self,
@@ -39,40 +49,59 @@ class GridSearchBacktester:
         for c in combos:
             c['long_delta_target'] = max(0.05, round(c['short_delta_target'] - OFFSET, 2))
 
-        print(f"Total combos: {len(combos)}")
-        print(combos[:25])
+        logger.info(f"Total combos: {len(combos)}")
+        logger.info(combos[:25])
 
         # For DEBUG
         # if True:
         #     return  
-
         rows = []
-        for i, combo in enumerate(combos, 1):
-            config = make_config(combo)
-            res = self.bt.run(config)
-            tr = res['trade_results']
-            stats = res.get('stats', pd.DataFrame())
-            if tr is None or tr.empty:
-                rows.append({**combo, 'total_pnl': 0.0, 'final_capital': config.initial_capital, 'win_rate_pct': 0.0, 'trades': 0, 'max_dd_pct': None})
-                continue
+        for period in self.periods:  # ASSUMING YEAR PERIODS
+            offset = 90  # 3 MONTHS
+            start_date = self.start_date
+            start_dt = pd.to_datetime(start_date)
+            end_bound = pd.to_datetime(self.end_date) if self.end_date is not None else datetime.now()
+            
+            while True:
+                # Calculate end date for this period
+                end_dt = start_dt + pd.Timedelta(days=period * 365)
+                if end_dt > end_bound:
+                    break
+                end_date = end_dt.strftime("%Y-%m-%d")
+                logger.info(f"Testing slice: {start_date} to {end_date}")
+                for i, combo in enumerate(combos, 1):
+                    logger.info(f"Testing combo {i}: {combo}")
+                    config = make_config(combo, start_date, end_date)
+                    res = self.bt.run(config)
+                    tr = res['trade_results']
+                    stats = res.get('stats', pd.DataFrame())
+                    if tr is None or tr.empty:
+                        rows.append({**combo, 'total_pnl': 0.0, 'final_capital': config.initial_capital, 'win_rate_pct': 0.0, 'trades': 0, 'max_dd_pct': None})
+                        continue
 
-            total_pnl = float(tr['cumulative_pnl'].iloc[-1])
-            final_capital = float(tr['capital'].iloc[-1])
-            win_rate = float(((tr['pnl'] > 0).sum() / len(tr)) * 100) if len(tr) else 0.0
-            max_dd_pct = float(stats['Drawdown (%)'].min()) if not stats.empty else None
+                    total_pnl = float(tr['cumulative_pnl'].iloc[-1])
+                    final_capital = float(tr['capital'].iloc[-1])
+                    win_rate = float(((tr['pnl'] > 0).sum() / len(tr)) * 100) if len(tr) else 0.0
+                    max_dd_pct = float(stats['Drawdown (%)'].min()) if not stats.empty else None
 
-            rows.append({
-                **combo,
-                'total_pnl': round(total_pnl, 2),
-                'final_capital': round(final_capital, 2),
-                'win_rate_pct': round(win_rate, 2),
-                'trades': int(len(tr)),
-                'avg_days_held': round(float(tr['days_held'].mean()), 2),
-                'avg_roi_pct': round(float(tr['roi'].mean()), 2),
-                'max_profit': round(float(tr['pnl'].max()), 2),
-                'max_loss': round(float(tr['pnl'].min()), 2),
-                'max_dd_pct': round(max_dd_pct, 2) if max_dd_pct is not None else None,
-            })
+                    rows.append({
+                        'start': start_date,
+                        'end': end_date  
+                        **combo,
+                        'total_pnl': round(total_pnl, 2),
+                        'final_capital': round(final_capital, 2),
+                        'win_rate_pct': round(win_rate, 2),
+                        'trades': int(len(tr)),
+                        'avg_days_held': round(float(tr['days_held'].mean()), 2),
+                        'avg_roi_pct': round(float(tr['roi'].mean()), 2),
+                        'max_profit': round(float(tr['pnl'].max()), 2),
+                        'max_loss': round(float(tr['pnl'].min()), 2),
+                        'max_dd_pct': round(max_dd_pct, 2) if max_dd_pct is not None else None,
+                    })
+
+                # Advance start date for the next, overlapping slice
+                start_dt = start_dt + pd.Timedelta(days=offset)
+                start_date = start_dt.strftime("%Y-%m-%d")
 
         df = pd.DataFrame(rows)
         if top_k is not None and 'total_pnl' in df.columns:
@@ -80,7 +109,7 @@ class GridSearchBacktester:
         return df
 
 
-def make_bull_put_config(combo):
+def make_bull_put_config(combo, start_date, end_date):
     # Fixed dates and static pieces; vary others via combo
     return MultiLegOptionStrategyConfig(
         quantity=1,
@@ -88,8 +117,8 @@ def make_bull_put_config(combo):
         spread_type=OptionSpreadType.VERTICAL,
         initial_capital=100000,
         leverage=1.0,
-        start_date="2020-01-01",
-        end_date="2020-12-31",
+        start_date=start_date,
+        end_date=end_date,
         use_underlying_close=False,
         early_close_days=combo.get('early_close_days', None),
         max_margin_utilization=0.80,
@@ -127,10 +156,15 @@ def run_grid():
     data = dl.load_data()
 
     bt = Backtester(data=data, save_trades=True, log_to_sheets=False)
-    runner = GridSearchBacktester(bt)
+    start_date="2010-01-01"
+    # end_date="2021-12-31"
+    end_date = "2023-12-29"
+    periods = [1, 3, 5, 10]
+    runner = GridSearchBacktester(bt, periods, start_date=start_date, end_date=end_date)
 
     param_grid = {
         # Original (commented to control explosion):
+     
         # 'max_spread_width': [50, 75, 100],
         # 'max_trade_loss': [2500, 5000, 7500],
         # 'trade_selection_method': [TradeSelectionMethod.DELTA_FIRST, TradeSelectionMethod.PREMIUM_FIRST],
@@ -139,14 +173,14 @@ def run_grid():
         # 'vix_max': [22, 24, 26, 28, None],
 
         # 'dte_range': [(40, 45)],
-        # 'early_close_days': [20, 30],  # optional
+        'early_close_days': [23, None],  # optional
 
         # Focused sweep
-        # 'short_delta_target': [0.30, 0.40, 0.50, 0.60, 0.70],
-        'short_delta_target': [0.60],
+        'short_delta_target': [0.30, 0.40, 0.50, 0.60, 0.70],
+        # 'short_delta_target': [0.60],
         # 'long_delta_target': [0.45, 0.50],
-        # 'dte_target': [30, 35, 40, 45],
-        'dte_target': [35],        
+        'dte_target': [30, 35, 40, 45],
+        # 'dte_target': [35],        
     }
 
     
