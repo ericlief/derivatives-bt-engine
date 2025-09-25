@@ -268,7 +268,7 @@ class Backtester:
 
         if self.save_trades:
             save_start = time.time()
-            results = self._save_results(
+            self._save_results(
                 results,
                 config,
                 param_str=param_str
@@ -804,7 +804,6 @@ class Backtester:
         if self.log_to_sheets:
             log_to_google_sheets(results, config=config, param_str=param_str)
 
-        return results
         # Save MTM results with same timestamp
         # if mtm_df is not None and not mtm_df.empty:
         #     mtm_csv_path = os.path.join(results_dir, f"mtm_{param_str}_{timestamp}.csv")

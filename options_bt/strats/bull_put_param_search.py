@@ -10,6 +10,8 @@ from options_bt.domain.option_leg_config import OptionLegConfig
 import itertools
 from typing import Dict, List, Callable, Any, Iterable, Optional, Union
 from options_bt.utils.gspread_utils import upload_df_to_google_sheets, _format_single_backtest_result_row
+import pickle
+
 
 # Create logger instance
 logger = setup_logger()
@@ -18,6 +20,16 @@ def product_dict(param_grid: Dict[str, Iterable[Any]]) -> List[Dict[str, Any]]:
     keys = list(param_grid.keys())
     vals = [param_grid[k] if isinstance(param_grid[k], Iterable) and not isinstance(param_grid[k], (str, bytes)) else [param_grid[k]] for k in keys]
     return [dict(zip(keys, combo)) for combo in itertools.product(*vals)]
+
+
+def backup_row_stream(row: dict, results_dir: str):
+    
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    fn = f"bt_results_stream_{ts}.pkl"
+    path = os.path.join(results_dir, fn)
+    with open(path, "ab") as f:
+        pickle.dump(row, f)
+
 
 class GridSearchBacktester:
     def __init__(self, 
@@ -82,23 +94,29 @@ class GridSearchBacktester:
                     formatted_row = _format_single_backtest_result_row(res, config, param_str, period)
                     
                     # Add combo parameters to the formatted row
-                    # formatted_row.update(combo)
+                    formatted_row.update(combo)
                     rows.append(formatted_row)
+                    # Backup (append row)
+                    backup_row_stream(formatted_row, self.bt.results_dir)
 
                 # Advance start date for the next, overlapping slice
                 start_dt = start_dt + pd.Timedelta(days=offset)
                 start_date = start_dt.strftime("%Y-%m-%d")
 
         df = pd.DataFrame(rows)
-        strat = '_'.join(config.option_strategy.value.upper().split())
-        upload_df_to_google_sheets(df, strat)
-        
+
+        #Upload the entire results_df to Google Sheets
+        # Assuming all configs in a run_grid share the same option_strategy
+        if not df.empty:
+            # Get strategy name from the first row of results_df
+            strategy_name = df['strategy'].iloc[0] 
+            upload_df_to_google_sheets(df, strategy_name=strategy_name)
+
+
         if top_k is not None and 'total_pnl' in df.columns:
             df = df.sort_values(by='total_pnl', ascending=False).head(top_k).reset_index(drop=True)
         
         return df
-
-
 
 
 def make_bull_put_config(combo, start_date, end_date):
@@ -149,12 +167,9 @@ def run_grid():
 
     bt = Backtester(data=data, save_trades=True, log_to_sheets=False) # Set log_to_sheets to False here
     start_date="2010-01-01"
-    end_date="2011-12-31"
-
-    # end_date = "2023-12-29"
-    # periods = [1, 3, 5, 10]
-    periods = [1]
-
+    # end_date="2021-12-31"
+    end_date = "2023-12-29"
+    periods = [1, 3, 5, 10]
     runner = GridSearchBacktester(bt, periods=periods, start_date=start_date, end_date=end_date)
 
     param_grid = {
@@ -174,8 +189,8 @@ def run_grid():
         # 'short_delta_target': [0.30, 0.40, 0.50, 0.60, 0.70],
         'short_delta_target': [0.60, 0.70],
         # 'long_delta_target': [0.45, 0.50],
-        # 'dte_target': [23, 30, 37, 44] ,
-        'dte_target': [23],       
+        'dte_target': [23, 30, 37, 44] ,
+        # 'dte_target': [35],       
     }
 
     
@@ -196,12 +211,7 @@ def run_grid():
     results_df.to_csv(csv_path, index=False)
     print(param_list)
 
-    # Upload the entire results_df to Google Sheets
-    # Assuming all configs in a run_grid share the same option_strategy
-    if not results_df.empty:
-        # Get strategy name from the first row of results_df
-        strategy_name = results_df['strategy'].iloc[0] 
-        upload_df_to_google_sheets(results_df, strategy_name=strategy_name)
+
 
 if __name__ == "__main__":
     run_grid()
