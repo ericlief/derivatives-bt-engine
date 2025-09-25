@@ -126,7 +126,7 @@ class OptionSignalGenerator(BaseSignalGenerator):
 
         elif dte_target:
             logger.debug(option_chain_df['dte'].describe())
-            dte_mask = abs(option_chain_df['dte'] - dte_target) < 1
+            dte_mask = abs(option_chain_df['dte'] - dte_target) <= 1   # range of 1
             option_chain_df = option_chain_df[dte_mask]
             logger.debug(f'Filtering for dte target: {dte_target}')
             logger.debug('Sample chain')
