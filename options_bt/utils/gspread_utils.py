@@ -65,49 +65,33 @@ def flatten_for_sheet(value):
         return json.dumps(value)
     return value
 
-def upload_df_to_google_sheets(df: pd.DataFrame, strategy_name: str, spreadsheet_name: str = 'spx_options_bt_results'):
-    """
-    Uploads a Pandas DataFrame to a specified Google Sheet worksheet.
-    Creates the worksheet and adds headers if it doesn't exist.
-    """
-    logger.info(f"Starting Google Sheets upload for strategy: {strategy_name}")
+def _json_or_blank(value):
+    v = convert_numpy_types(value)
 
-    try:
-        logger.info("Authenticating with Google Sheets...")
-        gc = google_auth()
-        logger.info("Authentication successful")
+    def norm(x):
+        x = convert_numpy_types(x)
+        return None if x in (None, 'N/A') else x
 
-        logger.info(f"Opening spreadsheet: {spreadsheet_name}...")
-        spreadsheet = gc.open(spreadsheet_name)
-        logger.info("Spreadsheet opened successfully")
+    # If list/tuple container
+    if isinstance(v, (list, tuple)):
+        vals = []
+        for x in v:
+            x = norm(x)
+            if isinstance(x, tuple):
+                x = list(x)
+            vals.append(x)
+        return '' if all(x is None for x in vals) else json.dumps(vals)
 
-        worksheet_name = '_'.join(strategy_name.upper().split())
-        try:
-            logger.info(f"Getting worksheet: {worksheet_name}...")
-            worksheet = spreadsheet.worksheet(worksheet_name)
-            logger.info(f"{worksheet_name} worksheet found")
-        except gspread.exceptions.WorksheetNotFound:
-            logger.info(f"{worksheet_name} worksheet not found, creating new one.")
-            worksheet = spreadsheet.add_worksheet(title=worksheet_name, rows=df.shape[0] + 1, cols=df.shape[1])
-            logger.info("New worksheet created")
-            # Add headers
-            headers = df.columns.tolist()
-            worksheet.append_row(headers)
-            logger.info("Headers added to new worksheet.")
+    # Scalar
+    v = norm(v)
+    return '' if v is None else v
 
-        # Prepare data for upload
-        # Convert DataFrame to a list of lists, handling numpy types and None/NaN
-        data_to_upload = df.replace({np.nan: '', None: ''}).astype(str).values.tolist()
-
-        logger.info(f"Uploading {len(data_to_upload)} rows to worksheet...")
-        worksheet.append_rows(data_to_upload)
-        logger.info("Data uploaded successfully to Google Sheets.")
-
-    except Exception as e:
-        logger.error(f"Failed to upload DataFrame to Google Sheets: {e}")
-        logger.error(f"Exception type: {type(e)}")
-        import traceback
-        logger.error(f"Full traceback: {traceback.format_exc()}")
+def _get_leg_field_json(config: Union['SingleLegOptionStrategyConfig', 'MultiLegOptionStrategyConfig'], field_name: str):
+    if hasattr(config, 'legs'):
+        vals = [getattr(leg, field_name, None) for leg in config.legs]
+        return _json_or_blank(vals)
+    leg = getattr(config, 'leg', None)
+    return _json_or_blank(getattr(leg, field_name, None)) if leg else ''
 
 
 def log_to_google_sheets(results: dict, 
@@ -277,3 +261,190 @@ def log_to_google_sheets(results: dict,
         import traceback
         logger.error(f"Full traceback: {traceback.format_exc()}")
     
+
+
+def _format_single_backtest_result_row(results: dict, 
+                                      config: Union['SingleLegOptionStrategyConfig', 'MultiLegOptionStrategyConfig'],
+                                      param_str: str,
+                                      period: int) -> dict:
+    """
+    Formats a single backtest result into a dictionary suitable for a Google Sheet row.
+    """
+    tr = results['trade_results']
+    stats = results.get('stats')
+    drawdown_analysis = results.get('drawdown_analysis', {})
+
+    # Calculate drawdown stats
+    max_dd_amount = "N/A"
+    max_dd_pct = "N/A"
+    if stats is not None and not stats.empty:
+        max_dd_amount = f"{stats['Drawdown ($)'].min():.2f}"
+        max_dd_pct = f"{stats['Drawdown (%)'].min():.2f}"
+
+    # Prepare data row
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    row_data = {
+        "timestamp": timestamp,
+        "strategy": config.option_strategy.value,
+        "start": config.start_date,
+        "end": config.end_date,
+        "period": period,
+        "quantity": config.quantity,
+        "dte_target": _get_leg_field_json(config, 'dte_target'),
+        "dte_range": _get_leg_field_json(config, 'dte_range'),
+        "delta_target": _get_leg_field_json(config, 'delta_target'),
+        "delta_range": _get_leg_field_json(config, 'delta_range'),
+        "total_pnl": round(tr['cumulative_pnl'].iloc[-1], 2) if not tr.empty else 0.0,
+        "initial_capital": config.initial_capital,
+        "final_capital": round(tr['capital'].iloc[-1], 2) if not tr.empty else config.initial_capital,
+        "return_pct": round((tr['capital'].iloc[-1] / config.initial_capital - 1) * 100, 2) if not tr.empty else 0.0,
+        "avg_days_held": round(tr['days_held'].mean(), 1) if not tr.empty else 0.0,
+        "avg_roi": round(tr['roi'].mean(), 2) if not tr.empty else 0.0,
+        "max_profit": round(tr['pnl'].max(), 2) if not tr.empty else 0.0,
+        "max_loss": round(tr['pnl'].min(), 2) if not tr.empty else 0.0,
+        "win_rate": round(((tr['pnl'] > 0).sum() / len(tr)) * 100, 2) if not tr.empty else 0.0,
+        "winning_trades": convert_numpy_types((tr['pnl'] > 0).sum()) if not tr.empty else 0,
+        "total_trades": convert_numpy_types(len(tr)) if not tr.empty else 0,
+        "max_dd_usd": max_dd_amount,
+        "max_dd_pct": max_dd_pct,
+        "peak_capital": round(drawdown_analysis.get('peak_capital', 0), 2),
+        "trough_capital": round(drawdown_analysis.get('trough_capital', 0), 2),
+        "dd_duration": convert_numpy_types(drawdown_analysis.get('drawdown_duration', 0)),
+        "execution_time": results.get('total_execution_time', ''),
+        "max_positions": getattr(config, 'max_positions', ''),
+        "early_close": getattr(config, 'early_close_days', ''),
+        "leverage": getattr(config, 'leverage', ''),
+        "max_margin": getattr(config, 'max_margin_utilization', ''),
+        "max_spread_width": getattr(config, 'max_spread_width', ''),
+        "max_trade_loss": getattr(config, 'max_trade_loss', ''),
+        "param_string": param_str,
+        "vix_range": getattr(config, 'vix_range', ''),
+        "vix_max": getattr(config, 'vix_max', ''),
+        "use_iv": getattr(config, 'use_iv', ''),
+        "sl": '',
+        "tp": '',
+        "avg_premium": round(tr['premium'].mean(), 2) if not tr.empty else 0.0,
+        "trade_selection": config.trade_selection_method.value,
+        "premium_ratio": getattr(config, 'premium_ratio', ''),
+    }
+
+    # Apply flatten_for_sheet to all values
+    # for key, value in row_data.items():
+    #     row_data[key] = flatten_for_sheet(value)
+
+    return row_data
+
+def log_to_google_sheets(results: dict, 
+                        config: Union['SingleLegOptionStrategyConfig', 'MultiLegOptionStrategyConfig'],
+                        param_str: str):
+    """
+    Log backtest results to Google Sheets as a single row.
+    """
+    logger.info(f"Starting Google Sheets logging for: {param_str}")
+    
+    # Call _format_single_backtest_result_row to get the formatted data
+    # The original log_to_google_sheets does not have a 'period' concept directly,
+    # so we pass a dummy value (e.g., 0) as it's not relevant for single row logging.
+    formatted_row_dict = _format_single_backtest_result_row(results, config, param_str, period=0)
+
+    try:
+        logger.info("Authenticating with Google Sheets...")
+        gc = google_auth()
+        logger.info("Authentication successful")
+        
+        logger.info("Opening spreadsheet...")
+        spreadsheet = gc.open('spx_options_bt_results')
+        logger.info("Spreadsheet opened successfully")
+        
+        # Try to get existing worksheet, create if doesn't exist
+        try:
+            strat = '_'.join(config.option_strategy.value.upper().split())
+            logger.info(f"Getting {strat} worksheet...")
+            worksheet = spreadsheet.worksheet(strat)
+            logger.info(f"{strat} worksheet found")
+        except Exception as e:
+            logger.info(f"{strat} worksheet not found, creating new one: {e}")
+            worksheet = spreadsheet.add_worksheet(title=strat, rows=1000, cols=20)
+            logger.info("New worksheet created")
+            # Add headers if new worksheet
+            headers = list(formatted_row_dict.keys()) # Use keys from the formatted dictionary for headers
+            logger.info("Adding headers...")
+            header_response = worksheet.append_row(headers)
+            logger.info(f"Headers added, response: {header_response}")
+        
+        # Prepare data row
+        row_data = [flatten_for_sheet(formatted_row_dict[key]) for key in list(formatted_row_dict.keys())] # Ensure order matches headers
+
+        logger.info(f"Prepared row data with {len(row_data)} columns")
+        logger.info(f"Row data: {row_data}")
+        
+        # Sanity check: headers vs row length
+        try:
+            expected_cols = len(headers)  # if we just created the sheet in this run
+        except NameError:
+            # existing sheet: read header row to get the true column count
+            expected_cols = len(worksheet.row_values(1))
+
+        if len(row_data) != expected_cols:
+            raise ValueError(f"Header/row length mismatch: expected {expected_cols}, got {len(row_data)}")
+
+        # Append the row
+        logger.info("Appending row to worksheet...")
+        response = worksheet.append_row(row_data)
+        logger.info(f"Row appended successfully!")
+        logger.info(f"Response type: {type(response)}")
+        logger.info(f"Response: {response}")
+        logger.info(f"Response status code: {getattr(response, 'status_code', 'No status_code attribute')}")
+        logger.info(f"Results logged to Google Sheets: {param_str}")
+        
+    except Exception as e:
+        logger.error(f"Failed to log to Google Sheets: {e}")
+        logger.error(f"Exception type: {type(e)}")
+        import traceback
+        logger.error(f"Full traceback: {traceback.format_exc()}")
+
+        
+def upload_df_to_google_sheets(df: pd.DataFrame, strategy_name: str, spreadsheet_name: str = 'spx_options_bt_results'):
+    """
+    Uploads a Pandas DataFrame to a specified Google Sheet worksheet.
+    Creates the worksheet and adds headers if it doesn't exist.
+    """
+    logger.info(f"Starting Google Sheets upload for strategy: {strategy_name}")
+
+    try:
+        logger.info("Authenticating with Google Sheets...")
+        gc = google_auth()
+        logger.info("Authentication successful")
+
+        logger.info(f"Opening spreadsheet: {spreadsheet_name}...")
+        spreadsheet = gc.open(spreadsheet_name)
+        logger.info("Spreadsheet opened successfully")
+
+        worksheet_name = '_'.join(strategy_name.upper().split())
+        try:
+            logger.info(f"Getting worksheet: {worksheet_name}...")
+            worksheet = spreadsheet.worksheet(worksheet_name)
+            logger.info(f"{worksheet_name} worksheet found")
+        except gspread.exceptions.WorksheetNotFound:
+            logger.info(f"{worksheet_name} worksheet not found, creating new one.")
+            worksheet = spreadsheet.add_worksheet(title=worksheet_name, rows=df.shape[0] + 1, cols=df.shape[1])
+            logger.info("New worksheet created")
+            # Add headers
+            headers = df.columns.tolist()
+            worksheet.append_row(headers)
+            logger.info("Headers added to new worksheet.")
+
+        # Prepare data for upload
+        # Convert DataFrame to a list of lists, handling numpy types and None/NaN
+        data_to_upload = df.replace({np.nan: '', None: ''}).astype(str).values.tolist()
+
+        logger.info(f"Uploading {len(data_to_upload)} rows to worksheet...")
+        worksheet.append_rows(data_to_upload)
+        logger.info("Data uploaded successfully to Google Sheets.")
+    
+    except Exception as e:
+        logger.error(f"Failed to log to Google Sheets: {e}")
+        logger.error(f"Exception type: {type(e)}")
+        import traceback
+        logger.error(f"Full traceback: {traceback.format_exc()}")

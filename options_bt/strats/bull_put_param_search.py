@@ -8,7 +8,8 @@ from options_bt.domain.dataloader import DataLoader
 from options_bt.domain.strategy_config import MultiLegOptionStrategyConfig
 from options_bt.domain.option_leg_config import OptionLegConfig
 import itertools
-from typing import Dict, List, Callable, Any, Iterable
+from typing import Dict, List, Callable, Any, Iterable, Optional, Union
+from options_bt.utils.gspread_utils import upload_df_to_google_sheets, _format_single_backtest_result_row
 
 # Create logger instance
 logger = setup_logger()
@@ -21,13 +22,11 @@ def product_dict(param_grid: Dict[str, Iterable[Any]]) -> List[Dict[str, Any]]:
 class GridSearchBacktester:
     def __init__(self, 
                 backtester: Backtester,
-                log_each_to_sheets: bool = False,
                 periods: Optional[List[int]] = [1],
                 start_date: Optional[str] = "2020-01-01",
                 end_date: Optional[str] = "2020-12-31"
     ):
         self.bt = backtester
-        self.log_each_to_sheets = log_each_to_sheets
         self.periods = periods
         self.start_date = start_date
         self.end_date = end_date
@@ -75,40 +74,31 @@ class GridSearchBacktester:
                     # Log early_close_days from the created config
                     logger.debug(f"Config early_close_days: {config.early_close_days}")
                     res = self.bt.run(config)
-                    tr = res['trade_results']
-                    stats = res.get('stats', pd.DataFrame())
-                    if tr is None or tr.empty:
-                        rows.append({**combo, 'total_pnl': 0.0, 'final_capital': config.initial_capital, 'win_rate_pct': 0.0, 'trades': 0, 'max_dd_pct': None})
-                        continue
+                    
+                    # Generate param_str here as it's needed for _format_single_backtest_result_row
+                    param_str = self.bt._generate_param_string(config)
 
-                    total_pnl = float(tr['cumulative_pnl'].iloc[-1])
-                    final_capital = float(tr['capital'].iloc[-1])
-                    win_rate = float(((tr['pnl'] > 0).sum() / len(tr)) * 100) if len(tr) else 0.0
-                    max_dd_pct = float(stats['Drawdown (%)'].min()) if not stats.empty else None
-
-                    rows.append({
-                        'start': start_date,
-                        'end': end_date,  
-                        **combo,
-                        'total_pnl': round(total_pnl, 2),
-                        'final_capital': round(final_capital, 2),
-                        'win_rate_pct': round(win_rate, 2),
-                        'trades': int(len(tr)),
-                        'avg_days_held': round(float(tr['days_held'].mean()), 2),
-                        'avg_roi_pct': round(float(tr['roi'].mean()), 2),
-                        'max_profit': round(float(tr['pnl'].max()), 2),
-                        'max_loss': round(float(tr['pnl'].min()), 2),
-                        'max_dd_pct': round(max_dd_pct, 2) if max_dd_pct is not None else None,
-                    })
+                    # Use the new helper function to format the row data
+                    formatted_row = _format_single_backtest_result_row(res, config, param_str, period)
+                    
+                    # Add combo parameters to the formatted row
+                    # formatted_row.update(combo)
+                    rows.append(formatted_row)
 
                 # Advance start date for the next, overlapping slice
                 start_dt = start_dt + pd.Timedelta(days=offset)
                 start_date = start_dt.strftime("%Y-%m-%d")
 
         df = pd.DataFrame(rows)
+        strat = '_'.join(config.option_strategy.value.upper().split())
+        upload_df_to_google_sheets(df, strat)
+        
         if top_k is not None and 'total_pnl' in df.columns:
             df = df.sort_values(by='total_pnl', ascending=False).head(top_k).reset_index(drop=True)
+        
         return df
+
+
 
 
 def make_bull_put_config(combo, start_date, end_date):
@@ -157,12 +147,15 @@ def run_grid():
     dl = DataLoader(data_dir=DATA_PATH, options_file="options_chain_preprocessed.csv", vix_file="vix.csv", use_preprocessed=True, save_preprocessed=False)
     data = dl.load_data()
 
-    bt = Backtester(data=data, save_trades=True, log_to_sheets=True)
+    bt = Backtester(data=data, save_trades=True, log_to_sheets=False) # Set log_to_sheets to False here
     start_date="2010-01-01"
-    # end_date="2021-12-31"
-    end_date = "2023-12-29"
-    periods = [1, 3, 5, 10]
-    runner = GridSearchBacktester(bt, log_each_to_sheets=True, periods=periods, start_date=start_date, end_date=end_date)
+    end_date="2011-12-31"
+
+    # end_date = "2023-12-29"
+    # periods = [1, 3, 5, 10]
+    periods = [1]
+
+    runner = GridSearchBacktester(bt, periods=periods, start_date=start_date, end_date=end_date)
 
     param_grid = {
         # Original (commented to control explosion):
@@ -181,8 +174,8 @@ def run_grid():
         # 'short_delta_target': [0.30, 0.40, 0.50, 0.60, 0.70],
         'short_delta_target': [0.60, 0.70],
         # 'long_delta_target': [0.45, 0.50],
-        'dte_target': [23, 30, 37, 44] ,
-        # 'dte_target': [35],       
+        # 'dte_target': [23, 30, 37, 44] ,
+        'dte_target': [23],       
     }
 
     
@@ -202,6 +195,13 @@ def run_grid():
     csv_path = os.path.join(bt.results_dir, f"backtest_summary_{timestamp}_{param_str}.csv")  
     results_df.to_csv(csv_path, index=False)
     print(param_list)
+
+    # Upload the entire results_df to Google Sheets
+    # Assuming all configs in a run_grid share the same option_strategy
+    if not results_df.empty:
+        # Get strategy name from the first row of results_df
+        strategy_name = results_df['strategy'].iloc[0] 
+        upload_df_to_google_sheets(results_df, strategy_name=strategy_name)
 
 if __name__ == "__main__":
     run_grid()

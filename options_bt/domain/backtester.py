@@ -268,7 +268,7 @@ class Backtester:
 
         if self.save_trades:
             save_start = time.time()
-            self._save_results(
+            results = self._save_results(
                 results,
                 config,
                 param_str=param_str
@@ -801,8 +801,10 @@ class Backtester:
         
         results['execution_times'] = self.execution_times
         results['total_execution_time'] = round(sum(self.execution_times.values()), 2)
-        log_to_google_sheets(results, config=config, param_str=param_str)
+        if self.log_to_sheets:
+            log_to_google_sheets(results, config=config, param_str=param_str)
 
+        return results
         # Save MTM results with same timestamp
         # if mtm_df is not None and not mtm_df.empty:
         #     mtm_csv_path = os.path.join(results_dir, f"mtm_{param_str}_{timestamp}.csv")
