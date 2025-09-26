@@ -6,7 +6,6 @@ from google.oauth2.service_account import Credentials
 from datetime import datetime
 import pandas as pd
 import numpy as np
-from options_bt.domain.strategy_config import MultiLegOptionStrategyConfig, SingleLegOptionStrategyConfig
 from options_bt.utils.logger import setup_logger
 
 # Load environment variables from .env file
@@ -41,6 +40,9 @@ def google_auth():
         logger.error(f"Error authenticating with Google Sheets: {e}")
         raise
 
+
+
+
 # Helper function to convert numpy types to Python types
 def convert_numpy_types(obj):
     """Convert numpy types to Python types for JSON serialization."""
@@ -64,6 +66,34 @@ def flatten_for_sheet(value):
         # return ", ".join(map(str, value)) if value else "N/A"
         return json.dumps(value)
     return value
+
+def _json_or_blank(value):
+        v = convert_numpy_types(value)
+
+        def norm(x):
+            x = convert_numpy_types(x)
+            return None if x in (None, 'N/A') else x
+
+        # If list/tuple container
+        if isinstance(v, (list, tuple)):
+            vals = []
+            for x in v:
+                x = norm(x)
+                if isinstance(x, tuple):
+                    x = list(x)
+                vals.append(x)
+            return '' if all(x is None for x in vals) else json.dumps(vals)
+
+        # Scalar
+        v = norm(v)
+        return '' if v is None else v
+
+def _get_leg_field_json(config, field_name):
+    if hasattr(config, 'legs'):
+        vals = [getattr(leg, field_name, None) for leg in config.legs]
+        return _json_or_blank(vals)
+    leg = getattr(config, 'leg', None)
+    return _json_or_blank(getattr(leg, field_name, None)) if leg else ''
 
 def log_to_google_sheets(results: dict, 
                         config: Union['SingleLegOptionStrategyConfig', 'MultiLegOptionStrategyConfig'],
@@ -129,34 +159,6 @@ def log_to_google_sheets(results: dict,
         
         # Prepare data row
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        
-        def _json_or_blank(value):
-            v = convert_numpy_types(value)
-
-            def norm(x):
-                x = convert_numpy_types(x)
-                return None if x in (None, 'N/A') else x
-
-            # If list/tuple container
-            if isinstance(v, (list, tuple)):
-                vals = []
-                for x in v:
-                    x = norm(x)
-                    if isinstance(x, tuple):
-                        x = list(x)
-                    vals.append(x)
-                return '' if all(x is None for x in vals) else json.dumps(vals)
-
-            # Scalar
-            v = norm(v)
-            return '' if v is None else v
-
-        def _get_leg_field_json(config, field_name):
-            if hasattr(config, 'legs'):
-                vals = [getattr(leg, field_name, None) for leg in config.legs]
-                return _json_or_blank(vals)
-            leg = getattr(config, 'leg', None)
-            return _json_or_blank(getattr(leg, field_name, None)) if leg else ''
 
         row_data = [
             timestamp,
@@ -298,33 +300,7 @@ def _format_single_backtest_result_row(results: dict,
     # Prepare data row
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-    def _json_or_blank(value):
-        v = convert_numpy_types(value)
-
-        def norm(x):
-            x = convert_numpy_types(x)
-            return None if x in (None, 'N/A') else x
-
-        # If list/tuple container
-        if isinstance(v, (list, tuple)):
-            vals = []
-            for x in v:
-                x = norm(x)
-                if isinstance(x, tuple):
-                    x = list(x)
-                vals.append(x)
-            return '' if all(x is None for x in vals) else json.dumps(vals)
-
-        # Scalar
-        v = norm(v)
-        return '' if v is None else v
-
-    def _get_leg_field_json(config, field_name):
-        if hasattr(config, 'legs'):
-            vals = [getattr(leg, field_name, None) for leg in config.legs]
-            return _json_or_blank(vals)
-        leg = getattr(config, 'leg', None)
-        return _json_or_blank(getattr(leg, field_name, None)) if leg else ''
+    
 
     row_data = {
         "timestamp": timestamp,
