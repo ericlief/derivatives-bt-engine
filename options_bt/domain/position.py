@@ -847,7 +847,7 @@ class SingleLegOptionPosition(BaseOptionPosition):
             exit_delta = round(getattr(row, delta_col), 2)
             
             mid_price = PriceUtils.calculate_midpoint_price(bid, ask)
-            if mid_price is not None:
+            if mid_price is not None or not pd.isna(mid_price):
                 # Update instance variables only if mid_price is valid
                 self.underlying_exit = underlying_close
                 self.exit_price = mid_price
@@ -1035,7 +1035,6 @@ class MultiLegOptionPosition(BaseOptionPosition):
             self.leg_ratios = {i: 1.0 for i in range(len(self.legs))}
         
         # Check if all legs have the same expiration date
-        print(f'legs: {self.legs}')
         is_same = False
         init_expire_date = self.legs[0].expire_date
         for leg in self.legs[1:]:

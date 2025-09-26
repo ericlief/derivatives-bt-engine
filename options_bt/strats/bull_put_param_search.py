@@ -23,7 +23,6 @@ def product_dict(param_grid: Dict[str, Iterable[Any]]) -> List[Dict[str, Any]]:
 
 
 def backup_row_stream(row: dict, results_dir: str):
-    
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     fn = f"bt_results_stream_{ts}.pkl"
     path = os.path.join(results_dir, fn)
@@ -167,9 +166,10 @@ def run_grid():
 
     bt = Backtester(data=data, save_trades=True, log_to_sheets=False) # Set log_to_sheets to False here
     start_date="2010-01-01"
-    # end_date="2021-12-31"
+    # end_date="2011-12-31"
     end_date = "2023-12-29"
     periods = [1, 3, 5, 10]
+    # periods = [1]
     runner = GridSearchBacktester(bt, periods=periods, start_date=start_date, end_date=end_date)
 
     param_grid = {
@@ -183,13 +183,15 @@ def run_grid():
         # 'vix_max': [22, 24, 26, 28, None],
 
         # 'dte_range': [(40, 45)],
-        # 'early_close_days': [23, None],  # optional
+        'early_close_days': [23],  # optional
 
         # Focused sweep
         # 'short_delta_target': [0.30, 0.40, 0.50, 0.60, 0.70],
         'short_delta_target': [0.60, 0.70],
         # 'long_delta_target': [0.45, 0.50],
-        'dte_target': [23, 30, 37, 44] ,
+        # 'dte_target': [23, 30, 37, 44] ,
+        'dte_target': [30, 37, 44] ,
+
         # 'dte_target': [35],       
     }
 

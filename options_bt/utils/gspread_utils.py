@@ -251,7 +251,9 @@ def upload_df_to_google_sheets(df: pd.DataFrame, strategy_name: str, spreadsheet
         spreadsheet = gc.open(spreadsheet_name)
         logger.info("Spreadsheet opened successfully")
 
-        worksheet_name = '_'.join(strategy_name.upper().split())
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        strat_name = '_'.join(strategy_name.upper().split())
+        worksheet_name = f'{strat_name}_{timestamp}'
         try:
             logger.info(f"Getting worksheet: {worksheet_name}...")
             worksheet = spreadsheet.worksheet(worksheet_name)

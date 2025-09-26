@@ -280,7 +280,8 @@ class Backtester:
         # NB: cumulative_pnl is the sum of realized profits/losses across all closed trades.
         # It starts from initial_capital and accumulates only closed P&L (not unrealized)
         # Thus (option_bp) matches the analytical P&L (cumulative_pnl + initial_capital):
-        assert abs(trade_results['capital'].iloc[-1] - trade_results['bp'].iloc[-1]) < 1e-6, f'Final capital: {trade_results["capital"].iloc[-1]} | BP: {trade_results["bp"].iloc[-1]}'
+        if not trade_results.empty:
+            assert abs(trade_results['capital'].iloc[-1] - trade_results['bp'].iloc[-1]) < 1e-6, f'Final capital: {trade_results["capital"].iloc[-1]} | BP: {trade_results["bp"].iloc[-1]}'
 
 
         return results

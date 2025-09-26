@@ -24,6 +24,9 @@ class PriceUtils:
         Returns:
             Optional[float]: Midpoint price if valid, None if invalid
         """
+        if pd.isna(bid) or pd.isna(ask):
+            return None
+
         if bid <= 0 or ask <= 0:
             return None
             
