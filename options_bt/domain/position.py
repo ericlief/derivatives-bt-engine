@@ -733,7 +733,9 @@ class SingleLegOptionPosition(BaseOptionPosition):
         
        
 
-    def _update_closing_data(self, option_chain: pd.DataFrame, underlying_price_history: pd.DataFrame) -> bool:
+    def _update_closing_data(self, option_chain: pd.DataFrame, 
+        underlying_price_history: pd.DataFrame, 
+        force: bool = False) -> bool:
         """
         Update the instance with closing price data for the position.
         
@@ -745,9 +747,13 @@ class SingleLegOptionPosition(BaseOptionPosition):
             bool: True if closing data was successfully updated, False otherwise.
         """
         # Handle single-leg positions (existing logic)
-        return self._update_single_leg_closing_data(option_chain, underlying_price_history)
+        return self._update_single_leg_closing_data(option_chain, underlying_price_history, force)
 
-    def _update_single_leg_closing_data(self, option_chain: pd.DataFrame, underlying_price_history: pd.DataFrame) -> bool:
+    def _update_single_leg_closing_data(self, 
+        option_chain: pd.DataFrame, 
+        underlying_price_history: pd.DataFrame,
+        force: bool = False  
+    ) -> bool:
         """Update closing data for single-leg positions (existing logic)."""
         
         # If no close_date, this is an expiration
@@ -801,7 +807,57 @@ class SingleLegOptionPosition(BaseOptionPosition):
 
             return False  # Failed to update
    
-    
+        # Early close - get data from close_date forward (up to 5 days)
+        if force:  # force close, e.g. if need to close all positions at end of period
+            date_range = pd.date_range(self.close_date, self.close_date + pd.Timedelta(days=5)) 
+            filtered_df = option_chain[
+                (option_chain.index.isin(date_range)) & 
+                (option_chain['expire_date'] == self.expire_date) &
+                (option_chain['strike'] == self.strike)    
+            ].sort_index()
+        else:
+            filtered_df = option_chain[
+                (option_chain.index == self.close_date) &
+                (option_chain['expire_date'] == self.expire_date) &
+                (option_chain['strike'] == self.strike)
+            ]
+
+        if filtered_df.empty:
+            # logger.warning(f"No valid prices found within 5 days of close date {self.close_date}")
+            logger.warning(f"No valid prices found on close date {self.close_date}")
+            return False
+            
+        bid_col = "p_bid" if self.is_put else "c_bid"
+        ask_col = "p_ask" if self.is_put else "c_ask"
+        delta_col = "p_delta" if self.is_put else 'c_delta'
+
+        # Try each date until we find valid prices
+        for row in filtered_df.itertuples():
+            date = row.Index
+            bid = getattr(row, bid_col)
+            ask = getattr(row, ask_col)
+            underlying_close = underlying_price_history.loc[date, 'close']   # added underlying data here
+            # Use last close in options data if available 
+            if underlying_close is None:
+                if hasattr(row, 'underlying_last'):
+                    underlying_close = row.underlying_last
+                else:
+                    logger.error(f'Cannot get closing data because no underlying available for {self.option_strategy}')
+                    return False
+            exit_delta = round(getattr(row, delta_col), 2)
+            
+            mid_price = PriceUtils.calculate_midpoint_price(bid, ask)
+            if mid_price is not None:
+                # Update instance variables only if mid_price is valid
+                self.underlying_exit = underlying_close
+                self.exit_price = mid_price
+                self.exit_delta = exit_delta 
+                self.close_date = date   # update since actual close date may have changed
+                return True  # Successfully updated
+        
+        logger.error(f"No valid (early close) closing prices found for strike {self.strike} and expire date {self.expire_date}")
+        return False  # Failed to update
+
  
     def calculate_intrinsic_value(self, underlying_price: float) -> float:
         """Calculate intrinsic value at expiration."""
@@ -847,6 +903,7 @@ class SingleLegOptionPosition(BaseOptionPosition):
     def close(self, 
             option_chain: pd.DataFrame, 
             underlying_price_history: pd.DataFrame,
+            force: bool = False
     ) -> Optional[Tuple[OptionTradeResult, Dict, float]]:
         """
         Close this single-leg position and calculate results.
@@ -893,7 +950,7 @@ class SingleLegOptionPosition(BaseOptionPosition):
             return None, None, None
         
         # Update class with closing data
-        if not self._update_closing_data(option_chain, underlying_price_history):
+        if not self._update_closing_data(option_chain, underlying_price_history, force):
             logger.error("Skipping trade due to missing close data")
             return None, None, None
             
@@ -1598,8 +1655,7 @@ class MultiLegOptionPosition(BaseOptionPosition):
     def close(self,
             option_chain: pd.DataFrame,
             underlying_price_history: pd.DataFrame,
-            # option_bp: float
-            ) -> Optional[Tuple[Dict, List[Dict], float]]:
+            force: bool = True) -> Optional[Tuple[Dict, List[Dict], float]]:
         """
         Close this multi-leg position and calculate results for each leg and the spread.
         
@@ -1621,8 +1677,7 @@ class MultiLegOptionPosition(BaseOptionPosition):
             leg_trade_result, leg_transaction_dict, leg_bp_effect = leg.close(
                 option_chain=option_chain,
                 underlying_price_history=underlying_price_history,
-                # option_bp=option_bp  # Pass the current BP to each leg
-            )
+                force=force)
             
             if leg_trade_result is None or leg_transaction_dict is None:
                 logger.error(f"Skipping spread closure due to missing closing data for leg {i+1}")
@@ -1662,7 +1717,9 @@ class MultiLegOptionPosition(BaseOptionPosition):
         # No need for additional manual calculation since each leg handles its own bp_effect
 
         # Determine the close_date for the spread (e.g., the latest close date of its legs)
-        close_date = self.close_date if self.close_date else self.expire_date # Prioritize explicit close_date, then expire_date
+        # close_date = self.close_date if self.close_date else self.expire_date # Prioritize explicit close_date, then expire_date
+        close_date = self.legs[0].close_date if self.legs[0].close_date else self.legs[0].expire_date # actual close date for legs may have been altered (e.g. forced in close all)
+
         if not close_date and all_transactions:
             # Fallback to the close_date of the first leg if no explicit spread close_date
             close_date = all_transactions[0]['exit_date']

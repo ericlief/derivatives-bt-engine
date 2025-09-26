@@ -118,8 +118,9 @@ class TradeManager:
         end = trade_signals.index.max()
         dates = pd.date_range(start, end)
 
-        # Iterate through each trade signal
-        # for trade_signal in trade_signals.itertuples():
+        # Iterate through all dates in backtest range first in order to manage trades, e.g. exit when certain
+        # certain conditions are met (vix, etc.) 
+        # Additionally we will open or close any positions if conditions are fulfilled
         for date in dates:
             current_date = date
             logger.debug(f'Processing date: {current_date}')
@@ -131,7 +132,7 @@ class TradeManager:
 
             # VIX gating (skip trade if outside range or missing)
             vix_close_value = None
-            early_closure = False
+            vix_early_closure = False
 
             if self.config.vix_range is not None or self.config.vix_max is not None:
                 if isinstance(self.vix, pd.DataFrame) and not self.vix.empty and current_date in self.vix.index:
@@ -145,20 +146,20 @@ class TradeManager:
                 if vix_close_value is not None:
                     # Check vix_max for early exit
                     if self.config.vix_max is not None and vix_close_value > self.config.vix_max:
-                        early_closure = True
+                        vix_early_closure = True
                         logger.debug(f'VIX {vix_close_value} exceeds max {self.config.vix_max}')
 
             # Close any expired positions
             n_open_positions = len(self.open_positions)
             if n_open_positions > 0:    
-                if early_closure:
+                if vix_early_closure:
                     logger.debug(f'VIX early closure for {n_open_positions} open positions')        
                     
                 trade_results, transactions = self._close_expired_positions(
                     option_chain=option_chain, 
                     underlying_price_history=underlying_price_history,
                     current_date=current_date,
-                    early_closure=early_closure  # Pass the boolean flag
+                    vix_early_closure=vix_early_closure  # Pass the boolean flag
                 )
                 # only aggregate results of close was successfull
                 if trade_results is not None:
@@ -233,6 +234,7 @@ class TradeManager:
             
 
         # Close any remaining open positions at their expiration
+        logger.info(f'Dates in period exhausted, attempting to close any remaining open positions: {self.open_positions}')
         trade_results, transactions = self._close_expired_positions(option_chain=option_chain, 
                                                                     underlying_price_history=underlying_price_history,
                                                                     current_date=current_date,
@@ -254,7 +256,7 @@ class TradeManager:
                                  option_chain: pd.DataFrame,
                                  underlying_price_history: pd.DataFrame,
                                  current_date: pd.Timestamp,
-                                 early_closure=False,
+                                 vix_early_closure=False,  # Close all open pos
                                  close_all=False) -> List[Optional[OptionTradeResult]]:
         """
         Close all open positions that have reached their expiration or close date, and update the option buying power accordingly.
@@ -266,23 +268,31 @@ class TradeManager:
         positions_to_remove = []
         trade_results = []
         transactions = []
+        
         for pos in self.open_positions:
 
-            # Handle positions with expiration or close date beyond backtest end date
+            # Handle positions with expiration or close date beyond backtest end date, closing then (NB: if
+            # it is desired to close at the end bound of the backtest can modify here)
             if close_all:
                 current_date = pos.close_date if pos.close_date is not None else pos.expire_date
 
+            early_closure = False
+            if pos.close_date is not None and current_date >= pos.close_date:
+                early_closure = True
+                
             # Close position if we're on/past the close_date or expire_date
-            if ((pos.close_date is not None and current_date >= pos.close_date) or
+            if (
                 (pos.expire_date is not None and current_date >= pos.expire_date) or
-                early_closure):
+                early_closure or
+                vix_early_closure
+                ):
 
                 logger.debug(f'Closing position: {pos.trade_id}')
                 
                 if isinstance(pos, MultiLegOptionPosition):
 
                     # Set early close date if not set for all legs (e.g. for VIX early closure)
-                    if early_closure:
+                    if early_closure or vix_early_closure:
                         for leg in pos.legs:
                             leg.close_date = current_date
 
@@ -293,7 +303,8 @@ class TradeManager:
 
                     # For multi-leg positions, use the spread's close method which handles all legs
                     result, leg_transactions, total_bp_effect = pos.close(option_chain=option_chain, 
-                                                                         underlying_price_history=underlying_price_history)                    
+                                                                         underlying_price_history=underlying_price_history,
+                                                                         force=close_all)                    
                                                                          
                     if result:  
                         # Update buying power with aggregated bp_effect
@@ -309,11 +320,12 @@ class TradeManager:
                     
                     else:
                         logger.error('Unable to close one or more positions due to incomplete closing data')
-                        return None, None
+                        self.transaction_counter -= 2
+                        # return None, None
                 
                 # Single leg position
                 else:
-                    if early_closure:
+                    if early_closure or vix_early_closure:
                         pos.close_date = current_date
                     
                     # Assign new transaction ID for the close before closing
@@ -334,7 +346,8 @@ class TradeManager:
                     
                     else:
                         logger.error('Unable to close one or more positions due to incomplete closing data')
-                        return None, None
+                        self.transaction_counter -= 1
+                        # return None, None
 
         # Remove closed positions
         for pos in positions_to_remove:

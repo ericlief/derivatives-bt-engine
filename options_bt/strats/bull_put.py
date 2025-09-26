@@ -45,15 +45,15 @@ def run_test_suite():
         start_date="2020-01-01",
         end_date="2020-12-31",
         use_underlying_close=False,
-        # early_close_days=30,
+        early_close_days=30,
         max_margin_utilization=0.80,
         max_positions=1,
         max_spread_width=100,
         max_trade_loss=7500.00,
         # trade_selection_method=TradeSelectionMethod.DELTA_FIRST,
         trade_selection_method=TradeSelectionMethod.PREMIUM_FIRST,
-        vix_range=None,
-        vix_max=25, 
+        # vix_range=None,
+        # vix_max=25, 
         premium_ratio=0.33,
 
         # Define the leg of the strategy
@@ -64,7 +64,7 @@ def run_test_suite():
             # delta_range=(0.65, 0.75),
             delta_target=0.60,
             # dte_range=(40, 45),
-            dte_target=35,
+            dte_target=44,
             ),
             OptionLegConfig(
             option_type=OptionType.PUT,
@@ -72,7 +72,7 @@ def run_test_suite():
             # delta_range=(0.65, 0.75),
             delta_target=0.50,
             # dte_range=(40, 45),
-            dte_target=35,
+            dte_target=44,
             )
         ],
         ),
