@@ -270,6 +270,7 @@ def upload_df_to_google_sheets(df: pd.DataFrame, strategy_name: str, spreadsheet
         # Prepare data for upload
         # Convert DataFrame to a list of lists, handling numpy types and None/NaN
         data_to_upload = df.replace({np.nan: '', None: ''}).values.tolist()
+        data_to_upload = [[_json_or_blank(x) for x in row] for row in data_to_upload]
 
         logger.info(f"Uploading {len(data_to_upload)} rows to worksheet...")
         worksheet.append_rows(data_to_upload)
