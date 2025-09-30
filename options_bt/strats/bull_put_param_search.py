@@ -169,7 +169,7 @@ def run_grid():
     # end_date="2011-12-31"
     end_date = "2023-12-29"
     periods = [1, 3, 5, 10]
-    # periods = [1]
+    periods = [1]
     runner = GridSearchBacktester(bt, periods=periods, start_date=start_date, end_date=end_date)
 
     param_grid = {
@@ -178,14 +178,14 @@ def run_grid():
         # 'max_spread_width': [50, 75, 100],
         # 'max_trade_loss': [2500, 5000, 7500],
         # 'trade_selection_method': [TradeSelectionMethod.DELTA_FIRST, TradeSelectionMethod.PREMIUM_FIRST],
-        'vix_range': [(8, 22), (8, 26), (8, 30)],
-        # 'vix_range': [(8, 22)],
+        # 'vix_range': [(8, 22), (8, 26), (8, 30), None],
+        'vix_range': [(8, 30), None],
 
-        # 'vix_max': [22, 24, 26, 28, None],
-        # 'vix_max': [22, 24, 26, 28, None],
+        # 'vix_max': [22],
+        'vix_max': [22, 24, 28, 32, None],
 
         # 'dte_range': [(40, 45)],
-        # 'early_close_days': [23],  # optional
+        'early_close_days': [23, None],  # optional
 
         # Focused sweep
         # 'short_delta_target': [0.30, 0.40, 0.50, 0.60, 0.70],
