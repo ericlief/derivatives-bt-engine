@@ -148,15 +148,35 @@ class OptionStrategy(BaseStrategy):
     STRADDLE = "straddle"
     STRANGLE = "strangle"
 
-class FuturesType(str, Enum):
-    """Futures contract type enumeration."""
-    MES = "MES" # Micro E-mini S&P 500
-    CONTRACT_MULTIPLIER = 5 # As per your instruction
+class FuturesType(Enum):
+    """Futures contract type enumeration, with associated properties."""
+    # Value format: (contract_multiplier, initial_margin, commission)
+    MES = (5, 2302.72, 1.42) # Micro E-mini S&P 500
+
+    def __new__(cls, contract_multiplier: float, initial_margin: float, commission: float):
+        obj = object.__new__(cls)
+        obj._value_ = contract_multiplier # The 'value' of the enum member will be the multiplier
+        obj.contract_multiplier = contract_multiplier
+        obj.initial_margin = initial_margin
+        obj.commission = commission
+        return obj
+
+    @property
+    def multiplier(self) -> float:
+        return self.contract_multiplier
+
+    @property
+    def margin_required(self) -> float:
+        return self.initial_margin
+    
+    @property
+    def transaction_commission(self) -> float:
+        return self.commission
 
 class FuturesStrategy(BaseStrategy):
     """Futures strategy type enumeration."""
-    LONG_FUTURES = "long futures"  
-    SHORT_FUTURES = "short futures"
+    LONG_FUTURES = "long_futures"  
+    SHORT_FUTURES = "short_futures"
 
 
 class TradeSelectionMethod(str, Enum):

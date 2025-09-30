@@ -260,7 +260,7 @@ class OptionSignalGenerator(BaseSignalGenerator):
                 
         start_date = pd.to_datetime(start_date) if start_date else self.underlying.index.min()
         end_date = pd.to_datetime(end_date) if end_date else self.underlying.index.max()
-        print(type(start_date))
+        # print(type(start_date))
         roll_dates = self._get_quarterly_roll_dates(start_date, end_date)
         
         # Derive futures from underlying
@@ -281,6 +281,9 @@ class OptionSignalGenerator(BaseSignalGenerator):
                     signal = pd.DataFrame([signal_data]).set_index('Index')
                     
                     signal['roll_date'] = roll_date
+                    # Add initial_margin to the single-row DataFrame 'signal'
+                    signal['initial_margin'] = self.config.futures_type.margin_required 
+
                     signals.append(signal)  
                     break
                 else:

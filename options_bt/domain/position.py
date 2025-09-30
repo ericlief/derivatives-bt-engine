@@ -1902,13 +1902,13 @@ class MultiLegOptionPosition(BaseOptionPosition):
                     strike=strike,
                     entry_date=entry_date,
                     expire_date=trade_signal.expire_date,
-                    entry_price=round(abs(entry_price), 2),  # Store positive price, use signed accessors
+                    entry_price=abs(entry_price),
                     entry_delta=entry_delta,
                     entry_dte=entry_dte,
                     underlying_entry=trade_signal.underlying_last,
+                    margin_required=margin_required,
                     close_date=entry_date + pd.Timedelta(days=config.early_close_days) if config.early_close_days is not None else None,
                 )
-                logger.debug(f'Created leg {i+1} of potential spread | Price: {position.signed_entry_price}')
 
                 legs.append(position)
 
@@ -2106,6 +2106,7 @@ class FuturesPosition(BasePosition):
 
     roll_date: pd.Timestamp # The date when this futures contract is expected to be rolled
     close_reason: Optional[str] = None # 'roll', 'early closure', etc.
+    initial_margin: float # Initial margin for one contract
 
     def __post_init__(self):
         super().__post_init__()
@@ -2118,7 +2119,8 @@ class FuturesPosition(BasePosition):
             self.roll_date = pd.Timestamp(self.roll_date)
         
         # Set contract multiplier from enum based on futures_type
-        self.contract_multiplier: float = FuturesType.CONTRACT_MULTIPLIER # Using your specified approach
+        # Corrected: Access the 'multiplier' property from the enum instance
+        self.contract_multiplier: float = self.futures_type.multiplier 
         
         # For futures, entry_price is the underlying price at entry, so we set underlying_entry
         # This ensures consistency with how futures P&L is typically calculated (exit - entry) * multiplier * quantity
@@ -2126,7 +2128,7 @@ class FuturesPosition(BasePosition):
             self.underlying_entry = self.entry_price
 
         # Calculate initial margin if not provided
-        if self.margin_required is None and hasattr(self, 'initial_margin') and self.initial_margin is not None:
+        if self.margin_required is None: # We now have initial_margin as a required attribute
              self.margin_required = self.calculate_margin()
 
     @property
@@ -2189,22 +2191,13 @@ class FuturesPosition(BasePosition):
         logger.info(f"Calculated pnl for {self.futures_type} futures: {pnl}")
         return round(pnl, 2)
 
-    @staticmethod
-    def calculate_margin(quantity: int,
-                         futures_type: Union[OptionType, str],
-                         position_side: Union[PositionSide, str],
-                         entry_price: float, 
-                         leverage: float = 1.0,
-                         margin_req_percent: float = 0.15) -> float:
+    def calculate_margin(self, leverage: float = 1.0) -> float:
         """
-        # Assuming `initial_margin` is set as an attribute (e.g., from config)
-        if not hasattr(self, 'initial_margin') or self.initial_margin is None:
-            logger.error(f"initial_margin not set for futures position {self.futures_type}")
-            return 0.0
+        Calculate margin requirement for the futures position.
+        Uses the provided initial_margin attribute.
+        """
         return round(self.initial_margin * self.quantity / leverage, 2)
-        """
 
-        
     def _update_closing_data(self, underlying_price_history: pd.DataFrame, close_date: pd.Timestamp) -> bool:
         """
         Update the instance with closing price data for the futures position.
@@ -2256,7 +2249,8 @@ class FuturesPosition(BasePosition):
         # For short futures, the initial margin is released.
         bp_effect += self.margin_required # Release margin
         
-        pnl = self.calculate_pnl(underlying_price_history=underlying_price_history, close_reason=close_reason)
+        # Pass commission to pnl calculation. If None, it will use futures_type.transaction_commission
+        pnl = self.calculate_pnl(underlying_price_history=underlying_price_history, close_reason=close_reason, commission=self.futures_type.transaction_commission)
         if pnl is None:
             logger.error(f"Failed to calculate PnL for futures position {self.futures_type}")
             return None, None, None
@@ -2309,7 +2303,7 @@ class FuturesPosition(BasePosition):
             position_side: PositionSide,
             futures_type: FuturesType,
             quantity: int,
-            initial_margin: float,
+            # initial_margin: float, # Removed as it's now an attribute of FuturesPosition, derived from signal
             roll_date: pd.Timestamp,
         ) -> Optional['FuturesPosition']:
             """
@@ -2351,12 +2345,13 @@ class FuturesPosition(BasePosition):
                 entry_price=entry_price, # This is the underlying price at entry
                 futures_type=futures_type,
                 futures_strategy=futures_strategy,
-                initial_margin=initial_margin,
+                initial_margin=futures_type.initial_margin, # Corrected: get initial_margin from the enum instance
                 roll_date=roll_date,
                 margin_required=None, # Will be calculated in post_init
             )
             # Calculate margin after all attributes are set (depends on quantity and initial_margin)
-            position.margin_required = position.calculate_margin()
+            # This line is now redundant as margin_required is calculated in __post_init__
+            # position.margin_required = position.calculate_margin() 
 
             logger.debug(f'Constructing futures position from signal: {futures_type} | Entry: {entry_price} | Margin: {position.margin_required}')
             

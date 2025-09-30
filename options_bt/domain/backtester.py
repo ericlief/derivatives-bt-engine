@@ -190,19 +190,13 @@ class Backtester:
                 axis=1
             )
         
+        # Futures
         elif isinstance(config, FuturesStrategyConfig):
-            logger.info(f"Calculating margin requirements for futures position: {config.quantity} | {config.futures_strategy} | {config.futures_type}")
-            signals['margin_required'] = signals.apply(
-                lambda row: FuturesPosition.calculate_margin(
-                    quantity=config.quantity,
-                    futures_type=config.leg.futures_type,
-                    position_side=config.leg.position_side,
-                    entry_price=row['close'],
-                    underlying_price=row['underlying_last'],
-                    leverage=config.leverage
-                    ), 
-                axis=1
-            )
+            logger.info(f"Calculating margin requirements for futures {len(signals)} signals: {config.quantity} | {config.futures_strategy} | {config.futures_type}")
+            # Use the 'initial_margin' already present in the signals DataFrame
+            signals['margin_required'] = signals['initial_margin'] * config.quantity / config.leverage
+            logger.info(f'Sample margin: {signals['margin_required'].iloc[0]}')
+
             
         # Filter out trades that would exceed margin limits
         valid_signals = signals[signals['margin_required'] <= max_allowed_margin]
@@ -214,7 +208,7 @@ class Backtester:
         logger.info(f"Average margin requirement for trades: ${valid_signals['margin_required'].mean():.2f}")
         logger.info(f"Maximum margin requirement for trades: ${valid_signals['margin_required'].max():.2f}")
         logger.info(f"Total valid signals: {len(valid_signals)}")
-
+        logger.debug(valid_signals)
         # if config.trade_selection_method == TradeSelectionMethod.MARGIN_FIRST:
         #     valid_signals = valid_signals.sort_values(by=['margin_required', 'delta_difference'])
 
