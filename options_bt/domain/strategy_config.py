@@ -83,3 +83,22 @@ class MultiLegOptionStrategyConfig(BaseOptionStrategyConfig):
         # Validate spread type
         if self.spread_type not in [OptionSpreadType.VERTICAL, OptionSpreadType.CALENDAR, OptionSpreadType.DIAGONAL, OptionSpreadType.IRON_CONDOR, OptionSpreadType.BUTTERFLY]:
             raise ValueError("Invalid spread type. Supported types are: vertical, calendar, diagonal, iron_condor, butterfly")
+
+@dataclass(kw_only=True)    
+class FuturesStrategyConfig(BaseStrategyConfig):
+
+    futures_type: FuturesType
+    futures_strategy: FuturesStrategy
+
+    def __post_init__(self):
+        if self.futures_type not in [FuturesType.MES]:
+            raise ValueError("Invalid futures type. Supported types are: MES")
+        
+        if self.futures_strategy not in [FuturesStrategy.LONG_FUTURES, FuturesStrategy.SHORT_FUTURES]:
+            raise ValueError("Invalid futures strategy. Supported strategies are: long futures") 
+
+        if self.futures_strategy in [FuturesStrategy.LONG_FUTURES]:
+            self.position_side = PositionSide.LONG
+
+        if self.futures_strategy in [FuturesStrategy.SHORT_FUTURES]:
+            self.position_side = PositionSide.SHORT

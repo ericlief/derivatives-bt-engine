@@ -59,7 +59,7 @@ class BasePosition(ABC):
         return abs(self.exit_price) if PositionSide.is_long(self.position_side) else -abs(self.exit_price)
     
     @abstractmethod
-    def calculate_pnl(self, exit_price: Optional[float] = None) -> float:
+    def calculate_pnl(self, underlying_price_history: pd.DataFrame, close_reason: Optional[str] = 'expiration', commission: Optional[float] = 0.0) -> Optional[float]:
         """Calculate profit and loss for the position."""
         pass
  
@@ -911,6 +911,7 @@ class SingleLegOptionPosition(BaseOptionPosition):
         Args:
             option_chain: pd.DataFrame, 
             underlying_price_history: pd.DataFrame,
+            force: bool = False (if closing at end of backtest)
         
         Returns:
             Optional[Tuple[OptionTradeResult, Dict, float]]: Tuple of (trade_result_dict, transaction_dict, bp_effect) if successful, None if closing data is unavailable.
@@ -1315,24 +1316,42 @@ class MultiLegOptionPosition(BaseOptionPosition):
 
                 
                 Example config:
-                    config = SingleLegOptionStrategyConfig(
-                        strategy=OptionStrategy.SHORT_CALL,
-                        quantity=1,
-                        initial_capital=100000,
-                        leverage=1.0,
-                        start_date="2020-01-01",
-                        end_date="2020-12-31",
-                        use_underlying_close=False,
-                        early_close_days=30,
-                        max_margin_utilization=0.80,
-                        max_positions=1,
-                        # Define the leg of the strategy
-                        leg=OptionLegConfig(
-                            option_type=OptionType.CALL,
-                            position_side=PositionSide.SHORT,
-                            delta_target=0.75,
-                            dte_range=(42, 45),
-                            )
+
+                MultiLegOptionStrategyConfig(
+                    quantity=1,
+                    option_strategy=OptionStrategy.BULL_PUT_CREDIT_SPREAD,
+                    spread_type=OptionSpreadType.VERTICAL,
+                    leg_ratio={0: 1.0, 1: 2.0, 2: 2.0, 3: 1.0},
+                    initial_capital=100000,
+                    leverage=1.0,
+                    start_date="2020-01-01",
+                    end_date="2020-12-31",
+                    use_underlying_close=False,
+                    early_close_days=30,
+                    max_margin_utilization=0.80,
+                    max_positions=1,
+                    max_spread_width=100,
+                    max_trade_loss=5000.00,
+                    trade_selection_method=TradeSelectionMethod.PREMIUM_FIRST,
+                    
+                    # Define the leg of the strategy
+                    legs=[
+                        OptionLegConfig(
+                        option_type=OptionType.PUT,
+                        position_side=PositionSide.SHORT,
+                        # delta_range=(0.65, 0.75), # one 
+                        delta_target=0.75,          # or another
+                        dte_range=(40, 45),
+                        ),
+                        OptionLegConfig(
+                        option_type=OptionType.PUT,
+                        position_side=PositionSide.LONG,
+                        # delta_range=(0.65, 0.75), # one 
+                        delta_target=0.55,          # or another
+                        dte_range=(40, 45),
+                        )
+                    ],
+            )
             Returns:
                 Optional[SingleLegOptionPosition]: Created position if valid, None otherwise
             """     
@@ -1399,7 +1418,7 @@ class MultiLegOptionPosition(BaseOptionPosition):
 
                 position = SingleLegOptionPosition(
                     option_strategy=config.option_strategy,
-                    quantity=1, # Individual legs should always have a quantity of 1, as the overall spread quantity is handled by MultiLegOptionPosition
+                    quantity=quantity, # Individual legs should always have a quantity of 1, as the overall spread quantity is handled by MultiLegOptionPosition
                     option_type=option_type,
                     position_side=position_side,
                     strike=strike,
@@ -2075,3 +2094,270 @@ class MultiLegOptionPosition(BaseOptionPosition):
         self.exit_price = total_exit
         logger.debug(f"Simple spread exit price: {self.exit_price}")
         
+
+class FuturesPosition(BasePosition):
+    """Class representing a futures position."""
+    futures_type: FuturesType
+    futures_strategy: FuturesStrategy
+    
+    underlying_entry: float # The price of the underlying at entry
+    underlying_exit: Optional[float] = None # The price of the underlying at exit
+    exit_price: Optional[float] = None # For futures, this will usually be the underlying_exit
+
+    roll_date: pd.Timestamp # The date when this futures contract is expected to be rolled
+    close_reason: Optional[str] = None # 'roll', 'early closure', etc.
+
+    def __post_init__(self):
+        super().__post_init__()
+        if isinstance(self.futures_type, str):
+            self.futures_type = FuturesType(self.futures_type)
+        if isinstance(self.futures_strategy, str):
+            self.futures_strategy = FuturesStrategy(self.futures_strategy)
+        
+        if isinstance(self.roll_date, str):
+            self.roll_date = pd.Timestamp(self.roll_date)
+        
+        # Set contract multiplier from enum based on futures_type
+        self.contract_multiplier: float = FuturesType.CONTRACT_MULTIPLIER # Using your specified approach
+        
+        # For futures, entry_price is the underlying price at entry, so we set underlying_entry
+        # This ensures consistency with how futures P&L is typically calculated (exit - entry) * multiplier * quantity
+        if self.entry_price:
+            self.underlying_entry = self.entry_price
+
+        # Calculate initial margin if not provided
+        if self.margin_required is None and hasattr(self, 'initial_margin') and self.initial_margin is not None:
+             self.margin_required = self.calculate_margin()
+
+    @property
+    def signed_entry_price(self) -> float:
+        """
+        For futures, the signed entry price is based on the entry price (underlying_entry for P&L)
+        and contract multiplier. This represents the total value change per point.
+        """
+        # For futures, entry_price itself is not a credit/debit, but the change in price is.
+        # However, to be consistent with the P&L calculation (exit_price - entry_price),
+        # we can represent the "cost" of opening a long future as negative total value,
+        # and "revenue" of opening a short future as positive total value for consistency
+        # with option premiums if we absolutely must.
+        # But for futures, it's more straightforward to just consider the change from entry to exit.
+        # For now, let's return 0 as the 'signed entry price' for futures,
+        # as the margin is the primary capital commitment and P&L is based on price difference.
+        return 0.0 # Futures don't have an "entry price" in the same way options have premiums.
+                   # Their value is derived from the underlying price movement.
+
+    @property
+    def signed_exit_price(self) -> float:
+        """
+        For futures, the signed exit price will represent the change in value
+        from entry, effectively capturing the P&L per contract.
+        """
+        if self.underlying_exit is None or self.underlying_entry is None:
+            return 0.0
+        
+        price_diff = (self.underlying_exit - self.underlying_entry) * self.contract_multiplier
+        if PositionSide.is_long(self.position_side):
+            return price_diff # Positive for long if price goes up
+        else: # Short position
+            return -price_diff # Positive for short if price goes down
+
+    def calculate_pnl(self, underlying_price_history: pd.DataFrame, close_reason: Optional[str] = 'roll', commission: Optional[float] = 1.0) -> Optional[float]:
+        """
+        Calculate profit and loss (P&L) for the futures position.
+        
+        Args:
+            underlying_price_history (pd.DataFrame): DataFrame containing historical prices of the underlying asset (SPX).
+            close_reason (Optional[str], optional): Reason for closing the position ('roll', 'early closure', etc.). Defaults to 'roll'.
+            commission (Optional[float], optional): Transaction fees per contract. Defaults to 1.0 (typical for MES).
+
+        Returns:
+            Optional[float]: P&L amount in dollars, or None if exit_price or underlying_exit is not available.
+        """
+        if self.underlying_exit is None or self.underlying_entry is None:
+            logger.warning('Underlying entry or exit price not set correctly for futures pnl calculation')
+            return None
+
+        # P&L for futures is simply (exit_price - entry_price) * quantity * contract_multiplier
+        pnl = (self.underlying_exit - self.underlying_entry) * self.quantity * self.contract_multiplier
+
+        # Subtract fees
+        fees = commission * self.quantity
+        self.fees = round(fees, 2)
+        pnl -= self.fees
+        self.close_reason = close_reason # Set the close reason on the position object
+
+        logger.info(f"Calculated pnl for {self.futures_type} futures: {pnl}")
+        return round(pnl, 2)
+
+    @staticmethod
+    def calculate_margin(quantity: int,
+                         futures_type: Union[OptionType, str],
+                         position_side: Union[PositionSide, str],
+                         entry_price: float, 
+                         leverage: float = 1.0,
+                         margin_req_percent: float = 0.15) -> float:
+        """
+        # Assuming `initial_margin` is set as an attribute (e.g., from config)
+        if not hasattr(self, 'initial_margin') or self.initial_margin is None:
+            logger.error(f"initial_margin not set for futures position {self.futures_type}")
+            return 0.0
+        return round(self.initial_margin * self.quantity / leverage, 2)
+        """
+
+        
+    def _update_closing_data(self, underlying_price_history: pd.DataFrame, close_date: pd.Timestamp) -> bool:
+        """
+        Update the instance with closing price data for the futures position.
+        
+        Args:
+            underlying_price_history (pd.DataFrame): DataFrame containing historical prices of the underlying asset.
+            close_date (pd.Timestamp): The date at which the position is being closed.
+
+        Returns:
+            bool: True if closing data was successfully updated, False otherwise.
+        """
+        if close_date not in underlying_price_history.index:
+            logger.error(f"No underlying closing price available for {close_date} for futures position.")
+            return False
+        
+        self.underlying_exit = underlying_price_history.loc[close_date, 'close']
+        self.exit_price = self.underlying_exit # For futures, exit price is the underlying price
+        
+        return True
+
+    def close(self,
+            option_chain: pd.DataFrame, # Not used for futures, but kept for method signature compatibility
+            underlying_price_history: pd.DataFrame,
+            force: bool = False,
+            close_reason: Optional[str] = None # Added close_reason parameter
+    ) -> Optional[Tuple[BaseTradeResult, Dict, float]]:
+        """
+        Close this futures position and calculate results.
+        
+        Args:
+            option_chain: pd.DataFrame (not used for futures)
+            underlying_price_history: pd.DataFrame,
+            force: bool = False (if closing at end of backtest)
+        
+        Returns:
+            Optional[Tuple[BaseTradeResult, Dict, float]]: Tuple of (trade_result, transaction_dict, bp_effect) if successful, None otherwise.
+        """
+        logger.info(f"Closing Trade #{self.trade_id}|Trans #{self.transaction_id}|{self.futures_type}|{self.position_side}")
+        bp_effect = 0
+        
+        # Determine the actual close date
+        effective_close_date = self.roll_date if self.roll_date and not force else underlying_price_history.index.max() # Use max date if forced
+
+        if not self._update_closing_data(underlying_price_history, effective_close_date):
+            logger.error(f"Skipping futures trade due to missing close data for {self.futures_type} on {effective_close_date}")
+            return None, None, None
+
+        # For long futures, when closing, the initial margin is released.
+        # For short futures, the initial margin is released.
+        bp_effect += self.margin_required # Release margin
+        
+        pnl = self.calculate_pnl(underlying_price_history=underlying_price_history, close_reason=close_reason)
+        if pnl is None:
+            logger.error(f"Failed to calculate PnL for futures position {self.futures_type}")
+            return None, None, None
+
+        bp_effect += pnl # PnL affects buying power
+        
+        # Create transaction 
+        transaction = {
+            'transaction_id': self.transaction_id,
+            'trade_id': self.trade_id,
+            'date': effective_close_date,
+            'type': 'close',
+            'instrument_type': 'futures',
+            'futures_type': self.futures_type.value,
+            'position_side': self.position_side.value,
+            'entry_price': self.entry_price, # This is the underlying_entry from the futures perspective
+            'exit_price': self.exit_price,   # This is the underlying_exit from the futures perspective
+            'underlying_entry': self.underlying_entry,
+            'underlying_exit': self.underlying_exit,
+            'quantity': self.quantity,
+            'contract_multiplier': self.contract_multiplier,
+            'pnl': pnl,
+            'fees': self.fees,
+            'bp_effect': round(bp_effect, 2)
+        }
+
+        # Prepare trade result
+        trade_result = BaseTradeResult(
+            trade_id=self.trade_id,
+            strategy=self.futures_type.value,
+            quantity=self.quantity,
+            opened=self.entry_date,
+            closed=effective_close_date,
+            days_held=(effective_close_date - self.entry_date).days,
+            close_reason=self.close_reason, # Use the close_reason set during pnl calculation
+            fees=self.fees,
+            pnl=pnl,
+            bp=None, # Will be set by TradeManager
+            capital_used=self.margin_required,
+            roi=round(pnl / self.margin_required * 100, 2) if self.margin_required != 0 else 0,
+        )
+
+        return trade_result, transaction, bp_effect
+
+    @staticmethod
+    def construct_from_signal(
+            trade_signal: NamedTuple,
+            futures_strategy: FuturesStrategy,
+            entry_date: pd.Timestamp,
+            position_side: PositionSide,
+            futures_type: FuturesType,
+            quantity: int,
+            initial_margin: float,
+            roll_date: pd.Timestamp,
+        ) -> Optional['FuturesPosition']:
+            """
+            Creates a FuturesPosition object from a given trade signal.
+            
+            Args:
+                trade_signal: NamedTuple, containing underlying_last (SPX price)
+                futures_strategy: FuturesStrategy (e.g., LONG_FUTURES)
+                entry_date: pd.Timestamp
+                position_side: PositionSide (e.g., LONG)
+                futures_type: FuturesType (e.g., MES)
+                quantity: int (number of contracts)
+                initial_margin: float (initial margin requirement for one contract)
+                roll_date: pd.Timestamp (next roll date)
+
+            Returns:
+                Optional[FuturesPosition]: Created position if valid, None otherwise
+            """
+            min_valid_date = pd.Timestamp('1990-01-01')
+            if not isinstance(entry_date, pd.Timestamp) or entry_date <= min_valid_date:
+                logger.error(f"Invalid entry date {entry_date}")
+                return None
+            
+            if not hasattr(trade_signal, 'close') or pd.isna(trade_signal.close):
+                logger.error(f"Missing underlying_last in trade signal on {trade_signal.Index}")
+                return None
+            
+            underlying_entry = trade_signal.close
+            
+            # For futures, entry_price is the underlying price itself
+            entry_price = underlying_entry 
+
+            position = FuturesPosition(
+                trade_id=None, # Will be set by TradeManager
+                transaction_id=None, # Will be set by TradeManager
+                quantity=quantity,
+                position_side=position_side,
+                entry_date=entry_date,
+                entry_price=entry_price, # This is the underlying price at entry
+                futures_type=futures_type,
+                futures_strategy=futures_strategy,
+                initial_margin=initial_margin,
+                roll_date=roll_date,
+                margin_required=None, # Will be calculated in post_init
+            )
+            # Calculate margin after all attributes are set (depends on quantity and initial_margin)
+            position.margin_required = position.calculate_margin()
+
+            logger.debug(f'Constructing futures position from signal: {futures_type} | Entry: {entry_price} | Margin: {position.margin_required}')
+            
+            return position

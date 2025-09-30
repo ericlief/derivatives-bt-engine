@@ -139,14 +139,25 @@ class OptionStrategy(BaseStrategy):
     SHORT_CALL = "short call"
     LONG_CALL = "long call"
     BULL_PUT_CREDIT_SPREAD = "bull put credit spread"
-    BEAR_PUT_CREDIT_SPREAD = "bear put debit spread"
-    BULL_CALL_CREDIT_SPREAD = "bull call debit spread"
+    BEAR_PUT_DEBIT_SPREAD = "bear put debit spread"
+    BULL_CALL_DEBIT_SPREAD = "bull call debit spread"
     BEAR_CALL_CREDIT_SPREAD = "bear call credit spread"
     CUSTOM_STRATEGY = "custom strategy"
     IRON_CONDOR = "iron condor"
     BUTTERFLY = "butterfly"
     STRADDLE = "straddle"
     STRANGLE = "strangle"
+
+class FuturesType(str, Enum):
+    """Futures contract type enumeration."""
+    MES = "MES" # Micro E-mini S&P 500
+    CONTRACT_MULTIPLIER = 5 # As per your instruction
+
+class FuturesStrategy(BaseStrategy):
+    """Futures strategy type enumeration."""
+    LONG_FUTURES = "long futures"  
+    SHORT_FUTURES = "short futures"
+
 
 class TradeSelectionMethod(str, Enum):
     """Trade selection method enumeration."""

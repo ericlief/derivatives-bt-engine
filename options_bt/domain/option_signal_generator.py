@@ -1,5 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
+from decimal import Underflow
 import os
 import time
 from typing import Optional, Dict, Union, List, NamedTuple, Tuple
@@ -10,7 +11,7 @@ import numpy as np
 
 from options_bt.domain.enums import *  
 from options_bt.domain.base_signal_generator import BaseSignalGenerator
-from options_bt.domain.strategy_config import SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig
+from options_bt.domain.strategy_config import FuturesStrategyConfig, SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig
 from options_bt.utils.logger import setup_logger
 from options_bt.utils.price_utils import PriceUtils
 
@@ -35,7 +36,7 @@ class OptionSignalGenerator(BaseSignalGenerator):
     def __post_init__(self):
         super().__init__(config=self.config)
         
-        if not isinstance(self.config, (SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig)):
+        if not isinstance(self.config, (SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig, FuturesStrategyConfig)):
             raise ValueError("Invalid config type")
 
         logger.info(f"Config: {self.config}")
@@ -235,6 +236,63 @@ class OptionSignalGenerator(BaseSignalGenerator):
         
         return option_chain_df
     
+    def generate_futures_signals(
+        self,
+        futures_type: FuturesType,
+        position_side: PositionSide,
+        futures_strategy: FuturesStrategy,
+        start_date: pd.Timestamp,
+        end_date: pd.Timestamp,
+    ) -> pd.DataFrame:
+        """
+        Generate trade signals for futures positions.
+        """
+        logger.info(f"Generating {self.config.futures_type.value} futures signals...")
+        
+        if futures_type not in [FuturesType.MES]:
+            raise ValueError("Invalid futures type. Supported types are: MES")
+        
+        if futures_strategy not in [FuturesStrategy.LONG_FUTURES]:
+            raise ValueError("Invalid futures strategy. Supported strategies are: long futures")
+
+        if position_side not in [PositionSide.LONG, PositionSide.SHORT]:
+            raise ValueError("Invalid position side. Supported sides are: long, short")
+                
+        start_date = pd.to_datetime(start_date) if start_date else self.underlying.index.min()
+        end_date = pd.to_datetime(end_date) if end_date else self.underlying.index.max()
+        print(type(start_date))
+        roll_dates = self._get_quarterly_roll_dates(start_date, end_date)
+        
+        # Derive futures from underlying
+        underlying = self.underlying[start_date:end_date]
+  
+
+        signals = []
+        prev_roll = start_date - pd.Timedelta(days=1)
+        for row in underlying.itertuples():
+            date = row.Index
+            # logger.debug(f'Processing {date}')
+            for roll_date in roll_dates:
+                if prev_roll  < date <= roll_date:
+                    # Convert the NamedTuple 'row' to a dictionary, then to a DataFrame
+                    # This preserves the original column names.
+                    # ._asdict() is available on NamedTuple instances.
+                    signal_data = row._asdict()
+                    signal = pd.DataFrame([signal_data]).set_index('Index')
+                    
+                    signal['roll_date'] = roll_date
+                    signals.append(signal)  
+                    break
+                else:
+                    prev_roll = roll_date
+                
+
+        signals = pd.concat(signals)
+        logger.info(f'Generated {len(signals)} future signals:\n {signals.head(40)}')
+            
+        return signals
+        
+
     def generate_multi_leg_signals(self) -> pd.DataFrame:
         """
         Generate trade signals for option spreads by pairing legs according to the specified spread type.
@@ -909,6 +967,53 @@ class OptionSignalGenerator(BaseSignalGenerator):
         logger.debug(f"Paired {len(paired)} valid iron condor spreads")
         
         return paired
+
+    @staticmethod
+    def _get_quarterly_roll_dates(start_date: pd.Timestamp, end_date: pd.Timestamp) -> List[pd.Timestamp]:
+        """
+        Helper to identify quarterly roll dates (Monday prior to the third Friday of March, June, September, December).
+        
+        Args:
+            start_date (pd.Timestamp): The start date of the backtest.
+            end_date (pd.Timestamp): The end date of the backtest.
+
+        Returns:
+            List[pd.Timestamp]: A sorted list of quarterly roll dates within the specified range.
+        """
+        roll_dates = []
+        # Futures for Equity Indices typically roll in March, June, September, December
+        roll_months = [3, 6, 9, 12]
+
+        start_year = start_date.year
+        end_year = end_date.year
+
+        for year in range(start_year, end_year + 2): # Look a bit ahead to catch rolls past end_date
+            for month in roll_months:
+                # Find the third Friday of the month
+                current_date = pd.Timestamp(year, month, 1)
+                
+                # Iterate through the month to find the 3rd Friday
+                friday_count = 0
+                third_friday = None
+                while current_date.month == month:
+                    if current_date.weekday() == 4: # Friday is weekday 4
+                        friday_count += 1
+                        if friday_count == 3:
+                            third_friday = current_date
+                            break
+                    current_date += pd.Timedelta(days=1)
+                
+                if third_friday:
+                    # The roll date is the Monday prior to the third Friday
+                    # Monday is weekday 0. If third_friday is for example March 21 (a Friday),
+                    # going back 4 days (21-4 = 17) gets to the Monday.
+                    roll_date = third_friday - pd.Timedelta(days=4)
+                    
+                    if start_date <= roll_date <= end_date:
+                        roll_dates.append(roll_date)
+        
+        # Sort and return unique dates
+        return sorted(list(set(roll_dates)))
 
     def fetch_data(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:    
         """

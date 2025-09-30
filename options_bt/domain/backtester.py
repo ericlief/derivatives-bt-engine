@@ -1,3 +1,4 @@
+import sys
 from typing import Dict, List, NamedTuple, Optional, Tuple, Union
 import numpy as np
 import pandas as pd
@@ -8,10 +9,10 @@ import os
 from enum import Enum
 
 from options_bt.domain.enums import *
-from options_bt.domain.strategy_config import SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig
+from options_bt.domain.strategy_config import FuturesStrategyConfig, SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig
 from options_bt.domain.option_signal_generator import OptionSignalGenerator
 from options_bt.domain.trade_manager import TradeManager
-from options_bt.domain.position import SingleLegOptionPosition     
+from options_bt.domain.position import FuturesPosition, SingleLegOptionPosition     
 from options_bt.domain.trade_result import OptionTradeResult
 from options_bt.domain.position import MultiLegOptionPosition
 from options_bt.utils.gspread_utils import log_to_google_sheets
@@ -64,7 +65,7 @@ class Backtester:
 
     def run(
         self,
-        config: Union[SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig]
+        config: Union[SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig, FuturesStrategyConfig]
         
     ) -> dict:
         """Execute a backtest with the given parameters."""
@@ -93,6 +94,14 @@ class Backtester:
             )
         elif isinstance(config, MultiLegOptionStrategyConfig):
             signals = signal_generator.generate_multi_leg_signals()
+        elif isinstance(config, FuturesStrategyConfig):
+            signals = signal_generator.generate_futures_signals(
+                futures_type=config.futures_type,
+                futures_strategy=config.futures_strategy,
+                position_side=config.position_side,
+                start_date=config.start_date,
+                end_date=config.end_date
+            )
         else:
             raise ValueError("Invalid config type")
         
@@ -166,7 +175,7 @@ class Backtester:
             logger.debug(f'First few margins: {signals.head()}')
         
         # Single leg
-        else:
+        elif isinstance(config, SingleLegOptionStrategyConfig):
             logger.info(f"Calculating margin requirements for single leg trade signals for {config.quantity} | {config.option_strategy} | {config.leg.option_type} | {config.leg.delta_target if config.leg.delta_target else config.leg.delta_range}")
             signals['margin_required'] = signals.apply(
                 lambda row: SingleLegOptionPosition.calculate_margin(
@@ -181,6 +190,20 @@ class Backtester:
                 axis=1
             )
         
+        elif isinstance(config, FuturesStrategyConfig):
+            logger.info(f"Calculating margin requirements for futures position: {config.quantity} | {config.futures_strategy} | {config.futures_type}")
+            signals['margin_required'] = signals.apply(
+                lambda row: FuturesPosition.calculate_margin(
+                    quantity=config.quantity,
+                    futures_type=config.leg.futures_type,
+                    position_side=config.leg.position_side,
+                    entry_price=row['close'],
+                    underlying_price=row['underlying_last'],
+                    leverage=config.leverage
+                    ), 
+                axis=1
+            )
+            
         # Filter out trades that would exceed margin limits
         valid_signals = signals[signals['margin_required'] <= max_allowed_margin]
         self.execution_times['signal_generation'] = time.time() - signal_start
@@ -208,6 +231,11 @@ class Backtester:
         if valid_signals.empty:
             logger.info("No valid signals; skipping trade execution.")
             return {'trade_results': pd.DataFrame(), 'transactions': pd.DataFrame()}
+        
+        
+        elif isinstance(config, FuturesStrategyConfig):
+            pass
+        
         # Execute trades
         backtest_start = time.time()
         results_transactions_dict = trade_manager.construct_and_execute_trades_from_signals(valid_signals, 
