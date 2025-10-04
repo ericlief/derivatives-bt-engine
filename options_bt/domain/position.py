@@ -1004,8 +1004,8 @@ class SingleLegOptionPosition(BaseOptionPosition):
             fees=round(self.fees, 2),
             pnl=round(pnl, 2),
             bp=None,
-            capital_used=round(self.margin_required, 2) if self.margin_required is not None else None,
-            roi=(pnl / self.margin_required * 100, 2) if self.margin_required is not None and self.margin_required != 0 else 0,
+            capital_used=round(self.margin_required, 2) if self.margin_required is not None else round(abs(self.entry_price) * self.quantity * 100, 2),
+            roi=round(pnl / self.margin_required * 100, 2) if self.margin_required is not None and self.margin_required != 0 else round(pnl / (abs(self.entry_price) * self.quantity * 100) * 100, 2),
         )
         return trade_result, transaction, bp_effect
 
@@ -1906,7 +1906,7 @@ class MultiLegOptionPosition(BaseOptionPosition):
                     entry_delta=entry_delta,
                     entry_dte=entry_dte,
                     underlying_entry=trade_signal.underlying_last,
-                    margin_required=margin_required,
+                    # margin_required=margin_required,
                     close_date=entry_date + pd.Timedelta(days=config.early_close_days) if config.early_close_days is not None else None,
                 )
 

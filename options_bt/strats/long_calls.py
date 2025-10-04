@@ -22,25 +22,26 @@ def run_test_suite():
         {
             'option_type': OptionType.CALL,
             'position_side': PositionSide.LONG,
-            'delta_target': 0.75,
+            'delta_target': 0.90,
             'use_spx_close': True,
             'start_date': "2020-01-01",
-            'end_date': "2020-12-31",
-            'dte_range': (42, 45),
+            # 'end_date': "2023-12-29",
+            'end_date': "2021-12-31",
+            'dte_range': (360, 370),
             'initial_capital': 100000,
             'early_close_days': None
         },
-        {
-            'option_type': OptionType.CALL,
-            'position_side': PositionSide.LONG,
-            'delta_target': 0.30,
-            'use_spx_close': True,
-            'start_date': "2020-01-01",
-            'end_date': "2020-12-31",
-            'dte_range': (42, 45),
-            'initial_capital': 100000,
-            'early_close_days': 30
-        },
+        # {
+        #     'option_type': OptionType.CALL,
+        #     'position_side': PositionSide.LONG,
+        #     'delta_target': 0.30,
+        #     'use_spx_close': True,
+        #     'start_date': "2020-01-01",
+        #     'end_date': "2020-12-31",
+        #     'dte_range': (42, 45),
+        #     'initial_capital': 100000,
+        #     'early_close_days': 30
+        # },
     ]
 
     # Run all tests using run_multiple_backtests

@@ -22,10 +22,8 @@ def product_dict(param_grid: Dict[str, Iterable[Any]]) -> List[Dict[str, Any]]:
     return [dict(zip(keys, combo)) for combo in itertools.product(*vals)]
 
 
-def backup_row_stream(row: dict, results_dir: str):
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    fn = f"bt_results_stream_{ts}.pkl"
-    path = os.path.join(results_dir, fn)
+def backup_row_stream(row: dict, results_dir: str, filename: str):
+    path = os.path.join(results_dir, filename)
     with open(path, "ab") as f:
         pickle.dump(row, f)
 
@@ -47,7 +45,15 @@ class GridSearchBacktester:
         param_grid: Dict[str, Iterable[Any]],
         make_config: Callable[[Dict[str, Any]], Any],
         top_k: int = None,
+        save_top_runs: int = 10,  # Save detailed results for top N runs
     ) -> pd.DataFrame:
+        # Generate a single filename for this grid search run
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_filename = f"bt_results_stream_{ts}.pkl"
+        
+        # Track top runs for detailed saving
+        top_runs = []  # List of (score, combo, res, config, param_str) tuples
+        
         combos = product_dict(param_grid)
         # print(f"Total combos (unfiltered): {len(combos)}")
         OFFSET = 0.10
@@ -96,13 +102,38 @@ class GridSearchBacktester:
                     formatted_row.update(combo)
                     rows.append(formatted_row)
                     # Backup (append row)
-                    backup_row_stream(formatted_row, self.bt.results_dir)
+                    backup_row_stream(formatted_row, self.bt.results_dir, backup_filename)
+                    
+                    # Track top runs for detailed saving
+                    if not res['trade_results'].empty and 'return_pct' in formatted_row:
+                        score = formatted_row['return_pct']
+                        logger.debug(f"Run score: {score}, combo: {combo}")
+                        top_runs.append((score, combo, res, config, param_str))
+                        # Keep only top N runs
+                        top_runs.sort(key=lambda x: x[0], reverse=True)
+                        if len(top_runs) > save_top_runs:
+                            top_runs = top_runs[:save_top_runs]
+                    else:
+                        logger.debug(f"Skipping run - empty results or missing total_return. Results empty: {res['trade_results'].empty}, has total_return: {'total_return' in formatted_row}")
 
                 # Advance start date for the next, overlapping slice
                 start_dt = start_dt + pd.Timedelta(days=offset)
                 start_date = start_dt.strftime("%Y-%m-%d")
-
+                
         df = pd.DataFrame(rows)
+        logger.info(f"Total runs completed: {len(rows)}")
+        logger.info(f"Top runs collected: {len(top_runs)}")
+        if top_runs:
+            logger.info(f"Top run scores: {[run[0] for run in top_runs]}")
+
+        # Save detailed results for top runs
+        if top_runs:
+             for i, (score, combo, res, config, param_str) in enumerate(top_runs):
+                # Create a descriptive filename with combo parameters
+                combo_str = "_".join([f"{k}{v}" for k, v in combo.items()])
+                filename = f"{param_str}_TOP{i+1}_{combo_str}"
+                # Save the detailed results directly
+                self.bt._save_results(res, config, filename)
 
         #Upload the entire results_df to Google Sheets
         # Assuming all configs in a run_grid share the same option_strategy
@@ -164,12 +195,12 @@ def run_grid():
     dl = DataLoader(data_dir=DATA_PATH, options_file="options_chain_preprocessed.csv", vix_file="vix.csv", use_preprocessed=True, save_preprocessed=False)
     data = dl.load_data()
 
-    bt = Backtester(data=data, save_trades=True, log_to_sheets=False) # Set log_to_sheets to False here
+    bt = Backtester(data=data, save_trades=False, log_to_sheets=False) # Disable saving for grid search performance
     start_date="2010-01-01"
     # end_date="2011-12-31"
     end_date = "2023-12-29"
-    periods = [1, 3, 5, 10]
-    periods = [1]
+    periods = [3, 5, 10]
+    # periods = [1]
     runner = GridSearchBacktester(bt, periods=periods, start_date=start_date, end_date=end_date)
 
     param_grid = {
@@ -178,11 +209,11 @@ def run_grid():
         # 'max_spread_width': [50, 75, 100],
         # 'max_trade_loss': [2500, 5000, 7500],
         # 'trade_selection_method': [TradeSelectionMethod.DELTA_FIRST, TradeSelectionMethod.PREMIUM_FIRST],
-        # 'vix_range': [(8, 22), (8, 26), (8, 30), None],
-        'vix_range': [(8, 30), None],
+        # 'vix_range': [(8, 22), (8, 26), (8, 30)],
+        # 'vix_range': [(8, 30), None],
 
         # 'vix_max': [22],
-        'vix_max': [22, 24, 28, 32, None],
+        'vix_max': [22, 24, 28, 32],
 
         # 'dte_range': [(40, 45)],
         'early_close_days': [23, None],  # optional
@@ -190,8 +221,6 @@ def run_grid():
         # Focused sweep
         # 'short_delta_target': [0.30, 0.40, 0.50, 0.60, 0.70],
         'short_delta_target': [0.60, 0.70],
-        # 'long_delta_target': [0.45, 0.50],
-        # 'dte_target': [23, 30, 37, 44] ,
         'dte_target': [23, 30, 37, 44] ,
         # 'dte_target': [35],       
     }
@@ -200,6 +229,7 @@ def run_grid():
     results_df = runner.run(
         param_grid=param_grid, 
         make_config=make_bull_put_config, 
+        save_top_runs=10,  # Save detailed results for top 5 runs
         # top_k=10
       )  # pass list of dicts too
     print(results_df.sort_values('total_pnl', ascending=False).head(20))
@@ -210,7 +240,7 @@ def run_grid():
           for v in param_grid.values()]
     param_list = [f"{k}_{v}" for k, v in zip(keys, values)]
     param_str = "__".join(param_list)
-    csv_path = os.path.join(bt.results_dir, f"backtest_summary_{timestamp}_{param_str}.csv")  
+    csv_path = os.path.join(bt.results_dir, f"backtest_summary_{timestamp}_{param_str}_{start_date}_{end_date}.csv")  
     results_df.to_csv(csv_path, index=False)
     print(param_list)
 
