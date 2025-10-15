@@ -196,11 +196,13 @@ def run_grid():
     data = dl.load_data()
 
     bt = Backtester(data=data, save_trades=False, log_to_sheets=False) # Disable saving for grid search performance
+    
     start_date="2010-01-01"
-    # end_date="2011-12-31"
-    end_date = "2023-12-29"
-    periods = [3, 5, 10]
-    # periods = [1]
+    end_date="2013-12-31"
+    # end_date = "2023-12-29"
+    # periods = [3, 5, 10]
+    periods = [1]
+
     runner = GridSearchBacktester(bt, periods=periods, start_date=start_date, end_date=end_date)
 
     param_grid = {
@@ -212,8 +214,8 @@ def run_grid():
         # 'vix_range': [(8, 22), (8, 26), (8, 30)],
         # 'vix_range': [(8, 30), None],
 
-        # 'vix_max': [22],
-        'vix_max': [22, 24, 28, 32],
+        'vix_max': [22],
+        # 'vix_max': [22, 24, 28, 32],
 
         # 'dte_range': [(40, 45)],
         'early_close_days': [23, None],  # optional
@@ -221,8 +223,8 @@ def run_grid():
         # Focused sweep
         # 'short_delta_target': [0.30, 0.40, 0.50, 0.60, 0.70],
         'short_delta_target': [0.60, 0.70],
-        'dte_target': [23, 30, 37, 44] ,
-        # 'dte_target': [35],       
+        # 'dte_target': [23, 30, 37, 44] ,
+        'dte_target': [35],            
     }
 
     

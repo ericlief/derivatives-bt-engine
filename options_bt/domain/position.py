@@ -808,23 +808,38 @@ class SingleLegOptionPosition(BaseOptionPosition):
             return False  # Failed to update
    
         # Early close - get data from close_date forward (up to 5 days)
+        # Exact close_date filtering with normalization and better diagnostics
+        close_dt = pd.Timestamp(self.close_date).normalize()
+        exp_dt = pd.Timestamp(self.expire_date).normalize()
+
+
         if force:  # force close, e.g. if need to close all positions at end of period
-            date_range = pd.date_range(self.close_date, self.close_date + pd.Timedelta(days=5)) 
+            # Look both forward and backward when force closing to handle wide spreads
+            date_range = pd.date_range(close_dt - pd.Timedelta(days=2), close_dt + pd.Timedelta(days=2)) 
             filtered_df = option_chain[
                 (option_chain.index.isin(date_range)) & 
-                (option_chain['expire_date'] == self.expire_date) &
+                (option_chain['expire_date'] == exp_dt) &
                 (option_chain['strike'] == self.strike)    
             ].sort_index()
         else:
+            date_range = pd.date_range(close_dt, close_dt + pd.Timedelta(days=2)) 
             filtered_df = option_chain[
-                (option_chain.index == self.close_date) &
-                (option_chain['expire_date'] == self.expire_date) &
+                (option_chain.index == close_dt) &
+                (option_chain['expire_date'] == exp_dt) &
                 (option_chain['strike'] == self.strike)
             ]
 
         if filtered_df.empty:
             # logger.warning(f"No valid prices found within 5 days of close date {self.close_date}")
-            logger.warning(f"No valid prices found on close date {self.close_date}")
+            around = option_chain.loc[
+                (option_chain.index >= close_dt - pd.Timedelta(days=1)) &
+                (option_chain.index <= close_dt + pd.Timedelta(days=1))
+            ]
+            nearby_dates = sorted(around.index.unique().tolist())
+            logger.debug(f"Nearby chain rows around {close_dt} (count={len(around)}): {nearby_dates[:5]}")
+            logger.warning(f"No valid prices found in date range around close date {self.close_date} "
+                   f"(expire={self.expire_date}, strike={self.strike}); "
+                   f"index_dtype={option_chain.index.dtype}")
             return False
             
         bid_col = "p_bid" if self.is_put else "c_bid"
@@ -832,6 +847,7 @@ class SingleLegOptionPosition(BaseOptionPosition):
         delta_col = "p_delta" if self.is_put else 'c_delta'
 
         # Try each date until we find valid prices
+        wide_spread_dates = []
         for row in filtered_df.itertuples():
             date = row.Index
             bid = getattr(row, bid_col)
@@ -854,6 +870,37 @@ class SingleLegOptionPosition(BaseOptionPosition):
                 self.exit_delta = exit_delta 
                 self.close_date = date   # update since actual close date may have changed
                 return True  # Successfully updated
+            else:
+                # Track dates with wide spreads for potential fallback
+                spread_pct = ((ask - bid) / bid) * 100 if bid > 0 else float('inf')
+                wide_spread_dates.append((date, bid, ask, spread_pct))
+        
+        # If all spreads are too wide, try using the closest date with the narrowest spread
+        if wide_spread_dates: # and force
+            logger.warning(f"All spreads too wide in date range, attempting fallback for strike {self.strike}")
+            # Sort by date proximity to close_date, then by spread width
+            wide_spread_dates.sort(key=lambda x: (abs((x[0] - close_dt).days), x[3]))
+            
+            # Use the closest date with the narrowest spread, even if it's wide
+            fallback_date, fallback_bid, fallback_ask, fallback_spread = wide_spread_dates[0]
+            logger.warning(f"Using fallback pricing: date={fallback_date}, bid={fallback_bid}, ask={fallback_ask}, spread={fallback_spread:.2f}%")
+            
+            # Get underlying price for fallback date
+            fallback_underlying = underlying_price_history.loc[fallback_date, 'close']
+            if fallback_underlying is None:
+                logger.error(f'Cannot get underlying price for fallback date {fallback_date}')
+                return False
+            
+            # Use midpoint even if spread is wide (as last resort)
+            fallback_mid_price = (fallback_bid + fallback_ask) / 2
+            fallback_delta = round(filtered_df.loc[fallback_date, delta_col], 2) if fallback_date in filtered_df.index else None
+            
+            self.underlying_exit = fallback_underlying
+            self.exit_price = fallback_mid_price
+            self.exit_delta = fallback_delta
+            self.close_date = fallback_date
+            logger.warning(f"Fallback successful: using mid_price={fallback_mid_price} for strike {self.strike}")
+            return True
         
         logger.error(f"No valid (early close) closing prices found for strike {self.strike} and expire date {self.expire_date}")
         return False  # Failed to update
@@ -1692,6 +1739,7 @@ class MultiLegOptionPosition(BaseOptionPosition):
         # Close each leg individually and collect results
         for i, leg in enumerate(self.legs):
             # Each leg's close method returns (trade_result, transaction, bp_effect)
+            logger.debug(f'Leg {i+1} using close_date={leg.close_date} expire_date={leg.expire_date}')
             leg_trade_result, leg_transaction_dict, leg_bp_effect = leg.close(
                 option_chain=option_chain,
                 underlying_price_history=underlying_price_history,

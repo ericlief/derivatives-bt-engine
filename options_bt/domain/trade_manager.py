@@ -277,14 +277,16 @@ class TradeManager:
                 current_date = pos.close_date if pos.close_date is not None else pos.expire_date
 
             early_closure = False
-            if pos.close_date is not None and current_date >= pos.close_date:
+            if (
+                (pos.close_date is not None and current_date >= pos.close_date) or
+                vix_early_closure    
+            ):
                 early_closure = True
-                
+
             # Close position if we're on/past the close_date or expire_date
             if (
                 (pos.expire_date is not None and current_date >= pos.expire_date) or
-                early_closure or
-                vix_early_closure
+                early_closure
                 ):
 
                 logger.debug(f'Closing position: {pos.trade_id}')
@@ -292,9 +294,11 @@ class TradeManager:
                 if isinstance(pos, MultiLegOptionPosition):
 
                     # Set early close date if not set for all legs (e.g. for VIX early closure)
-                    if early_closure or vix_early_closure:
-                        for leg in pos.legs:
+                    if early_closure:
+                        for idx, leg in enumerate(pos.legs):
+                            prev = leg.close_date
                             leg.close_date = current_date
+                            logger.debug(f'Leg {idx+1} close_date set: {prev} -> {leg.close_date}')
 
                     # Assign new transaction IDs for each leg close before closing
                     for leg in pos.legs:
