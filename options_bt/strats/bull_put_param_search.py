@@ -140,7 +140,7 @@ class GridSearchBacktester:
         if not df.empty:
             # Get strategy name from the first row of results_df
             strategy_name = df['strategy'].iloc[0] 
-            upload_df_to_google_sheets(df, strategy_name=strategy_name)
+            upload_df_to_google_sheets(df, strategy_name=strategy_name, spreadsheet_name='spx_options_bt_bull_put')
 
 
         if top_k is not None and 'total_pnl' in df.columns:
@@ -199,10 +199,10 @@ def run_grid():
     bt = Backtester(data=data, save_trades=False, log_to_sheets=False) # Disable saving for grid search performance
     
     start_date="2010-01-01"
-    end_date="2011-12-31"
+    # end_date="2011-01-01"
     # end_date = "2023-12-29"
-    # periods = [3, 5, 10]
-    periods = [1]
+    periods = [1, 3, 5, 10]
+    # periods = [1]
 
     runner = GridSearchBacktester(bt, periods=periods, start_date=start_date, end_date=end_date)
 
@@ -223,7 +223,7 @@ def run_grid():
 
         # Focused sweep
         # 'short_delta_target': [0.30, 0.40, 0.50, 0.60, 0.70],
-        'short_delta_target': [0.60, 0.70],
+        'short_delta_target': [0.40, 0.50, 0.60, 0.70],
         # 'dte_target': [23, 30, 37, 44] ,
         'dte_target': [7],            
     }

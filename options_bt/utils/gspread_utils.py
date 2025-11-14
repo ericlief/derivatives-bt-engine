@@ -7,6 +7,7 @@ from datetime import datetime
 import pandas as pd
 import numpy as np
 from options_bt.utils.logger import setup_logger
+from options_bt.domain.strategy_config import SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig
 
 # Load environment variables from .env file
 from dotenv import load_dotenv
@@ -97,7 +98,8 @@ def _get_leg_field_json(config, field_name):
 
 def log_to_google_sheets(results: dict, 
                         config: Union['SingleLegOptionStrategyConfig', 'MultiLegOptionStrategyConfig'],
-                        param_str: str):
+                        param_str: str,
+                        spreadsheet_name='spx_options_bt_results'):
     """
     Log backtest results to Google Sheets as a single row.
     """
@@ -112,8 +114,8 @@ def log_to_google_sheets(results: dict,
         gc = google_auth()
         logger.info("Authentication successful")
         
-        logger.info("Opening spreadsheet...")
-        spreadsheet = gc.open('spx_options_bt_results')
+        logger.info(f"Opening spreadsheet {spreadsheet_name}...")
+        spreadsheet = _get_or_create_spreadsheet(gc, spreadsheet_name=spreadsheet_name)
         logger.info("Spreadsheet opened successfully")
         
         # Try to get existing worksheet, create if doesn't exist
@@ -142,7 +144,7 @@ def log_to_google_sheets(results: dict,
                         "total_pnl", "initial_capital", "final_capital", "return_pct", "avg_days_held",
                         "avg_roi", "max_profit", "max_loss", "win_rate", "winning_trades", "total_trades",
                         "max_dd_usd", "max_dd_pct", "peak_capital", "trough_capital",
-                        "dd_duration", "execution_time", "max_positions", "early_close",
+                        "dd_duration", "execution_time", "max_positions", "early_close_after_dit", "early_close_on_dte",
                         "leverage", "max_margin", "max_spread_width", "max_trade_loss",
                         "param_string", "vix_range", "vix_max", "use_iv", "sl", "tp", "avg_premium", "trade_selection", "premium_ratio"
             ]
@@ -189,7 +191,8 @@ def log_to_google_sheets(results: dict,
             convert_numpy_types(drawdown_analysis.get('drawdown_duration', 0)),
             results.get('total_execution_time', ''),  # Execution_Time
             getattr(config, 'max_positions', ''),
-            getattr(config, 'early_close_days', ''),
+            getattr(config, 'early_close_after_dit', ''),
+            getattr(config, 'early_close_on_dte', ''),
             getattr(config, 'leverage', ''),
             getattr(config, 'max_margin_utilization', ''),
             getattr(config, 'max_spread_width', ''),
@@ -229,11 +232,18 @@ def log_to_google_sheets(results: dict,
         logger.info(f"Results logged to Google Sheets: {param_str}")
         
     except Exception as e:
-        logger.error(f"Failed to log to Google Sheets: {e}")
-        logger.error(f"Exception type: {type(e)}")
+        logger.error(f"An unexpected error occurred during Google Sheets upload: {e}")
         import traceback
         logger.error(f"Full traceback: {traceback.format_exc()}")
-    
+
+def _get_or_create_spreadsheet(gc, spreadsheet_name: str):
+    try:
+        spreadsheet = gc.open(spreadsheet_name)
+        logger.info(f"Spreadsheet '{spreadsheet_name}' opened successfully.")
+    except gspread.exceptions.SpreadsheetNotFound:
+        logger.error(f"Spreadsheet '{spreadsheet_name}' not found and cannot be created due to permissions. Please create it manually.")
+        raise
+    return spreadsheet
 
 def upload_df_to_google_sheets(df: pd.DataFrame, strategy_name: str, spreadsheet_name: str = 'spx_options_bt_results'):
     """
@@ -247,9 +257,7 @@ def upload_df_to_google_sheets(df: pd.DataFrame, strategy_name: str, spreadsheet
         gc = google_auth()
         logger.info("Authentication successful")
 
-        logger.info(f"Opening spreadsheet: {spreadsheet_name}...")
-        spreadsheet = gc.open(spreadsheet_name)
-        logger.info("Spreadsheet opened successfully")
+        spreadsheet = _get_or_create_spreadsheet(gc, spreadsheet_name)
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         strat_name = '_'.join(strategy_name.upper().split())
@@ -276,9 +284,8 @@ def upload_df_to_google_sheets(df: pd.DataFrame, strategy_name: str, spreadsheet
         worksheet.append_rows(data_to_upload)
         logger.info("Data uploaded successfully to Google Sheets.")
 
-    except Exception as e:
-        logger.error(f"Failed to upload DataFrame to Google Sheets: {e}")
-        logger.error(f"Exception type: {type(e)}")
+    except Exception as e: # Catch any other exceptions during the process
+        logger.error(f"An unexpected error occurred during Google Sheets upload: {e}")
         import traceback
         logger.error(f"Full traceback: {traceback.format_exc()}")
 
@@ -334,7 +341,8 @@ def _format_single_backtest_result_row(results: dict,
         "dd_duration": convert_numpy_types(drawdown_analysis.get('drawdown_duration', 0)),
         "execution_time": results.get('total_execution_time', ''),
         "max_positions": getattr(config, 'max_positions', ''),
-        "early_close": getattr(config, 'early_close_days', ''),
+        "early_close_after_dit": getattr(config, 'early_close_after_dit', ''),
+        "early_close_on_dte": getattr(config, 'early_close_on_dte', ''),
         "leverage": getattr(config, 'leverage', ''),
         "max_margin": getattr(config, 'max_margin_utilization', ''),
         "max_spread_width": getattr(config, 'max_spread_width', ''),

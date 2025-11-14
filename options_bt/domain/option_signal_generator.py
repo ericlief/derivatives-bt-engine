@@ -127,7 +127,7 @@ class OptionSignalGenerator(BaseSignalGenerator):
 
         elif dte_target:
             logger.debug(option_chain_df['dte'].describe())
-            dte_mask = abs(option_chain_df['dte'] - dte_target) <= 2   # span of 2
+            dte_mask = abs(option_chain_df['dte'] - dte_target) <= 2   # span of 1
             option_chain_df = option_chain_df[dte_mask]
             logger.debug(f'Filtering for dte target: {dte_target}')
             logger.debug('Sample chain')
@@ -199,7 +199,7 @@ class OptionSignalGenerator(BaseSignalGenerator):
             option_chain_df = option_chain_df.assign(delta_diff=delta_diff)
             
             # Filter out options that are too far from target delta (20% tolerance)
-            max_delta_diff = abs(target) * 0.05  # 5% tolerance
+            max_delta_diff = abs(target) * 0.075  # 5% tolerance
             option_chain_df = option_chain_df[option_chain_df['delta_diff'] <= max_delta_diff]
             
             # Sort by delta difference and delta value while maintaining the date index
