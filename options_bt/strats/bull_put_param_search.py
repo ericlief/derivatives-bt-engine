@@ -86,10 +86,10 @@ class GridSearchBacktester:
                 for i, combo in enumerate(combos, 1):
                     logger.info(f"Testing combo {i}: {combo}")
                     # Log early_close_days from the combo before creating config
-                    logger.debug(f"Combo early_close_days: {combo.get('early_close_days', 'Not present')}")
+                    logger.debug(f"Combo early_close_on_dte: {combo.get('early_close_on_dte', 'Not present')}")
+                    logger.debug(f"Combo early_close_after_dit: {combo.get('early_close_after_dit', 'Not present')}")
                     config = make_config(combo, start_date, end_date)
                     # Log early_close_days from the created config
-                    logger.debug(f"Config early_close_days: {config.early_close_days}")
                     res = self.bt.run(config)
                     
                     # Generate param_str here as it's needed for _format_single_backtest_result_row
@@ -160,7 +160,8 @@ def make_bull_put_config(combo, start_date, end_date):
         start_date=start_date,
         end_date=end_date,
         use_underlying_close=False,
-        early_close_days=combo.get('early_close_days', None),
+        early_close_on_dte=combo.get('early_close_on_dte', None),
+        early_close_after_dit=combo.get('early_close_after_dit', None),
         max_margin_utilization=0.80,
         max_positions=1,
         max_spread_width=combo.get('max_spread_width', 100),
@@ -198,7 +199,7 @@ def run_grid():
     bt = Backtester(data=data, save_trades=False, log_to_sheets=False) # Disable saving for grid search performance
     
     start_date="2010-01-01"
-    end_date="2013-12-31"
+    end_date="2011-12-31"
     # end_date = "2023-12-29"
     # periods = [3, 5, 10]
     periods = [1]
@@ -208,7 +209,7 @@ def run_grid():
     param_grid = {
         # Original (commented to control explosion):
      
-        # 'max_spread_width': [50, 75, 100],
+        'max_spread_width': [10],
         # 'max_trade_loss': [2500, 5000, 7500],
         # 'trade_selection_method': [TradeSelectionMethod.DELTA_FIRST, TradeSelectionMethod.PREMIUM_FIRST],
         # 'vix_range': [(8, 22), (8, 26), (8, 30)],
@@ -218,7 +219,7 @@ def run_grid():
         # 'vix_max': [22, 24, 28, 32],
 
         # 'dte_range': [(40, 45)],
-        'early_close_days': [2, None],  # optional
+        'early_close_on_dte': [2, None],  # optional
 
         # Focused sweep
         # 'short_delta_target': [0.30, 0.40, 0.50, 0.60, 0.70],

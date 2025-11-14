@@ -615,7 +615,8 @@ class SingleLegOptionPosition(BaseOptionPosition):
             position_side: PositionSide,    
             option_type: OptionType,
             quantity: int,  
-            early_close_days: int,
+            early_close_after_dit: int = None,
+            early_close_on_dte: int = None,
         ) -> Optional[SingleLegOptionPosition]:
             """
                 Creates a OptionPosition object from a given trade signal.
@@ -693,6 +694,11 @@ class SingleLegOptionPosition(BaseOptionPosition):
             # Get margin required from signal if available, otherwise use config
             margin_required = trade_signal.margin_required if hasattr(trade_signal, 'margin_required') else logger.warning(f"Missing margin required for trade signal on {trade_signal.Index}")
 
+            # Early closure
+            close_date = (entry_date + pd.Timedelta(days=early_close_after_dit) if early_close_after_dit else
+                          trade_signal.expire_date - pd.Timedelta(days=early_close_on_dte) if early_close_on_dte else
+                          None)
+
             # Create the position
             position = SingleLegOptionPosition(
                 option_strategy=option_strategy,
@@ -707,7 +713,7 @@ class SingleLegOptionPosition(BaseOptionPosition):
                 entry_dte=entry_dte,
                 underlying_entry=trade_signal.underlying_last,
                 margin_required=margin_required,
-                close_date=entry_date + pd.Timedelta(days=early_close_days) if early_close_days is not None else None,
+                close_date=close_date,
             )
 
             logger.debug(f'Constructing position from symbol')
@@ -831,10 +837,10 @@ class SingleLegOptionPosition(BaseOptionPosition):
             ]
 
         if filtered_df.empty:
-            # logger.warning(f"No valid prices found within 5 days of close date {self.close_date}")
+            logger.warning(f"No valid prices found within 2 days of close date {self.close_date}")
             around = option_chain.loc[
-                (option_chain.index >= close_dt - pd.Timedelta(days=1)) &
-                (option_chain.index <= close_dt + pd.Timedelta(days=1))
+                (option_chain.index >= close_dt - pd.Timedelta(days=5)) &
+                (option_chain.index <= close_dt + pd.Timedelta(days=5))
             ]
             nearby_dates = sorted(around.index.unique().tolist())
             logger.debug(f"Nearby chain rows around {close_dt} (count={len(around)}): {nearby_dates[:5]}")
@@ -862,7 +868,7 @@ class SingleLegOptionPosition(BaseOptionPosition):
                     logger.error(f'Cannot get closing data because no underlying available for {self.option_strategy}')
                     return False
             exit_delta = round(getattr(row, delta_col), 2)
-            
+            logger.debug(f'Calculating midpoint for {bid}-{ask}')
             mid_price = PriceUtils.calculate_midpoint_price(bid, ask)
             if mid_price is not None or not pd.isna(mid_price):
                 # Update instance variables only if mid_price is valid
@@ -1901,6 +1907,11 @@ class MultiLegOptionPosition(BaseOptionPosition):
             if expire_date <= entry_date:
                 logger.error(f"Expire date {expire_date} is not after entry date {entry_date}")
                 return None
+
+            # Early closure
+            close_date = (entry_date + pd.Timedelta(days=config.early_close_after_dit) if config.early_close_after_dit else
+                          trade_signal.expire_date - pd.Timedelta(days=config.early_close_on_dte) if config.early_close_on_dte else
+                          None)
             
             # Retrieve and construct legs for the spread
             n_legs = len(config.legs)
@@ -1942,6 +1953,8 @@ class MultiLegOptionPosition(BaseOptionPosition):
                 if entry_price is None or pd.isna(entry_price):
                     logger.error(f"Missing midpoint price value/s in trade signal on {trade_signal.Index}")
                     return None
+                
+       
 
                 position = SingleLegOptionPosition(
                     option_strategy=config.option_strategy,
@@ -1955,8 +1968,7 @@ class MultiLegOptionPosition(BaseOptionPosition):
                     entry_delta=entry_delta,
                     entry_dte=entry_dte,
                     underlying_entry=trade_signal.underlying_last,
-                    # margin_required=margin_required,
-                    close_date=entry_date + pd.Timedelta(days=config.early_close_days) if config.early_close_days is not None else None,
+                    close_date=close_date,
                 )
 
                 legs.append(position)
@@ -1999,7 +2011,7 @@ class MultiLegOptionPosition(BaseOptionPosition):
                 entry_dte=entry_dte,
                 underlying_entry=trade_signal.underlying_last,
                 margin_required=margin_required,
-                close_date=entry_date + pd.Timedelta(days=config.early_close_days) if config.early_close_days is not None else None,
+                close_date=close_date,
             )
 
             logger.debug(f'Constructing potential spread position from symbol')

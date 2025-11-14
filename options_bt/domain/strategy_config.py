@@ -24,7 +24,8 @@ class BaseStrategyConfig(ABC):
 class BaseOptionStrategyConfig(BaseStrategyConfig, ABC):
     option_strategy: OptionStrategy
     use_underlying_close: bool = False
-    early_close_days: Optional[int] = None
+    early_close_after_dit: Optional[int] = None
+    early_close_on_dte: Optional[int] = None
     trade_selection_method: Optional[TradeSelectionMethod] = TradeSelectionMethod.DELTA_FIRST
     delta_weight: float = 0.5
     premium_weight: float = 0.5
