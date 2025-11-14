@@ -214,17 +214,17 @@ def run_grid():
         # 'vix_range': [(8, 22), (8, 26), (8, 30)],
         # 'vix_range': [(8, 30), None],
 
-        'vix_max': [22],
+        # 'vix_max': [22],
         # 'vix_max': [22, 24, 28, 32],
 
         # 'dte_range': [(40, 45)],
-        'early_close_days': [23, None],  # optional
+        'early_close_days': [2, None],  # optional
 
         # Focused sweep
         # 'short_delta_target': [0.30, 0.40, 0.50, 0.60, 0.70],
         'short_delta_target': [0.60, 0.70],
         # 'dte_target': [23, 30, 37, 44] ,
-        'dte_target': [35],            
+        'dte_target': [7],            
     }
 
     

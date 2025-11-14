@@ -812,8 +812,8 @@ class SingleLegOptionPosition(BaseOptionPosition):
         close_dt = pd.Timestamp(self.close_date).normalize()
         exp_dt = pd.Timestamp(self.expire_date).normalize()
 
-
-        if force:  # force close, e.g. if need to close all positions at end of period
+        # Force close, e.g. if need to close all positions at end of period 
+        if force:  
             # Look both forward and backward when force closing to handle wide spreads
             date_range = pd.date_range(close_dt - pd.Timedelta(days=2), close_dt + pd.Timedelta(days=2)) 
             filtered_df = option_chain[
@@ -821,10 +821,11 @@ class SingleLegOptionPosition(BaseOptionPosition):
                 (option_chain['expire_date'] == exp_dt) &
                 (option_chain['strike'] == self.strike)    
             ].sort_index()
+        # Otherwise, just early close
         else:
             date_range = pd.date_range(close_dt, close_dt + pd.Timedelta(days=2)) 
             filtered_df = option_chain[
-                (option_chain.index == close_dt) &
+                (option_chain.index.isin(date_range)) &
                 (option_chain['expire_date'] == exp_dt) &
                 (option_chain['strike'] == self.strike)
             ]
