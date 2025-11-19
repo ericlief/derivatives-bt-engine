@@ -6,11 +6,17 @@ from google.oauth2.service_account import Credentials
 from datetime import datetime
 import pandas as pd
 import numpy as np
+
 from options_bt.utils.logger import setup_logger
+from options_bt.domain.strategy_config import SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig
+
+# Load environment variables from .env file
+from dotenv import load_dotenv
+load_dotenv()
 
 # Create logger instance
 logger = setup_logger()
- 
+
 def google_auth():
     """Authenticate with Google Sheets API."""
     try:
@@ -35,8 +41,6 @@ def google_auth():
     except Exception as e:
         logger.error(f"Error authenticating with Google Sheets: {e}")
         raise
-
-
 
 
 # Helper function to convert numpy types to Python types
@@ -240,50 +244,6 @@ def _get_or_create_spreadsheet(gc, spreadsheet_name: str):
         raise
     return spreadsheet
 
-def upload_df_to_google_sheets(df: pd.DataFrame, strategy_name: str, spreadsheet_name: str = 'spx_options_bt_results'):
-    """
-    Uploads a Pandas DataFrame to a specified Google Sheet worksheet.
-    Creates the worksheet and adds headers if it doesn't exist.
-    """
-    logger.info(f"Starting Google Sheets upload for strategy: {strategy_name}")
-
-    try:
-        logger.info("Authenticating with Google Sheets...")
-        gc = google_auth()
-        logger.info("Authentication successful")
-
-        spreadsheet = _get_or_create_spreadsheet(gc, spreadsheet_name)
-
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        strat_name = '_'.join(strategy_name.upper().split())
-        worksheet_name = f'{strat_name}_{timestamp}'
-        try:
-            logger.info(f"Getting worksheet: {worksheet_name}...")
-            worksheet = spreadsheet.worksheet(worksheet_name)
-            logger.info(f"{worksheet_name} worksheet found")
-        except gspread.exceptions.WorksheetNotFound:
-            logger.info(f"{worksheet_name} worksheet not found, creating new one.")
-            worksheet = spreadsheet.add_worksheet(title=worksheet_name, rows=df.shape[0] + 1, cols=df.shape[1])
-            logger.info("New worksheet created")
-            # Add headers
-            headers = df.columns.tolist()
-            worksheet.append_row(headers)
-            logger.info("Headers added to new worksheet.")
-
-        # Prepare data for upload
-        # Convert DataFrame to a list of lists, handling numpy types and None/NaN
-        data_to_upload = df.replace({np.nan: '', None: ''}).values.tolist()
-        data_to_upload = [[_json_or_blank(x) for x in row] for row in data_to_upload]
-
-        logger.info(f"Uploading {len(data_to_upload)} rows to worksheet...")
-        worksheet.append_rows(data_to_upload)
-        logger.info("Data uploaded successfully to Google Sheets.")
-
-    except Exception as e: # Catch any other exceptions during the process
-        logger.error(f"An unexpected error occurred during Google Sheets upload: {e}")
-        import traceback
-        logger.error(f"Full traceback: {traceback.format_exc()}")
-
 def _format_single_backtest_result_row(results: dict, 
                                       config: Union['SingleLegOptionStrategyConfig', 'MultiLegOptionStrategyConfig'],
                                       param_str: str,
@@ -358,4 +318,3 @@ def _format_single_backtest_result_row(results: dict,
         row_data[key] = flatten_for_sheet(value)
     
     return row_data
-    

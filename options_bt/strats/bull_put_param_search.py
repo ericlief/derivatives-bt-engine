@@ -200,7 +200,7 @@ def run_grid():
     
     start_date="2010-01-01"
     # end_date="2011-01-01"
-    # end_date = "2023-12-29"
+    end_date = "2023-12-29" 
     periods = [1, 3, 5, 10]
     # periods = [1]
 

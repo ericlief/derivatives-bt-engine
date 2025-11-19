@@ -15,7 +15,7 @@ from options_bt.domain.trade_manager import TradeManager
 from options_bt.domain.position import FuturesPosition, SingleLegOptionPosition     
 from options_bt.domain.trade_result import OptionTradeResult
 from options_bt.domain.position import MultiLegOptionPosition
-from options_bt.utils.gspread_utils import log_to_google_sheets
+from options_bt.utils.gspread_log_util import log_to_google_sheets
 from options_bt.utils.logger import setup_logger
 from options_bt.utils.price_utils import PriceUtils
 
