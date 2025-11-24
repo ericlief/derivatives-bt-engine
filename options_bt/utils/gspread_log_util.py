@@ -141,7 +141,7 @@ def log_to_google_sheets(results: dict,
                         "timestamp", "strategy", "start", "end", "period", "quantity",
                         "dte_target", "dte_range", "delta_target", "delta_range",
                         "total_pnl", "initial_capital", "final_capital", "return_pct", "avg_days_held",
-                        "avg_roi", "max_profit", "max_loss", "win_rate", "winning_trades", "total_trades",
+                        "avg_roi", "avg_win", "max_win", "avg_loss", "max_loss", "win_rate", "winning_trades", "total_trades",
                         "max_dd_usd", "max_dd_pct", "peak_capital", "trough_capital",
                         "dd_duration", "execution_time", "max_positions", "early_close_after_dit", "early_close_on_dte",
                         "leverage", "max_margin", "max_spread_width", "max_trade_loss",
@@ -178,9 +178,11 @@ def log_to_google_sheets(results: dict,
             round((results_df['capital'].iloc[-1] / config.initial_capital - 1) * 100, 2),  # Convert % to number
             round(results_df['days_held'].mean(), 1),
             round(results_df['roi'].mean(), 2),
+            round(results_df[results_df['pnl'] > 0]['pnl'].mean(), 2),   # avg_profit
             round(results_df['pnl'].max(), 2),
+            round(results_df[results_df['pnl'] <= 0]['pnl'].mean(), 2),   # avg_loss
             round(results_df['pnl'].min(), 2),
-            round(((results_df['pnl'] > 0).sum() / len(results_df)) * 100, 2),  # Convert % to number
+            round(((results_df['pnl'] > 0).sum() / len(results_df)) * 100, 2),  # win_rate
             convert_numpy_types((results_df['pnl'] > 0).sum()),
             convert_numpy_types(len(results_df)),
             max_dd_amount,
@@ -284,7 +286,9 @@ def _format_single_backtest_result_row(results: dict,
         "return_pct": round((tr['capital'].iloc[-1] / config.initial_capital - 1) * 100, 2) if not tr.empty else 0.0,
         "avg_days_held": round(tr['days_held'].mean(), 1) if not tr.empty else 0.0,
         "avg_roi": round(tr['roi'].mean(), 2) if not tr.empty else 0.0,
-        "max_profit": round(tr['pnl'].max(), 2) if not tr.empty else 0.0,
+        "avg_win": round(tr[tr['pnl'] > 0]['pnl'].mean(), 2) if not tr.empty else 0.0,
+        "max_win": round(tr['pnl'].max(), 2) if not tr.empty else 0.0,
+        "avg_loss": round(tr[tr['pnl'] <= 0]['pnl'].mean(), 2) if not tr.empty else 0.0,
         "max_loss": round(tr['pnl'].min(), 2) if not tr.empty else 0.0,
         "win_rate": round(((tr['pnl'] > 0).sum() / len(tr)) * 100, 2) if not tr.empty else 0.0,
         "winning_trades": convert_numpy_types((tr['pnl'] > 0).sum()) if not tr.empty else 0,
@@ -318,3 +322,47 @@ def _format_single_backtest_result_row(results: dict,
         row_data[key] = flatten_for_sheet(value)
     
     return row_data
+
+def upload_df_to_google_sheets(df: pd.DataFrame, strategy_name: str, spreadsheet_name: str = 'spx_options_bt_results'):
+    """
+    Uploads a Pandas DataFrame to a specified Google Sheet worksheet.
+    Creates the worksheet and adds headers if it doesn't exist.
+    """
+    logger.info(f"Starting Google Sheets upload for strategy: {strategy_name}")
+
+    try:
+        logger.info("Authenticating with Google Sheets...")
+        gc = google_auth()
+        logger.info("Authentication successful")
+
+        spreadsheet = _get_or_create_spreadsheet(gc, spreadsheet_name)
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        strat_name = '_'.join(strategy_name.upper().split())
+        worksheet_name = f'{strat_name}_{timestamp}'
+        try:
+            logger.info(f"Getting worksheet: {worksheet_name}...")
+            worksheet = spreadsheet.worksheet(worksheet_name)
+            logger.info(f"{worksheet_name} worksheet found")
+        except gspread.exceptions.WorksheetNotFound:
+            logger.info(f"{worksheet_name} worksheet not found, creating new one.")
+            worksheet = spreadsheet.add_worksheet(title=worksheet_name, rows=df.shape[0] + 1, cols=df.shape[1])
+            logger.info("New worksheet created")
+            # Add headers
+            headers = df.columns.tolist()
+            worksheet.append_row(headers)
+            logger.info("Headers added to new worksheet.")
+
+        # Prepare data for upload
+        # Convert DataFrame to a list of lists, handling numpy types and None/NaN
+        data_to_upload = df.replace({np.nan: '', None: ''}).values.tolist()
+        data_to_upload = [[_json_or_blank(x) for x in row] for row in data_to_upload]
+
+        logger.info(f"Uploading {len(data_to_upload)} rows to worksheet...")
+        worksheet.append_rows(data_to_upload)
+        logger.info("Data uploaded successfully to Google Sheets.")
+
+    except Exception as e: # Catch any other exceptions during the process
+        logger.error(f"An unexpected error occurred during Google Sheets upload: {e}")
+        import traceback
+        logger.error(f"Full traceback: {traceback.format_exc()}")

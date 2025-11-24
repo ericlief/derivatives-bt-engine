@@ -8,8 +8,8 @@ from options_bt.domain.dataloader import DataLoader
 from options_bt.domain.strategy_config import MultiLegOptionStrategyConfig
 from options_bt.domain.option_leg_config import OptionLegConfig
 import itertools
-from typing import Dict, List, Callable, Any, Iterable, Optional, Union
-from options_bt.utils.gspread_utils import upload_df_to_google_sheets, _format_single_backtest_result_row
+from typing import Dict, List, Callable, Any, Iterable, Optional
+from options_bt.utils.gspread_log_util import upload_df_to_google_sheets, _format_single_backtest_result_row
 import pickle
 
 
@@ -56,7 +56,7 @@ class GridSearchBacktester:
         
         combos = product_dict(param_grid)
         # print(f"Total combos (unfiltered): {len(combos)}")
-        OFFSET = 0.10
+        OFFSET = 0.05
         # combos = product_dict({'short_delta_target': [0.20, 0.30, 0.40, 0.50, 0.60, 0.70], 'dte_target': [30,35,40,45]})
         # combos = product_dict({'short_delta_target': [0.20, 0.30, 0.40, 0.50, 0.60, 0.70], 'dte_target': [30,35,40,45]})
 
@@ -169,7 +169,7 @@ def make_bull_put_config(combo, start_date, end_date):
         trade_selection_method=combo.get('trade_selection_method', TradeSelectionMethod.PREMIUM_FIRST),
         vix_range=combo.get('vix_range', None),
         vix_max=combo.get('vix_max', None),
-        premium_ratio=0.33,
+        # premium_ratio=0.33,
         legs=[
             OptionLegConfig(
                 option_type=OptionType.PUT,
@@ -199,17 +199,17 @@ def run_grid():
     bt = Backtester(data=data, save_trades=False, log_to_sheets=False) # Disable saving for grid search performance
     
     start_date="2010-01-01"
-    # end_date="2011-01-01"
-    end_date = "2023-12-29" 
-    periods = [1, 3, 5, 10]
-    # periods = [1]
+    end_date="2011-01-01"
+    # end_date = "2023-12-29" 
+    # periods = [1, 3, 5, 10]
+    periods = [1]
 
     runner = GridSearchBacktester(bt, periods=periods, start_date=start_date, end_date=end_date)
 
     param_grid = {
         # Original (commented to control explosion):
      
-        'max_spread_width': [10],
+        'max_spread_width': [10, 15, 20, 25],
         # 'max_trade_loss': [2500, 5000, 7500],
         # 'trade_selection_method': [TradeSelectionMethod.DELTA_FIRST, TradeSelectionMethod.PREMIUM_FIRST],
         # 'vix_range': [(8, 22), (8, 26), (8, 30)],
@@ -219,11 +219,13 @@ def run_grid():
         # 'vix_max': [22, 24, 28, 32],
 
         # 'dte_range': [(40, 45)],
-        'early_close_on_dte': [2, None],  # optional
+        # 'early_close_on_dte': [2, None],  # optional
 
         # Focused sweep
         # 'short_delta_target': [0.30, 0.40, 0.50, 0.60, 0.70],
-        'short_delta_target': [0.40, 0.50, 0.60, 0.70],
+        # 'short_delta_target': [0.45, 0.50, 0.55],
+        'short_delta_target': [0.45],
+
         # 'dte_target': [23, 30, 37, 44] ,
         'dte_target': [7],            
     }
