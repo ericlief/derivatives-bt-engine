@@ -29,7 +29,7 @@ class BaseTradeResult:
     bp: float    # Available buying power after trade
     pnl: float
     capital_used: float
-    roi: float 
+    # roi: float 
 
     def __post_init__(self):
         if self.closed:
@@ -48,6 +48,8 @@ class OptionTradeResult(BaseTradeResult):
     option_strategy: Optional[Union[OptionStrategy, str]]
     close_reason: Optional[str]
     premium: float
+    ret_per_unit_risk: Optional[float] = None
+    ret_per_point: Optional[float] = None  # only for spreads
 
     # @classmethod
     # def from_position(cls, position: OptionPosition, exit_data: Dict) -> OptionTrade:
@@ -115,8 +117,9 @@ class OptionTradeResult(BaseTradeResult):
             'fees': self.fees,
             'bp': self.bp,
             'capital_used': self.capital_used,
-            'roi': self.roi,
             'pnl': self.pnl,
+            'ret_per_unit_risk': self.ret_per_unit_risk,
+            'ret_per_pointk': self.ret_per_point
         }
         return results 
     

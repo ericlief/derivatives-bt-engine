@@ -144,17 +144,17 @@ class Backtester:
                     if config.option_strategy in [OptionStrategy.BULL_PUT_CREDIT_SPREAD, OptionStrategy.BEAR_CALL_CREDIT_SPREAD]:
                         # For credit spreads: max loss = (spread_width - credit) * 100 * qty
                         credit = signals['spread_price'].clip(lower=0)  # ensure non-negative credit
-                        signals['max_trade_loss'] = (signals['spread_width'] - credit) * config.quantity * 100
+                        signals['margin_required'] = (signals['spread_width'] - credit) * config.quantity * config.multiplier
                     elif config.option_strategy in [OptionStrategy.BULL_CALL_DEBIT_SPREAD, OptionStrategy.BEAR_PUT_DEBIT_SPREAD]:
-                        signals['max_trade_loss'] = (signals['spread_price'].abs()) * config.quantity * 100
+                        signals['margin_required'] = (signals['spread_price'].abs()) * config.quantity * config.multiplier
                     else:
-                        signals['max_trade_loss'] = signals['spread_width'] * config.quantity * 100  # fallback
+                        signals['margin_required'] = signals['spread_width'] * config.quantity * config.multiplier  # fallback
 
-                    signals = signals[signals['max_trade_loss'] <= config.max_trade_loss]
+                    signals = signals[signals['margin_required'] <= config.max_trade_loss]
                     filtered_count = original_count - len(signals)
                     if filtered_count > 0:
                         logger.warning(f"Filtered out {filtered_count} trades due to max allowed trade loss (${config.max_trade_loss})")
-                    logger.info(f"Maximum trade loss: ${signals['max_trade_loss'].max() if len(signals) > 0 else 'N/A'}")
+                    logger.info(f"Maximum trade loss: ${signals['margin_required'].max() if len(signals) > 0 else 'N/A'}")
            
 
             if config.premium_ratio is not None:
@@ -169,10 +169,10 @@ class Backtester:
                 logger.info(f"Maximum: {signals['premium_ratio'].max() if len(signals) > 0 else 'N/A'}")
 
             # Ensure 'margin_required' is calculated for spreads before trade selection
-            if 'margin_required' not in signals.columns: # If not already calculated by MultiLegOptionPosition
-                signals['margin_required'] = round(signals['spread_width'] * config.quantity * 100, 2)
-                logger.debug(f'Calculated margins for {len(signals)} spread groups')    
-            logger.debug(f'First few margins: {signals.head()}')
+            # if 'margin_required' not in signals.columns: # If not already calculated by MultiLegOptionPosition
+            #     signals['margin_required'] = round(signals['spread_width'] * config.quantity * config.multiplier, 2)
+            #     logger.debug(f'Calculated margins for {len(signals)} spread groups')    
+            logger.debug(f'First few (filtered) signals: {signals.head()}')
         
         # Single leg
         elif isinstance(config, SingleLegOptionStrategyConfig):
@@ -793,13 +793,16 @@ class Backtester:
                 results_file.write(f"Total trades executed: {len(trade_results)}\n")
                 results_file.write(f"Winning trades: {(trade_results['pnl'] > 0).sum()}\n")
                 results_file.write(f"Win rate: {((trade_results['pnl'] > 0).sum() / len(trade_results)):.2%}\n")
-                results_file.write(f"Total P&L: ${trade_results['cumulative_pnl'].iloc[-1]:.2f}\n")
+                results_file.write(f"Total raw P&L: ${trade_results['cumulative_pnl'].iloc[-1]:.2f}\n")
                 results_file.write(f"Final capital: ${trade_results['capital'].iloc[-1]:.2f}\n")
                 results_file.write(f"Return on initial capital: {(trade_results['capital'].iloc[-1] / config.initial_capital - 1):.2%}\n")
-                results_file.write(f"Average days held: {trade_results['days_held'].mean():.1f}\n")
-                results_file.write(f"Average roi {trade_results['roi'].mean():.2f}%\n")
+                results_file.write(f"Average return per unit risk {trade_results['ret_per_unit_risk'].mean():.2%}\n")
+                average_return_per_point = trade_results['ret_per_point'].mean() if trade_results['ret_per_point'] is not None and not trade_results['ret_per_point'].empty else 0.0
+                results_file.write(f"Average return per point {average_return_per_point:.2%}\n")
                 results_file.write(f"Max Profit {trade_results['pnl'].max():.2f}\n")
                 results_file.write(f"Max Loss {trade_results['pnl'].min():.2f}\n")
+                results_file.write(f"Average days held: {trade_results['days_held'].mean():.1f}\n")
+
 
                 # Add execution times
                 if hasattr(self, 'execution_times') and self.execution_times:

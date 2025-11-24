@@ -6,6 +6,7 @@ from functools import cached_property
 from abc import ABC, abstractmethod
 from numpy import info
 import pandas as pd
+from pandas.core.computation.ops import Op
 
 from options_bt.domain.dataloader import DataLoader
 from options_bt.domain.enums import *
@@ -100,6 +101,7 @@ class BaseOptionPosition(BasePosition, ABC):
 
     # Should go into Trade class
     # exit_date: Optional[pd.Timestamp] = None
+    multiplier: Optional[float] = 100  # default to stock or index 
     exit_price: Optional[float] = None
     exit_delta: Optional[float] = None
     underlying_exit: Optional[float] = None
@@ -296,10 +298,10 @@ class BaseOptionPosition(BasePosition, ABC):
         #     return None
         
         # Calculate PnL
-        pnl = (self.signed_exit_price + self.signed_entry_price) * 100 * self.quantity
+        pnl = (self.signed_exit_price + self.signed_entry_price) * self.multiplier * self.quantity
         
         # Subtract fees
-        fees = commission if commission else 0  # For expiration nad early closure
+        fees = commission if commission else 0  # For expiration and early closure
         # Expiration and Exercise
         if close_reason == 'expiration': 
             itm = self.is_ITM(self.underlying_exit)
@@ -330,6 +332,8 @@ class BaseOptionPosition(BasePosition, ABC):
         pnl -= fees
         # self.pnl = pnl    ???
         logger.info(f"Calculated pnl for {self.option_strategy}{self.option_type}: {pnl}")
+
+        # logger.info('Normalizing pnl and calculating return per unit risk')
 
         return round(pnl, 2)
 
@@ -1027,7 +1031,7 @@ class SingleLegOptionPosition(BaseOptionPosition):
 
         
         pnl = self.calculate_pnl(option_chain=option_chain, underlying_price_history=underlying_price_history, close_reason=close_reason)
-        logger.debug(f'Calculated pnl: {pnl}')
+        logger.debug(f'Calculated raw pnl: {pnl}')
 
         # Deduct fees from buying power
         logger.debug(f'Deducting fees from BP: {bp_effect}')
@@ -1045,6 +1049,30 @@ class SingleLegOptionPosition(BaseOptionPosition):
         # Create transaction 
         transaction = self.create_transaction(self, close_date, 'close', bp_effect)
         
+        # Calculate return at the strategy level
+        ret_per_unit_risk = None
+        strat_effective_risk = None
+        if self.option_strategy in [
+            OptionStrategy.SHORT_CALL,
+            OptionStrategy.SHORT_PUT,
+            OptionStrategy.LONG_CALL,
+            OptionStrategy.LONG_PUT,
+        ]:
+            strat_pnl = pnl
+            if self.is_long:
+                strat_effective_risk = abs(self.entry_price * self.quantity * self.multiplier)
+            else:  # short
+                if self.margin_required is not None:
+                    strat_effective_risk = self.margin_required
+                else:
+                    logger.error(
+                        'Cannot calculate pnl for strategy %s because required margin is unknown',
+                        self.option_strategy.value
+                    )
+                    strat_effective_risk = None
+
+            ret_per_unit_risk = strat_pnl / strat_effective_risk if strat_effective_risk is not None else None
+
         # Prepare trade result
         trade_result = OptionTradeResult(
             trade_id=self.trade_id,
@@ -1057,19 +1085,23 @@ class SingleLegOptionPosition(BaseOptionPosition):
             premium=round(self.premium, 2),
             fees=round(self.fees, 2),
             pnl=round(pnl, 2),
+            ret_per_unit_risk=round(ret_per_unit_risk, 2) if ret_per_unit_risk else None,
             bp=None,
             capital_used=round(self.margin_required, 2) if self.margin_required is not None else round(abs(self.entry_price) * self.quantity * 100, 2),
-            roi=round(pnl / self.margin_required * 100, 2) if self.margin_required is not None and self.margin_required != 0 else round(pnl / (abs(self.entry_price) * self.quantity * 100) * 100, 2),
+            # roi=round(pnl / self.margin_required * 100, 2) if self.margin_required is not None and self.margin_required != 0 else round(pnl / (abs(self.entry_price) * self.quantity * 100) * 100, 2),
         )
         return trade_result, transaction, bp_effect
 
 @dataclass(kw_only=True)
 class MultiLegOptionPosition(BaseOptionPosition):
-    """Class representing a multi-leg option spread.""" 
+    """Class representing a multi-leg option strategy.""" 
+
     spread_type: OptionSpreadType
     legs: List[SingleLegOptionPosition] 
     leg_ratios: Dict[int, float] = None  # Maps leg index to ratio
     # spread_price: Optional[float] = None  # property will calculate the net price
+    spread_width: Optional[float] = None
+    max_loss: Optional[float] = None
     # net_price: Optional[float] = None
     expire_date: Optional[pd.Timestamp] = None # Common expiration date for the spread
     entry_dte: int = 0  # Common DTE for the spread
@@ -1226,10 +1258,12 @@ class MultiLegOptionPosition(BaseOptionPosition):
         elif self.spread_type == OptionSpreadType.BUTTERFLY:
             if len(self.legs) != 3:
                 raise ValueError("Butterfly spread must have exactly 3 legs")
-            # Validate strikes and ratios
-            strikes = sorted([leg.strike for leg in self.legs])
-            if not (strikes[1] - strikes[0] == strikes[2] - strikes[1]):
-                raise ValueError("Butterfly spread must have equal wing widths")
+            
+            # Validate strikes and ratios TODO: add some check for broken-wing flies
+            # strikes = sorted([leg.strike for leg in self.legs])
+            # if not (strikes[1] - strikes[0] == strikes[2] - strikes[1]):
+            #     raise ValueError("Butterfly spread must have equal wing widths")
+            
             # Validate butterfly ratios (1:2:1)
             if self.leg_ratios != {0: 1.0, 1: 2.0, 2: 1.0}:
                 raise ValueError("Butterfly spread must have 1:2:1 ratio")
@@ -1776,6 +1810,10 @@ class MultiLegOptionPosition(BaseOptionPosition):
             return None, None, None
         logger.debug(f'Calculated spread PnL: {spread_pnl}')
 
+        # Calculate normalized/scaled return per unit risk/point
+        ret_per_unit_risk = round(spread_pnl / self.margin_required, 2)
+        ret_per_point = round(spread_pnl / self.margin_required /  self.spread_width, 2)
+
         # The total capital used for the spread is its margin required (already a cached_property)
         spread_capital_used = self.margin_required
         if spread_capital_used is None: # Fallback if margin_required is not yet set
@@ -1822,9 +1860,11 @@ class MultiLegOptionPosition(BaseOptionPosition):
             premium=round(self.premium, 2),
             fees=all_fees,
             pnl=spread_pnl,
+            ret_per_unit_risk = ret_per_unit_risk,
+            ret_per_point = ret_per_point,
             bp=None,
             capital_used=round(self.margin_required, 2),
-            roi=round(spread_pnl / self.margin_required * 100, 2) if self.margin_required is not None and self.margin_required != 0 else 0,
+            # roi=round(spread_pnl / self.margin_required * 100, 2) if self.margin_required is not None and self.margin_required != 0 else 0,
         )
         
         return aggregated_trade_result, all_transactions, total_bp_effect
@@ -1954,11 +1994,12 @@ class MultiLegOptionPosition(BaseOptionPosition):
                     logger.error(f"Missing midpoint price value/s in trade signal on {trade_signal.Index}")
                     return None
                 
-       
+                multiplier = getattr(config, 'multiplier', 100)
 
                 position = SingleLegOptionPosition(
                     option_strategy=config.option_strategy,
                     quantity=quantity, # Individual legs should always have a quantity of 1, as the overall spread quantity is handled by MultiLegOptionPosition
+                    multiplier=multiplier,
                     option_type=option_type,
                     position_side=position_side,
                     strike=strike,
@@ -1999,6 +2040,7 @@ class MultiLegOptionPosition(BaseOptionPosition):
             # Create the position
             position = MultiLegOptionPosition(
                 quantity=config.quantity,
+                multiplier=multiplier,
                 option_type=config.legs[0].option_type,
                 option_strategy=config.option_strategy,
                 spread_type=config.spread_type,
@@ -2010,6 +2052,7 @@ class MultiLegOptionPosition(BaseOptionPosition):
                 entry_price=abs(entry_price),  # Store positive price, use signed accessors
                 entry_dte=entry_dte,
                 underlying_entry=trade_signal.underlying_last,
+                spread_width=trade_signal.spread_width,
                 margin_required=margin_required,
                 close_date=close_date,
             )

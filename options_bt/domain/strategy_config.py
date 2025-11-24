@@ -29,7 +29,7 @@ class BaseOptionStrategyConfig(BaseStrategyConfig, ABC):
     trade_selection_method: Optional[TradeSelectionMethod] = TradeSelectionMethod.DELTA_FIRST
     delta_weight: float = 0.5
     premium_weight: float = 0.5
-   
+    multiplier: Optional[float] = 100
 
 @dataclass(kw_only=True)
 class SingleLegOptionStrategyConfig(BaseOptionStrategyConfig):

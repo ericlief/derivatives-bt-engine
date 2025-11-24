@@ -153,6 +153,7 @@ def make_bull_put_config(combo, start_date, end_date):
     # Fixed dates and static pieces; vary others via combo
     return MultiLegOptionStrategyConfig(
         quantity=1,
+        multiplier=100,
         option_strategy=OptionStrategy.BULL_PUT_CREDIT_SPREAD,
         spread_type=OptionSpreadType.VERTICAL,
         initial_capital=100000,
@@ -199,17 +200,18 @@ def run_grid():
     bt = Backtester(data=data, save_trades=False, log_to_sheets=False) # Disable saving for grid search performance
     
     start_date="2010-01-01"
-    end_date="2011-01-01"
-    # end_date = "2023-12-29" 
+    # end_date="2011-01-01"
+    # start_date = "2022-12-31"
+    end_date = "2023-12-31" 
     # periods = [1, 3, 5, 10]
-    periods = [1]
+    periods = [1, 3, 5, 10]
 
     runner = GridSearchBacktester(bt, periods=periods, start_date=start_date, end_date=end_date)
 
     param_grid = {
         # Original (commented to control explosion):
      
-        'max_spread_width': [10, 15, 20, 25],
+        'max_spread_width': [5, 10, 15],
         # 'max_trade_loss': [2500, 5000, 7500],
         # 'trade_selection_method': [TradeSelectionMethod.DELTA_FIRST, TradeSelectionMethod.PREMIUM_FIRST],
         # 'vix_range': [(8, 22), (8, 26), (8, 30)],
@@ -223,11 +225,11 @@ def run_grid():
 
         # Focused sweep
         # 'short_delta_target': [0.30, 0.40, 0.50, 0.60, 0.70],
-        # 'short_delta_target': [0.45, 0.50, 0.55],
-        'short_delta_target': [0.45],
+        'short_delta_target': [0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.55],
+        # 'short_delta_target': [0.45],
 
-        # 'dte_target': [23, 30, 37, 44] ,
-        'dte_target': [7],            
+        'dte_target': [7, 15, 23, 30, 37, 44] ,
+        # 'dte_target': [7],            
     }
 
     

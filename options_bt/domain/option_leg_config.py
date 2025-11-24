@@ -11,7 +11,8 @@ class OptionLegConfig:
     delta_range: Optional[Tuple[float, float]] = None
     dte_target: Optional[int] = None
     dte_range: Optional[Tuple[int, int]] = None
-    early_close_days: Optional[int] = None  # For complex assymetric strategies
+    early_close_after_dit: Optional[int] = None  # For complex assymetric strategies
+    early_close_on_dte: Optional[int] = None  # For complex assymetric strategies
 
     def __post_init__(self):
         if self.delta_target is None and self.delta_range is None:
