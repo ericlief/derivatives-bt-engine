@@ -536,7 +536,20 @@ class OptionSignalGenerator(BaseSignalGenerator):
         side2 = 1 if PositionSide.is_short(leg_signals[1].iloc[0]["position_side"]) else -1
         paired["spread_price"] = side1 * paired["leg1_price"] + side2 * paired["leg2_price"]
         
-        # # Calculate net spread price (credit if positive, debit if negative)
+        # Validate sign of premium (debit or credit)  for vertical
+        is_credit_spread = self.config.option_strategy in [OptionStrategy.BEAR_CALL_CREDIT_SPREAD, OptionStrategy.BULL_PUT_CREDIT_SPREAD]
+        num_signals_before = len(paired)
+        if is_credit_spread:
+            paired = paired[paired["spread_price"] > 0]
+            if len(paired) < num_signals_before:
+                logger.debug(f'Filtered {num_signals_before - len(paired)} negative priced credit spread signals')
+        else:
+            paired[paired["spread_price"] < 0]
+            if len(paired) < num_signals_before:
+                logger.debug(f'Filtered {num_signals_before - len(paired)} positive priced debit spread signals')
+
+
+            # # Calculate net spread price (credit if positive, debit if negative)
         # # For credit spreads (short first leg, long second leg)
         # if PositionSide.is_short(leg_signals[0].iloc[0]["position_side"]) and PositionSide.is_long(leg_signals[1].iloc[0]["position_side"]):
         #     paired["spread_price"] = paired["leg1_price"] - paired["leg2_price"]
@@ -701,16 +714,16 @@ class OptionSignalGenerator(BaseSignalGenerator):
         # Add spread information
         paired["spread_type"] = spread_type.value
         paired["time_width"] = paired.apply(lambda row: pd.Timedelta(row["leg2_expire_date"] - row["leg1_expire_date"]).days, axis=1)
-        paired["strike_width"] = abs(paired["leg1_strike"] - paired["leg2_strike"])
+        paired["spread_width"] = abs(paired["leg1_strike"] - paired["leg2_strike"])
         
         # Filter out spreads with excessive strike width if max_spread_width is set
         if hasattr(self.config, 'max_spread_width') and self.config.max_spread_width is not None:
             original_count = len(paired)
-            paired = paired[paired["strike_width"] <= self.config.max_spread_width]
+            paired = paired[paired["spread_width"] <= self.config.max_spread_width]
             filtered_count = original_count - len(paired)
             if filtered_count > 0:
                 logger.info(f"Filtered out {filtered_count} diagonal spreads due to excessive strike width (> {self.config.max_spread_width} points)")
-                logger.debug(f"Maximum strike width in remaining diagonal spreads: {paired['strike_width'].max() if len(paired) > 0 else 'N/A'} points")
+                logger.debug(f"Maximum strike width in remaining diagonal spreads: {paired['spread_width'].max() if len(paired) > 0 else 'N/A'} points")
         
         # Calculate leg prices
         paired["leg1_price"] = paired.apply(

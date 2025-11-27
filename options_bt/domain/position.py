@@ -712,11 +712,11 @@ class SingleLegOptionPosition(BaseOptionPosition):
                 strike=trade_signal.strike,
                 entry_date=entry_date,
                 expire_date=trade_signal.expire_date,
-                entry_price=abs(entry_price),
-                entry_delta=trade_signal.p_delta if OptionType.is_put(option_type) else trade_signal.c_delta,
+                entry_price=round(abs(entry_price, 2)),
+                entry_delta=round(trade_signal.p_delta, 2) if OptionType.is_put(option_type) else round(trade_signal.c_delta, 2),
                 entry_dte=entry_dte,
                 underlying_entry=trade_signal.underlying_last,
-                margin_required=margin_required,
+                margin_required=round(margin_required, 2),
                 close_date=close_date,
             )
 
@@ -1556,10 +1556,10 @@ class MultiLegOptionPosition(BaseOptionPosition):
                 position_side=position_side,
                 entry_date=entry_date,
                 expire_date=trade_signal.expire_date,
-                entry_price=abs(entry_price),  # Store positive price, use signed accessors
+                entry_price=round(abs(entry_price), 2),  # Store positive price, use signed accessors
                 entry_dte=entry_dte,
                 underlying_entry=trade_signal.underlying_last,
-                margin_required=margin_required,
+                margin_required=round(margin_required, 2),
                 close_date=entry_date + pd.Timedelta(days=config.early_close_days) if config.early_close_days is not None else None,
             )
 

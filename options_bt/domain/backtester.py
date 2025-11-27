@@ -136,10 +136,11 @@ class Backtester:
                 logger.info(f"Maximum spread width in trades: {signals['spread_width'].max() if len(signals) > 0 else 'N/A'} points")
 
             # Filter out trades with excessive max trade loss if max_trade_loss is set
-            if config.max_trade_loss is not None:
+            if 'margin_required' not in signals.columns:
                 if signals.empty:
                     logger.warning("No signals to filter for max_trade_loss after previous filters.")
                 else:
+                    logger.info('Calculating margin requirements for multileg position')
                     original_count = len(signals)
                     if config.option_strategy in [OptionStrategy.BULL_PUT_CREDIT_SPREAD, OptionStrategy.BEAR_CALL_CREDIT_SPREAD]:
                         # For credit spreads: max loss = (spread_width - credit) * 100 * qty
@@ -150,11 +151,12 @@ class Backtester:
                     else:
                         signals['margin_required'] = signals['spread_width'] * config.quantity * config.multiplier  # fallback
 
-                    signals = signals[signals['margin_required'] <= config.max_trade_loss]
-                    filtered_count = original_count - len(signals)
-                    if filtered_count > 0:
-                        logger.warning(f"Filtered out {filtered_count} trades due to max allowed trade loss (${config.max_trade_loss})")
-                    logger.info(f"Maximum trade loss: ${signals['margin_required'].max() if len(signals) > 0 else 'N/A'}")
+                    if config.max_trade_loss is not None:
+                        signals = signals[signals['margin_required'] <= config.max_trade_loss]
+                        filtered_count = original_count - len(signals)
+                        if filtered_count > 0:
+                            logger.warning(f"Filtered out {filtered_count} trades due to max allowed trade loss (${config.max_trade_loss})")
+                        logger.info(f"Maximum trade loss: ${signals['margin_required'].max() if len(signals) > 0 else 'N/A'}")
            
 
             if config.premium_ratio is not None:
