@@ -15,7 +15,6 @@ from options_bt.domain.trade_manager import TradeManager
 from options_bt.domain.position import FuturesPosition, SingleLegOptionPosition     
 from options_bt.domain.trade_result import OptionTradeResult
 from options_bt.domain.position import MultiLegOptionPosition
-from options_bt.utils.gspread_log_util import log_to_google_sheets
 from options_bt.utils.logger import setup_logger
 from options_bt.utils.price_utils import PriceUtils
 
@@ -830,6 +829,7 @@ class Backtester:
         results['execution_times'] = self.execution_times
         results['total_execution_time'] = round(sum(self.execution_times.values()), 2)
         if self.log_to_sheets:
+            from options_bt.utils.gspread_log_util import log_to_google_sheets
             log_to_google_sheets(results, config=config, param_str=param_str)
 
         # Save MTM results with same timestamp

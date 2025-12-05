@@ -201,10 +201,10 @@ def run_grid():
     
     start_date="2010-01-01"
     # end_date="2011-01-01"
-    # start_date = "2022-12-31"
+    # start_date = "2013-03-16"
     end_date = "2023-12-31" 
+    periods = [10]
     # periods = [1, 3, 5, 10]
-    periods = [1, 3, 5, 10]
 
     runner = GridSearchBacktester(bt, periods=periods, start_date=start_date, end_date=end_date)
 

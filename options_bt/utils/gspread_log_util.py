@@ -72,6 +72,9 @@ def _json_or_blank(value):
 
         def norm(x):
             x = convert_numpy_types(x)
+            # Handle infinity and NaN values
+            if isinstance(x, float) and (not np.isfinite(x)):
+                return ''
             return None if x in (None, 'N/A') else x
 
         # If list/tuple container
