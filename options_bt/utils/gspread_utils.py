@@ -148,11 +148,12 @@ def log_to_google_sheets(results: dict,
             logger.info(f"Headers added, response: {header_response}")
         
         # Calculate drawdown stats
+        # OLD (for negative drawdown): Use .min() instead of .max()
         max_dd_amount = "N/A"
         max_dd_pct = "N/A"
         if stats is not None and not stats.empty:
-            max_dd_amount = f"{stats['Drawdown ($)'].min():.2f}"
-            max_dd_pct = f"{stats['Drawdown (%)'].min():.2f}"
+            max_dd_amount = f"{stats['Drawdown ($)'].max():.2f}"  # Now using max since drawdown is positive
+            max_dd_pct = f"{stats['Drawdown (%)'].max():.2f}"  # Now using max since drawdown is positive
         
         # Prepare data row
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -296,11 +297,12 @@ def _format_single_backtest_result_row(results: dict,
     drawdown_analysis = results.get('drawdown_analysis', {})
 
     # Calculate drawdown stats
+    # OLD (for negative drawdown): Use .min() instead of .max()
     max_dd_amount = "N/A"
     max_dd_pct = "N/A"
     if stats is not None and not stats.empty:
-        max_dd_amount = f"{stats['Drawdown ($)'].min():.2f}"
-        max_dd_pct = f"{stats['Drawdown (%)'].min():.2f}"
+        max_dd_amount = f"{stats['Drawdown ($)'].max():.2f}"  # Now using max since drawdown is positive
+        max_dd_pct = f"{stats['Drawdown (%)'].max():.2f}"  # Now using max since drawdown is positive
 
     # Prepare data row
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')

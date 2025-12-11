@@ -245,10 +245,28 @@ class Backtester:
         
         
         # Calculate cumulative metrics based on PnL
+        # Insert a new row at the start with the initial capital (pre-trade)
+        init_row = trade_results.iloc[0].copy()
+        for col in trade_results.columns:
+            if col in init_row:
+                init_row[col] = 0.0
+        # Preserve integer trade identifiers so they don't get upcast to float
+        if 'trade_id' in init_row:
+            init_row['trade_id'] = 0
+        init_row['capital'] = config.initial_capital
+        trade_results = pd.concat(
+            [pd.DataFrame([init_row]), trade_results],
+            ignore_index=True
+        )
+        if 'trade_id' in trade_results.columns:
+            trade_results['trade_id'] = trade_results['trade_id'].astype('Int64')
         trade_results['cumulative_pnl'] = round(trade_results['pnl'].cumsum(), 2)
         trade_results['capital'] = round(config.initial_capital + trade_results['cumulative_pnl'], 2)  # Track actual capital based on cumulative PnL
         trade_results['peak_capital'] = round(trade_results['capital'].cummax(), 2)
         
+        # Remove init row
+        # Yes, it's generally OK to remove the initial synthetic row if you only want real trade results.
+        trade_results = trade_results.iloc[1:]
         # Calculate margin utilization
         trade_results['margin_utilization'] = round(trade_results['capital_used'] / config.initial_capital, 2)
         trade_results['avg_margin_util'] = round(trade_results['margin_utilization'].mean(), 2)
@@ -413,8 +431,9 @@ class Backtester:
                 results_file.write(f"Average days held: {trade_results['days_held'].mean():.1f}\n")
                 results_file.write(f"Average return on margin: {trade_results['return_on_margin'].mean():.2f}%\n")
                 if daily_df is not None and not daily_df.empty:
-                    max_drawdown_amount = daily_df['Drawdown ($)'].min()
-                    max_drawdown_percentage = daily_df['Drawdown (%)'].min()    
+                    # OLD (for negative drawdown): daily_df['Drawdown ($)'].min() and daily_df['Drawdown (%)'].min()
+                    max_drawdown_amount = daily_df['Drawdown ($)'].max()  # Now using max since drawdown is positive
+                    max_drawdown_percentage = daily_df['Drawdown (%)'].max()  # Now using max since drawdown is positive
                     # results_file.write(f"Maximum drawdown: ${daily_df['max_drawdown'].iloc[-1]:,.2f} ({daily_df['max_drawdown_pct'].iloc[-1]:.2f}%)\n")
                     results_file.write(f"Maximum drawdown: ${max_drawdown_amount:.2f} ({max_drawdown_percentage:.2f}%)\n")
         
@@ -619,9 +638,10 @@ class Backtester:
             if net_liq > peak_liquidity:
                 peak_liquidity = net_liq
                 
-            # Calculate drawdown
-            drawdown_amount = - max(0, round(peak_liquidity - net_liq, 2))
-            drawdown_pct = round(drawdown_amount / peak_liquidity * 100, 2) if peak_liquidity > 0 else 0
+            # Calculate drawdown (as positive values)
+            # OLD (for negative drawdown): drawdown_amount = - max(0, round(peak_liquidity - net_liq, 2))
+            drawdown_amount = max(0, round(peak_liquidity - net_liq, 2))  # Positive dollar amount
+            drawdown_pct = round(drawdown_amount / peak_liquidity * 100, 2) if peak_liquidity > 0 else 0  # Positive percentage
 
             # Calculate ROI metrics
             daily_roi = round(daily_pnl / daily_margin_requirement * 100, 2) if daily_margin_requirement > 0 else 0
@@ -815,8 +835,9 @@ class Backtester:
                     results_file.write(f"Total execution time: {total_execution_time:.2f}s\n")
 
                 if stats is not None and not stats.empty:
-                    max_drawdown_amount = stats['Drawdown ($)'].min()
-                    max_drawdown_percentage = stats['Drawdown (%)'].min()    
+                    # OLD (for negative drawdown): stats['Drawdown ($)'].min() and stats['Drawdown (%)'].min()
+                    max_drawdown_amount = stats['Drawdown ($)'].max()  # Now using max since drawdown is positive
+                    max_drawdown_percentage = stats['Drawdown (%)'].max()  # Now using max since drawdown is positive
                     results_file.write(f"Maximum drawdown: ${max_drawdown_amount:.2f} ({max_drawdown_percentage:.2f}%)\n")
                     
                     # Add peak and duration stats
@@ -866,44 +887,157 @@ class Backtester:
         logger.info("-" * 30)
         logger.info(f"Total Time: {total_time:.2f} seconds")
 
+
     def calculate_simple_drawdown(self, results, config):
-        trade_results = results['trade_results']
+
+            def get_dd_spans(drawdown_arr):
+                spans = []
+                current_span_start = None
+                for i, dd_val in enumerate(drawdown_arr):
+                    if dd_val > 0 and current_span_start is None:
+                        current_span_start = i
+                    elif dd_val <= 0 and current_span_start is not None:
+                        spans.append((current_span_start, i))
+                        current_span_start = None
+                if current_span_start is not None:
+                    spans.append((current_span_start, len(drawdown_arr) - 1))
+                return spans
+
+            trade_results = results['trade_results']
+
+            capital = trade_results['capital'].values
+            logger.debug(f'Capital array:\n{capital}')
+
+            capital_with_init = np.insert(capital, 0, config.initial_capital)
+            logger.debug(f'Capital with prepended init:\n{capital_with_init}')
+
+            running_max = np.maximum.accumulate(capital_with_init)
+            logger.debug(f'Running max:\n{running_max}')
+
+            drawdown = (running_max - capital_with_init)
+            logger.debug(f'Drawdown:\n{drawdown}')
+
+            max_drawdown_usd = np.max(drawdown)
+            logger.debug(f'Max dd USD: {max_drawdown_usd}')
+
+            trough_idx = np.argmax(drawdown)
+            logger.debug(f'Trough index: {trough_idx}')
+
+            if trough_idx > 0:
+                peak_idx = np.argmax(capital_with_init[:trough_idx])
+            else:
+                peak_idx = 0
+
+            logger.debug(f'Peak index: {peak_idx}')
+
+            spans = get_dd_spans(drawdown)
+            logger.debug(f'Drawdown spans: {spans}')
+
+            max_dd_duration = max([(j - i) for i, j in spans]) if spans else 0
+
+            logger.info(f"Maximum Drawdown (USD): {max_drawdown_usd:.2f}")
+            logger.info(f"Maximum Drawdown (%)): {max_drawdown_usd / capital_with_init[peak_idx]:.2%}")
+            logger.info(f"Peak Capital: ${capital_with_init[peak_idx]:.2f}")
+            logger.info(f"Trough Capital: ${capital_with_init[trough_idx]:.2f}")
+            logger.info(f"Drawdown Duration: {max_dd_duration} trades")
+
+            stats = pd.DataFrame({
+                'Drawdown ($)': drawdown,
+                'Drawdown (%)': drawdown / running_max * 100,
+                'Capital': capital_with_init,
+                'Running Max': running_max
+            })
+
+            results['stats'] = stats
+            results['drawdown_analysis'] = {
+                'max_drawdown': max_drawdown_usd,
+                'peak_capital': capital_with_init[peak_idx],
+                'trough_capital': capital_with_init[trough_idx],
+                'drawdown_duration': max_dd_duration
+            }
+
+            return results   # ← NECESSARY
+
+
+
+
+
+    # def calculate_simple_drawdown(self, results, config):
+
+    #     def get_dd_spans(drawdown_arr):
+    #         spans = []
+    #         current_span_start = None
+    #         for i, dd_val in enumerate(drawdown_arr):
+    #             if dd_val > 0 and current_span_start is None: # Drawdown starts
+    #                 current_span_start = i
+    #             elif dd_val <= 0 and current_span_start is not None: # Drawdown ends
+    #                 spans.append((current_span_start, i))
+    #                 current_span_start = None
+    #         if current_span_start is not None: # Handle drawdown extending to the end of the data
+    #             spans.append((current_span_start, len(drawdown_arr) -1))
+    #         return spans
+
+    #     trade_results = results['trade_results']
         
-        # Calculate running capital and drawdown
-        capital = trade_results['capital'].values
-        running_max = np.maximum.accumulate(capital)
-        drawdown = (capital - running_max) / running_max
+    #     # Calculate running capital and drawdown
+    #     capital = trade_results['capital'].values
+    #     # Prepend initial capital for accurate drawdown
+    #     logger.debug(f'Capital array:\n{capital}')
+    #     capital_with_init = np.insert(capital, 0, config.initial_capital)
+    #     logger.debug(f'Capital with prepended init:\n {capital_with_init}')
+
+    #     # Drawdown as positive percentage: (peak - current) / peak
+    #     # OLD (for negative drawdown): drawdown = (capital - running_max) / running_max
+    #     running_max = np.maximum.accumulate(capital_with_init)
+    #     logger.debug(f'Running max:\n {running_max}')
+
+    #     drawdown = (running_max - capital_with_init) # / running_max
+    #     logger.debug(f'Drawdown:\n {drawdown}')
+
+    #     # Find peak-to-trough drawdown periods
+    #     # OLD (for negative drawdown): max_drawdown = np.min(drawdown)
+    #     max_drawdown_usd = np.max(drawdown) # Now using max since drawdown is positive
+    #     logger.debug(f'Max dd USD: {max_drawdown_usd}')
+
+    #     trough_idx = np.argmax(drawdown) 
+    #     logger.debug(f'Trough index: {trough_idx}')
+
+    #     # peak_idx = np.argmin(capital[:trough_idx])
+    #     # Find the peak before the max drawdown 
+    #     # Old calc only searches for the deepest dd and uses this duration
+    #     if trough_idx > 0:
+    #         peak_idx = np.argmax(capital_with_init[:trough_idx])
+    #     else:
+    #         peak_idx = 0  # If max drawdown is at the first trade, peak is also the first trade
         
-        # Find peak-to-trough drawdown periods
-        max_drawdown = np.min(drawdown)
-        max_drawdown_idx = np.argmin(drawdown)
-        
-        # Find the peak before the max drawdown
-        if max_drawdown_idx > 0:
-            peak_idx = np.argmax(capital[:max_drawdown_idx])
-        else:
-            peak_idx = 0  # If max drawdown is at the first trade, peak is also the first trade
-        
-        logger.info(f"Maximum Drawdown: {max_drawdown:.2%}")
-        logger.info(f"Peak Capital: ${capital[peak_idx]:.2f}")
-        logger.info(f"Trough Capital: ${capital[max_drawdown_idx]:.2f}")
-        logger.info(f"Drawdown Duration: {max_drawdown_idx - peak_idx} trades")
+    #     spans = get_dd_spans(drawdown)
+    #     logger.debug(f'Drawdown spans: {spans}')
+
+    #     max_dd_duration = max([(j - i) for i,j in spans]) if spans else 0
+
+    #     logger.info(f"Maximum Drawdown USD: {max_drawdown_usd:.2f}")
+    #     logger.info(f"Peak Capital: ${capital_with_init[peak_idx]:.2f}")
+        # logger.info(f"Trough Capital: ${capital_with_init[trough_idx]:.2f}")
+        # logger.info(f"Drawdown Duration: {max_dd_duration} trades")
         
         # Create stats DataFrame (similar to your existing format)
-        stats = pd.DataFrame({
-            'Drawdown ($)': (capital - running_max),
-            'Drawdown (%)': drawdown * 100,
-            'Capital': capital,
-            'Running Max': running_max
-        })
+        # OLD (for negative drawdown):
+        #   'Drawdown ($)': (capital - running_max),  # Negative dollar amount
+        #   'Drawdown (%)': drawdown * 100,  # Negative percentage
+        # stats = pd.DataFrame({
+        #     'Drawdown ($)': (drawdown),  # Positive dollar amount
+        #     'Drawdown (%)': drawdown / running_max * 100,  # Positive percentage
+        #     'Capital': capital_with_init,
+        #     'Running Max': running_max
+        # })
         
         # Add drawdown to results
-        results['stats'] = stats
-        results['drawdown_analysis'] = {
-            'max_drawdown': max_drawdown,
-            'peak_capital': capital[peak_idx],
-            'trough_capital': capital[max_drawdown_idx],
-            'drawdown_duration': max_drawdown_idx - peak_idx
-        }
+        # results['stats'] = stats
+        # results['drawdown_analysis'] = {
+        #     'max_drawdown': max_drawdown_usd,
+        #     'peak_capital': capital_with_init[peak_idx],
+        #     'trough_capital': capital_with_init[trough_idx],
+        #     'drawdown_duration': max_dd_duration
+        # }
         
-        return results
+        # return results

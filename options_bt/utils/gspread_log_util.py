@@ -122,14 +122,18 @@ def log_to_google_sheets(results: dict,
         
         # Try to get existing worksheet, create if doesn't exist
         try:
-            strat = '_'.join(config.option_strategy.value.upper().split())
-            logger.info(f"Getting {strat} worksheet...")
-            worksheet = spreadsheet.worksheet(strat)
-            logger.info(f"{strat} worksheet found")
+            strat_name = '_'.join(config.option_strategy.value.upper().split())
+            # logger.info(f"{strat} worksheet found")
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            # strat_name = '_'.join(strategy_name.upper().split())
+            worksheet_name = f'{strat_name}_{timestamp}'
+            worksheet = spreadsheet.worksheet(worksheet_name)
+            logger.info(f"Appended data to existing worksheet {worksheet_name}...")
+
         except Exception as e:
-            logger.info(f"{strat} worksheet not found, creating new one: {e}")
-            worksheet = spreadsheet.add_worksheet(title=strat, rows=1000, cols=20)
-            logger.info("New worksheet created")
+            logger.info(f"Could not find existing worksheet, creating new one: {e}")
+            worksheet = spreadsheet.add_worksheet(title=worksheet_name, rows=1000, cols=40)
+            logger.info(f"New worksheet {worksheet_name} created successfully!")
             # Add headers if new worksheet
             # headers = [a
             #     'Timestamp', 'Strategy', 'Start', 'End', 'Period', 'Quantity', 'DTE_Target', 'DTE_Range', 'Delta_Target', 'Delta_Range',
@@ -143,23 +147,24 @@ def log_to_google_sheets(results: dict,
             headers = [
                         "timestamp", "strategy", "start", "end", "period", "quantity",
                         "dte_target", "dte_range", "delta_target", "delta_range",
-                        "total_pnl", "initial_capital", "final_capital", "return_pct", "avg_days_held",
-                        "avg_roi", "avg_win", "max_win", "avg_loss", "max_loss", "win_rate", "winning_trades", "total_trades",
+                        "total_pnl", "initial_capital", "final_capital", "ret_pct", "avg_ret_pur", "avg_ret_pp", "avg_win", "max_win", "avg_loss", "max_loss", "win_rate", "winning_trades", "total_trades", "avg_days_held",
                         "max_dd_usd", "max_dd_pct", "peak_capital", "trough_capital",
                         "dd_duration", "execution_time", "max_positions", "early_close_after_dit", "early_close_on_dte",
                         "leverage", "max_margin", "max_spread_width", "max_trade_loss",
-                        "param_string", "vix_range", "vix_max", "use_iv", "sl", "tp", "avg_premium", "trade_selection", "premium_ratio"
+                        "param_string", "vix_range", "vix_max", "use_iv", "sl", "tp", "avg_premium", "trade_selection", "premium_ratio",
+                        "short_delta_target", "long_delta_target"
             ]
             logger.info("Adding headers...")
             header_response = worksheet.append_row(headers)
             logger.info(f"Headers added, response: {header_response}")
         
         # Calculate drawdown stats
+        # OLD (for negative drawdown): Use .min() instead of .max()
         max_dd_amount = "N/A"
         max_dd_pct = "N/A"
         if stats is not None and not stats.empty:
-            max_dd_amount = f"{stats['Drawdown ($)'].min():.2f}"
-            max_dd_pct = f"{stats['Drawdown (%)'].min():.2f}"
+            max_dd_amount = f"{stats['Drawdown ($)'].max():.2f}"  # Now using max since drawdown is positive
+            max_dd_pct = f"{stats['Drawdown (%)'].max():.2f}"  # Now using max since drawdown is positive
         
         # Prepare data row
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -179,8 +184,8 @@ def log_to_google_sheets(results: dict,
             config.initial_capital,
             round(results_df['capital'].iloc[-1], 2),
             round((results_df['capital'].iloc[-1] / config.initial_capital - 1) * 100, 2),  # Convert % to number
-            round(results_df['days_held'].mean(), 1),
-            round(results_df['roi'].mean(), 2),
+            round(results_df['ret_per_unit_risk'].mean(), 2),
+            round(results_df['ret_per_point'].mean(), 2) if 'ret_per_point' in results_df.columns else 0.0,
             round(results_df[results_df['pnl'] > 0]['pnl'].mean(), 2),   # avg_profit
             round(results_df['pnl'].max(), 2),
             round(results_df[results_df['pnl'] <= 0]['pnl'].mean(), 2),   # avg_loss
@@ -188,6 +193,7 @@ def log_to_google_sheets(results: dict,
             round(((results_df['pnl'] > 0).sum() / len(results_df)) * 100, 2),  # win_rate
             convert_numpy_types((results_df['pnl'] > 0).sum()),
             convert_numpy_types(len(results_df)),
+            round(results_df['days_held'].mean(), 1),
             max_dd_amount,
             max_dd_pct,
             round(drawdown_analysis.get('peak_capital', 0), 2),
@@ -210,6 +216,8 @@ def log_to_google_sheets(results: dict,
             round(results_df['premium'].mean(), 2),
             config.trade_selection_method.value,
             getattr(config, 'premium_ratio', ''),
+            _get_leg_field_json(config, 'short_delta_target'),
+            _get_leg_field_json(config, 'long_delta_target'),
         ]
         
         row_data = [flatten_for_sheet(convert_numpy_types(obj)) for obj in row_data]
@@ -261,11 +269,12 @@ def _format_single_backtest_result_row(results: dict,
     drawdown_analysis = results.get('drawdown_analysis', {})
 
     # Calculate drawdown stats
+    # OLD (for negative drawdown): Use .min() instead of .max()
     max_dd_amount = "N/A"
     max_dd_pct = "N/A"
     if stats is not None and not stats.empty:
-        max_dd_amount = f"{stats['Drawdown ($)'].min():.2f}"
-        max_dd_pct = f"{stats['Drawdown (%)'].min():.2f}"
+        max_dd_amount = f"{stats['Drawdown ($)'].max():.2f}"  # Now using max since drawdown is positive
+        max_dd_pct = f"{stats['Drawdown (%)'].max():.2f}"  # Now using max since drawdown is positive
 
     # Prepare data row
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -286,9 +295,9 @@ def _format_single_backtest_result_row(results: dict,
         "total_pnl": round(tr['cumulative_pnl'].iloc[-1], 2) if not tr.empty else 0.0,
         "initial_capital": config.initial_capital,
         "final_capital": round(tr['capital'].iloc[-1], 2) if not tr.empty else config.initial_capital,
-        "ret_pct": round((tr['capital'].iloc[-1] / config.initial_capital - 1), 2) if not tr.empty else 0.0,
+        "ret_pct": round((tr['capital'].iloc[-1] / config.initial_capital - 1) * 100, 2) if not tr.empty else 0.0, # Convert % to number
         "avg_ret_pur": round(tr['ret_per_unit_risk'].mean(), 2) if not tr.empty else 0.0,
-        "avg_ret_pp": round(tr['ret_per_point'].mean(), 2) if not tr.empty and tr['ret_per_point'] is not None else 0.0,
+        "avg_ret_pp": round(tr['ret_per_point'].mean(), 2) if not tr.empty and 'ret_per_point' in tr.columns else 0.0,
         "avg_win": round(tr[tr['pnl'] > 0]['pnl'].mean(), 2) if not tr.empty else 0.0,
         "max_win": round(tr['pnl'].max(), 2) if not tr.empty else 0.0,
         "avg_loss": round(tr[tr['pnl'] <= 0]['pnl'].mean(), 2) if not tr.empty else 0.0,
@@ -319,6 +328,8 @@ def _format_single_backtest_result_row(results: dict,
         "avg_premium": round(tr['premium'].mean(), 2) if not tr.empty else 0.0,
         "trade_selection": config.trade_selection_method.value,
         "premium_ratio": getattr(config, 'premium_ratio', ''),
+        "short_delta_target": _get_leg_field_json(config, 'short_delta_target'),
+        "long_delta_target": _get_leg_field_json(config, 'long_delta_target'),
     }
 
     # Apply flatten_for_sheet to all values
