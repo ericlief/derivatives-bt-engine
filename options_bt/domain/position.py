@@ -874,7 +874,7 @@ class SingleLegOptionPosition(BaseOptionPosition):
             exit_delta = round(getattr(row, delta_col), 2)
             logger.debug(f'Calculating midpoint for {bid}-{ask}')
             mid_price = PriceUtils.calculate_midpoint_price(bid, ask)
-            if mid_price is not None or not pd.isna(mid_price):
+            if mid_price is not None and not pd.isna(mid_price):
                 # Update instance variables only if mid_price is valid
                 self.underlying_exit = underlying_close
                 self.exit_price = mid_price
@@ -882,9 +882,10 @@ class SingleLegOptionPosition(BaseOptionPosition):
                 self.close_date = date   # update since actual close date may have changed
                 return True  # Successfully updated
             else:
-                # Track dates with wide spreads for potential fallback
-                spread_pct = ((ask - bid) / bid) * 100 if bid > 0 else float('inf')
-                wide_spread_dates.append((date, bid, ask, spread_pct))
+                # Track dates with wide spreads for potential fallback (only if not NaN)
+                if not (pd.isna(bid) or pd.isna(ask)):
+                    spread_pct = ((ask - bid) / bid) * 100 if bid > 0 else float('inf')
+                    wide_spread_dates.append((date, bid, ask, spread_pct))
         
         # If all spreads are too wide, try using the closest date with the narrowest spread
         if wide_spread_dates: # and force
@@ -895,6 +896,11 @@ class SingleLegOptionPosition(BaseOptionPosition):
             # Use the closest date with the narrowest spread, even if it's wide
             fallback_date, fallback_bid, fallback_ask, fallback_spread = wide_spread_dates[0]
             logger.warning(f"Using fallback pricing: date={fallback_date}, bid={fallback_bid}, ask={fallback_ask}, spread={fallback_spread:.2f}%")
+            
+            # Check if fallback prices are NaN
+            if pd.isna(fallback_bid) or pd.isna(fallback_ask):
+                logger.error(f'Fallback bid/ask are NaN for strike {self.strike} on date {fallback_date}. Cannot close position.')
+                return False
             
             # Get underlying price for fallback date
             fallback_underlying = underlying_price_history.loc[fallback_date, 'close']
@@ -1084,8 +1090,8 @@ class SingleLegOptionPosition(BaseOptionPosition):
             close_reason=close_reason,
             premium=round(self.premium, 2),
             fees=round(self.fees, 2),
-            pnl=round(pnl, 2),
-            ret_per_unit_risk=round(ret_per_unit_risk, 2) if ret_per_unit_risk else None,
+            pnl=round(pnl, 4),
+            ret_per_unit_risk=ret_per_unit_risk if ret_per_unit_risk else None,
             bp=None,
             capital_used=round(self.margin_required, 2) if self.margin_required is not None else round(abs(self.entry_price) * self.quantity * 100, 2),
             # roi=round(pnl / self.margin_required * 100, 2) if self.margin_required is not None and self.margin_required != 0 else round(pnl / (abs(self.entry_price) * self.quantity * 100) * 100, 2),
@@ -1811,8 +1817,8 @@ class MultiLegOptionPosition(BaseOptionPosition):
         logger.debug(f'Calculated spread PnL: {spread_pnl}')
 
         # Calculate normalized/scaled return per unit risk/point
-        ret_per_unit_risk = round(spread_pnl / self.margin_required, 2)
-        ret_per_point = round(spread_pnl / self.margin_required /  self.spread_width, 2)
+        ret_per_unit_risk = spread_pnl / self.margin_required
+        ret_per_point = spread_pnl / self.margin_required /  self.spread_width
 
         # The total capital used for the spread is its margin required (already a cached_property)
         spread_capital_used = self.margin_required

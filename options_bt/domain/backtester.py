@@ -246,33 +246,42 @@ class Backtester:
         
         # Calculate cumulative metrics based on PnL
         # Insert a new row at the start with the initial capital (pre-trade)
-        init_row = trade_results.iloc[0].copy()
-        for col in trade_results.columns:
-            if col in init_row:
-                init_row[col] = 0.0
+        # init_row = trade_results.iloc[0].copy()
+        # for col in trade_results.columns:
+        #     if col in init_row:
+        #         init_row[col] = 0.0
+        init_row = pd.DataFrame([{
+            'pnl': 0.0,
+            'cumulative_pnl': 0.0,
+            'capital': config.initial_capital,
+            'trade_id': 0
+        }])
+
         # Preserve integer trade identifiers so they don't get upcast to float
-        if 'trade_id' in init_row:
-            init_row['trade_id'] = 0
-        init_row['capital'] = config.initial_capital
+        # if 'trade_id' in init_row:
+        #     init_row['trade_id'] = 0
+        # init_row['capital'] = config.initial_capital
         trade_results = pd.concat(
-            [pd.DataFrame([init_row]), trade_results],
+            [init_row, trade_results],
             ignore_index=True
         )
+
         if 'trade_id' in trade_results.columns:
             trade_results['trade_id'] = trade_results['trade_id'].astype('Int64')
         trade_results['cumulative_pnl'] = round(trade_results['pnl'].cumsum(), 2)
         trade_results['capital'] = round(config.initial_capital + trade_results['cumulative_pnl'], 2)  # Track actual capital based on cumulative PnL
         trade_results['peak_capital'] = round(trade_results['capital'].cummax(), 2)
-        
+        trade_results['ret'] = trade_results['pnl'] / trade_results['capital'].shift(1)
+
         # Remove init row
-        # Yes, it's generally OK to remove the initial synthetic row if you only want real trade results.
         trade_results = trade_results.iloc[1:]
+
         # Calculate margin utilization
-        trade_results['margin_utilization'] = round(trade_results['capital_used'] / config.initial_capital, 2)
-        trade_results['avg_margin_util'] = round(trade_results['margin_utilization'].mean(), 2)
-        trade_results['max_margin_util'] = round(trade_results['margin_utilization'].max(), 2       )
-        logger.info(f"Average margin utilization: {trade_results['avg_margin_util'].iloc[0]:.2%}")
-        logger.info(f"Maximum margin utilization: {trade_results['max_margin_util'].iloc[0]:.2%}")
+        trade_results['margin_utilization'] = round(trade_results['capital_used'] / config.initial_capital, 4)
+        # trade_results['avg_margin_util'] = round(trade_results['margin_utilization'].mean(), 2)
+        # trade_results['max_margin_util'] = round(trade_results['margin_utilization'].max(), 2)
+        # logger.info(f"Average margin utilization: {trade_results['avg_margin_util'].iloc[0]:.2%}")
+        # logger.info(f"Maximum margin utilization: {trade_results['max_margin_util'].iloc[0]:.2%}")
         
         # Calculate Sharpe Ratio without risk-free rate
         sharpe = None
@@ -294,8 +303,31 @@ class Backtester:
         self._log_execution_summary(total_time)
         self.execution_times['total'] = round(total_time, 2)
 
+        # Order columns     
+        ordered_cols = [
+            'trade_id',
+            'quantity',
+            'opened',
+            'closed',
+            'days_held',
+            'option_strategy',
+            'close_reason',
+            'bp',
+            'margin_utilization',
+            'capital',
+            'peak_capital',
+            'capital_used',
+            'pnl',
+            'cumulative_pnl',
+            'premium',
+            'fees',
+            'ret',
+            'ret_per_unit_risk',
+            'ret_per_point',
+        ]
 
-        # Calculate MTM
+        trade_results = trade_results[ordered_cols]
+
         results = {
             'trade_results': trade_results,
             'transactions': transactions
@@ -364,6 +396,9 @@ class Backtester:
         # logger.info(f"Average time per backtest: {total_time/len(hyperparameter_sets):.2f} seconds")
         
         # return results
+
+
+    
     def calculate_mtm(self, results: dict, config: Union[SingleLegOptionPosition, MultiLegOptionStrategyConfig]) -> pd.DataFrame:
         """
         Calculate MTM and log the results.
@@ -903,6 +938,24 @@ class Backtester:
                     spans.append((current_span_start, len(drawdown_arr) - 1))
                 return spans
 
+            def get_dd_spans_vectorized(drawdown):
+                dd_active = drawdown > 0
+                n = len(dd_active)
+                
+                # Start indices: where drawdown goes from False → True
+                starts = np.where((~dd_active[:-1]) & dd_active[1:])[0] + 1  # tuple of arrays so [0] to get the array
+                if dd_active[0]:
+                    starts = np.insert(starts, 0, 0)  # handle drawdown starting at first element
+
+                # End indices: where drawdown goes from True → False
+                ends = np.where(dd_active[:-1] & (~dd_active[1:]))[0] + 1
+                if dd_active[-1]:
+                    ends = np.append(ends, n - 1)  # handle drawdown ending at last element
+
+                spans = list(zip(starts, ends))
+                return spans
+
+
             trade_results = results['trade_results']
 
             capital = trade_results['capital'].values
@@ -930,7 +983,8 @@ class Backtester:
 
             logger.debug(f'Peak index: {peak_idx}')
 
-            spans = get_dd_spans(drawdown)
+            # spans = get_dd_spans(drawdown)
+            spans = get_dd_spans_vectorized(drawdown)
             logger.debug(f'Drawdown spans: {spans}')
 
             max_dd_duration = max([(j - i) for i, j in spans]) if spans else 0

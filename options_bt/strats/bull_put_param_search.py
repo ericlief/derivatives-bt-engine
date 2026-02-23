@@ -197,13 +197,13 @@ def run_grid():
     dl = DataLoader(data_dir=DATA_PATH, options_file="options_chain_preprocessed.csv", vix_file="vix.csv", use_preprocessed=True, save_preprocessed=False)
     data = dl.load_data()
 
-    bt = Backtester(data=data, save_trades=True, log_to_sheets=True) # Disable saving for grid search performance
+    bt = Backtester(data=data, save_trades=False, log_to_sheets=False) # Disable saving for grid search performance
     
     start_date="2010-01-01"
-    end_date="2011-01-01"
+    # end_date="2011-01-01"
     # start_date = "2013-03-16"
-    # end_date = "2023-12-31" 
-    periods = [1]
+    end_date = "2023-12-31" 
+    periods = [10]
     # periods = [1, 3, 5, 10]
 
     runner = GridSearchBacktester(bt, periods=periods, start_date=start_date, end_date=end_date)
@@ -211,7 +211,7 @@ def run_grid():
     param_grid = {
         # Original (commented to control explosion):
      
-        # 'max_spread_width': [5, 10, 15],
+        'max_spread_width': [5, 10],
         # 'max_trade_loss': [2500, 5000, 7500],
         # 'trade_selection_method': [TradeSelectionMethod.DELTA_FIRST, TradeSelectionMethod.PREMIUM_FIRST],
         # 'vix_range': [(8, 22), (8, 26), (8, 30)],
@@ -221,12 +221,12 @@ def run_grid():
         # 'vix_max': [22, 24, 28, 32],
 
         # 'dte_range': [(40, 45)],
-        # 'early_close_on_dte': [2, None],  # optional
+        'early_close_on_dte': [20, 25, None],  # optional
 
         # Focused sweep
         # 'short_delta_target': [0.30, 0.40, 0.50, 0.60, 0.70],
         # 'short_delta_target': [0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.55],
-        'short_delta_target': [0.50],
+        'short_delta_target': [0.45, 0.50, 0.55],
 
         # 'dte_target': [7, 15, 23, 30, 37, 44] ,   
         'dte_target': [44],            
