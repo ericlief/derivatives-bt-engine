@@ -375,6 +375,9 @@ class TradeManager:
             Optional[Union[SingleLegOptionPosition, MultiLegOptionPosition]]: A new position object if the signal is valid, otherwise None.
         """
         
+        # Early close logic 
+        early_close_days = self.config.early_close_after
+
         # Construct new position from signal
         if isinstance(self.config, SingleLegOptionStrategyConfig):
             return SingleLegOptionPosition.construct_from_signal(

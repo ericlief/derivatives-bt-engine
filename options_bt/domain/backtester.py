@@ -273,7 +273,7 @@ class Backtester:
         trade_results['peak_capital'] = round(trade_results['capital'].cummax(), 2)
         trade_results['ret'] = trade_results['pnl'] / trade_results['capital'].shift(1)
 
-        # Remove init row
+        # Remove init rowdfff
         trade_results = trade_results.iloc[1:]
 
         # Calculate margin utilization
