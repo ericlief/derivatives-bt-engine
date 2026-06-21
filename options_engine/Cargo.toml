@@ -1,0 +1,10 @@
+[package]
+name = "options_engine"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+pyo3 = { version = "0.23", features = ["extension-module"] }
+pyo3-polars = { version = "0.20", features = ["lazy"] }
+polars = { version = "0.46", features = ["lazy"] }
+rayon = "^1.10"   

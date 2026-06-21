@@ -11,3 +11,9 @@ nbs
 *.egg-info
 *.DS_Store
 *__pycache__
+
+# Rust artifacts
+
+# Cargo / Rust
+options_engine/target/
+options_engine/Cargo.lock
