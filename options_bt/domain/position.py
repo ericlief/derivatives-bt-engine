@@ -2299,8 +2299,10 @@ class FuturesPosition(BasePosition):
         direction = 1 if PositionSide.is_long(self.position_side) else -1
         pnl = (self.exit_price - self.entry_price) * self.quantity * self.mult * direction
 
-        # Subtract fees
-        fees = commission * self.quantity
+        # Subtract fees. `commission` (futures_type.transaction_commission)
+        # is per contract, per side -- this single close() call covers the
+        # full round trip (entry + exit), so double it here.
+        fees = commission * 2 * self.quantity
         self.fees = round(fees, 2)
         pnl -= self.fees
         self.close_reason = close_reason # Set the close reason on the position object

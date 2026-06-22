@@ -156,8 +156,10 @@ class FuturesType(Enum):
     # resets — MES/ES values were given; the rest below are rough estimates
     # only, scaled from typical CME margin levels for these products. Verify
     # against current CME/broker figures before relying on them for sizing.
-    # Commission reuses the existing per-contract tiers (standard vs micro).
-    MES = (5, 3406.84, 1.24) # Micro E-mini S&P 500 round trip
+    # Commission is per contract, per side (i.e. half of round trip) and
+    # reuses the existing per-contract tiers (standard vs micro) for the new
+    # symbols below; calculate_pnl() doubles it for the full round trip.
+    MES = (5, 3406.84, 1.24) # Micro E-mini S&P 500
     ES = (50, 34068.38, 1.70) # E-mini S&P 500
     MNQ = (2, 2900.0, 1.24) # Micro E-mini Nasdaq-100 -- margin estimated, verify
     NQ = (20, 29000.0, 1.70) # E-mini Nasdaq-100 -- margin estimated, verify
@@ -165,10 +167,10 @@ class FuturesType(Enum):
     YM = (5, 11000.0, 1.70) # E-mini Dow -- margin estimated, verify
     M2K = (5, 900.0, 1.24) # Micro E-mini Russell 2000 -- margin estimated, verify
     RTY = (50, 9000.0, 1.70) # E-mini Russell 2000 -- margin estimated, verify
-    ZN = (1000, 2000.0, 1.70) # 10-Year T-Note (CBOT) -- margin estimated, verify
-    ZT = (2000, 600.0, 1.70) # 2-Year T-Note (CBOT) -- margin estimated, verify
-    SI = (5000, 12000.0, 1.70) # Silver (COMEX) -- margin estimated, verify
-    CL = (1000, 6000.0, 1.70) # Crude Oil (NYMEX) -- margin estimated, verify
+    ZN = (1000, 2156.25, 1.67) # 10-Year T-Note (CBOT) -- margin estimated, verify
+    ZT = (2000, 1380.75, 3.04) # 2-Year T-Note (CBOT) -- margin estimated, verify
+    SI = (5000, 68233.0, 1.70) # Silver (COMEX) -- margin estimated, verify
+    CL = (1000, 18750.0, 1.70) # Crude Oil (NYMEX) -- margin estimated, verify
     ZL = (600, 3000.0, 1.70) # Soybean Oil (CBOT) -- margin estimated, verify
     ZC = (50, 1500.0, 1.70) # Corn (CBOT) -- margin estimated, verify
     ZS = (50, 3000.0, 1.70) # Soybeans (CBOT) -- margin estimated, verify
