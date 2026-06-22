@@ -2211,10 +2211,11 @@ class FuturesPosition(BasePosition):
     """Class representing a futures position."""
     futures_type: FuturesType
     futures_strategy: FuturesStrategy
-    
-    underlying_entry: float # The price of the underlying at entry
-    underlying_exit: Optional[float] = None # The price of the underlying at exit
-    exit_price: Optional[float] = None # For futures, this will usually be the underlying_exit
+
+    # No separate "underlying" price for futures (unlike options, where the
+    # underlying is a distinct cash index) — entry_price/exit_price are the
+    # futures contract's own open/close prices.
+    exit_price: Optional[float] = None
 
     roll_date: pd.Timestamp # The date when this futures contract is expected to be rolled
     close_reason: Optional[str] = None # 'roll', 'early closure', etc.
@@ -2239,12 +2240,7 @@ class FuturesPosition(BasePosition):
         
         # Set contract multiplier from enum based on futures_type
         # Corrected: Access the 'multiplier' property from the enum instance
-        self.contract_multiplier: float = self.futures_type.multiplier 
-        
-        # For futures, entry_price is the underlying price at entry, so we set underlying_entry
-        # This ensures consistency with how futures P&L is typically calculated (exit - entry) * multiplier * quantity
-        if self.entry_price:
-            self.underlying_entry = self.entry_price
+        self.contract_multiplier: float = self.futures_type.multiplier
 
         # Calculate initial margin if not provided
         if self.margin_required is None: # We now have initial_margin as a required attribute
@@ -2253,7 +2249,7 @@ class FuturesPosition(BasePosition):
     @property
     def signed_entry_price(self) -> float:
         """
-        For futures, the signed entry price is based on the entry price (underlying_entry for P&L)
+        For futures, the signed entry price is based on the entry price
         and contract multiplier. This represents the total value change per point.
         """
         # For futures, entry_price itself is not a credit/debit, but the change in price is.
@@ -2273,10 +2269,10 @@ class FuturesPosition(BasePosition):
         For futures, the signed exit price will represent the change in value
         from entry, effectively capturing the P&L per contract.
         """
-        if self.underlying_exit is None or self.underlying_entry is None:
+        if self.exit_price is None or self.entry_price is None:
             return 0.0
-        
-        price_diff = (self.underlying_exit - self.underlying_entry) * self.contract_multiplier
+
+        price_diff = (self.exit_price - self.entry_price) * self.contract_multiplier
         if PositionSide.is_long(self.position_side):
             return price_diff # Positive for long if price goes up
         else: # Short position
@@ -2292,16 +2288,16 @@ class FuturesPosition(BasePosition):
             commission (Optional[float], optional): Transaction fees per contract. Defaults to 1.0 (typical for MES).
 
         Returns:
-            Optional[float]: P&L amount in dollars, or None if exit_price or underlying_exit is not available.
+            Optional[float]: P&L amount in dollars, or None if entry_price or exit_price is not available.
         """
-        if self.underlying_exit is None or self.underlying_entry is None:
-            logger.warning('Underlying entry or exit price not set correctly for futures pnl calculation')
+        if self.exit_price is None or self.entry_price is None:
+            logger.warning('Entry or exit price not set correctly for futures pnl calculation')
             return None
 
         # P&L for futures is (exit_price - entry_price) * quantity * contract_multiplier,
         # negated for short positions (a short profits when price falls).
         direction = 1 if PositionSide.is_long(self.position_side) else -1
-        pnl = (self.underlying_exit - self.underlying_entry) * self.quantity * self.contract_multiplier * direction
+        pnl = (self.exit_price - self.entry_price) * self.quantity * self.contract_multiplier * direction
 
         # Subtract fees
         fees = commission * self.quantity
@@ -2336,8 +2332,7 @@ class FuturesPosition(BasePosition):
             logger.error(f"No underlying closing price available for {close_date} for futures position.")
             return False
 
-        self.underlying_exit = match['close'][0]
-        self.exit_price = self.underlying_exit # For futures, exit price is the underlying price
+        self.exit_price = match['close'][0]
 
         return True
 
@@ -2399,10 +2394,8 @@ class FuturesPosition(BasePosition):
             'instrument_type': 'futures',
             'futures_type': self.futures_type.value,
             'position_side': self.position_side.value,
-            'entry_price': self.entry_price, # This is the underlying_entry from the futures perspective
-            'exit_price': self.exit_price,   # This is the underlying_exit from the futures perspective
-            'underlying_entry': self.underlying_entry,
-            'underlying_exit': self.underlying_exit,
+            'open': self.entry_price,
+            'close': self.exit_price,
             'quantity': self.quantity,
             'contract_multiplier': self.contract_multiplier,
             'pnl': pnl,
@@ -2467,10 +2460,7 @@ class FuturesPosition(BasePosition):
                 logger.error(f"Missing close price in trade signal on {trade_signal.get('ts_event')}")
                 return None
 
-            underlying_entry = close_price
-
-            # For futures, entry_price is the underlying price itself
-            entry_price = underlying_entry
+            entry_price = close_price
 
             position = FuturesPosition(
                 trade_id=None, # Will be set by TradeManager
@@ -2478,8 +2468,7 @@ class FuturesPosition(BasePosition):
                 quantity=quantity,
                 position_side=position_side,
                 entry_date=entry_date,
-                entry_price=entry_price, # This is the underlying price at entry
-                underlying_entry=underlying_entry,
+                entry_price=entry_price,
                 futures_type=futures_type,
                 futures_strategy=futures_strategy,
                 initial_margin=futures_type.initial_margin, # Corrected: get initial_margin from the enum instance
@@ -2513,10 +2502,8 @@ class FuturesPosition(BasePosition):
             'instrument_type': 'futures',
             'futures_type': position.futures_type.value,
             'position_side': position.position_side.value,
-            'entry_price': position.entry_price,
-            'exit_price': None,
-            'underlying_entry': position.underlying_entry,
-            'underlying_exit': None,
+            'open': position.entry_price,
+            'close': None,
             'quantity': position.quantity,
             'contract_multiplier': position.contract_multiplier,
             'pnl': None,

@@ -1146,7 +1146,7 @@ class Backtester:
             return results
 
         close_tx = transactions[transactions['type'] == 'close'][
-            ['trade_id', 'entry_price', 'position_side', 'quantity', 'contract_multiplier']
+            ['trade_id', 'open', 'position_side', 'quantity', 'contract_multiplier']
         ]
         trades = trade_results[['trade_id', 'opened', 'closed', 'capital']].merge(close_tx, on='trade_id', how='left')
         trades = trades.sort_values('opened').reset_index(drop=True)
@@ -1181,7 +1181,7 @@ class Backtester:
             mtm_capital=pl.when(pl.col('is_open'))
             .then(
                 pl.col('capital_before') +
-                (pl.col('close') - pl.col('entry_price')) * pl.col('quantity') * pl.col('contract_multiplier') * pl.col('direction')
+                (pl.col('close') - pl.col('open')) * pl.col('quantity') * pl.col('contract_multiplier') * pl.col('direction')
             )
             .when(pl.col('closed').is_not_null())
             .then(pl.col('capital'))  # already closed as of this day -> flat at realized capital
