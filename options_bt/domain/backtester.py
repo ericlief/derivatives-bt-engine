@@ -336,7 +336,7 @@ class Backtester:
         trade_results['cumulative_pnl'] = round(trade_results['pnl'].cumsum(), 2)
         trade_results['capital'] = round(config.initial_capital + trade_results['cumulative_pnl'], 2)  # Track actual capital based on cumulative PnL
         trade_results['peak_capital'] = round(trade_results['capital'].cummax(), 2)
-        trade_results['ret'] = trade_results['pnl'] / trade_results['capital'].shift(1)
+        trade_results['ret'] = round(trade_results['pnl'] / trade_results['capital'].shift(1), 2)
 
         # Remove init rowdfff
         trade_results = trade_results.iloc[1:]

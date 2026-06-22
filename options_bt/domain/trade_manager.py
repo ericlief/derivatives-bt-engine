@@ -16,7 +16,7 @@ class TradeManager:
         self.config: Union[SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig] = config
         self.initial_capital: float = config.initial_capital
         self.leverage: float = config.leverage
-        self.option_bp: float = config.initial_capital
+        self.bp: float = config.initial_capital
         self.max_margin_utilization: float = config.max_margin_utilization
         self.max_positions: int = config.max_positions
         self.trade_counter: int = 1
@@ -25,7 +25,7 @@ class TradeManager:
         self.vix: Optional[pd.DataFrame] = vix
 
         logger.info(f'TradeManager instantiated')
-        logger.info(f'Init Cap: {self.initial_capital} | BP: {self.option_bp} | Trades: {self.trade_counter}')
+        logger.info(f'Init Cap: {self.initial_capital} | BP: {self.bp} | Trades: {self.trade_counter}')
         logger.info(f'Using vix range: {self.config.vix_range}')
         logger.info(f'VIX sample: {self.vix.head() if self.vix is not None else "N/A"}')
 
@@ -41,8 +41,8 @@ class TradeManager:
         """
 
         bp_effect = 0
-        logger.debug(f'In `execute_trade` | BP {self.option_bp} | BP Effect {bp_effect}')
-        logger.info(f'Init Cap: {self.initial_capital} | BP: {self.option_bp} | Trades: {self.trade_counter}')
+        logger.debug(f'In `execute_trade` | BP {self.bp} | BP Effect {bp_effect}')
+        logger.info(f'Init Cap: {self.initial_capital} | BP: {self.bp} | Trades: {self.trade_counter}')
 
         if isinstance(position, MultiLegOptionPosition) and position.spread_type != OptionSpreadType.NONE:
             if pd.isna(position.spread_price):
@@ -64,12 +64,12 @@ class TradeManager:
         # symmetrically for long and short, unlike options where only the
         # short side posts margin and the long side just pays a premium.
         if isinstance(position, FuturesPosition):
-            if self.option_bp >= effective_margin:
+            if self.bp >= effective_margin:
                 bp_effect -= effective_margin
-                logger.debug(f'Reserved futures margin. BP: {self.option_bp} | BP Effect: {bp_effect}')
+                logger.debug(f'Reserved futures margin. BP: {self.bp} | BP Effect: {bp_effect}')
                 return position, bp_effect
             else:
-                logger.warning(f"Insufficient buying power (${self.option_bp}) for futures margin. Required: ${effective_margin:.2f}")
+                logger.warning(f"Insufficient buying power (${self.bp}) for futures margin. Required: ${effective_margin:.2f}")
                 return None, bp_effect
 
         # Retrieve absolute premium regardless of position type
@@ -77,31 +77,31 @@ class TradeManager:
 
         # Open LONG position
         if position.is_long:            # Check if enough buying power to buy the option
-            if self.option_bp >= premium:
-                logger.debug(f'BP: {self.option_bp}')
-                # self.option_bp -= premium  # Deduct premium
+            if self.bp >= premium:
+                logger.debug(f'BP: {self.bp}')
+                # self.bp -= premium  # Deduct premium
                 bp_effect -= premium
-                logger.debug(f'Executing long trade. BP: {self.option_bp}| BP Effect: {bp_effect}')
+                logger.debug(f'Executing long trade. BP: {self.bp}| BP Effect: {bp_effect}')
                 return position, bp_effect
             else:
-                logger.warning(f"Insufficient buying power (${self.option_bp}) to buy option. Required: ${premium:.2f}")
+                logger.warning(f"Insufficient buying power (${self.bp}) to buy option. Required: ${premium:.2f}")
                 return None, bp_effect
 
         # Open SHORT position
         elif position.is_short:
             # Check if enough buying power for margin
-            if self.option_bp >= effective_margin:
-                logger.debug(f'BP: {self.option_bp}')
+            if self.bp >= effective_margin:
+                logger.debug(f'BP: {self.bp}')
                 bp_effect += premium  # Credit premium
                 bp_effect -= effective_margin  # Reserve margin
-                # self.option_bp += premium  # Credit premium
-                # self.option_bp -= effective_margin  # Reserve margin
-                logger.debug(f'After premium and margin update. BP: {self.option_bp} | BP Effect: {bp_effect}')
+                # self.bp += premium  # Credit premium
+                # self.bp -= effective_margin  # Reserve margin
+                logger.debug(f'After premium and margin update. BP: {self.bp} | BP Effect: {bp_effect}')
                 logger.info(f'Init Cap: {self.initial_capital} | Trades: {self.trade_counter}')
 
                 return position, bp_effect
             else:
-                logger.warning(f"Insufficient buying power (${self.option_bp}) to sell option. Required margin: ${effective_margin:.2f}")
+                logger.warning(f"Insufficient buying power (${self.bp}) to sell option. Required margin: ${effective_margin:.2f}")
                 return None, bp_effect
 
         return None, bp_effect
@@ -242,15 +242,15 @@ class TradeManager:
                     candidate_position = self.construct_position_from_signal(trade, current_date=current_date)
                       # Try to execute the new trade if it was created successfully
                     if candidate_position is not None:
-                        logger.debug(f'BP: ${self.option_bp:.2f}')
+                        logger.debug(f'BP: ${self.bp:.2f}')
                         logger.debug(f'Executing trade: {candidate_position}')
                         
                         # Execute the trade and create transactions and trades
                         executed_trade, bp_effect = self._execute_trade(candidate_position)
                         if executed_trade is not None:
-                            self.option_bp += bp_effect  # apply once for the spread
+                            self.bp += bp_effect  # apply once for the spread
                             executed_trade.trade_id = self.trade_counter
-                            logger.debug(f'Successfully executed trade {executed_trade.trade_id} | BP: ${self.option_bp:.2f}')
+                            logger.debug(f'Successfully executed trade {executed_trade.trade_id} | BP: ${self.bp:.2f}')
                             # Handle spread
                             if isinstance(executed_trade, MultiLegOptionPosition):
                                 for i, leg in enumerate(executed_trade.legs):
@@ -275,7 +275,7 @@ class TradeManager:
                             self.trade_counter += 1  # Increment counter only for successful trades
                             
                             logger.debug(f'Successfully executed trade: {executed_trade.trade_id}')
-                            logger.debug(f'BP: ${self.option_bp:.2f}')
+                            logger.debug(f'BP: ${self.bp:.2f}')
                             
                         else:
                             skipped_trades += 1
@@ -363,13 +363,13 @@ class TradeManager:
                                                                          
                     if result:  
                         # Update buying power with aggregated bp_effect
-                        self.option_bp += total_bp_effect 
+                        self.bp += total_bp_effect 
                         # Restore margin since we bypassed bp updates for individual legs
                         if pos.margin_required is not None:
-                            self.option_bp += pos.margin_required
-                        result.bp = round(self.option_bp, 2)
+                            self.bp += pos.margin_required
+                        result.bp = round(self.bp, 2)
                         positions_to_remove.append(pos)
-                        logger.debug(f"Closed multi-leg position {pos.trade_id} - Total BP Effect: ${total_bp_effect:.2f} - New BP: ${self.option_bp:.2f}")
+                        logger.debug(f"Closed multi-leg position {pos.trade_id} - Total BP Effect: ${total_bp_effect:.2f} - New BP: ${self.bp:.2f}")
                         trade_results.append(result)
                         transactions.extend(leg_transactions)
                     
@@ -393,10 +393,10 @@ class TradeManager:
 
                     if result:  
                         # Update buying power with the calculated bp_effect
-                        self.option_bp += bp_effect
-                        result.bp = round(self.option_bp, 2)
+                        self.bp += bp_effect
+                        result.bp = round(self.bp, 2)
                         positions_to_remove.append(pos)
-                        logger.debug(f"Closed position {pos.transaction_id} - BP Effect: ${bp_effect:.2f} - New BP: ${self.option_bp:.2f}")
+                        logger.debug(f"Closed position {pos.transaction_id} - BP Effect: ${bp_effect:.2f} - New BP: ${self.bp:.2f}")
                         trade_results.append(result)
                         transactions.append(transaction)    
                     
