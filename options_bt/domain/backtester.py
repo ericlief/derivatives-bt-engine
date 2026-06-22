@@ -1192,6 +1192,10 @@ class Backtester:
             .otherwise(0.0)
         )
 
+        daily = daily.with_columns(
+            pl.col('close', 'mtm_pnl', 'mtm_capital', 'running_max', 'drawdown_usd', 'drawdown_pct').round(2)
+        )
+
         max_dd_row = daily.sort('drawdown_usd', descending=False).head(1)
         max_drawdown_usd = max_dd_row['drawdown_usd'][0]
         max_drawdown_pct = max_dd_row['drawdown_pct'][0]
