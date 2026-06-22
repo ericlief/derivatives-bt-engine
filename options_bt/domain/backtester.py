@@ -1237,6 +1237,27 @@ class Backtester:
         logger.info(f"Trough Capital: ${trough_capital:.2f}")
         logger.info(f"Drawdown Duration: {max_dd_duration} trading days")
 
+        # Whole-strategy summary: total PnL/return from trade_results (same
+        # numbers as the per-trade table's last row), Sharpe from the daily
+        # mtm_capital series (more accurate than a trade-to-trade Sharpe —
+        # standard daily-return annualization via sqrt(252)), avg ROI/trade.
+        total_pnl = trade_results['cumulative_pnl'].iloc[-1]
+        total_return_pct = (trade_results['capital'].iloc[-1] / config.initial_capital - 1) * 100
+        avg_roi = trade_results['roi'].mean()
+
+        daily_ret = daily.with_columns(
+            daily_ret=pl.col('mtm_capital') / pl.col('mtm_capital').shift(1) - 1
+        )['daily_ret'].drop_nulls()
+        sharpe = (
+            (daily_ret.mean() / daily_ret.std() * (252 ** 0.5))
+            if daily_ret.std() and daily_ret.std() > 0 else None
+        )
+
+        logger.info(f"Total PnL: ${round(total_pnl, 2):.2f}")
+        logger.info(f"Total Return: {round(total_return_pct, 2):.2f}%")
+        logger.info(f"Sharpe Ratio: {round(sharpe, 2) if sharpe is not None else 'N/A'}")
+        logger.info(f"Average ROI per trade: {round(avg_roi, 2):.2f}%")
+
         # Lowercase snake_case column names throughout, matching the
         # convention used for Google Sheets headers elsewhere (e.g.
         # gspread_log_util.py's "total_pnl", "max_dd_usd", "peak_capital").
