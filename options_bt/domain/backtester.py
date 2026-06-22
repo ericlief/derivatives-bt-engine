@@ -420,7 +420,7 @@ class Backtester:
             'transactions': transactions
         }
 
-        print(results['trade_results'])
+        print(results['trade_results'].to_string())
 
         if not results['trade_results'].empty:
             if isinstance(config, FuturesStrategyConfig):
