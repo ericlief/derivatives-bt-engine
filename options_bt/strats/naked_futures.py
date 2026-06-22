@@ -1,0 +1,66 @@
+"""
+CLI for a naked (single-leg, long or short) futures backtest.
+
+Run:
+    naked --symbol ES --dir long --years 2025-2026
+    naked --symbol MES --dir short --years 2025-2026 --quantity 2
+"""
+import argparse
+
+from options_bt.domain.backtester import Backtester
+from options_bt.domain.enums import FuturesStrategy, FuturesType
+from options_bt.domain.futures_dataloader import FuturesDataLoader
+from options_bt.domain.strategy_config import FuturesStrategyConfig
+
+
+def parse_args():
+    p = argparse.ArgumentParser(description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument('--symbol', default='ES',
+                   help='Futures symbol, must be a defined FuturesType member (default: %(default)s)')
+    p.add_argument('--dir', choices=['long', 'short'], default='long',
+                   help='Position direction/side (default: %(default)s)')
+    p.add_argument('--years', default='2025-2026',
+                   help='Year range as START-END, inclusive (default: %(default)s)')
+    p.add_argument('--quantity', type=int, default=1)
+    p.add_argument('--initial-capital', type=float, default=100000)
+    p.add_argument('--leverage', type=float, default=1.0)
+    p.add_argument('--no-save', action='store_true', help='Skip saving trades/transactions/mtm to results/')
+    return p.parse_args()
+
+
+def main():
+    args = parse_args()
+
+    symbol = args.symbol.upper()
+    try:
+        futures_type = FuturesType[symbol]
+    except KeyError:
+        raise ValueError(f"Unknown futures symbol {symbol!r}. Defined types: {[t.name for t in FuturesType]}")
+
+    futures_strategy = FuturesStrategy.LONG_FUTURES if args.dir == 'long' else FuturesStrategy.SHORT_FUTURES
+
+    start_year, end_year = args.years.split('-')
+    start_date = f"{start_year}-01-01"
+    end_date = f"{end_year}-12-31"
+
+    dl = FuturesDataLoader(asset=symbol, use_preprocessed=False, save_preprocessed=False)
+    data = dl.load_data()
+
+    config = FuturesStrategyConfig(
+        quantity=args.quantity,
+        futures_type=futures_type,
+        futures_strategy=futures_strategy,
+        initial_capital=args.initial_capital,
+        leverage=args.leverage,
+        start_date=start_date,
+        end_date=end_date,
+    )
+
+    bt = Backtester(data=data, save_trades=not args.no_save, log_to_sheets=False)
+    results = bt.run(config)
+    print(results['trade_results'].to_string())
+
+
+if __name__ == "__main__":
+    main()
