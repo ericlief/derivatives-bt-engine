@@ -15,35 +15,30 @@ logger = setup_logger()
 
 # Front-month roll: for each trading date, take the not-yet-expired futures
 # contract for `asset` with the nearest expiration.
+#
+# `ohlcv_enriched` (the databento pipeline's build_db.py) already solves
+# `instrument_id` recycling more thoroughly than a plain join against
+# `instruments` could: it parses each bar's own raw `symbol` (independent of
+# `instruments`, which can have incomplete or entirely-missing history for a
+# given id) to recover asset/instrument_class/security_type directly from the
+# ticker shape, only trusts the ASOF-joined `instruments` row when it agrees
+# with that parse, and falls back through `expiry_lookup` (borrowed from any
+# other contract sharing the same month) and `rule_expirations` (empirically
+# fit CME contract-termination rules) when `instruments` has no expiration at
+# all for that id. This is what correctly excludes spreads/options that later
+# had their id recycled into an outright future (instrument_class lands NULL
+# for those, not 'F') and recovers full history `instruments` alone can't
+# provide (confirmed against CL: this view's instrument_class='F' filter
+# alone, with no further filtering on our part, gives the genuine 2010-2026
+# front-month series, correctly including the real Apr 2020 negative-WTI
+# print).
 _CONTINUOUS_FRONT_MONTH_SQL = """
-WITH futs AS (
-    -- DISTINCT: `instruments` can carry duplicate metadata snapshot rows
-    -- (same instrument_id/expiration recorded at different ts_event) which
-    -- would otherwise fan out the join below.
-    SELECT DISTINCT instrument_id, expiration
-    FROM instruments
+WITH bars AS (
+    SELECT instrument_id, ts_event, open, high, low, close, volume, expiration
+    FROM ohlcv_enriched
     WHERE asset = ? AND instrument_class = 'F' AND security_type = 'FUT'
-),
-bars AS (
-    SELECT o.instrument_id, o.ts_event, o.open, o.high, o.low, o.close, o.volume, f.expiration
-    FROM ohlcv o
-    JOIN futs f USING (instrument_id)
-    WHERE o.ts_event < CAST(f.expiration AS DATE)
-      -- `instrument_id` gets recycled by the exchange over long enough time
-      -- spans -- several of our futures' ids were previously assigned to
-      -- unrelated instruments (calendar spreads, options, even a different
-      -- asset's spread) whose `instruments` metadata history was never
-      -- captured locally, so a plain id+expiration join silently pulls in
-      -- that prior owner's bars too (confirmed: years of bogus low/negative
-      -- "CL" prices that were actually old calendar-spread/option bars).
-      -- `ohlcv.symbol` is the raw ticker captured per-bar at ingestion time,
-      -- independent of and more reliable than `instruments` -- a genuine
-      -- outright futures contract's ticker is always root+month code+1-2
-      -- digit year (e.g. "CLN7"), never hyphenated (a spread, e.g.
-      -- "CLX8-CLZ9") or space-suffixed (an option strike, e.g. "NQQ2
-      -- P1840"). Checking it directly sidesteps relying on `instruments`
-      -- having complete history at all.
-      AND regexp_matches(o.symbol, '^' || ? || '[FGHJKMNQUVXZ][0-9]{1,2}$')
+      AND expiration IS NOT NULL
+      AND ts_event < CAST(expiration AS DATE)
 ),
 ranked AS (
     SELECT *, row_number() OVER (PARTITION BY ts_event ORDER BY expiration ASC) AS rn
@@ -80,7 +75,7 @@ class FuturesDataLoader(BaseDataLoader):
 
         con = duckdb.connect(self.db_path, read_only=True)
         try:
-            df = con.sql(_CONTINUOUS_FRONT_MONTH_SQL, params=[self.asset, self.asset]).pl()
+            df = con.sql(_CONTINUOUS_FRONT_MONTH_SQL, params=[self.asset]).pl()
         finally:
             con.close()
 
