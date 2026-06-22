@@ -1,6 +1,6 @@
 [build-system]
-requires = ["maturin>=1.0"]
-build-backend = "maturin"
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "options-bt"
@@ -9,7 +9,6 @@ description = "Options backtesting engine"
 authors = [{ name = "Your Name", email = "you@example.com" }]
 readme = "README.md"
 requires-python = ">=3.11"
-packages = ["options_bt"]
 dependencies = [
     "gspread",
     "requests",
@@ -32,7 +31,12 @@ dependencies = [
 
 [project.scripts]
 tsmom = "options_bt.live.run_tsmom_rebalance:main"
+long-futures = "options_bt.strats.long_futures:run"
 
-[tool.maturin]
-manifest-path = "options_engine/Cargo.toml"
-module-name = "options_engine"
+[tool.setuptools.packages.find]
+include = ["options_bt*"]
+
+# options_engine is a separate, not-yet-wired-up Rust extension crate (no
+# Python code in this project imports it). It isn't part of this package's
+# build — build/install it independently if/when that work picks back up:
+#   maturin build --manifest-path options_engine/Cargo.toml

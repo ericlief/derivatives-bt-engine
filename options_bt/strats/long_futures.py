@@ -217,7 +217,7 @@ def run():
         quantity=1, futures_type=FuturesType.ES, futures_strategy=FuturesStrategy.LONG_FUTURES,
         initial_capital=100000, leverage=1.0, start_date='2023-01-01', end_date='2023-06-30',
     )
-    bt = Backtester(data=data, save_trades=False, log_to_sheets=False)
+    bt = Backtester(data=data, save_trades=True, log_to_sheets=False)
     results = bt.run(config)
     print(results['trade_results'])
 
