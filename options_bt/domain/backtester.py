@@ -976,8 +976,8 @@ class Backtester:
                     # option-path calculate_simple_drawdown is still positive
                     # (worst = .max()) — see that method's own comment.
                     if is_futures:
-                        max_drawdown_amount = stats['Drawdown ($)'].min()
-                        max_drawdown_percentage = stats['Drawdown (%)'].min()
+                        max_drawdown_amount = stats['drawdown_usd'].min()
+                        max_drawdown_percentage = stats['drawdown_pct'].min()
                     else:
                         max_drawdown_amount = stats['Drawdown ($)'].max()
                         max_drawdown_percentage = stats['Drawdown (%)'].max()
@@ -1237,15 +1237,12 @@ class Backtester:
         logger.info(f"Trough Capital: ${trough_capital:.2f}")
         logger.info(f"Drawdown Duration: {max_dd_duration} trading days")
 
+        # Lowercase snake_case column names throughout, matching the
+        # convention used for Google Sheets headers elsewhere (e.g.
+        # gspread_log_util.py's "total_pnl", "max_dd_usd", "peak_capital").
         stats = daily.select(['ts_event', 'close', 'mtm_pnl', 'cum_pnl', 'cum_pnl_pct', 'mtm_capital', 'running_max', 'drawdown_usd', 'drawdown_pct']).rename({
-            'close': 'Close',
-            'mtm_pnl': 'MTM PnL',
-            'cum_pnl': 'Cumulative PnL',
-            'cum_pnl_pct': 'Cumulative PnL (%)',
-            'mtm_capital': 'Capital',
-            'running_max': 'Running Max',
-            'drawdown_usd': 'Drawdown ($)',
-            'drawdown_pct': 'Drawdown (%)',
+            'ts_event': 'date',
+            'mtm_capital': 'capital',
         }).to_pandas()
 
         results['stats'] = stats
