@@ -1176,6 +1176,14 @@ class Backtester:
             .otherwise(pl.lit(config.initial_capital))  # before the first trade opened
         )
 
+        # Day-over-day MTM PnL — mathematically identical to (close - entry_price)
+        # for a single continuous holding period (the entry_price term cancels
+        # telescoping day to day), but reported this way to match how a real
+        # daily variation-margin settlement (e.g. IB's MTM report) is shown:
+        # today's settlement price and today's P&L versus yesterday, not
+        # "P&L since entry" recomputed fresh each row.
+        daily = daily.with_columns(mtm_pnl=pl.col('mtm_capital').diff().fill_null(0.0))
+
         daily = daily.with_columns(running_max=pl.col('mtm_capital').cum_max())
         daily = daily.with_columns(drawdown_usd=pl.col('mtm_capital') - pl.col('running_max'))
         daily = daily.with_columns(
@@ -1207,7 +1215,9 @@ class Backtester:
         logger.info(f"Trough Capital: ${trough_capital:.2f}")
         logger.info(f"Drawdown Duration: {max_dd_duration} trading days")
 
-        stats = daily.select(['ts_event', 'mtm_capital', 'running_max', 'drawdown_usd', 'drawdown_pct']).rename({
+        stats = daily.select(['ts_event', 'close', 'mtm_pnl', 'mtm_capital', 'running_max', 'drawdown_usd', 'drawdown_pct']).rename({
+            'close': 'Close',
+            'mtm_pnl': 'MTM PnL',
             'mtm_capital': 'Capital',
             'running_max': 'Running Max',
             'drawdown_usd': 'Drawdown ($)',
