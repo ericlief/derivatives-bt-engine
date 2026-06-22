@@ -137,7 +137,15 @@ class TradeManager:
             if trade_signals is None or trade_signals.height == 0:
                 return {'trade_results': pd.DataFrame(), 'transactions': pd.DataFrame()}
             start = trade_signals['ts_event'].min()
-            end = trade_signals['ts_event'].max()
+            # Bound on underlying_price_history's max, not signals' max: the
+            # signal generator drops the tail end of a backtest window when
+            # no roll date falls strictly after those days (e.g. the last
+            # ~2 weeks of a single-year run, since the *next* cycle's roll
+            # date is out of range) — but an already-open position still
+            # needs its daily close-check evaluated through the actual end
+            # of the period, or it never rolls/closes naturally and instead
+            # force-closes at the very end via close_all.
+            end = underlying_price_history['ts_event'].max()
             dates = pl.date_range(start, end, interval='1d', eager=True).to_list()
         else:
             if trade_signals is None or trade_signals.empty:
