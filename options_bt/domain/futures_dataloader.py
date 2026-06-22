@@ -24,39 +24,26 @@ WITH futs AS (
     FROM instruments
     WHERE asset = ? AND instrument_class = 'F' AND security_type = 'FUT'
 ),
--- `instrument_id` gets recycled by the exchange over long enough time spans
--- -- a handful of our futures' ids were previously assigned to unrelated,
--- long-expired instruments (e.g. old options on a different asset). `ohlcv`
--- has no symbol/asset column, only instrument_id, so a plain id join pulls
--- in that prior owner's bars too. Bars dated before the prior owner's own
--- expiration belong to that prior owner, not to this asset -- exclude them.
-prior_owner_cutoff AS (
-    SELECT i.instrument_id, MAX(i.expiration) AS prior_expiration
-    FROM instruments i
-    JOIN futs f USING (instrument_id)
-    WHERE i.asset != ?
-    GROUP BY i.instrument_id
-),
 bars AS (
     SELECT o.instrument_id, o.ts_event, o.open, o.high, o.low, o.close, o.volume, f.expiration
     FROM ohlcv o
     JOIN futs f USING (instrument_id)
-    LEFT JOIN prior_owner_cutoff p USING (instrument_id)
     WHERE o.ts_event < CAST(f.expiration AS DATE)
-      AND (p.prior_expiration IS NULL OR o.ts_event >= CAST(p.prior_expiration AS DATE))
-      -- Heuristic stopgap, not a real fix: some recycled instrument_ids have
-      -- no second `instruments` row at all recording their prior owner (the
-      -- ETL/Databento metadata history is incomplete for them), so the join
-      -- above can't catch them. Confirmed case: CL picked up a sustained
-      -- run of negative prices through all of 2018-2019 from one such id --
-      -- no outright futures contract legitimately prices at or below zero
-      -- (the one real historical exception, WTI's brief negative print in
-      -- Apr 2020, isn't present in this dataset at all). Excluding non-
-      -- positive prices removes that contamination without touching real
-      -- data; it does NOT catch every recycled-id artifact (e.g. some
-      -- positive-but-implausible low prices have also been observed) --
-      -- flag any backtest results that still look suspicious.
-      AND o.open > 0 AND o.high > 0 AND o.low > 0 AND o.close > 0
+      -- `instrument_id` gets recycled by the exchange over long enough time
+      -- spans -- several of our futures' ids were previously assigned to
+      -- unrelated instruments (calendar spreads, options, even a different
+      -- asset's spread) whose `instruments` metadata history was never
+      -- captured locally, so a plain id+expiration join silently pulls in
+      -- that prior owner's bars too (confirmed: years of bogus low/negative
+      -- "CL" prices that were actually old calendar-spread/option bars).
+      -- `ohlcv.symbol` is the raw ticker captured per-bar at ingestion time,
+      -- independent of and more reliable than `instruments` -- a genuine
+      -- outright futures contract's ticker is always root+month code+1-2
+      -- digit year (e.g. "CLN7"), never hyphenated (a spread, e.g.
+      -- "CLX8-CLZ9") or space-suffixed (an option strike, e.g. "NQQ2
+      -- P1840"). Checking it directly sidesteps relying on `instruments`
+      -- having complete history at all.
+      AND regexp_matches(o.symbol, '^' || ? || '[FGHJKMNQUVXZ][0-9]{1,2}$')
 ),
 ranked AS (
     SELECT *, row_number() OVER (PARTITION BY ts_event ORDER BY expiration ASC) AS rn
