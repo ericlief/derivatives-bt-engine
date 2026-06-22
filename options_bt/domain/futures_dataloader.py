@@ -24,11 +24,39 @@ WITH futs AS (
     FROM instruments
     WHERE asset = ? AND instrument_class = 'F' AND security_type = 'FUT'
 ),
+-- `instrument_id` gets recycled by the exchange over long enough time spans
+-- -- a handful of our futures' ids were previously assigned to unrelated,
+-- long-expired instruments (e.g. old options on a different asset). `ohlcv`
+-- has no symbol/asset column, only instrument_id, so a plain id join pulls
+-- in that prior owner's bars too. Bars dated before the prior owner's own
+-- expiration belong to that prior owner, not to this asset -- exclude them.
+prior_owner_cutoff AS (
+    SELECT i.instrument_id, MAX(i.expiration) AS prior_expiration
+    FROM instruments i
+    JOIN futs f USING (instrument_id)
+    WHERE i.asset != ?
+    GROUP BY i.instrument_id
+),
 bars AS (
     SELECT o.instrument_id, o.ts_event, o.open, o.high, o.low, o.close, o.volume, f.expiration
     FROM ohlcv o
     JOIN futs f USING (instrument_id)
+    LEFT JOIN prior_owner_cutoff p USING (instrument_id)
     WHERE o.ts_event < CAST(f.expiration AS DATE)
+      AND (p.prior_expiration IS NULL OR o.ts_event >= CAST(p.prior_expiration AS DATE))
+      -- Heuristic stopgap, not a real fix: some recycled instrument_ids have
+      -- no second `instruments` row at all recording their prior owner (the
+      -- ETL/Databento metadata history is incomplete for them), so the join
+      -- above can't catch them. Confirmed case: CL picked up a sustained
+      -- run of negative prices through all of 2018-2019 from one such id --
+      -- no outright futures contract legitimately prices at or below zero
+      -- (the one real historical exception, WTI's brief negative print in
+      -- Apr 2020, isn't present in this dataset at all). Excluding non-
+      -- positive prices removes that contamination without touching real
+      -- data; it does NOT catch every recycled-id artifact (e.g. some
+      -- positive-but-implausible low prices have also been observed) --
+      -- flag any backtest results that still look suspicious.
+      AND o.open > 0 AND o.high > 0 AND o.low > 0 AND o.close > 0
 ),
 ranked AS (
     SELECT *, row_number() OVER (PARTITION BY ts_event ORDER BY expiration ASC) AS rn
@@ -65,7 +93,7 @@ class FuturesDataLoader(BaseDataLoader):
 
         con = duckdb.connect(self.db_path, read_only=True)
         try:
-            df = con.sql(_CONTINUOUS_FRONT_MONTH_SQL, params=[self.asset]).pl()
+            df = con.sql(_CONTINUOUS_FRONT_MONTH_SQL, params=[self.asset, self.asset]).pl()
         finally:
             con.close()
 
