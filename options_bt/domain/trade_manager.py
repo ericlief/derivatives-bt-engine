@@ -448,6 +448,7 @@ class TradeManager:
                 futures_type=self.config.futures_type,
                 quantity=self.config.quantity,
                 roll_date=trade_signal['roll_date'],
+                fill_price=self.config.fill_price,
             )
         else:
             return MultiLegOptionPosition.construct_from_signal(

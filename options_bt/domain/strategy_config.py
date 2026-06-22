@@ -90,6 +90,11 @@ class FuturesStrategyConfig(BaseStrategyConfig):
 
     futures_type: FuturesType
     futures_strategy: FuturesStrategy
+    # Fill price model for entry/exit, since there's no bid/ask in the daily
+    # OHLCV data this is sourced from: 'close' (the day's settlement price,
+    # current default/unchanged behavior) or 'mid' ((high+low)/2, a rough
+    # proxy for average fill price across the day's traded range).
+    fill_price: str = 'close'
 
     def __post_init__(self):
         if not isinstance(self.futures_type, FuturesType):
@@ -97,6 +102,9 @@ class FuturesStrategyConfig(BaseStrategyConfig):
 
         if self.futures_strategy not in [FuturesStrategy.LONG_FUTURES, FuturesStrategy.SHORT_FUTURES]:
             raise ValueError("Invalid futures strategy. Supported strategies are: long futures, short futures")
+
+        if self.fill_price not in ('close', 'mid'):
+            raise ValueError(f"Invalid fill_price {self.fill_price!r}. Supported values are: 'close', 'mid'")
 
         if self.futures_strategy in [FuturesStrategy.LONG_FUTURES]:
             self.position_side = PositionSide.LONG

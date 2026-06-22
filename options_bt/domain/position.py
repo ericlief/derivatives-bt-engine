@@ -2221,6 +2221,7 @@ class FuturesPosition(BasePosition):
     close_reason: Optional[str] = None # 'roll', 'early closure', etc.
     initial_margin: float # Initial margin for one contract
     close_date: Optional[pd.Timestamp] = None # Set by TradeManager for early closure (e.g. VIX trigger)
+    fill_price: str = 'close' # 'close' or 'mid' ((high+low)/2) — see FuturesStrategyConfig.fill_price
 
     @property
     def expire_date(self) -> pd.Timestamp:
@@ -2334,7 +2335,10 @@ class FuturesPosition(BasePosition):
             logger.error(f"No underlying closing price available for {close_date} for futures position.")
             return False
 
-        self.exit_price = match['close'][0]
+        if self.fill_price == 'mid':
+            self.exit_price = (match['high'][0] + match['low'][0]) / 2
+        else:
+            self.exit_price = match['close'][0]
 
         return True
 
@@ -2433,13 +2437,14 @@ class FuturesPosition(BasePosition):
             quantity: int,
             # initial_margin: float, # Removed as it's now an attribute of FuturesPosition, derived from signal
             roll_date: date,
+            fill_price: str = 'close',
         ) -> Optional['FuturesPosition']:
             """
             Creates a FuturesPosition object from a given trade signal.
 
             Args:
                 trade_signal: dict (a polars row, from iter_rows(named=True)),
-                              containing the underlying 'close' price
+                              containing the underlying 'close'/'high'/'low' prices
                 futures_strategy: FuturesStrategy (e.g., LONG_FUTURES)
                 entry_date: date
                 position_side: PositionSide (e.g., LONG)
@@ -2447,6 +2452,7 @@ class FuturesPosition(BasePosition):
                 quantity: int (number of contracts)
                 initial_margin: float (initial margin requirement for one contract)
                 roll_date: date (next roll date)
+                fill_price: 'close' or 'mid' ((high+low)/2) — see FuturesStrategyConfig.fill_price
 
             Returns:
                 Optional[FuturesPosition]: Created position if valid, None otherwise
@@ -2462,7 +2468,10 @@ class FuturesPosition(BasePosition):
                 logger.error(f"Missing close price in trade signal on {trade_signal.get('ts_event')}")
                 return None
 
-            entry_price = close_price
+            if fill_price == 'mid':
+                entry_price = (trade_signal['high'] + trade_signal['low']) / 2
+            else:
+                entry_price = close_price
 
             position = FuturesPosition(
                 trade_id=None, # Will be set by TradeManager
@@ -2473,6 +2482,7 @@ class FuturesPosition(BasePosition):
                 entry_price=entry_price,
                 futures_type=futures_type,
                 futures_strategy=futures_strategy,
+                fill_price=fill_price,
                 initial_margin=futures_type.initial_margin, # Corrected: get initial_margin from the enum instance
                 roll_date=roll_date,
                 margin_required=None, # Will be calculated in post_init

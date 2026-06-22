@@ -159,10 +159,10 @@ class FuturesType(Enum):
     # Commission is per contract, per side (i.e. half of round trip) and
     # reuses the existing per-contract tiers (standard vs micro) for the new
     # symbols below; calculate_pnl() doubles it for the full round trip.
-    MES = (5, 3406.84, 1.24) # Micro E-mini S&P 500
-    ES = (50, 34068.38, 1.70) # E-mini S&P 500
-    MNQ = (2, 2900.0, 1.24) # Micro E-mini Nasdaq-100 -- margin estimated, verify
-    NQ = (20, 29000.0, 1.70) # E-mini Nasdaq-100 -- margin estimated, verify
+    MES = (5, 3406.84, 0.62) # Micro E-mini S&P 500
+    ES = (50, 34068.38, 0.85) # E-mini S&P 500
+    MNQ = (2, 2900.0, 0.62) # Micro E-mini Nasdaq-100 -- margin estimated, verify
+    NQ = (20, 67582.55, 0.85) # E-mini Nasdaq-100 -- margin estimated, verify
     MYM = (0.5, 1100.0, 1.24) # Micro E-mini Dow -- margin estimated, verify
     YM = (5, 11000.0, 1.70) # E-mini Dow -- margin estimated, verify
     M2K = (5, 900.0, 1.24) # Micro E-mini Russell 2000 -- margin estimated, verify
@@ -171,10 +171,10 @@ class FuturesType(Enum):
     ZT = (2000, 1380.75, 3.04) # 2-Year T-Note (CBOT) -- margin estimated, verify
     SI = (5000, 68233.0, 1.70) # Silver (COMEX) -- margin estimated, verify
     CL = (1000, 18750.0, 1.70) # Crude Oil (NYMEX) -- margin estimated, verify
-    ZL = (600, 3000.0, 1.70) # Soybean Oil (CBOT) -- margin estimated, verify
-    ZC = (50, 1500.0, 1.70) # Corn (CBOT) -- margin estimated, verify
-    ZS = (50, 3000.0, 1.70) # Soybeans (CBOT) -- margin estimated, verify
-    ZW = (50, 2500.0, 1.70) # Wheat (CBOT) -- margin estimated, verify
+    ZL = (600, 4603.97, 3.02) # Soybean Oil (CBOT) -- margin estimated, verify
+    ZC = (50, 1638.35, 3.02) # Corn (CBOT) -- margin estimated, verify
+    ZS = (50, 4130.84, 3.02) # Soybeans (CBOT) -- margin estimated, verify
+    ZW = (50, 2948.24, 3.02) # Wheat (CBOT) -- margin estimated, verify
     NIY = (500, 10000.0, 1.70) # Nikkei 225 Yen-denominated (CME) -- margin estimated, verify.
                                # NOTE: contract is JPY-denominated (Y500/point); this
                                # codebase's PnL math has no FX conversion, so PnL will
@@ -183,9 +183,9 @@ class FuturesType(Enum):
     # actual exchange ticker starts with one (6J, 6L, 6M) are named with a
     # leading underscore here -- use FuturesType.from_symbol('6J') to look
     # them up by their real ticker rather than FuturesType['6J'] (invalid).
-    _6J = (12_500_000, 3000.0, 1.70) # Japanese Yen (CME) -- margin estimated, verify
-    _6L = (100_000, 3500.0, 1.70) # Brazilian Real (CME) -- margin estimated, verify
-    _6M = (500_000, 2000.0, 1.70) # Mexican Peso (CME) -- margin estimated, verify
+    _6J = (12_500_000, 3015.0, 2.47) # Japanese Yen (CME) -- margin estimated, verify
+    _6L = (100_000, 5034.80, 2.47) # Brazilian Real (CME) -- margin estimated, verify
+    _6M = (500_000, 1971.67, 2.47) # Mexican Peso (CME) -- margin estimated, verify
     # SOX = (?, ?, 1.70) # Not added: genuinely unsure of this contract's point
     # value/margin (possibly a Small Exchange product, not a standard CME index
     # future I have reliable specs for) -- ask before adding rather than guess.
