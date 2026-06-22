@@ -42,8 +42,8 @@ class FuturesSignalGenerator(BaseSignalGenerator):
         """Generate trade signals for futures positions."""
         logger.info(f"Generating {self.config.futures_type.value} futures signals...")
 
-        if futures_type not in [FuturesType.MES]:
-            raise ValueError("Invalid futures type. Supported types are: MES")
+        if not isinstance(futures_type, FuturesType):
+            raise ValueError(f"Invalid futures type. Supported types are: {[t.name for t in FuturesType]}")
 
         if futures_strategy not in [FuturesStrategy.LONG_FUTURES, FuturesStrategy.SHORT_FUTURES]:
             raise ValueError("Invalid futures strategy. Supported strategies are: long futures, short futures")
@@ -67,11 +67,19 @@ class FuturesSignalGenerator(BaseSignalGenerator):
             .sort('ts_event')
         )
 
-        # For each bar, attach the next (>=) quarterly roll date — equivalent
-        # to "hold this contract until it rolls." Bars past the last roll
-        # date in range get no match (null) and are dropped, matching the
-        # original row-loop's behavior of producing no signal in that case.
-        signals = underlying.join_asof(roll_dates_df, left_on='ts_event', right_on='roll_date', strategy='forward')
+        # For each bar, attach the next roll date STRICTLY AFTER that bar's
+        # date — i.e. "hold until the next roll." Using a plain forward
+        # join_asof (>=) would make a bar dated exactly on a roll date match
+        # itself, producing a position that opens and immediately closes
+        # the same day every time the contract rolls. Shifting the join key
+        # forward by one day before matching fixes that: a bar on the roll
+        # date now correctly rolls into the *next* cycle, keeping exposure
+        # continuous across the roll instead of a same-day open/close.
+        # Bars past the last roll date in range get no match (null) and are
+        # dropped, matching the original row-loop's behavior in that case.
+        underlying = underlying.with_columns((pl.col('ts_event') + pl.duration(days=1)).alias('_roll_join_key'))
+        signals = underlying.join_asof(roll_dates_df, left_on='_roll_join_key', right_on='roll_date', strategy='forward')
+        signals = signals.drop('_roll_join_key')
         signals = signals.filter(pl.col('roll_date').is_not_null())
         signals = signals.with_columns(pl.lit(self.config.futures_type.margin_required).alias('initial_margin'))
 

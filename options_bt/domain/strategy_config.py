@@ -92,11 +92,11 @@ class FuturesStrategyConfig(BaseStrategyConfig):
     futures_strategy: FuturesStrategy
 
     def __post_init__(self):
-        if self.futures_type not in [FuturesType.MES]:
-            raise ValueError("Invalid futures type. Supported types are: MES")
-        
+        if not isinstance(self.futures_type, FuturesType):
+            raise ValueError(f"Invalid futures type. Supported types are: {[t.name for t in FuturesType]}")
+
         if self.futures_strategy not in [FuturesStrategy.LONG_FUTURES, FuturesStrategy.SHORT_FUTURES]:
-            raise ValueError("Invalid futures strategy. Supported strategies are: long futures") 
+            raise ValueError("Invalid futures strategy. Supported strategies are: long futures, short futures")
 
         if self.futures_strategy in [FuturesStrategy.LONG_FUTURES]:
             self.position_side = PositionSide.LONG

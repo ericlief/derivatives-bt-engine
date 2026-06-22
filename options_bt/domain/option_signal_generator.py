@@ -249,9 +249,9 @@ class OptionSignalGenerator(BaseSignalGenerator):
         """
         logger.info(f"Generating {self.config.futures_type.value} futures signals...")
         
-        if futures_type not in [FuturesType.MES]:
-            raise ValueError("Invalid futures type. Supported types are: MES")
-        
+        if not isinstance(futures_type, FuturesType):
+            raise ValueError(f"Invalid futures type. Supported types are: {[t.name for t in FuturesType]}")
+
         if futures_strategy not in [FuturesStrategy.LONG_FUTURES, FuturesStrategy.SHORT_FUTURES]:
             raise ValueError("Invalid futures strategy. Supported strategies are: long futures, short futures")
 
@@ -267,28 +267,31 @@ class OptionSignalGenerator(BaseSignalGenerator):
         underlying = self.underlying[start_date:end_date]
   
 
+        # Each bar is tagged with the next roll date STRICTLY AFTER that
+        # bar's date — i.e. "hold until the next roll." Matching on date <=
+        # roll_date (inclusive) would make a bar dated exactly on a roll
+        # date match itself, producing a position that opens and
+        # immediately closes the same day every time the contract rolls;
+        # using a strict '>' keeps exposure continuous across the roll.
         signals = []
-        prev_roll = start_date - pd.Timedelta(days=1)
         for row in underlying.itertuples():
             date = row.Index
-            # logger.debug(f'Processing {date}')
-            for roll_date in roll_dates:
-                if prev_roll  < date <= roll_date:
-                    # Convert the NamedTuple 'row' to a dictionary, then to a DataFrame
-                    # This preserves the original column names.
-                    # ._asdict() is available on NamedTuple instances.
-                    signal_data = row._asdict()
-                    signal = pd.DataFrame([signal_data]).set_index('Index')
-                    
-                    signal['roll_date'] = roll_date
-                    # Add initial_margin to the single-row DataFrame 'signal'
-                    signal['initial_margin'] = self.config.futures_type.margin_required 
+            candidate_rolls = [rd for rd in roll_dates if rd > date]
+            if not candidate_rolls:
+                continue
+            roll_date = min(candidate_rolls)
 
-                    signals.append(signal)  
-                    break
-                else:
-                    prev_roll = roll_date
-                
+            # Convert the NamedTuple 'row' to a dictionary, then to a DataFrame
+            # This preserves the original column names.
+            # ._asdict() is available on NamedTuple instances.
+            signal_data = row._asdict()
+            signal = pd.DataFrame([signal_data]).set_index('Index')
+
+            signal['roll_date'] = roll_date
+            # Add initial_margin to the single-row DataFrame 'signal'
+            signal['initial_margin'] = self.config.futures_type.margin_required
+
+            signals.append(signal)
 
         signals = pd.concat(signals)
         logger.info(f'Generated {len(signals)} future signals:\n {signals.head(40)}')

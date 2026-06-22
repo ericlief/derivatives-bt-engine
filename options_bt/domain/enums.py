@@ -151,7 +151,8 @@ class OptionStrategy(BaseStrategy):
 class FuturesType(Enum):
     """Futures contract type enumeration, with associated properties."""
     # Value format: (contract_multiplier, initial_margin, commission)
-    MES = (5, 2302.72, 1.42) # Micro E-mini S&P 500
+    MES = (5, 3406.84, 0.62) # Micro E-mini S&P 500
+    ES = (50, 34068.38, 1.42) # E-mini S&P 500
 
     def __new__(cls, contract_multiplier: float, initial_margin: float, commission: float):
         obj = object.__new__(cls)

@@ -203,7 +203,28 @@ def run_test_suite():
     #     else:
     #         logger.warning("No trades executed for this configuration")
 
+def run():
+
+    from options_bt.domain.backtester import Backtester
+    from options_bt.domain.futures_dataloader import FuturesDataLoader
+    from options_bt.domain.strategy_config import FuturesStrategyConfig
+    from options_bt.domain.enums import FuturesType, FuturesStrategy
+
+    dl = FuturesDataLoader(asset='ES', use_preprocessed=False, save_preprocessed=False)
+    data = dl.load_data()
+
+    config = FuturesStrategyConfig(
+        quantity=1, futures_type=FuturesType.ES, futures_strategy=FuturesStrategy.LONG_FUTURES,
+        initial_capital=100000, leverage=1.0, start_date='2023-01-01', end_date='2023-06-30',
+    )
+    bt = Backtester(data=data, save_trades=False, log_to_sheets=False)
+    results = bt.run(config)
+    print(results['trade_results'])
+
+
+
 if __name__ == "__main__":
-    run_test_suite()
+    # run_test_suite()
+    run()
     
  
