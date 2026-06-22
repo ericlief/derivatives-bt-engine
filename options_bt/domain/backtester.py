@@ -8,9 +8,12 @@ from datetime import datetime
 import os
 from enum import Enum
 
+import polars as pl
+
 from options_bt.domain.enums import *
 from options_bt.domain.strategy_config import FuturesStrategyConfig, SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig
 from options_bt.domain.option_signal_generator import OptionSignalGenerator
+from options_bt.domain.futures_signal_generator import FuturesSignalGenerator
 from options_bt.domain.trade_manager import TradeManager
 from options_bt.domain.position import FuturesPosition, SingleLegOptionPosition     
 from options_bt.domain.trade_result import OptionTradeResult
@@ -53,14 +56,19 @@ class Backtester:
         self.results: Dict[str, pd.DataFrame] = {}
         self.__post_init__()
 
+    @staticmethod
+    def _not_empty(df) -> bool:
+        """Works for both pandas (.empty) and polars (.height) DataFrames."""
+        return (df.height > 0) if isinstance(df, pl.DataFrame) else (not df.empty)
+
     def __post_init__(self):
         """Create the results directory if it does not exist."""
-        
+
         os.makedirs(self.results_dir, exist_ok=True)
         logger.info(f'Instantiated Backtester with following data: ')
-        logger.info(f'Options chain: {not self.option_chain.empty}')
-        logger.info(f'Underlying: {not self.underlying.empty}')
-        logger.info(f'VIX: {not self.vix.empty}')
+        logger.info(f'Options chain: {self._not_empty(self.option_chain)}')
+        logger.info(f'Underlying: {self._not_empty(self.underlying)}')
+        logger.info(f'VIX: {self._not_empty(self.vix)}')
 
     def run(
         self,
@@ -74,9 +82,17 @@ class Backtester:
         # Logic for early close days
         # leg_early_close = leg.early_close_days if leg.early_close_days is not None else strategy.early_close_days
         
+        # Futures signals/margin calc run entirely in polars (no spreads/legs,
+        # a much simpler path than options); the option paths below are
+        # untouched and stay on pandas.
+        is_futures = isinstance(config, FuturesStrategyConfig)
+
         # Initialize trade manager
         trade_manager = TradeManager(config=config, vix=self.vix)
-        signal_generator = OptionSignalGenerator(option_chain=self.option_chain.copy(), underlying=self.underlying.copy(), config=config)    
+        if is_futures:
+            signal_generator = FuturesSignalGenerator(config=config, underlying=self.underlying)
+        else:
+            signal_generator = OptionSignalGenerator(option_chain=self.option_chain.copy(), underlying=self.underlying.copy(), config=config)
         # Generate or validate signals
         signal_start = time.time()
         if isinstance(config, SingleLegOptionStrategyConfig):
@@ -93,7 +109,7 @@ class Backtester:
             )
         elif isinstance(config, MultiLegOptionStrategyConfig):
             signals = signal_generator.generate_multi_leg_signals()
-        elif isinstance(config, FuturesStrategyConfig):
+        elif is_futures:
             signals = signal_generator.generate_futures_signals(
                 futures_type=config.futures_type,
                 futures_strategy=config.futures_strategy,
@@ -103,18 +119,53 @@ class Backtester:
             )
         else:
             raise ValueError("Invalid config type")
-        
-        if signals.empty:
+
+        if (signals.height == 0) if is_futures else signals.empty:
             logger.warning("No valid signals generated")
             return {'trade_results': pd.DataFrame(), 'transactions': pd.DataFrame()}
 
-
-        # Pre-calculate margin requirements for all signals
-        is_spread = isinstance(config, MultiLegOptionStrategyConfig)
         max_allowed_margin = config.max_margin_utilization * config.initial_capital * config.leverage
         logger.info(f"Maximum allowed margin: ${max_allowed_margin:.2f} ({config.max_margin_utilization:.0%} of capital with {config.leverage}x leverage)")
         logger.info(f"Maximum simultaneous positions: {config.max_positions}")
-        
+
+        if is_futures:
+            logger.info(f"Calculating margin requirements for futures {len(signals)} signals: {config.quantity} | {config.futures_strategy} | {config.futures_type}")
+            signals = signals.with_columns(
+                (pl.col('initial_margin') * config.quantity / config.leverage).alias('margin_required')
+            )
+            valid_signals = signals.filter(pl.col('margin_required') <= max_allowed_margin)
+            self.execution_times['signal_generation'] = time.time() - signal_start
+
+            filtered_count = signals.height - valid_signals.height
+            if filtered_count > 0:
+                logger.warning(f"Filtered out {filtered_count} trades due to margin requirements")
+            if valid_signals.height > 0:
+                logger.info(f"Average margin requirement for trades: ${valid_signals['margin_required'].mean():.2f}")
+                logger.info(f"Maximum margin requirement for trades: ${valid_signals['margin_required'].max():.2f}")
+            logger.info(f"Total valid signals: {valid_signals.height}")
+
+            if valid_signals.height == 0:
+                logger.info("No valid signals; skipping trade execution.")
+                return {'trade_results': pd.DataFrame(), 'transactions': pd.DataFrame()}
+
+            backtest_start = time.time()
+            results_transactions_dict = trade_manager.construct_and_execute_trades_from_signals(
+                valid_signals,
+                option_chain=self.option_chain,
+                underlying_price_history=self.underlying,
+            )
+            self.execution_times['backtest_execution'] = time.time() - backtest_start
+            trade_results = results_transactions_dict['trade_results']
+            transactions = results_transactions_dict['transactions']
+            if trade_results.empty:
+                logger.warning("No trades were executed successfully")
+                return {'trade_results': pd.DataFrame(), 'transactions': pd.DataFrame()}
+
+            return self._finalize_results(trade_results, transactions, config, start_time)
+
+        # Pre-calculate margin requirements for all signals
+        is_spread = isinstance(config, MultiLegOptionStrategyConfig)
+
         # Handle all spread types
         if is_spread:
             # Calculate margins per spread group and ensure proper alignment
@@ -190,15 +241,7 @@ class Backtester:
                     ), 
                 axis=1
             )
-        
-        # Futures
-        elif isinstance(config, FuturesStrategyConfig):
-            logger.info(f"Calculating margin requirements for futures {len(signals)} signals: {config.quantity} | {config.futures_strategy} | {config.futures_type}")
-            # Use the 'initial_margin' already present in the signals DataFrame
-            signals['margin_required'] = signals['initial_margin'] * config.quantity / config.leverage
-            logger.info(f'Sample margin: {signals['margin_required'].iloc[0]}')
 
-            
         # Filter out trades that would exceed margin limits
         valid_signals = signals[signals['margin_required'] <= max_allowed_margin]
         self.execution_times['signal_generation'] = time.time() - signal_start
@@ -226,11 +269,7 @@ class Backtester:
         if valid_signals.empty:
             logger.info("No valid signals; skipping trade execution.")
             return {'trade_results': pd.DataFrame(), 'transactions': pd.DataFrame()}
-        
-        
-        elif isinstance(config, FuturesStrategyConfig):
-            pass
-        
+
         # Execute trades
         backtest_start = time.time()
         results_transactions_dict = trade_manager.construct_and_execute_trades_from_signals(valid_signals, 
@@ -242,8 +281,20 @@ class Backtester:
         if trade_results.empty:
             logger.warning("No trades were executed successfully")
             return {'trade_results': pd.DataFrame(), 'transactions': pd.DataFrame()}
-        
-        
+
+        return self._finalize_results(trade_results, transactions, config, start_time)
+
+    def _finalize_results(self, trade_results: pd.DataFrame, transactions: pd.DataFrame,
+                          config: Union[SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig, FuturesStrategyConfig],
+                          start_time: float) -> dict:
+        """
+        Shared post-processing for both the option and futures paths:
+        cumulative PnL/capital tracking, Sharpe, column ordering, drawdown,
+        and saving. trade_results/transactions are pandas here regardless of
+        which path produced them (TradeManager converts futures results to
+        pandas at its return boundary) since this math is unchanged from
+        before the futures-polars migration.
+        """
         # Calculate cumulative metrics based on PnL
         # Insert a new row at the start with the initial capital (pre-trade)
         # init_row = trade_results.iloc[0].copy()
@@ -303,30 +354,52 @@ class Backtester:
         self._log_execution_summary(total_time)
         self.execution_times['total'] = round(total_time, 2)
 
-        # Order columns     
-        ordered_cols = [
-            'trade_id',
-            'quantity',
-            'opened',
-            'closed',
-            'days_held',
-            'option_strategy',
-            'close_reason',
-            'bp',
-            'margin_utilization',
-            'capital',
-            'peak_capital',
-            'capital_used',
-            'pnl',
-            'cumulative_pnl',
-            'premium',
-            'fees',
-            'ret',
-            'ret_per_unit_risk',
-            'ret_per_point',
-        ]
+        # Order columns (futures trade results carry futures_strategy/roi
+        # instead of option_strategy/premium/ret_per_unit_risk/ret_per_point)
+        if isinstance(config, FuturesStrategyConfig):
+            ordered_cols = [
+                'trade_id',
+                'quantity',
+                'opened',
+                'closed',
+                'days_held',
+                'futures_strategy',
+                'close_reason',
+                'bp',
+                'margin_utilization',
+                'capital',
+                'peak_capital',
+                'capital_used',
+                'pnl',
+                'cumulative_pnl',
+                'fees',
+                'ret',
+                'roi',
+            ]
+        else:
+            ordered_cols = [
+                'trade_id',
+                'quantity',
+                'opened',
+                'closed',
+                'days_held',
+                'option_strategy',
+                'close_reason',
+                'bp',
+                'margin_utilization',
+                'capital',
+                'peak_capital',
+                'capital_used',
+                'pnl',
+                'cumulative_pnl',
+                'premium',
+                'fees',
+                'ret',
+                'ret_per_unit_risk',
+                'ret_per_point',
+            ]
 
-        trade_results = trade_results[ordered_cols]
+        trade_results = trade_results[[c for c in ordered_cols if c in trade_results.columns]]
 
         results = {
             'trade_results': trade_results,
@@ -819,9 +892,11 @@ class Backtester:
 
         if isinstance(config, MultiLegOptionStrategyConfig):
             param_str = f"{config.spread_type.value}_spread_{f'{config.legs[0].dte_range[0]}:{config.legs[0].dte_range[1]}' if config.legs[0].dte_range else config.legs[0].dte_target}_{config.start_date}:{config.end_date}"
+        elif isinstance(config, FuturesStrategyConfig):
+            param_str = f"{config.futures_type.name}_{config.futures_strategy.value}_{config.start_date}:{config.end_date}"
         else:
             param_str = f"{config.leg.option_type.value}_{config.leg.position_side.value}_{f'{config.leg.delta_range[0]}:{config.leg.delta_range[1]}' if config.leg.delta_range else config.leg.delta_target}_{f'{config.leg.dte_range[0]}:{config.leg.dte_range[1]}' if config.leg.dte_range else config.leg.dte_target}_{config.start_date}:{config.end_date}"
-        
+
         return param_str.upper()
 
  

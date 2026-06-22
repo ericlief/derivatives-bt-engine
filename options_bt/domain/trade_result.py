@@ -131,4 +131,39 @@ class OptionTradeResult(BaseTradeResult):
     @staticmethod
     def to_dataframe(results: list['OptionTradeResult']) -> pd.DataFrame:
         """Convert list of TradeResults to DataFrame."""
-        return pd.DataFrame([r.to_dict() for r in results]) 
+        return pd.DataFrame([r.to_dict() for r in results])
+
+
+@dataclass(kw_only=True)
+class FuturesTradeResult(BaseTradeResult):
+    """Represents a completed futures trade with entry and exit details."""
+    futures_strategy: Optional[Union[FuturesStrategy, str]]
+    close_reason: Optional[str]
+    roi: Optional[float] = None
+
+    def to_dict(self) -> Dict:
+        """Convert to dictionary for DataFrame creation."""
+        return {
+            'futures_strategy': self.futures_strategy,
+            'trade_id': self.trade_id,
+            'quantity': self.quantity,
+            'opened': self.opened,
+            'closed': self.closed,
+            'days_held': self.days_held,
+            'close_reason': self.close_reason,
+            'fees': self.fees,
+            'bp': self.bp,
+            'capital_used': self.capital_used,
+            'pnl': self.pnl,
+            'roi': self.roi,
+        }
+
+    @classmethod
+    def from_dataframe_row(cls, row: pd.Series) -> 'FuturesTradeResult':
+        """Create TradeResult from a DataFrame row."""
+        return cls(**row.to_dict())
+
+    @staticmethod
+    def to_dataframe(results: list['FuturesTradeResult']) -> pd.DataFrame:
+        """Convert list of TradeResults to DataFrame."""
+        return pd.DataFrame([r.to_dict() for r in results])

@@ -1,10 +1,11 @@
 from typing import Optional, Dict, Union, List, NamedTuple, Tuple
 import pandas as pd
+import polars as pl
 from options_bt.domain.enums import *
-from options_bt.domain.position import SingleLegOptionPosition, MultiLegOptionPosition
+from options_bt.domain.position import SingleLegOptionPosition, MultiLegOptionPosition, FuturesPosition
 from options_bt.domain.trade_result import OptionTradeResult
 from options_bt.utils.logger import setup_logger
-from options_bt.domain.strategy_config import SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig
+from options_bt.domain.strategy_config import SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig, FuturesStrategyConfig
 
 logger = setup_logger()
 
@@ -58,7 +59,19 @@ class TradeManager:
         if effective_margin is None or effective_margin <= 0 and position.position_side == PositionSide.SHORT:
             logger.error(f"Null or invalid margin requirement for short position on {position.entry_date}")
             return None, bp_effect
-                
+
+        # Futures have no premium (no upfront cash leg) — margin is reserved
+        # symmetrically for long and short, unlike options where only the
+        # short side posts margin and the long side just pays a premium.
+        if isinstance(position, FuturesPosition):
+            if self.option_bp >= effective_margin:
+                bp_effect -= effective_margin
+                logger.debug(f'Reserved futures margin. BP: {self.option_bp} | BP Effect: {bp_effect}')
+                return position, bp_effect
+            else:
+                logger.warning(f"Insufficient buying power (${self.option_bp}) for futures margin. Required: ${effective_margin:.2f}")
+                return None, bp_effect
+
         # Retrieve absolute premium regardless of position type
         premium = abs(position.signed_premium)
 
@@ -112,11 +125,26 @@ class TradeManager:
         all_trade_results = []
         all_transactions = []
         skipped_trades = 0
-        if trade_signals is None or trade_signals.empty:
-            return {'trade_results': pd.DataFrame(), 'transactions': pd.DataFrame()}
-        start = trade_signals.index.min()
-        end = trade_signals.index.max()
-        dates = pd.date_range(start, end)
+
+        # Futures signals are polars-native (no spreads/legs, simpler date
+        # handling); options signals stay on the existing pandas DatetimeIndex
+        # path. Branch only at the few index/iteration touchpoints below —
+        # the position construction/execution/closing logic further down is
+        # already polymorphic across position types and needs no branching.
+        is_futures = isinstance(self.config, FuturesStrategyConfig)
+
+        if is_futures:
+            if trade_signals is None or trade_signals.height == 0:
+                return {'trade_results': pd.DataFrame(), 'transactions': pd.DataFrame()}
+            start = trade_signals['ts_event'].min()
+            end = trade_signals['ts_event'].max()
+            dates = pl.date_range(start, end, interval='1d', eager=True).to_list()
+        else:
+            if trade_signals is None or trade_signals.empty:
+                return {'trade_results': pd.DataFrame(), 'transactions': pd.DataFrame()}
+            start = trade_signals.index.min()
+            end = trade_signals.index.max()
+            dates = pd.date_range(start, end)
 
         # Iterate through all dates in backtest range first in order to manage trades, e.g. exit when certain
         # certain conditions are met (vix, etc.) 
@@ -125,23 +153,37 @@ class TradeManager:
             current_date = date
             logger.debug(f'Processing date: {current_date}')
 
-            if current_date in trade_signals.index:
-                trade_signal = trade_signals.loc[[current_date]] # force to df
+            if is_futures:
+                match = trade_signals.filter(pl.col('ts_event') == current_date)
+                trade_signal = match if match.height > 0 else None
             else:
-                trade_signal = None
+                if current_date in trade_signals.index:
+                    trade_signal = trade_signals.loc[[current_date]] # force to df
+                else:
+                    trade_signal = None
 
             # VIX gating (skip trade if outside range or missing)
             vix_close_value = None
             vix_early_closure = False
 
             if self.config.vix_range is not None or self.config.vix_max is not None:
-                if isinstance(self.vix, pd.DataFrame) and not self.vix.empty and current_date in self.vix.index:
-                    row = self.vix.loc[current_date]
-                    try:
-                        vix_close_value = float(row['close'] if 'close' in row else float(row))
-                    except Exception:
-                        vix_close_value = None
-                    logger.debug(f'VIX daily value {vix_close_value}')
+                if is_futures:
+                    if isinstance(self.vix, pl.DataFrame) and self.vix.height > 0 and 'ts_event' in self.vix.columns:
+                        vix_match = self.vix.filter(pl.col('ts_event') == current_date)
+                        if vix_match.height > 0:
+                            try:
+                                vix_close_value = float(vix_match['close'][0])
+                            except Exception:
+                                vix_close_value = None
+                            logger.debug(f'VIX daily value {vix_close_value}')
+                else:
+                    if isinstance(self.vix, pd.DataFrame) and not self.vix.empty and current_date in self.vix.index:
+                        row = self.vix.loc[current_date]
+                        try:
+                            vix_close_value = float(row['close'] if 'close' in row else float(row))
+                        except Exception:
+                            vix_close_value = None
+                        logger.debug(f'VIX daily value {vix_close_value}')
 
                 if vix_close_value is not None:
                     # Check vix_max for early exit
@@ -179,8 +221,9 @@ class TradeManager:
                     continue
 
             # Construct a new position from the trade signal if possible on the current date
-            if trade_signal is not None:    
-                for trade in trade_signal.itertuples():
+            if trade_signal is not None:
+                row_iter = trade_signal.iter_rows(named=True) if is_futures else trade_signal.itertuples()
+                for trade in row_iter:
                     # Skip if we've reached max open positions
                     if len(self.open_positions) >= self.max_positions:
                         skipped_trades += 1
@@ -375,26 +418,34 @@ class TradeManager:
             Optional[Union[SingleLegOptionPosition, MultiLegOptionPosition]]: A new position object if the signal is valid, otherwise None.
         """
         
-        # Early close logic 
-        early_close_days = self.config.early_close_after
-
         # Construct new position from signal
         if isinstance(self.config, SingleLegOptionStrategyConfig):
             return SingleLegOptionPosition.construct_from_signal(
-                trade_signal=trade_signal, 
+                trade_signal=trade_signal,
                 option_strategy=self.config.option_strategy,
-                entry_date=current_date, 
-                position_side=self.config.leg.position_side, 
-                option_type=self.config.leg.option_type, 
-                quantity=self.config.quantity, 
-                early_close_days=self.config.early_close_days
+                entry_date=current_date,
+                position_side=self.config.leg.position_side,
+                option_type=self.config.leg.option_type,
+                quantity=self.config.quantity,
+                early_close_after_dit=self.config.early_close_after_dit,
+                early_close_on_dte=self.config.early_close_on_dte,
+            )
+        elif isinstance(self.config, FuturesStrategyConfig):
+            return FuturesPosition.construct_from_signal(
+                trade_signal=trade_signal,
+                futures_strategy=self.config.futures_strategy,
+                entry_date=current_date,
+                position_side=self.config.position_side,
+                futures_type=self.config.futures_type,
+                quantity=self.config.quantity,
+                roll_date=trade_signal['roll_date'],
             )
         else:
             return MultiLegOptionPosition.construct_from_signal(
-                trade_signal=trade_signal, 
+                trade_signal=trade_signal,
                 config=self.config,
-                entry_date=current_date, 
-            )   
+                entry_date=current_date,
+            )
 
         # if is_spread:
         #     # For spreads, we already have positions with dates

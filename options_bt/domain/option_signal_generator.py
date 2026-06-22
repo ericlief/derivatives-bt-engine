@@ -252,8 +252,8 @@ class OptionSignalGenerator(BaseSignalGenerator):
         if futures_type not in [FuturesType.MES]:
             raise ValueError("Invalid futures type. Supported types are: MES")
         
-        if futures_strategy not in [FuturesStrategy.LONG_FUTURES]:
-            raise ValueError("Invalid futures strategy. Supported strategies are: long futures")
+        if futures_strategy not in [FuturesStrategy.LONG_FUTURES, FuturesStrategy.SHORT_FUTURES]:
+            raise ValueError("Invalid futures strategy. Supported strategies are: long futures, short futures")
 
         if position_side not in [PositionSide.LONG, PositionSide.SHORT]:
             raise ValueError("Invalid position side. Supported sides are: long, short")

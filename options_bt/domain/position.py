@@ -1,17 +1,18 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
+import math
 from typing import Optional, Dict, Union, List, NamedTuple, Tuple
 from functools import cached_property
 from abc import ABC, abstractmethod
 from numpy import info
 import pandas as pd
+import polars as pl
 from pandas.core.computation.ops import Op
 
-from options_bt.domain.dataloader import DataLoader
 from options_bt.domain.enums import *
 from options_bt.domain.strategy_config import MultiLegOptionStrategyConfig
-from options_bt.domain.trade_result import BaseTradeResult, OptionTradeResult
+from options_bt.domain.trade_result import BaseTradeResult, OptionTradeResult, FuturesTradeResult
 from options_bt.utils.logger import setup_logger
 from options_bt.utils.price_utils import PriceUtils
 logger = setup_logger()
@@ -2205,6 +2206,7 @@ class MultiLegOptionPosition(BaseOptionPosition):
         logger.debug(f"Simple spread exit price: {self.exit_price}")
         
 
+@dataclass(kw_only=True)
 class FuturesPosition(BasePosition):
     """Class representing a futures position."""
     futures_type: FuturesType
@@ -2217,6 +2219,13 @@ class FuturesPosition(BasePosition):
     roll_date: pd.Timestamp # The date when this futures contract is expected to be rolled
     close_reason: Optional[str] = None # 'roll', 'early closure', etc.
     initial_margin: float # Initial margin for one contract
+    close_date: Optional[pd.Timestamp] = None # Set by TradeManager for early closure (e.g. VIX trigger)
+
+    @property
+    def expire_date(self) -> pd.Timestamp:
+        """Futures have no option-style expiration — the roll_date is the
+        equivalent trigger TradeManager uses to close/roll the position."""
+        return self.roll_date
 
     def __post_init__(self):
         super().__post_init__()
@@ -2308,48 +2317,60 @@ class FuturesPosition(BasePosition):
         """
         return round(self.initial_margin * self.quantity / leverage, 2)
 
-    def _update_closing_data(self, underlying_price_history: pd.DataFrame, close_date: pd.Timestamp) -> bool:
+    def _update_closing_data(self, underlying_price_history: pl.DataFrame, close_date: date) -> bool:
         """
         Update the instance with closing price data for the futures position.
-        
+
         Args:
-            underlying_price_history (pd.DataFrame): DataFrame containing historical prices of the underlying asset.
-            close_date (pd.Timestamp): The date at which the position is being closed.
+            underlying_price_history (pl.DataFrame): DataFrame containing historical prices of the underlying asset.
+            close_date (date): The date at which the position is being closed.
 
         Returns:
             bool: True if closing data was successfully updated, False otherwise.
         """
-        if close_date not in underlying_price_history.index:
+        close_date = self._as_date(close_date)
+        match = underlying_price_history.filter(pl.col('ts_event') == close_date)
+        if match.height == 0:
             logger.error(f"No underlying closing price available for {close_date} for futures position.")
             return False
-        
-        self.underlying_exit = underlying_price_history.loc[close_date, 'close']
+
+        self.underlying_exit = match['close'][0]
         self.exit_price = self.underlying_exit # For futures, exit price is the underlying price
-        
+
         return True
 
+    @staticmethod
+    def _as_date(value) -> date:
+        """Normalize a pd.Timestamp/date/str to a plain datetime.date for
+        comparison against the polars (pl.Date) underlying price history."""
+        if isinstance(value, pd.Timestamp):
+            return value.date()
+        if isinstance(value, str):
+            return pd.Timestamp(value).date()
+        return value
+
     def close(self,
-            option_chain: pd.DataFrame, # Not used for futures, but kept for method signature compatibility
-            underlying_price_history: pd.DataFrame,
+            option_chain: pl.DataFrame, # Not used for futures, but kept for method signature compatibility
+            underlying_price_history: pl.DataFrame,
             force: bool = False,
             close_reason: Optional[str] = None # Added close_reason parameter
     ) -> Optional[Tuple[BaseTradeResult, Dict, float]]:
         """
         Close this futures position and calculate results.
-        
+
         Args:
-            option_chain: pd.DataFrame (not used for futures)
-            underlying_price_history: pd.DataFrame,
+            option_chain: pl.DataFrame (not used for futures)
+            underlying_price_history: pl.DataFrame,
             force: bool = False (if closing at end of backtest)
-        
+
         Returns:
             Optional[Tuple[BaseTradeResult, Dict, float]]: Tuple of (trade_result, transaction_dict, bp_effect) if successful, None otherwise.
         """
         logger.info(f"Closing Trade #{self.trade_id}|Trans #{self.transaction_id}|{self.futures_type}|{self.position_side}")
         bp_effect = 0
-        
+
         # Determine the actual close date
-        effective_close_date = self.roll_date if self.roll_date and not force else underlying_price_history.index.max() # Use max date if forced
+        effective_close_date = self.roll_date if self.roll_date and not force else underlying_price_history['ts_event'].max() # Use max date if forced
 
         if not self._update_closing_data(underlying_price_history, effective_close_date):
             logger.error(f"Skipping futures trade due to missing close data for {self.futures_type} on {effective_close_date}")
@@ -2388,9 +2409,9 @@ class FuturesPosition(BasePosition):
         }
 
         # Prepare trade result
-        trade_result = BaseTradeResult(
+        trade_result = FuturesTradeResult(
             trade_id=self.trade_id,
-            strategy=self.futures_type.value,
+            futures_strategy=self.futures_strategy.value,
             quantity=self.quantity,
             opened=self.entry_date,
             closed=effective_close_date,
@@ -2407,44 +2428,47 @@ class FuturesPosition(BasePosition):
 
     @staticmethod
     def construct_from_signal(
-            trade_signal: NamedTuple,
+            trade_signal: dict,
             futures_strategy: FuturesStrategy,
-            entry_date: pd.Timestamp,
+            entry_date: date,
             position_side: PositionSide,
             futures_type: FuturesType,
             quantity: int,
             # initial_margin: float, # Removed as it's now an attribute of FuturesPosition, derived from signal
-            roll_date: pd.Timestamp,
+            roll_date: date,
         ) -> Optional['FuturesPosition']:
             """
             Creates a FuturesPosition object from a given trade signal.
-            
+
             Args:
-                trade_signal: NamedTuple, containing underlying_last (SPX price)
+                trade_signal: dict (a polars row, from iter_rows(named=True)),
+                              containing the underlying 'close' price
                 futures_strategy: FuturesStrategy (e.g., LONG_FUTURES)
-                entry_date: pd.Timestamp
+                entry_date: date
                 position_side: PositionSide (e.g., LONG)
                 futures_type: FuturesType (e.g., MES)
                 quantity: int (number of contracts)
                 initial_margin: float (initial margin requirement for one contract)
-                roll_date: pd.Timestamp (next roll date)
+                roll_date: date (next roll date)
 
             Returns:
                 Optional[FuturesPosition]: Created position if valid, None otherwise
             """
-            min_valid_date = pd.Timestamp('1990-01-01')
-            if not isinstance(entry_date, pd.Timestamp) or entry_date <= min_valid_date:
+            min_valid_date = date(1990, 1, 1)
+            # date covers datetime.date, datetime.datetime, and pd.Timestamp (all subclass date)
+            if not isinstance(entry_date, date) or entry_date <= min_valid_date:
                 logger.error(f"Invalid entry date {entry_date}")
                 return None
-            
-            if not hasattr(trade_signal, 'close') or pd.isna(trade_signal.close):
-                logger.error(f"Missing underlying_last in trade signal on {trade_signal.Index}")
+
+            close_price = trade_signal.get('close')
+            if close_price is None or (isinstance(close_price, float) and math.isnan(close_price)):
+                logger.error(f"Missing close price in trade signal on {trade_signal.get('ts_event')}")
                 return None
-            
-            underlying_entry = trade_signal.close
-            
+
+            underlying_entry = close_price
+
             # For futures, entry_price is the underlying price itself
-            entry_price = underlying_entry 
+            entry_price = underlying_entry
 
             position = FuturesPosition(
                 trade_id=None, # Will be set by TradeManager
@@ -2453,6 +2477,7 @@ class FuturesPosition(BasePosition):
                 position_side=position_side,
                 entry_date=entry_date,
                 entry_price=entry_price, # This is the underlying price at entry
+                underlying_entry=underlying_entry,
                 futures_type=futures_type,
                 futures_strategy=futures_strategy,
                 initial_margin=futures_type.initial_margin, # Corrected: get initial_margin from the enum instance
@@ -2464,5 +2489,35 @@ class FuturesPosition(BasePosition):
             # position.margin_required = position.calculate_margin() 
 
             logger.debug(f'Constructing futures position from signal: {futures_type} | Entry: {entry_price} | Margin: {position.margin_required}')
-            
+
             return position
+
+    @staticmethod
+    def create_transaction(position: 'FuturesPosition', date: pd.Timestamp, type: str, bp_effect: float = None) -> dict:
+        """
+        Create a transaction dictionary for a futures position open. Mirrors
+        the shape of the inline 'close' transaction dict built in close()
+        above, since both feed the same transactions DataFrame.
+        """
+        if type.lower() != 'open':
+            logger.error(f'FuturesPosition.create_transaction only handles open transactions, got {type!r}')
+            raise ValueError("FuturesPosition.create_transaction only handles 'open' transactions")
+
+        return {
+            'transaction_id': position.transaction_id,
+            'trade_id': position.trade_id,
+            'date': date,
+            'type': 'open',
+            'instrument_type': 'futures',
+            'futures_type': position.futures_type.value,
+            'position_side': position.position_side.value,
+            'entry_price': position.entry_price,
+            'exit_price': None,
+            'underlying_entry': position.underlying_entry,
+            'underlying_exit': None,
+            'quantity': position.quantity,
+            'contract_multiplier': position.contract_multiplier,
+            'pnl': None,
+            'fees': position.fees,
+            'bp_effect': round(bp_effect, 2) if bp_effect is not None else '',
+        }
