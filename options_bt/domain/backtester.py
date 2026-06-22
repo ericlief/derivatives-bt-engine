@@ -23,7 +23,9 @@ from options_bt.utils.price_utils import PriceUtils
 
 # Create logger instance
 logger = setup_logger()
-
+pl.Config.set_tbl_rows(100)
+pl.Config.set_tbl_cols(50)
+pl.Config.set_fmt_str_lengths(1000)
 
 
 class Backtester:
@@ -406,7 +408,7 @@ class Backtester:
             'transactions': transactions
         }
 
-        print(results['trade_results'])
+        print(results['trade_results'].to_string())
         
         # self.calculate_mtm(results, config) 
         if not results['trade_results'].empty:
