@@ -11,6 +11,8 @@ nbs
 *.egg-info
 *.DS_Store
 *__pycache__
+*.parquet
+vix.pkl
 
 # Rust artifacts
 

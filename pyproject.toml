@@ -32,6 +32,7 @@ dependencies = [
 [project.scripts]
 tsmom = "options_bt.live.run_tsmom_rebalance:main"
 naked = "options_bt.strats.naked_futures:main"
+tsmom-bt = "options_bt.strats.tsmom_backtest:main"
 
 [tool.setuptools.packages.find]
 include = ["options_bt*"]
