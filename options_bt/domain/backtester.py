@@ -150,11 +150,23 @@ class Backtester:
                 logger.info("No valid signals; skipping trade execution.")
                 return {'trade_results': pd.DataFrame(), 'transactions': pd.DataFrame()}
 
+            # Bound the price history passed to TradeManager to the backtest's
+            # own date range: a forced close at backtest end uses this
+            # series' max date as the closing price/date, and self.underlying
+            # is the full multi-year continuous series, not the config's
+            # window — without this filter, a position still open at
+            # config.end_date would force-close years later than requested.
+            backtest_start_ts = pd.Timestamp(config.start_date).date()
+            backtest_end_ts = pd.Timestamp(config.end_date).date()
+            bounded_underlying = self.underlying.filter(
+                (pl.col('ts_event') >= backtest_start_ts) & (pl.col('ts_event') <= backtest_end_ts)
+            )
+
             backtest_start = time.time()
             results_transactions_dict = trade_manager.construct_and_execute_trades_from_signals(
                 valid_signals,
                 option_chain=self.option_chain,
-                underlying_price_history=self.underlying,
+                underlying_price_history=bounded_underlying,
             )
             self.execution_times['backtest_execution'] = time.time() - backtest_start
             trade_results = results_transactions_dict['trade_results']

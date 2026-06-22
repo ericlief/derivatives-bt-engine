@@ -379,8 +379,9 @@ class TradeManager:
                     pos.transaction_id = self.transaction_counter
                     self.transaction_counter += 1
 
-                    result, transaction, bp_effect = pos.close(option_chain=option_chain, 
-                                                    underlying_price_history=underlying_price_history)
+                    result, transaction, bp_effect = pos.close(option_chain=option_chain,
+                                                    underlying_price_history=underlying_price_history,
+                                                    force=close_all)
 
                     if result:  
                         # Update buying power with the calculated bp_effect
