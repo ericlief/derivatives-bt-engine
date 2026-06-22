@@ -34,4 +34,5 @@ dependencies = [
 tsmom = "options_bt.live.run_tsmom_rebalance:main"
 
 [tool.maturin]
-path = "options_engine"
+manifest-path = "options_engine/Cargo.toml"
+module-name = "options_engine"

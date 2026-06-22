@@ -408,7 +408,7 @@ class Backtester:
             'transactions': transactions
         }
 
-        print(results['trade_results'].to_string())
+        print(results['trade_results'])
 
         if not results['trade_results'].empty:
             if isinstance(config, FuturesStrategyConfig):
@@ -920,7 +920,15 @@ class Backtester:
         if transactions is not None and not transactions.empty:
             transactions_csv_path = os.path.join(self.results_dir, f"transactions_{param_str}_{timestamp}.csv")
             transactions.to_csv(transactions_csv_path, index=False)
-        
+
+        # Save the full MTM/drawdown table (not just the text summary below)
+        if stats is not None and not stats.empty:
+            mtm_csv_path = os.path.join(self.results_dir, f"mtm_{param_str}_{timestamp}.csv")
+            stats.to_csv(mtm_csv_path, index=False)
+
+        is_futures = isinstance(config, FuturesStrategyConfig)
+        dd_duration_unit = "trading days" if is_futures else "trades"
+
         stats_csv_path = os.path.join(self.results_dir, f"stats_{param_str}_{timestamp}.csv")
 
         with open(stats_csv_path, 'w') as results_file:
@@ -931,9 +939,12 @@ class Backtester:
                 results_file.write(f"Total raw P&L: ${trade_results['cumulative_pnl'].iloc[-1]:.2f}\n")
                 results_file.write(f"Final capital: ${trade_results['capital'].iloc[-1]:.2f}\n")
                 results_file.write(f"Return on initial capital: {(trade_results['capital'].iloc[-1] / config.initial_capital - 1):.2%}\n")
-                results_file.write(f"Average return per unit risk {trade_results['ret_per_unit_risk'].mean():.2%}\n")
-                average_return_per_point = trade_results['ret_per_point'].mean() if trade_results['ret_per_point'] is not None and not trade_results['ret_per_point'].empty else 0.0
-                results_file.write(f"Average return per point {average_return_per_point:.2%}\n")
+                if is_futures:
+                    results_file.write(f"Average return on margin (roi) {trade_results['roi'].mean():.2f}%\n")
+                else:
+                    results_file.write(f"Average return per unit risk {trade_results['ret_per_unit_risk'].mean():.2%}\n")
+                    average_return_per_point = trade_results['ret_per_point'].mean() if trade_results['ret_per_point'] is not None and not trade_results['ret_per_point'].empty else 0.0
+                    results_file.write(f"Average return per point {average_return_per_point:.2%}\n")
                 results_file.write(f"Max Profit {trade_results['pnl'].max():.2f}\n")
                 results_file.write(f"Max Loss {trade_results['pnl'].min():.2f}\n")
                 results_file.write(f"Average days held: {trade_results['days_held'].mean():.1f}\n")
@@ -944,7 +955,7 @@ class Backtester:
                     results_file.write("\nExecution Times:\n")
                     for phase, time_taken in self.execution_times.items():
                         results_file.write(f"{phase.replace('_', ' ').title()}: {time_taken:.2f}s\n")
-                    
+
                     total_execution_time = sum(self.execution_times.values())
                     results_file.write(f"Total execution time: {total_execution_time:.2f}s\n")
 
@@ -953,14 +964,14 @@ class Backtester:
                     max_drawdown_amount = stats['Drawdown ($)'].max()  # Now using max since drawdown is positive
                     max_drawdown_percentage = stats['Drawdown (%)'].max()  # Now using max since drawdown is positive
                     results_file.write(f"Maximum drawdown: ${max_drawdown_amount:.2f} ({max_drawdown_percentage:.2f}%)\n")
-                    
+
                     # Add peak and duration stats
                     if 'drawdown_analysis' in results:
                         dd_analysis = results['drawdown_analysis']
                         results_file.write(f"Peak capital: ${dd_analysis['peak_capital']:.2f}\n")
                         results_file.write(f"Trough capital: ${dd_analysis['trough_capital']:.2f}\n")
-                        results_file.write(f"Drawdown duration: {dd_analysis['drawdown_duration']} trades\n")
-        
+                        results_file.write(f"Drawdown duration: {dd_analysis['drawdown_duration']} {dd_duration_unit}\n")
+
         results['execution_times'] = self.execution_times
         results['total_execution_time'] = round(sum(self.execution_times.values()), 2)
         if self.log_to_sheets:

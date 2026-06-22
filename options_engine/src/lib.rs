@@ -3,9 +3,6 @@ use pyo3::prelude::*;
 pub mod domain;
 pub mod signal_generator;
 
-pub mod curl;
-
-
 pub use domain::*;
 pub use signal_generator::*;
 
