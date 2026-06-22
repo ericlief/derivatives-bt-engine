@@ -960,9 +960,15 @@ class Backtester:
                     results_file.write(f"Total execution time: {total_execution_time:.2f}s\n")
 
                 if stats is not None and not stats.empty:
-                    # OLD (for negative drawdown): stats['Drawdown ($)'].min() and stats['Drawdown (%)'].min()
-                    max_drawdown_amount = stats['Drawdown ($)'].max()  # Now using max since drawdown is positive
-                    max_drawdown_percentage = stats['Drawdown (%)'].max()  # Now using max since drawdown is positive
+                    # Futures drawdown is negative (worst = .min()); the legacy
+                    # option-path calculate_simple_drawdown is still positive
+                    # (worst = .max()) — see that method's own comment.
+                    if is_futures:
+                        max_drawdown_amount = stats['Drawdown ($)'].min()
+                        max_drawdown_percentage = stats['Drawdown (%)'].min()
+                    else:
+                        max_drawdown_amount = stats['Drawdown ($)'].max()
+                        max_drawdown_percentage = stats['Drawdown (%)'].max()
                     results_file.write(f"Maximum drawdown: ${max_drawdown_amount:.2f} ({max_drawdown_percentage:.2f}%)\n")
 
                     # Add peak and duration stats
@@ -1171,21 +1177,21 @@ class Backtester:
         )
 
         daily = daily.with_columns(running_max=pl.col('mtm_capital').cum_max())
-        daily = daily.with_columns(drawdown_usd=pl.col('running_max') - pl.col('mtm_capital'))
+        daily = daily.with_columns(drawdown_usd=pl.col('mtm_capital') - pl.col('running_max'))
         daily = daily.with_columns(
             drawdown_pct=pl.when(pl.col('running_max') > 0)
             .then(pl.col('drawdown_usd') / pl.col('running_max') * 100)
             .otherwise(0.0)
         )
 
-        max_dd_row = daily.sort('drawdown_usd', descending=True).head(1)
+        max_dd_row = daily.sort('drawdown_usd', descending=False).head(1)
         max_drawdown_usd = max_dd_row['drawdown_usd'][0]
         max_drawdown_pct = max_dd_row['drawdown_pct'][0]
         trough_capital = max_dd_row['mtm_capital'][0]
         peak_capital = max_dd_row['running_max'][0]
 
-        # Drawdown duration in trading days: longest consecutive run with drawdown_usd > 0
-        dd_active = (daily['drawdown_usd'] > 0).to_numpy()
+        # Drawdown duration in trading days: longest consecutive run with drawdown_usd < 0
+        dd_active = (daily['drawdown_usd'] < 0).to_numpy()
         max_dd_duration = 0
         current_run = 0
         for active in dd_active:
