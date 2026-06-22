@@ -1194,7 +1194,18 @@ class Backtester:
         # daily variation-margin settlement (e.g. IB's MTM report) is shown:
         # today's settlement price and today's P&L versus yesterday, not
         # "P&L since entry" recomputed fresh each row.
-        daily = daily.with_columns(mtm_pnl=pl.col('mtm_capital').diff().fill_null(0.0))
+        #
+        # .diff() is null only for the very first row of the whole backtest
+        # (no prior row to diff against) — fill that with
+        # (mtm_capital - initial_capital), not a blind 0.0. Under
+        # fill_price='close' those are the same thing (entry_price IS that
+        # day's close, so day-1 PnL really is 0), but under fill_price='mid'
+        # entry_price != that day's close mark, so day-1 PnL is genuinely
+        # nonzero and a hardcoded 0.0 silently dropped it (cum_pnl already
+        # showed the correct nonzero value, just not mtm_pnl).
+        daily = daily.with_columns(
+            mtm_pnl=pl.col('mtm_capital').diff().fill_null(pl.col('mtm_capital') - config.initial_capital)
+        )
 
         # Cumulative PnL since backtest start (realized + unrealized as of
         # that day) — the daily-resolution equivalent of trade_results'
