@@ -1200,6 +1200,7 @@ class Backtester:
         # that day) — the daily-resolution equivalent of trade_results'
         # per-trade cumulative_pnl.
         daily = daily.with_columns(cum_pnl=pl.col('mtm_capital') - config.initial_capital)
+        daily = daily.with_columns(cum_pnl_pct=pl.col('cum_pnl') / config.initial_capital * 100)
 
         daily = daily.with_columns(running_max=pl.col('mtm_capital').cum_max())
         daily = daily.with_columns(drawdown_usd=pl.col('mtm_capital') - pl.col('running_max'))
@@ -1210,7 +1211,7 @@ class Backtester:
         )
 
         daily = daily.with_columns(
-            pl.col('close', 'mtm_pnl', 'cum_pnl', 'mtm_capital', 'running_max', 'drawdown_usd', 'drawdown_pct').round(2)
+            pl.col('close', 'mtm_pnl', 'cum_pnl', 'cum_pnl_pct', 'mtm_capital', 'running_max', 'drawdown_usd', 'drawdown_pct').round(2)
         )
 
         max_dd_row = daily.sort('drawdown_usd', descending=False).head(1)
@@ -1236,10 +1237,11 @@ class Backtester:
         logger.info(f"Trough Capital: ${trough_capital:.2f}")
         logger.info(f"Drawdown Duration: {max_dd_duration} trading days")
 
-        stats = daily.select(['ts_event', 'close', 'mtm_pnl', 'cum_pnl', 'mtm_capital', 'running_max', 'drawdown_usd', 'drawdown_pct']).rename({
+        stats = daily.select(['ts_event', 'close', 'mtm_pnl', 'cum_pnl', 'cum_pnl_pct', 'mtm_capital', 'running_max', 'drawdown_usd', 'drawdown_pct']).rename({
             'close': 'Close',
             'mtm_pnl': 'MTM PnL',
             'cum_pnl': 'Cumulative PnL',
+            'cum_pnl_pct': 'Cumulative PnL (%)',
             'mtm_capital': 'Capital',
             'running_max': 'Running Max',
             'drawdown_usd': 'Drawdown ($)',
