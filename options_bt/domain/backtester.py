@@ -409,10 +409,12 @@ class Backtester:
         }
 
         print(results['trade_results'].to_string())
-        
-        # self.calculate_mtm(results, config) 
+
         if not results['trade_results'].empty:
-            results = self.calculate_simple_drawdown(results, config)
+            if isinstance(config, FuturesStrategyConfig):
+                results = self.calculate_futures_mtm_drawdown(results, config)
+            else:
+                results = self.calculate_simple_drawdown(results, config)
 
         if self.save_trades:
             save_start = time.time()
@@ -1089,6 +1091,121 @@ class Backtester:
 
             return results   # ← NECESSARY
 
+    def calculate_futures_mtm_drawdown(self, results: dict, config: FuturesStrategyConfig) -> dict:
+        """
+        Daily mark-to-market drawdown for futures, built in polars from the
+        continuous underlying price series.
+
+        calculate_simple_drawdown only snapshots capital at trade-close
+        events, so an intra-trade dip that fully recovers by the time the
+        position closes/rolls is invisible — exactly the gap noted after a
+        71/91-day single-position ES backtest reported zero drawdown. This
+        marks the currently-open position to market every day instead,
+        using entry_price/position_side/quantity/contract_multiplier from
+        each trade's 'close' transaction record (trade_results no longer
+        carries entry/exit price post-_finalize_results' column selection).
+
+        Reports the same fields to the log as calculate_simple_drawdown
+        (Maximum Drawdown $/%, Peak/Trough Capital), except Drawdown
+        Duration is now in trading days rather than trade count, since the
+        underlying series is daily resolution.
+        """
+        trade_results = results['trade_results']
+        transactions = results['transactions']
+
+        if trade_results.empty or transactions.empty:
+            return results
+
+        close_tx = transactions[transactions['type'] == 'close'][
+            ['trade_id', 'entry_price', 'position_side', 'quantity', 'contract_multiplier']
+        ]
+        trades = trade_results[['trade_id', 'opened', 'closed', 'capital']].merge(close_tx, on='trade_id', how='left')
+        trades = trades.sort_values('opened').reset_index(drop=True)
+
+        trades['capital_before'] = trades['capital'].shift(1)
+        trades['capital_before'] = trades['capital_before'].fillna(config.initial_capital)
+        trades['direction'] = trades['position_side'].apply(lambda s: 1 if str(s).lower() == 'long' else -1)
+
+        trades_pl = pl.from_pandas(trades).with_columns(
+            pl.col('opened').cast(pl.Date),
+            pl.col('closed').cast(pl.Date),
+        )
+
+        start = pd.Timestamp(config.start_date).date()
+        end = pd.Timestamp(config.end_date).date()
+        daily = (
+            self.underlying
+            .filter((pl.col('ts_event') >= start) & (pl.col('ts_event') <= end))
+            .select(['ts_event', 'close'])
+            .sort('ts_event')
+        )
+
+        # Match each day to the most recently opened trade as of that day;
+        # is_open tells us whether that trade was still open (vs. already
+        # closed, with no newer trade opened yet) on this particular day.
+        daily = daily.join_asof(trades_pl, left_on='ts_event', right_on='opened', strategy='backward')
+        daily = daily.with_columns(
+            is_open=pl.col('closed').is_not_null() & (pl.col('ts_event') < pl.col('closed'))
+        )
+
+        daily = daily.with_columns(
+            mtm_capital=pl.when(pl.col('is_open'))
+            .then(
+                pl.col('capital_before') +
+                (pl.col('close') - pl.col('entry_price')) * pl.col('quantity') * pl.col('contract_multiplier') * pl.col('direction')
+            )
+            .when(pl.col('closed').is_not_null())
+            .then(pl.col('capital'))  # already closed as of this day -> flat at realized capital
+            .otherwise(pl.lit(config.initial_capital))  # before the first trade opened
+        )
+
+        daily = daily.with_columns(running_max=pl.col('mtm_capital').cum_max())
+        daily = daily.with_columns(drawdown_usd=pl.col('running_max') - pl.col('mtm_capital'))
+        daily = daily.with_columns(
+            drawdown_pct=pl.when(pl.col('running_max') > 0)
+            .then(pl.col('drawdown_usd') / pl.col('running_max') * 100)
+            .otherwise(0.0)
+        )
+
+        max_dd_row = daily.sort('drawdown_usd', descending=True).head(1)
+        max_drawdown_usd = max_dd_row['drawdown_usd'][0]
+        max_drawdown_pct = max_dd_row['drawdown_pct'][0]
+        trough_capital = max_dd_row['mtm_capital'][0]
+        peak_capital = max_dd_row['running_max'][0]
+
+        # Drawdown duration in trading days: longest consecutive run with drawdown_usd > 0
+        dd_active = (daily['drawdown_usd'] > 0).to_numpy()
+        max_dd_duration = 0
+        current_run = 0
+        for active in dd_active:
+            if active:
+                current_run += 1
+                max_dd_duration = max(max_dd_duration, current_run)
+            else:
+                current_run = 0
+
+        logger.info(f"Maximum Drawdown (USD): {max_drawdown_usd:.2f}")
+        logger.info(f"Maximum Drawdown (%)): {max_drawdown_pct:.2f}%")
+        logger.info(f"Peak Capital: ${peak_capital:.2f}")
+        logger.info(f"Trough Capital: ${trough_capital:.2f}")
+        logger.info(f"Drawdown Duration: {max_dd_duration} trading days")
+
+        stats = daily.select(['ts_event', 'mtm_capital', 'running_max', 'drawdown_usd', 'drawdown_pct']).rename({
+            'mtm_capital': 'Capital',
+            'running_max': 'Running Max',
+            'drawdown_usd': 'Drawdown ($)',
+            'drawdown_pct': 'Drawdown (%)',
+        }).to_pandas()
+
+        results['stats'] = stats
+        results['drawdown_analysis'] = {
+            'max_drawdown': max_drawdown_usd,
+            'peak_capital': peak_capital,
+            'trough_capital': trough_capital,
+            'drawdown_duration': max_dd_duration,
+        }
+
+        return results
 
 
 
