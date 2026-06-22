@@ -3,6 +3,7 @@ CLI for a naked (single-leg, long or short) futures backtest.
 
 Run:
     naked --symbol ES --dir long --years 2025-2026
+    naked --symbol ES --dir long --years 2025
     naked --symbol MES --dir short --years 2025-2026 --quantity 2
 """
 import argparse
@@ -21,7 +22,7 @@ def parse_args():
     p.add_argument('--dir', choices=['long', 'short'], default='long',
                    help='Position direction/side (default: %(default)s)')
     p.add_argument('--years', default='2025-2026',
-                   help='Year range as START-END, inclusive (default: %(default)s)')
+                   help='Year range as START-END (inclusive) or a single YEAR (default: %(default)s)')
     p.add_argument('--quantity', type=int, default=1)
     p.add_argument('--initial-capital', type=float, default=100000)
     p.add_argument('--leverage', type=float, default=1.0)
@@ -40,7 +41,13 @@ def main():
 
     futures_strategy = FuturesStrategy.LONG_FUTURES if args.dir == 'long' else FuturesStrategy.SHORT_FUTURES
 
-    start_year, end_year = args.years.split('-')
+    parts = args.years.split('-')
+    if len(parts) == 1:
+        start_year = end_year = parts[0]
+    elif len(parts) == 2:
+        start_year, end_year = parts
+    else:
+        raise ValueError(f"--years must be YYYY or YYYY-YYYY, got {args.years!r}")
     start_date = f"{start_year}-01-01"
     end_date = f"{end_year}-12-31"
 
