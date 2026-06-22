@@ -16,6 +16,8 @@ dependencies = [
     "websockets",
     "numpy",
     "pandas",
+    "polars",
+    "duckdb",
     "pyarrow",
     "ipykernel",
     "matplotlib",
@@ -24,7 +26,12 @@ dependencies = [
     "python-dotenv",
     "seaborn",
     "maturin",
+    "ib_insync",
+    "ib_tools @ file:///home/dev/projects/fin-tools/ib-tools",
 ]
+
+[project.scripts]
+tsmom = "options_bt.live.run_tsmom_rebalance:main"
 
 [tool.maturin]
 path = "options_engine"

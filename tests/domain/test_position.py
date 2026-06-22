@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 from options_bt.domain.position import SingleLegOptionPosition, MultiLegOptionPosition
 from options_bt.domain.enums import OptionType, PositionSide, OptionStrategy, OptionSpreadType
-from options_bt.domain.dataloader import DataLoader
+from options_bt.domain.dataloader import OptionsDataLoader
 from options_bt.domain.trade_result import OptionTradeResult
 from options_bt.domain.trade_manager import TradeManager
 from scipy.stats import norm

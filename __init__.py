@@ -1,3 +1,0 @@
-"""
-Options backtesting package.
-""" 

@@ -2,7 +2,7 @@ import pandas as pd
 from options_bt.utils.logger import setup_logger
 from options_bt.domain.enums import *  
 from options_bt.domain.backtester import Backtester 
-from options_bt.domain.dataloader import DataLoader
+from options_bt.domain.dataloader import OptionsDataLoader
 from options_bt.domain.strategy_config import SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig
 from options_bt.domain.option_leg_config import OptionLegConfig
 
@@ -20,7 +20,7 @@ def run_test_suite():
     DATA_PATH = "/Users/liefe/data/spx"
     OPTIONS_FILE = "options_chain_preprocessed.csv"
 
-    dl = DataLoader(data_dir=DATA_PATH, options_file=OPTIONS_FILE, use_preprocessed=True, save_preprocessed=False)
+    dl = OptionsDataLoader(data_dir=DATA_PATH, options_file=OPTIONS_FILE, use_preprocessed=True, save_preprocessed=False)
     data = dl.load_data()
     # print(dl.__dict__)
     # Check data quality once

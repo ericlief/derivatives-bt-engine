@@ -11,13 +11,14 @@ import numpy as np
 import logging
 
 from options_bt.domain.enums import OptionType, PositionSide
+from options_bt.domain.base_dataloader import BaseDataLoader
 from options_bt.utils.logger import setup_logger
 
 # Create logger instance
 logger = setup_logger()
 
 @dataclass
-class DataLoader:
+class OptionsDataLoader(BaseDataLoader):
     data_dir: str
     options_file: str
     use_preprocessed: bool = True
@@ -26,7 +27,7 @@ class DataLoader:
     vix_file: Optional[str] = None
     raw_files: Dict[str, str] = field(init=False)
     processed_files: Dict[str, str] = field(init=False)
-    
+
 
     def __post_init__(self):
         """Initialize file paths after instance creation"""
@@ -90,22 +91,6 @@ class DataLoader:
             
         return processed_data
 
-    @cached_property
-    def vix_data(self) -> pd.DataFrame:
-        """Lazy load and cache the VIX data"""
-        if self.use_preprocessed:
-            data = self._load_pickle(self.processed_files['vix'])
-            if data is not None:
-                return data
-        
-        raw_vix = pd.read_csv(self.raw_files['vix'], index_col=0, parse_dates=True)
-        processed_data = self._preprocess_vix_data(raw_vix)
-        
-        if self.save_preprocessed:
-            self._save_pickle(processed_data, self.processed_files['vix'])
-            
-        return processed_data
-
     def load_data(self) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         """
         Load and return all data at once. Maintains backward compatibility.
@@ -137,23 +122,6 @@ class DataLoader:
         except Exception as e:
             logger.error(f"Error loading data: {str(e)}")
             raise
-
-    def _load_pickle(self, file_path: str) -> Optional[pd.DataFrame]:
-        """Load a pickle file and return a pandas DataFrame."""
-        if os.path.exists(file_path):
-            logger.info(f"Loading {file_path}")
-            return pd.read_pickle(file_path)
-        else:
-            logger.info(f"File {file_path} does not exist")
-            return None
-    
-    def _save_pickle(self, data: pd.DataFrame, file_path: str):
-        """Save a pandas DataFrame to a pickle file."""
-        try:
-            data.to_pickle(file_path)
-            logger.info(f"Saved data to {file_path}")
-        except Exception as e:
-            logger.error(f"Failed to save data to {file_path}: {str(e)}")
 
     def _preprocess_option_chain(self, option_chain: pd.DataFrame) -> pd.DataFrame:
         """
@@ -309,38 +277,6 @@ class DataLoader:
         
         return df
 
-    def _preprocess_vix_data(self, vix_data: pd.DataFrame) -> pd.DataFrame:
-        """
-        Clean and preprocess VIX data.
-        
-        Args:
-            vix_data: Raw VIX DataFrame
-        
-        Returns:
-            Cleaned VIX DataFrame
-        """
-        logger.info("Preprocessing VIX data...")
-        
-        # Make a copy to avoid modifying the original
-        df = vix_data.copy()
-        
-        # Normalize the DataFrame index if needed
-        try:
-            df.index = pd.DatetimeIndex([pd.Timestamp(idx).date() for idx in df.index])
-        except Exception as e:
-            logger.info(f"Index normalization skipped: {e}")
-        
-        # Ensure all numeric columns are properly typed
-        numeric_cols = ['open', 'high', 'low', 'close']
-        for col in numeric_cols:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-        
-        # Sort by date
-        df.sort_index(inplace=True)
-        
-        return df
-    
     def _check_data_quality(self, option_chain, underlying, vix):
         """
         Check data quality for all datasets (options chain, SPX data, and VIX data).

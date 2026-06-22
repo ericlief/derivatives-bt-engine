@@ -4,7 +4,7 @@ import pandas as pd
 from options_bt.utils.logger import setup_logger
 from options_bt.domain.enums import *
 from options_bt.domain.backtester import Backtester
-from options_bt.domain.dataloader import DataLoader
+from options_bt.domain.dataloader import OptionsDataLoader
 from options_bt.domain.strategy_config import MultiLegOptionStrategyConfig
 from options_bt.domain.option_leg_config import OptionLegConfig
 import itertools
@@ -194,7 +194,7 @@ def run_grid():
     pd.set_option('display.width', 200)
 
     DATA_PATH = "/Users/liefe/data/spx"
-    dl = DataLoader(data_dir=DATA_PATH, options_file="options_chain_preprocessed.csv", vix_file="vix.csv", use_preprocessed=True, save_preprocessed=False)
+    dl = OptionsDataLoader(data_dir=DATA_PATH, options_file="options_chain_preprocessed.csv", vix_file="vix.csv", use_preprocessed=True, save_preprocessed=False)
     data = dl.load_data()
 
     bt = Backtester(data=data, save_trades=False, log_to_sheets=False) # Disable saving for grid search performance
