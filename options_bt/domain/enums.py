@@ -150,21 +150,68 @@ class OptionStrategy(BaseStrategy):
 
 class FuturesType(Enum):
     """Futures contract type enumeration, with associated properties."""
-    # Value format: (contract_multiplier, initial_margin, commission)
-    MES = (5, 3406.84, 0.62) # Micro E-mini S&P 500
-    ES = (50, 34068.38, 1.42) # E-mini S&P 500
+    # Value format: (mult, initial_margin, commission)
+    # Multipliers are fixed CME contract specs (high confidence). Margins
+    # are CME SPAN maintenance margin and move with volatility/exchange
+    # resets — MES/ES values were given; the rest below are rough estimates
+    # only, scaled from typical CME margin levels for these products. Verify
+    # against current CME/broker figures before relying on them for sizing.
+    # Commission reuses the existing per-contract tiers (standard vs micro).
+    MES = (5, 3406.84, 1.24) # Micro E-mini S&P 500 round trip
+    ES = (50, 34068.38, 1.70) # E-mini S&P 500
+    MNQ = (2, 2900.0, 1.24) # Micro E-mini Nasdaq-100 -- margin estimated, verify
+    NQ = (20, 29000.0, 1.70) # E-mini Nasdaq-100 -- margin estimated, verify
+    MYM = (0.5, 1100.0, 1.24) # Micro E-mini Dow -- margin estimated, verify
+    YM = (5, 11000.0, 1.70) # E-mini Dow -- margin estimated, verify
+    M2K = (5, 900.0, 1.24) # Micro E-mini Russell 2000 -- margin estimated, verify
+    RTY = (50, 9000.0, 1.70) # E-mini Russell 2000 -- margin estimated, verify
+    ZN = (1000, 2000.0, 1.70) # 10-Year T-Note (CBOT) -- margin estimated, verify
+    ZT = (2000, 600.0, 1.70) # 2-Year T-Note (CBOT) -- margin estimated, verify
+    SI = (5000, 12000.0, 1.70) # Silver (COMEX) -- margin estimated, verify
+    CL = (1000, 6000.0, 1.70) # Crude Oil (NYMEX) -- margin estimated, verify
+    ZL = (600, 3000.0, 1.70) # Soybean Oil (CBOT) -- margin estimated, verify
+    ZC = (50, 1500.0, 1.70) # Corn (CBOT) -- margin estimated, verify
+    ZS = (50, 3000.0, 1.70) # Soybeans (CBOT) -- margin estimated, verify
+    ZW = (50, 2500.0, 1.70) # Wheat (CBOT) -- margin estimated, verify
+    NIY = (500, 10000.0, 1.70) # Nikkei 225 Yen-denominated (CME) -- margin estimated, verify.
+                               # NOTE: contract is JPY-denominated (Y500/point); this
+                               # codebase's PnL math has no FX conversion, so PnL will
+                               # come out in JPY, not USD, unless that's added separately.
+    # Python identifiers can't start with a digit, so the FX futures whose
+    # actual exchange ticker starts with one (6J, 6L, 6M) are named with a
+    # leading underscore here -- use FuturesType.from_symbol('6J') to look
+    # them up by their real ticker rather than FuturesType['6J'] (invalid).
+    _6J = (12_500_000, 3000.0, 1.70) # Japanese Yen (CME) -- margin estimated, verify
+    _6L = (100_000, 3500.0, 1.70) # Brazilian Real (CME) -- margin estimated, verify
+    _6M = (500_000, 2000.0, 1.70) # Mexican Peso (CME) -- margin estimated, verify
+    # SOX = (?, ?, 1.70) # Not added: genuinely unsure of this contract's point
+    # value/margin (possibly a Small Exchange product, not a standard CME index
+    # future I have reliable specs for) -- ask before adding rather than guess.
 
-    def __new__(cls, contract_multiplier: float, initial_margin: float, commission: float):
+    def __new__(cls, mult: float, initial_margin: float, commission: float):
         obj = object.__new__(cls)
-        obj._value_ = contract_multiplier # The 'value' of the enum member will be the multiplier
-        obj.contract_multiplier = contract_multiplier
+        # _value_ must be unique per member or Python's Enum silently turns
+        # same-valued members into aliases of each other (e.g. ES/RTY/ZC/ZS/ZW
+        # all have mult=50 -- using just `mult` here collapsed them into one).
+        # The full tuple is unique across every member defined below.
+        obj._value_ = (mult, initial_margin, commission)
+        obj.mult = mult
         obj.initial_margin = initial_margin
         obj.commission = commission
         return obj
 
+    @classmethod
+    def from_symbol(cls, symbol: str) -> 'FuturesType':
+        """Look up by the actual exchange ticker (e.g. '6J'), handling the
+        leading-underscore workaround for tickers Python can't name directly."""
+        name = symbol.upper()
+        if name[0].isdigit():
+            name = f'_{name}'
+        return cls[name]
+
     @property
     def multiplier(self) -> float:
-        return self.contract_multiplier
+        return self.mult
 
     @property
     def margin_required(self) -> float:

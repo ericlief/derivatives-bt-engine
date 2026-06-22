@@ -535,7 +535,7 @@ class Backtester:
                 # 'Daily P&L': round(daily_pnl, 2),
                 # 'Cumulative P&L': round(cumulative_pnl, 2),
                 # 'Drawdown ($)': round(drawdown_amount, 2),
-                # 'Drawdown (%)': round(drawdown_pct, 2),
+                # 'Drawdown (%)': round(dd_pct, 2),
                 # 'Daily ROI (%)': daily_roi,
                 # 'Total ROI (%)': total_roi,
                 # 'Active Positions': len(active_trades),
@@ -558,7 +558,7 @@ class Backtester:
                     # OLD (for negative drawdown): daily_df['Drawdown ($)'].min() and daily_df['Drawdown (%)'].min()
                     max_drawdown_amount = daily_df['Drawdown ($)'].max()  # Now using max since drawdown is positive
                     max_drawdown_percentage = daily_df['Drawdown (%)'].max()  # Now using max since drawdown is positive
-                    # results_file.write(f"Maximum drawdown: ${daily_df['max_drawdown'].iloc[-1]:,.2f} ({daily_df['max_drawdown_pct'].iloc[-1]:.2f}%)\n")
+                    # results_file.write(f"Maximum drawdown: ${daily_df['max_drawdown'].iloc[-1]:,.2f} ({daily_df['max_dd_pct'].iloc[-1]:.2f}%)\n")
                     results_file.write(f"Maximum drawdown: ${max_drawdown_amount:.2f} ({max_drawdown_percentage:.2f}%)\n")
         
             # Final assertion
@@ -765,7 +765,7 @@ class Backtester:
             # Calculate drawdown (as positive values)
             # OLD (for negative drawdown): drawdown_amount = - max(0, round(peak_liquidity - net_liq, 2))
             drawdown_amount = max(0, round(peak_liquidity - net_liq, 2))  # Positive dollar amount
-            drawdown_pct = round(drawdown_amount / peak_liquidity * 100, 2) if peak_liquidity > 0 else 0  # Positive percentage
+            dd_pct = round(drawdown_amount / peak_liquidity * 100, 2) if peak_liquidity > 0 else 0  # Positive percentage
 
             # Calculate ROI metrics
             daily_roi = round(daily_pnl / daily_margin_requirement * 100, 2) if daily_margin_requirement > 0 else 0
@@ -782,7 +782,7 @@ class Backtester:
                 'Daily P&L': round(daily_pnl, 2),
                 'Cumulative P&L': round(cumulative_pnl, 2),
                 'Drawdown ($)': round(drawdown_amount, 2),
-                'Drawdown (%)': round(drawdown_pct, 2),
+                'Drawdown (%)': round(dd_pct, 2),
                 'Daily ROI (%)': daily_roi,
                 'Total ROI (%)': total_roi,
                 'Active Positions': len(active_trades),
@@ -976,8 +976,8 @@ class Backtester:
                     # option-path calculate_simple_drawdown is still positive
                     # (worst = .max()) — see that method's own comment.
                     if is_futures:
-                        max_drawdown_amount = stats['drawdown_usd'].min()
-                        max_drawdown_percentage = stats['drawdown_pct'].min()
+                        max_drawdown_amount = stats['dd_usd'].min()
+                        max_drawdown_percentage = stats['dd_pct'].min()
                     else:
                         max_drawdown_amount = stats['Drawdown ($)'].max()
                         max_drawdown_percentage = stats['Drawdown (%)'].max()
@@ -1078,8 +1078,8 @@ class Backtester:
             drawdown = (running_max - capital_with_init)
             logger.debug(f'Drawdown:\n{drawdown}')
 
-            max_drawdown_usd = np.max(drawdown)
-            logger.debug(f'Max dd USD: {max_drawdown_usd}')
+            max_dd_usd = np.max(drawdown)
+            logger.debug(f'Max dd USD: {max_dd_usd}')
 
             trough_idx = np.argmax(drawdown)
             logger.debug(f'Trough index: {trough_idx}')
@@ -1097,8 +1097,8 @@ class Backtester:
 
             max_dd_duration = max([(j - i) for i, j in spans]) if spans else 0
 
-            logger.info(f"Maximum Drawdown (USD): {max_drawdown_usd:.2f}")
-            logger.info(f"Maximum Drawdown (%)): {max_drawdown_usd / capital_with_init[peak_idx]:.2%}")
+            logger.info(f"Maximum Drawdown (USD): {max_dd_usd:.2f}")
+            logger.info(f"Maximum Drawdown (%)): {max_dd_usd / capital_with_init[peak_idx]:.2%}")
             logger.info(f"Peak Capital: ${capital_with_init[peak_idx]:.2f}")
             logger.info(f"Trough Capital: ${capital_with_init[trough_idx]:.2f}")
             logger.info(f"Drawdown Duration: {max_dd_duration} trades")
@@ -1112,7 +1112,7 @@ class Backtester:
 
             results['stats'] = stats
             results['drawdown_analysis'] = {
-                'max_drawdown': max_drawdown_usd,
+                'max_drawdown': max_dd_usd,
                 'peak_capital': capital_with_init[peak_idx],
                 'trough_capital': capital_with_init[trough_idx],
                 'drawdown_duration': max_dd_duration
@@ -1130,7 +1130,7 @@ class Backtester:
         position closes/rolls is invisible — exactly the gap noted after a
         71/91-day single-position ES backtest reported zero drawdown. This
         marks the currently-open position to market every day instead,
-        using entry_price/position_side/quantity/contract_multiplier from
+        using entry_price/position_side/quantity/mult from
         each trade's 'close' transaction record (trade_results no longer
         carries entry/exit price post-_finalize_results' column selection).
 
@@ -1146,7 +1146,7 @@ class Backtester:
             return results
 
         close_tx = transactions[transactions['type'] == 'close'][
-            ['trade_id', 'open', 'position_side', 'quantity', 'contract_multiplier']
+            ['trade_id', 'open', 'position_side', 'quantity', 'mult']
         ]
         trades = trade_results[['trade_id', 'opened', 'closed', 'capital']].merge(close_tx, on='trade_id', how='left')
         trades = trades.sort_values('opened').reset_index(drop=True)
@@ -1181,7 +1181,7 @@ class Backtester:
             mtm_capital=pl.when(pl.col('is_open'))
             .then(
                 pl.col('capital_before') +
-                (pl.col('close') - pl.col('open')) * pl.col('quantity') * pl.col('contract_multiplier') * pl.col('direction')
+                (pl.col('close') - pl.col('open')) * pl.col('quantity') * pl.col('mult') * pl.col('direction')
             )
             .when(pl.col('closed').is_not_null())
             .then(pl.col('capital'))  # already closed as of this day -> flat at realized capital
@@ -1203,25 +1203,25 @@ class Backtester:
         daily = daily.with_columns(cum_pnl_pct=pl.col('cum_pnl') / config.initial_capital * 100)
 
         daily = daily.with_columns(running_max=pl.col('mtm_capital').cum_max())
-        daily = daily.with_columns(drawdown_usd=pl.col('mtm_capital') - pl.col('running_max'))
+        daily = daily.with_columns(dd_usd=pl.col('mtm_capital') - pl.col('running_max'))
         daily = daily.with_columns(
-            drawdown_pct=pl.when(pl.col('running_max') > 0)
-            .then(pl.col('drawdown_usd') / pl.col('running_max') * 100)
+            dd_pct=pl.when(pl.col('running_max') > 0)
+            .then(pl.col('dd_usd') / pl.col('running_max') * 100)
             .otherwise(0.0)
         )
 
         daily = daily.with_columns(
-            pl.col('close', 'mtm_pnl', 'cum_pnl', 'cum_pnl_pct', 'mtm_capital', 'running_max', 'drawdown_usd', 'drawdown_pct').round(2)
+            pl.col('close', 'mtm_pnl', 'cum_pnl', 'cum_pnl_pct', 'mtm_capital', 'running_max', 'dd_usd', 'dd_pct').round(2)
         )
 
-        max_dd_row = daily.sort('drawdown_usd', descending=False).head(1)
-        max_drawdown_usd = max_dd_row['drawdown_usd'][0]
-        max_drawdown_pct = max_dd_row['drawdown_pct'][0]
+        max_dd_row = daily.sort('dd_usd', descending=False).head(1)
+        max_dd_usd = max_dd_row['dd_usd'][0]
+        max_dd_pct = max_dd_row['dd_pct'][0]
         trough_capital = max_dd_row['mtm_capital'][0]
         peak_capital = max_dd_row['running_max'][0]
 
-        # Drawdown duration in trading days: longest consecutive run with drawdown_usd < 0
-        dd_active = (daily['drawdown_usd'] < 0).to_numpy()
+        # Drawdown duration in trading days: longest consecutive run with dd_usd < 0
+        dd_active = (daily['dd_usd'] < 0).to_numpy()
         max_dd_duration = 0
         current_run = 0
         for active in dd_active:
@@ -1231,8 +1231,8 @@ class Backtester:
             else:
                 current_run = 0
 
-        logger.info(f"Maximum Drawdown (USD): {max_drawdown_usd:.2f}")
-        logger.info(f"Maximum Drawdown (%)): {max_drawdown_pct:.2f}%")
+        logger.info(f"Maximum Drawdown (USD): {max_dd_usd:.2f}")
+        logger.info(f"Maximum Drawdown (%)): {max_dd_pct:.2f}%")
         logger.info(f"Peak Capital: ${peak_capital:.2f}")
         logger.info(f"Trough Capital: ${trough_capital:.2f}")
         logger.info(f"Drawdown Duration: {max_dd_duration} trading days")
@@ -1240,14 +1240,14 @@ class Backtester:
         # Lowercase snake_case column names throughout, matching the
         # convention used for Google Sheets headers elsewhere (e.g.
         # gspread_log_util.py's "total_pnl", "max_dd_usd", "peak_capital").
-        stats = daily.select(['ts_event', 'close', 'mtm_pnl', 'cum_pnl', 'cum_pnl_pct', 'mtm_capital', 'running_max', 'drawdown_usd', 'drawdown_pct']).rename({
+        stats = daily.select(['ts_event', 'close', 'mtm_pnl', 'cum_pnl', 'cum_pnl_pct', 'mtm_capital', 'running_max', 'dd_usd', 'dd_pct']).rename({
             'ts_event': 'date',
             'mtm_capital': 'capital',
         }).to_pandas()
 
         results['stats'] = stats
         results['drawdown_analysis'] = {
-            'max_drawdown': max_drawdown_usd,
+            'max_drawdown': max_dd_usd,
             'peak_capital': peak_capital,
             'trough_capital': trough_capital,
             'drawdown_duration': max_dd_duration,
@@ -1292,8 +1292,8 @@ class Backtester:
 
     #     # Find peak-to-trough drawdown periods
     #     # OLD (for negative drawdown): max_drawdown = np.min(drawdown)
-    #     max_drawdown_usd = np.max(drawdown) # Now using max since drawdown is positive
-    #     logger.debug(f'Max dd USD: {max_drawdown_usd}')
+    #     max_dd_usd = np.max(drawdown) # Now using max since drawdown is positive
+    #     logger.debug(f'Max dd USD: {max_dd_usd}')
 
     #     trough_idx = np.argmax(drawdown) 
     #     logger.debug(f'Trough index: {trough_idx}')
@@ -1311,7 +1311,7 @@ class Backtester:
 
     #     max_dd_duration = max([(j - i) for i,j in spans]) if spans else 0
 
-    #     logger.info(f"Maximum Drawdown USD: {max_drawdown_usd:.2f}")
+    #     logger.info(f"Maximum Drawdown USD: {max_dd_usd:.2f}")
     #     logger.info(f"Peak Capital: ${capital_with_init[peak_idx]:.2f}")
         # logger.info(f"Trough Capital: ${capital_with_init[trough_idx]:.2f}")
         # logger.info(f"Drawdown Duration: {max_dd_duration} trades")
@@ -1330,7 +1330,7 @@ class Backtester:
         # Add drawdown to results
         # results['stats'] = stats
         # results['drawdown_analysis'] = {
-        #     'max_drawdown': max_drawdown_usd,
+        #     'max_drawdown': max_dd_usd,
         #     'peak_capital': capital_with_init[peak_idx],
         #     'trough_capital': capital_with_init[trough_idx],
         #     'drawdown_duration': max_dd_duration

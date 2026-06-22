@@ -40,7 +40,7 @@ class FuturesSignalGenerator(BaseSignalGenerator):
         end_date,
     ) -> pl.DataFrame:
         """Generate trade signals for futures positions."""
-        logger.info(f"Generating {self.config.futures_type.value} futures signals...")
+        logger.info(f"Generating {self.config.futures_type.name} futures signals...")
 
         if not isinstance(futures_type, FuturesType):
             raise ValueError(f"Invalid futures type. Supported types are: {[t.name for t in FuturesType]}")

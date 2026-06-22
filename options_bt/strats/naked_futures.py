@@ -35,7 +35,7 @@ def main():
 
     symbol = args.symbol.upper()
     try:
-        futures_type = FuturesType[symbol]
+        futures_type = FuturesType.from_symbol(symbol)
     except KeyError:
         raise ValueError(f"Unknown futures symbol {symbol!r}. Defined types: {[t.name for t in FuturesType]}")
 

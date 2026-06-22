@@ -2240,7 +2240,7 @@ class FuturesPosition(BasePosition):
         
         # Set contract multiplier from enum based on futures_type
         # Corrected: Access the 'multiplier' property from the enum instance
-        self.contract_multiplier: float = self.futures_type.multiplier
+        self.mult: float = self.futures_type.multiplier
 
         # Calculate initial margin if not provided
         if self.margin_required is None: # We now have initial_margin as a required attribute
@@ -2272,7 +2272,7 @@ class FuturesPosition(BasePosition):
         if self.exit_price is None or self.entry_price is None:
             return 0.0
 
-        price_diff = (self.exit_price - self.entry_price) * self.contract_multiplier
+        price_diff = (self.exit_price - self.entry_price) * self.mult
         if PositionSide.is_long(self.position_side):
             return price_diff # Positive for long if price goes up
         else: # Short position
@@ -2294,10 +2294,10 @@ class FuturesPosition(BasePosition):
             logger.warning('Entry or exit price not set correctly for futures pnl calculation')
             return None
 
-        # P&L for futures is (exit_price - entry_price) * quantity * contract_multiplier,
+        # P&L for futures is (exit_price - entry_price) * quantity * mult,
         # negated for short positions (a short profits when price falls).
         direction = 1 if PositionSide.is_long(self.position_side) else -1
-        pnl = (self.exit_price - self.entry_price) * self.quantity * self.contract_multiplier * direction
+        pnl = (self.exit_price - self.entry_price) * self.quantity * self.mult * direction
 
         # Subtract fees
         fees = commission * self.quantity
@@ -2392,12 +2392,12 @@ class FuturesPosition(BasePosition):
             'date': effective_close_date,
             'type': 'close',
             'instrument_type': 'futures',
-            'futures_type': self.futures_type.value,
+            'futures_type': self.futures_type.name,
             'position_side': self.position_side.value,
             'open': self.entry_price,
             'close': self.exit_price,
             'quantity': self.quantity,
-            'contract_multiplier': self.contract_multiplier,
+            'mult': self.mult,
             'pnl': pnl,
             'fees': self.fees,
             'bp_effect': round(bp_effect, 2)
@@ -2500,12 +2500,12 @@ class FuturesPosition(BasePosition):
             'date': date,
             'type': 'open',
             'instrument_type': 'futures',
-            'futures_type': position.futures_type.value,
+            'futures_type': position.futures_type.name,
             'position_side': position.position_side.value,
             'open': position.entry_price,
             'close': None,
             'quantity': position.quantity,
-            'contract_multiplier': position.contract_multiplier,
+            'mult': position.mult,
             'pnl': None,
             'fees': position.fees,
             'bp_effect': round(bp_effect, 2) if bp_effect is not None else '',
