@@ -2298,8 +2298,10 @@ class FuturesPosition(BasePosition):
             logger.warning('Underlying entry or exit price not set correctly for futures pnl calculation')
             return None
 
-        # P&L for futures is simply (exit_price - entry_price) * quantity * contract_multiplier
-        pnl = (self.underlying_exit - self.underlying_entry) * self.quantity * self.contract_multiplier
+        # P&L for futures is (exit_price - entry_price) * quantity * contract_multiplier,
+        # negated for short positions (a short profits when price falls).
+        direction = 1 if PositionSide.is_long(self.position_side) else -1
+        pnl = (self.underlying_exit - self.underlying_entry) * self.quantity * self.contract_multiplier * direction
 
         # Subtract fees
         fees = commission * self.quantity
