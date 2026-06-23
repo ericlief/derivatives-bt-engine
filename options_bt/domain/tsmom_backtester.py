@@ -19,6 +19,7 @@ front-month / VX-63d-MA ratio (see options_bt.live.tsmom_rebalance).
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass
 from datetime import date
 from typing import Optional
@@ -74,7 +75,9 @@ def load_portfolio_data(symbols: list[str]) -> tuple[dict[str, pl.DataFrame], pl
     read directly as polars (covers 1990-present, unlike the older
     pandas/CSV vix_file BaseDataLoader.vix_data still uses for the option
     path, which is stale past 2024-12-31)."""
-    price_data = {s: FuturesDataLoader(asset=s, use_preprocessed=True, save_preprocessed=True).ohlcv
+    cache_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', '..', '.cache', 'futures'))
+    os.makedirs(cache_dir, exist_ok=True)
+    price_data = {s: FuturesDataLoader(asset=s, data_dir=cache_dir, use_preprocessed=True, save_preprocessed=True).ohlcv
                   for s in symbols}
     vix = pl.read_parquet(VIX_FILE_PATH).select(['date', 'close']).rename({'close': 'vix_close'}).sort('date')
     return price_data, vix

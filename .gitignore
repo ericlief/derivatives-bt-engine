@@ -13,6 +13,7 @@ nbs
 *__pycache__
 *.parquet
 vix.pkl
+.cache
 
 # Rust artifacts
 
