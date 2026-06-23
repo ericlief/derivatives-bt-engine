@@ -90,6 +90,12 @@ def get_nearest_quarterly_expiry(ib: IBPySync, symbol: str, exchange: str, min_d
     """Nearest quarterly expiry (YYYYMM) with at least min_days remaining."""
     c = IBPySync.future(symbol, exchange=exchange, multiplier=multiplier)
     details = ib.req_contract_details(c)
+    log.debug(
+        'req_contract_details(%s, %s) returned %d contract(s): %s',
+        symbol, exchange, len(details),
+        [(d.contract.lastTradeDateOrContractMonth, d.contract.localSymbol,
+          d.contract.tradingClass, d.contract.multiplier) for d in details],
+    )
     cutoff = date.today() + timedelta(days=min_days)
     expiries = sorted(
         d.contract.lastTradeDateOrContractMonth
@@ -102,7 +108,7 @@ def get_nearest_quarterly_expiry(ib: IBPySync, symbol: str, exchange: str, min_d
     if not expiries:
         raise RuntimeError(f'No {symbol} ({exchange}) contracts found beyond {min_days}d')
     nearest = expiries[0][:6]
-    log.info('Auto-resolved %s (%s) expiry: %s', symbol, exchange, nearest)
+    log.info('Auto-resolved %s (%s) expiry: %s (all candidates: %s)', symbol, exchange, nearest, expiries)
     return nearest
 
 
