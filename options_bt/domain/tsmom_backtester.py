@@ -136,6 +136,10 @@ def _compute_target(symbol: str, d: date, full_price_data: dict[str, pl.DataFram
     ts3m, ts1y = last['ts3m'][0], last['ts1y'][0]
     daily_std_last = last['daily_std'][0] if 'daily_std' in last.columns else None
     last_close = float(last['close'][0])
+    # `dd` is already a (close - peak) / peak fraction from
+    # calculate_trend_strength -- express as a percentage to match
+    # `stats`' own drawdown_pct convention.
+    dd_pct = last['dd'][0] * 100 if 'dd' in last.columns and last['dd'][0] is not None else None
     regime = classify_regime(ts3m, ts1y)
 
     signal_for_scalar = trend_strength
@@ -165,7 +169,7 @@ def _compute_target(symbol: str, d: date, full_price_data: dict[str, pl.DataFram
     return {
         'target': target, 'trend_strength': trend_strength, 'regime': regime,
         'hv': hv, 'vol_scalar': vol_scalar * position_scale, 'discount': discount,
-        'close': last_close,
+        'close': last_close, 'dd_pct': dd_pct,
     }
 
 
@@ -205,7 +209,8 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
     capital = config.initial_capital
 
     def _rebalance_to(symbol: str, target: int, rebalance_date: date, trend_strength, regime, vol_regime,
-                       vix_close=None, hv=None, vol_scalar=None, discount=None, is_seed=False, close=None):
+                       vix_close=None, hv=None, vol_scalar=None, discount=None, is_seed=False, close=None,
+                       dd_pct=None):
         nonlocal capital
         prior = held_contracts[symbol]
         if target != prior:
@@ -216,7 +221,7 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
             'date': rebalance_date, 'symbol': symbol, 'close': _round(close, 2), 'trend_strength': _round(trend_strength, 4),
             'regime': regime, 'vol_regime': vol_regime, 'vix_close': _round(vix_close, 2),
             'hv': _round(hv, 4), 'vol_scalar': _round(vol_scalar, 4), 'discount': _round(discount, 2),
-            'prior_contracts': prior, 'target_contracts': target, 'is_seed': is_seed,
+            'dd_pct': _round(dd_pct, 2), 'prior_contracts': prior, 'target_contracts': target, 'is_seed': is_seed,
         })
 
     # Seed the position from the last completed month-end *before*
@@ -240,7 +245,7 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
                     _rebalance_to(symbol, result['target'], seed_date, result['trend_strength'], result['regime'],
                                   vol_regime, vix_close=vix_close, hv=result['hv'],
                                   vol_scalar=result['vol_scalar'], discount=result['discount'], is_seed=True,
-                                  close=result['close'])
+                                  close=result['close'], dd_pct=result['dd_pct'])
 
     for d in all_dates:
         # 1. Mark existing holdings to market: today's close vs yesterday's,
@@ -276,7 +281,8 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
                         continue
                     _rebalance_to(symbol, result['target'], d, result['trend_strength'], result['regime'],
                                   vol_regime, vix_close=vix_close, hv=result['hv'],
-                                  vol_scalar=result['vol_scalar'], discount=result['discount'], close=result['close'])
+                                  vol_scalar=result['vol_scalar'], discount=result['discount'],
+                                  close=result['close'], dd_pct=result['dd_pct'])
 
         daily_rows.append({'date': d, 'capital': round(capital, 2)})
 
