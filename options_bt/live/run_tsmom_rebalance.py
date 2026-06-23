@@ -39,11 +39,40 @@ load_dotenv()
 log = logging.getLogger(__name__)
 
 # Known CME equity-index futures defaults: (exchange, multiplier)
-KNOWN_INSTRUMENTS = {
-    'MES': ('CME', 5),
+KNOWN_INSTRUMENTS = {    
     'ES':  ('CME', 50),
-    'MNQ': ('CME', 2),
+    'MES': ('CME', 5),
     'NQ':  ('CME', 20),
+    'MNQ': ('CME', 2),
+
+    'CL': ('COMEX', 1000),
+    'MCL': ('COMEX', 100),
+    'GC': ('COMEX', 100),
+    'MGC': ('COMEX', 10),
+    'SI': ('COMEX', 5000), # Silver (COMEX) -- margin estimated, verify 
+    'SIL': ('COMEX', 1000), # Micro Silver (COMEX) -- margin estimated, verify, same symbol at IB: SI?
+
+    'ZN': ('CBOT', 1000), # 10-Year T-Note (CBOT) -- margin estimated, verify
+    'ZT': ('CBOT', 2000),  # 2-Year T-Note (CBOT) -- margin estimated, verify
+    
+    'ZL': ('CBOT', 600), # Soybean Oil (CBOT) -- 60K lbs, 0.01 cent/lb
+    'MZL': ('CBOT', 60), # Micro Soybean Oil (CBOT) -- 6K lbs, 0.02 cent/lb
+    'ZC': ('CBOT', 50), # Corn (CBOT) -- 5000 bushels, 0.0025 cent/bu
+    'MZC': ('CBOT', 5), # Micro Corn (CBOT) -- 500 bushels, 0.005 cent/bu = $2.50
+    'ZS': ('CBOT', 50), # Soy (CBOT) -- 5000 bushels, 0.0025 cent/bu
+    'MZS': ('CBOT', 5), # Micro Soy (CBOT) -- 500 bushels, 0.005 cent/bu = $2.50
+    'ZW': ('CBOT', 50), # Wheatoy (CBOT) -- 5000 bushels, 0.0025 cent/bu
+    'MZW': ('CBOT', 5), # Micro Wheat (CBOT) -- 500 bushels, 0.005 cent/bu = $2.50
+     
+    # 'NIY': ('CME', 10000),  
+    'NKD': ('CME', 5),   
+    'MNK': ('CME', 0.5),   
+
+    '_6J': ('CME', 12_500_000),   
+    '_6L': ('CME', 100_000), 
+    '_6M': ('CME', 500_000), 
+
+    
 }
 
 DEFAULT_MAX_NOTIONAL = float(os.getenv('TSMOM_DEFAULT_MAX_NOTIONAL', '25000'))

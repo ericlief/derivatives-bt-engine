@@ -62,6 +62,7 @@ def main():
         leverage=args.leverage,
         start_date=start_date,
         end_date=end_date,
+        fill_price='mid'
     )
 
     bt = Backtester(data=data, save_trades=not args.no_save, log_to_sheets=False)
