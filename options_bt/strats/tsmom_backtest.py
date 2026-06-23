@@ -77,11 +77,18 @@ def main():
     print(f"{len(events)} rebalance events, {sum(1 for e in events if e['target_contracts'] != e['prior_contracts'])} caused a position change")
 
     if not args.no_save:
-        os.makedirs('results', exist_ok=True)
+        # Anchored to the project root rather than a bare relative
+        # "results" -- a bare relative path silently creates results/results
+        # (and setup_logger's own relative "logs") if this is ever invoked
+        # from inside results/ itself, e.g. after cd-ing there to inspect
+        # prior output.
+        results_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', '..', 'results'))
+        os.makedirs(results_dir, exist_ok=True)
         symbol_str = '_'.join(symbols)
-        stats.write_csv(f"results/tsmom_stats_{symbol_str}_{start_year}-{end_year}.csv")
+        stats.write_csv(os.path.join(results_dir, f"tsmom_stats_{symbol_str}_{start_year}-{end_year}.csv"))
         import polars as pl
-        pl.DataFrame(events).write_csv(f"results/tsmom_events_{symbol_str}_{start_year}-{end_year}.csv")
+        pl.DataFrame(events).write_csv(
+            os.path.join(results_dir, f"tsmom_events_{symbol_str}_{start_year}-{end_year}.csv"))
 
 
 if __name__ == "__main__":
