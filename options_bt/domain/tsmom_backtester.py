@@ -95,6 +95,12 @@ def _compute_vix_regime_series(vix: pl.DataFrame) -> pl.DataFrame:
     return vix.with_columns(vol_regime=pl.Series(regimes))
 
 
+def _round(x: Optional[float], ndigits: int) -> Optional[float]:
+    """round() that passes None through, for optional diagnostic fields
+    that may not have been computable (e.g. gated/skipped rebalances)."""
+    return None if x is None else round(x, ndigits)
+
+
 def _month_end_dates(price_data: dict[str, pl.DataFrame]) -> set[date]:
     """Last trading day of each calendar month, across the union of every
     loaded symbol's dates."""
@@ -206,9 +212,9 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
             capital -= fee
         held_contracts[symbol] = target
         events.append({
-            'date': rebalance_date, 'symbol': symbol, 'trend_strength': trend_strength,
-            'regime': regime, 'vol_regime': vol_regime, 'vix_close': vix_close,
-            'hv': hv, 'vol_scalar': vol_scalar, 'discount': discount,
+            'date': rebalance_date, 'symbol': symbol, 'trend_strength': _round(trend_strength, 4),
+            'regime': regime, 'vol_regime': vol_regime, 'vix_close': _round(vix_close, 2),
+            'hv': _round(hv, 4), 'vol_scalar': _round(vol_scalar, 4), 'discount': _round(discount, 2),
             'prior_contracts': prior, 'target_contracts': target, 'is_seed': is_seed,
         })
 
