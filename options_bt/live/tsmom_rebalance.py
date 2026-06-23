@@ -87,7 +87,13 @@ def _get_vx_future(ib: IBPySync, expiry: str):
 
 def get_nearest_quarterly_expiry(ib: IBPySync, symbol: str, exchange: str, min_days: int = 7,
                                   multiplier: str = '') -> str:
-    """Nearest quarterly expiry (YYYYMM) with at least min_days remaining."""
+    """Nearest expiry with at least min_days remaining, as the full
+    YYYYMMDD IB already gave us in req_contract_details -- truncating to
+    YYYYMM and letting IB re-resolve from the partial month was observed to
+    fail qualify_contracts for some symbols (MCL/MZC/MZW) even though the
+    exact same month was a real, listed contract a moment earlier; passing
+    back the untruncated date IB itself returned avoids that re-resolution
+    step entirely."""
     c = IBPySync.future(symbol, exchange=exchange, multiplier=multiplier)
     details = ib.req_contract_details(c)
     log.debug(
@@ -107,7 +113,7 @@ def get_nearest_quarterly_expiry(ib: IBPySync, symbol: str, exchange: str, min_d
     )
     if not expiries:
         raise RuntimeError(f'No {symbol} ({exchange}) contracts found beyond {min_days}d')
-    nearest = expiries[0][:6]
+    nearest = expiries[0]
     log.info('Auto-resolved %s (%s) expiry: %s (all candidates: %s)', symbol, exchange, nearest, expiries)
     return nearest
 
@@ -257,7 +263,16 @@ def compute_rebalance_targets(ib: IBPySync, instruments: list[dict], config: dic
         symbol = instr['symbol']
         try:
             contract = _resolve_contract(ib, instr, min_days)
-            bars = ib.get_historical_bars(contract, duration='3 y', bar_size='1 day')
+            # Historical bars come from the continuous front-month contract,
+            # not the dated one -- a single expiry-specific Future only has
+            # bars back to when that contract was listed (well under a
+            # year), which silently starves the 252-day (ts1y) momentum calc
+            # and makes classify_regime() return 'Unknown' for every symbol
+            # whose nearest contract hasn't been listed a full year yet.
+            ib_symbol = instr.get('ib_symbol') or instr['symbol']
+            cont = IBPySync.cont_future(ib_symbol, exchange=instr.get('exchange', 'CME'))
+            ib.qualify_contracts(cont)
+            bars = ib.get_historical_bars(cont, duration='3 y', bar_size='1 day')
             if bars is None or bars.height < 64:
                 raise RuntimeError(f'Insufficient bar history for {symbol} ({bars.height if bars is not None else 0} rows)')
 
