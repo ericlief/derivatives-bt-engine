@@ -38,19 +38,26 @@ load_dotenv()
 
 log = logging.getLogger(__name__)
 
-# Known CME equity-index futures defaults: (exchange, multiplier)
-KNOWN_INSTRUMENTS = {    
+# Known CME equity-index futures defaults: (exchange, multiplier, ib_symbol)
+# ib_symbol is only set when IBKR's actual ticker differs from our local key
+# (e.g. SIL: IBKR has no separate Micro Silver symbol -- it's traded under
+# the same root symbol 'SI' as full-size silver, disambiguated only by the
+# contract's multiplier field, confirmed via IBKR users hitting this exact
+# mismatch: https://www.quantconnect.com/forum/discussion/19622/).
+KNOWN_INSTRUMENTS = {
     'ES':  ('CME', 50),
     'MES': ('CME', 5),
     'NQ':  ('CME', 20),
     'MNQ': ('CME', 2),
 
-    'CL': ('COMEX', 1000),
-    'MCL': ('COMEX', 100),
+    # CL/MCL: NYMEX, not COMEX -- COMEX is metals only (CME Group splits its
+    # exchanges by product class; crude oil clears on NYMEX).
+    'CL': ('NYMEX', 1000),
+    'MCL': ('NYMEX', 100),
     'GC': ('COMEX', 100),
     'MGC': ('COMEX', 10),
-    'SI': ('COMEX', 5000), # Silver (COMEX) -- margin estimated, verify 
-    'SIL': ('COMEX', 1000), # Micro Silver (COMEX) -- margin estimated, verify, same symbol at IB: SI?
+    'SI': ('COMEX', 5000), # Silver (COMEX) -- margin estimated, verify
+    'SIL': ('COMEX', 1000, 'SI'), # Micro Silver -- IBKR ticker is 'SI', not 'SIL'; multiplier disambiguates
 
     'ZN': ('CBOT', 1000), # 10-Year T-Note (CBOT) -- margin estimated, verify
     'ZT': ('CBOT', 2000),  # 2-Year T-Note (CBOT) -- margin estimated, verify
@@ -123,9 +130,12 @@ def _build_instruments(spec: str, max_notional: float, max_contracts: int) -> li
                 f'Unknown symbol {symbol!r} — pass a JSON config path for '
                 f'instruments outside {sorted(KNOWN_INSTRUMENTS)}'
             )
-        exchange, multiplier = KNOWN_INSTRUMENTS[symbol]
+        spec_tuple = KNOWN_INSTRUMENTS[symbol]
+        exchange, multiplier = spec_tuple[0], spec_tuple[1]
+        ib_symbol = spec_tuple[2] if len(spec_tuple) > 2 else symbol
         instruments.append({
             'symbol': symbol,
+            'ib_symbol': ib_symbol,
             'exchange': exchange,
             'expiry': 'auto',
             'multiplier': multiplier,

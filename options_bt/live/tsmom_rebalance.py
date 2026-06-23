@@ -85,9 +85,10 @@ def _get_vx_future(ib: IBPySync, expiry: str):
     return vx
 
 
-def get_nearest_quarterly_expiry(ib: IBPySync, symbol: str, exchange: str, min_days: int = 7) -> str:
+def get_nearest_quarterly_expiry(ib: IBPySync, symbol: str, exchange: str, min_days: int = 7,
+                                  multiplier: str = '') -> str:
     """Nearest quarterly expiry (YYYYMM) with at least min_days remaining."""
-    c = IBPySync.future(symbol, exchange=exchange)
+    c = IBPySync.future(symbol, exchange=exchange, multiplier=multiplier)
     details = ib.req_contract_details(c)
     cutoff = date.today() + timedelta(days=min_days)
     expiries = sorted(
@@ -314,10 +315,19 @@ def compute_rebalance_targets(ib: IBPySync, instruments: list[dict], config: dic
 
 
 def _resolve_contract(ib: IBPySync, instr: dict, min_days: int):
+    ib_symbol = instr.get('ib_symbol') or instr['symbol']
+    # Only pass multiplier when ib_symbol diverges from our local symbol
+    # (i.e. a genuine same-ticker collision like SI/SIL) -- passing it
+    # unconditionally risks breaking already-working contracts if our
+    # multiplier's string formatting doesn't exactly match what IB has on
+    # file (e.g. "0.5" vs "0.50").
+    multiplier = str(instr.get('multiplier', '') or '') if ib_symbol != instr['symbol'] else ''
     expiry = instr.get('expiry', 'auto')
     if expiry == 'auto':
-        expiry = get_nearest_quarterly_expiry(ib, instr['symbol'], instr.get('exchange', 'CME'), min_days)
-    contract = IBPySync.future(instr['symbol'], exchange=instr.get('exchange', 'CME'), expiration=expiry)
+        expiry = get_nearest_quarterly_expiry(ib, ib_symbol, instr.get('exchange', 'CME'), min_days,
+                                               multiplier=multiplier)
+    contract = IBPySync.future(ib_symbol, exchange=instr.get('exchange', 'CME'), expiration=expiry,
+                               multiplier=multiplier)
     ib.qualify_contracts(contract)
     return contract
 
