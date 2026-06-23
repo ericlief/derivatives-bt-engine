@@ -132,6 +132,12 @@ def fetch_vx_spike_ratio(ib: IBPySync, vx_expiry: str = 'auto', min_days: int = 
     if vx_ma63 is None or math.isnan(vx_ma63) or vx_ma63 <= 0:
         raise RuntimeError('Insufficient VX history to compute a 63-day MA')
 
+    # Delayed data type, not live: this account has no CFE/CBOE real-time
+    # subscription, so reqMktData on VX/VIX would otherwise hit error 10168
+    # and burn ~100s per get_price call before falling through (see
+    # combined_monitor.py, which sidesteps the same issue the same way).
+    ib.set_market_data_type(3)
+
     vx_current = None
     if not _vx_is_stale():
         try:
