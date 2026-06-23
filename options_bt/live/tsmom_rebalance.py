@@ -251,6 +251,8 @@ def compute_rebalance_targets(ib: IBPySync, instruments: list[dict], config: dic
                 'current_contracts': current,
                 'signal': None,
                 'regime': None,
+                'vx_current': vx_current,
+                'vx_ma63': vx_ma63,
                 'vx_ratio': vx_ratio,
                 'vol_regime': vol_regime,
             })
@@ -283,12 +285,22 @@ def compute_rebalance_targets(ib: IBPySync, instruments: list[dict], config: dic
             ts1y = last['ts1y'][0]
             daily_std_last = last['daily_std'][0] if 'daily_std' in last.columns else None
             last_close = float(last['close'][0])
+            dd_raw = last['dd'][0] if 'dd' in last.columns else None
+            dd_pct = dd_raw * 100 if dd_raw is not None else None
 
             regime = classify_regime(ts3m, ts1y)
 
             signal_for_scalar = trend_strength
             if long_only and signal_for_scalar is not None and not math.isnan(signal_for_scalar):
                 signal_for_scalar = max(0.0, signal_for_scalar)
+
+            # hv/vol_scalar/discount recomputed here (mirrors
+            # compute_position_scalar's own internal math) purely for
+            # reporting -- so the printed report shows *why* a given
+            # trend_strength did or didn't turn into a trade.
+            hv = daily_std_last * math.sqrt(252) if daily_std_last and daily_std_last > 0 else None
+            vol_scalar = max(0.25, min(2.0, vol_target / hv)) if hv else 1.0
+            discount = regime_discount if regime in ('Correction', 'Rebound') else 1.0
 
             scalar = compute_position_scalar(
                 signal_for_scalar, daily_std_last, vol_target, regime,
@@ -315,7 +327,17 @@ def compute_rebalance_targets(ib: IBPySync, instruments: list[dict], config: dic
                 'target_contracts': target_contracts,
                 'current_contracts': current_contracts,
                 'signal': trend_strength,
+                'ts3m': ts3m,
+                'ts1y': ts1y,
+                'daily_std': daily_std_last,
+                'hv': hv,
+                'vol_scalar': vol_scalar,
+                'discount': discount,
+                'close': last_close,
+                'dd_pct': dd_pct,
                 'regime': regime,
+                'vx_current': vx_current,
+                'vx_ma63': vx_ma63,
                 'vx_ratio': vx_ratio,
                 'vol_regime': vol_regime,
             })
@@ -353,6 +375,12 @@ def _resolve_contract(ib: IBPySync, instr: dict, min_days: int):
     return contract
 
 
+def _fmt(v, spec='+.3f'):
+    if v is None or (isinstance(v, float) and math.isnan(v)):
+        return 'N/A'
+    return format(v, spec)
+
+
 def print_rebalance_report(targets: list[dict]) -> str:
     """Pretty-print (and return as a string) the rebalancing plan."""
     lines = ['TSMOM Rebalance Report', '=' * 60]
@@ -360,11 +388,15 @@ def print_rebalance_report(targets: list[dict]) -> str:
         if t.get('error'):
             lines.append(f"{t['symbol']:6s}  ERROR: {t['error']}")
             continue
-        signal_str = f"{t['signal']:+.3f}" if t['signal'] is not None else 'N/A'
         lines.append(
             f"{t['symbol']:6s}  target={t['target_contracts']!s:>4}  "
-            f"current={t['current_contracts']!s:>4}  signal={signal_str:>7}  "
+            f"current={t['current_contracts']!s:>4}  signal={_fmt(t.get('signal')):>7}  "
+            f"ts3m={_fmt(t.get('ts3m')):>7}  ts1y={_fmt(t.get('ts1y')):>7}  "
+            f"close={_fmt(t.get('close'), '.2f'):>9}  dd_pct={_fmt(t.get('dd_pct'), '.2f'):>7}  "
+            f"daily_std={_fmt(t.get('daily_std'), '.4f'):>7}  hv={_fmt(t.get('hv'), '.3f'):>6}  "
+            f"vol_scalar={_fmt(t.get('vol_scalar'), '.3f'):>6}  discount={_fmt(t.get('discount'), '.2f'):>5}  "
             f"regime={t['regime'] or 'N/A':<10}  "
+            f"vx_current={_fmt(t.get('vx_current'), '.2f'):>6}  vx_ma63={_fmt(t.get('vx_ma63'), '.2f'):>6}  "
             f"vx_ratio={t['vx_ratio']:.3f}  vol_regime={t['vol_regime']}"
         )
     report = '\n'.join(lines)
