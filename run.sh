@@ -1,4 +1,4 @@
 #!/bin/bash
 
-tsmom-bt --symbols ES --years 2025 --max-contracts 1
+tsmom --instruments 'MES,NQ,MCL,MZL,MZC,MZS,MZW,MGC,SIL' --max-contracts 1
 

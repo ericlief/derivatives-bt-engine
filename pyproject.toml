@@ -26,7 +26,7 @@ dependencies = [
     "seaborn",
     "maturin",
     "ib_insync",
-    "ib_tools @ file:///home/dev/projects/fin-tools/ib-tools",
+    "ib_tools @ file:///Users/liefe/Projects/personal/fin/fin-tools/ib-tools"
 ]
 
 [project.scripts]

@@ -176,6 +176,7 @@ def parse_args():
                    help='Position discount for Correction/Rebound regimes; 1.0 disables (default: %(default)s)')
     p.add_argument('--dry-run', action='store_true', default=True,
                    help='Print targets only, no orders (default — this is the safe default)')
+    p.add_argument('--paper',    action='store_true')
     p.add_argument('--live', action='store_true',
                    help='Place real orders to reach target_contracts, after a typed confirmation')
     conn = p.add_argument_group('Connection')
@@ -214,7 +215,11 @@ def main():
         print('DRY RUN — targets only, no orders will be placed')
 
     ib = IBPySync()
-    connect_with_retry(ib, args.host, [args.port], args.client_id)
+    host      = '127.0.0.1' if args.paper else args.host
+    ports     = [4002, 7497] if args.paper else [args.port, 7496]
+    client_id = 1            if args.paper else args.client_id
+
+    connect_with_retry(ib, host, ports, client_id)
     atexit.register(ib.disconnect)
 
     targets = compute_rebalance_targets(ib, instruments, config)
