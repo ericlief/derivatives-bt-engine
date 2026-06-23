@@ -97,6 +97,36 @@ def _patch_data(monkeypatch, price_data: dict, vix: pl.DataFrame):
     monkeypatch.setattr(tb, 'load_portfolio_data', lambda symbols: (price_data, vix))
 
 
+def test_seeds_position_from_last_month_end_before_start_date(monkeypatch):
+    """With start_date set, the first event should be a seed dated at the
+    last month-end *before* start_date (not start_date itself), and the
+    position should already be on as of day one of the window -- not
+    flat-until-the-first-in-window-rebalance."""
+    price_data = {'X': _price_df(date(2018, 1, 1), 460, drift=0.0015, vol=0.005, seed=1)}
+    vix = _vix_df(date(2018, 1, 1), 460, level=15.0)
+    _patch_data(monkeypatch, price_data, vix)
+    monkeypatch.setattr(tb.FuturesType, 'from_symbol', staticmethod(lambda s: tb.FuturesType.ES))
+
+    all_dates = sorted(price_data['X']['ts_event'].to_list())
+    start_date = all_dates[-30]  # well past the 64-bar minimum, comfortably inside the series
+
+    config = TsmomBacktestConfig(symbols=['X'], max_notional=50_000, max_contracts=5, start_date=start_date)
+    result = run_tsmom_backtest(config)
+
+    seed_events = [e for e in result['events'] if e['is_seed']]
+    assert seed_events, "expected a seed event before start_date"
+    for e in seed_events:
+        assert e['date'] < start_date
+
+    first_day_capital = result['stats'].filter(pl.col('date') == start_date)
+    assert first_day_capital.height == 1
+    # held_contracts must already reflect the seed target on day one --
+    # confirmed indirectly: at least one symbol holds a nonzero position
+    # immediately (no "wait for the next month-end" gap).
+    held_after_seed = {e['symbol']: e['target_contracts'] for e in seed_events}
+    assert any(v != 0 for v in held_after_seed.values())
+
+
 def test_long_uptrend_produces_long_position(monkeypatch):
     price_data = {'X': _price_df(date(2018, 1, 1), 500, drift=0.0015, vol=0.005, seed=1)}
     vix = _vix_df(date(2018, 1, 1), 500, level=15.0)
