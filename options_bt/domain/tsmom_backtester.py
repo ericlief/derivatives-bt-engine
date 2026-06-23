@@ -165,6 +165,7 @@ def _compute_target(symbol: str, d: date, full_price_data: dict[str, pl.DataFram
     return {
         'target': target, 'trend_strength': trend_strength, 'regime': regime,
         'hv': hv, 'vol_scalar': vol_scalar * position_scale, 'discount': discount,
+        'close': last_close,
     }
 
 
@@ -204,7 +205,7 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
     capital = config.initial_capital
 
     def _rebalance_to(symbol: str, target: int, rebalance_date: date, trend_strength, regime, vol_regime,
-                       vix_close=None, hv=None, vol_scalar=None, discount=None, is_seed=False):
+                       vix_close=None, hv=None, vol_scalar=None, discount=None, is_seed=False, close=None):
         nonlocal capital
         prior = held_contracts[symbol]
         if target != prior:
@@ -212,7 +213,7 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
             capital -= fee
         held_contracts[symbol] = target
         events.append({
-            'date': rebalance_date, 'symbol': symbol, 'trend_strength': _round(trend_strength, 4),
+            'date': rebalance_date, 'symbol': symbol, 'close': _round(close, 2), 'trend_strength': _round(trend_strength, 4),
             'regime': regime, 'vol_regime': vol_regime, 'vix_close': _round(vix_close, 2),
             'hv': _round(hv, 4), 'vol_scalar': _round(vol_scalar, 4), 'discount': _round(discount, 2),
             'prior_contracts': prior, 'target_contracts': target, 'is_seed': is_seed,
@@ -238,7 +239,8 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
                         continue
                     _rebalance_to(symbol, result['target'], seed_date, result['trend_strength'], result['regime'],
                                   vol_regime, vix_close=vix_close, hv=result['hv'],
-                                  vol_scalar=result['vol_scalar'], discount=result['discount'], is_seed=True)
+                                  vol_scalar=result['vol_scalar'], discount=result['discount'], is_seed=True,
+                                  close=result['close'])
 
     for d in all_dates:
         # 1. Mark existing holdings to market: today's close vs yesterday's,
@@ -263,7 +265,9 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
                 for symbol in config.symbols:
                     prior = held_contracts[symbol]
                     target = round(prior / 2) if vol_regime == 'extreme' else prior
-                    _rebalance_to(symbol, target, d, None, None, vol_regime, vix_close=vix_close)
+                    close_row = full_price_data[symbol].filter(pl.col('ts_event') <= d).tail(1)
+                    close = float(close_row['close'][0]) if close_row.height > 0 else None
+                    _rebalance_to(symbol, target, d, None, None, vol_regime, vix_close=vix_close, close=close)
             else:
                 position_scale = VIX_ELEVATED_SCALE if vol_regime == 'elevated' else 1.0
                 for symbol in config.symbols:
@@ -272,7 +276,7 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
                         continue
                     _rebalance_to(symbol, result['target'], d, result['trend_strength'], result['regime'],
                                   vol_regime, vix_close=vix_close, hv=result['hv'],
-                                  vol_scalar=result['vol_scalar'], discount=result['discount'])
+                                  vol_scalar=result['vol_scalar'], discount=result['discount'], close=result['close'])
 
         daily_rows.append({'date': d, 'capital': round(capital, 2)})
 
