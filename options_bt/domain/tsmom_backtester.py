@@ -112,13 +112,14 @@ def _month_end_dates(price_data: dict[str, pl.DataFrame]) -> set[date]:
     return set(month_ends['month_end'].to_list())
 
 
-def _vix_regime_at(vix: pl.DataFrame, d: date) -> tuple[str, Optional[float]]:
-    """(vol_regime, vix_close) as of the latest available VIX row at or
-    before `d`. ('normal', None) if no VIX data is available yet."""
+def _vix_regime_at(vix: pl.DataFrame, d: date) -> tuple[str, Optional[float], Optional[float]]:
+    """(vol_regime, vix_close, vix_ratio) as of the latest available VIX
+    row at or before `d`. ('normal', None, None) if no VIX data is
+    available yet."""
     row = vix.filter(pl.col('date') <= d).tail(1)
     if row.height == 0:
-        return 'normal', None
-    return row['vol_regime'][0], row['vix_close'][0]
+        return 'normal', None, None
+    return row['vol_regime'][0], row['vix_close'][0], row['vix_ratio'][0]
 
 
 def _compute_target(symbol: str, d: date, full_price_data: dict[str, pl.DataFrame],
@@ -132,14 +133,19 @@ def _compute_target(symbol: str, d: date, full_price_data: dict[str, pl.DataFram
         return None
     signal_df = calculate_trend_strength(df)
     last = signal_df.tail(1)
-    trend_strength = last['trend_strength'][0]
-    ts3m, ts1y = last['ts3m'][0], last['ts1y'][0]
-    daily_std_last = last['daily_std'][0] if 'daily_std' in last.columns else None
+
+    def _col(name):
+        return last[name][0] if name in last.columns else None
+
+    trend_strength = _col('trend_strength')
+    ts3m, ts1y = _col('ts3m'), _col('ts1y')
+    daily_std_last = _col('daily_std')
     last_close = float(last['close'][0])
     # `dd` is already a (close - peak) / peak fraction from
     # calculate_trend_strength -- express as a percentage to match
     # `stats`' own drawdown_pct convention.
-    dd_pct = last['dd'][0] * 100 if 'dd' in last.columns and last['dd'][0] is not None else None
+    dd_raw = _col('dd')
+    dd_pct = dd_raw * 100 if dd_raw is not None else None
     regime = classify_regime(ts3m, ts1y)
 
     signal_for_scalar = trend_strength
@@ -170,6 +176,11 @@ def _compute_target(symbol: str, d: date, full_price_data: dict[str, pl.DataFram
         'target': target, 'trend_strength': trend_strength, 'regime': regime,
         'hv': hv, 'vol_scalar': vol_scalar * position_scale, 'discount': discount,
         'close': last_close, 'dd_pct': dd_pct,
+        # Raw signal-row fields, straight from calculate_trend_strength,
+        # purely for debugging/sanity-checking the sizing math end to end.
+        'peak': _col('peak'), 'avg3m': _col('avg3m'), 'avg1y': _col('avg1y'),
+        'r3m': _col('r3m'), 'r1y': _col('r1y'), 'ts3m': ts3m, 'ts1y': ts1y,
+        'r1y_pct': _col('r1y_pct'),
     }
 
 
@@ -208,20 +219,31 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
     daily_rows = []
     capital = config.initial_capital
 
-    def _rebalance_to(symbol: str, target: int, rebalance_date: date, trend_strength, regime, vol_regime,
-                       vix_close=None, hv=None, vol_scalar=None, discount=None, is_seed=False, close=None,
-                       dd_pct=None):
+    def _rebalance_to(symbol: str, target: int, rebalance_date: date, vol_regime,
+                       vix_close=None, vix_ratio=None, signal: Optional[dict] = None, is_seed=False):
+        """`signal` is _compute_target's full result dict (or None on a
+        spike/extreme-gated event, where signal computation is skipped
+        entirely -- every signal-derived field below is then None, same
+        as before)."""
         nonlocal capital
+        s = signal or {}
         prior = held_contracts[symbol]
         if target != prior:
             fee = futures_types[symbol].commission * 2 * abs(target - prior)
             capital -= fee
         held_contracts[symbol] = target
         events.append({
-            'date': rebalance_date, 'symbol': symbol, 'close': _round(close, 2), 'trend_strength': _round(trend_strength, 4),
-            'regime': regime, 'vol_regime': vol_regime, 'vix_close': _round(vix_close, 2),
-            'hv': _round(hv, 4), 'vol_scalar': _round(vol_scalar, 4), 'discount': _round(discount, 2),
-            'dd_pct': _round(dd_pct, 2), 'prior_contracts': prior, 'target_contracts': target, 'is_seed': is_seed,
+            'date': rebalance_date, 'symbol': symbol,
+            'close': _round(s.get('close'), 2), 'peak': _round(s.get('peak'), 2),
+            'dd_pct': _round(s.get('dd_pct'), 2),
+            'avg3m': _round(s.get('avg3m'), 2), 'avg1y': _round(s.get('avg1y'), 2),
+            'r3m': _round(s.get('r3m'), 4), 'r1y': _round(s.get('r1y'), 4),
+            'ts3m': _round(s.get('ts3m'), 4), 'ts1y': _round(s.get('ts1y'), 4),
+            'trend_strength': _round(s.get('trend_strength'), 4), 'r1y_pct': _round(s.get('r1y_pct'), 2),
+            'regime': s.get('regime'), 'vix_close': _round(vix_close, 2), 'vix_ratio': _round(vix_ratio, 4),
+            'vol_regime': vol_regime, 'hv': _round(s.get('hv'), 4), 'vol_scalar': _round(s.get('vol_scalar'), 4),
+            'discount': _round(s.get('discount'), 2),
+            'prior_contracts': prior, 'target_contracts': target, 'is_seed': is_seed,
         })
 
     # Seed the position from the last completed month-end *before*
@@ -235,17 +257,15 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
         prior_month_ends = [d for d in _month_end_dates(full_price_data) if d < config.start_date]
         if prior_month_ends:
             seed_date = max(prior_month_ends)
-            vol_regime, vix_close = _vix_regime_at(vix, seed_date)
+            vol_regime, vix_close, vix_ratio = _vix_regime_at(vix, seed_date)
             if vol_regime not in ('spike', 'extreme'):  # held_contracts are all 0 here -- hold/halve would be a no-op anyway
                 position_scale = VIX_ELEVATED_SCALE if vol_regime == 'elevated' else 1.0
                 for symbol in config.symbols:
                     result = _compute_target(symbol, seed_date, full_price_data, futures_types, config, position_scale)
                     if result is None:
                         continue
-                    _rebalance_to(symbol, result['target'], seed_date, result['trend_strength'], result['regime'],
-                                  vol_regime, vix_close=vix_close, hv=result['hv'],
-                                  vol_scalar=result['vol_scalar'], discount=result['discount'], is_seed=True,
-                                  close=result['close'], dd_pct=result['dd_pct'])
+                    _rebalance_to(symbol, result['target'], seed_date, vol_regime, vix_close=vix_close,
+                                  vix_ratio=vix_ratio, signal=result, is_seed=True)
 
     for d in all_dates:
         # 1. Mark existing holdings to market: today's close vs yesterday's,
@@ -264,7 +284,7 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
         # gated by the spot-VIX regime (mirrors
         # tsmom_rebalance.compute_rebalance_targets' early-return shape).
         if d in rebalance_dates:
-            vol_regime, vix_close = _vix_regime_at(vix, d)
+            vol_regime, vix_close, vix_ratio = _vix_regime_at(vix, d)
 
             if vol_regime in ('spike', 'extreme'):
                 for symbol in config.symbols:
@@ -272,17 +292,16 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
                     target = round(prior / 2) if vol_regime == 'extreme' else prior
                     close_row = full_price_data[symbol].filter(pl.col('ts_event') <= d).tail(1)
                     close = float(close_row['close'][0]) if close_row.height > 0 else None
-                    _rebalance_to(symbol, target, d, None, None, vol_regime, vix_close=vix_close, close=close)
+                    _rebalance_to(symbol, target, d, vol_regime, vix_close=vix_close, vix_ratio=vix_ratio,
+                                  signal={'close': close})
             else:
                 position_scale = VIX_ELEVATED_SCALE if vol_regime == 'elevated' else 1.0
                 for symbol in config.symbols:
                     result = _compute_target(symbol, d, full_price_data, futures_types, config, position_scale)
                     if result is None:
                         continue
-                    _rebalance_to(symbol, result['target'], d, result['trend_strength'], result['regime'],
-                                  vol_regime, vix_close=vix_close, hv=result['hv'],
-                                  vol_scalar=result['vol_scalar'], discount=result['discount'],
-                                  close=result['close'], dd_pct=result['dd_pct'])
+                    _rebalance_to(symbol, result['target'], d, vol_regime, vix_close=vix_close,
+                                  vix_ratio=vix_ratio, signal=result)
 
         daily_rows.append({'date': d, 'capital': round(capital, 2)})
 
