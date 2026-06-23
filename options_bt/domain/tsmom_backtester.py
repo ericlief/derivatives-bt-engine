@@ -19,7 +19,7 @@ front-month / VX-63d-MA ratio (see options_bt.live.tsmom_rebalance).
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date
 from typing import Optional
 
@@ -32,7 +32,7 @@ from options_bt.utils.logger import setup_logger
 
 logger = setup_logger()
 
-VIX_FILE_PATH = "/home/dev/data/fin/market/index/SPX/external/options/historical/vix.csv"
+VIX_FILE_PATH = "/home/dev/data/fin/market/index/VIX/historical/vix.parquet"
 
 # Same band thresholds as options_bt.live.tsmom_rebalance's VX-futures gate,
 # applied to spot-VIX-current / spot-VIX-63d-MA instead.
@@ -70,21 +70,13 @@ def check_vol_regime(vix_ratio: Optional[float]) -> str:
 
 def load_portfolio_data(symbols: list[str]) -> tuple[dict[str, pl.DataFrame], pl.DataFrame]:
     """Loads each symbol's continuous front-month OHLCV (via the existing
-    FuturesDataLoader, parquet-cached) plus one shared spot-VIX series
-    (via the existing BaseDataLoader.vix_data, loaded once)."""
-    price_data = {}
-    vix = pl.DataFrame()
-    for i, symbol in enumerate(symbols):
-        vix_file = VIX_FILE_PATH if i == 0 else None
-        dl = FuturesDataLoader(asset=symbol, vix_file=vix_file, use_preprocessed=True, save_preprocessed=True)
-        price_data[symbol] = dl.ohlcv
-        if vix_file is not None:
-            vix = pl.from_pandas(dl.vix_data.reset_index())
-            # _preprocess_vix_data clears the index name, so reset_index()
-            # always yields a plain "index" column regardless of the
-            # source CSV's original date column name.
-            vix = vix.select(['index', 'close']).rename({'index': 'date', 'close': 'vix_close'})
-            vix = vix.with_columns(pl.col('date').cast(pl.Date)).sort('date')
+    FuturesDataLoader, parquet-cached) plus one shared spot-VIX series,
+    read directly as polars (covers 1990-present, unlike the older
+    pandas/CSV vix_file BaseDataLoader.vix_data still uses for the option
+    path, which is stale past 2024-12-31)."""
+    price_data = {s: FuturesDataLoader(asset=s, use_preprocessed=True, save_preprocessed=True).ohlcv
+                  for s in symbols}
+    vix = pl.read_parquet(VIX_FILE_PATH).select(['date', 'close']).rename({'close': 'vix_close'}).sort('date')
     return price_data, vix
 
 
@@ -131,8 +123,14 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
             df = df.filter(pl.col('ts_event') <= config.end_date)
         windowed[symbol] = df.sort('ts_event')
 
-    rebalance_dates = _month_end_dates(windowed)
     all_dates = sorted(set().union(*(set(df['ts_event'].to_list()) for df in windowed.values())))
+    # A position opened on the very last date in the window has zero
+    # subsequent days to mark to market -- it shows up as a pure commission
+    # cost with no chance of P&L, which is misleading rather than meaningful.
+    # Mirrors Backtester's own bounded-window handling (backtester.py:152-160)
+    # in spirit: don't let the backtest take an action it can't show the
+    # result of within the requested range.
+    rebalance_dates = _month_end_dates(windowed) - ({all_dates[-1]} if all_dates else set())
 
     held_contracts = {s: 0 for s in config.symbols}
     prior_close = {s: None for s in config.symbols}
@@ -140,7 +138,8 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
     daily_rows = []
     capital = config.initial_capital
 
-    def _rebalance_to(symbol: str, target: int, rebalance_date: date, trend_strength, regime, vol_regime):
+    def _rebalance_to(symbol: str, target: int, rebalance_date: date, trend_strength, regime, vol_regime,
+                       vix_close=None, hv=None, vol_scalar=None, discount=None):
         nonlocal capital
         prior = held_contracts[symbol]
         if target != prior:
@@ -149,7 +148,8 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
         held_contracts[symbol] = target
         events.append({
             'date': rebalance_date, 'symbol': symbol, 'trend_strength': trend_strength,
-            'regime': regime, 'vol_regime': vol_regime,
+            'regime': regime, 'vol_regime': vol_regime, 'vix_close': vix_close,
+            'hv': hv, 'vol_scalar': vol_scalar, 'discount': discount,
             'prior_contracts': prior, 'target_contracts': target,
         })
 
@@ -172,12 +172,13 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
         if d in rebalance_dates:
             vix_row = vix.filter(pl.col('date') <= d).tail(1)
             vol_regime = vix_row['vol_regime'][0] if vix_row.height > 0 else 'normal'
+            vix_close = vix_row['vix_close'][0] if vix_row.height > 0 else None
 
             if vol_regime in ('spike', 'extreme'):
                 for symbol in config.symbols:
                     prior = held_contracts[symbol]
                     target = round(prior / 2) if vol_regime == 'extreme' else prior
-                    _rebalance_to(symbol, target, d, None, None, vol_regime)
+                    _rebalance_to(symbol, target, d, None, None, vol_regime, vix_close=vix_close)
             else:
                 position_scale = VIX_ELEVATED_SCALE if vol_regime == 'elevated' else 1.0
                 for symbol in config.symbols:
@@ -198,6 +199,14 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
                     ):
                         signal_for_scalar = max(0.0, signal_for_scalar)
 
+                    # Recomputed here (mirrors compute_position_scalar's own
+                    # internal math exactly) purely so the event log can show
+                    # *why* a given trend_strength did or didn't turn into a
+                    # trade -- compute_position_scalar itself stays untouched.
+                    hv = daily_std_last * math.sqrt(252) if daily_std_last and daily_std_last > 0 else None
+                    vol_scalar = max(0.25, min(2.0, config.vol_target / hv)) if hv else 1.0
+                    discount = config.regime_discount if regime in ('Correction', 'Rebound') else 1.0
+
                     scalar = compute_position_scalar(
                         signal_for_scalar, daily_std_last, config.vol_target, regime,
                         regime_discount=config.regime_discount,
@@ -208,7 +217,8 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
                     target = round((config.max_notional * scalar) / contract_notional) if contract_notional else 0
                     target = max(-config.max_contracts, min(config.max_contracts, target))
 
-                    _rebalance_to(symbol, target, d, trend_strength, regime, vol_regime)
+                    _rebalance_to(symbol, target, d, trend_strength, regime, vol_regime,
+                                  vix_close=vix_close, hv=hv, vol_scalar=vol_scalar * position_scale, discount=discount)
 
         daily_rows.append({'date': d, 'capital': round(capital, 2)})
 

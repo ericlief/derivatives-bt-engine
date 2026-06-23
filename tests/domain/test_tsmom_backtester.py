@@ -136,8 +136,12 @@ def test_portfolio_capital_aggregates_across_symbols(monkeypatch):
 def test_vix_spike_holds_positions_unchanged(monkeypatch):
     """ratio ~25/15=1.67 lands in the 'spike' band (not 'extreme') -- the
     gate should hold prior positions exactly, with signal computation
-    skipped entirely (trend_strength/regime both None on those events)."""
-    price_data = {'X': _price_df(date(2018, 1, 1), 400, drift=0.0015, vol=0.005, seed=4)}
+    skipped entirely (trend_strength/regime both None on those events).
+    Price data runs ~60 trading days past the (short) VIX spike, so the
+    spike's rebalance date isn't the literal last date in the window
+    (which the last-date-in-window cutoff excludes) and the rolling
+    63-day VIX MA doesn't have time to absorb the spike before then."""
+    price_data = {'X': _price_df(date(2018, 1, 1), 460, drift=0.0015, vol=0.005, seed=4)}
     base_vix = _vix_df(date(2018, 1, 1), 395, level=15.0)
     spike_vix = _vix_df(base_vix['date'][-1] + timedelta(days=1), 5, level=25.0)
     vix = pl.concat([base_vix, spike_vix])
@@ -158,8 +162,9 @@ def test_vix_spike_holds_positions_unchanged(monkeypatch):
 def test_vix_extreme_halves_positions(monkeypatch):
     """ratio ~35/15=2.33 lands in 'extreme' -- the gate should halve
     (round-to-nearest) the prior position rather than hold or resize via
-    the signal."""
-    price_data = {'X': _price_df(date(2018, 1, 1), 400, drift=0.0015, vol=0.005, seed=4)}
+    the signal. Same spike-then-runway construction as the 'spike' test
+    above, just a higher level."""
+    price_data = {'X': _price_df(date(2018, 1, 1), 460, drift=0.0015, vol=0.005, seed=4)}
     base_vix = _vix_df(date(2018, 1, 1), 395, level=15.0)
     spike_vix = _vix_df(base_vix['date'][-1] + timedelta(days=1), 5, level=35.0)
     vix = pl.concat([base_vix, spike_vix])
