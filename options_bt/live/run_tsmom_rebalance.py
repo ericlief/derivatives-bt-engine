@@ -75,9 +75,14 @@ KNOWN_INSTRUMENTS = {
     'NKD': ('CME', 5),   
     'MNK': ('CME', 0.5),   
 
-    '_6J': ('CME', 12_500_000),   
-    '_6L': ('CME', 100_000), 
-    '_6M': ('CME', 500_000), 
+    # No leading underscore here, unlike enums.py's FuturesType -- that
+    # workaround exists only because Python enum members can't start with a
+    # digit. This is a plain dict, so the key is the real IBKR ticker; using
+    # '_6J' previously meant --instruments 6J couldn't match this entry, and
+    # even a literal '_6J' lookup would have sent the wrong symbol to IB.
+    '6J': ('CME', 12_500_000),
+    '6L': ('CME', 100_000),
+    '6M': ('CME', 500_000),
 
     
 }
