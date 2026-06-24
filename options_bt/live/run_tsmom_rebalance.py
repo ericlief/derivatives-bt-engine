@@ -38,12 +38,18 @@ load_dotenv()
 
 log = logging.getLogger(__name__)
 
-# Known CME equity-index futures defaults: (exchange, multiplier, ib_symbol)
-# ib_symbol is only set when IBKR's actual ticker differs from our local key
-# (e.g. SIL: IBKR has no separate Micro Silver symbol -- it's traded under
-# the same root symbol 'SI' as full-size silver, disambiguated only by the
-# contract's multiplier field, confirmed via IBKR users hitting this exact
-# mismatch: https://www.quantconnect.com/forum/discussion/19622/).
+# Known CME equity-index futures defaults: (exchange, multiplier, ib_symbol, signal_symbol)
+# ib_symbol is only set when IBKR's actual contract ticker differs from our
+# local key (e.g. SIL: IBKR has no separate Micro Silver symbol -- it's
+# traded under the same root symbol 'SI' as full-size silver, disambiguated
+# only by the contract's multiplier field, confirmed via IBKR users hitting
+# this exact mismatch: https://www.quantconnect.com/forum/discussion/19622/).
+# signal_symbol is only set when the TRADED contract's own continuous
+# front-month history is too short/thin to trust for the TSMOM signal (e.g.
+# the CBOT micro grains below, all launched ~Feb 2025) -- in that case the
+# signal is computed off the full-size contract's much longer history
+# (same cents/bushel quote scale, just a different contract multiplier),
+# while sizing/orders still use the traded micro contract.
 KNOWN_INSTRUMENTS = {
     'ES':  ('CME', 50),
     'MES': ('CME', 5),
@@ -61,15 +67,15 @@ KNOWN_INSTRUMENTS = {
 
     'ZN': ('CBOT', 1000), # 10-Year T-Note (CBOT) -- margin estimated, verify
     'ZT': ('CBOT', 2000),  # 2-Year T-Note (CBOT) -- margin estimated, verify
-    
+
     'ZL': ('CBOT', 600), # Soybean Oil (CBOT) -- 60K lbs, 0.01 cent/lb
-    'MZL': ('CBOT', 60), # Micro Soybean Oil (CBOT) -- 6K lbs, 0.02 cent/lb
+    'MZL': ('CBOT', 60, None, 'ZL'), # Micro Soybean Oil (CBOT) -- 6K lbs, 0.02 cent/lb
     'ZC': ('CBOT', 50), # Corn (CBOT) -- 5000 bushels, 0.0025 cent/bu
-    'MZC': ('CBOT', 5), # Micro Corn (CBOT) -- 500 bushels, 0.005 cent/bu = $2.50
+    'MZC': ('CBOT', 5, None, 'ZC'), # Micro Corn (CBOT) -- 500 bushels, 0.005 cent/bu = $2.50
     'ZS': ('CBOT', 50), # Soy (CBOT) -- 5000 bushels, 0.0025 cent/bu
-    'MZS': ('CBOT', 5), # Micro Soy (CBOT) -- 500 bushels, 0.005 cent/bu = $2.50
+    'MZS': ('CBOT', 5, None, 'ZS'), # Micro Soy (CBOT) -- 500 bushels, 0.005 cent/bu = $2.50
     'ZW': ('CBOT', 50), # Wheatoy (CBOT) -- 5000 bushels, 0.0025 cent/bu
-    'MZW': ('CBOT', 5), # Micro Wheat (CBOT) -- 500 bushels, 0.005 cent/bu = $2.50
+    'MZW': ('CBOT', 5, None, 'ZW'), # Micro Wheat (CBOT) -- 500 bushels, 0.005 cent/bu = $2.50
      
     # 'NIY': ('CME', 10000),  
     'NKD': ('CME', 5),   
@@ -137,10 +143,12 @@ def _build_instruments(spec: str, max_notional: float, max_contracts: int) -> li
             )
         spec_tuple = KNOWN_INSTRUMENTS[symbol]
         exchange, multiplier = spec_tuple[0], spec_tuple[1]
-        ib_symbol = spec_tuple[2] if len(spec_tuple) > 2 else symbol
+        ib_symbol = spec_tuple[2] if len(spec_tuple) > 2 and spec_tuple[2] else symbol
+        signal_symbol = spec_tuple[3] if len(spec_tuple) > 3 and spec_tuple[3] else ib_symbol
         instruments.append({
             'symbol': symbol,
             'ib_symbol': ib_symbol,
+            'signal_symbol': signal_symbol,
             'exchange': exchange,
             'expiry': 'auto',
             'multiplier': multiplier,

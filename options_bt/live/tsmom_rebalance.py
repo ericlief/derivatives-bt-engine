@@ -271,8 +271,15 @@ def compute_rebalance_targets(ib: IBPySync, instruments: list[dict], config: dic
             # year), which silently starves the 252-day (ts1y) momentum calc
             # and makes classify_regime() return 'Unknown' for every symbol
             # whose nearest contract hasn't been listed a full year yet.
-            ib_symbol = instr.get('ib_symbol') or instr['symbol']
-            cont = IBPySync.cont_future(ib_symbol, exchange=instr.get('exchange', 'CME'))
+            #
+            # signal_symbol lets a recently-listed thin contract (e.g. the
+            # CBOT micro grains, all launched ~Feb 2025) borrow the
+            # full-size contract's much longer history instead -- same
+            # cents/bushel quote scale, just a different multiplier -- while
+            # sizing/orders still use the actually-traded micro contract
+            # (instr['ib_symbol']/`contract` above).
+            signal_symbol = instr.get('signal_symbol') or instr.get('ib_symbol') or instr['symbol']
+            cont = IBPySync.cont_future(signal_symbol, exchange=instr.get('exchange', 'CME'))
             ib.qualify_contracts(cont)
             bars = ib.get_historical_bars(cont, duration='3 y', bar_size='1 day')
             if bars is None or bars.height < 64:
