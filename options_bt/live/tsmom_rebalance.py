@@ -443,6 +443,7 @@ def compute_rebalance_targets(ib: IBPySync, instruments: list[dict], config: dic
                 'discount': s['discount'],
                 'close': s['close'],
                 'multiplier': multiplier,
+                'target_notional': target_notional,
                 'cluster': s['cluster'],
                 'dd_pct': s['dd_pct'],
                 'regime': s['regime'],

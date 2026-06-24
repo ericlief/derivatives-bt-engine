@@ -195,7 +195,7 @@ def _save_report(report: str, targets: list[dict]) -> None:
     # you actually scan a rebalance report for), everything else after in a
     # stable, predictable order.
     priority = ['symbol', 'current_contracts', 'target_contracts', 'signal',
-                'regime', 'vol_regime']
+                'regime', 'vol_regime', 'target_notional', 'position_risk']
     all_keys = {key for t in targets for key in t}
     fieldnames = [k for k in priority if k in all_keys] + sorted(all_keys - set(priority))
     rounded_rows = [
