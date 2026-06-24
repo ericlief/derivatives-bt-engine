@@ -466,7 +466,8 @@ def compute_rebalance_targets(ib: IBPySync, instruments: list[dict], config: dic
                 'error': str(exc),
             })
 
-    apply_cluster_risk_cap(targets, max_cluster_risk_pct)
+    total_risk_target = account_equity * target_portfolio_vol if account_equity else None
+    apply_cluster_risk_cap(targets, max_cluster_risk_pct, total_risk_target, n_effective)
     return targets
 
 

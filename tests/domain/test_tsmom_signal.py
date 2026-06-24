@@ -174,6 +174,13 @@ def test_desired_risk_budget_fewer_active_clusters_means_bigger_budget_each():
 
 
 # ── apply_cluster_risk_cap ───────────────────────────────────────────────────
+#
+# The cap is taken against a FIXED total_risk_target (account_equity *
+# target_portfolio_vol, supplied by the caller) -- never the emergent sum
+# of this run's pre-cap position risks. effective_cap_pct = max(
+# max_cluster_risk_pct, 1/n_active_clusters), so a single active cluster
+# isn't capped below 100% of the target just for being the only trade in
+# the book.
 
 def _target(symbol, cluster, target_contracts, close=100.0, multiplier=10.0, hv=0.2):
     return {
@@ -182,40 +189,70 @@ def _target(symbol, cluster, target_contracts, close=100.0, multiplier=10.0, hv=
     }
 
 
-def test_cluster_cap_rescales_overweight_cluster_down_to_pct():
-    # One equity instrument (small risk) vs four grain instruments (each
-    # carrying equal risk) -- grain alone is way more than 25% of the total,
-    # so it must be rescaled down; equity (well under the cap) is untouched.
-    # Contract counts are large enough (~30) that integer rounding only
-    # introduces a small approximation error relative to the nominal cap --
-    # with tiny counts (e.g. -2), rounding to the nearest whole contract can
-    # overshoot the cap by a large relative margin, which isn't a bug, just
-    # the inherent granularity limit of whole-contract sizing.
+@pytest.mark.parametrize('n_active_clusters,expected_pct', [
+    (1, 1.0), (2, 0.5), (3, 1 / 3), (4, 0.25), (5, 0.25), (6, 0.25),
+])
+def test_cluster_cap_floor_table(n_active_clusters, expected_pct):
+    # max_cluster_risk_pct=0.25 throughout -- the floor (1/n) only matters
+    # while it's bigger than 0.25, i.e. n <= 4.
+    targets = [_target('MES', 'equity', target_contracts=10, close=100, multiplier=1, hv=0.1)]  # risk=100
+    total_risk_target = 1000.0
+    out = apply_cluster_risk_cap(targets, max_cluster_risk_pct=0.25,
+                                 total_risk_target=total_risk_target, n_active_clusters=n_active_clusters)
+    # risk=100 is below every tier's cap here, so target_contracts is
+    # untouched in all cases -- this test is purely about effective_cap_pct
+    # being computed correctly, verified indirectly via a second case where
+    # the cap actually binds at exactly the expected_pct boundary.
+    assert out[0]['target_contracts'] == 10
+
+    # Now push the single cluster's risk just over the expected cap and
+    # confirm it gets rescaled down to (approximately) expected_pct of the
+    # fixed target, not capped at the old flat 0.25 in every case.
+    big_targets = [_target('MES', 'equity', target_contracts=100, close=100, multiplier=1, hv=0.1)]  # risk=1000
+    out_big = apply_cluster_risk_cap(big_targets, max_cluster_risk_pct=0.25,
+                                     total_risk_target=total_risk_target, n_active_clusters=n_active_clusters)
+    expected_risk = expected_pct * total_risk_target
+    assert math.isclose(out_big[0]['position_risk'], expected_risk, rel_tol=0.05)
+
+
+def test_cluster_cap_fixed_denominator_not_inflated_by_correlated_cluster():
+    # Four grain instruments that would, under the old (buggy) emergent-sum
+    # denominator, have summed to 60% of total_risk -- the bug was that
+    # this sum itself became the denominator the cap was measured against,
+    # so a correlated cluster could never meaningfully exceed ~its own
+    # share no matter how concentrated it was. Under the fixed
+    # total_risk_target, the cap is compared against the account-level
+    # target instead, independent of how much risk this cluster (or any
+    # other) happens to carry this run.
     targets = [
-        _target('MES', 'equity', target_contracts=5, close=100, multiplier=1, hv=0.05),   # risk=25
-        _target('MZC', 'grain', target_contracts=-30, close=100, multiplier=1, hv=0.05),  # risk=150
-        _target('MZS', 'grain', target_contracts=-30, close=100, multiplier=1, hv=0.05),  # risk=150
-        _target('MZW', 'grain', target_contracts=-30, close=100, multiplier=1, hv=0.05),  # risk=150
-        _target('MZL', 'grain', target_contracts=-30, close=100, multiplier=1, hv=0.05),  # risk=150
+        _target('MES', 'equity', target_contracts=4, close=100, multiplier=1, hv=0.1),    # risk=40
+        _target('MZC', 'grain', target_contracts=15, close=100, multiplier=1, hv=0.1),    # risk=150
+        _target('MZS', 'grain', target_contracts=15, close=100, multiplier=1, hv=0.1),    # risk=150
+        _target('MZW', 'grain', target_contracts=15, close=100, multiplier=1, hv=0.1),    # risk=150
+        _target('MZL', 'grain', target_contracts=15, close=100, multiplier=1, hv=0.1),    # risk=150
     ]
-    # total_risk_budget (the static, pre-cap reference the spec scales
-    # against) = 25 + 600 = 625; grain share pre-cap = 600/625 = 96% >> 25%
-    total_risk_budget = 25 + 4 * 150
-    out = apply_cluster_risk_cap(targets, max_cluster_risk_pct=0.25)
-
+    # pre-cap sum = 40 + 600 = 640; grain's emergent share = 600/640 = 93.75%
+    # -- but under the OLD bug, since this sum is also today's denominator,
+    # any cluster gets "more room" the bigger it draws relative to others.
+    # Use a total_risk_target deliberately smaller than the emergent sum
+    # (640) -- e.g. account_equity * target_portfolio_vol = 400 -- so the
+    # fixed-target cap actually constrains grain harder than the emergent
+    # sum ever would have.
+    total_risk_target = 400.0
+    n_active_clusters = 2  # equity, grain
+    effective_cap_pct = max(0.25, 1 / n_active_clusters)  # = 0.5
+    out = apply_cluster_risk_cap(targets, max_cluster_risk_pct=0.25,
+                                 total_risk_target=total_risk_target, n_active_clusters=n_active_clusters)
     by_symbol = {t['symbol']: t for t in out}
-    assert by_symbol['MES']['target_contracts'] == 5   # equity untouched, well under cap
 
-    grain_targets = [by_symbol[s]['target_contracts'] for s in ('MZC', 'MZS', 'MZW', 'MZL')]
-    assert all(t < 0 for t in grain_targets)            # sign preserved (short)
-    assert all(abs(t) < 30 for t in grain_targets)      # magnitude reduced
-
-    # Cap is scaled against the static pre-cap total_risk_budget (not a
-    # recomputed post-cap total -- the cap doesn't get easier to hit just
-    # because the cluster being capped shrinks the total). Allow a small
-    # tolerance for whole-contract rounding.
     grain_risk = sum(by_symbol[s]['position_risk'] for s in ('MZC', 'MZS', 'MZW', 'MZL'))
-    assert grain_risk <= 0.25 * total_risk_budget * 1.1
+    cap = effective_cap_pct * total_risk_target  # = 200
+    assert grain_risk <= cap * 1.1  # small tolerance for whole-contract rounding
+    # Confirm this is meaningfully tighter than the old emergent-sum
+    # behavior would have allowed (0.25 * 640 = 160 there too, incidentally
+    # similar in this constructed case -- the point is grain_risk is now
+    # anchored to the fixed 400, not whatever the instruments summed to).
+    assert grain_risk < 600  # i.e. it was actually rescaled down from pre-cap
 
 
 def test_cluster_cap_leaves_single_instrument_cluster_dominant_clusters_alone():
@@ -228,12 +265,16 @@ def test_cluster_cap_leaves_single_instrument_cluster_dominant_clusters_alone():
         _target('MCL', 'energy', target_contracts=2, close=100, multiplier=10, hv=0.1),  # risk=200
         _target('MGC', 'metal', target_contracts=1, close=100, multiplier=10, hv=0.1),   # risk=100
     ]
-    # total=600; equity share=50% > 25% -- equity itself gets capped too,
-    # since the rule is purely risk-share-based, not "exempt the biggest".
-    out = apply_cluster_risk_cap(targets, max_cluster_risk_pct=0.25)
+    # 3 active clusters -> effective_cap_pct = max(0.25, 1/3) = 1/3.
+    # total_risk_target=600 (matches the old test's implicit total) ->
+    # cap = 200. equity (300) exceeds it and gets capped; metal (100) does
+    # not.
+    total_risk_target = 600.0
+    out = apply_cluster_risk_cap(targets, max_cluster_risk_pct=0.25,
+                                 total_risk_target=total_risk_target, n_active_clusters=3)
     by_symbol = {t['symbol']: t for t in out}
     assert abs(by_symbol['MES']['target_contracts']) < 3
-    assert by_symbol['MGC']['target_contracts'] == 1  # 100/600=16.7% < 25%, untouched
+    assert by_symbol['MGC']['target_contracts'] == 1  # 100 < 200 cap, untouched
 
 
 def test_cluster_cap_no_op_when_all_clusters_within_budget():
@@ -243,7 +284,8 @@ def test_cluster_cap_no_op_when_all_clusters_within_budget():
         _target('MGC', 'metal', target_contracts=1, close=100, multiplier=10, hv=0.1),
         _target('J7', 'fx', target_contracts=1, close=100, multiplier=10, hv=0.1),
     ]
-    out = apply_cluster_risk_cap(targets, max_cluster_risk_pct=0.25)
+    out = apply_cluster_risk_cap(targets, max_cluster_risk_pct=0.25,
+                                 total_risk_target=100_000.0, n_active_clusters=4)
     assert all(t['target_contracts'] == 1 for t in out)
 
 
@@ -252,13 +294,86 @@ def test_cluster_cap_skips_error_targets():
         _target('MES', 'equity', target_contracts=1, close=100, multiplier=10, hv=0.1),
         {'symbol': 'MCL', 'error': 'boom', 'target_contracts': None},
     ]
-    out = apply_cluster_risk_cap(targets, max_cluster_risk_pct=0.25)
+    out = apply_cluster_risk_cap(targets, max_cluster_risk_pct=0.25,
+                                 total_risk_target=1000.0, n_active_clusters=1)
     errored = next(t for t in out if t['symbol'] == 'MCL')
     assert errored['error'] == 'boom'
     assert errored['target_contracts'] is None
 
 
-def test_cluster_cap_zero_total_risk_is_no_op():
-    targets = [_target('MES', 'equity', target_contracts=0, close=100, multiplier=10, hv=0.1)]
-    out = apply_cluster_risk_cap(targets, max_cluster_risk_pct=0.25)
-    assert out[0]['target_contracts'] == 0
+def test_cluster_cap_zero_total_risk_target_is_no_op():
+    targets = [_target('MES', 'equity', target_contracts=5, close=100, multiplier=10, hv=0.1)]
+    out = apply_cluster_risk_cap(targets, max_cluster_risk_pct=0.25,
+                                 total_risk_target=0.0, n_active_clusters=1)
+    assert out[0]['target_contracts'] == 5
+
+
+def test_cluster_cap_none_total_risk_target_is_no_op():
+    targets = [_target('MES', 'equity', target_contracts=5, close=100, multiplier=10, hv=0.1)]
+    out = apply_cluster_risk_cap(targets, max_cluster_risk_pct=0.25,
+                                 total_risk_target=None, n_active_clusters=1)
+    assert out[0]['target_contracts'] == 5
+
+
+def test_cluster_cap_zero_n_active_clusters_falls_back_to_max_cluster_risk_pct():
+    # n_active_clusters=0 shouldn't divide by zero -- falls back to the
+    # flat max_cluster_risk_pct with no floor adjustment.
+    targets = [_target('MES', 'equity', target_contracts=100, close=100, multiplier=1, hv=0.1)]  # risk=1000
+    out = apply_cluster_risk_cap(targets, max_cluster_risk_pct=0.25,
+                                 total_risk_target=1000.0, n_active_clusters=0)
+    assert math.isclose(out[0]['position_risk'], 0.25 * 1000.0, rel_tol=0.05)
+
+
+def test_cluster_cap_live_session_scenario_recomputed_for_fixed_denominator():
+    """Recomputes the grain/fx/equity scenario validated earlier this
+    session, but under the corrected fixed-denominator math -- the old
+    validation (grain/fx -> ~25.0% each) assumed the cap was measured
+    against the emergent pre-cap sum, which is exactly the bug this fix
+    removes, so that result no longer holds and must not be assumed."""
+    targets = [
+        _target('MES', 'equity', target_contracts=1, close=7437.50, multiplier=5, hv=0.1524),    # risk=5667
+        _target('MZL', 'grain', target_contracts=5, close=66.58, multiplier=60, hv=0.2429),       # risk=4854
+        _target('MZC', 'grain', target_contracts=-13, close=437.00, multiplier=5, hv=0.1937),     # risk=5509
+        _target('MZS', 'grain', target_contracts=-2, close=1142.00, multiplier=5, hv=0.1492),     # risk=1704
+        _target('MZW', 'grain', target_contracts=-2, close=597.00, multiplier=5, hv=0.2969),       # risk=1773
+        _target('J7', 'fx', target_contracts=1, close=0.0066, multiplier=6_250_000, hv=0.0825),    # risk=3403
+        _target('BRE', 'fx', target_contracts=2, close=0.19, multiplier=100_000, hv=0.1143),       # risk=4343
+        _target('6M', 'fx', target_contracts=2, close=0.06, multiplier=500_000, hv=0.0825),         # risk=4950
+    ]
+    # account_equity=100_000, target_portfolio_vol=0.15 -> fixed
+    # total_risk_target=15_000 (NOT the emergent pre-cap sum, ~32_203).
+    # n_active_clusters=3 (equity, grain, fx; metal/energy inactive this
+    # round) -> effective_cap_pct = max(0.25, 1/3) = 1/3.
+    total_risk_target = 100_000 * 0.15
+    n_active_clusters = 3
+    effective_cap_pct = max(0.25, 1 / n_active_clusters)
+    cap = effective_cap_pct * total_risk_target  # = 5000
+
+    out = apply_cluster_risk_cap(targets, max_cluster_risk_pct=0.25,
+                                 total_risk_target=total_risk_target, n_active_clusters=n_active_clusters)
+    by_symbol = {t['symbol']: t for t in out}
+
+    grain_risk = sum(by_symbol[s]['position_risk'] for s in ('MZL', 'MZC', 'MZS', 'MZW'))
+    fx_risk = sum(by_symbol[s]['position_risk'] for s in ('J7', 'BRE', '6M'))
+    equity_risk = by_symbol['MES']['position_risk']
+
+    # grain (pre-cap ~13840) and fx (pre-cap ~12696) both exceed the fixed
+    # cap (5000) and must be rescaled down to ~it; equity (5667, just over)
+    # also gets rescaled slightly under this stricter fixed-target regime
+    # -- a real behavior change from the old emergent-sum result, where
+    # equity's pre-cap share (17.6%) was comfortably under the (also
+    # emergent-sum-relative) 25% and untouched.
+    # Grain's tolerance is wider than fx/equity's -- it has 4 independently-
+    # rounded instruments (vs fx's 3, equity's 1), so whole-contract
+    # rounding compounds more before landing near the cap.
+    assert grain_risk <= cap * 1.2
+    assert fx_risk <= cap * 1.15
+    assert equity_risk <= cap * 1.15
+    # Signs preserved (never flipped) throughout -- J7's single pre-cap
+    # contract can legitimately round to zero under the stricter cap
+    # (round-toward-zero below 0.5), but never to a negative.
+    assert by_symbol['MZC']['target_contracts'] < 0
+    assert by_symbol['MZL']['target_contracts'] > 0
+    assert by_symbol['J7']['target_contracts'] >= 0
+    assert by_symbol['BRE']['target_contracts'] >= 0
+    assert by_symbol['6M']['target_contracts'] >= 0

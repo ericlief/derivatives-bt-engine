@@ -157,13 +157,29 @@ def compute_desired_risk_budget(account_equity: float, target_portfolio_vol: flo
     return account_equity * target_portfolio_vol / math.sqrt(n_effective)
 
 
-def apply_cluster_risk_cap(targets: list[dict], max_cluster_risk_pct: float = 0.25) -> list[dict]:
+def apply_cluster_risk_cap(targets: list[dict], max_cluster_risk_pct: float,
+                            total_risk_target: float, n_active_clusters: int) -> list[dict]:
     """
     Second pass over an already-sized targets list: rescales any cluster
-    whose aggregate dollar-vol risk exceeds max_cluster_risk_pct of total
-    portfolio risk, so e.g. 4 grain micros that are each individually
-    sized correctly don't collectively become one oversized bet on the
-    ag-complex factor they all share.
+    whose aggregate dollar-vol risk exceeds its share of a fixed,
+    account-equity-derived risk target, so e.g. 4 grain micros that are
+    each individually sized correctly don't collectively become one
+    oversized bet on the ag-complex factor they all share.
+
+    The cap is taken against total_risk_target (account_equity *
+    target_portfolio_vol, computed by the caller) -- a fixed number, NOT
+    the emergent sum of this run's pre-cap position risks. Capping against
+    the emergent sum is a bug, not a simplification: a cluster with several
+    correlated instruments that each independently draw the full
+    per-instrument budget inflates the sum, which inflates its own
+    permitted ceiling, doing the least capping exactly when concentration
+    is worst.
+
+    effective_cap_pct = max(max_cluster_risk_pct, 1/n_active_clusters) --
+    the 1/n floor means a single active cluster (e.g. only grain has a live
+    signal this rebalance) isn't capped below 100% of the target just for
+    being the only trade in the book; the floor relaxes as more clusters
+    are active and there's more to share the target with.
 
     Each target dict must carry 'cluster', 'target_contracts', 'close',
     'multiplier', 'hv' (already computed per-instrument by the caller).
@@ -187,11 +203,11 @@ def apply_cluster_risk_cap(targets: list[dict], max_cluster_risk_pct: float = 0.
         t['position_risk'] = position_risk
         cluster_risk[t['cluster']] = cluster_risk.get(t['cluster'], 0.0) + position_risk
 
-    total_risk = sum(cluster_risk.values())
-    if total_risk <= 0:
+    if total_risk_target is None or total_risk_target <= 0:
         return targets
 
-    cap = max_cluster_risk_pct * total_risk
+    effective_cap_pct = max(max_cluster_risk_pct, 1.0 / n_active_clusters) if n_active_clusters > 0 else max_cluster_risk_pct
+    cap = effective_cap_pct * total_risk_target
     for cluster, risk in cluster_risk.items():
         if risk <= cap:
             continue
