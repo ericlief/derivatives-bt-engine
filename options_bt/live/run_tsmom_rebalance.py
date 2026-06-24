@@ -80,8 +80,8 @@ KNOWN_INSTRUMENTS = {
     # digit. This is a plain dict, so the key is the real IBKR ticker; using
     # '_6J' previously meant --instruments 6J couldn't match this entry, and
     # even a literal '_6J' lookup would have sent the wrong symbol to IB.
-    '6J': ('CME', 12_500_000),
-    '6L': ('CME', 100_000),
+    'JPY': ('CME', 12_500_000),
+    'BRE': ('CME', 100_000),
     '6M': ('CME', 500_000),
 
     
