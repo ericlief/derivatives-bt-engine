@@ -190,11 +190,15 @@ def _save_report(report: str, targets: list[dict]) -> None:
         f.write(report)
 
     fieldnames = sorted({key for t in targets for key in t})
+    rounded_rows = [
+        {k: (round(v, 4) if isinstance(v, float) and not math.isnan(v) else v) for k, v in t.items()}
+        for t in targets
+    ]
     csv_path = os.path.join(results_dir, f'tsmom_live_rebalance_{ts}.csv')
     with open(csv_path, 'w', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
-        writer.writerows(targets)
+        writer.writerows(rounded_rows)
 
     log.info('Saved rebalance report to %s, %s', txt_path, csv_path)
 
