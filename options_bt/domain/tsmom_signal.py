@@ -126,11 +126,84 @@ def compute_position_scalar(trend_strength, daily_std_last, vol_target: float,
     if daily_std_last is None or (isinstance(daily_std_last, float) and math.isnan(daily_std_last)) or daily_std_last <= 0:
         vol_scalar = 1.0   # insufficient history to size by vol — neutral
     else:
-        current_realized_vol = daily_std_last * math.sqrt(252)
-        vol_scalar = vol_target / current_realized_vol
+        current_realized_vol = daily_std_last * math.sqrt(252)  
+        vol_scalar = vol_target / current_realized_vol # 0.15/0.60 ~= 0.25
         vol_scalar = max(0.25, min(2.0, vol_scalar))
 
     discount = regime_discount if regime in ('Correction', 'Rebound') else 1.0
 
     scalar = trend_strength * vol_scalar * discount
     return max(-1.0, min(1.0, scalar))
+
+
+def compute_n_effective(active_clusters: set) -> int:
+    """Count of clusters carrying a live signal -- the portfolio's
+    effective number of independent bets, not its raw instrument count
+    (e.g. 4 grain micros moving on one shared ag-complex factor are one
+    bet, not four)."""
+    return len(active_clusters)
+
+
+def compute_desired_risk_budget(account_equity: float, target_portfolio_vol: float,
+                                 n_effective: int) -> float:
+    """Per-cluster dollar risk budget, sqrt(N)-scaled so total portfolio
+    risk (assuming roughly independent clusters) targets
+    account_equity * target_portfolio_vol regardless of how many clusters
+    are currently active."""
+    if n_effective <= 0:
+        return 0.0
+    return account_equity * target_portfolio_vol / math.sqrt(n_effective)
+
+
+def apply_cluster_risk_cap(targets: list[dict], max_cluster_risk_pct: float = 0.25) -> list[dict]:
+    """
+    Second pass over an already-sized targets list: rescales any cluster
+    whose aggregate dollar-vol risk exceeds max_cluster_risk_pct of total
+    portfolio risk, so e.g. 4 grain micros that are each individually
+    sized correctly don't collectively become one oversized bet on the
+    ag-complex factor they all share.
+
+    Each target dict must carry 'cluster', 'target_contracts', 'close',
+    'multiplier', 'hv' (already computed per-instrument by the caller).
+    Targets with an 'error' key, or missing one of those fields, are left
+    untouched and excluded from the risk totals. Mutates and returns the
+    same list (adds a 'position_risk' field to the rescaled entries).
+    """
+    valid = [
+        t for t in targets
+        if not t.get('error')
+        and t.get('target_contracts') is not None
+        and t.get('cluster') is not None
+        and t.get('close') is not None
+        and t.get('multiplier') is not None
+    ]
+
+    cluster_risk: dict[str, float] = {}
+    for t in valid:
+        hv = t.get('hv') or 0.0
+        position_risk = abs(t['target_contracts']) * t['close'] * t['multiplier'] * hv
+        t['position_risk'] = position_risk
+        cluster_risk[t['cluster']] = cluster_risk.get(t['cluster'], 0.0) + position_risk
+
+    total_risk = sum(cluster_risk.values())
+    if total_risk <= 0:
+        return targets
+
+    cap = max_cluster_risk_pct * total_risk
+    for cluster, risk in cluster_risk.items():
+        if risk <= cap:
+            continue
+        scale = cap / risk
+        for t in valid:
+            if t['cluster'] != cluster:
+                continue
+            scaled = t['target_contracts'] * scale
+            sign = 1 if scaled > 0 else (-1 if scaled < 0 else 0)
+            magnitude = 0 if abs(scaled) < 0.5 else round(abs(scaled))
+            t['target_contracts'] = sign * magnitude
+            # Recompute now that target_contracts changed -- otherwise
+            # position_risk (and any downstream risk-share check) reflects
+            # the pre-cap size, defeating the point of the cap.
+            t['position_risk'] = abs(t['target_contracts']) * t['close'] * t['multiplier'] * (t.get('hv') or 0.0)
+
+    return targets

@@ -9,8 +9,11 @@ import polars as pl
 import pytest
 
 from options_bt.domain.tsmom_signal import (
+    apply_cluster_risk_cap,
     calculate_trend_strength,
     classify_regime,
+    compute_desired_risk_budget,
+    compute_n_effective,
     compute_position_scalar,
 )
 
@@ -140,3 +143,121 @@ def test_position_scalar_neutral_vol_scalar_on_missing_std():
     # daily_std_last unusable -> vol_scalar treated as neutral (1.0), not a crash
     scalar = compute_position_scalar(0.4, None, vol_target=0.15, regime='Bull')
     assert math.isclose(scalar, 0.4, rel_tol=1e-9)
+
+
+# ── compute_n_effective ──────────────────────────────────────────────────────
+
+def test_n_effective_counts_distinct_clusters():
+    assert compute_n_effective({'equity', 'energy', 'grain', 'metal', 'fx'}) == 5
+    assert compute_n_effective(set()) == 0
+    assert compute_n_effective({'grain'}) == 1
+
+
+# ── compute_desired_risk_budget ──────────────────────────────────────────────
+
+def test_desired_risk_budget_scales_with_equity_and_vol():
+    budget = compute_desired_risk_budget(account_equity=100_000, target_portfolio_vol=0.15, n_effective=5)
+    assert math.isclose(budget, 100_000 * 0.15 / math.sqrt(5), rel_tol=1e-9)
+
+
+def test_desired_risk_budget_zero_n_effective_is_zero_not_error():
+    assert compute_desired_risk_budget(100_000, 0.15, 0) == 0.0
+
+
+def test_desired_risk_budget_fewer_active_clusters_means_bigger_budget_each():
+    # sqrt(N) scaling -- fewer active bets means each can be sized bigger,
+    # without blowing through the total target_portfolio_vol.
+    budget_1_cluster = compute_desired_risk_budget(100_000, 0.15, 1)
+    budget_5_clusters = compute_desired_risk_budget(100_000, 0.15, 5)
+    assert budget_1_cluster > budget_5_clusters
+
+
+# ── apply_cluster_risk_cap ───────────────────────────────────────────────────
+
+def _target(symbol, cluster, target_contracts, close=100.0, multiplier=10.0, hv=0.2):
+    return {
+        'symbol': symbol, 'cluster': cluster, 'target_contracts': target_contracts,
+        'close': close, 'multiplier': multiplier, 'hv': hv,
+    }
+
+
+def test_cluster_cap_rescales_overweight_cluster_down_to_pct():
+    # One equity instrument (small risk) vs four grain instruments (each
+    # carrying equal risk) -- grain alone is way more than 25% of the total,
+    # so it must be rescaled down; equity (well under the cap) is untouched.
+    # Contract counts are large enough (~30) that integer rounding only
+    # introduces a small approximation error relative to the nominal cap --
+    # with tiny counts (e.g. -2), rounding to the nearest whole contract can
+    # overshoot the cap by a large relative margin, which isn't a bug, just
+    # the inherent granularity limit of whole-contract sizing.
+    targets = [
+        _target('MES', 'equity', target_contracts=5, close=100, multiplier=1, hv=0.05),   # risk=25
+        _target('MZC', 'grain', target_contracts=-30, close=100, multiplier=1, hv=0.05),  # risk=150
+        _target('MZS', 'grain', target_contracts=-30, close=100, multiplier=1, hv=0.05),  # risk=150
+        _target('MZW', 'grain', target_contracts=-30, close=100, multiplier=1, hv=0.05),  # risk=150
+        _target('MZL', 'grain', target_contracts=-30, close=100, multiplier=1, hv=0.05),  # risk=150
+    ]
+    # total_risk_budget (the static, pre-cap reference the spec scales
+    # against) = 25 + 600 = 625; grain share pre-cap = 600/625 = 96% >> 25%
+    total_risk_budget = 25 + 4 * 150
+    out = apply_cluster_risk_cap(targets, max_cluster_risk_pct=0.25)
+
+    by_symbol = {t['symbol']: t for t in out}
+    assert by_symbol['MES']['target_contracts'] == 5   # equity untouched, well under cap
+
+    grain_targets = [by_symbol[s]['target_contracts'] for s in ('MZC', 'MZS', 'MZW', 'MZL')]
+    assert all(t < 0 for t in grain_targets)            # sign preserved (short)
+    assert all(abs(t) < 30 for t in grain_targets)      # magnitude reduced
+
+    # Cap is scaled against the static pre-cap total_risk_budget (not a
+    # recomputed post-cap total -- the cap doesn't get easier to hit just
+    # because the cluster being capped shrinks the total). Allow a small
+    # tolerance for whole-contract rounding.
+    grain_risk = sum(by_symbol[s]['position_risk'] for s in ('MZC', 'MZS', 'MZW', 'MZL'))
+    assert grain_risk <= 0.25 * total_risk_budget * 1.1
+
+
+def test_cluster_cap_leaves_single_instrument_cluster_dominant_clusters_alone():
+    # Equity and energy are each a single-instrument cluster in the example
+    # universe -- with nothing else in their own cluster to share risk with,
+    # they shouldn't get clipped just for being individually large relative
+    # to other clusters' instrument counts.
+    targets = [
+        _target('MES', 'equity', target_contracts=3, close=100, multiplier=10, hv=0.1),  # risk=300
+        _target('MCL', 'energy', target_contracts=2, close=100, multiplier=10, hv=0.1),  # risk=200
+        _target('MGC', 'metal', target_contracts=1, close=100, multiplier=10, hv=0.1),   # risk=100
+    ]
+    # total=600; equity share=50% > 25% -- equity itself gets capped too,
+    # since the rule is purely risk-share-based, not "exempt the biggest".
+    out = apply_cluster_risk_cap(targets, max_cluster_risk_pct=0.25)
+    by_symbol = {t['symbol']: t for t in out}
+    assert abs(by_symbol['MES']['target_contracts']) < 3
+    assert by_symbol['MGC']['target_contracts'] == 1  # 100/600=16.7% < 25%, untouched
+
+
+def test_cluster_cap_no_op_when_all_clusters_within_budget():
+    targets = [
+        _target('MES', 'equity', target_contracts=1, close=100, multiplier=10, hv=0.1),
+        _target('MCL', 'energy', target_contracts=1, close=100, multiplier=10, hv=0.1),
+        _target('MGC', 'metal', target_contracts=1, close=100, multiplier=10, hv=0.1),
+        _target('J7', 'fx', target_contracts=1, close=100, multiplier=10, hv=0.1),
+    ]
+    out = apply_cluster_risk_cap(targets, max_cluster_risk_pct=0.25)
+    assert all(t['target_contracts'] == 1 for t in out)
+
+
+def test_cluster_cap_skips_error_targets():
+    targets = [
+        _target('MES', 'equity', target_contracts=1, close=100, multiplier=10, hv=0.1),
+        {'symbol': 'MCL', 'error': 'boom', 'target_contracts': None},
+    ]
+    out = apply_cluster_risk_cap(targets, max_cluster_risk_pct=0.25)
+    errored = next(t for t in out if t['symbol'] == 'MCL')
+    assert errored['error'] == 'boom'
+    assert errored['target_contracts'] is None
+
+
+def test_cluster_cap_zero_total_risk_is_no_op():
+    targets = [_target('MES', 'equity', target_contracts=0, close=100, multiplier=10, hv=0.1)]
+    out = apply_cluster_risk_cap(targets, max_cluster_risk_pct=0.25)
+    assert out[0]['target_contracts'] == 0

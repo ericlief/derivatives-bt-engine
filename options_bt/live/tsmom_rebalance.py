@@ -25,7 +25,14 @@ from zoneinfo import ZoneInfo
 
 from ib_tools.ibpysync import IBPySync
 
-from options_bt.domain.tsmom_signal import calculate_trend_strength, classify_regime, compute_position_scalar
+from options_bt.domain.tsmom_signal import (
+    apply_cluster_risk_cap,
+    calculate_trend_strength,
+    classify_regime,
+    compute_desired_risk_budget,
+    compute_n_effective,
+    compute_position_scalar,
+)
 
 log = logging.getLogger(__name__)
 
@@ -204,27 +211,114 @@ def _current_contracts(ib: IBPySync, contract) -> int:
 # Main orchestration
 # ------------------------------------------------------------------
 
+def _compute_signal(ib: IBPySync, instr: dict, min_days: int, vol_target: float, long_only: bool,
+                     regime_discount: float):
+    """Stage 1: resolve the contract, fetch bars, compute the TSMOM signal
+    for one instrument. No budget/sizing here -- that needs to know every
+    instrument's signal first (to derive n_effective), so it happens in a
+    later pass. Returns a dict of everything sizing/reporting need."""
+    contract = _resolve_contract(ib, instr, min_days)
+    # Historical bars come from the continuous front-month contract, not the
+    # dated one -- a single expiry-specific Future only has bars back to
+    # when that contract was listed (well under a year), which silently
+    # starves the 252-day (ts1y) momentum calc and makes classify_regime()
+    # return 'Unknown' for every symbol whose nearest contract hasn't been
+    # listed a full year yet.
+    #
+    # signal_symbol lets a recently-listed thin contract (e.g. the CBOT
+    # micro grains, all launched ~Feb 2025) borrow the full-size contract's
+    # much longer history instead -- same cents/bushel quote scale, just a
+    # different multiplier -- while sizing/orders still use the actually-
+    # traded micro contract (instr['ib_symbol']/`contract` above).
+    signal_symbol = instr.get('signal_symbol') or instr.get('ib_symbol') or instr['symbol']
+    cont = IBPySync.cont_future(signal_symbol, exchange=instr.get('exchange', 'CME'))
+    ib.qualify_contracts(cont)
+    bars = ib.get_historical_bars(cont, duration='3 y', bar_size='1 day')
+    if bars is None or bars.height < 64:
+        raise RuntimeError(f"Insufficient bar history for {instr['symbol']} ({bars.height if bars is not None else 0} rows)")
+
+    df = calculate_trend_strength(bars)
+    last = df.tail(1)
+    trend_strength = last['trend_strength'][0]
+    ts3m = last['ts3m'][0]
+    ts1y = last['ts1y'][0]
+    daily_std_last = last['daily_std'][0] if 'daily_std' in last.columns else None
+    last_close = float(last['close'][0])
+    dd_raw = last['dd'][0] if 'dd' in last.columns else None
+    dd_pct = dd_raw * 100 if dd_raw is not None else None
+
+    regime = classify_regime(ts3m, ts1y)
+
+    signal_for_scalar = trend_strength
+    if long_only and signal_for_scalar is not None and not math.isnan(signal_for_scalar):
+        signal_for_scalar = max(0.0, signal_for_scalar)
+
+    # hv/vol_scalar/discount recomputed here (mirrors compute_position_
+    # scalar's own internal math) purely for reporting -- so the printed
+    # report shows *why* a given trend_strength did or didn't turn into a
+    # trade.
+    hv = daily_std_last * math.sqrt(252) if daily_std_last and daily_std_last > 0 else None
+    vol_scalar = max(0.25, min(2.0, vol_target / hv)) if hv else 1.0
+    discount = regime_discount if regime in ('Correction', 'Rebound') else 1.0
+
+    return {
+        'contract': contract,
+        'signal': trend_strength,
+        'signal_for_scalar': signal_for_scalar,
+        'ts3m': ts3m,
+        'ts1y': ts1y,
+        'daily_std': daily_std_last,
+        'hv': hv,
+        'vol_scalar': vol_scalar,
+        'discount': discount,
+        'close': last_close,
+        'dd_pct': dd_pct,
+        'regime': regime,
+        'cluster': instr.get('cluster', 'other'),
+        'multiplier': instr.get('multiplier'),
+    }
+
+
 def compute_rebalance_targets(ib: IBPySync, instruments: list[dict], config: dict) -> list[dict]:
     """
     Runs the VX spike gate first. If a spike/extreme regime is detected,
     returns early with target_contracts == current_contracts (held
     unchanged), halved on 'extreme', and skips signal computation entirely.
 
-    Otherwise, for each instrument: resolves the contract, fetches 3y of
-    daily bars, computes the TSMOM signal, applies vol targeting + regime
-    discount (+ the 'elevated' 60% scale-down), and turns the resulting
-    scalar into a target contract count clamped to the instrument's
-    max_contracts.
+    Otherwise this runs in three stages:
+      1. _compute_signal() for every instrument -- resolves the contract,
+         fetches bars, computes trend_strength/regime/hv. No budget yet.
+      2. Determine which clusters have a live signal (abs(signal_for_scalar)
+         above min_conviction) -> n_effective -> desired_risk_budget
+         (account_equity * target_portfolio_vol / sqrt(n_effective)) ->
+         budget_constant = desired_risk_budget / vol_target. This replaces
+         the old flat --max-notional as the dollar figure that converts
+         scalar -> target_notional, so instruments aren't all sized off the
+         same flat budget regardless of how many other clusters are active.
+      3. Per instrument: scalar -> target_notional (budget_constant * scalar,
+         optionally capped by instr['max_notional'] if set as a hard
+         ceiling) -> target_contracts, clamped to max_contracts (now just a
+         sanity backstop). Then apply_cluster_risk_cap() rescales any
+         cluster whose aggregate dollar-vol risk exceeds
+         max_cluster_risk_pct of total portfolio risk -- e.g. 4 grain
+         micros that each individually look fine can still collectively be
+         one oversized bet on the shared ag-complex factor.
 
     config keys: vol_target (float), max_contracts (int, per-instrument
-    default), vx_expiry (str, 'auto' or YYYYMM), long_only (bool),
-    regime_discount (float), min_days (int, expiry-resolution margin).
+    default/backstop), vx_expiry (str, 'auto' or YYYYMM), long_only (bool),
+    regime_discount (float), min_days (int, expiry-resolution margin),
+    account_equity (float, required for sizing), target_portfolio_vol
+    (float), max_cluster_risk_pct (float), min_conviction (float).
     """
     vol_target = config.get('vol_target', 0.15)
     long_only = config.get('long_only', False)
     regime_discount = config.get('regime_discount', 0.5)
-    default_max_contracts = config.get('max_contracts', 5)
+    default_max_contracts = config.get('max_contracts', 15)
     min_days = config.get('min_days', 7)
+    account_equity = config.get('account_equity')
+    target_portfolio_vol = config.get('target_portfolio_vol', 0.15)
+    max_cluster_risk_pct = config.get('max_cluster_risk_pct', 0.25)
+    min_conviction = config.get('min_conviction', 0.05)
 
     vx_current, vx_ma63 = fetch_vx_spike_ratio(ib, config.get('vx_expiry', 'auto'))
     vx_ratio = vx_current / vx_ma63
@@ -260,89 +354,98 @@ def compute_rebalance_targets(ib: IBPySync, instruments: list[dict], config: dic
 
     position_scale = VX_ELEVATED_SCALE if vol_regime == 'elevated' else 1.0
 
-    targets = []
+    # Stage 1: signal for every instrument, no sizing yet.
+    signals: dict[str, dict] = {}
+    errors: dict[str, str] = {}
     for instr in instruments:
         symbol = instr['symbol']
         try:
-            contract = _resolve_contract(ib, instr, min_days)
-            # Historical bars come from the continuous front-month contract,
-            # not the dated one -- a single expiry-specific Future only has
-            # bars back to when that contract was listed (well under a
-            # year), which silently starves the 252-day (ts1y) momentum calc
-            # and makes classify_regime() return 'Unknown' for every symbol
-            # whose nearest contract hasn't been listed a full year yet.
-            #
-            # signal_symbol lets a recently-listed thin contract (e.g. the
-            # CBOT micro grains, all launched ~Feb 2025) borrow the
-            # full-size contract's much longer history instead -- same
-            # cents/bushel quote scale, just a different multiplier -- while
-            # sizing/orders still use the actually-traded micro contract
-            # (instr['ib_symbol']/`contract` above).
-            signal_symbol = instr.get('signal_symbol') or instr.get('ib_symbol') or instr['symbol']
-            cont = IBPySync.cont_future(signal_symbol, exchange=instr.get('exchange', 'CME'))
-            ib.qualify_contracts(cont)
-            bars = ib.get_historical_bars(cont, duration='3 y', bar_size='1 day')
-            if bars is None or bars.height < 64:
-                raise RuntimeError(f'Insufficient bar history for {symbol} ({bars.height if bars is not None else 0} rows)')
+            signals[symbol] = _compute_signal(ib, instr, min_days, vol_target, long_only, regime_discount)
+        except Exception as exc:
+            log.error('Failed to compute signal for %s: %s', symbol, exc)
+            errors[symbol] = str(exc)
 
-            df = calculate_trend_strength(bars)
-            last = df.tail(1)
-            trend_strength = last['trend_strength'][0]
-            ts3m = last['ts3m'][0]
-            ts1y = last['ts1y'][0]
-            daily_std_last = last['daily_std'][0] if 'daily_std' in last.columns else None
-            last_close = float(last['close'][0])
-            dd_raw = last['dd'][0] if 'dd' in last.columns else None
-            dd_pct = dd_raw * 100 if dd_raw is not None else None
+    # Stage 2: derive the risk budget from which clusters actually have a
+    # live signal right now, not from the raw instrument count.
+    active_clusters = {
+        s['cluster'] for s in signals.values()
+        if s['signal_for_scalar'] is not None
+        and not (isinstance(s['signal_for_scalar'], float) and math.isnan(s['signal_for_scalar']))
+        and abs(s['signal_for_scalar']) > min_conviction
+    }
+    n_effective = compute_n_effective(active_clusters)
+    if account_equity:
+        desired_risk_budget = compute_desired_risk_budget(account_equity, target_portfolio_vol, n_effective)
+        budget_constant = desired_risk_budget / vol_target if vol_target else 0.0
+    else:
+        desired_risk_budget = None
+        budget_constant = None
+    log.info('Risk budget — active_clusters=%s  n_effective=%d  desired_risk_budget=%s  budget_constant=%s',
+             sorted(active_clusters), n_effective,
+             f'{desired_risk_budget:.0f}' if desired_risk_budget is not None else 'N/A (no account_equity)',
+             f'{budget_constant:.0f}' if budget_constant is not None else 'N/A')
 
-            regime = classify_regime(ts3m, ts1y)
+    # Stage 3: per-instrument sizing off the derived budget, then the
+    # cluster risk cap as a second pass.
+    targets = []
+    for instr in instruments:
+        symbol = instr['symbol']
+        if symbol in errors:
+            targets.append({
+                'symbol': symbol,
+                'target_contracts': None,
+                'current_contracts': None,
+                'signal': None,
+                'regime': None,
+                'vx_ratio': vx_ratio,
+                'vol_regime': vol_regime,
+                'error': errors[symbol],
+            })
+            continue
 
-            signal_for_scalar = trend_strength
-            if long_only and signal_for_scalar is not None and not math.isnan(signal_for_scalar):
-                signal_for_scalar = max(0.0, signal_for_scalar)
+        s = signals[symbol]
+        try:
+            multiplier = s['multiplier']
+            max_contracts = instr.get('max_contracts', default_max_contracts)
+            max_notional_ceiling = instr.get('max_notional')
 
-            # hv/vol_scalar/discount recomputed here (mirrors
-            # compute_position_scalar's own internal math) purely for
-            # reporting -- so the printed report shows *why* a given
-            # trend_strength did or didn't turn into a trade.
-            hv = daily_std_last * math.sqrt(252) if daily_std_last and daily_std_last > 0 else None
-            vol_scalar = max(0.25, min(2.0, vol_target / hv)) if hv else 1.0
-            discount = regime_discount if regime in ('Correction', 'Rebound') else 1.0
+            if multiplier is None:
+                raise ValueError(f'{symbol}: instrument config missing multiplier')
+            if budget_constant is None:
+                raise ValueError(f'{symbol}: account_equity not configured — cannot derive a risk budget')
 
             scalar = compute_position_scalar(
-                signal_for_scalar, daily_std_last, vol_target, regime,
+                s['signal_for_scalar'], s['daily_std'], vol_target, s['regime'],
                 regime_discount=regime_discount,
             )
             scalar *= position_scale
 
-            max_notional = instr.get('max_notional')
-            multiplier = instr.get('multiplier')
-            max_contracts = instr.get('max_contracts', default_max_contracts)
+            target_notional = budget_constant * scalar
+            if max_notional_ceiling is not None:
+                target_notional = max(-max_notional_ceiling, min(max_notional_ceiling, target_notional))
 
-            if max_notional is None or multiplier is None:
-                raise ValueError(f'{symbol}: instrument config missing max_notional/multiplier')
-
-            target_notional = max_notional * scalar
-            contract_notional_value = last_close * multiplier
+            contract_notional_value = s['close'] * multiplier
             target_contracts = round(target_notional / contract_notional_value) if contract_notional_value else 0
             target_contracts = max(-max_contracts, min(max_contracts, target_contracts))
 
-            current_contracts = _current_contracts(ib, contract)
+            current_contracts = _current_contracts(ib, s['contract'])
 
             targets.append({
                 'symbol': symbol,
                 'target_contracts': target_contracts,
                 'current_contracts': current_contracts,
-                'signal': trend_strength,
-                'ts3m': ts3m,
-                'ts1y': ts1y,
-                'daily_std': daily_std_last,
-                'hv': hv,
-                'vol_scalar': vol_scalar,
-                'discount': discount,
-                'close': last_close,
-                'dd_pct': dd_pct,
-                'regime': regime,
+                'signal': s['signal'],
+                'ts3m': s['ts3m'],
+                'ts1y': s['ts1y'],
+                'daily_std': s['daily_std'],
+                'hv': s['hv'],
+                'vol_scalar': s['vol_scalar'],
+                'discount': s['discount'],
+                'close': s['close'],
+                'multiplier': multiplier,
+                'cluster': s['cluster'],
+                'dd_pct': s['dd_pct'],
+                'regime': s['regime'],
                 'vx_current': vx_current,
                 'vx_ma63': vx_ma63,
                 'vx_ratio': vx_ratio,
@@ -361,6 +464,7 @@ def compute_rebalance_targets(ib: IBPySync, instruments: list[dict], config: dic
                 'error': str(exc),
             })
 
+    apply_cluster_risk_cap(targets, max_cluster_risk_pct)
     return targets
 
 

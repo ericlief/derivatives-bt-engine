@@ -38,63 +38,74 @@ load_dotenv()
 
 log = logging.getLogger(__name__)
 
-# Known CME equity-index futures defaults: (exchange, multiplier, ib_symbol, signal_symbol)
+# Known instrument defaults, keyed by our local symbol. Each entry is a
+# dict, not a positional tuple -- ib_symbol/signal_symbol were already
+# fragile optional positional slots, and adding 'cluster' on top of that
+# would make it worse.
+#
 # ib_symbol is only set when IBKR's actual contract ticker differs from our
 # local key (e.g. SIL: IBKR has no separate Micro Silver symbol -- it's
 # traded under the same root symbol 'SI' as full-size silver, disambiguated
 # only by the contract's multiplier field, confirmed via IBKR users hitting
 # this exact mismatch: https://www.quantconnect.com/forum/discussion/19622/).
+#
 # signal_symbol is only set when the TRADED contract's own continuous
 # front-month history is too short/thin to trust for the TSMOM signal (e.g.
 # the CBOT micro grains below, all launched ~Feb 2025) -- in that case the
 # signal is computed off the full-size contract's much longer history
 # (same cents/bushel quote scale, just a different contract multiplier),
 # while sizing/orders still use the traded micro contract.
+#
+# cluster groups instruments that move on a shared factor (ag complex,
+# EM/risk-on FX, etc) -- used by apply_cluster_risk_cap so a handful of
+# individually-fine-looking positions don't add up to one oversized bet on
+# that shared factor. Static tags, not a rolling correlation estimate (out
+# of scope for a small-account retail system) -- review/adjust by hand if
+# the traded universe changes meaningfully.
 KNOWN_INSTRUMENTS = {
-    'ES':  ('CME', 50),
-    'MES': ('CME', 5),
-    'NQ':  ('CME', 20),
-    'MNQ': ('CME', 2),
+    'ES':  {'exchange': 'CME', 'multiplier': 50, 'cluster': 'equity'},
+    'MES': {'exchange': 'CME', 'multiplier': 5, 'cluster': 'equity'},
+    'NQ':  {'exchange': 'CME', 'multiplier': 20, 'cluster': 'equity'},
+    'MNQ': {'exchange': 'CME', 'multiplier': 2, 'cluster': 'equity'},
 
     # CL/MCL: NYMEX, not COMEX -- COMEX is metals only (CME Group splits its
     # exchanges by product class; crude oil clears on NYMEX).
-    'CL': ('NYMEX', 1000),
-    'MCL': ('NYMEX', 100),
-    'GC': ('COMEX', 100),
-    'MGC': ('COMEX', 10),
-    'SI': ('COMEX', 5000), # Silver (COMEX) -- margin estimated, verify
-    'SIL': ('COMEX', 1000, 'SI'), # Micro Silver -- IBKR ticker is 'SI', not 'SIL'; multiplier disambiguates
+    'CL':  {'exchange': 'NYMEX', 'multiplier': 1000, 'cluster': 'energy'},
+    'MCL': {'exchange': 'NYMEX', 'multiplier': 100, 'cluster': 'energy'},
+    'GC':  {'exchange': 'COMEX', 'multiplier': 100, 'cluster': 'metal'},
+    'MGC': {'exchange': 'COMEX', 'multiplier': 10, 'cluster': 'metal'},
+    'SI':  {'exchange': 'COMEX', 'multiplier': 5000, 'cluster': 'metal'}, # margin estimated, verify
+    'SIL': {'exchange': 'COMEX', 'multiplier': 1000, 'ib_symbol': 'SI', 'cluster': 'metal'}, # IBKR ticker is 'SI', not 'SIL'; multiplier disambiguates
 
-    'ZN': ('CBOT', 1000), # 10-Year T-Note (CBOT) -- margin estimated, verify
-    'ZT': ('CBOT', 2000),  # 2-Year T-Note (CBOT) -- margin estimated, verify
+    'ZN': {'exchange': 'CBOT', 'multiplier': 1000, 'cluster': 'rates'}, # 10-Year T-Note -- margin estimated, verify
+    'ZT': {'exchange': 'CBOT', 'multiplier': 2000, 'cluster': 'rates'}, # 2-Year T-Note -- margin estimated, verify
 
-    'ZL': ('CBOT', 600), # Soybean Oil (CBOT) -- 60K lbs, 0.01 cent/lb
-    'MZL': ('CBOT', 60, None, 'ZL'), # Micro Soybean Oil (CBOT) -- 6K lbs, 0.02 cent/lb
-    'ZC': ('CBOT', 50), # Corn (CBOT) -- 5000 bushels, 0.0025 cent/bu
-    'MZC': ('CBOT', 5, None, 'ZC'), # Micro Corn (CBOT) -- 500 bushels, 0.005 cent/bu = $2.50
-    'ZS': ('CBOT', 50), # Soy (CBOT) -- 5000 bushels, 0.0025 cent/bu
-    'MZS': ('CBOT', 5, None, 'ZS'), # Micro Soy (CBOT) -- 500 bushels, 0.005 cent/bu = $2.50
-    'ZW': ('CBOT', 50), # Wheatoy (CBOT) -- 5000 bushels, 0.0025 cent/bu
-    'MZW': ('CBOT', 5, None, 'ZW'), # Micro Wheat (CBOT) -- 500 bushels, 0.005 cent/bu = $2.50
-     
-    # 'NIY': ('CME', 10000),  
-    'NKD': ('CME', 5),   
-    'MNK': ('CME', 0.5),   
+    'ZL':  {'exchange': 'CBOT', 'multiplier': 600, 'cluster': 'grain'}, # Soybean Oil -- 60K lbs, 0.01 cent/lb
+    'MZL': {'exchange': 'CBOT', 'multiplier': 60, 'signal_symbol': 'ZL', 'cluster': 'grain'}, # Micro Soybean Oil -- 6K lbs, 0.02 cent/lb
+    'ZC':  {'exchange': 'CBOT', 'multiplier': 50, 'cluster': 'grain'}, # Corn -- 5000 bushels, 0.0025 cent/bu
+    'MZC': {'exchange': 'CBOT', 'multiplier': 5, 'signal_symbol': 'ZC', 'cluster': 'grain'}, # Micro Corn -- 500 bushels, 0.005 cent/bu = $2.50
+    'ZS':  {'exchange': 'CBOT', 'multiplier': 50, 'cluster': 'grain'}, # Soybeans -- 5000 bushels, 0.0025 cent/bu
+    'MZS': {'exchange': 'CBOT', 'multiplier': 5, 'signal_symbol': 'ZS', 'cluster': 'grain'}, # Micro Soybeans -- 500 bushels, 0.005 cent/bu = $2.50
+    'ZW':  {'exchange': 'CBOT', 'multiplier': 50, 'cluster': 'grain'}, # Wheat -- 5000 bushels, 0.0025 cent/bu
+    'MZW': {'exchange': 'CBOT', 'multiplier': 5, 'signal_symbol': 'ZW', 'cluster': 'grain'}, # Micro Wheat -- 500 bushels, 0.005 cent/bu = $2.50
+
+    # Nikkei is its own factor (Japan equity, JPY-adjacent), not lumped into
+    # the US-equity cluster with ES/MES/NQ/MNQ.
+    'NKD': {'exchange': 'CME', 'multiplier': 5, 'cluster': 'intl_equity'},
+    'MNK': {'exchange': 'CME', 'multiplier': 0.5, 'cluster': 'intl_equity'},
 
     # No leading underscore here, unlike enums.py's FuturesType -- that
     # workaround exists only because Python enum members can't start with a
     # digit. This is a plain dict, so the key is the real IBKR ticker; using
     # '_6J' previously meant --instruments 6J couldn't match this entry, and
     # even a literal '_6J' lookup would have sent the wrong symbol to IB.
-    'JPY': ('CME', 12_500_000),
-    'J7': ('CME', 6_250_000),
-    'BRE': ('CME', 100_000),
-    '6M': ('CME', 500_000),
-
-    
+    'JPY': {'exchange': 'CME', 'multiplier': 12_500_000, 'cluster': 'fx'},
+    'J7':  {'exchange': 'CME', 'multiplier': 6_250_000, 'cluster': 'fx'},
+    'BRE': {'exchange': 'CME', 'multiplier': 100_000, 'cluster': 'fx'},
+    '6M':  {'exchange': 'CME', 'multiplier': 500_000, 'cluster': 'fx'},
 }
 
-DEFAULT_MAX_NOTIONAL = float(os.getenv('TSMOM_DEFAULT_MAX_NOTIONAL', '50000'))
+DEFAULT_MAX_NOTIONAL = float(os.getenv('TSMOM_DEFAULT_MAX_NOTIONAL', '0')) or None
 
 
 def configure_logging():
@@ -142,18 +153,21 @@ def _build_instruments(spec: str, max_notional: float, max_contracts: int) -> li
                 f'Unknown symbol {symbol!r} — pass a JSON config path for '
                 f'instruments outside {sorted(KNOWN_INSTRUMENTS)}'
             )
-        spec_tuple = KNOWN_INSTRUMENTS[symbol]
-        exchange, multiplier = spec_tuple[0], spec_tuple[1]
-        ib_symbol = spec_tuple[2] if len(spec_tuple) > 2 and spec_tuple[2] else symbol
-        signal_symbol = spec_tuple[3] if len(spec_tuple) > 3 and spec_tuple[3] else ib_symbol
+        known = KNOWN_INSTRUMENTS[symbol]
+        ib_symbol = known.get('ib_symbol') or symbol
+        signal_symbol = known.get('signal_symbol') or ib_symbol
         instruments.append({
             'symbol': symbol,
             'ib_symbol': ib_symbol,
             'signal_symbol': signal_symbol,
-            'exchange': exchange,
+            'exchange': known['exchange'],
             'expiry': 'auto',
-            'multiplier': multiplier,
+            'multiplier': known['multiplier'],
+            'cluster': known.get('cluster', 'other'),
             'max_contracts': max_contracts,
+            # max_notional is now an optional hard per-instrument ceiling,
+            # not the main sizing lever (see --account-equity) -- None
+            # unless the caller explicitly passed one.
             'max_notional': max_notional,
         })
     return instruments
@@ -188,10 +202,25 @@ def parse_args():
                    help='Comma-separated symbols (e.g. MES,MNQ) or path to a JSON instrument config')
     p.add_argument('--vol-target', type=float, default=0.15,
                    help='Annualized vol target (default: %(default)s = 15%%)')
-    p.add_argument('--max-contracts', type=int, default=5,
-                   help='Per-instrument hard cap, used when --instruments is a symbol list (default: %(default)s)')
+    p.add_argument('--account-equity', type=float, required=True,
+                   help='Account equity USD -- the primary sizing input: drives the derived '
+                        'per-cluster risk budget (account_equity * target_portfolio_vol / sqrt(n_effective))')
+    p.add_argument('--target-portfolio-vol', type=float, default=0.15,
+                   help='Target total portfolio vol, used to derive the risk budget (default: %(default)s = 15%%)')
+    p.add_argument('--max-cluster-risk-pct', type=float, default=0.25,
+                   help='Max share of total portfolio dollar-vol risk any one cluster '
+                        '(e.g. grains, FX) may carry before being rescaled down (default: %(default)s)')
+    p.add_argument('--min-conviction', type=float, default=0.05,
+                   help='Min abs(trend_strength) for a cluster to count as "active" '
+                        'when deriving n_effective (default: %(default)s)')
+    p.add_argument('--max-contracts', type=int, default=15,
+                   help='Per-instrument sanity backstop (not the primary sizing lever -- '
+                        'that is the derived risk budget + cluster cap), used when '
+                        '--instruments is a symbol list (default: %(default)s)')
     p.add_argument('--max-notional', type=float, default=DEFAULT_MAX_NOTIONAL,
-                   help='Per-instrument max notional USD, used when --instruments is a symbol list (default: %(default)s)')
+                   help='Optional hard per-instrument notional USD ceiling, used when '
+                        '--instruments is a symbol list (default: %(default)s, i.e. no ceiling '
+                        'beyond the derived risk budget)')
     p.add_argument('--vx-expiry', default='auto',
                    help='VX futures expiry YYYYMM or "auto" for nearest >=3d (default: %(default)s)')
     p.add_argument('--long-only', action='store_true',
@@ -223,6 +252,10 @@ def main():
         'vx_expiry': args.vx_expiry,
         'long_only': args.long_only,
         'regime_discount': args.regime_discount,
+        'account_equity': args.account_equity,
+        'target_portfolio_vol': args.target_portfolio_vol,
+        'max_cluster_risk_pct': args.max_cluster_risk_pct,
+        'min_conviction': args.min_conviction,
     }
 
     if args.live:
