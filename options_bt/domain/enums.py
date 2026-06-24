@@ -168,6 +168,8 @@ class FuturesType(Enum):
     M2K = (5, 900.0, 1.24) # Micro E-mini Russell 2000 -- margin estimated, verify
     RTY = (50, 9000.0, 1.70) # E-mini Russell 2000 -- margin estimated, verify
     ZN = (1000, 2156.25, 1.67) # 10-Year T-Note (CBOT) -- margin estimated, verify
+    TN = (1000, 2935.79, 1.67) # Ultra 10-Year T-Note (CBOT) -- margin estimated, verify
+    MTN = (100, 725.80, 0.57) # Micro 10-Year T-Note (CBOT) -- margin estimated, verify
     ZT = (2000, 1380.75, 3.04) # 2-Year T-Note (CBOT) -- margin estimated, verify
     GC = (100, 48345.79, 1.70) # Gold (COMEX) -- margin estimated, verify
     SI = (5000, 74299.37, 1.70) # Silver (COMEX) -- margin estimated, verify

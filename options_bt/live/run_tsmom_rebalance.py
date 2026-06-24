@@ -80,6 +80,8 @@ KNOWN_INSTRUMENTS = {
     'SIL': {'exchange': 'COMEX', 'multiplier': 1000, 'ib_symbol': 'SI', 'cluster': 'metal'}, # IBKR ticker is 'SI', not 'SIL'; multiplier disambiguates
 
     'ZN': {'exchange': 'CBOT', 'multiplier': 1000, 'cluster': 'rates'}, # 10-Year T-Note -- margin estimated, verify
+    'TN': {'exchange': 'CBOT', 'multiplier': 1000, 'cluster': 'rates'}, # 10-Year T-Note -- margin estimated, verify
+    'MTN': {'exchange': 'CBOT', 'multiplier': 100, 'cluster': 'rates'}, # 10-Year T-Note -- margin estimated, verify
     'ZT': {'exchange': 'CBOT', 'multiplier': 2000, 'cluster': 'rates'}, # 2-Year T-Note -- margin estimated, verify
 
     'ZL':  {'exchange': 'CBOT', 'multiplier': 600, 'cluster': 'grain'}, # Soybean Oil -- 60K lbs, 0.01 cent/lb
