@@ -18,12 +18,14 @@ connectivity — all strategy/signal logic lives in options_bt.
 
 import argparse
 import atexit
+import csv
 import json
 import logging
 import math
 import os
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -173,6 +175,30 @@ def _build_instruments(spec: str, max_notional: float, max_contracts: int) -> li
     return instruments
 
 
+def _save_report(report: str, targets: list[dict]) -> None:
+    """Persists each run's report (plain text, matches stdout) and targets
+    (CSV, one row per instrument) to options-bt/results/, timestamped --
+    mirrors tsmom_backtest.py's results dir so live and backtest output
+    live in the same place. Previously this only ever printed to stdout/
+    Telegram and was lost the moment the terminal scrolled."""
+    results_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', '..', 'results'))
+    os.makedirs(results_dir, exist_ok=True)
+    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+
+    txt_path = os.path.join(results_dir, f'tsmom_live_rebalance_{ts}.txt')
+    with open(txt_path, 'w') as f:
+        f.write(report)
+
+    fieldnames = sorted({key for t in targets for key in t})
+    csv_path = os.path.join(results_dir, f'tsmom_live_rebalance_{ts}.csv')
+    with open(csv_path, 'w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(targets)
+
+    log.info('Saved rebalance report to %s, %s', txt_path, csv_path)
+
+
 def _execute_rebalance_order(ib: IBPySync, contract, delta_contracts: int):
     """Simple limit-at-mid (falls back to market) order for the size delta
     needed to reach target_contracts from current_contracts."""
@@ -229,6 +255,8 @@ def parse_args():
                    help='Position discount for Correction/Rebound regimes; 1.0 disables (default: %(default)s)')
     p.add_argument('--dry-run', action='store_true', default=True,
                    help='Print targets only, no orders (default — this is the safe default)')
+    p.add_argument('--no-save', action='store_true',
+                   help='Skip saving the report/targets to options-bt/results/ (saved by default)')
     p.add_argument('--paper',    action='store_true')
     p.add_argument('--live', action='store_true',
                    help='Place real orders to reach target_contracts, after a typed confirmation')
@@ -281,6 +309,9 @@ def main():
 
     targets = compute_rebalance_targets(ib, instruments, config)
     report = print_rebalance_report(targets)
+
+    if not args.no_save:
+        _save_report(report, targets)
 
     if not dry_run:
         send_telegram(f'TSMOM Rebalance\n{report}')
