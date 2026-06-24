@@ -25,6 +25,7 @@ from zoneinfo import ZoneInfo
 
 from ib_tools.ibpysync import IBPySync
 
+from options_bt.domain.enums import TrendRegime, VolRegime
 from options_bt.domain.tsmom_signal import (
     apply_cluster_risk_cap,
     calculate_trend_strength,
@@ -178,15 +179,15 @@ def fetch_vx_spike_ratio(ib: IBPySync, vx_expiry: str = 'auto', min_days: int = 
     return float(vx_current), float(vx_ma63)
 
 
-def check_vol_regime(vx_ratio: float) -> str:
-    """'normal' | 'elevated' | 'spike' | 'extreme' from vx_current / vx_ma63."""
+def check_vol_regime(vx_ratio: float) -> VolRegime:
+    """Normal | Elevated | Spike | Extreme from vx_current / vx_ma63."""
     if vx_ratio > VX_EXTREME_RATIO:
-        return 'extreme'
+        return VolRegime.EXTREME
     if vx_ratio > VX_SPIKE_RATIO:
-        return 'spike'
+        return VolRegime.SPIKE
     if vx_ratio > VX_ELEVATED_RATIO:
-        return 'elevated'
-    return 'normal'
+        return VolRegime.ELEVATED
+    return VolRegime.NORMAL
 
 
 # ------------------------------------------------------------------
@@ -259,7 +260,7 @@ def _compute_signal(ib: IBPySync, instr: dict, min_days: int, vol_target: float,
     # trade.
     hv = daily_std_last * math.sqrt(252) if daily_std_last and daily_std_last > 0 else None
     vol_scalar = max(0.25, min(2.0, vol_target / hv)) if hv else 1.0
-    discount = regime_discount if regime in ('Correction', 'Rebound') else 1.0
+    discount = regime_discount if regime in (TrendRegime.CORRECTION, TrendRegime.REBOUND) else 1.0
 
     return {
         'contract': contract,
@@ -324,11 +325,11 @@ def compute_rebalance_targets(ib: IBPySync, instruments: list[dict], config: dic
     vx_ratio = vx_current / vx_ma63
     vol_regime = check_vol_regime(vx_ratio)
     log.info('VX spike gate — vx_current=%.2f  vx_ma63=%.2f  ratio=%.3f  regime=%s',
-             vx_current, vx_ma63, vx_ratio, vol_regime)
+             vx_current, vx_ma63, vx_ratio, vol_regime.value)
 
-    if vol_regime in ('spike', 'extreme'):
+    if vol_regime in (VolRegime.SPIKE, VolRegime.EXTREME):
         log.warning('VX %s detected (ratio=%.3f) — holding existing positions, skipping rebalance',
-                     vol_regime, vx_ratio)
+                     vol_regime.value, vx_ratio)
         targets = []
         for instr in instruments:
             try:
@@ -336,9 +337,9 @@ def compute_rebalance_targets(ib: IBPySync, instruments: list[dict], config: dic
                 current = _current_contracts(ib, contract)
             except Exception as exc:
                 log.warning('Could not resolve %s during VX %s (%s) — reporting current=0',
-                            instr['symbol'], vol_regime, exc)
+                            instr['symbol'], vol_regime.value, exc)
                 current = 0
-            target = round(current / 2) if vol_regime == 'extreme' else current
+            target = round(current / 2) if vol_regime == VolRegime.EXTREME else current
             targets.append({
                 'symbol': instr['symbol'],
                 'target_contracts': target,
@@ -352,7 +353,7 @@ def compute_rebalance_targets(ib: IBPySync, instruments: list[dict], config: dic
             })
         return targets
 
-    position_scale = VX_ELEVATED_SCALE if vol_regime == 'elevated' else 1.0
+    position_scale = VX_ELEVATED_SCALE if vol_regime == VolRegime.ELEVATED else 1.0
 
     # Stage 1: signal for every instrument, no sizing yet.
     signals: dict[str, dict] = {}
@@ -507,9 +508,9 @@ def print_rebalance_report(targets: list[dict]) -> str:
             f"close={_fmt(t.get('close'), '.2f'):>9}  dd_pct={_fmt(t.get('dd_pct'), '.2f'):>7}  "
             f"daily_std={_fmt(t.get('daily_std'), '.4f'):>7}  hv={_fmt(t.get('hv'), '.3f'):>6}  "
             f"vol_scalar={_fmt(t.get('vol_scalar'), '.3f'):>6}  discount={_fmt(t.get('discount'), '.2f'):>5}  "
-            f"regime={t['regime'] or 'N/A':<10}  "
+            f"regime={t['regime'].capitalize() if t.get('regime') else 'N/A':<10}  "
             f"vx_current={_fmt(t.get('vx_current'), '.2f'):>6}  vx_ma63={_fmt(t.get('vx_ma63'), '.2f'):>6}  "
-            f"vx_ratio={t['vx_ratio']:.3f}  vol_regime={t['vol_regime']}"
+            f"vx_ratio={t['vx_ratio']:.3f}  vol_regime={t['vol_regime'].capitalize()}"
         )
     report = '\n'.join(lines)
     print(report)

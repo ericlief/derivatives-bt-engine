@@ -20,6 +20,8 @@ import math
 
 import polars as pl
 
+from options_bt.domain.enums import TrendRegime
+
 
 def calculate_trend_strength(df: pl.DataFrame, w3m: float = 0.4, w1y: float = 0.6) -> pl.DataFrame:
     """Canonical TSMOM signal. tanh (not sigmoid) so the sign is preserved —
@@ -69,7 +71,7 @@ def calculate_trend_strength(df: pl.DataFrame, w3m: float = 0.4, w1y: float = 0.
     return df
 
 
-def classify_regime(ts3m, ts1y) -> str:
+def classify_regime(ts3m, ts1y) -> TrendRegime:
     """
     Classify into Bull/Correction/Bear/Rebound from the sign of the fast
     (~3mo) and slow (~12mo) trend-strength scores.
@@ -80,29 +82,29 @@ def classify_regime(ts3m, ts1y) -> str:
          -     -    Bear         strong downtrend, high-confidence short/flat
          -     +    Rebound      short-term recovery in downtrend (55% up next)
 
-    Exactly zero, None, or NaN on either input is ambiguous -> 'Unknown'.
+    Exactly zero, None, or NaN on either input is ambiguous -> Unknown.
     """
     if ts3m is None or ts1y is None:
-        return 'Unknown'
+        return TrendRegime.UNKNOWN
     if (isinstance(ts3m, float) and math.isnan(ts3m)) or (isinstance(ts1y, float) and math.isnan(ts1y)):
-        return 'Unknown'
+        return TrendRegime.UNKNOWN
     if ts3m == 0 or ts1y == 0:
-        return 'Unknown'
+        return TrendRegime.UNKNOWN
 
     slow_up = ts1y > 0
     fast_up = ts3m > 0
 
     if slow_up and fast_up:
-        return 'Bull'
+        return TrendRegime.BULL
     if slow_up and not fast_up:
-        return 'Correction'
+        return TrendRegime.CORRECTION
     if not slow_up and not fast_up:
-        return 'Bear'
-    return 'Rebound'   # not slow_up and fast_up
+        return TrendRegime.BEAR
+    return TrendRegime.REBOUND   # not slow_up and fast_up
 
 
 def compute_position_scalar(trend_strength, daily_std_last, vol_target: float,
-                             regime: str, regime_discount: float = 0.5) -> float:
+                             regime: TrendRegime, regime_discount: float = 0.5) -> float:
     """
     Layers 2-4 of the position sizing framework, combined into a single
     scalar in [-1, +1]:
@@ -130,7 +132,7 @@ def compute_position_scalar(trend_strength, daily_std_last, vol_target: float,
         vol_scalar = vol_target / current_realized_vol # 0.15/0.60 ~= 0.25
         vol_scalar = max(0.25, min(2.0, vol_scalar))
 
-    discount = regime_discount if regime in ('Correction', 'Rebound') else 1.0
+    discount = regime_discount if regime in (TrendRegime.CORRECTION, TrendRegime.REBOUND) else 1.0
 
     scalar = trend_strength * vol_scalar * discount
     return max(-1.0, min(1.0, scalar))

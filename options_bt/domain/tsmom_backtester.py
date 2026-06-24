@@ -27,7 +27,7 @@ from typing import Optional
 import duckdb
 import polars as pl
 
-from options_bt.domain.enums import FuturesType
+from options_bt.domain.enums import FuturesType, TrendRegime, VolRegime
 from options_bt.domain.futures_dataloader import FuturesDataLoader
 from options_bt.domain.tsmom_signal import calculate_trend_strength, classify_regime, compute_position_scalar
 from options_bt.utils.logger import setup_logger
@@ -57,17 +57,17 @@ class TsmomBacktestConfig:
     end_date: Optional[date] = None
 
 
-def check_vol_regime(vix_ratio: Optional[float]) -> str:
-    """'normal' | 'elevated' | 'spike' | 'extreme' from vix_current / vix_ma63."""
+def check_vol_regime(vix_ratio: Optional[float]) -> VolRegime:
+    """Normal | Elevated | Spike | Extreme from vix_current / vix_ma63."""
     if vix_ratio is None:
-        return 'normal'
+        return VolRegime.NORMAL
     if vix_ratio > VIX_EXTREME_RATIO:
-        return 'extreme'
+        return VolRegime.EXTREME
     if vix_ratio > VIX_SPIKE_RATIO:
-        return 'spike'
+        return VolRegime.SPIKE
     if vix_ratio > VIX_ELEVATED_RATIO:
-        return 'elevated'
-    return 'normal'
+        return VolRegime.ELEVATED
+    return VolRegime.NORMAL
 
 
 def load_portfolio_data(symbols: list[str]) -> tuple[dict[str, pl.DataFrame], pl.DataFrame]:
@@ -141,14 +141,14 @@ def _month_end_dates(price_data: dict[str, pl.DataFrame]) -> set[date]:
     return set(month_ends['month_end'].to_list())
 
 
-def _vix_regime_at(vix: pl.DataFrame, d: date) -> tuple[str, Optional[float], Optional[float]]:
+def _vix_regime_at(vix: pl.DataFrame, d: date) -> tuple[VolRegime, Optional[float], Optional[float]]:
     """(vol_regime, vix_close, vix_ratio) as of the latest available VIX
-    row at or before `d`. ('normal', None, None) if no VIX data is
+    row at or before `d`. (Normal, None, None) if no VIX data is
     available yet."""
     row = vix.filter(pl.col('date') <= d).tail(1)
     if row.height == 0:
-        return 'normal', None, None
-    return row['vol_regime'][0], row['vix_close'][0], row['vix_ratio'][0]
+        return VolRegime.NORMAL, None, None
+    return VolRegime(row['vol_regime'][0]), row['vix_close'][0], row['vix_ratio'][0]
 
 
 def _compute_target(symbol: str, d: date, full_price_data: dict[str, pl.DataFrame],
@@ -189,7 +189,7 @@ def _compute_target(symbol: str, d: date, full_price_data: dict[str, pl.DataFram
     # scalar itself stays untouched.
     hv = daily_std_last * math.sqrt(252) if daily_std_last and daily_std_last > 0 else None
     vol_scalar = max(0.25, min(2.0, config.vol_target / hv)) if hv else 1.0
-    discount = config.regime_discount if regime in ('Correction', 'Rebound') else 1.0
+    discount = config.regime_discount if regime in (TrendRegime.CORRECTION, TrendRegime.REBOUND) else 1.0
 
     scalar = compute_position_scalar(
         signal_for_scalar, daily_std_last, config.vol_target, regime,
@@ -287,8 +287,8 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
         if prior_month_ends:
             seed_date = max(prior_month_ends)
             vol_regime, vix_close, vix_ratio = _vix_regime_at(vix, seed_date)
-            if vol_regime not in ('spike', 'extreme'):  # held_contracts are all 0 here -- hold/halve would be a no-op anyway
-                position_scale = VIX_ELEVATED_SCALE if vol_regime == 'elevated' else 1.0
+            if vol_regime not in (VolRegime.SPIKE, VolRegime.EXTREME):  # held_contracts are all 0 here -- hold/halve would be a no-op anyway
+                position_scale = VIX_ELEVATED_SCALE if vol_regime == VolRegime.ELEVATED else 1.0
                 for symbol in config.symbols:
                     result = _compute_target(symbol, seed_date, full_price_data, futures_types, config, position_scale)
                     if result is None:
@@ -315,16 +315,16 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
         if d in rebalance_dates:
             vol_regime, vix_close, vix_ratio = _vix_regime_at(vix, d)
 
-            if vol_regime in ('spike', 'extreme'):
+            if vol_regime in (VolRegime.SPIKE, VolRegime.EXTREME):
                 for symbol in config.symbols:
                     prior = held_contracts[symbol]
-                    target = round(prior / 2) if vol_regime == 'extreme' else prior
+                    target = round(prior / 2) if vol_regime == VolRegime.EXTREME else prior
                     close_row = full_price_data[symbol].filter(pl.col('ts_event') <= d).tail(1)
                     close = float(close_row['close'][0]) if close_row.height > 0 else None
                     _rebalance_to(symbol, target, d, vol_regime, vix_close=vix_close, vix_ratio=vix_ratio,
                                   signal={'close': close})
             else:
-                position_scale = VIX_ELEVATED_SCALE if vol_regime == 'elevated' else 1.0
+                position_scale = VIX_ELEVATED_SCALE if vol_regime == VolRegime.ELEVATED else 1.0
                 for symbol in config.symbols:
                     result = _compute_target(symbol, d, full_price_data, futures_types, config, position_scale)
                     if result is None:

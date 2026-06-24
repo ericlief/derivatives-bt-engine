@@ -8,6 +8,7 @@ import numpy as np
 import polars as pl
 import pytest
 
+from options_bt.domain.enums import TrendRegime
 from options_bt.domain.tsmom_signal import (
     apply_cluster_risk_cap,
     calculate_trend_strength,
@@ -77,71 +78,71 @@ def test_trend_strength_falls_back_to_ts3m_before_252_bars():
 # ── classify_regime ─────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize('ts1y,ts3m,expected', [
-    (1.0, 1.0, 'Bull'),
-    (1.0, -1.0, 'Correction'),
-    (-1.0, -1.0, 'Bear'),
-    (-1.0, 1.0, 'Rebound'),
+    (1.0, 1.0, TrendRegime.BULL),
+    (1.0, -1.0, TrendRegime.CORRECTION),
+    (-1.0, -1.0, TrendRegime.BEAR),
+    (-1.0, 1.0, TrendRegime.REBOUND),
 ])
 def test_classify_regime(ts1y, ts3m, expected):
     assert classify_regime(ts3m, ts1y) == expected
 
 
 def test_classify_regime_unknown_on_none():
-    assert classify_regime(None, 1.0) == 'Unknown'
-    assert classify_regime(1.0, None) == 'Unknown'
+    assert classify_regime(None, 1.0) == TrendRegime.UNKNOWN
+    assert classify_regime(1.0, None) == TrendRegime.UNKNOWN
 
 
 def test_classify_regime_unknown_on_nan():
-    assert classify_regime(float('nan'), 1.0) == 'Unknown'
+    assert classify_regime(float('nan'), 1.0) == TrendRegime.UNKNOWN
 
 
 def test_classify_regime_unknown_on_zero():
-    assert classify_regime(0.0, 1.0) == 'Unknown'
-    assert classify_regime(1.0, 0.0) == 'Unknown'
+    assert classify_regime(0.0, 1.0) == TrendRegime.UNKNOWN
+    assert classify_regime(1.0, 0.0) == TrendRegime.UNKNOWN
 
 
 # ── compute_position_scalar ──────────────────────────────────────────────────
 
 def test_position_scalar_sign_follows_trend_strength():
-    pos = compute_position_scalar(0.5, 0.01, vol_target=0.15, regime='Bull')
-    neg = compute_position_scalar(-0.5, 0.01, vol_target=0.15, regime='Bear')
+    pos = compute_position_scalar(0.5, 0.01, vol_target=0.15, regime=TrendRegime.BULL)
+    neg = compute_position_scalar(-0.5, 0.01, vol_target=0.15, regime=TrendRegime.BEAR)
     assert pos > 0
     assert neg < 0
 
 
 def test_position_scalar_clamped_to_unit_range():
     # extreme trend_strength * max vol_scalar must still clamp to [-1, 1]
-    scalar = compute_position_scalar(1.0, daily_std_last=0.0001, vol_target=0.50, regime='Bull')
+    scalar = compute_position_scalar(1.0, daily_std_last=0.0001, vol_target=0.50, regime=TrendRegime.BULL)
     assert -1.0 <= scalar <= 1.0
     assert scalar == 1.0  # vol_scalar clamps to 2.0, but final result re-clamps
 
 
 def test_position_scalar_vol_scalar_clamp_floor():
     # very high realized vol should clamp vol_scalar to the 0.25 floor, not go to ~0
-    scalar = compute_position_scalar(1.0, daily_std_last=1.0, vol_target=0.15, regime='Bull')
+    scalar = compute_position_scalar(1.0, daily_std_last=1.0, vol_target=0.15, regime=TrendRegime.BULL)
     assert math.isclose(scalar, 0.25, rel_tol=1e-6)
 
 
 def test_position_scalar_discount_applied_for_disagreement_regimes():
-    bull = compute_position_scalar(0.5, 0.02, vol_target=0.15, regime='Bull', regime_discount=0.5)
-    correction = compute_position_scalar(0.5, 0.02, vol_target=0.15, regime='Correction', regime_discount=0.5)
+    bull = compute_position_scalar(0.5, 0.02, vol_target=0.15, regime=TrendRegime.BULL, regime_discount=0.5)
+    correction = compute_position_scalar(0.5, 0.02, vol_target=0.15, regime=TrendRegime.CORRECTION, regime_discount=0.5)
     assert math.isclose(correction, bull * 0.5, rel_tol=1e-9)
 
 
 def test_position_scalar_discount_disabled_at_1():
-    correction = compute_position_scalar(0.5, 0.02, vol_target=0.15, regime='Correction', regime_discount=1.0)
-    bull = compute_position_scalar(0.5, 0.02, vol_target=0.15, regime='Bull', regime_discount=1.0)
+    correction = compute_position_scalar(0.5, 0.02, vol_target=0.15, regime=TrendRegime.CORRECTION, regime_discount=1.0)
+    bull = compute_position_scalar(0.5, 0.02, vol_target=0.15, regime=TrendRegime.BULL, regime_discount=1.0)
     assert math.isclose(correction, bull, rel_tol=1e-9)
 
 
 def test_position_scalar_zero_on_null_trend_strength():
-    assert compute_position_scalar(None, 0.01, vol_target=0.15, regime='Bull') == 0.0
-    assert compute_position_scalar(float('nan'), 0.01, vol_target=0.15, regime='Bull') == 0.0
+    assert compute_position_scalar(None, 0.01, vol_target=0.15, regime=TrendRegime.BULL) == 0.0
+    assert compute_position_scalar(float('nan'), 0.01, vol_target=0.15, regime=TrendRegime.BULL) == 0.0
 
 
 def test_position_scalar_neutral_vol_scalar_on_missing_std():
     # daily_std_last unusable -> vol_scalar treated as neutral (1.0), not a crash
-    scalar = compute_position_scalar(0.4, None, vol_target=0.15, regime='Bull')
+    scalar = compute_position_scalar(0.4, None, vol_target=0.15, regime=TrendRegime.BULL)
     assert math.isclose(scalar, 0.4, rel_tol=1e-9)
 
 

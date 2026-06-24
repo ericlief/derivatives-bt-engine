@@ -237,3 +237,23 @@ class TradeSelectionMethod(str, Enum):
     PREMIUM_FIRST = "premium first"
     DELTA_FIRST = "delta first"
     WEIGHTED = "weighted"
+
+
+class TrendRegime(str, Enum):
+    """TSMOM trend regime from classify_regime() -- sign agreement between
+    the fast (~3mo) and slow (~12mo) trend-strength scores."""
+    BULL = "bull"
+    CORRECTION = "correction"
+    BEAR = "bear"
+    REBOUND = "rebound"
+    UNKNOWN = "unknown"
+
+
+class VolRegime(str, Enum):
+    """TSMOM vol-spike regime from check_vol_regime() -- current vol
+    (VX front-month live, or spot VIX in the backtest) vs its trailing
+    63-day MA."""
+    NORMAL = "normal"
+    ELEVATED = "elevated"
+    SPIKE = "spike"
+    EXTREME = "extreme"
