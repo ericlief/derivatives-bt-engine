@@ -191,12 +191,22 @@ def _save_report(report: str, targets: list[dict]) -> None:
     with open(txt_path, 'w') as f:
         f.write(report)
 
-    fieldnames = sorted({key for t in targets for key in t})
+    # symbol -> current/target position -> signal/regime first (the columns
+    # you actually scan a rebalance report for), everything else after in a
+    # stable, predictable order.
+    priority = ['symbol', 'current_contracts', 'target_contracts', 'signal',
+                'regime', 'vol_regime']
+    all_keys = {key for t in targets for key in t}
+    fieldnames = [k for k in priority if k in all_keys] + sorted(all_keys - set(priority))
+    rounded_rows = [
+        {k: (round(v, 4) if isinstance(v, float) and not math.isnan(v) else v) for k, v in t.items()}
+        for t in targets
+    ]
     csv_path = os.path.join(results_dir, f'tsmom_live_rebalance_{ts}.csv')
     with open(csv_path, 'w', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
-        writer.writerows(targets)
+        writer.writerows(rounded_rows)
 
     log.info('Saved rebalance report to %s, %s', txt_path, csv_path)
 
