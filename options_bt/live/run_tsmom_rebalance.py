@@ -189,7 +189,13 @@ def _save_report(report: str, targets: list[dict]) -> None:
     with open(txt_path, 'w') as f:
         f.write(report)
 
-    fieldnames = sorted({key for t in targets for key in t})
+    # symbol -> current/target position -> signal/regime first (the columns
+    # you actually scan a rebalance report for), everything else after in a
+    # stable, predictable order.
+    priority = ['symbol', 'current_contracts', 'target_contracts', 'signal',
+                'regime', 'vol_regime']
+    all_keys = {key for t in targets for key in t}
+    fieldnames = [k for k in priority if k in all_keys] + sorted(all_keys - set(priority))
     rounded_rows = [
         {k: (round(v, 4) if isinstance(v, float) and not math.isnan(v) else v) for k, v in t.items()}
         for t in targets
