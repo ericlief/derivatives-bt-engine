@@ -81,13 +81,14 @@ KNOWN_INSTRUMENTS = {
     # '_6J' previously meant --instruments 6J couldn't match this entry, and
     # even a literal '_6J' lookup would have sent the wrong symbol to IB.
     'JPY': ('CME', 12_500_000),
+    'J7': ('CME', 6_250_000),
     'BRE': ('CME', 100_000),
     '6M': ('CME', 500_000),
 
     
 }
 
-DEFAULT_MAX_NOTIONAL = float(os.getenv('TSMOM_DEFAULT_MAX_NOTIONAL', '25000'))
+DEFAULT_MAX_NOTIONAL = float(os.getenv('TSMOM_DEFAULT_MAX_NOTIONAL', '50000'))
 
 
 def configure_logging():
