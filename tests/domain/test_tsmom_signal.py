@@ -182,16 +182,28 @@ def test_desired_risk_budget_fewer_active_clusters_means_bigger_budget_each():
 # isn't capped below 100% of the target just for being the only trade in
 # the book.
 #
-# Operates on continuous_contracts (unrounded, unclamped) throughout, and
-# rounds to a final integer + applies max_contracts exactly once, at the
-# end -- rescaling an already-rounded-and-clamped integer (the old
-# behavior) double-rounds, which can zero out large-multiplier instruments
-# that would survive on the true continuous math.
+# Within an over-budget cluster, allocation is GREEDY BY CONVICTION
+# PRIORITY (priority = abs(scalar), descending), not a uniform haircut --
+# a uniform scale factor can push every instrument below the 0.5 rounding
+# threshold at once, even when the top-conviction instrument alone would
+# easily survive on the full cap. A bounded lot-size exception (gated to
+# the first instrument only) still grants exactly 1 contract when the true
+# continuous math would round to zero but the instrument's own signal
+# genuinely wants a full contract and its single-contract risk isn't
+# wildly over the cap.
+#
+# infeasible is OUTCOME-based: True only when every instrument in a
+# cluster ends at target_contracts == 0 despite at least one having a
+# genuine (>=0.5) pre-cap signal -- not a cap-vs-single-contract-risk
+# precomputation, since the top-priority instrument may still land a
+# contract via the lot exception even when that precomputed check would
+# have said "infeasible".
 
 def _target(symbol, cluster, continuous_contracts, close=100.0, multiplier=10.0, hv=0.2,
-            max_contracts=None, target_contracts=None):
+            max_contracts=None, target_contracts=None, scalar=0.0):
     return {
         'symbol': symbol, 'cluster': cluster, 'continuous_contracts': continuous_contracts,
+        'scalar': scalar,
         # target_contracts simulates whatever the caller (tsmom_rebalance.py)
         # already computed upstream, pre-cluster-cap -- only actually
         # observable in tests that exercise the early-return (no budget)
@@ -206,21 +218,15 @@ def _target(symbol, cluster, continuous_contracts, close=100.0, multiplier=10.0,
 ])
 def test_cluster_cap_floor_table(n_active_clusters, expected_pct):
     # max_cluster_risk_pct=0.25 throughout -- the floor (1/n) only matters
-    # while it's bigger than 0.25, i.e. n <= 4.
-    targets = [_target('MES', 'equity', continuous_contracts=10, close=100, multiplier=1, hv=0.1)]  # risk=100
+    # while it's bigger than 0.25, i.e. n <= 4. Single-instrument cluster,
+    # so greedy allocation reduces to the same math as a plain cap check.
+    targets = [_target('MES', 'equity', continuous_contracts=10, close=100, multiplier=1, hv=0.1, scalar=0.9)]  # risk=100
     total_risk_target = 1000.0
     out = apply_cluster_risk_cap(targets, max_cluster_risk_pct=0.25,
                                  total_risk_target=total_risk_target, n_active_clusters=n_active_clusters)
-    # risk=100 is below every tier's cap here, so target_contracts is
-    # untouched in all cases -- this test is purely about effective_cap_pct
-    # being computed correctly, verified indirectly via a second case where
-    # the cap actually binds at exactly the expected_pct boundary.
     assert out[0]['target_contracts'] == 10
 
-    # Now push the single cluster's risk just over the expected cap and
-    # confirm it gets rescaled down to (approximately) expected_pct of the
-    # fixed target, not capped at the old flat 0.25 in every case.
-    big_targets = [_target('MES', 'equity', continuous_contracts=100, close=100, multiplier=1, hv=0.1)]  # risk=1000
+    big_targets = [_target('MES', 'equity', continuous_contracts=100, close=100, multiplier=1, hv=0.1, scalar=0.9)]  # risk=1000
     out_big = apply_cluster_risk_cap(big_targets, max_cluster_risk_pct=0.25,
                                      total_risk_target=total_risk_target, n_active_clusters=n_active_clusters)
     expected_risk = expected_pct * total_risk_target
@@ -230,57 +236,41 @@ def test_cluster_cap_floor_table(n_active_clusters, expected_pct):
 def test_cluster_cap_fixed_denominator_not_inflated_by_correlated_cluster():
     # Four grain instruments that would, under the old (buggy) emergent-sum
     # denominator, have summed to 60% of total_risk -- the bug was that
-    # this sum itself became the denominator the cap was measured against,
-    # so a correlated cluster could never meaningfully exceed ~its own
-    # share no matter how concentrated it was. Under the fixed
-    # total_risk_target, the cap is compared against the account-level
-    # target instead, independent of how much risk this cluster (or any
-    # other) happens to carry this run.
+    # this sum itself became the denominator the cap was measured against.
+    # Under the fixed total_risk_target, the cap is compared against the
+    # account-level target instead, independent of how much risk this
+    # cluster happens to carry this run. (Tied scalars here -- this test
+    # is about the fixed denominator, not priority order; see the dedicated
+    # walk-down tests for priority behavior.)
     targets = [
-        _target('MES', 'equity', continuous_contracts=4, close=100, multiplier=1, hv=0.1),    # risk=40
-        _target('MZC', 'grain', continuous_contracts=15, close=100, multiplier=1, hv=0.1),    # risk=150
-        _target('MZS', 'grain', continuous_contracts=15, close=100, multiplier=1, hv=0.1),    # risk=150
-        _target('MZW', 'grain', continuous_contracts=15, close=100, multiplier=1, hv=0.1),    # risk=150
-        _target('MZL', 'grain', continuous_contracts=15, close=100, multiplier=1, hv=0.1),    # risk=150
+        _target('MES', 'equity', continuous_contracts=4, close=100, multiplier=1, hv=0.1, scalar=0.5),
+        _target('MZC', 'grain', continuous_contracts=15, close=100, multiplier=1, hv=0.1, scalar=0.5),
+        _target('MZS', 'grain', continuous_contracts=15, close=100, multiplier=1, hv=0.1, scalar=0.5),
+        _target('MZW', 'grain', continuous_contracts=15, close=100, multiplier=1, hv=0.1, scalar=0.5),
+        _target('MZL', 'grain', continuous_contracts=15, close=100, multiplier=1, hv=0.1, scalar=0.5),
     ]
-    # pre-cap sum = 40 + 600 = 640; grain's emergent share = 600/640 = 93.75%
-    # -- but under the OLD bug, since this sum is also today's denominator,
-    # any cluster gets "more room" the bigger it draws relative to others.
-    # Use a total_risk_target deliberately smaller than the emergent sum
-    # (640) -- e.g. account_equity * target_portfolio_vol = 400 -- so the
-    # fixed-target cap actually constrains grain harder than the emergent
-    # sum ever would have.
     total_risk_target = 400.0
     n_active_clusters = 2  # equity, grain
-    effective_cap_pct = max(0.25, 1 / n_active_clusters)  # = 0.5
     out = apply_cluster_risk_cap(targets, max_cluster_risk_pct=0.25,
                                  total_risk_target=total_risk_target, n_active_clusters=n_active_clusters)
     by_symbol = {t['symbol']: t for t in out}
 
     grain_risk = sum(by_symbol[s]['position_risk'] for s in ('MZC', 'MZS', 'MZW', 'MZL'))
-    cap = effective_cap_pct * total_risk_target  # = 200
-    assert grain_risk <= cap * 1.1  # small tolerance for whole-contract rounding
-    # Confirm this is meaningfully tighter than the old emergent-sum
-    # behavior would have allowed (0.25 * 640 = 160 there too, incidentally
-    # similar in this constructed case -- the point is grain_risk is now
-    # anchored to the fixed 400, not whatever the instruments summed to).
-    assert grain_risk < 600  # i.e. it was actually rescaled down from pre-cap
+    cap = max(0.25, 1 / n_active_clusters) * total_risk_target  # = 200
+    assert grain_risk <= cap * 1.1
+    assert grain_risk < 600  # rescaled down from the 600 pre-cap sum
 
 
 def test_cluster_cap_leaves_single_instrument_cluster_dominant_clusters_alone():
-    # Equity and energy are each a single-instrument cluster in the example
-    # universe -- with nothing else in their own cluster to share risk with,
-    # they shouldn't get clipped just for being individually large relative
-    # to other clusters' instrument counts.
+    # Equity and energy are each a single-instrument cluster -- with
+    # nothing else in their own cluster to share risk with, they aren't
+    # clipped just for being individually large relative to other
+    # clusters' instrument counts.
     targets = [
-        _target('MES', 'equity', continuous_contracts=3, close=100, multiplier=10, hv=0.1),  # risk=300
-        _target('MCL', 'energy', continuous_contracts=2, close=100, multiplier=10, hv=0.1),  # risk=200
-        _target('MGC', 'metal', continuous_contracts=1, close=100, multiplier=10, hv=0.1),   # risk=100
+        _target('MES', 'equity', continuous_contracts=3, close=100, multiplier=10, hv=0.1, scalar=0.5),  # risk=300
+        _target('MCL', 'energy', continuous_contracts=2, close=100, multiplier=10, hv=0.1, scalar=0.5),  # risk=200
+        _target('MGC', 'metal', continuous_contracts=1, close=100, multiplier=10, hv=0.1, scalar=0.5),   # risk=100
     ]
-    # 3 active clusters -> effective_cap_pct = max(0.25, 1/3) = 1/3.
-    # total_risk_target=600 (matches the old test's implicit total) ->
-    # cap = 200. equity (300) exceeds it and gets capped; metal (100) does
-    # not.
     total_risk_target = 600.0
     out = apply_cluster_risk_cap(targets, max_cluster_risk_pct=0.25,
                                  total_risk_target=total_risk_target, n_active_clusters=3)
@@ -291,19 +281,30 @@ def test_cluster_cap_leaves_single_instrument_cluster_dominant_clusters_alone():
 
 def test_cluster_cap_no_op_when_all_clusters_within_budget():
     targets = [
-        _target('MES', 'equity', continuous_contracts=1, close=100, multiplier=10, hv=0.1),
-        _target('MCL', 'energy', continuous_contracts=1, close=100, multiplier=10, hv=0.1),
-        _target('MGC', 'metal', continuous_contracts=1, close=100, multiplier=10, hv=0.1),
-        _target('J7', 'fx', continuous_contracts=1, close=100, multiplier=10, hv=0.1),
+        _target('MES', 'equity', continuous_contracts=1, close=100, multiplier=10, hv=0.1, scalar=0.5),
+        _target('MCL', 'energy', continuous_contracts=1, close=100, multiplier=10, hv=0.1, scalar=0.5),
+        _target('MGC', 'metal', continuous_contracts=1, close=100, multiplier=10, hv=0.1, scalar=0.5),
+        _target('J7', 'fx', continuous_contracts=1, close=100, multiplier=10, hv=0.1, scalar=0.5),
     ]
     out = apply_cluster_risk_cap(targets, max_cluster_risk_pct=0.25,
                                  total_risk_target=100_000.0, n_active_clusters=4)
     assert all(t['target_contracts'] == 1 for t in out)
 
 
+def test_cluster_cap_within_budget_cluster_untouched():
+    # Explicit, isolated within-budget case: continuous=1.3 with a cap so
+    # large the cluster never needs the walk-down -- rounds directly,
+    # unaffected by any cluster-cap mechanics.
+    targets = [_target('A', 'c', continuous_contracts=1.3, close=100, multiplier=1, hv=1.0, scalar=0.9)]
+    out = apply_cluster_risk_cap(targets, max_cluster_risk_pct=0.25,
+                                 total_risk_target=1_000_000.0, n_active_clusters=1)
+    assert out[0]['target_contracts'] == 1
+    assert not out[0].get('infeasible')
+
+
 def test_cluster_cap_skips_error_targets():
     targets = [
-        _target('MES', 'equity', continuous_contracts=1, close=100, multiplier=10, hv=0.1),
+        _target('MES', 'equity', continuous_contracts=1, close=100, multiplier=10, hv=0.1, scalar=0.5),
         {'symbol': 'MCL', 'error': 'boom', 'target_contracts': None},
     ]
     out = apply_cluster_risk_cap(targets, max_cluster_risk_pct=0.25,
@@ -314,8 +315,6 @@ def test_cluster_cap_skips_error_targets():
 
 
 def test_cluster_cap_zero_total_risk_target_is_no_op():
-    # total_risk_target<=0 early-returns without touching anything --
-    # target_contracts stays whatever the caller already set upstream.
     targets = [_target('MES', 'equity', continuous_contracts=5.3, target_contracts=5,
                        close=100, multiplier=10, hv=0.1)]
     out = apply_cluster_risk_cap(targets, max_cluster_risk_pct=0.25,
@@ -334,183 +333,238 @@ def test_cluster_cap_none_total_risk_target_is_no_op():
 def test_cluster_cap_zero_n_active_clusters_falls_back_to_max_cluster_risk_pct():
     # n_active_clusters=0 shouldn't divide by zero -- falls back to the
     # flat max_cluster_risk_pct with no floor adjustment.
-    targets = [_target('MES', 'equity', continuous_contracts=100, close=100, multiplier=1, hv=0.1)]  # risk=1000
+    targets = [_target('MES', 'equity', continuous_contracts=100, close=100, multiplier=1, hv=0.1, scalar=0.9)]  # risk=1000
     out = apply_cluster_risk_cap(targets, max_cluster_risk_pct=0.25,
                                  total_risk_target=1000.0, n_active_clusters=0)
     assert math.isclose(out[0]['position_risk'], 0.25 * 1000.0, rel_tol=0.05)
 
 
 def test_cluster_cap_max_contracts_clamp_applied_after_cap_not_before():
-    # max_contracts is now applied as the TRUE last step (after the
-    # cluster-cap rescale + single rounding), not before. Single
-    # uncapped-cluster instrument: continuous=10, no cluster pressure
-    # (cap is huge), so target_contracts would be 10 without a clamp --
-    # max_contracts=3 must still bring it down to 3 at the very end.
+    # max_contracts is applied as the TRUE last step (after the cluster-
+    # cap allocation), not before. Single uncapped-cluster instrument:
+    # continuous=10, no cluster pressure (cap is huge), so target_contracts
+    # would be 10 without a clamp -- max_contracts=3 must still bring it
+    # down to 3 at the very end.
     targets = [_target('MES', 'equity', continuous_contracts=10, close=100, multiplier=1, hv=0.1,
-                       max_contracts=3)]
+                       max_contracts=3, scalar=0.9)]
     out = apply_cluster_risk_cap(targets, max_cluster_risk_pct=0.25,
                                  total_risk_target=1_000_000.0, n_active_clusters=1)
     assert out[0]['target_contracts'] == 3
 
 
-def test_cluster_cap_continuous_rounding_differs_from_double_rounding():
-    """Locks in the actual rounding-sequence fix: A's true continuous value
-    (0.6) would, under the OLD double-rounded path, first round up to 1
-    *before* the cluster-cap scale is applied (1 * 0.7 = 0.7 -> rounds back
-    to 1, unchanged -- the old, wrong answer). Under the corrected
-    continuous-math path, A is scaled directly (0.6 * 0.7 = 0.42 -> rounds
-    to 0, the right answer) before ever being rounded. This is not a no-op:
-    the two paths produce different final integers for A."""
+def test_cluster_cap_walk_down_three_instruments_partial_consumption():
+    """3+ instrument cluster: the walk-down generalizes past 2 instruments
+    -- #1 (highest priority) fully consumes its desired size, #2 gets
+    whatever's left, #3 gets nothing once the budget is exhausted."""
     targets = [
-        _target('A', 'test', continuous_contracts=0.6, close=100, multiplier=1, hv=1.0),  # risk=60
-        _target('B', 'test', continuous_contracts=5.0, close=100, multiplier=1, hv=1.0),  # risk=500
+        _target('A', 'c', continuous_contracts=2.0, close=100, multiplier=1, hv=3.0, scalar=0.9),  # single=300
+        _target('B', 'c', continuous_contracts=1.0, close=100, multiplier=1, hv=3.0, scalar=0.6),  # single=300
+        _target('C', 'c', continuous_contracts=1.0, close=100, multiplier=1, hv=3.0, scalar=0.3),  # single=300
     ]
-    # cluster_risk (continuous) = 60 + 500 = 560; cap = 1.0 * 392 = 392
-    # (n_active=1 -> floor=1.0) -> scale = 392/560 = 0.7 exactly.
-    total_risk_target = 392.0
+    # cap = 1.0 (n_active=1 floor) * 1000 = 1000
     out = apply_cluster_risk_cap(targets, max_cluster_risk_pct=0.25,
-                                 total_risk_target=total_risk_target, n_active_clusters=1)
+                                 total_risk_target=1000.0, n_active_clusters=1)
     by_symbol = {t['symbol']: t for t in out}
+    # A: affordable=1000/300=3.33, usable=min(2.0,3.33)=2.0 -> 2 contracts, remaining=1000-600=400
+    assert by_symbol['A']['target_contracts'] == 2
+    # B: affordable=400/300=1.33, usable=min(1.0,1.33)=1.0 -> 1 contract, remaining=400-300=100
+    assert by_symbol['B']['target_contracts'] == 1
+    # C: affordable=100/300=0.33<0.5, not first -> 0
+    assert by_symbol['C']['target_contracts'] == 0
+    assert not any(t.get('infeasible') for t in out)  # A got real exposure -- not infeasible
 
-    # The corrected behavior: 0.6 * 0.7 = 0.42 -> rounds to 0.
-    assert by_symbol['A']['target_contracts'] == 0
-    # Sanity-check what the old (buggy) double-rounded path would have
-    # given, to make the divergence explicit rather than assumed: round
-    # A's continuous value FIRST (round(0.6) = 1), then apply the same
-    # 0.7 scale, then round again -- this is the exact old algorithm,
-    # inlined here only for comparison, not because tsmom_signal.py still
-    # has this code path.
-    old_path_result = round(round(0.6) * 0.7)
-    assert old_path_result == 1
-    assert by_symbol['A']['target_contracts'] != old_path_result
+
+def test_cluster_cap_greedy_diverges_from_old_proportional_haircut():
+    """Documents the known, accepted tradeoff of greedy allocation: a
+    uniform proportional haircut (the previous algorithm) would have kept
+    BOTH instruments here at 1 contract each (0.6875x scale applied to two
+    already-integer continuous values, both staying >= 0.5). Greedy gives
+    the top-priority instrument (A) everything it wants first, leaving B
+    with too little to round to a nonzero contract. This is intentional --
+    conviction-priority allocation deliberately sacrifices the lower-
+    priority instrument rather than diluting both -- and should NOT be
+    "fixed" later to restore the old proportional-survival behavior."""
+    targets = [
+        _target('A', 'c', continuous_contracts=1.0, close=100, multiplier=1, hv=4.0, scalar=0.6),  # single=400
+        _target('B', 'c', continuous_contracts=1.0, close=100, multiplier=1, hv=4.0, scalar=0.5),  # single=400
+    ]
+    # cluster_risk = 400+400=800; cap=1.0*550=550 (n_active=1 floor).
+    # Old proportional: scale=550/800=0.6875; A=1*0.6875=0.6875->1; B=1*0.6875=0.6875->1 (both survive).
+    out = apply_cluster_risk_cap(targets, max_cluster_risk_pct=0.25,
+                                 total_risk_target=550.0, n_active_clusters=1)
+    by_symbol = {t['symbol']: t for t in out}
+    # Greedy: A first, affordable=550/400=1.375, usable=1.0 -> 1, remaining=550-400=150.
+    # B: affordable=150/400=0.375<0.5, not first -> 0. This is the accepted tradeoff: B would
+    # have survived (1 contract) under the old uniform haircut but gets zero under greedy --
+    # not a regression to "fix", a deliberate design choice (top conviction wins the budget).
+    assert by_symbol['A']['target_contracts'] == 1
+    assert by_symbol['B']['target_contracts'] == 0
+
+
+@pytest.mark.parametrize('single_contract_risk,expect_exception', [
+    (2499.0, True),   # just below cap * (1 + max_lot_overrun_pct) = 1000 * 2.5 = 2500
+    (2501.0, False),  # just above
+])
+def test_cluster_cap_lot_overrun_boundary(single_contract_risk, expect_exception):
+    """affordable_continuous itself falls under 0.5 here (1000/2499=0.40,
+    1000/2501=0.40) -- isolating whether the exception's overrun-tolerance
+    check (single_contract_risk <= cap * (1 + max_lot_overrun_pct)) is the
+    deciding factor at its exact boundary."""
+    targets = [_target('A', 'c', continuous_contracts=1.0, close=single_contract_risk,
+                       multiplier=1, hv=1.0, scalar=0.9)]
+    out = apply_cluster_risk_cap(targets, max_cluster_risk_pct=0.25,
+                                 total_risk_target=1000.0, n_active_clusters=1,
+                                 max_lot_overrun_pct=1.5)
+    if expect_exception:
+        assert out[0]['target_contracts'] == 1
+    else:
+        assert out[0]['target_contracts'] == 0
+        assert out[0]['infeasible'] is True
+
+
+def test_cluster_cap_lot_exception_never_applies_past_first_instrument():
+    """B's own situation (in isolation) would qualify for the lot
+    exception -- abs(original) >= 0.5, single_contract_risk within the
+    overrun tolerance of the cap -- but B is evaluated second, after A has
+    already spent part of the budget, so remaining_budget != cap and the
+    exception must not fire for B."""
+    targets = [
+        _target('A', 'c', continuous_contracts=1.0, close=400, multiplier=1, hv=1.0, scalar=0.9),    # single=400
+        _target('B', 'c', continuous_contracts=1.0, close=2500, multiplier=1, hv=1.0, scalar=0.5),   # single=2500
+    ]
+    # cap=1000 (n_active=1 floor). max_lot_overrun_pct=2.0 -> threshold=1000*3=3000.
+    # B's single_contract_risk (2500) <= 3000, and B's own original (1.0) >= 0.5 -- B
+    # WOULD qualify for the exception if it were first (remaining=1000: affordable=1000/2500=0.4<0.5).
+    out = apply_cluster_risk_cap(targets, max_cluster_risk_pct=0.25,
+                                 total_risk_target=1000.0, n_active_clusters=1,
+                                 max_lot_overrun_pct=2.0)
+    by_symbol = {t['symbol']: t for t in out}
+    # A (first, scalar=0.9): affordable=1000/400=2.5, usable=min(1.0,2.5)=1.0 -> 1, remaining=600.
+    assert by_symbol['A']['target_contracts'] == 1
+    # B (second): affordable=600/2500=0.24<0.5, not first -> exception gated off -> 0,
+    # even though B would have qualified had it been evaluated first.
+    assert by_symbol['B']['target_contracts'] == 0
 
 
 def test_cluster_cap_infeasible_when_cap_below_single_contract_risk():
     """Small synthetic equivalent of the $1,000,000/ES+NQ scenario: a
     cluster cap that's smaller than even the cheapest single contract's
-    own dollar-vol risk. No scale factor can produce a compliant nonzero
-    position -- this is reported as infeasible, not silently zeroed with
-    no explanation."""
-    single_contract_risk = 0.0066 * 6_250_000 * 0.08  # = 3300.0, J7-like
+    own dollar-vol risk. Outcome-based: the instrument ends at zero AND
+    that's flagged infeasible, not because of a cap-vs-single-contract-
+    risk precomputation alone."""
     targets = [_target('J7', 'fx', continuous_contracts=1.0, close=0.0066,
-                       multiplier=6_250_000, hv=0.08)]
-    # cap = 1.0 (n_active=1 floor) * 1000 = 1000 < single_contract_risk (3300).
+                       multiplier=6_250_000, hv=0.08, scalar=0.9)]
+    # single_contract_risk = 0.0066*6_250_000*0.08 = 3300; cap=1.0*1000=1000 < 3300.
     out = apply_cluster_risk_cap(targets, max_cluster_risk_pct=0.25,
                                  total_risk_target=1000.0, n_active_clusters=1)
     assert out[0]['infeasible'] is True
-    assert out[0]['target_contracts'] == 0  # scale (1000/3300=0.303) * 1.0 < 0.5
+    assert out[0]['target_contracts'] == 0  # scale-equivalent (1000/3300=0.303) * 1.0 < 0.5
 
 
-def test_cluster_cap_not_infeasible_when_single_contract_fits_under_cap():
-    # Contrast case: cap exceeds the single-contract risk, so even though
-    # the cluster still needs rescaling, it's not infeasible.
+def test_cluster_cap_not_infeasible_when_walk_down_captures_exposure():
+    # Contrast case: even though the cluster needs rescaling, the top-
+    # priority instrument still captures real exposure -- not infeasible.
     targets = [
-        _target('MES', 'equity', continuous_contracts=5, close=100, multiplier=10, hv=0.1),  # single=100
-        _target('MNQ', 'equity', continuous_contracts=5, close=100, multiplier=10, hv=0.1),  # single=100
+        _target('MES', 'equity', continuous_contracts=5, close=100, multiplier=10, hv=0.1, scalar=0.9),
+        _target('MNQ', 'equity', continuous_contracts=5, close=100, multiplier=10, hv=0.1, scalar=0.5),
     ]
     out = apply_cluster_risk_cap(targets, max_cluster_risk_pct=0.25,
                                  total_risk_target=600.0, n_active_clusters=1)  # cap=600
     assert not any(t.get('infeasible') for t in out)
+    assert any(t['target_contracts'] != 0 for t in out)
 
 
-def test_cluster_cap_es_nq_million_dollar_scenario_recomputed_continuously():
-    """Reproduces this session's exact $1,000,000 account, ES+NQ-both-near-
-    max-conviction scenario using the real session figures. Confirms (a)
-    the corrected continuous-math cluster risk (which is LOWER than the old
-    double-rounded sum, since NQ's true 0.5258 contracts contributes less
-    risk than the old path's rounded-up 1.0) is used for the scale
-    decision, and (b) the cap is still below even ES's (the cheaper
-    instrument's) single-contract risk, so this is correctly flagged
-    infeasible -- both end up at zero contracts, but now reported as an
-    infeasible constraint rather than an unexplained sizing failure."""
-    es_close, es_mult, es_hv = 7428.25, 50, 0.1524
-    nq_close, nq_mult, nq_hv = 29514.25, 20, 0.238
+def test_cluster_cap_mes_mnq_80k_scenario():
+    """The exact $80K MES/MNQ scenario from this session's live run: MES
+    (higher scalar/conviction) gets 1 contract; MNQ (lower scalar, and a
+    much more expensive single contract) gets 0 -- the walk-down's top
+    priority wins the cluster's budget instead of both being uniformly
+    scaled to zero."""
+    targets = [
+        _target('MES', 'equity', continuous_contracts=1.0133, close=7472.75, multiplier=5, hv=0.1539, scalar=0.8168),
+        _target('MNQ', 'equity', continuous_contracts=0.4137, close=30028.25, multiplier=2, hv=0.2381, scalar=0.5301),
+    ]
+    out = apply_cluster_risk_cap(targets, max_cluster_risk_pct=0.25,
+                                 total_risk_target=80_000 * 0.15, n_active_clusters=3)
+    by_symbol = {t['symbol']: t for t in out}
+    assert by_symbol['MES']['target_contracts'] == 1
+    assert by_symbol['MNQ']['target_contracts'] == 0
+    assert not by_symbol['MES'].get('infeasible')
+    assert not by_symbol['MNQ'].get('infeasible')  # cluster captured exposure via MES -- not infeasible
+
+
+def test_cluster_cap_es_nq_million_dollar_scenario_recomputed_for_greedy():
+    """Reproduces this session's exact $1,000,000 account, ES+NQ-both-
+    near-max-conviction scenario under the corrected greedy allocation.
+    Recomputed (not assumed): ES (the higher-scalar instrument) wins the
+    cluster's entire cap and gets 1 contract; NQ gets 0. Neither is
+    flagged infeasible, since the cluster did capture real exposure."""
+    es_close, es_mult, es_hv, es_scalar = 7428.25, 50, 0.1524, 0.8302
+    nq_close, nq_mult, nq_hv, nq_scalar = 29514.25, 20, 0.238, 0.5379
     es_continuous = 479_325.91 / (es_close * es_mult)   # ~1.2908
     nq_continuous = 310_528.16 / (nq_close * nq_mult)   # ~0.5258
 
     targets = [
-        _target('ES', 'equity', continuous_contracts=es_continuous, close=es_close, multiplier=es_mult, hv=es_hv),
-        _target('NQ', 'equity', continuous_contracts=nq_continuous, close=nq_close, multiplier=nq_mult, hv=nq_hv),
+        _target('ES', 'equity', continuous_contracts=es_continuous, close=es_close, multiplier=es_mult,
+               hv=es_hv, scalar=es_scalar),
+        _target('NQ', 'equity', continuous_contracts=nq_continuous, close=nq_close, multiplier=nq_mult,
+               hv=nq_hv, scalar=nq_scalar),
     ]
-    account_equity, target_portfolio_vol, n_active_clusters = 1_000_000, 0.15, 3
-    total_risk_target = account_equity * target_portfolio_vol  # 150,000
-    effective_cap_pct = max(0.25, 1 / n_active_clusters)        # 1/3
-    cap = effective_cap_pct * total_risk_target                 # 50,000
+    total_risk_target = 1_000_000 * 0.15  # 150,000
+    n_active_clusters = 3
+    cap = max(0.25, 1 / n_active_clusters) * total_risk_target  # 50,000
 
     es_single_contract_risk = es_close * es_mult * es_hv   # ~56,607.3
-    nq_single_contract_risk = nq_close * nq_mult * nq_hv   # ~140,487.9
-    assert cap < es_single_contract_risk < nq_single_contract_risk  # confirms the scenario's premise
-
-    # The corrected (continuous) cluster risk is lower than the old
-    # double-rounded sum (which would have used round(1.29)=1 and
-    # round(0.53)=1, i.e. 56,607.3 + 140,487.9 = 197,095.2).
-    continuous_cluster_risk = es_continuous * es_single_contract_risk + nq_continuous * nq_single_contract_risk
-    old_double_rounded_risk = 1 * es_single_contract_risk + 1 * nq_single_contract_risk
-    assert continuous_cluster_risk < old_double_rounded_risk
+    assert cap < es_single_contract_risk  # confirms the scenario's premise: even ES alone exceeds the cap
 
     out = apply_cluster_risk_cap(targets, max_cluster_risk_pct=0.25,
                                  total_risk_target=total_risk_target, n_active_clusters=n_active_clusters)
     by_symbol = {t['symbol']: t for t in out}
 
-    # Both flagged infeasible -- the cap can't accommodate even ES alone.
-    assert by_symbol['ES']['infeasible'] is True
-    assert by_symbol['NQ']['infeasible'] is True
-    # And, in this specific scenario, both still round to zero (matching
-    # what was observed live) -- but now explained, not unexplained.
-    assert by_symbol['ES']['target_contracts'] == 0
+    assert by_symbol['ES']['target_contracts'] == 1
     assert by_symbol['NQ']['target_contracts'] == 0
+    # The cluster DID capture exposure (via ES) -- not infeasible, even
+    # though a precomputed cap-vs-single-contract-risk check alone would
+    # have said it should be.
+    assert not by_symbol['ES'].get('infeasible')
+    assert not by_symbol['NQ'].get('infeasible')
 
 
-def test_cluster_cap_live_session_scenario_recomputed_for_fixed_denominator():
-    """Recomputes the grain/fx/equity scenario validated earlier this
-    session, but under the corrected fixed-denominator math -- the old
-    validation (grain/fx -> ~25.0% each) assumed the cap was measured
-    against the emergent pre-cap sum, which is exactly the bug this fix
-    removes, so that result no longer holds and must not be assumed."""
+def test_cluster_cap_live_session_scenario_recomputed_for_greedy_priority():
+    """Recomputes the grain/fx/equity scenario from this session under
+    conviction-priority allocation: within each over-budget cluster, the
+    highest-|scalar| instrument wins the cluster's cap first. Recomputed
+    via direct verification, not assumed."""
     targets = [
-        _target('MES', 'equity', continuous_contracts=1, close=7437.50, multiplier=5, hv=0.1524),    # risk=5667
-        _target('MZL', 'grain', continuous_contracts=5, close=66.58, multiplier=60, hv=0.2429),       # risk=4854
-        _target('MZC', 'grain', continuous_contracts=-13, close=437.00, multiplier=5, hv=0.1937),     # risk=5509
-        _target('MZS', 'grain', continuous_contracts=-2, close=1142.00, multiplier=5, hv=0.1492),     # risk=1704
-        _target('MZW', 'grain', continuous_contracts=-2, close=597.00, multiplier=5, hv=0.2969),       # risk=1773
-        _target('J7', 'fx', continuous_contracts=1, close=0.0066, multiplier=6_250_000, hv=0.0825),    # risk=3403
-        _target('BRE', 'fx', continuous_contracts=2, close=0.19, multiplier=100_000, hv=0.1143),       # risk=4343
-        _target('6M', 'fx', continuous_contracts=2, close=0.06, multiplier=500_000, hv=0.0825),         # risk=4950
+        _target('MES', 'equity', continuous_contracts=1, close=7437.50, multiplier=5, hv=0.1524, scalar=0.85),
+        _target('MZL', 'grain', continuous_contracts=5, close=66.58, multiplier=60, hv=0.2429, scalar=0.70),
+        _target('MZC', 'grain', continuous_contracts=-13, close=437.00, multiplier=5, hv=0.1937, scalar=0.80),
+        _target('MZS', 'grain', continuous_contracts=-2, close=1142.00, multiplier=5, hv=0.1492, scalar=0.20),
+        _target('MZW', 'grain', continuous_contracts=-2, close=597.00, multiplier=5, hv=0.2969, scalar=0.19),
+        _target('J7', 'fx', continuous_contracts=1, close=0.0066, multiplier=6_250_000, hv=0.0825, scalar=0.85),
+        _target('BRE', 'fx', continuous_contracts=2, close=0.19, multiplier=100_000, hv=0.1143, scalar=0.75),
+        _target('6M', 'fx', continuous_contracts=2, close=0.06, multiplier=500_000, hv=0.0825, scalar=0.78),
     ]
-    # account_equity=100_000, target_portfolio_vol=0.15 -> fixed
-    # total_risk_target=15_000 (NOT the emergent pre-cap sum, ~32_203).
-    # n_active_clusters=3 (equity, grain, fx; metal/energy inactive this
-    # round) -> effective_cap_pct = max(0.25, 1/3) = 1/3.
     total_risk_target = 100_000 * 0.15
     n_active_clusters = 3
-    effective_cap_pct = max(0.25, 1 / n_active_clusters)
-    cap = effective_cap_pct * total_risk_target  # = 5000
 
     out = apply_cluster_risk_cap(targets, max_cluster_risk_pct=0.25,
                                  total_risk_target=total_risk_target, n_active_clusters=n_active_clusters)
     by_symbol = {t['symbol']: t for t in out}
 
-    grain_risk = sum(by_symbol[s]['position_risk'] for s in ('MZL', 'MZC', 'MZS', 'MZW'))
-    fx_risk = sum(by_symbol[s]['position_risk'] for s in ('J7', 'BRE', '6M'))
-    equity_risk = by_symbol['MES']['position_risk']
-
-    # grain (pre-cap ~13840) and fx (pre-cap ~12696) both exceed the fixed
-    # cap (5000) and must be rescaled down to ~it; equity (5667, just over)
-    # also gets rescaled slightly under this stricter fixed-target regime
-    # -- a real behavior change from the old emergent-sum result, where
-    # equity's pre-cap share (17.6%) was comfortably under the (also
-    # emergent-sum-relative) 25% and untouched.
-    # Grain's tolerance is wider than fx/equity's -- it has 4 independently-
-    # rounded instruments (vs fx's 3, equity's 1), so whole-contract
-    # rounding compounds more before landing near the cap.
-    assert grain_risk <= cap * 1.2
-    assert fx_risk <= cap * 1.15
-    assert equity_risk <= cap * 1.15
-    # Signs preserved (never flipped) throughout -- J7's single pre-cap
-    # contract can legitimately round to zero under the stricter cap
-    # (round-toward-zero below 0.5), but never to a negative.
-    assert by_symbol['MZC']['target_contracts'] < 0
-    assert by_symbol['MZL']['target_contracts'] > 0
-    assert by_symbol['J7']['target_contracts'] >= 0
-    assert by_symbol['BRE']['target_contracts'] >= 0
-    assert by_symbol['6M']['target_contracts'] >= 0
+    # Equity: only one instrument, no competition.
+    assert by_symbol['MES']['target_contracts'] == 1
+    # Grain: MZC (scalar 0.80, highest) wins the cluster's cap; the others
+    # (lower priority) get nothing once MZC's allocation exhausts it.
+    assert by_symbol['MZC']['target_contracts'] < 0  # short, sign preserved
+    assert by_symbol['MZL']['target_contracts'] == 0
+    assert by_symbol['MZS']['target_contracts'] == 0
+    assert by_symbol['MZW']['target_contracts'] == 0
+    # FX: J7 (0.85) and 6M (0.78) both outrank BRE (0.75) and capture
+    # exposure; BRE gets whatever's left, which in this case is nothing.
+    assert by_symbol['J7']['target_contracts'] > 0
+    assert by_symbol['6M']['target_contracts'] > 0
+    assert by_symbol['BRE']['target_contracts'] == 0
+    # Every over-budget cluster still captured real exposure via its
+    # top-priority instrument -- none are infeasible.
+    assert not any(t.get('infeasible') for t in out)

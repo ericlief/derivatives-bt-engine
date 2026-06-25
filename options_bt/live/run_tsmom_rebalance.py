@@ -199,7 +199,8 @@ def _save_report(report: str, targets: list[dict]) -> None:
     priority = ['symbol', 'current_contracts', 'target_contracts', 'infeasible', 'signal',
                 'regime', 'vol_regime', 'scalar', 'account_equity', 'n_effective',
                 'risk_budget', 'vol_target', 'target_portfolio_vol', 'budget_constant',
-                'position_risk', 'raw_notional', 'target_notional', 'max_cluster_risk_pct']
+                'position_risk', 'raw_notional', 'target_notional', 'max_cluster_risk_pct',
+                'max_lot_overrun_pct']
     all_keys = {key for t in targets for key in t}
     fieldnames = [k for k in priority if k in all_keys] + sorted(all_keys - set(priority))
     rounded_rows = [
@@ -255,6 +256,11 @@ def parse_args():
     p.add_argument('--min-conviction', type=float, default=0.05,
                    help='Min abs(trend_strength) for a cluster to count as "active" '
                         'when deriving n_effective (default: %(default)s)')
+    p.add_argument('--max-lot-overrun-pct', type=float, default=0.5,
+                   help='Lot-size exception tolerance: the top-priority instrument in an '
+                        'over-budget cluster still gets 1 contract (instead of 0) if its own '
+                        'single-contract risk is within this fraction over the cluster cap '
+                        '(default: %(default)s = 50%%)')
     p.add_argument('--max-contracts', type=int, default=15,
                    help='Per-instrument sanity backstop (not the primary sizing lever -- '
                         'that is the derived risk budget + cluster cap), used when '
@@ -300,6 +306,7 @@ def main():
         'target_portfolio_vol': args.target_portfolio_vol,
         'max_cluster_risk_pct': args.max_cluster_risk_pct,
         'min_conviction': args.min_conviction,
+        'max_lot_overrun_pct': args.max_lot_overrun_pct,
     }
 
     if args.live:

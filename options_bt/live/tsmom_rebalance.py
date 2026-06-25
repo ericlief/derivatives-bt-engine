@@ -309,7 +309,9 @@ def compute_rebalance_targets(ib: IBPySync, instruments: list[dict], config: dic
     default/backstop), vx_expiry (str, 'auto' or YYYYMM), long_only (bool),
     regime_discount (float), min_days (int, expiry-resolution margin),
     account_equity (float, required for sizing), target_portfolio_vol
-    (float), max_cluster_risk_pct (float), min_conviction (float).
+    (float), max_cluster_risk_pct (float), min_conviction (float),
+    max_lot_overrun_pct (float, lot-size exception tolerance for
+    apply_cluster_risk_cap's conviction-priority allocation).
     """
     vol_target = config.get('vol_target', 0.15)
     long_only = config.get('long_only', False)
@@ -320,6 +322,7 @@ def compute_rebalance_targets(ib: IBPySync, instruments: list[dict], config: dic
     target_portfolio_vol = config.get('target_portfolio_vol', 0.15)
     max_cluster_risk_pct = config.get('max_cluster_risk_pct', 0.25)
     min_conviction = config.get('min_conviction', 0.05)
+    max_lot_overrun_pct = config.get('max_lot_overrun_pct', 0.5)
 
     vx_current, vx_ma63 = fetch_vx_spike_ratio(ib, config.get('vx_expiry', 'auto'))
     vx_ratio = vx_current / vx_ma63
@@ -358,6 +361,7 @@ def compute_rebalance_targets(ib: IBPySync, instruments: list[dict], config: dic
                 'vol_target': vol_target,
                 'target_portfolio_vol': target_portfolio_vol,
                 'max_cluster_risk_pct': max_cluster_risk_pct,
+                'max_lot_overrun_pct': max_lot_overrun_pct,
             })
         return targets
 
@@ -416,6 +420,7 @@ def compute_rebalance_targets(ib: IBPySync, instruments: list[dict], config: dic
                 'target_portfolio_vol': target_portfolio_vol,
                 'budget_constant': budget_constant,
                 'max_cluster_risk_pct': max_cluster_risk_pct,
+                'max_lot_overrun_pct': max_lot_overrun_pct,
             })
             continue
 
@@ -497,6 +502,7 @@ def compute_rebalance_targets(ib: IBPySync, instruments: list[dict], config: dic
                 'target_portfolio_vol': target_portfolio_vol,
                 'budget_constant': budget_constant,
                 'max_cluster_risk_pct': max_cluster_risk_pct,
+                'max_lot_overrun_pct': max_lot_overrun_pct,
             })
         except Exception as exc:
             log.error('Failed to compute rebalance target for %s: %s', symbol, exc)
@@ -512,7 +518,8 @@ def compute_rebalance_targets(ib: IBPySync, instruments: list[dict], config: dic
             })
 
     total_risk_target = account_equity * target_portfolio_vol if account_equity else None
-    apply_cluster_risk_cap(targets, max_cluster_risk_pct, total_risk_target, n_effective)
+    apply_cluster_risk_cap(targets, max_cluster_risk_pct, total_risk_target, n_effective,
+                          max_lot_overrun_pct=max_lot_overrun_pct)
     return targets
 
 
