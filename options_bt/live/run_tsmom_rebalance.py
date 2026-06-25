@@ -192,10 +192,14 @@ def _save_report(report: str, targets: list[dict]) -> None:
         f.write(report)
 
     # symbol -> current/target position -> signal/regime first (the columns
-    # you actually scan a rebalance report for), everything else after in a
-    # stable, predictable order.
+    # you actually scan a rebalance report for), then the sizing-math trail
+    # (scalar -> budget inputs -> raw/target notional -> position risk) in
+    # the order you'd actually want to follow the calculation, everything
+    # else after in a stable, predictable order.
     priority = ['symbol', 'current_contracts', 'target_contracts', 'signal',
-                'regime', 'vol_regime', 'target_notional', 'position_risk']
+                'regime', 'vol_regime', 'scalar', 'account_equity', 'n_effective',
+                'risk_budget', 'vol_target', 'target_portfolio_vol', 'budget_constant',
+                'position_risk', 'raw_notional', 'target_notional', 'max_cluster_risk_pct']
     all_keys = {key for t in targets for key in t}
     fieldnames = [k for k in priority if k in all_keys] + sorted(all_keys - set(priority))
     rounded_rows = [

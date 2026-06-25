@@ -350,6 +350,14 @@ def compute_rebalance_targets(ib: IBPySync, instruments: list[dict], config: dic
                 'vx_ma63': vx_ma63,
                 'vx_ratio': vx_ratio,
                 'vol_regime': vol_regime,
+                # n_effective/risk_budget/budget_constant aren't computed on
+                # this early-return path (signal computation, which they
+                # depend on, is skipped entirely during a spike/extreme) --
+                # only what's already in scope from config is available.
+                'account_equity': account_equity,
+                'vol_target': vol_target,
+                'target_portfolio_vol': target_portfolio_vol,
+                'max_cluster_risk_pct': max_cluster_risk_pct,
             })
         return targets
 
@@ -401,6 +409,13 @@ def compute_rebalance_targets(ib: IBPySync, instruments: list[dict], config: dic
                 'vx_ratio': vx_ratio,
                 'vol_regime': vol_regime,
                 'error': errors[symbol],
+                'account_equity': account_equity,
+                'n_effective': n_effective,
+                'risk_budget': desired_risk_budget,
+                'vol_target': vol_target,
+                'target_portfolio_vol': target_portfolio_vol,
+                'budget_constant': budget_constant,
+                'max_cluster_risk_pct': max_cluster_risk_pct,
             })
             continue
 
@@ -421,7 +436,12 @@ def compute_rebalance_targets(ib: IBPySync, instruments: list[dict], config: dic
             )
             scalar *= position_scale
 
-            target_notional = budget_constant * scalar
+            # raw_notional is budget_constant * scalar before the optional
+            # per-instrument max_notional ceiling clamp; target_notional is
+            # what actually drives target_contracts below. They only differ
+            # when max_notional_ceiling clips raw_notional.
+            raw_notional = budget_constant * scalar
+            target_notional = raw_notional
             if max_notional_ceiling is not None:
                 target_notional = max(-max_notional_ceiling, min(max_notional_ceiling, target_notional))
 
@@ -436,6 +456,7 @@ def compute_rebalance_targets(ib: IBPySync, instruments: list[dict], config: dic
                 'target_contracts': target_contracts,
                 'current_contracts': current_contracts,
                 'signal': s['signal'],
+                'scalar': scalar,
                 'ts3m': s['ts3m'],
                 'ts1y': s['ts1y'],
                 'daily_std': s['daily_std'],
@@ -444,6 +465,7 @@ def compute_rebalance_targets(ib: IBPySync, instruments: list[dict], config: dic
                 'discount': s['discount'],
                 'close': s['close'],
                 'multiplier': multiplier,
+                'raw_notional': raw_notional,
                 'target_notional': target_notional,
                 'cluster': s['cluster'],
                 'dd_pct': s['dd_pct'],
@@ -452,6 +474,17 @@ def compute_rebalance_targets(ib: IBPySync, instruments: list[dict], config: dic
                 'vx_ma63': vx_ma63,
                 'vx_ratio': vx_ratio,
                 'vol_regime': vol_regime,
+                # Portfolio-level context, identical across every
+                # instrument this run -- included per-row so each CSV row
+                # is self-contained (no need to cross-reference the log for
+                # what budget/equity this run used).
+                'account_equity': account_equity,
+                'n_effective': n_effective,
+                'risk_budget': desired_risk_budget,
+                'vol_target': vol_target,
+                'target_portfolio_vol': target_portfolio_vol,
+                'budget_constant': budget_constant,
+                'max_cluster_risk_pct': max_cluster_risk_pct,
             })
         except Exception as exc:
             log.error('Failed to compute rebalance target for %s: %s', symbol, exc)
