@@ -196,7 +196,7 @@ def _save_report(report: str, targets: list[dict]) -> None:
     # (scalar -> budget inputs -> raw/target notional -> position risk) in
     # the order you'd actually want to follow the calculation, everything
     # else after in a stable, predictable order.
-    priority = ['symbol', 'current_contracts', 'target_contracts', 'signal',
+    priority = ['symbol', 'current_contracts', 'target_contracts', 'infeasible', 'signal',
                 'regime', 'vol_regime', 'scalar', 'account_equity', 'n_effective',
                 'risk_budget', 'vol_target', 'target_portfolio_vol', 'budget_constant',
                 'position_risk', 'raw_notional', 'target_notional', 'max_cluster_risk_pct']

@@ -446,6 +446,16 @@ def compute_rebalance_targets(ib: IBPySync, instruments: list[dict], config: dic
                 target_notional = max(-max_notional_ceiling, min(max_notional_ceiling, target_notional))
 
             contract_notional_value = s['close'] * multiplier
+            # continuous_contracts is the unrounded, unclamped value the
+            # cluster cap operates on -- rescaling and rounding an already-
+            # rounded-and-clamped integer (the old target_contracts below)
+            # double-rounds, which can zero out large-multiplier instruments
+            # (full-size ES/NQ/JPY/etc) that would survive on the true
+            # continuous math. target_contracts is still computed the same
+            # way here for any caller that wants a pre-cluster-cap integer
+            # (e.g. granularity-tracking instrumentation) -- apply_cluster_
+            # risk_cap is what now does the real, single round+clamp.
+            continuous_contracts = target_notional / contract_notional_value if contract_notional_value else 0.0
             target_contracts = round(target_notional / contract_notional_value) if contract_notional_value else 0
             target_contracts = max(-max_contracts, min(max_contracts, target_contracts))
 
@@ -454,6 +464,8 @@ def compute_rebalance_targets(ib: IBPySync, instruments: list[dict], config: dic
             targets.append({
                 'symbol': symbol,
                 'target_contracts': target_contracts,
+                'continuous_contracts': continuous_contracts,
+                'max_contracts': max_contracts,
                 'current_contracts': current_contracts,
                 'signal': s['signal'],
                 'scalar': scalar,
@@ -545,6 +557,7 @@ def print_rebalance_report(targets: list[dict]) -> str:
             f"regime={t['regime'].capitalize() if t.get('regime') else 'N/A':<10}  "
             f"vx_current={_fmt(t.get('vx_current'), '.2f'):>6}  vx_ma63={_fmt(t.get('vx_ma63'), '.2f'):>6}  "
             f"vx_ratio={t['vx_ratio']:.3f}  vol_regime={t['vol_regime'].capitalize()}"
+            + ("  INFEASIBLE (cluster cap < min contract risk in this cluster)" if t.get('infeasible') else "")
         )
     report = '\n'.join(lines)
     print(report)

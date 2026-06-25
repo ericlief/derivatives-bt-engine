@@ -16,11 +16,14 @@ Horizon choice (do not revisit):
     signal at this cadence.
 """
 
+import logging
 import math
 
 import polars as pl
 
 from options_bt.domain.enums import TrendRegime
+
+log = logging.getLogger(__name__)
 
 
 def calculate_trend_strength(df: pl.DataFrame, w3m: float = 0.4, w1y: float = 0.6) -> pl.DataFrame:
@@ -181,16 +184,32 @@ def apply_cluster_risk_cap(targets: list[dict], max_cluster_risk_pct: float,
     being the only trade in the book; the floor relaxes as more clusters
     are active and there's more to share the target with.
 
-    Each target dict must carry 'cluster', 'target_contracts', 'close',
+    Operates on continuous_contracts (the unrounded, unclamped pre-cluster-
+    cap size), not target_contracts -- rescaling and rounding an already-
+    rounded-and-clamped integer double-rounds, which can zero out large-
+    multiplier instruments (full-size ES/NQ/JPY/etc) that would survive on
+    the true continuous math. Rounding to a final integer, and the
+    max_contracts clamp, both happen exactly once, at the very end of this
+    function, in that order: signal -> continuous risk -> cluster rescale
+    -> round once -> max_contracts clamp.
+
+    If a cluster needs rescaling and even its cheapest instrument's single-
+    contract risk exceeds the cap, the constraint is infeasible -- no scale
+    factor produces a compliant nonzero position, so every instrument in
+    that cluster is forced to zero and marked 'infeasible': True. This is
+    reported (logged + flagged), not silently worked around.
+
+    Each target dict must carry 'cluster', 'continuous_contracts', 'close',
     'multiplier', 'hv' (already computed per-instrument by the caller).
     Targets with an 'error' key, or missing one of those fields, are left
     untouched and excluded from the risk totals. Mutates and returns the
-    same list (adds a 'position_risk' field to the rescaled entries).
+    same list (adds/overwrites 'target_contracts' and 'position_risk',
+    and 'infeasible' where applicable).
     """
     valid = [
         t for t in targets
         if not t.get('error')
-        and t.get('target_contracts') is not None
+        and t.get('continuous_contracts') is not None
         and t.get('cluster') is not None
         and t.get('close') is not None
         and t.get('multiplier') is not None
@@ -199,8 +218,7 @@ def apply_cluster_risk_cap(targets: list[dict], max_cluster_risk_pct: float,
     cluster_risk: dict[str, float] = {}
     for t in valid:
         hv = t.get('hv') or 0.0
-        position_risk = abs(t['target_contracts']) * t['close'] * t['multiplier'] * hv
-        t['position_risk'] = position_risk
+        position_risk = abs(t['continuous_contracts']) * t['close'] * t['multiplier'] * hv
         cluster_risk[t['cluster']] = cluster_risk.get(t['cluster'], 0.0) + position_risk
 
     if total_risk_target is None or total_risk_target <= 0:
@@ -208,20 +226,53 @@ def apply_cluster_risk_cap(targets: list[dict], max_cluster_risk_pct: float,
 
     effective_cap_pct = max(max_cluster_risk_pct, 1.0 / n_active_clusters) if n_active_clusters > 0 else max_cluster_risk_pct
     cap = effective_cap_pct * total_risk_target
+
+    # Per-cluster scale (1.0 for clusters already within the cap) applied
+    # to the continuous value -- not yet rounded. Infeasibility is checked
+    # only for clusters that actually need rescaling: if even the cheapest
+    # single whole contract in the cluster already costs more than the
+    # cap, no scale factor can produce a compliant nonzero position --
+    # zero is the only valid answer, not a rounding artifact.
+    scale_by_cluster: dict[str, float] = {}
     for cluster, risk in cluster_risk.items():
         if risk <= cap:
+            scale_by_cluster[cluster] = 1.0
             continue
-        scale = cap / risk
-        for t in valid:
-            if t['cluster'] != cluster:
-                continue
-            scaled = t['target_contracts'] * scale
-            sign = 1 if scaled > 0 else (-1 if scaled < 0 else 0)
-            magnitude = 0 if abs(scaled) < 0.5 else round(abs(scaled))
-            t['target_contracts'] = sign * magnitude
-            # Recompute now that target_contracts changed -- otherwise
-            # position_risk (and any downstream risk-share check) reflects
-            # the pre-cap size, defeating the point of the cap.
-            t['position_risk'] = abs(t['target_contracts']) * t['close'] * t['multiplier'] * (t.get('hv') or 0.0)
+        cluster_members = [t for t in valid if t['cluster'] == cluster]
+        single_contract_risk = {
+            t['symbol']: t['close'] * t['multiplier'] * (t.get('hv') or 0.0)
+            for t in cluster_members
+        }
+        cheapest_symbol = min(single_contract_risk, key=single_contract_risk.get)
+        cheapest_risk = single_contract_risk[cheapest_symbol]
+        if cap < cheapest_risk:
+            log.warning(
+                "%s cluster cap ($%.0f) is below %s's single-contract risk ($%.0f) -- "
+                "cannot size any %s position without exceeding the cap; consider raising "
+                "max_cluster_risk_pct, reducing n_effective's denominator effect, or "
+                "excluding large-multiplier instruments from this account",
+                cluster, cap, cheapest_symbol, cheapest_risk, cluster,
+            )
+            for t in cluster_members:
+                t['infeasible'] = True
+        scale_by_cluster[cluster] = cap / risk
+
+    for t in valid:
+        t['continuous_contracts'] *= scale_by_cluster.get(t['cluster'], 1.0)
+
+    # Round once, here, against the fully-rescaled continuous value -- then
+    # clamp to max_contracts as the true last step (previously this clamp
+    # ran on the pre-cluster-cap integer, before the cap had a chance to
+    # change anything).
+    for t in valid:
+        scaled = t['continuous_contracts']
+        sign = 1 if scaled > 0 else (-1 if scaled < 0 else 0)
+        magnitude = 0 if abs(scaled) < 0.5 else round(abs(scaled))
+        final = sign * magnitude
+        max_contracts = t.get('max_contracts')
+        if max_contracts is not None:
+            final = max(-max_contracts, min(max_contracts, final))
+        t['target_contracts'] = final
+        t['position_risk'] = abs(final) * t['close'] * t['multiplier'] * (t.get('hv') or 0.0)
 
     return targets
