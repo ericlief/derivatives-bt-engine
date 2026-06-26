@@ -52,7 +52,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import sys
 
 import numpy as np
 import pandas as pd
@@ -325,7 +324,10 @@ def fetch_all_continuous_bars(ib, instruments: list[dict], duration: str = '3 y'
     return price_frames
 
 
-def parse_args():
+def parse_args(argv=None):
+    """argv: explicit CLI-style arg list (e.g. ['--account-equity', '80000']),
+    for calling main()/parse_args() directly from a notebook instead of a
+    real command line -- defaults to sys.argv as usual when omitted."""
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--instruments', default=None,
                    help='Comma-separated symbols, or path to a JSON instrument config -- defaults to '
@@ -351,17 +353,23 @@ def parse_args():
     p.add_argument('--port', type=int, default=7496)
     p.add_argument('--client-id', type=int, default=19)
     p.add_argument('--no-save', action='store_true', help='Skip saving the report CSVs to results/')
-    return p.parse_args()
+    return p.parse_args(argv)
 
 
-def main():
+def main(argv=None):
+    """argv: explicit CLI-style arg list, forwarded to parse_args -- lets a
+    notebook call main(['--account-equity', '80000', ...]) directly rather
+    than going through a real command line. Returns a dict of every
+    computed artifact (report/summary/corr/cov/weights/targets), in
+    addition to printing/saving them, so a caller (e.g. a notebook) can
+    plot or inspect them further without re-running anything."""
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(name)s [%(levelname)s] %(message)s')
 
     from ib_tools.ibpysync import IBPySync
     from options_bt.live.run_tsmom_rebalance import KNOWN_INSTRUMENTS, _build_instruments
     from options_bt.live.tsmom_rebalance import compute_rebalance_targets
 
-    args = parse_args()
+    args = parse_args(argv)
     instruments_spec = args.instruments or ','.join(sorted(KNOWN_INSTRUMENTS))
     instruments = _build_instruments(instruments_spec, args.max_notional, args.max_contracts)
 
@@ -415,6 +423,18 @@ def main():
         report.to_csv(os.path.join(results_dir, f'tsmom_risk_budget_diagnostic_{ts}.csv'))
         corr.to_csv(os.path.join(results_dir, f'tsmom_risk_budget_diagnostic_corr_{ts}.csv'))
 
+    return {
+        'report': report,
+        'summary': summary,
+        'corr': corr,
+        'cov': cov,
+        'returns': returns,
+        'targets': targets,
+        'current_weights': current_w,
+        'erc_weights': erc_w,
+        'hrp_weights': hrp_w,
+    }
+
 
 if __name__ == '__main__':
-    sys.exit(main())
+    main()
