@@ -68,7 +68,7 @@ def calculate_trend_strength(df: pl.DataFrame, w3m: float = 0.4, w1y: float = 0.
     # daily_std is kept (the notebook's original drop list removes it) —
     # the position-sizing layer needs daily_std_last from the last row to
     # compute current_realized_vol for vol targeting.
-    df = df.drop(['open', 'high', 'low', 'r1d', 'log_price',
+    df = df.drop(['open', 'high', 'low', 
                   'barCount', 'volume', 'average', 'w3', 'w1'],
                  strict=False)
     return df
@@ -126,18 +126,18 @@ def compute_vol_ratio(df: pl.DataFrame, short_window: int = 21, long_window: int
     'hv_short', 'hv_long', 'vol_ratio' columns (vol_ratio is None/null
     wherever hv_long isn't yet defined or is zero).
     """
-    df = df.with_columns(_log_price=pl.col('close').log())
-    df = df.with_columns(_r1d=pl.col('_log_price').diff(1))
+    # df = df.with_columns(_log_price=pl.col('log_price')
+    # df = df.with_columns(_r1d=pl.col('log_price').diff(1))
     df = df.with_columns(
-        hv_short=pl.col('_r1d').rolling_std(short_window),
-        hv_long=pl.col('_r1d').rolling_std(long_window),
+        hv_short=pl.col('r1d').rolling_std(short_window),
+        hv_long=pl.col('r1d').rolling_std(long_window),
     )
     df = df.with_columns(
         vol_ratio=pl.when(pl.col('hv_long') > 0)
         .then(pl.col('hv_short') / pl.col('hv_long'))
         .otherwise(None)
     )
-    return df.drop(['_log_price', '_r1d'], strict=False)
+    return df.drop(['log_price', 'r1d'], strict=False)
 
 
 def classify_signal_confidence(vol_ratio, low_threshold: float, high_threshold: float) -> SignalConfidenceRegime:
@@ -151,6 +151,7 @@ def classify_signal_confidence(vol_ratio, low_threshold: float, high_threshold: 
     missing-data gap shouldn't read as "unusual," just as "unknown."
     """
     if vol_ratio is None or (isinstance(vol_ratio, float) and math.isnan(vol_ratio)):
+        log.warning("Signal confidence couldn't be computed because of NaN component/s in vol_ratio")
         return SignalConfidenceRegime.NORMAL
     if vol_ratio >= high_threshold:
         return SignalConfidenceRegime.HIGH
@@ -205,7 +206,7 @@ def compute_position_scalar(trend_strength, daily_std_last, vol_target: float,
     risk_scalar = vol_target / current_realized_vol, clamped to [0.25, 2.0]
     -- a risk-equalization ratio driven by THIS instrument's own realized
     vol, nothing regime- or market-wide about it.
-    current_realized_vol = daily_std_last * sqrt(252).
+    current_realized_vol = daily_std_last * sqrt(252) <= ** 63-day rolling **
 
     momentum_discount is applied only for Correction/Rebound (disagreement
     between the fast and slow momentum signal — lower conviction);
@@ -229,8 +230,8 @@ def compute_position_scalar(trend_strength, daily_std_last, vol_target: float,
     if daily_std_last is None or (isinstance(daily_std_last, float) and math.isnan(daily_std_last)) or daily_std_last <= 0:
         risk_scalar = 1.0   # insufficient history to size by vol — neutral
     else:
-        current_realized_vol = daily_std_last * math.sqrt(252)
-        risk_scalar = vol_target / current_realized_vol # 0.15/0.60 ~= 0.25
+        current_realized_vol = daily_std_last * math.sqrt(252) # 63 day not last month
+        risk_scalar = vol_target / current_realized_vol # 0.15/0.60 ~= 0.25, this is not hv_long here, but a param
         risk_scalar = max(0.25, min(2.0, risk_scalar))
 
     momentum_discount = momentum_discount if regime in (TrendRegime.CORRECTION, TrendRegime.REBOUND) else 1.0
