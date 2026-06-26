@@ -197,7 +197,9 @@ def _save_report(report: str, targets: list[dict]) -> None:
     # the order you'd actually want to follow the calculation, everything
     # else after in a stable, predictable order.
     priority = ['symbol', 'current_contracts', 'target_contracts', 'infeasible', 'signal',
-                'regime', 'vol_regime', 'scalar', 'account_equity', 'n_effective',
+                'regime', 'vol_regime', 'scalar', 'risk_scalar', 'momentum_discount',
+                'signal_confidence_regime', 'signal_confidence', 'vol_ratio', 'market_stress_scale',
+                'account_equity', 'n_effective',
                 'risk_budget', 'vol_target', 'target_portfolio_vol', 'budget_constant',
                 'position_risk', 'raw_notional', 'target_notional', 'max_cluster_risk_pct',
                 'max_lot_overrun_pct']
@@ -273,8 +275,27 @@ def parse_args():
                    help='VX futures expiry YYYYMM or "auto" for nearest >=3d (default: %(default)s)')
     p.add_argument('--long-only', action='store_true',
                    help='Disable short positions (signal_scalar = max(0, trend_strength))')
-    p.add_argument('--regime-discount', type=float, default=0.5,
-                   help='Position discount for Correction/Rebound regimes; 1.0 disables (default: %(default)s)')
+    p.add_argument('--momentum-discount', type=float, default=0.5,
+                   help='Position discount for Correction/Rebound regimes (fast/slow trend sign '
+                        'disagreement); 1.0 disables (default: %(default)s)')
+    p.add_argument('--enable-signal-confidence', action='store_true',
+                   help='Opt in to signal_confidence: a per-instrument discount on trust in that '
+                        "instrument's own trend signal when ITS OWN vol_ratio (short/long realized "
+                        'vol, asset-specific, NOT VIX/VX-driven) is unusual relative to its own '
+                        'history. Off by default -- existing behavior is unchanged unless set.')
+    p.add_argument('--signal-confidence-low-threshold', type=float, default=0.7,
+                   help='vol_ratio (hv_short/hv_long) at or below this is classified "low" '
+                        '(default: %(default)s)')
+    p.add_argument('--signal-confidence-high-threshold', type=float, default=1.5,
+                   help='vol_ratio (hv_short/hv_long) at or above this is classified "high" '
+                        '(default: %(default)s)')
+    p.add_argument('--signal-confidence-high-vol', type=float, default=0.5,
+                   help='Discount factor applied when vol_ratio is "high" -- vol spikes specifically '
+                        'damage momentum reliability (default: %(default)s)')
+    p.add_argument('--signal-confidence-low-vol', type=float, default=1.0,
+                   help='Discount factor applied when vol_ratio is "low" -- no settled answer for '
+                        'whether low vol should discount trend confidence, so this defaults to a '
+                        'no-op (default: %(default)s)')
     p.add_argument('--dry-run', action='store_true', default=True,
                    help='Print targets only, no orders (default — this is the safe default)')
     p.add_argument('--no-save', action='store_true',
@@ -301,12 +322,17 @@ def main():
         'max_contracts': args.max_contracts,
         'vx_expiry': args.vx_expiry,
         'long_only': args.long_only,
-        'regime_discount': args.regime_discount,
+        'momentum_discount': args.momentum_discount,
         'account_equity': args.account_equity,
         'target_portfolio_vol': args.target_portfolio_vol,
         'max_cluster_risk_pct': args.max_cluster_risk_pct,
         'min_conviction': args.min_conviction,
         'max_lot_overrun_pct': args.max_lot_overrun_pct,
+        'enable_signal_confidence': args.enable_signal_confidence,
+        'signal_confidence_low_threshold': args.signal_confidence_low_threshold,
+        'signal_confidence_high_threshold': args.signal_confidence_high_threshold,
+        'signal_confidence_high_vol': args.signal_confidence_high_vol,
+        'signal_confidence_low_vol': args.signal_confidence_low_vol,
     }
 
     if args.live:

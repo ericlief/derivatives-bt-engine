@@ -32,7 +32,7 @@ def parse_args():
                    help='Per-symbol max notional USD (default: %(default)s -- sized for full-size ES/NQ, not micros)')
     p.add_argument('--long-only', action='store_true',
                    help='Disable short positions (signal_scalar = max(0, trend_strength))')
-    p.add_argument('--regime-discount', type=float, default=0.5,
+    p.add_argument('--momentum-discount', type=float, default=0.5,
                    help='Position discount for Correction/Rebound regimes; 1.0 disables (default: %(default)s)')
     p.add_argument('--no-save', action='store_true', help='Skip saving stats/events to results/')
     return p.parse_args()
@@ -59,7 +59,7 @@ def main():
         max_contracts=args.max_contracts,
         max_notional=args.max_notional,
         long_only=args.long_only,
-        regime_discount=args.regime_discount,
+        momentum_discount=args.momentum_discount,
         start_date=date(int(start_year), 1, 1),
         end_date=date(int(end_year), 12, 31),
     )

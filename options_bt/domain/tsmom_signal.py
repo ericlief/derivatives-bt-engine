@@ -21,7 +21,7 @@ import math
 
 import polars as pl
 
-from options_bt.domain.enums import TrendRegime
+from options_bt.domain.enums import SignalConfidenceRegime, TrendRegime
 
 log = logging.getLogger(__name__)
 
@@ -106,38 +106,136 @@ def classify_regime(ts3m, ts1y) -> TrendRegime:
     return TrendRegime.REBOUND   # not slow_up and fast_up
 
 
-def compute_position_scalar(trend_strength, daily_std_last, vol_target: float,
-                             regime: TrendRegime, regime_discount: float = 0.5) -> float:
+def compute_vol_ratio(df: pl.DataFrame, short_window: int = 21, long_window: int = 252) -> pl.DataFrame:
     """
-    Layers 2-4 of the position sizing framework, combined into a single
-    scalar in [-1, +1]:
+    Per-instrument, asset-specific vol-regime ratio: this instrument's own
+    short-window realized vol / long-window realized vol of its daily log
+    returns (short_window ~= 1 trading month, long_window ~= 1 trading
+    year). NOT VIX/VX-driven -- this is what catches an instrument-
+    specific vol spike (a corn-harvest shock, a JPY intervention) with
+    broad-market VX/VIX staying calm, since VX/VIX only reflects S&P-
+    linked vol and has no visibility into corn's or JPY's own vol at all.
 
-        scalar = trend_strength * vol_scalar * regime_discount_factor
+    Deliberately a separate function from calculate_trend_strength (which
+    stays canonical/finalized, not to be touched) rather than adding
+    columns there -- callers chain this on demand instead of paying for it
+    on every signal computation. Annualization factors cancel in the
+    ratio, so this works directly off raw rolling std of daily log returns.
+
+    Expects a DataFrame with a 'close' column. Returns the same frame plus
+    'hv_short', 'hv_long', 'vol_ratio' columns (vol_ratio is None/null
+    wherever hv_long isn't yet defined or is zero).
+    """
+    df = df.with_columns(_log_price=pl.col('close').log())
+    df = df.with_columns(_r1d=pl.col('_log_price').diff(1))
+    df = df.with_columns(
+        hv_short=pl.col('_r1d').rolling_std(short_window),
+        hv_long=pl.col('_r1d').rolling_std(long_window),
+    )
+    df = df.with_columns(
+        vol_ratio=pl.when(pl.col('hv_long') > 0)
+        .then(pl.col('hv_short') / pl.col('hv_long'))
+        .otherwise(None)
+    )
+    return df.drop(['_log_price', '_r1d'], strict=False)
+
+
+def classify_signal_confidence(vol_ratio, low_threshold: float, high_threshold: float) -> SignalConfidenceRegime:
+    """
+    Low | Normal | High from vol_ratio (hv_short/hv_long, see
+    compute_vol_ratio) against configurable thresholds -- deliberately not
+    hardcoded, since the right threshold is asset- and regime-dependent
+    and there's no settled, universal value.
+
+    None/NaN (insufficient history) -> Normal, i.e. no discount -- a
+    missing-data gap shouldn't read as "unusual," just as "unknown."
+    """
+    if vol_ratio is None or (isinstance(vol_ratio, float) and math.isnan(vol_ratio)):
+        return SignalConfidenceRegime.NORMAL
+    if vol_ratio >= high_threshold:
+        return SignalConfidenceRegime.HIGH
+    if vol_ratio <= low_threshold:
+        return SignalConfidenceRegime.LOW
+    return SignalConfidenceRegime.NORMAL
+
+
+def compute_signal_confidence(vol_ratio, low_threshold: float, high_threshold: float,
+                               high_vol_discount: float = 0.5, low_vol_discount: float = 1.0) -> float:
+    """
+    Per-instrument discount on trust in THIS instrument's trend signal,
+    triggered when its own vol_ratio is unusual relative to its own
+    history -- distinct from momentum_discount (fast/slow sign
+    disagreement) and from market_stress_scale (portfolio-wide, VX-
+    driven; applied by the caller, not in here).
+
+    high_vol_discount and low_vol_discount are independent, free
+    parameters -- deliberately NOT assumed symmetric. The literature
+    reviewed in cta-vol-scalar-clamping.md treats high-vol momentum
+    unreliability and low-vol mean-variance leverage opportunities
+    (Bongaerts et al.'s low-vol response is to increase exposure for
+    alpha reasons specific to equity factor timing, not to discount trend
+    confidence) as different phenomena for different reasons -- there is
+    no settled answer for whether low vol should discount this system's
+    trend signal at all, hence low_vol_discount's no-op default of 1.0,
+    vs high_vol_discount's suggested 0.5 (vol spikes specifically damage
+    momentum reliability, per the Mozes-article finding already
+    established in this project's research).
+    """
+    regime = classify_signal_confidence(vol_ratio, low_threshold, high_threshold)
+    if regime == SignalConfidenceRegime.HIGH:
+        return high_vol_discount
+    if regime == SignalConfidenceRegime.LOW:
+        return low_vol_discount
+    return 1.0
+
+
+def compute_position_scalar(trend_strength, daily_std_last, vol_target: float,
+                             regime: TrendRegime, momentum_discount: float = 0.5,
+                             signal_confidence: float = 1.0) -> float:
+    """
+    Layers 2-4 of the position sizing framework (plus the opt-in layer 5,
+    signal_confidence), combined into a single scalar in [-1, +1]:
+
+        scalar = trend_strength * risk_scalar * momentum_discount * signal_confidence
 
     Long-only filtering (signal_scalar = max(0, trend_strength)) is the
     caller's responsibility — pass the already-filtered trend_strength in
     for long-only accounts. This function stays pure w.r.t. direction.
 
-    vol_scalar = vol_target / current_realized_vol, clamped to [0.25, 2.0].
+    risk_scalar = vol_target / current_realized_vol, clamped to [0.25, 2.0]
+    -- a risk-equalization ratio driven by THIS instrument's own realized
+    vol, nothing regime- or market-wide about it.
     current_realized_vol = daily_std_last * sqrt(252).
 
-    regime_discount is applied only for Correction/Rebound (disagreement
-    between the fast and slow signal — lower conviction); Bull/Bear/Unknown
-    get a discount factor of 1.0.
+    momentum_discount is applied only for Correction/Rebound (disagreement
+    between the fast and slow momentum signal — lower conviction);
+    Bull/Bear/Unknown get a discount factor of 1.0. Despite the similar
+    "discount" shape, this is unrelated to market_stress_scale (the
+    portfolio-wide, VX-driven de-risking lever applied by the caller in
+    options_bt.live.tsmom_rebalance, not in here) -- the two were
+    conflated in earlier design review, hence the explicit naming.
+
+    signal_confidence (default 1.0, no-op) is a separate, opt-in, per-
+    instrument discount on trust in THIS instrument's signal when its own
+    vol_ratio (short-window/long-window realized vol, asset-specific, NOT
+    VIX/VX-driven) is unusual relative to its own history -- see
+    compute_signal_confidence(). Orthogonal to momentum_discount (which is
+    about fast/slow sign disagreement, not vol) and to market_stress_scale
+    (which is portfolio-wide, not per-instrument).
     """
     if trend_strength is None or (isinstance(trend_strength, float) and math.isnan(trend_strength)):
         return 0.0
 
     if daily_std_last is None or (isinstance(daily_std_last, float) and math.isnan(daily_std_last)) or daily_std_last <= 0:
-        vol_scalar = 1.0   # insufficient history to size by vol — neutral
+        risk_scalar = 1.0   # insufficient history to size by vol — neutral
     else:
-        current_realized_vol = daily_std_last * math.sqrt(252)  
-        vol_scalar = vol_target / current_realized_vol # 0.15/0.60 ~= 0.25
-        vol_scalar = max(0.25, min(2.0, vol_scalar))
+        current_realized_vol = daily_std_last * math.sqrt(252)
+        risk_scalar = vol_target / current_realized_vol # 0.15/0.60 ~= 0.25
+        risk_scalar = max(0.25, min(2.0, risk_scalar))
 
-    discount = regime_discount if regime in (TrendRegime.CORRECTION, TrendRegime.REBOUND) else 1.0
+    momentum_discount = momentum_discount if regime in (TrendRegime.CORRECTION, TrendRegime.REBOUND) else 1.0
 
-    scalar = trend_strength * vol_scalar * discount
+    scalar = trend_strength * risk_scalar * momentum_discount * signal_confidence
     return max(-1.0, min(1.0, scalar))
 
 

@@ -1,5 +1,5 @@
 """
-Grid search over TSMOM hyperparameters (vol_target, regime_discount,
+Grid search over TSMOM hyperparameters (vol_target, momentum_discount,
 long_only, max_notional, max_contracts), parallelized via multiprocessing.
 
 Unlike the options engine's GridSearchBacktester (bull_put_param_search.py,
@@ -72,7 +72,7 @@ def _run_one(combo: dict, symbols: list[str], start_date: date, end_date: date) 
     config = TsmomBacktestConfig(
         symbols=symbols, start_date=start_date, end_date=end_date,
         vol_target=combo.get('vol_target', 0.15),
-        regime_discount=combo.get('regime_discount', 0.5),
+        momentum_discount=combo.get('momentum_discount', 0.5),
         long_only=combo.get('long_only', False),
         max_notional=combo.get('max_notional', 250_000),
         max_contracts=combo.get('max_contracts', 10),
@@ -148,7 +148,7 @@ def main():
 
     param_grid = {
         'vol_target': [0.10, 0.15, 0.20],
-        'regime_discount': [0.0, 0.5, 1.0],
+        'momentum_discount': [0.0, 0.5, 1.0],
         'long_only': [False, True],
     }
 

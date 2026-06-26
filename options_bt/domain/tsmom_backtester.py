@@ -52,13 +52,21 @@ class TsmomBacktestConfig:
     max_contracts: int = 5
     max_notional: float = 25_000.0
     long_only: bool = False
-    regime_discount: float = 0.5
+    momentum_discount: float = 0.5
     start_date: Optional[date] = None
     end_date: Optional[date] = None
 
 
 def check_vol_regime(vix_ratio: Optional[float]) -> VolRegime:
-    """Normal | Elevated | Spike | Extreme from vix_current / vix_ma63."""
+    """Normal | Elevated | Spike | Extreme from vix_current / vix_ma63.
+
+    Deliberately one-sided (mirrors options_bt.live.tsmom_rebalance's
+    version): every threshold checks vix_ratio being HIGH -- no symmetric
+    low-vix_ratio bucket, not an oversight. This is a portfolio-wide risk-
+    management gate (feeds market_stress_scale / the spike-extreme hold-
+    or-halve bypass), not a regime-confidence detector. Per-instrument,
+    asset-specific vol state (including a low-vol bucket) is a separate
+    mechanism -- see SignalConfidenceRegime in tsmom_signal.py."""
     if vix_ratio is None:
         return VolRegime.NORMAL
     if vix_ratio > VIX_EXTREME_RATIO:
@@ -153,7 +161,7 @@ def _vix_regime_at(vix: pl.DataFrame, d: date) -> tuple[VolRegime, Optional[floa
 
 def _compute_target(symbol: str, d: date, full_price_data: dict[str, pl.DataFrame],
                      futures_types: dict[str, FuturesType], config: TsmomBacktestConfig,
-                     position_scale: float) -> Optional[dict]:
+                     market_stress_scale: float) -> Optional[dict]:
     """Signal + vol-targeted sizing for one symbol as of date `d`, using
     full unbounded history for lookback. None if there isn't yet enough
     history (< 64 bars) to compute a signal at all."""
@@ -188,13 +196,13 @@ def _compute_target(symbol: str, d: date, full_price_data: dict[str, pl.DataFram
     # trend_strength did or didn't turn into a trade -- compute_position_
     # scalar itself stays untouched.
     hv = daily_std_last * math.sqrt(252) if daily_std_last and daily_std_last > 0 else None
-    vol_scalar = max(0.25, min(2.0, config.vol_target / hv)) if hv else 1.0
-    discount = config.regime_discount if regime in (TrendRegime.CORRECTION, TrendRegime.REBOUND) else 1.0
+    risk_scalar = max(0.25, min(2.0, config.vol_target / hv)) if hv else 1.0
+    momentum_discount = config.momentum_discount if regime in (TrendRegime.CORRECTION, TrendRegime.REBOUND) else 1.0
 
     scalar = compute_position_scalar(
         signal_for_scalar, daily_std_last, config.vol_target, regime,
-        regime_discount=config.regime_discount,
-    ) * position_scale
+        momentum_discount=config.momentum_discount,
+    ) * market_stress_scale
 
     mult = futures_types[symbol].mult
     contract_notional = last_close * mult
@@ -203,7 +211,7 @@ def _compute_target(symbol: str, d: date, full_price_data: dict[str, pl.DataFram
 
     return {
         'target': target, 'trend_strength': trend_strength, 'regime': regime,
-        'hv': hv, 'vol_scalar': vol_scalar * position_scale, 'discount': discount,
+        'hv': hv, 'risk_scalar': risk_scalar * market_stress_scale, 'momentum_discount': momentum_discount,
         'close': last_close, 'dd_pct': dd_pct,
         # Raw signal-row fields, straight from calculate_trend_strength,
         # purely for debugging/sanity-checking the sizing math end to end.
@@ -270,8 +278,8 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
             'ts3m': _round(s.get('ts3m'), 4), 'ts1y': _round(s.get('ts1y'), 4),
             'trend_strength': _round(s.get('trend_strength'), 4), 'r1y_pct': _round(s.get('r1y_pct'), 2),
             'regime': s.get('regime'), 'vix_close': _round(vix_close, 2), 'vix_ratio': _round(vix_ratio, 4),
-            'vol_regime': vol_regime, 'hv': _round(s.get('hv'), 4), 'vol_scalar': _round(s.get('vol_scalar'), 4),
-            'discount': _round(s.get('discount'), 2),
+            'vol_regime': vol_regime, 'hv': _round(s.get('hv'), 4), 'risk_scalar': _round(s.get('risk_scalar'), 4),
+            'momentum_discount': _round(s.get('momentum_discount'), 2),
             'prior_contracts': prior, 'target_contracts': target, 'is_seed': is_seed,
         })
 
@@ -288,9 +296,9 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
             seed_date = max(prior_month_ends)
             vol_regime, vix_close, vix_ratio = _vix_regime_at(vix, seed_date)
             if vol_regime not in (VolRegime.SPIKE, VolRegime.EXTREME):  # held_contracts are all 0 here -- hold/halve would be a no-op anyway
-                position_scale = VIX_ELEVATED_SCALE if vol_regime == VolRegime.ELEVATED else 1.0
+                market_stress_scale = VIX_ELEVATED_SCALE if vol_regime == VolRegime.ELEVATED else 1.0
                 for symbol in config.symbols:
-                    result = _compute_target(symbol, seed_date, full_price_data, futures_types, config, position_scale)
+                    result = _compute_target(symbol, seed_date, full_price_data, futures_types, config, market_stress_scale)
                     if result is None:
                         continue
                     _rebalance_to(symbol, result['target'], seed_date, vol_regime, vix_close=vix_close,
@@ -324,9 +332,9 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
                     _rebalance_to(symbol, target, d, vol_regime, vix_close=vix_close, vix_ratio=vix_ratio,
                                   signal={'close': close})
             else:
-                position_scale = VIX_ELEVATED_SCALE if vol_regime == VolRegime.ELEVATED else 1.0
+                market_stress_scale = VIX_ELEVATED_SCALE if vol_regime == VolRegime.ELEVATED else 1.0
                 for symbol in config.symbols:
-                    result = _compute_target(symbol, d, full_price_data, futures_types, config, position_scale)
+                    result = _compute_target(symbol, d, full_price_data, futures_types, config, market_stress_scale)
                     if result is None:
                         continue
                     _rebalance_to(symbol, result['target'], d, vol_regime, vix_close=vix_close,

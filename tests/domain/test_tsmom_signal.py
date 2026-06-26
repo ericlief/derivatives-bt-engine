@@ -8,14 +8,17 @@ import numpy as np
 import polars as pl
 import pytest
 
-from options_bt.domain.enums import TrendRegime
+from options_bt.domain.enums import SignalConfidenceRegime, TrendRegime
 from options_bt.domain.tsmom_signal import (
     apply_cluster_risk_cap,
     calculate_trend_strength,
     classify_regime,
+    classify_signal_confidence,
     compute_desired_risk_budget,
     compute_n_effective,
     compute_position_scalar,
+    compute_signal_confidence,
+    compute_vol_ratio,
 )
 
 
@@ -124,14 +127,14 @@ def test_position_scalar_vol_scalar_clamp_floor():
 
 
 def test_position_scalar_discount_applied_for_disagreement_regimes():
-    bull = compute_position_scalar(0.5, 0.02, vol_target=0.15, regime=TrendRegime.BULL, regime_discount=0.5)
-    correction = compute_position_scalar(0.5, 0.02, vol_target=0.15, regime=TrendRegime.CORRECTION, regime_discount=0.5)
+    bull = compute_position_scalar(0.5, 0.02, vol_target=0.15, regime=TrendRegime.BULL, momentum_discount=0.5)
+    correction = compute_position_scalar(0.5, 0.02, vol_target=0.15, regime=TrendRegime.CORRECTION, momentum_discount=0.5)
     assert math.isclose(correction, bull * 0.5, rel_tol=1e-9)
 
 
 def test_position_scalar_discount_disabled_at_1():
-    correction = compute_position_scalar(0.5, 0.02, vol_target=0.15, regime=TrendRegime.CORRECTION, regime_discount=1.0)
-    bull = compute_position_scalar(0.5, 0.02, vol_target=0.15, regime=TrendRegime.BULL, regime_discount=1.0)
+    correction = compute_position_scalar(0.5, 0.02, vol_target=0.15, regime=TrendRegime.CORRECTION, momentum_discount=1.0)
+    bull = compute_position_scalar(0.5, 0.02, vol_target=0.15, regime=TrendRegime.BULL, momentum_discount=1.0)
     assert math.isclose(correction, bull, rel_tol=1e-9)
 
 
@@ -568,3 +571,163 @@ def test_cluster_cap_live_session_scenario_recomputed_for_greedy_priority():
     # Every over-budget cluster still captured real exposure via its
     # top-priority instrument -- none are infeasible.
     assert not any(t.get('infeasible') for t in out)
+
+
+# ── compute_vol_ratio / classify_signal_confidence / compute_signal_confidence
+#
+# Per-instrument, asset-specific vol-regime ratio (hv_short/hv_long of THIS
+# instrument's own daily returns) -- NOT VIX/VX-driven. Feeds
+# signal_confidence, an opt-in (default 1.0/no-op) discount on trust in a
+# specific instrument's trend signal, orthogonal to momentum_discount
+# (fast/slow sign disagreement) and market_stress_scale (portfolio-wide,
+# VX-driven, applied by the caller separately).
+
+def _vol_series(n_calm: int, n_shock: int, calm_vol: float, shock_vol: float,
+                drift: float = 0.0005, seed: int = 0) -> pl.DataFrame:
+    """A price series that's calm for n_calm bars, then switches to a
+    different (shock_vol) volatility for the trailing n_shock bars --
+    simulates an instrument-specific vol regime change (e.g. a corn-
+    harvest shock or a JPY intervention) independent of any broad-market
+    state."""
+    rng = np.random.default_rng(seed)
+    rets = np.concatenate([
+        rng.normal(drift, calm_vol, n_calm),
+        rng.normal(0.0, shock_vol, n_shock),
+    ])
+    close = 100 * np.exp(np.cumsum(rets))
+    return pl.DataFrame({'close': close})
+
+
+def test_vol_ratio_high_for_instrument_specific_spike():
+    # Calm for 379 bars, then a sharp vol spike in the trailing 21 --
+    # hv_short (21d) should be far above hv_long (252d), giving a high
+    # vol_ratio.
+    df = _vol_series(379, 21, calm_vol=0.01, shock_vol=0.08, seed=1)
+    out = compute_vol_ratio(df)
+    vol_ratio = out.tail(1)['vol_ratio'][0]
+    assert vol_ratio > 1.5
+
+
+def test_vol_ratio_low_for_instrument_specific_quiet_spell():
+    # Calm-ish for 379 bars, then unusually QUIET for the trailing 21 --
+    # hv_short far below hv_long, giving a low vol_ratio. Confirms the
+    # ratio detects unusual calm just as readily as unusual turbulence.
+    df = _vol_series(379, 21, calm_vol=0.02, shock_vol=0.002, seed=2)
+    out = compute_vol_ratio(df)
+    vol_ratio = out.tail(1)['vol_ratio'][0]
+    assert vol_ratio < 0.5
+
+
+def test_vol_ratio_near_one_for_steady_series():
+    df = _vol_series(379, 21, calm_vol=0.01, shock_vol=0.01, seed=3)
+    out = compute_vol_ratio(df)
+    vol_ratio = out.tail(1)['vol_ratio'][0]
+    assert 0.7 < vol_ratio < 1.5
+
+
+@pytest.mark.parametrize('vol_ratio,expected', [
+    (None, SignalConfidenceRegime.NORMAL),
+    (float('nan'), SignalConfidenceRegime.NORMAL),
+    (1.0, SignalConfidenceRegime.NORMAL),
+    (0.71, SignalConfidenceRegime.NORMAL),
+    (1.49, SignalConfidenceRegime.NORMAL),
+    (0.7, SignalConfidenceRegime.LOW),
+    (0.3, SignalConfidenceRegime.LOW),
+    (1.5, SignalConfidenceRegime.HIGH),
+    (3.0, SignalConfidenceRegime.HIGH),
+])
+def test_classify_signal_confidence_thresholds(vol_ratio, expected):
+    assert classify_signal_confidence(vol_ratio, low_threshold=0.7, high_threshold=1.5) == expected
+
+
+def test_signal_confidence_high_and_low_discounts_are_independent():
+    """Locks in non-symmetry: high_vol_discount and low_vol_discount are
+    free, independently configurable parameters -- this must NOT assume
+    the high-vol value applies to the low-vol bucket too."""
+    high_discount = compute_signal_confidence(3.0, low_threshold=0.7, high_threshold=1.5,
+                                               high_vol_discount=0.4, low_vol_discount=0.9)
+    low_discount = compute_signal_confidence(0.3, low_threshold=0.7, high_threshold=1.5,
+                                              high_vol_discount=0.4, low_vol_discount=0.9)
+    assert high_discount == 0.4
+    assert low_discount == 0.9
+    assert high_discount != low_discount
+
+
+def test_signal_confidence_low_vol_default_is_a_no_op():
+    """low_vol_discount's suggested default (1.0) is a no-op -- there's no
+    settled answer for whether low vol should discount trend confidence at
+    all (Bongaerts et al.'s low-vol response is about equity factor-timing
+    alpha, not trend-signal reliability), so the default must not silently
+    apply a discount."""
+    discount = compute_signal_confidence(0.2, low_threshold=0.7, high_threshold=1.5)
+    assert discount == 1.0
+
+
+def test_signal_confidence_normal_regime_is_always_a_no_op():
+    discount = compute_signal_confidence(1.0, low_threshold=0.7, high_threshold=1.5,
+                                          high_vol_discount=0.3, low_vol_discount=0.3)
+    assert discount == 1.0
+
+
+def test_signal_confidence_defaults_to_high_vol_discount_of_half():
+    # Suggested default (0.5), consistent with the Mozes-article finding
+    # that vol spikes specifically damage momentum reliability.
+    discount = compute_signal_confidence(3.0, low_threshold=0.7, high_threshold=1.5)
+    assert discount == 0.5
+
+
+# ── compute_position_scalar + signal_confidence wiring ──────────────────────
+
+def test_position_scalar_signal_confidence_defaults_to_noop():
+    """signal_confidence must default to 1.0 -- existing callers that don't
+    pass it get byte-identical behavior to before Phase 2 existed."""
+    with_default = compute_position_scalar(0.6, 0.01, vol_target=0.15, regime=TrendRegime.BULL,
+                                            momentum_discount=0.5)
+    explicit_noop = compute_position_scalar(0.6, 0.01, vol_target=0.15, regime=TrendRegime.BULL,
+                                             momentum_discount=0.5, signal_confidence=1.0)
+    assert with_default == explicit_noop
+
+
+def test_position_scalar_signal_confidence_discounts_multiplicatively():
+    base = compute_position_scalar(0.6, 0.01, vol_target=0.15, regime=TrendRegime.BULL, momentum_discount=0.5)
+    discounted = compute_position_scalar(0.6, 0.01, vol_target=0.15, regime=TrendRegime.BULL,
+                                          momentum_discount=0.5, signal_confidence=0.5)
+    assert math.isclose(discounted, base * 0.5, rel_tol=1e-9)
+
+
+def test_signal_confidence_instrument_specific_spike_discounts_only_that_instrument():
+    """The core Phase 2 case: an instrument-specific vol spike (high
+    hv_short/hv_long) discounts THAT instrument's scalar, while a sibling
+    instrument with calm own-history vol is untouched -- even when both
+    share the exact same market_stress_scale (portfolio-wide VX state).
+    This is the JPY-/corn-spike blind spot market_stress_scale alone can't
+    see, since it only looks at VIX/VX, not at corn's or JPY's own vol."""
+    spiking_df = _vol_series(379, 21, calm_vol=0.01, shock_vol=0.08, seed=4)
+    calm_df = _vol_series(379, 21, calm_vol=0.01, shock_vol=0.01, seed=5)
+
+    spiking_vol_ratio = compute_vol_ratio(spiking_df).tail(1)['vol_ratio'][0]
+    calm_vol_ratio = compute_vol_ratio(calm_df).tail(1)['vol_ratio'][0]
+
+    low_threshold, high_threshold = 0.7, 1.5
+    spiking_confidence = compute_signal_confidence(spiking_vol_ratio, low_threshold, high_threshold)
+    calm_confidence = compute_signal_confidence(calm_vol_ratio, low_threshold, high_threshold)
+
+    assert spiking_confidence < 1.0   # discounted
+    assert calm_confidence == 1.0     # untouched
+
+    # Same trend_strength/daily_std/regime for both instruments -- only
+    # signal_confidence differs -- and the SAME market_stress_scale
+    # applied afterward to both (simulating one portfolio-wide VX state
+    # that's calm, i.e. 1.0, so it doesn't mask the per-instrument effect).
+    market_stress_scale = 1.0
+    spiking_scalar = compute_position_scalar(
+        0.6, 0.01, vol_target=0.15, regime=TrendRegime.BULL,
+        momentum_discount=1.0, signal_confidence=spiking_confidence,
+    ) * market_stress_scale
+    calm_scalar = compute_position_scalar(
+        0.6, 0.01, vol_target=0.15, regime=TrendRegime.BULL,
+        momentum_discount=1.0, signal_confidence=calm_confidence,
+    ) * market_stress_scale
+
+    assert spiking_scalar < calm_scalar
+    assert math.isclose(calm_scalar, 0.6 * max(0.25, min(2.0, 0.15 / (0.01 * math.sqrt(252)))), rel_tol=1e-9)

@@ -30,9 +30,12 @@ from options_bt.domain.tsmom_signal import (
     apply_cluster_risk_cap,
     calculate_trend_strength,
     classify_regime,
+    classify_signal_confidence,
     compute_desired_risk_budget,
     compute_n_effective,
     compute_position_scalar,
+    compute_signal_confidence,
+    compute_vol_ratio,
 )
 
 log = logging.getLogger(__name__)
@@ -180,7 +183,18 @@ def fetch_vx_spike_ratio(ib: IBPySync, vx_expiry: str = 'auto', min_days: int = 
 
 
 def check_vol_regime(vx_ratio: float) -> VolRegime:
-    """Normal | Elevated | Spike | Extreme from vx_current / vx_ma63."""
+    """Normal | Elevated | Spike | Extreme from vx_current / vx_ma63.
+
+    Deliberately one-sided: every threshold here checks vx_ratio being
+    HIGH (1.3/1.5/2.0) -- there is no symmetric low-vx_ratio bucket, and
+    that's not an oversight. This function's job is a portfolio-wide risk-
+    management gate (feeds market_stress_scale, and the spike/extreme
+    hold-or-halve bypass), not a regime-confidence detector -- "the market
+    looks unusually calm" isn't a risk to manage the same way "the market
+    looks dangerous" is, so nothing here classifies it. (Per-instrument,
+    asset-specific vol state -- including a low-vol-ratio bucket -- is a
+    different, independent mechanism: see SignalConfidenceRegime /
+    classify_signal_confidence in tsmom_signal.py.)"""
     if vx_ratio > VX_EXTREME_RATIO:
         return VolRegime.EXTREME
     if vx_ratio > VX_SPIKE_RATIO:
@@ -213,11 +227,16 @@ def _current_contracts(ib: IBPySync, contract) -> int:
 # ------------------------------------------------------------------
 
 def _compute_signal(ib: IBPySync, instr: dict, min_days: int, vol_target: float, long_only: bool,
-                     regime_discount: float):
+                     momentum_discount: float, signal_confidence_cfg: dict):
     """Stage 1: resolve the contract, fetch bars, compute the TSMOM signal
     for one instrument. No budget/sizing here -- that needs to know every
     instrument's signal first (to derive n_effective), so it happens in a
-    later pass. Returns a dict of everything sizing/reporting need."""
+    later pass. Returns a dict of everything sizing/reporting need.
+
+    signal_confidence_cfg: {'enabled': bool, 'low_threshold': float,
+    'high_threshold': float, 'high_vol': float, 'low_vol': float} -- see
+    compute_signal_confidence(). When disabled (the default), this stage
+    still returns signal_confidence=1.0 (no-op) and vol_ratio=None."""
     contract = _resolve_contract(ib, instr, min_days)
     # Historical bars come from the continuous front-month contract, not the
     # dated one -- a single expiry-specific Future only has bars back to
@@ -254,13 +273,33 @@ def _compute_signal(ib: IBPySync, instr: dict, min_days: int, vol_target: float,
     if long_only and signal_for_scalar is not None and not math.isnan(signal_for_scalar):
         signal_for_scalar = max(0.0, signal_for_scalar)
 
-    # hv/vol_scalar/discount recomputed here (mirrors compute_position_
-    # scalar's own internal math) purely for reporting -- so the printed
-    # report shows *why* a given trend_strength did or didn't turn into a
-    # trade.
+    # hv/risk_scalar/momentum_discount recomputed here (mirrors compute_
+    # position_scalar's own internal math) purely for reporting -- so the
+    # printed report shows *why* a given trend_strength did or didn't turn
+    # into a trade.
     hv = daily_std_last * math.sqrt(252) if daily_std_last and daily_std_last > 0 else None
-    vol_scalar = max(0.25, min(2.0, vol_target / hv)) if hv else 1.0
-    discount = regime_discount if regime in (TrendRegime.CORRECTION, TrendRegime.REBOUND) else 1.0
+    risk_scalar = max(0.25, min(2.0, vol_target / hv)) if hv else 1.0
+    momentum_discount = momentum_discount if regime in (TrendRegime.CORRECTION, TrendRegime.REBOUND) else 1.0
+
+    # signal_confidence: opt-in, per-instrument discount on trust in THIS
+    # instrument's signal when ITS OWN vol_ratio (short/long realized vol,
+    # asset-specific) is unusual -- not VIX/VX-driven, orthogonal to
+    # market_stress_scale (portfolio-wide) and momentum_discount (fast/
+    # slow sign disagreement). Computed off the same continuous-front-
+    # month bars already fetched above, no extra IB calls.
+    vol_ratio = None
+    signal_confidence_regime = None
+    signal_confidence = 1.0
+    if signal_confidence_cfg.get('enabled'):
+        conf_df = compute_vol_ratio(df)
+        vol_ratio = conf_df.tail(1)['vol_ratio'][0]
+        signal_confidence_regime = classify_signal_confidence(
+            vol_ratio, signal_confidence_cfg['low_threshold'], signal_confidence_cfg['high_threshold'],
+        )
+        signal_confidence = compute_signal_confidence(
+            vol_ratio, signal_confidence_cfg['low_threshold'], signal_confidence_cfg['high_threshold'],
+            high_vol_discount=signal_confidence_cfg['high_vol'], low_vol_discount=signal_confidence_cfg['low_vol'],
+        )
 
     return {
         'contract': contract,
@@ -270,8 +309,11 @@ def _compute_signal(ib: IBPySync, instr: dict, min_days: int, vol_target: float,
         'ts1y': ts1y,
         'daily_std': daily_std_last,
         'hv': hv,
-        'vol_scalar': vol_scalar,
-        'discount': discount,
+        'risk_scalar': risk_scalar,
+        'momentum_discount': momentum_discount,
+        'vol_ratio': vol_ratio,
+        'signal_confidence_regime': signal_confidence_regime,
+        'signal_confidence': signal_confidence,
         'close': last_close,
         'dd_pct': dd_pct,
         'regime': regime,
@@ -307,15 +349,18 @@ def compute_rebalance_targets(ib: IBPySync, instruments: list[dict], config: dic
 
     config keys: vol_target (float), max_contracts (int, per-instrument
     default/backstop), vx_expiry (str, 'auto' or YYYYMM), long_only (bool),
-    regime_discount (float), min_days (int, expiry-resolution margin),
+    momentum_discount (float), min_days (int, expiry-resolution margin),
     account_equity (float, required for sizing), target_portfolio_vol
     (float), max_cluster_risk_pct (float), min_conviction (float),
     max_lot_overrun_pct (float, lot-size exception tolerance for
-    apply_cluster_risk_cap's conviction-priority allocation).
+    apply_cluster_risk_cap's conviction-priority allocation),
+    enable_signal_confidence (bool, default False), signal_confidence_
+    low_threshold/signal_confidence_high_threshold (float), signal_
+    confidence_high_vol/signal_confidence_low_vol (float, discount factors).
     """
     vol_target = config.get('vol_target', 0.15)
     long_only = config.get('long_only', False)
-    regime_discount = config.get('regime_discount', 0.5)
+    momentum_discount = config.get('momentum_discount', 0.5)
     default_max_contracts = config.get('max_contracts', 15)
     min_days = config.get('min_days', 7)
     account_equity = config.get('account_equity')
@@ -323,6 +368,13 @@ def compute_rebalance_targets(ib: IBPySync, instruments: list[dict], config: dic
     max_cluster_risk_pct = config.get('max_cluster_risk_pct', 0.25)
     min_conviction = config.get('min_conviction', 0.05)
     max_lot_overrun_pct = config.get('max_lot_overrun_pct', 0.5)
+    signal_confidence_cfg = {
+        'enabled': config.get('enable_signal_confidence', False),
+        'low_threshold': config.get('signal_confidence_low_threshold', 0.7),
+        'high_threshold': config.get('signal_confidence_high_threshold', 1.5),
+        'high_vol': config.get('signal_confidence_high_vol', 0.5),
+        'low_vol': config.get('signal_confidence_low_vol', 1.0),
+    }
 
     vx_current, vx_ma63 = fetch_vx_spike_ratio(ib, config.get('vx_expiry', 'auto'))
     vx_ratio = vx_current / vx_ma63
@@ -365,7 +417,7 @@ def compute_rebalance_targets(ib: IBPySync, instruments: list[dict], config: dic
             })
         return targets
 
-    position_scale = VX_ELEVATED_SCALE if vol_regime == VolRegime.ELEVATED else 1.0
+    market_stress_scale = VX_ELEVATED_SCALE if vol_regime == VolRegime.ELEVATED else 1.0
 
     # Stage 1: signal for every instrument, no sizing yet.
     signals: dict[str, dict] = {}
@@ -373,7 +425,8 @@ def compute_rebalance_targets(ib: IBPySync, instruments: list[dict], config: dic
     for instr in instruments:
         symbol = instr['symbol']
         try:
-            signals[symbol] = _compute_signal(ib, instr, min_days, vol_target, long_only, regime_discount)
+            signals[symbol] = _compute_signal(ib, instr, min_days, vol_target, long_only, momentum_discount,
+                                              signal_confidence_cfg)
         except Exception as exc:
             log.error('Failed to compute signal for %s: %s', symbol, exc)
             errors[symbol] = str(exc)
@@ -437,9 +490,9 @@ def compute_rebalance_targets(ib: IBPySync, instruments: list[dict], config: dic
 
             scalar = compute_position_scalar(
                 s['signal_for_scalar'], s['daily_std'], vol_target, s['regime'],
-                regime_discount=regime_discount,
+                momentum_discount=momentum_discount, signal_confidence=s['signal_confidence'],
             )
-            scalar *= position_scale
+            scalar *= market_stress_scale
 
             # raw_notional is budget_constant * scalar before the optional
             # per-instrument max_notional ceiling clamp; target_notional is
@@ -478,8 +531,12 @@ def compute_rebalance_targets(ib: IBPySync, instruments: list[dict], config: dic
                 'ts1y': s['ts1y'],
                 'daily_std': s['daily_std'],
                 'hv': s['hv'],
-                'vol_scalar': s['vol_scalar'],
-                'discount': s['discount'],
+                'risk_scalar': s['risk_scalar'],
+                'momentum_discount': s['momentum_discount'],
+                'vol_ratio': s['vol_ratio'],
+                'signal_confidence_regime': s['signal_confidence_regime'],
+                'signal_confidence': s['signal_confidence'],
+                'market_stress_scale': market_stress_scale,
                 'close': s['close'],
                 'multiplier': multiplier,
                 'raw_notional': raw_notional,
@@ -560,10 +617,12 @@ def print_rebalance_report(targets: list[dict]) -> str:
             f"ts3m={_fmt(t.get('ts3m')):>7}  ts1y={_fmt(t.get('ts1y')):>7}  "
             f"close={_fmt(t.get('close'), '.2f'):>9}  dd_pct={_fmt(t.get('dd_pct'), '.2f'):>7}  "
             f"daily_std={_fmt(t.get('daily_std'), '.4f'):>7}  hv={_fmt(t.get('hv'), '.3f'):>6}  "
-            f"vol_scalar={_fmt(t.get('vol_scalar'), '.3f'):>6}  discount={_fmt(t.get('discount'), '.2f'):>5}  "
+            f"risk_scalar={_fmt(t.get('risk_scalar'), '.3f'):>6}  momentum_discount={_fmt(t.get('momentum_discount'), '.2f'):>5}  "
+            f"signal_confidence={_fmt(t.get('signal_confidence'), '.2f'):>5}  "
             f"regime={t['regime'].capitalize() if t.get('regime') else 'N/A':<10}  "
             f"vx_current={_fmt(t.get('vx_current'), '.2f'):>6}  vx_ma63={_fmt(t.get('vx_ma63'), '.2f'):>6}  "
-            f"vx_ratio={t['vx_ratio']:.3f}  vol_regime={t['vol_regime'].capitalize()}"
+            f"vx_ratio={t['vx_ratio']:.3f}  vol_regime={t['vol_regime'].capitalize()}  "
+            f"market_stress_scale={_fmt(t.get('market_stress_scale'), '.2f')}"
             + ("  INFEASIBLE (cluster cap < min contract risk in this cluster)" if t.get('infeasible') else "")
         )
     report = '\n'.join(lines)

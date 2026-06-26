@@ -252,8 +252,23 @@ class TrendRegime(str, Enum):
 class VolRegime(str, Enum):
     """TSMOM vol-spike regime from check_vol_regime() -- current vol
     (VX front-month live, or spot VIX in the backtest) vs its trailing
-    63-day MA."""
+    63-day MA. Portfolio-wide and VIX/VX-driven -- feeds market_stress_scale,
+    not signal_confidence (see SignalConfidenceRegime, which is per-
+    instrument and asset-specific instead)."""
     NORMAL = "normal"
     ELEVATED = "elevated"
     SPIKE = "spike"
     EXTREME = "extreme"
+
+
+class SignalConfidenceRegime(str, Enum):
+    """Per-instrument, asset-specific vol-regime classification from
+    classify_signal_confidence() -- THIS instrument's own short-window/
+    long-window realized-vol ratio vs its own history. NOT VIX/VX-driven
+    (contrast VolRegime, which is portfolio-wide) -- catches e.g. a corn-
+    harvest or JPY-intervention vol spike that broad-market VX/VIX has no
+    visibility into. Feeds signal_confidence, an opt-in discount on trust
+    in that instrument's own trend signal."""
+    LOW = "low"
+    NORMAL = "normal"
+    HIGH = "high"
