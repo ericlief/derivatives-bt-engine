@@ -33,10 +33,11 @@ def _price_df(n: int, drift: float, vol: float = 0.01, seed: int = 0) -> pl.Data
 
 def test_trend_strength_columns_present():
     df = calculate_trend_strength(_price_df(400, drift=0.001))
-    for col in ('trend_strength', 'ts3m', 'ts1y', 'daily_std', 'r1y_pct', 'dd', 'peak'):
+    # log_price/r1d are deliberately kept (compute_vol_ratio chains onto
+    # them) -- only the truly disposable intermediates are dropped.
+    for col in ('trend_strength', 'ts3m', 'ts1y', 'daily_std', 'r1y_pct', 'dd', 'peak', 'log_price', 'r1d'):
         assert col in df.columns
-    # dropped intermediate/raw columns
-    for col in ('log_price', 'r1d', 'w3', 'w1'):
+    for col in ('w3', 'w1'):
         assert col not in df.columns
 
 
@@ -595,7 +596,9 @@ def _vol_series(n_calm: int, n_shock: int, calm_vol: float, shock_vol: float,
         rng.normal(0.0, shock_vol, n_shock),
     ])
     close = 100 * np.exp(np.cumsum(rets))
-    return pl.DataFrame({'close': close})
+    # compute_vol_ratio chains onto calculate_trend_strength's output (it
+    # needs the 'r1d' column that produces, not raw 'close' alone).
+    return calculate_trend_strength(pl.DataFrame({'close': close}))
 
 
 def test_vol_ratio_high_for_instrument_specific_spike():

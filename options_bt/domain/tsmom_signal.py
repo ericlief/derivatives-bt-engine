@@ -122,12 +122,13 @@ def compute_vol_ratio(df: pl.DataFrame, short_window: int = 21, long_window: int
     on every signal computation. Annualization factors cancel in the
     ratio, so this works directly off raw rolling std of daily log returns.
 
-    Expects a DataFrame with a 'close' column. Returns the same frame plus
-    'hv_short', 'hv_long', 'vol_ratio' columns (vol_ratio is None/null
-    wherever hv_long isn't yet defined or is zero).
+    Expects a DataFrame that already has an 'r1d' column (daily log-return
+    diff) -- i.e. chain this onto calculate_trend_strength's output, which
+    retains 'r1d'/'log_price' for exactly this purpose, rather than on raw
+    bars directly. Returns the same frame plus 'hv_short', 'hv_long',
+    'vol_ratio' columns (vol_ratio is None/null wherever hv_long isn't yet
+    defined or is zero), with 'log_price'/'r1d' dropped again afterward.
     """
-    # df = df.with_columns(_log_price=pl.col('log_price')
-    # df = df.with_columns(_r1d=pl.col('log_price').diff(1))
     df = df.with_columns(
         hv_short=pl.col('r1d').rolling_std(short_window),
         hv_long=pl.col('r1d').rolling_std(long_window),
