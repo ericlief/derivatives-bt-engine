@@ -642,21 +642,21 @@ def fetch_ib_prices(ib, instruments: list[dict], duration: str = '3 y') -> pl.Da
         if bars is None or bars.height == 0:
             log.warning('%s: no bars returned', symbol)
             continue
-        df = bars.to_pandas()[['date', 'close']].rename(columns={'close': symbol})
-        df['date'] = df['date'].astype(str)
-        frames[symbol] = df
+        # bars is already a pl.DataFrame (IBPySync.get_historical_bars returns
+        # pl.DataFrame(bars)) -- select and rename directly, no pandas roundtrip.
+        frames[symbol] = bars.select([
+            pl.col(DATE_COL).cast(pl.Date),
+            pl.col('close').alias(symbol),
+        ])
 
     if not frames:
         raise RuntimeError('No bars returned for any instrument')
 
-    # Build wide DataFrame via inner join on date.
-    import pandas as pd
+    # Inner join across all instruments entirely in polars.
     wide = None
-    for sym, df in frames.items():
-        df = df.set_index('date')
-        wide = df if wide is None else wide.join(df, how='inner')
-    wide = wide.reset_index().rename(columns={'index': DATE_COL})
-    return pl.from_pandas(wide).with_columns(pl.col(DATE_COL).cast(pl.Date))
+    for df in frames.values():
+        wide = df if wide is None else wide.join(df, on=DATE_COL, how='inner')
+    return wide.sort(DATE_COL)
 
 
 def load_db_prices(symbols: list[str], cache_dir: Optional[str] = None) -> Optional[pl.DataFrame]:
