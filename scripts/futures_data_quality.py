@@ -149,6 +149,7 @@ def detect_low_volume(prices: pl.DataFrame, volume: Optional[pl.DataFrame],
         return {
             'limitation': 'No volume data provided — Step 2 skipped; stale detection relies on zero-return runs only.',
             'low_vol_mask': None,
+            'flagged_tickers': {},
             'overlap_count': None,
             'genuine_zero_count': None,
         }
@@ -171,6 +172,9 @@ def detect_low_volume(prices: pl.DataFrame, volume: Optional[pl.DataFrame],
         pl.col(DATE_COL).cast(pl.Date)
     )
 
+    # Per-ticker low-volume row counts (independent of stale returns).
+    flagged_tickers = {t: sum(low_vol_cols[t]) for t in tickers if sum(low_vol_cols[t]) > 0}
+
     overlap_count = None
     genuine_zero_count = None
     if stale_result and stale_result['stale_mask'] is not None:
@@ -189,6 +193,7 @@ def detect_low_volume(prices: pl.DataFrame, volume: Optional[pl.DataFrame],
 
     return {
         'low_vol_mask': low_vol_mask,
+        'flagged_tickers': flagged_tickers,
         'overlap_count': overlap_count,
         'genuine_zero_count': genuine_zero_count,
         'limitation': None,
@@ -585,6 +590,11 @@ def _print_summary(stale, volume, rolls, deletion, cov, recommendation):
     if volume['limitation']:
         print(f'  {volume["limitation"]}')
     else:
+        if volume['flagged_tickers']:
+            for t, n in sorted(volume['flagged_tickers'].items()):
+                print(f'  {t}: {n} low-volume rows (< 10% of median daily volume)')
+        else:
+            print('  No low-volume rows detected.')
         print(f'  Zero-return + low-volume overlap: {volume["overlap_count"]}')
         print(f'  Zero-return at normal volume (holidays/CBs): {volume["genuine_zero_count"]}')
 
