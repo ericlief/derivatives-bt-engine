@@ -635,9 +635,10 @@ def fetch_ib_prices(ib, instruments: list[dict], duration: str = '3 y') -> pl.Da
         signal_sym = resolve_signal_symbol(instr)
         if signal_sym != (instr.get('ib_symbol') or symbol):
             log.info('%s: using %s continuous history (signal_symbol fallback)', symbol, signal_sym)
+        log.info('%s: qualifying contract (%s @ %s)...', symbol, signal_sym, instr.get('exchange', 'CME'))
         cont = IBPySync.cont_future(signal_sym, exchange=instr.get('exchange', 'CME'))
         ib.qualify_contracts(cont)
-        log.info('Fetching %s (%s) continuous bars...', symbol, signal_sym)
+        log.info('%s: fetching %s continuous bars...', symbol, signal_sym)
         bars = ib.get_historical_bars(cont, duration=duration, bar_size='1 day')
         if bars is None or bars.height == 0:
             log.warning('%s: no bars returned', symbol)
