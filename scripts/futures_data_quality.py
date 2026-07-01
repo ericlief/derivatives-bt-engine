@@ -622,14 +622,19 @@ def _print_summary(stale, volume, rolls, deletion, cov, recommendation):
 # IB-dependent IO
 # ------------------------------------------------------------------
 
-def fetch_ib_prices(ib, instruments: list[dict], duration: str = '3 y') -> pl.DataFrame:
-    """Fetch continuous front-month daily prices for all instruments via IB.
-    Returns a wide polars DataFrame (date col + one col per symbol), with
-    the same signal_symbol substitution used by the main rebalance system."""
+def fetch_ib_prices(
+    ib, instruments: list[dict], duration: str = '3 y'
+) -> tuple[pl.DataFrame, pl.DataFrame]:
+    """Fetch continuous front-month daily OHLCV bars for all instruments via IB.
+
+    Returns (prices, volume) -- both wide polars DataFrames with a 'date' column
+    and one column per symbol.  Pass volume to run_quality_check to enable Step 2.
+    """
     from ib_tools.ibpysync import IBPySync
     from scripts.tsmom_risk_budget_diagnostic import resolve_signal_symbol
 
-    frames: dict[str, pl.DataFrame] = {}
+    price_frames: dict[str, pl.DataFrame] = {}
+    vol_frames: dict[str, pl.DataFrame] = {}
     skipped: list[str] = []
     for instr in instruments:
         symbol = instr['symbol']
@@ -659,24 +664,28 @@ def fetch_ib_prices(ib, instruments: list[dict], duration: str = '3 y') -> pl.Da
             log.warning('%s: no bars returned -- skipped', symbol)
             skipped.append(symbol)
             continue
-        # bars is already a pl.DataFrame (IBPySync.get_historical_bars returns
-        # pl.DataFrame(bars)) -- select and rename directly, no pandas roundtrip.
-        frames[symbol] = bars.select([
-            pl.col(DATE_COL).cast(pl.Date),
-            pl.col('close').alias(symbol),
-        ])
+        date_col = pl.col(DATE_COL).cast(pl.Date)
+        price_frames[symbol] = bars.select([date_col, pl.col('close').alias(symbol)])
+        if 'volume' in bars.columns:
+            vol_frames[symbol] = bars.select([date_col, pl.col('volume').alias(symbol)])
 
     if skipped:
         log.warning('Skipped %d instrument(s): %s', len(skipped), ', '.join(skipped))
 
-    if not frames:
+    if not price_frames:
         raise RuntimeError('No bars returned for any instrument')
 
-    # Inner join across all instruments entirely in polars.
-    wide = None
-    for df in frames.values():
-        wide = df if wide is None else wide.join(df, on=DATE_COL, how='inner')
-    return wide.sort(DATE_COL)
+    def _wide_join(frames: dict) -> pl.DataFrame:
+        wide = None
+        for df in frames.values():
+            wide = df if wide is None else wide.join(df, on=DATE_COL, how='inner')
+        return wide.sort(DATE_COL)
+
+    prices = _wide_join(price_frames)
+    volume = _wide_join(vol_frames) if vol_frames else None
+    if volume is None:
+        log.warning('No volume column in IB bars -- Step 2 will be skipped')
+    return prices, volume
 
 
 def load_db_prices(symbols: list[str], cache_dir: Optional[str] = None) -> Optional[pl.DataFrame]:
@@ -749,7 +758,7 @@ def main(argv=None) -> dict:
     ib = IBPySync()
     ib.connect(args.host, args.port, args.client_id)
     try:
-        ib_prices = fetch_ib_prices(ib, instruments, duration=args.duration)
+        ib_prices, ib_volume = fetch_ib_prices(ib, instruments, duration=args.duration)
     finally:
         ib.disconnect()
 
@@ -762,6 +771,7 @@ def main(argv=None) -> dict:
 
     return run_quality_check(
         ib_prices, db_prices,
+        volume=ib_volume,
         stale_run_threshold=args.stale_run_threshold,
         outlier_sigma=args.outlier_sigma,
         halflife=args.halflife,
