@@ -629,7 +629,8 @@ def fetch_ib_prices(ib, instruments: list[dict], duration: str = '3 y') -> pl.Da
     from ib_tools.ibpysync import IBPySync
     from scripts.tsmom_risk_budget_diagnostic import resolve_signal_symbol
 
-    frames = {}
+    frames: dict[str, pl.DataFrame] = {}
+    skipped: list[str] = []
     for instr in instruments:
         symbol = instr['symbol']
         signal_sym = resolve_signal_symbol(instr)
@@ -637,11 +638,26 @@ def fetch_ib_prices(ib, instruments: list[dict], duration: str = '3 y') -> pl.Da
             log.info('%s: using %s continuous history (signal_symbol fallback)', symbol, signal_sym)
         log.info('%s: qualifying contract (%s @ %s)...', symbol, signal_sym, instr.get('exchange', 'CME'))
         cont = IBPySync.cont_future(signal_sym, exchange=instr.get('exchange', 'CME'))
-        ib.qualify_contracts(cont)
+        try:
+            ib.qualify_contracts(cont)
+        except Exception as exc:
+            log.warning('%s: qualify_contracts failed (%s) -- skipped', symbol, exc)
+            skipped.append(symbol)
+            continue
+        if not cont.conId:
+            log.warning('%s: IB returned no conId -- contract not recognised, skipped', symbol)
+            skipped.append(symbol)
+            continue
         log.info('%s: fetching %s continuous bars...', symbol, signal_sym)
-        bars = ib.get_historical_bars(cont, duration=duration, bar_size='1 day')
+        try:
+            bars = ib.get_historical_bars(cont, duration=duration, bar_size='1 day')
+        except Exception as exc:
+            log.warning('%s: get_historical_bars failed (%s) -- skipped', symbol, exc)
+            skipped.append(symbol)
+            continue
         if bars is None or bars.height == 0:
-            log.warning('%s: no bars returned', symbol)
+            log.warning('%s: no bars returned -- skipped', symbol)
+            skipped.append(symbol)
             continue
         # bars is already a pl.DataFrame (IBPySync.get_historical_bars returns
         # pl.DataFrame(bars)) -- select and rename directly, no pandas roundtrip.
@@ -649,6 +665,9 @@ def fetch_ib_prices(ib, instruments: list[dict], duration: str = '3 y') -> pl.Da
             pl.col(DATE_COL).cast(pl.Date),
             pl.col('close').alias(symbol),
         ])
+
+    if skipped:
+        log.warning('Skipped %d instrument(s): %s', len(skipped), ', '.join(skipped))
 
     if not frames:
         raise RuntimeError('No bars returned for any instrument')
