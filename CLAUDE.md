@@ -11,3 +11,7 @@ When a third-party library requires pandas specifically (this comes up with port
 - Don't let a pandas conversion done for one library's sake become the ambient format for the rest of a script.
 
 When writing implementation prompts or new scripts in this project, check what data format each proposed library actually expects before assuming polars works everywhere — verify, don't assume.
+
+WHen running python commands always use `.venv/bin/python`
+
+Always git commit.
