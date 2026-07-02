@@ -73,50 +73,77 @@ def compute_log_returns(prices: pl.DataFrame) -> pl.DataFrame:
     return prices.select(exprs)
 
 
-def detect_stale_prices(returns: pl.DataFrame, run_threshold: int = STALE_RUN_THRESHOLD) -> dict:
+def detect_stale_prices(
+    returns: pl.DataFrame,
+    prices: Optional[pl.DataFrame] = None,
+    run_threshold: int = STALE_RUN_THRESHOLD,
+) -> dict:
     """
-    Step 1: flag consecutive zero-return runs per instrument.
+    Step 1: flag stale price periods per instrument using two complementary checks:
+
+    1. Consecutive zero-return runs (catches feeds that repeat the last close exactly).
+    2. Consecutive identical-price runs (catches feeds that add tiny noise to a
+       frozen price so the return is non-zero but prices are effectively unchanged).
+
+    Both checks use the same run_threshold.  ``prices`` is optional; when omitted
+    only the zero-return check runs.
 
     Returns a dict with:
-      - 'stale_mask'      : polars DataFrame (bool columns, one per ticker)
-      - 'runs'            : {ticker: list of (start_date, end_date, length)}
-      - 'flagged_tickers' : {ticker: total_flagged_rows}
-      - 'total_flagged'   : int
+      - 'stale_mask'             : polars DataFrame (bool columns, one per ticker)
+      - 'runs'                   : {ticker: list of (start_date, end_date, length)}
+      - 'repeated_price_runs'    : {ticker: list of (start_date, end_date, length)}
+      - 'flagged_tickers'        : {ticker: total_flagged_rows}
+      - 'total_flagged'          : int
     """
     tickers = ticker_cols(returns)
     dates = returns[DATE_COL].to_list()
     stale_cols = {}
     runs_by_ticker = {}
+    repeated_by_ticker = {}
     flagged_counts = {}
 
-    for t in tickers:
-        vals = returns[t].to_list()
-        is_zero = [v is not None and v == 0.0 for v in vals]
-
-        # Detect consecutive-zero runs of length >= run_threshold.
-        runs = []
+    def _find_runs(flags: list[bool]) -> list[tuple]:
+        """Return (start_date, end_date, length) for runs >= run_threshold."""
+        found = []
         i = 0
-        while i < len(is_zero):
-            if is_zero[i]:
+        while i < len(flags):
+            if flags[i]:
                 j = i
-                while j < len(is_zero) and is_zero[j]:
+                while j < len(flags) and flags[j]:
                     j += 1
-                length = j - i
-                if length >= run_threshold:
-                    runs.append((dates[i], dates[j - 1], length))
+                if j - i >= run_threshold:
+                    found.append((dates[i], dates[j - 1], j - i))
                 i = j
             else:
                 i += 1
+        return found
 
-        # Build per-row stale mask: any zero that's part of a run >= threshold.
-        run_set = set()
-        for start, end, _ in runs:
+    for t in tickers:
+        # ── Check 1: zero returns ──────────────────────────────────────────
+        vals = returns[t].to_list()
+        is_zero = [v is not None and v == 0.0 for v in vals]
+        zero_runs = _find_runs(is_zero)
+
+        # ── Check 2: repeated prices (optional) ───────────────────────────
+        repeated_runs: list[tuple] = []
+        if prices is not None and t in prices.columns:
+            pvals = prices[t].to_list()
+            is_repeat = [
+                False if k == 0 else (p is not None and pvals[k - 1] is not None and p == pvals[k - 1])
+                for k, p in enumerate(pvals)
+            ]
+            repeated_runs = _find_runs(is_repeat)
+
+        # ── Merge both into a single stale mask ───────────────────────────
+        run_set: set[int] = set()
+        for start, end, _ in zero_runs + repeated_runs:
             for k, d in enumerate(dates):
                 if start <= d <= end:
                     run_set.add(k)
         mask = [k in run_set for k in range(len(dates))]
         stale_cols[t] = mask
-        runs_by_ticker[t] = runs
+        runs_by_ticker[t] = zero_runs
+        repeated_by_ticker[t] = repeated_runs
         flagged_counts[t] = sum(mask)
 
     stale_mask = pl.DataFrame({DATE_COL: dates, **stale_cols}).with_columns(
@@ -127,6 +154,7 @@ def detect_stale_prices(returns: pl.DataFrame, run_threshold: int = STALE_RUN_TH
     return {
         'stale_mask': stale_mask,
         'runs': runs_by_ticker,
+        'repeated_price_runs': repeated_by_ticker,
         'flagged_tickers': {t: n for t, n in flagged_counts.items() if n > 0},
         'total_flagged': total,
     }
@@ -520,9 +548,9 @@ def run_quality_check(ib_prices, db_prices=None, volume=None,
     db = _to_polars_wide(db_prices) if db_prices is not None else None
     vol = _to_polars_wide(volume) if volume is not None else None
 
-    # Step 1.
+    # Step 1: zero-return runs + repeated-price runs.
     returns = compute_log_returns(ib)
-    stale = detect_stale_prices(returns, run_threshold=stale_run_threshold)
+    stale = detect_stale_prices(returns, prices=ib, run_threshold=stale_run_threshold)
 
     # Step 2.
     volume_report = detect_low_volume(ib, vol, stale_result=stale,
@@ -579,11 +607,15 @@ def _print_summary(stale, volume, rolls, deletion, cov, recommendation):
     """Print a concise human-readable summary of all six steps."""
     print('=' * 60)
     print('STEP 1 — STALE PRICE DETECTION')
-    if stale['flagged_tickers']:
-        for t, n in stale['flagged_tickers'].items():
-            for start, end, length in stale['runs'][t]:
-                print(f'  {t}: {length} consecutive zeros {start} -> {end}')
-    else:
+    anything = False
+    for t in stale['runs']:
+        for start, end, length in stale['runs'][t]:
+            print(f'  {t}: {length} consecutive zero-return rows {start} -> {end}')
+            anything = True
+        for start, end, length in stale.get('repeated_price_runs', {}).get(t, []):
+            print(f'  {t}: {length} consecutive identical prices {start} -> {end}')
+            anything = True
+    if not anything:
         print('  No stale runs detected.')
 
     print('\nSTEP 2 — VOLUME / LIQUIDITY GATE')
