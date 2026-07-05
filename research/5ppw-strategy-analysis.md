@@ -83,6 +83,53 @@ These two trades alone cost -$630, exceeding all 2026 winning trades combined.
 
 ---
 
+## Scaling to $15,000/Trade (30 Contracts)
+
+$15,000 ÷ $500 max risk per contract = 30 contracts per weekly trade.
+
+### Fees by Broker
+
+| Broker | Open | Close (win) | Close (loss) |
+|---|---|---|---|
+| **Tastytrade** | $20 | $0 | $20 |
+| IBKR Pro | $50 | $0 | $50 |
+| Schwab/ToS | $39 | $0 | $39 |
+
+Tastytrade is most cost-effective at this scale — SPX is a broad-based index option so they cap fees at **$10/leg regardless of contract count**. 30 contracts costs the same $20 to open as 2 contracts.
+
+### Slippage
+
+Far-OTM 5-point SPX spreads are thin at $0.10–$0.25 credit. Filling 30 contracts requires working the order for 1–2 minutes; expect $0.02–$0.04 slippage on the spread:
+
+| Credit | Gross Win (30 cts) | Slippage Est. | Drag |
+|---|---|---|---|
+| $0.25 (historical) | $750 | $60–$120 | 8–16% |
+| $0.10 (2026) | $300 | $60–$120 | **20–40%** |
+
+At $0.10 credit, slippage alone can eat a third of the winning trade.
+
+### Net P&L Impact (174-trade history, scaled)
+
+| | Tastytrade | IBKR Pro |
+|---|---|---|
+| Gross | $54,540 | $54,540 |
+| Fees | -$3,859 | -$9,648 |
+| Slippage (~$40/trade) | -$6,960 | -$6,960 |
+| **Net** | **$43,721 (80%)** | **$37,932 (70%)** |
+
+### Risk at Scale
+
+| Scenario | 1 contract | 30 contracts |
+|---|---|---|
+| Normal stop loss | -$75 | -$2,250 |
+| May 2026 loss | -$230 | -$6,900 |
+| March 2026 loss | -$400 | **-$12,000** |
+| Max possible loss | -$490 | **-$14,700** |
+
+At $0.10 credit: collect $300, risk $14,700 — **50:1 max-loss-to-max-gain**. A single undisciplined loss like March 2026 wipes roughly 3 years of winning trades at this scale.
+
+---
+
 ## Verdict
 
 The strategy has real positive expected value (~$10.45/trade) and the underlying structure — far-OTM weekly SPX credit spreads with a defined 4× stop — is sound. The 3.4-year track record is internally consistent. However:
