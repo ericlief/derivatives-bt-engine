@@ -103,10 +103,20 @@ KNOWN_INSTRUMENTS = {
     # digit. This is a plain dict, so the key is the real IBKR ticker; using
     # '_6J' previously meant --instruments 6J couldn't match this entry, and
     # even a literal '_6J' lookup would have sent the wrong symbol to IB.
-    'JPY': {'exchange': 'CME', 'multiplier': 12_500_000, 'cluster': 'fx'},
-    'J7':  {'exchange': 'CME', 'multiplier': 6_250_000, 'cluster': 'fx'},
-    'BRE': {'exchange': 'CME', 'multiplier': 100_000, 'cluster': 'fx'},
-    '6M':  {'exchange': 'CME', 'multiplier': 500_000, 'cluster': 'fx'},
+    #
+    # db_symbol maps IBKR tickers to their Globex root symbol in the duckdb
+    # (ohlcv_enriched.asset column, Databento CME MDP3.0 feed). Most
+    # instruments match (ES, NQ, CL, ZL, …); FX diverges:
+    #   JPY/J7  → Globex '6J'   (duckdb stores it as '6J', IB uses 'JPY'/'J7')
+    #   BRE     → Globex '6L'   (duckdb '6L', IB 'BRE')
+    #   6M      → Globex '6M'   (same in both -- no mapping needed)
+    # signal_symbol on J7: J7 is a mini (~2019 listing); borrowing full-size
+    # JPY's continuous IB history gives it the same long-run signal quality as
+    # the full-size contract -- same pattern as MZC→ZC for CBOT micro grains.
+    'JPY': {'exchange': 'CME', 'multiplier': 12_500_000, 'cluster': 'fx', 'db_symbol': '6J'},
+    'J7':  {'exchange': 'CME', 'multiplier': 6_250_000,  'cluster': 'fx', 'db_symbol': '6J', 'signal_symbol': 'JPY'},
+    'BRE': {'exchange': 'CME', 'multiplier': 100_000,    'cluster': 'fx', 'db_symbol': '6L'},
+    '6M':  {'exchange': 'CME', 'multiplier': 500_000,    'cluster': 'fx'},
 }
 
 DEFAULT_MAX_NOTIONAL = float(os.getenv('TSMOM_DEFAULT_MAX_NOTIONAL', '0')) or None
@@ -160,10 +170,16 @@ def _build_instruments(spec: str, max_notional: float, max_contracts: int) -> li
         known = KNOWN_INSTRUMENTS[symbol]
         ib_symbol = known.get('ib_symbol') or symbol
         signal_symbol = known.get('signal_symbol') or ib_symbol
+        # db_symbol: Globex root symbol in the duckdb (ohlcv_enriched.asset).
+        # Explicit when IB and Globex names diverge (e.g. J7→6J, BRE→6L);
+        # falls back to signal_symbol (thin contracts borrow their full-size
+        # sibling's duckdb data too) then ib_symbol.
+        db_symbol = known.get('db_symbol') or signal_symbol
         instruments.append({
             'symbol': symbol,
             'ib_symbol': ib_symbol,
             'signal_symbol': signal_symbol,
+            'db_symbol': db_symbol,
             'exchange': known['exchange'],
             'expiry': 'auto',
             'multiplier': known['multiplier'],

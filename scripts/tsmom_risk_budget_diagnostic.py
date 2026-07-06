@@ -59,8 +59,33 @@ from scipy.optimize import minimize
 
 log = logging.getLogger(__name__)
 
-DEFAULT_HALFLIFE_DAYS = 60.0
-DEFAULT_MIN_SYNCED_ROWS = 252  # ~1 trading year of common history
+DEFAULT_HALFLIFE_DAYS    = 60.0
+DEFAULT_MIN_SYNCED_ROWS  = 252    # ~1 trading year of common history
+DEFAULT_LOOKBACK_DAYS    = 1100   # ~3 calendar years; gives ~750 trading days
+DEFAULT_DB_PATH          = '/home/dev/fin/db/globex_mdp_3.0.duckdb'
+
+# Continuous front-month from ohlcv_enriched: nearest expiry per date,
+# pre-expiry bars only.  Parameterised by asset and a lookback date cutoff
+# (two positional ? placeholders) to keep it fast on the full duckdb.
+_DB_CONT_FRONT_SQL = """
+WITH bars AS (
+    SELECT ts_event::date AS date, close, expiration
+    FROM ohlcv_enriched
+    WHERE asset = ?
+      AND instrument_class = 'F' AND security_type = 'FUT'
+      AND expiration IS NOT NULL
+      AND ts_event < CAST(expiration AS DATE)
+      AND ts_event::date >= ?::DATE
+),
+ranked AS (
+    SELECT *, row_number() OVER (PARTITION BY date ORDER BY expiration ASC) AS rn
+    FROM bars
+)
+SELECT date, close
+FROM ranked
+WHERE rn = 1
+ORDER BY date
+"""
 
 
 # ------------------------------------------------------------------
@@ -73,6 +98,14 @@ def resolve_signal_symbol(instr: dict) -> str:
     history backs this instrument" never silently diverges from what the
     live system actually does."""
     return instr.get('signal_symbol') or instr.get('ib_symbol') or instr['symbol']
+
+
+def resolve_db_symbol(instr: dict) -> str:
+    """Globex root symbol for this instrument in ohlcv_enriched.asset.
+    Resolution: explicit db_symbol > signal_symbol (thin micros already
+    borrow their full-size sibling's history) > ib_symbol > symbol.
+    Examples: J7→6J, BRE→6L, MZC→ZC (via signal_symbol), SIL→SI."""
+    return instr.get('db_symbol') or instr.get('signal_symbol') or instr.get('ib_symbol') or instr['symbol']
 
 
 def log_signal_symbol_fallbacks(instruments: list[dict]) -> dict[str, str]:
@@ -324,6 +357,42 @@ def fetch_all_continuous_bars(ib, instruments: list[dict], duration: str = '3 y'
     return price_frames
 
 
+def fetch_db_bars(db_con, instr: dict, lookback_days: int = DEFAULT_LOOKBACK_DAYS) -> pd.DataFrame:
+    """Continuous front-month daily bars from the duckdb for one instrument.
+    Uses resolve_db_symbol to map IBKR tickers to Globex root symbols
+    (e.g. J7→6J, BRE→6L) so FX and other divergent names fetch correctly."""
+    db_symbol = resolve_db_symbol(instr)
+    cutoff = (pd.Timestamp.today() - pd.Timedelta(days=lookback_days)).strftime('%Y-%m-%d')
+    result = db_con.execute(_DB_CONT_FRONT_SQL, [db_symbol, cutoff]).fetchdf()
+    if result.empty:
+        return pd.DataFrame(columns=['date', 'close'])
+    result['date'] = pd.to_datetime(result['date'])
+    return result[['date', 'close']]
+
+
+def fetch_all_db_bars(instruments: list[dict], db_path: str = DEFAULT_DB_PATH,
+                       lookback_days: int = DEFAULT_LOOKBACK_DAYS) -> dict[str, pd.DataFrame]:
+    """Fetch continuous front-month bars from duckdb for every instrument.
+    No IB connection required -- uses the local Databento CME MDP3.0 feed.
+    Logs the db_symbol used for each instrument so it's visible when the
+    IBKR name and Globex name diverge (J7→6J, BRE→6L, MZC→ZC, etc.)."""
+    import duckdb
+    con = duckdb.connect(db_path, read_only=True)
+    try:
+        price_frames = {}
+        for instr in instruments:
+            symbol = instr['symbol']
+            db_symbol = resolve_db_symbol(instr)
+            if db_symbol != symbol:
+                log.info('%s: fetching duckdb bars under Globex symbol %s', symbol, db_symbol)
+            else:
+                log.info('Fetching duckdb bars for %s...', symbol)
+            price_frames[symbol] = fetch_db_bars(con, instr, lookback_days=lookback_days)
+    finally:
+        con.close()
+    return price_frames
+
+
 def parse_args(argv=None):
     """argv: explicit CLI-style arg list (e.g. ['--account-equity', '80000']),
     for calling main()/parse_args() directly from a notebook instead of a
@@ -349,6 +418,17 @@ def parse_args(argv=None):
     p.add_argument('--min-synced-rows', type=int, default=DEFAULT_MIN_SYNCED_ROWS,
                    help='Minimum common-date-window rows required after synchronization '
                         '(default: %(default)s)')
+    p.add_argument('--data-source', choices=['ib', 'db'], default='ib',
+                   help='Price history source: "ib" (live IB connection, default) or '
+                        '"db" (local duckdb, no IB required -- uses Globex root symbols '
+                        'via resolve_db_symbol, e.g. J7→6J, BRE→6L). '
+                        'db mode skips current-system weights (no IB = no VX gate).')
+    p.add_argument('--db-path', default=DEFAULT_DB_PATH,
+                   help='Path to the duckdb file (used only with --data-source db, '
+                        'default: %(default)s)')
+    p.add_argument('--lookback-days', type=int, default=DEFAULT_LOOKBACK_DAYS,
+                   help='Calendar days of history to fetch from duckdb '
+                        '(used only with --data-source db, default: %(default)s ≈ 3 years)')
     p.add_argument('--host', default='127.0.0.1')
     p.add_argument('--port', type=int, default=7496)
     p.add_argument('--client-id', type=int, default=19)
@@ -375,32 +455,44 @@ def main(argv=None):
 
     log_signal_symbol_fallbacks(instruments)
 
-    ib = IBPySync()
-    ib.connect(args.host, args.port, args.client_id)
-    try:
-        price_frames = fetch_all_continuous_bars(ib, instruments)
+    config = {
+        'vol_target': args.vol_target,
+        'max_contracts': args.max_contracts,
+        'long_only': False,
+        'momentum_discount': args.momentum_discount,
+        'account_equity': args.account_equity,
+        'target_portfolio_vol': args.target_portfolio_vol,
+        'max_cluster_risk_pct': args.max_cluster_risk_pct,
+        'min_conviction': args.min_conviction,
+        'max_lot_overrun_pct': args.max_lot_overrun_pct,
+    }
+
+    if args.data_source == 'db':
+        # Offline path: fetch from local duckdb, no IB connection required.
+        # current_weights will be empty (VX gate / contract resolution need IB).
+        log.info('data_source=db — fetching from %s, no IB connection', args.db_path)
+        price_frames = fetch_all_db_bars(instruments, args.db_path, args.lookback_days)
         prices = synchronize_price_frames(price_frames, min_rows=args.min_synced_rows)
         returns = compute_log_returns(prices)
         cov = compute_ewm_covariance(returns, halflife=args.halflife)
-
         erc_w = compute_erc_weights(cov)
         hrp_w = compute_hrp_weights(returns)
-
-        config = {
-            'vol_target': args.vol_target,
-            'max_contracts': args.max_contracts,
-            'long_only': False,
-            'momentum_discount': args.momentum_discount,
-            'account_equity': args.account_equity,
-            'target_portfolio_vol': args.target_portfolio_vol,
-            'max_cluster_risk_pct': args.max_cluster_risk_pct,
-            'min_conviction': args.min_conviction,
-            'max_lot_overrun_pct': args.max_lot_overrun_pct,
-        }
-        targets = compute_rebalance_targets(ib, instruments, config)
-        current_w = compute_current_system_weights(targets)
-    finally:
-        ib.disconnect()
+        targets = []
+        current_w = pd.Series(dtype=float)
+    else:
+        ib = IBPySync()
+        ib.connect(args.host, args.port, args.client_id)
+        try:
+            price_frames = fetch_all_continuous_bars(ib, instruments)
+            prices = synchronize_price_frames(price_frames, min_rows=args.min_synced_rows)
+            returns = compute_log_returns(prices)
+            cov = compute_ewm_covariance(returns, halflife=args.halflife)
+            erc_w = compute_erc_weights(cov)
+            hrp_w = compute_hrp_weights(returns)
+            targets = compute_rebalance_targets(ib, instruments, config)
+            current_w = compute_current_system_weights(targets)
+        finally:
+            ib.disconnect()
 
     report = build_comparison_report(instruments, current_w, erc_w, hrp_w)
     summary = summarize_divergence(report)

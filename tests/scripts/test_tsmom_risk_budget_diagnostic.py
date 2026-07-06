@@ -19,10 +19,38 @@ from scripts.tsmom_risk_budget_diagnostic import (
     compute_log_returns,
     correlation_view,
     log_signal_symbol_fallbacks,
+    resolve_db_symbol,
     resolve_signal_symbol,
     summarize_divergence,
     synchronize_price_frames,
 )
+
+
+# ── resolve_db_symbol ────────────────────────────────────────────────────────
+
+def test_resolve_db_symbol_prefers_explicit_db_symbol():
+    # J7 is the IBKR mini JPY ticker; Globex/duckdb stores it as '6J'.
+    instr = {'symbol': 'J7', 'ib_symbol': 'J7', 'signal_symbol': 'JPY', 'db_symbol': '6J'}
+    assert resolve_db_symbol(instr) == '6J'
+
+
+def test_resolve_db_symbol_falls_back_to_signal_symbol():
+    # MZC has signal_symbol='ZC' (borrows full-size corn history); duckdb
+    # also has ZC, not MZC -- so signal_symbol is the right duckdb symbol.
+    instr = {'symbol': 'MZC', 'ib_symbol': 'MZC', 'signal_symbol': 'ZC'}
+    assert resolve_db_symbol(instr) == 'ZC'
+
+
+def test_resolve_db_symbol_falls_back_to_ib_symbol():
+    # SIL uses ib_symbol='SI' (ticker collision, not a history substitute);
+    # duckdb has SI, so ib_symbol is correct for the duckdb lookup too.
+    instr = {'symbol': 'SIL', 'ib_symbol': 'SI'}
+    assert resolve_db_symbol(instr) == 'SI'
+
+
+def test_resolve_db_symbol_falls_back_to_symbol():
+    instr = {'symbol': 'ES'}
+    assert resolve_db_symbol(instr) == 'ES'
 
 
 # ── resolve_signal_symbol / log_signal_symbol_fallbacks ─────────────────────
