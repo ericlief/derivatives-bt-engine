@@ -750,13 +750,25 @@ ORDER BY asset, ts_event
 """
 
 
-def load_db_prices(symbols: list[str], cache_dir: Optional[str] = None) -> Optional[pl.DataFrame]:
+_DEFAULT_DB_PATH = "/home/dev/fin/db/globex_mdp_3.0.duckdb"
+
+
+def load_db_prices(
+    symbols: list[str],
+    cache_dir: Optional[str] = None,
+    db_path: Optional[str] = None,
+) -> Optional[pl.DataFrame]:
     """Load continuous front-month close prices for all symbols from the local DuckDB.
 
     Strategy:
     - Symbols with an existing per-symbol parquet cache are loaded from disk.
     - Remaining symbols are fetched in ONE batched DuckDB query (asset IN (...)),
       then split and cached per symbol so subsequent calls hit the parquet fast path.
+
+    Args:
+        symbols:   instrument tickers to load.
+        cache_dir: directory for per-symbol parquet caches (default: ../.cache/futures/).
+        db_path:   path to the local DuckDB file (default: _DEFAULT_DB_PATH).
 
     Returns a wide polars DataFrame (date + one col per symbol), or None if nothing loaded.
     """
@@ -767,7 +779,7 @@ def load_db_prices(symbols: list[str], cache_dir: Optional[str] = None) -> Optio
         os.path.join(os.path.dirname(__file__), '..', '.cache', 'futures'))
     os.makedirs(cache_dir, exist_ok=True)
 
-    db_path = "/home/dev/fin/db/globex_mdp_3.0.duckdb"
+    db_path = db_path or _DEFAULT_DB_PATH
 
     def _parquet_path(sym: str) -> str:
         return os.path.join(cache_dir, f'{sym}_ohlcv.parquet')
@@ -842,6 +854,8 @@ def parse_args(argv=None):
                    help='IB historical data duration string (default: %(default)s)')
     p.add_argument('--include-db', action='store_true',
                    help='Also load DB rolling view prices and compare (requires local duckdb cache)')
+    p.add_argument('--db-path', default=None,
+                   help=f'Path to local DuckDB file (default: {_DEFAULT_DB_PATH})')
     p.add_argument('--stale-run-threshold', type=int, default=STALE_RUN_THRESHOLD)
     p.add_argument('--outlier-sigma', type=float, default=OUTLIER_SIGMA)
     p.add_argument('--halflife', type=float, default=60.0)
@@ -875,7 +889,7 @@ def main(argv=None) -> dict:
     db_prices = None
     if args.include_db:
         tickers = [instr['symbol'] for instr in instruments]
-        db_prices = load_db_prices(tickers)
+        db_prices = load_db_prices(tickers, db_path=args.db_path)
         if db_prices is None:
             log.warning('DB prices unavailable -- proceeding with IB only')
 
