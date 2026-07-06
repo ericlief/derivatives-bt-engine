@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
@@ -29,14 +28,39 @@ import polars as pl
 
 log = logging.getLogger(__name__)
 
-DATE_COL = 'date'
-STALE_RUN_THRESHOLD   = 3
-OUTLIER_SIGMA         = 5.0
-PAIRWISE_N_TOLERANCE  = 0.20
-VOL_DIFF_THRESHOLD    = 0.05
-COV_DIFF_THRESHOLD    = 0.01
-FREQUENCY             = 252
-TRAILING_STD_WINDOW   = 60     # days for auto roll-detection
+# ── Tunable defaults (all overridable via function args or CLI flags) ──────────
+DATE_COL               = 'date'
+STALE_RUN_THRESHOLD    = 3
+OUTLIER_SIGMA          = 5.0
+PAIRWISE_N_TOLERANCE   = 0.20
+VOL_DIFF_THRESHOLD     = 0.05
+COV_DIFF_THRESHOLD     = 0.01
+FREQUENCY              = 252
+TRAILING_STD_WINDOW    = 60    # days for auto roll-detection (Step 3)
+DEFAULT_HALFLIFE        = 60.0  # EWM covariance halflife in days (Step 5)
+VOLUME_THRESHOLD_FACTOR = 0.1   # flag rows below this fraction of median volume (Step 2)
+
+# ── Infrastructure ─────────────────────────────────────────────────────────────
+_DEFAULT_DB_PATH = '/home/dev/fin/db/globex_mdp_3.0.duckdb'
+
+_MULTI_ASSET_SQL = """
+WITH bars AS (
+    SELECT asset, ts_event, close, expiration
+    FROM ohlcv_enriched
+    WHERE asset IN ({placeholders})
+      AND instrument_class = 'F' AND security_type = 'FUT'
+      AND expiration IS NOT NULL
+      AND ts_event < CAST(expiration AS DATE)
+),
+ranked AS (
+    SELECT *, row_number() OVER (PARTITION BY asset, ts_event ORDER BY expiration ASC) AS rn
+    FROM bars
+)
+SELECT asset, ts_event, close
+FROM ranked
+WHERE rn = 1
+ORDER BY asset, ts_event
+"""
 
 
 # ------------------------------------------------------------------
@@ -166,7 +190,7 @@ def detect_stale_prices(
 
 def detect_low_volume(prices: pl.DataFrame, volume: Optional[pl.DataFrame],
                       stale_result: Optional[dict] = None,
-                      volume_threshold_factor: float = 0.1) -> dict:
+                      volume_threshold_factor: float = VOLUME_THRESHOLD_FACTOR) -> dict:
     """
     Step 2: flag low-volume rows and cross-reference with stale-return flags.
 
@@ -355,7 +379,7 @@ def assess_deletion(returns: pl.DataFrame, stale_result: dict,
 
 def compare_covariance_matrices(ib_prices: pl.DataFrame,
                                   db_prices: Optional[pl.DataFrame] = None,
-                                  halflife: float = 60.0,
+                                  halflife: float = DEFAULT_HALFLIFE,
                                   cov_diff_threshold: float = COV_DIFF_THRESHOLD,
                                   vol_diff_threshold: float = VOL_DIFF_THRESHOLD,
                                   frequency: int = FREQUENCY) -> dict:
@@ -537,8 +561,8 @@ def run_quality_check(ib_prices, db_prices=None, volume=None,
                        pairwise_n_tolerance: float = PAIRWISE_N_TOLERANCE,
                        vol_diff_threshold: float = VOL_DIFF_THRESHOLD,
                        cov_diff_threshold: float = COV_DIFF_THRESHOLD,
-                       halflife: float = 60.0,
-                       volume_threshold_factor: float = 0.1,
+                       halflife: float = DEFAULT_HALFLIFE,
+                       volume_threshold_factor: float = VOLUME_THRESHOLD_FACTOR,
                        print_report: bool = True) -> dict:
     """
     Run all six quality-check steps on the provided price data.
@@ -730,29 +754,6 @@ def fetch_ib_prices(
     return prices, volume
 
 
-_MULTI_ASSET_SQL = """
-WITH bars AS (
-    SELECT asset, ts_event, close, expiration
-    FROM ohlcv_enriched
-    WHERE asset IN ({placeholders})
-      AND instrument_class = 'F' AND security_type = 'FUT'
-      AND expiration IS NOT NULL
-      AND ts_event < CAST(expiration AS DATE)
-),
-ranked AS (
-    SELECT *, row_number() OVER (PARTITION BY asset, ts_event ORDER BY expiration ASC) AS rn
-    FROM bars
-)
-SELECT asset, ts_event, close
-FROM ranked
-WHERE rn = 1
-ORDER BY asset, ts_event
-"""
-
-
-_DEFAULT_DB_PATH = "/home/dev/fin/db/globex_mdp_3.0.duckdb"
-
-
 def load_db_prices(
     symbols: list[str],
     cache_dir: Optional[str] = None,
@@ -858,7 +859,7 @@ def parse_args(argv=None):
                    help=f'Path to local DuckDB file (default: {_DEFAULT_DB_PATH})')
     p.add_argument('--stale-run-threshold', type=int, default=STALE_RUN_THRESHOLD)
     p.add_argument('--outlier-sigma', type=float, default=OUTLIER_SIGMA)
-    p.add_argument('--halflife', type=float, default=60.0)
+    p.add_argument('--halflife', type=float, default=DEFAULT_HALFLIFE)
     p.add_argument('--host', default='127.0.0.1')
     p.add_argument('--port', type=int, default=7496)
     p.add_argument('--client-id', type=int, default=22)

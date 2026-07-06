@@ -15,3 +15,19 @@ When writing implementation prompts or new scripts in this project, check what d
 WHen running python commands always use `.venv/bin/python`
 
 Always git commit.
+
+## Constants and defaults
+
+Tunable defaults and infrastructure constants (SQL strings, file paths, numeric thresholds) belong at the **top of the file** in a clearly labelled constants block — not inline in function signatures or buried near the function that happens to use them first. Function signatures reference the constant by name; the constant definition is the single place to change the value.
+
+```python
+# ── Tunable defaults ───────────────────────────────────────────────
+DEFAULT_HALFLIFE        = 60.0
+VOLUME_THRESHOLD_FACTOR = 0.1
+
+# ── Infrastructure ─────────────────────────────────────────────────
+_DEFAULT_DB_PATH = '/path/to/db'
+_SOME_SQL = """..."""
+
+def my_func(halflife: float = DEFAULT_HALFLIFE): ...
+```
