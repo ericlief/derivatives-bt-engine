@@ -730,35 +730,103 @@ def fetch_ib_prices(
     return prices, volume
 
 
+_MULTI_ASSET_SQL = """
+WITH bars AS (
+    SELECT asset, ts_event, close, expiration
+    FROM ohlcv_enriched
+    WHERE asset IN ({placeholders})
+      AND instrument_class = 'F' AND security_type = 'FUT'
+      AND expiration IS NOT NULL
+      AND ts_event < CAST(expiration AS DATE)
+),
+ranked AS (
+    SELECT *, row_number() OVER (PARTITION BY asset, ts_event ORDER BY expiration ASC) AS rn
+    FROM bars
+)
+SELECT asset, ts_event, close
+FROM ranked
+WHERE rn = 1
+ORDER BY asset, ts_event
+"""
+
+
 def load_db_prices(symbols: list[str], cache_dir: Optional[str] = None) -> Optional[pl.DataFrame]:
-    """Load prices from the local duckdb/parquet cache (FuturesDataLoader).
-    Returns wide polars DataFrame, or None if unavailable for any symbol."""
+    """Load continuous front-month close prices for all symbols from the local DuckDB.
+
+    Strategy:
+    - Symbols with an existing per-symbol parquet cache are loaded from disk.
+    - Remaining symbols are fetched in ONE batched DuckDB query (asset IN (...)),
+      then split and cached per symbol so subsequent calls hit the parquet fast path.
+
+    Returns a wide polars DataFrame (date + one col per symbol), or None if nothing loaded.
+    """
     import os
-    from options_bt.domain.futures_dataloader import FuturesDataLoader
+    import duckdb
 
     cache_dir = cache_dir or os.path.normpath(
         os.path.join(os.path.dirname(__file__), '..', '.cache', 'futures'))
     os.makedirs(cache_dir, exist_ok=True)
 
-    frames = {}
+    db_path = "/home/dev/fin/db/globex_mdp_3.0.duckdb"
+
+    def _parquet_path(sym: str) -> str:
+        return os.path.join(cache_dir, f'{sym}_ohlcv.parquet')
+
+    frames: dict[str, pl.DataFrame] = {}
+
+    # ── Fast path: load already-cached symbols from parquet ──────────────────
+    need_db = []
     for sym in symbols:
+        p = _parquet_path(sym)
+        if os.path.exists(p):
+            try:
+                df = pl.read_parquet(p)
+                frames[sym] = df.select([
+                    pl.col('ts_event').cast(pl.Date).alias(DATE_COL),
+                    pl.col('close').alias(sym),
+                ])
+                log.info('DB cache hit: %s (%d rows)', sym, len(df))
+            except Exception as exc:
+                log.warning('DB: failed to read parquet for %s (%s) -- will re-query', sym, exc)
+                need_db.append(sym)
+        else:
+            need_db.append(sym)
+
+    # ── Slow path: one batched DuckDB query for all cache-miss symbols ────────
+    if need_db:
+        log.info('DB: querying %d symbol(s) in one pass: %s', len(need_db), need_db)
+        placeholders = ', '.join('?' * len(need_db))
+        sql = _MULTI_ASSET_SQL.format(placeholders=placeholders)
         try:
-            df = FuturesDataLoader(asset=sym, data_dir=cache_dir,
-                                    use_preprocessed=True, save_preprocessed=True).ohlcv
-            # ohlcv returns a polars DataFrame with ts_event + close columns.
-            frames[sym] = df.select(['ts_event', 'close']).rename(
-                {'ts_event': DATE_COL, 'close': sym}
-            )
+            con = duckdb.connect(db_path, read_only=True)
+            try:
+                raw = con.sql(sql, params=need_db).pl()
+            finally:
+                con.close()
+
+            for sym in need_db:
+                sym_df = raw.filter(pl.col('asset') == sym).drop('asset')
+                if sym_df.is_empty():
+                    log.warning('DB: no rows for %s', sym)
+                    continue
+                sym_df = sym_df.with_columns(pl.col('ts_event').cast(pl.Date)).sort('ts_event')
+                # Cache for future runs.
+                sym_df.write_parquet(_parquet_path(sym))
+                frames[sym] = sym_df.select([
+                    pl.col('ts_event').alias(DATE_COL),
+                    pl.col('close').alias(sym),
+                ])
+                log.info('DB: fetched and cached %s (%d rows)', sym, len(sym_df))
         except Exception as exc:
-            log.warning('DB: could not load %s (%s)', sym, exc)
+            log.warning('DB: batched query failed (%s)', exc)
 
     if not frames:
         return None
 
     wide = None
-    for sym, df in frames.items():
+    for df in frames.values():
         wide = df if wide is None else wide.join(df, on=DATE_COL, how='inner')
-    return wide.with_columns(pl.col(DATE_COL).cast(pl.Date)).sort(DATE_COL)
+    return wide.sort(DATE_COL)
 
 
 # ------------------------------------------------------------------
