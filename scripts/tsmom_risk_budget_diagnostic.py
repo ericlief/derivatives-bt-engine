@@ -446,7 +446,8 @@ def main(argv=None):
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(name)s [%(levelname)s] %(message)s')
 
     from ib_tools.ibpysync import IBPySync
-    from options_bt.live.run_tsmom_rebalance import KNOWN_INSTRUMENTS, _build_instruments
+    from options_bt.domain.instruments import INSTRUMENTS as KNOWN_INSTRUMENTS
+    from options_bt.live.run_tsmom_rebalance import _build_instruments
     from options_bt.live.tsmom_rebalance import compute_rebalance_targets
 
     args = parse_args(argv)
