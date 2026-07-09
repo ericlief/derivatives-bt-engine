@@ -1962,10 +1962,23 @@ class MultiLegOptionPosition(BaseOptionPosition):
             
             # Retrieve and construct legs for the spread
             n_legs = len(config.legs)
+            # Iron condor signals use put_leg1_/put_leg2_/call_leg1_/call_leg2_
+            # column prefixes (see _pair_iron_condor_spread_legs), not the
+            # generic leg1_/leg2_/... prefixes every other spread type uses.
+            if config.spread_type == OptionSpreadType.IRON_CONDOR:
+                leg_prefixes = ['put_leg1_', 'put_leg2_', 'call_leg1_', 'call_leg2_']
+                # Iron condor pairing never coalesces underlying_last into a
+                # shared column the way vertical spreads do -- it's duplicated
+                # per leg instead (same value on every leg), so read it off
+                # leg 1's copy.
+                underlying_last = getattr(trade_signal, leg_prefixes[0] + 'underlying_last')
+            else:
+                leg_prefixes = [f"leg{i+1}_" for i in range(n_legs)]
+                underlying_last = trade_signal.underlying_last
             legs = []
             for i in range(n_legs):
                 # Get keys
-                leg_n = f"leg{i+1}_"
+                leg_n = leg_prefixes[i]
                 quantity = config.quantity * config.leg_ratios[i]  # effective quantity
                 option_type = config.legs[i].option_type
                 position_side = config.legs[i].position_side
@@ -1993,14 +2006,14 @@ class MultiLegOptionPosition(BaseOptionPosition):
                 if entry_dte is None or pd.isna(entry_dte):
                     logger.error(f"Missing dte value/s in trade signal on {trade_signal.Index}")
                     return None
-                
+
                 # Entry price (midpoint_price)
                 price_str = leg_n + 'midpoint_price'
                 entry_price = getattr(trade_signal, price_str)
                 if entry_price is None or pd.isna(entry_price):
                     logger.error(f"Missing midpoint price value/s in trade signal on {trade_signal.Index}")
                     return None
-                
+
                 multiplier = getattr(config, 'multiplier', 100)
 
                 position = SingleLegOptionPosition(
@@ -2015,7 +2028,7 @@ class MultiLegOptionPosition(BaseOptionPosition):
                     entry_price=abs(entry_price),
                     entry_delta=entry_delta,
                     entry_dte=entry_dte,
-                    underlying_entry=trade_signal.underlying_last,
+                    underlying_entry=underlying_last,
                     close_date=close_date,
                 )
 
@@ -2026,12 +2039,12 @@ class MultiLegOptionPosition(BaseOptionPosition):
             if entry_price is None:
                 logger.error(f"Missing spread price for trade signal on {trade_signal.Index}")
                 return None
-                
+
             position_side = PositionSide('short') if entry_price >= 0 else PositionSide('long')
             # Adjust entry price sign based on position side
             # signed_entry_price = -entry_price if PositionSide.is_long(position_side) else entry_price
-         
-            
+
+
             # Validate dte value
             # n_legs = len(config.legs)
             # for i in range(n_legs, 1):
@@ -2039,7 +2052,7 @@ class MultiLegOptionPosition(BaseOptionPosition):
             #     if not hasattr(trade_signal, leg_prefix + 'dte') or pd.isna(getattr(trade_signal, leg_prefix + 'dte')):
             #         logger.error(f"Missing dte value in trade signal on leg {i} of {trade_signal.Index}")
             #         return None
-            entry_dte = getattr(trade_signal, 'leg1_dte')   
+            entry_dte = getattr(trade_signal, leg_prefixes[0] + 'dte')
             
             # Get margin required from signal if available, otherwise use config
             margin_required = trade_signal.margin_required if hasattr(trade_signal, 'margin_required') else logger.warning(f"Missing margin required for trade signal on {trade_signal.Index}")
@@ -2058,7 +2071,7 @@ class MultiLegOptionPosition(BaseOptionPosition):
                 expire_date=trade_signal.expire_date,
                 entry_price=abs(entry_price),  # Store positive price, use signed accessors
                 entry_dte=entry_dte,
-                underlying_entry=trade_signal.underlying_last,
+                underlying_entry=underlying_last,
                 spread_width=trade_signal.spread_width,
                 margin_required=margin_required,
                 close_date=close_date,

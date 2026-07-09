@@ -136,7 +136,7 @@ class OptionsDataLoader(BaseDataLoader):
         logger.info("Preprocessing options chain data...")
         
         # Make a copy to avoid modifying the original
-        df = options_chain.copy()
+        df = option_chain.copy()
         
         # Normalize the DataFrame index if needed - more efficient approach
         try:
@@ -165,41 +165,16 @@ class OptionsDataLoader(BaseDataLoader):
         
         # Check and fix expire_date issues
         if 'expire_date' in df.columns:
-            # Count invalid timestamps
-            invalid_dates = 0
-            fixed_dates = 0
-            
-            # Sample a few rows to check if fixes are needed
-            sample_size = min(100, len(df))
-            sample_rows = df.sample(n=sample_size) if sample_size > 0 else df
-            
-            needs_fixing = False
-            for _, row in sample_rows.iterrows():
-                if row['expire_date'] is not None and not isinstance(row['expire_date'], pd.Timestamp):
-                    needs_fixing = True
-                    break
-            
-            # Only process if we detected issues in the sample
-            if needs_fixing:
-                logger.info("Fixing invalid expire_date values...")
-                # Check for any non-Timestamp objects in expire_date
-                for i, row in df.iterrows():
-                    if row['expire_date'] is not None and not isinstance(row['expire_date'], pd.Timestamp):
-                        invalid_dates += 1
-                        try:
-                            # Try to convert to Timestamp
-                            df.at[i, 'expire_date'] = pd.Timestamp(row['expire_date'])
-                            fixed_dates += 1
-                        except:
-                            # If conversion fails, set to NaT (pandas missing timestamp)
-                            df.at[i, 'expire_date'] = pd.NaT
-                
-                logger.info(f"Fixed {fixed_dates} of {invalid_dates} invalid expire_date values")
-            
+            # Vectorized coercion to Timestamp (invalid/unparseable values -> NaT);
+            # equivalent to, but far faster than, a per-row iterrows()+.at[] loop.
+            null_before = df['expire_date'].isna().sum()
+            df['expire_date'] = pd.to_datetime(df['expire_date'], errors='coerce')
+            newly_invalid = df['expire_date'].isna().sum() - null_before
+            if newly_invalid > 0:
+                logger.info(f"{newly_invalid} expire_date values could not be parsed and were set to NaT")
+
             # Normalize all expire_dates to remove time component
             logger.info("Normalizing expire_date values...")
-            df['expire_date'] = pd.to_datetime(df['expire_date'])
-            # Use .dt accessor for Series objects instead of directly calling floor
             df['expire_date'] = df['expire_date'].dt.normalize()
             
             # Drop rows with missing expire_dates

@@ -187,7 +187,14 @@ class Backtester:
             logger.info(f"Calculating margin requirements for multileg trade signals for {config.quantity} | {config.option_strategy} | {config.spread_type}")
             if 'spread_width' not in signals:
                 logger.warning(f"Spread width not found in multileg signals. Calculating.")
-                signals['spread_width'] = abs(signals["leg1_strike"] - signals["leg2_strike"])
+                if config.spread_type == OptionSpreadType.IRON_CONDOR:
+                    # Iron condor signals carry put_width/call_width (no generic
+                    # leg1_strike/leg2_strike columns) -- risk is bounded by
+                    # whichever wing is wider, matching
+                    # MultiLegOptionPosition.max_risk's convention.
+                    signals['spread_width'] = signals[['put_width', 'call_width']].max(axis=1)
+                else:
+                    signals['spread_width'] = abs(signals["leg1_strike"] - signals["leg2_strike"])
 
             # Filter out trades with excessive spread width if max_spread_width is set
             if config.max_spread_width is not None:
@@ -206,7 +213,7 @@ class Backtester:
                 else:
                     logger.info('Calculating margin requirements for multileg position')
                     original_count = len(signals)
-                    if config.option_strategy in [OptionStrategy.BULL_PUT_CREDIT_SPREAD, OptionStrategy.BEAR_CALL_CREDIT_SPREAD]:
+                    if config.option_strategy in [OptionStrategy.BULL_PUT_CREDIT_SPREAD, OptionStrategy.BEAR_CALL_CREDIT_SPREAD, OptionStrategy.IRON_CONDOR]:
                         # For credit spreads: max loss = (spread_width - credit) * 100 * qty
                         credit = signals['spread_price'].clip(lower=0)  # ensure non-negative credit
                         signals['margin_required'] = (signals['spread_width'] - credit) * config.quantity * config.multiplier

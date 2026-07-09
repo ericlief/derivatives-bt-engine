@@ -857,9 +857,15 @@ class OptionSignalGenerator(BaseSignalGenerator):
         # Short butterfly: sell wing options, buy 2x middle option
         else:
             paired["spread_price"] = 2 * paired["leg2_price"] - paired["leg1_price"] - paired["leg3_price"]
-        
+
+        # Set the index back to the date column (TradeManager's day-loop
+        # requires signals to be indexed by date, like the other _pair_*
+        # methods -- without this, `paired` keeps a plain RangeIndex and no
+        # trade ever gets matched to a simulated date).
+        paired = paired.set_index("date")
+
         logger.debug(f"Paired {len(paired)} valid butterfly spreads")
-        
+
         return paired
 
     def _pair_iron_condor_spread_legs(self, leg_signals: List[pd.DataFrame], spread_type: OptionSpreadType) -> pd.DataFrame:
@@ -884,17 +890,20 @@ class OptionSignalGenerator(BaseSignalGenerator):
         call_leg1 = leg_signals[2].copy().reset_index()  # Lower call strike (short)
         call_leg2 = leg_signals[3].copy().reset_index()  # Higher call strike (long)
         
+        # Set index name to make it clear (must happen before the date-column
+        # cast below: reset_index() names the new column 'index', not 'date',
+        # whenever the leg's source index is unnamed -- casting before this
+        # rename raises KeyError('date') in that case).
+        put_leg1 = put_leg1.rename(columns={"index": "date"})
+        put_leg2 = put_leg2.rename(columns={"index": "date"})
+        call_leg1 = call_leg1.rename(columns={"index": "date"})
+        call_leg2 = call_leg2.rename(columns={"index": "date"})
+
         # Convert date columns to pandas Timestamps
         put_leg1['date'] = pd.to_datetime(put_leg1['date'])
         put_leg2['date'] = pd.to_datetime(put_leg2['date'])
         call_leg1['date'] = pd.to_datetime(call_leg1['date'])
         call_leg2['date'] = pd.to_datetime(call_leg2['date'])
-        
-        # Set index name to make it clear
-        put_leg1 = put_leg1.rename(columns={"index": "date"})
-        put_leg2 = put_leg2.rename(columns={"index": "date"})
-        call_leg1 = call_leg1.rename(columns={"index": "date"})
-        call_leg2 = call_leg2.rename(columns={"index": "date"})
         
         # Rename columns to distinguish between legs
         put_leg1_cols = {col: f"put_leg1_{col}" for col in put_leg1.columns if col != "date" and col != "expire_date"}
@@ -982,9 +991,15 @@ class OptionSignalGenerator(BaseSignalGenerator):
         call_spread_price = paired["call_leg1_price"] - paired["call_leg2_price"]
         # Total credit from iron condor
         paired["spread_price"] = put_spread_price + call_spread_price
-        
+
+        # Set the index back to the date column (TradeManager's day-loop
+        # requires signals to be indexed by date, like the other _pair_*
+        # methods -- without this, `paired` keeps a plain RangeIndex and no
+        # trade ever gets matched to a simulated date).
+        paired = paired.set_index("date")
+
         logger.debug(f"Paired {len(paired)} valid iron condor spreads")
-        
+
         return paired
 
     @staticmethod
