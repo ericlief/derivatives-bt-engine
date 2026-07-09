@@ -119,7 +119,7 @@ class OptionTradeResult(BaseTradeResult):
             'capital_used': self.capital_used,
             'pnl': self.pnl,
             'ret_per_unit_risk': self.ret_per_unit_risk,
-            'ret_per_pointk': self.ret_per_point
+            'ret_per_point': self.ret_per_point
         }
         return results 
     
