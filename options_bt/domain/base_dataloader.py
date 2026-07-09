@@ -47,7 +47,12 @@ class BaseDataLoader(ABC):
             if data is not None:
                 return data
 
-        raw_vix = pd.read_csv(self._vix_raw_path, index_col=0, parse_dates=True)
+        raw_path = self._vix_raw_path
+        if raw_path.endswith('.parquet'):
+            raw_vix = pd.read_parquet(raw_path)
+            raw_vix = raw_vix.set_index(raw_vix.columns[0])
+        else:
+            raw_vix = pd.read_csv(raw_path, index_col=0, parse_dates=True)
         processed_data = self._preprocess_vix_data(raw_vix)
 
         if self.save_preprocessed:
