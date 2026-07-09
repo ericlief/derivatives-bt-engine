@@ -105,7 +105,6 @@ class Backtester:
                 delta_range=config.leg.delta_range,
                 dte_target=config.leg.dte_target,
                 dte_range=config.leg.dte_range,
-                early_close_days=config.leg.early_close_days,
                 start_date=config.start_date,
                 end_date=config.end_date
             )

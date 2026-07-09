@@ -108,15 +108,17 @@ class TradeManager:
     
 
     def construct_and_execute_trades_from_signals(self,
-                         trade_signals: pd.DataFrame,
+                         trade_signals: Union[pd.DataFrame, pl.DataFrame],
                          option_chain: pd.DataFrame,
                          underlying_price_history: pd.DataFrame
-                        ) -> Dict:  
+                        ) -> Dict:
         """
         Construct and execute trades based on signals.
-        
+
         Args:
-            trade_signals: DataFrame containing trade signals
+            trade_signals: DataFrame containing trade signals (polars for
+                futures; pandas, DatetimeIndex, for options -- converted to
+                polars just below)
             config: Union[SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig]
         Returns:
             Dictionary containing trade results and transactions
@@ -126,11 +128,15 @@ class TradeManager:
         all_transactions = []
         skipped_trades = 0
 
-        # Futures signals are polars-native (no spreads/legs, simpler date
-        # handling); options signals stay on the existing pandas DatetimeIndex
-        # path. Branch only at the few index/iteration touchpoints below —
-        # the position construction/execution/closing logic further down is
-        # already polymorphic across position types and needs no branching.
+        # Futures signals are already polars-native (no spreads/legs, simpler
+        # date handling); options signals arrive as pandas (option_chain /
+        # underlying_price_history have an unnamed DatetimeIndex, matching
+        # OptionsDataLoader/OptionSignalGenerator's pandas boundary) and are
+        # converted to polars here -- the single scoped conversion point (per
+        # CLAUDE.md's pandas/polars convention) needed since Backtester is
+        # still pandas-based. This should be deleted once Backtester is
+        # migrated too. `current_date` stays a pd.Timestamp throughout either
+        # way, since Position objects' date fields are pd.Timestamp.
         is_futures = isinstance(self.config, FuturesStrategyConfig)
 
         if is_futures:
@@ -154,8 +160,16 @@ class TradeManager:
             end = trade_signals.index.max()
             dates = pd.date_range(start, end)
 
+            # trade_signals' index is already named 'date' (OptionSignalGenerator
+            # sets it via .set_index('date')); option_chain/underlying_price_history
+            # have an unnamed index (OptionsDataLoader), so reset_index() names
+            # that column 'index' instead.
+            trade_signals = pl.from_pandas(trade_signals.reset_index())
+            option_chain = pl.from_pandas(option_chain.reset_index()).rename({'index': 'date'})
+            underlying_price_history = pl.from_pandas(underlying_price_history.reset_index()).rename({'index': 'date'})
+
         # Iterate through all dates in backtest range first in order to manage trades, e.g. exit when certain
-        # certain conditions are met (vix, etc.) 
+        # certain conditions are met (vix, etc.)
         # Additionally we will open or close any positions if conditions are fulfilled
         for date in dates:
             current_date = date
@@ -163,12 +177,9 @@ class TradeManager:
 
             if is_futures:
                 match = trade_signals.filter(pl.col('ts_event') == current_date)
-                trade_signal = match if match.height > 0 else None
             else:
-                if current_date in trade_signals.index:
-                    trade_signal = trade_signals.loc[[current_date]] # force to df
-                else:
-                    trade_signal = None
+                match = trade_signals.filter(pl.col('date') == current_date.date())
+            trade_signal = match if match.height > 0 else None
 
             # VIX gating (skip trade if outside range or missing)
             vix_close_value = None
@@ -230,8 +241,7 @@ class TradeManager:
 
             # Construct a new position from the trade signal if possible on the current date
             if trade_signal is not None:
-                row_iter = trade_signal.iter_rows(named=True) if is_futures else trade_signal.itertuples()
-                for trade in row_iter:
+                for trade in trade_signal.iter_rows(named=True):
                     # Skip if we've reached max open positions
                     if len(self.open_positions) >= self.max_positions:
                         skipped_trades += 1
@@ -304,8 +314,8 @@ class TradeManager:
                 'transactions': pd.DataFrame(all_transactions)}
 
     def _close_expired_positions(self,
-                                 option_chain: pd.DataFrame,
-                                 underlying_price_history: pd.DataFrame,
+                                 option_chain: pl.DataFrame,
+                                 underlying_price_history: pl.DataFrame,
                                  current_date: pd.Timestamp,
                                  vix_early_closure=False,  # Close all open pos
                                  close_all=False) -> List[Optional[OptionTradeResult]]:
@@ -411,17 +421,17 @@ class TradeManager:
 
         return trade_results, transactions
 
-    def construct_position_from_signal(self, trade_signal: pd.Series, 
+    def construct_position_from_signal(self, trade_signal: dict,
                                        current_date: pd.Timestamp) -> Optional[Union[SingleLegOptionPosition, MultiLegOptionPosition]]:
         """
         Creates a new position based on the provided trade signal.
-        
-        This method takes a trade signal as input and constructs a new position object. 
+
+        This method takes a trade signal as input and constructs a new position object.
         The type of position created depends on the configuration of the trade manager.
         Args:
-            trade_signal (pd.Series): The trade signal to use for constructing the position. 
-                                        This signal should contain all necessary information for creating a position, 
-                                        such as entry date, position side, option type, quantity, and early close days.
+            trade_signal (dict): A polars row (from iter_rows(named=True)) containing
+                                  all necessary information for creating a position,
+                                  such as entry date, position side, option type, quantity, and early close days.
             current_date (pd.Timestamp): The current date to use for constructing the position.
         Returns:
             Optional[Union[SingleLegOptionPosition, MultiLegOptionPosition]]: A new position object if the signal is valid, otherwise None.
@@ -456,364 +466,3 @@ class TradeManager:
                 config=self.config,
                 entry_date=current_date,
             )
-
-        # if is_spread:
-        #     # For spreads, we already have positions with dates
-        #     # Group positions by spread_id and date for processing in chronological order
-        #     spread_groups = trades.groupby(['spread_id', 'entry_date'])
-            
-        #     # Sort groups by date
-        #     sorted_spreads = sorted(spread_groups, key=lambda x: x[0][1])
-        #     logger.debug(f'Sorted spreads {sorted_spreads}')
-            
-        #     # Process each spread's positions
-        #     for (spread_id, current_date), group in sorted_spreads:
-        #         # First, check if any open positions need to be closed
-        #         positions_to_remove = []
-        #         for pos in open_positions:
-        #             # Close position if we're on/past the close_date or expire_date
-        #             if (('close_date' in pos and pos['close_date'] is not None and current_date >= pos['close_date']) or
-        #                 ('expire_date' in pos and pos['expire_date'] is not None and current_date >= pos['expire_date'])):
-                        
-        #                 logger.debug(f'Closing position: {pos}')
-        #                 result = close_position(pos, full_chain_df, underlying_price_history, option_bp)
-        #                 if result:
-        #                     option_bp = result['option_bp']
-        #                     positions_to_remove.append(pos)
-        #                     logger.debug(f"Closed position - BP: ${option_bp:.2f}")
-        #                     trade_results.append(result)
-                
-        #         # Remove closed positions
-        #         for pos in positions_to_remove:
-        #             open_positions.remove(pos)
-                
-        #         # Skip if we've reached max positions
-        #         if len(open_positions) >= max_positions:
-        #             skipped_trades += 1
-        #             continue
-                
-        #         # Execute all legs of the spread together
-        #         spread_executed = True
-        #         spread_positions = []
-                
-        #         # First leg will check BP for the entire spread
-        #         first_leg = True
-        #         for position in group.itertuples():
-        #             position_dict = position._asdict()
-        #             position_dict['trade_id'] = trade_counter
-        #             if first_leg:
-        #                 # First leg checks BP for entire spread
-        #                 executed_position, option_bp = execute_trade(position_dict, option_bp, leverage)
-        #                 first_leg = False
-        #             else:
-        #                 # Other legs don't affect BP
-        #                 executed_position = position_dict.copy()
-                    
-        #             if executed_position:
-        #                 spread_positions.append(executed_position)
-        #                 logger.debug(f'Prepared spread leg: {executed_position}')
-        #             else:
-        #                 spread_executed = False
-        #                 break
-                
-        #         if spread_executed:
-        #             open_positions.extend(spread_positions)
-        #             trade_counter += 1
-        #             logger.debug(f'BP: ${option_bp:.2f}')
-        #         else:
-        #             skipped_trades += 1
-        # else:
-        #     # Traditional single-leg processing
-        #     trades = trades.sort_index()
-            
-        #     for i, trade_signal in trades.iterrows():
-        #         current_date = trade_signal.name
-                
-        #         logger.debug(f'Trade signal {i}, {trade_signal.name}, Delta {trade_signal.p_delta}')
-
-        #         # First, check if any open positions need to be closed
-        #         positions_to_remove = []
-        #         for pos in open_positions:
-        #             # Close position if we're on/past the close_date or expire_date
-        #             if (('close_date' in pos and pos['close_date'] is not None and current_date >= pos['close_date']) or
-        #                 ('expire_date' in pos and pos['expire_date'] is not None and current_date >= pos['expire_date'])):
-                        
-        #                 logger.debug(f'Closing position: {pos}')
-        #                 result = close_position(pos, full_chain_df, underlying_price_history, option_bp)
-        #                 if result:
-        #                     option_bp = result['option_bp']
-        #                     positions_to_remove.append(pos)
-        #                     logger.debug(f"Closed position - BP: ${option_bp:.2f}")
-        #                     trade_results.append(result)
-                
-        #         # Remove closed positions
-        #         for pos in positions_to_remove:
-        #             open_positions.remove(pos)
-                
-        #         # Skip if we've reached max positions
-        #         if len(open_positions) >= max_positions:
-        #             skipped_trades += 1
-        #             continue
-                
-        #         # Create new trade from signal
-        #         new_trade = create_trade_from_signal(trade_signal, quantity, option_type, position_side, delta_target, current_date, early_close_days, delta_range)
-                
-        #         # Try to execute the new trade
-        #         executed_trade, option_bp = execute_trade(new_trade, option_bp, leverage)
-        #         if executed_trade:
-        #             executed_trade['trade_id'] = trade_counter
-        #             open_positions.append(executed_trade)
-        #             trade_counter += 1  # Increment counter only for successful trades
-        #             logger.debug(f'Opened position: {executed_trade}')
-        #             logger.debug(f'BP: ${option_bp:.2f}')
-        #         else:
-        #             skipped_trades += 1
-        
-        # # Close any remaining open positions at their expiration
-        # for pos in open_positions:
-        #     result = close_position(pos, full_chain_df, underlying_price_history, option_bp)
-        #     if result:
-        #         trade_results.append(result)
-        #         option_bp = result['option_bp']
-        
-        # if not trade_results:
-        #     logger.warning("No trades were executed successfully")
-        #     return pd.DataFrame()
-        
-        # results_df = pd.DataFrame(trade_results)
-        
-        # Calculate cumulative metrics based on PnL
-        # results_df['cumulative_pnl'] = results_df['pnl'].cumsum()
-        # results_df['capital'] = initial_capital  + results_df['cumulative_pnl']  # Track actual capital based on cumulative PnL
-        # results_df['peak_capital'] = results_df['capital'].cummax()
-        
-        return results_df   
-    
-    # def _execute_backtest(self, signals: pd.DataFrame, **kwargs):
-    #     """Execute the backtest using the trade manager."""
-    #     # Implementation of backtest execution here
-    #     pass
-    
-    def _save_results(self, trade_results: pd.DataFrame, param_str: str):
-        """Save backtest results."""
-        # Implementation of results saving here
-        pass
-    
-    def _generate_param_string(self, **kwargs) -> str:
-        """Generate parameter string for file naming."""
-        # Implementation of parameter string generation here
-        pass
-    
-    def _log_execution_summary(self, total_time: float):
-        """Log execution time summary."""
-        logger.info(f"\nTotal execution time: {total_time:.2f} seconds")
-        logger.info(f"Breakdown:")
-        for phase, time_taken in self.execution_times.items():
-            percentage = time_taken/total_time*100
-            logger.info(f"- {phase}: {time_taken:.2f} seconds ({percentage:.1f}%)") 
-
-    def generate_param_template(self) -> Dict:
-        return {
-            "option_type": OptionType.PUT,
-            "position_side": PositionSide.SHORT,
-            "delta_target": 0.30,
-            "dte_target": 30,
-            "quantity": 1,
-            "early_close_days": 5,
-    }
-
-    def _prepare_backtest_params(
-        self,
-        params: Dict,
-   
-        preloaded_data: Dict
-    ) -> Dict:
-        """
-        Prepare the appropriate parameters for run_backtest based on whether 
-        this is a spread or single-leg backtest.
-        
-        Args:
-            params: Dictionary of backtest parameters
-            
-        Returns:
-            Dictionary of parameters to pass to run_backtest
-        """
-        # Check if this is a spread backtest
-        is_spread = 'spread_type' in params and 'legs_config' in params
-        
-        # Common parameters that apply to both types
-        backtest_params = {
-            'dte_range': params.get('dte_range'),
-            'dte_target': params.get('dte_target'),
-            'start_date': params.get('start_date'),
-            'end_date': params.get('end_date'),
-            'quantity': params.get('quantity', 1),
-        }
-        
-        # Add specific parameters based on backtest type
-        if is_spread:
-            # Generate spread signals
-            spread_signals = self._generate_spread_signals(
-                spread_type=params['spread_type'],
-                legs_config=params['legs_config'],
-                start_date=params.get('start_date'),
-                end_date=params.get('end_date'),
-                dte_range=params.get('dte_range'),
-                dte_target=params.get('dte_target'),
-                spx_data=self.underlying
-            )
-            
-            # Add spread-specific parameters
-            backtest_params.update({
-                'spread_signals': spread_signals,
-                'spread_type': params['spread_type'],
-                'legs_config': params['legs_config'],
-            })
-        else:
-            # Generate single-leg trade signals
-            trade_signals = self._generate_trade_signals(
-                spx_data=self.underlying,
-                option_chain=self.option_chain,
-                option_type=params['option_type'],
-                delta_target=params.get('delta_target'),
-                delta_range=params.get('delta_range'),
-                dte_target=params.get('dte_target'),
-                dte_range=params.get('dte_range'),
-                start_date=params.get('start_date'),
-                end_date=params.get('end_date')
-            )
-            
-            # Add single-leg specific parameters
-            backtest_params.update({
-                'option_type': params['option_type'],
-                'position_side': params['position_side'],
-                'delta_target': params.get('delta_target'),
-                'delta_range': params.get('delta_range'),
-                'trade_signals': trade_signals  # Add generated signals
-            })
-        
-        # Add any remaining parameters from the original params
-        for k, v in params.items():
-            if k not in backtest_params:
-                backtest_params[k] = v
-                
-        return backtest_params
-        
- 
-
-    
-    # @staticmethod   
-    # def calculate_intrinsic_value(underlying_price: float, strike: float, option_type: Union[OptionType, str]) -> float:
-    #     """
-    #     Calculates the intrinsic value of an option.
-        
-    #     Args:
-    #         underlying_price (float): The current price of the underlying asset.
-    #         strike (float): The strike price of the option.
-    #         option_type (Union[OptionType, str]): The type of option, either PUT or CALL.
-        
-    #     Returns:
-    #         float: The intrinsic value of the option.
-    #     """
-
-    #     # is_put = option_type in [OptionType.PUT, OptionType.PUT.value, "put"]
-    #     # if isinstance(option_type, str):
-    #     #     is_put = option_type in [OptionType.PUT, OptionType.PUT.value, "put"]
-    #     # else:
-    #     #     is_put = option_type == OptionType.PUT
-        
-    #     logger.debug(f'Expiration. Calculating intrinsic value for {option_type}, strike={strike}, underlying={underlying_price}')
-    #     logger.debug(f'IV: {max(0, strike - underlying_price) if OptionType.is_put(option_type) else max(0, underlying_price - strike)}')
-
-        
-    #     if OptionType.is_put(option_type):
-    #         return max(0, strike - underlying_price)
-    #     else:  # CALL
-    #         return max(0, underlying_price - strike)
-
-
-    # def get_closing_data(
-    #         self,
-    #         position: SingleLegOptionPosition,
-    #     ) -> Optional[SingleLegOptionPosition]:
-    #     """
-    #     Get closing price data for an option position.  
-        
-    #     Args:
-    #         position OptionPosition: Position containing trade details.
-        
-    #     Returns:
-    #         Optional[Position]: The updated position object with closing price and other relevant data, or None if no valid closing data is found.
-    #     """
-    #     expire_date = position.expire_date
-
-    #     # If no close_date, this is an expiration.
-    #     if not position.close_date:
-    #         if expire_date not in self.underlying.index:
-    #             logger.warning(f"No valid closing data found for position with expire date {expire_date}. Returning None.")
-    #             return None  # Return None if no valid closing data is found
-            
-    #         # Get underlying (e.g. SPX) at close
-    #         try:
-    #             if 'close' in self.underlying:
-    #                 underlying_close = self.underlying.loc[expire_date, 'close']
-    #             elif 'Close' in self.underlying:
-    #                 underlying_close = self.underlying.loc[expire_date, 'Close']
-    #             else:
-    #                 raise ValueError(f"No valid closing data found for position with expire date {expire_date}. Returning None.")
-    #         except (KeyError, ValueError):
-    #             logger.warning(f"No valid closing data found for position with expire date {expire_date}. Returning None.")
-    #             return None  # Return None if no valid closing data is found
-            
-    #         position.underlying_exit = underlying_close
-    #         position.exit_price = calculate_intrinsic_value(underlying_close, position.strike, position.option_type)
-    #         position.exit_price = signed_entry_price(position)
-
-    #         # Get delta value at expiration
-    #         delta_col = "p_delta" if is_put(position) else 'c_delta'
-    #         filtered_df = self.options_chain[
-    #                 (self.options_chain.index == expire_date) &
-    #                 (self.options_chain.expire_date == expire_date) &
-    #                 (self.options_chain.strike == position.strike)
-    #             ]
-            
-    #         if not filtered_df.empty:
-    #             exit_delta = round(filtered_df[delta_col].iloc[0], 2)      
-    #             position.exit_delta = exit_delta
-
-    #         return position
-        
-    #     # Early close - get data from close_date forward (up to 5 days)
-    #     close_date = position.close_date
-    #     date_range = pd.date_range(close_date, close_date + pd.Timedelta(days=5))
-        
-    #     filtered_df = self.options_chain[
-    #         (self.options_chain.index.isin(date_range)) & 
-    #         (self.options_chain.expire_date == position.expire_date) &
-    #         (self.options_chain.strike == position.strike)
-    #     ].sort_index()  # Sort by date to try closest dates first
-        
-    #     if filtered_df.empty:
-    #         logger.warning(f"No valid prices found within 5 days of close date {close_date}. Returning None.")
-    #         return position  # Return unchanged position if no valid prices were found within 5 days
-            
-    #     bid_col = "p_bid" if is_put(position) else "c_bid"
-    #     ask_col = "p_ask" if is_put(position) else "c_ask"
-    #     delta_col = "p_delta" if is_put(position) else 'c_delta'
-
-    #     # Try each date in the filtered data until we find valid prices
-    #     for _, row in filtered_df.iterrows():
-    #         bid = row[bid_col]
-    #         ask = row[ask_col]
-    #         underlying_close = row['underlying_last']
-    #         position.underlying_exit = underlying_close
-    #         position.exit_delta = round(row[delta_col], 2)
-    #         mid_price = calculate_midpoint_price(bid, ask)
-    #         if mid_price is not None:
-    #             position.exit_price = mid_price
-    #             position.exit_price = signed_entry_price(position)
-    #             return position
-        
-    #     # If we get here, no valid prices were found within 5 days
-    #     logger.error(f"No valid closing prices found for position with strike {position.strike} and expire date {position.expire_date}. Returning None.")
-    #     return position  # Return None if no valid closing prices were

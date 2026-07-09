@@ -1,14 +1,12 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 import math
 from typing import Optional, Dict, Union, List, NamedTuple, Tuple
 from functools import cached_property
 from abc import ABC, abstractmethod
-from numpy import info
 import pandas as pd
 import polars as pl
-from pandas.core.computation.ops import Op
 
 from options_bt.domain.enums import *
 from options_bt.domain.strategy_config import MultiLegOptionStrategyConfig
@@ -61,21 +59,21 @@ class BasePosition(ABC):
         return abs(self.exit_price) if PositionSide.is_long(self.position_side) else -abs(self.exit_price)
     
     @abstractmethod
-    def calculate_pnl(self, underlying_price_history: pd.DataFrame, close_reason: Optional[str] = 'expiration', commission: Optional[float] = 0.0) -> Optional[float]:
+    def calculate_pnl(self, underlying_price_history: pl.DataFrame, close_reason: Optional[str] = 'expiration', commission: Optional[float] = 0.0) -> Optional[float]:
         """Calculate profit and loss for the position."""
         pass
  
     @abstractmethod
     def close(self, 
-            option_chain: pd.DataFrame, 
-            underlying_price_history: pd.DataFrame,
+            option_chain: pl.DataFrame, 
+            underlying_price_history: pl.DataFrame,
     ) -> Optional[Tuple[BaseTradeResult, Dict, float]]:
         """
         Close this position and calculate results.
         
         Args:
-            option_chain: pd.DataFrame,
-            underlying_price_history: pd.DataFrame,
+            option_chain: pl.DataFrame,
+            underlying_price_history: pl.DataFrame,
         
         Returns:
             Optional[Tuple[BaseTradeResult, Dict, float]]: Tuple of (trade_result_dict, transaction_dict, bp_effect) if successful, None if closing data is unavailable.
@@ -146,16 +144,17 @@ class BaseOptionPosition(BasePosition, ABC):
         """Check if position is short."""
         return self.position_side in [PositionSide.SHORT, PositionSide.SHORT.value, "short"]
 
-    # def is_closed(self) -> bool:
-    #     """Check if position is closed based on exit information."""
-    #     pass
-        # return (self.exit_date is not None or  # Normal exit
-        #         (self.expire_date is not None and pd.Timestamp.now() >= self.expire_date))  # Expired
+    @staticmethod
+    def _as_date(value) -> date:
+        """Normalize a pd.Timestamp/date/str to a plain datetime.date for
+        comparison against the polars (pl.Date) option chain/underlying
+        price history. Mirrors FuturesPosition._as_date."""
+        if isinstance(value, pd.Timestamp):
+            return value.date()
+        if isinstance(value, str):
+            return pd.Timestamp(value).date()
+        return value
 
-    # @property
-    # def is_open(self) -> bool:
-    #     """Check if position is currently open."""
-    #     return not self.is_closed()
     @abstractmethod
     def is_ITM(sefl, underlying_price) -> bool:
         pass
@@ -240,8 +239,8 @@ class BaseOptionPosition(BasePosition, ABC):
 
     def calculate_pnl(
         self,
-        option_chain: pd.DataFrame,
-        underlying_price_history: pd.DataFrame,
+        option_chain: pl.DataFrame,
+        underlying_price_history: pl.DataFrame,
         close_reason: Optional[str] = 'expiration',
         commission: Optional[float] = 1.78,
         exercise_fee: Optional[float] = 5.0
@@ -344,7 +343,7 @@ class BaseOptionPosition(BasePosition, ABC):
         pass    
 
     @abstractmethod
-    def _update_closing_data(self, option_chain: pd.DataFrame, underlying_price_history: pd.DataFrame) -> bool:
+    def _update_closing_data(self, option_chain: pl.DataFrame, underlying_price_history: pl.DataFrame) -> bool:
         """
         Update the instance with closing price data for the position.
         
@@ -356,67 +355,6 @@ class BaseOptionPosition(BasePosition, ABC):
             bool: True if closing data was successfully updated, False otherwise.
         """
         pass
-
-    @classmethod
-    def create_vertical_spread(
-        cls,
-        strikes: List[float],
-        option_type: OptionType,
-        expire_date: pd.Timestamp,
-        is_credit: bool = True
-    ) -> List['OptionPosition']:
-        """
-        Factory method to create a vertical spread.
-        
-        Args:
-            strikes: [short_strike, long_strike]
-            option_type: PUT or CALL
-            expire_date: Expiration date
-            is_credit: If True, creates credit spread (default)
-        """
-        if len(strikes) != 2:
-            raise ValueError("Vertical spread requires exactly 2 strikes")
-
-        # For credit spreads:
-        # PUT: Sell higher strike, buy lower strike
-        # CALL: Sell lower strike, buy higher strike
-        if is_credit:
-            if option_type == OptionType.PUT:
-                short_strike, long_strike = max(strikes), min(strikes)
-            else:  # CALL
-                short_strike, long_strike = min(strikes), max(strikes)
-        else:  # Debit spreads are opposite
-            if option_type == OptionType.PUT:
-                short_strike, long_strike = min(strikes), max(strikes)
-            else:  # CALL
-                short_strike, long_strike = max(strikes), min(strikes)
-
-        return [
-            cls(strike=short_strike, option_type=option_type, position_side=PositionSide.SHORT, expire_date=expire_date),
-            cls(strike=long_strike, option_type=option_type, position_side=PositionSide.LONG, expire_date=expire_date)
-        ]
-
-    @classmethod
-    def create_iron_condor(
-        cls,
-        put_strikes: List[float],
-        call_strikes: List[float],
-        expire_date: pd.Timestamp
-    ) -> List['OptionPosition']:
-        """
-        Factory method to create an iron condor.
-        
-        Args:
-            put_strikes: [long_put_strike, short_put_strike]
-            call_strikes: [short_call_strike, long_call_strike]
-            expire_date: Expiration date
-        """
-        if len(put_strikes) != 2 or len(call_strikes) != 2:
-            raise ValueError("Iron condor requires exactly 2 strikes for puts and 2 for calls")
-
-        put_spread = cls.create_vertical_spread(put_strikes, OptionType.PUT, expire_date, is_credit=True)
-        call_spread = cls.create_vertical_spread(call_strikes, OptionType.CALL, expire_date, is_credit=True)
-        return put_spread + call_spread
 
     def to_dict(self) -> Dict:
         """Convert position to dictionary format."""
@@ -614,95 +552,80 @@ class SingleLegOptionPosition(BaseOptionPosition):
     #     return self.exit_price
     @staticmethod
     def construct_from_signal(
-            trade_signal: NamedTuple,
+            trade_signal: dict,
             option_strategy: OptionStrategy,
             entry_date: pd.Timestamp,
-            position_side: PositionSide,    
+            position_side: PositionSide,
             option_type: OptionType,
-            quantity: int,  
+            quantity: int,
             early_close_after_dit: int = None,
             early_close_on_dte: int = None,
         ) -> Optional[SingleLegOptionPosition]:
             """
                 Creates a OptionPosition object from a given trade signal.
-                
-                Args:       
-                    trade_signal: NamedTuple,
-                    entry_date: pd.Timestamp,
-                    position_side: PositionSide,    
-                    option_type: OptionType,
-                    quantity: int,  
-                    early_close_days: int,
 
-                
-                Example config:
-                    config = SingleLegOptionStrategyConfig(
-                        strategy=OptionStrategy.SHORT_CALL,
-                        quantity=1,
-                        initial_capital=100000,
-                        leverage=1.0,
-                        start_date="2020-01-01",
-                        end_date="2020-12-31",
-                        use_underlying_close=False,
-                        early_close_days=30,
-                        max_margin_utilization=0.80,
-                        max_positions=1,
-                        # Define the leg of the strategy
-                        leg=OptionLegConfig(
-                            option_type=OptionType.CALL,
-                            position_side=PositionSide.SHORT,
-                            delta_target=0.75,
-                            dte_range=(42, 45),
-                            )
+                Args:
+                    trade_signal: dict (a polars row, from iter_rows(named=True))
+                    entry_date: pd.Timestamp,
+                    position_side: PositionSide,
+                    option_type: OptionType,
+                    quantity: int,
+                    early_close_after_dit: int,
+                    early_close_on_dte: int,
+
             Returns:
                 Optional[SingleLegOptionPosition]: Created position if valid, None otherwise
-            """     
-            # is_spread = isinstance(self.config, MultiLegOptionStrategyConfig)
-            # Validate entry date
+            """
             min_valid_date = pd.Timestamp('1990-01-01')
             if not isinstance(entry_date, pd.Timestamp) or entry_date <= min_valid_date:
                 logger.error(f"Invalid entry date {entry_date}")
                 return None
-                
+
             # Validate expire_date exists and is valid
-            if not trade_signal.expire_date:
-                logger.error(f"expire_date is missing for trade signal on {trade_signal.Index}")
+            raw_expire_date = trade_signal.get('expire_date')
+            if not raw_expire_date:
+                logger.error(f"expire_date is missing for trade signal on {trade_signal.get('date')}")
                 return None
-                
-            expire_date = trade_signal.expire_date
-            if not isinstance(expire_date, pd.Timestamp) or expire_date <= min_valid_date:
+
+            expire_date = pd.Timestamp(raw_expire_date)
+            if expire_date <= min_valid_date:
                 logger.error(f"Invalid expire date {expire_date}")
                 return None
-            
+
             if expire_date <= entry_date:
                 logger.error(f"Expire date {expire_date} is not after entry date {entry_date}")
                 return None
-            
+
             # Validate strike value
-            if not hasattr(trade_signal, 'strike') or pd.isna(trade_signal.strike):
-                logger.error(f"Missing strike value in trade signal on {trade_signal.Index}")
+            strike = trade_signal.get('strike')
+            if strike is None or (isinstance(strike, float) and math.isnan(strike)):
+                logger.error(f"Missing strike value in trade signal on {trade_signal.get('date')}")
                 return None
-            
+
             # Get entry price (already validated in signal generation)
-            entry_price = trade_signal.midpoint_price if trade_signal.midpoint_price is not None else trade_signal.spread_price
+            entry_price = trade_signal.get('midpoint_price')
             if entry_price is None:
-                logger.error(f"Missing midpoint price for trade signal on {trade_signal.Index}")
+                entry_price = trade_signal.get('spread_price')
+            if entry_price is None:
+                logger.error(f"Missing midpoint price for trade signal on {trade_signal.get('date')}")
                 return None
-                
-            # Adjust entry price sign based on position side
-            # signed_entry_price = -entry_price if PositionSide.is_long(position_side) else entry_price
-            # TODO: check for consistency in code
 
             # Calculate DTE
-            entry_dte = trade_signal.dte if hasattr(trade_signal, 'dte') else pd.Timedelta(trade_signal.expire_date - entry_date).days
-            
-            # Get margin required from signal if available, otherwise use config
-            margin_required = trade_signal.margin_required if hasattr(trade_signal, 'margin_required') else logger.warning(f"Missing margin required for trade signal on {trade_signal.Index}")
+            entry_dte = trade_signal.get('dte')
+            if entry_dte is None:
+                entry_dte = (expire_date - entry_date).days
+
+            # Get margin required from signal if available
+            margin_required = trade_signal.get('margin_required')
+            if margin_required is None:
+                logger.warning(f"Missing margin required for trade signal on {trade_signal.get('date')}")
 
             # Early closure
             close_date = (entry_date + pd.Timedelta(days=early_close_after_dit) if early_close_after_dit else
-                          trade_signal.expire_date - pd.Timedelta(days=early_close_on_dte) if early_close_on_dte else
+                          expire_date - pd.Timedelta(days=early_close_on_dte) if early_close_on_dte else
                           None)
+
+            entry_delta = trade_signal.get('p_delta') if OptionType.is_put(option_type) else trade_signal.get('c_delta')
 
             # Create the position
             position = SingleLegOptionPosition(
@@ -710,49 +633,33 @@ class SingleLegOptionPosition(BaseOptionPosition):
                 quantity=quantity,
                 option_type=option_type,
                 position_side=position_side,
-                strike=trade_signal.strike,
+                strike=strike,
                 entry_date=entry_date,
-                expire_date=trade_signal.expire_date,
-                entry_price=round(abs(entry_price, 2)),
-                entry_delta=round(trade_signal.p_delta, 2) if OptionType.is_put(option_type) else round(trade_signal.c_delta, 2),
+                expire_date=expire_date,
+                entry_price=round(abs(entry_price), 2),
+                entry_delta=round(entry_delta, 2) if entry_delta is not None else None,
                 entry_dte=entry_dte,
-                underlying_entry=trade_signal.underlying_last,
-                margin_required=round(margin_required, 2),
+                underlying_entry=trade_signal.get('underlying_last'),
+                margin_required=round(margin_required, 2) if margin_required is not None else None,
                 close_date=close_date,
             )
 
             logger.debug(f'Constructing position from symbol')
             logger.debug(f'{option_strategy} | Premium: {position.premium}')
-            # if is_spread:
-            #     position = MultiLegOptionPosition(
-            #         trade_id=self.trade_counter,
-            #         quantity=quantity,
-            #         option_type=option_type,
-            #         position_side=position_side,
-            #         strike=trade_signal.strike,
-            #         expire_date=trade_signal.expire_date,
-            #     entry_date=entry_date,
-            #     entry_price=signed_entry_price,
-            #     entry_delta=trade_signal.p_delta if OptionType.is_put(option_type) else trade_signal.c_delta,
-            #     entry_dte=trade_signal.dte if hasattr(trade_signal, 'dte') else entry_dte,
-            #     underlying_entry=trade_signal.underlying_last,
-            #     margin_required=trade_signal.margin_required if hasattr(trade_signal, 'margin_required') else 0,
-            #     close_date=entry_date + pd.Timedelta(days=early_close_days) if early_close_days is not None else None,
-            # )
-            
+
             return position
-        
+
        
 
-    def _update_closing_data(self, option_chain: pd.DataFrame, 
-        underlying_price_history: pd.DataFrame, 
+    def _update_closing_data(self, option_chain: pl.DataFrame,
+        underlying_price_history: pl.DataFrame,
         force: bool = False) -> bool:
         """
         Update the instance with closing price data for the position.
-        
+
         Args:
-            option_chain (pd.DataFrame): DataFrame containing the full option chain data.
-            underlying_price_history (pd.DataFrame): DataFrame containing historical prices of the underlying asset.
+            option_chain (pl.DataFrame): DataFrame containing the full option chain data.
+            underlying_price_history (pl.DataFrame): DataFrame containing historical prices of the underlying asset.
 
         Returns:
             bool: True if closing data was successfully updated, False otherwise.
@@ -760,55 +667,57 @@ class SingleLegOptionPosition(BaseOptionPosition):
         # Handle single-leg positions (existing logic)
         return self._update_single_leg_closing_data(option_chain, underlying_price_history, force)
 
-    def _update_single_leg_closing_data(self, 
-        option_chain: pd.DataFrame, 
-        underlying_price_history: pd.DataFrame,
-        force: bool = False  
+    def _update_single_leg_closing_data(self,
+        option_chain: pl.DataFrame,
+        underlying_price_history: pl.DataFrame,
+        force: bool = False
     ) -> bool:
         """Update closing data for single-leg positions (existing logic)."""
-        
+
         # If no close_date, this is an expiration
         if not self.close_date:
+            expire_key = self._as_date(self.expire_date)
+
             # 1) Try underlying history close
-            if self.expire_date in underlying_price_history.index:
-                underlying_close = underlying_price_history.loc[self.expire_date, 'close']
+            match = underlying_price_history.filter(pl.col('date') == expire_key)
+            if match.height > 0:
+                underlying_close = match['close'][0]
             else:
                 logger.warning(f"No underlying close for {self.expire_date}; falling back to option chain 'underlying_last'")
                 # 2) Try option chain rows on the same calendar date (and expiry)
-                oc_same_day = option_chain[
-                    (option_chain.index == self.expire_date) &
-                    (option_chain['expire_date'] == self.expire_date)
-                ].sort_index()
+                oc_same_day = option_chain.filter(
+                    (pl.col('date') == expire_key) & (pl.col('expire_date') == expire_key)
+                ).sort('date')
 
-                if not oc_same_day.empty and 'underlying_last' in oc_same_day:
-                    underlying_close = float(oc_same_day['underlying_last'].iloc[0])
+                if oc_same_day.height > 0 and 'underlying_last' in oc_same_day.columns:
+                    underlying_close = float(oc_same_day['underlying_last'][0])
                 else:
                     # 3) Try nearest prior chain row for this expiry
-                    oc_exp = option_chain[option_chain['expire_date'] == self.expire_date].sort_index()
-                    prior = oc_exp[oc_exp.index <= self.expire_date].tail(1)
-                    if not prior.empty and 'underlying_last' in prior:
-                        underlying_close = float(prior['underlying_last'].iloc[0])
+                    oc_exp = option_chain.filter(pl.col('expire_date') == expire_key).sort('date')
+                    prior = oc_exp.filter(pl.col('date') <= expire_key).tail(1)
+                    if prior.height > 0 and 'underlying_last' in prior.columns:
+                        underlying_close = float(prior['underlying_last'][0])
                     else:
                         logger.error(f"No valid (expiration) closing prices found for strike {self.strike} and expire date {self.expire_date}")
                         return False
-            
+
             logger.info(f'Expiration - underlying close: {underlying_close}')
-            
+
             # Calculate intrinsic value at expiration
             exit_price = self.calculate_intrinsic_value(underlying_close)
             logger.info(f'Expiration {self.expire_date} - strike {self.strike} - exit price: {exit_price}')
 
             # Get delta value at expiration (best-effort from chain on the day)
             delta_col = "p_delta" if self.is_put else 'c_delta'
-            filtered_df = option_chain[
-                (option_chain.index == self.expire_date) &
-                (option_chain['expire_date'] == self.expire_date) &
-                (option_chain['strike'] == self.strike)
-            ]
-        
+            filtered_df = option_chain.filter(
+                (pl.col('date') == expire_key) &
+                (pl.col('expire_date') == expire_key) &
+                (pl.col('strike') == self.strike)
+            )
+
             logger.debug(f'filtered_df: {filtered_df}')
 
-            exit_delta = round(filtered_df[delta_col].iloc[0], 2) if not filtered_df.empty else None
+            exit_delta = round(filtered_df[delta_col][0], 2) if filtered_df.height > 0 else None
 
             if exit_price is not None:
                 self.underlying_exit = underlying_close
@@ -817,113 +726,112 @@ class SingleLegOptionPosition(BaseOptionPosition):
                 return True  # Successfully updated
 
             return False  # Failed to update
-   
-        # Early close - get data from close_date forward (up to 5 days)
-        # Exact close_date filtering with normalization and better diagnostics
-        close_dt = pd.Timestamp(self.close_date).normalize()
-        exp_dt = pd.Timestamp(self.expire_date).normalize()
 
-        # Force close, e.g. if need to close all positions at end of period 
-        if force:  
+        # Early close - get data from close_date forward (up to 5 days)
+        close_dt = self._as_date(self.close_date)
+        exp_dt = self._as_date(self.expire_date)
+
+        # Force close, e.g. if need to close all positions at end of period
+        if force:
             # Look both forward and backward when force closing to handle wide spreads
-            date_range = pd.date_range(close_dt - pd.Timedelta(days=2), close_dt + pd.Timedelta(days=2)) 
-            filtered_df = option_chain[
-                (option_chain.index.isin(date_range)) & 
-                (option_chain['expire_date'] == exp_dt) &
-                (option_chain['strike'] == self.strike)    
-            ].sort_index()
+            date_range = [close_dt + timedelta(days=d) for d in range(-2, 3)]
+            filtered_df = option_chain.filter(
+                pl.col('date').is_in(date_range) &
+                (pl.col('expire_date') == exp_dt) &
+                (pl.col('strike') == self.strike)
+            ).sort('date')
         # Otherwise, just early close
         else:
-            date_range = pd.date_range(close_dt, close_dt + pd.Timedelta(days=2)) 
-            filtered_df = option_chain[
-                (option_chain.index.isin(date_range)) &
-                (option_chain['expire_date'] == exp_dt) &
-                (option_chain['strike'] == self.strike)
-            ]
+            date_range = [close_dt + timedelta(days=d) for d in range(0, 3)]
+            filtered_df = option_chain.filter(
+                pl.col('date').is_in(date_range) &
+                (pl.col('expire_date') == exp_dt) &
+                (pl.col('strike') == self.strike)
+            )
 
-        if filtered_df.empty:
+        if filtered_df.height == 0:
             logger.warning(f"No valid prices found within 2 days of close date {self.close_date}")
-            around = option_chain.loc[
-                (option_chain.index >= close_dt - pd.Timedelta(days=5)) &
-                (option_chain.index <= close_dt + pd.Timedelta(days=5))
-            ]
-            nearby_dates = sorted(around.index.unique().tolist())
-            logger.debug(f"Nearby chain rows around {close_dt} (count={len(around)}): {nearby_dates[:5]}")
+            around = option_chain.filter(
+                (pl.col('date') >= close_dt - timedelta(days=5)) &
+                (pl.col('date') <= close_dt + timedelta(days=5))
+            )
+            nearby_dates = sorted(around['date'].unique().to_list())
+            logger.debug(f"Nearby chain rows around {close_dt} (count={around.height}): {nearby_dates[:5]}")
             logger.warning(f"No valid prices found in date range around close date {self.close_date} "
-                   f"(expire={self.expire_date}, strike={self.strike}); "
-                   f"index_dtype={option_chain.index.dtype}")
+                   f"(expire={self.expire_date}, strike={self.strike})")
             return False
-            
+
         bid_col = "p_bid" if self.is_put else "c_bid"
         ask_col = "p_ask" if self.is_put else "c_ask"
         delta_col = "p_delta" if self.is_put else 'c_delta'
 
         # Try each date until we find valid prices
         wide_spread_dates = []
-        for row in filtered_df.itertuples():
-            date = row.Index
-            bid = getattr(row, bid_col)
-            ask = getattr(row, ask_col)
-            underlying_close = underlying_price_history.loc[date, 'close']   # added underlying data here
-            # Use last close in options data if available 
+        for row in filtered_df.iter_rows(named=True):
+            row_date = row['date']
+            bid = row[bid_col]
+            ask = row[ask_col]
+            underlying_match = underlying_price_history.filter(pl.col('date') == row_date)
+            underlying_close = underlying_match['close'][0] if underlying_match.height > 0 else None
+            # Use last close in options data if available
             if underlying_close is None:
-                if hasattr(row, 'underlying_last'):
-                    underlying_close = row.underlying_last
+                if row.get('underlying_last') is not None:
+                    underlying_close = row['underlying_last']
                 else:
                     logger.error(f'Cannot get closing data because no underlying available for {self.option_strategy}')
                     return False
-            exit_delta = round(getattr(row, delta_col), 2)
+            exit_delta = round(row[delta_col], 2) if row[delta_col] is not None else None
             logger.debug(f'Calculating midpoint for {bid}-{ask}')
             mid_price = PriceUtils.calculate_midpoint_price(bid, ask)
-            if mid_price is not None and not pd.isna(mid_price):
+            if mid_price is not None and not (isinstance(mid_price, float) and math.isnan(mid_price)):
                 # Update instance variables only if mid_price is valid
                 self.underlying_exit = underlying_close
                 self.exit_price = mid_price
-                self.exit_delta = exit_delta 
-                self.close_date = date   # update since actual close date may have changed
+                self.exit_delta = exit_delta
+                self.close_date = pd.Timestamp(row_date)   # update since actual close date may have changed
                 return True  # Successfully updated
             else:
-                # Track dates with wide spreads for potential fallback (only if not NaN)
-                if not (pd.isna(bid) or pd.isna(ask)):
+                # Track dates with wide spreads for potential fallback (only if not null)
+                if bid is not None and ask is not None:
                     spread_pct = ((ask - bid) / bid) * 100 if bid > 0 else float('inf')
-                    wide_spread_dates.append((date, bid, ask, spread_pct))
-        
+                    wide_spread_dates.append((row_date, bid, ask, spread_pct, exit_delta))
+
         # If all spreads are too wide, try using the closest date with the narrowest spread
-        if wide_spread_dates: # and force
+        if wide_spread_dates:
             logger.warning(f"All spreads too wide in date range, attempting fallback for strike {self.strike}")
             # Sort by date proximity to close_date, then by spread width
             wide_spread_dates.sort(key=lambda x: (abs((x[0] - close_dt).days), x[3]))
-            
+
             # Use the closest date with the narrowest spread, even if it's wide
-            fallback_date, fallback_bid, fallback_ask, fallback_spread = wide_spread_dates[0]
+            fallback_date, fallback_bid, fallback_ask, fallback_spread, fallback_delta = wide_spread_dates[0]
             logger.warning(f"Using fallback pricing: date={fallback_date}, bid={fallback_bid}, ask={fallback_ask}, spread={fallback_spread:.2f}%")
-            
-            # Check if fallback prices are NaN
-            if pd.isna(fallback_bid) or pd.isna(fallback_ask):
-                logger.error(f'Fallback bid/ask are NaN for strike {self.strike} on date {fallback_date}. Cannot close position.')
+
+            # Check if fallback prices are null
+            if fallback_bid is None or fallback_ask is None:
+                logger.error(f'Fallback bid/ask are missing for strike {self.strike} on date {fallback_date}. Cannot close position.')
                 return False
-            
+
             # Get underlying price for fallback date
-            fallback_underlying = underlying_price_history.loc[fallback_date, 'close']
-            if fallback_underlying is None:
+            fallback_underlying_match = underlying_price_history.filter(pl.col('date') == fallback_date)
+            if fallback_underlying_match.height == 0:
                 logger.error(f'Cannot get underlying price for fallback date {fallback_date}')
                 return False
-            
+            fallback_underlying = fallback_underlying_match['close'][0]
+
             # Use midpoint even if spread is wide (as last resort)
             fallback_mid_price = (fallback_bid + fallback_ask) / 2
-            fallback_delta = round(filtered_df.loc[fallback_date, delta_col], 2) if fallback_date in filtered_df.index else None
-            
+
             self.underlying_exit = fallback_underlying
             self.exit_price = fallback_mid_price
             self.exit_delta = fallback_delta
-            self.close_date = fallback_date
+            self.close_date = pd.Timestamp(fallback_date)
             logger.warning(f"Fallback successful: using mid_price={fallback_mid_price} for strike {self.strike}")
             return True
-        
+
         logger.error(f"No valid (early close) closing prices found for strike {self.strike} and expire date {self.expire_date}")
         return False  # Failed to update
 
- 
+
     def calculate_intrinsic_value(self, underlying_price: float) -> float:
         """Calculate intrinsic value at expiration."""
         
@@ -966,16 +874,16 @@ class SingleLegOptionPosition(BaseOptionPosition):
         }
 
     def close(self, 
-            option_chain: pd.DataFrame, 
-            underlying_price_history: pd.DataFrame,
+            option_chain: pl.DataFrame, 
+            underlying_price_history: pl.DataFrame,
             force: bool = False
     ) -> Optional[Tuple[OptionTradeResult, Dict, float]]:
         """
         Close this single-leg position and calculate results.
         
         Args:
-            option_chain: pd.DataFrame, 
-            underlying_price_history: pd.DataFrame,
+            option_chain: pl.DataFrame, 
+            underlying_price_history: pl.DataFrame,
             force: bool = False (if closing at end of backtest)
         
         Returns:
@@ -1179,7 +1087,7 @@ class MultiLegOptionPosition(BaseOptionPosition):
         # Validate spread configuration
         self.validate_spread()
 
-    def _update_closing_data(self, option_chain: pd.DataFrame, underlying_price_history: pd.DataFrame) -> bool:
+    def _update_closing_data(self, option_chain: pl.DataFrame, underlying_price_history: pl.DataFrame) -> bool:
         """
         Update the instance with closing price data for the position.
         
@@ -1327,7 +1235,7 @@ class MultiLegOptionPosition(BaseOptionPosition):
         # For undefined risk spreads, sum individual margins
         return sum(leg.calculate_position_margin() for leg in self.legs)
 
-    def calculate_pnl(self, option_chain:pd.DataFrame, underlying_price_history: pd.DataFrame, close_reason: Optional[str]=None,  commission: Optional[float]=None, exercise_fee: Optional[float]=None) -> Optional[float]:
+    def calculate_pnl(self, option_chain:pl.DataFrame, underlying_price_history: pl.DataFrame, close_reason: Optional[str]=None,  commission: Optional[float]=None, exercise_fee: Optional[float]=None) -> Optional[float]:
         """Calculate total P&L for the spread."""
         total_pnl = 0.0
         total_fees = 0.0
@@ -1370,411 +1278,16 @@ class MultiLegOptionPosition(BaseOptionPosition):
             'margin_required': self.margin_required
         } 
     
-    @staticmethod
-    def calculate_margin(spread_type: OptionSpreadType,
-                         legs: Tuple[List[SingleLegOptionPosition], NamedTuple]
-                         ) -> float:
-        """
-        Calculate margin requirement for a spread position.
-        
-        Args:
-            leg_group: DataFrame containing the legs of the spread
-            
-        Returns:
-            float: Total margin required for the spread
-        """
-        # logger.debug(f'Calculating margin for spread type: {leg_group.iloc[0]["spread_type"]}')
-        legs = list(legs.itertuples()) if isinstance(legs, pd.NamedTuple) else legs
-        return 0
-
-
-
-
-
-
-    @staticmethod
-    def construct_from_signal(
-            trade_signal: NamedTuple,
-            config: MultiLegOptionStrategyConfig,
-            entry_date: pd.Timestamp,
-        ) -> Optional[SingleLegOptionPosition]:
-            """
-                Creates a OptionPosition object from a given trade signal.
-                
-                Args:       
-                    trade_signal: NamedTuple,
-                    entry_date: pd.Timestamp,
-                    position_side: PositionSide,    
-                    option_type: OptionType,
-                    quantity: int,  
-                    early_close_days: int,
-
-                
-                Example config:
-
-                MultiLegOptionStrategyConfig(
-                    quantity=1,
-                    option_strategy=OptionStrategy.BULL_PUT_CREDIT_SPREAD,
-                    spread_type=OptionSpreadType.VERTICAL,
-                    leg_ratio={0: 1.0, 1: 2.0, 2: 2.0, 3: 1.0},
-                    initial_capital=100000,
-                    leverage=1.0,
-                    start_date="2020-01-01",
-                    end_date="2020-12-31",
-                    use_underlying_close=False,
-                    early_close_days=30,
-                    max_margin_utilization=0.80,
-                    max_positions=1,
-                    max_spread_width=100,
-                    max_trade_loss=5000.00,
-                    trade_selection_method=TradeSelectionMethod.PREMIUM_FIRST,
-                    
-                    # Define the leg of the strategy
-                    legs=[
-                        OptionLegConfig(
-                        option_type=OptionType.PUT,
-                        position_side=PositionSide.SHORT,
-                        # delta_range=(0.65, 0.75), # one 
-                        delta_target=0.75,          # or another
-                        dte_range=(40, 45),
-                        ),
-                        OptionLegConfig(
-                        option_type=OptionType.PUT,
-                        position_side=PositionSide.LONG,
-                        # delta_range=(0.65, 0.75), # one 
-                        delta_target=0.55,          # or another
-                        dte_range=(40, 45),
-                        )
-                    ],
-            )
-            Returns:
-                Optional[SingleLegOptionPosition]: Created position if valid, None otherwise
-            """     
-            # is_spread = isinstance(self.config, MultiLegOptionStrategyConfig)
-            # Validate entry date
-            min_valid_date = pd.Timestamp('1990-01-01')
-            if not isinstance(entry_date, pd.Timestamp) or entry_date <= min_valid_date:
-                logger.error(f"Invalid entry date {entry_date}")
-                return None
-                
-            # Validate expire_date exists and is valid
-            if not trade_signal.expire_date:
-                logger.error(f"expire_date is missing for trade signal on {trade_signal.Index}")
-                return None
-                
-            expire_date = trade_signal.expire_date
-            if not isinstance(expire_date, pd.Timestamp) or expire_date <= min_valid_date:
-                logger.error(f"Invalid expire date {expire_date}")
-                return None
-            
-            if expire_date <= entry_date:
-                logger.error(f"Expire date {expire_date} is not after entry date {entry_date}")
-                return None
-            
-            # Retrieve and construct legs for the spread
-            n_legs = len(config.legs)
-            legs = []
-            for i in range(n_legs):
-                # Get keys
-                leg_n = f"leg{i+1}_"
-                option_type = config.legs[i].option_type
-                position_side = config.legs[i].position_side
-
-                # Strike
-                strike_str = leg_n + 'strike'
-                # Direct attribute access (more reliable with NamedTuple)
-                strike = getattr(trade_signal, strike_str)
-                if strike is None or pd.isna(strike):
-                    logger.error(f"Missing strike value/s in trade signal on {trade_signal.Index}")
-                    return None
-
-                # Delta
-                type_prefix = "p_" if OptionType.is_put(option_type) else "c_"
-                prefix = leg_n + type_prefix
-                delta_str = prefix + 'delta'
-                entry_delta = getattr(trade_signal, delta_str)
-                if entry_delta is None or pd.isna(entry_date):
-                    logger.error(f"Missing delta value/s in trade signal on {trade_signal.Index}")
-                    return None
-
-                # DTE
-                dte_str = leg_n + 'dte'
-                entry_dte = getattr(trade_signal, dte_str)
-                if entry_dte is None or pd.isna(entry_dte):
-                    logger.error(f"Missing dte value/s in trade signal on {trade_signal.Index}")
-                    return None
-                
-                # Entry price (midpoint_price)
-                price_str = leg_n + 'midpoint_price'
-                entry_price = getattr(trade_signal, price_str)
-                if entry_price is None or pd.isna(entry_price):
-                    logger.error(f"Missing midpoint price value/s in trade signal on {trade_signal.Index}")
-                    return None
-
-                position = SingleLegOptionPosition(
-                    option_strategy=config.option_strategy,
-                    quantity=quantity, # Individual legs should always have a quantity of 1, as the overall spread quantity is handled by MultiLegOptionPosition
-                    option_type=option_type,
-                    position_side=position_side,
-                    strike=strike,
-                    entry_date=entry_date,
-                    expire_date=trade_signal.expire_date,
-                    entry_price=abs(entry_price),
-                    entry_delta=entry_delta,
-                    entry_dte=entry_dte,
-                    underlying_entry=trade_signal.underlying_last,
-                    margin_required=margin_required,
-                    close_date=entry_date + pd.Timedelta(days=config.early_close_days) if config.early_close_days is not None else None,
-                )
-
-                legs.append(position)
-
-            # Get entry price (already validated in signal generation)
-            entry_price = round(trade_signal.spread_price, 2)
-            if entry_price is None:
-                logger.error(f"Missing spread price for trade signal on {trade_signal.Index}")
-                return None
-                
-            position_side = PositionSide('short') if entry_price >= 0 else PositionSide('long')
-            # Adjust entry price sign based on position side
-            # signed_entry_price = -entry_price if PositionSide.is_long(position_side) else entry_price
-         
-            
-            # Validate dte value
-            # n_legs = len(config.legs)
-            # for i in range(n_legs, 1):
-            #     leg_prefix = f"leg{i}_"
-            #     if not hasattr(trade_signal, leg_prefix + 'dte') or pd.isna(getattr(trade_signal, leg_prefix + 'dte')):
-            #         logger.error(f"Missing dte value in trade signal on leg {i} of {trade_signal.Index}")
-            #         return None
-            entry_dte = getattr(trade_signal, 'leg1_dte')   
-            
-            # Get margin required from signal if available, otherwise use config
-            margin_required = trade_signal.margin_required if hasattr(trade_signal, 'margin_required') else logger.warning(f"Missing margin required for trade signal on {trade_signal.Index}")
-
-            # Create the position
-            position = MultiLegOptionPosition(
-                quantity=config.quantity,  # spread quantity only set
-                option_type=config.legs[0].option_type,
-                option_strategy=config.option_strategy,
-                spread_type=config.spread_type,
-                legs=legs,
-                leg_ratios=config.leg_ratios,
-                position_side=position_side,
-                entry_date=entry_date,
-                expire_date=trade_signal.expire_date,
-                entry_price=round(abs(entry_price), 2),  # Store positive price, use signed accessors
-                entry_dte=entry_dte,
-                underlying_entry=trade_signal.underlying_last,
-                margin_required=round(margin_required, 2),
-                close_date=entry_date + pd.Timedelta(days=config.early_close_days) if config.early_close_days is not None else None,
-            )
-
-            logger.debug(f'Constructing spread position from symbol')
-            logger.debug(f'{config.option_strategy} | Premium: {position.premium}')
-            # if is_spread:
-            #     position = MultiLegOptionPosition(
-            #         trade_id=self.trade_counter,
-            #         quantity=quantity,
-            #         option_type=option_type,
-            #         position_side=position_side,
-            #         strike=trade_signal.strike,
-            #         expire_date=trade_signal.expire_date,
-            #     entry_date=entry_date,
-            #     entry_price=signed_entry_price,
-            #     entry_delta=trade_signal.p_delta if OptionType.is_put(option_type) else trade_signal.c_delta,
-            #     entry_dte=trade_signal.dte if hasattr(trade_signal, 'dte') else entry_dte,
-            #     underlying_entry=trade_signal.underlying_last,
-            #     margin_required=trade_signal.margin_required if hasattr(trade_signal, 'margin_required') else 0,
-            #     close_date=entry_date + pd.Timedelta(days=early_close_days) if early_close_days is not None else None,
-            # )
-            
-            return position
-
-
-        # # For diagonal spreads, margin depends on whether it's a long or short diagonal spread
-        # if OptionSpreadType.is_spread_type(spread_type, OptionSpreadType.DIAGONAL):   
-        #     total_margin = 0
-        #     for leg in legs:
-        #         leg_margin = SingleLegOptionPosition.calculate_margin(
-        #             leg.quantity,
-        #             leg.option_type,
-        #             leg.position_side,
-        #             leg.underlying_entry,
-        #             leg.entry_price,
-        #             leg.strike,
-        #             leg.expire_date
-        #         )
-        #         total_margin += leg_margin
-        #     return total_margin
-        
-        # # For vertical spreads, margin is the width of the spread
-        # elif OptionSpreadType.is_spread_type(spread_type, OptionSpreadType.VERTICAL):
-        #     if len(legs) != 2:
-        #         raise ValueError(f"Vertical spread must have exactly 2 legs, got {len(legs)}")
-        #     strikes = sorted([leg.strike for leg in legs]) if isinstance(legs, SingleLegOptionPosition) else sorted([leg.get_attr(f'leg_{i}_strike') for i in range(len(legs))])
-        #     return abs(strikes[1] - strikes[0]) * 100
-        
-        # # For calendar spreads, margin is the width of the spread
-        # elif OptionSpreadType.is_spread_type(spread_type, OptionSpreadType.CALENDAR):
-        #     if len(legs) != 2:
-        #         raise ValueError(f"Calendar spread must have exactly 2 legs, got {len(legs)}")
-        #     strikes = sorted([leg.strike for leg in legs])
-        #     return abs(strikes[1] - strikes[0]) * 100
-        
-        # # For iron condors, margin is the width of the put spread plus the width of the call spread
-        # elif OptionSpreadType.is_spread_type(spread_type, OptionSpreadType.IRON_CONDOR):
-        #     if len(legs) != 4:
-        #         raise ValueError(f"Iron condor must have exactly 4 legs, got {len(legs)}")
-            
-        #     # Sort legs by strike price
-        #     legs.sort(key=lambda x: x.strike) if isinstance(legs, SingleLegOptionPosition) else legs.sort(key=lambda x: x.get_attr(f'leg_{i}_strike') for i in range(len(legs)))    
-        #     strikes = sorted([leg.strike for leg in legs])
-            
-        #     # Calculate width of put spread (first two legs) and call spread (last two legs)
-        #     put_spread_width = abs(strikes[1] - strikes[0])
-        #     call_spread_width = abs(strikes[3] - strikes[2])
-            
-        #     return (put_spread_width + call_spread_width) * 100
-        
-        # # For butterflies, margin is the width of the spread
-        # elif OptionSpreadType.is_spread_type(spread_type, OptionSpreadType.BUTTERFLY):
-        #     if len(legs) != 3:
-        #         raise ValueError(f"Butterfly spread must have exactly 3 legs, got {len(legs)}")
-        #     strikes = sorted([leg.strike for leg in legs])
-        #     return abs(strikes[2] - strikes[0]) * 100
-        
-        # else:
-        #     raise ValueError(f"Unsupported spread type: {spread_type}")
-    
-    def _update_multileg_closing_data(self, option_chain: pd.DataFrame, underlying_price_history: pd.DataFrame) -> bool:
-        """Update closing data for multi-leg positions."""
-
-        logger.debug(f"Updating closing data for {self.spread_type} spread with {len(self.legs)} legs")
-        
-        # Update each individual leg first
-        success = True
-        for i, leg in enumerate(self.legs):
-            logger.debug(f"Updating leg {i+1}: {leg.option_type} {leg.position_side} {leg.strike}")
-            if not leg._update_single_leg_closing_data(option_chain, underlying_price_history):
-                success = False
-                logger.warning(f"Failed to update leg {i+1}")
-        
-        if not success:
-            return False
-        
-        # Calculate net spread exit price based on spread type
-        if self.spread_type == OptionSpreadType.VERTICAL:
-            self._calculate_vertical_spread_exit_price()
-        elif self.spread_type == OptionSpreadType.CALENDAR:
-            self._calculate_calendar_spread_exit_price()
-        elif self.spread_type == OptionSpreadType.IRON_CONDOR:
-            self._calculate_iron_condor_exit_price()
-        elif self.spread_type == OptionSpreadType.BUTTERFLY:
-            self._calculate_butterfly_spread_exit_price()
-        else:
-            logger.warning(f"Unknown spread type {self.spread_type}, using simple leg aggregation")
-            self._calculate_simple_spread_exit_price()
-        
-        # Set underlying exit to the first leg's underlying exit (they should be the same)
-        if self.legs:
-            self.underlying_exit = self.legs[0].underlying_exit
-        
-        return True
-
-    def _calculate_vertical_spread_exit_price(self):
-        """Calculate exit price for vertical spreads."""
-        if len(self.legs) != 2:
-            logger.error(f"Vertical spread must have exactly 2 legs, got {len(self.legs)}")
-            return
-        
-        # For vertical spreads, exit price is the difference between leg exit prices
-        # Adjust for position side (credit vs debit spread)
-        leg1_exit = self.legs[0].exit_price
-        leg2_exit = self.legs[1].exit_price
-        
-        # Net spread exit = long leg exit price - short leg exit price
-        if self.legs[0].position_side == PositionSide.LONG:
-            self.exit_price = leg1_exit - leg2_exit
-        else:  # short leg1
-            self.exit_price = leg2_exit - leg1_exit
-        
-        logger.debug(f"Vertical spread exit price: {self.exit_price} (leg1: {leg1_exit}, leg2: {leg2_exit})")
-
-    def _calculate_calendar_spread_exit_price(self):
-        """Calculate exit price for calendar spreads."""
-        if len(self.legs) != 2:
-            logger.error(f"Calendar spread must have exactly 2 legs, got {len(self.legs)}")
-            return
-        
-        # For calendar spreads, exit price is typically the difference between leg exit prices
-        # This assumes you're closing both legs at the same time
-        leg1_exit = self.legs[0].exit_price
-        leg2_exit = self.legs[1].exit_price
-        
-        if self.legs[0].position_side == PositionSide.SHORT and self.legs[1].position_side == PositionSide.LONG:
-            # Standard calendar: short front month, long back month
-            self.exit_price = leg2_exit - leg1_exit
-        else:
-            # Reverse calendar: long front month, short back month
-            self.exit_price = leg1_exit - leg2_exit
-        
-        logger.debug(f"Calendar spread exit price: {self.exit_price}")
-
-    def _calculate_iron_condor_exit_price(self):
-        """Calculate exit price for iron condors."""
-        if len(self.legs) != 4:
-            logger.error(f"Iron condor must have exactly 4 legs, got {len(self.legs)}")
-            return
-        
-        # Iron condor exit price is the sum of the two spreads
-        # Put spread: legs[0] (long) - legs[1] (short)
-        # Call spread: legs[2] (short) - legs[3] (long)
-        put_spread_exit = self.legs[0].exit_price - self.legs[1].exit_price
-        call_spread_exit = self.legs[2].exit_price - self.legs[3].exit_price
-        
-        self.exit_price = put_spread_exit + call_spread_exit
-        logger.debug(f"Iron condor exit price: {self.exit_price} (put: {put_spread_exit}, call: {call_spread_exit})")
-
-    def _calculate_butterfly_spread_exit_price(self):
-        """Calculate exit price for butterfly spreads."""
-        if len(self.legs) != 3:
-            logger.error(f"Butterfly spread must have exactly 3 legs, got {len(self.legs)}")
-            return
-        
-        # Butterfly exit price: 2 * middle leg - outer legs
-        # Assuming 1:2:1 ratio
-        middle_exit = self.legs[1].exit_price
-        outer1_exit = self.legs[0].exit_price
-        outer2_exit = self.legs[2].exit_price
-        
-        self.exit_price = 2 * middle_exit - outer1_exit - outer2_exit
-        logger.debug(f"Butterfly spread exit price: {self.exit_price}")
-
-    def _calculate_simple_spread_exit_price(self):
-        """Calculate exit price by simple aggregation of leg exit prices."""
-        # Simple approach: sum up all leg exit prices weighted by their ratios
-        total_exit = 0
-        for i, leg in enumerate(self.legs):
-            ratio = self.leg_ratios.get(i, 1.0)
-            if leg.position_side == PositionSide.SHORT:
-                total_exit += leg.exit_price * ratio  # Short legs are positive
-            else:
-                total_exit -= leg.exit_price * ratio  # Long legs are negative
-        
-        self.exit_price = total_exit
-        logger.debug(f"Simple spread exit price: {self.exit_price}")
-
     def close(self,
-            option_chain: pd.DataFrame,
-            underlying_price_history: pd.DataFrame,
+            option_chain: pl.DataFrame,
+            underlying_price_history: pl.DataFrame,
             force: bool = True) -> Optional[Tuple[Dict, List[Dict], float]]:
         """
         Close this multi-leg position and calculate results for each leg and the spread.
-        
+
         Args:
-            option_chain: pd.DataFrame,
-            underlying_price_history: pd.DataFrame,
+            option_chain: pl.DataFrame,
+            underlying_price_history: pl.DataFrame,
         
         Returns:
             Optional[Tuple[OptionTradeResult, List[Dict], float]]: Tuple of (trade_result_dict, list_of_transaction_dicts, total_bp_effect) if successful, None if closing data is unavailable.
@@ -1878,88 +1391,47 @@ class MultiLegOptionPosition(BaseOptionPosition):
     
     @staticmethod
     def construct_from_signal(
-            trade_signal: NamedTuple,
+            trade_signal: dict,
             config: MultiLegOptionStrategyConfig,
             entry_date: pd.Timestamp,
-        ) -> Optional[SingleLegOptionPosition]:
+        ) -> Optional[MultiLegOptionPosition]:
             """
-                Creates a OptionPosition object from a given trade signal.
-                
-                Args:       
-                    trade_signal: NamedTuple,
-                    entry_date: pd.Timestamp,
-                    position_side: PositionSide,    
-                    option_type: OptionType,
-                    quantity: int,  
-                    early_close_days: int,
+                Creates a MultiLegOptionPosition object from a given trade signal.
 
-                
-                Example config:
+                Args:
+                    trade_signal: dict (a polars row, from iter_rows(named=True))
+                    config: MultiLegOptionStrategyConfig
+                    entry_date: pd.Timestamp
 
-                MultiLegOptionStrategyConfig(
-                    quantity=1,
-                    option_strategy=OptionStrategy.BULL_PUT_CREDIT_SPREAD,
-                    spread_type=OptionSpreadType.VERTICAL,
-                    leg_ratio={0: 1.0, 1: 2.0, 2: 2.0, 3: 1.0},
-                    initial_capital=100000,
-                    leverage=1.0,
-                    start_date="2020-01-01",
-                    end_date="2020-12-31",
-                    use_underlying_close=False,
-                    early_close_days=30,
-                    max_margin_utilization=0.80,
-                    max_positions=1,
-                    max_spread_width=100,
-                    max_trade_loss=5000.00,
-                    trade_selection_method=TradeSelectionMethod.PREMIUM_FIRST,
-                    
-                    # Define the leg of the strategy
-                    legs=[
-                        OptionLegConfig(
-                        option_type=OptionType.PUT,
-                        position_side=PositionSide.SHORT,
-                        # delta_range=(0.65, 0.75), # one 
-                        delta_target=0.75,          # or another
-                        dte_range=(40, 45),
-                        ),
-                        OptionLegConfig(
-                        option_type=OptionType.PUT,
-                        position_side=PositionSide.LONG,
-                        # delta_range=(0.65, 0.75), # one 
-                        delta_target=0.55,          # or another
-                        dte_range=(40, 45),
-                        )
-                    ],
-            )
-            Returns:
-                Optional[SingleLegOptionPosition]: Created position if valid, None otherwise
-            """     
-            # is_spread = isinstance(self.config, MultiLegOptionStrategyConfig)
+                Returns:
+                    Optional[MultiLegOptionPosition]: Created position if valid, None otherwise
+            """
             # Validate entry date
             min_valid_date = pd.Timestamp('1990-01-01')
             if not isinstance(entry_date, pd.Timestamp) or entry_date <= min_valid_date:
                 logger.error(f"Invalid entry date {entry_date}")
                 return None
-                
+
             # Validate expire_date exists and is valid
-            if not trade_signal.expire_date:
-                logger.error(f"expire_date is missing for trade signal on {trade_signal.Index}")
+            raw_expire_date = trade_signal.get('expire_date')
+            if not raw_expire_date:
+                logger.error(f"expire_date is missing for trade signal on {trade_signal.get('date')}")
                 return None
-                
-            expire_date = trade_signal.expire_date
-            if not isinstance(expire_date, pd.Timestamp) or expire_date <= min_valid_date:
+
+            expire_date = pd.Timestamp(raw_expire_date)
+            if expire_date <= min_valid_date:
                 logger.error(f"Invalid expire date {expire_date}")
                 return None
-            
+
             if expire_date <= entry_date:
                 logger.error(f"Expire date {expire_date} is not after entry date {entry_date}")
                 return None
 
             # Early closure
             close_date = (entry_date + pd.Timedelta(days=config.early_close_after_dit) if config.early_close_after_dit else
-                          trade_signal.expire_date - pd.Timedelta(days=config.early_close_on_dte) if config.early_close_on_dte else
+                          expire_date - pd.Timedelta(days=config.early_close_on_dte) if config.early_close_on_dte else
                           None)
-            
+
             # Retrieve and construct legs for the spread
             n_legs = len(config.legs)
             # Iron condor signals use put_leg1_/put_leg2_/call_leg1_/call_leg2_
@@ -1971,10 +1443,11 @@ class MultiLegOptionPosition(BaseOptionPosition):
                 # shared column the way vertical spreads do -- it's duplicated
                 # per leg instead (same value on every leg), so read it off
                 # leg 1's copy.
-                underlying_last = getattr(trade_signal, leg_prefixes[0] + 'underlying_last')
+                underlying_last = trade_signal.get(leg_prefixes[0] + 'underlying_last')
             else:
                 leg_prefixes = [f"leg{i+1}_" for i in range(n_legs)]
-                underlying_last = trade_signal.underlying_last
+                underlying_last = trade_signal.get('underlying_last')
+            multiplier = getattr(config, 'multiplier', 100)
             legs = []
             for i in range(n_legs):
                 # Get keys
@@ -1984,37 +1457,29 @@ class MultiLegOptionPosition(BaseOptionPosition):
                 position_side = config.legs[i].position_side
 
                 # Strike
-                strike_str = leg_n + 'strike'
-                # Direct attribute access (more reliable with NamedTuple)
-                strike = getattr(trade_signal, strike_str)
-                if strike is None or pd.isna(strike):
-                    logger.error(f"Missing strike value/s in trade signal on {trade_signal.Index}")
+                strike = trade_signal.get(leg_n + 'strike')
+                if strike is None or (isinstance(strike, float) and math.isnan(strike)):
+                    logger.error(f"Missing strike value/s in trade signal on {trade_signal.get('date')}")
                     return None
 
                 # Delta
                 type_prefix = "p_" if OptionType.is_put(option_type) else "c_"
-                prefix = leg_n + type_prefix
-                delta_str = prefix + 'delta'
-                entry_delta = getattr(trade_signal, delta_str)
-                if entry_delta is None or pd.isna(entry_date):
-                    logger.error(f"Missing delta value/s in trade signal on {trade_signal.Index}")
+                entry_delta = trade_signal.get(leg_n + type_prefix + 'delta')
+                if entry_delta is None or (isinstance(entry_delta, float) and math.isnan(entry_delta)):
+                    logger.error(f"Missing delta value/s in trade signal on {trade_signal.get('date')}")
                     return None
 
                 # DTE
-                dte_str = leg_n + 'dte'
-                entry_dte = getattr(trade_signal, dte_str)
-                if entry_dte is None or pd.isna(entry_dte):
-                    logger.error(f"Missing dte value/s in trade signal on {trade_signal.Index}")
+                entry_dte = trade_signal.get(leg_n + 'dte')
+                if entry_dte is None:
+                    logger.error(f"Missing dte value/s in trade signal on {trade_signal.get('date')}")
                     return None
 
                 # Entry price (midpoint_price)
-                price_str = leg_n + 'midpoint_price'
-                entry_price = getattr(trade_signal, price_str)
-                if entry_price is None or pd.isna(entry_price):
-                    logger.error(f"Missing midpoint price value/s in trade signal on {trade_signal.Index}")
+                entry_price = trade_signal.get(leg_n + 'midpoint_price')
+                if entry_price is None or (isinstance(entry_price, float) and math.isnan(entry_price)):
+                    logger.error(f"Missing midpoint price value/s in trade signal on {trade_signal.get('date')}")
                     return None
-
-                multiplier = getattr(config, 'multiplier', 100)
 
                 position = SingleLegOptionPosition(
                     option_strategy=config.option_strategy,
@@ -2024,7 +1489,7 @@ class MultiLegOptionPosition(BaseOptionPosition):
                     position_side=position_side,
                     strike=strike,
                     entry_date=entry_date,
-                    expire_date=trade_signal.expire_date,
+                    expire_date=expire_date,
                     entry_price=abs(entry_price),
                     entry_delta=entry_delta,
                     entry_dte=entry_dte,
@@ -2035,27 +1500,20 @@ class MultiLegOptionPosition(BaseOptionPosition):
                 legs.append(position)
 
             # Get entry price (already validated in signal generation)
-            entry_price = round(trade_signal.spread_price, 2)
-            if entry_price is None:
-                logger.error(f"Missing spread price for trade signal on {trade_signal.Index}")
+            spread_price = trade_signal.get('spread_price')
+            if spread_price is None:
+                logger.error(f"Missing spread price for trade signal on {trade_signal.get('date')}")
                 return None
+            entry_price = round(spread_price, 2)
 
             position_side = PositionSide('short') if entry_price >= 0 else PositionSide('long')
-            # Adjust entry price sign based on position side
-            # signed_entry_price = -entry_price if PositionSide.is_long(position_side) else entry_price
 
+            entry_dte = trade_signal.get(leg_prefixes[0] + 'dte')
 
-            # Validate dte value
-            # n_legs = len(config.legs)
-            # for i in range(n_legs, 1):
-            #     leg_prefix = f"leg{i}_"
-            #     if not hasattr(trade_signal, leg_prefix + 'dte') or pd.isna(getattr(trade_signal, leg_prefix + 'dte')):
-            #         logger.error(f"Missing dte value in trade signal on leg {i} of {trade_signal.Index}")
-            #         return None
-            entry_dte = getattr(trade_signal, leg_prefixes[0] + 'dte')
-            
             # Get margin required from signal if available, otherwise use config
-            margin_required = trade_signal.margin_required if hasattr(trade_signal, 'margin_required') else logger.warning(f"Missing margin required for trade signal on {trade_signal.Index}")
+            margin_required = trade_signal.get('margin_required')
+            if margin_required is None:
+                logger.warning(f"Missing margin required for trade signal on {trade_signal.get('date')}")
 
             # Create the position
             position = MultiLegOptionPosition(
@@ -2068,39 +1526,21 @@ class MultiLegOptionPosition(BaseOptionPosition):
                 leg_ratios=config.leg_ratios,
                 position_side=position_side,
                 entry_date=entry_date,
-                expire_date=trade_signal.expire_date,
+                expire_date=expire_date,
                 entry_price=abs(entry_price),  # Store positive price, use signed accessors
                 entry_dte=entry_dte,
                 underlying_entry=underlying_last,
-                spread_width=trade_signal.spread_width,
+                spread_width=trade_signal.get('spread_width'),
                 margin_required=margin_required,
                 close_date=close_date,
             )
 
             logger.debug(f'Constructing potential spread position from symbol')
             logger.debug(f'{config.option_strategy} | Price: {position.spread_price} | Premium: {position.premium}')
-            # if is_spread:
-            #     position = MultiLegOptionPosition(
-            #         trade_id=self.trade_counter,
-            #         quantity=quantity,
-            #         option_type=option_type,
-            #         position_side=position_side,
-            #         strike=trade_signal.strike,
-            #         expire_date=trade_signal.expire_date,
-            #     entry_date=entry_date,
-            #     entry_price=signed_entry_price,
-            #     entry_delta=trade_signal.p_delta if OptionType.is_put(option_type) else trade_signal.c_delta,
-            #     entry_dte=trade_signal.dte if hasattr(trade_signal, 'dte') else entry_dte,
-            #     underlying_entry=trade_signal.underlying_last,
-            #     margin_required=trade_signal.margin_required if hasattr(trade_signal, 'margin_required') else 0,
-            #     close_date=entry_date + pd.Timedelta(days=early_close_days) if early_close_days is not None else None,
-            # )
-            
-            return position
-        
-       
 
-    def _update_multileg_closing_data(self, option_chain: pd.DataFrame, underlying_price_history: pd.DataFrame) -> bool:
+            return position
+
+    def _update_multileg_closing_data(self, option_chain: pl.DataFrame, underlying_price_history: pl.DataFrame) -> bool:
         """Update closing data for multi-leg positions."""
 
         logger.debug(f"Updating closing data for {self.spread_type} spread with {len(self.legs)} legs")
