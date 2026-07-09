@@ -83,7 +83,10 @@ class OptionsDataLoader(BaseDataLoader):
         df = df.rename({first_col: 'date'})
 
         if df['date'].dtype != pl.Date:
-            df = df.with_columns(pl.col('date').cast(pl.Datetime, strict=False).dt.date().alias('date'))
+            # .cast(pl.Datetime) only reinterprets numeric epoch-like values,
+            # not date strings -- it silently nulls every row of a genuine
+            # "YYYY-MM-DD" string column. .str.to_datetime() actually parses it.
+            df = df.with_columns(pl.col('date').str.to_datetime(strict=False).dt.date().alias('date'))
 
         return df
 
@@ -208,8 +211,12 @@ class OptionsDataLoader(BaseDataLoader):
         # so no separate "normalize" step is needed once cast.
         if 'expire_date' in df.columns:
             if df['expire_date'].dtype != pl.Date:
+                # .cast(pl.Datetime) only reinterprets numeric epoch-like
+                # values, not date strings -- it silently nulls every row of
+                # a genuine "YYYY-MM-DD" string column. .str.to_datetime()
+                # actually parses it.
                 df = df.with_columns(
-                    pl.col('expire_date').cast(pl.Datetime, strict=False).dt.date().alias('expire_date')
+                    pl.col('expire_date').str.to_datetime(strict=False).dt.date().alias('expire_date')
                 )
             rows_before = df.height
             df = df.filter(pl.col('expire_date').is_not_null())
@@ -221,7 +228,7 @@ class OptionsDataLoader(BaseDataLoader):
         for col in _CHAIN_DATE_COLUMNS:
             if col in df.columns and df[col].dtype != pl.Date:
                 logger.info(f"Normalizing {col} values...")
-                df = df.with_columns(pl.col(col).cast(pl.Datetime, strict=False).dt.date().alias(col))
+                df = df.with_columns(pl.col(col).str.to_datetime(strict=False).dt.date().alias(col))
 
         # Ensure all numeric columns are properly typed
         numeric_casts = [pl.col(c).cast(pl.Float64, strict=False) for c in _CHAIN_NUMERIC_COLUMNS if c in df.columns]
