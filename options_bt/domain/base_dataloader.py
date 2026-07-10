@@ -51,7 +51,13 @@ class BaseDataLoader(ABC):
           {dir}/processed/{filename_in_processed_dir}, and the parquet cache
           is the same filename with a .parquet extension, in that same
           processed/ directory.
+
+        filename_or_path and data_dir may each use a leading '~' (expanded
+        here) -- os.path.isabs('~/x') is False, so an unexpanded '~/x' would
+        otherwise be (wrongly) treated as relative and joined onto data_dir.
         """
+        data_dir = os.path.expanduser(data_dir)
+        filename_or_path = os.path.expanduser(filename_or_path)
         resolved = filename_or_path if os.path.isabs(filename_or_path) else os.path.join(data_dir, filename_or_path)
 
         if os.path.isdir(resolved):
