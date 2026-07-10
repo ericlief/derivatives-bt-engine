@@ -1,3 +1,6 @@
+import os
+from pathlib import Path
+
 import pandas as pd
 from options_bt.utils.logger import setup_logger
 from options_bt.domain.enums import *
@@ -5,16 +8,16 @@ from options_bt.domain.backtester import Backtester
 from options_bt.domain.dataloader import OptionsDataLoader
 from options_bt.domain.strategy_config import MultiLegOptionStrategyConfig
 from options_bt.domain.option_leg_config import OptionLegConfig
+from dotenv import load_dotenv
 
 # Create logger instance
 logger = setup_logger()
+load_dotenv()
 
 
 def run_test_suite():
 
     """Run a suite of backtest examples with different configurations."""
-    pd.set_option('display.max_columns', None)
-    pd.set_option('display.max_colwidth', None)
 
     # Set up data paths.
     # NOTE: OptionsDataLoader currently requires the options chain, underlying
@@ -24,9 +27,16 @@ def run_test_suite():
     # fixture co-locates a Jan-Jun 2019 slice of all three for local runs; the
     # Phase 1 polars rewrite of dataloader.py should let each source be pointed
     # at its own real path instead of requiring this workaround.
-    DATA_PATH = "/tmp/claude-1000/-home-dev-projects-options-bt/0c09cbb9-f8d7-453b-8d99-3ce255a715aa/scratchpad/spx_fixture/csv_for_pandas_baseline"
+    
+    # Set up data paths
+    print('data path', os.getenv('DATA_PATH'))
+
+    DATA_PATH = Path(os.getenv('DATA_PATH')).expanduser()
+    print('data path', os.getenv('DATA_PATH'))
     OPTIONS_FILE = "options_chain_preprocessed.csv"
     VIX_FILE = "vix.csv"
+    # DATA_PATH = "/tmp/claude-1000/-home-dev-projects-o4ptions-bt/0c09cbb9-f8d7-453b-8d99-3ce255a715aa/scratchpad/spx_fixture/csv_for_pandas_baseline"
+    
 
     dl = OptionsDataLoader(data_dir=DATA_PATH, options_file=OPTIONS_FILE, vix_file=VIX_FILE, use_preprocessed=True, save_preprocessed=False)
     data = dl.load_data()

@@ -1,23 +1,23 @@
-import pandas as pd
 from options_bt.utils.logger import setup_logger
 from options_bt.domain.enums import *  
 from options_bt.domain.backtester import Backtester 
 from options_bt.domain.dataloader import OptionsDataLoader
 from options_bt.domain.strategy_config import SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig
 from options_bt.domain.option_leg_config import OptionLegConfig
+from dotenv import load_dotenv
 
 # Create logger instance
 logger = setup_logger()
- 
+load_dotenv()
+
 
 def run_test_suite():
 
     """Run a suite of backtest examples with different configurations."""
-    pd.set_option('display.max_columns', None)
-    pd.set_option('display.max_colwidth', None)
+ 
 
     # Set up data paths
-    DATA_PATH = "/Users/liefe/data/spx"
+    # DATA_PATH = "/Users/liefe/data/spx"
     OPTIONS_FILE = "options_chain_preprocessed.csv"
     VIX_FILE = "vix.csv"
 
