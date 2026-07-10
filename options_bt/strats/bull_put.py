@@ -29,9 +29,9 @@ def run_test_suite():
     #
     # .env example:
     #   DATA_PATH=/Users/liefe/data/fin/market/index/SPX
-    #   SPX_OPTIONS_CHAIN_PATH=/Users/liefe/data/fin/market/index/SPX/external/options/historical/eod/processed/options_chain_preprocessed.csv
-    #   SPX_UNDERLYING_PATH=/Users/liefe/data/fin/market/index/SPX/external/index/processed/spx-daily-1996-ohlc-cleaned.csv
-    #   VIX_PATH=/Users/liefe/data/fin/market/index/VIX/historical/vix.parquet
+    #   SPX_OPTIONS_CHAIN_PATH=/Users/liefe/data/fin/market/index/SPX/eod  (looks for processed/spx_chain_eod.csv inside it)
+    #   SPX_UNDERLYING_PATH=/Users/liefe/data/fin/market/index/SPX/eod  (looks for processed/spx_eod_preproc.csv inside it)
+    #   VIX_PATH=/Users/liefe/data/fin/market/index/VIX/eod  (looks for processed/vix.csv inside it)
     DATA_PATH = Path(os.getenv('DATA_PATH')).expanduser()
     OPTIONS_FILE = os.getenv('SPX_OPTIONS_CHAIN_PATH', 'options_chain_preprocessed.csv')
     SPX_FILE = os.getenv('SPX_UNDERLYING_PATH', 'spx.csv')

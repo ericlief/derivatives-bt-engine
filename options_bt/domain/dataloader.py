@@ -22,9 +22,13 @@ _UNDERLYING_NUMERIC_COLUMNS = ['open', 'high', 'low', 'close']
 
 # ── Infrastructure ──────────────────────────────────────────────────
 _DEFAULT_UNDERLYING_FILENAME = "spx.csv"
-_CHAIN_CACHE_FILENAME = "options.parquet"
 _CHAIN_MULTI_INDEX_CACHE_FILENAME = "chain_multi_index.parquet"
-_UNDERLYING_CACHE_FILENAME = "spx.parquet"
+_PROCESSED_SUBDIR = "processed"
+# When options_file/spx_file point at a directory (rather than a specific
+# file), the raw CSV is expected at {dir}/processed/{this filename} -- these
+# match the current on-disk convention, not something auto-detected.
+_CHAIN_FILENAME_IN_PROCESSED_DIR = "spx_chain_eod.csv"
+_UNDERLYING_FILENAME_IN_PROCESSED_DIR = "spx_eod_preproc.csv"
 
 
 @dataclass
@@ -37,37 +41,61 @@ class OptionsDataLoader(BaseDataLoader):
     vix_file: Optional[str] = None
 
     @staticmethod
-    def _resolve_path(data_dir: str, filename_or_path: str) -> str:
-        """An absolute filename_or_path is used as-is; a relative one is
-        joined to data_dir. Lets each source (chain/underlying/vix) live in
-        its own directory instead of requiring all three to be co-located."""
-        return filename_or_path if os.path.isabs(filename_or_path) else os.path.join(data_dir, filename_or_path)
+    def _resolve_source_paths(data_dir: str, filename_or_path: str, filename_in_processed_dir: str) -> tuple[str, str]:
+        """Resolve a configured source (options_file/spx_file/vix_file) to
+        (raw_path, processed_path). filename_or_path may be:
+
+        - a bare filename: joined to data_dir; the parquet cache uses the
+          same filename stem, in data_dir.
+        - an absolute path to a specific raw file: the parquet cache uses the
+          same stem, alongside it.
+        - an absolute path to a directory: the raw CSV is expected at
+          {dir}/processed/{filename_in_processed_dir}, and the parquet cache
+          is the same filename with a .parquet extension, in that same
+          processed/ directory.
+        """
+        resolved = filename_or_path if os.path.isabs(filename_or_path) else os.path.join(data_dir, filename_or_path)
+
+        if os.path.isdir(resolved):
+            processed_dir = os.path.join(resolved, _PROCESSED_SUBDIR)
+            raw_path = os.path.join(processed_dir, filename_in_processed_dir)
+            stem = os.path.splitext(filename_in_processed_dir)[0]
+            return raw_path, os.path.join(processed_dir, f"{stem}.parquet")
+
+        # A specific file (or bare filename already joined to data_dir above)
+        # -- parquet cache uses the same stem, alongside it.
+        stem = os.path.splitext(os.path.basename(resolved))[0]
+        return resolved, os.path.join(os.path.dirname(resolved), f"{stem}.parquet")
+
+    @cached_property
+    def _option_chain_paths(self) -> tuple[str, str]:
+        return self._resolve_source_paths(self.data_dir, self.options_file, _CHAIN_FILENAME_IN_PROCESSED_DIR)
 
     @property
     def _option_chain_raw_path(self) -> str:
-        return self._resolve_path(self.data_dir, self.options_file)
+        return self._option_chain_paths[0]
 
     @property
     def _option_chain_processed_path(self) -> str:
-        # Cached next to the raw source file itself (not data_dir), since
-        # options_file/spx_file/vix_file can each live in their own
-        # directory -- data_dir alone can't express three different
-        # locations, so it's no longer used as a shared cache directory.
-        return os.path.join(os.path.dirname(self._option_chain_raw_path), _CHAIN_CACHE_FILENAME)
+        return self._option_chain_paths[1]
 
     @property
     def _chain_multi_index_processed_path(self) -> str:
-        return os.path.join(os.path.dirname(self._option_chain_raw_path), _CHAIN_MULTI_INDEX_CACHE_FILENAME)
+        return os.path.join(os.path.dirname(self._option_chain_processed_path), _CHAIN_MULTI_INDEX_CACHE_FILENAME)
+
+    @cached_property
+    def _underlying_paths(self) -> tuple[str, str]:
+        # NOTE: previously hardcoded to 'spx.csv' regardless of the spx_file
+        # field, so spx_file silently did nothing -- now actually respected.
+        return self._resolve_source_paths(self.data_dir, self.spx_file or _DEFAULT_UNDERLYING_FILENAME, _UNDERLYING_FILENAME_IN_PROCESSED_DIR)
 
     @property
     def _underlying_raw_path(self) -> str:
-        # NOTE: previously hardcoded to 'spx.csv' regardless of the spx_file
-        # field, so spx_file silently did nothing -- now actually respected.
-        return self._resolve_path(self.data_dir, self.spx_file or _DEFAULT_UNDERLYING_FILENAME)
+        return self._underlying_paths[0]
 
     @property
     def _underlying_processed_path(self) -> str:
-        return os.path.join(os.path.dirname(self._underlying_raw_path), _UNDERLYING_CACHE_FILENAME)
+        return self._underlying_paths[1]
 
     @staticmethod
     def _read_raw_source(path: str) -> pl.DataFrame:
@@ -106,6 +134,7 @@ class OptionsDataLoader(BaseDataLoader):
         processed_data = self._preprocess_option_chain(raw_options)
 
         if self.save_preprocessed:
+            os.makedirs(os.path.dirname(self._option_chain_processed_path), exist_ok=True)
             processed_data.write_parquet(self._option_chain_processed_path)
             logger.info(f"Saved data to {self._option_chain_processed_path}")
 
@@ -123,6 +152,7 @@ class OptionsDataLoader(BaseDataLoader):
         multi_index = self.option_chain.sort(['date', 'strike'])
 
         if self.save_preprocessed:
+            os.makedirs(os.path.dirname(self._chain_multi_index_processed_path), exist_ok=True)
             multi_index.write_parquet(self._chain_multi_index_processed_path)
             logger.info(f"Saved data to {self._chain_multi_index_processed_path}")
 
@@ -140,6 +170,7 @@ class OptionsDataLoader(BaseDataLoader):
         processed_data = self._preprocess_underlying(raw_underlying)
 
         if self.save_preprocessed:
+            os.makedirs(os.path.dirname(self._underlying_processed_path), exist_ok=True)
             processed_data.write_parquet(self._underlying_processed_path)
             logger.info(f"Saved data to {self._underlying_processed_path}")
 

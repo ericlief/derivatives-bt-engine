@@ -10,10 +10,17 @@ from options_bt.utils.logger import setup_logger
 
 logger = setup_logger()
 
+# ── Infrastructure ──────────────────────────────────────────────────
+_PROCESSED_SUBDIR = "processed"
+# When vix_file points at a directory (rather than a specific file), the raw
+# CSV is expected at {dir}/processed/{this filename} -- matches the current
+# on-disk convention, not something auto-detected.
+_VIX_FILENAME_IN_PROCESSED_DIR = "vix.csv"
+
 
 class BaseDataLoader(ABC):
     """
-    Shared lazy-load/pickle-cache behavior and VIX loading for asset-specific
+    Shared lazy-load/parquet-cache behavior and VIX loading for asset-specific
     data loaders (options chain, futures OHLCV, ...).
 
     Subclasses must declare `data_dir`, `vix_file`, `use_preprocessed`, and
@@ -31,26 +38,51 @@ class BaseDataLoader(ABC):
         """Load and return all data needed for a backtest as a dict."""
         ...
 
+    @staticmethod
+    def _resolve_source_paths(data_dir: str, filename_or_path: str, filename_in_processed_dir: str) -> tuple[str, str]:
+        """Resolve a configured source (vix_file) to (raw_path,
+        processed_path). filename_or_path may be:
+
+        - a bare filename: joined to data_dir; the parquet cache uses the
+          same filename stem, in data_dir.
+        - an absolute path to a specific raw file: the parquet cache uses the
+          same stem, alongside it.
+        - an absolute path to a directory: the raw CSV is expected at
+          {dir}/processed/{filename_in_processed_dir}, and the parquet cache
+          is the same filename with a .parquet extension, in that same
+          processed/ directory.
+        """
+        resolved = filename_or_path if os.path.isabs(filename_or_path) else os.path.join(data_dir, filename_or_path)
+
+        if os.path.isdir(resolved):
+            processed_dir = os.path.join(resolved, _PROCESSED_SUBDIR)
+            raw_path = os.path.join(processed_dir, filename_in_processed_dir)
+            stem = os.path.splitext(filename_in_processed_dir)[0]
+            return raw_path, os.path.join(processed_dir, f"{stem}.parquet")
+
+        # A specific file (or bare filename already joined to data_dir above)
+        # -- parquet cache uses the same stem, alongside it.
+        stem = os.path.splitext(os.path.basename(resolved))[0]
+        return resolved, os.path.join(os.path.dirname(resolved), f"{stem}.parquet")
+
+    @cached_property
+    def _vix_paths(self) -> tuple[str, str]:
+        return self._resolve_source_paths(self.data_dir, self.vix_file or "vix.csv", _VIX_FILENAME_IN_PROCESSED_DIR)
+
     @property
     def _vix_raw_path(self) -> str:
-        # os.path.join discards data_dir automatically when vix_file is
-        # already absolute, so this supports vix_file living in its own
-        # directory, separate from data_dir.
-        return os.path.join(self.data_dir, self.vix_file or "vix.csv")
+        return self._vix_paths[0]
 
     @property
     def _vix_processed_path(self) -> str:
-        # Cached next to the raw source file itself (not data_dir), since
-        # vix_file can live in its own directory, separate from data_dir.
-        return os.path.join(os.path.dirname(self._vix_raw_path), "vix.pkl")
+        return self._vix_paths[1]
 
     @cached_property
     def vix_data(self) -> pd.DataFrame:
         """Lazy load and cache historical VIX data (shared across loaders)."""
-        if self.use_preprocessed:
-            data = self._load_pickle(self._vix_processed_path)
-            if data is not None:
-                return data
+        if self.use_preprocessed and os.path.exists(self._vix_processed_path):
+            logger.info(f"Loading {self._vix_processed_path}")
+            return pd.read_parquet(self._vix_processed_path)
 
         raw_path = self._vix_raw_path
         if raw_path.endswith('.parquet'):
@@ -61,7 +93,9 @@ class BaseDataLoader(ABC):
         processed_data = self._preprocess_vix_data(raw_vix)
 
         if self.save_preprocessed:
-            self._save_pickle(processed_data, self._vix_processed_path)
+            os.makedirs(os.path.dirname(self._vix_processed_path), exist_ok=True)
+            processed_data.to_parquet(self._vix_processed_path)
+            logger.info(f"Saved data to {self._vix_processed_path}")
 
         return processed_data
 
@@ -84,20 +118,3 @@ class BaseDataLoader(ABC):
         df.sort_index(inplace=True)
 
         return df
-
-    def _load_pickle(self, file_path: str) -> Optional[pd.DataFrame]:
-        """Load a pickle file and return a pandas DataFrame."""
-        if os.path.exists(file_path):
-            logger.info(f"Loading {file_path}")
-            return pd.read_pickle(file_path)
-        else:
-            logger.info(f"File {file_path} does not exist")
-            return None
-
-    def _save_pickle(self, data: pd.DataFrame, file_path: str):
-        """Save a pandas DataFrame to a pickle file."""
-        try:
-            data.to_pickle(file_path)
-            logger.info(f"Saved data to {file_path}")
-        except Exception as e:
-            logger.error(f"Failed to save data to {file_path}: {str(e)}")
