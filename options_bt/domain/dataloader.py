@@ -49,11 +49,15 @@ class OptionsDataLoader(BaseDataLoader):
 
     @property
     def _option_chain_processed_path(self) -> str:
-        return os.path.join(self.data_dir, _CHAIN_CACHE_FILENAME)
+        # Cached next to the raw source file itself (not data_dir), since
+        # options_file/spx_file/vix_file can each live in their own
+        # directory -- data_dir alone can't express three different
+        # locations, so it's no longer used as a shared cache directory.
+        return os.path.join(os.path.dirname(self._option_chain_raw_path), _CHAIN_CACHE_FILENAME)
 
     @property
     def _chain_multi_index_processed_path(self) -> str:
-        return os.path.join(self.data_dir, _CHAIN_MULTI_INDEX_CACHE_FILENAME)
+        return os.path.join(os.path.dirname(self._option_chain_raw_path), _CHAIN_MULTI_INDEX_CACHE_FILENAME)
 
     @property
     def _underlying_raw_path(self) -> str:
@@ -63,7 +67,7 @@ class OptionsDataLoader(BaseDataLoader):
 
     @property
     def _underlying_processed_path(self) -> str:
-        return os.path.join(self.data_dir, _UNDERLYING_CACHE_FILENAME)
+        return os.path.join(os.path.dirname(self._underlying_raw_path), _UNDERLYING_CACHE_FILENAME)
 
     @staticmethod
     def _read_raw_source(path: str) -> pl.DataFrame:

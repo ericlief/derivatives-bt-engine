@@ -33,11 +33,16 @@ class BaseDataLoader(ABC):
 
     @property
     def _vix_raw_path(self) -> str:
+        # os.path.join discards data_dir automatically when vix_file is
+        # already absolute, so this supports vix_file living in its own
+        # directory, separate from data_dir.
         return os.path.join(self.data_dir, self.vix_file or "vix.csv")
 
     @property
     def _vix_processed_path(self) -> str:
-        return os.path.join(self.data_dir, "vix.pkl")
+        # Cached next to the raw source file itself (not data_dir), since
+        # vix_file can live in its own directory, separate from data_dir.
+        return os.path.join(os.path.dirname(self._vix_raw_path), "vix.pkl")
 
     @cached_property
     def vix_data(self) -> pd.DataFrame:
