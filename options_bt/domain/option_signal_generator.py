@@ -9,6 +9,7 @@ import pandas as pd
 
 from options_bt.domain.enums import *
 from options_bt.domain.base_signal_generator import BaseSignalGenerator
+from options_bt.domain.option_leg_config import OptionLegConfig
 from options_bt.domain.strategy_config import FuturesStrategyConfig, SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig
 from options_bt.utils.logger import setup_logger
 
@@ -211,6 +212,78 @@ class OptionSignalGenerator(BaseSignalGenerator):
             logger.error('Cannot sort signal df because trade strategy default not defined')
             return chain
 
+    def _tag_leg_signals(self, leg_df: pl.DataFrame, i: int, leg_config: OptionLegConfig) -> pl.DataFrame:
+        """Attach leg-identifying columns (leg_number, position_side, option_type,
+        leg_ratio, delta_target[/range]) shared by every leg regardless of how
+        its candidate strikes were selected (delta-based or width-derived)."""
+        option_type = leg_config.option_type
+        position_side = leg_config.position_side
+        leg_df = leg_df.with_columns([
+            pl.lit(i + 1).alias('leg_number'),
+            pl.lit(position_side.value if isinstance(position_side, Enum) else position_side).alias('position_side'),
+            pl.lit(option_type.value if isinstance(option_type, Enum) else option_type).alias('option_type'),
+            pl.lit(getattr(leg_config, 'ratio', 1)).alias('leg_ratio'),
+            pl.lit(leg_config.delta_target).alias('delta_target'),
+        ])
+        if leg_config.delta_range:
+            leg_df = leg_df.with_columns([
+                pl.lit(leg_config.delta_range[0]).alias('delta_range_min'),
+                pl.lit(leg_config.delta_range[1]).alias('delta_range_max'),
+            ])
+        return leg_df
+
+    def _derive_width_based_leg_signals_pl(self, leg_config: OptionLegConfig, anchor_signals: pl.DataFrame, width: float) -> pl.DataFrame:
+        """Derive a LONG leg's candidate strikes from its matching SHORT leg's
+        best-per-date candidate (anchor_signals, already sorted best-first per
+        date by _sort_by_trade_selection), placed `width` points further
+        out-of-the-money -- used in place of delta-based selection when
+        MultiLegOptionStrategyConfig.use_spread_width is set.
+        """
+        is_put = OptionType.is_put(leg_config.option_type)
+        prefix = 'p_' if is_put else 'c_'
+        direction = -1 if is_put else 1  # further OTM: lower strike for puts, higher for calls
+
+        # One row per (date, expire_date): the anchor's best candidate. A row
+        # index preserves that ordering across the join_asof below, which
+        # requires re-sorting by strike.
+        anchor = anchor_signals.unique(subset=['date', 'expire_date'], keep='first', maintain_order=True)
+        anchor = anchor.with_row_index('_anchor_idx').with_columns(
+            (pl.col('strike') + direction * width).alias('target_strike')
+        ).select(['_anchor_idx', 'date', 'expire_date', 'target_strike'])
+
+        chain = self._option_chain_pl
+        needed_cols = [col for col in chain.columns if col.startswith(prefix)]
+        needed_cols.extend(['date', 'strike', 'dte', 'underlying_last', 'expire_date'])
+        chain = chain.select(needed_cols)
+
+        bid_col, ask_col = f'{prefix}bid', f'{prefix}ask'
+        chain = chain.filter((pl.col(bid_col) > 0) & (pl.col(ask_col) > 0))
+        chain = chain.with_columns(
+            (((pl.col(ask_col) - pl.col(bid_col)) / pl.col(bid_col)) * 100).alias('spread_percent')
+        ).filter(pl.col('spread_percent') <= _MAX_SPREAD_PERCENT)
+        chain = chain.with_columns(((pl.col(bid_col) + pl.col(ask_col)) / 2).alias('midpoint_price'))
+
+        if leg_config.dte_range:
+            chain = chain.filter((pl.col('dte') >= leg_config.dte_range[0]) & (pl.col('dte') <= leg_config.dte_range[1]))
+        elif leg_config.dte_target:
+            chain = chain.filter((pl.col('dte') - leg_config.dte_target).abs() <= _DTE_TARGET_TOLERANCE_DAYS)
+
+        anchor_sorted = anchor.sort(['date', 'expire_date', 'target_strike'])
+        chain_sorted = chain.sort(['date', 'expire_date', 'strike'])
+
+        joined = anchor_sorted.join_asof(
+            chain_sorted,
+            left_on='target_strike',
+            right_on='strike',
+            by=['date', 'expire_date'],
+            strategy='nearest',
+        )
+        joined = joined.sort('_anchor_idx').drop(['_anchor_idx', 'target_strike'])
+        joined = joined.drop_nulls(subset=['strike'])  # no chain match for that date/expire_date group
+
+        logger.info(f"Derived {joined.height} width-based ({width}pt) trade signals for {leg_config.option_type.value}")
+        return joined
+
     def generate_multi_leg_signals(self) -> pd.DataFrame:
         """
         Generate trade signals for option spreads by pairing legs according to the specified spread type.
@@ -223,16 +296,20 @@ class OptionSignalGenerator(BaseSignalGenerator):
         if self.config.spread_type == OptionSpreadType.NONE:
             raise ValueError("Use generate_trade_signals for single-leg positions")
 
-        # Generate signals for each leg separately
-        leg_signals = []
+        use_spread_width = getattr(self.config, 'use_spread_width', False)
+
+        # Pass 1: generate delta-based candidate strikes for every leg that
+        # has a delta_target/delta_range. Width-derived long legs (no delta;
+        # only valid when use_spread_width=True, enforced in
+        # MultiLegOptionStrategyConfig.__post_init__) are left as None here
+        # and filled in during pass 2, since they depend on their anchor
+        # SHORT leg's signals already having been generated.
+        leg_signals: List[Optional[pl.DataFrame]] = [None] * len(self.config.legs)
         for i, leg_config in enumerate(self.config.legs):
-            option_type = leg_config.option_type
-            position_side = leg_config.position_side
-            delta_target = leg_config.delta_target
-            delta_range = leg_config.delta_range
-            if delta_target is None and delta_range is None:
-                logger.error(f"Leg {i+1} must have either delta_target or delta_range specified")
-                return pd.DataFrame()
+            has_delta = leg_config.delta_target is not None or leg_config.delta_range is not None
+            if not has_delta:
+                continue
+
             dte_target = leg_config.dte_target
             dte_range = leg_config.dte_range
             if dte_target is None and dte_range is None:
@@ -240,10 +317,10 @@ class OptionSignalGenerator(BaseSignalGenerator):
                 return pd.DataFrame()
 
             leg_df = self._generate_single_leg_signals_pl(
-                option_type=option_type,
-                position_side=position_side,
-                delta_target=delta_target,
-                delta_range=delta_range,
+                option_type=leg_config.option_type,
+                position_side=leg_config.position_side,
+                delta_target=leg_config.delta_target,
+                delta_range=leg_config.delta_range,
                 dte_target=dte_target,
                 dte_range=dte_range,
                 start_date=self.config.start_date,
@@ -254,24 +331,28 @@ class OptionSignalGenerator(BaseSignalGenerator):
                 logger.warning(f"No signals generated for leg {i+1} with config: {leg_config}")
                 return pd.DataFrame()
 
-            # Tag with leg-specific columns
-            leg_df = leg_df.with_columns([
-                pl.lit(i + 1).alias('leg_number'),
-                pl.lit(position_side.value if isinstance(position_side, Enum) else position_side).alias('position_side'),
-                pl.lit(option_type.value if isinstance(option_type, Enum) else option_type).alias('option_type'),
-                pl.lit(getattr(leg_config, 'ratio', 1)).alias('leg_ratio'),
-                pl.lit(delta_target).alias('delta_target'),
-            ])
-            if delta_range:
-                leg_df = leg_df.with_columns([
-                    pl.lit(delta_range[0]).alias('delta_range_min'),
-                    pl.lit(delta_range[1]).alias('delta_range_max'),
-                ])
+            leg_signals[i] = self._tag_leg_signals(leg_df, i, leg_config)
 
-            leg_signals.append(leg_df)
+        # Pass 2: derive width-based LONG legs from their matching anchor
+        # SHORT leg (same option_type), now that anchors are generated.
+        if use_spread_width:
+            for i, leg_config in enumerate(self.config.legs):
+                if leg_signals[i] is not None:
+                    continue
+                anchor_idx = next(
+                    j for j, lc in enumerate(self.config.legs)
+                    if lc.option_type == leg_config.option_type and lc.position_side == PositionSide.SHORT
+                )
+                leg_df = self._derive_width_based_leg_signals_pl(leg_config, leg_signals[anchor_idx], self.config.max_spread_width)
+
+                if leg_df.height == 0:
+                    logger.warning(f"No width-derived signals for leg {i+1} with config: {leg_config}")
+                    return pd.DataFrame()
+
+                leg_signals[i] = self._tag_leg_signals(leg_df, i, leg_config)
 
         # No valid signals for one or more legs
-        if any(df.height == 0 for df in leg_signals):
+        if any(df is None or df.height == 0 for df in leg_signals):
             logger.error("One or more legs returned no signals")
             return pd.DataFrame()
 

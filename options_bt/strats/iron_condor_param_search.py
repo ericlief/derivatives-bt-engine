@@ -15,18 +15,13 @@ from dotenv import load_dotenv
 logger = setup_logger()
 load_dotenv()
 
-# ── Tunable defaults ────────────────────────────────────────────────
-WING_OFFSET = 0.05  # long-leg delta = short-leg delta - WING_OFFSET, per side
-
-
 def make_iron_condor_config(combo, start_date, end_date):
-    """Build a symmetric iron condor: same short/long delta targets on the
-    put and call side. Fixed dates and static pieces; vary the rest via combo."""
+    """Build a symmetric iron condor: short legs at a target delta; long legs
+    (the wings) are placed max_spread_width points further out-of-the-money
+    (use_spread_width=True) rather than swept by their own delta_target --
+    keeps the grid to one width dimension instead of two independent deltas.
+    Fixed dates and static pieces; vary the rest via combo."""
     short_delta = combo['short_delta_target']
-    long_delta = combo.get(
-        'long_delta_target',
-        max(0.05, round(short_delta - combo.get('wing_offset', WING_OFFSET), 2))
-    )
     dte_target = combo.get('dte_target')
     dte_range = combo.get('dte_range')  # harmless if None
 
@@ -45,6 +40,7 @@ def make_iron_condor_config(combo, start_date, end_date):
         max_margin_utilization=0.80,
         max_positions=1,
         max_spread_width=combo.get('max_spread_width', 50),
+        use_spread_width=combo.get('use_spread_width', True),
         max_trade_loss=combo.get('max_trade_loss', 7500),
         trade_selection_method=combo.get('trade_selection_method', TradeSelectionMethod.PREMIUM_FIRST),
         vix_range=combo.get('vix_range', None),
@@ -52,12 +48,13 @@ def make_iron_condor_config(combo, start_date, end_date):
         # _pair_iron_condor_spread_legs() pairs leg_signals positionally, not
         # by option_type/position_side, so this order is load-bearing: it
         # must be [long put (lower strike), short put (higher strike),
-        # short call (lower strike), long call (higher strike)].
+        # short call (lower strike), long call (higher strike)]. The long
+        # legs omit delta_target/delta_range entirely -- use_spread_width
+        # derives their strike from the matching short leg instead.
         legs=[
             OptionLegConfig(
                 option_type=OptionType.PUT,
                 position_side=PositionSide.LONG,
-                delta_target=long_delta,
                 dte_target=dte_target,
                 dte_range=dte_range,
             ),
@@ -78,7 +75,6 @@ def make_iron_condor_config(combo, start_date, end_date):
             OptionLegConfig(
                 option_type=OptionType.CALL,
                 position_side=PositionSide.LONG,
-                delta_target=long_delta,
                 dte_target=dte_target,
                 dte_range=dte_range,
             ),

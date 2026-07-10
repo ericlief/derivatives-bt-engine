@@ -69,18 +69,51 @@ class MultiLegOptionStrategyConfig(BaseOptionStrategyConfig):
     max_spread_width: Optional[float] = None  # Maximum spread width in points (e.g., 50 for SPX means max $5000 margin)
     max_trade_loss: Optional[float] = None # Position-based risk management (e.g. $500)
     premium_ratio: Optional[float] = None # Only trades with 1/3 of width, etc.
+    # When True, any LONG leg without a delta_target/delta_range has its
+    # strike derived from the matching SHORT leg of the same option_type
+    # (same-day, same expiration), placed max_spread_width points further
+    # out-of-the-money -- overrides delta-based long-leg selection for
+    # verticals and iron condors.
+    use_spread_width: bool = False
 
     def __post_init__(self):
         # Validate legs configuration
         for leg in self.legs:
             if not hasattr(leg, 'option_type') or not hasattr(leg, 'position_side'):
                 raise ValueError("Each leg must have 'option_type' and 'position_side' defined")
-   
+
+        # A leg with no delta_target/delta_range is only valid as a LONG leg
+        # under use_spread_width, and only if a matching SHORT leg (same
+        # option_type, itself delta-based) exists to anchor it.
+        for leg in self.legs:
+            has_delta = leg.delta_target is not None or leg.delta_range is not None
+            if has_delta:
+                continue
+            if not self.use_spread_width or leg.position_side != PositionSide.LONG:
+                raise ValueError(
+                    "Leg has neither delta_target nor delta_range; this is only "
+                    "allowed for a LONG leg when use_spread_width=True"
+                )
+            anchor = next(
+                (l for l in self.legs if l.option_type == leg.option_type
+                 and l.position_side == PositionSide.SHORT
+                 and (l.delta_target is not None or l.delta_range is not None)),
+                None,
+            )
+            if anchor is None:
+                raise ValueError(
+                    f"use_spread_width=True: no matching SHORT {leg.option_type} leg "
+                    "with a delta_target/delta_range found to anchor this LONG leg's strike"
+                )
+
+        if self.use_spread_width and self.max_spread_width is None:
+            raise ValueError("use_spread_width=True requires max_spread_width to be set")
+
         # Not sure if we should derive ratio form leg quantity here or in the leg config
          # Set default leg ratios if not provided
         if not self.leg_ratios:
             self.leg_ratios = {i: 1.0 for i in range(len(self.legs))}
-            
+
         # Validate spread type
         if self.spread_type not in [OptionSpreadType.VERTICAL, OptionSpreadType.CALENDAR, OptionSpreadType.DIAGONAL, OptionSpreadType.IRON_CONDOR, OptionSpreadType.BUTTERFLY]:
             raise ValueError("Invalid spread type. Supported types are: vertical, calendar, diagonal, iron_condor, butterfly")

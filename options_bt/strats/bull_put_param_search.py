@@ -57,13 +57,13 @@ class GridSearchBacktester:
         
         combos = product_dict(param_grid)
         # print(f"Total combos (unfiltered): {len(combos)}")
-        OFFSET = 0.05
         # combos = product_dict({'short_delta_target': [0.20, 0.30, 0.40, 0.50, 0.60, 0.70], 'dte_target': [30,35,40,45]})
         # combos = product_dict({'short_delta_target': [0.20, 0.30, 0.40, 0.50, 0.60, 0.70], 'dte_target': [30,35,40,45]})
 
-        for c in combos:
-            c['long_delta_target'] = max(0.05, round(c['short_delta_target'] - OFFSET, 2))
-
+        # Long-leg delta (when not using use_spread_width) is derived in
+        # make_config itself now, not injected here -- this runner is shared
+        # across strategies (bull put, iron condor) and shouldn't assume a
+        # long_delta_target combo key applies to all of them.
         logger.info(f"Total combos: {len(combos)}")
         logger.info(combos[:25])
 
@@ -150,8 +150,33 @@ class GridSearchBacktester:
         return df
 
 
+# ── Tunable defaults ────────────────────────────────────────────────
+_LONG_LEG_DELTA_OFFSET = 0.05  # long-leg delta = short-leg delta - this, unless use_spread_width
+
+
 def make_bull_put_config(combo, start_date, end_date):
-    # Fixed dates and static pieces; vary others via combo
+    """Fixed dates and static pieces; vary others via combo.
+
+    By default the long (wing) leg is picked by its own delta_target
+    (short_delta_target - _LONG_LEG_DELTA_OFFSET, or an explicit
+    'long_delta_target' combo override). Set combo['use_spread_width']=True
+    to instead place the long leg max_spread_width points further
+    out-of-the-money -- drops the long-leg delta as a grid dimension
+    entirely, leaving max_spread_width as the only width knob.
+    """
+    use_spread_width = combo.get('use_spread_width', False)
+    dte_target = combo.get('dte_target')
+    dte_range = combo.get('dte_range')  # harmless if None
+
+    if use_spread_width:
+        long_leg_kwargs = {}
+    else:
+        long_delta = combo.get(
+            'long_delta_target',
+            max(0.05, round(combo['short_delta_target'] - _LONG_LEG_DELTA_OFFSET, 2))
+        )
+        long_leg_kwargs = {'delta_target': long_delta}
+
     return MultiLegOptionStrategyConfig(
         quantity=1,
         multiplier=100,
@@ -167,6 +192,7 @@ def make_bull_put_config(combo, start_date, end_date):
         max_margin_utilization=0.80,
         max_positions=1,
         max_spread_width=combo.get('max_spread_width', 100),
+        use_spread_width=use_spread_width,
         max_trade_loss=combo.get('max_trade_loss', 7500),
         trade_selection_method=combo.get('trade_selection_method', TradeSelectionMethod.PREMIUM_FIRST),
         vix_range=combo.get('vix_range', None),
@@ -177,15 +203,15 @@ def make_bull_put_config(combo, start_date, end_date):
                 option_type=OptionType.PUT,
                 position_side=PositionSide.SHORT,
                 delta_target=combo['short_delta_target'],
-                dte_target=combo.get('dte_target'),
-                dte_range=combo.get('dte_range'),  # harmless if None
+                dte_target=dte_target,
+                dte_range=dte_range,  # harmless if None
             ),
             OptionLegConfig(
                 option_type=OptionType.PUT,
                 position_side=PositionSide.LONG,
-                delta_target=combo['long_delta_target'],
-                dte_target=combo.get('dte_target'),
-                dte_range=combo.get('dte_range'),
+                dte_target=dte_target,
+                dte_range=dte_range,
+                **long_leg_kwargs,
             ),
         ],
     )

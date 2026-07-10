@@ -15,9 +15,10 @@ class OptionLegConfig:
     early_close_on_dte: Optional[int] = None  # For complex assymetric strategies
 
     def __post_init__(self):
-        if self.delta_target is None and self.delta_range is None:
-            raise ValueError("Must provide either delta_target or delta_range")
-
+        # delta_target/delta_range may both be left None for a LONG leg whose
+        # strike is instead derived from its paired SHORT leg's strike +/-
+        # MultiLegOptionStrategyConfig.max_spread_width (use_spread_width=True)
+        # -- validated there, since it needs to see the whole legs list.
         if self.dte_target is None and self.dte_range is None:
             raise ValueError("Must provide either dte_target or dte_range")
 
