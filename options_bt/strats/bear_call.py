@@ -119,11 +119,6 @@ def run_test_suite():
     print('Transactions:')
     print(transactions.head())
     print()
-    # MTM
-    print('Calculating MTM')
-    mtm_res = bt.calculate_mtm(results, config=config)
-    print(f'MTM results:')
-    print(mtm_res.head())
 
     # Define hyperparameter sets for different tests
     # hyperparameter_sets = [

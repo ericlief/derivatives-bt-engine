@@ -126,7 +126,6 @@ class GridSearchBacktester:
     def _shared_data(self) -> dict:
         return {
             'option_chain': self.bt.option_chain,
-            'option_chain_multi_index': self.bt.option_chain_multi_index,
             'underlying': self.bt.underlying,
             'vix': self.bt.vix,
         }
