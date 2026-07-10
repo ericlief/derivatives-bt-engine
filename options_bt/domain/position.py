@@ -734,17 +734,19 @@ class SingleLegOptionPosition(BaseOptionPosition):
         # Force close, e.g. if need to close all positions at end of period
         if force:
             # Look both forward and backward when force closing to handle wide spreads
-            date_range = [close_dt + timedelta(days=d) for d in range(-2, 3)]
+            date_range = [(close_dt + timedelta(days=d)).date for d in range(-2, 3)]
+            # date_range = [self._as_date(dt) for dt in date_range]
             filtered_df = option_chain.filter(
-                pl.col('date').is_in(date_range) &
+                pl.col('date').dt.date().is_in(date_range) &
                 (pl.col('expire_date') == exp_dt) &
                 (pl.col('strike') == self.strike)
             ).sort('date')
         # Otherwise, just early close
         else:
             date_range = [close_dt + timedelta(days=d) for d in range(0, 3)]
+            # date_range = [self._as_date(dt) for dt in date_range]
             filtered_df = option_chain.filter(
-                pl.col('date').is_in(date_range) &
+                pl.col('date').dt.date().is_in(date_range) &
                 (pl.col('expire_date') == exp_dt) &
                 (pl.col('strike') == self.strike)
             )
@@ -800,7 +802,7 @@ class SingleLegOptionPosition(BaseOptionPosition):
         if wide_spread_dates:
             logger.warning(f"All spreads too wide in date range, attempting fallback for strike {self.strike}")
             # Sort by date proximity to close_date, then by spread width
-            wide_spread_dates.sort(key=lambda x: (abs((x[0] - close_dt).days), x[3]))
+            wide_spread_dates.sort(key=lambda x: (abs((x[0].date() - close_dt).days), x[3]))
 
             # Use the closest date with the narrowest spread, even if it's wide
             fallback_date, fallback_bid, fallback_ask, fallback_spread, fallback_delta = wide_spread_dates[0]

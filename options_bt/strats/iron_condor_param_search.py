@@ -110,9 +110,9 @@ def run_grid():
     runner = GridSearchBacktester(bt, periods=periods, start_date=start_date, end_date=end_date)
 
     param_grid = {
-        'max_spread_width': [50, 75],
+        'max_spread_width': [10, 20, 30],
         'early_close_on_dte': [20, 25, None],
-        'short_delta_target': [0.20, 0.25, 0.30],
+        'short_delta_target': [0.20, 0.25, 0.30, 0.40],
         'dte_target': [30, 45],
     }
 
