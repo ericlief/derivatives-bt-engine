@@ -422,7 +422,7 @@ class BaseOptionPosition(BasePosition, ABC):
                 'date': date,
                 'type': operation,
                 'option_type': position.option_type.value if isinstance(position.option_type, OptionType) else position.option_type,
-                'position_side': position.position_side,
+                'position_side': position.position_side.value if isinstance(position.position_side, PositionSide) else position.position_side,
                 'expire_date': position.expire_date,
                 'entry_delta': round(position.entry_delta, 2),
                 'exit_delta': round(position.exit_delta, 2) if position.exit_delta is not None else None,
@@ -432,6 +432,14 @@ class BaseOptionPosition(BasePosition, ABC):
                 'underlying_exit': position.underlying_exit if position.underlying_exit is not None else None,
                 'strike': position.strike,
                 'price': price,
+                # quantity/multiplier: needed (alongside strike/expire_date/
+                # option_type/position_side, already here) to mark this leg
+                # to market on an arbitrary date -- see
+                # Backtester.calculate_options_mtm_drawdown, which sources
+                # per-leg contract terms from these 'open' transaction rows
+                # (trade_results is spread-level only and has neither).
+                'quantity': position.quantity,
+                'multiplier': position.multiplier,
                 'effect': effect,
                 'bp_effect': round(bp_effect, 2) if bp_effect is not None else None,
                 'fees': round(position.fees, 2) if position.fees is not None else 0

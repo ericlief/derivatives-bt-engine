@@ -3,7 +3,7 @@ from typing import Dict, List, NamedTuple, Optional, Tuple, Union
 import numpy as np
 import logging
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import os
 from enum import Enum
 
@@ -335,10 +335,14 @@ class Backtester:
         # Calculate margin utilization
         trade_results = trade_results.with_columns((pl.col('capital_used') / config.initial_capital).round(4).alias('margin_utilization'))
 
-        # Calculate Sharpe Ratio without risk-free rate
+        # Trade-to-trade Sharpe: NOT a calendar-time Sharpe -- it treats each
+        # closed trade as one "period" and annualizes by average trade
+        # duration, implicitly assuming trades are evenly spaced and capital
+        # is continuously at risk between them. See calculate_options_mtm_drawdown
+        # (options) / calculate_futures_mtm_drawdown (futures) below for the
+        # daily-return Sharpe that doesn't make that assumption.
         sharpe = None
         if trade_results.height > 1:
-            # If you want to keep trade-to-trade returns:
             avg_trade_days = trade_results['days_held'].mean()  # Average days per trade
             if avg_trade_days:
                 annualization_factor = np.sqrt(252 / avg_trade_days)
@@ -346,7 +350,7 @@ class Backtester:
                 returns = np.diff(capital_vals) / capital_vals[:-1]
                 if len(returns) > 0 and np.std(returns) > 0:
                     sharpe = np.mean(returns) / np.std(returns) * annualization_factor
-                    logger.info(f"Sharpe Ratio: {sharpe:.2f}")
+                    logger.info(f"Trade-to-trade Sharpe Ratio: {sharpe:.2f}")
 
         # Save results if requested
         # Generate parameter string based on backtest type
@@ -406,7 +410,8 @@ class Backtester:
 
         results = {
             'trade_results': trade_results,
-            'transactions': transactions
+            'transactions': transactions,
+            'sharpe_trade_to_trade': sharpe,
         }
 
         print(results['trade_results'])
@@ -416,6 +421,7 @@ class Backtester:
                 results = self.calculate_futures_mtm_drawdown(results, config)
             else:
                 results = self.calculate_simple_drawdown(results, config)
+                results = self.calculate_options_mtm_drawdown(results, config)
 
         if self.save_trades:
             save_start = time.time()
@@ -810,6 +816,194 @@ class Backtester:
 
         results['stats'] = stats
         results['drawdown_analysis'] = {
+            'max_drawdown': max_dd_usd,
+            'peak_capital': peak_capital,
+            'trough_capital': trough_capital,
+            'drawdown_duration': max_dd_duration,
+        }
+
+        return results
+
+    def calculate_options_mtm_drawdown(self, results: dict,
+                                       config: Union[SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig]) -> dict:
+        """
+        Daily mark-to-market Sharpe/drawdown for options, built in polars —
+        the options analogue of calculate_futures_mtm_drawdown, added
+        because trade-to-trade Sharpe (computed above in _finalize_results)
+        implicitly assumes trades are evenly spaced and capital is
+        continuously at risk, which understates real day-to-day volatility
+        whenever the strategy sits in cash between trades. This method adds
+        results['mtm_sharpe']/['daily_mtm'] alongside (not replacing) the
+        existing trade-by-trade drawdown from calculate_simple_drawdown.
+
+        Unlike futures (a single continuous instrument, marked via one
+        join_asof against its own price series), an option spread can have
+        several legs at different strikes/expirations, so each leg is
+        marked to market separately against the option chain by
+        (date, strike, expire_date) and summed per spread per day — no
+        Python per-day loop, and no MultiIndex (this is exactly the
+        approach the option_chain_multi_index removal commit recommended
+        instead of resurrecting that structure). Per-leg contract terms
+        (strike/expire_date/option_type/position_side/quantity/multiplier)
+        come from 'open' transactions (BTO/STO rows) — trade_results is
+        spread-level only and carries neither.
+        """
+        trade_results = results['trade_results']
+        transactions = results['transactions']
+
+        if trade_results.height == 0 or transactions.height == 0:
+            return results
+
+        leg_opens = transactions.filter(pl.col('type').is_in(['BTO', 'STO'])).select(
+            ['trade_id', 'strike', 'expire_date', 'option_type', 'position_side', 'quantity', 'multiplier', 'price']
+        )
+        if leg_opens.height == 0:
+            return results
+
+        trades_meta = trade_results.select(['trade_id', 'opened', 'closed', 'capital'])
+        legs = leg_opens.join(trades_meta, on='trade_id', how='inner')
+
+        # One row per (leg, day it was open), day range [opened, closed) --
+        # matches calculate_futures_mtm_drawdown's is_open convention (the
+        # close day itself is already flat at realized capital, handled by
+        # the join_asof branch below). Trades opened/closed same-day have no
+        # is_open days at all -- their entire life is realized capital.
+        legs = legs.filter(pl.col('opened') < pl.col('closed'))
+        if legs.height == 0:
+            return results
+
+        legs = legs.with_row_index('leg_id').with_columns(
+            pl.date_ranges(pl.col('opened'), pl.col('closed') - timedelta(days=1), interval='1d').alias('date')
+        ).explode('date')
+
+        # Polars expressions can't pick a column name per-row (p_bid vs
+        # c_bid) -- split by option_type, join each half against its own
+        # bid/ask pair aliased to a shared name, then recombine.
+        option_chain = self.option_chain
+        chain_puts = option_chain.select(['date', 'strike', 'expire_date',
+                                           pl.col('p_bid').alias('bid'), pl.col('p_ask').alias('ask')])
+        chain_calls = option_chain.select(['date', 'strike', 'expire_date',
+                                            pl.col('c_bid').alias('bid'), pl.col('c_ask').alias('ask')])
+
+        put_legs = legs.filter(pl.col('option_type') == OptionType.PUT.value).join(
+            chain_puts, on=['date', 'strike', 'expire_date'], how='left')
+        call_legs = legs.filter(pl.col('option_type') == OptionType.CALL.value).join(
+            chain_calls, on=['date', 'strike', 'expire_date'], how='left')
+        legs_priced = pl.concat([put_legs, call_legs], how='diagonal_relaxed').sort(['leg_id', 'date'])
+
+        # Fill quote gaps (thin/no-quote days for a given strike) from the
+        # nearest available day for that same leg -- forward first (use the
+        # last known price), then backward for a gap at the very start of a
+        # leg's life, mirroring the closing-price fallback philosophy
+        # already used in position.py's _update_single_leg_closing_data.
+        legs_priced = legs_priced.with_columns([
+            pl.col('bid').fill_null(strategy='forward').over('leg_id'),
+            pl.col('ask').fill_null(strategy='forward').over('leg_id'),
+        ]).with_columns([
+            pl.col('bid').fill_null(strategy='backward').over('leg_id'),
+            pl.col('ask').fill_null(strategy='backward').over('leg_id'),
+        ])
+        legs_priced = legs_priced.with_columns(((pl.col('bid') + pl.col('ask')) / 2).alias('mid_price'))
+
+        # Signed entry/current price, mirroring
+        # BasePosition.signed_entry_price/signed_exit_price exactly (long:
+        # entry is a debit/negative, current value is positive; short:
+        # entry is a credit/positive, current cost-to-close is negative) --
+        # summing the two gives per-share unrealized P&L, scaled by
+        # multiplier/quantity to dollars, same as calculate_pnl's formula.
+        is_long = pl.col('position_side') == PositionSide.LONG.value
+        legs_priced = legs_priced.with_columns([
+            pl.when(is_long).then(-pl.col('price').abs()).otherwise(pl.col('price').abs()).alias('signed_entry'),
+            pl.when(is_long).then(pl.col('mid_price').abs()).otherwise(-pl.col('mid_price').abs()).alias('signed_current'),
+        ])
+        legs_priced = legs_priced.with_columns(
+            ((pl.col('signed_current') + pl.col('signed_entry')) * pl.col('multiplier') * pl.col('quantity')).alias('leg_unrealized_pnl')
+        )
+
+        daily_unrealized = legs_priced.group_by(['trade_id', 'date']).agg(
+            pl.col('leg_unrealized_pnl').sum().alias('unrealized_pnl')
+        )
+
+        start = date.fromisoformat(config.start_date)
+        end = date.fromisoformat(config.end_date)
+        daily = (
+            self.underlying
+            .filter((pl.col('date') >= start) & (pl.col('date') <= end))
+            .select(['date'])
+            .sort('date')
+        )
+
+        trades_for_join = trades_meta.sort('opened').with_columns(
+            pl.col('capital').shift(1).fill_null(config.initial_capital).alias('capital_before')
+        )
+
+        daily = daily.join_asof(trades_for_join, left_on='date', right_on='opened', strategy='backward')
+        daily = daily.with_columns(
+            is_open=pl.col('closed').is_not_null() & (pl.col('date') < pl.col('closed'))
+        )
+        daily = daily.join(daily_unrealized, on=['trade_id', 'date'], how='left')
+
+        daily = daily.with_columns(
+            mtm_capital=pl.when(pl.col('is_open'))
+            .then(pl.col('capital_before') + pl.col('unrealized_pnl').fill_null(0.0))
+            .when(pl.col('closed').is_not_null())
+            .then(pl.col('capital'))  # already closed as of this day -> flat at realized capital
+            .otherwise(pl.lit(float(config.initial_capital)))  # before the first trade opened
+        )
+
+        daily = daily.with_columns(
+            mtm_pnl=pl.col('mtm_capital').diff().fill_null(pl.col('mtm_capital') - config.initial_capital)
+        )
+        daily = daily.with_columns(cum_pnl=pl.col('mtm_capital') - config.initial_capital)
+        daily = daily.with_columns(cum_pnl_pct=pl.col('cum_pnl') / config.initial_capital * 100)
+        daily = daily.with_columns(running_max=pl.col('mtm_capital').cum_max())
+        daily = daily.with_columns(dd_usd=pl.col('mtm_capital') - pl.col('running_max'))
+        daily = daily.with_columns(
+            dd_pct=pl.when(pl.col('running_max') > 0)
+            .then(pl.col('dd_usd') / pl.col('running_max') * 100)
+            .otherwise(0.0)
+        )
+        daily = daily.with_columns(
+            pl.col('mtm_pnl', 'cum_pnl', 'cum_pnl_pct', 'mtm_capital', 'running_max', 'dd_usd', 'dd_pct').round(2)
+        )
+
+        max_dd_row = daily.sort('dd_usd', descending=False).head(1)
+        max_dd_usd = max_dd_row['dd_usd'][0]
+        max_dd_pct = max_dd_row['dd_pct'][0]
+        trough_capital = max_dd_row['mtm_capital'][0]
+        peak_capital = max_dd_row['running_max'][0]
+
+        dd_active = (daily['dd_usd'] < 0).to_numpy()
+        max_dd_duration = 0
+        current_run = 0
+        for active in dd_active:
+            if active:
+                current_run += 1
+                max_dd_duration = max(max_dd_duration, current_run)
+            else:
+                current_run = 0
+
+        daily_ret = daily.with_columns(
+            daily_ret=pl.col('mtm_capital') / pl.col('mtm_capital').shift(1) - 1
+        )['daily_ret'].drop_nulls()
+        mtm_sharpe = (
+            (daily_ret.mean() / daily_ret.std() * (252 ** 0.5))
+            if daily_ret.std() and daily_ret.std() > 0 else None
+        )
+
+        logger.info(f"[Daily MTM] Maximum Drawdown (USD): {max_dd_usd:.2f}")
+        logger.info(f"[Daily MTM] Maximum Drawdown (%): {max_dd_pct:.2f}%")
+        logger.info(f"[Daily MTM] Peak Capital: ${peak_capital:.2f}")
+        logger.info(f"[Daily MTM] Trough Capital: ${trough_capital:.2f}")
+        logger.info(f"[Daily MTM] Drawdown Duration: {max_dd_duration} trading days")
+        logger.info(f"[Daily MTM] Sharpe Ratio: {round(mtm_sharpe, 2) if mtm_sharpe is not None else 'N/A'} "
+                    f"(calendar-time, daily-return -- distinct from the trade-to-trade Sharpe above)")
+
+        results['mtm_sharpe'] = mtm_sharpe
+        results['daily_mtm'] = daily.select(
+            ['date', 'mtm_capital', 'mtm_pnl', 'cum_pnl', 'cum_pnl_pct', 'running_max', 'dd_usd', 'dd_pct']
+        )
+        results['mtm_drawdown_analysis'] = {
             'max_drawdown': max_dd_usd,
             'peak_capital': peak_capital,
             'trough_capital': trough_capital,
