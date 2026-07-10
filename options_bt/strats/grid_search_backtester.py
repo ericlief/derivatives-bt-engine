@@ -3,7 +3,7 @@ import multiprocessing
 import os
 import pickle
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
@@ -39,14 +39,14 @@ def _generate_windows(periods: List[int], start_date: str, end_date: Optional[st
     windows = []
     for period in periods:  # ASSUMING YEAR PERIODS
         cur_start = start_date
-        start_dt = pd.to_datetime(cur_start)
-        end_bound = pd.to_datetime(end_date) if end_date is not None else datetime.now()
+        start_dt = datetime.strptime(cur_start, "%Y-%m-%d")
+        end_bound = datetime.strptime(end_date, "%Y-%m-%d") if end_date is not None else datetime.now()
         while True:
-            end_dt = start_dt + pd.Timedelta(days=period * 365)
+            end_dt = start_dt + timedelta(days=period * 365)
             if end_dt > end_bound:
                 break
             windows.append((period, cur_start, end_dt.strftime("%Y-%m-%d")))
-            start_dt = start_dt + pd.Timedelta(days=_WINDOW_SLIDE_DAYS)
+            start_dt = start_dt + timedelta(days=_WINDOW_SLIDE_DAYS)
             cur_start = start_dt.strftime("%Y-%m-%d")
     return windows
 
