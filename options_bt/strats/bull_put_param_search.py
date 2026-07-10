@@ -1,6 +1,5 @@
 from datetime import datetime
 import os
-import pandas as pd
 from options_bt.utils.logger import setup_logger
 from options_bt.domain.enums import *
 from options_bt.domain.backtester import Backtester
@@ -81,8 +80,8 @@ def make_bull_put_config(combo, start_date, end_date):
     )
 
 def run_grid():
-    pd.set_option('display.max_columns', None)
-    pd.set_option('display.width', 200)
+    # Display width/precision for results (polars DataFrames) is configured
+    # globally by backtester.py's module-level pl.Config calls.
 
     # Set up data paths. The options chain, SPX underlying, and VIX files
     # live in three different directories, each fully resolved to an
@@ -147,7 +146,7 @@ def run_grid():
         save_top_runs=10,  # Save detailed results for top 5 runs
         # top_k=10
       )  # pass list of dicts too
-    print(results_df.sort_values('total_pnl', ascending=False).head(20))
+    print(results_df.sort('total_pnl', descending=True).head(20))
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     keys = list(param_grid.keys())
@@ -155,8 +154,8 @@ def run_grid():
           for v in param_grid.values()]
     param_list = [f"{k}_{v}" for k, v in zip(keys, values)]
     param_str = "__".join(param_list)
-    csv_path = os.path.join(bt.results_dir, f"backtest_summary_{timestamp}_{param_str}_{start_date}_{end_date}.csv")  
-    results_df.to_csv(csv_path, index=False)
+    csv_path = os.path.join(bt.results_dir, f"backtest_summary_{timestamp}_{param_str}_{start_date}_{end_date}.csv")
+    results_df.write_csv(csv_path)
     print(param_list)
 
 

@@ -1,6 +1,5 @@
 import os
 
-import pandas as pd
 from options_bt.utils.logger import setup_logger
 from options_bt.domain.enums import *
 from options_bt.domain.backtester import Backtester
@@ -17,8 +16,8 @@ load_dotenv()
 def run_test_suite():
 
     """Run a suite of backtest examples with different configurations."""
-    pd.set_option('display.max_columns', None)
-    pd.set_option('display.max_colwidth', None)
+    # Display width/precision for results (polars DataFrames) is configured
+    # globally by backtester.py's module-level pl.Config calls.
 
     # Set up data paths. The options chain, SPX underlying, and VIX files
     # live in three different directories, each fully resolved to an

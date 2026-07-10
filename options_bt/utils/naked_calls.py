@@ -1,21 +1,19 @@
-import pandas as pd
-
 from options_bt.utils.logger import setup_logger
-from options_bt.domain.enums import *  
-from options_bt.domain.backtester import Backtester 
+from options_bt.domain.enums import *
+from options_bt.domain.backtester import Backtester
 from options_bt.domain.dataloader import OptionsDataLoader
 from options_bt.domain.strategy_config import SingleLegOptionStrategyConfig
 from options_bt.domain.option_leg_config import OptionLegConfig
 
 # Create logger instance
 logger = setup_logger()
- 
+
 
 def run_test_suite():
 
     """Run a suite of backtest examples with different configurations."""
-    pd.set_option('display.max_columns', None)
-    pd.set_option('display.max_colwidth', None)
+    # Display width/precision for results (polars DataFrames) is configured
+    # globally by backtester.py's module-level pl.Config calls.
 
     # Set up data paths
     DATA_PATH = "/Users/liefe/Data/spx"

@@ -3,8 +3,8 @@ import os
 from typing import Union
 import gspread
 from google.oauth2.service_account import Credentials
-from datetime import datetime
-import pandas as pd
+from datetime import date, datetime
+import polars as pl
 import numpy as np
 
 from options_bt.utils.logger import setup_logger
@@ -162,10 +162,10 @@ def log_to_google_sheets(results: dict,
         # OLD (for negative drawdown): Use .min() instead of .max()
         max_dd_amount = "N/A"
         max_dd_pct = "N/A"
-        if stats is not None and not stats.empty:
+        if stats is not None and stats.height > 0:
             max_dd_amount = f"{stats['Drawdown ($)'].max():.2f}"  # Now using max since drawdown is positive
             max_dd_pct = f"{stats['Drawdown (%)'].max():.2f}"  # Now using max since drawdown is positive
-        
+
         # Prepare data row
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
@@ -174,25 +174,25 @@ def log_to_google_sheets(results: dict,
             config.option_strategy.value,
             config.start_date,
             config.end_date,
-            round((pd.to_datetime(config.end_date) - pd.to_datetime(config.start_date)).days, 2),
+            round((date.fromisoformat(config.end_date) - date.fromisoformat(config.start_date)).days, 2),
             config.quantity,
             _get_leg_field_json(config, 'dte_target'),
             _get_leg_field_json(config, 'dte_range'),
             _get_leg_field_json(config, 'delta_target'),
             _get_leg_field_json(config, 'delta_range'),
-            round(results_df['cumulative_pnl'].iloc[-1], 2),
+            round(results_df['cumulative_pnl'][-1], 2),
             config.initial_capital,
-            round(results_df['capital'].iloc[-1], 2),
-            round((results_df['capital'].iloc[-1] / config.initial_capital - 1) * 100, 2),  # Convert % to number
+            round(results_df['capital'][-1], 2),
+            round((results_df['capital'][-1] / config.initial_capital - 1) * 100, 2),  # Convert % to number
             round(results_df['ret_per_unit_risk'].mean(), 2),
             round(results_df['ret_per_point'].mean(), 2) if 'ret_per_point' in results_df.columns else 0.0,
-            round(results_df[results_df['pnl'] > 0]['pnl'].mean(), 2),   # avg_profit
+            round(results_df.filter(pl.col('pnl') > 0)['pnl'].mean() or 0.0, 2),   # avg_profit
             round(results_df['pnl'].max(), 2),
-            round(results_df[results_df['pnl'] <= 0]['pnl'].mean(), 2),   # avg_loss
+            round(results_df.filter(pl.col('pnl') <= 0)['pnl'].mean() or 0.0, 2),   # avg_loss
             round(results_df['pnl'].min(), 2),
-            round(((results_df['pnl'] > 0).sum() / len(results_df)) * 100, 2),  # win_rate
-            convert_numpy_types((results_df['pnl'] > 0).sum()),
-            convert_numpy_types(len(results_df)),
+            round(((results_df['pnl'] > 0).sum() / results_df.height) * 100, 2),  # win_rate
+            (results_df['pnl'] > 0).sum(),
+            results_df.height,
             round(results_df['days_held'].mean(), 1),
             max_dd_amount,
             max_dd_pct,
@@ -272,14 +272,14 @@ def _format_single_backtest_result_row(results: dict,
     # OLD (for negative drawdown): Use .min() instead of .max()
     max_dd_amount = "N/A"
     max_dd_pct = "N/A"
-    if stats is not None and not stats.empty:
+    if stats is not None and stats.height > 0:
         max_dd_amount = f"{stats['Drawdown ($)'].max():.2f}"  # Now using max since drawdown is positive
         max_dd_pct = f"{stats['Drawdown (%)'].max():.2f}"  # Now using max since drawdown is positive
 
     # Prepare data row
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-    
+    has_trades = tr.height > 0
 
     row_data = {
         "timestamp": timestamp,
@@ -292,20 +292,20 @@ def _format_single_backtest_result_row(results: dict,
         "dte_range": _get_leg_field_json(config, 'dte_range'),
         "delta_target": _get_leg_field_json(config, 'delta_target'),
         "delta_range": _get_leg_field_json(config, 'delta_range'),
-        "total_pnl": round(tr['cumulative_pnl'].iloc[-1], 2) if not tr.empty else 0.0,
+        "total_pnl": round(tr['cumulative_pnl'][-1], 2) if has_trades else 0.0,
         "initial_capital": config.initial_capital,
-        "final_capital": round(tr['capital'].iloc[-1], 2) if not tr.empty else config.initial_capital,
-        "ret_pct": round((tr['capital'].iloc[-1] / config.initial_capital - 1) * 100, 2) if not tr.empty else 0.0, # Convert % to number
-        "avg_ret_pur": round(tr['ret_per_unit_risk'].mean(), 2) if not tr.empty else 0.0,
-        "avg_ret_pp": round(tr['ret_per_point'].mean(), 2) if not tr.empty and 'ret_per_point' in tr.columns else 0.0,
-        "avg_win": round(tr[tr['pnl'] > 0]['pnl'].mean(), 2) if not tr.empty else 0.0,
-        "max_win": round(tr['pnl'].max(), 2) if not tr.empty else 0.0,
-        "avg_loss": round(tr[tr['pnl'] <= 0]['pnl'].mean(), 2) if not tr.empty else 0.0,
-        "max_loss": round(tr['pnl'].min(), 2) if not tr.empty else 0.0,
-        "win_rate": round((tr['pnl'] > 0).sum() / len(tr), 2) if not tr.empty else 0.0,
-        "winning_trades": convert_numpy_types((tr['pnl'] > 0).sum()) if not tr.empty else 0,
-        "total_trades": convert_numpy_types(len(tr)) if not tr.empty else 0,
-        "avg_days_held": round(tr['days_held'].mean(), 1) if not tr.empty else 0.0,
+        "final_capital": round(tr['capital'][-1], 2) if has_trades else config.initial_capital,
+        "ret_pct": round((tr['capital'][-1] / config.initial_capital - 1) * 100, 2) if has_trades else 0.0, # Convert % to number
+        "avg_ret_pur": round(tr['ret_per_unit_risk'].mean(), 2) if has_trades else 0.0,
+        "avg_ret_pp": round(tr['ret_per_point'].mean(), 2) if has_trades and 'ret_per_point' in tr.columns else 0.0,
+        "avg_win": round(tr.filter(pl.col('pnl') > 0)['pnl'].mean() or 0.0, 2) if has_trades else 0.0,
+        "max_win": round(tr['pnl'].max(), 2) if has_trades else 0.0,
+        "avg_loss": round(tr.filter(pl.col('pnl') <= 0)['pnl'].mean() or 0.0, 2) if has_trades else 0.0,
+        "max_loss": round(tr['pnl'].min(), 2) if has_trades else 0.0,
+        "win_rate": round((tr['pnl'] > 0).sum() / tr.height, 2) if has_trades else 0.0,
+        "winning_trades": (tr['pnl'] > 0).sum() if has_trades else 0,
+        "total_trades": tr.height if has_trades else 0,
+        "avg_days_held": round(tr['days_held'].mean(), 1) if has_trades else 0.0,
         "max_dd_usd": max_dd_amount,
         "max_dd_pct": max_dd_pct,
         "peak_capital": round(drawdown_analysis.get('peak_capital', 0), 2),
@@ -325,7 +325,7 @@ def _format_single_backtest_result_row(results: dict,
         "use_iv": getattr(config, 'use_iv', ''),
         "sl": '',
         "tp": '',
-        "avg_premium": round(tr['premium'].mean(), 2) if not tr.empty else 0.0,
+        "avg_premium": round(tr['premium'].mean(), 2) if has_trades else 0.0,
         "trade_selection": config.trade_selection_method.value,
         "premium_ratio": getattr(config, 'premium_ratio', ''),
         "short_delta_target": _get_leg_field_json(config, 'short_delta_target'),
@@ -338,9 +338,9 @@ def _format_single_backtest_result_row(results: dict,
     
     return row_data
 
-def upload_df_to_google_sheets(df: pd.DataFrame, strategy_name: str, spreadsheet_name: str = 'spx_options_bt_results'):
+def upload_df_to_google_sheets(df: pl.DataFrame, strategy_name: str, spreadsheet_name: str = 'spx_options_bt_results'):
     """
-    Uploads a Pandas DataFrame to a specified Google Sheet worksheet.
+    Uploads a polars DataFrame to a specified Google Sheet worksheet.
     Creates the worksheet and adds headers if it doesn't exist.
     """
     logger.info(f"Starting Google Sheets upload for strategy: {strategy_name}")
@@ -361,17 +361,17 @@ def upload_df_to_google_sheets(df: pd.DataFrame, strategy_name: str, spreadsheet
             logger.info(f"{worksheet_name} worksheet found")
         except gspread.exceptions.WorksheetNotFound:
             logger.info(f"{worksheet_name} worksheet not found, creating new one.")
-            worksheet = spreadsheet.add_worksheet(title=worksheet_name, rows=df.shape[0] + 1, cols=df.shape[1])
+            worksheet = spreadsheet.add_worksheet(title=worksheet_name, rows=df.height + 1, cols=df.width)
             logger.info("New worksheet created")
             # Add headers
-            headers = df.columns.tolist()
+            headers = df.columns
             worksheet.append_row(headers)
             logger.info("Headers added to new worksheet.")
 
-        # Prepare data for upload
-        # Convert DataFrame to a list of lists, handling numpy types and None/NaN
-        data_to_upload = df.replace({np.nan: '', None: ''}).values.tolist()
-        data_to_upload = [[_json_or_blank(x) for x in row] for row in data_to_upload]
+        # Prepare data for upload -- _json_or_blank already handles None/NaN
+        # (via convert_numpy_types + its own non-finite-float check), so no
+        # separate null-replacement pass is needed before it.
+        data_to_upload = [[_json_or_blank(x) for x in row] for row in df.rows()]
 
         logger.info(f"Uploading {len(data_to_upload)} rows to worksheet...")
         worksheet.append_rows(data_to_upload)

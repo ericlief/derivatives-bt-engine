@@ -6,7 +6,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
-import pandas as pd
+import polars as pl
 
 from options_bt.domain.backtester import Backtester
 from options_bt.utils.gspread_log_util import upload_df_to_google_sheets, _format_single_backtest_result_row
@@ -136,7 +136,7 @@ class GridSearchBacktester:
         make_config: Callable[[Dict[str, Any]], Any],
         top_k: int = None,
         save_top_runs: int = 10,  # Save detailed results for top N runs
-    ) -> pd.DataFrame:
+    ) -> pl.DataFrame:
         # Generate a single filename for this grid search run
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_filename = f"bt_results_stream_{ts}.pkl"
@@ -154,7 +154,7 @@ class GridSearchBacktester:
         else:
             rows, top_runs = self._run_sequential(windows, combos, make_config, backup_filename, save_top_runs)
 
-        df = pd.DataFrame(rows)
+        df = pl.DataFrame(rows)
         logger.info(f"Total runs completed: {len(rows)}")
         logger.info(f"Top runs collected: {len(top_runs)}")
         if top_runs:
@@ -171,13 +171,13 @@ class GridSearchBacktester:
 
         #Upload the entire results_df to Google Sheets
         # Assuming all configs in a run_grid share the same option_strategy
-        if not df.empty:
+        if df.height > 0:
             # Get strategy name from the first row of results_df
-            strategy_name = df['strategy'].iloc[0]
+            strategy_name = df['strategy'][0]
             upload_df_to_google_sheets(df, strategy_name=strategy_name, spreadsheet_name='spx_options_bt_bull_put')
 
         if top_k is not None and 'total_pnl' in df.columns:
-            df = df.sort_values(by='total_pnl', ascending=False).head(top_k).reset_index(drop=True)
+            df = df.sort('total_pnl', descending=True).head(top_k)
 
         return df
 

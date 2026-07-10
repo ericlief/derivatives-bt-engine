@@ -68,7 +68,7 @@ def main():
     stats = result['stats']
     events = result['events']
 
-    print(stats.tail(10).to_pandas().to_string())
+    print(stats.tail(10))
     print()
     print(f"Final capital: ${stats['capital'][-1]:,.2f}  "
           f"Cumulative PnL: ${stats['cum_pnl'][-1]:,.2f}  "
