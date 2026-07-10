@@ -109,7 +109,12 @@ def run_grid():
     periods = [10]
     # periods = [1, 3, 5, 10]
 
-    runner = GridSearchBacktester(bt, periods=periods, start_date=start_date, end_date=end_date)
+    # Runs every (rolling window, param combo) backtest as an independent
+    # task across this many worker processes -- set to 1 for the old
+    # sequential behavior (e.g. if debugging a single combo).
+    max_workers = os.cpu_count()
+
+    runner = GridSearchBacktester(bt, periods=periods, start_date=start_date, end_date=end_date, max_workers=max_workers)
 
     param_grid = {
         # Original (commented to control explosion):
