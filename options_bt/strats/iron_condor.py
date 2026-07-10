@@ -1,5 +1,4 @@
 import os
-from pathlib import Path
 
 from options_bt.utils.logger import setup_logger
 from options_bt.domain.enums import *
@@ -18,26 +17,20 @@ def run_test_suite():
 
     """Run a suite of backtest examples with different configurations."""
 
-    # Set up data paths.
-    # The options chain, SPX underlying, and VIX files live in three
-    # different directories -- DATA_PATH alone can't express that, so each
-    # source has its own optional env var. Set them to full absolute paths
-    # in .env; OptionsDataLoader uses an absolute options_file/spx_file/
-    # vix_file as-is instead of joining it to data_dir (data_dir is still
-    # used as the parquet cache directory, and as the join-base for any of
-    # the three that's left as a bare filename instead of a full path).
+    # Set up data paths. The options chain, SPX underlying, and VIX files
+    # live in three different directories, each fully resolved to an
+    # absolute path by its own env var -- OptionsDataLoader takes them as-is,
+    # no shared base directory needed.
     #
     # .env example:
-    #   DATA_PATH=/Users/liefe/data/fin/market/index/SPX
-    #   SPX_OPTIONS_CHAIN_PATH=/Users/liefe/data/fin/market/index/SPX/eod  (looks for processed/spx_chain_eod.csv inside it)
-    #   SPX_UNDERLYING_PATH=/Users/liefe/data/fin/market/index/SPX/eod  (looks for processed/spx_eod_preproc.csv inside it)
-    #   VIX_PATH=/Users/liefe/data/fin/market/index/VIX/eod  (looks for processed/vix.csv inside it)
-    DATA_PATH = Path(os.getenv('DATA_PATH')).expanduser()
+    #   SPX_OPTIONS_CHAIN_PATH=/Users/liefe/data/fin/market/index/SPX/external/options/historical/eod/processed/options_chain_preprocessed.csv
+    #   SPX_UNDERLYING_PATH=/Users/liefe/data/fin/market/index/SPX/external/index/processed/spx-daily-1996-ohlc-cleaned.csv
+    #   VIX_PATH=/Users/liefe/data/fin/market/index/VIX/historical/vix.parquet
     OPTIONS_FILE = os.getenv('SPX_OPTIONS_CHAIN_PATH', 'options_chain_preprocessed.csv')
     SPX_FILE = os.getenv('SPX_UNDERLYING_PATH', 'spx.csv')
     VIX_FILE = os.getenv('VIX_PATH', 'vix.csv')
 
-    dl = OptionsDataLoader(data_dir=DATA_PATH, options_file=OPTIONS_FILE, spx_file=SPX_FILE, vix_file=VIX_FILE, use_preprocessed=True, save_preprocessed=False)
+    dl = OptionsDataLoader(options_file=OPTIONS_FILE, spx_file=SPX_FILE, vix_file=VIX_FILE, use_preprocessed=True, save_preprocessed=False)
     data = dl.load_data()
 
     configs = [

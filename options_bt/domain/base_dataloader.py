@@ -28,7 +28,7 @@ class BaseDataLoader(ABC):
     `load_data()`.
     """
 
-    data_dir: str
+    data_dir: Optional[str]
     vix_file: Optional[str]
     use_preprocessed: bool
     save_preprocessed: bool
@@ -39,7 +39,7 @@ class BaseDataLoader(ABC):
         ...
 
     @staticmethod
-    def _resolve_source_paths(data_dir: str, filename_or_path: str, filename_in_processed_dir: str) -> tuple[str, str]:
+    def _resolve_source_paths(data_dir: Optional[str], filename_or_path: str, filename_in_processed_dir: str) -> tuple[str, str]:
         """Resolve a configured source (vix_file) to (raw_path,
         processed_path). filename_or_path may be:
 
@@ -55,8 +55,9 @@ class BaseDataLoader(ABC):
         filename_or_path and data_dir may each use a leading '~' (expanded
         here) -- os.path.isabs('~/x') is False, so an unexpanded '~/x' would
         otherwise be (wrongly) treated as relative and joined onto data_dir.
+        data_dir itself may be None if filename_or_path is always absolute.
         """
-        data_dir = os.path.expanduser(data_dir)
+        data_dir = os.path.expanduser(data_dir) if data_dir else ""
         filename_or_path = os.path.expanduser(filename_or_path)
         resolved = filename_or_path if os.path.isabs(filename_or_path) else os.path.join(data_dir, filename_or_path)
 

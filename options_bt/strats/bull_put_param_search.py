@@ -1,6 +1,5 @@
 from datetime import datetime
 import os
-from pathlib import Path
 import pandas as pd
 from options_bt.utils.logger import setup_logger
 from options_bt.domain.enums import *
@@ -195,25 +194,20 @@ def run_grid():
     pd.set_option('display.max_columns', None)
     pd.set_option('display.width', 200)
 
-    # Set up data paths.
-    # The options chain, SPX underlying, and VIX files live in three
-    # different directories -- DATA_PATH alone can't express that, so each
-    # source has its own optional env var. Set them to full absolute paths
-    # in .env; OptionsDataLoader uses an absolute options_file/spx_file/
-    # vix_file as-is instead of joining it to data_dir (data_dir is only
-    # used as the join-base for any of the three left as a bare filename).
+    # Set up data paths. The options chain, SPX underlying, and VIX files
+    # live in three different directories, each fully resolved to an
+    # absolute path by its own env var -- OptionsDataLoader takes them as-is,
+    # no shared base directory needed.
     #
     # .env example:
-    #   DATA_PATH=/Users/liefe/data/fin/market/index/SPX
     #   SPX_OPTIONS_CHAIN_PATH=/Users/liefe/data/fin/market/index/SPX/eod  (looks for processed/spx_chain_eod.csv inside it)
     #   SPX_UNDERLYING_PATH=/Users/liefe/data/fin/market/index/SPX/eod  (looks for processed/spx_eod_preproc.csv inside it)
     #   VIX_PATH=/Users/liefe/data/fin/market/index/VIX/eod  (looks for processed/vix.csv inside it)
-    DATA_PATH = Path(os.getenv('DATA_PATH')).expanduser()
     OPTIONS_FILE = os.getenv('SPX_OPTIONS_CHAIN_PATH', 'options_chain_preprocessed.csv')
     SPX_FILE = os.getenv('SPX_UNDERLYING_PATH', 'spx.csv')
     VIX_FILE = os.getenv('VIX_PATH', 'vix.csv')
 
-    dl = OptionsDataLoader(data_dir=DATA_PATH, options_file=OPTIONS_FILE, spx_file=SPX_FILE, vix_file=VIX_FILE, use_preprocessed=True, save_preprocessed=False)
+    dl = OptionsDataLoader(options_file=OPTIONS_FILE, spx_file=SPX_FILE, vix_file=VIX_FILE, use_preprocessed=True, save_preprocessed=False)
     data = dl.load_data()
 
     bt = Backtester(data=data, save_trades=False, log_to_sheets=False) # Disable saving for grid search performance

@@ -33,15 +33,18 @@ _UNDERLYING_FILENAME_IN_PROCESSED_DIR = "spx_eod_preproc.csv"
 
 @dataclass
 class OptionsDataLoader(BaseDataLoader):
-    data_dir: str
     options_file: str
+    # Only used as a join-base when options_file/spx_file/vix_file is a bare
+    # relative filename -- if all three are absolute paths (or directories),
+    # data_dir is never actually consulted, so it's optional.
+    data_dir: Optional[str] = None
     use_preprocessed: bool = True
     save_preprocessed: bool = True
     spx_file: Optional[str] = None
     vix_file: Optional[str] = None
 
     @staticmethod
-    def _resolve_source_paths(data_dir: str, filename_or_path: str, filename_in_processed_dir: str) -> tuple[str, str]:
+    def _resolve_source_paths(data_dir: Optional[str], filename_or_path: str, filename_in_processed_dir: str) -> tuple[str, str]:
         """Resolve a configured source (options_file/spx_file/vix_file) to
         (raw_path, processed_path). filename_or_path may be:
 
@@ -57,8 +60,9 @@ class OptionsDataLoader(BaseDataLoader):
         filename_or_path and data_dir may each use a leading '~' (expanded
         here) -- os.path.isabs('~/x') is False, so an unexpanded '~/x' would
         otherwise be (wrongly) treated as relative and joined onto data_dir.
+        data_dir itself may be None if filename_or_path is always absolute.
         """
-        data_dir = os.path.expanduser(data_dir)
+        data_dir = os.path.expanduser(data_dir) if data_dir else ""
         filename_or_path = os.path.expanduser(filename_or_path)
         resolved = filename_or_path if os.path.isabs(filename_or_path) else os.path.join(data_dir, filename_or_path)
 
