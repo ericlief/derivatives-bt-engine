@@ -93,12 +93,11 @@ class FuturesDataLoader(BaseDataLoader):
         shaped to match Backtester's data contract.
 
         Backtester.__init__ unconditionally reads data['option_chain'],
-        data['option_chain_multi_index'], data['underlying'], and
-        data['vix'] regardless of strategy type, and
+        data['underlying'], and data['vix'] regardless of strategy type, and
         FuturesSignalGenerator derives the futures price series straight
-        from `underlying` (option_chain doesn't apply to futures) — so the
+        from `underlying` (option_chain doesn't apply to futures) -- so the
         continuous front-month series goes in as 'underlying', and the
-        unused option_chain slots are empty placeholders. All values are
+        unused option_chain slot is an empty placeholder. All values are
         polars DataFrames; vix comes from the (pandas-based, shared with
         OptionsDataLoader) BaseDataLoader.vix_data and is converted once
         here at the boundary.
@@ -115,7 +114,6 @@ class FuturesDataLoader(BaseDataLoader):
 
         result = {
             'option_chain': pl.DataFrame(),
-            'option_chain_multi_index': pl.DataFrame(),
             'underlying': ohlcv,
             'vix': vix,
         }

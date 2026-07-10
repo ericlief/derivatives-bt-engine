@@ -107,7 +107,12 @@ def run_grid():
     end_date = "2023-12-31"
     periods = [1]
 
-    runner = GridSearchBacktester(bt, periods=periods, start_date=start_date, end_date=end_date)
+    # Runs every (rolling window, param combo) backtest as an independent
+    # task across this many worker processes -- set to 1 for the old
+    # sequential behavior (e.g. if debugging a single combo).
+    max_workers = os.cpu_count()
+
+    runner = GridSearchBacktester(bt, periods=periods, start_date=start_date, end_date=end_date, max_workers=max_workers)
 
     param_grid = {
         'max_spread_width': [10, 20, 30],

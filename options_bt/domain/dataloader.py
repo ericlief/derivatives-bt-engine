@@ -22,7 +22,6 @@ _UNDERLYING_NUMERIC_COLUMNS = ['open', 'high', 'low', 'close']
 
 # ── Infrastructure ──────────────────────────────────────────────────
 _DEFAULT_UNDERLYING_FILENAME = "spx.csv"
-_CHAIN_MULTI_INDEX_CACHE_FILENAME = "chain_multi_index.parquet"
 _PROCESSED_SUBDIR = "processed"
 # When options_file/spx_file point at a directory (rather than a specific
 # file), the raw CSV is expected at {dir}/processed/{this filename} -- these
@@ -89,10 +88,6 @@ class OptionsDataLoader(BaseDataLoader):
     def _option_chain_processed_path(self) -> str:
         return self._option_chain_paths[1]
 
-    @property
-    def _chain_multi_index_processed_path(self) -> str:
-        return os.path.join(os.path.dirname(self._option_chain_processed_path), _CHAIN_MULTI_INDEX_CACHE_FILENAME)
-
     @cached_property
     def _underlying_paths(self) -> tuple[str, str]:
         # NOTE: previously hardcoded to 'spx.csv' regardless of the spx_file
@@ -151,24 +146,6 @@ class OptionsDataLoader(BaseDataLoader):
         return processed_data
 
     @cached_property
-    def option_chain_multi_index(self) -> pl.DataFrame:
-        """Options chain sorted by (date, strike). polars has no index
-        concept, so this is just the chain pre-sorted for the (date, strike)
-        lookups that used a pandas MultiIndex before the polars migration."""
-        if self.use_preprocessed and os.path.exists(self._chain_multi_index_processed_path):
-            logger.info(f"Loading {self._chain_multi_index_processed_path}")
-            return pl.read_parquet(self._chain_multi_index_processed_path)
-
-        multi_index = self.option_chain.sort(['date', 'strike'])
-
-        if self.save_preprocessed:
-            os.makedirs(os.path.dirname(self._chain_multi_index_processed_path), exist_ok=True)
-            multi_index.write_parquet(self._chain_multi_index_processed_path)
-            logger.info(f"Saved data to {self._chain_multi_index_processed_path}")
-
-        return multi_index
-
-    @cached_property
     def underlying_data(self) -> pl.DataFrame:
         """Lazy load and cache the SPX underlying data as a polars DataFrame
         with a `date` column."""
@@ -190,9 +167,9 @@ class OptionsDataLoader(BaseDataLoader):
         """
         Load and return all data at once.
 
-        Returns pandas DataFrames (option_chain/option_chain_multi_index with
-        an *unnamed* DatetimeIndex, matching the pre-migration shape exactly --
-        several downstream methods, e.g. OptionSignalGenerator's spread-pairing
+        Returns pandas DataFrames (option_chain with an *unnamed*
+        DatetimeIndex, matching the pre-migration shape exactly -- several
+        downstream methods, e.g. OptionSignalGenerator's spread-pairing
         methods, rely on reset_index() producing a literal 'index' column,
         which only happens when the index has no name) since the signal
         generator / position / trade manager / backtester option paths are
@@ -205,13 +182,11 @@ class OptionsDataLoader(BaseDataLoader):
 
         try:
             option_chain = self.option_chain
-            option_chain_multi_index = self.option_chain_multi_index
             underlying = self.underlying_data
             vix = self.vix_data
 
             logger.info(f"Loaded and preprocessed data:")
             logger.info(f"- Normal options chain: {len(option_chain)} rows")
-            logger.info(f"- MultiIndex options chain: {len(option_chain_multi_index)} rows")
             logger.info(f"- Underlying data: {len(underlying)} rows")
             logger.info(f"- VIX data: {len(vix)} rows")
 
@@ -220,7 +195,6 @@ class OptionsDataLoader(BaseDataLoader):
 
             option_chain_pd = option_chain.to_pandas().set_index('date')
             option_chain_pd.index.name = None
-            option_chain_multi_index_pd = option_chain_multi_index.to_pandas().set_index(['date', 'strike'])
             underlying_pd = underlying.to_pandas().set_index('date')
             underlying_pd.index.name = None
 
@@ -228,7 +202,6 @@ class OptionsDataLoader(BaseDataLoader):
 
             return {
                 'option_chain': option_chain_pd,
-                'option_chain_multi_index': option_chain_multi_index_pd,
                 'underlying': underlying_pd,
                 'vix': vix,
             }
