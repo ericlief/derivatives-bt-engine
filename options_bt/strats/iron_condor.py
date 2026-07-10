@@ -1,7 +1,6 @@
 import os
 from pathlib import Path
 
-import pandas as pd
 from options_bt.utils.logger import setup_logger
 from options_bt.domain.enums import *
 from options_bt.domain.backtester import Backtester

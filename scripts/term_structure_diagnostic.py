@@ -53,9 +53,9 @@ pivoted AS (
 )
 SELECT asset, date_part('year', ts_event)::int AS yr,
     count(*) AS n_days,
-    avg(front - back) AS avg_spread,
-    avg((front - back) / back) * 100 AS avg_pct_spread,
-    sum(CASE WHEN front > back THEN 1 ELSE 0 END)::double / count(*) * 100 AS pct_days_backwardated
+    ROUND(avg(front - back), 2) AS avg_spread,
+    ROUND(avg((front - back) / back) * 100) AS avg_pct_spread, 
+    ROUND(sum(CASE WHEN front > back THEN 1 ELSE 0 END)::double / count(*) * 100) AS pct_days_backwardated
 FROM pivoted
 WHERE front IS NOT NULL AND back IS NOT NULL
 GROUP BY asset, yr
