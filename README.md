@@ -32,7 +32,7 @@ options-bt/
 1. Clone the repository
 2. Install dependencies:
 ```bash
-pip install pandas numpy
+pip install polars numpy
 ```
 
 ## Usage
@@ -72,20 +72,17 @@ results = run_backtest(
 
 ## Data Requirements
 
-The package expects the following data files:
+The package expects the following data files, loaded as polars DataFrames with a plain `date` column (polars has no index concept):
 
 1. SPX Price Data (CSV):
    - Columns: date, open, high, low, close
-   - Index: date
 
 2. Options Chain Data (CSV):
-   - Required columns: strike, expire_date, p_bid, p_ask, c_bid, c_ask, p_delta, c_delta, underlying_last
+   - Required columns: date, strike, expire_date, p_bid, p_ask, c_bid, c_ask, p_delta, c_delta, underlying_last
    - Optional columns: p_iv, c_iv, p_size, c_size
-   - Index: date
 
 3. VIX Data (CSV):
-   - Required column: close
-   - Index: date
+   - Required columns: date, close
 
 ## Output
 
