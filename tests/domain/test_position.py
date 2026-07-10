@@ -1,6 +1,7 @@
 # tests/domain/test_position.py
 import pytest
-import pandas as pd
+from datetime import date
+import polars as pl
 import numpy as np
 from options_bt.domain.position import SingleLegOptionPosition, MultiLegOptionPosition
 from options_bt.domain.enums import OptionType, PositionSide, OptionStrategy, OptionSpreadType
@@ -18,8 +19,8 @@ logger = setup_logger()
 # @pytest.fixture(scope="module")
 # def mock_data():
 #     """Fixture to create mock option chain data."""
-#     start_date = pd.Timestamp('2023-01-01')
-#     end_date = pd.Timestamp('2023-01-31')
+#     start_date = date(2023, 1, 1)
+#     end_date = date(2023, 1, 31)
 #     dates = pd.date_range(start=start_date, end=end_date, freq='D')
     
 #     r = 0.05  # 5% risk-free rate
@@ -90,10 +91,10 @@ def test_instance_vars(setup_test_data):
         quantity=1,
         option_type=OptionType.CALL,
         position_side=PositionSide.LONG,
-        entry_date=pd.Timestamp('2023-01-01'),
+        entry_date=date(2023, 1, 1),
         entry_price=round(float(c_bid + c_ask) / 2, 2),
         strike=100.0,
-        expire_date=pd.Timestamp('2023-01-31'),
+        expire_date=date(2023, 1, 31),
         entry_delta=0.34,
         entry_dte=30,
         underlying_entry=95.75
@@ -105,10 +106,10 @@ def test_instance_vars(setup_test_data):
         quantity=1,
         option_type=OptionType.PUT,
         position_side=PositionSide.SHORT,
-        entry_date=pd.Timestamp('2023-01-01'),
+        entry_date=date(2023, 1, 1),
         entry_price=round(float(p_bid + p_ask) / 2, 2),
         strike=100.0,
-        expire_date=pd.Timestamp('2023-01-31'),
+        expire_date=date(2023, 1, 31),
         entry_delta=-0.66,
         entry_dte=30,
         underlying_entry=95.75
@@ -117,14 +118,14 @@ def test_instance_vars(setup_test_data):
     data, single_leg_long_call, single_leg_short_put = setup_test_data
 
     # Opening prices
-    p_bid, p_ask = data['option_chain']['p_bid'].iloc[0], data['option_chain']['p_ask'].iloc[0]
-    c_bid, c_ask = data['option_chain']['c_bid'].iloc[0], data['option_chain']['c_ask'].iloc[0]
+    p_bid, p_ask = data['option_chain']['p_bid'][0], data['option_chain']['p_ask'][0]
+    c_bid, c_ask = data['option_chain']['c_bid'][0], data['option_chain']['c_ask'][0]
     long_call_entry_price = round(float(c_bid + c_ask) / 2, 2)
     short_put_entry_price = round(float(p_bid + p_ask) / 2, 2)
     print(f"long_call_entry_price: {long_call_entry_price}, short_put_entry_price: {short_put_entry_price}")
     # Closing prices
-    p_bid, p_ask = data['option_chain']['p_bid'].iloc[-1], data['option_chain']['p_ask'].iloc[-1]
-    c_bid, c_ask = data['option_chain']['c_bid'].iloc[-1], data['option_chain']['c_ask'].iloc[-1]
+    p_bid, p_ask = data['option_chain']['p_bid'][-1], data['option_chain']['p_ask'][-1]
+    c_bid, c_ask = data['option_chain']['c_bid'][-1], data['option_chain']['c_ask'][-1]
     long_call_exit_price = round(float(c_bid + c_ask) / 2, 2)   
     short_put_exit_price = round(float(p_bid + p_ask) / 2, 2)
     print(f"long_call_exit_price: {long_call_exit_price}, short_put_exit_price: {short_put_exit_price}")
@@ -210,10 +211,10 @@ def test_single_leg_pnl():
         quantity=1,
         option_type=OptionType.CALL,
         position_side=PositionSide.LONG,
-        entry_date=pd.Timestamp('2023-01-01'),
+        entry_date=date(2023, 1, 1),
         entry_price=entry_price,
         strike=strike,
-        expire_date=pd.Timestamp('2023-01-31'),
+        expire_date=date(2023, 1, 31),
         entry_delta=entry_delta,
         entry_dte=30,
         underlying_entry=underlying_price
@@ -260,10 +261,10 @@ def test_single_leg_pnl():
         quantity=10,
         option_type=OptionType.PUT,
         position_side=PositionSide.SHORT,
-        entry_date=pd.Timestamp('2023-01-01'),
+        entry_date=date(2023, 1, 1),
         entry_price=entry_price,
         strike=strike,
-        expire_date=pd.Timestamp('2023-01-31'),
+        expire_date=date(2023, 1, 31),
         entry_delta=-0.66,
         entry_dte=30,
         underlying_entry=underlying_price
@@ -296,10 +297,10 @@ def test_pnl_with_fees(setup_test_data):
             quantity=quantity,
             option_type=option_type,
             position_side=position_side,
-            entry_date=pd.Timestamp('2023-01-01'),
+            entry_date=date(2023, 1, 1),
             entry_price=entry_price,
             strike=100.0,
-            expire_date=pd.Timestamp('2023-01-31'),
+            expire_date=date(2023, 1, 31),
             entry_delta=0.5,
             entry_dte=30,
             underlying_entry=95.0
@@ -398,10 +399,10 @@ def test_margin_requirements(setup_test_data):
             quantity=1,
             option_type=option_type,
             position_side=position_side,
-            entry_date=pd.Timestamp('2023-01-01'),
+            entry_date=date(2023, 1, 1),
             entry_price=entry_price,
             strike=strike,
-            expire_date=pd.Timestamp('2023-01-31'),
+            expire_date=date(2023, 1, 31),
             entry_delta=0.5,
             entry_dte=30,
             underlying_entry=underlying
@@ -424,18 +425,18 @@ def test_close_validation(setup_test_data):
         quantity=1,
         option_type=OptionType.CALL,
         position_side=PositionSide.LONG,
-        entry_date=pd.Timestamp('1970-01-01'),  # Invalid date
+        entry_date=date(1970, 1, 1),  # Invalid date
         entry_price=5.0,
         strike=100.0,
-        expire_date=pd.Timestamp('2023-01-31'),
+        expire_date=date(2023, 1, 31),
         entry_delta=0.5,
         entry_dte=30,
         underlying_entry=95.0
     )
     
     result = invalid_position.close(
-        option_chain=pd.DataFrame(),
-        underlying_price_history=pd.DataFrame(),
+        option_chain=pl.DataFrame(),
+        underlying_price_history=pl.DataFrame(),
         option_bp=10000
     )
     assert result is None
@@ -447,7 +448,7 @@ def test_close_validation(setup_test_data):
         quantity=1,
         option_type=OptionType.CALL,
         position_side=PositionSide.LONG,
-        entry_date=pd.Timestamp('2023-01-01'),
+        entry_date=date(2023, 1, 1),
         entry_price=5.0,
         strike=100.0,
         expire_date=None,
@@ -457,8 +458,8 @@ def test_close_validation(setup_test_data):
     )
     
     result = no_dates_position.close(
-        option_chain=pd.DataFrame(),
-        underlying_price_history=pd.DataFrame(),
+        option_chain=pl.DataFrame(),
+        underlying_price_history=pl.DataFrame(),
         option_bp=10000
     )
     assert result is None
@@ -470,8 +471,8 @@ def test_close_position(setup_test_data):
     data, _ , _ = setup_test_data
     
     # Create test positions
-    p_bid, p_ask = data['option_chain']['p_bid'].iloc[1], data['option_chain']['p_ask'].iloc[1]
-    c_bid, c_ask = data['option_chain']['c_bid'].iloc[1], data['option_chain']['c_ask'].iloc[1]
+    p_bid, p_ask = data['option_chain']['p_bid'][1], data['option_chain']['p_ask'][1]
+    c_bid, c_ask = data['option_chain']['c_bid'][1], data['option_chain']['c_ask'][1]
 
     entry_price_call = round(float(c_bid + c_ask) / 2, 2)
     entry_price_put = round(float(p_bid + p_ask) / 2, 2)
@@ -483,10 +484,10 @@ def test_close_position(setup_test_data):
         quantity=10,
         option_type=OptionType.CALL,
         position_side=PositionSide.LONG,
-        entry_date=pd.Timestamp('2023-01-02'),
+        entry_date=date(2023, 1, 2),
         entry_price=entry_price_call,
         strike=100.0,
-        expire_date=pd.Timestamp('2023-01-31'),
+        expire_date=date(2023, 1, 31),
         entry_delta=0.5,
         entry_dte=29,
         underlying_entry=95.0,
@@ -503,8 +504,8 @@ def test_close_position(setup_test_data):
     assert transaction['quantity'] == 10
     assert transaction['option_type'] == OptionType.CALL.value
     assert transaction['position_side'] == PositionSide.LONG.value
-    assert transaction['entry_date'] == pd.Timestamp('2023-01-02')
-    assert transaction['expire_date'] == pd.Timestamp('2023-01-31')
+    assert transaction['entry_date'] == date(2023, 1, 2)
+    assert transaction['expire_date'] == date(2023, 1, 31)
     assert transaction['entry_delta'] == 0.5
     assert transaction['days_held'] == 29  # Full period
     assert transaction['underlying_entry'] == 95.0
@@ -519,10 +520,10 @@ def test_close_position(setup_test_data):
         quantity=10,
         option_type=OptionType.PUT,
         position_side=PositionSide.SHORT,
-        entry_date=pd.Timestamp('2023-01-02'),
+        entry_date=date(2023, 1, 2),
         entry_price=entry_price_call,
         strike=100.0,
-        expire_date=pd.Timestamp('2023-01-31'),
+        expire_date=date(2023, 1, 31),
         entry_delta=0.5,
         entry_dte=29,
         underlying_entry=95.0,
@@ -539,8 +540,8 @@ def test_close_position(setup_test_data):
     assert transaction['quantity'] == 10
     assert transaction['option_type'] == OptionType.PUT.value
     assert transaction['position_side'] == PositionSide.SHORT.value
-    assert transaction['entry_date'] == pd.Timestamp('2023-01-02')
-    assert transaction['expire_date'] == pd.Timestamp('2023-01-31')
+    assert transaction['entry_date'] == date(2023, 1, 2)
+    assert transaction['expire_date'] == date(2023, 1, 31)
     assert transaction['entry_delta'] == 0.5
     assert transaction['days_held'] == 29  # Full period
     assert transaction['underlying_entry'] == 95.0
@@ -553,7 +554,7 @@ def test_close_scenarios(setup_test_data):
     """Test different position closure scenarios."""
 
     data, single_leg_long, single_leg_short = setup_test_data
-    logger.info(f'underlying close 1-31: {data["underlying_price_history"].loc["01-31-2023"].iloc[0]}')
+    logger.info(f"underlying close 1-31: {data['underlying_price_history'].filter(pl.col('date') == date(2023, 1, 31))['close'][0]}")
     # Test early closure
     early_close_position = SingleLegOptionPosition(
         option_strategy=OptionStrategy.LONG_CALL,
@@ -561,14 +562,14 @@ def test_close_scenarios(setup_test_data):
         quantity=1,
         option_type=OptionType.CALL,
         position_side=PositionSide.LONG,
-        entry_date=pd.Timestamp('2023-01-01'),
+        entry_date=date(2023, 1, 1),
         entry_price=single_leg_long.entry_price,
         strike=100.0,
-        expire_date=pd.Timestamp('2023-01-31'),
+        expire_date=date(2023, 1, 31),
         entry_delta=0.5,
         entry_dte=90,
         underlying_entry=95.0,
-        close_date=pd.Timestamp('2023-01-15'),
+        close_date=date(2023, 1, 15),
         margin_required=1000.0  # Add margin required to avoid division by zero
     )
     
@@ -580,7 +581,7 @@ def test_close_scenarios(setup_test_data):
     assert result is not None
     trade_result, transaction = result
     assert trade_result['close_reason'] == 'early closure'
-    assert transaction['days_held'] == (pd.Timestamp('2023-01-15') - pd.Timestamp('2023-01-01')).days  # Jan 1 to Jan 15    
+    assert transaction['days_held'] == (date(2023, 1, 15) - date(2023, 1, 1)).days  # Jan 1 to Jan 15    
 
     # Test expiration closure for ITM option
     itm_expire_position = SingleLegOptionPosition(
@@ -589,10 +590,10 @@ def test_close_scenarios(setup_test_data):
         quantity=1,
         option_type=OptionType.CALL,
         position_side=PositionSide.LONG,
-        entry_date=pd.Timestamp('2023-01-01'),
+        entry_date=date(2023, 1, 1),
         entry_price=single_leg_long.entry_price,
         strike=100.0,
-        expire_date=pd.Timestamp('2023-01-31'),
+        expire_date=date(2023, 1, 31),
         entry_delta=0.5,
         entry_dte=30,
         underlying_entry=95.0,
@@ -616,10 +617,10 @@ def test_close_scenarios(setup_test_data):
         quantity=1,
         option_type=OptionType.PUT,
         position_side=PositionSide.LONG,
-        entry_date=pd.Timestamp('2023-01-01'),
+        entry_date=date(2023, 1, 1),
         entry_price=single_leg_long.entry_price,
         strike=100.0,  # OTM put
-        expire_date=pd.Timestamp('2023-01-31'),
+        expire_date=date(2023, 1, 31),
         entry_delta=-0.3,
         entry_dte=30,
         underlying_entry=95.0,
@@ -647,14 +648,14 @@ def test_invalid_close_dates(setup_test_data):
         quantity=1,
         option_type=OptionType.CALL,
         position_side=PositionSide.LONG,
-        entry_date=pd.Timestamp('2023-02-01'),
+        entry_date=date(2023, 2, 1),
         entry_price=5.0,
         strike=100.0,
-        expire_date=pd.Timestamp('2023-03-31'),
+        expire_date=date(2023, 3, 31),
         entry_delta=0.5,
         entry_dte=60,
         underlying_entry=95.0,
-        close_date=pd.Timestamp('2023-01-01')  # Close date before entry
+        close_date=date(2023, 1, 1)  # Close date before entry
     )
     
     result = invalid_close_position.close(
@@ -671,10 +672,10 @@ def test_invalid_close_dates(setup_test_data):
         quantity=1,
         option_type=OptionType.CALL,
         position_side=PositionSide.LONG,
-        entry_date=pd.Timestamp('2023-02-01'),
+        entry_date=date(2023, 2, 1),
         entry_price=5.0,
         strike=100.0,
-        expire_date=pd.Timestamp('2023-01-31'),  # Expire before entry
+        expire_date=date(2023, 1, 31),  # Expire before entry
         entry_delta=0.5,
         entry_dte=60,
         underlying_entry=95.0
@@ -698,10 +699,10 @@ def test_exercise_fees(setup_test_data):
         quantity=2,
         option_type=OptionType.CALL,
         position_side=PositionSide.LONG,
-        entry_date=pd.Timestamp('2023-01-01'),
+        entry_date=date(2023, 1, 1),
         entry_price=single_leg_long.entry_price,
         strike=100.0,  # ITM call (underlying at 105)
-        expire_date=pd.Timestamp('2023-01-31'),
+        expire_date=date(2023, 1, 31),
         entry_delta=0.7,
         entry_dte=30,
         underlying_entry=95.0,
@@ -727,10 +728,10 @@ def test_exercise_fees(setup_test_data):
         quantity=2,
         option_type=OptionType.PUT,
         position_side=PositionSide.LONG,
-        entry_date=pd.Timestamp('2023-01-01'),
+        entry_date=date(2023, 1, 1),
         entry_price=single_leg_long.entry_price,
         strike=100.0,  # ITM put (underlying at 95)
-        expire_date=pd.Timestamp('2023-01-31'),
+        expire_date=date(2023, 1, 31),
         entry_delta=-0.7,
         entry_dte=30,
         underlying_entry=95.0,
@@ -761,10 +762,10 @@ def test_buying_power_updates(setup_test_data):
         quantity=1,
         option_type=OptionType.CALL,
         position_side=PositionSide.LONG,
-        entry_date=pd.Timestamp('2023-01-01'),
+        entry_date=date(2023, 1, 1),
         entry_price=5.0,
         strike=100.0,
-        expire_date=pd.Timestamp('2023-01-31'),
+        expire_date=date(2023, 1, 31),
         entry_delta=0.5,
         entry_dte=30,
         underlying_entry=95.0
@@ -787,10 +788,10 @@ def test_buying_power_updates(setup_test_data):
     #     quantity=1,
     #     option_type=OptionType.CALL,
     #     position_side=PositionSide.SHORT,
-    #     entry_date=pd.Timestamp('2023-01-01'),
+    #     entry_date=date(2023, 1, 1),
     #     entry_price=5.0,
     #     strike=100.0,
-    #     expire_date=pd.Timestamp('2023-01-31'),
+    #     expire_date=date(2023, 1, 31),
     #     entry_delta=0.5,
     #     entry_dte=30,
     #     underlying_entry=95.0
@@ -820,10 +821,10 @@ def test_margin_required_property(setup_test_data):
         quantity=1,
         option_type=OptionType.CALL,
         position_side=PositionSide.LONG,
-        entry_date=pd.Timestamp('2023-01-01'),
+        entry_date=date(2023, 1, 1),
         entry_price=5.0,
         strike=100.0,
-        expire_date=pd.Timestamp('2023-01-31'),
+        expire_date=date(2023, 1, 31),
         entry_delta=0.5,
         entry_dte=30,
         underlying_entry=100.0
@@ -837,10 +838,10 @@ def test_margin_required_property(setup_test_data):
         quantity=1,
         option_type=OptionType.PUT,
         position_side=PositionSide.SHORT,
-        entry_date=pd.Timestamp('2023-01-01'),
+        entry_date=date(2023, 1, 1),
         entry_price=5.0,
         strike=100.0,
-        expire_date=pd.Timestamp('2023-01-31'),
+        expire_date=date(2023, 1, 31),
         entry_delta=-0.5,
         entry_dte=30,
         underlying_entry=100.0
@@ -865,10 +866,10 @@ def test_margin_required_property(setup_test_data):
         quantity=1,
         option_type=OptionType.CALL,
         position_side=PositionSide.SHORT,
-        entry_date=pd.Timestamp('2023-01-01'),
+        entry_date=date(2023, 1, 1),
         entry_price=5.0,
         strike=100.0,
-        expire_date=pd.Timestamp('2023-01-31'),
+        expire_date=date(2023, 1, 31),
         entry_delta=0.5,
         entry_dte=30,
         underlying_entry=100.0
@@ -902,10 +903,10 @@ def test_margin_required_property(setup_test_data):
             quantity=1,
             option_type=option_type,
             position_side=PositionSide.SHORT,
-            entry_date=pd.Timestamp('2023-01-01'),
+            entry_date=date(2023, 1, 1),
             entry_price=5.0,
             strike=strike,
-            expire_date=pd.Timestamp('2023-01-31'),
+            expire_date=date(2023, 1, 31),
             entry_delta=0.5 if option_type == OptionType.CALL else -0.5,
             entry_dte=30,
             underlying_entry=underlying
@@ -930,8 +931,8 @@ def setup_test_data(mock_data):
     data = mock_data
 
     # Create test positions
-    p_bid, p_ask = data['option_chain']['p_bid'].iloc[0], data['option_chain']['p_ask'].iloc[0]
-    c_bid, c_ask = data['option_chain']['c_bid'].iloc[0], data['option_chain']['c_ask'].iloc[0]
+    p_bid, p_ask = data['option_chain']['p_bid'][0], data['option_chain']['p_ask'][0]
+    c_bid, c_ask = data['option_chain']['c_bid'][0], data['option_chain']['c_ask'][0]
 
     entry_price_call = round(float(c_bid + c_ask) / 2, 2)
     entry_price_put = round(float(p_bid + p_ask) / 2, 2)
@@ -942,10 +943,10 @@ def setup_test_data(mock_data):
         quantity=1,
         option_type=OptionType.CALL,
         position_side=PositionSide.LONG,
-        entry_date=pd.Timestamp('2023-01-01'),
+        entry_date=date(2023, 1, 1),
         entry_price=entry_price_call,
         strike=100.0,
-        expire_date=pd.Timestamp('2023-01-31'),
+        expire_date=date(2023, 1, 31),
         entry_delta=0.34,
         entry_dte=30,
         underlying_entry=95.75
@@ -957,10 +958,10 @@ def setup_test_data(mock_data):
         quantity=1,
         option_type=OptionType.PUT,
         position_side=PositionSide.SHORT,
-        entry_date=pd.Timestamp('2023-01-01'),
+        entry_date=date(2023, 1, 1),
         entry_price=entry_price_put,
         strike=100.0,
-        expire_date=pd.Timestamp('2023-01-31'),
+        expire_date=date(2023, 1, 31),
         entry_delta=-0.66,
         entry_dte=30,
         underlying_entry=95.75
