@@ -1,5 +1,6 @@
+import math
+from datetime import date
 from typing import Optional, Dict, Union, List, NamedTuple, Tuple
-import pandas as pd
 import polars as pl
 from options_bt.domain.enums import *
 from options_bt.domain.position import SingleLegOptionPosition, MultiLegOptionPosition, FuturesPosition
@@ -11,8 +12,8 @@ logger = setup_logger()
 
 class TradeManager:
     """Class to manage trade creation and execution."""
-    
-    def __init__(self, config: Union[SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig], vix: Optional[pd.DataFrame] = None):
+
+    def __init__(self, config: Union[SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig], vix: Optional[pl.DataFrame] = None):
         self.config: Union[SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig] = config
         self.initial_capital: float = config.initial_capital
         self.leverage: float = config.leverage
@@ -22,7 +23,7 @@ class TradeManager:
         self.trade_counter: int = 1
         self.transaction_counter: int = 1
         self.open_positions: List[Union[SingleLegOptionPosition, MultiLegOptionPosition]] = []
-        self.vix: Optional[pd.DataFrame] = vix
+        self.vix: Optional[pl.DataFrame] = vix
 
         logger.info(f'TradeManager instantiated')
         logger.info(f'Init Cap: {self.initial_capital} | BP: {self.bp} | Trades: {self.trade_counter}')
@@ -32,10 +33,10 @@ class TradeManager:
     def _execute_trade(self, position: Union[SingleLegOptionPosition, MultiLegOptionPosition]) -> Optional[Tuple[SingleLegOptionPosition, float]]:
         """
         Execute a trade with the current buying power and leverage, updating the option buying power state (option_bp)
-        
+
         Args:
             position: Position to execute
-            
+
         Returns:
             Executed position if successful, None otherwise, bp_effect
         """
@@ -45,14 +46,15 @@ class TradeManager:
         logger.info(f'Init Cap: {self.initial_capital} | BP: {self.bp} | Trades: {self.trade_counter}')
 
         if isinstance(position, MultiLegOptionPosition) and position.spread_type != OptionSpreadType.NONE:
-            if pd.isna(position.spread_price):
+            spread_price = position.spread_price
+            if spread_price is None or (isinstance(spread_price, float) and math.isnan(spread_price)):
                 logger.error(f"Missing spread_price for spread {position.spread_id} leg {position.leg_number}")
                 return None, bp_effect
 
 
         # Validate margin requirement
         # if isinstance(self.config, SingleLegOptionStrategyConfig):
-        #     effective_margin = position.margin_required / self.leverage    
+        #     effective_margin = position.margin_required / self.leverage
         # else:
         #     effective_margin = None
         effective_margin = position.margin_required
@@ -105,20 +107,19 @@ class TradeManager:
                 return None, bp_effect
 
         return None, bp_effect
-    
+
 
     def construct_and_execute_trades_from_signals(self,
-                         trade_signals: Union[pd.DataFrame, pl.DataFrame],
-                         option_chain: pd.DataFrame,
-                         underlying_price_history: pd.DataFrame
+                         trade_signals: pl.DataFrame,
+                         option_chain: pl.DataFrame,
+                         underlying_price_history: pl.DataFrame
                         ) -> Dict:
         """
         Construct and execute trades based on signals.
 
         Args:
-            trade_signals: DataFrame containing trade signals (polars for
-                futures; pandas, DatetimeIndex, for options -- converted to
-                polars just below)
+            trade_signals: polars DataFrame of trade signals (futures and
+                options paths are both polars-native end to end now).
             config: Union[SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig]
         Returns:
             Dictionary containing trade results and transactions
@@ -128,21 +129,14 @@ class TradeManager:
         all_transactions = []
         skipped_trades = 0
 
-        # Futures signals are already polars-native (no spreads/legs, simpler
-        # date handling); options signals arrive as pandas (option_chain /
-        # underlying_price_history have an unnamed DatetimeIndex, matching
-        # OptionsDataLoader/OptionSignalGenerator's pandas boundary) and are
-        # converted to polars here -- the single scoped conversion point (per
-        # CLAUDE.md's pandas/polars convention) needed since Backtester is
-        # still pandas-based. This should be deleted once Backtester is
-        # migrated too. `current_date` stays a pd.Timestamp throughout either
-        # way, since Position objects' date fields are pd.Timestamp.
         is_futures = isinstance(self.config, FuturesStrategyConfig)
+        date_col = 'ts_event' if is_futures else 'date'
 
+        if trade_signals is None or trade_signals.height == 0:
+            return {'trade_results': pl.DataFrame(), 'transactions': pl.DataFrame()}
+
+        start = trade_signals[date_col].min()
         if is_futures:
-            if trade_signals is None or trade_signals.height == 0:
-                return {'trade_results': pd.DataFrame(), 'transactions': pd.DataFrame()}
-            start = trade_signals['ts_event'].min()
             # Bound on underlying_price_history's max, not signals' max: the
             # signal generator drops the tail end of a backtest window when
             # no roll date falls strictly after those days (e.g. the last
@@ -151,34 +145,18 @@ class TradeManager:
             # needs its daily close-check evaluated through the actual end
             # of the period, or it never rolls/closes naturally and instead
             # force-closes at the very end via close_all.
-            end = underlying_price_history['ts_event'].max()
-            dates = pl.date_range(start, end, interval='1d', eager=True).to_list()
+            end = underlying_price_history[date_col].max()
         else:
-            if trade_signals is None or trade_signals.empty:
-                return {'trade_results': pd.DataFrame(), 'transactions': pd.DataFrame()}
-            start = trade_signals.index.min()
-            end = trade_signals.index.max()
-            dates = pd.date_range(start, end)
-
-            # trade_signals' index is already named 'date' (OptionSignalGenerator
-            # sets it via .set_index('date')); option_chain/underlying_price_history
-            # have an unnamed index (OptionsDataLoader), so reset_index() names
-            # that column 'index' instead.
-            trade_signals = pl.from_pandas(trade_signals.reset_index())
-            option_chain = pl.from_pandas(option_chain.reset_index()).rename({'index': 'date'})
-            underlying_price_history = pl.from_pandas(underlying_price_history.reset_index()).rename({'index': 'date'})
+            end = trade_signals[date_col].max()
+        dates = pl.date_range(start, end, interval='1d', eager=True).to_list()
 
         # Iterate through all dates in backtest range first in order to manage trades, e.g. exit when certain
         # certain conditions are met (vix, etc.)
         # Additionally we will open or close any positions if conditions are fulfilled
-        for date in dates:
-            current_date = date
+        for current_date in dates:
             logger.debug(f'Processing date: {current_date}')
 
-            if is_futures:
-                match = trade_signals.filter(pl.col('ts_event') == current_date)
-            else:
-                match = trade_signals.filter(pl.col('date') == current_date.date())
+            match = trade_signals.filter(pl.col(date_col) == current_date)
             trade_signal = match if match.height > 0 else None
 
             # VIX gating (skip trade if outside range or missing)
@@ -186,20 +164,11 @@ class TradeManager:
             vix_early_closure = False
 
             if self.config.vix_range is not None or self.config.vix_max is not None:
-                if is_futures:
-                    if isinstance(self.vix, pl.DataFrame) and self.vix.height > 0 and 'ts_event' in self.vix.columns:
-                        vix_match = self.vix.filter(pl.col('ts_event') == current_date)
-                        if vix_match.height > 0:
-                            try:
-                                vix_close_value = float(vix_match['close'][0])
-                            except Exception:
-                                vix_close_value = None
-                            logger.debug(f'VIX daily value {vix_close_value}')
-                else:
-                    if isinstance(self.vix, pd.DataFrame) and not self.vix.empty and current_date in self.vix.index:
-                        row = self.vix.loc[current_date]
+                if self.vix is not None and self.vix.height > 0 and date_col in self.vix.columns:
+                    vix_match = self.vix.filter(pl.col(date_col) == current_date)
+                    if vix_match.height > 0:
                         try:
-                            vix_close_value = float(row['close'] if 'close' in row else float(row))
+                            vix_close_value = float(vix_match['close'][0])
                         except Exception:
                             vix_close_value = None
                         logger.debug(f'VIX daily value {vix_close_value}')
@@ -212,12 +181,12 @@ class TradeManager:
 
             # Close any expired positions
             n_open_positions = len(self.open_positions)
-            if n_open_positions > 0:    
+            if n_open_positions > 0:
                 if vix_early_closure:
-                    logger.debug(f'VIX early closure for {n_open_positions} open positions')        
-                    
+                    logger.debug(f'VIX early closure for {n_open_positions} open positions')
+
                 trade_results, transactions = self._close_expired_positions(
-                    option_chain=option_chain, 
+                    option_chain=option_chain,
                     underlying_price_history=underlying_price_history,
                     current_date=current_date,
                     vix_early_closure=vix_early_closure  # Pass the boolean flag
@@ -230,7 +199,7 @@ class TradeManager:
 
                 else:
                     logger.error("Failed to close some trades")
-            
+
             # Check vix_range for trade entry
             if vix_close_value is not None and self.config.vix_range is not None:
                 lo, hi = self.config.vix_range
@@ -247,14 +216,14 @@ class TradeManager:
                         skipped_trades += 1
                         logger.debug(f'Skipping trade date {current_date} due to max {self.max_positions} positions. Current positions: {len(self.open_positions)}')
                         break
-                    
-                    # Attempt trade 
+
+                    # Attempt trade
                     candidate_position = self.construct_position_from_signal(trade, current_date=current_date)
                       # Try to execute the new trade if it was created successfully
                     if candidate_position is not None:
                         logger.debug(f'BP: ${self.bp:.2f}')
                         logger.debug(f'Executing trade: {candidate_position}')
-                        
+
                         # Execute the trade and create transactions and trades
                         executed_trade, bp_effect = self._execute_trade(candidate_position)
                         if executed_trade is not None:
@@ -269,7 +238,7 @@ class TradeManager:
                                     leg.transaction_id = self.transaction_counter # ''
                                     transaction = executed_trade.create_transaction(leg, current_date, 'open', leg_bp)
                                     all_transactions.append(transaction)
-                                 
+
                                     self.transaction_counter += 1
                             # Single leg
                             else:
@@ -283,24 +252,24 @@ class TradeManager:
                             # Prepare trade result
                             # transaction = executed_trade.create_transaction(executed_trade, current_date, 'open')
                             self.trade_counter += 1  # Increment counter only for successful trades
-                            
+
                             logger.debug(f'Successfully executed trade: {executed_trade.trade_id}')
                             logger.debug(f'BP: ${self.bp:.2f}')
-                            
+
                         else:
                             skipped_trades += 1
                     else:
                         logger.debug("Skipping trade - invalid signal")
                         skipped_trades += 1
-            
+
 
         # Close any remaining open positions at their expiration
         logger.info(f'Dates in period exhausted, attempting to close any remaining open positions: {self.open_positions}')
-        trade_results, transactions = self._close_expired_positions(option_chain=option_chain, 
+        trade_results, transactions = self._close_expired_positions(option_chain=option_chain,
                                                                     underlying_price_history=underlying_price_history,
                                                                     current_date=current_date,
                                                                     close_all=True)
-    
+
 
         if trade_results is not None:
             all_trade_results.extend(trade_results)
@@ -310,18 +279,18 @@ class TradeManager:
         else:
             logger.error("Failed to close some trades")
 
-        return {'trade_results': pd.DataFrame(all_trade_results), 
-                'transactions': pd.DataFrame(all_transactions)}
+        return {'trade_results': pl.DataFrame(all_trade_results),
+                'transactions': pl.DataFrame(all_transactions)}
 
     def _close_expired_positions(self,
                                  option_chain: pl.DataFrame,
                                  underlying_price_history: pl.DataFrame,
-                                 current_date: pd.Timestamp,
+                                 current_date: date,
                                  vix_early_closure=False,  # Close all open pos
                                  close_all=False) -> List[Optional[OptionTradeResult]]:
         """
         Close all open positions that have reached their expiration or close date, and update the option buying power accordingly.
-        
+
         Args:
             current_date: The current date to check against the positions' expiration and close dates.
         """
@@ -329,7 +298,7 @@ class TradeManager:
         positions_to_remove = []
         trade_results = []
         transactions = []
-        
+
         for pos in self.open_positions:
 
             # Handle positions with expiration or close date beyond backtest end date, closing then (NB: if
@@ -340,7 +309,7 @@ class TradeManager:
             early_closure = False
             if (
                 (pos.close_date is not None and current_date >= pos.close_date) or
-                vix_early_closure    
+                vix_early_closure
             ):
                 early_closure = True
 
@@ -351,7 +320,7 @@ class TradeManager:
                 ):
 
                 logger.debug(f'Closing position: {pos.trade_id}')
-                
+
                 if isinstance(pos, MultiLegOptionPosition):
 
                     # Set early close date if not set for all legs (e.g. for VIX early closure)
@@ -367,13 +336,13 @@ class TradeManager:
                         self.transaction_counter += 1
 
                     # For multi-leg positions, use the spread's close method which handles all legs
-                    result, leg_transactions, total_bp_effect = pos.close(option_chain=option_chain, 
+                    result, leg_transactions, total_bp_effect = pos.close(option_chain=option_chain,
                                                                          underlying_price_history=underlying_price_history,
-                                                                         force=close_all)                    
-                                                                         
-                    if result:  
+                                                                         force=close_all)
+
+                    if result:
                         # Update buying power with aggregated bp_effect
-                        self.bp += total_bp_effect 
+                        self.bp += total_bp_effect
                         # Restore margin since we bypassed bp updates for individual legs
                         if pos.margin_required is not None:
                             self.bp += pos.margin_required
@@ -382,17 +351,17 @@ class TradeManager:
                         logger.debug(f"Closed multi-leg position {pos.trade_id} - Total BP Effect: ${total_bp_effect:.2f} - New BP: ${self.bp:.2f}")
                         trade_results.append(result)
                         transactions.extend(leg_transactions)
-                    
+
                     else:
                         logger.error('Unable to close one or more positions due to incomplete closing data')
                         self.transaction_counter -= 2
                         # return None, None
-                
+
                 # Single leg position
                 else:
                     if early_closure or vix_early_closure:
                         pos.close_date = current_date
-                    
+
                     # Assign new transaction ID for the close before closing
                     pos.transaction_id = self.transaction_counter
                     self.transaction_counter += 1
@@ -401,15 +370,15 @@ class TradeManager:
                                                     underlying_price_history=underlying_price_history,
                                                     force=close_all)
 
-                    if result:  
+                    if result:
                         # Update buying power with the calculated bp_effect
                         self.bp += bp_effect
                         result.bp = round(self.bp, 2)
                         positions_to_remove.append(pos)
                         logger.debug(f"Closed position {pos.transaction_id} - BP Effect: ${bp_effect:.2f} - New BP: ${self.bp:.2f}")
                         trade_results.append(result)
-                        transactions.append(transaction)    
-                    
+                        transactions.append(transaction)
+
                     else:
                         logger.error('Unable to close one or more positions due to incomplete closing data')
                         self.transaction_counter -= 1
@@ -422,7 +391,7 @@ class TradeManager:
         return trade_results, transactions
 
     def construct_position_from_signal(self, trade_signal: dict,
-                                       current_date: pd.Timestamp) -> Optional[Union[SingleLegOptionPosition, MultiLegOptionPosition]]:
+                                       current_date: date) -> Optional[Union[SingleLegOptionPosition, MultiLegOptionPosition]]:
         """
         Creates a new position based on the provided trade signal.
 
@@ -432,11 +401,11 @@ class TradeManager:
             trade_signal (dict): A polars row (from iter_rows(named=True)) containing
                                   all necessary information for creating a position,
                                   such as entry date, position side, option type, quantity, and early close days.
-            current_date (pd.Timestamp): The current date to use for constructing the position.
+            current_date (date): The current date to use for constructing the position.
         Returns:
             Optional[Union[SingleLegOptionPosition, MultiLegOptionPosition]]: A new position object if the signal is valid, otherwise None.
         """
-        
+
         # Construct new position from signal
         if isinstance(self.config, SingleLegOptionStrategyConfig):
             return SingleLegOptionPosition.construct_from_signal(

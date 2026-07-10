@@ -1,10 +1,9 @@
 import sys
 from typing import Dict, List, NamedTuple, Optional, Tuple, Union
 import numpy as np
-import pandas as pd
 import logging
 import time
-from datetime import datetime
+from datetime import date, datetime
 import os
 from enum import Enum
 
@@ -54,13 +53,12 @@ class Backtester:
 
         # Results (clear between runs?)
         self.results_dir = 'results'
-        self.results: Dict[str, pd.DataFrame] = {}
+        self.results: Dict[str, pl.DataFrame] = {}
         self.__post_init__()
 
     @staticmethod
     def _not_empty(df) -> bool:
-        """Works for both pandas (.empty) and polars (.height) DataFrames."""
-        return (df.height > 0) if isinstance(df, pl.DataFrame) else (not df.empty)
+        return df.height > 0
 
     def __post_init__(self):
         """Create the results directory if it does not exist."""
@@ -82,10 +80,9 @@ class Backtester:
         
         # Logic for early close days
         # leg_early_close = leg.early_close_days if leg.early_close_days is not None else strategy.early_close_days
-        
-        # Futures signals/margin calc run entirely in polars (no spreads/legs,
-        # a much simpler path than options); the option paths below are
-        # untouched and stay on pandas.
+
+        # Both the futures and option signal/margin paths are polars-native
+        # end to end now.
         is_futures = isinstance(config, FuturesStrategyConfig)
 
         # Initialize trade manager
@@ -93,7 +90,7 @@ class Backtester:
         if is_futures:
             signal_generator = FuturesSignalGenerator(config=config, underlying=self.underlying)
         else:
-            signal_generator = OptionSignalGenerator(option_chain=self.option_chain.copy(), underlying=self.underlying.copy(), config=config)
+            signal_generator = OptionSignalGenerator(option_chain=self.option_chain, underlying=self.underlying, config=config)
         # Generate or validate signals
         signal_start = time.time()
         if isinstance(config, SingleLegOptionStrategyConfig):
@@ -120,9 +117,9 @@ class Backtester:
         else:
             raise ValueError("Invalid config type")
 
-        if (signals.height == 0) if is_futures else signals.empty:
+        if signals.height == 0:
             logger.warning("No valid signals generated")
-            return {'trade_results': pd.DataFrame(), 'transactions': pd.DataFrame()}
+            return {'trade_results': pl.DataFrame(), 'transactions': pl.DataFrame()}
 
         max_allowed_margin = config.max_margin_utilization * config.initial_capital * config.leverage
         logger.info(f"Maximum allowed margin: ${max_allowed_margin:.2f} ({config.max_margin_utilization:.0%} of capital with {config.leverage}x leverage)")
@@ -146,7 +143,7 @@ class Backtester:
 
             if valid_signals.height == 0:
                 logger.info("No valid signals; skipping trade execution.")
-                return {'trade_results': pd.DataFrame(), 'transactions': pd.DataFrame()}
+                return {'trade_results': pl.DataFrame(), 'transactions': pl.DataFrame()}
 
             # Bound the price history passed to TradeManager to the backtest's
             # own date range: a forced close at backtest end uses this
@@ -154,8 +151,8 @@ class Backtester:
             # is the full multi-year continuous series, not the config's
             # window — without this filter, a position still open at
             # config.end_date would force-close years later than requested.
-            backtest_start_ts = pd.Timestamp(config.start_date).date()
-            backtest_end_ts = pd.Timestamp(config.end_date).date()
+            backtest_start_ts = date.fromisoformat(config.start_date)
+            backtest_end_ts = date.fromisoformat(config.end_date)
             bounded_underlying = self.underlying.filter(
                 (pl.col('ts_event') >= backtest_start_ts) & (pl.col('ts_event') <= backtest_end_ts)
             )
@@ -169,9 +166,9 @@ class Backtester:
             self.execution_times['backtest_execution'] = time.time() - backtest_start
             trade_results = results_transactions_dict['trade_results']
             transactions = results_transactions_dict['transactions']
-            if trade_results.empty:
+            if trade_results.height == 0:
                 logger.warning("No trades were executed successfully")
-                return {'trade_results': pd.DataFrame(), 'transactions': pd.DataFrame()}
+                return {'trade_results': pl.DataFrame(), 'transactions': pl.DataFrame()}
 
             return self._finalize_results(trade_results, transactions, config, start_time)
 
@@ -181,188 +178,175 @@ class Backtester:
         # Handle all spread types
         if is_spread:
             # Calculate margins per spread group and ensure proper alignment
-            # margins = signals.groupby('spread_id').apply(SingleLegOptionStrategyConfig.calculate_margin_for_spread)
             logger.info(f"Calculating margin requirements for multileg trade signals for {config.quantity} | {config.option_strategy} | {config.spread_type}")
-            if 'spread_width' not in signals:
+            if 'spread_width' not in signals.columns:
                 logger.warning(f"Spread width not found in multileg signals. Calculating.")
                 if config.spread_type == OptionSpreadType.IRON_CONDOR:
                     # Iron condor signals carry put_width/call_width (no generic
                     # leg1_strike/leg2_strike columns) -- risk is bounded by
                     # whichever wing is wider, matching
                     # MultiLegOptionPosition.max_risk's convention.
-                    signals['spread_width'] = signals[['put_width', 'call_width']].max(axis=1)
+                    signals = signals.with_columns(pl.max_horizontal('put_width', 'call_width').alias('spread_width'))
                 else:
-                    signals['spread_width'] = abs(signals["leg1_strike"] - signals["leg2_strike"])
+                    signals = signals.with_columns((pl.col('leg1_strike') - pl.col('leg2_strike')).abs().alias('spread_width'))
 
             # Filter out trades with excessive spread width if max_spread_width is set
             if config.max_spread_width is not None:
-                original_count = len(signals)
+                original_count = signals.height
                 logger.debug(f'Number of signals before filtering {original_count}')
-                signals = signals[signals['spread_width'] <= config.max_spread_width]
-                filtered_count = original_count - len(signals)
+                signals = signals.filter(pl.col('spread_width') <= config.max_spread_width)
+                filtered_count = original_count - signals.height
                 if filtered_count > 0:
                     logger.warning(f"Filtered out {filtered_count} trades due to excessive spread width (> {config.max_spread_width} points)")
-                logger.info(f"Maximum spread width in trades: {signals['spread_width'].max() if len(signals) > 0 else 'N/A'} points")
+                logger.info(f"Maximum spread width in trades: {signals['spread_width'].max() if signals.height > 0 else 'N/A'} points")
 
             # Filter out trades with excessive max trade loss if max_trade_loss is set
             if 'margin_required' not in signals.columns:
-                if signals.empty:
+                if signals.height == 0:
                     logger.warning("No signals to filter for max_trade_loss after previous filters.")
                 else:
                     logger.info('Calculating margin requirements for multileg position')
-                    original_count = len(signals)
+                    original_count = signals.height
                     if config.option_strategy in [OptionStrategy.BULL_PUT_CREDIT_SPREAD, OptionStrategy.BEAR_CALL_CREDIT_SPREAD, OptionStrategy.IRON_CONDOR]:
                         # For credit spreads: max loss = (spread_width - credit) * 100 * qty
-                        credit = signals['spread_price'].clip(lower=0)  # ensure non-negative credit
-                        signals['margin_required'] = (signals['spread_width'] - credit) * config.quantity * config.multiplier
+                        signals = signals.with_columns(
+                            ((pl.col('spread_width') - pl.col('spread_price').clip(lower_bound=0)) * config.quantity * config.multiplier).alias('margin_required')
+                        )
                     elif config.option_strategy in [OptionStrategy.BULL_CALL_DEBIT_SPREAD, OptionStrategy.BEAR_PUT_DEBIT_SPREAD]:
-                        signals['margin_required'] = (signals['spread_price'].abs()) * config.quantity * config.multiplier
+                        signals = signals.with_columns(
+                            (pl.col('spread_price').abs() * config.quantity * config.multiplier).alias('margin_required')
+                        )
                     else:
-                        signals['margin_required'] = signals['spread_width'] * config.quantity * config.multiplier  # fallback
+                        signals = signals.with_columns(
+                            (pl.col('spread_width') * config.quantity * config.multiplier).alias('margin_required')  # fallback
+                        )
 
                     if config.max_trade_loss is not None:
-                        signals = signals[signals['margin_required'] <= config.max_trade_loss]
-                        filtered_count = original_count - len(signals)
+                        signals = signals.filter(pl.col('margin_required') <= config.max_trade_loss)
+                        filtered_count = original_count - signals.height
                         if filtered_count > 0:
                             logger.warning(f"Filtered out {filtered_count} trades due to max allowed trade loss (${config.max_trade_loss})")
-                        logger.info(f"Maximum trade loss: ${signals['margin_required'].max() if len(signals) > 0 else 'N/A'}")
-           
+                        logger.info(f"Maximum trade loss: ${signals['margin_required'].max() if signals.height > 0 else 'N/A'}")
+
 
             if config.premium_ratio is not None:
-                original_count = len(signals)
-                premium = signals['spread_price'].clip(lower=0)
-                signals['premium_ratio'] = round(premium / signals['spread_width'], 2)
-                signals = signals[signals['premium_ratio'] >= config.premium_ratio]
-                filtered_count = original_count - len(signals)
+                original_count = signals.height
+                signals = signals.with_columns(
+                    (pl.col('spread_price').clip(lower_bound=0) / pl.col('spread_width')).round(2).alias('premium_ratio')
+                )
+                signals = signals.filter(pl.col('premium_ratio') >= config.premium_ratio)
+                filtered_count = original_count - signals.height
                 if filtered_count > 0:
                     logger.warning(f"Filtered out {filtered_count} trades due to premium ratio ({config.premium_ratio})")
-                logger.info(f"Minimum: {signals['premium_ratio'].min() if len(signals) > 0 else 'N/A'}")
-                logger.info(f"Maximum: {signals['premium_ratio'].max() if len(signals) > 0 else 'N/A'}")
+                logger.info(f"Minimum: {signals['premium_ratio'].min() if signals.height > 0 else 'N/A'}")
+                logger.info(f"Maximum: {signals['premium_ratio'].max() if signals.height > 0 else 'N/A'}")
 
-            # Ensure 'margin_required' is calculated for spreads before trade selection
-            # if 'margin_required' not in signals.columns: # If not already calculated by MultiLegOptionPosition
-            #     signals['margin_required'] = round(signals['spread_width'] * config.quantity * config.multiplier, 2)
-            #     logger.debug(f'Calculated margins for {len(signals)} spread groups')    
             logger.debug(f'First few (filtered) signals: {signals.head()}')
-        
+
         # Single leg
         elif isinstance(config, SingleLegOptionStrategyConfig):
             logger.info(f"Calculating margin requirements for single leg trade signals for {config.quantity} | {config.option_strategy} | {config.leg.option_type} | {config.leg.delta_target if config.leg.delta_target else config.leg.delta_range}")
-            signals['margin_required'] = signals.apply(
-                lambda row: SingleLegOptionPosition.calculate_margin(
-                    quantity=config.quantity,
-                    option_type=config.leg.option_type,
-                    position_side=config.leg.position_side,
-                    entry_price=row['midpoint_price'],
-                    strike=row['strike'],
-                    underlying_price=row['underlying_last'],
-                    leverage=config.leverage
-                    ), 
-                axis=1
+            signals = signals.with_columns(
+                pl.struct(['midpoint_price', 'strike', 'underlying_last']).map_elements(
+                    lambda row: SingleLegOptionPosition.calculate_margin(
+                        quantity=config.quantity,
+                        option_type=config.leg.option_type,
+                        position_side=config.leg.position_side,
+                        entry_price=row['midpoint_price'],
+                        strike=row['strike'],
+                        underlying_price=row['underlying_last'],
+                        leverage=config.leverage
+                    ),
+                    return_dtype=pl.Float64,
+                ).alias('margin_required')
             )
 
         # Filter out trades that would exceed margin limits
-        valid_signals = signals[signals['margin_required'] <= max_allowed_margin]
+        valid_signals = signals.filter(pl.col('margin_required') <= max_allowed_margin)
         self.execution_times['signal_generation'] = time.time() - signal_start
 
-        filtered_count = len(signals) - len(valid_signals)
+        filtered_count = signals.height - valid_signals.height
         if filtered_count > 0:
             logger.warning(f"Filtered out {filtered_count} trades due to margin requirements")
         logger.info(f"Average margin requirement for trades: ${valid_signals['margin_required'].mean():.2f}")
         logger.info(f"Maximum margin requirement for trades: ${valid_signals['margin_required'].max():.2f}")
-        logger.info(f"Total valid signals: {len(valid_signals)}")
+        logger.info(f"Total valid signals: {valid_signals.height}")
         logger.debug(valid_signals)
         # if config.trade_selection_method == TradeSelectionMethod.MARGIN_FIRST:
-        #     valid_signals = valid_signals.sort_values(by=['margin_required', 'delta_difference'])
+        #     valid_signals = valid_signals.sort(['margin_required', 'delta_difference'])
 
-        
-        
-        
-        
         logger.info("Minimum margin sample:")
-        logger.info(valid_signals.sort_values(by="margin_required", ascending=True).head())
+        logger.info(valid_signals.sort('margin_required').head())
         logger.info("Maximum margin sample:")
-        logger.info(valid_signals.sort_values(by="margin_required", ascending=True).tail())
+        logger.info(valid_signals.sort('margin_required').tail())
 
-        logger.info(f"Total signals: {len(valid_signals)} | Date Range: {valid_signals.index.min()} to {valid_signals.index.max()}")
-        if valid_signals.empty:
+        logger.info(f"Total signals: {valid_signals.height} | Date Range: {valid_signals['date'].min()} to {valid_signals['date'].max()}")
+        if valid_signals.height == 0:
             logger.info("No valid signals; skipping trade execution.")
-            return {'trade_results': pd.DataFrame(), 'transactions': pd.DataFrame()}
+            return {'trade_results': pl.DataFrame(), 'transactions': pl.DataFrame()}
 
         # Execute trades
         backtest_start = time.time()
-        results_transactions_dict = trade_manager.construct_and_execute_trades_from_signals(valid_signals, 
-                                                                                option_chain=self.option_chain, 
+        results_transactions_dict = trade_manager.construct_and_execute_trades_from_signals(valid_signals,
+                                                                                option_chain=self.option_chain,
                                                                                 underlying_price_history=self.underlying)
         self.execution_times['backtest_execution'] = time.time() - backtest_start
         trade_results = results_transactions_dict['trade_results']
         transactions = results_transactions_dict['transactions']
-        if trade_results.empty:
+        if trade_results.height == 0:
             logger.warning("No trades were executed successfully")
-            return {'trade_results': pd.DataFrame(), 'transactions': pd.DataFrame()}
+            return {'trade_results': pl.DataFrame(), 'transactions': pl.DataFrame()}
 
         return self._finalize_results(trade_results, transactions, config, start_time)
 
-    def _finalize_results(self, trade_results: pd.DataFrame, transactions: pd.DataFrame,
+    def _finalize_results(self, trade_results: pl.DataFrame, transactions: pl.DataFrame,
                           config: Union[SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig, FuturesStrategyConfig],
                           start_time: float) -> dict:
         """
         Shared post-processing for both the option and futures paths:
         cumulative PnL/capital tracking, Sharpe, column ordering, drawdown,
-        and saving. trade_results/transactions are pandas here regardless of
-        which path produced them (TradeManager converts futures results to
-        pandas at its return boundary) since this math is unchanged from
-        before the futures-polars migration.
+        and saving.
         """
         # Calculate cumulative metrics based on PnL
-        # Insert a new row at the start with the initial capital (pre-trade)
-        # init_row = trade_results.iloc[0].copy()
-        # for col in trade_results.columns:
-        #     if col in init_row:
-        #         init_row[col] = 0.0
-        init_row = pd.DataFrame([{
+        # Insert a new row at the start with the initial capital (pre-trade).
+        # trade_results has many more columns than this row supplies (e.g.
+        # option_strategy, opened, closed, ...) -- how='diagonal_relaxed'
+        # fills those with null for this one row, matching pandas' pd.concat
+        # NaN-fill-on-missing-column behavior.
+        init_row = pl.DataFrame([{
             'pnl': 0.0,
             'cumulative_pnl': 0.0,
-            'capital': config.initial_capital,
-            'trade_id': 0
+            'capital': float(config.initial_capital),
+            'trade_id': 0,
         }])
 
-        # Preserve integer trade identifiers so they don't get upcast to float
-        # if 'trade_id' in init_row:
-        #     init_row['trade_id'] = 0
-        # init_row['capital'] = config.initial_capital
-        trade_results = pd.concat(
-            [init_row, trade_results],
-            ignore_index=True
-        )
+        trade_results = pl.concat([init_row, trade_results], how='diagonal_relaxed')
 
         if 'trade_id' in trade_results.columns:
-            trade_results['trade_id'] = trade_results['trade_id'].astype('Int64')
-        trade_results['cumulative_pnl'] = round(trade_results['pnl'].cumsum(), 2)
-        trade_results['capital'] = round(config.initial_capital + trade_results['cumulative_pnl'], 2)  # Track actual capital based on cumulative PnL
-        trade_results['peak_capital'] = round(trade_results['capital'].cummax(), 2)
-        trade_results['ret'] = round(trade_results['pnl'] / trade_results['capital'].shift(1), 2)
+            trade_results = trade_results.with_columns(pl.col('trade_id').cast(pl.Int64))
+        trade_results = trade_results.with_columns(pl.col('pnl').cum_sum().round(2).alias('cumulative_pnl'))
+        trade_results = trade_results.with_columns((pl.lit(float(config.initial_capital)) + pl.col('cumulative_pnl')).round(2).alias('capital'))  # Track actual capital based on cumulative PnL
+        trade_results = trade_results.with_columns(pl.col('capital').cum_max().round(2).alias('peak_capital'))
+        trade_results = trade_results.with_columns((pl.col('pnl') / pl.col('capital').shift(1)).round(2).alias('ret'))
 
-        # Remove init rowdfff
-        trade_results = trade_results.iloc[1:]
+        # Remove init row
+        trade_results = trade_results.slice(1)
 
         # Calculate margin utilization
-        trade_results['margin_utilization'] = round(trade_results['capital_used'] / config.initial_capital, 4)
-        # trade_results['avg_margin_util'] = round(trade_results['margin_utilization'].mean(), 2)
-        # trade_results['max_margin_util'] = round(trade_results['margin_utilization'].max(), 2)
-        # logger.info(f"Average margin utilization: {trade_results['avg_margin_util'].iloc[0]:.2%}")
-        # logger.info(f"Maximum margin utilization: {trade_results['max_margin_util'].iloc[0]:.2%}")
-        
+        trade_results = trade_results.with_columns((pl.col('capital_used') / config.initial_capital).round(4).alias('margin_utilization'))
+
         # Calculate Sharpe Ratio without risk-free rate
         sharpe = None
-        if len(trade_results) > 1:
+        if trade_results.height > 1:
             # If you want to keep trade-to-trade returns:
             avg_trade_days = trade_results['days_held'].mean()  # Average days per trade
-            annualization_factor = np.sqrt(252 / avg_trade_days)
-            returns = np.diff(trade_results['capital'].values) / trade_results['capital'].values[:-1]
-            if len(returns) > 0 and np.std(returns) > 0:
-                sharpe = np.mean(returns) / np.std(returns) * annualization_factor
-                logger.info(f"Sharpe Ratio: {sharpe:.2f}")
+            if avg_trade_days:
+                annualization_factor = np.sqrt(252 / avg_trade_days)
+                capital_vals = trade_results['capital'].to_numpy()
+                returns = np.diff(capital_vals) / capital_vals[:-1]
+                if len(returns) > 0 and np.std(returns) > 0:
+                    sharpe = np.mean(returns) / np.std(returns) * annualization_factor
+                    logger.info(f"Sharpe Ratio: {sharpe:.2f}")
 
         # Save results if requested
         # Generate parameter string based on backtest type
@@ -418,16 +402,16 @@ class Backtester:
                 'ret_per_point',
             ]
 
-        trade_results = trade_results[[c for c in ordered_cols if c in trade_results.columns]]
+        trade_results = trade_results.select([c for c in ordered_cols if c in trade_results.columns])
 
         results = {
             'trade_results': trade_results,
             'transactions': transactions
         }
 
-        print(results['trade_results'].to_string())
+        print(results['trade_results'])
 
-        if not results['trade_results'].empty:
+        if results['trade_results'].height > 0:
             if isinstance(config, FuturesStrategyConfig):
                 results = self.calculate_futures_mtm_drawdown(results, config)
             else:
@@ -441,14 +425,16 @@ class Backtester:
                 param_str=param_str
             )
             self.execution_times['saving'] = time.time() - save_start
-            
 
-    
+
+
         # NB: cumulative_pnl is the sum of realized profits/losses across all closed trades.
         # It starts from initial_capital and accumulates only closed P&L (not unrealized)
         # Thus (option_bp) matches the analytical P&L (cumulative_pnl + initial_capital):
-        if not trade_results.empty:
-            assert abs(trade_results['capital'].iloc[-1] - trade_results['bp'].iloc[-1]) < 1e-6, f'Final capital: {trade_results["capital"].iloc[-1]} | BP: {trade_results["bp"].iloc[-1]}'
+        if trade_results.height > 0:
+            final_capital = trade_results['capital'][-1]
+            final_bp = trade_results['bp'][-1]
+            assert abs(final_capital - final_bp) < 1e-6, f'Final capital: {final_capital} | BP: {final_bp}'
 
 
         return results
@@ -493,36 +479,39 @@ class Backtester:
         # Save trades
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         trades_csv_path = os.path.join(self.results_dir, f"trades_{param_str}_{timestamp}.csv")
-        trade_results.to_csv(trades_csv_path, index=False)      
+        trade_results.write_csv(trades_csv_path)
 
         # Save transactions if available
-        if transactions is not None and not transactions.empty:
+        if transactions is not None and transactions.height > 0:
             transactions_csv_path = os.path.join(self.results_dir, f"transactions_{param_str}_{timestamp}.csv")
-            transactions.to_csv(transactions_csv_path, index=False)
+            transactions.write_csv(transactions_csv_path)
 
         # Save the full MTM/drawdown table (not just the text summary below)
-        if stats is not None and not stats.empty:
+        if stats is not None and stats.height > 0:
             mtm_csv_path = os.path.join(self.results_dir, f"mtm_{param_str}_{timestamp}.csv")
-            stats.to_csv(mtm_csv_path, index=False)
+            stats.write_csv(mtm_csv_path)
 
         is_futures = isinstance(config, FuturesStrategyConfig)
         dd_duration_unit = "trading days" if is_futures else "trades"
 
         stats_csv_path = os.path.join(self.results_dir, f"stats_{param_str}_{timestamp}.csv")
+        n_trades = trade_results.height
+        win_count = (trade_results['pnl'] > 0).sum()
 
         with open(stats_csv_path, 'w') as results_file:
                 # results_file.write("Backtest Results Summary:\n")
-                results_file.write(f"Total trades executed: {len(trade_results)}\n")
-                results_file.write(f"Winning trades: {(trade_results['pnl'] > 0).sum()}\n")
-                results_file.write(f"Win rate: {((trade_results['pnl'] > 0).sum() / len(trade_results)):.2%}\n")
-                results_file.write(f"Total raw P&L: ${trade_results['cumulative_pnl'].iloc[-1]:.2f}\n")
-                results_file.write(f"Final capital: ${trade_results['capital'].iloc[-1]:.2f}\n")
-                results_file.write(f"Return on initial capital: {(trade_results['capital'].iloc[-1] / config.initial_capital - 1):.2%}\n")
+                results_file.write(f"Total trades executed: {n_trades}\n")
+                results_file.write(f"Winning trades: {win_count}\n")
+                results_file.write(f"Win rate: {(win_count / n_trades):.2%}\n")
+                results_file.write(f"Total raw P&L: ${trade_results['cumulative_pnl'][-1]:.2f}\n")
+                results_file.write(f"Final capital: ${trade_results['capital'][-1]:.2f}\n")
+                results_file.write(f"Return on initial capital: {(trade_results['capital'][-1] / config.initial_capital - 1):.2%}\n")
                 if is_futures:
                     results_file.write(f"Average return on margin (roi) {trade_results['roi'].mean():.2f}%\n")
                 else:
                     results_file.write(f"Average return per unit risk {trade_results['ret_per_unit_risk'].mean():.2%}\n")
-                    average_return_per_point = trade_results['ret_per_point'].mean() if trade_results['ret_per_point'] is not None and not trade_results['ret_per_point'].empty else 0.0
+                    average_return_per_point = trade_results['ret_per_point'].mean() if 'ret_per_point' in trade_results.columns else 0.0
+                    average_return_per_point = average_return_per_point or 0.0
                     results_file.write(f"Average return per point {average_return_per_point:.2%}\n")
                 results_file.write(f"Max Profit {trade_results['pnl'].max():.2f}\n")
                 results_file.write(f"Max Loss {trade_results['pnl'].min():.2f}\n")
@@ -538,7 +527,7 @@ class Backtester:
                     total_execution_time = sum(self.execution_times.values())
                     results_file.write(f"Total execution time: {total_execution_time:.2f}s\n")
 
-                if stats is not None and not stats.empty:
+                if stats is not None and stats.height > 0:
                     # Futures drawdown is negative (worst = .min()); the legacy
                     # option-path calculate_simple_drawdown is still positive
                     # (worst = .max()) — see that method's own comment.
@@ -599,15 +588,11 @@ class Backtester:
 
 
     def calculate_simple_drawdown(self, results, config):
-            """Peak-to-trough drawdown over the trade-by-trade capital curve,
-            computed in polars. trade_results['capital'] is pandas (matches
-            _finalize_results' pandas boundary); results['stats'] is
-            converted back to pandas at the end since _save_results' CSV
-            writing still expects pandas."""
+            """Peak-to-trough drawdown over the trade-by-trade capital curve, computed in polars."""
 
             trade_results = results['trade_results']
 
-            capital = pl.Series('capital', trade_results['capital'].to_numpy(), dtype=pl.Float64)
+            capital = trade_results['capital'].cast(pl.Float64)
             capital_with_init = pl.concat([pl.Series('capital', [float(config.initial_capital)], dtype=pl.Float64), capital])
             logger.debug(f'Capital with prepended init:\n{capital_with_init}')
 
@@ -660,7 +645,7 @@ class Backtester:
                 'Running Max': running_max,
             })
 
-            results['stats'] = stats.to_pandas()
+            results['stats'] = stats
             results['drawdown_analysis'] = {
                 'max_drawdown': max_dd_usd,
                 'peak_capital': capital_with_init[peak_idx],
@@ -692,26 +677,22 @@ class Backtester:
         trade_results = results['trade_results']
         transactions = results['transactions']
 
-        if trade_results.empty or transactions.empty:
+        if trade_results.height == 0 or transactions.height == 0:
             return results
 
-        close_tx = transactions[transactions['type'] == 'close'][
+        close_tx = transactions.filter(pl.col('type') == 'close').select(
             ['trade_id', 'open', 'position_side', 'quantity', 'mult']
-        ]
-        trades = trade_results[['trade_id', 'opened', 'closed', 'capital']].merge(close_tx, on='trade_id', how='left')
-        trades = trades.sort_values('opened').reset_index(drop=True)
+        )
+        trades_pl = trade_results.select(['trade_id', 'opened', 'closed', 'capital']).join(close_tx, on='trade_id', how='left')
+        trades_pl = trades_pl.sort('opened')
 
-        trades['capital_before'] = trades['capital'].shift(1)
-        trades['capital_before'] = trades['capital_before'].fillna(config.initial_capital)
-        trades['direction'] = trades['position_side'].apply(lambda s: 1 if str(s).lower() == 'long' else -1)
-
-        trades_pl = pl.from_pandas(trades).with_columns(
-            pl.col('opened').cast(pl.Date),
-            pl.col('closed').cast(pl.Date),
+        trades_pl = trades_pl.with_columns(pl.col('capital').shift(1).fill_null(config.initial_capital).alias('capital_before'))
+        trades_pl = trades_pl.with_columns(
+            pl.when(pl.col('position_side').str.to_lowercase() == 'long').then(1).otherwise(-1).alias('direction')
         )
 
-        start = pd.Timestamp(config.start_date).date()
-        end = pd.Timestamp(config.end_date).date()
+        start = date.fromisoformat(config.start_date)
+        end = date.fromisoformat(config.end_date)
         daily = (
             self.underlying
             .filter((pl.col('ts_event') >= start) & (pl.col('ts_event') <= end))
@@ -802,8 +783,8 @@ class Backtester:
         # numbers as the per-trade table's last row), Sharpe from the daily
         # mtm_capital series (more accurate than a trade-to-trade Sharpe —
         # standard daily-return annualization via sqrt(252)), avg ROI/trade.
-        total_pnl = trade_results['cumulative_pnl'].iloc[-1]
-        total_return_pct = (trade_results['capital'].iloc[-1] / config.initial_capital - 1) * 100
+        total_pnl = trade_results['cumulative_pnl'][-1]
+        total_return_pct = (trade_results['capital'][-1] / config.initial_capital - 1) * 100
         avg_roi = trade_results['roi'].mean()
 
         daily_ret = daily.with_columns(
@@ -825,7 +806,7 @@ class Backtester:
         stats = daily.select(['ts_event', 'close', 'mtm_pnl', 'cum_pnl', 'cum_pnl_pct', 'mtm_capital', 'running_max', 'dd_usd', 'dd_pct']).rename({
             'ts_event': 'date',
             'mtm_capital': 'capital',
-        }).to_pandas()
+        })
 
         results['stats'] = stats
         results['drawdown_analysis'] = {

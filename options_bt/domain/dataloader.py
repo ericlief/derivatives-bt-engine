@@ -6,7 +6,6 @@ from typing import Optional, Dict
 from functools import cached_property
 
 import polars as pl
-import pandas as pd
 
 from options_bt.domain.base_dataloader import BaseDataLoader
 from options_bt.utils.logger import setup_logger
@@ -102,31 +101,6 @@ class OptionsDataLoader(BaseDataLoader):
     def _underlying_processed_path(self) -> str:
         return self._underlying_paths[1]
 
-    @staticmethod
-    def _read_raw_source(path: str) -> pl.DataFrame:
-        """Read a raw CSV or parquet source. Historical raw chain/underlying
-        CSVs use a blank header for the leading date column (equivalent to
-        pandas' index_col=0); normalize whatever that first column is named
-        (blank, 'Date', 'date', ...) to a lowercase `date` column, and
-        lowercase every other column too (the real underlying source mixes
-        case, e.g. 'Date,open,high,Low,close')."""
-        if path.endswith('.parquet'):
-            df = pl.read_parquet(path)
-        else:
-            df = pl.read_csv(path, infer_schema_length=10000)
-
-        first_col = df.columns[0]
-        df = df.rename({c: c.lower() for c in df.columns if c != first_col})
-        df = df.rename({first_col: 'date'})
-
-        if df['date'].dtype != pl.Date:
-            # .cast(pl.Datetime) only reinterprets numeric epoch-like values,
-            # not date strings -- it silently nulls every row of a genuine
-            # "YYYY-MM-DD" string column. .str.to_datetime() actually parses it.
-            df = df.with_columns(pl.col('date').str.to_datetime(strict=False).dt.date().alias('date'))
-
-        return df
-
     @cached_property
     def option_chain(self) -> pl.DataFrame:
         """Lazy load and cache the options chain data as a polars DataFrame
@@ -165,18 +139,10 @@ class OptionsDataLoader(BaseDataLoader):
 
     def load_data(self) -> Dict:
         """
-        Load and return all data at once.
-
-        Returns pandas DataFrames (option_chain with an *unnamed*
-        DatetimeIndex, matching the pre-migration shape exactly -- several
-        downstream methods, e.g. OptionSignalGenerator's spread-pairing
-        methods, rely on reset_index() producing a literal 'index' column,
-        which only happens when the index has no name) since the signal
+        Load and return all data at once, as polars DataFrames (each with a
+        plain `date` column -- polars has no index concept) -- the signal
         generator / position / trade manager / backtester option paths are
-        still pandas-based. This to_pandas() conversion is the single scoped
-        boundary (per CLAUDE.md's pandas/polars convention); loading and
-        preprocessing above it are fully polars already, and this boundary
-        should be deleted once those downstream consumers are migrated too.
+        polars-native end to end now, so no pandas conversion happens here.
         """
         data_loading_start = time.time()
 
@@ -193,16 +159,11 @@ class OptionsDataLoader(BaseDataLoader):
             data_loading_time = time.time() - data_loading_start
             logger.info(f"Data loading completed in {data_loading_time:.2f} seconds")
 
-            option_chain_pd = option_chain.to_pandas().set_index('date')
-            option_chain_pd.index.name = None
-            underlying_pd = underlying.to_pandas().set_index('date')
-            underlying_pd.index.name = None
-
-            self._check_data_quality(option_chain_pd, underlying_pd, vix)
+            self._check_data_quality(option_chain, underlying, vix)
 
             return {
-                'option_chain': option_chain_pd,
-                'underlying': underlying_pd,
+                'option_chain': option_chain,
+                'underlying': underlying,
                 'vix': vix,
             }
 
@@ -293,7 +254,7 @@ class OptionsDataLoader(BaseDataLoader):
 
         return df.sort('date')
 
-    def _check_data_quality(self, option_chain: pd.DataFrame, underlying: pd.DataFrame, vix: pd.DataFrame):
+    def _check_data_quality(self, option_chain: pl.DataFrame, underlying: pl.DataFrame, vix: pl.DataFrame):
         """
         Check data quality for all datasets (options chain, SPX data, and VIX data).
         Verifies required columns exist and checks for missing or invalid values.
@@ -328,6 +289,7 @@ class OptionsDataLoader(BaseDataLoader):
                 continue
 
             required_cols = dataset_info['required_cols']
+            n_rows = df.height
 
             logger.info(f"\nChecking {dataset_name} data quality...")
 
@@ -335,32 +297,33 @@ class OptionsDataLoader(BaseDataLoader):
             logger.info(f"\nMissing values in {dataset_name}:")
             for col in required_cols:
                 if col in df.columns:
-                    missing = df[col].isna().sum()
-                    percent = (missing / len(df)) * 100 if len(df) > 0 else 0
+                    missing = df[col].null_count()
+                    percent = (missing / n_rows) * 100 if n_rows > 0 else 0
                     logger.info(f"{col}: {missing} missing values ({percent:.2f}%)")
 
             # Check date ranges
-            if not df.empty:
-                logger.info(f"\n{dataset_name} date range: {df.index.min()} to {df.index.max()}")
+            if n_rows > 0 and 'date' in df.columns:
+                logger.info(f"\n{dataset_name} date range: {df['date'].min()} to {df['date'].max()}")
 
             # Check for negative or zero values in bid/ask (separately from missing values)
             logger.info("\nZero or negative values (not including NaN):")
             bid_ask_cols = ['p_bid', 'p_ask', 'c_bid', 'c_ask']
             for col in bid_ask_cols:
                 if col in df.columns:
-                    zero_values = ((df[col] == 0) & ~df[col].isna()).sum()
-                    zero_percent = (zero_values / len(df)) * 100 if len(df) > 0 else 0
+                    not_null = df[col].is_not_null()
+                    zero_values = ((df[col] == 0) & not_null).sum()
+                    zero_percent = (zero_values / n_rows) * 100 if n_rows > 0 else 0
 
-                    negative_values = ((df[col] < 0) & ~df[col].isna()).sum()
-                    negative_percent = (negative_values / len(df)) * 100 if len(df) > 0 else 0
+                    negative_values = ((df[col] < 0) & not_null).sum()
+                    negative_percent = (negative_values / n_rows) * 100 if n_rows > 0 else 0
 
-                    nan_values = df[col].isna().sum()
-                    nan_percent = (nan_values / len(df)) * 100 if len(df) > 0 else 0
+                    nan_values = df[col].null_count()
+                    nan_percent = (nan_values / n_rows) * 100 if n_rows > 0 else 0
 
                     logger.info(f"{col}: {zero_values} zeros ({zero_percent:.2f}%), {negative_values} negative ({negative_percent:.2f}%), {nan_values} NaN ({nan_percent:.2f}%)")
 
             # Sample data
-            if not df.empty:
+            if n_rows > 0:
                 logger.info("\nSample data:")
                 logger.info(df.head(2))
 

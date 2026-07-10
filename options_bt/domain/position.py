@@ -1,11 +1,10 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 import math
 from typing import Optional, Dict, Union, List, NamedTuple, Tuple
 from functools import cached_property
 from abc import ABC, abstractmethod
-import pandas as pd
 import polars as pl
 
 from options_bt.domain.enums import *
@@ -23,18 +22,18 @@ class BasePosition(ABC):
     transaction_id: Optional[int] = None
     quantity: int
     position_side: Optional[Union[PositionSide, str]] = None
-    entry_date: pd.Timestamp
+    entry_date: date
     entry_price: float
     margin_required: Optional[float] = None
-    fees: Optional[float] = None   # added 
+    fees: Optional[float] = None   # added
     # pnl: Optional[float] = None
-    
+
     def __post_init__(self):
         """Validate and convert types after initialization."""
         if isinstance(self.position_side, str):
             self.position_side = PositionSide(self.position_side.lower())
         if isinstance(self.entry_date, str):
-            self.entry_date = pd.Timestamp(self.entry_date)
+            self.entry_date = date.fromisoformat(self.entry_date)
 
  
     @property
@@ -90,7 +89,7 @@ class BaseOptionPosition(BasePosition, ABC):
     """Abstract base class for any option position."""
     # Required parameters (no defaults)
     option_strategy: OptionStrategy
-    expire_date: pd.Timestamp
+    expire_date: date
     entry_dte: int
     underlying_entry: float
     option_type: Union[OptionType, str]  # Add missing option_type property
@@ -99,24 +98,24 @@ class BaseOptionPosition(BasePosition, ABC):
 
 
     # Should go into Trade class
-    # exit_date: Optional[pd.Timestamp] = None
-    multiplier: Optional[float] = 100  # default to stock or index 
+    # exit_date: Optional[date] = None
+    multiplier: Optional[float] = 100  # default to stock or index
     exit_price: Optional[float] = None
     exit_delta: Optional[float] = None
     underlying_exit: Optional[float] = None
-    close_date: Optional[pd.Timestamp] = None  # For early closure
+    close_date: Optional[date] = None  # For early closure
     close_reason: Optional[str] = None  # expiration, early closure
-    
+
     def __post_init__(self):
         super().__post_init__()
 
         """Validate and convert types after initialization."""
-    
+
         if isinstance(self.close_date, str):
-            self.close_date = pd.Timestamp(self.close_date)
-            
+            self.close_date = date.fromisoformat(self.close_date)
+
         if isinstance(self.expire_date, str):
-            self.expire_date = pd.Timestamp(self.expire_date)   
+            self.expire_date = date.fromisoformat(self.expire_date)
 
         if isinstance(self.option_strategy, str):
             self.option_strategy=OptionStrategy(self.option_strategy)
@@ -146,13 +145,13 @@ class BaseOptionPosition(BasePosition, ABC):
 
     @staticmethod
     def _as_date(value) -> date:
-        """Normalize a pd.Timestamp/date/str to a plain datetime.date for
+        """Normalize a datetime/date/str to a plain datetime.date for
         comparison against the polars (pl.Date) option chain/underlying
         price history. Mirrors FuturesPosition._as_date."""
-        if isinstance(value, pd.Timestamp):
-            return value.date()
         if isinstance(value, str):
-            return pd.Timestamp(value).date()
+            return date.fromisoformat(value)
+        if isinstance(value, datetime):  # datetime subclasses date but carries a time component
+            return value.date()
         return value
 
     @abstractmethod
@@ -249,8 +248,8 @@ class BaseOptionPosition(BasePosition, ABC):
         Calculate profit and loss (P&L) for the position, considering all relevant parameters.
 
         Args:
-            option_chain (pd.DataFrame): DataFrame containing the full option chain data.
-            underlying_price_history (pd.DataFrame): DataFrame containing historical prices of the underlying asset.
+            option_chain (pl.DataFrame): DataFrame containing the full option chain data.
+            underlying_price_history (pl.DataFrame): DataFrame containing historical prices of the underlying asset.
             close_reason (Optional[str], optional): Reason for closing the position ('expiration', 'early closure', etc.). Defaults to 'expiration'.
             commission (Optional[float], optional): Transaction fees per contract. Defaults to 1.78.
             exercise_fee (Optional[float], optional): Exercise fee for ITM options per contract. Defaults to 5.0.
@@ -348,8 +347,8 @@ class BaseOptionPosition(BasePosition, ABC):
         Update the instance with closing price data for the position.
         
         Args:
-            option_chain (pd.DataFrame): DataFrame containing the full option chain data.
-            underlying_price_history (pd.DataFrame): DataFrame containing historical prices of the underlying asset.
+            option_chain (pl.DataFrame): DataFrame containing the full option chain data.
+            underlying_price_history (pl.DataFrame): DataFrame containing historical prices of the underlying asset.
 
         Returns:
             bool: True if closing data was successfully updated, False otherwise.
@@ -434,7 +433,7 @@ class BaseOptionPosition(BasePosition, ABC):
                 'strike': position.strike,
                 'price': price,
                 'effect': effect,
-                'bp_effect': round(bp_effect, 2) if bp_effect is not None else '',
+                'bp_effect': round(bp_effect, 2) if bp_effect is not None else None,
                 'fees': round(position.fees, 2) if position.fees is not None else 0
             }
 
@@ -450,11 +449,11 @@ class SingleLegOptionPosition(BaseOptionPosition):
     entry_dte: int
 
     # Should go into Trade class
-    # exit_date: Optional[pd.Timestamp] = None
+    # exit_date: Optional[date] = None
     # exit_price: Optional[float] = None
     # exit_delta: Optional[float] = None
     # underlying_exit: Optional[float] = None
-    close_date: Optional[pd.Timestamp] = None  # For early closure
+    close_date: Optional[date] = None  # For early closure
 
     def __post_init__(self):
         super().__post_init__()
@@ -462,15 +461,15 @@ class SingleLegOptionPosition(BaseOptionPosition):
         """Validate and convert types after initialization."""
         if isinstance(self.option_type, str):
             self.option_type = OptionType(self.option_type.lower())
-      
+
         if isinstance(self.entry_date, str):
-            self.entry_date = pd.Timestamp(self.entry_date)
-            
+            self.entry_date = date.fromisoformat(self.entry_date)
+
         if isinstance(self.close_date, str):
-            self.close_date = pd.Timestamp(self.close_date)
-            
+            self.close_date = date.fromisoformat(self.close_date)
+
         if isinstance(self.expire_date, str):
-            self.expire_date = pd.Timestamp(self.expire_date)   
+            self.expire_date = date.fromisoformat(self.expire_date)
 
         # Calculate margin required based on entry price and underlying entry
         # NOTE: This is not needed anymore since we are using the margin required from the signal it should not compute margin for indiv spread legs
@@ -554,7 +553,7 @@ class SingleLegOptionPosition(BaseOptionPosition):
     def construct_from_signal(
             trade_signal: dict,
             option_strategy: OptionStrategy,
-            entry_date: pd.Timestamp,
+            entry_date: date,
             position_side: PositionSide,
             option_type: OptionType,
             quantity: int,
@@ -566,7 +565,7 @@ class SingleLegOptionPosition(BaseOptionPosition):
 
                 Args:
                     trade_signal: dict (a polars row, from iter_rows(named=True))
-                    entry_date: pd.Timestamp,
+                    entry_date: date,
                     position_side: PositionSide,
                     option_type: OptionType,
                     quantity: int,
@@ -576,8 +575,8 @@ class SingleLegOptionPosition(BaseOptionPosition):
             Returns:
                 Optional[SingleLegOptionPosition]: Created position if valid, None otherwise
             """
-            min_valid_date = pd.Timestamp('1990-01-01')
-            if not isinstance(entry_date, pd.Timestamp) or entry_date <= min_valid_date:
+            min_valid_date = date(1990, 1, 1)
+            if not isinstance(entry_date, date) or entry_date <= min_valid_date:
                 logger.error(f"Invalid entry date {entry_date}")
                 return None
 
@@ -587,7 +586,7 @@ class SingleLegOptionPosition(BaseOptionPosition):
                 logger.error(f"expire_date is missing for trade signal on {trade_signal.get('date')}")
                 return None
 
-            expire_date = pd.Timestamp(raw_expire_date)
+            expire_date = SingleLegOptionPosition._as_date(raw_expire_date)
             if expire_date <= min_valid_date:
                 logger.error(f"Invalid expire date {expire_date}")
                 return None
@@ -621,8 +620,8 @@ class SingleLegOptionPosition(BaseOptionPosition):
                 logger.warning(f"Missing margin required for trade signal on {trade_signal.get('date')}")
 
             # Early closure
-            close_date = (entry_date + pd.Timedelta(days=early_close_after_dit) if early_close_after_dit else
-                          expire_date - pd.Timedelta(days=early_close_on_dte) if early_close_on_dte else
+            close_date = (entry_date + timedelta(days=early_close_after_dit) if early_close_after_dit else
+                          expire_date - timedelta(days=early_close_on_dte) if early_close_on_dte else
                           None)
 
             entry_delta = trade_signal.get('p_delta') if OptionType.is_put(option_type) else trade_signal.get('c_delta')
@@ -788,7 +787,7 @@ class SingleLegOptionPosition(BaseOptionPosition):
                 self.underlying_exit = underlying_close
                 self.exit_price = mid_price
                 self.exit_delta = exit_delta
-                self.close_date = pd.Timestamp(row_date)   # update since actual close date may have changed
+                self.close_date = row_date   # update since actual close date may have changed (already a plain date from the polars row)
                 return True  # Successfully updated
             else:
                 # Track dates with wide spreads for potential fallback (only if not null)
@@ -824,7 +823,7 @@ class SingleLegOptionPosition(BaseOptionPosition):
             self.underlying_exit = fallback_underlying
             self.exit_price = fallback_mid_price
             self.exit_delta = fallback_delta
-            self.close_date = pd.Timestamp(fallback_date)
+            self.close_date = fallback_date  # already a plain date from the polars row
             logger.warning(f"Fallback successful: using mid_price={fallback_mid_price} for strike {self.strike}")
             return True
 
@@ -892,7 +891,7 @@ class SingleLegOptionPosition(BaseOptionPosition):
         logger.info(f"Closing Trade #{self.trade_id}|Trans #{self.transaction_id}|{self.option_strategy}|{self.option_type}|{self.position_side}")
         bp_effect = 0
         close_reason = None
-        min_valid_date = pd.Timestamp('1990-01-01')  # Arbitrary date well after 1970
+        min_valid_date = date(1990, 1, 1)  # Arbitrary date well after 1970
 
         # Validate entry_date
         if self.entry_date <= min_valid_date:
@@ -914,7 +913,7 @@ class SingleLegOptionPosition(BaseOptionPosition):
         logger.info(f'Date: {close_date} - Close Reason: {close_reason}')
 
         # Validate close_date
-        if not isinstance(close_date, pd.Timestamp) or close_date <= min_valid_date:
+        if not isinstance(close_date, date) or close_date <= min_valid_date:
             logger.error(f"Invalid close date: {close_date} - skipping trade")
             return None, None, None
         
@@ -954,7 +953,7 @@ class SingleLegOptionPosition(BaseOptionPosition):
         logger.debug(f'Deducted fees from BP: {bp_effect}')
 
         # Calculate days held
-        days_held = pd.Timedelta(close_date - self.entry_date).days
+        days_held = (close_date - self.entry_date).days
         if days_held < 0:
             logger.error(f"Calculated negative days held ({days_held}) - skipping trade")
             return None, None, None
@@ -1018,7 +1017,7 @@ class MultiLegOptionPosition(BaseOptionPosition):
     spread_width: Optional[float] = None
     max_loss: Optional[float] = None
     # net_price: Optional[float] = None
-    expire_date: Optional[pd.Timestamp] = None # Common expiration date for the spread
+    expire_date: Optional[date] = None # Common expiration date for the spread
     entry_dte: int = 0  # Common DTE for the spread
     underlying_entry: Optional[float] = None  # Common underlying entry price for the spread
     option_type: Union[OptionType, str] = None  # Will be derived from legs
@@ -1047,7 +1046,7 @@ class MultiLegOptionPosition(BaseOptionPosition):
                 is_same = True
                 
         # Set the common expiration date if all legs have the same expiration date
-        self.expire_date = pd.to_datetime(self.legs[0].expire_date) if is_same else None
+        self.expire_date = self.legs[0].expire_date if is_same else None
 
         # Check if all legs have the same entry DTE
         is_same = False
@@ -1092,8 +1091,8 @@ class MultiLegOptionPosition(BaseOptionPosition):
         Update the instance with closing price data for the position.
         
         Args:
-            option_chain (pd.DataFrame): DataFrame containing the full option chain data.
-            underlying_price_history (pd.DataFrame): DataFrame containing historical prices of the underlying asset.
+            option_chain (pl.DataFrame): DataFrame containing the full option chain data.
+            underlying_price_history (pl.DataFrame): DataFrame containing historical prices of the underlying asset.
 
         Returns:
             bool: True if closing data was successfully updated, False otherwise.
@@ -1360,7 +1359,7 @@ class MultiLegOptionPosition(BaseOptionPosition):
             return None, None, None
 
         # Calculate days_held for the spread
-        days_held = (close_date.date() - self.entry_date.date()).days
+        days_held = (close_date - self.entry_date).days
         if days_held < 0:
             logger.warning(f"Calculated negative days held ({days_held}) for spread {self.trade_id}")
             days_held = 0 # Or handle as an error if appropriate
@@ -1393,7 +1392,7 @@ class MultiLegOptionPosition(BaseOptionPosition):
     def construct_from_signal(
             trade_signal: dict,
             config: MultiLegOptionStrategyConfig,
-            entry_date: pd.Timestamp,
+            entry_date: date,
         ) -> Optional[MultiLegOptionPosition]:
             """
                 Creates a MultiLegOptionPosition object from a given trade signal.
@@ -1401,14 +1400,14 @@ class MultiLegOptionPosition(BaseOptionPosition):
                 Args:
                     trade_signal: dict (a polars row, from iter_rows(named=True))
                     config: MultiLegOptionStrategyConfig
-                    entry_date: pd.Timestamp
+                    entry_date: date
 
                 Returns:
                     Optional[MultiLegOptionPosition]: Created position if valid, None otherwise
             """
             # Validate entry date
-            min_valid_date = pd.Timestamp('1990-01-01')
-            if not isinstance(entry_date, pd.Timestamp) or entry_date <= min_valid_date:
+            min_valid_date = date(1990, 1, 1)
+            if not isinstance(entry_date, date) or entry_date <= min_valid_date:
                 logger.error(f"Invalid entry date {entry_date}")
                 return None
 
@@ -1418,7 +1417,7 @@ class MultiLegOptionPosition(BaseOptionPosition):
                 logger.error(f"expire_date is missing for trade signal on {trade_signal.get('date')}")
                 return None
 
-            expire_date = pd.Timestamp(raw_expire_date)
+            expire_date = MultiLegOptionPosition._as_date(raw_expire_date)
             if expire_date <= min_valid_date:
                 logger.error(f"Invalid expire date {expire_date}")
                 return None
@@ -1428,8 +1427,8 @@ class MultiLegOptionPosition(BaseOptionPosition):
                 return None
 
             # Early closure
-            close_date = (entry_date + pd.Timedelta(days=config.early_close_after_dit) if config.early_close_after_dit else
-                          expire_date - pd.Timedelta(days=config.early_close_on_dte) if config.early_close_on_dte else
+            close_date = (entry_date + timedelta(days=config.early_close_after_dit) if config.early_close_after_dit else
+                          expire_date - timedelta(days=config.early_close_on_dte) if config.early_close_on_dte else
                           None)
 
             # Retrieve and construct legs for the spread
@@ -1670,14 +1669,14 @@ class FuturesPosition(BasePosition):
     # futures contract's own open/close prices.
     exit_price: Optional[float] = None
 
-    roll_date: pd.Timestamp # The date when this futures contract is expected to be rolled
+    roll_date: date # The date when this futures contract is expected to be rolled
     close_reason: Optional[str] = None # 'roll', 'early closure', etc.
     initial_margin: float # Initial margin for one contract
-    close_date: Optional[pd.Timestamp] = None # Set by TradeManager for early closure (e.g. VIX trigger)
+    close_date: Optional[date] = None # Set by TradeManager for early closure (e.g. VIX trigger)
     fill_price: str = 'close' # 'close' or 'mid' ((high+low)/2) — see FuturesStrategyConfig.fill_price
 
     @property
-    def expire_date(self) -> pd.Timestamp:
+    def expire_date(self) -> date:
         """Futures have no option-style expiration — the roll_date is the
         equivalent trigger TradeManager uses to close/roll the position."""
         return self.roll_date
@@ -1688,9 +1687,9 @@ class FuturesPosition(BasePosition):
             self.futures_type = FuturesType(self.futures_type)
         if isinstance(self.futures_strategy, str):
             self.futures_strategy = FuturesStrategy(self.futures_strategy)
-        
+
         if isinstance(self.roll_date, str):
-            self.roll_date = pd.Timestamp(self.roll_date)
+            self.roll_date = date.fromisoformat(self.roll_date)
         
         # Set contract multiplier from enum based on futures_type
         # Corrected: Access the 'multiplier' property from the enum instance
@@ -1732,12 +1731,12 @@ class FuturesPosition(BasePosition):
         else: # Short position
             return -price_diff # Positive for short if price goes down
 
-    def calculate_pnl(self, underlying_price_history: pd.DataFrame, close_reason: Optional[str] = 'roll', commission: Optional[float] = 1.0) -> Optional[float]:
+    def calculate_pnl(self, underlying_price_history: pl.DataFrame, close_reason: Optional[str] = 'roll', commission: Optional[float] = 1.0) -> Optional[float]:
         """
         Calculate profit and loss (P&L) for the futures position.
         
         Args:
-            underlying_price_history (pd.DataFrame): DataFrame containing historical prices of the underlying asset (SPX).
+            underlying_price_history (pl.DataFrame): DataFrame containing historical prices of the underlying asset (SPX).
             close_reason (Optional[str], optional): Reason for closing the position ('roll', 'early closure', etc.). Defaults to 'roll'.
             commission (Optional[float], optional): Transaction fees per contract. Defaults to 1.0 (typical for MES).
 
@@ -1797,12 +1796,12 @@ class FuturesPosition(BasePosition):
 
     @staticmethod
     def _as_date(value) -> date:
-        """Normalize a pd.Timestamp/date/str to a plain datetime.date for
+        """Normalize a datetime/date/str to a plain datetime.date for
         comparison against the polars (pl.Date) underlying price history."""
-        if isinstance(value, pd.Timestamp):
-            return value.date()
         if isinstance(value, str):
-            return pd.Timestamp(value).date()
+            return date.fromisoformat(value)
+        if isinstance(value, datetime):  # datetime subclasses date but carries a time component
+            return value.date()
         return value
 
     def close(self,
@@ -1911,7 +1910,7 @@ class FuturesPosition(BasePosition):
                 Optional[FuturesPosition]: Created position if valid, None otherwise
             """
             min_valid_date = date(1990, 1, 1)
-            # date covers datetime.date, datetime.datetime, and pd.Timestamp (all subclass date)
+            # date covers both datetime.date and datetime.datetime (a date subclass)
             if not isinstance(entry_date, date) or entry_date <= min_valid_date:
                 logger.error(f"Invalid entry date {entry_date}")
                 return None
@@ -1949,7 +1948,7 @@ class FuturesPosition(BasePosition):
             return position
 
     @staticmethod
-    def create_transaction(position: 'FuturesPosition', date: pd.Timestamp, type: str, bp_effect: float = None) -> dict:
+    def create_transaction(position: 'FuturesPosition', date: date, type: str, bp_effect: float = None) -> dict:
         """
         Create a transaction dictionary for a futures position open. Mirrors
         the shape of the inline 'close' transaction dict built in close()

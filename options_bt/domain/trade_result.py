@@ -1,9 +1,10 @@
 from __future__ import annotations
 from dataclasses import dataclass
+from datetime import date
 from typing import List, Optional, Dict, Union
-import pandas as pd
-from options_bt.domain.enums import *  
-from options_bt.utils.logger import setup_logger      
+import polars as pl
+from options_bt.domain.enums import *
+from options_bt.utils.logger import setup_logger
 
 # from options_bt.domain.position import SingleLegOptionPosition
 
@@ -19,9 +20,9 @@ class BaseTradeResult:
     trade_id: int
     quantity: int
     
-    # entry details 
-    opened: pd.Timestamp
-    closed: pd.Timestamp
+    # entry details
+    opened: date
+    closed: date
     days_held: Optional[int]
 
     # results
@@ -124,14 +125,14 @@ class OptionTradeResult(BaseTradeResult):
         return results 
     
     @classmethod
-    def from_dataframe_row(cls, row: pd.Series) -> 'OptionTradeResult':
-        """Create TradeResult from a DataFrame row."""
-        return cls(**row.to_dict())
+    def from_dataframe_row(cls, row: dict) -> 'OptionTradeResult':
+        """Create TradeResult from a DataFrame row (a plain dict, e.g. from polars' .iter_rows(named=True))."""
+        return cls(**row)
 
     @staticmethod
-    def to_dataframe(results: list['OptionTradeResult']) -> pd.DataFrame:
+    def to_dataframe(results: list['OptionTradeResult']) -> pl.DataFrame:
         """Convert list of TradeResults to DataFrame."""
-        return pd.DataFrame([r.to_dict() for r in results])
+        return pl.DataFrame([r.to_dict() for r in results])
 
 
 @dataclass(kw_only=True)
@@ -159,11 +160,11 @@ class FuturesTradeResult(BaseTradeResult):
         }
 
     @classmethod
-    def from_dataframe_row(cls, row: pd.Series) -> 'FuturesTradeResult':
-        """Create TradeResult from a DataFrame row."""
-        return cls(**row.to_dict())
+    def from_dataframe_row(cls, row: dict) -> 'FuturesTradeResult':
+        """Create TradeResult from a DataFrame row (a plain dict, e.g. from polars' .iter_rows(named=True))."""
+        return cls(**row)
 
     @staticmethod
-    def to_dataframe(results: list['FuturesTradeResult']) -> pd.DataFrame:
+    def to_dataframe(results: list['FuturesTradeResult']) -> pl.DataFrame:
         """Convert list of TradeResults to DataFrame."""
-        return pd.DataFrame([r.to_dict() for r in results])
+        return pl.DataFrame([r.to_dict() for r in results])

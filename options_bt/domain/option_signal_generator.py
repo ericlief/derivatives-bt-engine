@@ -5,7 +5,6 @@ from enum import Enum
 from typing import Optional, Union, List, Tuple
 
 import polars as pl
-import pandas as pd
 
 from options_bt.domain.enums import *
 from options_bt.domain.base_signal_generator import BaseSignalGenerator
@@ -27,19 +26,14 @@ _BUTTERFLY_STRIKE_SPACING_TOLERANCE = 0.01   # float tolerance for equal wing wi
 class OptionSignalGenerator(BaseSignalGenerator):
     """Class to generate signals for trading.
 
-    option_chain/underlying are still pandas (matching what Backtester hands
-    in today) -- converted to polars once here and used internally
-    throughout. generate_single_leg_signals()/generate_multi_leg_signals()
-    convert back to pandas at their return boundary, since the position /
-    trade manager / backtester option paths are still pandas-based. Both
-    boundary conversions are the single scoped conversion points (per
-    CLAUDE.md's pandas/polars convention) and should be deleted once those
-    downstream consumers are migrated too.
+    option_chain/underlying are polars DataFrames (matching what Backtester
+    hands in), used internally throughout -- no pandas conversion anywhere
+    in this class.
     """
 
     config: Union[SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig]
-    option_chain: pd.DataFrame
-    underlying: pd.DataFrame
+    option_chain: pl.DataFrame
+    underlying: pl.DataFrame
 
     def __post_init__(self):
         super().__init__(config=self.config)
@@ -49,11 +43,9 @@ class OptionSignalGenerator(BaseSignalGenerator):
 
         logger.info(f"Config: {self.config}")
 
-        # option_chain's DatetimeIndex is unnamed -- reset_index() names the
-        # new column 'index', not 'date'.
-        self._option_chain_pl = pl.from_pandas(self.option_chain.reset_index()).rename({'index': 'date'})
+        self._option_chain_pl = self.option_chain
 
-    def fetch_data(self) -> pd.DataFrame:
+    def fetch_data(self) -> pl.DataFrame:
         return self.option_chain
 
     def generate_single_leg_signals(
@@ -67,7 +59,7 @@ class OptionSignalGenerator(BaseSignalGenerator):
         early_close_days: Optional[int] = None,
         start_date: Optional[str] = None,
         end_date: Optional[str] = None
-    ) -> pd.DataFrame:
+    ) -> pl.DataFrame:
         """
         Generate trade signals based on the provided parameters. These are not the actual trades,
         but rather potential trades filtered for the desired criteria.
@@ -84,9 +76,9 @@ class OptionSignalGenerator(BaseSignalGenerator):
             end_date: End date for filtering
 
         Returns:
-            DataFrame containing the generated trade signals, indexed by date
+            DataFrame containing the generated trade signals, with a `date` column
         """
-        result = self._generate_single_leg_signals_pl(
+        return self._generate_single_leg_signals_pl(
             option_type=option_type,
             position_side=position_side,
             delta_target=delta_target,
@@ -97,7 +89,6 @@ class OptionSignalGenerator(BaseSignalGenerator):
             start_date=start_date,
             end_date=end_date,
         )
-        return result.to_pandas().set_index('date')
 
     def _generate_single_leg_signals_pl(
         self,
@@ -284,12 +275,12 @@ class OptionSignalGenerator(BaseSignalGenerator):
         logger.info(f"Derived {joined.height} width-based ({width}pt) trade signals for {leg_config.option_type.value}")
         return joined
 
-    def generate_multi_leg_signals(self) -> pd.DataFrame:
+    def generate_multi_leg_signals(self) -> pl.DataFrame:
         """
         Generate trade signals for option spreads by pairing legs according to the specified spread type.
 
         Returns:
-            DataFrame containing the generated spread signals with legs paired by date, indexed by date
+            DataFrame containing the generated spread signals with legs paired by date, with a `date` column
         """
         logger.info(f"Generating {self.config.spread_type.value} spread signals...")
 
@@ -314,7 +305,7 @@ class OptionSignalGenerator(BaseSignalGenerator):
             dte_range = leg_config.dte_range
             if dte_target is None and dte_range is None:
                 logger.error(f"Leg {i+1} must have either dte_target or dte_range specified")
-                return pd.DataFrame()
+                return pl.DataFrame()
 
             leg_df = self._generate_single_leg_signals_pl(
                 option_type=leg_config.option_type,
@@ -329,7 +320,7 @@ class OptionSignalGenerator(BaseSignalGenerator):
 
             if leg_df.height == 0:
                 logger.warning(f"No signals generated for leg {i+1} with config: {leg_config}")
-                return pd.DataFrame()
+                return pl.DataFrame()
 
             leg_signals[i] = self._tag_leg_signals(leg_df, i, leg_config)
 
@@ -347,14 +338,14 @@ class OptionSignalGenerator(BaseSignalGenerator):
 
                 if leg_df.height == 0:
                     logger.warning(f"No width-derived signals for leg {i+1} with config: {leg_config}")
-                    return pd.DataFrame()
+                    return pl.DataFrame()
 
                 leg_signals[i] = self._tag_leg_signals(leg_df, i, leg_config)
 
         # No valid signals for one or more legs
         if any(df is None or df.height == 0 for df in leg_signals):
             logger.error("One or more legs returned no signals")
-            return pd.DataFrame()
+            return pl.DataFrame()
 
         # Create spread signals based on the spread type
         if self.config.spread_type == OptionSpreadType.VERTICAL:
@@ -371,8 +362,8 @@ class OptionSignalGenerator(BaseSignalGenerator):
             raise ValueError(f"Unsupported spread type: {self.config.spread_type}")
 
         if result.height == 0:
-            return pd.DataFrame()
-        return result.to_pandas().set_index('date')
+            return pl.DataFrame()
+        return result
 
     def _pair_vertical_spread_legs(self, leg_signals: List[pl.DataFrame], spread_type: OptionSpreadType) -> pl.DataFrame:
         """Pair legs for vertical spreads (same expiration, different strikes)."""

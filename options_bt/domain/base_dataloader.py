@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from functools import cached_property
 from typing import Optional
 
-import pandas as pd
+import polars as pl
 
 from options_bt.utils.logger import setup_logger
 
@@ -84,44 +84,55 @@ class BaseDataLoader(ABC):
     def _vix_processed_path(self) -> str:
         return self._vix_paths[1]
 
+    @staticmethod
+    def _read_raw_source(path: str) -> pl.DataFrame:
+        """Read a raw CSV or parquet source. Historical raw chain/underlying/
+        VIX CSVs use a blank header for the leading date column (equivalent
+        to pandas' index_col=0); normalize whatever that first column is
+        named (blank, 'Date', 'date', ...) to a lowercase `date` column, and
+        lowercase every other column too (some raw sources mix case, e.g.
+        'Date,open,high,Low,close'). Shared by every BaseDataLoader subclass
+        plus vix_data below."""
+        if path.endswith('.parquet'):
+            df = pl.read_parquet(path)
+        else:
+            df = pl.read_csv(path, infer_schema_length=10000)
+
+        first_col = df.columns[0]
+        df = df.rename({c: c.lower() for c in df.columns if c != first_col})
+        df = df.rename({first_col: 'date'})
+
+        if df['date'].dtype != pl.Date:
+            # .cast(pl.Datetime) only reinterprets numeric epoch-like values,
+            # not date strings -- it silently nulls every row of a genuine
+            # "YYYY-MM-DD" string column. .str.to_datetime() actually parses it.
+            df = df.with_columns(pl.col('date').str.to_datetime(strict=False).dt.date().alias('date'))
+
+        return df
+
     @cached_property
-    def vix_data(self) -> pd.DataFrame:
-        """Lazy load and cache historical VIX data (shared across loaders)."""
+    def vix_data(self) -> pl.DataFrame:
+        """Lazy load and cache historical VIX data (shared across loaders) as
+        a polars DataFrame with a `date` column."""
         if self.use_preprocessed and os.path.exists(self._vix_processed_path):
             logger.info(f"Loading {self._vix_processed_path}")
-            return pd.read_parquet(self._vix_processed_path)
+            return pl.read_parquet(self._vix_processed_path)
 
-        raw_path = self._vix_raw_path
-        if raw_path.endswith('.parquet'):
-            raw_vix = pd.read_parquet(raw_path)
-            raw_vix = raw_vix.set_index(raw_vix.columns[0])
-        else:
-            raw_vix = pd.read_csv(raw_path, index_col=0, parse_dates=True)
+        raw_vix = self._read_raw_source(self._vix_raw_path)
         processed_data = self._preprocess_vix_data(raw_vix)
 
         if self.save_preprocessed:
             os.makedirs(os.path.dirname(self._vix_processed_path), exist_ok=True)
-            processed_data.to_parquet(self._vix_processed_path)
+            processed_data.write_parquet(self._vix_processed_path)
             logger.info(f"Saved data to {self._vix_processed_path}")
 
         return processed_data
 
-    def _preprocess_vix_data(self, vix_data: pd.DataFrame) -> pd.DataFrame:
+    def _preprocess_vix_data(self, vix_data: pl.DataFrame) -> pl.DataFrame:
         """Clean and preprocess VIX data."""
         logger.info("Preprocessing VIX data...")
 
-        df = vix_data.copy()
+        numeric_casts = [pl.col(c).cast(pl.Float64, strict=False) for c in ('open', 'high', 'low', 'close') if c in vix_data.columns]
+        df = vix_data.with_columns(numeric_casts) if numeric_casts else vix_data
 
-        try:
-            df.index = pd.DatetimeIndex([pd.Timestamp(idx).date() for idx in df.index])
-        except Exception as e:
-            logger.info(f"Index normalization skipped: {e}")
-
-        numeric_cols = ['open', 'high', 'low', 'close']
-        for col in numeric_cols:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-
-        df.sort_index(inplace=True)
-
-        return df
+        return df.sort('date')

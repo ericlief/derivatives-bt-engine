@@ -98,9 +98,11 @@ class FuturesDataLoader(BaseDataLoader):
         from `underlying` (option_chain doesn't apply to futures) -- so the
         continuous front-month series goes in as 'underlying', and the
         unused option_chain slot is an empty placeholder. All values are
-        polars DataFrames; vix comes from the (pandas-based, shared with
-        OptionsDataLoader) BaseDataLoader.vix_data and is converted once
-        here at the boundary.
+        polars DataFrames; vix comes from the (polars-native, shared with
+        OptionsDataLoader) BaseDataLoader.vix_data, renamed here from `date`
+        to `ts_event` to match this loader's own date-column convention (the
+        rest of the futures path keys off `ts_event`, matching the raw
+        databento series).
         """
         data_loading_start = time.time()
 
@@ -108,7 +110,7 @@ class FuturesDataLoader(BaseDataLoader):
         logger.info(f"Loaded {self.asset} continuous futures OHLCV: {len(ohlcv)} rows")
 
         if self.vix_file is not None:
-            vix = pl.from_pandas(self.vix_data.reset_index())
+            vix = self.vix_data.rename({'date': 'ts_event'})
         else:
             vix = pl.DataFrame()
 
