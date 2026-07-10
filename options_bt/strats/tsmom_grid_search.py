@@ -2,7 +2,7 @@
 Grid search over TSMOM hyperparameters (vol_target, momentum_discount,
 long_only, max_notional, max_contracts), parallelized via multiprocessing.
 
-Unlike the options engine's GridSearchBacktester (bull_put_param_search.py,
+Unlike the options engine's GridSearchBacktester (grid_search_backtester.py,
 sequential -- each combo mutates/reuses a shared Backtester instance),
 run_tsmom_backtest is a pure function over a fresh config each call, with no
 shared mutable state across runs, so combos can run as truly independent

@@ -7,8 +7,7 @@ from options_bt.domain.backtester import Backtester
 from options_bt.domain.dataloader import OptionsDataLoader
 from options_bt.domain.strategy_config import MultiLegOptionStrategyConfig
 from options_bt.domain.option_leg_config import OptionLegConfig
-from options_bt.strats.bull_put_param_search import GridSearchBacktester
-from options_bt.utils.gspread_log_util import upload_df_to_google_sheets
+from options_bt.strats.grid_search_backtester import GridSearchBacktester
 from dotenv import load_dotenv
 
 # Create logger instance
