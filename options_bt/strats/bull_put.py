@@ -60,6 +60,8 @@ def run_test_suite():
         max_margin_utilization=0.80,
         max_positions=1,
         max_spread_width=5,
+        use_spread_width=True,
+
         max_trade_loss=7500.00,
         # trade_selection_method=TradeSelectionMethod.DELTA_FIRST,
         trade_selection_method=TradeSelectionMethod.PREMIUM_FIRST,
@@ -81,7 +83,7 @@ def run_test_suite():
             option_type=OptionType.PUT,
             position_side=PositionSide.LONG,
             # delta_range=(0.65, 0.75),
-            delta_target=0.45,
+            # delta_target=0.45,
             # dte_range=(40, 45),
             dte_target=30,
             )
