@@ -62,10 +62,25 @@ AUTOCORR_MAX_LAG = 5                 # Scheme-A lag-1..lag-N autocorrelation of 
 CHAIN_BUFFER_AFTER_DAYS = 150
 CHAIN_BUFFER_BEFORE_DAYS = 10
 
+# use_spread_width=True: place each long wing a fixed max_spread_width
+# points OTM of its (delta-selected) short leg, instead of selecting it by
+# its own independent delta_target -- make_iron_condor_config already
+# defaults to this (unlike make_bull_put_config, which defaults to False),
+# but it's set explicitly here so the choice isn't silently dependent on
+# that default. Without it, two independently-delta-selected legs per side
+# plus a fixed-points max_spread_width *filter* would have the same failure
+# mode confirmed in window_scheme_bull_put.py: SPX's mean level rose from
+# ~1140 (2010) to ~4273 (2021), so a fixed delta gap between legs spans
+# more and more raw strike points over time, and eventually every spread
+# gets filtered out with nothing surviving. With use_spread_width=True the
+# wing's strike is derived directly from its short leg + max_spread_width,
+# so a spread of exactly that width exists by construction at any
+# underlying price level.
 COMBO: Dict[str, Any] = {
     'short_delta_target': 0.25,
     'dte_target': 45,
     'max_spread_width': 50,
+    'use_spread_width': True,
     'early_close_on_dte': 25,
 }
 

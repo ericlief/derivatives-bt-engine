@@ -63,10 +63,24 @@ AUTOCORR_MAX_LAG = 5                   # Scheme-A lag-1..lag-N autocorrelation o
 CHAIN_BUFFER_AFTER_DAYS = 150
 CHAIN_BUFFER_BEFORE_DAYS = 10
 
+# use_spread_width=True: place the long leg a fixed max_spread_width points
+# OTM of the (delta-selected) short leg, instead of selecting it by its own
+# independent delta_target. Without this, two independently-delta-selected
+# legs plus a fixed-points max_spread_width *filter* silently stops
+# producing any signals at all once SPX has risen far enough that a
+# 0.05-delta gap between legs routinely spans more than max_spread_width
+# points -- confirmed empirically: SPX's mean level goes from ~1140 (2010)
+# to ~4273 (2021), and every window starting ~mid-2019 onward produced
+# zero trades for this combo before this flag was added (signal generation
+# logged e.g. "Filtered out 5170 spreads due to excessive width" with
+# nothing surviving). With use_spread_width=True the long leg's strike is
+# derived directly from the short leg + max_spread_width, so a spread of
+# exactly that width exists by construction at any underlying price level.
 COMBO: Dict[str, Any] = {
     'short_delta_target': 0.30,
     'dte_target': 45,
     'max_spread_width': 10,
+    'use_spread_width': True,
     'early_close_on_dte': 25,
 }
 
