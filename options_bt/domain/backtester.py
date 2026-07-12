@@ -361,8 +361,8 @@ class Backtester:
         self._log_execution_summary(total_time)
         self.execution_times['total'] = round(total_time, 2)
 
-        # Order columns (futures trade results carry futures_strategy/roi
-        # instead of option_strategy/premium/ret_per_unit_risk/ret_per_point)
+        # Order columns (futures trade results carry futures_strategy,
+        # options carry option_strategy/premium; both now carry roi)
         if isinstance(config, FuturesStrategyConfig):
             ordered_cols = [
                 'trade_id',
@@ -402,8 +402,7 @@ class Backtester:
                 'premium',
                 'fees',
                 'ret',
-                'ret_per_unit_risk',
-                'ret_per_point',
+                'roi',
             ]
 
         trade_results = trade_results.select([c for c in ordered_cols if c in trade_results.columns])
@@ -512,13 +511,8 @@ class Backtester:
                 results_file.write(f"Total raw P&L: ${trade_results['cumulative_pnl'][-1]:.2f}\n")
                 results_file.write(f"Final capital: ${trade_results['capital'][-1]:.2f}\n")
                 results_file.write(f"Return on initial capital: {(trade_results['capital'][-1] / config.initial_capital - 1):.2%}\n")
-                if is_futures:
-                    results_file.write(f"Average return on margin (roi) {trade_results['roi'].mean():.2f}%\n")
-                else:
-                    results_file.write(f"Average return per unit risk {trade_results['ret_per_unit_risk'].mean():.2%}\n")
-                    average_return_per_point = trade_results['ret_per_point'].mean() if 'ret_per_point' in trade_results.columns else 0.0
-                    average_return_per_point = average_return_per_point or 0.0
-                    results_file.write(f"Average return per point {average_return_per_point:.2%}\n")
+                if 'roi' in trade_results.columns:
+                    results_file.write(f"Average ROI per trade: {trade_results['roi'].mean():.2f}%\n")
                 results_file.write(f"Max Profit {trade_results['pnl'].max():.2f}\n")
                 results_file.write(f"Max Loss {trade_results['pnl'].min():.2f}\n")
                 results_file.write(f"Average days held: {trade_results['days_held'].mean():.1f}\n")
