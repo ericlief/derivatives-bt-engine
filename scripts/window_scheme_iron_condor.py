@@ -79,9 +79,9 @@ CHAIN_BUFFER_BEFORE_DAYS = 10
 COMBO: Dict[str, Any] = {
     'short_delta_target': 0.25,
     'dte_target': 45,
-    'max_spread_width': 50,
+    'max_spread_width': 10,
     'use_spread_width': True,
-    'early_close_on_dte': 25,
+    # 'early_close_on_dte': 25,
 }
 
 # ── Infrastructure ──────────────────────────────────────────────────
