@@ -8,6 +8,8 @@ Run:
 """
 import argparse
 
+import polars as pl
+
 from options_bt.domain.backtester import Backtester
 from options_bt.domain.enums import FuturesStrategy, FuturesType
 from options_bt.domain.futures_dataloader import FuturesDataLoader
@@ -67,7 +69,8 @@ def main():
 
     bt = Backtester(data=data, save_trades=not args.no_save, log_to_sheets=False)
     results = bt.run(config)
-    print(results['trade_results'].to_string())
+    with pl.Config(tbl_rows=-1, tbl_cols=-1, tbl_width_chars=200):
+        print(results['trade_results'])
 
 
 if __name__ == "__main__":
