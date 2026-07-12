@@ -147,7 +147,7 @@ def log_to_google_sheets(results: dict,
             headers = [
                         "timestamp", "strategy", "start", "end", "period", "quantity",
                         "dte_target", "dte_range", "delta_target", "delta_range",
-                        "total_pnl", "initial_capital", "final_capital", "ret_pct", "avg_ret_pur", "avg_ret_pp", "avg_win", "max_win", "avg_loss", "max_loss", "win_rate", "winning_trades", "total_trades", "avg_days_held",
+                        "total_pnl", "initial_capital", "final_capital", "ret_yr", "roi", "avg_win", "max_win", "avg_loss", "max_loss", "win_rate", "winning_trades", "total_trades", "avg_days_held",
                         "max_dd_usd", "max_dd_pct", "peak_capital", "trough_capital",
                         "dd_duration", "execution_time", "max_positions", "early_close_after_dit", "early_close_on_dte",
                         "leverage", "max_margin", "max_spread_width", "max_trade_loss",
@@ -169,23 +169,26 @@ def log_to_google_sheets(results: dict,
         # Prepare data row
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
+        window_years = (date.fromisoformat(config.end_date) - date.fromisoformat(config.start_date)).days / 365.0
+        gs_avg_margin = float(results_df['capital_used'].mean()) if results_df.height > 0 else float(config.initial_capital)
+        gs_total_pnl = round(results_df['cumulative_pnl'][-1], 2)
+
         row_data = [
             timestamp,
             config.option_strategy.value,
             config.start_date,
             config.end_date,
-            round((date.fromisoformat(config.end_date) - date.fromisoformat(config.start_date)).days, 2),
+            round(window_years, 2),
             config.quantity,
             _get_leg_field_json(config, 'dte_target'),
             _get_leg_field_json(config, 'dte_range'),
             _get_leg_field_json(config, 'delta_target'),
             _get_leg_field_json(config, 'delta_range'),
-            round(results_df['cumulative_pnl'][-1], 2),
+            gs_total_pnl,
             config.initial_capital,
             round(results_df['capital'][-1], 2),
-            round((results_df['capital'][-1] / config.initial_capital - 1) * 100, 2),  # Convert % to number
-            round(results_df['ret_per_unit_risk'].mean(), 2),
-            round(results_df['ret_per_point'].mean(), 2) if 'ret_per_point' in results_df.columns else 0.0,
+            round(gs_total_pnl / gs_avg_margin / window_years * 100, 2) if window_years and gs_avg_margin else 0.0,
+            round(results_df['roi'].mean(), 2) if results_df.height > 0 else 0.0,
             round(results_df.filter(pl.col('pnl') > 0)['pnl'].mean() or 0.0, 2),   # avg_profit
             round(results_df['pnl'].max(), 2),
             round(results_df.filter(pl.col('pnl') <= 0)['pnl'].mean() or 0.0, 2),   # avg_loss
@@ -280,6 +283,8 @@ def _format_single_backtest_result_row(results: dict,
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
     has_trades = tr.height > 0
+    avg_margin = float(tr['capital_used'].mean()) if has_trades else float(config.initial_capital)
+    total_pnl_val = round(tr['cumulative_pnl'][-1], 2) if has_trades else 0.0
 
     row_data = {
         "timestamp": timestamp,
@@ -292,12 +297,11 @@ def _format_single_backtest_result_row(results: dict,
         "dte_range": _get_leg_field_json(config, 'dte_range'),
         "delta_target": _get_leg_field_json(config, 'delta_target'),
         "delta_range": _get_leg_field_json(config, 'delta_range'),
-        "total_pnl": round(tr['cumulative_pnl'][-1], 2) if has_trades else 0.0,
+        "total_pnl": total_pnl_val,
         "initial_capital": config.initial_capital,
         "final_capital": round(tr['capital'][-1], 2) if has_trades else config.initial_capital,
-        "ret_pct": round((tr['capital'][-1] / config.initial_capital - 1) * 100, 2) if has_trades else 0.0, # Convert % to number
-        "avg_ret_pur": round(tr['ret_per_unit_risk'].mean(), 2) if has_trades else 0.0,
-        "avg_ret_pp": round(tr['ret_per_point'].mean(), 2) if has_trades and 'ret_per_point' in tr.columns else 0.0,
+        "ret_yr": round(total_pnl_val / avg_margin / period * 100, 2) if (has_trades and period and avg_margin) else 0.0,
+        "roi": round(tr['roi'].mean(), 2) if has_trades else 0.0,
         "avg_win": round(tr.filter(pl.col('pnl') > 0)['pnl'].mean() or 0.0, 2) if has_trades else 0.0,
         "max_win": round(tr['pnl'].max(), 2) if has_trades else 0.0,
         "avg_loss": round(tr.filter(pl.col('pnl') <= 0)['pnl'].mean() or 0.0, 2) if has_trades else 0.0,

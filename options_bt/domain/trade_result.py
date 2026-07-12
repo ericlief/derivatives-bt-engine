@@ -49,8 +49,7 @@ class OptionTradeResult(BaseTradeResult):
     option_strategy: Optional[Union[OptionStrategy, str]]
     close_reason: Optional[str]
     premium: float
-    ret_per_unit_risk: Optional[float] = None
-    ret_per_point: Optional[float] = None  # only for spreads
+    roi: Optional[float] = None  # pnl / margin_required * 100 (%)
 
     # @classmethod
     # def from_position(cls, position: OptionPosition, exit_data: Dict) -> OptionTrade:
@@ -119,8 +118,7 @@ class OptionTradeResult(BaseTradeResult):
             'bp': self.bp,
             'capital_used': self.capital_used,
             'pnl': self.pnl,
-            'ret_per_unit_risk': self.ret_per_unit_risk,
-            'ret_per_point': self.ret_per_point
+            'roi': self.roi,
         }
         return results 
     
