@@ -240,7 +240,7 @@ def _run_window_isolated(chain_parquet_path: str, start_date: str, end_date: str
         logger.debug(traceback.format_exc())
         return {
             'start': start_date, 'end': end_date, 'period': period_label,
-            'sharpe': None, 'mtm_sharpe': None, 'ret_pct': None, 'total_pnl': None, 'win_rate': None,
+            'sharpe': None, 'mtm_sharpe': None, 'ret_yr': None, 'total_pnl': None, 'win_rate': None,
             'max_dd_pct': None, 'max_dd_usd': None, 'total_trades': None,
             'window_years': _window_years(start_date, end_date),
             'error': str(e),
@@ -351,7 +351,7 @@ def write_markdown_report(path: str, data_end: str, summary: Dict[str, Any],
         lines.append(
             f"| {name} | {s['n_windows']} | {_fmt(s['sharpe']['mean'])} | {_fmt(s['sharpe']['std'])} | "
             f"{_fmt(s['mtm_sharpe']['mean'])} | {_fmt(s['mtm_sharpe']['std'])} | "
-            f"{_fmt(s['ret_pct']['mean'], 2)} | {_fmt(s['ret_pct']['std'], 2)} |"
+            f"{_fmt(s['ret_yr']['mean'], 2)} | {_fmt(s['ret_yr']['std'], 2)} |"
         )
     if n_errors:
         lines.append(f"\n*{n_errors} window(s) failed to complete (see `error` column in the CSV, "
@@ -483,9 +483,9 @@ def main():
     b_sharpe_cum, b_ret_cum = [], []
     for r in scheme_b_rows:
         b_sharpe_cum.append(r.get('sharpe'))
-        b_ret_cum.append(r.get('ret_pct'))
+        b_ret_cum.append(r.get('ret_yr'))
         r['cum_avg_sharpe'] = float(np.nanmean(np.array([np.nan if v is None else v for v in b_sharpe_cum], dtype=float)))
-        r['cum_avg_ret_pct'] = float(np.nanmean(np.array([np.nan if v is None else v for v in b_ret_cum], dtype=float)))
+        r['cum_avg_ret_yr'] = float(np.nanmean(np.array([np.nan if v is None else v for v in b_ret_cum], dtype=float)))
 
     # ── Scheme C: expanding to a 5yr cap, then rolling ─────────────────
     scheme_c_windows = generate_capped_rolling_windows(ANCHOR_START_DATE, data_end, SCHEME_C_MAX_WIDTH_YEARS, STEP_YEARS)
@@ -498,9 +498,9 @@ def main():
     n_errors = sum(1 for r in all_rows if r.get('error'))
     df = pl.DataFrame(all_rows)
 
-    front_cols = ['scheme', 'start', 'end', 'window_years', 'sharpe', 'mtm_sharpe', 'ret_pct', 'total_pnl',
+    front_cols = ['scheme', 'start', 'end', 'window_years', 'sharpe', 'mtm_sharpe', 'ret_yr', 'total_pnl',
                   'win_rate', 'max_dd_pct', 'max_dd_usd', 'total_trades',
-                  'cum_avg_sharpe', 'cum_avg_ret_pct', 'error']
+                  'cum_avg_sharpe', 'cum_avg_ret_yr', 'error']
     other_cols = [c for c in df.columns if c not in front_cols]
     df = df.select([c for c in front_cols if c in df.columns] + other_cols)
 
@@ -511,7 +511,7 @@ def main():
     # ── Scheme A autocorrelation ───────────────────────────────────────
     a_df = pl.DataFrame(scheme_a_rows).sort('start')
     sharpe_autocorr = lag_autocorrelation(a_df['sharpe'].to_list(), AUTOCORR_MAX_LAG)
-    ret_autocorr = lag_autocorrelation(a_df['ret_pct'].to_list(), AUTOCORR_MAX_LAG)
+    ret_autocorr = lag_autocorrelation(a_df['ret_yr'].to_list(), AUTOCORR_MAX_LAG)
 
     # ── Aggregate stats per scheme ─────────────────────────────────────
     summary = {}
@@ -520,7 +520,7 @@ def main():
             'n_windows': len(rows),
             'sharpe': aggregate_stats(rows, 'sharpe'),
             'mtm_sharpe': aggregate_stats(rows, 'mtm_sharpe'),
-            'ret_pct': aggregate_stats(rows, 'ret_pct'),
+            'ret_yr': aggregate_stats(rows, 'ret_yr'),
         }
 
     write_markdown_report(_OUTPUT_MD_PATH, data_end, summary, sharpe_autocorr, ret_autocorr, scheme_b_rows, n_errors)
@@ -530,11 +530,11 @@ def main():
     for name, s in summary.items():
         print(f"{name}: {s['n_windows']} windows | Sharpe mean={_fmt(s['sharpe']['mean'])} std={_fmt(s['sharpe']['std'])} "
               f"| MTM Sharpe mean={_fmt(s['mtm_sharpe']['mean'])} std={_fmt(s['mtm_sharpe']['std'])} "
-              f"| ret_pct mean={_fmt(s['ret_pct']['mean'], 2)} std={_fmt(s['ret_pct']['std'], 2)}")
+              f"| ret_yr mean={_fmt(s['ret_yr']['mean'], 2)} std={_fmt(s['ret_yr']['std'], 2)}")
 
     print("\n=== Scheme A lag-N autocorrelation ===")
     print("Sharpe autocorr:", {k: (round(v, 3) if v is not None else None) for k, v in sharpe_autocorr.items()})
-    print("ret_pct autocorr:", {k: (round(v, 3) if v is not None else None) for k, v in ret_autocorr.items()})
+    print("ret_yr autocorr:", {k: (round(v, 3) if v is not None else None) for k, v in ret_autocorr.items()})
 
     if n_errors:
         print(f"\n{n_errors} window(s) failed (see 'error' column in CSV).")

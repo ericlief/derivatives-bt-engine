@@ -971,8 +971,8 @@ class SingleLegOptionPosition(BaseOptionPosition):
         # Create transaction 
         transaction = self.create_transaction(self, close_date, 'close', bp_effect)
         
-        # Calculate return at the strategy level
-        ret_per_unit_risk = None
+        # Calculate ROI as % of margin (capital at risk)
+        roi = None
         strat_effective_risk = None
         if self.option_strategy in [
             OptionStrategy.SHORT_CALL,
@@ -993,7 +993,9 @@ class SingleLegOptionPosition(BaseOptionPosition):
                     )
                     strat_effective_risk = None
 
-            ret_per_unit_risk = strat_pnl / strat_effective_risk if strat_effective_risk is not None else None
+            roi = strat_pnl / strat_effective_risk * 100 if strat_effective_risk is not None else None
+
+        capital_used = round(self.margin_required, 2) if self.margin_required is not None else round(abs(self.entry_price) * self.quantity * 100, 2)
 
         # Prepare trade result
         trade_result = OptionTradeResult(
@@ -1007,10 +1009,9 @@ class SingleLegOptionPosition(BaseOptionPosition):
             premium=round(self.premium, 2),
             fees=round(self.fees, 2),
             pnl=round(pnl, 4),
-            ret_per_unit_risk=ret_per_unit_risk if ret_per_unit_risk else None,
+            roi=roi,
             bp=None,
-            capital_used=round(self.margin_required, 2) if self.margin_required is not None else round(abs(self.entry_price) * self.quantity * 100, 2),
-            # roi=round(pnl / self.margin_required * 100, 2) if self.margin_required is not None and self.margin_required != 0 else round(pnl / (abs(self.entry_price) * self.quantity * 100) * 100, 2),
+            capital_used=capital_used,
         )
         return trade_result, transaction, bp_effect
 
@@ -1337,9 +1338,7 @@ class MultiLegOptionPosition(BaseOptionPosition):
             return None, None, None
         logger.debug(f'Calculated spread PnL: {spread_pnl}')
 
-        # Calculate normalized/scaled return per unit risk/point
-        ret_per_unit_risk = spread_pnl / self.margin_required
-        ret_per_point = spread_pnl / self.margin_required /  self.spread_width
+        roi = spread_pnl / self.margin_required * 100
 
         # The total capital used for the spread is its margin required (already a cached_property)
         spread_capital_used = self.margin_required
@@ -1387,11 +1386,9 @@ class MultiLegOptionPosition(BaseOptionPosition):
             premium=round(self.premium, 2),
             fees=all_fees,
             pnl=spread_pnl,
-            ret_per_unit_risk = ret_per_unit_risk,
-            ret_per_point = ret_per_point,
+            roi=roi,
             bp=None,
             capital_used=round(self.margin_required, 2),
-            # roi=round(spread_pnl / self.margin_required * 100, 2) if self.margin_required is not None and self.margin_required != 0 else 0,
         )
         
         return aggregated_trade_result, all_transactions, total_bp_effect
