@@ -1704,66 +1704,25 @@ class FuturesPosition(BasePosition):
         if self.margin_required is None: # We now have initial_margin as a required attribute
              self.margin_required = self.calculate_margin()
 
-    @property
-    def signed_entry_price(self) -> float:
-        """
-        For futures, the signed entry price is based on the entry price
-        and contract multiplier. This represents the total value change per point.
-        """
-        # For futures, entry_price itself is not a credit/debit, but the change in price is.
-        # However, to be consistent with the P&L calculation (exit_price - entry_price),
-        # we can represent the "cost" of opening a long future as negative total value,
-        # and "revenue" of opening a short future as positive total value for consistency
-        # with option premiums if we absolutely must.
-        # But for futures, it's more straightforward to just consider the change from entry to exit.
-        # For now, let's return 0 as the 'signed entry price' for futures,
-        # as the margin is the primary capital commitment and P&L is based on price difference.
-        return 0.0 # Futures don't have an "entry price" in the same way options have premiums.
-                   # Their value is derived from the underlying price movement.
-
-    @property
-    def signed_exit_price(self) -> float:
-        """
-        For futures, the signed exit price will represent the change in value
-        from entry, effectively capturing the P&L per contract.
-        """
-        if self.exit_price is None or self.entry_price is None:
-            return 0.0
-
-        price_diff = (self.exit_price - self.entry_price) * self.mult
-        if PositionSide.is_long(self.position_side):
-            return price_diff # Positive for long if price goes up
-        else: # Short position
-            return -price_diff # Positive for short if price goes down
-
     def calculate_pnl(self, underlying_price_history: pl.DataFrame, close_reason: Optional[str] = 'roll', commission: Optional[float] = 1.0) -> Optional[float]:
         """
-        Calculate profit and loss (P&L) for the futures position.
-        
-        Args:
-            underlying_price_history (pl.DataFrame): DataFrame containing historical prices of the underlying asset (SPX).
-            close_reason (Optional[str], optional): Reason for closing the position ('roll', 'early closure', etc.). Defaults to 'roll'.
-            commission (Optional[float], optional): Transaction fees per contract. Defaults to 1.0 (typical for MES).
+        Calculate P&L using the same signed cash-flow convention as options:
+          signed_entry_price = -entry for long (debit), +entry for short (credit)
+          signed_exit_price  = +exit  for long (credit), -exit  for short (debit)
+          pnl = (signed_exit + signed_entry) * mult * quantity - fees
 
-        Returns:
-            Optional[float]: P&L amount in dollars, or None if entry_price or exit_price is not available.
+        commission is per contract per side; doubled here to cover the round trip.
         """
         if self.exit_price is None or self.entry_price is None:
             logger.warning('Entry or exit price not set correctly for futures pnl calculation')
             return None
 
-        # P&L for futures is (exit_price - entry_price) * quantity * mult,
-        # negated for short positions (a short profits when price falls).
-        direction = 1 if PositionSide.is_long(self.position_side) else -1
-        pnl = (self.exit_price - self.entry_price) * self.quantity * self.mult * direction
+        pnl = (self.signed_exit_price + self.signed_entry_price) * self.mult * self.quantity
 
-        # Subtract fees. `commission` (futures_type.transaction_commission)
-        # is per contract, per side -- this single close() call covers the
-        # full round trip (entry + exit), so double it here.
         fees = commission * 2 * self.quantity
         self.fees = round(fees, 2)
         pnl -= self.fees
-        self.close_reason = close_reason # Set the close reason on the position object
+        self.close_reason = close_reason
 
         logger.info(f"Calculated pnl for {self.futures_type} futures: {pnl}")
         return round(pnl, 2)
