@@ -1,5 +1,5 @@
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import os
 import time
 from functools import cached_property
@@ -7,9 +7,15 @@ from typing import Optional
 
 import duckdb
 import polars as pl
+from dotenv import load_dotenv
 
 from options_bt.domain.base_dataloader import BaseDataLoader
 from options_bt.utils.logger import setup_logger
+
+load_dotenv()
+
+# ── Infrastructure ─────────────────────────────────────────────────────────
+_DEFAULT_GLOBEX_DB_PATH = '/home/dev/fin/db/globex_mdp_3.0.duckdb'
 
 logger = setup_logger()
 
@@ -56,7 +62,7 @@ class FuturesDataLoader(BaseDataLoader):
     """Loads continuous front-month futures OHLCV from the CME Globex MDP db, as polars DataFrames."""
 
     asset: str
-    db_path: str = "/home/dev/fin/db/globex_mdp_3.0.duckdb"
+    db_path: str = field(default_factory=lambda: os.getenv('GLOBEX_DB_PATH', _DEFAULT_GLOBEX_DB_PATH))
     data_dir: str = "."
     vix_file: Optional[str] = None
     use_preprocessed: bool = True

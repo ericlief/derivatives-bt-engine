@@ -13,8 +13,8 @@ logger = setup_logger()
 class TradeManager:
     """Class to manage trade creation and execution."""
 
-    def __init__(self, config: Union[SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig], vix: Optional[pl.DataFrame] = None):
-        self.config: Union[SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig] = config
+    def __init__(self, config: Union[SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig, FuturesStrategyConfig], vix: Optional[pl.DataFrame] = None):
+        self.config: Union[SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig, FuturesStrategyConfig] = config
         self.initial_capital: float = config.initial_capital
         self.leverage: float = config.leverage
         self.bp: float = config.initial_capital
@@ -22,7 +22,7 @@ class TradeManager:
         self.max_positions: int = config.max_positions
         self.trade_counter: int = 1
         self.transaction_counter: int = 1
-        self.open_positions: List[Union[SingleLegOptionPosition, MultiLegOptionPosition]] = []
+        self.open_positions: List[Union[SingleLegOptionPosition, MultiLegOptionPosition, FuturesPosition]] = []
         self.vix: Optional[pl.DataFrame] = vix
 
         logger.info(f'TradeManager instantiated')
@@ -30,7 +30,7 @@ class TradeManager:
         logger.info(f'Using vix range: {self.config.vix_range}')
         logger.info(f'VIX sample: {self.vix.head() if self.vix is not None else "N/A"}')
 
-    def _execute_trade(self, position: Union[SingleLegOptionPosition, MultiLegOptionPosition]) -> Optional[Tuple[SingleLegOptionPosition, float]]:
+    def _execute_trade(self, position: Union[SingleLegOptionPosition, MultiLegOptionPosition, FuturesPosition]) -> Optional[Tuple[SingleLegOptionPosition, float]]:
         """
         Execute a trade with the current buying power and leverage, updating the option buying power state (option_bp)
 
@@ -391,7 +391,7 @@ class TradeManager:
         return trade_results, transactions
 
     def construct_position_from_signal(self, trade_signal: dict,
-                                       current_date: date) -> Optional[Union[SingleLegOptionPosition, MultiLegOptionPosition]]:
+                                       current_date: date) -> Optional[Union[SingleLegOptionPosition, MultiLegOptionPosition, FuturesPosition]]:
         """
         Creates a new position based on the provided trade signal.
 
