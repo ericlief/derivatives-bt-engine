@@ -17,6 +17,7 @@ from options_bt.domain.trade_manager import TradeManager
 from options_bt.domain.position import FuturesPosition, SingleLegOptionPosition     
 from options_bt.domain.trade_result import OptionTradeResult
 from options_bt.domain.position import MultiLegOptionPosition
+from options_bt.domain.tsmom_signal import calculate_trend_strength, classify_regime
 from options_bt.utils.logger import setup_logger
 from options_bt.utils.price_utils import PriceUtils
 
@@ -693,12 +694,43 @@ class Backtester:
 
         start = date.fromisoformat(config.start_date)
         end = date.fromisoformat(config.end_date)
-        daily = (
-            self.underlying
-            .filter((pl.col('ts_event') >= start) & (pl.col('ts_event') <= end))
-            .select(['ts_event', 'close'])
-            .sort('ts_event')
+        # Signal/vol overlay -- hv, avg3m/avg1y ("mean"), ts3m/ts1y
+        # (fast/slow), trend_strength (weighted signal), regime
+        # (Bull/Bear/Correction/Rebound), rolling Sharpe, and vix_close --
+        # computed on the FULL underlying series before windowing to
+        # [start, end]: trimming first would starve the 63/252-day rolling
+        # windows of real prior history and show spurious nulls at the
+        # start of the window, unlike what the strategy's own signal
+        # actually saw at each date. Reuses tsmom_signal.py's canonical
+        # calculate_trend_strength/classify_regime (same functions the
+        # live TSMOM signal uses) rather than reimplementing rolling stats.
+        signal = calculate_trend_strength(self.underlying.select(['ts_event', 'close']).sort('ts_event'))
+        signal = signal.with_columns(
+            hv=(pl.col('daily_std') * (252 ** 0.5)).round(4),
+            regime=pl.struct(['ts3m', 'ts1y']).map_elements(
+                lambda s: classify_regime(s['ts3m'], s['ts1y']).value,
+                return_dtype=pl.Utf8,
+            ),
+            **{c: pl.col(c).round(4) for c in ('ts3m', 'ts1y', 'trend_strength')},
         )
+        signal = signal.with_columns(
+            # Rolling Sharpe on the same 63-day window as hv/ts3m/regime,
+            # not whole-to-date -- keeps it on the same clock as regime so
+            # a regime flip and a Sharpe/vol move are comparable at a
+            # glance instead of drifting at different speeds.
+            sharpe_63d=pl.when(pl.col('hv') > 0)
+            .then((pl.col('r1d').rolling_mean(63) * 252) / pl.col('hv'))
+            .otherwise(None)
+            .round(4)
+        )
+
+        if self.vix.height > 0 and 'ts_event' in self.vix.columns:
+            vix_daily = self.vix.select(['ts_event', 'close']).rename({'close': 'vix_close'}).sort('ts_event')
+            signal = signal.join(vix_daily, on='ts_event', how='left')
+        else:
+            signal = signal.with_columns(vix_close=pl.lit(None, dtype=pl.Float64))
+
+        daily = signal.filter((pl.col('ts_event') >= start) & (pl.col('ts_event') <= end))
 
         # Match each day to the most recently opened trade as of that day;
         # is_open tells us whether that trade was still open (vs. already
@@ -803,7 +835,11 @@ class Backtester:
         # Lowercase snake_case column names throughout, matching the
         # convention used for Google Sheets headers elsewhere (e.g.
         # gspread_log_util.py's "total_pnl", "max_dd_usd", "peak_capital").
-        stats = daily.select(['ts_event', 'close', 'mtm_pnl', 'cum_pnl', 'cum_pnl_pct', 'mtm_capital', 'running_max', 'dd_usd', 'dd_pct']).rename({
+        stats = daily.select([
+            'ts_event', 'close', 'mtm_pnl', 'cum_pnl', 'cum_pnl_pct', 'mtm_capital',
+            'running_max', 'dd_usd', 'dd_pct', 'hv', 'sharpe_63d',
+            'avg3m', 'avg1y', 'ts3m', 'ts1y', 'trend_strength', 'regime', 'vix_close',
+        ]).rename({
             'ts_event': 'date',
             'mtm_capital': 'capital',
         })

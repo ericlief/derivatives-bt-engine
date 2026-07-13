@@ -7,6 +7,7 @@ Run:
     naked --symbol MES --dir short --years 2025-2026 --quantity 2
 """
 import argparse
+import os
 
 import polars as pl
 
@@ -14,6 +15,12 @@ from options_bt.domain.backtester import Backtester
 from options_bt.domain.enums import FuturesStrategy, FuturesType
 from options_bt.domain.futures_dataloader import FuturesDataLoader
 from options_bt.domain.strategy_config import FuturesStrategyConfig
+
+# Same VIX_PATH convention as the options strategies (iron_condor.py,
+# bull_put.py, ...) -- a directory resolves to {dir}/processed/vix.csv
+# (see BaseDataLoader._resolve_source_paths), currently
+# ~/data/fin/market/index/VIX/eod, fresh through the latest trading day.
+VIX_FILE = os.getenv('VIX_PATH', 'vix.csv')
 
 
 def parse_args():
@@ -53,7 +60,7 @@ def main():
     start_date = f"{start_year}-01-01"
     end_date = f"{end_year}-12-31"
 
-    dl = FuturesDataLoader(asset=symbol, use_preprocessed=False, save_preprocessed=False)
+    dl = FuturesDataLoader(asset=symbol, vix_file=VIX_FILE, use_preprocessed=False, save_preprocessed=False)
     data = dl.load_data()
 
     config = FuturesStrategyConfig(
