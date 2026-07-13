@@ -103,27 +103,28 @@ INSTRUMENTS: dict[str, dict] = {
     # same root 'SI' as full-size silver, disambiguated by multiplier.
     # resolve_price_symbol already falls through to ib_symbol for SIL, so no
     # separate db_symbol/signal_symbol is needed. No margin/commission for
-    # MGC/SIL: never had a FuturesType entry to relocate from, and
-    # fabricating new CME figures is out of scope here.
+    # SIL yet (not sourced).
     'GC':  {'exchange': 'COMEX', 'multiplier': 100,        'cluster': 'metal',
             'initial_margin': 40701.95, 'commission': 2.24},
-    'MGC': {'exchange': 'COMEX', 'multiplier': 10,         'cluster': 'metal'},
+    'MGC': {'exchange': 'COMEX', 'multiplier': 10,         'cluster': 'metal',
+            'initial_margin': 4084.79, 'commission': 0.96, 'signal_symbol': 'GC'},
     'SI':  {'exchange': 'COMEX', 'multiplier': 5000,       'cluster': 'metal',
             'initial_margin': 74299.37, 'commission': 1.70},
-    'SIL': {'exchange': 'COMEX', 'multiplier': 1000,       'cluster': 'metal', 'ib_symbol': 'SI'},
+    'SIL': {'exchange': 'COMEX', 'multiplier': 1000,       'cluster': 'metal', 
+             'initial_margin': 13038.92, 'commission': 1.36, 'ib_symbol': 'SI'},
 
     # ── Rates ───────────────────────────────────────────────────────────────
     # MTN borrows ZN's via signal_symbol (the standard 10-Year, not TN the
     # Ultra 10-Year -- a different duration/contract, not MTN's full-size
     # sibling), same reasoning as MES/MNQ above.
-    'ZN':  {'exchange': 'CBOT',  'multiplier': 1000,       'cluster': 'rates',
-            'initial_margin': 2156.25, 'commission': 1.67},
+    'ZN':  {'exchange': 'CBOT',  'multiplier': 1000,       'cluster': 'rates', # notional ~= 109K
+            'initial_margin': 2156.25, 'commission': 1.66},
     'TN':  {'exchange': 'CBOT',  'multiplier': 1000,       'cluster': 'rates',
-            'initial_margin': 2935.79, 'commission': 1.67},
-    'MTN': {'exchange': 'CBOT',  'multiplier': 100,        'cluster': 'rates',
-            'initial_margin': 725.80, 'commission': 0.57, 'signal_symbol': 'ZN'},
-    'ZT':  {'exchange': 'CBOT',  'multiplier': 2000,       'cluster': 'rates',
-            'initial_margin': 1380.75, 'commission': 3.04},
+            'initial_margin': 2932.50, 'commission': 1.66},
+    'MTN': {'exchange': 'CBOT',  'multiplier': 100,        'cluster': 'rates', # notional ~= 11K
+            'initial_margin': 769.16, 'commission': 0.56, 'signal_symbol': 'ZN'},
+    'ZT':  {'exchange': 'CBOT',  'multiplier': 2000,       'cluster': 'rates', # notional ~= 205K
+            'initial_margin': 1380.00, 'commission': 1.51},
 
     # ── Grains ──────────────────────────────────────────────────────────────
     # CBOT micro grains (MZL/MZC/MZS/MZW) launched ~Feb 2025 -- too short a
@@ -131,26 +132,30 @@ INSTRUMENTS: dict[str, dict] = {
     # full-size contract's continuous IB bars; db_symbol falls back to
     # signal_symbol so the duckdb path uses the same full-size asset.
     'ZL':  {'exchange': 'CBOT',  'multiplier': 600,        'cluster': 'grain',
-            'initial_margin': 4603.97, 'commission': 3.02},
-    'MZL': {'exchange': 'CBOT',  'multiplier': 60,         'cluster': 'grain', 'signal_symbol': 'ZL'},
+            'initial_margin': 45102.79, 'commission': 3.01},
+    'MZL': {'exchange': 'CBOT',  'multiplier': 60,         'cluster': 'grain', 
+            'initial_margin': 525.16, 'commission': 0.76, 'signal_symbol': 'ZL'},
     'ZC':  {'exchange': 'CBOT',  'multiplier': 50,         'cluster': 'grain',
-            'initial_margin': 1638.35, 'commission': 3.02},
-    'MZC': {'exchange': 'CBOT',  'multiplier': 5,          'cluster': 'grain', 'signal_symbol': 'ZC'},
+            'initial_margin': 1855.76, 'commission': 3.01},
+    'MZC': {'exchange': 'CBOT',  'multiplier': 5,          'cluster': 'grain', 
+            'initial_margin': 166.51, 'commission': 0.76, 'signal_symbol': 'ZC'},
     'ZS':  {'exchange': 'CBOT',  'multiplier': 50,         'cluster': 'grain',
-            'initial_margin': 4130.84, 'commission': 3.02},
-    'MZS': {'exchange': 'CBOT',  'multiplier': 5,          'cluster': 'grain', 'signal_symbol': 'ZS'},
+            'initial_margin': 4038.46, 'commission': 3.01},
+    'MZS': {'exchange': 'CBOT',  'multiplier': 5,          'cluster': 'grain', 
+            'initial_margin': 382.95, 'commission':  0.76, 'signal_symbol': 'ZS'},
     'ZW':  {'exchange': 'CBOT',  'multiplier': 50,         'cluster': 'grain',
-            'initial_margin': 2948.24, 'commission': 3.02},
-    'MZW': {'exchange': 'CBOT',  'multiplier': 5,          'cluster': 'grain', 'signal_symbol': 'ZW'},
+            'initial_margin': 3321.39, 'commission': 3.01},
+    'MZW': {'exchange': 'CBOT',  'multiplier': 5,          'cluster': 'grain', 
+             'initial_margin': 332.14, 'commission': 0.76, 'signal_symbol': 'ZW'},
 
     # ── International equity ─────────────────────────────────────────────────
     # Nikkei: its own factor (Japan equity, JPY-adjacent), not lumped with
     # US equity. NKD/MNK (dollar-denominated) are a DIFFERENT contract from
-    # FuturesType's NIY (yen-denominated) -- see BACKTEST_ONLY_SPECS. No
-    # margin/commission for NKD/MNK, same "never had data to relocate"
-    # reasoning as MCL/MGC/SIL above.
-    'NKD': {'exchange': 'CME',   'multiplier': 5,          'cluster': 'intl_equity'},
-    'MNK': {'exchange': 'CME',   'multiplier': 0.5,        'cluster': 'intl_equity'},
+    # FuturesType's NIY (yen-denominated) -- see BACKTEST_ONLY_SPECS.
+    'NKD': {'exchange': 'CME',   'multiplier': 5,          'cluster': 'intl_equity',
+            'initial_margin': 43347.93, 'commission': 3.01},
+    'MNK': {'exchange': 'CME',   'multiplier': 0.5,        'cluster': 'intl_equity',
+             'initial_margin': 4334.76, 'commission': 0.69, 'signal_symbol': 'NKD'},
 
     # ── FX ──────────────────────────────────────────────────────────────────
     # IBKR tickers differ from Globex root symbols in the duckdb:
@@ -159,16 +164,15 @@ INSTRUMENTS: dict[str, dict] = {
     #   6M        → Globex '6M'  (Mexican Peso; name matches, no mapping)
     # signal_symbol on J7: borrows full-size JPY continuous IB history for
     # signal/covariance (same MZC→ZC pattern -- mini listed ~2019, too thin
-    # for a reliable 252-day signal on its own). No margin/commission for J7:
-    # never had a FuturesType entry (only full-size JPY did), same
-    # "never had data to relocate" reasoning as MCL/MGC/SIL/NKD/MNK above.
+    # for a reliable 252-day signal on its own).
     'JPY': {'exchange': 'CME',   'multiplier': 12_500_000, 'cluster': 'fx', 'db_symbol': '6J',
-            'initial_margin': 3015.0, 'commission': 2.47},
-    'J7':  {'exchange': 'CME',   'multiplier': 6_250_000,  'cluster': 'fx', 'db_symbol': '6J', 'signal_symbol': 'JPY'},
-    'BRE': {'exchange': 'CME',   'multiplier': 100_000,    'cluster': 'fx', 'db_symbol': '6L',
-            'initial_margin': 5034.80, 'commission': 2.47},
-    '6M':  {'exchange': 'CME',   'multiplier': 500_000,    'cluster': 'fx',
-            'initial_margin': 1971.67, 'commission': 2.47},
+            'initial_margin': 3051.83, 'commission': 2.46},
+    'J7':  {'exchange': 'CME',   'multiplier': 6_250_000,  'cluster': 'fx', 'db_symbol': '6J', # notional ~= 39K
+            'initial_margin': 1525.92, 'commission': 1.36, 'signal_symbol': 'JPY'},
+    'BRE': {'exchange': 'CME',   'multiplier': 100_000,    'cluster': 'fx', 'db_symbol': '6L', # notional ~= 19K
+            'initial_margin': 5023.68, 'commission': 2.46},
+    '6M':  {'exchange': 'CME',   'multiplier': 500_000,    'cluster': 'fx', # notional ~= 28K
+            'initial_margin': 1962.36, 'commission': 2.46},
 }
 
 # ── Backtest-only contracts ─────────────────────────────────────────────────

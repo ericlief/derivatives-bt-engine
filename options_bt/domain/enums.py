@@ -155,6 +155,11 @@ class FuturesType(Enum):
     ZT = _spec('ZT') # 2-Year T-Note (CBOT)
     GC = _spec('GC') # Gold (COMEX)
     SI = _spec('SI') # Silver (COMEX)
+    SIL = _spec('SIL') # Micro Silver (COMEX) -- 1/5 SI's multiplier; no
+                        # separate IBKR ticker or db history of its own,
+                        # borrows SI's via the ib_symbol fallback in
+                        # instruments.py's resolve_price_symbol/
+                        # resolve_signal_symbol.
     CL = _spec('CL') # Crude Oil (NYMEX)
     ZL = _spec('ZL') # Soybean Oil (CBOT)
     ZC = _spec('ZC') # Corn (CBOT)
