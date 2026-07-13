@@ -28,30 +28,27 @@ Each `INSTRUMENTS` entry carries:
                     disambiguated by multiplier)
   signal_symbol  -- IB continuous-front-month ticker for LIVE signal/
                     covariance history; only set when the traded contract's
-                    own history is too short/thin (e.g. J7→JPY, MZC→ZC for
-                    CBOT micro grains). Read by resolve_signal_symbol()
-                    (options_bt.live.tsmom_rebalance) for the live IB
-                    continuous-bars fetch -- deliberately NOT used for the
-                    db_symbol fallback below when the divergence is a pure
-                    duckdb-coverage gap rather than a genuine thin-history
-                    problem (see MES/MNQ/MTN/MCL).
+                    own history is too short/thin for a reliable estimate
+                    (e.g. J7→JPY, MZC→ZC for CBOT micro grains launched
+                    ~2025, MES/MNQ/MTN/MCL→ES/NQ/ZN/CL -- CME Micro
+                    products launched 2019-2021, comparably new to J7).
+                    Read by resolve_signal_symbol() (options_bt.live.
+                    tsmom_rebalance) for the live IB continuous-bars fetch
+                    -- this is the SAME fetch tsmom_risk_budget_diagnostic.py
+                    uses for its covariance analysis, so setting this also
+                    gives that diagnostic the full-size contract's longer
+                    history, not just live rebalancing.
   db_symbol      -- Globex root symbol in daily.asset (Databento CME
-                    MDP3.0 feed); only set when it differs from the key.
-                    Two distinct reasons a symbol needs this:
-                      (a) IBKR/Globex ticker naming divergence -- J7→6J,
-                          BRE→6L, JPY→6J (unrelated to data completeness,
-                          this ticker just doesn't exist in the db).
-                      (b) Pure duckdb-coverage gap -- MES/MNQ/MTN/MCL have
-                          no db history under their own symbol at all, but
-                          their full-size sibling (ES/NQ/ZN/CL) does,
-                          confirmed by direct query. Set here so backtests
-                          can borrow that history while still using the
-                          MICRO's own multiplier/margin/commission for
-                          sizing and PnL (see resolve_price_symbol below)
-                          -- deliberately NOT mirrored into signal_symbol,
-                          since these symbols' LIVE IB continuous-bar
-                          history is fine on its own; only the local
-                          duckdb is missing it.
+                    MDP3.0 feed); only set when it differs from the key AND
+                    signal_symbol doesn't already resolve it (resolve_price_
+                    symbol falls through db_symbol > signal_symbol >
+                    ib_symbol, so MES etc. don't need an explicit db_symbol
+                    once signal_symbol is set). Needed on its own only for a
+                    pure IBKR/Globex ticker naming divergence with NO
+                    history problem -- J7→6J, BRE→6L, JPY→6J (these
+                    symbols' own IB history is genuinely fine; the local
+                    duckdb just happens to store them under a different
+                    ticker).
                     Used by the duckdb continuous-front-month queries in
                     the backtester, diagnostic, and data-quality scripts.
 
@@ -79,52 +76,52 @@ DEFAULT_DB_PATH = '/home/dev/fin/db/globex_mdp_3.0.duckdb'
 # ── Instrument universe ─────────────────────────────────────────────────────
 INSTRUMENTS: dict[str, dict] = {
     # ── Equity index ────────────────────────────────────────────────────────
-    # MES/MNQ have no db history under their own symbol (confirmed) -- db_symbol
-    # borrows ES/NQ's for backtesting; live IB signal history is unaffected
-    # (resolve_signal_symbol doesn't read db_symbol).
+    # MES/MNQ (launched May 2019, ~6y of history) borrow ES/NQ's via
+    # signal_symbol -- both for backtesting (resolve_price_symbol falls
+    # through to signal_symbol) and for live/diagnostic IB covariance
+    # history (resolve_signal_symbol), matching the J7/MZC pattern.
     'ES':  {'exchange': 'CME',   'multiplier': 50,         'cluster': 'equity',
             'initial_margin': 34068.38, 'commission': 2.24},
     'MES': {'exchange': 'CME',   'multiplier': 5,          'cluster': 'equity',
-            'initial_margin': 3429.11, 'commission': 0.61, 'db_symbol': 'ES'},
+            'initial_margin': 3429.11, 'commission': 0.61, 'signal_symbol': 'ES'},
     'NQ':  {'exchange': 'CME',   'multiplier': 20,         'cluster': 'equity',
             'initial_margin': 67582.55, 'commission': 2.24},
     'MNQ': {'exchange': 'CME',   'multiplier': 2,          'cluster': 'equity',
-            'initial_margin': 6607.19, 'commission': 0.61, 'db_symbol': 'NQ'},
+            'initial_margin': 6607.19, 'commission': 0.61, 'signal_symbol': 'NQ'},
 
     # ── Energy ──────────────────────────────────────────────────────────────
-    # CL/MCL clear on NYMEX (crude oil), not COMEX (metals only). MCL has no
-    # db history under its own symbol (confirmed) -- db_symbol borrows CL's.
-    # No initial_margin/commission for MCL: never had a FuturesType entry to
-    # relocate from, and fabricating new CME figures is out of scope here --
-    # this db_symbol addition helps the live/diagnostic duckdb path, not
-    # general single-symbol backtesting (which still needs those fields).
+    # CL/MCL clear on NYMEX (crude oil), not COMEX (metals only). MCL
+    # (launched 2021) borrows CL's via signal_symbol, same reasoning as
+    # MES/MNQ above.
     'CL':  {'exchange': 'NYMEX', 'multiplier': 1000,       'cluster': 'energy',
-            'initial_margin': 18750.0, 'commission': 1.70},
-    'MCL': {'exchange': 'NYMEX', 'multiplier': 100,        'cluster': 'energy', 'db_symbol': 'CL'},
+            'initial_margin': 16602.40, 'commission': 2.36},
+    'MCL': {'exchange': 'NYMEX', 'multiplier': 100,        'cluster': 'energy',
+            'initial_margin': 1660.24, 'commission': 0.76, 'signal_symbol': 'CL'},
 
     # ── Metals ──────────────────────────────────────────────────────────────
     # SIL: IBKR has no separate Micro Silver ticker -- it trades under the
     # same root 'SI' as full-size silver, disambiguated by multiplier.
     # resolve_price_symbol already falls through to ib_symbol for SIL, so no
-    # separate db_symbol is needed. No margin/commission for MGC/SIL, same
-    # "never had FuturesType data to relocate" reasoning as MCL above.
+    # separate db_symbol/signal_symbol is needed. No margin/commission for
+    # MGC/SIL: never had a FuturesType entry to relocate from, and
+    # fabricating new CME figures is out of scope here.
     'GC':  {'exchange': 'COMEX', 'multiplier': 100,        'cluster': 'metal',
-            'initial_margin': 48345.79, 'commission': 1.70},
+            'initial_margin': 40701.95, 'commission': 2.24},
     'MGC': {'exchange': 'COMEX', 'multiplier': 10,         'cluster': 'metal'},
     'SI':  {'exchange': 'COMEX', 'multiplier': 5000,       'cluster': 'metal',
             'initial_margin': 74299.37, 'commission': 1.70},
     'SIL': {'exchange': 'COMEX', 'multiplier': 1000,       'cluster': 'metal', 'ib_symbol': 'SI'},
 
     # ── Rates ───────────────────────────────────────────────────────────────
-    # MTN has no db history under its own symbol (confirmed) -- db_symbol
-    # borrows ZN's (the standard 10-Year, not TN the Ultra 10-Year -- a
-    # different duration/contract, not MTN's full-size sibling).
+    # MTN borrows ZN's via signal_symbol (the standard 10-Year, not TN the
+    # Ultra 10-Year -- a different duration/contract, not MTN's full-size
+    # sibling), same reasoning as MES/MNQ above.
     'ZN':  {'exchange': 'CBOT',  'multiplier': 1000,       'cluster': 'rates',
             'initial_margin': 2156.25, 'commission': 1.67},
     'TN':  {'exchange': 'CBOT',  'multiplier': 1000,       'cluster': 'rates',
             'initial_margin': 2935.79, 'commission': 1.67},
     'MTN': {'exchange': 'CBOT',  'multiplier': 100,        'cluster': 'rates',
-            'initial_margin': 725.80, 'commission': 0.57, 'db_symbol': 'ZN'},
+            'initial_margin': 725.80, 'commission': 0.57, 'signal_symbol': 'ZN'},
     'ZT':  {'exchange': 'CBOT',  'multiplier': 2000,       'cluster': 'rates',
             'initial_margin': 1380.75, 'commission': 3.04},
 
