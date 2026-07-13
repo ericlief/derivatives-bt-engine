@@ -93,7 +93,7 @@ def _build_instruments(spec: str, max_notional: float, max_contracts: int) -> li
         known = KNOWN_INSTRUMENTS[symbol]
         ib_symbol = known.get('ib_symbol') or symbol
         signal_symbol = known.get('signal_symbol') or ib_symbol
-        # db_symbol: Globex root symbol in the duckdb (ohlcv_enriched.asset).
+        # db_symbol: Globex root symbol in the duckdb (daily.asset).
         # Explicit when IB and Globex names diverge (e.g. J7→6J, BRE→6L);
         # falls back to signal_symbol (thin contracts borrow their full-size
         # sibling's duckdb data too) then ib_symbol.

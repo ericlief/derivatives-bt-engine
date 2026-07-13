@@ -87,14 +87,14 @@ def load_portfolio_data(symbols: list[str]) -> tuple[dict[str, pl.DataFrame], pl
     cache_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', '..', '.cache', 'futures'))
     os.makedirs(cache_dir, exist_ok=True)
     _validate_symbols_exist(symbols, cache_dir)
-    price_data = {s: FuturesDataLoader(asset=s, data_dir=cache_dir, use_preprocessed=True, save_preprocessed=True).ohlcv
+    price_data = {s: FuturesDataLoader(asset=s, data_dir=cache_dir, use_preprocessed=True, save_preprocessed=True).daily
                   for s in symbols}
     vix = pl.read_parquet(VIX_FILE_PATH).select(['date', 'close']).rename({'close': 'vix_close'}).sort('date')
     return price_data, vix
 
 
 def _validate_symbols_exist(symbols: list[str], cache_dir: str) -> None:
-    """The continuous-front-month query (FuturesDataLoader.ohlcv) has no
+    """The continuous-front-month query (FuturesDataLoader.daily) has no
     early-exit for a non-matching asset -- it's an unindexed full-table scan
     that takes minutes either way, so a typo'd or IB-only symbol (e.g. the
     live rebalance's IBKR ticker 'JPY'/'BRE' rather than this db's real
@@ -103,12 +103,12 @@ def _validate_symbols_exist(symbols: list[str], cache_dir: str) -> None:
     list up front instead, skipping symbols that are already parquet-cached
     (no need to hit duckdb at all for those)."""
     uncached = [s for s in symbols
-                if not os.path.exists(os.path.join(cache_dir, f'{s}_ohlcv.parquet'))]
+                if not os.path.exists(os.path.join(cache_dir, f'{s}_daily.parquet'))]
     if not uncached:
         return
     con = duckdb.connect(FuturesDataLoader.db_path, read_only=True)
     try:
-        known = set(con.sql('SELECT DISTINCT asset FROM ohlcv_enriched').pl()['asset'].to_list())
+        known = set(con.sql('SELECT DISTINCT asset FROM daily').pl()['asset'].to_list())
     finally:
         con.close()
     missing = [s for s in uncached if s not in known]

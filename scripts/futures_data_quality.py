@@ -46,7 +46,7 @@ _DEFAULT_DB_PATH = '/home/dev/fin/db/globex_mdp_3.0.duckdb'
 _MULTI_ASSET_SQL = """
 WITH bars AS (
     SELECT asset, ts_event, close, expiration
-    FROM ohlcv_enriched
+    FROM daily
     WHERE asset IN ({placeholders})
       AND instrument_class = 'F' AND security_type = 'FUT'
       AND expiration IS NOT NULL
@@ -783,7 +783,7 @@ def load_db_prices(
     db_path = db_path or _DEFAULT_DB_PATH
 
     def _parquet_path(sym: str) -> str:
-        return os.path.join(cache_dir, f'{sym}_ohlcv.parquet')
+        return os.path.join(cache_dir, f'{sym}_daily.parquet')
 
     frames: dict[str, pl.DataFrame] = {}
 

@@ -22,8 +22,8 @@ logger = setup_logger()
 # Front-month roll: for each trading date, take the not-yet-expired futures
 # contract for `asset` with the nearest expiration.
 #
-# `ohlcv_enriched` (the databento pipeline's build_db.py) already solves
-# `instrument_id` recycling more thoroughly than a plain join against
+# `daily` (the databento pipeline's build_db.py; formerly `ohlcv_enriched`)
+# already solves `instrument_id` recycling more thoroughly than a plain join against
 # `instruments` could: it parses each bar's own raw `symbol` (independent of
 # `instruments`, which can have incomplete or entirely-missing history for a
 # given id) to recover asset/instrument_class/security_type directly from the
@@ -41,10 +41,10 @@ logger = setup_logger()
 _CONTINUOUS_FRONT_MONTH_SQL = """
 WITH bars AS (
     SELECT instrument_id, ts_event, open, high, low, close, volume, expiration
-    FROM ohlcv_enriched
+    FROM daily
     WHERE asset = ? AND instrument_class = 'F' AND security_type = 'FUT'
       AND expiration IS NOT NULL
-      AND ts_event < CAST(expiration AS DATE)
+      AND ts_event < expiration
 ),
 ranked AS (
     SELECT *, row_number() OVER (PARTITION BY ts_event ORDER BY expiration ASC) AS rn
@@ -69,15 +69,15 @@ class FuturesDataLoader(BaseDataLoader):
     save_preprocessed: bool = True
 
     @property
-    def _ohlcv_processed_path(self) -> str:
-        return os.path.join(self.data_dir, f"{self.asset}_ohlcv.parquet")
+    def _daily_processed_path(self) -> str:
+        return os.path.join(self.data_dir, f"{self.asset}_daily.parquet")
 
     @cached_property
-    def ohlcv(self) -> pl.DataFrame:
-        """Lazy load and cache the continuous front-month futures OHLCV series."""
-        if self.use_preprocessed and os.path.exists(self._ohlcv_processed_path):
-            logger.info(f"Loading {self._ohlcv_processed_path}")
-            return pl.read_parquet(self._ohlcv_processed_path)
+    def daily(self) -> pl.DataFrame:
+        """Lazy load and cache the continuous front-month futures daily OHLCV series."""
+        if self.use_preprocessed and os.path.exists(self._daily_processed_path):
+            logger.info(f"Loading {self._daily_processed_path}")
+            return pl.read_parquet(self._daily_processed_path)
 
         con = duckdb.connect(self.db_path, read_only=True)
         try:
@@ -88,8 +88,8 @@ class FuturesDataLoader(BaseDataLoader):
         df = df.with_columns(pl.col('ts_event').cast(pl.Date)).sort('ts_event')
 
         if self.save_preprocessed:
-            df.write_parquet(self._ohlcv_processed_path)
-            logger.info(f"Saved data to {self._ohlcv_processed_path}")
+            df.write_parquet(self._daily_processed_path)
+            logger.info(f"Saved data to {self._daily_processed_path}")
 
         return df
 
@@ -112,8 +112,8 @@ class FuturesDataLoader(BaseDataLoader):
         """
         data_loading_start = time.time()
 
-        ohlcv = self.ohlcv
-        logger.info(f"Loaded {self.asset} continuous futures OHLCV: {len(ohlcv)} rows")
+        daily = self.daily
+        logger.info(f"Loaded {self.asset} continuous futures daily OHLCV: {len(daily)} rows")
 
         if self.vix_file is not None:
             vix = self.vix_data.rename({'date': 'ts_event'})
@@ -122,7 +122,7 @@ class FuturesDataLoader(BaseDataLoader):
 
         result = {
             'option_chain': pl.DataFrame(),
-            'underlying': ohlcv,
+            'underlying': daily,
             'vix': vix,
         }
 
