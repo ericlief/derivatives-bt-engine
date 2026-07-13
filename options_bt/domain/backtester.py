@@ -694,26 +694,33 @@ class Backtester:
 
         start = date.fromisoformat(config.start_date)
         end = date.fromisoformat(config.end_date)
-        # Signal/vol overlay -- hv3m, avg_r3m/avg_r1y ("mean"), ts3m/ts1y
-        # (fast/slow), signal (weighted trend-strength score), regime
-        # (Bull/Bear/Correction/Rebound), sharpe3m, and vix_close --
-        # computed on the FULL underlying series before windowing to
-        # [start, end]: trimming first would starve the 63/252-day rolling
-        # windows of real prior history and show spurious nulls at the
-        # start of the window, unlike what the strategy's own signal
-        # actually saw at each date. Reuses tsmom_signal.py's canonical
-        # calculate_trend_strength/classify_regime (same functions the
-        # live TSMOM signal uses) rather than reimplementing rolling stats.
+        # Signal/vol overlay -- hv3m/hv1y, avg_r3m/avg_r1y ("mean"),
+        # sharpe3m/sharpe1y, ts3m/ts1y (fast/slow), signal (weighted
+        # trend-strength score), regime (Bull/Bear/Correction/Rebound),
+        # and vix_close -- computed on the FULL underlying series before
+        # windowing to [start, end]: trimming first would starve the
+        # 63/252-day rolling windows of real prior history and show
+        # spurious nulls at the start of the window, unlike what the
+        # strategy's own signal actually saw at each date. Reuses
+        # tsmom_signal.py's canonical calculate_trend_strength/
+        # classify_regime (same functions the live TSMOM signal uses)
+        # rather than reimplementing rolling stats -- hv1y/sharpe1y are
+        # the one exception, computed here (not in calculate_trend_
+        # strength, which stays untouched/canonical) directly off the
+        # 'r1d' column it already retains for exactly this kind of
+        # downstream chaining (see compute_vol_ratio's docstring for the
+        # same pattern).
         #
         # Suffixes (3m, 1y, ...) denote the rolling estimation window,
         # not the reporting horizon. Volatility, Sharpe, and avg_r3m/
-        # avg_r1y all remain annualized -- hv3m is annualized vol
-        # estimated from the last 63d, avg_r3m is annualized mean return
-        # estimated from the last 63d, sharpe3m is annualized Sharpe
-        # estimated from the last 63d.
+        # avg_r1y all remain annualized -- hv3m/hv1y is annualized vol
+        # estimated from the last 63d/252d, avg_r3m/avg_r1y is annualized
+        # mean return estimated from the last 63d/252d, sharpe3m/sharpe1y
+        # is annualized Sharpe estimated from the last 63d/252d.
         overlay = calculate_trend_strength(self.underlying.select(['ts_event', 'close']).sort('ts_event'))
         overlay = overlay.with_columns(
             hv3m=(pl.col('daily_std') * (252 ** 0.5)).round(4),
+            hv1y=(pl.col('r1d').rolling_std(252) * (252 ** 0.5)).round(4),
             regime=pl.struct(['ts3m', 'ts1y']).map_elements(
                 lambda s: classify_regime(s['ts3m'], s['ts1y']).value,
                 return_dtype=pl.Utf8,
@@ -721,17 +728,21 @@ class Backtester:
             **{c: pl.col(c).round(4) for c in ('ts3m', 'ts1y', 'signal', 'avg_r3m', 'avg_r1y')},
         )
         overlay = overlay.with_columns(
-            # Rolling Sharpe on the same 3m (63-day) window as hv3m/ts3m/
-            # regime, not whole-to-date -- keeps it on the same clock as
-            # regime so a regime flip and a Sharpe/vol move are comparable
-            # at a glance instead of drifting at different speeds. avg_r3m
-            # is already annualized (see calculate_trend_strength), so no
-            # extra *252 here -- both numerator and denominator are
-            # annualized already.
+            # Rolling Sharpe on the same 3m/1y windows as hv3m/hv1y/ts3m/
+            # ts1y/regime, not whole-to-date -- keeps everything on the
+            # same clock so a regime flip and a Sharpe/vol move are
+            # comparable at a glance instead of drifting at different
+            # speeds. avg_r3m/avg_r1y are already annualized (see
+            # calculate_trend_strength), so no extra *252 here -- both
+            # numerator and denominator are annualized already.
             sharpe3m=pl.when(pl.col('hv3m') > 0)
             .then(pl.col('avg_r3m') / pl.col('hv3m'))
             .otherwise(None)
-            .round(4)
+            .round(4),
+            sharpe1y=pl.when(pl.col('hv1y') > 0)
+            .then(pl.col('avg_r1y') / pl.col('hv1y'))
+            .otherwise(None)
+            .round(4),
         )
 
         if self.vix.height > 0 and 'ts_event' in self.vix.columns:
@@ -847,8 +858,9 @@ class Backtester:
         # gspread_log_util.py's "total_pnl", "max_dd_usd", "peak_capital").
         stats = daily.select([
             'ts_event', 'close', 'mtm_pnl', 'cum_pnl', 'cum_pnl_pct', 'mtm_capital',
-            'running_max', 'dd_usd', 'dd_pct', 'hv3m', 'sharpe3m',
-            'avg_r3m', 'avg_r1y', 'ts3m', 'ts1y', 'signal', 'regime', 'vix_close',
+            'running_max', 'dd_usd', 'dd_pct',
+            'avg_r3m', 'avg_r1y', 'hv3m', 'hv1y', 'sharpe3m', 'sharpe1y',
+            'ts3m', 'ts1y', 'signal', 'regime', 'vix_close',
         ]).rename({
             'ts_event': 'date',
             'mtm_capital': 'capital',
