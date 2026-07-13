@@ -60,7 +60,17 @@ def main():
     start_date = f"{start_year}-01-01"
     end_date = f"{end_year}-12-31"
 
-    dl = FuturesDataLoader(asset=symbol, vix_file=VIX_FILE, use_preprocessed=False, save_preprocessed=False)
+    # use_preprocessed=True is required for VIX (not just an optimization):
+    # BaseDataLoader.vix_data only reads the already-current
+    # {VIX_PATH}/processed/vix.parquet cache when this is True. With it
+    # False, vix_data falls through to re-parsing processed/vix.csv, which
+    # is a stale, separately-maintained file (ends 2024-12-31, and its
+    # ambiguous M/D/YYYY-with-time date strings silently fail to parse for
+    # ~60% of rows even within that stale range). Safe for the futures side
+    # too: save_preprocessed=False means FuturesDataLoader.daily never
+    # writes a local cache, so with no such file already present this still
+    # queries duckdb fresh every run, same as before.
+    dl = FuturesDataLoader(asset=symbol, vix_file=VIX_FILE, use_preprocessed=True, save_preprocessed=False)
     data = dl.load_data()
 
     config = FuturesStrategyConfig(
