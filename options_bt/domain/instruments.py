@@ -131,8 +131,8 @@ INSTRUMENTS: dict[str, dict] = {
     # history for the 252-day TSMOM lookback. signal_symbol borrows the
     # full-size contract's continuous IB bars; db_symbol falls back to
     # signal_symbol so the duckdb path uses the same full-size asset.
-    'ZL':  {'exchange': 'CBOT',  'multiplier': 600,        'cluster': 'grain',
-            'initial_margin': 45102.79, 'commission': 3.01},
+    'ZL':  {'exchange': 'CBOT',  'multiplier': 600,        'cluster': 'grain', # notional ~= 43K
+            'initial_margin': 5102.79, 'commission': 3.01},
     'MZL': {'exchange': 'CBOT',  'multiplier': 60,         'cluster': 'grain', 
             'initial_margin': 525.16, 'commission': 0.76, 'signal_symbol': 'ZL'},
     'ZC':  {'exchange': 'CBOT',  'multiplier': 50,         'cluster': 'grain',
