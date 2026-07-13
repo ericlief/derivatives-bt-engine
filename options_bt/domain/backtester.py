@@ -694,9 +694,9 @@ class Backtester:
 
         start = date.fromisoformat(config.start_date)
         end = date.fromisoformat(config.end_date)
-        # Signal/vol overlay -- hv, avg3m/avg1y ("mean"), ts3m/ts1y
+        # Signal/vol overlay -- hv3m, avg3m/avg1y ("mean"), ts3m/ts1y
         # (fast/slow), trend_strength (weighted signal), regime
-        # (Bull/Bear/Correction/Rebound), rolling Sharpe, and vix_close --
+        # (Bull/Bear/Correction/Rebound), sharpe3m, and vix_close --
         # computed on the FULL underlying series before windowing to
         # [start, end]: trimming first would starve the 63/252-day rolling
         # windows of real prior history and show spurious nulls at the
@@ -704,9 +704,14 @@ class Backtester:
         # actually saw at each date. Reuses tsmom_signal.py's canonical
         # calculate_trend_strength/classify_regime (same functions the
         # live TSMOM signal uses) rather than reimplementing rolling stats.
+        #
+        # Naming: the *3m/*1y suffix always denotes the rolling WINDOW
+        # (63/252 trading days), matching ts3m/ts1y/avg3m/avg1y -- never
+        # the annualization arithmetic inside the formula (e.g. hv3m's
+        # sqrt(252) is annualizing a 63-day/"3m" std, not a 252-day one).
         signal = calculate_trend_strength(self.underlying.select(['ts_event', 'close']).sort('ts_event'))
         signal = signal.with_columns(
-            hv=(pl.col('daily_std') * (252 ** 0.5)).round(4),
+            hv3m=(pl.col('daily_std') * (252 ** 0.5)).round(4),
             regime=pl.struct(['ts3m', 'ts1y']).map_elements(
                 lambda s: classify_regime(s['ts3m'], s['ts1y']).value,
                 return_dtype=pl.Utf8,
@@ -714,12 +719,12 @@ class Backtester:
             **{c: pl.col(c).round(4) for c in ('ts3m', 'ts1y', 'trend_strength')},
         )
         signal = signal.with_columns(
-            # Rolling Sharpe on the same 63-day window as hv/ts3m/regime,
-            # not whole-to-date -- keeps it on the same clock as regime so
-            # a regime flip and a Sharpe/vol move are comparable at a
-            # glance instead of drifting at different speeds.
-            sharpe_63d=pl.when(pl.col('hv') > 0)
-            .then((pl.col('r1d').rolling_mean(63) * 252) / pl.col('hv'))
+            # Rolling Sharpe on the same 3m (63-day) window as hv3m/ts3m/
+            # regime, not whole-to-date -- keeps it on the same clock as
+            # regime so a regime flip and a Sharpe/vol move are comparable
+            # at a glance instead of drifting at different speeds.
+            sharpe3m=pl.when(pl.col('hv3m') > 0)
+            .then((pl.col('r1d').rolling_mean(63) * 252) / pl.col('hv3m'))
             .otherwise(None)
             .round(4)
         )
@@ -837,7 +842,7 @@ class Backtester:
         # gspread_log_util.py's "total_pnl", "max_dd_usd", "peak_capital").
         stats = daily.select([
             'ts_event', 'close', 'mtm_pnl', 'cum_pnl', 'cum_pnl_pct', 'mtm_capital',
-            'running_max', 'dd_usd', 'dd_pct', 'hv', 'sharpe_63d',
+            'running_max', 'dd_usd', 'dd_pct', 'hv3m', 'sharpe3m',
             'avg3m', 'avg1y', 'ts3m', 'ts1y', 'trend_strength', 'regime', 'vix_close',
         ]).rename({
             'ts_event': 'date',
