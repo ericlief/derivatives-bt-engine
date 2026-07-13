@@ -35,7 +35,7 @@ def test_trend_strength_columns_present():
     df = calculate_trend_strength(_price_df(400, drift=0.001))
     # log_price/r1d are deliberately kept (compute_vol_ratio chains onto
     # them) -- only the truly disposable intermediates are dropped.
-    for col in ('trend_strength', 'ts3m', 'ts1y', 'daily_std', 'r1y_pct', 'dd', 'peak', 'log_price', 'r1d'):
+    for col in ('ts', 'ts3m', 'ts1y', 'daily_std', 'avg_r3m', 'avg_r1y', 'r1y_pct', 'dd', 'peak', 'log_price', 'r1d'):
         assert col in df.columns
     for col in ('w3', 'w1'):
         assert col not in df.columns
@@ -43,26 +43,26 @@ def test_trend_strength_columns_present():
 
 def test_trend_strength_null_until_63_bars():
     df = calculate_trend_strength(_price_df(100, drift=0.0))
-    # before 63 bars, ts3m/trend_strength must be null
-    assert df['trend_strength'][:63].null_count() == 63
-    assert df['trend_strength'][63:].null_count() == 0
+    # before 63 bars, ts3m/ts must be null
+    assert df['ts'][:63].null_count() == 63
+    assert df['ts'][63:].null_count() == 0
 
 
 def test_trend_strength_sign_matches_strong_uptrend():
     df = calculate_trend_strength(_price_df(400, drift=0.003, vol=0.005))
-    last = df.tail(1)['trend_strength'][0]
+    last = df.tail(1)['ts'][0]
     assert last > 0
 
 
 def test_trend_strength_sign_matches_strong_downtrend():
     df = calculate_trend_strength(_price_df(400, drift=-0.003, vol=0.005))
-    last = df.tail(1)['trend_strength'][0]
+    last = df.tail(1)['ts'][0]
     assert last < 0
 
 
 def test_trend_strength_bounded():
     df = calculate_trend_strength(_price_df(400, drift=0.0005, vol=0.01))
-    vals = df['trend_strength'].drop_nulls()
+    vals = df['ts'].drop_nulls()
     assert vals.min() >= -1.0
     assert vals.max() <= 1.0
 
@@ -74,7 +74,7 @@ def test_trend_strength_falls_back_to_ts3m_before_252_bars():
     row = df.tail(1)
     ts3m = row['ts3m'][0]
     ts1y = row['ts1y'][0]
-    trend = row['trend_strength'][0]
+    trend = row['ts'][0]
     assert ts1y is None
     assert math.isclose(trend, math.tanh(ts3m), rel_tol=1e-9)
 

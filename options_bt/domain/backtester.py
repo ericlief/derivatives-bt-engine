@@ -694,8 +694,8 @@ class Backtester:
 
         start = date.fromisoformat(config.start_date)
         end = date.fromisoformat(config.end_date)
-        # Signal/vol overlay -- hv3m, avg3m/avg1y ("mean"), ts3m/ts1y
-        # (fast/slow), trend_strength (weighted signal), regime
+        # Signal/vol overlay -- hv3m, avg_r3m/avg_r1y ("mean"), ts3m/ts1y
+        # (fast/slow), ts (weighted signal), regime
         # (Bull/Bear/Correction/Rebound), sharpe3m, and vix_close --
         # computed on the FULL underlying series before windowing to
         # [start, end]: trimming first would starve the 63/252-day rolling
@@ -716,15 +716,16 @@ class Backtester:
                 lambda s: classify_regime(s['ts3m'], s['ts1y']).value,
                 return_dtype=pl.Utf8,
             ),
-            **{c: pl.col(c).round(4) for c in ('ts3m', 'ts1y', 'trend_strength')},
+            **{c: pl.col(c).round(4) for c in ('ts3m', 'ts1y', 'ts')},
         )
         signal = signal.with_columns(
             # Rolling Sharpe on the same 3m (63-day) window as hv3m/ts3m/
             # regime, not whole-to-date -- keeps it on the same clock as
             # regime so a regime flip and a Sharpe/vol move are comparable
-            # at a glance instead of drifting at different speeds.
+            # at a glance instead of drifting at different speeds. avg_r3m
+            # is already r1d.rolling_mean(63) from calculate_trend_strength.
             sharpe3m=pl.when(pl.col('hv3m') > 0)
-            .then((pl.col('r1d').rolling_mean(63) * 252) / pl.col('hv3m'))
+            .then((pl.col('avg_r3m') * 252) / pl.col('hv3m'))
             .otherwise(None)
             .round(4)
         )
@@ -843,7 +844,7 @@ class Backtester:
         stats = daily.select([
             'ts_event', 'close', 'mtm_pnl', 'cum_pnl', 'cum_pnl_pct', 'mtm_capital',
             'running_max', 'dd_usd', 'dd_pct', 'hv3m', 'sharpe3m',
-            'avg3m', 'avg1y', 'ts3m', 'ts1y', 'trend_strength', 'regime', 'vix_close',
+            'avg_r3m', 'avg_r1y', 'ts3m', 'ts1y', 'ts', 'regime', 'vix_close',
         ]).rename({
             'ts_event': 'date',
             'mtm_capital': 'capital',

@@ -166,7 +166,7 @@ def test_portfolio_capital_aggregates_across_symbols(monkeypatch):
 def test_vix_spike_holds_positions_unchanged(monkeypatch):
     """ratio ~25/15=1.67 lands in the 'spike' band (not 'extreme') -- the
     gate should hold prior positions exactly, with signal computation
-    skipped entirely (trend_strength/regime both None on those events).
+    skipped entirely (ts/regime both None on those events).
     Price data runs ~60 trading days past the (short) VIX spike, so the
     spike's rebalance date isn't the literal last date in the window
     (which the last-date-in-window cutoff excludes) and the rolling
@@ -184,7 +184,7 @@ def test_vix_spike_holds_positions_unchanged(monkeypatch):
     spike_events = [e for e in result['events'] if e['vol_regime'] == 'spike']
     assert spike_events, "expected the synthetic VIX spike to trigger at least one gated rebalance"
     for e in spike_events:
-        assert e['trend_strength'] is None
+        assert e['ts'] is None
         assert e['regime'] is None
         assert e['target_contracts'] == e['prior_contracts']
 

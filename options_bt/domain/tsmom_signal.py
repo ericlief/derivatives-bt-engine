@@ -43,13 +43,17 @@ def calculate_trend_strength(df: pl.DataFrame, w3m: float = 0.4, w1y: float = 0.
     df = df.with_columns(
         dd=((pl.col('close') - pl.col('peak')) / pl.col('peak')).round(2),
         r1d=pl.col('log_price').diff(1),
-        avg3m=pl.col('close').rolling_mean(63).round(2),
-        avg1y=pl.col('close').rolling_mean(252).round(2),
         r3m=pl.col('log_price').diff(63),
         r1y=pl.col('log_price').diff(252),
     )
     df = df.with_columns(
-        daily_std=pl.col('r1d').rolling_std(63)
+        daily_std=pl.col('r1d').rolling_std(63),
+        # Rolling mean of daily returns (not price -- avg3m/avg1y used to
+        # be a rolling mean of close, but that's not comparable to r3m/r1y
+        # or daily_std, which are both return-based) over the same 3m/1y
+        # windows as ts3m/ts1y.
+        avg_r3m=pl.col('r1d').rolling_mean(63),
+        avg_r1y=pl.col('r1d').rolling_mean(252),
     )
     df = df.with_columns(
         ts3m=pl.col('r3m') / (pl.col('daily_std') * math.sqrt(63)),
@@ -60,7 +64,7 @@ def calculate_trend_strength(df: pl.DataFrame, w3m: float = 0.4, w1y: float = 0.
         w1=pl.col('ts1y').is_not_null().cast(pl.Float64) * w1y,
     )
     df = df.with_columns(
-        trend_strength=(
+        ts=(
             pl.when(pl.col('ts3m').is_not_null())
             .then(
                 ((
