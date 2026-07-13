@@ -693,11 +693,19 @@ class Backtester:
 
         start = date.fromisoformat(config.start_date)
         end = date.fromisoformat(config.end_date)
+        # hv (63-day annualized realized vol of daily log returns -- same
+        # convention as tsmom_signal.py's daily_std/hv) is computed on the
+        # FULL underlying series before windowing to [start, end]: trimming
+        # first would starve the 63-day rolling std of real prior history
+        # and show spurious nulls at the start of the window, unlike what
+        # the strategy's own signal actually saw at each date.
         daily = (
             self.underlying
-            .filter((pl.col('ts_event') >= start) & (pl.col('ts_event') <= end))
             .select(['ts_event', 'close'])
             .sort('ts_event')
+            .with_columns(r1d=pl.col('close').log().diff(1))
+            .with_columns(hv=(pl.col('r1d').rolling_std(63) * (252 ** 0.5)).round(4))
+            .filter((pl.col('ts_event') >= start) & (pl.col('ts_event') <= end))
         )
 
         # Match each day to the most recently opened trade as of that day;
@@ -803,7 +811,7 @@ class Backtester:
         # Lowercase snake_case column names throughout, matching the
         # convention used for Google Sheets headers elsewhere (e.g.
         # gspread_log_util.py's "total_pnl", "max_dd_usd", "peak_capital").
-        stats = daily.select(['ts_event', 'close', 'mtm_pnl', 'cum_pnl', 'cum_pnl_pct', 'mtm_capital', 'running_max', 'dd_usd', 'dd_pct']).rename({
+        stats = daily.select(['ts_event', 'close', 'mtm_pnl', 'cum_pnl', 'cum_pnl_pct', 'mtm_capital', 'running_max', 'dd_usd', 'dd_pct', 'hv']).rename({
             'ts_event': 'date',
             'mtm_capital': 'capital',
         })
