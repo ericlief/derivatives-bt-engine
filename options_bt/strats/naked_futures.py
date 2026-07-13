@@ -14,7 +14,11 @@ import polars as pl
 from options_bt.domain.backtester import Backtester
 from options_bt.domain.enums import FuturesStrategy, FuturesType
 from options_bt.domain.futures_dataloader import FuturesDataLoader
+from options_bt.domain.instruments import resolve_price_symbol
 from options_bt.domain.strategy_config import FuturesStrategyConfig
+from options_bt.utils.logger import setup_logger
+
+logger = setup_logger()
 
 # Same VIX_PATH convention as the options strategies (iron_condor.py,
 # bull_put.py, ...) -- a directory resolves to {dir}/processed/vix.csv
@@ -70,7 +74,15 @@ def main():
     # too: save_preprocessed=False means FuturesDataLoader.daily never
     # writes a local cache, so with no such file already present this still
     # queries duckdb fresh every run, same as before.
-    dl = FuturesDataLoader(asset=symbol, vix_file=VIX_FILE, use_preprocessed=True, save_preprocessed=False)
+    # price_symbol: some micros (MES, MNQ, MTN, ...) have no db history under
+    # their own symbol -- resolve_price_symbol borrows the full-size
+    # sibling's (ES, NQ, ZN, ...) via instruments.py's db_symbol field.
+    # futures_type above stays on the raw traded `symbol`, so sizing/margin/
+    # PnL are still MES-scaled, never ES-scaled.
+    price_symbol = resolve_price_symbol(symbol)
+    if price_symbol != symbol:
+        logger.info(f"{symbol}: no db history under its own symbol -- borrowing {price_symbol}'s continuous price history")
+    dl = FuturesDataLoader(asset=price_symbol, vix_file=VIX_FILE, use_preprocessed=True, save_preprocessed=False)
     data = dl.load_data()
 
     config = FuturesStrategyConfig(

@@ -29,12 +29,21 @@ import polars as pl
 
 from options_bt.domain.enums import FuturesType, TrendRegime, VolRegime
 from options_bt.domain.futures_dataloader import FuturesDataLoader
+from options_bt.domain.instruments import resolve_price_symbol
 from options_bt.domain.tsmom_signal import calculate_trend_strength, classify_regime, compute_position_scalar
 from options_bt.utils.logger import setup_logger
 
 logger = setup_logger()
 
-VIX_FILE_PATH = "/home/dev/data/fin/market/index/VIX/historical/vix.parquet"
+# Same VIX_PATH convention as naked_futures.py/the options strategies -- a
+# directory resolves to {dir}/processed/vix.parquet (see
+# BaseDataLoader._resolve_source_paths). The old hardcoded
+# .../VIX/historical/vix.parquet path no longer exists (stale, pre-dates a
+# data-directory reorg) and would raise FileNotFoundError.
+VIX_FILE_PATH = os.path.join(
+    os.path.expanduser(os.getenv('VIX_PATH', '~/data/fin/market/index/VIX/eod')),
+    'processed', 'vix.parquet',
+)
 
 # Same band thresholds as options_bt.live.tsmom_rebalance's VX-futures gate,
 # applied to spot-VIX-current / spot-VIX-63d-MA instead.
@@ -83,17 +92,26 @@ def load_portfolio_data(symbols: list[str]) -> tuple[dict[str, pl.DataFrame], pl
     FuturesDataLoader, parquet-cached) plus one shared spot-VIX series,
     read directly as polars (covers 1990-present, unlike the older
     pandas/CSV vix_file BaseDataLoader.vix_data still uses for the option
-    path, which is stale past 2024-12-31)."""
+    path, which is stale past 2024-12-31).
+
+    Some micros (MES, MNQ, MTN, ...) have no db history under their own
+    symbol -- resolve_price_symbol borrows the full-size sibling's (ES,
+    NQ, ZN, ...) via instruments.py's db_symbol field, so the cache/query
+    below runs against the resolved symbol while price_data stays keyed by
+    the raw traded symbol (matching futures_types/windowed elsewhere in
+    this module, which always use the traded symbol for margin/commission/
+    mult -- MES stays sized as MES, never as ES)."""
     cache_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', '..', '.cache', 'futures'))
     os.makedirs(cache_dir, exist_ok=True)
-    _validate_symbols_exist(symbols, cache_dir)
-    price_data = {s: FuturesDataLoader(asset=s, data_dir=cache_dir, use_preprocessed=True, save_preprocessed=True).daily
+    price_symbols = {s: resolve_price_symbol(s) for s in symbols}
+    _validate_symbols_exist(set(price_symbols.values()), cache_dir)
+    price_data = {s: FuturesDataLoader(asset=price_symbols[s], data_dir=cache_dir, use_preprocessed=True, save_preprocessed=True).daily
                   for s in symbols}
     vix = pl.read_parquet(VIX_FILE_PATH).select(['date', 'close']).rename({'close': 'vix_close'}).sort('date')
     return price_data, vix
 
 
-def _validate_symbols_exist(symbols: list[str], cache_dir: str) -> None:
+def _validate_symbols_exist(price_symbols, cache_dir: str) -> None:
     """The continuous-front-month query (FuturesDataLoader.daily) has no
     early-exit for a non-matching asset -- it's an unindexed full-table scan
     that takes minutes either way, so a typo'd or IB-only symbol (e.g. the
@@ -101,12 +119,19 @@ def _validate_symbols_exist(symbols: list[str], cache_dir: str) -> None:
     CME/Globex root '6J'/'6L') would otherwise silently come back as an
     empty frame after minutes of waiting. Check the cheap `DISTINCT asset`
     list up front instead, skipping symbols that are already parquet-cached
-    (no need to hit duckdb at all for those)."""
-    uncached = [s for s in symbols
+    (no need to hit duckdb at all for those). Takes already-resolved price
+    symbols (see load_portfolio_data), not raw traded symbols -- a micro
+    like MES is expected to be absent from `daily` and shouldn't raise."""
+    uncached = [s for s in price_symbols
                 if not os.path.exists(os.path.join(cache_dir, f'{s}_daily.parquet'))]
     if not uncached:
         return
-    con = duckdb.connect(FuturesDataLoader.db_path, read_only=True)
+    # FuturesDataLoader.db_path is a dataclass field with a default_factory,
+    # so it isn't readable as a class attribute (FuturesDataLoader.db_path
+    # raises AttributeError) -- call the same factory instances use, so this
+    # doesn't duplicate the GLOBEX_DB_PATH env-var/default logic.
+    db_path = FuturesDataLoader.__dataclass_fields__['db_path'].default_factory()
+    con = duckdb.connect(db_path, read_only=True)
     try:
         known = set(con.sql('SELECT DISTINCT asset FROM daily').pl()['asset'].to_list())
     finally:
