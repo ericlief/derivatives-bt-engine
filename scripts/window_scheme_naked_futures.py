@@ -25,7 +25,7 @@ from dateutil.relativedelta import relativedelta
 from dotenv import load_dotenv
 
 from options_bt.domain.backtester import Backtester
-from options_bt.domain.enums import FuturesStrategy, FuturesType
+from options_bt.domain.enums import FuturesStrategy
 from options_bt.domain.futures_dataloader import FuturesDataLoader
 from options_bt.domain.strategy_config import FuturesStrategyConfig
 from options_bt.strats.grid_search_backtester import _generate_windows
@@ -100,7 +100,7 @@ def generate_capped_rolling_windows(anchor_start: str, data_end: str, max_width_
 
 # ── Single-window backtest ─────────────────────────────────────────────
 def _run_window(full_data: dict, start_date: str, end_date: str,
-                futures_type: FuturesType, futures_strategy: FuturesStrategy) -> dict:
+                futures_type: str, futures_strategy: FuturesStrategy) -> dict:
     """Run one window against the pre-loaded full OHLCV (Backtester filters
     by config start/end internally; no per-window data slicing needed since
     futures OHLCV is tiny compared with the option chain)."""
@@ -126,7 +126,7 @@ def _run_window(full_data: dict, start_date: str, end_date: str,
 
 
 def run_windows(full_data: dict, windows: List[Tuple[str, str]], scheme_name: str,
-                futures_type: FuturesType, futures_strategy: FuturesStrategy) -> List[dict]:
+                futures_type: str, futures_strategy: FuturesStrategy) -> List[dict]:
     rows = []
     for i, (w_start, w_end) in enumerate(windows, 1):
         t0 = time.time()
@@ -235,10 +235,7 @@ def main():
     args = parse_args()
 
     symbol = args.symbol.upper()
-    try:
-        futures_type = FuturesType.from_symbol(symbol)
-    except KeyError:
-        raise ValueError(f"Unknown symbol {symbol!r}. Defined types: {[t.name for t in FuturesType]}")
+    futures_type = symbol  # validated by FuturesStrategyConfig.__post_init__ on first use
 
     futures_strategy = FuturesStrategy.LONG_FUTURES if args.dir == 'long' else FuturesStrategy.SHORT_FUTURES
     direction        = args.dir

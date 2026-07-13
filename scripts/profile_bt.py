@@ -10,7 +10,7 @@ import time
 
 from options_bt.domain.backtester import Backtester
 from options_bt.domain.dataloader import OptionsDataLoader
-from options_bt.domain.enums import FuturesStrategy, FuturesType, OptionStrategy, OptionType, PositionSide
+from options_bt.domain.enums import FuturesStrategy, OptionStrategy, OptionType, PositionSide
 from options_bt.domain.option_leg_config import OptionLegConfig
 from options_bt.domain.strategy_config import FuturesStrategyConfig, SingleLegOptionStrategyConfig
 
@@ -58,7 +58,7 @@ def profile_futures_backtest(asset: str = 'ES'):
 
     config = FuturesStrategyConfig(
         quantity=1,
-        futures_type=FuturesType.MES,
+        futures_type='MES',
         futures_strategy=FuturesStrategy.LONG_FUTURES,
         initial_capital=100000,
         leverage=1.0,

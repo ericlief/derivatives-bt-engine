@@ -8,7 +8,7 @@ import os
 import pytest
 
 from options_bt.domain.backtester import Backtester
-from options_bt.domain.enums import FuturesStrategy, FuturesType
+from options_bt.domain.enums import FuturesStrategy
 from options_bt.domain.futures_dataloader import FuturesDataLoader
 from options_bt.domain.strategy_config import FuturesStrategyConfig
 
@@ -39,7 +39,7 @@ def test_futures_dataloader_shape_matches_backtester_contract(es_data):
 def test_long_futures_backtest_runs_end_to_end(es_data):
     config = FuturesStrategyConfig(
         quantity=1,
-        futures_type=FuturesType.ES,
+        futures_type='ES',
         futures_strategy=FuturesStrategy.LONG_FUTURES,
         initial_capital=100000,
         leverage=1.0,
@@ -68,7 +68,7 @@ def test_long_futures_backtest_runs_end_to_end(es_data):
 def test_short_futures_backtest_runs_end_to_end(es_data):
     config = FuturesStrategyConfig(
         quantity=1,
-        futures_type=FuturesType.ES,
+        futures_type='ES',
         futures_strategy=FuturesStrategy.SHORT_FUTURES,
         initial_capital=100000,
         leverage=1.0,

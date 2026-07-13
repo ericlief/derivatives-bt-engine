@@ -8,6 +8,7 @@ from abc import ABC, abstractmethod
 import polars as pl
 
 from options_bt.domain.enums import *
+from options_bt.domain.instruments import get_spec
 from options_bt.domain.strategy_config import MultiLegOptionStrategyConfig
 from options_bt.domain.trade_result import BaseTradeResult, OptionTradeResult, FuturesTradeResult
 from options_bt.utils.logger import setup_logger
@@ -1666,7 +1667,7 @@ class MultiLegOptionPosition(BaseOptionPosition):
 @dataclass(kw_only=True)
 class FuturesPosition(BasePosition):
     """Class representing a futures position."""
-    futures_type: FuturesType
+    futures_type: str
     futures_strategy: FuturesStrategy
 
     # No separate "underlying" price for futures (unlike options, where the
@@ -1688,17 +1689,16 @@ class FuturesPosition(BasePosition):
 
     def __post_init__(self):
         super().__post_init__()
-        if isinstance(self.futures_type, str):
-            self.futures_type = FuturesType(self.futures_type)
         if isinstance(self.futures_strategy, str):
             self.futures_strategy = FuturesStrategy(self.futures_strategy)
 
         if isinstance(self.roll_date, str):
             self.roll_date = date.fromisoformat(self.roll_date)
-        
-        # Set contract multiplier from enum based on futures_type
-        # Corrected: Access the 'multiplier' property from the enum instance
-        self.mult: float = self.futures_type.multiplier
+
+        # Contract multiplier for this symbol, from instruments.py's spec
+        # registry (no per-instrument enum -- see enums.py's FuturesStrategy
+        # comment).
+        self.mult: float = get_spec(self.futures_type)['multiplier']
 
         # Calculate initial margin if not provided
         if self.margin_required is None: # We now have initial_margin as a required attribute
@@ -1799,8 +1799,8 @@ class FuturesPosition(BasePosition):
         # For short futures, the initial margin is released.
         bp_effect += self.margin_required # Release margin
         
-        # Pass commission to pnl calculation. If None, it will use futures_type.transaction_commission
-        pnl = self.calculate_pnl(underlying_price_history=underlying_price_history, close_reason=close_reason, commission=self.futures_type.transaction_commission)
+        # Pass commission to pnl calculation. If None, it will use get_spec(futures_type)['commission']
+        pnl = self.calculate_pnl(underlying_price_history=underlying_price_history, close_reason=close_reason, commission=get_spec(self.futures_type)['commission'])
         if pnl is None:
             logger.error(f"Failed to calculate PnL for futures position {self.futures_type}")
             return None, None, None
@@ -1814,7 +1814,7 @@ class FuturesPosition(BasePosition):
             'date': effective_close_date,
             'type': 'close',
             'instrument_type': 'futures',
-            'futures_type': self.futures_type.name,
+            'futures_type': self.futures_type,
             'position_side': self.position_side.value,
             'open': self.entry_price,
             'close': self.exit_price,
@@ -1849,7 +1849,7 @@ class FuturesPosition(BasePosition):
             futures_strategy: FuturesStrategy,
             entry_date: date,
             position_side: PositionSide,
-            futures_type: FuturesType,
+            futures_type: str,
             quantity: int,
             # initial_margin: float, # Removed as it's now an attribute of FuturesPosition, derived from signal
             roll_date: date,
@@ -1864,7 +1864,8 @@ class FuturesPosition(BasePosition):
                 futures_strategy: FuturesStrategy (e.g., LONG_FUTURES)
                 entry_date: date
                 position_side: PositionSide (e.g., LONG)
-                futures_type: FuturesType (e.g., MES)
+                futures_type: str symbol (e.g., 'MES') -- looked up via
+                              instruments.get_spec, not an enum member
                 quantity: int (number of contracts)
                 initial_margin: float (initial margin requirement for one contract)
                 roll_date: date (next roll date)
@@ -1899,7 +1900,7 @@ class FuturesPosition(BasePosition):
                 futures_type=futures_type,
                 futures_strategy=futures_strategy,
                 fill_price=fill_price,
-                initial_margin=futures_type.initial_margin, # Corrected: get initial_margin from the enum instance
+                initial_margin=get_spec(futures_type)['initial_margin'],
                 roll_date=roll_date,
                 margin_required=None, # Will be calculated in post_init
             )
@@ -1928,7 +1929,7 @@ class FuturesPosition(BasePosition):
             'date': date,
             'type': 'open',
             'instrument_type': 'futures',
-            'futures_type': position.futures_type.name,
+            'futures_type': position.futures_type,
             'position_side': position.position_side.value,
             'open': position.entry_price,
             'close': None,

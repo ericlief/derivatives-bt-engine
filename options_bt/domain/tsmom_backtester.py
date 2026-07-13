@@ -27,9 +27,9 @@ from typing import Optional
 import duckdb
 import polars as pl
 
-from options_bt.domain.enums import FuturesType, TrendRegime, VolRegime
+from options_bt.domain.enums import TrendRegime, VolRegime
 from options_bt.domain.futures_dataloader import FuturesDataLoader
-from options_bt.domain.instruments import resolve_price_symbol
+from options_bt.domain.instruments import get_spec, resolve_price_symbol
 from options_bt.domain.tsmom_signal import calculate_trend_strength, classify_regime, compute_position_scalar
 from options_bt.utils.logger import setup_logger
 
@@ -185,7 +185,7 @@ def _vix_regime_at(vix: pl.DataFrame, d: date) -> tuple[VolRegime, Optional[floa
 
 
 def _compute_target(symbol: str, d: date, full_price_data: dict[str, pl.DataFrame],
-                     futures_types: dict[str, FuturesType], config: TsmomBacktestConfig,
+                     futures_types: dict[str, dict], config: TsmomBacktestConfig,
                      market_stress_scale: float) -> Optional[dict]:
     """Signal + vol-targeted sizing for one symbol as of date `d`, using
     full unbounded history for lookback. None if there isn't yet enough
@@ -229,7 +229,7 @@ def _compute_target(symbol: str, d: date, full_price_data: dict[str, pl.DataFram
         momentum_discount=config.momentum_discount,
     ) * market_stress_scale
 
-    mult = futures_types[symbol].mult
+    mult = futures_types[symbol]['multiplier']
     contract_notional = last_close * mult
     target = round((config.max_notional * scalar) / contract_notional) if contract_notional else 0
     target = max(-config.max_contracts, min(config.max_contracts, target))
@@ -256,7 +256,7 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
     # range (and what counts as a rebalance/MTM date) is bounded.
     full_price_data, vix = load_portfolio_data(config.symbols)
     vix = _compute_vix_regime_series(vix)
-    futures_types = {s: FuturesType.from_symbol(s) for s in config.symbols}
+    futures_types = {s: get_spec(s) for s in config.symbols}
 
     windowed = {}
     for symbol, df in full_price_data.items():
@@ -291,7 +291,7 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
         s = signal or {}
         prior = held_contracts[symbol]
         if target != prior:
-            fee = futures_types[symbol].commission * 2 * abs(target - prior)
+            fee = futures_types[symbol]['commission'] * 2 * abs(target - prior)
             capital -= fee
         held_contracts[symbol] = target
         events.append({
@@ -339,7 +339,7 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
                 continue
             close = row['close'][0]
             if prior_close[symbol] is not None and held_contracts[symbol] != 0:
-                capital += held_contracts[symbol] * (close - prior_close[symbol]) * futures_types[symbol].mult
+                capital += held_contracts[symbol] * (close - prior_close[symbol]) * futures_types[symbol]['multiplier']
             prior_close[symbol] = close
 
         # 2. On rebalance dates, resize toward the vol-targeted signal,

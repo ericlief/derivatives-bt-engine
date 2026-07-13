@@ -54,16 +54,27 @@ Each `INSTRUMENTS` entry carries:
 
 `BACKTEST_ONLY_SPECS` holds multiplier/margin/commission for contracts that
 exist only on the general single/multi-symbol backtest path (naked_futures.py,
-tsmom_backtester.py via FuturesType) and have never been part of the live
-TSMOM instrument universe -- see its own docstring for why this must stay a
-separate dict from INSTRUMENTS.
+tsmom_backtester.py) and have never been part of the live TSMOM instrument
+universe -- see its own docstring for why this must stay a separate dict
+from INSTRUMENTS.
+
+get_spec(symbol) is the single lookup point for a contract's multiplier/
+margin/commission -- there is no per-instrument enum (deliberately: an
+underlying instrument isn't a distinct *type*, any more than an option's
+underlying is -- OptionType is just CALL/PUT, not one member per
+underlying). FuturesStrategy (LONG_FUTURES/SHORT_FUTURES) remains the
+correct futures analog to OptionStrategy: it describes position *shape*,
+orthogonal to the traded symbol.
 
 Imported by:
-  options_bt.domain.enums.FuturesType   -- mult/margin/commission for every
-                                            member (both dicts)
+  options_bt.domain.position            -- FuturesPosition margin/mult/
+                                            commission (via get_spec)
+  options_bt.domain.strategy_config     -- FuturesStrategyConfig validation
+                                            (via known_futures_symbols)
+  options_bt.domain.futures_signal_generator -- signal margin (via get_spec)
   options_bt.live.run_tsmom_rebalance   -- live rebalancing + order execution
   options_bt.domain.tsmom_backtester    -- historical backtest (via
-                                            resolve_price_symbol)
+                                            get_spec, resolve_price_symbol)
   options_bt.strats.naked_futures       -- single-symbol backtest CLI (via
                                             resolve_price_symbol)
   scripts.tsmom_risk_budget_diagnostic  -- ERC/HRP vs cluster-cap diagnostic
@@ -151,7 +162,7 @@ INSTRUMENTS: dict[str, dict] = {
     # ── International equity ─────────────────────────────────────────────────
     # Nikkei: its own factor (Japan equity, JPY-adjacent), not lumped with
     # US equity. NKD/MNK (dollar-denominated) are a DIFFERENT contract from
-    # FuturesType's NIY (yen-denominated) -- see BACKTEST_ONLY_SPECS.
+    # BACKTEST_ONLY_SPECS' NIY (yen-denominated).
     'NKD': {'exchange': 'CME',   'multiplier': 5,          'cluster': 'intl_equity',
             'initial_margin': 43347.93, 'commission': 3.01},
     'MNK': {'exchange': 'CME',   'multiplier': 0.5,        'cluster': 'intl_equity',
@@ -176,10 +187,10 @@ INSTRUMENTS: dict[str, dict] = {
 }
 
 # ── Backtest-only contracts ─────────────────────────────────────────────────
-# Multiplier/margin/commission for FuturesType members with NO live TSMOM
+# Multiplier/margin/commission for contracts with NO live TSMOM
 # counterpart -- never part of INSTRUMENTS, never traded/analyzed by the live
 # system. Used only by ad-hoc single-symbol backtests (naked_futures.py,
-# profile_bt.py) via FuturesType.
+# profile_bt.py) via get_spec().
 #
 # MUST NEVER be merged into INSTRUMENTS or unioned into any
 # "default to every known instrument" fallback (e.g. run_tsmom_rebalance.py's
@@ -221,12 +232,44 @@ def resolve_price_symbol(symbol: str) -> str:
     multi-symbol backtests can reuse it too, not just live rebalancing.
 
     Distinct from the instrument's own contract specs (multiplier/margin/
-    commission), which always come from `symbol` itself via
-    FuturesType.from_symbol(symbol) -- e.g. MES borrows ES's price series
-    but stays sized/margined as MES, never as ES.
+    commission), which always come from `symbol` itself via get_spec(symbol)
+    -- e.g. MES borrows ES's price series but stays sized/margined as MES,
+    never as ES.
 
     Returns `symbol` unchanged for anything not in INSTRUMENTS (including
     BACKTEST_ONLY_SPECS members, which have no db-coverage gap to resolve).
     """
     instr = INSTRUMENTS.get(symbol, {})
     return instr.get('db_symbol') or instr.get('signal_symbol') or instr.get('ib_symbol') or symbol
+
+
+# get_spec()'s Globex/db ticker -> INSTRUMENTS dict key, for the 3 FX
+# symbols where they diverge (INSTRUMENTS keys by IBKR-facing ticker, not
+# the raw Globex root -- see this module's docstring, db_symbol field).
+_FX_TICKER_TO_KEY = {'6J': 'JPY', '6L': 'BRE', '6M': '6M'}
+
+
+def get_spec(symbol: str) -> dict:
+    """Full contract spec (multiplier/initial_margin/commission, plus
+    exchange/cluster/etc. if present) for `symbol` -- the single lookup
+    point for consumers that need a contract's multiplier/margin/
+    commission (FuturesPosition, FuturesStrategyConfig,
+    FuturesSignalGenerator, tsmom_backtester.py, naked_futures.py).
+    `symbol` may be the real exchange/Globex ticker (e.g. '6J') for the 3
+    FX contracts where that diverges from INSTRUMENTS' IBKR-facing key.
+
+    Raises KeyError (with the full known-symbol list) if not found --
+    callers wanting a friendlier error should validate against
+    known_futures_symbols() first."""
+    key = _FX_TICKER_TO_KEY.get(symbol.upper(), symbol.upper())
+    info = INSTRUMENTS.get(key) or BACKTEST_ONLY_SPECS.get(key)
+    if info is None:
+        raise KeyError(f"Unknown futures symbol {symbol!r}. Known: {sorted(known_futures_symbols())}")
+    return info
+
+
+def known_futures_symbols() -> set[str]:
+    """Every symbol get_spec() accepts -- INSTRUMENTS/BACKTEST_ONLY_SPECS
+    keys plus the FX Globex tickers that map to a different INSTRUMENTS
+    key (6J, 6L; 6M's Globex ticker matches its INSTRUMENTS key already)."""
+    return set(INSTRUMENTS) | set(BACKTEST_ONLY_SPECS) | set(_FX_TICKER_TO_KEY)

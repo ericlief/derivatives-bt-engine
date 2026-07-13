@@ -20,7 +20,7 @@ def parse_args():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--symbols', default='ES,NQ',
-                   help='Comma-separated futures symbols, must be defined FuturesType members (default: %(default)s)')
+                   help='Comma-separated futures symbols, must be known instruments.py symbols (default: %(default)s)')
     p.add_argument('--years', default='2015-2025',
                    help='Year range as START-END (inclusive) or a single YEAR (default: %(default)s)')
     p.add_argument('--initial-capital', type=float, default=100000)

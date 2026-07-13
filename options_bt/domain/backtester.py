@@ -468,7 +468,7 @@ class Backtester:
         if isinstance(config, MultiLegOptionStrategyConfig):
             param_str = f"{config.spread_type.value}_spread_{f'{config.legs[0].dte_range[0]}:{config.legs[0].dte_range[1]}' if config.legs[0].dte_range else config.legs[0].dte_target}_{config.start_date}:{config.end_date}"
         elif isinstance(config, FuturesStrategyConfig):
-            param_str = f"{config.futures_type.name}_{config.futures_strategy.value}_{config.start_date}:{config.end_date}"
+            param_str = f"{config.futures_type}_{config.futures_strategy.value}_{config.start_date}:{config.end_date}"
         else:
             param_str = f"{config.leg.option_type.value}_{config.leg.position_side.value}_{f'{config.leg.delta_range[0]}:{config.leg.delta_range[1]}' if config.leg.delta_range else config.leg.delta_target}_{f'{config.leg.dte_range[0]}:{config.leg.dte_range[1]}' if config.leg.dte_range else config.leg.dte_target}_{config.start_date}:{config.end_date}"
 

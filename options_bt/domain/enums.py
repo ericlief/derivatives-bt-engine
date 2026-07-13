@@ -2,8 +2,6 @@ from __future__ import annotations
 from enum import Enum
 from typing import TypedDict, Optional, Union, NamedTuple
 
-from options_bt.domain.instruments import INSTRUMENTS, BACKTEST_ONLY_SPECS
-
 class OptionType(str, Enum):
     """Option type enumeration."""
     CALL = "call"
@@ -119,98 +117,13 @@ class OptionStrategy(BaseStrategy):
     STRADDLE = "straddle"
     STRANGLE = "strangle"
 
-# FuturesType's Globex/db ticker -> INSTRUMENTS dict key, for the 3 FX
-# symbols where they diverge (INSTRUMENTS keys by IBKR-facing ticker, not
-# the raw Globex root -- see instruments.py's db_symbol field docs).
-_FX_TICKER_TO_INSTRUMENTS_KEY = {'6J': 'JPY', '6L': 'BRE', '6M': '6M'}
-
-
-def _spec(db_symbol: str) -> tuple[float, float, float]:
-    """(mult, initial_margin, commission) for one FuturesType member,
-    sourced from instruments.py's INSTRUMENTS/BACKTEST_ONLY_SPECS -- the
-    single source of truth for these numbers (see that module's docstring
-    for provenance/estimation caveats and why BACKTEST_ONLY_SPECS is a
-    separate dict). `db_symbol` is the real exchange ticker (e.g. '6J'),
-    mapped to its INSTRUMENTS key where they diverge."""
-    key = _FX_TICKER_TO_INSTRUMENTS_KEY.get(db_symbol, db_symbol)
-    info = INSTRUMENTS.get(key) or BACKTEST_ONLY_SPECS[key]
-    return (info['multiplier'], info['initial_margin'], info['commission'])
-
-
-class FuturesType(Enum):
-    """Futures contract type enumeration, with associated properties.
-    Multiplier/margin/commission values live in instruments.py (see
-    _spec() above and that module's docstring), not here."""
-    MES = _spec('MES') # Micro E-mini S&P 500
-    ES = _spec('ES') # E-mini S&P 500
-    MNQ = _spec('MNQ') # Micro E-mini Nasdaq-100
-    NQ = _spec('NQ') # E-mini Nasdaq-100
-    MYM = _spec('MYM') # Micro E-mini Dow
-    YM = _spec('YM') # E-mini Dow
-    M2K = _spec('M2K') # Micro E-mini Russell 2000
-    RTY = _spec('RTY') # E-mini Russell 2000
-    ZN = _spec('ZN') # 10-Year T-Note (CBOT)
-    TN = _spec('TN') # Ultra 10-Year T-Note (CBOT)
-    MTN = _spec('MTN') # Micro 10-Year T-Note (CBOT)
-    ZT = _spec('ZT') # 2-Year T-Note (CBOT)
-    GC = _spec('GC') # Gold (COMEX)
-    SI = _spec('SI') # Silver (COMEX)
-    SIL = _spec('SIL') # Micro Silver (COMEX) -- 1/5 SI's multiplier; no
-                        # separate IBKR ticker or db history of its own,
-                        # borrows SI's via the ib_symbol fallback in
-                        # instruments.py's resolve_price_symbol/
-                        # resolve_signal_symbol.
-    CL = _spec('CL') # Crude Oil (NYMEX)
-    ZL = _spec('ZL') # Soybean Oil (CBOT)
-    ZC = _spec('ZC') # Corn (CBOT)
-    ZS = _spec('ZS') # Soybeans (CBOT)
-    ZW = _spec('ZW') # Wheat (CBOT)
-    NIY = _spec('NIY') # Nikkei 225 Yen-denominated (CME) -- JPY-denominated
-                        # (Y500/point); this codebase's PnL math has no FX
-                        # conversion, so PnL comes out in JPY, not USD,
-                        # unless that's added separately.
-    # Python identifiers can't start with a digit, so the FX futures whose
-    # actual exchange ticker starts with one (6J, 6L, 6M) are named with a
-    # leading underscore here -- use FuturesType.from_symbol('6J') to look
-    # them up by their real ticker rather than FuturesType['6J'] (invalid).
-    _6J = _spec('6J') # Japanese Yen (CME)
-    _6L = _spec('6L') # Brazilian Real (CME)
-    _6M = _spec('6M') # Mexican Peso (CME)
-    # SOX: not added, see instruments.py's BACKTEST_ONLY_SPECS docstring.
-
-    def __new__(cls, mult: float, initial_margin: float, commission: float):
-        obj = object.__new__(cls)
-        # _value_ must be unique per member or Python's Enum silently turns
-        # same-valued members into aliases of each other (e.g. ES/RTY/ZC/ZS/ZW
-        # all have mult=50 -- using just `mult` here collapsed them into one).
-        # The full tuple is unique across every member defined below.
-        obj._value_ = (mult, initial_margin, commission)
-        obj.mult = mult
-        obj.initial_margin = initial_margin
-        obj.commission = commission
-        return obj
-
-    @classmethod
-    def from_symbol(cls, symbol: str) -> 'FuturesType':
-        """Look up by the actual exchange ticker (e.g. '6J'), handling the
-        leading-underscore workaround for tickers Python can't name directly."""
-        name = symbol.upper()
-        if name[0].isdigit():
-            name = f'_{name}'
-        return cls[name]
-
-    @property
-    def multiplier(self) -> float:
-        return self.mult
-
-    @property
-    def margin_required(self) -> float:
-        return self.initial_margin
-    
-    @property
-    def transaction_commission(self) -> float:
-        return self.commission
-
+# Futures contracts are not modeled as an enum-per-instrument (there used
+# to be a FuturesType here) -- an underlying instrument isn't a distinct
+# *type* any more than an option's underlying is (OptionType above is just
+# CALL/PUT, not one member per underlying). Contract specs (multiplier/
+# margin/commission) are looked up by plain symbol string via
+# options_bt.domain.instruments.get_spec(symbol); known_futures_symbols()
+# is the membership check for validation.
 class FuturesStrategy(BaseStrategy):
     """Futures strategy type enumeration."""
     LONG_FUTURES = "long_futures"  

@@ -12,7 +12,7 @@ import os
 import polars as pl
 
 from options_bt.domain.backtester import Backtester
-from options_bt.domain.enums import FuturesStrategy, FuturesType
+from options_bt.domain.enums import FuturesStrategy
 from options_bt.domain.futures_dataloader import FuturesDataLoader
 from options_bt.domain.instruments import resolve_price_symbol
 from options_bt.domain.strategy_config import FuturesStrategyConfig
@@ -31,7 +31,7 @@ def parse_args():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--symbol', default='ES',
-                   help='Futures symbol, must be a defined FuturesType member (default: %(default)s)')
+                   help='Futures symbol, must be a known instruments.py symbol (default: %(default)s)')
     p.add_argument('--dir', choices=['long', 'short'], default='long',
                    help='Position direction/side (default: %(default)s)')
     p.add_argument('--years', default='2025-2026',
@@ -47,11 +47,6 @@ def main():
     args = parse_args()
 
     symbol = args.symbol.upper()
-    try:
-        futures_type = FuturesType.from_symbol(symbol)
-    except KeyError:
-        raise ValueError(f"Unknown futures symbol {symbol!r}. Defined types: {[t.name for t in FuturesType]}")
-
     futures_strategy = FuturesStrategy.LONG_FUTURES if args.dir == 'long' else FuturesStrategy.SHORT_FUTURES
 
     parts = args.years.split('-')
@@ -77,8 +72,10 @@ def main():
     # price_symbol: some micros (MES, MNQ, MTN, ...) have no db history under
     # their own symbol -- resolve_price_symbol borrows the full-size
     # sibling's (ES, NQ, ZN, ...) via instruments.py's db_symbol field.
-    # futures_type above stays on the raw traded `symbol`, so sizing/margin/
-    # PnL are still MES-scaled, never ES-scaled.
+    # `symbol` itself (used as futures_type below) stays the raw traded
+    # ticker, so sizing/margin/PnL are still MES-scaled, never ES-scaled.
+    # FuturesStrategyConfig.__post_init__ validates `symbol` against
+    # instruments.known_futures_symbols() -- no separate check needed here.
     price_symbol = resolve_price_symbol(symbol)
     if price_symbol != symbol:
         logger.info(f"{symbol}: no db history under its own symbol -- borrowing {price_symbol}'s continuous price history")
@@ -87,7 +84,7 @@ def main():
 
     config = FuturesStrategyConfig(
         quantity=args.quantity,
-        futures_type=futures_type,
+        futures_type=symbol,
         futures_strategy=futures_strategy,
         initial_capital=args.initial_capital,
         leverage=args.leverage,

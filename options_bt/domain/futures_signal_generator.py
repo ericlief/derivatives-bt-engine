@@ -6,7 +6,8 @@ from typing import List
 import polars as pl
 
 from options_bt.domain.base_signal_generator import BaseSignalGenerator
-from options_bt.domain.enums import FuturesStrategy, FuturesType, PositionSide
+from options_bt.domain.enums import FuturesStrategy, PositionSide
+from options_bt.domain.instruments import get_spec, known_futures_symbols
 from options_bt.domain.strategy_config import FuturesStrategyConfig
 from options_bt.utils.logger import setup_logger
 
@@ -33,17 +34,17 @@ class FuturesSignalGenerator(BaseSignalGenerator):
 
     def generate_futures_signals(
         self,
-        futures_type: FuturesType,
+        futures_type: str,
         position_side: PositionSide,
         futures_strategy: FuturesStrategy,
         start_date,
         end_date,
     ) -> pl.DataFrame:
         """Generate trade signals for futures positions."""
-        logger.info(f"Generating {self.config.futures_type.name} futures signals...")
+        logger.info(f"Generating {self.config.futures_type} futures signals...")
 
-        if not isinstance(futures_type, FuturesType):
-            raise ValueError(f"Invalid futures type. Supported types are: {[t.name for t in FuturesType]}")
+        if futures_type not in known_futures_symbols():
+            raise ValueError(f"Invalid futures type. Supported types are: {sorted(known_futures_symbols())}")
 
         if futures_strategy not in [FuturesStrategy.LONG_FUTURES, FuturesStrategy.SHORT_FUTURES]:
             raise ValueError("Invalid futures strategy. Supported strategies are: long futures, short futures")
@@ -81,7 +82,7 @@ class FuturesSignalGenerator(BaseSignalGenerator):
         signals = underlying.join_asof(roll_dates_df, left_on='_roll_join_key', right_on='roll_date', strategy='forward')
         signals = signals.drop('_roll_join_key')
         signals = signals.filter(pl.col('roll_date').is_not_null())
-        signals = signals.with_columns(pl.lit(self.config.futures_type.margin_required).alias('initial_margin'))
+        signals = signals.with_columns(pl.lit(get_spec(self.config.futures_type)['initial_margin']).alias('initial_margin'))
 
         logger.info(f'Generated {len(signals)} future signals:\n {signals.head(40)}')
 

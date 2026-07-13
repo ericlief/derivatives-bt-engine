@@ -37,7 +37,7 @@ def run_test_suite():
         FuturesStrategyConfig(
 
             quantity=1,
-            futures_type=FuturesType.MES,
+            futures_type='MES',
             futures_strategy=FuturesStrategy.LONG_FUTURES,
             initial_capital=100000,
             leverage=1.0,

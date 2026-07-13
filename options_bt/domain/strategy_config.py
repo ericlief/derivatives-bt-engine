@@ -2,6 +2,7 @@ from options_bt.domain.enums import *
 from dataclasses import dataclass
 from typing import Optional, List, Dict
 from abc import ABC, abstractmethod
+from options_bt.domain.instruments import known_futures_symbols
 from options_bt.domain.option_leg_config import OptionLegConfig
 from typing import List
 from typing import Optional, Tuple
@@ -121,7 +122,7 @@ class MultiLegOptionStrategyConfig(BaseOptionStrategyConfig):
 @dataclass(kw_only=True)    
 class FuturesStrategyConfig(BaseStrategyConfig):
 
-    futures_type: FuturesType
+    futures_type: str
     futures_strategy: FuturesStrategy
     # Fill price model for entry/exit, since there's no bid/ask in the daily
     # OHLCV data this is sourced from: 'close' (the day's settlement price,
@@ -130,8 +131,8 @@ class FuturesStrategyConfig(BaseStrategyConfig):
     fill_price: str = 'close'
 
     def __post_init__(self):
-        if not isinstance(self.futures_type, FuturesType):
-            raise ValueError(f"Invalid futures type. Supported types are: {[t.name for t in FuturesType]}")
+        if self.futures_type not in known_futures_symbols():
+            raise ValueError(f"Invalid futures type. Supported types are: {sorted(known_futures_symbols())}")
 
         if self.futures_strategy not in [FuturesStrategy.LONG_FUTURES, FuturesStrategy.SHORT_FUTURES]:
             raise ValueError("Invalid futures strategy. Supported strategies are: long futures, short futures")

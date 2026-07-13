@@ -12,6 +12,7 @@ import polars as pl
 import pytest
 
 from options_bt.domain import tsmom_backtester as tb
+from options_bt.domain.instruments import get_spec
 from options_bt.domain.tsmom_backtester import (
     TsmomBacktestConfig,
     check_vol_regime,
@@ -105,7 +106,7 @@ def test_seeds_position_from_last_month_end_before_start_date(monkeypatch):
     price_data = {'X': _price_df(date(2018, 1, 1), 460, drift=0.0015, vol=0.005, seed=1)}
     vix = _vix_df(date(2018, 1, 1), 460, level=15.0)
     _patch_data(monkeypatch, price_data, vix)
-    monkeypatch.setattr(tb.FuturesType, 'from_symbol', staticmethod(lambda s: tb.FuturesType.ES))
+    monkeypatch.setattr(tb, 'get_spec', lambda s: get_spec('ES'))
 
     all_dates = sorted(price_data['X']['ts_event'].to_list())
     start_date = all_dates[-30]  # well past the 64-bar minimum, comfortably inside the series
@@ -133,7 +134,7 @@ def test_long_uptrend_produces_long_position(monkeypatch):
     _patch_data(monkeypatch, price_data, vix)
 
     config = TsmomBacktestConfig(symbols=['X'], max_notional=50_000, max_contracts=5)
-    monkeypatch.setattr(tb.FuturesType, 'from_symbol', staticmethod(lambda s: tb.FuturesType.ES))
+    monkeypatch.setattr(tb, 'get_spec', lambda s: get_spec('ES'))
 
     result = run_tsmom_backtest(config)
     later_events = [e for e in result['events'] if e['target_contracts'] is not None][-5:]
@@ -146,7 +147,7 @@ def test_portfolio_capital_aggregates_across_symbols(monkeypatch):
     price_data = {'A': a, 'B': b}
     vix = _vix_df(date(2018, 1, 1), 400, level=15.0)
     _patch_data(monkeypatch, price_data, vix)
-    monkeypatch.setattr(tb.FuturesType, 'from_symbol', staticmethod(lambda s: tb.FuturesType.ES))
+    monkeypatch.setattr(tb, 'get_spec', lambda s: get_spec('ES'))
 
     config_ab = TsmomBacktestConfig(symbols=['A', 'B'], max_notional=50_000, max_contracts=5)
     result_ab = run_tsmom_backtest(config_ab)
@@ -176,7 +177,7 @@ def test_vix_spike_holds_positions_unchanged(monkeypatch):
     spike_vix = _vix_df(base_vix['date'][-1] + timedelta(days=1), 5, level=25.0)
     vix = pl.concat([base_vix, spike_vix])
     _patch_data(monkeypatch, price_data, vix)
-    monkeypatch.setattr(tb.FuturesType, 'from_symbol', staticmethod(lambda s: tb.FuturesType.ES))
+    monkeypatch.setattr(tb, 'get_spec', lambda s: get_spec('ES'))
 
     config = TsmomBacktestConfig(symbols=['X'], max_notional=50_000, max_contracts=5)
     result = run_tsmom_backtest(config)
@@ -199,7 +200,7 @@ def test_vix_extreme_halves_positions(monkeypatch):
     spike_vix = _vix_df(base_vix['date'][-1] + timedelta(days=1), 5, level=35.0)
     vix = pl.concat([base_vix, spike_vix])
     _patch_data(monkeypatch, price_data, vix)
-    monkeypatch.setattr(tb.FuturesType, 'from_symbol', staticmethod(lambda s: tb.FuturesType.ES))
+    monkeypatch.setattr(tb, 'get_spec', lambda s: get_spec('ES'))
 
     config = TsmomBacktestConfig(symbols=['X'], max_notional=50_000, max_contracts=5)
     result = run_tsmom_backtest(config)
