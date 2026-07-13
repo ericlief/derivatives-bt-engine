@@ -50,7 +50,7 @@ def validate_delta(signals, config):
 
     # Check Single legs
     if isinstance(config, SingleLegOptionStrategyConfig):
-        is_put = OptionType.is_put(config.leg.option_type)      
+        is_put = OptionsType.is_put(config.leg.option_type)      
         delta_col = 'p_delta' if is_put else 'c_delta'
     
         # Check delta target
@@ -97,7 +97,7 @@ def test_signals_single_leg_targets(setup):
 
     config = SingleLegOptionStrategyConfig(
             quantity=1,
-            option_strategy=OptionStrategy.LONG_CALL,
+            option_strategy=OptionsStrategy.LONG_CALL,
             initial_capital=100000,
             leverage=1.0,
             start_date="2023-01-01",
@@ -107,7 +107,7 @@ def test_signals_single_leg_targets(setup):
             max_positions=5,
             # Define the leg of the strategy
             leg=OptionLegConfig(
-                option_type=OptionType.CALL,
+                option_type=OptionsType.CALL,
                 position_side=PositionSide.LONG,
                 delta_target=0.30,
                 dte_target=30,
@@ -120,7 +120,7 @@ def test_signals_single_leg_targets(setup):
 
     config = SingleLegOptionStrategyConfig(
             quantity=1,
-            option_strategy=OptionStrategy.SHORT_PUT,
+            option_strategy=OptionsStrategy.SHORT_PUT,
             initial_capital=100000,
             leverage=1.0,
             start_date="2023-01-01",
@@ -130,7 +130,7 @@ def test_signals_single_leg_targets(setup):
             max_positions=5,
             # Define the leg of the strategy
             leg=OptionLegConfig(
-                option_type=OptionType.PUT,
+                option_type=OptionsType.PUT,
                 position_side=PositionSide.SHORT,
                 delta_target=0.30,
                 dte_target=30,
@@ -149,7 +149,7 @@ def test_signals_single_leg_ranges(setup):
     # Test call
     config = SingleLegOptionStrategyConfig(
             quantity=1,
-            option_strategy=OptionStrategy.LONG_CALL,
+            option_strategy=OptionsStrategy.LONG_CALL,
             initial_capital=100000,
             leverage=1.0,
             start_date="2023-01-01",
@@ -159,7 +159,7 @@ def test_signals_single_leg_ranges(setup):
             max_positions=5,
             # Define the leg of the strategy
             leg=OptionLegConfig(
-                option_type=OptionType.CALL,
+                option_type=OptionsType.CALL,
                 position_side=PositionSide.LONG,
                 delta_range=(0.25, 0.35),
                 dte_range=(30, 35)
@@ -173,7 +173,7 @@ def test_signals_single_leg_ranges(setup):
     # Test put
     config = SingleLegOptionStrategyConfig(
             quantity=1,
-            option_strategy=OptionStrategy.SHORT_PUT,
+            option_strategy=OptionsStrategy.SHORT_PUT,
             initial_capital=100000,
             leverage=1.0,
             start_date="2023-01-01",
@@ -183,7 +183,7 @@ def test_signals_single_leg_ranges(setup):
             max_positions=5,
             # Define the leg of the strategy
             leg=OptionLegConfig(
-                option_type=OptionType.PUT,
+                option_type=OptionsType.PUT,
                 position_side=PositionSide.SHORT,
                 delta_range=(0.25, 0.35),
                 dte_range=(30, 35)

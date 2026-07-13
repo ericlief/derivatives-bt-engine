@@ -43,7 +43,7 @@ def make_bull_put_config(combo, start_date, end_date):
     return MultiLegOptionStrategyConfig(
         quantity=1,
         multiplier=100,
-        option_strategy=OptionStrategy.BULL_PUT_CREDIT_SPREAD,
+        option_strategy=OptionsStrategy.BULL_PUT_CREDIT_SPREAD,
         spread_type=OptionSpreadType.VERTICAL,
         initial_capital=100000,
         leverage=1.0,
@@ -63,14 +63,14 @@ def make_bull_put_config(combo, start_date, end_date):
         # premium_ratio=0.33,
         legs=[
             OptionLegConfig(
-                option_type=OptionType.PUT,
+                option_type=OptionsType.PUT,
                 position_side=PositionSide.SHORT,
                 delta_target=combo['short_delta_target'],
                 dte_target=dte_target,
                 dte_range=dte_range,  # harmless if None
             ),
             OptionLegConfig(
-                option_type=OptionType.PUT,
+                option_type=OptionsType.PUT,
                 position_side=PositionSide.LONG,
                 dte_target=dte_target,
                 dte_range=dte_range,

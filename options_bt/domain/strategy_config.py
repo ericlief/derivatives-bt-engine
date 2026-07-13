@@ -23,7 +23,7 @@ class BaseStrategyConfig(ABC):
     
 @dataclass(kw_only=True)
 class BaseOptionStrategyConfig(BaseStrategyConfig, ABC):
-    option_strategy: OptionStrategy
+    option_strategy: OptionsStrategy
     use_underlying_close: bool = False
     early_close_after_dit: Optional[int] = None
     early_close_on_dte: Optional[int] = None
@@ -47,17 +47,17 @@ class SingleLegOptionStrategyConfig(BaseOptionStrategyConfig):
         SHORT_CALL = "short_call"
         LONG_CALL = "long_call"
         """
-        if self.option_strategy == OptionStrategy.LONG_CALL:
-            if self.leg.option_type != OptionType.CALL or self.leg.position_side != PositionSide.LONG:
+        if self.option_strategy == OptionsStrategy.LONG_CALL:
+            if self.leg.option_type != OptionsType.CALL or self.leg.position_side != PositionSide.LONG:
                 raise ValueError(f"Option strategy {self.option_strategy} requires one long call leg")
-        elif self.option_strategy == OptionStrategy.LONG_PUT:
-            if self.leg.option_type != OptionType.PUT or self.leg.position_side != PositionSide.LONG:
+        elif self.option_strategy == OptionsStrategy.LONG_PUT:
+            if self.leg.option_type != OptionsType.PUT or self.leg.position_side != PositionSide.LONG:
                 raise ValueError(f"Option strategy {self.option_strategy} requires one long put leg")
-        elif self.option_strategy == OptionStrategy.SHORT_CALL:
-            if self.leg.option_type != OptionType.CALL or self.leg.position_side != PositionSide.SHORT:
+        elif self.option_strategy == OptionsStrategy.SHORT_CALL:
+            if self.leg.option_type != OptionsType.CALL or self.leg.position_side != PositionSide.SHORT:
                 raise ValueError(f"Option strategy {self.option_strategy} requires one short call leg")        
-        elif self.option_strategy == OptionStrategy.SHORT_PUT:
-            if self.leg.option_type != OptionType.PUT or self.leg.position_side != PositionSide.SHORT:
+        elif self.option_strategy == OptionsStrategy.SHORT_PUT:
+            if self.leg.option_type != OptionsType.PUT or self.leg.position_side != PositionSide.SHORT:
                 raise ValueError(f"Option strategy {self.option_strategy} requires one short put leg")
         else:
             raise ValueError("Unknown single-leg option strategy")

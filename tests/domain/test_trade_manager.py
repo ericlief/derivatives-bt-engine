@@ -28,8 +28,8 @@ def setup(mock_data):
 
 
 def basic_filter_signals(config, signals: pl.DataFrame) -> pl.DataFrame:
-    bid_col = 'c_bid' if OptionType.is_call(config.leg.option_type) else 'p_bid'
-    ask_col = 'c_ask' if OptionType.is_call(config.leg.option_type) else 'p_ask'
+    bid_col = 'c_bid' if OptionsType.is_call(config.leg.option_type) else 'p_bid'
+    ask_col = 'c_ask' if OptionsType.is_call(config.leg.option_type) else 'p_ask'
 
     signals = signals.with_columns(
         pl.struct([bid_col, ask_col]).map_elements(
@@ -81,7 +81,7 @@ def validate_results(tm: TradeManager, results: dict) -> None:
 def test_construct_trades_long_call(setup):
     config = SingleLegOptionStrategyConfig(
         quantity=1,
-        option_strategy=OptionStrategy.LONG_CALL,
+        option_strategy=OptionsStrategy.LONG_CALL,
         initial_capital=100000,
         leverage=1.0,
         start_date="2023-01-01",
@@ -90,7 +90,7 @@ def test_construct_trades_long_call(setup):
         max_margin_utilization=0.80,
         max_positions=5,
         leg=OptionLegConfig(
-            option_type=OptionType.CALL,
+            option_type=OptionsType.CALL,
             position_side=PositionSide.LONG,
             delta_target=0.30,
             dte_target=30,
@@ -108,7 +108,7 @@ def test_construct_trades_long_call(setup):
 def test_construct_trades_short_call(setup):
     config = SingleLegOptionStrategyConfig(
         quantity=1,
-        option_strategy=OptionStrategy.SHORT_CALL,
+        option_strategy=OptionsStrategy.SHORT_CALL,
         initial_capital=100000,
         leverage=1.0,
         start_date="2023-01-01",
@@ -117,7 +117,7 @@ def test_construct_trades_short_call(setup):
         max_margin_utilization=0.80,
         max_positions=5,
         leg=OptionLegConfig(
-            option_type=OptionType.CALL,
+            option_type=OptionsType.CALL,
             position_side=PositionSide.SHORT,
             delta_target=0.30,
             dte_target=30,

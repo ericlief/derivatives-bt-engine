@@ -11,7 +11,7 @@ import numpy as np
 
 import logging
 
-from options_bt.domain.enums import OptionType, PositionSide
+from options_bt.domain.enums import OptionsType, PositionSide
 from options_bt.domain.strategy_config import SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig
 from options_bt.utils.logger import setup_logger
 

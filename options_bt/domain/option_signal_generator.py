@@ -50,7 +50,7 @@ class OptionSignalGenerator(BaseSignalGenerator):
 
     def generate_single_leg_signals(
         self,
-        option_type: OptionType,
+        option_type: OptionsType,
         position_side: PositionSide,
         delta_target: Optional[float] = None,
         delta_range: Optional[Tuple[float, float]] = None,
@@ -92,7 +92,7 @@ class OptionSignalGenerator(BaseSignalGenerator):
 
     def _generate_single_leg_signals_pl(
         self,
-        option_type: OptionType,
+        option_type: OptionsType,
         position_side: PositionSide,
         delta_target: Optional[float] = None,
         delta_range: Optional[Tuple[float, float]] = None,
@@ -114,7 +114,7 @@ class OptionSignalGenerator(BaseSignalGenerator):
         logger.debug(f'Sample chain of length: {chain.height}')
 
         # Remove columns that are not needed
-        is_put = OptionType.is_put(option_type)
+        is_put = OptionsType.is_put(option_type)
         prefix = 'p_' if is_put else 'c_'
         needed_cols = [col for col in chain.columns if col.startswith(prefix)]
         needed_cols.extend(['date', 'strike', 'dte', 'underlying_last', 'expire_date'])
@@ -230,7 +230,7 @@ class OptionSignalGenerator(BaseSignalGenerator):
         out-of-the-money -- used in place of delta-based selection when
         MultiLegOptionStrategyConfig.use_spread_width is set.
         """
-        is_put = OptionType.is_put(leg_config.option_type)
+        is_put = OptionsType.is_put(leg_config.option_type)
         prefix = 'p_' if is_put else 'c_'
         direction = -1 if is_put else 1  # further OTM: lower strike for puts, higher for calls
 
@@ -391,10 +391,10 @@ class OptionSignalGenerator(BaseSignalGenerator):
             paired = paired.filter(pl.col('leg1_strike') != pl.col('leg2_strike'))
 
             # For put vertical spreads, leg1 strike should be higher than leg2 strike for a credit spread
-            if OptionType.is_put(leg1_option_type) and PositionSide.is_short(leg1_position_side):
+            if OptionsType.is_put(leg1_option_type) and PositionSide.is_short(leg1_position_side):
                 paired = paired.filter(pl.col('leg1_strike') > pl.col('leg2_strike'))
             # For call vertical spreads, leg1 strike should be lower than leg2 strike for a credit spread
-            elif OptionType.is_call(leg1_option_type) and PositionSide.is_short(leg1_position_side):
+            elif OptionsType.is_call(leg1_option_type) and PositionSide.is_short(leg1_position_side):
                 paired = paired.filter(pl.col('leg1_strike') < pl.col('leg2_strike'))
 
         paired = paired.with_columns([
@@ -408,10 +408,10 @@ class OptionSignalGenerator(BaseSignalGenerator):
             if paired.height < before:
                 logger.info(f"Filtered out {before - paired.height} spreads due to excessive width (> {self.config.max_spread_width} points)")
 
-        leg1_bid = 'leg1_p_bid' if OptionType.is_put(leg1_option_type) else 'leg1_c_bid'
-        leg1_ask = 'leg1_p_ask' if OptionType.is_put(leg1_option_type) else 'leg1_c_ask'
-        leg2_bid = 'leg2_p_bid' if OptionType.is_put(leg2_option_type) else 'leg2_c_bid'
-        leg2_ask = 'leg2_p_ask' if OptionType.is_put(leg2_option_type) else 'leg2_c_ask'
+        leg1_bid = 'leg1_p_bid' if OptionsType.is_put(leg1_option_type) else 'leg1_c_bid'
+        leg1_ask = 'leg1_p_ask' if OptionsType.is_put(leg1_option_type) else 'leg1_c_ask'
+        leg2_bid = 'leg2_p_bid' if OptionsType.is_put(leg2_option_type) else 'leg2_c_bid'
+        leg2_ask = 'leg2_p_ask' if OptionsType.is_put(leg2_option_type) else 'leg2_c_ask'
         paired = paired.with_columns([
             ((pl.col(leg1_bid) + pl.col(leg1_ask)) / 2).alias('leg1_price'),
             ((pl.col(leg2_bid) + pl.col(leg2_ask)) / 2).alias('leg2_price'),
@@ -422,7 +422,7 @@ class OptionSignalGenerator(BaseSignalGenerator):
         paired = paired.with_columns((side1 * pl.col('leg1_price') + side2 * pl.col('leg2_price')).alias('spread_price'))
 
         # Validate sign of premium (debit or credit) for vertical
-        is_credit_spread = self.config.option_strategy in [OptionStrategy.BEAR_CALL_CREDIT_SPREAD, OptionStrategy.BULL_PUT_CREDIT_SPREAD]
+        is_credit_spread = self.config.option_strategy in [OptionsStrategy.BEAR_CALL_CREDIT_SPREAD, OptionsStrategy.BULL_PUT_CREDIT_SPREAD]
         before = paired.height
         if is_credit_spread:
             paired = paired.filter(pl.col('spread_price') > 0)
@@ -468,10 +468,10 @@ class OptionSignalGenerator(BaseSignalGenerator):
             (pl.col('leg2_expire_date') - pl.col('leg1_expire_date')).dt.total_days().alias('time_width'),
         ])
 
-        leg1_bid = 'leg1_p_bid' if OptionType.is_put(leg1_option_type) else 'leg1_c_bid'
-        leg1_ask = 'leg1_p_ask' if OptionType.is_put(leg1_option_type) else 'leg1_c_ask'
-        leg2_bid = 'leg2_p_bid' if OptionType.is_put(leg2_option_type) else 'leg2_c_bid'
-        leg2_ask = 'leg2_p_ask' if OptionType.is_put(leg2_option_type) else 'leg2_c_ask'
+        leg1_bid = 'leg1_p_bid' if OptionsType.is_put(leg1_option_type) else 'leg1_c_bid'
+        leg1_ask = 'leg1_p_ask' if OptionsType.is_put(leg1_option_type) else 'leg1_c_ask'
+        leg2_bid = 'leg2_p_bid' if OptionsType.is_put(leg2_option_type) else 'leg2_c_bid'
+        leg2_ask = 'leg2_p_ask' if OptionsType.is_put(leg2_option_type) else 'leg2_c_ask'
         paired = paired.with_columns([
             ((pl.col(leg1_bid) + pl.col(leg1_ask)) / 2).alias('leg1_price'),
             ((pl.col(leg2_bid) + pl.col(leg2_ask)) / 2).alias('leg2_price'),
@@ -522,10 +522,10 @@ class OptionSignalGenerator(BaseSignalGenerator):
             if paired.height < before:
                 logger.info(f"Filtered out {before - paired.height} diagonal spreads due to excessive strike width (> {self.config.max_spread_width} points)")
 
-        leg1_bid = 'leg1_p_bid' if OptionType.is_put(leg1_option_type) else 'leg1_c_bid'
-        leg1_ask = 'leg1_p_ask' if OptionType.is_put(leg1_option_type) else 'leg1_c_ask'
-        leg2_bid = 'leg2_p_bid' if OptionType.is_put(leg2_option_type) else 'leg2_c_bid'
-        leg2_ask = 'leg2_p_ask' if OptionType.is_put(leg2_option_type) else 'leg2_c_ask'
+        leg1_bid = 'leg1_p_bid' if OptionsType.is_put(leg1_option_type) else 'leg1_c_bid'
+        leg1_ask = 'leg1_p_ask' if OptionsType.is_put(leg1_option_type) else 'leg1_c_ask'
+        leg2_bid = 'leg2_p_bid' if OptionsType.is_put(leg2_option_type) else 'leg2_c_bid'
+        leg2_ask = 'leg2_p_ask' if OptionsType.is_put(leg2_option_type) else 'leg2_c_ask'
         paired = paired.with_columns([
             ((pl.col(leg1_bid) + pl.col(leg1_ask)) / 2).alias('leg1_price'),
             ((pl.col(leg2_bid) + pl.col(leg2_ask)) / 2).alias('leg2_price'),
@@ -579,12 +579,12 @@ class OptionSignalGenerator(BaseSignalGenerator):
             pl.col('diff1').alias('wing_width'),
         ])
 
-        leg1_bid = 'leg1_p_bid' if OptionType.is_put(leg1_option_type) else 'leg1_c_bid'
-        leg1_ask = 'leg1_p_ask' if OptionType.is_put(leg1_option_type) else 'leg1_c_ask'
-        leg2_bid = 'leg2_p_bid' if OptionType.is_put(leg2_option_type) else 'leg2_c_bid'
-        leg2_ask = 'leg2_p_ask' if OptionType.is_put(leg2_option_type) else 'leg2_c_ask'
-        leg3_bid = 'leg3_p_bid' if OptionType.is_put(leg3_option_type) else 'leg3_c_bid'
-        leg3_ask = 'leg3_p_ask' if OptionType.is_put(leg3_option_type) else 'leg3_c_ask'
+        leg1_bid = 'leg1_p_bid' if OptionsType.is_put(leg1_option_type) else 'leg1_c_bid'
+        leg1_ask = 'leg1_p_ask' if OptionsType.is_put(leg1_option_type) else 'leg1_c_ask'
+        leg2_bid = 'leg2_p_bid' if OptionsType.is_put(leg2_option_type) else 'leg2_c_bid'
+        leg2_ask = 'leg2_p_ask' if OptionsType.is_put(leg2_option_type) else 'leg2_c_ask'
+        leg3_bid = 'leg3_p_bid' if OptionsType.is_put(leg3_option_type) else 'leg3_c_bid'
+        leg3_ask = 'leg3_p_ask' if OptionsType.is_put(leg3_option_type) else 'leg3_c_ask'
         paired = paired.with_columns([
             ((pl.col(leg1_bid) + pl.col(leg1_ask)) / 2).alias('leg1_price'),
             ((pl.col(leg2_bid) + pl.col(leg2_ask)) / 2).alias('leg2_price'),

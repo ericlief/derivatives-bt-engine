@@ -1,11 +1,11 @@
 from dataclasses import dataclass
 from typing import Optional
-from options_bt.domain.enums import OptionType, PositionSide
+from options_bt.domain.enums import OptionsType, PositionSide
 from typing import Tuple
 
 @dataclass
 class OptionLegConfig:
-    option_type: OptionType
+    option_type: OptionsType
     position_side: PositionSide
     delta_target: Optional[float] = None
     delta_range: Optional[Tuple[float, float]] = None

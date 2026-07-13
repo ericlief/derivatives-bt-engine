@@ -208,12 +208,12 @@ class Backtester:
                 else:
                     logger.info('Calculating margin requirements for multileg position')
                     original_count = signals.height
-                    if config.option_strategy in [OptionStrategy.BULL_PUT_CREDIT_SPREAD, OptionStrategy.BEAR_CALL_CREDIT_SPREAD, OptionStrategy.IRON_CONDOR]:
+                    if config.option_strategy in [OptionsStrategy.BULL_PUT_CREDIT_SPREAD, OptionsStrategy.BEAR_CALL_CREDIT_SPREAD, OptionsStrategy.IRON_CONDOR]:
                         # For credit spreads: max loss = (spread_width - credit) * 100 * qty
                         signals = signals.with_columns(
                             ((pl.col('spread_width') - pl.col('spread_price').clip(lower_bound=0)) * config.quantity * config.multiplier).alias('margin_required')
                         )
-                    elif config.option_strategy in [OptionStrategy.BULL_CALL_DEBIT_SPREAD, OptionStrategy.BEAR_PUT_DEBIT_SPREAD]:
+                    elif config.option_strategy in [OptionsStrategy.BULL_CALL_DEBIT_SPREAD, OptionsStrategy.BEAR_PUT_DEBIT_SPREAD]:
                         signals = signals.with_columns(
                             (pl.col('spread_price').abs() * config.quantity * config.multiplier).alias('margin_required')
                         )
@@ -937,9 +937,9 @@ class Backtester:
         chain_calls = option_chain.select(['date', 'strike', 'expire_date',
                                             pl.col('c_bid').alias('bid'), pl.col('c_ask').alias('ask')])
 
-        put_legs = legs.filter(pl.col('option_type') == OptionType.PUT.value).join(
+        put_legs = legs.filter(pl.col('option_type') == OptionsType.PUT.value).join(
             chain_puts, on=['date', 'strike', 'expire_date'], how='left')
-        call_legs = legs.filter(pl.col('option_type') == OptionType.CALL.value).join(
+        call_legs = legs.filter(pl.col('option_type') == OptionsType.CALL.value).join(
             chain_calls, on=['date', 'strike', 'expire_date'], how='left')
         legs_priced = pl.concat([put_legs, call_legs], how='diagonal_relaxed').sort(['leg_id', 'date'])
 

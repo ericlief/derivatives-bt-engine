@@ -26,7 +26,7 @@ def make_iron_condor_config(combo, start_date, end_date):
     return MultiLegOptionStrategyConfig(
         quantity=1,
         multiplier=100,
-        option_strategy=OptionStrategy.IRON_CONDOR,
+        option_strategy=OptionsStrategy.IRON_CONDOR,
         spread_type=OptionSpreadType.IRON_CONDOR,
         initial_capital=100000,
         leverage=1.0,
@@ -51,27 +51,27 @@ def make_iron_condor_config(combo, start_date, end_date):
         # derives their strike from the matching short leg instead.
         legs=[
             OptionLegConfig(
-                option_type=OptionType.PUT,
+                option_type=OptionsType.PUT,
                 position_side=PositionSide.LONG,
                 dte_target=dte_target,
                 dte_range=dte_range,
             ),
             OptionLegConfig(
-                option_type=OptionType.PUT,
+                option_type=OptionsType.PUT,
                 position_side=PositionSide.SHORT,
                 delta_target=short_delta,
                 dte_target=dte_target,
                 dte_range=dte_range,
             ),
             OptionLegConfig(
-                option_type=OptionType.CALL,
+                option_type=OptionsType.CALL,
                 position_side=PositionSide.SHORT,
                 delta_target=short_delta,
                 dte_target=dte_target,
                 dte_range=dte_range,
             ),
             OptionLegConfig(
-                option_type=OptionType.CALL,
+                option_type=OptionsType.CALL,
                 position_side=PositionSide.LONG,
                 dte_target=dte_target,
                 dte_range=dte_range,

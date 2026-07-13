@@ -36,7 +36,7 @@ def run_test_suite():
     configs = [
         MultiLegOptionStrategyConfig(
         quantity=1,
-        option_strategy=OptionStrategy.IRON_CONDOR,
+        option_strategy=OptionsStrategy.IRON_CONDOR,
         spread_type=OptionSpreadType.IRON_CONDOR,
         initial_capital=100000,
         leverage=1.0,
@@ -56,25 +56,25 @@ def run_test_suite():
         #  short call (lower strike), long call (higher strike)].
         legs=[
             OptionLegConfig(
-            option_type=OptionType.PUT,
+            option_type=OptionsType.PUT,
             position_side=PositionSide.LONG,
             # delta_target=0.20,
             dte_target=45,
             ),
             OptionLegConfig(
-            option_type=OptionType.PUT,
+            option_type=OptionsType.PUT,
             position_side=PositionSide.SHORT,
             delta_target=0.25,
             dte_target=45,
             ),
             OptionLegConfig(
-            option_type=OptionType.CALL,
+            option_type=OptionsType.CALL,
             position_side=PositionSide.SHORT,
             delta_target=0.25,
             dte_target=45,
             ),
             OptionLegConfig(
-            option_type=OptionType.CALL,
+            option_type=OptionsType.CALL,
             position_side=PositionSide.LONG,
             # delta_target=0.20,
             dte_target=45,

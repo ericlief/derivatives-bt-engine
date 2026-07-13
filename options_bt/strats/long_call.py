@@ -36,7 +36,7 @@ def run_test_suite():
     configs = [ 
         SingleLegOptionStrategyConfig(
         quantity=1,
-        option_strategy=OptionStrategy.LONG_CALL,
+        option_strategy=OptionsStrategy.LONG_CALL,
         initial_capital=100000,
         leverage=1.0,
         start_date="2010-01-01",
@@ -54,7 +54,7 @@ def run_test_suite():
 
         # Define the leg of the strategy
         leg=OptionLegConfig(
-        option_type=OptionType.CALL,
+        option_type=OptionsType.CALL,
             position_side=PositionSide.LONG,
             # delta_range=(0.65, 0.75),
             delta_target=0.90,
@@ -96,7 +96,7 @@ def run_test_suite():
     # Define hyperparameter sets for different tests
     # hyperparameter_sets = [
         # {
-        #     'option_type': OptionType.CALL,
+        #     'option_type': OptionsType.CALL,
         #     'position_side': PositionSide.SHORT,
         #     'delta_target': 0.75,
         #     'use_spx_close': True,
@@ -107,7 +107,7 @@ def run_test_suite():
         #     'early_close_days': None
         # },
         # {
-        #     'option_type': OptionType.CALL,
+        #     'option_type': OptionsType.CALL,
         #     'position_side': PositionSide.SHORT,
         #     'delta_target': 0.75,
         #     'use_spx_close': True,
@@ -118,8 +118,8 @@ def run_test_suite():
         #     'early_close_days': 30
         # },
         # {
-        #     'strategy': OptionStrategy.SHORT_CALL,
-        #     'option_type': OptionType.CALL,
+        #     'strategy': OptionsStrategy.SHORT_CALL,
+        #     'option_type': OptionsType.CALL,
         #     'position_side': PositionSide.SHORT,
         #     'delta_target': 0.75,
         #     'use_underlying_close': True,
@@ -132,7 +132,7 @@ def run_test_suite():
         #     'leverage': 1.0
         # },
         #    {
-        #     'option_type': OptionType.CALL,
+        #     'option_type': OptionsType.CALL,
         #     'position_side': PositionSide.SHORT,
         #     'delta_target': 0.75,
         #     'use_spx_close': True,

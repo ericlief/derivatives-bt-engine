@@ -2,45 +2,45 @@ from __future__ import annotations
 from enum import Enum
 from typing import TypedDict, Optional, Union, NamedTuple
 
-class OptionType(str, Enum):
+class OptionsType(str, Enum):
     """Option type enumeration."""
     CALL = "call"
     PUT = "put"
 
     @staticmethod
-    def is_put(value: Union[OptionType, str]) -> bool:
+    def is_put(value: Union[OptionsType, str]) -> bool:
         """
         Check if the value represents a PUT option.
 
         Args:
-            value: Can be OptionType enum or string
+            value: Can be OptionsType enum or string
 
         Returns:
             bool: True if PUT, False otherwise
         """
-        if isinstance(value, OptionType):
-            return value == OptionType.PUT
+        if isinstance(value, OptionsType):
+            return value == OptionsType.PUT
         elif hasattr(value, 'option_type'):  # Check for NamedTuple or similar
-            return value.option_type in [OptionType.PUT, OptionType.PUT.value, "put"]
+            return value.option_type in [OptionsType.PUT, OptionsType.PUT.value, "put"]
         elif isinstance(value, str):
             return value.lower() == "put"
         return False
 
     @staticmethod
-    def is_call(value: Union[OptionType, str]) -> bool:
+    def is_call(value: Union[OptionsType, str]) -> bool:
         """
         Check if the value represents a CALL option.
 
         Args:
-            value: Can be OptionType enum or string
+            value: Can be OptionsType enum or string
 
         Returns:
             bool: True if CALL, False otherwise
         """
-        if isinstance(value, OptionType):
-            return value == OptionType.CALL
+        if isinstance(value, OptionsType):
+            return value == OptionsType.CALL
         elif hasattr(value, 'option_type'):  # Check for NamedTuple or similar
-            return value.option_type in [OptionType.CALL, OptionType.CALL.value, "call"]
+            return value.option_type in [OptionsType.CALL, OptionsType.CALL.value, "call"]
         elif isinstance(value, str):
             return value.lower() == "call"
         return False
@@ -101,7 +101,7 @@ class BaseStrategy(str, Enum):
     """Base class for strategy types."""
     pass
 
-class OptionStrategy(BaseStrategy):
+class OptionsStrategy(BaseStrategy):
     """Option strategy type enumeration."""
     SHORT_PUT = "short put"
     LONG_PUT = "long put"
@@ -119,7 +119,7 @@ class OptionStrategy(BaseStrategy):
 
 # Futures contracts are not modeled as an enum-per-instrument (there used
 # to be a FuturesType here) -- an underlying instrument isn't a distinct
-# *type* any more than an option's underlying is (OptionType above is just
+# *type* any more than an option's underlying is (OptionsType above is just
 # CALL/PUT, not one member per underlying). Contract specs (multiplier/
 # margin/commission) are looked up by plain symbol string via
 # options_bt.domain.instruments.get_spec(symbol); known_futures_symbols()

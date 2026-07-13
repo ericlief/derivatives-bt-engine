@@ -10,7 +10,7 @@ import time
 
 from options_bt.domain.backtester import Backtester
 from options_bt.domain.dataloader import OptionsDataLoader
-from options_bt.domain.enums import FuturesStrategy, OptionStrategy, OptionType, PositionSide
+from options_bt.domain.enums import FuturesStrategy, OptionsStrategy, OptionsType, PositionSide
 from options_bt.domain.option_leg_config import OptionLegConfig
 from options_bt.domain.strategy_config import FuturesStrategyConfig, SingleLegOptionStrategyConfig
 
@@ -29,13 +29,13 @@ def profile_options_backtest(data_dir: str, options_file: str, vix_file: str):
 
     config = SingleLegOptionStrategyConfig(
         quantity=1,
-        option_strategy=OptionStrategy.SHORT_PUT,
+        option_strategy=OptionsStrategy.SHORT_PUT,
         initial_capital=100000,
         leverage=1.0,
         start_date="2020-01-01",
         end_date="2020-12-31",
         leg=OptionLegConfig(
-            option_type=OptionType.PUT,
+            option_type=OptionsType.PUT,
             position_side=PositionSide.SHORT,
             delta_target=0.30,
             dte_target=30,

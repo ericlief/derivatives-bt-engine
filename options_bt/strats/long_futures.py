@@ -58,7 +58,7 @@ def run_test_suite():
 
     #     MultiLegOptionStrategyConfig(
     #     quantity=1,
-    #     option_strategy=OptionStrategy.BULL_PUT_CREDIT_SPREAD,
+    #     option_strategy=OptionsStrategy.BULL_PUT_CREDIT_SPREAD,
     #     spread_type=OptionSpreadType.VERTICAL,
     #     # leg_ratio={0: 1.0, 1: 2.0, 2: 2.0, 3: 1.0},   
     #     initial_capital=100000,
@@ -76,14 +76,14 @@ def run_test_suite():
     #     # Define the leg of the strategy
     #     legs=[
     #         OptionLegConfig(
-    #         option_type=OptionType.PUT,
+    #         option_type=OptionsType.PUT,
     #         position_side=PositionSide.SHORT,
     #         # delta_range=(0.65, 0.75),
     #         delta_target=0.75,
     #         dte_range=(40, 45),
     #         ),
     #         OptionLegConfig(
-    #         option_type=OptionType.PUT,
+    #         option_type=OptionsType.PUT,
     #         position_side=PositionSide.LONG,
     #         # delta_range=(0.65, 0.75),
     #         delta_target=0.55,
@@ -124,7 +124,7 @@ def run_test_suite():
     # Define hyperparameter sets for different tests
     # hyperparameter_sets = [
         # {
-        #     'option_type': OptionType.CALL,
+        #     'option_type': OptionsType.CALL,
         #     'position_side': PositionSide.SHORT,
         #     'delta_target': 0.75,
         #     'use_spx_close': True,
@@ -135,7 +135,7 @@ def run_test_suite():
         #     'early_close_days': None
         # },
         # {
-        #     'option_type': OptionType.CALL,
+        #     'option_type': OptionsType.CALL,
         #     'position_side': PositionSide.SHORT,
         #     'delta_target': 0.75,
         #     'use_spx_close': True,
@@ -146,8 +146,8 @@ def run_test_suite():
         #     'early_close_days': 30
         # },
         # {
-        #     'strategy': OptionStrategy.SHORT_CALL,
-        #     'option_type': OptionType.CALL,
+        #     'strategy': OptionsStrategy.SHORT_CALL,
+        #     'option_type': OptionsType.CALL,
         #     'position_side': PositionSide.SHORT,
         #     'delta_target': 0.75,
         #     'use_underlying_close': True,
@@ -160,7 +160,7 @@ def run_test_suite():
         #     'leverage': 1.0
         # },
         #    {
-        #     'option_type': OptionType.CALL,
+        #     'option_type': OptionsType.CALL,
         #     'position_side': PositionSide.SHORT,
         #     'delta_target': 0.75,
         #     'use_spx_close': True,

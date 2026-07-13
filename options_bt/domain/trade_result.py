@@ -46,7 +46,7 @@ class OptionTradeResult(BaseTradeResult):
     Designed to wdork efficiently with pandas DataFrames.
     """
     # metadata
-    option_strategy: Optional[Union[OptionStrategy, str]]
+    option_strategy: Optional[Union[OptionsStrategy, str]]
     close_reason: Optional[str]
     premium: float
     roi: Optional[float] = None  # pnl / margin_required * 100 (%)

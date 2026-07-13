@@ -5,7 +5,7 @@ This shows how to limit spread widths to prevent excessive margin requirements.
 """
 
 from options_bt.domain.strategy_config import MultiLegOptionStrategyConfig
-from options_bt.domain.enums import OptionStrategy, OptionSpreadType, OptionType, PositionSide
+from options_bt.domain.enums import OptionsStrategy, OptionSpreadType, OptionsType, PositionSide
 from options_bt.domain.option_leg_config import OptionLegConfig
 
 def test_max_spread_width_config():
@@ -13,14 +13,14 @@ def test_max_spread_width_config():
     
     # Create option leg configurations for a vertical put spread
     leg1 = OptionLegConfig(
-        option_type=OptionType.PUT,
+        option_type=OptionsType.PUT,
         position_side=PositionSide.SHORT,
         delta_target=-0.30,
         dte_target=45
     )
     
     leg2 = OptionLegConfig(
-        option_type=OptionType.PUT,
+        option_type=OptionsType.PUT,
         position_side=PositionSide.LONG,
         delta_target=-0.15,
         dte_target=45
@@ -28,7 +28,7 @@ def test_max_spread_width_config():
     
     # Create strategy config WITHOUT max_spread_width (unlimited)
     config_unlimited = MultiLegOptionStrategyConfig(
-        option_strategy=OptionStrategy.BEAR_CALL_CREDIT_SPREAD,
+        option_strategy=OptionsStrategy.BEAR_CALL_CREDIT_SPREAD,
         spread_type=OptionSpreadType.VERTICAL,
         legs=[leg1, leg2],
         quantity=1,
@@ -42,7 +42,7 @@ def test_max_spread_width_config():
     
     # Create strategy config WITH max_spread_width limit
     config_limited = MultiLegOptionStrategyConfig(
-        option_strategy=OptionStrategy.BULL_PUT_CREDIT_SPREAD,
+        option_strategy=OptionsStrategy.BULL_PUT_CREDIT_SPREAD,
         spread_type=OptionSpreadType.VERTICAL,
         legs=[leg1, leg2],
         quantity=1,

@@ -12,5 +12,5 @@ from options_bt.domain.backtester import Backtester
 from options_bt.domain.trade_manager import TradeManager
 from options_bt.domain.enums import *
 
-__all__ = ['SingleLegOptionPosition', 'MultiLegOptionPosition', 'OptionsDataLoader', 'Backtester', 'TradeManager', 'OptionSignalGenerator', 'OptionType', 'PositionSide', 'OptionSpreadType', 'OptionTrade', 'OptionLegConfig', 'SingleLegOptionStrategyConfig', 'MultiLegOptionStrategyConfig', 'OptionTradeResult']
+__all__ = ['SingleLegOptionPosition', 'MultiLegOptionPosition', 'OptionsDataLoader', 'Backtester', 'TradeManager', 'OptionSignalGenerator', 'OptionsType', 'PositionSide', 'OptionSpreadType', 'OptionTrade', 'OptionLegConfig', 'SingleLegOptionStrategyConfig', 'MultiLegOptionStrategyConfig', 'OptionTradeResult']
     

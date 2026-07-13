@@ -40,14 +40,14 @@ pip install polars numpy
 ### Basic Example
 
 ```python
-from options_bt.bt import run_backtest, OptionType, PositionSide
+from options_bt.bt import run_backtest, OptionsType, PositionSide
 
 # Run a backtest for short puts
 results = run_backtest(
     spx_file_path="path/to/spx_data.csv",
     options_chain_file_path="path/to/options_chain.csv",
     vix_file_path="path/to/vix_data.csv",
-    option_type=OptionType.PUT,
+    option_type=OptionsType.PUT,
     position_side=PositionSide.SHORT,
     start_date="2020-01-01",
     end_date="2020-12-31",
@@ -59,7 +59,7 @@ results = run_backtest(
 
 ### Parameters
 
-- `option_type`: `OptionType.PUT` or `OptionType.CALL`
+- `option_type`: `OptionsType.PUT` or `OptionsType.CALL`
 - `position_side`: `PositionSide.LONG` or `PositionSide.SHORT`
 - `delta_target`: Single delta value for option selection
 - `delta_range`: Tuple of (min_delta, max_delta)

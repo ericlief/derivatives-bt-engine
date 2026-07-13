@@ -89,11 +89,11 @@ class BasePosition(ABC):
 class BaseOptionPosition(BasePosition, ABC):
     """Abstract base class for any option position."""
     # Required parameters (no defaults)
-    option_strategy: OptionStrategy
+    option_strategy: OptionsStrategy
     expire_date: date
     entry_dte: int
     underlying_entry: float
-    option_type: Union[OptionType, str]  # Add missing option_type property
+    option_type: Union[OptionsType, str]  # Add missing option_type property
     strike: float  # Add missing strike property
     entry_delta: float  # Add missing entry_delta property
 
@@ -119,7 +119,7 @@ class BaseOptionPosition(BasePosition, ABC):
             self.expire_date = date.fromisoformat(self.expire_date)
 
         if isinstance(self.option_strategy, str):
-            self.option_strategy=OptionStrategy(self.option_strategy)
+            self.option_strategy=OptionsStrategy(self.option_strategy)
         # Calculate margin required based on entry price and underlying entry
         # if self.entry_price is not None and self.underlying_entry is not None:
         #     self.margin_required = self.calculate_margin()
@@ -127,12 +127,12 @@ class BaseOptionPosition(BasePosition, ABC):
     @cached_property
     def is_put(self) -> bool:
         """Check if position is a put option."""
-        return self.option_type in [OptionType.PUT, OptionType.PUT.value, "put"]
+        return self.option_type in [OptionsType.PUT, OptionsType.PUT.value, "put"]
 
     @cached_property
     def is_call(self) -> bool:
         """Check if position is a call option."""
-        return self.option_type in [OptionType.CALL, OptionType.CALL.value, "call"]
+        return self.option_type in [OptionsType.CALL, OptionsType.CALL.value, "call"]
 
     @cached_property
     def is_long(self) -> bool:
@@ -175,7 +175,7 @@ class BaseOptionPosition(BasePosition, ABC):
 
     @staticmethod
     def calculate_margin(quantity: int,
-                         option_type: Union[OptionType, str],
+                         option_type: Union[OptionsType, str],
                          position_side: Union[PositionSide, str],
                          underlying_price: float, 
                          entry_price: float, 
@@ -205,7 +205,7 @@ class BaseOptionPosition(BasePosition, ABC):
             return 0.0
         
         # For short positions, calculate OTM amount based on option type
-        if OptionType.is_put(option_type):
+        if OptionsType.is_put(option_type):
             otm_amount = max(0, underlying_price - strike)  # OTM when underlying > strike
         else:  # CALL
             otm_amount = max(0, strike - underlying_price)  # OTM when strike > underlying
@@ -366,7 +366,7 @@ class BaseOptionPosition(BasePosition, ABC):
             'underlying_entry': self.underlying_entry,
             'underlying_exit': self.underlying_exit,
             'strike': self.strike,
-            'option_type': self.option_type.value if isinstance(self.option_type, OptionType) else self.option_type,
+            'option_type': self.option_type.value if isinstance(self.option_type, OptionsType) else self.option_type,
             'position_side': self.position_side.value if isinstance(self.position_side, PositionSide) else self.position_side,
             'entry_price': self.entry_price,
             'exit_price': self.exit_price,
@@ -422,7 +422,7 @@ class BaseOptionPosition(BasePosition, ABC):
                 'trade_id': position.trade_id,
                 'date': date,
                 'type': operation,
-                'option_type': position.option_type.value if isinstance(position.option_type, OptionType) else position.option_type,
+                'option_type': position.option_type.value if isinstance(position.option_type, OptionsType) else position.option_type,
                 'position_side': position.position_side.value if isinstance(position.position_side, PositionSide) else position.position_side,
                 'expire_date': position.expire_date,
                 'entry_delta': round(position.entry_delta, 2),
@@ -452,7 +452,7 @@ class SingleLegOptionPosition(BaseOptionPosition):
     """Core option position. Represents a single 'open' option contract position."""
     # Required parameters (no defaults)
 
-    option_type: Union[OptionType, str]
+    option_type: Union[OptionsType, str]
     strike: float
     entry_delta: float
     entry_dte: int
@@ -469,7 +469,7 @@ class SingleLegOptionPosition(BaseOptionPosition):
 
         """Validate and convert types after initialization."""
         if isinstance(self.option_type, str):
-            self.option_type = OptionType(self.option_type.lower())
+            self.option_type = OptionsType(self.option_type.lower())
 
         if isinstance(self.entry_date, str):
             self.entry_date = date.fromisoformat(self.entry_date)
@@ -488,12 +488,12 @@ class SingleLegOptionPosition(BaseOptionPosition):
     @cached_property
     def is_put(self) -> bool:
         """Check if position is a put option."""
-        return self.option_type in [OptionType.PUT, OptionType.PUT.value, "put"]
+        return self.option_type in [OptionsType.PUT, OptionsType.PUT.value, "put"]
 
     @cached_property
     def is_call(self) -> bool:
         """Check if position is a call option."""
-        return self.option_type in [OptionType.CALL, OptionType.CALL.value, "call"]
+        return self.option_type in [OptionsType.CALL, OptionsType.CALL.value, "call"]
 
     @cached_property
     def is_long(self) -> bool:
@@ -561,10 +561,10 @@ class SingleLegOptionPosition(BaseOptionPosition):
     @staticmethod
     def construct_from_signal(
             trade_signal: dict,
-            option_strategy: OptionStrategy,
+            option_strategy: OptionsStrategy,
             entry_date: date,
             position_side: PositionSide,
-            option_type: OptionType,
+            option_type: OptionsType,
             quantity: int,
             early_close_after_dit: int = None,
             early_close_on_dte: int = None,
@@ -576,7 +576,7 @@ class SingleLegOptionPosition(BaseOptionPosition):
                     trade_signal: dict (a polars row, from iter_rows(named=True))
                     entry_date: date,
                     position_side: PositionSide,
-                    option_type: OptionType,
+                    option_type: OptionsType,
                     quantity: int,
                     early_close_after_dit: int,
                     early_close_on_dte: int,
@@ -633,7 +633,7 @@ class SingleLegOptionPosition(BaseOptionPosition):
                           expire_date - timedelta(days=early_close_on_dte) if early_close_on_dte else
                           None)
 
-            entry_delta = trade_signal.get('p_delta') if OptionType.is_put(option_type) else trade_signal.get('c_delta')
+            entry_delta = trade_signal.get('p_delta') if OptionsType.is_put(option_type) else trade_signal.get('c_delta')
 
             # Create the position
             position = SingleLegOptionPosition(
@@ -870,7 +870,7 @@ class SingleLegOptionPosition(BaseOptionPosition):
             'underlying_entry': self.underlying_entry,
             'underlying_exit': self.underlying_exit,
             'strike': self.strike,
-            'option_type': self.option_type.value if isinstance(self.option_type, OptionType) else self.option_type,
+            'option_type': self.option_type.value if isinstance(self.option_type, OptionsType) else self.option_type,
             'position_side': self.position_side.value if isinstance(self.position_side, PositionSide) else self.position_side,
             'entry_price': self.entry_price,
             'exit_price': self.exit_price,
@@ -976,10 +976,10 @@ class SingleLegOptionPosition(BaseOptionPosition):
         roi = None
         strat_effective_risk = None
         if self.option_strategy in [
-            OptionStrategy.SHORT_CALL,
-            OptionStrategy.SHORT_PUT,
-            OptionStrategy.LONG_CALL,
-            OptionStrategy.LONG_PUT,
+            OptionsStrategy.SHORT_CALL,
+            OptionsStrategy.SHORT_PUT,
+            OptionsStrategy.LONG_CALL,
+            OptionsStrategy.LONG_PUT,
         ]:
             strat_pnl = pnl
             if self.is_long:
@@ -1001,7 +1001,7 @@ class SingleLegOptionPosition(BaseOptionPosition):
         # Prepare trade result
         trade_result = OptionTradeResult(
             trade_id=self.trade_id,
-            option_strategy=self.option_strategy.value if isinstance(self.option_strategy, OptionStrategy) else self.option_strategy,
+            option_strategy=self.option_strategy.value if isinstance(self.option_strategy, OptionsStrategy) else self.option_strategy,
             quantity=self.quantity,
             opened=self.entry_date,
             closed=close_date,
@@ -1030,7 +1030,7 @@ class MultiLegOptionPosition(BaseOptionPosition):
     expire_date: Optional[date] = None # Common expiration date for the spread
     entry_dte: int = 0  # Common DTE for the spread
     underlying_entry: Optional[float] = None  # Common underlying entry price for the spread
-    option_type: Union[OptionType, str] = None  # Will be derived from legs
+    option_type: Union[OptionsType, str] = None  # Will be derived from legs
     strike: float = None  # Will be derived from legs
     entry_delta: float = None  # Will be derived from legs
 
@@ -1130,7 +1130,7 @@ class MultiLegOptionPosition(BaseOptionPosition):
             return first_leg.is_ITM(underlying_price)
         
         # Fallback to base implementation
-        return self.option_type == OptionType.PUT and underlying_price <= self.strike or self.option_type == OptionType.CALL and underlying_price >= self.strike
+        return self.option_type == OptionsType.PUT and underlying_price <= self.strike or self.option_type == OptionsType.CALL and underlying_price >= self.strike
 
     def calculate_intrinsic_value(self, underlying_price: float) -> float:
         """
@@ -1378,7 +1378,7 @@ class MultiLegOptionPosition(BaseOptionPosition):
         # Construct the aggregated trade result for the spread
         aggregated_trade_result = OptionTradeResult(
             trade_id=self.trade_id,
-            option_strategy=self.option_strategy.value if isinstance(self.option_strategy, OptionStrategy) else self.option_strategy,
+            option_strategy=self.option_strategy.value if isinstance(self.option_strategy, OptionsStrategy) else self.option_strategy,
             quantity=self.quantity,
             opened=self.entry_date,
             closed=close_date,
@@ -1468,7 +1468,7 @@ class MultiLegOptionPosition(BaseOptionPosition):
                     return None
 
                 # Delta
-                type_prefix = "p_" if OptionType.is_put(option_type) else "c_"
+                type_prefix = "p_" if OptionsType.is_put(option_type) else "c_"
                 entry_delta = trade_signal.get(leg_n + type_prefix + 'delta')
                 if entry_delta is None or (isinstance(entry_delta, float) and math.isnan(entry_delta)):
                     logger.error(f"Missing delta value/s in trade signal on {trade_signal.get('date')}")

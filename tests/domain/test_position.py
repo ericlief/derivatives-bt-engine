@@ -4,7 +4,7 @@ from datetime import date
 import polars as pl
 import numpy as np
 from options_bt.domain.position import SingleLegOptionPosition, MultiLegOptionPosition
-from options_bt.domain.enums import OptionType, PositionSide, OptionStrategy, OptionSpreadType
+from options_bt.domain.enums import OptionsType, PositionSide, OptionsStrategy, OptionSpreadType
 from options_bt.domain.dataloader import OptionsDataLoader
 from options_bt.domain.trade_result import OptionTradeResult
 from options_bt.domain.trade_manager import TradeManager
@@ -87,9 +87,9 @@ def test_instance_vars(setup_test_data):
     
     single_leg_long_call = SingleLegOptionPosition(
         trade_id=1,
-        option_strategy=OptionStrategy.LONG_CALL,
+        option_strategy=OptionsStrategy.LONG_CALL,
         quantity=1,
-        option_type=OptionType.CALL,
+        option_type=OptionsType.CALL,
         position_side=PositionSide.LONG,
         entry_date=date(2023, 1, 1),
         entry_price=round(float(c_bid + c_ask) / 2, 2),
@@ -102,9 +102,9 @@ def test_instance_vars(setup_test_data):
 
     single_leg_short_put = SingleLegOptionPosition(
         trade_id=2,
-        option_strategy=OptionStrategy.SHORT_PUT,
+        option_strategy=OptionsStrategy.SHORT_PUT,
         quantity=1,
-        option_type=OptionType.PUT,
+        option_type=OptionsType.PUT,
         position_side=PositionSide.SHORT,
         entry_date=date(2023, 1, 1),
         entry_price=round(float(p_bid + p_ask) / 2, 2),
@@ -161,9 +161,9 @@ def test_instance_vars(setup_test_data):
 
 
 @pytest.mark.parametrize("underlying_price, strike, option_type, position_side", [
-    (100.0, 90.0, OptionType.CALL, PositionSide.SHORT),
-    (100.0, 100.0, OptionType.CALL, PositionSide.SHORT),
-    (100.0, 110.0, OptionType.CALL, PositionSide.SHORT),
+    (100.0, 90.0, OptionsType.CALL, PositionSide.SHORT),
+    (100.0, 100.0, OptionsType.CALL, PositionSide.SHORT),
+    (100.0, 110.0, OptionsType.CALL, PositionSide.SHORT),
 ])
 def test_single_leg_margin(underlying_price, strike, option_type, position_side):
     """Test margin calculation for a single leg option position."""
@@ -174,7 +174,7 @@ def test_single_leg_margin(underlying_price, strike, option_type, position_side)
         T=30/365,
         r=0.05,
         sigma=0.3,
-        option_type='call' if option_type == OptionType.CALL else 'put'
+        option_type='call' if option_type == OptionsType.CALL else 'put'
     )
     
     margin = SingleLegOptionPosition.calculate_margin(
@@ -186,7 +186,7 @@ def test_single_leg_margin(underlying_price, strike, option_type, position_side)
         strike=strike
     )
     
-    otm_amount = max(0, underlying_price - strike) if option_type == OptionType.PUT else max(0, strike - underlying_price)
+    otm_amount = max(0, underlying_price - strike) if option_type == OptionsType.PUT else max(0, strike - underlying_price)
     expected_margin = (entry_price + max(0.15 * underlying_price - otm_amount, 0.10 * underlying_price)) * 100
     
     assert margin == round(expected_margin, 2), f"Margin mismatch for {option_type} {position_side} with strike {strike}"
@@ -207,9 +207,9 @@ def test_single_leg_pnl():
     )
     position = SingleLegOptionPosition(
         trade_id=1,
-        option_strategy=OptionStrategy.LONG_CALL,
+        option_strategy=OptionsStrategy.LONG_CALL,
         quantity=1,
-        option_type=OptionType.CALL,
+        option_type=OptionsType.CALL,
         position_side=PositionSide.LONG,
         entry_date=date(2023, 1, 1),
         entry_price=entry_price,
@@ -257,9 +257,9 @@ def test_single_leg_pnl():
 
     position = SingleLegOptionPosition(
         trade_id=2,
-        option_strategy=OptionStrategy.SHORT_PUT,
+        option_strategy=OptionsStrategy.SHORT_PUT,
         quantity=10,
-        option_type=OptionType.PUT,
+        option_type=OptionsType.PUT,
         position_side=PositionSide.SHORT,
         entry_date=date(2023, 1, 1),
         entry_price=entry_price,
@@ -280,20 +280,20 @@ def test_pnl_with_fees(setup_test_data):
     # data, single_leg_long, single_leg_short = setup_test_data
     test_cases = [
         # (entry_price, exit_price, quantity, position_side, option_type, expected_pnl)
-        (5.0, 6.0, 1, PositionSide.LONG, OptionType.CALL, (6 - 5) * 100 * 1 - 1.78),  # Long call profit
-        (5.0, 4.0, 1, PositionSide.LONG, OptionType.CALL, (4 - 5) * 100 * 1 - 1.78),  # Long call loss
-        (5.0, 4.0, 1, PositionSide.SHORT, OptionType.PUT, (-4 + 5) * 100 * 1 - 1.78),   # Short put profit
-        (5.0, 6.0, 1, PositionSide.SHORT, OptionType.PUT, (-6 + 5) * 100 * 1 - 1.78),  # Short put loss
+        (5.0, 6.0, 1, PositionSide.LONG, OptionsType.CALL, (6 - 5) * 100 * 1 - 1.78),  # Long call profit
+        (5.0, 4.0, 1, PositionSide.LONG, OptionsType.CALL, (4 - 5) * 100 * 1 - 1.78),  # Long call loss
+        (5.0, 4.0, 1, PositionSide.SHORT, OptionsType.PUT, (-4 + 5) * 100 * 1 - 1.78),   # Short put profit
+        (5.0, 6.0, 1, PositionSide.SHORT, OptionsType.PUT, (-6 + 5) * 100 * 1 - 1.78),  # Short put loss
         # Test with multiple contracts
-        (5.0, 6.0, 2, PositionSide.LONG, OptionType.CALL, (6 - 5) * 100 * 2 - 1.78 * 2),  # 2 contracts
-        (5.0, 4.0, 3, PositionSide.SHORT, OptionType.PUT, (-4 + 5) * 100 * 3 - 1.78 * 3),  # 3 contracts
+        (5.0, 6.0, 2, PositionSide.LONG, OptionsType.CALL, (6 - 5) * 100 * 2 - 1.78 * 2),  # 2 contracts
+        (5.0, 4.0, 3, PositionSide.SHORT, OptionsType.PUT, (-4 + 5) * 100 * 3 - 1.78 * 3),  # 3 contracts
     ]
 
     for entry_price, exit_price, quantity, position_side, option_type, expected_pnl in test_cases:
         # Create test position
         position = SingleLegOptionPosition(
             trade_id=1,
-            option_strategy=OptionStrategy.LONG_CALL if position_side == PositionSide.LONG else OptionStrategy.SHORT_CALL,
+            option_strategy=OptionsStrategy.LONG_CALL if position_side == PositionSide.LONG else OptionsStrategy.SHORT_CALL,
             quantity=quantity,
             option_type=option_type,
             position_side=position_side,
@@ -364,15 +364,15 @@ def test_margin_requirements(setup_test_data):
     # Test cases with different moneyness levels
     test_cases = [
         # (underlying, strike, option_type, position_side, entry_price, expected_margin)
-        (100.0, 100.0, OptionType.CALL, PositionSide.SHORT, 5.0, 2000.0),  # ATM call
-        (100.0, 90.0, OptionType.CALL, PositionSide.SHORT, 12.0, 2700.0),  # ITM call
-        (100.0, 110.0, OptionType.CALL, PositionSide.SHORT, 2.0, 1200.0),  # OTM call
-        (100.0, 100.0, OptionType.PUT, PositionSide.SHORT, 5.0, 2000.0),   # ATM put
-        (100.0, 110.0, OptionType.PUT, PositionSide.SHORT, 12.0, 2700.0),  # ITM put
-        (100.0, 90.0, OptionType.PUT, PositionSide.SHORT, 2.0, 1200.0),    # OTM put
+        (100.0, 100.0, OptionsType.CALL, PositionSide.SHORT, 5.0, 2000.0),  # ATM call
+        (100.0, 90.0, OptionsType.CALL, PositionSide.SHORT, 12.0, 2700.0),  # ITM call
+        (100.0, 110.0, OptionsType.CALL, PositionSide.SHORT, 2.0, 1200.0),  # OTM call
+        (100.0, 100.0, OptionsType.PUT, PositionSide.SHORT, 5.0, 2000.0),   # ATM put
+        (100.0, 110.0, OptionsType.PUT, PositionSide.SHORT, 12.0, 2700.0),  # ITM put
+        (100.0, 90.0, OptionsType.PUT, PositionSide.SHORT, 2.0, 1200.0),    # OTM put
         # Test long positions (should have no margin requirement)
-        (100.0, 100.0, OptionType.CALL, PositionSide.LONG, 5.0, 0.0),
-        (100.0, 100.0, OptionType.PUT, PositionSide.LONG, 5.0, 0.0),
+        (100.0, 100.0, OptionsType.CALL, PositionSide.LONG, 5.0, 0.0),
+        (100.0, 100.0, OptionsType.PUT, PositionSide.LONG, 5.0, 0.0),
     ]
 
     for underlying, strike, option_type, position_side, entry_price, expected_margin in test_cases:
@@ -395,7 +395,7 @@ def test_margin_requirements(setup_test_data):
         # Also test using instance method for consistency
         position = SingleLegOptionPosition(
             trade_id=1,
-            option_strategy=OptionStrategy.LONG_CALL if position_side == PositionSide.LONG else OptionStrategy.SHORT_CALL,
+            option_strategy=OptionsStrategy.LONG_CALL if position_side == PositionSide.LONG else OptionsStrategy.SHORT_CALL,
             quantity=1,
             option_type=option_type,
             position_side=position_side,
@@ -421,9 +421,9 @@ def test_close_validation(setup_test_data):
     # Test invalid entry date
     invalid_position = SingleLegOptionPosition(
         trade_id=1,
-        option_strategy=OptionStrategy.LONG_CALL,
+        option_strategy=OptionsStrategy.LONG_CALL,
         quantity=1,
-        option_type=OptionType.CALL,
+        option_type=OptionsType.CALL,
         position_side=PositionSide.LONG,
         entry_date=date(1970, 1, 1),  # Invalid date
         entry_price=5.0,
@@ -444,9 +444,9 @@ def test_close_validation(setup_test_data):
     # Test missing expiration and close dates
     no_dates_position = SingleLegOptionPosition(
         trade_id=1,
-        option_strategy=OptionStrategy.LONG_CALL,
+        option_strategy=OptionsStrategy.LONG_CALL,
         quantity=1,
-        option_type=OptionType.CALL,
+        option_type=OptionsType.CALL,
         position_side=PositionSide.LONG,
         entry_date=date(2023, 1, 1),
         entry_price=5.0,
@@ -479,10 +479,10 @@ def test_close_position(setup_test_data):
 
     # Create a position with proper margin_required
     position = SingleLegOptionPosition(
-        option_strategy=OptionStrategy.LONG_CALL,
+        option_strategy=OptionsStrategy.LONG_CALL,
         trade_id=1,
         quantity=10,
-        option_type=OptionType.CALL,
+        option_type=OptionsType.CALL,
         position_side=PositionSide.LONG,
         entry_date=date(2023, 1, 2),
         entry_price=entry_price_call,
@@ -502,7 +502,7 @@ def test_close_position(setup_test_data):
     assert isinstance(trade_result, dict)
     assert isinstance(transaction, dict)
     assert transaction['quantity'] == 10
-    assert transaction['option_type'] == OptionType.CALL.value
+    assert transaction['option_type'] == OptionsType.CALL.value
     assert transaction['position_side'] == PositionSide.LONG.value
     assert transaction['entry_date'] == date(2023, 1, 2)
     assert transaction['expire_date'] == date(2023, 1, 31)
@@ -515,10 +515,10 @@ def test_close_position(setup_test_data):
 
   # Create a position with proper margin_required
     position = SingleLegOptionPosition(
-        option_strategy=OptionStrategy.SHORT_PUT,
+        option_strategy=OptionsStrategy.SHORT_PUT,
         trade_id=1,
         quantity=10,
-        option_type=OptionType.PUT,
+        option_type=OptionsType.PUT,
         position_side=PositionSide.SHORT,
         entry_date=date(2023, 1, 2),
         entry_price=entry_price_call,
@@ -538,7 +538,7 @@ def test_close_position(setup_test_data):
     assert isinstance(trade_result, dict)
     assert isinstance(transaction, dict)
     assert transaction['quantity'] == 10
-    assert transaction['option_type'] == OptionType.PUT.value
+    assert transaction['option_type'] == OptionsType.PUT.value
     assert transaction['position_side'] == PositionSide.SHORT.value
     assert transaction['entry_date'] == date(2023, 1, 2)
     assert transaction['expire_date'] == date(2023, 1, 31)
@@ -557,10 +557,10 @@ def test_close_scenarios(setup_test_data):
     logger.info(f"underlying close 1-31: {data['underlying_price_history'].filter(pl.col('date') == date(2023, 1, 31))['close'][0]}")
     # Test early closure
     early_close_position = SingleLegOptionPosition(
-        option_strategy=OptionStrategy.LONG_CALL,
+        option_strategy=OptionsStrategy.LONG_CALL,
         trade_id=1,
         quantity=1,
-        option_type=OptionType.CALL,
+        option_type=OptionsType.CALL,
         position_side=PositionSide.LONG,
         entry_date=date(2023, 1, 1),
         entry_price=single_leg_long.entry_price,
@@ -585,10 +585,10 @@ def test_close_scenarios(setup_test_data):
 
     # Test expiration closure for ITM option
     itm_expire_position = SingleLegOptionPosition(
-        option_strategy=OptionStrategy.LONG_CALL,
+        option_strategy=OptionsStrategy.LONG_CALL,
         trade_id=2,
         quantity=1,
-        option_type=OptionType.CALL,
+        option_type=OptionsType.CALL,
         position_side=PositionSide.LONG,
         entry_date=date(2023, 1, 1),
         entry_price=single_leg_long.entry_price,
@@ -612,10 +612,10 @@ def test_close_scenarios(setup_test_data):
 
     # Test expiration closure for OTM option
     otm_expire_position = SingleLegOptionPosition(
-        option_strategy=OptionStrategy.LONG_PUT,
+        option_strategy=OptionsStrategy.LONG_PUT,
         trade_id=3,
         quantity=1,
-        option_type=OptionType.PUT,
+        option_type=OptionsType.PUT,
         position_side=PositionSide.LONG,
         entry_date=date(2023, 1, 1),
         entry_price=single_leg_long.entry_price,
@@ -643,10 +643,10 @@ def test_invalid_close_dates(setup_test_data):
     data, single_leg_long, single_leg_short = setup_test_data
     # Test close date before entry date
     invalid_close_position = SingleLegOptionPosition(
-        option_strategy=OptionStrategy.LONG_CALL,
+        option_strategy=OptionsStrategy.LONG_CALL,
         trade_id=1,
         quantity=1,
-        option_type=OptionType.CALL,
+        option_type=OptionsType.CALL,
         position_side=PositionSide.LONG,
         entry_date=date(2023, 2, 1),
         entry_price=5.0,
@@ -667,10 +667,10 @@ def test_invalid_close_dates(setup_test_data):
 
     # Test expire date before entry date
     invalid_expire_position = SingleLegOptionPosition(
-        option_strategy=OptionStrategy.LONG_CALL,
+        option_strategy=OptionsStrategy.LONG_CALL,
         trade_id=1,
         quantity=1,
-        option_type=OptionType.CALL,
+        option_type=OptionsType.CALL,
         position_side=PositionSide.LONG,
         entry_date=date(2023, 2, 1),
         entry_price=5.0,
@@ -694,10 +694,10 @@ def test_exercise_fees(setup_test_data):
 
     # Test ITM call at expiration (should include exercise fee)
     itm_call = SingleLegOptionPosition(
-        option_strategy=OptionStrategy.LONG_CALL,
+        option_strategy=OptionsStrategy.LONG_CALL,
         trade_id=1,
         quantity=2,
-        option_type=OptionType.CALL,
+        option_type=OptionsType.CALL,
         position_side=PositionSide.LONG,
         entry_date=date(2023, 1, 1),
         entry_price=single_leg_long.entry_price,
@@ -723,10 +723,10 @@ def test_exercise_fees(setup_test_data):
 
     # Test ITM put at expiration (should include exercise fee)
     otm_put = SingleLegOptionPosition(
-        option_strategy=OptionStrategy.LONG_PUT,
+        option_strategy=OptionsStrategy.LONG_PUT,
         trade_id=2,
         quantity=2,
-        option_type=OptionType.PUT,
+        option_type=OptionsType.PUT,
         position_side=PositionSide.LONG,
         entry_date=date(2023, 1, 1),
         entry_price=single_leg_long.entry_price,
@@ -757,10 +757,10 @@ def test_buying_power_updates(setup_test_data):
     
     # Test long position closure (should add exit premium to BP)
     long_pos = SingleLegOptionPosition(
-        option_strategy=OptionStrategy.LONG_CALL,
+        option_strategy=OptionsStrategy.LONG_CALL,
         trade_id=1,
         quantity=1,
-        option_type=OptionType.CALL,
+        option_type=OptionsType.CALL,
         position_side=PositionSide.LONG,
         entry_date=date(2023, 1, 1),
         entry_price=5.0,
@@ -783,10 +783,10 @@ def test_buying_power_updates(setup_test_data):
 
     # # Test short position closure (should subtract exit premium from BP and return margin)
     # short_pos = SingleLegOptionPosition(
-    #     option_strategy=OptionStrategy.SHORT_CALL,
+    #     option_strategy=OptionsStrategy.SHORT_CALL,
     #     trade_id=2,
     #     quantity=1,
-    #     option_type=OptionType.CALL,
+    #     option_type=OptionsType.CALL,
     #     position_side=PositionSide.SHORT,
     #     entry_date=date(2023, 1, 1),
     #     entry_price=5.0,
@@ -816,10 +816,10 @@ def test_margin_required_property(setup_test_data):
     data, single_leg_long, single_leg_short = setup_test_data
     # Test long call - should have no margin requirement
     long_call = SingleLegOptionPosition(
-        option_strategy=OptionStrategy.LONG_CALL,
+        option_strategy=OptionsStrategy.LONG_CALL,
         trade_id=1,
         quantity=1,
-        option_type=OptionType.CALL,
+        option_type=OptionsType.CALL,
         position_side=PositionSide.LONG,
         entry_date=date(2023, 1, 1),
         entry_price=5.0,
@@ -833,10 +833,10 @@ def test_margin_required_property(setup_test_data):
 
     # Test short put - should use IB's formula
     short_put = SingleLegOptionPosition(
-        option_strategy=OptionStrategy.SHORT_PUT,
+        option_strategy=OptionsStrategy.SHORT_PUT,
         trade_id=2,
         quantity=1,
-        option_type=OptionType.PUT,
+        option_type=OptionsType.PUT,
         position_side=PositionSide.SHORT,
         entry_date=date(2023, 1, 1),
         entry_price=5.0,
@@ -861,10 +861,10 @@ def test_margin_required_property(setup_test_data):
 
     # Test short call - should use IB's formula
     short_call = SingleLegOptionPosition(
-        option_strategy=OptionStrategy.SHORT_CALL,
+        option_strategy=OptionsStrategy.SHORT_CALL,
         trade_id=3,
         quantity=1,
-        option_type=OptionType.CALL,
+        option_type=OptionsType.CALL,
         position_side=PositionSide.SHORT,
         entry_date=date(2023, 1, 1),
         entry_price=5.0,
@@ -890,15 +890,15 @@ def test_margin_required_property(setup_test_data):
     # Test margin for different moneyness levels
     test_cases = [
         # (underlying, strike, option_type, expected_otm)
-        (100.0, 90.0, OptionType.PUT, 10.0),   # OTM put
-        (100.0, 110.0, OptionType.PUT, 0.0),   # ITM put
-        (100.0, 90.0, OptionType.CALL, 0.0),   # ITM call
-        (100.0, 110.0, OptionType.CALL, 10.0), # OTM call
+        (100.0, 90.0, OptionsType.PUT, 10.0),   # OTM put
+        (100.0, 110.0, OptionsType.PUT, 0.0),   # ITM put
+        (100.0, 90.0, OptionsType.CALL, 0.0),   # ITM call
+        (100.0, 110.0, OptionsType.CALL, 10.0), # OTM call
     ]
 
     for underlying, strike, option_type, expected_otm in test_cases:
         position = SingleLegOptionPosition(
-            option_strategy=OptionStrategy.SHORT_CALL if option_type == OptionType.CALL else OptionStrategy.SHORT_PUT,
+            option_strategy=OptionsStrategy.SHORT_CALL if option_type == OptionsType.CALL else OptionsStrategy.SHORT_PUT,
             trade_id=4,
             quantity=1,
             option_type=option_type,
@@ -907,7 +907,7 @@ def test_margin_required_property(setup_test_data):
             entry_price=5.0,
             strike=strike,
             expire_date=date(2023, 1, 31),
-            entry_delta=0.5 if option_type == OptionType.CALL else -0.5,
+            entry_delta=0.5 if option_type == OptionsType.CALL else -0.5,
             entry_dte=30,
             underlying_entry=underlying
         )
@@ -939,9 +939,9 @@ def setup_test_data(mock_data):
 
     single_leg_long_call = SingleLegOptionPosition(
         trade_id=1,
-        option_strategy=OptionStrategy.LONG_CALL,
+        option_strategy=OptionsStrategy.LONG_CALL,
         quantity=1,
-        option_type=OptionType.CALL,
+        option_type=OptionsType.CALL,
         position_side=PositionSide.LONG,
         entry_date=date(2023, 1, 1),
         entry_price=entry_price_call,
@@ -954,9 +954,9 @@ def setup_test_data(mock_data):
 
     single_leg_short_put = SingleLegOptionPosition(
         trade_id=2,
-        option_strategy=OptionStrategy.SHORT_PUT,
+        option_strategy=OptionsStrategy.SHORT_PUT,
         quantity=1,
-        option_type=OptionType.PUT,
+        option_type=OptionsType.PUT,
         position_side=PositionSide.SHORT,
         entry_date=date(2023, 1, 1),
         entry_price=entry_price_put,

@@ -61,9 +61,9 @@ from INSTRUMENTS.
 get_spec(symbol) is the single lookup point for a contract's multiplier/
 margin/commission -- there is no per-instrument enum (deliberately: an
 underlying instrument isn't a distinct *type*, any more than an option's
-underlying is -- OptionType is just CALL/PUT, not one member per
+underlying is -- OptionsType is just CALL/PUT, not one member per
 underlying). FuturesStrategy (LONG_FUTURES/SHORT_FUTURES) remains the
-correct futures analog to OptionStrategy: it describes position *shape*,
+correct futures analog to OptionsStrategy: it describes position *shape*,
 orthogonal to the traded symbol.
 
 Imported by:
