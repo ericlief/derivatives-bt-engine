@@ -14,6 +14,13 @@ Horizon choice (do not revisit):
   - 1-month is excluded for monthly rebalancing: a single rebalance-period
     observation is too noisy to trust; 3-month is the minimum reliable fast
     signal at this cadence.
+
+Naming convention (applies wherever these columns are consumed, e.g.
+Backtester.calculate_futures_mtm_drawdown's hv3m/sharpe3m): suffixes (3m,
+1y, ...) denote the rolling estimation window, not the reporting horizon.
+Volatility and Sharpe remain annualized -- e.g. hv3m is annualized vol
+estimated from the last 63d, not a 3-month vol figure; sharpe3m is
+annualized Sharpe estimated from the last 63d.
 """
 
 import logging

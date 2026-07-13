@@ -705,10 +705,10 @@ class Backtester:
         # calculate_trend_strength/classify_regime (same functions the
         # live TSMOM signal uses) rather than reimplementing rolling stats.
         #
-        # Naming: the *3m/*1y suffix always denotes the rolling WINDOW
-        # (63/252 trading days), matching ts3m/ts1y/avg3m/avg1y -- never
-        # the annualization arithmetic inside the formula (e.g. hv3m's
-        # sqrt(252) is annualizing a 63-day/"3m" std, not a 252-day one).
+        # Suffixes (3m, 1y, ...) denote the rolling estimation window,
+        # not the reporting horizon. Volatility and Sharpe remain
+        # annualized -- hv3m is annualized vol estimated from the last
+        # 63d, sharpe3m is annualized Sharpe estimated from the last 63d.
         signal = calculate_trend_strength(self.underlying.select(['ts_event', 'close']).sort('ts_event'))
         signal = signal.with_columns(
             hv3m=(pl.col('daily_std') * (252 ** 0.5)).round(4),
