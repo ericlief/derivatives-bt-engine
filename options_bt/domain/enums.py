@@ -2,6 +2,8 @@ from __future__ import annotations
 from enum import Enum
 from typing import TypedDict, Optional, Union, NamedTuple
 
+from options_bt.domain.instruments import INSTRUMENTS, BACKTEST_ONLY_SPECS
+
 class OptionType(str, Enum):
     """Option type enumeration."""
     CALL = "call"
@@ -117,50 +119,59 @@ class OptionStrategy(BaseStrategy):
     STRADDLE = "straddle"
     STRANGLE = "strangle"
 
+# FuturesType's Globex/db ticker -> INSTRUMENTS dict key, for the 3 FX
+# symbols where they diverge (INSTRUMENTS keys by IBKR-facing ticker, not
+# the raw Globex root -- see instruments.py's db_symbol field docs).
+_FX_TICKER_TO_INSTRUMENTS_KEY = {'6J': 'JPY', '6L': 'BRE', '6M': '6M'}
+
+
+def _spec(db_symbol: str) -> tuple[float, float, float]:
+    """(mult, initial_margin, commission) for one FuturesType member,
+    sourced from instruments.py's INSTRUMENTS/BACKTEST_ONLY_SPECS -- the
+    single source of truth for these numbers (see that module's docstring
+    for provenance/estimation caveats and why BACKTEST_ONLY_SPECS is a
+    separate dict). `db_symbol` is the real exchange ticker (e.g. '6J'),
+    mapped to its INSTRUMENTS key where they diverge."""
+    key = _FX_TICKER_TO_INSTRUMENTS_KEY.get(db_symbol, db_symbol)
+    info = INSTRUMENTS.get(key) or BACKTEST_ONLY_SPECS[key]
+    return (info['multiplier'], info['initial_margin'], info['commission'])
+
+
 class FuturesType(Enum):
-    """Futures contract type enumeration, with associated properties."""
-    # Value format: (mult, initial_margin, commission)
-    # Multipliers are fixed CME contract specs (high confidence). Margins
-    # are CME SPAN maintenance margin and move with volatility/exchange
-    # resets — MES/ES values were given; the rest below are rough estimates
-    # only, scaled from typical CME margin levels for these products. Verify
-    # against current CME/broker figures before relying on them for sizing.
-    # Commission is per contract, per side (i.e. half of round trip) and
-    # reuses the existing per-contract tiers (standard vs micro) for the new
-    # symbols below; calculate_pnl() doubles it for the full round trip.
-    MES = (5, 3406.84, 0.62) # Micro E-mini S&P 500
-    ES = (50, 34068.38, 0.85) # E-mini S&P 500
-    MNQ = (2, 2900.0, 0.62) # Micro E-mini Nasdaq-100 -- margin estimated, verify
-    NQ = (20, 67582.55, 0.85) # E-mini Nasdaq-100 -- margin estimated, verify
-    MYM = (0.5, 1100.0, 1.24) # Micro E-mini Dow -- margin estimated, verify
-    YM = (5, 11000.0, 1.70) # E-mini Dow -- margin estimated, verify
-    M2K = (5, 900.0, 1.24) # Micro E-mini Russell 2000 -- margin estimated, verify
-    RTY = (50, 9000.0, 1.70) # E-mini Russell 2000 -- margin estimated, verify
-    ZN = (1000, 2156.25, 1.67) # 10-Year T-Note (CBOT) -- margin estimated, verify
-    TN = (1000, 2935.79, 1.67) # Ultra 10-Year T-Note (CBOT) -- margin estimated, verify
-    MTN = (100, 725.80, 0.57) # Micro 10-Year T-Note (CBOT) -- margin estimated, verify
-    ZT = (2000, 1380.75, 3.04) # 2-Year T-Note (CBOT) -- margin estimated, verify
-    GC = (100, 48345.79, 1.70) # Gold (COMEX) -- margin estimated, verify
-    SI = (5000, 74299.37, 1.70) # Silver (COMEX) -- margin estimated, verify
-    CL = (1000, 18750.0, 1.70) # Crude Oil (NYMEX) -- margin estimated, verify
-    ZL = (600, 4603.97, 3.02) # Soybean Oil (CBOT) -- margin estimated, verify
-    ZC = (50, 1638.35, 3.02) # Corn (CBOT) -- margin estimated, verify
-    ZS = (50, 4130.84, 3.02) # Soybeans (CBOT) -- margin estimated, verify
-    ZW = (50, 2948.24, 3.02) # Wheat (CBOT) -- margin estimated, verify
-    NIY = (500, 10000.0, 1.70) # Nikkei 225 Yen-denominated (CME) -- margin estimated, verify.
-                               # NOTE: contract is JPY-denominated (Y500/point); this
-                               # codebase's PnL math has no FX conversion, so PnL will
-                               # come out in JPY, not USD, unless that's added separately.
+    """Futures contract type enumeration, with associated properties.
+    Multiplier/margin/commission values live in instruments.py (see
+    _spec() above and that module's docstring), not here."""
+    MES = _spec('MES') # Micro E-mini S&P 500
+    ES = _spec('ES') # E-mini S&P 500
+    MNQ = _spec('MNQ') # Micro E-mini Nasdaq-100
+    NQ = _spec('NQ') # E-mini Nasdaq-100
+    MYM = _spec('MYM') # Micro E-mini Dow
+    YM = _spec('YM') # E-mini Dow
+    M2K = _spec('M2K') # Micro E-mini Russell 2000
+    RTY = _spec('RTY') # E-mini Russell 2000
+    ZN = _spec('ZN') # 10-Year T-Note (CBOT)
+    TN = _spec('TN') # Ultra 10-Year T-Note (CBOT)
+    MTN = _spec('MTN') # Micro 10-Year T-Note (CBOT)
+    ZT = _spec('ZT') # 2-Year T-Note (CBOT)
+    GC = _spec('GC') # Gold (COMEX)
+    SI = _spec('SI') # Silver (COMEX)
+    CL = _spec('CL') # Crude Oil (NYMEX)
+    ZL = _spec('ZL') # Soybean Oil (CBOT)
+    ZC = _spec('ZC') # Corn (CBOT)
+    ZS = _spec('ZS') # Soybeans (CBOT)
+    ZW = _spec('ZW') # Wheat (CBOT)
+    NIY = _spec('NIY') # Nikkei 225 Yen-denominated (CME) -- JPY-denominated
+                        # (Y500/point); this codebase's PnL math has no FX
+                        # conversion, so PnL comes out in JPY, not USD,
+                        # unless that's added separately.
     # Python identifiers can't start with a digit, so the FX futures whose
     # actual exchange ticker starts with one (6J, 6L, 6M) are named with a
     # leading underscore here -- use FuturesType.from_symbol('6J') to look
     # them up by their real ticker rather than FuturesType['6J'] (invalid).
-    _6J = (12_500_000, 3015.0, 2.47) # Japanese Yen (CME) -- margin estimated, verify
-    _6L = (100_000, 5034.80, 2.47) # Brazilian Real (CME) -- margin estimated, verify
-    _6M = (500_000, 1971.67, 2.47) # Mexican Peso (CME) -- margin estimated, verify
-    # SOX = (?, ?, 1.70) # Not added: genuinely unsure of this contract's point
-    # value/margin (possibly a Small Exchange product, not a standard CME index
-    # future I have reliable specs for) -- ask before adding rather than guess.
+    _6J = _spec('6J') # Japanese Yen (CME)
+    _6L = _spec('6L') # Brazilian Real (CME)
+    _6M = _spec('6M') # Mexican Peso (CME)
+    # SOX: not added, see instruments.py's BACKTEST_ONLY_SPECS docstring.
 
     def __new__(cls, mult: float, initial_margin: float, commission: float):
         obj = object.__new__(cls)
