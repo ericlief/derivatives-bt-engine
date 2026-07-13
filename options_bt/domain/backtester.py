@@ -695,7 +695,7 @@ class Backtester:
         start = date.fromisoformat(config.start_date)
         end = date.fromisoformat(config.end_date)
         # Signal/vol overlay -- hv3m, avg_r3m/avg_r1y ("mean"), ts3m/ts1y
-        # (fast/slow), ts (weighted signal), regime
+        # (fast/slow), signal (weighted trend-strength score), regime
         # (Bull/Bear/Correction/Rebound), sharpe3m, and vix_close --
         # computed on the FULL underlying series before windowing to
         # [start, end]: trimming first would starve the 63/252-day rolling
@@ -706,37 +706,41 @@ class Backtester:
         # live TSMOM signal uses) rather than reimplementing rolling stats.
         #
         # Suffixes (3m, 1y, ...) denote the rolling estimation window,
-        # not the reporting horizon. Volatility and Sharpe remain
-        # annualized -- hv3m is annualized vol estimated from the last
-        # 63d, sharpe3m is annualized Sharpe estimated from the last 63d.
-        signal = calculate_trend_strength(self.underlying.select(['ts_event', 'close']).sort('ts_event'))
-        signal = signal.with_columns(
+        # not the reporting horizon. Volatility, Sharpe, and avg_r3m/
+        # avg_r1y all remain annualized -- hv3m is annualized vol
+        # estimated from the last 63d, avg_r3m is annualized mean return
+        # estimated from the last 63d, sharpe3m is annualized Sharpe
+        # estimated from the last 63d.
+        overlay = calculate_trend_strength(self.underlying.select(['ts_event', 'close']).sort('ts_event'))
+        overlay = overlay.with_columns(
             hv3m=(pl.col('daily_std') * (252 ** 0.5)).round(4),
             regime=pl.struct(['ts3m', 'ts1y']).map_elements(
                 lambda s: classify_regime(s['ts3m'], s['ts1y']).value,
                 return_dtype=pl.Utf8,
             ),
-            **{c: pl.col(c).round(4) for c in ('ts3m', 'ts1y', 'ts')},
+            **{c: pl.col(c).round(4) for c in ('ts3m', 'ts1y', 'signal', 'avg_r3m', 'avg_r1y')},
         )
-        signal = signal.with_columns(
+        overlay = overlay.with_columns(
             # Rolling Sharpe on the same 3m (63-day) window as hv3m/ts3m/
             # regime, not whole-to-date -- keeps it on the same clock as
             # regime so a regime flip and a Sharpe/vol move are comparable
             # at a glance instead of drifting at different speeds. avg_r3m
-            # is already r1d.rolling_mean(63) from calculate_trend_strength.
+            # is already annualized (see calculate_trend_strength), so no
+            # extra *252 here -- both numerator and denominator are
+            # annualized already.
             sharpe3m=pl.when(pl.col('hv3m') > 0)
-            .then((pl.col('avg_r3m') * 252) / pl.col('hv3m'))
+            .then(pl.col('avg_r3m') / pl.col('hv3m'))
             .otherwise(None)
             .round(4)
         )
 
         if self.vix.height > 0 and 'ts_event' in self.vix.columns:
             vix_daily = self.vix.select(['ts_event', 'close']).rename({'close': 'vix_close'}).sort('ts_event')
-            signal = signal.join(vix_daily, on='ts_event', how='left')
+            overlay = overlay.join(vix_daily, on='ts_event', how='left')
         else:
-            signal = signal.with_columns(vix_close=pl.lit(None, dtype=pl.Float64))
+            overlay = overlay.with_columns(vix_close=pl.lit(None, dtype=pl.Float64))
 
-        daily = signal.filter((pl.col('ts_event') >= start) & (pl.col('ts_event') <= end))
+        daily = overlay.filter((pl.col('ts_event') >= start) & (pl.col('ts_event') <= end))
 
         # Match each day to the most recently opened trade as of that day;
         # is_open tells us whether that trade was still open (vs. already
@@ -844,7 +848,7 @@ class Backtester:
         stats = daily.select([
             'ts_event', 'close', 'mtm_pnl', 'cum_pnl', 'cum_pnl_pct', 'mtm_capital',
             'running_max', 'dd_usd', 'dd_pct', 'hv3m', 'sharpe3m',
-            'avg_r3m', 'avg_r1y', 'ts3m', 'ts1y', 'ts', 'regime', 'vix_close',
+            'avg_r3m', 'avg_r1y', 'ts3m', 'ts1y', 'signal', 'regime', 'vix_close',
         ]).rename({
             'ts_event': 'date',
             'mtm_capital': 'capital',

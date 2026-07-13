@@ -174,7 +174,7 @@ def _compute_target(symbol: str, d: date, full_price_data: dict[str, pl.DataFram
     def _col(name):
         return last[name][0] if name in last.columns else None
 
-    trend_strength = _col('ts')
+    trend_strength = _col('signal')
     ts3m, ts1y = _col('ts3m'), _col('ts1y')
     daily_std_last = _col('daily_std')
     last_close = float(last['close'][0])
@@ -210,7 +210,7 @@ def _compute_target(symbol: str, d: date, full_price_data: dict[str, pl.DataFram
     target = max(-config.max_contracts, min(config.max_contracts, target))
 
     return {
-        'target': target, 'ts': trend_strength, 'regime': regime,
+        'target': target, 'signal': trend_strength, 'regime': regime,
         'hv': hv, 'risk_scalar': risk_scalar * market_stress_scale, 'momentum_discount': momentum_discount,
         'close': last_close, 'dd_pct': dd_pct,
         # Raw signal-row fields, straight from calculate_trend_strength,
@@ -273,10 +273,10 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
             'date': rebalance_date, 'symbol': symbol,
             'close': _round(s.get('close'), 2), 'peak': _round(s.get('peak'), 2),
             'dd_pct': _round(s.get('dd_pct'), 2),
-            'avg_r3m': _round(s.get('avg_r3m'), 6), 'avg_r1y': _round(s.get('avg_r1y'), 6),
+            'avg_r3m': _round(s.get('avg_r3m'), 4), 'avg_r1y': _round(s.get('avg_r1y'), 4),
             'r3m': _round(s.get('r3m'), 4), 'r1y': _round(s.get('r1y'), 4),
             'ts3m': _round(s.get('ts3m'), 4), 'ts1y': _round(s.get('ts1y'), 4),
-            'ts': _round(s.get('ts'), 4), 'r1y_pct': _round(s.get('r1y_pct'), 2),
+            'signal': _round(s.get('signal'), 4), 'r1y_pct': _round(s.get('r1y_pct'), 2),
             'regime': s.get('regime'), 'vix_close': _round(vix_close, 2), 'vix_ratio': _round(vix_ratio, 4),
             'vol_regime': vol_regime, 'hv': _round(s.get('hv'), 4), 'risk_scalar': _round(s.get('risk_scalar'), 4),
             'momentum_discount': _round(s.get('momentum_discount'), 2),

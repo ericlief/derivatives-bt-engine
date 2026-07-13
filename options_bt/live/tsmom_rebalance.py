@@ -259,7 +259,7 @@ def _compute_signal(ib: IBPySync, instr: dict, min_days: int, vol_target: float,
 
     df = calculate_trend_strength(bars)
     last = df.tail(1)
-    trend_strength = last['ts'][0]
+    trend_strength = last['signal'][0]
     ts3m = last['ts3m'][0]
     ts1y = last['ts1y'][0]
     daily_std_last = last['daily_std'][0] if 'daily_std' in last.columns else None

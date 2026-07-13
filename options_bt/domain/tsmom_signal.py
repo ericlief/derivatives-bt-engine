@@ -18,9 +18,11 @@ Horizon choice (do not revisit):
 Naming convention (applies wherever these columns are consumed, e.g.
 Backtester.calculate_futures_mtm_drawdown's hv3m/sharpe3m): suffixes (3m,
 1y, ...) denote the rolling estimation window, not the reporting horizon.
-Volatility and Sharpe remain annualized -- e.g. hv3m is annualized vol
-estimated from the last 63d, not a 3-month vol figure; sharpe3m is
-annualized Sharpe estimated from the last 63d.
+Volatility, Sharpe, and avg_r3m/avg_r1y all remain annualized -- e.g.
+hv3m is annualized vol estimated from the last 63d, not a 3-month vol
+figure; avg_r3m is the annualized mean daily return estimated from the
+last 63d, not a 3-month return; sharpe3m is annualized Sharpe estimated
+from the last 63d.
 """
 
 import logging
@@ -50,10 +52,12 @@ def calculate_trend_strength(df: pl.DataFrame, w3m: float = 0.4, w1y: float = 0.
         daily_std=pl.col('r1d').rolling_std(63),
         # Rolling mean of daily returns (not price -- avg3m/avg1y used to
         # be a rolling mean of close, but that's not comparable to r3m/r1y
-        # or daily_std, which are both return-based) over the same 3m/1y
-        # windows as ts3m/ts1y.
-        avg_r3m=pl.col('r1d').rolling_mean(63),
-        avg_r1y=pl.col('r1d').rolling_mean(252),
+        # or daily_std, which are both return-based), over the same 3m/1y
+        # windows as ts3m/ts1y, annualized (*252, linear -- means scale
+        # with time, unlike std which scales with sqrt(time)) so the
+        # values are readable instead of tiny daily-return fractions.
+        avg_r3m=pl.col('r1d').rolling_mean(63) * 252,
+        avg_r1y=pl.col('r1d').rolling_mean(252) * 252,
     )
     df = df.with_columns(
         ts3m=pl.col('r3m') / (pl.col('daily_std') * math.sqrt(63)),
@@ -64,7 +68,7 @@ def calculate_trend_strength(df: pl.DataFrame, w3m: float = 0.4, w1y: float = 0.
         w1=pl.col('ts1y').is_not_null().cast(pl.Float64) * w1y,
     )
     df = df.with_columns(
-        ts=(
+        signal=(
             pl.when(pl.col('ts3m').is_not_null())
             .then(
                 ((
