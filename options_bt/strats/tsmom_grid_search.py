@@ -102,7 +102,7 @@ def run_grid(symbols: list[str], start_date: date, end_date: date, param_grid: d
 
     # Warm the parquet/VIX cache once, sequentially, in the parent process --
     # otherwise every worker's first cache-miss would race to write the same
-    # file (FuturesDataLoader.ohlcv's save_preprocessed path has no locking).
+    # file (FuturesDataLoader.daily's save_preprocessed path has no locking).
     load_portfolio_data(symbols)
 
     # mp_context='spawn', not the Linux default 'fork': polars and duckdb

@@ -13,7 +13,7 @@ contexts it appears in:
   signal_symbol -- IB continuous-front-month ticker for signal/history;
                    only set when the traded contract's own history is too
                    short/thin (e.g. J7→JPY, MZC→ZC for CBOT micro grains)
-  db_symbol     -- Globex root symbol in ohlcv_enriched.asset (Databento
+  db_symbol     -- Globex root symbol in daily.asset (Databento
                    CME MDP3.0 feed); only set when it differs from the key
                    (e.g. J7→6J, BRE→6L, JPY→6J). Used by the duckdb
                    continuous-front-month queries in the backtester,

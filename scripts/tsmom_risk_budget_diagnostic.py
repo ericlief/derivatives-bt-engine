@@ -64,13 +64,13 @@ DEFAULT_MIN_SYNCED_ROWS  = 252    # ~1 trading year of common history
 DEFAULT_LOOKBACK_DAYS    = 1100   # ~3 calendar years; gives ~750 trading days
 DEFAULT_DB_PATH          = '/home/dev/fin/db/globex_mdp_3.0.duckdb'
 
-# Continuous front-month from ohlcv_enriched: nearest expiry per date,
+# Continuous front-month from daily: nearest expiry per date,
 # pre-expiry bars only.  Parameterised by asset and a lookback date cutoff
 # (two positional ? placeholders) to keep it fast on the full duckdb.
 _DB_CONT_FRONT_SQL = """
 WITH bars AS (
     SELECT ts_event::date AS date, close, expiration
-    FROM ohlcv_enriched
+    FROM daily
     WHERE asset = ?
       AND instrument_class = 'F' AND security_type = 'FUT'
       AND expiration IS NOT NULL
@@ -101,7 +101,7 @@ def resolve_signal_symbol(instr: dict) -> str:
 
 
 def resolve_db_symbol(instr: dict) -> str:
-    """Globex root symbol for this instrument in ohlcv_enriched.asset.
+    """Globex root symbol for this instrument in daily.asset.
     Resolution: explicit db_symbol > signal_symbol (thin micros already
     borrow their full-size sibling's history) > ib_symbol > symbol.
     Examples: J7→6J, BRE→6L, MZC→ZC (via signal_symbol), SIL→SI."""

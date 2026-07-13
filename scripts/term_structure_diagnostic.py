@@ -33,7 +33,7 @@ DEFAULT_OUT_PATH = 'research/term_structure_by_year.csv'
 _TERM_STRUCTURE_SQL = """
 WITH bars AS (
     SELECT asset, ts_event, close, expiration
-    FROM ohlcv_enriched
+    FROM daily
     WHERE asset IN ({placeholders})
       AND instrument_class = 'F' AND security_type = 'FUT'
       AND expiration IS NOT NULL
