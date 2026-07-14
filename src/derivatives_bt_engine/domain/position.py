@@ -881,24 +881,33 @@ class SingleLegOptionPosition(BaseOptionPosition):
             'margin_required': self.margin_required
         }
 
-    def close(self, 
-            option_chain: pl.DataFrame, 
+    def close(self,
+            option_chain: pl.DataFrame,
             underlying_price_history: pl.DataFrame,
-            force: bool = False
+            force: bool = False,
+            close_reason: Optional[str] = None
     ) -> Optional[Tuple[OptionTradeResult, Dict, float]]:
         """
         Close this single-leg position and calculate results.
-        
+
         Args:
-            option_chain: pl.DataFrame, 
+            option_chain: pl.DataFrame,
             underlying_price_history: pl.DataFrame,
             force: bool = False (if closing at end of backtest)
-        
+            close_reason: caller-supplied hint for *why* this is an early
+                closure (e.g. 'vix', 'signal_ts_threshold',
+                'signal_crossover') -- used only when close_date (not
+                expire_date) is what's driving the close; falls back to
+                the generic 'early closure' if not provided. Never
+                overrides 'expiration' (fee-critical: ITM exercise fee
+                logic in calculate_pnl keys off that exact string).
+
         Returns:
             Optional[Tuple[OptionTradeResult, Dict, float]]: Tuple of (trade_result_dict, transaction_dict, bp_effect) if successful, None if closing data is unavailable.
         """
         logger.info(f"Closing Trade #{self.trade_id}|Trans #{self.transaction_id}|{self.option_strategy}|{self.option_type}|{self.position_side}")
         bp_effect = 0
+        external_close_reason = close_reason
         close_reason = None
         min_valid_date = date(1990, 1, 1)  # Arbitrary date well after 1970
 
@@ -909,7 +918,7 @@ class SingleLegOptionPosition(BaseOptionPosition):
         
         # Early closure, get close date with validation
         if self.close_date is not None:
-            close_reason = 'early closure'
+            close_reason = external_close_reason or 'early closure'
             close_date = self.close_date
         elif self.expire_date is not None:
             close_reason = 'expiration'
@@ -1290,21 +1299,25 @@ class MultiLegOptionPosition(BaseOptionPosition):
     def close(self,
             option_chain: pl.DataFrame,
             underlying_price_history: pl.DataFrame,
-            force: bool = True) -> Optional[Tuple[Dict, List[Dict], float]]:
+            force: bool = True,
+            close_reason: Optional[str] = None) -> Optional[Tuple[Dict, List[Dict], float]]:
         """
         Close this multi-leg position and calculate results for each leg and the spread.
 
         Args:
             option_chain: pl.DataFrame,
             underlying_price_history: pl.DataFrame,
-        
+            close_reason: forwarded to each leg's own close() -- see
+                SingleLegOptionPosition.close() for the exact semantics
+                (early-closure hint only, never overrides 'expiration').
+
         Returns:
             Optional[Tuple[OptionTradeResult, List[Dict], float]]: Tuple of (trade_result_dict, list_of_transaction_dicts, total_bp_effect) if successful, None if closing data is unavailable.
         """
         all_trade_results = []
         all_transactions = []
         total_bp_effect = 0.0
-        
+
         logger.debug(f'Closing spread {self.trade_id}')
         # Close each leg individually and collect results
         for i, leg in enumerate(self.legs):
@@ -1313,7 +1326,8 @@ class MultiLegOptionPosition(BaseOptionPosition):
             leg_trade_result, leg_transaction_dict, leg_bp_effect = leg.close(
                 option_chain=option_chain,
                 underlying_price_history=underlying_price_history,
-                force=force)
+                force=force,
+                close_reason=close_reason)
             
             if leg_trade_result is None or leg_transaction_dict is None:
                 logger.error(f"Skipping spread closure due to missing closing data for leg {i+1}")

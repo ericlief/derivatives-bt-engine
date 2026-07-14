@@ -154,23 +154,25 @@ class TradeManager:
                 .select([date_col, 'signal', 'ts3m', 'ts1y'])
             )
 
-        def _signal_gate_triggered(sig_val, ts3m_val, ts1y_val, is_long: bool, threshold: Optional[float]) -> bool:
-            """True if the direction-aware weak-signal condition holds for
+        def _signal_gate_reason(sig_val, ts3m_val, ts1y_val, is_long: bool, threshold: Optional[float]) -> Optional[str]:
+            """Which direction-aware weak-signal condition holds for
             `threshold` (an exit or entry threshold -- same shape, different
             value so entry can require a stronger bar than exit, avoiding
-            close/reopen thrashing right at one shared line) or, independent
-            of threshold, exit_on_ts_crossover's ts3m-vs-ts1y condition."""
+            close/reopen thrashing right at one shared line), if any --
+            returned as a specific reason string (not just a bool) so
+            callers can record *why* a position closed, not just that it
+            did."""
             if threshold is not None and sig_val is not None:
                 if is_long and sig_val < threshold:
-                    return True
+                    return 'signal_ts_threshold'
                 if not is_long and sig_val > -threshold:
-                    return True
+                    return 'signal_ts_threshold'
             if self.config.exit_on_ts_crossover and ts3m_val is not None and ts1y_val is not None:
                 if is_long and ts3m_val < ts1y_val:
-                    return True
+                    return 'signal_crossover'
                 if not is_long and ts3m_val > ts1y_val:
-                    return True
-            return False
+                    return 'signal_crossover'
+            return None
 
         start = trade_signals[date_col].min()
         if is_futures:
@@ -222,7 +224,7 @@ class TradeManager:
             # uses ts_entry_threshold (typically a stronger bar than
             # ts_exit_threshold) so a just-closed position doesn't reopen
             # the instant the signal ticks back over the exit line.
-            signal_early_closure = False
+            signal_exit_reason: Optional[str] = None
             signal_entry_blocked = False
             if signal_df is not None:
                 sig_match = signal_df.filter(pl.col(date_col) == current_date)
@@ -232,13 +234,13 @@ class TradeManager:
                     ts1y_val = sig_match['ts1y'][0]
                     is_long = self.config.position_side == PositionSide.LONG
 
-                    signal_early_closure = _signal_gate_triggered(
+                    signal_exit_reason = _signal_gate_reason(
                         sig_val, ts3m_val, ts1y_val, is_long, self.config.ts_exit_threshold)
-                    signal_entry_blocked = _signal_gate_triggered(
-                        sig_val, ts3m_val, ts1y_val, is_long, self.config.ts_entry_threshold)
+                    signal_entry_blocked = _signal_gate_reason(
+                        sig_val, ts3m_val, ts1y_val, is_long, self.config.ts_entry_threshold) is not None
 
-                    if signal_early_closure:
-                        logger.debug(f'Signal exit gate triggered: signal={sig_val}, ts3m={ts3m_val}, ts1y={ts1y_val}')
+                    if signal_exit_reason is not None:
+                        logger.debug(f'Signal exit gate triggered ({signal_exit_reason}): signal={sig_val}, ts3m={ts3m_val}, ts1y={ts1y_val}')
                     if signal_entry_blocked:
                         logger.debug(f'Signal entry gate blocked: signal={sig_val}, ts3m={ts3m_val}, ts1y={ts1y_val}')
 
@@ -247,7 +249,7 @@ class TradeManager:
             if n_open_positions > 0:
                 if vix_early_closure:
                     logger.debug(f'VIX early closure for {n_open_positions} open positions')
-                if signal_early_closure:
+                if signal_exit_reason is not None:
                     logger.debug(f'Signal early closure for {n_open_positions} open positions')
 
                 trade_results, transactions = self._close_expired_positions(
@@ -255,7 +257,7 @@ class TradeManager:
                     underlying_price_history=underlying_price_history,
                     current_date=current_date,
                     vix_early_closure=vix_early_closure,  # Pass the boolean flag
-                    signal_early_closure=signal_early_closure,
+                    signal_exit_reason=signal_exit_reason,
                 )
                 # only aggregate results of close was successfull
                 if trade_results is not None:
@@ -363,7 +365,7 @@ class TradeManager:
                                  underlying_price_history: pl.DataFrame,
                                  current_date: date,
                                  vix_early_closure=False,  # Close all open pos
-                                 signal_early_closure=False,  # Close all open pos (ts_threshold/exit_on_ts_crossover)
+                                 signal_exit_reason: Optional[str] = None,  # Close all open pos (ts_exit_threshold/exit_on_ts_crossover); also names *why*
                                  close_all=False) -> List[Optional[OptionTradeResult]]:
         """
         Close all open positions that have reached their expiration or close date, and update the option buying power accordingly.
@@ -376,6 +378,20 @@ class TradeManager:
         trade_results = []
         transactions = []
 
+        # Reason recorded on the trade result for an early closure -- 'vix'/
+        # signal_exit_reason take priority (they're what force-closed a
+        # position that hadn't otherwise reached its own close_date/
+        # expire_date yet); if neither fired, pass None through so
+        # SingleLegOptionPosition/MultiLegOptionPosition/FuturesPosition each
+        # fall back to their own existing default ('early closure'/
+        # 'expiration'/'roll') -- unchanged behavior when no gate applies.
+        if signal_exit_reason is not None:
+            reason = signal_exit_reason
+        elif vix_early_closure:
+            reason = 'vix'
+        else:
+            reason = None
+
         for pos in self.open_positions:
 
             # Handle positions with expiration or close date beyond backtest end date, closing then (NB: if
@@ -386,7 +402,7 @@ class TradeManager:
             early_closure = False
             if (
                 (pos.close_date is not None and current_date >= pos.close_date) or
-                vix_early_closure or signal_early_closure
+                vix_early_closure or signal_exit_reason is not None
             ):
                 early_closure = True
 
@@ -415,7 +431,8 @@ class TradeManager:
                     # For multi-leg positions, use the spread's close method which handles all legs
                     result, leg_transactions, total_bp_effect = pos.close(option_chain=option_chain,
                                                                          underlying_price_history=underlying_price_history,
-                                                                         force=close_all)
+                                                                         force=close_all,
+                                                                         close_reason=reason)
 
                     if result:
                         # Update buying power with aggregated bp_effect
@@ -443,9 +460,17 @@ class TradeManager:
                     pos.transaction_id = self.transaction_counter
                     self.transaction_counter += 1
 
+                    # FuturesPosition's own close_reason default is None (not
+                    # 'roll') -- since close() always forwards the keyword
+                    # explicitly, an unset gate must be filled in here or a
+                    # natural roll would record close_reason=None instead of
+                    # 'roll'. Options positions derive their own default
+                    # ('early closure'/'expiration') internally when None.
+                    close_reason_arg = (reason or 'roll') if isinstance(pos, FuturesPosition) else reason
                     result, transaction, bp_effect = pos.close(option_chain=option_chain,
                                                     underlying_price_history=underlying_price_history,
-                                                    force=close_all)
+                                                    force=close_all,
+                                                    close_reason=close_reason_arg)
 
                     if result:
                         # Update buying power with the calculated bp_effect
