@@ -1,10 +1,16 @@
 """
-CLI for a naked (single-leg, long or short) futures backtest.
+CLI for a naked (single-leg, long or short) futures backtest. Accepts one
+or more comma-separated symbols -- each runs as its own fully independent
+single-position backtest (own capital/margin, no shared risk budget or
+correlation-aware sizing across symbols; that's the TSMOM backtester's
+job, not this one) so you can quickly compare e.g. how a signal-gate rule
+plays out on ES vs GC side by side.
 
 Run:
-    naked --symbol ES --dir long --years 2025-2026
-    naked --symbol ES --dir long --years 2025
-    naked --symbol MES --dir short --years 2025-2026 --quantity 2
+    naked --symbols ES --dir long --years 2025-2026
+    naked --symbols ES --dir long --years 2025
+    naked --symbols MES --dir short --years 2025-2026 --quantity 2
+    naked --symbols ES,GC,CL --dir long --years 2010-2026 --ts-exit-threshold 0 --ts-entry-threshold 0.5
 """
 import argparse
 import os
@@ -30,8 +36,9 @@ VIX_FILE = os.getenv('VIX_PATH', 'vix.csv')
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument('--symbol', default='ES',
-                   help='Futures symbol, must be a known instruments.py symbol (default: %(default)s)')
+    p.add_argument('--symbols', default='ES',
+                   help='Comma-separated futures symbols, each a known instruments.py symbol '
+                        '-- each runs as its own independent backtest (default: %(default)s)')
     p.add_argument('--dir', choices=['long', 'short'], default='long',
                    help='Position direction/side (default: %(default)s)')
     p.add_argument('--years', default='2025-2026',
@@ -54,10 +61,12 @@ def parse_args():
     return p.parse_args()
 
 
-def main():
-    args = parse_args()
-
-    symbol = args.symbol.upper()
+def _run_one_symbol(symbol: str, args) -> dict:
+    """Runs one fully independent single-position backtest for `symbol` --
+    its own capital/margin, no shared risk budget or correlation-aware
+    sizing with any other symbol (that coordination is the TSMOM
+    backtester's job, not this one). Returns a summary row for the
+    cross-symbol comparison table."""
     futures_strategy = FuturesStrategy.LONG_FUTURES if args.dir == 'long' else FuturesStrategy.SHORT_FUTURES
 
     parts = args.years.split('-')
@@ -110,7 +119,32 @@ def main():
     bt = Backtester(data=data, save_trades=not args.no_save, log_to_sheets=False)
     results = bt.run(config)
     with pl.Config(tbl_rows=-1, tbl_cols=-1, tbl_width_chars=200):
+        print(f"\n=== {symbol} ===")
         print(results['trade_results'])
+
+    trade_results = results['trade_results']
+    dd = results.get('drawdown_analysis', {})
+    return {
+        'symbol': symbol,
+        'trades': trade_results.height,
+        'win_rate_pct': round(100 * (trade_results['pnl'] > 0).sum() / trade_results.height, 2) if trade_results.height else None,
+        'total_pnl': round(trade_results['cumulative_pnl'][-1], 2) if trade_results.height else None,
+        'max_loss': round(trade_results['pnl'].min(), 2) if trade_results.height else None,
+        'avg_days_held': round(trade_results['days_held'].mean(), 1) if trade_results.height else None,
+        'max_drawdown_usd': dd.get('max_drawdown'),
+    }
+
+
+def main():
+    args = parse_args()
+    symbols = [s.strip().upper() for s in args.symbols.split(',') if s.strip()]
+
+    summary_rows = [_run_one_symbol(symbol, args) for symbol in symbols]
+
+    if len(summary_rows) > 1:
+        with pl.Config(tbl_rows=-1, tbl_cols=-1, tbl_width_chars=200):
+            print("\n=== Cross-symbol summary (each an independent backtest, no shared risk budget) ===")
+            print(pl.DataFrame(summary_rows))
 
 
 if __name__ == "__main__":
