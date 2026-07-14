@@ -9,9 +9,9 @@ Scheme C -- expanding like B until width hits SCHEME_C_MAX_WIDTH_YEARS,
     then a rolling window of that fixed width slides forward by STEP_YEARS.
 
 Run:
-    .venv/bin/python scripts/window_scheme_naked_futures.py
-    .venv/bin/python scripts/window_scheme_naked_futures.py --symbol ES --dir long
-    .venv/bin/python scripts/window_scheme_naked_futures.py --symbol CL --dir short
+    window-naked
+    window-naked --symbol ES --dir long
+    window-naked --symbol CL --dir short
 """
 import argparse
 import datetime as dt

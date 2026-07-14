@@ -13,7 +13,7 @@ logger = setup_logger()
 load_dotenv()
 
 
-def run_test_suite():
+def main():
 
     """Run a suite of backtest examples with different configurations."""
 
@@ -95,4 +95,4 @@ def run_test_suite():
 
 
 if __name__ == "__main__":
-    run_test_suite()
+    main()

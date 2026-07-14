@@ -9,7 +9,7 @@ from derivatives_bt_engine.domain.option_leg_config import OptionLegConfig
 logger = setup_logger()
 
 
-def run_test_suite():
+def main():
 
     """Run a suite of backtest examples with different configurations."""
     # Display width/precision for results (polars DataFrames) is configured
@@ -203,6 +203,6 @@ def run_test_suite():
     #         logger.warning("No trades executed for this configuration")
 
 if __name__ == "__main__":
-    run_test_suite()
+    main()
     
  

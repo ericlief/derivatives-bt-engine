@@ -13,7 +13,7 @@ logger = setup_logger()
 load_dotenv()
 
 
-def run_test_suite():
+def main():
 
     """Run a suite of backtest examples with different configurations."""
     # Display width/precision for results (polars DataFrames) is configured
@@ -201,6 +201,6 @@ def run_test_suite():
     #         logger.warning("No trades executed for this configuration")
 
 if __name__ == "__main__":
-    run_test_suite()
+    main()
     
  

@@ -9,7 +9,7 @@ shared mutable state across runs, so combos can run as truly independent
 worker processes via ProcessPoolExecutor.
 
 Run:
-    python -m derivatives_bt_engine.strats.tsmom_grid_search --symbols ES --years 2015-2025
+    tsmom-grid-search --symbols ES --years 2015-2025
 """
 import argparse
 import itertools

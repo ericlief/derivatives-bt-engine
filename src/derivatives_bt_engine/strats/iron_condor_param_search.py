@@ -80,7 +80,7 @@ def make_iron_condor_config(combo, start_date, end_date):
     )
 
 
-def run_grid():
+def main():
     # Display width/precision for results (polars DataFrames) is configured
     # globally by backtester.py's module-level pl.Config calls.
 
@@ -139,4 +139,4 @@ def run_grid():
 
 
 if __name__ == "__main__":
-    run_grid()
+    main()

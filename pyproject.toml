@@ -35,6 +35,17 @@ dependencies = [
 tsmom = "derivatives_bt_engine.live.run_tsmom_rebalance:main"
 naked = "derivatives_bt_engine.strats.naked_futures:main"
 tsmom-bt = "derivatives_bt_engine.strats.tsmom_backtest:main"
+tsmom-grid-search = "derivatives_bt_engine.strats.tsmom_grid_search:main"
+bear-call = "derivatives_bt_engine.strats.bear_call:main"
+bull-put = "derivatives_bt_engine.strats.bull_put:main"
+bull-put-search = "derivatives_bt_engine.strats.bull_put_param_search:main"
+iron-condor = "derivatives_bt_engine.strats.iron_condor:main"
+iron-condor-search = "derivatives_bt_engine.strats.iron_condor_param_search:main"
+long-call = "derivatives_bt_engine.strats.long_call:main"
+long-futures = "derivatives_bt_engine.strats.long_futures:main"
+window-naked = "derivatives_bt_engine.strats.window_scheme_naked_futures:main"
+window-bull-put = "derivatives_bt_engine.strats.window_scheme_bull_put:main"
+window-iron-condor = "derivatives_bt_engine.strats.window_scheme_iron_condor:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

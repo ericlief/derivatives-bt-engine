@@ -1,8 +1,7 @@
 """Compare three ways of slicing 2010-2023 SPX history into backtest windows
-for a single, fixed bull-put-credit-spread parameter combo -- windowing
-scheme is the only thing that varies. See
-research/research_window_slicing_bull_put.md for the write-up this script's
-output feeds.
+for a single, fixed iron-condor parameter combo -- windowing scheme is the
+only thing that varies. See research/research_window_slicing_iron_condor.md
+for the write-up this script's output feeds.
 
 Scheme A -- fixed rolling window, 90-day slide (already implemented in
     grid_search_backtester.py). Reuses that module's own window generator
@@ -22,7 +21,7 @@ Scheme B -- expanding window anchored at ANCHOR_START_DATE, end date grows
 Scheme C -- expanding window like B until it hits SCHEME_C_MAX_WIDTH_YEARS,
     then a rolling window of that fixed width slides forward by STEP_YEARS.
 
-Run: .venv/bin/python scripts/window_scheme_bull_put.py
+Run: window-iron-condor
 """
 import datetime as dt
 import multiprocessing
@@ -40,21 +39,21 @@ from dotenv import load_dotenv
 
 from derivatives_bt_engine.domain.backtester import Backtester
 from derivatives_bt_engine.domain.dataloader import OptionsDataLoader
-from derivatives_bt_engine.strats.bull_put_param_search import make_bull_put_config
 from derivatives_bt_engine.strats.grid_search_backtester import _generate_windows
+from derivatives_bt_engine.strats.iron_condor_param_search import make_iron_condor_config
 from derivatives_bt_engine.utils.gspread_log_util import _format_single_backtest_result_row
 from derivatives_bt_engine.utils.logger import setup_logger
 
 logger = setup_logger()
 load_dotenv()
 
-# ── Tunable defaults ─────────────────────────────────────────────────
-ANCHOR_START_DATE = "2010-01-01"       # Scheme A/B/C anchor start date
-SCHEME_A_PERIOD_YEARS = 1              # fixed rolling-window width (Scheme A), matches
-                                        # grid_search_backtester.py's own periods=[1] usage
-SCHEME_C_MAX_WIDTH_YEARS = 5           # width Scheme C expands to before it starts rolling
-STEP_YEARS = 1                         # calendar-year step for both B's expansion and C's roll
-AUTOCORR_MAX_LAG = 5                   # Scheme-A lag-1..lag-N autocorrelation of Sharpe/return_pct
+# ── Tunable defaults ────────────────────────────────────────────────
+ANCHOR_START_DATE = "2010-01-01"     # Scheme A/B/C anchor start date
+SCHEME_A_PERIOD_YEARS = 1            # fixed rolling-window width (Scheme A), matches
+                                      # grid_search_backtester.py's own periods=[1] usage
+SCHEME_C_MAX_WIDTH_YEARS = 5         # width Scheme C expands to before it starts rolling
+STEP_YEARS = 1                       # calendar-year step for both B's expansion and C's roll
+AUTOCORR_MAX_LAG = 5                 # Scheme-A lag-1..lag-N autocorrelation of Sharpe/return_pct
 
 # dte_target(45) + early_close_on_dte(25) means a position can live up to
 # ~45 calendar days past its open date; 150 days of chain data past a
@@ -63,38 +62,38 @@ AUTOCORR_MAX_LAG = 5                   # Scheme-A lag-1..lag-N autocorrelation o
 CHAIN_BUFFER_AFTER_DAYS = 150
 CHAIN_BUFFER_BEFORE_DAYS = 10
 
-# use_spread_width=True: place the long leg a fixed max_spread_width points
-# OTM of the (delta-selected) short leg, instead of selecting it by its own
-# independent delta_target. Without this, two independently-delta-selected
-# legs plus a fixed-points max_spread_width *filter* silently stops
-# producing any signals at all once SPX has risen far enough that a
-# 0.05-delta gap between legs routinely spans more than max_spread_width
-# points -- confirmed empirically: SPX's mean level goes from ~1140 (2010)
-# to ~4273 (2021), and every window starting ~mid-2019 onward produced
-# zero trades for this combo before this flag was added (signal generation
-# logged e.g. "Filtered out 5170 spreads due to excessive width" with
-# nothing surviving). With use_spread_width=True the long leg's strike is
-# derived directly from the short leg + max_spread_width, so a spread of
-# exactly that width exists by construction at any underlying price level.
+# use_spread_width=True: place each long wing a fixed max_spread_width
+# points OTM of its (delta-selected) short leg, instead of selecting it by
+# its own independent delta_target -- make_iron_condor_config already
+# defaults to this (unlike make_bull_put_config, which defaults to False),
+# but it's set explicitly here so the choice isn't silently dependent on
+# that default. Without it, two independently-delta-selected legs per side
+# plus a fixed-points max_spread_width *filter* would have the same failure
+# mode confirmed in window_scheme_bull_put.py: SPX's mean level rose from
+# ~1140 (2010) to ~4273 (2021), so a fixed delta gap between legs spans
+# more and more raw strike points over time, and eventually every spread
+# gets filtered out with nothing surviving. With use_spread_width=True the
+# wing's strike is derived directly from its short leg + max_spread_width,
+# so a spread of exactly that width exists by construction at any
+# underlying price level.
 COMBO: Dict[str, Any] = {
-    'short_delta_target': 0.30,
+    'short_delta_target': 0.25,
     'dte_target': 45,
     'max_spread_width': 10,
     'use_spread_width': True,
-    'early_close_on_dte': 25,
+    # 'early_close_on_dte': 25,
 }
 
-# ── Infrastructure ───────────────────────────────────────────────────
-# Same .env-based resolution as bull_put_param_search.py. The repo's own
-# .env only had DATA_PATH/FIN_DATA_ROOT until this task's investigation
-# added SPX_OPTIONS_CHAIN_PATH/SPX_UNDERLYING_PATH/VIX_PATH -- these
-# fallbacks match that same layout in case they're ever unset again.
+# ── Infrastructure ──────────────────────────────────────────────────
+# Same .env-based resolution as iron_condor_param_search.py, but with real
+# fallback defaults (this machine's .env only sets FIN_DATA_ROOT/DATA_PATH,
+# not the three SPX_*/VIX_* vars that OptionsDataLoader actually reads).
 _DEFAULT_SPX_OPTIONS_CHAIN_PATH = os.path.expanduser("~/data/fin/market/options/SPX/eod")
 _DEFAULT_SPX_UNDERLYING_PATH = os.path.expanduser("~/data/fin/market/index/SPX/eod")
 _DEFAULT_VIX_PATH = os.path.expanduser("~/data/fin/market/index/VIX/eod")
 
-_OUTPUT_CSV_PATH = "research/window_scheme_bull_put_windows.csv"
-_OUTPUT_MD_PATH = "research/research_window_slicing_bull_put.md"
+_OUTPUT_CSV_PATH = "research/window_scheme_iron_condor_windows.csv"
+_OUTPUT_MD_PATH = "research/research_window_slicing_iron_condor.md"
 
 
 def _resolve_paths() -> Tuple[str, str, str]:
@@ -150,9 +149,7 @@ def generate_expanding_windows(anchor_start: str, data_end: str, step_years: int
     """Scheme B: start fixed at anchor_start; end grows by step_years each
     step (calendar-year add, not +365d, so it lands on the same month/day
     every year) until the next step would run past data_end -- then one
-    final window is appended capped at data_end itself, exactly hitting the
-    'up to the actual last available date' requirement even though that
-    date isn't itself a clean N-year boundary from anchor_start."""
+    final window is appended capped at data_end itself."""
     start_dt = dt.date.fromisoformat(anchor_start)
     end_bound = dt.date.fromisoformat(data_end)
     windows = []
@@ -210,7 +207,7 @@ def _worker_run_window(chain_parquet_path: str, start_date: str, end_date: str, 
 
     data = {'option_chain': chain_pl, 'underlying': dl.underlying_data, 'vix': dl.vix_data}
     bt = Backtester(data=data, save_trades=False, log_to_sheets=False)
-    config = make_bull_put_config(combo, start_date, end_date)
+    config = make_iron_condor_config(combo, start_date, end_date)
     res = bt.run(config)
     param_str = bt._generate_param_string(config)
     row = _format_single_backtest_result_row(res, config, param_str, period_label)
@@ -295,7 +292,7 @@ def lag_autocorrelation(values: List[float], max_lag: int) -> Dict[int, Optional
 
 # ── Markdown report ──────────────────────────────────────────────────
 def _fmt(x, nd=3):
-    return "n/a" if x is None or (isinstance(x, float) and np.isnan(x)) else f"{x:.{nd}f}"
+    return "n/a" if x is None or (isinstance(x, float) and not np.isfinite(x)) else f"{x:.{nd}f}"
 
 
 def write_markdown_report(path: str, data_end: str, summary: Dict[str, Any],
@@ -306,13 +303,13 @@ def write_markdown_report(path: str, data_end: str, summary: Dict[str, Any],
     c = summary['C_capped_rolling']
 
     lines = []
-    lines.append("# Window-slicing scheme comparison: bull put credit spread\n")
+    lines.append("# Window-slicing scheme comparison: iron condor (SPX)\n")
     lines.append(
         "Question: does the existing 90-day-slide rolling window "
         "(`grid_search_backtester.py`'s `_generate_windows`) produce independent, "
         "meaningful out-of-sample performance estimates, or mostly redundant/"
         "autocorrelated noise -- versus an expanding-window or a capped-rolling-window "
-        "alternative? Fixed strategy: bull put credit spread, fixed combo "
+        "alternative? Fixed strategy: iron condor, fixed combo "
         f"`{COMBO}`, SPX options 2010-01-04 through {data_end} (option chain is the "
         "binding data constraint; underlying/VIX both run longer)."
     )
@@ -405,18 +402,34 @@ def write_markdown_report(path: str, data_end: str, summary: Dict[str, Any],
         "on a 1-2 window horizon."
     )
 
+    a_lag1 = sharpe_autocorr.get(1)
     lines.append("\n## Answer: is the 90-day slide meaningful, or is another scheme more reliable?\n")
+    if a_lag1 is not None and a_lag1 > 0.5:
+        verdict = (
+            f"Lag-1 Sharpe autocorrelation of {_fmt(a_lag1)} across Scheme A's 90-day-spaced "
+            "windows is high -- consistent with those windows being dominated by shared trading "
+            "days rather than independent regimes. The 90-day slide inflates the *count* of "
+            "backtests far more than it inflates genuinely new information; treating its "
+            "per-window std as if each window were an independent sample materially understates "
+            "the true uncertainty in the strategy's Sharpe."
+        )
+    else:
+        verdict = (
+            f"Lag-1 Sharpe autocorrelation of {_fmt(a_lag1)} across Scheme A's 90-day-spaced "
+            "windows is not particularly high, suggesting the 90-day slide does capture some "
+            "genuinely distinct information window to window, not pure overlap noise."
+        )
+    lines.append(verdict)
     lines.append(
-        "See the autocorrelation table above for the direct evidence. In general terms: the "
-        "90-day slide's large window count is mostly an illusion of sample size -- adjacent "
-        "windows overlap so heavily that they are not independent evaluations of the strategy, "
-        "so its reported std of Sharpe across ~50-60 windows understates true uncertainty far "
-        "more than a naive reading would suggest. An expanding window (Scheme B) is the most "
-        "honest *summary* statistic (all data, no double-counting) but is unresponsive to "
-        "recent decay by design. A capped rolling window (Scheme C) is the best *monitoring* "
-        "tool -- each step is a materially different sample of history (not just a 90-day "
-        "nudge), so its cross-window variance is a more trustworthy read on how stable the "
-        "strategy's edge really is, at the cost of being sensitive to the choice of cap width."
+        "\nIn general terms: the 90-day slide's large window count is mostly an illusion of "
+        "sample size when neighboring windows overlap heavily -- so its reported std of Sharpe "
+        "across ~50-60 windows can understate true uncertainty far more than a naive reading "
+        "would suggest. An expanding window (Scheme B) is the most honest *summary* statistic "
+        "(all data, no double-counting) but is unresponsive to recent decay by design. A capped "
+        "rolling window (Scheme C) is the best *monitoring* tool -- each step is a materially "
+        "different sample of history (not just a 90-day nudge), so its cross-window variance is "
+        "a more trustworthy read on how stable the strategy's edge really is, at the cost of "
+        "being sensitive to the choice of cap width."
     )
 
     lines.append("\n## Recommendation\n")
@@ -429,7 +442,10 @@ def write_markdown_report(path: str, data_end: str, summary: Dict[str, Any],
         "windows as, at most, a high-resolution *sensitivity* view (e.g. for spotting which "
         "sub-periods drove the aggregate result) rather than as ~50-60 independent samples for "
         "a standard error calculation -- the 90-day slide does not manufacture new information "
-        "at that cadence; it re-samples the same handful of realized regimes."
+        "at that cadence; it re-samples the same handful of realized regimes. If a formal "
+        "confidence interval on Sharpe is ever needed from Scheme A's windows, it must correct "
+        "for the lag-1..lag-N autocorrelation reported above (e.g. block bootstrap on "
+        "non-overlapping blocks) rather than treating each window as an i.i.d. draw."
     )
 
     with open(path, 'w') as f:
