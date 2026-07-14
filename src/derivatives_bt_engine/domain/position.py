@@ -1802,8 +1802,23 @@ class FuturesPosition(BasePosition):
         logger.info(f"Closing Trade #{self.trade_id}|Trans #{self.transaction_id}|{self.futures_type}|{self.position_side}")
         bp_effect = 0
 
-        # Determine the actual close date
-        effective_close_date = self.roll_date if self.roll_date and not force else underlying_price_history['ts_event'].max() # Use max date if forced
+        # Determine the actual close date. Priority: force (end-of-backtest
+        # sweep) > close_date (an early closure -- vix/signal -- set by
+        # TradeManager specifically to override the natural roll) > roll_date
+        # (natural quarterly roll) > underlying's max date as a last resort.
+        # Previously this ignored self.close_date entirely and always fell
+        # through to roll_date whenever force=False, so every early closure
+        # (vix or signal) silently priced/dated the exit at the *natural*
+        # roll date instead of the day the gate actually fired -- e.g. a
+        # signal-triggered close on day N would still be priced (and
+        # reported) using day N+40's close, a real look-ahead bug, not just
+        # a cosmetic mislabel.
+        if force:
+            effective_close_date = underlying_price_history['ts_event'].max()
+        elif self.close_date is not None:
+            effective_close_date = self.close_date
+        else:
+            effective_close_date = self.roll_date if self.roll_date else underlying_price_history['ts_event'].max()
 
         if not self._update_closing_data(underlying_price_history, effective_close_date):
             logger.error(f"Skipping futures trade due to missing close data for {self.futures_type} on {effective_close_date}")

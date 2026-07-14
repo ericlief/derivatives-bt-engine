@@ -161,7 +161,19 @@ class TradeManager:
             close/reopen thrashing right at one shared line), if any --
             returned as a specific reason string (not just a bool) so
             callers can record *why* a position closed, not just that it
-            did."""
+            did.
+
+            Bails out entirely (never gates) if either ts3m or ts1y is
+            still null -- calculate_trend_strength only requires ts3m to
+            be non-null to emit a `signal` value at all (its `signal`
+            column formula zero-weights whichever of ts3m/ts1y is still
+            null rather than staying null itself), so early in any
+            backtest window (< ~1yr of available history) `signal` can
+            already look like a real number while it's actually a
+            ts3m-only estimate with none of the intended 1yr weight --
+            not reliable enough to force a real entry/exit decision on."""
+            if ts3m_val is None or ts1y_val is None:
+                return None
             if threshold is not None and sig_val is not None:
                 if is_long and sig_val < threshold:
                     return 'signal_ts_threshold'
