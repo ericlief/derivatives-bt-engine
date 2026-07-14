@@ -4,6 +4,8 @@ CLI for the multi-symbol TSMOM monthly-rebalance backtest.
 Run:
     tsmom-bt --symbols ES,NQ --years 2015-2022
     tsmom-bt --symbols ES,NQ --years 2015-2022 --vol-target 0.10 --long-only
+    tsmom-bt --symbols ES,GC --years 2010-2026 --signal-gate-mode monthly --ts-exit-threshold 0 --ts-entry-threshold 0.5
+    tsmom-bt --symbols ES,GC --years 2010-2026 --signal-gate-mode daily --ts-exit-threshold 0 --ts-entry-threshold 0.5
 
 Note: MES/MNQ (the live system's default micro-contract universe) have no
 data in the local Globex duckdb -- only the full-size ES/NQ contracts are
@@ -34,6 +36,22 @@ def parse_args():
                    help='Disable short positions (signal_scalar = max(0, trend_strength))')
     p.add_argument('--momentum-discount', type=float, default=0.5,
                    help='Position discount for Correction/Rebound regimes; 1.0 disables (default: %(default)s)')
+    p.add_argument('--signal-gate-mode', choices=['off', 'monthly', 'daily'], default='off',
+                   help="'off': no gate (default). 'monthly': check ts-exit/entry-threshold and "
+                        "exit-on-ts-crossover only at the existing monthly rebalance. 'daily': also "
+                        "check the exit half every day in between, off-cycle from the monthly resize "
+                        "-- entry stays monthly-only either way.")
+    p.add_argument('--ts-exit-threshold', type=float, default=None,
+                   help='Force a symbol flat if its own raw signal weakens past this threshold, '
+                        'direction-aware (default: disabled)')
+    p.add_argument('--ts-entry-threshold', type=float, default=None,
+                   help='Block a currently-flat symbol from opening a new position until its '
+                        'signal recovers past this threshold, direction-aware -- typically '
+                        'stronger than --ts-exit-threshold to avoid close/reopen thrashing at '
+                        'one shared line (default: disabled)')
+    p.add_argument('--exit-on-ts-crossover', action='store_true',
+                   help="Also gate on ts3m crossing to the wrong side of ts1y for the position's "
+                        "direction (default: disabled)")
     p.add_argument('--no-save', action='store_true', help='Skip saving stats/events to results/')
     return p.parse_args()
 
@@ -62,6 +80,10 @@ def main():
         momentum_discount=args.momentum_discount,
         start_date=date(int(start_year), 1, 1),
         end_date=date(int(end_year), 12, 31),
+        signal_gate_mode=args.signal_gate_mode,
+        ts_exit_threshold=args.ts_exit_threshold,
+        ts_entry_threshold=args.ts_entry_threshold,
+        exit_on_ts_crossover=args.exit_on_ts_crossover,
     )
 
     result = run_tsmom_backtest(config)
@@ -75,6 +97,12 @@ def main():
           f"Max drawdown: ${stats['drawdown_usd'].min():,.2f} ({stats['drawdown_pct'].min():.2f}%)")
     print()
     print(f"{len(events)} rebalance events, {sum(1 for e in events if e['target_contracts'] != e['prior_contracts'])} caused a position change")
+    if args.signal_gate_mode != 'off':
+        gated = [e for e in events if e.get('gate_reason')]
+        print(f"{len(gated)} events triggered the signal gate "
+              f"({sum(1 for e in gated if e['gate_reason'] == 'signal_ts_threshold')} ts_threshold, "
+              f"{sum(1 for e in gated if e['gate_reason'] == 'signal_crossover')} crossover, "
+              f"{sum(1 for e in gated if e['gate_reason'] == 'signal_entry_blocked')} entry_blocked)")
 
     if not args.no_save:
         # Anchored to the project root rather than a bare relative

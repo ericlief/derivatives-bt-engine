@@ -64,6 +64,30 @@ class TsmomBacktestConfig:
     momentum_discount: float = 0.5
     start_date: Optional[date] = None
     end_date: Optional[date] = None
+    # Signal-based entry/exit gate -- same mechanism as FuturesStrategyConfig/
+    # TradeManager's ts_exit_threshold/ts_entry_threshold/exit_on_ts_crossover
+    # (domain/trade_manager.py), adapted here for TSMOM's variable-direction
+    # sizing: direction is derived from whichever side actually matters (the
+    # currently-held position for exit, the newly-proposed target for entry)
+    # rather than a fixed config field, since a TSMOM symbol can go long or
+    # short depending on the sign of its own signal. signal_gate_mode picks
+    # the cadence at which the EXIT half is checked -- 'monthly' only at the
+    # existing rebalance points (near-zero extra cost, reuses signal/ts3m/
+    # ts1y _compute_target already computed that day); 'daily' additionally
+    # checks every day in between, off-cycle from the monthly resize, so a
+    # deteriorating signal can force a flatten before the next rebalance
+    # instead of waiting for it. The entry half only ever applies at
+    # rebalance points either way (sizing itself is still monthly) -- 'daily'
+    # differs from 'monthly' by exactly one variable (exit-check frequency),
+    # deliberately, so the two are a controlled comparison.
+    ts_exit_threshold: Optional[float] = None
+    ts_entry_threshold: Optional[float] = None
+    exit_on_ts_crossover: bool = False
+    signal_gate_mode: str = 'off'  # 'off' | 'monthly' | 'daily'
+
+    def __post_init__(self):
+        if self.signal_gate_mode not in ('off', 'monthly', 'daily'):
+            raise ValueError(f"signal_gate_mode must be 'off', 'monthly', or 'daily', got {self.signal_gate_mode!r}")
 
 
 def check_vol_regime(vix_ratio: Optional[float]) -> VolRegime:
@@ -161,6 +185,62 @@ def _round(x: Optional[float], ndigits: int) -> Optional[float]:
     """round() that passes None through, for optional diagnostic fields
     that may not have been computable (e.g. gated/skipped rebalances)."""
     return None if x is None else round(x, ndigits)
+
+
+def _signal_gate_reason(sig_val, ts3m_val, ts1y_val, is_long: bool, threshold: Optional[float],
+                         exit_on_ts_crossover: bool) -> Optional[str]:
+    """Same shape as TradeManager's per-position gate check
+    (domain/trade_manager.py's _signal_gate_reason), standalone here since
+    TSMOM has no per-position `self.config` to close over and this module
+    is deliberately kept separate from TradeManager. Bails out (never
+    gates) if either ts3m or ts1y is still null -- calculate_trend_strength
+    only requires ts3m to be non-null to emit a `signal` value at all, so
+    early in any backtest window `signal` can look like a real number
+    while being an unreliable ts3m-only estimate."""
+    if ts3m_val is None or ts1y_val is None:
+        return None
+    if threshold is not None and sig_val is not None:
+        if is_long and sig_val < threshold:
+            return 'signal_ts_threshold'
+        if not is_long and sig_val > -threshold:
+            return 'signal_ts_threshold'
+    if exit_on_ts_crossover:
+        if is_long and ts3m_val < ts1y_val:
+            return 'signal_crossover'
+        if not is_long and ts3m_val > ts1y_val:
+            return 'signal_crossover'
+    return None
+
+
+def _apply_signal_gate(prior_contracts: int, proposed_target: int, result: dict,
+                        config: TsmomBacktestConfig) -> tuple[int, Optional[str]]:
+    """Overrides `proposed_target` to 0 if the signal gate fires. Direction
+    is derived from whichever side actually matters: the CURRENTLY-HELD
+    position's sign for the exit check (an existing long/short that's
+    weakened), the PROPOSED target's sign for the entry check (a new
+    position sizing wants to open, in that direction) -- not a fixed
+    config field, since a TSMOM symbol's direction comes from its own
+    signal sign, unlike a naked single-direction FuturesStrategyConfig.
+    Returns (final_target, gate_reason)."""
+    if config.signal_gate_mode == 'off':
+        return proposed_target, None
+    sig_val, ts3m_val, ts1y_val = result.get('signal'), result.get('ts3m'), result.get('ts1y')
+
+    if prior_contracts != 0:
+        is_long = prior_contracts > 0
+        reason = _signal_gate_reason(sig_val, ts3m_val, ts1y_val, is_long,
+                                      config.ts_exit_threshold, config.exit_on_ts_crossover)
+        if reason is not None:
+            return 0, reason
+
+    if prior_contracts == 0 and proposed_target != 0:
+        is_long = proposed_target > 0
+        blocked = _signal_gate_reason(sig_val, ts3m_val, ts1y_val, is_long,
+                                       config.ts_entry_threshold, config.exit_on_ts_crossover) is not None
+        if blocked:
+            return 0, 'signal_entry_blocked'
+
+    return proposed_target, None
 
 
 def _month_end_dates(price_data: dict[str, pl.DataFrame]) -> set[date]:
@@ -306,6 +386,7 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
             'vol_regime': vol_regime, 'hv': _round(s.get('hv'), 4), 'risk_scalar': _round(s.get('risk_scalar'), 4),
             'momentum_discount': _round(s.get('momentum_discount'), 2),
             'prior_contracts': prior, 'target_contracts': target, 'is_seed': is_seed,
+            'gate_reason': s.get('gate_reason'),
         })
 
     # Seed the position from the last completed month-end *before*
@@ -326,8 +407,22 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
                     result = _compute_target(symbol, seed_date, full_price_data, futures_types, config, market_stress_scale)
                     if result is None:
                         continue
-                    _rebalance_to(symbol, result['target'], seed_date, vol_regime, vix_close=vix_close,
-                                  vix_ratio=vix_ratio, signal=result, is_seed=True)
+                    target, gate_reason = _apply_signal_gate(held_contracts[symbol], result['target'], result, config)
+                    _rebalance_to(symbol, target, seed_date, vol_regime, vix_close=vix_close,
+                                  vix_ratio=vix_ratio, signal={**result, 'gate_reason': gate_reason}, is_seed=True)
+
+    # Precomputed once, full unbounded history per symbol -- only when
+    # signal_gate_mode == 'daily' actually needs a per-day lookup between
+    # rebalances. calculate_trend_strength's rolling windows make a
+    # per-iteration recompute O(n^2) over a multi-year daily loop; a single
+    # pass up front plus a per-day filter is the same trick trade_manager.py
+    # uses for the naked single-position path's own daily gate.
+    daily_signal_series: dict[str, pl.DataFrame] = {}
+    if config.signal_gate_mode == 'daily':
+        daily_signal_series = {
+            s: calculate_trend_strength(full_price_data[s].sort('ts_event')).select(['ts_event', 'signal', 'ts3m', 'ts1y'])
+            for s in config.symbols
+        }
 
     for d in all_dates:
         # 1. Mark existing holdings to market: today's close vs yesterday's,
@@ -341,6 +436,32 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
             if prior_close[symbol] is not None and held_contracts[symbol] != 0:
                 capital += held_contracts[symbol] * (close - prior_close[symbol]) * futures_types[symbol]['multiplier']
             prior_close[symbol] = close
+
+        # 1.5. Daily signal-gate exit check (signal_gate_mode == 'daily'
+        # only), off-cycle from the monthly resize below -- lets a
+        # deteriorating signal force a flatten mid-month instead of
+        # waiting for the next scheduled rebalance. Skipped on
+        # rebalance_dates themselves since the monthly resize logic below
+        # already re-evaluates the same gate that day (avoids a duplicate
+        # event on the same date). Entry stays monthly-only either way --
+        # this only ever flattens an existing position, never opens one.
+        if config.signal_gate_mode == 'daily' and d not in rebalance_dates:
+            for symbol in config.symbols:
+                if held_contracts[symbol] == 0:
+                    continue
+                sig_row = daily_signal_series[symbol].filter(pl.col('ts_event') == d)
+                if sig_row.height == 0:
+                    continue
+                is_long = held_contracts[symbol] > 0
+                reason = _signal_gate_reason(sig_row['signal'][0], sig_row['ts3m'][0], sig_row['ts1y'][0],
+                                              is_long, config.ts_exit_threshold, config.exit_on_ts_crossover)
+                if reason is not None:
+                    vol_regime_d, vix_close_d, vix_ratio_d = _vix_regime_at(vix, d)
+                    close_row = full_price_data[symbol].filter(pl.col('ts_event') <= d).tail(1)
+                    close = float(close_row['close'][0]) if close_row.height > 0 else None
+                    _rebalance_to(symbol, 0, d, vol_regime_d, vix_close=vix_close_d, vix_ratio=vix_ratio_d,
+                                  signal={'close': close, 'gate_reason': reason,
+                                          'signal': sig_row['signal'][0], 'ts3m': sig_row['ts3m'][0], 'ts1y': sig_row['ts1y'][0]})
 
         # 2. On rebalance dates, resize toward the vol-targeted signal,
         # gated by the spot-VIX regime (mirrors
@@ -362,8 +483,9 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
                     result = _compute_target(symbol, d, full_price_data, futures_types, config, market_stress_scale)
                     if result is None:
                         continue
-                    _rebalance_to(symbol, result['target'], d, vol_regime, vix_close=vix_close,
-                                  vix_ratio=vix_ratio, signal=result)
+                    target, gate_reason = _apply_signal_gate(held_contracts[symbol], result['target'], result, config)
+                    _rebalance_to(symbol, target, d, vol_regime, vix_close=vix_close,
+                                  vix_ratio=vix_ratio, signal={**result, 'gate_reason': gate_reason})
 
         daily_rows.append({'date': d, 'capital': round(capital, 2)})
 
