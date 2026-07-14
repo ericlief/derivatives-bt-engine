@@ -129,6 +129,27 @@ class FuturesStrategyConfig(BaseStrategyConfig):
     # current default/unchanged behavior) or 'mid' ((high+low)/2, a rough
     # proxy for average fill price across the day's traded range).
     fill_price: str = 'close'
+    # Signal-based entry/exit gates (checked daily by TradeManager, same
+    # early_closure/entry-gating path as vix_max/vix_range) -- use the raw
+    # tsmom_signal.calculate_trend_strength() values, with no vol-target
+    # scalar/momentum_discount/risk-budget applied (those are TSMOM
+    # position-sizing concerns, not exit conditions). Direction-aware: a
+    # LONG position exits/is blocked from entry on weakness, a SHORT
+    # position on the mirrored condition.
+    #
+    # ts_exit_threshold/ts_entry_threshold are deliberately separate (not
+    # one threshold reused for both) so entry can require the signal to
+    # recover past a stronger bar than the one that triggered the exit --
+    # without that gap, a position closed for weak signal reopens the
+    # instant the signal ticks back over the same single line, causing
+    # rapid close/reopen thrashing (confirmed empirically: a single shared
+    # threshold took ES 2010-2026 from 63 trades to 854-1402).
+    ts_exit_threshold: Optional[float] = None
+    ts_entry_threshold: Optional[float] = None
+    # ts3m/ts1y crossover has no natural "threshold" (it's a sign/ordering
+    # comparison, not a magnitude) -- entry is blocked by the mirrored
+    # condition of whatever would trigger an exit, no separate parameter.
+    exit_on_ts_crossover: bool = False
 
     def __post_init__(self):
         if self.futures_type not in known_futures_symbols():

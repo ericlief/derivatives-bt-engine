@@ -39,6 +39,17 @@ def parse_args():
     p.add_argument('--quantity', type=int, default=1)
     p.add_argument('--initial-capital', type=float, default=100000)
     p.add_argument('--leverage', type=float, default=1.0)
+    p.add_argument('--ts-exit-threshold', type=float, default=None,
+                   help='Exit if the raw tsmom signal (no vol-target/discount applied) '
+                        'weakens past this threshold, direction-aware (default: disabled)')
+    p.add_argument('--ts-entry-threshold', type=float, default=None,
+                   help='Block (re-)entry until the raw tsmom signal recovers past this '
+                        'threshold, direction-aware -- typically stronger than '
+                        '--ts-exit-threshold to avoid close/reopen thrashing at one shared '
+                        'line (default: disabled)')
+    p.add_argument('--exit-on-ts-crossover', action='store_true',
+                   help='Exit when ts3m crosses to the wrong side of ts1y for this position\'s '
+                        'direction, and block entry until it crosses back (default: disabled)')
     p.add_argument('--no-save', action='store_true', help='Skip saving trades/transactions/mtm to results/')
     return p.parse_args()
 
@@ -90,7 +101,10 @@ def main():
         leverage=args.leverage,
         start_date=start_date,
         end_date=end_date,
-        fill_price='mid'
+        fill_price='mid',
+        ts_exit_threshold=args.ts_exit_threshold,
+        ts_entry_threshold=args.ts_entry_threshold,
+        exit_on_ts_crossover=args.exit_on_ts_crossover,
     )
 
     bt = Backtester(data=data, save_trades=not args.no_save, log_to_sheets=False)
