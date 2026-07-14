@@ -19,7 +19,7 @@ A Python package for backtesting options trading strategies, specifically design
 
 ```
 options-bt/
-├── options_bt/           # Source code directory
+├── derivatives_bt_engine/           # Source code directory
 │   ├── __init__.py      # Package initialization
 │   └── bt.py            # Main backtesting logic
 ├── logs/                 # Log files directory
@@ -40,7 +40,7 @@ pip install polars numpy
 ### Basic Example
 
 ```python
-from options_bt.bt import run_backtest, OptionsType, PositionSide
+from derivatives_bt_engine.bt import run_backtest, OptionsType, PositionSide
 
 # Run a backtest for short puts
 results = run_backtest(

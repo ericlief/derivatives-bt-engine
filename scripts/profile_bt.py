@@ -1,6 +1,6 @@
 """
 Ad hoc profiling script for the backtest engine (not part of the installed
-package — dev/ops scripts live here, strategy code lives in options_bt/).
+package — dev/ops scripts live here, strategy code lives in derivatives_bt_engine/).
 
 Times an options backtest and a futures backtest through the current
 Backtester API. Update the data paths below before running.
@@ -8,11 +8,11 @@ Backtester API. Update the data paths below before running.
 import logging
 import time
 
-from options_bt.domain.backtester import Backtester
-from options_bt.domain.dataloader import OptionsDataLoader
-from options_bt.domain.enums import FuturesStrategy, OptionsStrategy, OptionsType, PositionSide
-from options_bt.domain.option_leg_config import OptionLegConfig
-from options_bt.domain.strategy_config import FuturesStrategyConfig, SingleLegOptionStrategyConfig
+from derivatives_bt_engine.domain.backtester import Backtester
+from derivatives_bt_engine.domain.dataloader import OptionsDataLoader
+from derivatives_bt_engine.domain.enums import FuturesStrategy, OptionsStrategy, OptionsType, PositionSide
+from derivatives_bt_engine.domain.option_leg_config import OptionLegConfig
+from derivatives_bt_engine.domain.strategy_config import FuturesStrategyConfig, SingleLegOptionStrategyConfig
 
 logging.basicConfig(
     level=logging.INFO,
@@ -51,7 +51,7 @@ def profile_options_backtest(data_dir: str, options_file: str, vix_file: str):
 
 
 def profile_futures_backtest(asset: str = 'ES'):
-    from options_bt.domain.futures_dataloader import FuturesDataLoader
+    from derivatives_bt_engine.domain.futures_dataloader import FuturesDataLoader
 
     dl = FuturesDataLoader(asset=asset, use_preprocessed=True, save_preprocessed=False)
     data = dl.load_data()

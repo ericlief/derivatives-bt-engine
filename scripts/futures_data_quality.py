@@ -874,8 +874,8 @@ def main(argv=None) -> dict:
                         format='%(asctime)s %(name)s [%(levelname)s] %(message)s')
 
     from ib_tools.ibpysync import IBPySync
-    from options_bt.domain.instruments import INSTRUMENTS as KNOWN_INSTRUMENTS
-    from options_bt.live.run_tsmom_rebalance import _build_instruments
+    from derivatives_bt_engine.domain.instruments import INSTRUMENTS as KNOWN_INSTRUMENTS
+    from derivatives_bt_engine.live.run_tsmom_rebalance import _build_instruments
 
     args = parse_args(argv)
     instruments_spec = args.instruments or ','.join(sorted(KNOWN_INSTRUMENTS))

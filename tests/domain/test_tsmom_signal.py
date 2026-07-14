@@ -8,8 +8,8 @@ import numpy as np
 import polars as pl
 import pytest
 
-from options_bt.domain.enums import SignalConfidenceRegime, TrendRegime
-from options_bt.domain.tsmom_signal import (
+from derivatives_bt_engine.domain.enums import SignalConfidenceRegime, TrendRegime
+from derivatives_bt_engine.domain.tsmom_signal import (
     apply_cluster_risk_cap,
     calculate_trend_strength,
     classify_regime,

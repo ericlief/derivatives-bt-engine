@@ -1,5 +1,5 @@
 """
-Tests for options_bt.domain.tsmom_backtester — the multi-symbol monthly-
+Tests for derivatives_bt_engine.domain.tsmom_backtester — the multi-symbol monthly-
 rebalance TSMOM backtest engine. Uses synthetic price/VIX data throughout
 (monkeypatched in place of load_portfolio_data) so these run fast and
 without a duckdb/CSV dependency.
@@ -11,9 +11,9 @@ import numpy as np
 import polars as pl
 import pytest
 
-from options_bt.domain import tsmom_backtester as tb
-from options_bt.domain.instruments import get_spec
-from options_bt.domain.tsmom_backtester import (
+from derivatives_bt_engine.domain import tsmom_backtester as tb
+from derivatives_bt_engine.domain.instruments import get_spec
+from derivatives_bt_engine.domain.tsmom_backtester import (
     TsmomBacktestConfig,
     check_vol_regime,
     _compute_vix_regime_series,

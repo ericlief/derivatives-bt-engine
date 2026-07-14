@@ -32,12 +32,12 @@ dependencies = [
 ]
 
 [project.scripts]
-tsmom = "options_bt.live.run_tsmom_rebalance:main"
-naked = "options_bt.strats.naked_futures:main"
-tsmom-bt = "options_bt.strats.tsmom_backtest:main"
+tsmom = "derivatives_bt_engine.live.run_tsmom_rebalance:main"
+naked = "derivatives_bt_engine.strats.naked_futures:main"
+tsmom-bt = "derivatives_bt_engine.strats.tsmom_backtest:main"
 
 [tool.setuptools.packages.find]
-include = ["options_bt*"]
+include = ["derivatives_bt_engine*"]
 
 # options_engine is a separate, not-yet-wired-up Rust extension crate (no
 # Python code in this project imports it). It isn't part of this package's

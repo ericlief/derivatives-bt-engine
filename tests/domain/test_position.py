@@ -3,14 +3,14 @@ import pytest
 from datetime import date
 import polars as pl
 import numpy as np
-from options_bt.domain.position import SingleLegOptionPosition, MultiLegOptionPosition
-from options_bt.domain.enums import OptionsType, PositionSide, OptionsStrategy, OptionSpreadType
-from options_bt.domain.dataloader import OptionsDataLoader
-from options_bt.domain.trade_result import OptionTradeResult
-from options_bt.domain.trade_manager import TradeManager
+from derivatives_bt_engine.domain.position import SingleLegOptionPosition, MultiLegOptionPosition
+from derivatives_bt_engine.domain.enums import OptionsType, PositionSide, OptionsStrategy, OptionSpreadType
+from derivatives_bt_engine.domain.dataloader import OptionsDataLoader
+from derivatives_bt_engine.domain.trade_result import OptionTradeResult
+from derivatives_bt_engine.domain.trade_manager import TradeManager
 from scipy.stats import norm
-from options_bt.utils.logger import setup_logger
-from options_bt.utils.price_utils import PriceUtils
+from derivatives_bt_engine.utils.logger import setup_logger
+from derivatives_bt_engine.utils.price_utils import PriceUtils
 from tests.domain.conftest import *
 
 

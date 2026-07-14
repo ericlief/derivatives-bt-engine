@@ -7,10 +7,10 @@ import os
 
 import pytest
 
-from options_bt.domain.backtester import Backtester
-from options_bt.domain.enums import FuturesStrategy
-from options_bt.domain.futures_dataloader import FuturesDataLoader
-from options_bt.domain.strategy_config import FuturesStrategyConfig
+from derivatives_bt_engine.domain.backtester import Backtester
+from derivatives_bt_engine.domain.enums import FuturesStrategy
+from derivatives_bt_engine.domain.futures_dataloader import FuturesDataLoader
+from derivatives_bt_engine.domain.strategy_config import FuturesStrategyConfig
 
 GLOBEX_DB_PATH = "/home/dev/fin/db/globex_mdp_3.0.duckdb"
 

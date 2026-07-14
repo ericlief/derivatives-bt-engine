@@ -38,12 +38,12 @@ import polars as pl
 from dateutil.relativedelta import relativedelta
 from dotenv import load_dotenv
 
-from options_bt.domain.backtester import Backtester
-from options_bt.domain.dataloader import OptionsDataLoader
-from options_bt.strats.bull_put_param_search import make_bull_put_config
-from options_bt.strats.grid_search_backtester import _generate_windows
-from options_bt.utils.gspread_log_util import _format_single_backtest_result_row
-from options_bt.utils.logger import setup_logger
+from derivatives_bt_engine.domain.backtester import Backtester
+from derivatives_bt_engine.domain.dataloader import OptionsDataLoader
+from derivatives_bt_engine.strats.bull_put_param_search import make_bull_put_config
+from derivatives_bt_engine.strats.grid_search_backtester import _generate_windows
+from derivatives_bt_engine.utils.gspread_log_util import _format_single_backtest_result_row
+from derivatives_bt_engine.utils.logger import setup_logger
 
 logger = setup_logger()
 load_dotenv()

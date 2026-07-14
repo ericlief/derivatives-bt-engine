@@ -24,13 +24,13 @@ import polars as pl
 from dateutil.relativedelta import relativedelta
 from dotenv import load_dotenv
 
-from options_bt.domain.backtester import Backtester
-from options_bt.domain.enums import FuturesStrategy
-from options_bt.domain.futures_dataloader import FuturesDataLoader
-from options_bt.domain.strategy_config import FuturesStrategyConfig
-from options_bt.strats.grid_search_backtester import _generate_windows
-from options_bt.utils.gspread_log_util import _format_single_backtest_result_row
-from options_bt.utils.logger import setup_logger
+from derivatives_bt_engine.domain.backtester import Backtester
+from derivatives_bt_engine.domain.enums import FuturesStrategy
+from derivatives_bt_engine.domain.futures_dataloader import FuturesDataLoader
+from derivatives_bt_engine.domain.strategy_config import FuturesStrategyConfig
+from derivatives_bt_engine.strats.grid_search_backtester import _generate_windows
+from derivatives_bt_engine.utils.gspread_log_util import _format_single_backtest_result_row
+from derivatives_bt_engine.utils.logger import setup_logger
 
 logger = setup_logger()
 load_dotenv()

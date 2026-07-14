@@ -2,7 +2,7 @@
 
 ## Data format: polars, not pandas
 
-This project uses polars throughout (`pl.DataFrame`, `pl.col`, etc.) — `options_bt/domain/`, `options_bt/live/`, and `options_bt/domain/tsmom_backtester.py` are all polars-based. Don't introduce pandas as a general dependency or let it leak into data-handling code beyond a single, scoped conversion point.
+This project uses polars throughout (`pl.DataFrame`, `pl.col`, etc.) — `derivatives_bt_engine/domain/`, `derivatives_bt_engine/live/`, and `derivatives_bt_engine/domain/tsmom_backtester.py` are all polars-based. Don't introduce pandas as a general dependency or let it leak into data-handling code beyond a single, scoped conversion point.
 
 When a third-party library requires pandas specifically (this comes up with portfolio-optimization libraries — e.g. `PyPortfolioOpt`'s `HRPOpt` expects a pandas DataFrame, dates as index, assets as columns):
 

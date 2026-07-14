@@ -22,8 +22,8 @@ import argparse
 import duckdb
 import polars as pl
 
-from options_bt.domain.instruments import INSTRUMENTS as KNOWN_INSTRUMENTS
-from options_bt.domain.instruments import DEFAULT_DB_PATH
+from derivatives_bt_engine.domain.instruments import INSTRUMENTS as KNOWN_INSTRUMENTS
+from derivatives_bt_engine.domain.instruments import DEFAULT_DB_PATH
 
 # ── Tunable defaults ────────────────────────────────────────────────────────
 DEFAULT_INSTRUMENTS = 'ES,NQ,CL,ZL,ZC,ZS,ZW,GC,SI,JPY,BRE,6M'

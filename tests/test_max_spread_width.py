@@ -4,9 +4,9 @@ Test script to demonstrate the new max_spread_width parameter functionality.
 This shows how to limit spread widths to prevent excessive margin requirements.
 """
 
-from options_bt.domain.strategy_config import MultiLegOptionStrategyConfig
-from options_bt.domain.enums import OptionsStrategy, OptionSpreadType, OptionsType, PositionSide
-from options_bt.domain.option_leg_config import OptionLegConfig
+from derivatives_bt_engine.domain.strategy_config import MultiLegOptionStrategyConfig
+from derivatives_bt_engine.domain.enums import OptionsStrategy, OptionSpreadType, OptionsType, PositionSide
+from derivatives_bt_engine.domain.option_leg_config import OptionLegConfig
 
 def test_max_spread_width_config():
     """Test creating a configuration with max_spread_width parameter."""
