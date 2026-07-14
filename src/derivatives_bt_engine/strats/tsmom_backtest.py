@@ -82,7 +82,7 @@ def main():
         # (and setup_logger's own relative "logs") if this is ever invoked
         # from inside results/ itself, e.g. after cd-ing there to inspect
         # prior output.
-        results_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', '..', 'results'))
+        results_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'results'))
         os.makedirs(results_dir, exist_ok=True)
         symbol_str = '_'.join(symbols)
         stats.write_csv(os.path.join(results_dir, f"tsmom_stats_{symbol_str}_{start_year}-{end_year}.csv"))

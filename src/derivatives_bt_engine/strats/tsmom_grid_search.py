@@ -157,7 +157,7 @@ def main():
         print(df.sort('cum_pnl', descending=True))
 
     if not args.no_save:
-        results_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', '..', 'results'))
+        results_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'results'))
         os.makedirs(results_dir, exist_ok=True)
         ts = datetime.now().strftime('%Y%m%d_%H%M%S')
         symbol_str = '_'.join(symbols)

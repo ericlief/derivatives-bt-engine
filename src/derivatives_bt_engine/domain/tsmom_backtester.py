@@ -101,7 +101,7 @@ def load_portfolio_data(symbols: list[str]) -> tuple[dict[str, pl.DataFrame], pl
     the raw traded symbol (matching futures_types/windowed elsewhere in
     this module, which always use the traded symbol for margin/commission/
     mult -- MES stays sized as MES, never as ES)."""
-    cache_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', '..', '.cache', 'futures'))
+    cache_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', '..', '..', '.cache', 'futures'))
     os.makedirs(cache_dir, exist_ok=True)
     price_symbols = {s: resolve_price_symbol(s) for s in symbols}
     _validate_symbols_exist(set(price_symbols.values()), cache_dir)

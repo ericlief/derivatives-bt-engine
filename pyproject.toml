@@ -37,6 +37,7 @@ naked = "derivatives_bt_engine.strats.naked_futures:main"
 tsmom-bt = "derivatives_bt_engine.strats.tsmom_backtest:main"
 
 [tool.setuptools.packages.find]
+where = ["src"]
 include = ["derivatives_bt_engine*"]
 
 # options_engine is a separate, not-yet-wired-up Rust extension crate (no
