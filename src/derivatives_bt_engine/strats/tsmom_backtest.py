@@ -89,6 +89,8 @@ def main():
     result = run_tsmom_backtest(config)
     stats = result['stats']
     events = result['events']
+    transactions = result['transactions']
+    trades = result['trades']
 
     print(stats.tail(10))
     print()
@@ -103,6 +105,11 @@ def main():
               f"({sum(1 for e in gated if e['gate_reason'] == 'signal_ts_threshold')} ts_threshold, "
               f"{sum(1 for e in gated if e['gate_reason'] == 'signal_crossover')} crossover, "
               f"{sum(1 for e in gated if e['gate_reason'] == 'signal_entry_blocked')} entry_blocked)")
+    print()
+    print(f"{transactions.height} transactions (buys/sells that changed a contract count)")
+    print(f"{trades.height} trades (reconstructed open/close spans of nonzero exposure per symbol)")
+    if trades.height > 0:
+        print(trades.tail(10))
 
     if not args.no_save:
         # Anchored to the project root rather than a bare relative
@@ -117,6 +124,8 @@ def main():
         import polars as pl
         pl.DataFrame(events).write_csv(
             os.path.join(results_dir, f"tsmom_events_{symbol_str}_{start_year}-{end_year}.csv"))
+        transactions.write_csv(os.path.join(results_dir, f"tsmom_transactions_{symbol_str}_{start_year}-{end_year}.csv"))
+        trades.write_csv(os.path.join(results_dir, f"tsmom_trades_{symbol_str}_{start_year}-{end_year}.csv"))
 
 
 if __name__ == "__main__":

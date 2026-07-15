@@ -328,8 +328,16 @@ def _compute_target(symbol: str, d: date, full_price_data: dict[str, pl.DataFram
 
 def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
     """Runs the monthly-rebalance TSMOM backtest. Returns a dict with
-    'stats' (daily portfolio capital/drawdown, polars DataFrame) and
-    'events' (per-rebalance-event log, list of dicts)."""
+    'stats' (daily portfolio capital/drawdown, polars DataFrame), 'events'
+    (per-rebalance-event log, list of dicts), 'transactions' (one row per
+    rebalance that actually changed a symbol's contract count -- what was
+    bought/sold, when, at what price/fee), and 'trades' (reconstructed
+    round-trips: TSMOM has no discrete open/close lifecycle like
+    FuturesPosition -- a symbol's exposure is continuously resized, not
+    "opened then closed" -- so a trade here is defined as one continuous
+    span of nonzero exposure in a single direction: 0->nonzero opens it,
+    nonzero->0 or a direct sign flip closes it; resizing within the same
+    direction extends the same trade rather than starting a new one)."""
     # `full_price_data` stays unbounded -- calculate_trend_strength's 252-day
     # lookback needs real history before config.start_date, not just
     # whatever falls inside the requested window. Only the iterated date
@@ -358,8 +366,30 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
     held_contracts = {s: 0 for s in config.symbols}
     prior_close = {s: None for s in config.symbols}
     events: list[dict] = []
+    transactions: list[dict] = []
+    trades: list[dict] = []
+    # Per-symbol open trade accumulator: None when flat, else a dict
+    # tracking the currently-open span's entry info plus running realized
+    # MTM pnl/fees, closed out (appended to `trades`) on a return to flat,
+    # a direct sign flip, or a final force-close after the day loop ends.
+    open_trade: dict[str, Optional[dict]] = {s: None for s in config.symbols}
     daily_rows = []
     capital = config.initial_capital
+
+    def _close_trade(symbol: str, exit_date: date, exit_price: Optional[float]) -> None:
+        ot = open_trade[symbol]
+        if ot is None:
+            return
+        net_pnl = round(ot['mtm_pnl'] - ot['fees'], 2)
+        trades.append({
+            'symbol': symbol, 'direction': ot['direction'],
+            'entry_date': ot['entry_date'], 'entry_price': ot['entry_price'],
+            'exit_date': exit_date, 'exit_price': exit_price,
+            'days_held': (exit_date - ot['entry_date']).days,
+            'max_contracts': ot['max_contracts'], 'fees': round(ot['fees'], 2),
+            'pnl': net_pnl, 'close_reason': ot['close_reason'],
+        })
+        open_trade[symbol] = None
 
     def _rebalance_to(symbol: str, target: int, rebalance_date: date, vol_regime,
                        vix_close=None, vix_ratio=None, signal: Optional[dict] = None, is_seed=False):
@@ -370,9 +400,53 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
         nonlocal capital
         s = signal or {}
         prior = held_contracts[symbol]
+        fee = 0.0
         if target != prior:
             fee = futures_types[symbol]['commission'] * 2 * abs(target - prior)
             capital -= fee
+            price = s.get('close')
+            transactions.append({
+                'date': rebalance_date, 'symbol': symbol,
+                'action': 'buy' if target > prior else 'sell',
+                'quantity': abs(target - prior), 'price': _round(price, 2),
+                'fee': round(fee, 2), 'prior_contracts': prior, 'target_contracts': target,
+                'gate_reason': s.get('gate_reason'), 'is_seed': is_seed,
+            })
+
+            flipped = prior != 0 and target != 0 and (prior > 0) != (target > 0)
+            if flipped or target == 0:
+                # This transaction's fee covers closing the existing span
+                # (a flip's fee covers both legs at once -- attributed
+                # entirely to the trade that's ending, not split with the
+                # new one) -- must be folded in before _close_trade reads
+                # open_trade[symbol]['fees'], or the closing leg's fee is
+                # silently dropped from the trade's own total (portfolio
+                # capital stays correct regardless, since that deduction
+                # already happened above; only the per-trade fees/pnl
+                # fields were at risk of undercounting).
+                if open_trade[symbol] is not None:
+                    open_trade[symbol]['fees'] += fee
+                _close_trade(symbol, rebalance_date, price)
+            if target != 0 and open_trade[symbol] is None:
+                open_trade[symbol] = {
+                    'entry_date': rebalance_date, 'entry_price': price,
+                    'direction': 'long' if target > 0 else 'short',
+                    'max_contracts': abs(target), 'mtm_pnl': 0.0,
+                    'fees': 0.0 if flipped else fee,
+                    'close_reason': None,
+                }
+            elif target != 0 and open_trade[symbol] is not None:
+                # Resize within the same direction -- extend the existing
+                # span rather than starting a new trade; fold in this
+                # resize's own fee and track the largest size held.
+                open_trade[symbol]['fees'] += fee
+                open_trade[symbol]['max_contracts'] = max(open_trade[symbol]['max_contracts'], abs(target))
+            if (flipped or target == 0) and s.get('gate_reason'):
+                # _close_trade already ran above and cleared open_trade;
+                # the reason belongs on the trade that just closed, so
+                # patch the just-appended row rather than re-opening it.
+                trades[-1]['close_reason'] = s.get('gate_reason')
+
         held_contracts[symbol] = target
         events.append({
             'date': rebalance_date, 'symbol': symbol,
@@ -442,7 +516,10 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
                 continue
             close = row['close'][0]
             if prior_close[symbol] is not None and held_contracts[symbol] != 0:
-                capital += held_contracts[symbol] * (close - prior_close[symbol]) * futures_types[symbol]['multiplier']
+                day_pnl = held_contracts[symbol] * (close - prior_close[symbol]) * futures_types[symbol]['multiplier']
+                capital += day_pnl
+                if open_trade[symbol] is not None:
+                    open_trade[symbol]['mtm_pnl'] += day_pnl
             prior_close[symbol] = close
 
         # 1.5. Daily signal-gate exit check (signal_gate_mode == 'daily'
@@ -497,6 +574,19 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
 
         daily_rows.append({'date': d, 'capital': round(capital, 2)})
 
+    # Force-close any position still open at the end of the window -- same
+    # spirit as Backtester's close_all sweep: a trade that's still running
+    # when the backtest ends isn't abandoned, it's marked at the last
+    # available price so `trades` doesn't silently drop it.
+    if all_dates:
+        last_date = all_dates[-1]
+        for symbol in config.symbols:
+            if open_trade[symbol] is not None:
+                close_row = full_price_data[symbol].filter(pl.col('ts_event') <= last_date).tail(1)
+                last_price = float(close_row['close'][0]) if close_row.height > 0 else None
+                open_trade[symbol]['close_reason'] = 'end_of_backtest'
+                _close_trade(symbol, last_date, last_price)
+
     stats = pl.DataFrame(daily_rows)
     stats = stats.with_columns(running_max=pl.col('capital').cum_max())
     stats = stats.with_columns(
@@ -509,4 +599,8 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
         .otherwise(0.0)
     )
 
-    return {'stats': stats, 'events': events}
+    return {
+        'stats': stats, 'events': events,
+        'transactions': pl.DataFrame(transactions),
+        'trades': pl.DataFrame(trades).sort('entry_date') if trades else pl.DataFrame(trades),
+    }
