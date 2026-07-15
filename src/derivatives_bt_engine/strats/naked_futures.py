@@ -140,13 +140,22 @@ def _run_one_symbol(symbol: str, args) -> tuple[dict, pl.DataFrame]:
     return summary, daily_mtm
 
 
-def _build_total_mtm(symbols: list[str], daily_mtm_by_symbol: dict[str, pl.DataFrame], initial_capital: float) -> pl.DataFrame:
-    """Combines each symbol's independent daily mtm series (own capital,
-    own initial_capital -- NOT a shared risk-budgeted portfolio, just N
-    accounts' equity curves added together) into one daily total. Symbols
-    with different data coverage are handled via an outer join: a missing
-    day contributes 0 mtm_pnl and carries forward that symbol's last known
-    capital (or its own initial_capital before its first available day)."""
+def _build_total_mtm(symbols: list[str], daily_mtm_by_symbol: dict[str, pl.DataFrame],
+                      initial_capital: float) -> tuple[pl.DataFrame, list[dict]]:
+    """Combines each symbol's independent daily mtm series -- own margin/
+    sizing, no shared risk budget or correlation-aware position caps --
+    into one daily total against a SINGLE shared initial_capital (not
+    N independent accounts summed): each symbol's own cumulative PnL
+    (capital_<symbol> - initial_capital, since every symbol was run with
+    the same initial_capital) is added onto one starting balance, so 2
+    symbols read as "$100k trading two things," not "$200k." Symbols with
+    different data coverage are handled via an outer join: a missing day
+    contributes 0 mtm_pnl and carries forward that symbol's last known
+    capital (or its own initial_capital before its first available day).
+
+    Returns (daily total DataFrame, per-symbol contribution-% summary --
+    each symbol's own final cum_pnl as a % of the total's final cum_pnl;
+    can exceed 100% or go negative when symbols' PnL signs disagree)."""
     per_symbol = []
     for symbol in symbols:
         symbol_mtm = daily_mtm_by_symbol[symbol]
@@ -158,7 +167,7 @@ def _build_total_mtm(symbols: list[str], daily_mtm_by_symbol: dict[str, pl.DataF
             )
         )
     if not per_symbol:
-        return pl.DataFrame()
+        return pl.DataFrame(), []
 
     combined = per_symbol[0]
     for other in per_symbol[1:]:
@@ -176,13 +185,25 @@ def _build_total_mtm(symbols: list[str], daily_mtm_by_symbol: dict[str, pl.DataF
 
     cap_cols = [f'capital_{s}' for s in symbols if f'capital_{s}' in combined.columns]
     pnl_cols = [f'mtm_pnl_{s}' for s in symbols if f'mtm_pnl_{s}' in combined.columns]
+    present_symbols = [s for s in symbols if f'capital_{s}' in combined.columns]
+
+    # Each symbol's own cum_pnl relative to the SAME shared initial_capital
+    # (not its own separate one) -- summing these, not the raw capital_*
+    # columns, is what keeps the total anchored to one starting balance.
+    cum_pnl_cols = []
+    for symbol in present_symbols:
+        col = f'cum_pnl_{symbol}'
+        combined = combined.with_columns((pl.col(f'capital_{symbol}') - initial_capital).alias(col))
+        cum_pnl_cols.append(col)
+
     combined = combined.with_columns(
-        total_capital=pl.sum_horizontal(cap_cols),
         total_mtm_pnl=pl.sum_horizontal(pnl_cols),
+        total_cum_pnl=pl.sum_horizontal(cum_pnl_cols).round(2),
     )
-    total_initial = initial_capital * len(cap_cols)
     combined = combined.with_columns(
-        total_cum_pnl=(pl.col('total_capital') - total_initial).round(2),
+        total_capital=(initial_capital + pl.col('total_cum_pnl')).round(2),
+    )
+    combined = combined.with_columns(
         total_running_max=pl.col('total_capital').cum_max(),
     )
     combined = combined.with_columns(
@@ -193,7 +214,19 @@ def _build_total_mtm(symbols: list[str], daily_mtm_by_symbol: dict[str, pl.DataF
         .then((pl.col('total_dd_usd') / pl.col('total_running_max') * 100).round(2))
         .otherwise(0.0)
     )
-    return combined
+
+    final_total_cum_pnl = combined['total_cum_pnl'][-1]
+    contributions = []
+    for symbol in present_symbols:
+        symbol_final_pnl = combined[f'cum_pnl_{symbol}'][-1]
+        pct = (symbol_final_pnl / final_total_cum_pnl * 100) if final_total_cum_pnl else None
+        contributions.append({
+            'symbol': symbol,
+            'final_pnl': round(symbol_final_pnl, 2),
+            'pct_of_total': round(pct, 2) if pct is not None else None,
+        })
+
+    return combined, contributions
 
 
 def main():
@@ -212,15 +245,20 @@ def main():
             print("\n=== Cross-symbol summary (each an independent backtest, no shared risk budget) ===")
             print(pl.DataFrame(summary_rows))
 
-        total_mtm = _build_total_mtm(symbols, daily_mtm_by_symbol, args.initial_capital)
+        total_mtm, contributions = _build_total_mtm(symbols, daily_mtm_by_symbol, args.initial_capital)
         if total_mtm.height > 0:
             with pl.Config(tbl_rows=10, tbl_cols=-1, tbl_width_chars=200):
-                print("\n=== Total mtm (sum of each symbol's own independent equity curve) ===")
+                print(f"\n=== Total mtm (single shared ${args.initial_capital:,.0f} starting balance, "
+                      f"not {len(symbols)}x summed) ===")
                 print(total_mtm.tail(10))
             print(f"Total final capital: ${total_mtm['total_capital'][-1]:,.2f}  "
                   f"Total cumulative PnL: ${total_mtm['total_cum_pnl'][-1]:,.2f}  "
                   f"Total max drawdown: ${total_mtm['total_dd_usd'].min():,.2f} "
                   f"({total_mtm['total_dd_pct'].min():.2f}%)")
+
+            with pl.Config(tbl_rows=-1, tbl_cols=-1, tbl_width_chars=200):
+                print("\n=== Per-symbol contribution to total PnL ===")
+                print(pl.DataFrame(contributions))
 
             if not args.no_save:
                 start_year, end_year = _parse_years(args.years)
