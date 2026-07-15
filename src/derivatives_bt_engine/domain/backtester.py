@@ -483,7 +483,14 @@ class Backtester:
 
         trade_results = results['trade_results']
         transactions = results['transactions']
-        stats = results['stats']
+        # Futures: calculate_futures_mtm_drawdown's table, under 'daily_mtm'.
+        # Options: calculate_simple_drawdown's legacy table, still under
+        # 'stats' -- deliberately not renamed/moved to 'daily_mtm', since
+        # calculate_options_mtm_drawdown already owns that key for its own
+        # (different, newer) table and runs right after this for options
+        # configs; reading it here would silently pick up the wrong table.
+        is_futures = isinstance(config, FuturesStrategyConfig)
+        daily_mtm = results.get('daily_mtm') if is_futures else results.get('stats')
 
         # Save trades
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -496,18 +503,21 @@ class Backtester:
             transactions.write_csv(transactions_csv_path)
 
         # Save the full MTM/drawdown table (not just the text summary below)
-        if stats is not None and stats.height > 0:
+        if daily_mtm is not None and daily_mtm.height > 0:
             mtm_csv_path = os.path.join(self.results_dir, f"mtm_{param_str}_{timestamp}.csv")
-            stats.write_csv(mtm_csv_path)
+            daily_mtm.write_csv(mtm_csv_path)
 
-        is_futures = isinstance(config, FuturesStrategyConfig)
         dd_duration_unit = "trading days" if is_futures else "trades"
 
-        stats_csv_path = os.path.join(self.results_dir, f"stats_{param_str}_{timestamp}.csv")
+        # Plain-text summary (Total trades/Win rate/Max Profit/...) -- not
+        # a CSV at all (was previously misnamed stats_*.csv, colliding in
+        # name with the actual daily mtm/stats table above even though
+        # it's a completely different, one-shot summary, not a series).
+        summary_path = os.path.join(self.results_dir, f"summary_{param_str}_{timestamp}.txt")
         n_trades = trade_results.height
         win_count = (trade_results['pnl'] > 0).sum()
 
-        with open(stats_csv_path, 'w') as results_file:
+        with open(summary_path, 'w') as results_file:
                 # results_file.write("Backtest Results Summary:\n")
                 results_file.write(f"Total trades executed: {n_trades}\n")
                 results_file.write(f"Winning trades: {win_count}\n")
@@ -531,16 +541,16 @@ class Backtester:
                     total_execution_time = sum(self.execution_times.values())
                     results_file.write(f"Total execution time: {total_execution_time:.2f}s\n")
 
-                if stats is not None and stats.height > 0:
+                if daily_mtm is not None and daily_mtm.height > 0:
                     # Futures drawdown is negative (worst = .min()); the legacy
                     # option-path calculate_simple_drawdown is still positive
                     # (worst = .max()) — see that method's own comment.
                     if is_futures:
-                        max_drawdown_amount = stats['dd_usd'].min()
-                        max_drawdown_percentage = stats['dd_pct'].min()
+                        max_drawdown_amount = daily_mtm['dd_usd'].min()
+                        max_drawdown_percentage = daily_mtm['dd_pct'].min()
                     else:
-                        max_drawdown_amount = stats['Drawdown ($)'].max()
-                        max_drawdown_percentage = stats['Drawdown (%)'].max()
+                        max_drawdown_amount = daily_mtm['Drawdown ($)'].max()
+                        max_drawdown_percentage = daily_mtm['Drawdown (%)'].max()
                     results_file.write(f"Maximum drawdown: ${max_drawdown_amount:.2f} ({max_drawdown_percentage:.2f}%)\n")
 
                     # Add peak and duration stats
@@ -642,14 +652,20 @@ class Backtester:
             logger.info(f"Trough Capital: ${capital_with_init[trough_idx]:.2f}")
             logger.info(f"Drawdown Duration: {max_dd_duration} trades")
 
-            stats = pl.DataFrame({
+            # NB: key stays 'stats' (not 'daily_mtm') deliberately -- this is
+            # the legacy options-only drawdown table (capitalized column
+            # names), and calculate_options_mtm_drawdown (which runs right
+            # after this for options configs) already owns the 'daily_mtm'
+            # key for its own, newer table; reusing it here would silently
+            # get overwritten instead of renamed.
+            legacy_drawdown = pl.DataFrame({
                 'Drawdown ($)': drawdown,
                 'Drawdown (%)': drawdown / running_max * 100,
                 'Capital': capital_with_init,
                 'Running Max': running_max,
             })
 
-            results['stats'] = stats
+            results['stats'] = legacy_drawdown
             results['drawdown_analysis'] = {
                 'max_drawdown': max_dd_usd,
                 'peak_capital': capital_with_init[peak_idx],
@@ -881,7 +897,7 @@ class Backtester:
         # Lowercase snake_case column names throughout, matching the
         # convention used for Google Sheets headers elsewhere (e.g.
         # gspread_log_util.py's "total_pnl", "max_dd_usd", "peak_capital").
-        stats = daily.select([
+        daily_mtm = daily.select([
             'ts_event', 'close', 'mtm_pnl', 'cum_pnl', 'cum_pnl_pct', 'mtm_capital',
             'running_max', 'dd_usd', 'dd_pct',
             'avg_r3m', 'avg_r1y', 'hv3m', 'hv1y', 'sharpe3m', 'sharpe1y',
@@ -891,7 +907,7 @@ class Backtester:
             'mtm_capital': 'capital',
         })
 
-        results['stats'] = stats
+        results['daily_mtm'] = daily_mtm
         results['drawdown_analysis'] = {
             'max_drawdown': max_dd_usd,
             'peak_capital': peak_capital,

@@ -26,7 +26,7 @@ INITIAL_CAPITAL = 100_000.0
 
 
 @pytest.fixture(scope='module')
-def two_symbol_stats():
+def two_symbol_daily_mtm():
     """Runs the exact _run_one_symbol path naked_futures.py's own main()
     uses (not a hand-rolled reimplementation), for two symbols with
     different underlying price series (MES->ES, MGC->GC) and a gate
@@ -37,19 +37,19 @@ def two_symbol_stats():
         ts_exit_threshold=0.0, ts_entry_threshold=0.5,
         exit_on_ts_crossover=False, no_save=True,
     )
-    stats_by_symbol = {}
+    daily_mtm_by_symbol = {}
     for symbol in SYMBOLS:
-        _, stats = _run_one_symbol(symbol, args)
-        assert stats.height > 100, f"{symbol}: expected a real multi-year daily stats series"
-        stats_by_symbol[symbol] = stats
-    return stats_by_symbol
+        _, daily_mtm = _run_one_symbol(symbol, args)
+        assert daily_mtm.height > 100, f"{symbol}: expected a real multi-year daily mtm series"
+        daily_mtm_by_symbol[symbol] = daily_mtm
+    return daily_mtm_by_symbol
 
 
-def test_total_mtm_equals_sum_of_each_symbol_every_date(two_symbol_stats):
+def test_total_mtm_equals_sum_of_each_symbol_every_date(two_symbol_daily_mtm):
     """The actual ask: total_capital/total_mtm_pnl at EVERY date must
     equal the sum of each individual symbol's own capital/mtm_pnl that
     date -- not just checked in isolation per symbol."""
-    total_mtm = _build_total_mtm(SYMBOLS, two_symbol_stats, INITIAL_CAPITAL)
+    total_mtm = _build_total_mtm(SYMBOLS, two_symbol_daily_mtm, INITIAL_CAPITAL)
     assert total_mtm.height > 100
 
     expected_capital = pl.sum_horizontal([f'capital_{s}' for s in SYMBOLS])
@@ -74,15 +74,15 @@ def test_total_mtm_equals_sum_of_each_symbol_every_date(two_symbol_stats):
     )
 
 
-def test_total_mtm_telescopes_to_sum_of_each_symbols_own_total(two_symbol_stats):
+def test_total_mtm_telescopes_to_sum_of_each_symbols_own_total(two_symbol_daily_mtm):
     """Aggregate-level cross-check, independent of the per-date test
     above: the combined series' final cumulative pnl must equal the sum
     of each symbol's OWN final cumulative pnl (i.e. what naked's
     cross-symbol summary table reports per symbol)."""
-    total_mtm = _build_total_mtm(SYMBOLS, two_symbol_stats, INITIAL_CAPITAL)
+    total_mtm = _build_total_mtm(SYMBOLS, two_symbol_daily_mtm, INITIAL_CAPITAL)
 
     per_symbol_final_cum_pnl = sum(
-        two_symbol_stats[s]['cum_pnl'][-1] for s in SYMBOLS
+        two_symbol_daily_mtm[s]['cum_pnl'][-1] for s in SYMBOLS
     )
     assert total_mtm['total_cum_pnl'][-1] == pytest.approx(per_symbol_final_cum_pnl, abs=0.01)
     assert total_mtm['total_mtm_pnl'].sum() == pytest.approx(per_symbol_final_cum_pnl, abs=0.01)

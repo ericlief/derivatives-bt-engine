@@ -75,7 +75,7 @@ def _run_one_symbol(symbol: str, args) -> tuple[dict, pl.DataFrame]:
     its own capital/margin, no shared risk budget or correlation-aware
     sizing with any other symbol (that coordination is the TSMOM
     backtester's job, not this one). Returns (summary row for the
-    cross-symbol comparison table, this symbol's own daily mtm stats)."""
+    cross-symbol comparison table, this symbol's own daily mtm)."""
     futures_strategy = FuturesStrategy.LONG_FUTURES if args.dir == 'long' else FuturesStrategy.SHORT_FUTURES
 
     start_year, end_year = _parse_years(args.years)
@@ -136,11 +136,11 @@ def _run_one_symbol(symbol: str, args) -> tuple[dict, pl.DataFrame]:
         'avg_days_held': round(trade_results['days_held'].mean(), 1) if trade_results.height else None,
         'max_drawdown_usd': dd.get('max_drawdown'),
     }
-    stats = results.get('stats', pl.DataFrame())
-    return summary, stats
+    daily_mtm = results.get('daily_mtm', pl.DataFrame())
+    return summary, daily_mtm
 
 
-def _build_total_mtm(symbols: list[str], stats_by_symbol: dict[str, pl.DataFrame], initial_capital: float) -> pl.DataFrame:
+def _build_total_mtm(symbols: list[str], daily_mtm_by_symbol: dict[str, pl.DataFrame], initial_capital: float) -> pl.DataFrame:
     """Combines each symbol's independent daily mtm series (own capital,
     own initial_capital -- NOT a shared risk-budgeted portfolio, just N
     accounts' equity curves added together) into one daily total. Symbols
@@ -149,11 +149,11 @@ def _build_total_mtm(symbols: list[str], stats_by_symbol: dict[str, pl.DataFrame
     capital (or its own initial_capital before its first available day)."""
     per_symbol = []
     for symbol in symbols:
-        s = stats_by_symbol[symbol]
-        if s.height == 0:
+        symbol_mtm = daily_mtm_by_symbol[symbol]
+        if symbol_mtm.height == 0:
             continue
         per_symbol.append(
-            s.select(['date', 'capital', 'mtm_pnl']).rename(
+            symbol_mtm.select(['date', 'capital', 'mtm_pnl']).rename(
                 {'capital': f'capital_{symbol}', 'mtm_pnl': f'mtm_pnl_{symbol}'}
             )
         )
@@ -201,18 +201,18 @@ def main():
     symbols = [s.strip().upper() for s in args.symbols.split(',') if s.strip()]
 
     summary_rows = []
-    stats_by_symbol = {}
+    daily_mtm_by_symbol = {}
     for symbol in symbols:
-        summary, stats = _run_one_symbol(symbol, args)
+        summary, daily_mtm = _run_one_symbol(symbol, args)
         summary_rows.append(summary)
-        stats_by_symbol[symbol] = stats
+        daily_mtm_by_symbol[symbol] = daily_mtm
 
     if len(summary_rows) > 1:
         with pl.Config(tbl_rows=-1, tbl_cols=-1, tbl_width_chars=200):
             print("\n=== Cross-symbol summary (each an independent backtest, no shared risk budget) ===")
             print(pl.DataFrame(summary_rows))
 
-        total_mtm = _build_total_mtm(symbols, stats_by_symbol, args.initial_capital)
+        total_mtm = _build_total_mtm(symbols, daily_mtm_by_symbol, args.initial_capital)
         if total_mtm.height > 0:
             with pl.Config(tbl_rows=10, tbl_cols=-1, tbl_width_chars=200):
                 print("\n=== Total mtm (sum of each symbol's own independent equity curve) ===")

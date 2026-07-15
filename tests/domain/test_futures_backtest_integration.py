@@ -130,7 +130,7 @@ def test_mtm_telescopes_through_every_trade_close(gated_mtm_results):
     same day (a roll) or days/weeks later (a gate-triggered re-entry) --
     not just the first trade in the sequence."""
     trade_results = gated_mtm_results['trade_results']
-    stats = gated_mtm_results['stats']
+    stats = gated_mtm_results['daily_mtm']
     assert trade_results.height > 5  # need a real multi-trade sequence, not a degenerate 0/1-trade run
 
     stats_by_date = {row['date']: row['capital'] for row in stats.iter_rows(named=True)}
@@ -156,7 +156,7 @@ def test_mtm_flat_during_gate_gap(gated_mtm_results):
     roll always reopens same-day -- mtm_capital must stay flat at the
     closed trade's own realized capital, not drift."""
     trade_results = gated_mtm_results['trade_results'].sort('opened')
-    stats = gated_mtm_results['stats']
+    stats = gated_mtm_results['daily_mtm']
     rows = list(trade_results.iter_rows(named=True))
     assert len(rows) > 5
 
@@ -188,7 +188,7 @@ def test_mtm_total_matches_realized_total(gated_mtm_results):
     property as the per-trade test, just end to end over the full window
     instead of trade by trade."""
     trade_results = gated_mtm_results['trade_results']
-    stats = gated_mtm_results['stats']
+    stats = gated_mtm_results['daily_mtm']
 
     total_realized_pnl = trade_results['cumulative_pnl'][-1]
     total_mtm_pnl = stats['mtm_pnl'].sum()
