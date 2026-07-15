@@ -60,6 +60,11 @@ def parse_args():
     p.add_argument('--exit-on-ts-crossover', action='store_true',
                    help="Also gate on ts3m crossing to the wrong side of ts1y for the position's "
                         "direction (default: disabled)")
+    p.add_argument('--disable-vix-gating', action='store_true',
+                   help="Turn off the portfolio-wide VIX regime gate (spike/extreme hold-or-halve, "
+                        "elevated de-risking) entirely -- isolates the effect of "
+                        "ts-exit/entry-threshold/exit-on-ts-crossover alone, without VIX interference "
+                        "(default: VIX gating on, matching all prior behavior)")
     p.add_argument('--no-save', action='store_true', help='Skip saving stats/events to results/')
     return p.parse_args()
 
@@ -97,6 +102,7 @@ def main():
         ts_entry_threshold=args.ts_entry_threshold,
         exit_on_ts_crossover=args.exit_on_ts_crossover,
         fixed_quantities=fixed_quantities,
+        vix_gating=not args.disable_vix_gating,
     )
 
     result = run_tsmom_backtest(config)

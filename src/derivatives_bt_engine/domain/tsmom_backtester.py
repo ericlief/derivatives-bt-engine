@@ -100,6 +100,16 @@ class TsmomBacktestConfig:
     # continuous vol-targeted scalar with a constant, it doesn't touch
     # the rest of the day loop.
     fixed_quantities: Optional[list[int]] = None
+    # Portfolio-wide VIX regime gate (spot-VIX-vs-63d-MA spike/extreme
+    # hold-or-halve override, elevated -> market_stress_scale de-risking)
+    # -- on by default (matches all prior behavior). Toggle off to isolate
+    # the effect of ts_exit_threshold/ts_entry_threshold/exit_on_ts_crossover
+    # alone, without VIX-driven interference -- particularly relevant for
+    # signal_gate_mode='daily', which is already a departure from
+    # traditional monthly-only TSMOM, and where mixing in a second,
+    # differently-cadenced portfolio-wide gate makes it harder to isolate
+    # what's actually being tested.
+    vix_gating: bool = True
 
     def __post_init__(self):
         if self.signal_gate_mode not in ('off', 'monthly', 'daily'):
@@ -521,6 +531,8 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
         if prior_month_ends:
             seed_date = max(prior_month_ends)
             vol_regime, vix_close, vix_ratio = _vix_regime_at(vix, seed_date)
+            if not config.vix_gating:
+                vol_regime = VolRegime.NORMAL  # vix_close/vix_ratio still logged, just not acted on
             if vol_regime not in (VolRegime.SPIKE, VolRegime.EXTREME):  # held_contracts are all 0 here -- hold/halve would be a no-op anyway
                 market_stress_scale = VIX_ELEVATED_SCALE if vol_regime == VolRegime.ELEVATED else 1.0
                 for symbol in config.symbols:
@@ -591,6 +603,8 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
         # tsmom_rebalance.compute_rebalance_targets' early-return shape).
         if d in rebalance_dates:
             vol_regime, vix_close, vix_ratio = _vix_regime_at(vix, d)
+            if not config.vix_gating:
+                vol_regime = VolRegime.NORMAL  # vix_close/vix_ratio still logged, just not acted on
 
             if vol_regime in (VolRegime.SPIKE, VolRegime.EXTREME):
                 for symbol in config.symbols:
