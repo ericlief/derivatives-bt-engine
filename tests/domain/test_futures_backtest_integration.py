@@ -5,6 +5,7 @@ duckdb. Skipped if that db isn't available in the current environment.
 """
 import os
 
+import polars as pl
 import pytest
 
 from derivatives_bt_engine.domain.backtester import Backtester
@@ -80,3 +81,100 @@ def test_short_futures_backtest_runs_end_to_end(es_data):
     results = bt.run(config)
 
     assert not results['trade_results'].empty
+
+
+@pytest.fixture(scope='module')
+def gated_mtm_results(es_data):
+    """A multi-year run with the signal gate enabled so the trade sequence
+    includes both same-day close+reopen transitions (natural quarterly
+    rolls, gate_reason is null) and multi-day-gap transitions (signal-gate
+    -triggered exits followed later by a re-entry once ts_entry_threshold
+    clears) -- exercising both cases the mtm join fix needs to get right,
+    not just rolls in isolation."""
+    config = FuturesStrategyConfig(
+        quantity=1,
+        futures_type='ES',
+        futures_strategy=FuturesStrategy.LONG_FUTURES,
+        initial_capital=100000,
+        leverage=1.0,
+        start_date="2010-01-01",
+        end_date="2018-12-31",
+        fill_price='mid',
+        ts_exit_threshold=0.0,
+        ts_entry_threshold=0.5,
+    )
+    bt = Backtester(data=es_data, save_trades=False, log_to_sheets=False)
+    return bt.run(config)
+
+
+def test_mtm_telescopes_through_every_trade_close(gated_mtm_results):
+    """Regression test for the join_asof(right_on='opened') bug: every
+    trade's OWN closing date must resolve to that trade's own realized
+    capital in the daily mtm overlay, whether the next trade reopens the
+    same day (a roll) or days/weeks later (a gate-triggered re-entry) --
+    not just the first trade in the sequence."""
+    trade_results = gated_mtm_results['trade_results']
+    stats = gated_mtm_results['stats']
+    assert trade_results.height > 5  # need a real multi-trade sequence, not a degenerate 0/1-trade run
+
+    stats_by_date = {row['date']: row['capital'] for row in stats.iter_rows(named=True)}
+
+    mismatches = []
+    for row in trade_results.iter_rows(named=True):
+        mtm_capital_at_close = stats_by_date.get(row['closed'])
+        if mtm_capital_at_close is None:
+            continue  # closed date fell outside the stats window (shouldn't happen here, but don't hide a KeyError as a failure of the invariant)
+        if mtm_capital_at_close != pytest.approx(row['capital'], abs=0.01):
+            mismatches.append((row['trade_id'], row['closed'], row['close_reason'], mtm_capital_at_close, row['capital']))
+
+    assert not mismatches, (
+        f"{len(mismatches)} trade(s) whose closing-date mtm capital doesn't match their own "
+        f"realized capital (trade_id, closed, close_reason, mtm_capital, realized_capital): {mismatches}"
+    )
+
+
+def test_mtm_flat_during_gate_gap(gated_mtm_results):
+    """Between one trade's close and the next trade's (later) open -- a
+    genuine gap, only possible via a gate-triggered exit since a natural
+    roll always reopens same-day -- mtm_capital must stay flat at the
+    closed trade's own realized capital, not drift."""
+    trade_results = gated_mtm_results['trade_results'].sort('opened')
+    stats = gated_mtm_results['stats']
+    rows = list(trade_results.iter_rows(named=True))
+    assert len(rows) > 5
+
+    gaps_checked = 0
+    for prev_row, next_row in zip(rows, rows[1:]):
+        if next_row['opened'] <= prev_row['closed']:
+            continue  # same-day roll, not a gap -- covered by the telescoping test above
+        gap = stats.filter(
+            (pl.col('date') > prev_row['closed']) & (pl.col('date') < next_row['opened'])
+        )
+        if gap.height == 0:
+            continue
+        gaps_checked += 1
+        assert gap['capital'].to_list() == pytest.approx([prev_row['capital']] * gap.height, abs=0.01), (
+            f"mtm_capital drifted during the flat gap after trade {prev_row['trade_id']} "
+            f"({prev_row['closed']}) before trade {next_row['trade_id']} opens ({next_row['opened']})"
+        )
+        assert (gap['mtm_pnl'].abs() < 0.01).all()
+
+    assert gaps_checked > 0, "expected at least one gate-triggered gap in this window to actually test flatness against"
+
+
+def test_mtm_total_matches_realized_total(gated_mtm_results):
+    """Aggregate check: summed daily mtm_pnl across the whole backtest
+    must equal the final realized cumulative pnl -- the same telescoping
+    property as the per-trade test, just end to end over the full window
+    instead of trade by trade."""
+    trade_results = gated_mtm_results['trade_results']
+    stats = gated_mtm_results['stats']
+
+    total_realized_pnl = trade_results['cumulative_pnl'][-1]
+    total_mtm_pnl = stats['mtm_pnl'].sum()
+
+    assert total_mtm_pnl == pytest.approx(total_realized_pnl, abs=0.01)
+    # cum_pnl is itself just a running sum of mtm_pnl -- its final value
+    # should agree with the same total via an independent column, not
+    # just the .sum() above re-deriving the same number.
+    assert stats['cum_pnl'][-1] == pytest.approx(total_realized_pnl, abs=0.01)
