@@ -1862,7 +1862,9 @@ class FuturesPosition(BasePosition):
             futures_strategy=self.futures_strategy.value,
             quantity=self.quantity,
             opened=self.entry_date,
+            entry_price=round(self.entry_price, 2) if self.entry_price is not None else None,
             closed=effective_close_date,
+            exit_price=round(self.exit_price, 2) if self.exit_price is not None else None,
             days_held=(effective_close_date - self.entry_date).days,
             close_reason=self.close_reason, # Use the close_reason set during pnl calculation
             fees=self.fees,

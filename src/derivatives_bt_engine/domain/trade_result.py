@@ -137,6 +137,8 @@ class OptionTradeResult(BaseTradeResult):
 class FuturesTradeResult(BaseTradeResult):
     """Represents a completed futures trade with entry and exit details."""
     symbol: str
+    entry_price: float
+    exit_price: Optional[float]
     futures_strategy: Optional[Union[FuturesStrategy, str]]
     close_reason: Optional[str]
     roi: Optional[float] = None
@@ -149,7 +151,9 @@ class FuturesTradeResult(BaseTradeResult):
             'trade_id': self.trade_id,
             'quantity': self.quantity,
             'opened': self.opened,
+            'entry_price': self.entry_price,
             'closed': self.closed,
+            'exit_price': self.exit_price,
             'days_held': self.days_held,
             'close_reason': self.close_reason,
             'fees': self.fees,
