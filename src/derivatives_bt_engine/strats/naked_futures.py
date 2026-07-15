@@ -61,21 +61,24 @@ def parse_args():
     return p.parse_args()
 
 
-def _run_one_symbol(symbol: str, args) -> dict:
+def _parse_years(years: str) -> tuple[str, str]:
+    parts = years.split('-')
+    if len(parts) == 1:
+        return parts[0], parts[0]
+    if len(parts) == 2:
+        return parts[0], parts[1]
+    raise ValueError(f"--years must be YYYY or YYYY-YYYY, got {years!r}")
+
+
+def _run_one_symbol(symbol: str, args) -> tuple[dict, pl.DataFrame]:
     """Runs one fully independent single-position backtest for `symbol` --
     its own capital/margin, no shared risk budget or correlation-aware
     sizing with any other symbol (that coordination is the TSMOM
-    backtester's job, not this one). Returns a summary row for the
-    cross-symbol comparison table."""
+    backtester's job, not this one). Returns (summary row for the
+    cross-symbol comparison table, this symbol's own daily mtm stats)."""
     futures_strategy = FuturesStrategy.LONG_FUTURES if args.dir == 'long' else FuturesStrategy.SHORT_FUTURES
 
-    parts = args.years.split('-')
-    if len(parts) == 1:
-        start_year = end_year = parts[0]
-    elif len(parts) == 2:
-        start_year, end_year = parts
-    else:
-        raise ValueError(f"--years must be YYYY or YYYY-YYYY, got {args.years!r}")
+    start_year, end_year = _parse_years(args.years)
     start_date = f"{start_year}-01-01"
     end_date = f"{end_year}-12-31"
 
@@ -124,7 +127,7 @@ def _run_one_symbol(symbol: str, args) -> dict:
 
     trade_results = results['trade_results']
     dd = results.get('drawdown_analysis', {})
-    return {
+    summary = {
         'symbol': symbol,
         'trades': trade_results.height,
         'win_rate_pct': round(100 * (trade_results['pnl'] > 0).sum() / trade_results.height, 2) if trade_results.height else None,
@@ -133,18 +136,98 @@ def _run_one_symbol(symbol: str, args) -> dict:
         'avg_days_held': round(trade_results['days_held'].mean(), 1) if trade_results.height else None,
         'max_drawdown_usd': dd.get('max_drawdown'),
     }
+    stats = results.get('stats', pl.DataFrame())
+    return summary, stats
+
+
+def _build_total_mtm(symbols: list[str], stats_by_symbol: dict[str, pl.DataFrame], initial_capital: float) -> pl.DataFrame:
+    """Combines each symbol's independent daily mtm series (own capital,
+    own initial_capital -- NOT a shared risk-budgeted portfolio, just N
+    accounts' equity curves added together) into one daily total. Symbols
+    with different data coverage are handled via an outer join: a missing
+    day contributes 0 mtm_pnl and carries forward that symbol's last known
+    capital (or its own initial_capital before its first available day)."""
+    per_symbol = []
+    for symbol in symbols:
+        s = stats_by_symbol[symbol]
+        if s.height == 0:
+            continue
+        per_symbol.append(
+            s.select(['date', 'capital', 'mtm_pnl']).rename(
+                {'capital': f'capital_{symbol}', 'mtm_pnl': f'mtm_pnl_{symbol}'}
+            )
+        )
+    if not per_symbol:
+        return pl.DataFrame()
+
+    combined = per_symbol[0]
+    for other in per_symbol[1:]:
+        combined = combined.join(other, on='date', how='full', coalesce=True)
+    combined = combined.sort('date')
+
+    for symbol in symbols:
+        cap_col, pnl_col = f'capital_{symbol}', f'mtm_pnl_{symbol}'
+        if cap_col not in combined.columns:
+            continue
+        combined = combined.with_columns(
+            pl.col(cap_col).fill_null(strategy='forward').fill_null(initial_capital).alias(cap_col),
+            pl.col(pnl_col).fill_null(0.0).alias(pnl_col),
+        )
+
+    cap_cols = [f'capital_{s}' for s in symbols if f'capital_{s}' in combined.columns]
+    pnl_cols = [f'mtm_pnl_{s}' for s in symbols if f'mtm_pnl_{s}' in combined.columns]
+    combined = combined.with_columns(
+        total_capital=pl.sum_horizontal(cap_cols),
+        total_mtm_pnl=pl.sum_horizontal(pnl_cols),
+    )
+    total_initial = initial_capital * len(cap_cols)
+    combined = combined.with_columns(
+        total_cum_pnl=(pl.col('total_capital') - total_initial).round(2),
+        total_running_max=pl.col('total_capital').cum_max(),
+    )
+    combined = combined.with_columns(
+        total_dd_usd=(pl.col('total_capital') - pl.col('total_running_max')).round(2),
+    )
+    combined = combined.with_columns(
+        total_dd_pct=pl.when(pl.col('total_running_max') > 0)
+        .then((pl.col('total_dd_usd') / pl.col('total_running_max') * 100).round(2))
+        .otherwise(0.0)
+    )
+    return combined
 
 
 def main():
     args = parse_args()
     symbols = [s.strip().upper() for s in args.symbols.split(',') if s.strip()]
 
-    summary_rows = [_run_one_symbol(symbol, args) for symbol in symbols]
+    summary_rows = []
+    stats_by_symbol = {}
+    for symbol in symbols:
+        summary, stats = _run_one_symbol(symbol, args)
+        summary_rows.append(summary)
+        stats_by_symbol[symbol] = stats
 
     if len(summary_rows) > 1:
         with pl.Config(tbl_rows=-1, tbl_cols=-1, tbl_width_chars=200):
             print("\n=== Cross-symbol summary (each an independent backtest, no shared risk budget) ===")
             print(pl.DataFrame(summary_rows))
+
+        total_mtm = _build_total_mtm(symbols, stats_by_symbol, args.initial_capital)
+        if total_mtm.height > 0:
+            with pl.Config(tbl_rows=10, tbl_cols=-1, tbl_width_chars=200):
+                print("\n=== Total mtm (sum of each symbol's own independent equity curve) ===")
+                print(total_mtm.tail(10))
+            print(f"Total final capital: ${total_mtm['total_capital'][-1]:,.2f}  "
+                  f"Total cumulative PnL: ${total_mtm['total_cum_pnl'][-1]:,.2f}  "
+                  f"Total max drawdown: ${total_mtm['total_dd_usd'].min():,.2f} "
+                  f"({total_mtm['total_dd_pct'].min():.2f}%)")
+
+            if not args.no_save:
+                start_year, end_year = _parse_years(args.years)
+                results_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'results'))
+                os.makedirs(results_dir, exist_ok=True)
+                symbol_str = '_'.join(symbols)
+                total_mtm.write_csv(os.path.join(results_dir, f"total_mtm_{symbol_str}_{start_year}-{end_year}.csv"))
 
 
 if __name__ == "__main__":
