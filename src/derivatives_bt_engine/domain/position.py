@@ -1836,8 +1836,9 @@ class FuturesPosition(BasePosition):
 
         bp_effect += pnl # PnL affects buying power
         
-        # Create transaction 
+        # Create transaction
         transaction = {
+            'symbol': self.futures_type,
             'transaction_id': self.transaction_id,
             'trade_id': self.trade_id,
             'date': effective_close_date,
@@ -1845,8 +1846,8 @@ class FuturesPosition(BasePosition):
             'instrument_type': 'futures',
             'futures_type': self.futures_type,
             'position_side': self.position_side.value,
-            'open': self.entry_price,
-            'close': self.exit_price,
+            'open': round(self.entry_price, 2) if self.entry_price is not None else None,
+            'close': round(self.exit_price, 2) if self.exit_price is not None else None,
             'quantity': self.quantity,
             'mult': self.mult,
             'pnl': pnl,
@@ -1856,6 +1857,7 @@ class FuturesPosition(BasePosition):
 
         # Prepare trade result
         trade_result = FuturesTradeResult(
+            symbol=self.futures_type,
             trade_id=self.trade_id,
             futures_strategy=self.futures_strategy.value,
             quantity=self.quantity,
@@ -1953,6 +1955,7 @@ class FuturesPosition(BasePosition):
             raise ValueError("FuturesPosition.create_transaction only handles 'open' transactions")
 
         return {
+            'symbol': position.futures_type,
             'transaction_id': position.transaction_id,
             'trade_id': position.trade_id,
             'date': date,
@@ -1960,7 +1963,7 @@ class FuturesPosition(BasePosition):
             'instrument_type': 'futures',
             'futures_type': position.futures_type,
             'position_side': position.position_side.value,
-            'open': position.entry_price,
+            'open': round(position.entry_price, 2) if position.entry_price is not None else None,
             'close': None,
             'quantity': position.quantity,
             'mult': position.mult,

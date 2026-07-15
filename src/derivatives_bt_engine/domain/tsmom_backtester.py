@@ -383,8 +383,8 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
         net_pnl = round(ot['mtm_pnl'] - ot['fees'], 2)
         trades.append({
             'symbol': symbol, 'direction': ot['direction'],
-            'entry_date': ot['entry_date'], 'entry_price': ot['entry_price'],
-            'exit_date': exit_date, 'exit_price': exit_price,
+            'entry_date': ot['entry_date'], 'entry_price': _round(ot['entry_price'], 2),
+            'exit_date': exit_date, 'exit_price': _round(exit_price, 2),
             'days_held': (exit_date - ot['entry_date']).days,
             'max_contracts': ot['max_contracts'], 'fees': round(ot['fees'], 2),
             'pnl': net_pnl, 'close_reason': ot['close_reason'],
@@ -406,7 +406,7 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
             capital -= fee
             price = s.get('close')
             transactions.append({
-                'date': rebalance_date, 'symbol': symbol,
+                'symbol': symbol, 'date': rebalance_date,
                 'action': 'buy' if target > prior else 'sell',
                 'quantity': abs(target - prior), 'price': _round(price, 2),
                 'fee': round(fee, 2), 'prior_contracts': prior, 'target_contracts': target,

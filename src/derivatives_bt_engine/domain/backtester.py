@@ -366,6 +366,7 @@ class Backtester:
         # options carry option_strategy/premium; both now carry roi)
         if isinstance(config, FuturesStrategyConfig):
             ordered_cols = [
+                'symbol',
                 'trade_id',
                 'quantity',
                 'opened',

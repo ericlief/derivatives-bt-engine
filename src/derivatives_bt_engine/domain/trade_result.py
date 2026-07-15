@@ -136,6 +136,7 @@ class OptionTradeResult(BaseTradeResult):
 @dataclass(kw_only=True)
 class FuturesTradeResult(BaseTradeResult):
     """Represents a completed futures trade with entry and exit details."""
+    symbol: str
     futures_strategy: Optional[Union[FuturesStrategy, str]]
     close_reason: Optional[str]
     roi: Optional[float] = None
@@ -143,6 +144,7 @@ class FuturesTradeResult(BaseTradeResult):
     def to_dict(self) -> Dict:
         """Convert to dictionary for DataFrame creation."""
         return {
+            'symbol': self.symbol,
             'futures_strategy': self.futures_strategy,
             'trade_id': self.trade_id,
             'quantity': self.quantity,
