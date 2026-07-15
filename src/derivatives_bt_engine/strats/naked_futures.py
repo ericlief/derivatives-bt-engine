@@ -11,9 +11,12 @@ Run:
     naked --symbols ES --dir long --years 2025
     naked --symbols MES --dir short --years 2025-2026 --quantity 2
     naked --symbols ES,GC,CL --dir long --years 2010-2026 --ts-exit-threshold 0 --ts-entry-threshold 0.5
+    naked --symbols ES,GC,CL,NQ --years 2010-2026 --max-workers 4
 """
 import argparse
+import multiprocessing
 import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import polars as pl
 
@@ -58,6 +61,11 @@ def parse_args():
                    help='Exit when ts3m crosses to the wrong side of ts1y for this position\'s '
                         'direction, and block entry until it crosses back (default: disabled)')
     p.add_argument('--no-save', action='store_true', help='Skip saving trades/transactions/mtm to results/')
+    p.add_argument('--max-workers', type=int, default=None,
+                   help='Run --symbols across this many worker processes instead of sequentially '
+                        '(default: sequential). Only matters with more than one symbol -- each '
+                        "symbol's backtest is already fully independent, so this is pure "
+                        'wall-clock speedup, no behavior change.')
     return p.parse_args()
 
 
@@ -193,11 +201,11 @@ def _build_total_mtm(symbols: list[str], daily_mtm_by_symbol: dict[str, pl.DataF
     cum_pnl_cols = []
     for symbol in present_symbols:
         col = f'cum_pnl_{symbol}'
-        combined = combined.with_columns((pl.col(f'capital_{symbol}') - initial_capital).alias(col))
+        combined = combined.with_columns((pl.col(f'capital_{symbol}') - initial_capital).round(2).alias(col))
         cum_pnl_cols.append(col)
 
     combined = combined.with_columns(
-        total_mtm_pnl=pl.sum_horizontal(pnl_cols),
+        total_mtm_pnl=pl.sum_horizontal(pnl_cols).round(2),
         total_cum_pnl=pl.sum_horizontal(cum_pnl_cols).round(2),
     )
     combined = combined.with_columns(
@@ -233,10 +241,30 @@ def main():
     args = parse_args()
     symbols = [s.strip().upper() for s in args.symbols.split(',') if s.strip()]
 
+    results_by_symbol = {}
+    if args.max_workers and args.max_workers > 1 and len(symbols) > 1:
+        # spawn, not the default 'fork': polars/duckdb both run internal
+        # thread pools, very likely already started in this process by the
+        # time any symbol has loaded data. Forking after those threads
+        # exist copies whatever locks they held into each child with no
+        # thread there to ever release them -- every worker deadlocks at
+        # 0% CPU. spawn starts each worker as a fresh interpreter instead,
+        # same fix already used by grid_search_backtester.py/
+        # tsmom_grid_search.py's own worker pools.
+        ctx = multiprocessing.get_context('spawn')
+        with ProcessPoolExecutor(max_workers=args.max_workers, mp_context=ctx) as pool:
+            futures = {pool.submit(_run_one_symbol, symbol, args): symbol for symbol in symbols}
+            for future in as_completed(futures):
+                symbol = futures[future]
+                results_by_symbol[symbol] = future.result()
+    else:
+        for symbol in symbols:
+            results_by_symbol[symbol] = _run_one_symbol(symbol, args)
+
     summary_rows = []
     daily_mtm_by_symbol = {}
-    for symbol in symbols:
-        summary, daily_mtm = _run_one_symbol(symbol, args)
+    for symbol in symbols:  # preserve requested order regardless of completion order
+        summary, daily_mtm = results_by_symbol[symbol]
         summary_rows.append(summary)
         daily_mtm_by_symbol[symbol] = daily_mtm
 
