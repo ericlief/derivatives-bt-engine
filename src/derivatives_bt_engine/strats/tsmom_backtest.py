@@ -6,6 +6,7 @@ Run:
     tsmom-bt --symbols ES,NQ --years 2015-2022 --vol-target 0.10 --long-only
     tsmom-bt --symbols ES,GC --years 2010-2026 --signal-gate-mode monthly --ts-exit-threshold 0 --ts-entry-threshold 0.5
     tsmom-bt --symbols ES,GC --years 2010-2026 --signal-gate-mode daily --ts-exit-threshold 0 --ts-entry-threshold 0.5
+    tsmom-bt --symbols ES,GC,CL --years 2010-2026 --fixed-quantities 4,3,2 --signal-gate-mode monthly --ts-exit-threshold 0 --ts-entry-threshold 0.5
 
 Note: MES/MNQ (the live system's default micro-contract universe) have no
 data in the local Globex duckdb -- only the full-size ES/NQ contracts are
@@ -32,6 +33,13 @@ def parse_args():
                    help='Per-symbol hard cap on contract count (default: %(default)s)')
     p.add_argument('--max-notional', type=float, default=250000,
                    help='Per-symbol max notional USD (default: %(default)s -- sized for full-size ES/NQ, not micros)')
+    p.add_argument('--fixed-quantities', default=None,
+                   help='Comma-separated fixed contract counts, positionally matched to --symbols '
+                        '(e.g. --symbols ES,GC,CL --fixed-quantities 4,3,2). When set, disables '
+                        'vol-targeted/notional-scaled sizing entirely -- each symbol always trades '
+                        'this many contracts (still direction-aware from its own signal, still '
+                        'gated by ts-exit/entry-threshold and VIX spike/extreme); --vol-target/'
+                        '--max-notional are ignored (default: disabled, normal vol-targeted sizing)')
     p.add_argument('--long-only', action='store_true',
                    help='Disable short positions (signal_scalar = max(0, trend_strength))')
     p.add_argument('--momentum-discount', type=float, default=0.5,
@@ -69,6 +77,10 @@ def main():
     else:
         raise ValueError(f"--years must be YYYY or YYYY-YYYY, got {args.years!r}")
 
+    fixed_quantities = None
+    if args.fixed_quantities:
+        fixed_quantities = [int(q.strip()) for q in args.fixed_quantities.split(',') if q.strip()]
+
     from datetime import date
     config = TsmomBacktestConfig(
         symbols=symbols,
@@ -84,6 +96,7 @@ def main():
         ts_exit_threshold=args.ts_exit_threshold,
         ts_entry_threshold=args.ts_entry_threshold,
         exit_on_ts_crossover=args.exit_on_ts_crossover,
+        fixed_quantities=fixed_quantities,
     )
 
     result = run_tsmom_backtest(config)

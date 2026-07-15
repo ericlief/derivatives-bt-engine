@@ -84,10 +84,32 @@ class TsmomBacktestConfig:
     ts_entry_threshold: Optional[float] = None
     exit_on_ts_crossover: bool = False
     signal_gate_mode: str = 'off'  # 'off' | 'monthly' | 'daily'
+    # Opt-in "no rebalancing" mode: a positional list of fixed contract
+    # counts, one per symbol (index-aligned with `symbols`, e.g.
+    # symbols=['ES','GC','CL'], fixed_quantities=[4,3,2] means ES always
+    # trades in units of 4, GC in units of 3, CL in units of 2). When set,
+    # _compute_target skips vol-targeted/notional-scaled sizing entirely --
+    # direction still comes from the sign of that symbol's own raw signal
+    # (there's no other principled way to know when to go short without
+    # it), but magnitude is just this fixed count (times market_stress_scale
+    # during an elevated-VIX regime, rounded, same as the vol-targeted
+    # path's own elevated-VIX scaling) instead of vol_target/max_notional
+    # math. Entry/exit gates (ts_exit_threshold/ts_entry_threshold/
+    # exit_on_ts_crossover) and the VIX spike/extreme hold-or-halve
+    # override still apply exactly as before -- this only replaces the
+    # continuous vol-targeted scalar with a constant, it doesn't touch
+    # the rest of the day loop.
+    fixed_quantities: Optional[list[int]] = None
 
     def __post_init__(self):
         if self.signal_gate_mode not in ('off', 'monthly', 'daily'):
             raise ValueError(f"signal_gate_mode must be 'off', 'monthly', or 'daily', got {self.signal_gate_mode!r}")
+        if self.fixed_quantities is not None and len(self.fixed_quantities) != len(self.symbols):
+            raise ValueError(
+                f"fixed_quantities must have exactly one entry per symbol (positional, same order): "
+                f"got {len(self.fixed_quantities)} quantities for {len(self.symbols)} symbols "
+                f"({self.symbols})"
+            )
 
 
 def check_vol_regime(vix_ratio: Optional[float]) -> VolRegime:
@@ -310,8 +332,24 @@ def _compute_target(symbol: str, d: date, full_price_data: dict[str, pl.DataFram
     ) * market_stress_scale
 
     mult = futures_types[symbol]['multiplier']
-    contract_notional = last_close * mult
-    target = round((config.max_notional * scalar) / contract_notional) if contract_notional else 0
+    if config.fixed_quantities is not None:
+        # No-rebalancing mode: direction is still signal-driven (there's no
+        # other principled way to know when to go short without it), but
+        # magnitude is this symbol's own fixed contract count -- scaled by
+        # market_stress_scale (the same elevated-VIX de-risking the vol-
+        # targeted path applies) and rounded, not derived from vol_target/
+        # max_notional at all. max_contracts still clamps as a sanity
+        # backstop (raise it if it's below your configured fixed_quantities
+        # -- it silently truncates otherwise, same as the vol-targeted path).
+        fixed_qty = config.fixed_quantities[config.symbols.index(symbol)]
+        if signal_for_scalar is None or (isinstance(signal_for_scalar, float) and math.isnan(signal_for_scalar)) or signal_for_scalar == 0:
+            target = 0
+        else:
+            direction = 1 if signal_for_scalar > 0 else -1
+            target = direction * round(fixed_qty * market_stress_scale)
+    else:
+        contract_notional = last_close * mult
+        target = round((config.max_notional * scalar) / contract_notional) if contract_notional else 0
     target = max(-config.max_contracts, min(config.max_contracts, target))
 
     return {
