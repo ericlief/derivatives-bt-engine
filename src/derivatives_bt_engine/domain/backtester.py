@@ -694,6 +694,26 @@ class Backtester:
         trades_pl = trades_pl.with_columns(
             pl.when(pl.col('position_side').str.to_lowercase() == 'long').then(1).otherwise(-1).alias('direction')
         )
+        # On a same-day close+reopen (every roll, every gate-triggered
+        # close+reopen), a plain backward join on 'opened' would match that
+        # date to the NEW trade instead of the one actually closing --
+        # silently overwriting the closing trade's realized capital snap
+        # with the new trade's own one-day-old entry-vs-close noise, so its
+        # real close-out value never appears in the daily series at all
+        # (confirmed empirically: sum of daily mtm_pnl across a trade's
+        # holding period landed 2.9pts * mult off the trade's own realized
+        # pnl -- exactly the reopened trade's entry-price-vs-that-day's-
+        # close gap leaking into the wrong trade's day). Push such a
+        # trade's own is_open window to start the day *after* it opens so
+        # the closing trade's row still resolves to its own realized
+        # capital; the new trade's own marking simply starts one day later
+        # instead of double-booking the transition date.
+        trades_pl = trades_pl.with_columns(prior_closed=pl.col('closed').shift(1))
+        trades_pl = trades_pl.with_columns(
+            mtm_start=pl.when(pl.col('prior_closed') == pl.col('opened'))
+            .then(pl.col('opened') + pl.duration(days=1))
+            .otherwise(pl.col('opened'))
+        )
 
         start = date.fromisoformat(config.start_date)
         end = date.fromisoformat(config.end_date)
@@ -756,10 +776,12 @@ class Backtester:
 
         daily = overlay.filter((pl.col('ts_event') >= start) & (pl.col('ts_event') <= end))
 
-        # Match each day to the most recently opened trade as of that day;
+        # Match each day to the most recently opened trade as of that day
+        # (using mtm_start, not 'opened', so a same-day reopen doesn't
+        # steal the prior trade's own closing date -- see mtm_start above);
         # is_open tells us whether that trade was still open (vs. already
         # closed, with no newer trade opened yet) on this particular day.
-        daily = daily.join_asof(trades_pl, left_on='ts_event', right_on='opened', strategy='backward')
+        daily = daily.join_asof(trades_pl, left_on='ts_event', right_on='mtm_start', strategy='backward')
         daily = daily.with_columns(
             is_open=pl.col('closed').is_not_null() & (pl.col('ts_event') < pl.col('closed'))
         )
