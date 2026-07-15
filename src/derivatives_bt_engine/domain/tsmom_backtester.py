@@ -387,6 +387,14 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
             'momentum_discount': _round(s.get('momentum_discount'), 2),
             'prior_contracts': prior, 'target_contracts': target, 'is_seed': is_seed,
             'gate_reason': s.get('gate_reason'),
+            # Portfolio-level capital snapshot as of this event (after
+            # today's mark-to-market and this event's own commission fee,
+            # both already applied above) -- previously only available in
+            # the separate daily `stats` table (keyed by date only, not
+            # per-symbol), so reading an event required cross-referencing
+            # a different table by date to see its $ context.
+            'capital': round(capital, 2),
+            'cum_pnl': round(capital - config.initial_capital, 2),
         })
 
     # Seed the position from the last completed month-end *before*
