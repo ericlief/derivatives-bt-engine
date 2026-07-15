@@ -11,6 +11,7 @@ import pytest
 from derivatives_bt_engine.domain.backtester import Backtester
 from derivatives_bt_engine.domain.enums import FuturesStrategy
 from derivatives_bt_engine.domain.futures_dataloader import FuturesDataLoader
+from derivatives_bt_engine.domain.instruments import resolve_price_symbol
 from derivatives_bt_engine.domain.strategy_config import FuturesStrategyConfig
 
 GLOBEX_DB_PATH = "/home/dev/fin/db/globex_mdp_3.0.duckdb"
@@ -83,17 +84,30 @@ def test_short_futures_backtest_runs_end_to_end(es_data):
     assert not results['trade_results'].empty
 
 
-@pytest.fixture(scope='module')
-def gated_mtm_results(es_data):
+@pytest.fixture(scope='module', params=['MES', 'MGC'])
+def gated_mtm_results(request):
     """A multi-year run with the signal gate enabled so the trade sequence
     includes both same-day close+reopen transitions (natural quarterly
     rolls, gate_reason is null) and multi-day-gap transitions (signal-gate
     -triggered exits followed later by a re-entry once ts_entry_threshold
     clears) -- exercising both cases the mtm join fix needs to get right,
-    not just rolls in isolation."""
+    not just rolls in isolation. Parametrized across two symbols (MES/MGC,
+    same convention naked_futures.py uses: load price history via
+    resolve_price_symbol -- these micros have no native db history, they
+    borrow ES/GC's -- while futures_type stays the raw micro ticker so
+    sizing/margin/multiplier come from the micro's own instruments.py
+    spec) rather than just one, since the bug this guards against is a
+    join-key issue that doesn't depend on any one symbol's own price
+    series -- a single-symbol pass wouldn't catch a symbol-specific
+    regression in how price data is resolved/joined."""
+    symbol = request.param
+    price_symbol = resolve_price_symbol(symbol)
+    dl = FuturesDataLoader(asset=price_symbol, db_path=GLOBEX_DB_PATH,
+                           use_preprocessed=False, save_preprocessed=False)
+    data = dl.load_data()
     config = FuturesStrategyConfig(
         quantity=1,
-        futures_type='ES',
+        futures_type=symbol,
         futures_strategy=FuturesStrategy.LONG_FUTURES,
         initial_capital=100000,
         leverage=1.0,
@@ -103,8 +117,10 @@ def gated_mtm_results(es_data):
         ts_exit_threshold=0.0,
         ts_entry_threshold=0.5,
     )
-    bt = Backtester(data=es_data, save_trades=False, log_to_sheets=False)
-    return bt.run(config)
+    bt = Backtester(data=data, save_trades=False, log_to_sheets=False)
+    result = bt.run(config)
+    result['_symbol'] = symbol
+    return result
 
 
 def test_mtm_telescopes_through_every_trade_close(gated_mtm_results):
@@ -128,8 +144,9 @@ def test_mtm_telescopes_through_every_trade_close(gated_mtm_results):
             mismatches.append((row['trade_id'], row['closed'], row['close_reason'], mtm_capital_at_close, row['capital']))
 
     assert not mismatches, (
-        f"{len(mismatches)} trade(s) whose closing-date mtm capital doesn't match their own "
-        f"realized capital (trade_id, closed, close_reason, mtm_capital, realized_capital): {mismatches}"
+        f"[{gated_mtm_results['_symbol']}] {len(mismatches)} trade(s) whose closing-date mtm capital "
+        f"doesn't match their own realized capital "
+        f"(trade_id, closed, close_reason, mtm_capital, realized_capital): {mismatches}"
     )
 
 
@@ -154,12 +171,15 @@ def test_mtm_flat_during_gate_gap(gated_mtm_results):
             continue
         gaps_checked += 1
         assert gap['capital'].to_list() == pytest.approx([prev_row['capital']] * gap.height, abs=0.01), (
-            f"mtm_capital drifted during the flat gap after trade {prev_row['trade_id']} "
-            f"({prev_row['closed']}) before trade {next_row['trade_id']} opens ({next_row['opened']})"
+            f"[{gated_mtm_results['_symbol']}] mtm_capital drifted during the flat gap after trade "
+            f"{prev_row['trade_id']} ({prev_row['closed']}) before trade {next_row['trade_id']} opens ({next_row['opened']})"
         )
         assert (gap['mtm_pnl'].abs() < 0.01).all()
 
-    assert gaps_checked > 0, "expected at least one gate-triggered gap in this window to actually test flatness against"
+    assert gaps_checked > 0, (
+        f"[{gated_mtm_results['_symbol']}] expected at least one gate-triggered gap in this window "
+        "to actually test flatness against"
+    )
 
 
 def test_mtm_total_matches_realized_total(gated_mtm_results):
@@ -173,8 +193,8 @@ def test_mtm_total_matches_realized_total(gated_mtm_results):
     total_realized_pnl = trade_results['cumulative_pnl'][-1]
     total_mtm_pnl = stats['mtm_pnl'].sum()
 
-    assert total_mtm_pnl == pytest.approx(total_realized_pnl, abs=0.01)
+    assert total_mtm_pnl == pytest.approx(total_realized_pnl, abs=0.01), gated_mtm_results['_symbol']
     # cum_pnl is itself just a running sum of mtm_pnl -- its final value
     # should agree with the same total via an independent column, not
     # just the .sum() above re-deriving the same number.
-    assert stats['cum_pnl'][-1] == pytest.approx(total_realized_pnl, abs=0.01)
+    assert stats['cum_pnl'][-1] == pytest.approx(total_realized_pnl, abs=0.01), gated_mtm_results['_symbol']
