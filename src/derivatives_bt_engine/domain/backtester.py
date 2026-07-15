@@ -423,7 +423,6 @@ class Backtester:
             if isinstance(config, FuturesStrategyConfig):
                 results = self.calculate_futures_mtm_drawdown(results, config)
             else:
-                results = self.calculate_simple_drawdown(results, config)
                 results = self.calculate_options_mtm_drawdown(results, config)
 
         if self.save_trades:
@@ -483,14 +482,14 @@ class Backtester:
 
         trade_results = results['trade_results']
         transactions = results['transactions']
-        # Futures: calculate_futures_mtm_drawdown's table, under 'daily_mtm'.
-        # Options: calculate_simple_drawdown's legacy table, still under
-        # 'stats' -- deliberately not renamed/moved to 'daily_mtm', since
-        # calculate_options_mtm_drawdown already owns that key for its own
-        # (different, newer) table and runs right after this for options
-        # configs; reading it here would silently pick up the wrong table.
-        is_futures = isinstance(config, FuturesStrategyConfig)
-        daily_mtm = results.get('daily_mtm') if is_futures else results.get('stats')
+        # Both futures (calculate_futures_mtm_drawdown) and options
+        # (calculate_options_mtm_drawdown) now set the same 'daily_mtm'/
+        # 'drawdown_analysis' keys with the same schema (dd_usd/dd_pct,
+        # negative = drawdown, worst = .min()) -- no more per-config-type
+        # branching needed here since calculate_simple_drawdown (the older,
+        # trade-close-event-only options table with capitalized column
+        # names) was removed.
+        daily_mtm = results.get('daily_mtm')
 
         # Save trades
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -506,8 +505,6 @@ class Backtester:
         if daily_mtm is not None and daily_mtm.height > 0:
             mtm_csv_path = os.path.join(self.results_dir, f"mtm_{param_str}_{timestamp}.csv")
             daily_mtm.write_csv(mtm_csv_path)
-
-        dd_duration_unit = "trading days" if is_futures else "trades"
 
         # Plain-text summary (Total trades/Win rate/Max Profit/...) -- not
         # a CSV at all (was previously misnamed stats_*.csv, colliding in
@@ -542,15 +539,10 @@ class Backtester:
                     results_file.write(f"Total execution time: {total_execution_time:.2f}s\n")
 
                 if daily_mtm is not None and daily_mtm.height > 0:
-                    # Futures drawdown is negative (worst = .min()); the legacy
-                    # option-path calculate_simple_drawdown is still positive
-                    # (worst = .max()) — see that method's own comment.
-                    if is_futures:
-                        max_drawdown_amount = daily_mtm['dd_usd'].min()
-                        max_drawdown_percentage = daily_mtm['dd_pct'].min()
-                    else:
-                        max_drawdown_amount = daily_mtm['Drawdown ($)'].max()
-                        max_drawdown_percentage = daily_mtm['Drawdown (%)'].max()
+                    # Both paths: dd_usd/dd_pct are negative (drawdown),
+                    # worst = .min().
+                    max_drawdown_amount = daily_mtm['dd_usd'].min()
+                    max_drawdown_percentage = daily_mtm['dd_pct'].min()
                     results_file.write(f"Maximum drawdown: ${max_drawdown_amount:.2f} ({max_drawdown_percentage:.2f}%)\n")
 
                     # Add peak and duration stats
@@ -558,7 +550,7 @@ class Backtester:
                         dd_analysis = results['drawdown_analysis']
                         results_file.write(f"Peak capital: ${dd_analysis['peak_capital']:.2f}\n")
                         results_file.write(f"Trough capital: ${dd_analysis['trough_capital']:.2f}\n")
-                        results_file.write(f"Drawdown duration: {dd_analysis['drawdown_duration']} {dd_duration_unit}\n")
+                        results_file.write(f"Drawdown duration: {dd_analysis['drawdown_duration']} trading days\n")
 
         results['execution_times'] = self.execution_times
         results['total_execution_time'] = round(sum(self.execution_times.values()), 2)
@@ -601,98 +593,24 @@ class Backtester:
         logger.info(f"Total Time: {total_time:.2f} seconds")
 
 
-    def calculate_simple_drawdown(self, results, config):
-            """Peak-to-trough drawdown over the trade-by-trade capital curve, computed in polars."""
-
-            trade_results = results['trade_results']
-
-            capital = trade_results['capital'].cast(pl.Float64)
-            capital_with_init = pl.concat([pl.Series('capital', [float(config.initial_capital)], dtype=pl.Float64), capital])
-            logger.debug(f'Capital with prepended init:\n{capital_with_init}')
-
-            running_max = capital_with_init.cum_max()
-            logger.debug(f'Running max:\n{running_max}')
-
-            drawdown = running_max - capital_with_init
-            logger.debug(f'Drawdown:\n{drawdown}')
-
-            max_dd_usd = drawdown.max()
-            logger.debug(f'Max dd USD: {max_dd_usd}')
-
-            trough_idx = drawdown.arg_max()
-            logger.debug(f'Trough index: {trough_idx}')
-
-            if trough_idx > 0:
-                peak_idx = capital_with_init.slice(0, trough_idx).arg_max()
-            else:
-                peak_idx = 0
-
-            logger.debug(f'Peak index: {peak_idx}')
-
-            # Drawdown spans: contiguous runs where drawdown > 0, via
-            # shift-based edge detection (True->False / False->True transitions).
-            dd_active = (drawdown > 0).to_list()
-            spans = []
-            span_start = None
-            for i, active in enumerate(dd_active):
-                if active and span_start is None:
-                    span_start = i
-                elif not active and span_start is not None:
-                    spans.append((span_start, i))
-                    span_start = None
-            if span_start is not None:
-                spans.append((span_start, len(dd_active) - 1))
-            logger.debug(f'Drawdown spans: {spans}')
-
-            max_dd_duration = max((j - i) for i, j in spans) if spans else 0
-
-            logger.info(f"Maximum Drawdown (USD): {max_dd_usd:.2f}")
-            logger.info(f"Maximum Drawdown (%)): {max_dd_usd / capital_with_init[peak_idx]:.2%}")
-            logger.info(f"Peak Capital: ${capital_with_init[peak_idx]:.2f}")
-            logger.info(f"Trough Capital: ${capital_with_init[trough_idx]:.2f}")
-            logger.info(f"Drawdown Duration: {max_dd_duration} trades")
-
-            # NB: key stays 'stats' (not 'daily_mtm') deliberately -- this is
-            # the legacy options-only drawdown table (capitalized column
-            # names), and calculate_options_mtm_drawdown (which runs right
-            # after this for options configs) already owns the 'daily_mtm'
-            # key for its own, newer table; reusing it here would silently
-            # get overwritten instead of renamed.
-            legacy_drawdown = pl.DataFrame({
-                'Drawdown ($)': drawdown,
-                'Drawdown (%)': drawdown / running_max * 100,
-                'Capital': capital_with_init,
-                'Running Max': running_max,
-            })
-
-            results['stats'] = legacy_drawdown
-            results['drawdown_analysis'] = {
-                'max_drawdown': max_dd_usd,
-                'peak_capital': capital_with_init[peak_idx],
-                'trough_capital': capital_with_init[trough_idx],
-                'drawdown_duration': max_dd_duration
-            }
-
-            return results   # ← NECESSARY
-
     def calculate_futures_mtm_drawdown(self, results: dict, config: FuturesStrategyConfig) -> dict:
         """
         Daily mark-to-market drawdown for futures, built in polars from the
         continuous underlying price series.
 
-        calculate_simple_drawdown only snapshots capital at trade-close
-        events, so an intra-trade dip that fully recovers by the time the
-        position closes/rolls is invisible — exactly the gap noted after a
-        71/91-day single-position ES backtest reported zero drawdown. This
-        marks the currently-open position to market every day instead,
-        using entry_price/position_side/quantity/mult from
-        each trade's 'close' transaction record (trade_results no longer
-        carries entry/exit price post-_finalize_results' column selection).
+        A trade-close-event-only snapshot (this method's now-removed
+        predecessor, calculate_simple_drawdown) misses an intra-trade dip
+        that fully recovers by the time the position closes/rolls --
+        exactly the gap noted after a 71/91-day single-position ES
+        backtest reported zero drawdown. This marks the currently-open
+        position to market every day instead, using entry_price/
+        position_side/quantity/mult from each trade's 'close' transaction
+        record (trade_results no longer carries entry/exit price post-
+        _finalize_results' column selection).
 
-        Reports the same fields to the log as calculate_simple_drawdown
-        (Maximum Drawdown $/%, Peak/Trough Capital), except Drawdown
-        Duration is now in trading days rather than trade count, since the
-        underlying series is daily resolution.
+        Reports Maximum Drawdown $/%, Peak/Trough Capital, and Drawdown
+        Duration in trading days (the underlying series is daily
+        resolution).
         """
         trade_results = results['trade_results']
         transactions = results['transactions']
@@ -925,9 +843,10 @@ class Backtester:
         because trade-to-trade Sharpe (computed above in _finalize_results)
         implicitly assumes trades are evenly spaced and capital is
         continuously at risk, which understates real day-to-day volatility
-        whenever the strategy sits in cash between trades. This method adds
-        results['mtm_sharpe']/['daily_mtm'] alongside (not replacing) the
-        existing trade-by-trade drawdown from calculate_simple_drawdown.
+        whenever the strategy sits in cash between trades. Sets
+        results['mtm_sharpe']/['daily_mtm']/['drawdown_analysis'] -- the
+        sole source of drawdown/mtm for options now that the older,
+        trade-close-event-only calculate_simple_drawdown has been removed.
 
         Unlike futures (a single continuous instrument, marked via one
         join_asof against its own price series), an option spread can have
@@ -1096,7 +1015,7 @@ class Backtester:
         results['daily_mtm'] = daily.select(
             ['date', 'mtm_capital', 'mtm_pnl', 'cum_pnl', 'cum_pnl_pct', 'running_max', 'dd_usd', 'dd_pct']
         )
-        results['mtm_drawdown_analysis'] = {
+        results['drawdown_analysis'] = {
             'max_drawdown': max_dd_usd,
             'peak_capital': peak_capital,
             'trough_capital': trough_capital,
