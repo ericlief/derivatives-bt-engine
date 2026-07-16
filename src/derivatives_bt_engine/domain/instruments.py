@@ -32,12 +32,12 @@ Each `INSTRUMENTS` entry carries:
                     (e.g. J7→JPY, MZC→ZC for CBOT micro grains launched
                     ~2025, MES/MNQ/MTN/MCL→ES/NQ/ZN/CL -- CME Micro
                     products launched 2019-2021, comparably new to J7).
-                    Read by resolve_signal_symbol() (derivatives_bt_engine.live.
-                    tsmom_rebalance) for the live IB continuous-bars fetch
-                    -- this is the SAME fetch tsmom_risk_budget_diagnostic.py
-                    uses for its covariance analysis, so setting this also
-                    gives that diagnostic the full-size contract's longer
-                    history, not just live rebalancing.
+                    Read by resolve_signal_symbol() (this module) for the
+                    live IB continuous-bars fetch -- shared by
+                    derivatives_bt_engine.live.tsmom_rebalance and
+                    scripts.tsmom_risk_budget_diagnostic's covariance
+                    analysis, so setting this gives both the full-size
+                    contract's longer history, not just live rebalancing.
   db_symbol      -- Globex root symbol in daily.asset (Databento CME
                     MDP3.0 feed); only set when it differs from the key AND
                     signal_symbol doesn't already resolve it (resolve_price_
@@ -241,6 +241,29 @@ def resolve_price_symbol(symbol: str) -> str:
     """
     instr = INSTRUMENTS.get(symbol, {})
     return instr.get('db_symbol') or instr.get('signal_symbol') or instr.get('ib_symbol') or symbol
+
+
+def resolve_signal_symbol(instr: dict) -> str:
+    """Ticker whose continuous IB front-month history should back `instr`'s
+    live TSMOM signal/covariance calculation -- either its own traded
+    ticker (default) or a fuller-history sibling's, via signal_symbol >
+    ib_symbol > symbol. Deliberately excludes db_symbol (unlike
+    resolve_price_symbol above) -- db_symbol only resolves a pure IBKR/
+    Globex ticker-naming divergence for the local duckdb path (J7->6J,
+    BRE->6L) and isn't necessarily a valid/intended ticker for the live IB
+    continuous-bars fetch this function backs.
+
+    Takes an already-built instrument dict (as produced by
+    run_tsmom_rebalance._build_instruments, or a hand-written JSON
+    instrument config -- see _build_instruments' own docstring), not a
+    bare traded symbol, since every call site already has one in hand.
+    `instr['symbol']` is required; `signal_symbol`/`ib_symbol` are
+    optional, same as the INSTRUMENTS entries themselves.
+
+    Shared by derivatives_bt_engine.live.tsmom_rebalance (the live IB
+    continuous-bars fetch) and scripts.tsmom_risk_budget_diagnostic (the
+    same fetch, for covariance) -- previously duplicated in both places."""
+    return instr.get('signal_symbol') or instr.get('ib_symbol') or instr['symbol']
 
 
 # get_spec()'s Globex/db ticker -> INSTRUMENTS dict key, for the 3 FX

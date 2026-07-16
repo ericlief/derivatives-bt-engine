@@ -57,6 +57,8 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
 
+from derivatives_bt_engine.domain.instruments import resolve_signal_symbol
+
 log = logging.getLogger(__name__)
 
 DEFAULT_HALFLIFE_DAYS    = 60.0
@@ -91,14 +93,6 @@ ORDER BY date
 # ------------------------------------------------------------------
 # Pure logic -- no IB dependency, fully unit-testable
 # ------------------------------------------------------------------
-
-def resolve_signal_symbol(instr: dict) -> str:
-    """Identical resolution order to tsmom_rebalance.py's _compute_signal
-    -- reused, not reinvented, so this script's notion of "which contract's
-    history backs this instrument" never silently diverges from what the
-    live system actually does."""
-    return instr.get('signal_symbol') or instr.get('ib_symbol') or instr['symbol']
-
 
 def resolve_db_symbol(instr: dict) -> str:
     """Globex root symbol for this instrument in daily.asset.

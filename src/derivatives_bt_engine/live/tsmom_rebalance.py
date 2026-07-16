@@ -26,6 +26,7 @@ from zoneinfo import ZoneInfo
 from ib_tools.ibpysync import IBPySync
 
 from derivatives_bt_engine.domain.enums import TrendRegime, VolRegime
+from derivatives_bt_engine.domain.instruments import resolve_signal_symbol
 from derivatives_bt_engine.domain.tsmom_signal import (
     apply_cluster_risk_cap,
     calculate_trend_strength,
@@ -250,7 +251,7 @@ def _compute_signal(ib: IBPySync, instr: dict, min_days: int, vol_target: float,
     # much longer history instead -- same cents/bushel quote scale, just a
     # different multiplier -- while sizing/orders still use the actually-
     # traded micro contract (instr['ib_symbol']/`contract` above).
-    signal_symbol = instr.get('signal_symbol') or instr.get('ib_symbol') or instr['symbol']
+    signal_symbol = resolve_signal_symbol(instr)
     cont = IBPySync.cont_future(signal_symbol, exchange=instr.get('exchange', 'CME'))
     ib.qualify_contracts(cont)
     bars = ib.get_historical_bars(cont, duration='3 y', bar_size='1 day')
