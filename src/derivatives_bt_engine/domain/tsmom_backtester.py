@@ -402,8 +402,11 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
 
 def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
     """Runs the monthly-rebalance TSMOM backtest. Returns a dict with
-    'stats' (daily portfolio capital/drawdown, polars DataFrame), 'events'
-    (per-rebalance-event log, list of dicts), 'transactions' (one row per
+    'daily_mtm' (daily portfolio capital/drawdown, polars DataFrame -- same
+    key name as the naked single-position path's Backtester.run() result),
+    'trend_signals' (per-rebalance trend/signal diagnostic log: ts3m, ts1y,
+    regime, risk_scalar, momentum_discount, gate_reason, etc., list of
+    dicts), 'transactions' (one row per
     rebalance that actually changed a symbol's contract count -- what was
     bought/sold, when, at what price/fee), and 'trades' (reconstructed
     round-trips: TSMOM has no discrete open/close lifecycle like
@@ -765,7 +768,7 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
     )
 
     return {
-        'stats': stats, 'events': events,
+        'daily_mtm': stats, 'trend_signals': events,
         'transactions': pl.DataFrame(transactions),
         'trades': pl.DataFrame(trades).sort('entry_date') if trades else pl.DataFrame(trades),
     }

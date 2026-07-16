@@ -67,7 +67,7 @@ def parse_args():
                         "elevated de-risking) entirely -- isolates the effect of "
                         "ts-exit/entry-threshold/exit-on-ts-crossover alone, without VIX interference "
                         "(default: VIX gating on, matching all prior behavior)")
-    p.add_argument('--no-save', action='store_true', help='Skip saving stats/events to results/')
+    p.add_argument('--no-save', action='store_true', help='Skip saving daily_mtm/trend_signals to results/')
     return p.parse_args()
 
 
@@ -108,8 +108,8 @@ def main():
     )
 
     result = run_tsmom_backtest(config)
-    stats = result['stats']
-    events = result['events']
+    stats = result['daily_mtm']
+    events = result['trend_signals']
     transactions = result['transactions']
     trades = result['trades']
 
@@ -141,10 +141,10 @@ def main():
         results_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'results'))
         os.makedirs(results_dir, exist_ok=True)
         symbol_str = '_'.join(symbols)
-        stats.write_csv(os.path.join(results_dir, f"tsmom_stats_{symbol_str}_{start_year}-{end_year}.csv"))
+        stats.write_csv(os.path.join(results_dir, f"tsmom_mtm_{symbol_str}_{start_year}-{end_year}.csv"))
         import polars as pl
         pl.DataFrame(events).write_csv(
-            os.path.join(results_dir, f"tsmom_events_{symbol_str}_{start_year}-{end_year}.csv"))
+            os.path.join(results_dir, f"tsmom_signals_{symbol_str}_{start_year}-{end_year}.csv"))
         transactions.write_csv(os.path.join(results_dir, f"tsmom_transactions_{symbol_str}_{start_year}-{end_year}.csv"))
         trades.write_csv(os.path.join(results_dir, f"tsmom_trades_{symbol_str}_{start_year}-{end_year}.csv"))
 

@@ -114,12 +114,12 @@ def test_seeds_position_from_last_month_end_before_start_date(monkeypatch):
     config = TsmomBacktestConfig(symbols=['X'], max_notional=50_000, max_contracts=5, start_date=start_date)
     result = run_tsmom_backtest(config)
 
-    seed_events = [e for e in result['events'] if e['is_seed']]
+    seed_events = [e for e in result['trend_signals'] if e['is_seed']]
     assert seed_events, "expected a seed event before start_date"
     for e in seed_events:
         assert e['date'] < start_date
 
-    first_day_capital = result['stats'].filter(pl.col('date') == start_date)
+    first_day_capital = result['daily_mtm'].filter(pl.col('date') == start_date)
     assert first_day_capital.height == 1
     # held_contracts must already reflect the seed target on day one --
     # confirmed indirectly: at least one symbol holds a nonzero position
@@ -137,7 +137,7 @@ def test_long_uptrend_produces_long_position(monkeypatch):
     monkeypatch.setattr(tb, 'get_spec', lambda s: get_spec('ES'))
 
     result = run_tsmom_backtest(config)
-    later_events = [e for e in result['events'] if e['target_contracts'] is not None][-5:]
+    later_events = [e for e in result['trend_signals'] if e['target_contracts'] is not None][-5:]
     assert any(e['target_contracts'] > 0 for e in later_events)
 
 
@@ -160,8 +160,8 @@ def test_portfolio_capital_aggregates_across_symbols(monkeypatch):
     _patch_data(monkeypatch, {'B': b}, vix)
     result_b = run_tsmom_backtest(TsmomBacktestConfig(symbols=['B'], max_notional=50_000, max_contracts=5))
 
-    combined_pnl = result_a['stats']['cum_pnl'][-1] + result_b['stats']['cum_pnl'][-1]
-    assert result_ab['stats']['cum_pnl'][-1] == pytest.approx(combined_pnl, abs=1.0)
+    combined_pnl = result_a['daily_mtm']['cum_pnl'][-1] + result_b['daily_mtm']['cum_pnl'][-1]
+    assert result_ab['daily_mtm']['cum_pnl'][-1] == pytest.approx(combined_pnl, abs=1.0)
 
 
 def test_vix_spike_holds_positions_unchanged(monkeypatch):
@@ -182,7 +182,7 @@ def test_vix_spike_holds_positions_unchanged(monkeypatch):
     config = TsmomBacktestConfig(symbols=['X'], max_notional=50_000, max_contracts=5)
     result = run_tsmom_backtest(config)
 
-    spike_events = [e for e in result['events'] if e['vol_regime'] == 'spike']
+    spike_events = [e for e in result['trend_signals'] if e['vol_regime'] == 'spike']
     assert spike_events, "expected the synthetic VIX spike to trigger at least one gated rebalance"
     for e in spike_events:
         assert e['signal'] is None
@@ -205,7 +205,7 @@ def test_vix_extreme_halves_positions(monkeypatch):
     config = TsmomBacktestConfig(symbols=['X'], max_notional=50_000, max_contracts=5)
     result = run_tsmom_backtest(config)
 
-    extreme_events = [e for e in result['events'] if e['vol_regime'] == 'extreme']
+    extreme_events = [e for e in result['trend_signals'] if e['vol_regime'] == 'extreme']
     assert extreme_events, "expected the synthetic VIX blowout to trigger at least one 'extreme' rebalance"
     for e in extreme_events:
         assert e['target_contracts'] == round(e['prior_contracts'] / 2)

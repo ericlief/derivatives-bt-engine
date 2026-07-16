@@ -78,18 +78,18 @@ def _run_one(combo: dict, symbols: list[str], start_date: date, end_date: date) 
         max_contracts=combo.get('max_contracts', 10),
     )
     result = run_tsmom_backtest(config)
-    stats = result['stats']
+    stats = result['daily_mtm']
     all_dates = stats['date'].to_list()
     rows = []
     for symbol in symbols:
-        switches = _direction_switches(result['events'], symbol)
+        switches = _direction_switches(result['trend_signals'], symbol)
         rows.append({
             **combo,
             'symbol': symbol,
             'final_capital': stats['capital'][-1],
             'cum_pnl': stats['cum_pnl'][-1],
             'max_drawdown_pct': stats['drawdown_pct'].min(),
-            'time_in_trade_pct': round(_time_in_trade_pct(result['events'], all_dates, symbol), 1),
+            'time_in_trade_pct': round(_time_in_trade_pct(result['trend_signals'], all_dates, symbol), 1),
             'n_direction_switches': len(switches),
         })
     return rows
