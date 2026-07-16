@@ -29,6 +29,7 @@ import polars as pl
 
 from derivatives_bt_engine.domain.enums import TrendRegime, VolRegime
 from derivatives_bt_engine.domain.futures_dataloader import FuturesDataLoader
+from derivatives_bt_engine.domain.futures_signal_generator import FuturesSignalGenerator
 from derivatives_bt_engine.domain.instruments import get_spec, resolve_price_symbol
 from derivatives_bt_engine.domain.tsmom_signal import calculate_trend_strength, classify_regime, compute_position_scalar
 from derivatives_bt_engine.utils.logger import setup_logger
@@ -410,7 +411,13 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
     "opened then closed" -- so a trade here is defined as one continuous
     span of nonzero exposure in a single direction: 0->nonzero opens it,
     nonzero->0 or a direct sign flip closes it; resizing within the same
-    direction extends the same trade rather than starting a new one)."""
+    direction extends the same trade rather than starting a new one. The
+    quarterly contract roll is the one exception forced regardless of
+    exposure direction: a held span is always closed and immediately
+    reopened at each scheduled roll date (close_reason='roll'), same as
+    FuturesPosition's own roll_date handling, so 'trades' never reports a
+    holding period spanning more than one actual futures contract even
+    when the signal itself never triggers a close)."""
     # `full_price_data` stays unbounded -- calculate_trend_strength's 252-day
     # lookback needs real history before config.start_date, not just
     # whatever falls inside the requested window. Only the iterated date
@@ -440,6 +447,16 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
     # in spirit: don't let the backtest take an action it can't show the
     # result of within the requested range.
     rebalance_dates = _month_end_dates(windowed) - ({all_dates[-1]} if all_dates else set())
+    # Quarterly contract roll schedule -- same static method (Monday prior
+    # to the third Friday of Mar/Jun/Sep/Dec) the naked single-position path
+    # already uses to tag FuturesPosition.roll_date. Unlike naked's roll_date
+    # (checked per-position via `current_date >= pos.roll_date`, so a
+    # non-trading scheduled date still fires on the next available day),
+    # this is fired via a monotonic pointer below rather than an `in` check,
+    # for the same reason.
+    sorted_roll_dates = FuturesSignalGenerator._get_quarterly_roll_dates(
+        all_dates[0], all_dates[-1]) if all_dates else []
+    roll_ptr = 0
 
     held_contracts = {s: 0 for s in config.symbols}
     prior_close = {s: None for s in config.symbols}
@@ -549,6 +566,43 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
             'cum_pnl': round(capital - config.initial_capital, 2),
         })
 
+    def _process_roll(symbol: str, roll_date: date) -> None:
+        """Mandatory quarterly contract roll for a currently-held symbol:
+        close the expiring contract (full round-trip commission on its own
+        quantity, close_reason='roll') and immediately reopen the identical
+        size under the new contract at the same price -- net zero PnL/size
+        effect, cost is the fee alone. Mirrors FuturesPosition.close()
+        (position.py:1785-1877): a roll is a mechanical consequence of the
+        contract's own expiration, not a signal decision, so it fires
+        regardless of signal_gate_mode/fixed_quantities and doesn't touch
+        held_contracts or go through _rebalance_to (which would incorrectly
+        charge a second commission for the "reopen" leg -- opening a
+        position is free in this fee model, only closing charges, exactly
+        as in FuturesPosition.calculate_pnl)."""
+        nonlocal capital
+        prior = held_contracts[symbol]
+        if prior == 0:
+            return
+        price = prior_close[symbol]
+        fee = futures_types[symbol]['commission'] * 2 * abs(prior)
+        capital -= fee
+        transactions.append({
+            'symbol': symbol, 'date': roll_date, 'action': 'roll',
+            'quantity': abs(prior), 'price': _round(price, 2),
+            'fee': round(fee, 2), 'prior_contracts': prior, 'target_contracts': prior,
+            'gate_reason': None, 'is_seed': False,
+        })
+        if open_trade[symbol] is not None:
+            open_trade[symbol]['fees'] += fee
+            open_trade[symbol]['close_reason'] = 'roll'
+            _close_trade(symbol, roll_date, price)
+        open_trade[symbol] = {
+            'entry_date': roll_date, 'entry_price': price,
+            'direction': 'long' if prior > 0 else 'short',
+            'max_contracts': abs(prior), 'mtm_pnl': 0.0,
+            'fees': 0.0, 'close_reason': None,
+        }
+
     # Seed the position from the last completed month-end *before*
     # start_date, using full unbounded history -- otherwise the backtest
     # starts flat and wastes its entire first calendar month sitting in
@@ -588,6 +642,18 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
                 if open_trade[symbol] is not None:
                     open_trade[symbol]['mtm_pnl'] += day_pnl
             prior_close[symbol] = close
+
+        # 1.25. Mandatory quarterly contract roll -- unconditional (not
+        # gated by signal_gate_mode/fixed_quantities), since it's a
+        # mechanical consequence of the contract's own expiration, exactly
+        # like the naked path's FuturesPosition.roll_date. Fires on the
+        # first actual trading day >= each scheduled roll date (a monotonic
+        # pointer rather than an `in` check, in case the scheduled date
+        # itself isn't a trading day for these symbols).
+        while roll_ptr < len(sorted_roll_dates) and sorted_roll_dates[roll_ptr] <= d:
+            for symbol in config.symbols:
+                _process_roll(symbol, d)
+            roll_ptr += 1
 
         # 1.5. Daily signal-gate check (signal_gate_mode == 'daily' only),
         # off-cycle from the monthly resize below -- BOTH entry and exit,
