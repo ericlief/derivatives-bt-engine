@@ -536,7 +536,8 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
                 if ot is not None:
                     ot['fees'] += fee
                 _close_trade(symbol, rebalance_date, price)
-            if target != 0 and open_trade[symbol] is None:
+            ot = open_trade[symbol]  # re-read post-close: _close_trade above may have just cleared it
+            if target != 0 and ot is None:
                 open_trade[symbol] = {
                     'entry_date': rebalance_date, 'entry_price': price,
                     'direction': 'long' if target > 0 else 'short',
@@ -544,12 +545,11 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
                     'fees': 0.0 if flipped else fee,
                     'close_reason': None,
                 }
-            elif target != 0 and open_trade[symbol] is not None:
+            elif target != 0 and ot is not None:
                 # Resize within the same direction -- extend the existing
                 # span rather than starting a new trade; fold in this
                 # resize's own fee (zero unless this shrank toward zero) and
                 # track the largest size held.
-                ot = open_trade[symbol]
                 ot['fees'] += fee
                 ot['max_contracts'] = max(ot['max_contracts'], abs(target))
             if (flipped or target == 0) and s.get('gate_reason'):
