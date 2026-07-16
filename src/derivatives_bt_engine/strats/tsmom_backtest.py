@@ -46,9 +46,11 @@ def parse_args():
                    help='Position discount for Correction/Rebound regimes; 1.0 disables (default: %(default)s)')
     p.add_argument('--signal-gate-mode', choices=['off', 'monthly', 'daily'], default='off',
                    help="'off': no gate (default). 'monthly': check ts-exit/entry-threshold and "
-                        "exit-on-ts-crossover only at the existing monthly rebalance. 'daily': also "
-                        "check the exit half every day in between, off-cycle from the monthly resize "
-                        "-- entry stays monthly-only either way.")
+                        "exit-on-ts-crossover only at the existing monthly rebalance. 'daily': check "
+                        "both entry and exit every day, off-cycle from the monthly resize -- a flat "
+                        "symbol can open the day its entry gate first clears, a held symbol can "
+                        "flatten the day its exit gate fires. Resizing an already-open position's "
+                        "magnitude stays strictly monthly-only in both modes.")
     p.add_argument('--ts-exit-threshold', type=float, default=None,
                    help='Force a symbol flat if its own raw signal weakens past this threshold, '
                         'direction-aware (default: disabled)')

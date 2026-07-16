@@ -71,15 +71,16 @@ class TsmomBacktestConfig:
     # currently-held position for exit, the newly-proposed target for entry)
     # rather than a fixed config field, since a TSMOM symbol can go long or
     # short depending on the sign of its own signal. signal_gate_mode picks
-    # the cadence at which the EXIT half is checked -- 'monthly' only at the
+    # the cadence at which the gate is checked -- 'monthly' only at the
     # existing rebalance points (near-zero extra cost, reuses signal/ts3m/
-    # ts1y _compute_target already computed that day); 'daily' additionally
-    # checks every day in between, off-cycle from the monthly resize, so a
-    # deteriorating signal can force a flatten before the next rebalance
-    # instead of waiting for it. The entry half only ever applies at
-    # rebalance points either way (sizing itself is still monthly) -- 'daily'
-    # differs from 'monthly' by exactly one variable (exit-check frequency),
-    # deliberately, so the two are a controlled comparison.
+    # ts1y _compute_signal_row already computed that day); 'daily'
+    # additionally checks both entry AND exit every day in between,
+    # off-cycle from the monthly resize, so a flat symbol can open the day
+    # its entry gate first clears (not just at month-end) and a held
+    # symbol can flatten the day its exit gate fires. Resizing (magnitude
+    # changes to an already-open position) stays strictly monthly-only in
+    # BOTH modes either way -- 'daily' only adds off-cycle open/flatten
+    # transitions, never off-cycle resizing.
     ts_exit_threshold: Optional[float] = None
     ts_entry_threshold: Optional[float] = None
     exit_on_ts_crossover: bool = False
@@ -264,6 +265,20 @@ def _apply_signal_gate(prior_contracts: int, proposed_target: int, result: dict,
                                       config.ts_exit_threshold, config.exit_on_ts_crossover)
         if reason is not None:
             return 0, reason
+        if config.fixed_quantities is not None:
+            # fixed_quantities has no "resize" concept -- magnitude is a
+            # constant, so if the exit gate didn't fire, ANY difference
+            # between prior_contracts and proposed_target here can only be
+            # an implicit sign flip driven by the raw composite signal's
+            # own sign changing independently of whatever specific exit
+            # condition is configured (e.g. exit_on_ts_crossover checks
+            # ts3m-vs-ts1y directly, which isn't guaranteed to coincide
+            # with tanh(0.4*ts3m+0.6*ts1y) crossing zero) -- stay held,
+            # unchanged; a flip must go through the gate, never happen
+            # silently just because the vol-targeted path's own "let the
+            # freshly computed target through" fallthrough doesn't
+            # distinguish resizing from flipping.
+            return prior_contracts, None
 
     if prior_contracts == 0 and proposed_target != 0:
         is_long = proposed_target > 0
@@ -296,25 +311,35 @@ def _vix_regime_at(vix: pl.DataFrame, d: date) -> tuple[VolRegime, Optional[floa
     return VolRegime(row['vol_regime'][0]), row['vix_close'][0], row['vix_ratio'][0]
 
 
-def _compute_target(symbol: str, d: date, full_price_data: dict[str, pl.DataFrame],
-                     futures_types: dict[str, dict], config: TsmomBacktestConfig,
-                     market_stress_scale: float) -> Optional[dict]:
-    """Signal + vol-targeted sizing for one symbol as of date `d`, using
-    full unbounded history for lookback. None if there isn't yet enough
-    history (< 64 bars) to compute a signal at all."""
-    df = full_price_data[symbol].filter(pl.col('ts_event') <= d)
-    if df.height < 64:
+def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: date,
+                         futures_types: dict[str, dict], config: TsmomBacktestConfig,
+                         market_stress_scale: float) -> Optional[dict]:
+    """Signal + vol-targeted (or fixed-quantity) sizing for one symbol as of
+    date `d`, reading from `precomputed` -- each symbol's full
+    calculate_trend_strength output, computed ONCE for the whole unbounded
+    history (see run_tsmom_backtest). calculate_trend_strength's rolling/
+    diff functions are strictly backward-looking, so a given date's row is
+    identical whether computed from the full series or from a series
+    truncated to that date -- precomputing once and looking up by date is
+    exactly equivalent to (and far cheaper than) this function's old
+    per-call recompute, which used to run fresh at every rebalance and
+    would otherwise need to run for every symbol on every calendar day to
+    support daily entry/exit checking. None if there isn't yet enough
+    history for a signal at all (calculate_trend_strength's own `signal`
+    column is null until ts3m has 63 bars)."""
+    row = precomputed[symbol].filter(pl.col('ts_event') == d)
+    if row.height == 0:
         return None
-    signal_df = calculate_trend_strength(df)
-    last = signal_df.tail(1)
 
     def _col(name):
-        return last[name][0] if name in last.columns else None
+        return row[name][0] if name in row.columns else None
 
     trend_strength = _col('signal')
+    if trend_strength is None:
+        return None
     ts3m, ts1y = _col('ts3m'), _col('ts1y')
     daily_std_last = _col('daily_std')
-    last_close = float(last['close'][0])
+    last_close = float(row['close'][0])
     # `dd` is already a (close - peak) / peak fraction from
     # calculate_trend_strength -- express as a percentage to match
     # `stats`' own drawdown_pct convention.
@@ -392,6 +417,11 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
     # range (and what counts as a rebalance/MTM date) is bounded.
     full_price_data, vix = load_portfolio_data(config.symbols)
     vix = _compute_vix_regime_series(vix)
+    # Precomputed once per symbol, unconditionally (not just for
+    # signal_gate_mode == 'daily') -- see _compute_signal_row's own
+    # docstring for why this is exactly equivalent to (and much cheaper
+    # than) recomputing calculate_trend_strength fresh at every rebalance.
+    precomputed = {s: calculate_trend_strength(full_price_data[s].sort('ts_event')) for s in config.symbols}
     futures_types = {s: get_spec(s) for s in config.symbols}
 
     windowed = {}
@@ -536,25 +566,12 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
             if vol_regime not in (VolRegime.SPIKE, VolRegime.EXTREME):  # held_contracts are all 0 here -- hold/halve would be a no-op anyway
                 market_stress_scale = VIX_ELEVATED_SCALE if vol_regime == VolRegime.ELEVATED else 1.0
                 for symbol in config.symbols:
-                    result = _compute_target(symbol, seed_date, full_price_data, futures_types, config, market_stress_scale)
+                    result = _compute_signal_row(symbol, precomputed, seed_date, futures_types, config, market_stress_scale)
                     if result is None:
                         continue
                     target, gate_reason = _apply_signal_gate(held_contracts[symbol], result['target'], result, config)
                     _rebalance_to(symbol, target, seed_date, vol_regime, vix_close=vix_close,
                                   vix_ratio=vix_ratio, signal={**result, 'gate_reason': gate_reason}, is_seed=True)
-
-    # Precomputed once, full unbounded history per symbol -- only when
-    # signal_gate_mode == 'daily' actually needs a per-day lookup between
-    # rebalances. calculate_trend_strength's rolling windows make a
-    # per-iteration recompute O(n^2) over a multi-year daily loop; a single
-    # pass up front plus a per-day filter is the same trick trade_manager.py
-    # uses for the naked single-position path's own daily gate.
-    daily_signal_series: dict[str, pl.DataFrame] = {}
-    if config.signal_gate_mode == 'daily':
-        daily_signal_series = {
-            s: calculate_trend_strength(full_price_data[s].sort('ts_event')).select(['ts_event', 'signal', 'ts3m', 'ts1y'])
-            for s in config.symbols
-        }
 
     for d in all_dates:
         # 1. Mark existing holdings to market: today's close vs yesterday's,
@@ -572,31 +589,42 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
                     open_trade[symbol]['mtm_pnl'] += day_pnl
             prior_close[symbol] = close
 
-        # 1.5. Daily signal-gate exit check (signal_gate_mode == 'daily'
-        # only), off-cycle from the monthly resize below -- lets a
-        # deteriorating signal force a flatten mid-month instead of
-        # waiting for the next scheduled rebalance. Skipped on
-        # rebalance_dates themselves since the monthly resize logic below
-        # already re-evaluates the same gate that day (avoids a duplicate
-        # event on the same date). Entry stays monthly-only either way --
-        # this only ever flattens an existing position, never opens one.
+        # 1.5. Daily signal-gate check (signal_gate_mode == 'daily' only),
+        # off-cycle from the monthly resize below -- BOTH entry and exit,
+        # not exit-only: a currently-held symbol can only be flattened here
+        # (its own resize/magnitude stays monthly-only in both modes, so a
+        # weakening vol-targeted position doesn't get continuously
+        # rebalanced mid-month just because this loop now also checks
+        # daily); a currently-flat symbol can open the very day its entry
+        # gate first clears, instead of waiting for month-end. Skipped on
+        # rebalance_dates themselves since the monthly block below already
+        # re-evaluates the same gate that day (avoids a duplicate event).
+        # VIX spike/extreme hold-or-halve intentionally stays a monthly-
+        # only mechanism -- not extended to off-cycle days here.
         if config.signal_gate_mode == 'daily' and d not in rebalance_dates:
+            vol_regime_d, vix_close_d, vix_ratio_d = _vix_regime_at(vix, d)
+            if not config.vix_gating:
+                vol_regime_d = VolRegime.NORMAL
+            market_stress_scale_d = VIX_ELEVATED_SCALE if vol_regime_d == VolRegime.ELEVATED else 1.0
+
             for symbol in config.symbols:
-                if held_contracts[symbol] == 0:
+                prior = held_contracts[symbol]
+                result = _compute_signal_row(symbol, precomputed, d, futures_types, config, market_stress_scale_d)
+                if result is None:
                     continue
-                sig_row = daily_signal_series[symbol].filter(pl.col('ts_event') == d)
-                if sig_row.height == 0:
-                    continue
-                is_long = held_contracts[symbol] > 0
-                reason = _signal_gate_reason(sig_row['signal'][0], sig_row['ts3m'][0], sig_row['ts1y'][0],
-                                              is_long, config.ts_exit_threshold, config.exit_on_ts_crossover)
-                if reason is not None:
-                    vol_regime_d, vix_close_d, vix_ratio_d = _vix_regime_at(vix, d)
-                    close_row = full_price_data[symbol].filter(pl.col('ts_event') <= d).tail(1)
-                    close = float(close_row['close'][0]) if close_row.height > 0 else None
-                    _rebalance_to(symbol, 0, d, vol_regime_d, vix_close=vix_close_d, vix_ratio=vix_ratio_d,
-                                  signal={'close': close, 'gate_reason': reason,
-                                          'signal': sig_row['signal'][0], 'ts3m': sig_row['ts3m'][0], 'ts1y': sig_row['ts1y'][0]})
+
+                if prior != 0:
+                    is_long = prior > 0
+                    reason = _signal_gate_reason(result['signal'], result['ts3m'], result['ts1y'], is_long,
+                                                  config.ts_exit_threshold, config.exit_on_ts_crossover)
+                    if reason is not None:
+                        _rebalance_to(symbol, 0, d, vol_regime_d, vix_close=vix_close_d, vix_ratio=vix_ratio_d,
+                                      signal={**result, 'gate_reason': reason})
+                elif result['target'] != 0:
+                    target, gate_reason = _apply_signal_gate(0, result['target'], result, config)
+                    if target != 0:
+                        _rebalance_to(symbol, target, d, vol_regime_d, vix_close=vix_close_d,
+                                      vix_ratio=vix_ratio_d, signal={**result, 'gate_reason': gate_reason})
 
         # 2. On rebalance dates, resize toward the vol-targeted signal,
         # gated by the spot-VIX regime (mirrors
@@ -617,7 +645,7 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
             else:
                 market_stress_scale = VIX_ELEVATED_SCALE if vol_regime == VolRegime.ELEVATED else 1.0
                 for symbol in config.symbols:
-                    result = _compute_target(symbol, d, full_price_data, futures_types, config, market_stress_scale)
+                    result = _compute_signal_row(symbol, precomputed, d, futures_types, config, market_stress_scale)
                     if result is None:
                         continue
                     target, gate_reason = _apply_signal_gate(held_contracts[symbol], result['target'], result, config)
