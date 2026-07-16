@@ -497,7 +497,21 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
         prior = held_contracts[symbol]
         fee = 0.0
         if target != prior:
-            fee = futures_types[symbol]['commission'] * 2 * abs(target - prior)
+            # Commission is charged only on the quantity actually closed out
+            # -- opening a position, or adding to one, is free (matches
+            # FuturesPosition.calculate_pnl / _process_roll's convention:
+            # fees = commission * 2 * quantity, charged entirely at close).
+            # A flip closes the *entire* prior side (the new opposite-
+            # direction open that follows is then free, same as any other
+            # open); a same-direction resize only charges for the portion
+            # that shrinks back toward zero, not the portion added.
+            if prior == 0:
+                closed_qty = 0
+            elif target == 0 or (prior > 0) != (target > 0):
+                closed_qty = abs(prior)
+            else:
+                closed_qty = max(0, abs(prior) - abs(target))
+            fee = futures_types[symbol]['commission'] * 2 * closed_qty
             capital -= fee
             price = s.get('close')
             transactions.append({
@@ -510,17 +524,17 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
 
             flipped = prior != 0 and target != 0 and (prior > 0) != (target > 0)
             if flipped or target == 0:
-                # This transaction's fee covers closing the existing span
-                # (a flip's fee covers both legs at once -- attributed
-                # entirely to the trade that's ending, not split with the
-                # new one) -- must be folded in before _close_trade reads
-                # open_trade[symbol]['fees'], or the closing leg's fee is
-                # silently dropped from the trade's own total (portfolio
+                # This transaction's fee is the closing leg's cost alone (the
+                # whole prior side on a flip -- the new opposite-direction
+                # open that follows is free, same as any other open) --
+                # must be folded in before _close_trade reads ot['fees'], or
+                # it's silently dropped from the trade's own total (portfolio
                 # capital stays correct regardless, since that deduction
                 # already happened above; only the per-trade fees/pnl
                 # fields were at risk of undercounting).
-                if open_trade[symbol] is not None:
-                    open_trade[symbol]['fees'] += fee
+                ot = open_trade[symbol]
+                if ot is not None:
+                    ot['fees'] += fee
                 _close_trade(symbol, rebalance_date, price)
             if target != 0 and open_trade[symbol] is None:
                 open_trade[symbol] = {
@@ -533,9 +547,11 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
             elif target != 0 and open_trade[symbol] is not None:
                 # Resize within the same direction -- extend the existing
                 # span rather than starting a new trade; fold in this
-                # resize's own fee and track the largest size held.
-                open_trade[symbol]['fees'] += fee
-                open_trade[symbol]['max_contracts'] = max(open_trade[symbol]['max_contracts'], abs(target))
+                # resize's own fee (zero unless this shrank toward zero) and
+                # track the largest size held.
+                ot = open_trade[symbol]
+                ot['fees'] += fee
+                ot['max_contracts'] = max(ot['max_contracts'], abs(target))
             if (flipped or target == 0) and s.get('gate_reason'):
                 # _close_trade already ran above and cleared open_trade;
                 # the reason belongs on the trade that just closed, so
@@ -592,9 +608,10 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
             'fee': round(fee, 2), 'prior_contracts': prior, 'target_contracts': prior,
             'gate_reason': None, 'is_seed': False,
         })
-        if open_trade[symbol] is not None:
-            open_trade[symbol]['fees'] += fee
-            open_trade[symbol]['close_reason'] = 'roll'
+        ot = open_trade[symbol]
+        if ot is not None:
+            ot['fees'] += fee
+            ot['close_reason'] = 'roll'
             _close_trade(symbol, roll_date, price)
         open_trade[symbol] = {
             'entry_date': roll_date, 'entry_price': price,
@@ -639,8 +656,9 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
             if prior_close[symbol] is not None and held_contracts[symbol] != 0:
                 day_pnl = held_contracts[symbol] * (close - prior_close[symbol]) * futures_types[symbol]['multiplier']
                 capital += day_pnl
-                if open_trade[symbol] is not None:
-                    open_trade[symbol]['mtm_pnl'] += day_pnl
+                ot = open_trade[symbol]
+                if ot is not None:
+                    ot['mtm_pnl'] += day_pnl
             prior_close[symbol] = close
 
         # 1.25. Mandatory quarterly contract roll -- unconditional (not
@@ -727,10 +745,11 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
     if all_dates:
         last_date = all_dates[-1]
         for symbol in config.symbols:
-            if open_trade[symbol] is not None:
+            ot = open_trade[symbol]
+            if ot is not None:
                 close_row = full_price_data[symbol].filter(pl.col('ts_event') <= last_date).tail(1)
                 last_price = float(close_row['close'][0]) if close_row.height > 0 else None
-                open_trade[symbol]['close_reason'] = 'end_of_backtest'
+                ot['close_reason'] = 'end_of_backtest'
                 _close_trade(symbol, last_date, last_price)
 
     stats = pl.DataFrame(daily_rows)
