@@ -17,12 +17,15 @@ import argparse
 import multiprocessing
 import os
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from typing import Optional
 
 import polars as pl
+from ib_tools.ibpysync import IBPySync
 
 from derivatives_bt_engine.domain.backtester import Backtester
 from derivatives_bt_engine.domain.enums import FuturesStrategy
 from derivatives_bt_engine.domain.futures_dataloader import FuturesDataLoader
+from derivatives_bt_engine.domain.ib_futures_dataloader import IBFuturesDataLoader, connect_ib
 from derivatives_bt_engine.domain.instruments import resolve_price_symbol
 from derivatives_bt_engine.domain.strategy_config import FuturesStrategyConfig
 from derivatives_bt_engine.utils.logger import setup_logger
@@ -66,6 +69,20 @@ def parse_args():
                         '(default: sequential). Only matters with more than one symbol -- each '
                         "symbol's backtest is already fully independent, so this is pure "
                         'wall-clock speedup, no behavior change.')
+    p.add_argument('--use-ib-data', action='store_true',
+                   help='Fetch continuous front-month history from live IB (a fixed 3-year '
+                        'lookback -- the same reqHistoricalData call live.tsmom_rebalance '
+                        'already makes for its own signal calc) instead of the local duckdb '
+                        '`daily` table. Requires TWS/IB Gateway running. A --years range '
+                        'longer than the available IB history will only replay whatever of '
+                        'it survives the date-range filter (default: use local duckdb).')
+    ib_conn = p.add_argument_group('IB connection (only used with --use-ib-data)')
+    ib_conn.add_argument('--host', default=os.getenv('IB_HOST', '127.0.0.1'))
+    ib_conn.add_argument('--port', default=int(os.getenv('IB_PORT', '7497')), type=int)
+    ib_conn.add_argument('--client-id', default=int(os.getenv('IB_CLIENT_ID', '15')), type=int)
+    ib_conn.add_argument('--paper', action='store_true',
+                         help='Use paper-trading connection defaults (host 127.0.0.1, '
+                              'ports 4002/7497, client-id 2) instead of --host/--port/--client-id')
     return p.parse_args()
 
 
@@ -78,40 +95,50 @@ def _parse_years(years: str) -> tuple[str, str]:
     raise ValueError(f"--years must be YYYY or YYYY-YYYY, got {years!r}")
 
 
-def _run_one_symbol(symbol: str, args) -> tuple[dict, pl.DataFrame]:
+def _run_one_symbol(symbol: str, args, data: Optional[dict] = None) -> tuple[dict, pl.DataFrame]:
     """Runs one fully independent single-position backtest for `symbol` --
     its own capital/margin, no shared risk budget or correlation-aware
     sizing with any other symbol (that coordination is the TSMOM
     backtester's job, not this one). Returns (summary row for the
-    cross-symbol comparison table, this symbol's own daily mtm)."""
+    cross-symbol comparison table, this symbol's own daily mtm).
+
+    `data` lets a caller (main(), for --use-ib-data) pass in an
+    already-loaded {'option_chain', 'underlying', 'vix'} dict -- skipping
+    the duckdb load below entirely -- so a multi-symbol IB-backed run can
+    fetch every symbol's history up front over one shared IB connection
+    and hand each worker plain polars DataFrames, rather than each worker
+    needing its own IB connection (IB's historical-data pacing limits and
+    per-connection clientId make that unsafe, unlike duckdb's per-worker
+    read-only connections)."""
     futures_strategy = FuturesStrategy.LONG_FUTURES if args.dir == 'long' else FuturesStrategy.SHORT_FUTURES
 
     start_year, end_year = _parse_years(args.years)
     start_date = f"{start_year}-01-01"
     end_date = f"{end_year}-12-31"
 
-    # use_preprocessed=True is required for VIX (not just an optimization):
-    # BaseDataLoader.vix_data only reads the already-current
-    # {VIX_PATH}/processed/vix.parquet cache when this is True. With it
-    # False, vix_data falls through to re-parsing processed/vix.csv, which
-    # is a stale, separately-maintained file (ends 2024-12-31, and its
-    # ambiguous M/D/YYYY-with-time date strings silently fail to parse for
-    # ~60% of rows even within that stale range). Safe for the futures side
-    # too: save_preprocessed=False means FuturesDataLoader.daily never
-    # writes a local cache, so with no such file already present this still
-    # queries duckdb fresh every run, same as before.
-    # price_symbol: some micros (MES, MNQ, MTN, ...) have no db history under
-    # their own symbol -- resolve_price_symbol borrows the full-size
-    # sibling's (ES, NQ, ZN, ...) via instruments.py's db_symbol field.
-    # `symbol` itself (used as futures_type below) stays the raw traded
-    # ticker, so sizing/margin/PnL are still MES-scaled, never ES-scaled.
-    # FuturesStrategyConfig.__post_init__ validates `symbol` against
-    # instruments.known_futures_symbols() -- no separate check needed here.
-    price_symbol = resolve_price_symbol(symbol)
-    if price_symbol != symbol:
-        logger.info(f"{symbol}: no db history under its own symbol -- borrowing {price_symbol}'s continuous price history")
-    dl = FuturesDataLoader(asset=price_symbol, vix_file=VIX_FILE, use_preprocessed=True, save_preprocessed=False)
-    data = dl.load_data()
+    if data is None:
+        # use_preprocessed=True is required for VIX (not just an optimization):
+        # BaseDataLoader.vix_data only reads the already-current
+        # {VIX_PATH}/processed/vix.parquet cache when this is True. With it
+        # False, vix_data falls through to re-parsing processed/vix.csv, which
+        # is a stale, separately-maintained file (ends 2024-12-31, and its
+        # ambiguous M/D/YYYY-with-time date strings silently fail to parse for
+        # ~60% of rows even within that stale range). Safe for the futures side
+        # too: save_preprocessed=False means FuturesDataLoader.daily never
+        # writes a local cache, so with no such file already present this still
+        # queries duckdb fresh every run, same as before.
+        # price_symbol: some micros (MES, MNQ, MTN, ...) have no db history under
+        # their own symbol -- resolve_price_symbol borrows the full-size
+        # sibling's (ES, NQ, ZN, ...) via instruments.py's db_symbol field.
+        # `symbol` itself (used as futures_type below) stays the raw traded
+        # ticker, so sizing/margin/PnL are still MES-scaled, never ES-scaled.
+        # FuturesStrategyConfig.__post_init__ validates `symbol` against
+        # instruments.known_futures_symbols() -- no separate check needed here.
+        price_symbol = resolve_price_symbol(symbol)
+        if price_symbol != symbol:
+            logger.info(f"{symbol}: no db history under its own symbol -- borrowing {price_symbol}'s continuous price history")
+        dl = FuturesDataLoader(asset=price_symbol, vix_file=VIX_FILE, use_preprocessed=True, save_preprocessed=False)
+        data = dl.load_data()
 
     config = FuturesStrategyConfig(
         quantity=args.quantity,
@@ -237,9 +264,33 @@ def _build_total_mtm(symbols: list[str], daily_mtm_by_symbol: dict[str, pl.DataF
     return combined, contributions
 
 
+def _fetch_ib_data(symbols: list[str], args) -> dict[str, dict]:
+    """Fetches every symbol's continuous IB history sequentially over one
+    shared connection, before any parallel backtest work starts -- see
+    _run_one_symbol's docstring for why this can't be pushed into each
+    worker process instead. Connects, fetches, disconnects; the resulting
+    dict holds only plain polars DataFrames (data['underlying'] etc.),
+    safe to pass into a spawned worker."""
+    ib = IBPySync()
+    host = '127.0.0.1' if args.paper else args.host
+    ports = [4002, 7497] if args.paper else [7496, 4001]
+    client_id = 2 if args.paper else args.client_id
+    connect_ib(ib, host, ports, client_id)
+    try:
+        data_by_symbol = {}
+        for symbol in symbols:
+            dl = IBFuturesDataLoader(asset=symbol, ib=ib, vix_file=VIX_FILE)
+            data_by_symbol[symbol] = dl.load_data()
+        return data_by_symbol
+    finally:
+        ib.disconnect()
+
+
 def main():
     args = parse_args()
     symbols = [s.strip().upper() for s in args.symbols.split(',') if s.strip()]
+
+    data_by_symbol = _fetch_ib_data(symbols, args) if args.use_ib_data else {}
 
     results_by_symbol = {}
     if args.max_workers and args.max_workers > 1 and len(symbols) > 1:
@@ -253,13 +304,14 @@ def main():
         # tsmom_grid_search.py's own worker pools.
         ctx = multiprocessing.get_context('spawn')
         with ProcessPoolExecutor(max_workers=args.max_workers, mp_context=ctx) as pool:
-            futures = {pool.submit(_run_one_symbol, symbol, args): symbol for symbol in symbols}
+            futures = {pool.submit(_run_one_symbol, symbol, args, data_by_symbol.get(symbol)): symbol
+                      for symbol in symbols}
             for future in as_completed(futures):
                 symbol = futures[future]
                 results_by_symbol[symbol] = future.result()
     else:
         for symbol in symbols:
-            results_by_symbol[symbol] = _run_one_symbol(symbol, args)
+            results_by_symbol[symbol] = _run_one_symbol(symbol, args, data_by_symbol.get(symbol))
 
     summary_rows = []
     daily_mtm_by_symbol = {}
