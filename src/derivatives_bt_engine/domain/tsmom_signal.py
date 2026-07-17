@@ -35,41 +35,99 @@ from derivatives_bt_engine.domain.enums import SignalConfidenceRegime, TrendRegi
 log = logging.getLogger(__name__)
 
 
-def calculate_trend_strength(df: pl.DataFrame, w3m: float = 0.4, w1y: float = 0.6) -> pl.DataFrame:
-    """Canonical TSMOM signal. tanh (not sigmoid) so the sign is preserved —
-    this is what drives long vs. short, not just conviction magnitude."""
+# def calculate_trend_strength(df: pl.DataFrame, w3m: float = 0.4, w1y: float = 0.6) -> pl.DataFrame:
+#     """Canonical TSMOM signal. tanh (not sigmoid) so the sign is preserved —
+#     this is what drives long vs. short, not just conviction magnitude."""
+    # df = df.with_columns(
+    #     log_price=pl.col('close').log(),
+    #     peak=pl.col('close').cum_max(),
+    # )
+    # df = df.with_columns(
+    #     dd=((pl.col('close') - pl.col('peak')) / pl.col('peak')).round(2),
+    #     r1d=pl.col('log_price').diff(1),
+    #     r3m=pl.col('log_price').diff(63),
+    #     r1y=pl.col('log_price').diff(252),
+    # )
+    # df = df.with_columns(
+    #     daily_std=pl.col('r1d').rolling_std(63),
+    #     # Rolling mean of daily returns (not price -- avg3m/avg1y used to
+    #     # be a rolling mean of close, but that's not comparable to r3m/r1y
+    #     # or daily_std, which are both return-based), over the same 3m/1y
+    #     # windows as ts3m/ts1y, annualized (*252, linear -- means scale
+    #     # with time, unlike std which scales with sqrt(time)) so the
+    #     # values are readable instead of tiny daily-return fractions.
+    #     avg_r3m=pl.col('r1d').rolling_mean(63) * 252,
+    #     avg_r1y=pl.col('r1d').rolling_mean(252) * 252,
+    # )
+    # df = df.with_columns(
+    #     ts3m=pl.col('r3m') / (pl.col('daily_std') * math.sqrt(63)),
+    #     ts1y=pl.col('r1y') / (pl.col('daily_std') * math.sqrt(252)),
+    # )
+    # df = df.with_columns(
+    #     w3=pl.col('ts3m').is_not_null().cast(pl.Float64) * w3m,
+    #     w1=pl.col('ts1y').is_not_null().cast(pl.Float64) * w1y,
+    # )
+    # df = df.with_columns(
+    #     signal=(
+    #         pl.when(pl.col('ts3m').is_not_null())
+    #         .then(
+    #             ((
+    #                 pl.col('w3') * pl.col('ts3m').fill_null(0) +
+    #                 pl.col('w1') * pl.col('ts1y').fill_null(0)
+    #             ) / (pl.col('w3') + pl.col('w1')).clip(lower_bound=1e-12)).tanh()
+    #         )
+    #         .otherwise(None)
+    #     ),
+    #     r1y_pct=(100 * (pl.col('r1y').exp() - 1)).round(2),
+    # )
+    # # daily_std is kept (the notebook's original drop list removes it) —
+    # # the position-sizing layer needs daily_std_last from the last row to
+    # # compute current_realized_vol for vol targeting.
+    # df = df.drop(['open', 'high', 'low', 
+    #               'barCount', 'volume', 'average', 'w3', 'w1'],
+    #              strict=False)
+    # return df
+# import math
+
+def calculate_trend_strength(contract, w3m=0.4, w1y=0.6, discount=0.5):
+    # df = ib.cont_future(contract)
+    # df = ib.get_historical_bars(contract, duration=duration)
+    df = contract
     df = df.with_columns(
-        log_price=pl.col('close').log(),
-        peak=pl.col('close').cum_max(),
+        log_price = pl.col('close').log(),
+        peak      = pl.col('close').cum_max(),
     )
     df = df.with_columns(
-        dd=((pl.col('close') - pl.col('peak')) / pl.col('peak')).round(2),
-        r1d=pl.col('log_price').diff(1),
-        r3m=pl.col('log_price').diff(63),
-        r1y=pl.col('log_price').diff(252),
+        dd    = ((pl.col('close') - pl.col('peak')) / pl.col('peak')).round(2),
+        r1d   = pl.col('log_price').diff(1),
+        avg3m = pl.col('close').rolling_mean(63).round(2),
+        avg1y = pl.col('close').rolling_mean(252).round(2),
+
+        r3m   = pl.col('log_price').diff(63),
+        r1y   = pl.col('log_price').diff(252),
     )
+
     df = df.with_columns(
-        daily_std=pl.col('r1d').rolling_std(63),
-        # Rolling mean of daily returns (not price -- avg3m/avg1y used to
-        # be a rolling mean of close, but that's not comparable to r3m/r1y
-        # or daily_std, which are both return-based), over the same 3m/1y
-        # windows as ts3m/ts1y, annualized (*252, linear -- means scale
-        # with time, unlike std which scales with sqrt(time)) so the
-        # values are readable instead of tiny daily-return fractions.
-        avg_r3m=pl.col('r1d').rolling_mean(63) * 252,
-        avg_r1y=pl.col('r1d').rolling_mean(252) * 252,
+        avg_r3m = (pl.col('r1d').rolling_mean(63) * 252).round(2),
+        avg_r1y = (pl.col('r1d').rolling_mean(252) * 252).round(2),
+    
+        daily_std = pl.col('r1d').rolling_std(63)
     )
+
     df = df.with_columns(
-        ts3m=pl.col('r3m') / (pl.col('daily_std') * math.sqrt(63)),
-        ts1y=pl.col('r1y') / (pl.col('daily_std') * math.sqrt(252)),
+        hv = pl.col('daily_std') * 252 ** 0.5,
+        ts3m = pl.col('r3m') / (pl.col('daily_std') * math.sqrt(63)),
+        ts1y = pl.col('r1y') / (pl.col('daily_std') * math.sqrt(252)),
     )
+
     df = df.with_columns(
-        w3=pl.col('ts3m').is_not_null().cast(pl.Float64) * w3m,
-        w1=pl.col('ts1y').is_not_null().cast(pl.Float64) * w1y,
+        w3 = pl.col('ts3m').is_not_null().cast(pl.Float64) * w3m,
+        w1 = pl.col('ts1y').is_not_null().cast(pl.Float64) * w1y,
     )
+
     df = df.with_columns(
-        signal=(
-            pl.when(pl.col('ts3m').is_not_null())
+        ts = (
+            pl.when(pl.col('ts1y').is_not_null())
             .then(
                 ((
                     pl.col('w3') * pl.col('ts3m').fill_null(0) +
@@ -78,14 +136,34 @@ def calculate_trend_strength(df: pl.DataFrame, w3m: float = 0.4, w1y: float = 0.
             )
             .otherwise(None)
         ),
-        r1y_pct=(100 * (pl.col('r1y').exp() - 1)).round(2),
+        # r1y_pct = (100 * (pl.col('r1y').exp() - 1)).round(2),
+        regime = (
+            pl.when((pl.col('ts3m') < 0) & (pl.col('ts1y') < 0))
+            .then(pl.lit('bear'))
+            .when((pl.col('ts3m') >= 0) & (pl.col('ts1y') >= 0))
+            .then(pl.lit('bull'))
+            .when((pl.col('ts3m') < 0) & (pl.col('ts1y') >= 0))
+            .then(pl.lit('correction'))
+            .when((pl.col('ts3m') >= 0) & (pl.col('ts1y') < 0))
+            .then(pl.lit('rebound'))
+            # .otherwise(pl.lit('unknown'))
+        ),
+        mom = (pl.col('ts3m') - pl.col('ts1y')).tanh().round(2)
+
     )
-    # daily_std is kept (the notebook's original drop list removes it) —
-    # the position-sizing layer needs daily_std_last from the last row to
-    # compute current_realized_vol for vol targeting.
-    df = df.drop(['open', 'high', 'low', 
-                  'barCount', 'volume', 'average', 'w3', 'w1'],
-                 strict=False)
+    df = df.with_columns(
+            signal = (
+                pl.when(pl.col('regime').is_in(['correction', 'rebound']))
+                .then(pl.col('ts') * discount)
+                .otherwise(pl.col('ts'))
+                )
+        )
+    
+                 
+    df = df.drop(['open', 'high', 'low', 'log_price', 
+                   'volume', 'average', 'w3', 'w1'], strict=False)
+
+    df = df.with_columns(pl.col(pl.Float32, pl.Float64).round(2))
     return df
 
 

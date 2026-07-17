@@ -291,7 +291,7 @@ def main():
     ib = IBPySync()
     host      = '127.0.0.1' if args.paper else args.host
     ports     = [4002, 7497] if args.paper else [7496, 4001]
-    client_id = 1            if args.paper else args.client_id
+    client_id = 2            if args.paper else args.client_id
 
     connect_with_retry(ib, host, ports, client_id)
     atexit.register(ib.disconnect)
