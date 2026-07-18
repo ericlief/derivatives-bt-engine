@@ -12,6 +12,7 @@ Run:
     naked --symbols MES --dir short --years 2025-2026 --quantity 2
     naked --symbols ES,GC,CL --dir long --years 2010-2026 --ts-exit-threshold 0 --ts-entry-threshold 0.5
     naked --symbols ES,GC,CL,NQ --years 2010-2026 --max-workers 4
+    naked --symbols MES --dir long --use-ib-data
 """
 import argparse
 import multiprocessing
@@ -32,6 +33,13 @@ from derivatives_bt_engine.utils.logger import setup_logger
 
 logger = setup_logger()
 
+# ── Tunable defaults ─────────────────────────────────────────────────────
+# Only applied when --years is omitted AND --use-ib-data is NOT set (the
+# duckdb path has decades of history available, so a date range has to
+# come from somewhere -- see _run_one_symbol for the --use-ib-data case,
+# which instead replays the full fetched IB lookback).
+DEFAULT_YEARS = '2025-2026'
+
 # Same VIX_PATH convention as the options strategies (iron_condor.py,
 # bull_put.py, ...) -- a directory resolves to {dir}/processed/vix.csv
 # (see BaseDataLoader._resolve_source_paths), currently
@@ -47,8 +55,11 @@ def parse_args():
                         '-- each runs as its own independent backtest (default: %(default)s)')
     p.add_argument('--dir', choices=['long', 'short'], default='long',
                    help='Position direction/side (default: %(default)s)')
-    p.add_argument('--years', default='2025-2026',
-                   help='Year range as START-END (inclusive) or a single YEAR (default: %(default)s)')
+    p.add_argument('--years', default=None,
+                   help='Year range as START-END (inclusive) or a single YEAR. Default: '
+                        f'{DEFAULT_YEARS} normally, or the full fetched lookback with '
+                        '--use-ib-data (so a bare --use-ib-data actually replays all 3 '
+                        "fetched years, instead of being clipped back down to 2025-2026).")
     p.add_argument('--quantity', type=int, default=1)
     p.add_argument('--initial-capital', type=float, default=100000)
     p.add_argument('--leverage', type=float, default=1.0)
@@ -77,9 +88,10 @@ def parse_args():
                    help='Fetch continuous front-month history from live IB (a fixed 3-year '
                         'lookback -- the same reqHistoricalData call live.tsmom_rebalance '
                         'already makes for its own signal calc) instead of the local duckdb '
-                        '`daily` table. Requires TWS/IB Gateway running. A --years range '
-                        'longer than the available IB history will only replay whatever of '
-                        'it survives the date-range filter (default: use local duckdb).')
+                        '`daily` table. Requires TWS/IB Gateway running. With no --years given, '
+                        'replays the full fetched 3-year lookback; an explicit --years range '
+                        'longer than that will only replay whatever of it survives the '
+                        'date-range filter (default: use local duckdb).')
     ib_conn = p.add_argument_group('IB connection (only used with --use-ib-data)')
     ib_conn.add_argument('--host', default=os.getenv('IB_HOST', '127.0.0.1'))
     ib_conn.add_argument('--port', default=int(os.getenv('IB_PORT', '7497')), type=int)
@@ -116,10 +128,6 @@ def _run_one_symbol(symbol: str, args, data: Optional[dict] = None) -> tuple[dic
     read-only connections)."""
     futures_strategy = FuturesStrategy.LONG_FUTURES if args.dir == 'long' else FuturesStrategy.SHORT_FUTURES
 
-    start_year, end_year = _parse_years(args.years)
-    start_date = f"{start_year}-01-01"
-    end_date = f"{end_year}-12-31"
-
     if data is None:
         # use_preprocessed=True is required for VIX (not just an optimization):
         # BaseDataLoader.vix_data only reads the already-current
@@ -143,6 +151,25 @@ def _run_one_symbol(symbol: str, args, data: Optional[dict] = None) -> tuple[dic
             logger.info(f"{symbol}: no db history under its own symbol -- borrowing {price_symbol}'s continuous price history")
         dl = FuturesDataLoader(asset=price_symbol, vix_file=VIX_FILE, use_preprocessed=True, save_preprocessed=False)
         data = dl.load_data()
+
+    if args.years is not None:
+        start_year, end_year = _parse_years(args.years)
+        start_date = f"{start_year}-01-01"
+        end_date = f"{end_year}-12-31"
+    elif args.use_ib_data:
+        # No --years given alongside --use-ib-data: replay the FULL fetched
+        # IB lookback (IBFuturesDataLoader's fixed 3-year duration) instead
+        # of silently falling back to DEFAULT_YEARS, which would clip that
+        # 3 years of fetched data back down to a single requested year.
+        underlying = data['underlying']
+        start_date = underlying['ts_event'].min().isoformat()
+        end_date = underlying['ts_event'].max().isoformat()
+        logger.info(f"{symbol}: no --years given -- replaying the full fetched IB lookback "
+                    f"({start_date} to {end_date})")
+    else:
+        start_year, end_year = _parse_years(DEFAULT_YEARS)
+        start_date = f"{start_year}-01-01"
+        end_date = f"{end_year}-12-31"
 
     config = FuturesStrategyConfig(
         quantity=args.quantity,
@@ -345,7 +372,11 @@ def main():
                 print(pl.DataFrame(contributions))
 
             if not args.no_save:
-                start_year, end_year = _parse_years(args.years)
+                # Derived from the actual backtested range (total_mtm's own
+                # 'date' column), not re-parsed from args.years -- correct
+                # regardless of source (duckdb vs --use-ib-data, which may
+                # leave args.years unset entirely, see _run_one_symbol).
+                start_year, end_year = total_mtm['date'].min().year, total_mtm['date'].max().year
                 results_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'results'))
                 os.makedirs(results_dir, exist_ok=True)
                 symbol_str = '_'.join(symbols)
