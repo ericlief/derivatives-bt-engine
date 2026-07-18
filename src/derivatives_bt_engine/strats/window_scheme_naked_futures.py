@@ -100,19 +100,33 @@ def generate_capped_rolling_windows(anchor_start: str, data_end: str, max_width_
 
 # ── Single-window backtest ─────────────────────────────────────────────
 def _run_window(full_data: dict, start_date: str, end_date: str,
-                futures_type: str, futures_strategy: FuturesStrategy) -> dict:
+                futures_type: str, futures_strategy: FuturesStrategy, args) -> dict:
     """Run one window against the pre-loaded full OHLCV (Backtester filters
     by config start/end internally; no per-window data slicing needed since
     futures OHLCV is tiny compared with the option chain)."""
+    # config = FuturesStrategyConfig(
+    #     quantity=QUANTITY,
+    #     futures_type=futures_type,
+    #     futures_strategy=futures_strategy,
+    #     initial_capital=INITIAL_CAPITAL,
+    #     leverage=LEVERAGE,
+    #     start_date=start_date,
+    #     end_date=end_date,
+    #     fill_price=FILL_PRICE,
+    # )
+
     config = FuturesStrategyConfig(
-        quantity=QUANTITY,
-        futures_type=futures_type,
+        quantity=args.quantity,
+        futures_type=args.symbol,
         futures_strategy=futures_strategy,
-        initial_capital=INITIAL_CAPITAL,
-        leverage=LEVERAGE,
+        initial_capital=args.initial_capital,
+        leverage=args.leverage,
         start_date=start_date,
         end_date=end_date,
         fill_price=FILL_PRICE,
+        ts_exit_threshold=args.ts_exit_threshold,
+        ts_entry_threshold=args.ts_entry_threshold,
+        exit_on_ts_crossover=args.exit_on_ts_crossover,
     )
     bt  = Backtester(data=full_data, save_trades=False, log_to_sheets=False)
     res = bt.run(config)
@@ -225,8 +239,31 @@ def parse_args():
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--symbol', default=DEFAULT_SYMBOL,
                    help=f'Futures symbol (default: {DEFAULT_SYMBOL})')
-    p.add_argument('--dir', choices=['long', 'short'], default=DEFAULT_DIRECTION,
-                   help=f'Position direction (default: {DEFAULT_DIRECTION})')
+    p.add_argument('--dir', choices=['long', 'short'], default='long',
+                   help='Position direction/side (default: %(default)s)')
+    p.add_argument('--quantity', type=int, default=QUANTITY)
+    p.add_argument('--initial-capital', type=float, default=100000)
+    p.add_argument('--leverage', type=float, default=1.0)
+    p.add_argument('--ts-exit-threshold', type=float, default=None,
+                   help='Exit if the raw tsmom signal (no vol-target/discount applied) '
+                        'weakens past this threshold, direction-aware (default: disabled)')
+    p.add_argument('--ts-entry-threshold', type=float, default=None,
+                   help='Block (re-)entry until the raw tsmom signal recovers past this '
+                        'threshold, direction-aware -- typically stronger than '
+                        '--ts-exit-threshold to avoid close/reopen thrashing at one shared '
+                        'line (default: disabled)')
+    p.add_argument('--exit-on-ts-crossover', action='store_true',
+                   help='Exit when ts3m crosses to the wrong side of ts1y for this position\'s '
+                        'direction, and block entry until it crosses back (default: disabled)')
+    p.add_argument('--no-save', action='store_true', help='Skip saving trades/transactions/mtm to results/')
+    p.add_argument('--max-workers', type=int, default=None,
+                   help='Run --symbols across this many worker processes instead of sequentially '
+                        '(default: sequential). Only matters with more than one symbol -- each '
+                        "symbol's backtest is already fully independent, so this is pure "
+                        'wall-clock speedup, no behavior change.')
+
+
+
     return p.parse_args()
 
 
