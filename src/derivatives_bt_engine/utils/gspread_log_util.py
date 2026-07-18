@@ -441,11 +441,14 @@ def log_futures_to_google_sheets(results: dict,
     'futures_bt', a spreadsheet already created for this purpose --
     _get_or_create_spreadsheet can only open an existing spreadsheet with
     these credentials, not create a brand new one, same limitation the
-    options path already has). Worksheet is named
-    f'{symbol}_{futures_strategy}_{timestamp}', mirroring log_to_google_
-    sheets' one-new-tab-per-run convention. Called from Backtester.run()'s
-    log_to_sheets dispatch whenever `config` is a FuturesStrategyConfig --
-    see the isinstance check there."""
+    options path already has).
+
+    Worksheet is named f'{symbol}_{futures_strategy}' (e.g.
+    'MES_LONG_FUTURES') -- one persistent tab PER STRATEGY CONFIG, not per
+    run: every run of the same symbol+direction appends another row to the
+    same tab, so a tab's rows are directly comparable across runs (deliberately
+    NOT log_to_google_sheets' options convention above, which timestamps a
+    brand new tab every single call)."""
     logger.info(f"Starting Google Sheets logging for: {param_str}")
 
     try:
@@ -460,9 +463,7 @@ def log_futures_to_google_sheets(results: dict,
         period = (date.fromisoformat(config.end_date) - date.fromisoformat(config.start_date)).days / 365.0
         row = _format_futures_backtest_result_row(results, config, param_str, period)
 
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        strat_name = f"{config.futures_type}_{config.futures_strategy.value}".upper()
-        worksheet_name = f'{strat_name}_{timestamp}'
+        worksheet_name = f"{config.futures_type}_{config.futures_strategy.value}".upper()
 
         try:
             worksheet = spreadsheet.worksheet(worksheet_name)
