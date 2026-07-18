@@ -8,7 +8,7 @@ import polars as pl
 import numpy as np
 
 from derivatives_bt_engine.utils.logger import setup_logger
-from derivatives_bt_engine.domain.strategy_config import SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig
+from derivatives_bt_engine.domain.strategy_config import SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig, FuturesStrategyConfig
 
 # Load environment variables from .env file
 from dotenv import load_dotenv
@@ -99,7 +99,7 @@ def _get_leg_field_json(config, field_name):
     return _json_or_blank(getattr(leg, field_name, None)) if leg else ''
 
 def log_to_google_sheets(results: dict, 
-                        config: Union['SingleLegOptionStrategyConfig', 'MultiLegOptionStrategyConfig'],
+                        config: Union['SingleLegOptionStrategyConfig', 'MultiLegOptionStrategyConfig', 'FuturesStrategyConfig'],
                         param_str: str,
                         spreadsheet_name='spx_options_bt_results'):
     """
@@ -261,7 +261,7 @@ def _get_or_create_spreadsheet(gc, spreadsheet_name: str):
     return spreadsheet
 
 def _format_single_backtest_result_row(results: dict, 
-                                      config: Union['SingleLegOptionStrategyConfig', 'MultiLegOptionStrategyConfig'],
+                                      config: Union['SingleLegOptionStrategyConfig', 'MultiLegOptionStrategyConfig','FuturesStrategyConfig'],
                                       param_str: str,
                                       period: int) -> dict:
     """
