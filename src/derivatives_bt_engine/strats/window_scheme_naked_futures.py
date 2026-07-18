@@ -27,9 +27,12 @@ from dotenv import load_dotenv
 from derivatives_bt_engine.domain.backtester import Backtester
 from derivatives_bt_engine.domain.enums import FuturesStrategy
 from derivatives_bt_engine.domain.futures_dataloader import FuturesDataLoader
+from derivatives_bt_engine.domain.instruments import resolve_price_symbol
 from derivatives_bt_engine.domain.strategy_config import FuturesStrategyConfig
 from derivatives_bt_engine.strats.grid_search_backtester import _generate_windows
-from derivatives_bt_engine.utils.gspread_log_util import _format_single_backtest_result_row
+from derivatives_bt_engine.utils.gspread_log_util import (
+    DEFAULT_FUTURES_SPREADSHEET, _format_futures_backtest_result_row, upload_df_to_google_sheets,
+)
 from derivatives_bt_engine.utils.logger import setup_logger
 
 logger = setup_logger()
@@ -104,17 +107,6 @@ def _run_window(full_data: dict, start_date: str, end_date: str,
     """Run one window against the pre-loaded full OHLCV (Backtester filters
     by config start/end internally; no per-window data slicing needed since
     futures OHLCV is tiny compared with the option chain)."""
-    # config = FuturesStrategyConfig(
-    #     quantity=QUANTITY,
-    #     futures_type=futures_type,
-    #     futures_strategy=futures_strategy,
-    #     initial_capital=INITIAL_CAPITAL,
-    #     leverage=LEVERAGE,
-    #     start_date=start_date,
-    #     end_date=end_date,
-    #     fill_price=FILL_PRICE,
-    # )
-
     config = FuturesStrategyConfig(
         quantity=args.quantity,
         futures_type=args.symbol,
@@ -132,7 +124,7 @@ def _run_window(full_data: dict, start_date: str, end_date: str,
     res = bt.run(config)
     param_str = bt._generate_param_string(config)
     period    = _window_years(start_date, end_date)
-    row       = _format_single_backtest_result_row(res, config, param_str, period)
+    row       = _format_futures_backtest_result_row(res, config, param_str, period)
     row['sharpe']       = res.get('sharpe_trade_to_trade')
     row['mtm_sharpe']   = res.get('mtm_sharpe')
     row['window_years'] = period
@@ -140,13 +132,13 @@ def _run_window(full_data: dict, start_date: str, end_date: str,
 
 
 def run_windows(full_data: dict, windows: List[Tuple[str, str]], scheme_name: str,
-                futures_type: str, futures_strategy: FuturesStrategy) -> List[dict]:
+                futures_type: str, futures_strategy: FuturesStrategy, args) -> List[dict]:
     rows = []
     for i, (w_start, w_end) in enumerate(windows, 1):
         t0 = time.time()
         logger.info(f"{scheme_name}: window {i}/{len(windows)}: {w_start} to {w_end}")
         try:
-            row = _run_window(full_data, w_start, w_end, futures_type, futures_strategy)
+            row = _run_window(full_data, w_start, w_end, futures_type, futures_strategy, args)
         except Exception as e:
             logger.error(f"Window {w_start}..{w_end} failed: {e}")
             row = {
@@ -256,6 +248,11 @@ def parse_args():
                    help='Exit when ts3m crosses to the wrong side of ts1y for this position\'s '
                         'direction, and block entry until it crosses back (default: disabled)')
     p.add_argument('--no-save', action='store_true', help='Skip saving trades/transactions/mtm to results/')
+    p.add_argument('--no-sheets', action='store_true',
+                   help='Skip uploading the combined window-scheme results to the futures_bt '
+                        'Google Sheet (uploaded by default, one tab for this whole run -- '
+                        "matches grid_search_backtester.py's own end-of-run "
+                        'upload_df_to_google_sheets call)')
     p.add_argument('--max-workers', type=int, default=None,
                    help='Run --symbols across this many worker processes instead of sequentially '
                         '(default: sequential). Only matters with more than one symbol -- each '
@@ -280,9 +277,24 @@ def main():
     output_csv = _OUTPUT_CSV_TMPL.format(symbol=symbol.lower(), dir=direction)
     output_md  = _OUTPUT_MD_TMPL.format(symbol=symbol.lower(), dir=direction)
 
-    logger.info(f"Loading {symbol} OHLCV...")
-    dl        = FuturesDataLoader(asset=symbol, use_preprocessed=False, save_preprocessed=False)
+    # price_symbol: some micros (MES, MNQ, MTN, ...) have no db history under
+    # their own symbol -- resolve_price_symbol borrows the full-size
+    # sibling's (ES, NQ, ZN, ...) via instruments.py's db_symbol field, same
+    # substitution naked_futures.py already does. `symbol`/`futures_type`
+    # stay the raw traded ticker, so sizing/margin/PnL are still MES-scaled.
+    price_symbol = resolve_price_symbol(symbol)
+    if price_symbol != symbol:
+        logger.info(f"{symbol}: no db history under its own symbol -- borrowing {price_symbol}'s continuous price history")
+    logger.info(f"Loading {price_symbol} OHLCV...")
+    dl        = FuturesDataLoader(asset=price_symbol, use_preprocessed=False, save_preprocessed=False)
     full_data = dl.load_data()
+
+    if full_data['underlying'].height == 0:
+        raise RuntimeError(
+            f"No duckdb history found for {symbol} (queried as {price_symbol!r}) -- "
+            f"check instruments.py's db_symbol/signal_symbol mapping, or that this "
+            f"symbol has real data in the `daily` table."
+        )
 
     # Derive data end from the loaded OHLCV
     data_end = full_data['underlying']['ts_event'].max().strftime("%Y-%m-%d")
@@ -291,7 +303,7 @@ def main():
     # ── Scheme A ──────────────────────────────────────────────────────
     scheme_a_windows = [(s, e) for _p, s, e in _generate_windows([SCHEME_A_PERIOD_YEARS], ANCHOR_START_DATE, data_end)]
     logger.info(f"Scheme A: {len(scheme_a_windows)} windows ({SCHEME_A_PERIOD_YEARS}yr rolling, 90-day slide)")
-    scheme_a_rows = run_windows(full_data, scheme_a_windows, "Scheme A", futures_type, futures_strategy)
+    scheme_a_rows = run_windows(full_data, scheme_a_windows, "Scheme A", futures_type, futures_strategy, args)
     for r in scheme_a_rows:
         r['scheme'] = 'A_rolling_90d_slide'
     scheme_a_rows.sort(key=lambda r: r['start'])
@@ -299,7 +311,7 @@ def main():
     # ── Scheme B ──────────────────────────────────────────────────────
     scheme_b_windows = generate_expanding_windows(ANCHOR_START_DATE, data_end, STEP_YEARS)
     logger.info(f"Scheme B: {len(scheme_b_windows)} windows (expanding)")
-    scheme_b_rows = run_windows(full_data, scheme_b_windows, "Scheme B", futures_type, futures_strategy)
+    scheme_b_rows = run_windows(full_data, scheme_b_windows, "Scheme B", futures_type, futures_strategy, args)
     for r in scheme_b_rows:
         r['scheme'] = 'B_expanding'
     b_sharpe_cum, b_ret_cum = [], []
@@ -312,7 +324,7 @@ def main():
     # ── Scheme C ──────────────────────────────────────────────────────
     scheme_c_windows = generate_capped_rolling_windows(ANCHOR_START_DATE, data_end, SCHEME_C_MAX_WIDTH_YEARS, STEP_YEARS)
     logger.info(f"Scheme C: {len(scheme_c_windows)} windows (expand-then-cap)")
-    scheme_c_rows = run_windows(full_data, scheme_c_windows, "Scheme C", futures_type, futures_strategy)
+    scheme_c_rows = run_windows(full_data, scheme_c_windows, "Scheme C", futures_type, futures_strategy, args)
     for r in scheme_c_rows:
         r['scheme'] = 'C_capped_rolling'
 
@@ -330,6 +342,15 @@ def main():
     os.makedirs(os.path.dirname(output_csv), exist_ok=True)
     df.write_csv(output_csv)
     logger.info(f"Wrote {df.height} rows to {output_csv}")
+
+    if not args.no_sheets:
+        # One batched upload for the whole run (all schemes/windows), not a
+        # per-window log_to_google_sheets call -- mirrors grid_search_
+        # backtester.py's own end-of-run upload_df_to_google_sheets, and
+        # avoids spamming futures_bt with dozens of single-row tabs (one per
+        # window) the way per-window sheets logging would.
+        upload_df_to_google_sheets(df, strategy_name=f'{symbol}_{direction}_window',
+                                   spreadsheet_name=DEFAULT_FUTURES_SPREADSHEET)
 
     # ── Scheme A autocorrelation ───────────────────────────────────────
     a_df = pl.DataFrame(scheme_a_rows).sort('start')

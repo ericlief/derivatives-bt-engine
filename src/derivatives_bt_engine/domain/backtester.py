@@ -555,8 +555,17 @@ class Backtester:
         results['execution_times'] = self.execution_times
         results['total_execution_time'] = round(sum(self.execution_times.values()), 2)
         if self.log_to_sheets:
-            from derivatives_bt_engine.utils.gspread_log_util import log_to_google_sheets
-            log_to_google_sheets(results, config=config, param_str=param_str)
+            if isinstance(config, FuturesStrategyConfig):
+                # Options' log_to_google_sheets assumes config.option_strategy
+                # and a 'premium' trade_results column, neither of which
+                # exist on a futures config/trade table -- log_futures_to_
+                # google_sheets is the futures-shaped counterpart (own
+                # spreadsheet, 'futures_bt', includes the signal gate params).
+                from derivatives_bt_engine.utils.gspread_log_util import log_futures_to_google_sheets
+                log_futures_to_google_sheets(results, config=config, param_str=param_str)
+            else:
+                from derivatives_bt_engine.utils.gspread_log_util import log_to_google_sheets
+                log_to_google_sheets(results, config=config, param_str=param_str)
 
         # Save MTM results with same timestamp
         # if mtm_df is not None and not mtm_df.empty:

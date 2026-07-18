@@ -17,6 +17,10 @@ load_dotenv()
 # Create logger instance
 logger = setup_logger()
 
+# ── Tunable defaults ────────────────────────────────────────────────────────
+DEFAULT_OPTIONS_SPREADSHEET = 'spx_options_bt_results'
+DEFAULT_FUTURES_SPREADSHEET = 'futures_bt'
+
 def google_auth():
     """Authenticate with Google Sheets API."""
     try:
@@ -98,10 +102,10 @@ def _get_leg_field_json(config, field_name):
     leg = getattr(config, 'leg', None)
     return _json_or_blank(getattr(leg, field_name, None)) if leg else ''
 
-def log_to_google_sheets(results: dict, 
+def log_to_google_sheets(results: dict,
                         config: Union['SingleLegOptionStrategyConfig', 'MultiLegOptionStrategyConfig', 'FuturesStrategyConfig'],
                         param_str: str,
-                        spreadsheet_name='spx_options_bt_results'):
+                        spreadsheet_name=DEFAULT_OPTIONS_SPREADSHEET):
     """
     Log backtest results to Google Sheets as a single row.
     """
@@ -342,7 +346,142 @@ def _format_single_backtest_result_row(results: dict,
     
     return row_data
 
-def upload_df_to_google_sheets(df: pl.DataFrame, strategy_name: str, spreadsheet_name: str = 'spx_options_bt_results'):
+def _format_futures_backtest_result_row(results: dict,
+                                        config: 'FuturesStrategyConfig',
+                                        param_str: str,
+                                        period: float) -> dict:
+    """Futures analog of _format_single_backtest_result_row above, which
+    assumes an options config (option_strategy, legs, dte/delta targets)
+    and an options trade_results schema (a 'premium' column) -- both
+    absent from FuturesStrategyConfig/the naked futures trade_results
+    table, so that formatter raises AttributeError/ColumnNotFoundError the
+    moment it's used on a futures backtest. This one reads only fields
+    that actually exist on FuturesStrategyConfig and naked_futures.py's
+    trade_results columns (symbol, quantity, opened/closed, entry_price/
+    exit_price, days_held, futures_strategy, close_reason, capital,
+    capital_used, margin_utilization, pnl, cumulative_pnl, fees, roi), and
+    explicitly includes the signal entry/exit gate params
+    (ts_exit_threshold/ts_entry_threshold/exit_on_ts_crossover) alongside
+    quantity/leverage/fill_price -- the "gating params and other naked
+    params" a futures sheet row needs that an options row has no concept
+    of.
+
+    Shared by naked_futures.py (single/multi-symbol runs, via Backtester.
+    run()'s own log_to_sheets dispatch -- see FuturesStrategyConfig branch
+    there), window_scheme_naked_futures.py (one row per window, batch-
+    uploaded via upload_df_to_google_sheets), and any future naked-futures
+    grid search -- same formatter/uploader split options already uses
+    between log_to_google_sheets (one row per run) and
+    upload_df_to_google_sheets (many rows in one shot)."""
+    tr = results['trade_results']
+    daily_mtm = results.get('daily_mtm')
+    drawdown_analysis = results.get('drawdown_analysis', {})
+
+    max_dd_usd = drawdown_analysis.get('max_drawdown')
+    # dd_pct is negative (drawdown) in daily_mtm, worst = .min() -- same
+    # convention as calculate_futures_mtm_drawdown/_save_results' own
+    # "Maximum drawdown" log line in backtester.py.
+    max_dd_pct = float(daily_mtm['dd_pct'].min()) if daily_mtm is not None and daily_mtm.height > 0 else None
+
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    has_trades = tr.height > 0
+    avg_margin = float(tr['capital_used'].mean()) if has_trades else float(config.initial_capital)
+    total_pnl_val = round(tr['cumulative_pnl'][-1], 2) if has_trades else 0.0
+
+    row_data = {
+        "timestamp": timestamp,
+        "symbol": config.futures_type,
+        "futures_strategy": config.futures_strategy.value,
+        "start": config.start_date,
+        "end": config.end_date,
+        "period": period,
+        "quantity": config.quantity,
+        "fill_price": config.fill_price,
+        "initial_capital": config.initial_capital,
+        "final_capital": round(tr['capital'][-1], 2) if has_trades else config.initial_capital,
+        "total_pnl": total_pnl_val,
+        "ret_yr": round(total_pnl_val / avg_margin / period * 100, 2) if (has_trades and period and avg_margin) else 0.0,
+        "roi": round(tr['roi'].mean(), 2) if has_trades else 0.0,
+        "avg_win": round(tr.filter(pl.col('pnl') > 0)['pnl'].mean() or 0.0, 2) if has_trades else 0.0,
+        "max_win": round(tr['pnl'].max(), 2) if has_trades else 0.0,
+        "avg_loss": round(tr.filter(pl.col('pnl') <= 0)['pnl'].mean() or 0.0, 2) if has_trades else 0.0,
+        "max_loss": round(tr['pnl'].min(), 2) if has_trades else 0.0,
+        "win_rate": round((tr['pnl'] > 0).sum() / tr.height, 2) if has_trades else 0.0,
+        "winning_trades": int((tr['pnl'] > 0).sum()) if has_trades else 0,
+        "total_trades": tr.height if has_trades else 0,
+        "avg_days_held": round(tr['days_held'].mean(), 1) if has_trades else 0.0,
+        "max_dd_usd": round(max_dd_usd, 2) if max_dd_usd is not None else 'N/A',
+        "max_dd_pct": round(max_dd_pct, 2) if max_dd_pct is not None else 'N/A',
+        "peak_capital": round(drawdown_analysis.get('peak_capital', 0) or 0, 2),
+        "trough_capital": round(drawdown_analysis.get('trough_capital', 0) or 0, 2),
+        "dd_duration": convert_numpy_types(drawdown_analysis.get('drawdown_duration', 0)),
+        "execution_time": results.get('total_execution_time', ''),
+        "leverage": getattr(config, 'leverage', ''),
+        "avg_margin_utilization": round(tr['margin_utilization'].mean(), 4) if has_trades else 0.0,
+        "total_fees": round(tr['fees'].sum(), 2) if has_trades else 0.0,
+        "ts_exit_threshold": getattr(config, 'ts_exit_threshold', None),
+        "ts_entry_threshold": getattr(config, 'ts_entry_threshold', None),
+        "exit_on_ts_crossover": getattr(config, 'exit_on_ts_crossover', False),
+        "param_string": param_str,
+    }
+
+    for key, value in row_data.items():
+        row_data[key] = flatten_for_sheet(value)
+
+    return row_data
+
+
+def log_futures_to_google_sheets(results: dict,
+                                 config: 'FuturesStrategyConfig',
+                                 param_str: str,
+                                 spreadsheet_name: str = DEFAULT_FUTURES_SPREADSHEET):
+    """Futures analog of log_to_google_sheets above -- appends ONE row (this
+    single backtest run) to a worksheet in `spreadsheet_name` (default:
+    'futures_bt', a spreadsheet already created for this purpose --
+    _get_or_create_spreadsheet can only open an existing spreadsheet with
+    these credentials, not create a brand new one, same limitation the
+    options path already has). Worksheet is named
+    f'{symbol}_{futures_strategy}_{timestamp}', mirroring log_to_google_
+    sheets' one-new-tab-per-run convention. Called from Backtester.run()'s
+    log_to_sheets dispatch whenever `config` is a FuturesStrategyConfig --
+    see the isinstance check there."""
+    logger.info(f"Starting Google Sheets logging for: {param_str}")
+
+    try:
+        logger.info("Authenticating with Google Sheets...")
+        gc = google_auth()
+        logger.info("Authentication successful")
+
+        logger.info(f"Opening spreadsheet {spreadsheet_name}...")
+        spreadsheet = _get_or_create_spreadsheet(gc, spreadsheet_name=spreadsheet_name)
+        logger.info("Spreadsheet opened successfully")
+
+        period = (date.fromisoformat(config.end_date) - date.fromisoformat(config.start_date)).days / 365.0
+        row = _format_futures_backtest_result_row(results, config, param_str, period)
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        strat_name = f"{config.futures_type}_{config.futures_strategy.value}".upper()
+        worksheet_name = f'{strat_name}_{timestamp}'
+
+        try:
+            worksheet = spreadsheet.worksheet(worksheet_name)
+            logger.info(f"Appending data to existing worksheet {worksheet_name}...")
+        except gspread.exceptions.WorksheetNotFound:
+            worksheet = spreadsheet.add_worksheet(title=worksheet_name, rows=1000, cols=len(row))
+            worksheet.append_row(list(row.keys()))
+            logger.info(f"New worksheet {worksheet_name} created successfully!")
+
+        worksheet.append_row(list(row.values()))
+        logger.info(f"Results logged to Google Sheets: {param_str}")
+
+    except Exception as e:
+        logger.error(f"An unexpected error occurred during Google Sheets upload: {e}")
+        import traceback
+        logger.error(f"Full traceback: {traceback.format_exc()}")
+
+
+def upload_df_to_google_sheets(df: pl.DataFrame, strategy_name: str, spreadsheet_name: str = DEFAULT_OPTIONS_SPREADSHEET):
     """
     Uploads a polars DataFrame to a specified Google Sheet worksheet.
     Creates the worksheet and adds headers if it doesn't exist.

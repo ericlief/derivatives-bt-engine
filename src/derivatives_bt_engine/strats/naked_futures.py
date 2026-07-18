@@ -64,6 +64,10 @@ def parse_args():
                    help='Exit when ts3m crosses to the wrong side of ts1y for this position\'s '
                         'direction, and block entry until it crosses back (default: disabled)')
     p.add_argument('--no-save', action='store_true', help='Skip saving trades/transactions/mtm to results/')
+    p.add_argument('--no-sheets', action='store_true',
+                   help="Skip logging this run's summary to the futures_bt Google Sheet "
+                        '(logged by default -- one new tab per symbol per run, matching '
+                        "iron_condor.py/long_futures.py's own always-on sheets logging)")
     p.add_argument('--max-workers', type=int, default=None,
                    help='Run --symbols across this many worker processes instead of sequentially '
                         '(default: sequential). Only matters with more than one symbol -- each '
@@ -154,7 +158,7 @@ def _run_one_symbol(symbol: str, args, data: Optional[dict] = None) -> tuple[dic
         exit_on_ts_crossover=args.exit_on_ts_crossover,
     )
 
-    bt = Backtester(data=data, save_trades=not args.no_save, log_to_sheets=False)
+    bt = Backtester(data=data, save_trades=not args.no_save, log_to_sheets=not args.no_sheets)
     results = bt.run(config)
     with pl.Config(tbl_rows=-1, tbl_cols=-1, tbl_width_chars=200):
         print(f"\n=== {symbol} ===")

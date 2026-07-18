@@ -35,7 +35,7 @@ def two_symbol_daily_mtm():
         dir='long', years='2010-2026', quantity=1,
         initial_capital=INITIAL_CAPITAL, leverage=1.0,
         ts_exit_threshold=0.0, ts_entry_threshold=0.5,
-        exit_on_ts_crossover=False, no_save=True,
+        exit_on_ts_crossover=False, no_save=True, no_sheets=True,
     )
     daily_mtm_by_symbol = {}
     for symbol in SYMBOLS:
