@@ -28,12 +28,12 @@ def google_auth():
         key_file_path = os.getenv('GSPREAD_KEY')
         if not key_file_path:
             raise ValueError("GSPREAD_KEY environment variable not set")
-        
+        key_file_path = Path(key_file_path).expanduser()
         # Define the scope
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
         
         # Create credentials
-        credentials = Credentials.from_service_account_file(key_file_path, scopes=scope)
+        credentials = Credentials.from_service_account_file(str(key_file_path), scopes=scope)
         
         # Authorize and return the client
         gc = gspread.authorize(credentials)
