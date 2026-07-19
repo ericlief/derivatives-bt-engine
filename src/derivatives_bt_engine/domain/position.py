@@ -1748,7 +1748,7 @@ class FuturesPosition(BasePosition):
         """
         return round(self.initial_margin * self.quantity / leverage, 2)
 
-    def _update_closing_data(self, underlying_price_history: pl.DataFrame, close_date: date) -> bool:
+    def _update_closing_data(self, underlying_price_history: pl.DataFrame, close_date: date) -> Optional[date]:
         """
         Update the instance with closing price data for the futures position.
 
@@ -1757,20 +1757,43 @@ class FuturesPosition(BasePosition):
             close_date (date): The date at which the position is being closed.
 
         Returns:
-            bool: True if closing data was successfully updated, False otherwise.
+            Optional[date]: the actual date the position closed on if successful, None
+            otherwise. Usually equals `close_date`, but snaps forward to the next
+            available bar if `close_date` itself has no data (see below) -- callers must
+            use the returned date, not the one they passed in, for anything reported
+            downstream (days_held, closed, effective_close_date, etc).
         """
         close_date = self._as_date(close_date)
         match = underlying_price_history.filter(pl.col('ts_event') == close_date)
         if match.height == 0:
-            logger.error(f"No underlying closing price available for {close_date} for futures position.")
-            return False
+            # `close_date` here is usually a natural roll_date, a pure calendar
+            # calculation (Monday before the contract month's third Friday) that
+            # doesn't know this specific instrument's actual trading calendar --
+            # thinly-traded contracts (e.g. BRE/6L) can have real gaps that leave a
+            # computed roll_date with no bar at all. Previously this returned False
+            # outright and the position was never removed from open_positions; since
+            # roll_date is a fixed attribute that never advances, every subsequent day
+            # retried the exact same missing date and failed the exact same way,
+            # forever (or until an unrelated signal/vix gate happened to close it) --
+            # silently turning a same-quarter roll into a months-long stuck position.
+            # Snapping forward to the next available bar keeps the roll happening on
+            # schedule (a day or two late, priced off real data) instead of not
+            # happening at all.
+            after = underlying_price_history.filter(pl.col('ts_event') >= close_date).sort('ts_event')
+            if after.height == 0:
+                logger.error(f"No underlying closing price available on/after {close_date} for futures position.")
+                return None
+            logger.info(f"{self.futures_type}: no bar on {close_date} (computed roll/close date) -- "
+                        f"snapping forward to next available bar {after['ts_event'][0]}")
+            match = after.head(1)
+            close_date = match['ts_event'][0]
 
         if self.fill_price == 'mid':
             self.exit_price = (match['high'][0] + match['low'][0]) / 2
         else:
             self.exit_price = match['close'][0]
 
-        return True
+        return close_date
 
     @staticmethod
     def _as_date(value) -> date:
@@ -1820,9 +1843,11 @@ class FuturesPosition(BasePosition):
         else:
             effective_close_date = self.roll_date if self.roll_date else underlying_price_history['ts_event'].max()
 
-        if not self._update_closing_data(underlying_price_history, effective_close_date):
-            logger.error(f"Skipping futures trade due to missing close data for {self.futures_type} on {effective_close_date}")
+        actual_close_date = self._update_closing_data(underlying_price_history, effective_close_date)
+        if actual_close_date is None:
+            logger.error(f"Skipping futures trade due to missing close data for {self.futures_type} on/after {effective_close_date}")
             return None, None, None
+        effective_close_date = actual_close_date
 
         # For long futures, when closing, the initial margin is released.
         # For short futures, the initial margin is released.

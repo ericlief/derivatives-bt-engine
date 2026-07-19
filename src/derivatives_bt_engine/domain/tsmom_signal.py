@@ -160,10 +160,22 @@ def calculate_trend_strength(contract, w3m=0.4, w1y=0.6, discount=0.5):
         )
     
                  
-    df = df.drop(['open', 'high', 'low', 'log_price', 
+    df = df.drop(['open', 'high', 'low', 'log_price',
                    'volume', 'average', 'w3', 'w1'], strict=False)
 
-    df = df.with_columns(pl.col(pl.Float32, pl.Float64).round(2))
+    # Round only the bounded/display-scale columns (tanh scores, price
+    # averages, drawdown pct) to 2dp. r1d/daily_std/r3m/r1y/hv are return-
+    # scale (typically well under 0.01 for a quiet instrument -- a rates
+    # future like MTN, a quiet FX pair like BRE) and MUST stay full
+    # precision: a blanket round(2) here used to floor them to exactly
+    # 0.0, which propagated downstream into a silently-zeroed hv3m
+    # (Backtester.calculate_futures_mtm_drawdown) and, worse, into
+    # tsmom_backtester._compute_target/live.tsmom_rebalance._compute_signal
+    # treating `daily_std_last == 0.0` as falsy and silently defaulting
+    # risk_scalar to 1.0 (vol-targeting disabled) instead of the
+    # up-scaled size a genuinely low-vol instrument should get.
+    _DISPLAY_SCALE_COLS = ['dd', 'avg3m', 'avg1y', 'ts3m', 'ts1y', 'ts', 'mom', 'signal']
+    df = df.with_columns([pl.col(c).round(2) for c in _DISPLAY_SCALE_COLS if c in df.columns])
     return df
 
 
