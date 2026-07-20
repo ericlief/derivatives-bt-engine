@@ -14,7 +14,7 @@ When writing implementation prompts or new scripts in this project, check what d
 
 WHen running python commands always use `.venv/bin/python`
 
-Always git commit.
+Always git commit. Always git push after committing.
 
 ## Constants and defaults
 

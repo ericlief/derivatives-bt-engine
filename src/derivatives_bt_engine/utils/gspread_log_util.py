@@ -403,6 +403,7 @@ def _format_futures_backtest_result_row(results: dict,
         "final_capital": round(tr['capital'][-1], 2) if has_trades else config.initial_capital,
         "total_pnl": total_pnl_val,
         "ret_yr": round(total_pnl_val / avg_margin / period * 100, 2) if (has_trades and period and avg_margin) else 0.0,
+        "sharpe": round(results['mtm_sharpe'], 2) if results.get('mtm_sharpe') is not None else 'N/A',
         "roi": round(tr['roi'].mean(), 2) if has_trades else 0.0,
         "avg_win": round(tr.filter(pl.col('pnl') > 0)['pnl'].mean() or 0.0, 2) if has_trades else 0.0,
         "max_win": round(tr['pnl'].max(), 2) if has_trades else 0.0,
@@ -469,12 +470,27 @@ def log_futures_to_google_sheets(results: dict,
         try:
             worksheet = spreadsheet.worksheet(worksheet_name)
             logger.info(f"Appending data to existing worksheet {worksheet_name}...")
+
+            # This tab is persistent across runs (see docstring above), so its
+            # header row may predate a field that was later added to
+            # _format_futures_backtest_result_row (e.g. "sharpe") -- appending
+            # by position would silently shift every later column. Align by
+            # header name instead, extending the header row in place for any
+            # new keys so old rows keep their original columns (blank for the
+            # new field) and new rows land under the right header.
+            headers = worksheet.row_values(1)
+            new_keys = [k for k in row.keys() if k not in headers]
+            if new_keys:
+                headers = headers + new_keys
+                worksheet.update('A1', [headers])
+                logger.info(f"Extended {worksheet_name} header row with new column(s): {new_keys}")
         except gspread.exceptions.WorksheetNotFound:
             worksheet = spreadsheet.add_worksheet(title=worksheet_name, rows=1000, cols=len(row))
-            worksheet.append_row(list(row.keys()))
+            headers = list(row.keys())
+            worksheet.append_row(headers)
             logger.info(f"New worksheet {worksheet_name} created successfully!")
 
-        worksheet.append_row(list(row.values()))
+        worksheet.append_row([row.get(h, '') for h in headers])
         logger.info(f"Results logged to Google Sheets: {param_str}")
 
     except Exception as e:

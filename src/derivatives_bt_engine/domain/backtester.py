@@ -835,6 +835,7 @@ class Backtester:
         })
 
         results['daily_mtm'] = daily_mtm
+        results['mtm_sharpe'] = sharpe
         results['drawdown_analysis'] = {
             'max_drawdown': max_dd_usd,
             'peak_capital': peak_capital,
