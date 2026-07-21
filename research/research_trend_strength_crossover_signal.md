@@ -463,13 +463,16 @@ reusing only pure functions (`calculate_trend_strength`, `load_portfolio_data`,
 Same 14-symbol universe, 2023-01-01 to 2026-06-18 (2018 warm-up start for
 signal history):
 
-| `momentum_discount` | ann. vol (raw) | Sharpe | max DD | ann. return @ 10% vol (rescaled) | total fees |
+| `momentum_discount` | ann. ret | ann. vol | Sharpe | max DD | total fees |
 |---|---|---|---|---|---|
-| 0.5 (current default) | 3.9% | **0.51** | -4.5% | 5.1% | $2,101 |
-| 1.0 (discount disabled) | 4.1% | **0.46** | -5.7% | 4.6% | $2,352 |
+| 0.5 (current default) | 2.0% | 3.9% | **0.51** | -4.5% | $2,101 |
+| 1.0 (discount disabled) | 1.9% | 4.1% | **0.46** | -5.7% | $2,352 |
 
-(Table updated after two corrections flagged directly by the user — see
-below; script at `scripts/tsmom_binary_vol_parity_backtest.py`.)
+All figures at actual (unscaled) portfolio scale — an earlier version of
+this table also reported a return rescaled to a 10% vol target, dropped
+after the user flagged it as inconsistent with the un-rescaled fee figure
+sitting next to it (see correction #2 below); script at
+`scripts/tsmom_binary_vol_parity_backtest.py`.
 
 Realized vol (~4%) landed well under the paper's 10% because this
 project's 14-symbol universe has less cross-asset diversification than
@@ -488,7 +491,7 @@ regime-based de-risking, not enough to justify strong claims about the
 flat-0.5-discount vs. a fully re-estimated `a_Co`/`a_Re` mattering much at
 this sample size.
 
-**Two corrections made to the first version of this test, both flagged
+**Three corrections made to the first version of this test, all flagged
 directly by the user rather than caught in review:**
 
 1. **Missing transaction costs.** The first version charged zero
@@ -506,25 +509,51 @@ directly by the user rather than caught in review:**
    here sizes fairly small contract counts — this would matter far more at
    larger size or with a tighter rebalance cadence.
 
-2. **A deeper, pre-existing, shared data-layer issue — not fixed, flagged
+2. **Vol-rescaling the return figure without rescaling fees.** The
+   version right after fix #1 reported a return figure post-hoc rescaled
+   to 10% vol (`ann_ret × target_vol/ann_vol`, matching Figure 4's stated
+   methodology), printed alongside the actual, un-rescaled `total_fees`
+   dollar figure. That pairing is only consistent under an idealized
+   assumption — that fees scale exactly linearly with position size, same
+   as gross P&L, so a "what if we'd traded ~2.5x bigger" return figure
+   should sit next to a "what fees would have been at that size" number,
+   not the actual smaller-scale fee total. Integer contract-count rounding
+   also breaks strict linearity in practice. Removed the rescaled-return
+   metric entirely — Sharpe alone is the valid scale-invariant comparison
+   and needs no such rescale; the table above now reports raw ann. return/
+   vol/fees together, all at the same actual scale.
+
+3. **A deeper, pre-existing, shared data-layer bug — not fixed, flagged
    separately.** Checking whether "the naked backtester" handles rolling
    differently surfaced that it doesn't avoid this the way it might seem
-   to: `FuturesDataLoader.daily` (`_CONTINUOUS_FRONT_MONTH_SQL`, "nearest
-   not-yet-expired contract per date") is the *same* continuous price
-   series feeding `naked_futures.py`, `tsmom_backtester.py`, and this
-   script alike — none of them hold a single physical contract's own price
-   series through a position's life. That series is not back-adjusted, and
-   near expiration it can flip-flop between two different contracts on
-   adjacent dates whenever the about-to-expire contract has a thin/no-
-   volume day. Confirmed directly against ZN, March 2023:
-   `2023-03-19` prices off the **Jun'23** contract (115.19), `2023-03-20`
-   drops back to the **Mar'23** contract (114.42), `2023-03-22` jumps
-   forward to **Jun'23** again (115.39) — a pure contract-switch artifact,
-   not a real price move, and any held position across any of these three
-   backtest paths gets marked-to-market against it. This affects all three
-   paths equally and is a pre-existing bug in shared infrastructure, not
-   something this test introduced — left unfixed here, flagged as a
-   separate, higher-priority investigation.
+   to: `FuturesDataLoader.daily` (`_CONTINUOUS_FRONT_MONTH_SQL`) is the
+   *same* continuous price series feeding `naked_futures.py`,
+   `tsmom_backtester.py`, and this script alike — none of them hold a
+   single physical contract's own price series through a position's life.
+   Its query picks, independently for **every date**, whichever
+   not-yet-expired contract has the soonest expiration *among those with a
+   printed bar that day* (`row_number() OVER (PARTITION BY ts_event ORDER
+   BY expiration ASC)`) — with no memory of which contract was "front"
+   yesterday. Confirmed directly against ZN, March 2023 (row-level query
+   against every contract, not just the picked one): the Mar'23 contract
+   (instrument_id 397730) traded a genuinely thin few hundred contracts/day
+   even at its most active, had **no printed bar at all** on 2023-03-19 (so
+   that day's price was silently read from the already-far-more-liquid
+   Jun'23 contract instead, 1.6-2.5M contracts/day), printed one more trade
+   on 2023-03-20 (ranking flips back to Mar'23, a lower price level), then
+   went quiet for good from 2023-03-21 onward (ranking settles on Jun'23).
+   The result — `2023-03-19` prices off Jun'23 (115.19), `2023-03-20` drops
+   back to Mar'23 (114.42), `2023-03-22` jumps forward to Jun'23 again
+   (115.39) — is a pure contract-switch artifact, not a real price move,
+   and any held position across all three backtest paths gets marked-to-
+   market against it. Same root phenomenon as the BRE/6L stuck-roll bug
+   fixed earlier this project's history (a soon-to-expire contract going
+   quiet before its own listed expiration), surfacing as a different
+   defect here: there, a position got stuck waiting for an exact-date match
+   that never came; here, the continuous price series itself silently
+   swaps which contract it's quoting, day to day. Affects all three
+   backtest paths equally — worth its own separate investigation/fix, not
+   patched here.
 
 ## 7. Price-space vs. return-space scaling, and correlation-only signal weighting
 

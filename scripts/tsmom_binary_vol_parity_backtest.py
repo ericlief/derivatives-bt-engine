@@ -24,11 +24,19 @@ literal sizing scheme instead of trying to patch it.
 Sharpe is invariant to FLAT_PER_ASSET_VOL_TARGET_USD's absolute level (a
 uniform leverage rescale) -- the specific value only matters for realistic
 contract-count rounding, not for the Sharpe comparison across
---momentum-discounts. Reported returns are additionally post-hoc rescaled
-to TARGET_PORTFOLIO_VOL, matching Figure 4's own stated methodology in
-Goulding/Harvey/Mazzoleni ("returns scaled to achieve 10% annualized
-monthly volatility") -- again, this only restates the return/vol figures,
-it does not change Sharpe.
+--momentum-discounts. An earlier version also reported a return figure
+post-hoc rescaled to a 10% vol target (matching Figure 4's own stated
+methodology in Goulding/Harvey/Mazzoleni, "returns scaled to achieve 10%
+annualized monthly volatility") -- this was REMOVED after it was flagged
+as misleading: the rescale multiplied only the return figure, while
+total_fees (reported alongside it) stayed at its actual, un-rescaled
+dollar value. That's only truly consistent under an idealized assumption
+(fees scale exactly linearly with position size, same as gross P&L) that
+integer contract-count rounding breaks in practice. Sharpe alone is the
+valid, scale-invariant comparison and needs no such rescale/asterisk --
+report raw ann_ret/ann_vol/fees together instead, all at the same actual
+scale, or explicitly rescale fees by the same factor if a vol-normalized
+return figure is ever needed again.
 
 Transaction costs: get_spec(symbol)['commission'] is charged per contract
 per side on every monthly resize (abs(new_target - held)), plus a
@@ -42,18 +50,29 @@ backtest; this was flagged directly and fixed.
 
 Known limitation NOT fixed here, and not unique to this script: the
 continuous front-month price series this project uses everywhere
-(FuturesDataLoader.daily / futures_dataloader._CONTINUOUS_FRONT_MONTH_SQL,
-"nearest not-yet-expired contract per date") is not back-adjusted, and
-near expiration it can flip-flop between two different contracts on
-adjacent dates when the about-to-expire contract has a thin/no-volume day
-(confirmed directly against ZN, March 2023: 2023-03-19 prices off the
-Jun'23 contract, 2023-03-20 drops back to the Mar'23 contract, 2023-03-22
-jumps forward to Jun'23 again -- a pure contract-switch artifact, not a
-real price move). Both naked_futures.py's Backtester/FuturesPosition path
-and tsmom_backtester.py's own multi-symbol path read from this exact same
-series, so this is a pre-existing, shared data-layer issue affecting all
-three backtest paths equally, not something introduced by this script's
-simplification -- worth its own separate investigation/fix, not patched
+(FuturesDataLoader.daily / futures_dataloader._CONTINUOUS_FRONT_MONTH_SQL)
+picks, independently for EVERY date, whichever not-yet-expired contract
+has the soonest expiration AMONG THOSE WITH A PRINTED BAR THAT DAY
+(`row_number() OVER (PARTITION BY ts_event ORDER BY expiration ASC)`).
+This has no memory of which contract was "front" yesterday -- it's
+recomputed from scratch each day. Confirmed directly against ZN, March
+2023: the Mar'23 contract (instrument_id 397730) trades a genuinely thin
+few hundred contracts/day even at its most active, has NO printed bar at
+all on 2023-03-19 (so that day's front-month price is silently read from
+Jun'23 instead, already the real liquid contract by volume), reappears
+with one more trade on 2023-03-20 (so the ranking flips BACK to Mar'23,
+a lower price level), then goes quiet for good from 2023-03-21 onward
+(ranking settles on Jun'23). The result is a pure contract-switch
+artifact -- not a real price move -- read by every downstream consumer as
+if it were one instrument's continuous price path. Same root phenomenon
+(thin trading right before a contract's own expiration) as the BRE/6L
+stuck-roll bug fixed earlier this project's history, surfacing as a
+different defect: there, a position got stuck waiting for an exact-date
+match that never came; here, the continuous *price series itself*
+silently swaps which contract it's quoting. Both naked_futures.py's
+Backtester/FuturesPosition path and tsmom_backtester.py's own multi-symbol
+path read from this exact same series, so this affects all three backtest
+paths equally -- worth its own separate investigation/fix, not patched
 here.
 
 Run:
@@ -79,14 +98,12 @@ DEFAULT_YEARS = '2023-2026'
 DEFAULT_WARMUP_START = date(2018, 1, 1)   # signal history buffer before --years' start
 DEFAULT_INITIAL_CAPITAL = 1_000_000.0
 DEFAULT_FLAT_PER_ASSET_VOL_TARGET_USD = 10_000.0  # 1% of default capital, same for every asset -- no clustering
-DEFAULT_TARGET_PORTFOLIO_VOL = 0.10
 DEFAULT_MOMENTUM_DISCOUNTS = [0.5, 1.0]
 
 
 def run(symbols: list[str], start: date, end: date, momentum_discount: float,
         initial_capital: float = DEFAULT_INITIAL_CAPITAL,
         flat_per_asset_vol_target_usd: float = DEFAULT_FLAT_PER_ASSET_VOL_TARGET_USD,
-        target_portfolio_vol: float = DEFAULT_TARGET_PORTFOLIO_VOL,
         warmup_start: date = DEFAULT_WARMUP_START) -> dict:
     price_data, _ = load_portfolio_data(symbols)
 
@@ -178,15 +195,13 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
     running_max = stats['capital'].cum_max()
     dd_pct = ((stats['capital'] - running_max) / running_max * 100).min()
 
-    rescale = target_portfolio_vol / ann_vol if ann_vol else None
     return {
         'discount': momentum_discount,
         'n_days': stats.height,
-        'raw_ann_ret_pct': round(ann_ret * 100, 2),
-        'raw_ann_vol_pct': round(ann_vol * 100, 2),
+        'ann_ret_pct': round(ann_ret * 100, 2),
+        'ann_vol_pct': round(ann_vol * 100, 2),
         'sharpe': round(sharpe, 2) if sharpe else None,
         'max_dd_pct': round(dd_pct, 2),
-        f'ann_ret_at_{target_portfolio_vol * 100:.0f}pct_vol': round(ann_ret * rescale * 100, 2) if rescale else None,
         'total_fees': round(total_fees, 2),
     }
 
@@ -201,8 +216,6 @@ def parse_args():
     p.add_argument('--initial-capital', type=float, default=DEFAULT_INITIAL_CAPITAL)
     p.add_argument('--flat-vol-target', type=float, default=DEFAULT_FLAT_PER_ASSET_VOL_TARGET_USD,
                     help='Flat annualized $ vol target, same for every asset -- no clustering (default: %(default)s)')
-    p.add_argument('--target-portfolio-vol', type=float, default=DEFAULT_TARGET_PORTFOLIO_VOL,
-                    help='Post-hoc rescale target for the reported return figure only, does not affect Sharpe (default: %(default)s)')
     return p.parse_args()
 
 
@@ -216,8 +229,7 @@ def main():
     for discount in discounts:
         result = run(symbols, start, end, discount,
                       initial_capital=args.initial_capital,
-                      flat_per_asset_vol_target_usd=args.flat_vol_target,
-                      target_portfolio_vol=args.target_portfolio_vol)
+                      flat_per_asset_vol_target_usd=args.flat_vol_target)
         print(result)
 
 
