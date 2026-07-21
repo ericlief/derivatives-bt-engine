@@ -203,3 +203,255 @@ reliable.
   momentum" signal in the peer-reviewed TSMOM literature specifically — any
   such framing found online was blog/practitioner-level commentary, not
   verified research.
+
+---
+
+# Part 2: Combining TSMOM/MACROSS when sources disagree, front-end smoothing, regime-disagreement mechanism, price- vs return-space scaling
+
+Follow-up research question, prompted by Levine & Pedersen (2016), "Which
+Trend Is Your Friend?" (Table 1/Table 2, the TSMOM/MACROSS equivalence and
+cross-regression tables) and a comparison against a second source (a
+systematic-trading text using price-space dollar-vol scaling rather than
+return-space). Four sub-questions: (1) how to empirically decide a
+combination method when sources disagree, (2) whether the fast end of a
+return-based TSMOM signal should be smoothed relative to a MACROSS
+equivalent, (3) what "regime disagreement" (this codebase's
+`TrendRegime.CORRECTION`/`REBOUND`) should actually do in practice — discount
+or reweight, and at what cadence, (4) price-space vs. return-space vol
+normalization, and correlation-only (not performance-based) signal
+weighting.
+
+## 4. Testing which TSMOM/MACROSS combination is "right"
+
+Levine & Pedersen's equivalence proof is a proof about the *general linear-
+filter class*, not a claim that any specific MACROSS speed and any specific
+TSMOM speed are numerically interchangeable. Their own Table 2 (regressing
+each MACROSS factor on the three TSMOM factors and vice versa) makes this
+precise: R² ranges 81-86%, not 100% — i.e., even in their own dataset, a
+specific MACROSS/TSMOM pair share the large majority but not all of their
+variance. The 14-19% residual is exactly where "which recipe is right"
+disagreement across sources lives — sources aren't contradicting each other
+in error, they're parameterizing an approximate (not exact) equivalence
+differently.
+
+**Practical test, using the same device Levine & Pedersen use on themselves:**
+regress candidate signal variants against each other directly on this
+project's own data and read the R². Concretely: regress `ts3m`/`ts1y`
+(`tsmom_signal.py`'s current 63d/252d t-stats) against an EWMA-crossover
+built at equivalent speeds. High R² (>~80%, in the paper's range) means
+they're functionally the same rule for this instrument set — blending both
+adds cost, not diversification. Low R² means real incremental information —
+a blend is justified. This also directly answers the arXiv 2510.23150
+redundancy caution already flagged in Part 1: don't take `w3=0.4`/`w1=0.6`
+on faith from any single paper's parameterization — check the empirical
+`ts3m`/`ts1y` correlation in this dataset first, the same diagnostic
+Levine & Pedersen's Table 2 exists to compute.
+
+## 5. Front-end smoothing: point-to-point log-return vs. MA/EWMA crossover noise
+
+Yes — and it's structural, not incidental. `ts3m` is built from `r3m =
+log_price.diff(63)` (`tsmom_signal.py:106`): a pure two-point difference
+between today's close and the close 63 days ago, blind to every day in
+between. A single-day glitch or thin-volume gap on either endpoint (exactly
+the class of day the futures-roll bug fix earlier this session dealt with —
+BRE/6L's zero-trade days) moves the whole signal by that spike's full size,
+undamortized. A MACROSS/EWMA crossover is a weighted average of *many* days'
+prices, so the same single-day spike is diluted by roughly `1/window_length`
+instead of landing at full weight. This is precisely what Levine &
+Pedersen's "trend signature" plots (Part 1, §1) show structurally — pure
+lookback-return signals place weight sharply at the window boundary; MA
+crossovers spread weight smoothly across all lags — and matches Zakamulin's
+finding (Part 1, §1) that MA/MOM correlation is highest exactly when a trend
+is unambiguous and lowest in weak/transitional regimes, i.e. exactly where
+endpoint noise in a 2-point signal would dominate real signal. Baz et al.
+(2015)'s standard vol-scaled MACD construction (Part 1, §1) is built from
+`EMA(fast) − EMA(slow)`, not a raw lookback-return difference — the
+standard CTA answer to "should the front end be smoothed" is yes, in
+construction, not as a post-hoc filter.
+
+**Where this applies in this codebase:** the fast end (`ts3m`, 63d) is the
+one exposed to this, not the slow end (`ts1y`, 252d) — a single glitch day
+is proportionally much smaller against a 252-day move, and 252d realized vol
+is already smoother by construction. The file's own docstring (`tsmom_signal.py:14-16`)
+already treats a 1-month lookback as too noisy to trust and 3-month as "the
+minimum reliable fast signal at this cadence" — that responsiveness floor is
+the reason `ts3m` exists at all, so smoothing the *output* score (e.g.
+rolling-averaging the finished `ts3m` t-stat) would just add lag on top of
+an already-deliberately-fast signal and fight the reason it's there.
+**If smoothing is pursued, do it at construction** — replace the
+`log_price.diff(63)` numerator with an EMA-of-log-price-based difference
+(literalizing `ts3m` into a MACROSS-equivalent at that speed) — not by
+smoothing the finished score after the fact. No structural or literature
+reason was found to smooth the slow end (`ts1y`) further; it isn't the noisy
+one.
+
+## 6. Regime disagreement in practice: reweight, not a flat discount
+
+**Goulding, Harvey & Mazzoleni (2023), "Breaking Bad Trends,"** *Financial
+Analysts Journal* 80(1), 84-98 ([Duke PDF](https://people.duke.edu/~charvey/Research/Published_Papers/P167_Breaking_bad_trends.pdf),
+full text obtained and read directly). This is almost certainly the direct
+source of this codebase's `TrendRegime` framework — their four-state
+partition, definitions, and even the "61%/55% revert/continue" figures
+already in `classify_regime`'s docstring line up exactly:
+
+> Bull if slow ≥0 and fast ≥0; Correction if slow ≥0 and fast <0; Bear if
+> slow <0 and fast <0; Rebound if slow <0 and fast ≥0. (eq. 4)
+
+**Their mechanism is not a flat discount on the blended signal** — which is
+what `compute_position_scalar`'s `momentum_discount` currently does
+(`ts * 0.5` whenever `regime ∈ {CORRECTION, REBOUND}`, one constant for
+both states). Instead they dynamically **reweight fast vs. slow** (eq. 7):
+
+```
+r_DYN =  r_slow                              if Bull
+      = -r_slow                              if Bear
+      = (1 − a_Co)·r_slow + a_Co·r_fast       if Correction
+      = (1 − a_Re)·r_slow + a_Re·r_fast       if Rebound
+```
+
+`a_Co` and `a_Re` are **not fixed at 0.5 or at each other** — each is
+estimated ex ante, per asset, from that asset's own historical returns in
+the months *following* a correction or rebound specifically. If returns
+after a correction tend to keep following the slow trend (the dip mean-
+reverts), `a_Co < 0.5` (tilt away from fast — trust slow more). If returns
+after a rebound tend to follow the new (fast) direction, `a_Re > 0.5` (tilt
+toward fast). A noisy/thin estimate shrinks toward the uninformed 0.5 — the
+same shrinkage instinct the current flat multiplier has, but applied
+per-state and per-asset rather than as one hardcoded global constant for
+both correction and rebound alike.
+
+**Cadence** — directly answers "immediately or monthly": their framework is
+monthly throughout (monthly signals, monthly rebalance, monthly turning-
+point observation) — a periodic reweight at the same cadence as the signal
+itself, evaluated at the start of the state, held until the next
+observation. **Nothing in this literature supports an immediate full exit**
+on a regime flip — the strategy never goes flat in Correction/Rebound, it
+reweights between the two signals it already has.
+
+**Quantitative payoff** (their Figure 4, read directly from the paper): in
+the 2009-2019 post-GFC expansion — the exact period where turning-point
+frequency ran above the 33-year median in 9 of 11 years, and static
+12-month trend-following's performance visibly degraded — static 12-month
+trend returned only **+0.3% annualized in months following turning points**
+(essentially noise) vs. the dynamic (reweighted) strategy's **+1.7%** in
+those same months, at matched 10% target vol. That swing is effectively the
+entire gap between the static portfolio's degraded period-average (0.3%
+overall, 2009-2019) and the dynamic portfolio's 3.4% — i.e. the benefit of
+reweighting-over-discounting is concentrated exactly in the disagreement
+months, which is the mechanism working as designed, not a diffuse
+improvement.
+
+**Comparison to what's implemented now:** `momentum_discount` in
+`compute_position_scalar` (`tsmom_signal.py:299-346`) is a coarser version
+of the same underlying insight (de-risk during fast/slow disagreement) but
+differs in two ways the paper's results suggest matter: (a) one fixed
+constant vs. two separately-calibrated, empirically-estimated weights — the
+paper's own asymmetry (`a_Co` typically <0.5, `a_Re` typically >0.5) means
+corrections and rebounds are *not* interchangeable states and arguably
+shouldn't get the same treatment; (b) a flat multiplier on the already-
+blended `ts` score vs. a re-blend of the `ts3m`/`ts1y` components
+themselves before combining. If this is worth pursuing further: estimate
+`a_Co`/`a_Re` empirically (pooled across the futures universe, or per-
+instrument if there's enough history) from realized forward returns
+following each state, with shrinkage to 0.5 under a thin sample — a
+concrete, literature-backed upgrade path, not merely "needs more research."
+
+## 7. Price-space vs. return-space scaling, and correlation-only signal weighting
+
+**Robert Carver's EWMAC construction** (*Systematic Trading*, 2015 — the
+standard open-source reference implementation, [`ewmac.py`](https://github.com/robcarver17/systematictradingexamples/blob/master/ewmac.py),
+matches the user's second source): `raw = EMA_fast(price) − EMA_slow(price)`,
+normalized by `ewmstd(price.diff())` — the exponentially-weighted standard
+deviation of raw price *changes* (point/dollar terms), not a percentage or
+log-return volatility. This is the same construction the user described
+(`s = s / (daily_vol * close_price)`) in different notation — `daily_vol *
+close_price` is a first-order approximation of the same price-change std,
+since `d(log_price) ≈ pct_return ≈ price_diff / price` for small moves.
+
+**Compared to what's implemented here:** `ts3m`/`ts1y` are built entirely in
+*return space* — `log_price.diff(N) / (daily_std_of_log_returns *
+sqrt(N))`, a dimensionless Sharpe-style t-stat, not a price-level measure.
+For a well-behaved instrument the two converge (both representations get
+converted to $-risk at the position-sizing stage anyway — see
+`compute_position_scalar`'s `daily_std_last * sqrt(252)` and
+`apply_cluster_risk_cap`'s `hv`-based `position_risk`, both of which re-
+introduce price/multiplier terms downstream regardless of which space the
+raw signal itself was computed in). Where they can diverge: instruments
+with large discrete price jumps or fat-tailed return behavior — quarterly-
+roll futures being exactly this project's domain, and exactly the class of
+edge case the BRE/6L roll-bug fix earlier this session ran into — can make
+a log-return-space vol estimate and a raw price-change-space vol estimate
+disagree around a roll. Return-space is also the more directly comparable
+choice across a diversified futures book with wildly different point
+values (a bond future's ~$100k full point vs. a metals micro's ~$10/point)
+without Carver's separate `block_value` normalization layer doing that work.
+No strong reason to switch given the current architecture already handles
+cross-instrument normalization this way — worth flagging as a deliberate,
+defensible architectural choice rather than an oversight if it comes up in
+review, not a bug to fix.
+
+**Correlation-only (not performance-based) weighting is a real, named
+method** — Carver's "handcrafting" (*Systematic Trading*, expanded in
+*Smart Portfolios*, 2017; [qoppac.blogspot.com summary](https://qoppac.blogspot.com/2018/12/portfolio-construction-through_7.html)):
+group signals/assets into clusters by correlation, weight equally within a
+correlated cluster, then combine cluster-level weights — deliberately
+**not** optimized against each rule's own backtested Sharpe, specifically to
+avoid overfitting portfolio weights to noisy historical performance (the
+same overfitting risk Carver separately documents when fitting EWMAC
+forecast scalars — more-tuned rules generalize worse out of sample).
+Contrasts with `pysystemtrade`'s other supported method (bootstrapped
+Sharpe-optimization over pooled weekly rule returns); Carver treats
+handcrafting as the more robust default and cites an empirical result where
+handcrafted (in-sample, correlation-only) weights slightly *beat*
+rolling out-of-sample bootstrap-optimized weights (Sharpe 0.54 vs. 0.52)
+despite using no performance data at all.
+
+**Relevance to this project's `w3=0.4`/`w1=0.6`:** currently a fixed,
+judgment-set pair, derived from neither method. A handcrafting-style check
+is the same empirical correlation test already recommended in §4 — compute
+`ts3m`/`ts1y`'s realized correlation in this dataset and check whether
+0.4/0.6 is defensible as roughly-equal-adjusted-for-correlation, or whether
+it's silently overweighting one horizon beyond what the observed
+correlation structure would justify.
+
+## Synthesis / recommendation (Part 2)
+
+- The TSMOM/MACROSS "disagreement" across sources isn't an error to
+  resolve by picking the more authoritative paper — it's the expected shape
+  of an *approximate* equivalence. Settle any specific combination choice
+  empirically, via direct regression/correlation on this project's own
+  instruments (§4), the same diagnostic Levine & Pedersen use on themselves.
+- Smooth the fast end (`ts3m`) at construction (EMA-based numerator) if
+  pursued, not the slow end, and not by post-hoc filtering the finished
+  score (§5).
+- For regime disagreement, the literature-backed upgrade from the current
+  flat `momentum_discount=0.5` is an empirically-estimated, asymmetric
+  reweighting between `ts3m` and `ts1y` (separate `a_Co`/`a_Re`), evaluated
+  at the same (not necessarily immediate) cadence as the signal, with
+  shrinkage to no-op under thin samples — not an immediate exit (§6).
+- Price-space vs. return-space vol normalization is a legitimate
+  architectural fork, not a bug; the current return-space choice is
+  defensible for a cross-instrument futures book and converges with the
+  price-space alternative downstream at the position-sizing stage (§7).
+- Correlation-only ("handcrafted") weighting is real, literature-backed,
+  and directly testable here with the same `ts3m`/`ts1y` correlation
+  check as §4/§6 — worth running before treating `w3`/`w1` as settled.
+
+## Caveats on source verification (Part 2)
+
+- Goulding, Harvey & Mazzoleni (2023) was fetched and read in full from the
+  Duke-hosted PDF — eq. (4)/(7), Figure 4's numbers, and the 2009-2019
+  period figures above are read directly from the paper, not a secondary
+  summary.
+- Carver's exact EWMAC normalization was verified directly against the
+  `ewmac.py` reference source code (not just prose description) —
+  `ewmstd(price.diff())`, confirmed price-change/point-space, not percent.
+- The handcrafting-vs-bootstrap Sharpe comparison (0.54 vs. 0.52) and the
+  diversification-multiplier formula came from qoppac.blogspot.com
+  secondary summaries of *Systematic Trading*/*Smart Portfolios*, not the
+  books' primary text directly — treat as well-corroborated but secondary.
+- The claim that `TrendRegime`'s Bull/Correction/Bear/Rebound framework and
+  its docstring's 61%/55% figures trace to Goulding/Harvey/Mazzoleni is
+  inferred from the exact match in definitions and figures, not confirmed
+  by this codebase's own history/commit messages — flagged as a strong
+  structural inference, not a verified citation trail.
