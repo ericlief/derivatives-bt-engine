@@ -392,6 +392,23 @@ reweighting-over-discounting is concentrated exactly in the disagreement
 months, which is the mechanism working as designed, not a diffuse
 improvement.
 
+**Caveat — the relative outperformance is real but the absolute level is
+weak, and that matters.** Table E.1, Panel C (their multi-asset portfolio,
+Post-GFC 2009-2022, *unscaled* — i.e. not renormalized to 10% target vol
+the way Figure 4's numbers are) reports Dynamic Trend at **1.2% annualized
+excess return, 5.5% annualized vol, Sharpe 0.22** — beating static
+12-month's 0.4%/6.3%/0.06, but both are weak in absolute terms (every
+strategy in that panel, static or dynamic, is under 0.35 Sharpe). "Dynamic
+beats static by 2-4x" is a true statement about relative ranking within a
+period where trend-following broadly struggled — it is not, by itself,
+evidence that the reweighting mechanism produces a strategy worth trading.
+A refinement that turns a failing strategy into a slightly-less-failing one
+is a weaker result than the Figure 4 framing (vol-normalized, decomposed
+into bull/bear vs. turning-point months) makes it look. Before adopting the
+`a_Co`/`a_Re` reweighting on the strength of this paper alone, this should
+be tested directly against this project's own recent data — see the
+2023-2026 backtest discussion below.
+
 **Comparison to what's implemented now:** `momentum_discount` in
 `compute_position_scalar` (`tsmom_signal.py:299-346`) is a coarser version
 of the same underlying insight (de-risk during fast/slow disagreement) but
@@ -406,6 +423,67 @@ themselves before combining. If this is worth pursuing further: estimate
 instrument if there's enough history) from realized forward returns
 following each state, with shrinkage to 0.5 under a thin sample — a
 concrete, literature-backed upgrade path, not merely "needs more research."
+
+**Empirical test on this project's own data, 2023-2026.** The obvious next
+step (per the caveat above) is testing the discount mechanism directly,
+not leaning on the paper's numbers. First attempt used the existing
+`tsmom-bt` CLI (`tsmom_backtester.py`) over the full live instrument
+universe (`ES, NQ, CL, GC, SI, ZN, ZT, ZL, ZC, ZS, ZW, JPY, BRE, 6M` —
+`NKD` excluded, confirmed no data in the local db) and was **discarded as
+uninformative**: realized annualized vol came out at 82-90% against a 15%
+target — a >5x overshoot. Root cause: `tsmom_backtester.py` is explicitly
+documented as sizing each symbol independently against its own
+`vol_target`/`max_notional`/`max_contracts`, with **no cross-instrument
+risk cap** — unlike the live path (`live/tsmom_rebalance.py`), which runs
+every position through `compute_desired_risk_budget`/
+`apply_cluster_risk_cap`. With 14 correlated symbols each independently
+allowed up to their own ceiling, nothing stops them all leaning the same
+way at once and stacking leverage well past any stated target. This is a
+real gap between the backtest path and the live path, not just a
+parameter-tuning issue — worth fixing in `tsmom_backtester.py` independent
+of this research question if the CLI is meant to be a faithful stand-in
+for live sizing.
+
+Given that, the test was rebuilt from scratch as a standalone script,
+deliberately bypassing all of `tsmom_backtester.py`'s sizing machinery
+(`risk_scalar` clamp, cluster cap, `max_notional`/`max_contracts`) in favor
+of Levine & Pedersen's own literal methodology (Part 1 intro, Table 1):
+binary `sign(signal)` direction (not magnitude-scaled), a **flat, equal,
+per-asset annualized-$-vol target — no cluster/bucket hierarchy at
+all** (confirmed from their own text: every asset gets the same 0.65% vol
+target via an EWMA vol estimate; the ~10% portfolio-level figure they
+report is what emerges from aggregating many such positions, not a
+deliberate hierarchical split — that hierarchical equal-weight-by-cluster
+scheme belongs to the *different* Goulding/Harvey/Mazzoleni multi-asset
+construction, not to this paper). Monthly rebalance, same cadence as
+`tsmom_backtester.py`. Positions sized as
+`contracts = round(direction · discount · flat_target_usd / (close · multiplier · daily_std · sqrt(252)))`,
+reusing only pure functions (`calculate_trend_strength`, `load_portfolio_data`,
+`_month_end_dates`) — no other position-sizing code from this project.
+Same 14-symbol universe, 2023-01-01 to 2026-06-18 (2018 warm-up start for
+signal history):
+
+| `momentum_discount` | ann. vol (raw) | Sharpe | max DD | ann. return @ 10% vol (rescaled) |
+|---|---|---|---|---|
+| 0.5 (current default) | 3.9% | **0.52** | -4.5% | 5.2% |
+| 1.0 (discount disabled) | 4.1% | **0.47** | -5.7% | 4.7% |
+
+Realized vol (~4%) landed well under the paper's 10% because this
+project's 14-symbol universe has less cross-asset diversification than
+Levine & Pedersen's 58 assets at the same flat per-asset target — expected,
+and irrelevant to the Sharpe comparison (Sharpe is invariant to a uniform
+leverage rescale). The discount does help at the margin here — Sharpe
+0.52 vs. 0.47, drawdown -4.5% vs. -5.7% — in the same *direction* the
+literature predicts, but the **effect size is small and, over only ~4.3
+years/1,079 days, not distinguishable from noise** (a Sharpe-difference
+this size has no claim to statistical significance at this sample length).
+Both absolute Sharpes (~0.5) are also modest, echoing the same point as
+the Table E.1 caveat above — this recent period doesn't show a strong edge
+either way, discount or no discount. This is a directionally-supportive,
+not confirmatory, result: enough to justify keeping some form of
+regime-based de-risking, not enough to justify strong claims about the
+flat-0.5-discount vs. a fully re-estimated `a_Co`/`a_Re` mattering much at
+this sample size.
 
 ## 7. Price-space vs. return-space scaling, and correlation-only signal weighting
 
@@ -479,7 +557,16 @@ correlation structure would justify.
   flat `momentum_discount=0.5` is an empirically-estimated, asymmetric
   reweighting between `ts3m` and `ts1y` (separate `a_Co`/`a_Re`), evaluated
   at the same (not necessarily immediate) cadence as the signal, with
-  shrinkage to no-op under thin samples — not an immediate exit (§6).
+  shrinkage to no-op under thin samples — not an immediate exit (§6). A
+  direct 2023-2026 test on this project's own 14-symbol universe (§6,
+  stripped-down binary-signal/flat-vol-parity methodology) found the
+  current flat discount does help at the margin (Sharpe 0.52 vs. 0.47,
+  same direction the literature predicts) but the effect isn't
+  distinguishable from noise at only ~4.3 years of data — directionally
+  supportive, not confirmatory. Both the paper's own Table E.1 numbers and
+  this project's own test show a fairly weak absolute edge in this recent
+  period regardless of which discount scheme is used — that's a separate,
+  more important caveat than which reweighting scheme wins.
 - Price-space vs. return-space vol normalization is a legitimate
   architectural fork, not a bug; the current return-space choice is
   defensible for a cross-instrument futures book and converges with the
