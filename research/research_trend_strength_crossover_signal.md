@@ -463,17 +463,20 @@ reusing only pure functions (`calculate_trend_strength`, `load_portfolio_data`,
 Same 14-symbol universe, 2023-01-01 to 2026-06-18 (2018 warm-up start for
 signal history):
 
-| `momentum_discount` | ann. vol (raw) | Sharpe | max DD | ann. return @ 10% vol (rescaled) |
-|---|---|---|---|---|
-| 0.5 (current default) | 3.9% | **0.52** | -4.5% | 5.2% |
-| 1.0 (discount disabled) | 4.1% | **0.47** | -5.7% | 4.7% |
+| `momentum_discount` | ann. vol (raw) | Sharpe | max DD | ann. return @ 10% vol (rescaled) | total fees |
+|---|---|---|---|---|---|
+| 0.5 (current default) | 3.9% | **0.51** | -4.5% | 5.1% | $2,101 |
+| 1.0 (discount disabled) | 4.1% | **0.46** | -5.7% | 4.6% | $2,352 |
+
+(Table updated after two corrections flagged directly by the user — see
+below; script at `scripts/tsmom_binary_vol_parity_backtest.py`.)
 
 Realized vol (~4%) landed well under the paper's 10% because this
 project's 14-symbol universe has less cross-asset diversification than
 Levine & Pedersen's 58 assets at the same flat per-asset target — expected,
 and irrelevant to the Sharpe comparison (Sharpe is invariant to a uniform
 leverage rescale). The discount does help at the margin here — Sharpe
-0.52 vs. 0.47, drawdown -4.5% vs. -5.7% — in the same *direction* the
+0.51 vs. 0.46, drawdown -4.5% vs. -5.7% — in the same *direction* the
 literature predicts, but the **effect size is small and, over only ~4.3
 years/1,079 days, not distinguishable from noise** (a Sharpe-difference
 this size has no claim to statistical significance at this sample length).
@@ -484,6 +487,44 @@ not confirmatory, result: enough to justify keeping some form of
 regime-based de-risking, not enough to justify strong claims about the
 flat-0.5-discount vs. a fully re-estimated `a_Co`/`a_Re` mattering much at
 this sample size.
+
+**Two corrections made to the first version of this test, both flagged
+directly by the user rather than caught in review:**
+
+1. **Missing transaction costs.** The first version charged zero
+   commission anywhere — not on monthly resizing, not on the quarterly
+   contract roll — unlike both `naked_futures.py`'s `FuturesPosition`/
+   `TradeManager` path and `tsmom_backtester.py` itself (`net_pnl =
+   mtm_pnl − fees`), which charge `get_spec(symbol)['commission']` on every
+   trade. Fixed: commission now applies to `abs(new_target − held)` on
+   every monthly resize, plus a mandatory quarterly roll charge (`2 ×
+   abs(held) × commission`, same Mon-before-3rd-Friday schedule
+   `FuturesPosition.roll_date` uses) — a roll is a real close-old/open-new
+   round trip and costs commission twice even when price doesn't move.
+   Impact here was modest (Sharpe 0.52→0.51 and 0.47→0.46, ~$2.1-2.4k total
+   fees over 4.3 years on $1M) because the flat per-asset vol target used
+   here sizes fairly small contract counts — this would matter far more at
+   larger size or with a tighter rebalance cadence.
+
+2. **A deeper, pre-existing, shared data-layer issue — not fixed, flagged
+   separately.** Checking whether "the naked backtester" handles rolling
+   differently surfaced that it doesn't avoid this the way it might seem
+   to: `FuturesDataLoader.daily` (`_CONTINUOUS_FRONT_MONTH_SQL`, "nearest
+   not-yet-expired contract per date") is the *same* continuous price
+   series feeding `naked_futures.py`, `tsmom_backtester.py`, and this
+   script alike — none of them hold a single physical contract's own price
+   series through a position's life. That series is not back-adjusted, and
+   near expiration it can flip-flop between two different contracts on
+   adjacent dates whenever the about-to-expire contract has a thin/no-
+   volume day. Confirmed directly against ZN, March 2023:
+   `2023-03-19` prices off the **Jun'23** contract (115.19), `2023-03-20`
+   drops back to the **Mar'23** contract (114.42), `2023-03-22` jumps
+   forward to **Jun'23** again (115.39) — a pure contract-switch artifact,
+   not a real price move, and any held position across any of these three
+   backtest paths gets marked-to-market against it. This affects all three
+   paths equally and is a pre-existing bug in shared infrastructure, not
+   something this test introduced — left unfixed here, flagged as a
+   separate, higher-priority investigation.
 
 ## 7. Price-space vs. return-space scaling, and correlation-only signal weighting
 

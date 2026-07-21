@@ -30,6 +30,32 @@ Goulding/Harvey/Mazzoleni ("returns scaled to achieve 10% annualized
 monthly volatility") -- again, this only restates the return/vol figures,
 it does not change Sharpe.
 
+Transaction costs: get_spec(symbol)['commission'] is charged per contract
+per side on every monthly resize (abs(new_target - held)), plus a
+mandatory quarterly roll charge (2 * abs(held) * commission, the same
+Mon-before-3rd-Friday Mar/Jun/Sep/Dec schedule FuturesPosition.roll_date
+uses) -- a roll is a real close-old/open-new round trip and costs
+commission twice even on a quarter where the continuous price series
+happens not to jump. An earlier version of this script had NO transaction
+costs at all, which inflated its Sharpe/return figures versus a realistic
+backtest; this was flagged directly and fixed.
+
+Known limitation NOT fixed here, and not unique to this script: the
+continuous front-month price series this project uses everywhere
+(FuturesDataLoader.daily / futures_dataloader._CONTINUOUS_FRONT_MONTH_SQL,
+"nearest not-yet-expired contract per date") is not back-adjusted, and
+near expiration it can flip-flop between two different contracts on
+adjacent dates when the about-to-expire contract has a thin/no-volume day
+(confirmed directly against ZN, March 2023: 2023-03-19 prices off the
+Jun'23 contract, 2023-03-20 drops back to the Mar'23 contract, 2023-03-22
+jumps forward to Jun'23 again -- a pure contract-switch artifact, not a
+real price move). Both naked_futures.py's Backtester/FuturesPosition path
+and tsmom_backtester.py's own multi-symbol path read from this exact same
+series, so this is a pre-existing, shared data-layer issue affecting all
+three backtest paths equally, not something introduced by this script's
+simplification -- worth its own separate investigation/fix, not patched
+here.
+
 Run:
     python -m scripts.tsmom_binary_vol_parity_backtest
     python -m scripts.tsmom_binary_vol_parity_backtest --momentum-discounts 0.5,1.0 --years 2023-2026
@@ -42,6 +68,7 @@ from datetime import date
 
 import polars as pl
 
+from derivatives_bt_engine.domain.futures_signal_generator import FuturesSignalGenerator
 from derivatives_bt_engine.domain.instruments import get_spec
 from derivatives_bt_engine.domain.tsmom_backtester import _month_end_dates, load_portfolio_data
 from derivatives_bt_engine.domain.tsmom_signal import calculate_trend_strength
@@ -74,9 +101,20 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
     all_dates = [d for d in all_dates if start <= d <= end]
     rebal_set = set(rebal_dates)
 
+    # Mandatory quarterly contract roll (same schedule FuturesSignalGenerator/
+    # tsmom_backtester.py use for FuturesPosition.roll_date -- Monday prior to
+    # the third Friday of Mar/Jun/Sep/Dec) -- a real close-old/open-new round
+    # trip that costs commission twice even when this project's continuous
+    # front-month price series (FuturesDataLoader.daily) doesn't itself show a
+    # price change that day. Snapped onto the nearest date actually present in
+    # the loaded data (a specific calendar roll_date can fall on a non-trading
+    # day for a given symbol).
+    roll_dates = set(FuturesSignalGenerator._get_quarterly_roll_dates(start, end))
+
     held = {s: 0 for s in symbols}
     prev_close: dict[str, float] = {}
     capital = initial_capital
+    total_fees = 0.0
     rows = []
 
     for d in all_dates:
@@ -93,8 +131,19 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
             prev_close[s] = close
         capital += pnl
 
+        # Mandatory quarterly roll: commission on a full close+reopen of
+        # whatever is currently held, no price/quantity effect (see note above).
+        if d in roll_dates:
+            fees = 0.0
+            for s in symbols:
+                if held[s] != 0:
+                    fees += 2 * abs(held[s]) * get_spec(s)['commission']
+            capital -= fees
+            total_fees += fees
+
         # Rebalance at month-end using today's just-observed signal.
         if d in rebal_set:
+            fees = 0.0
             for s in symbols:
                 row = signals[s].filter(pl.col('ts_event') == d)
                 if row.height == 0:
@@ -111,7 +160,11 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
                 dollar_vol_per_contract = close * spec['multiplier'] * dstd * (252 ** 0.5)
                 if dollar_vol_per_contract <= 0:
                     continue
-                held[s] = round(weight * flat_per_asset_vol_target_usd / dollar_vol_per_contract)
+                new_target = round(weight * flat_per_asset_vol_target_usd / dollar_vol_per_contract)
+                fees += abs(new_target - held[s]) * spec['commission']
+                held[s] = new_target
+            capital -= fees
+            total_fees += fees
 
         rows.append({'date': d, 'capital': capital})
 
@@ -134,6 +187,7 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
         'sharpe': round(sharpe, 2) if sharpe else None,
         'max_dd_pct': round(dd_pct, 2),
         f'ann_ret_at_{target_portfolio_vol * 100:.0f}pct_vol': round(ann_ret * rescale * 100, 2) if rescale else None,
+        'total_fees': round(total_fees, 2),
     }
 
 
