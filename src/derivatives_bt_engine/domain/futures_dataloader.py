@@ -20,7 +20,9 @@ _DEFAULT_GLOBEX_DB_PATH = '/home/dev/fin/db/globex_mdp_3.0.duckdb'
 logger = setup_logger()
 
 # Front-month roll: for each trading date, take the not-yet-expired futures
-# contract for `asset` with the nearest expiration.
+# contract for `asset` with the HIGHEST VOLUME that day (real liquidity, not
+# nearest expiration) -- STICKY once picked, never reverting to an
+# earlier-expiring contract.
 #
 # `daily` (the databento pipeline's build_db.py; formerly `ohlcv_enriched`)
 # already solves `instrument_id` recycling more thoroughly than a plain join against
@@ -38,6 +40,40 @@ logger = setup_logger()
 # alone, with no further filtering on our part, gives the genuine 2010-2026
 # front-month series, correctly including the real Apr 2020 negative-WTI
 # print).
+#
+# Two bugs, one fix. Originally this ranked by `expiration ASC` alone --
+# whichever not-yet-expired contract had the soonest expiration AMONG THOSE
+# WITH A PRINTED BAR THAT DAY, recomputed independently for EVERY date with
+# no memory of which contract was "front" yesterday. That produced two
+# distinct failure modes, both confirmed directly against real data:
+#
+#   1. Near-expiry flip-flop (e.g. ZN, 2023-03-19: the Mar'23 contract has
+#      no bar at all that day, so the naive pick jumps to Jun'23;
+#      2023-03-20: Mar'23 prints once more and the pick reverts to it, a
+#      lower price level; 2023-03-21 on: Mar'23 goes quiet for good) -- a
+#      pure contract-switch artifact read by every downstream consumer as
+#      if it were one instrument's real price move.
+#   2. Off-month contamination (e.g. GC gold, which lists thin non-primary
+#      months alongside its real active ones -- confirmed 2025-12-21: the
+#      Jan'26 contract trades a token 20 lots, over a MONTH before its own
+#      expiry, while Feb'26 -- the real active month -- already trades
+#      5,137. "Nearest expiration, any trade that day" latched onto Jan
+#      anyway, for weeks, purely because it kept printing a handful of
+#      trades). This is a mistimed *initial* selection, not a reversion --
+#      a monotonicity guard alone doesn't fix it, since the naive pick
+#      never actually favored Feb until Jan finally went silent.
+#
+# Fixed by ranking on volume instead of proximity to expiration (real
+# liquidity, not calendar distance, decides "front month" -- the standard
+# resolution for both failure modes at once), wrapped in the same
+# stickiness guarantee as before: a running max of the naive daily pick's
+# own expiration (`naive_front`, `sticky_expiration` -- monotonically
+# non-decreasing by construction over ts_event), re-selecting each date's
+# actual bar against that sticky expiration rather than the naive one-off
+# pick, so a stray one-day volume anomaly right at a genuine crossover
+# can't cause a reversion either. If the sticky contract itself has no bar
+# on some date, the date is simply dropped (an honest gap) rather than
+# silently substituting a different, unrelated instrument's price.
 _CONTINUOUS_FRONT_MONTH_SQL = """
 WITH bars AS (
     SELECT instrument_id, ts_event, open, high, low, close, volume, expiration
@@ -46,15 +82,45 @@ WITH bars AS (
       AND expiration IS NOT NULL
       AND ts_event < expiration
 ),
-ranked AS (
-    SELECT *, row_number() OVER (PARTITION BY ts_event ORDER BY expiration ASC) AS rn
+naive_ranked AS (
+    SELECT *, row_number() OVER (PARTITION BY ts_event ORDER BY volume DESC, expiration ASC) AS rn
     FROM bars
+),
+naive_front AS (
+    SELECT ts_event, expiration,
+           max(expiration) OVER (ORDER BY ts_event ROWS UNBOUNDED PRECEDING) AS sticky_expiration
+    FROM naive_ranked
+    WHERE rn = 1
 )
-SELECT ts_event, open, high, low, close, volume, instrument_id
-FROM ranked
-WHERE rn = 1
-ORDER BY ts_event
+SELECT b.ts_event, b.open, b.high, b.low, b.close, b.volume, b.instrument_id, b.expiration
+FROM bars b
+JOIN naive_front f ON b.ts_event = f.ts_event AND b.expiration = f.sticky_expiration
+ORDER BY b.ts_event
 """
+
+
+def assert_monotonic_expiration(df: pl.DataFrame, asset: str) -> None:
+    """Guards the invariant _CONTINUOUS_FRONT_MONTH_SQL's sticky-expiration
+    logic is supposed to guarantee by construction: a continuous
+    front-month series' `expiration` must never decrease from one row to
+    the next (sorted by ts_event). Raises loudly rather than letting a
+    regression (e.g. someone editing the SQL again without preserving this
+    property, or a bad cached parquet built under a pre-fix version of this
+    module) silently reintroduce the flip-flop-between-contracts bug this
+    was written to catch. `df` must have `ts_event` and `expiration`
+    columns and be usable as-is (sorted internally here, not assumed
+    pre-sorted)."""
+    if df.height == 0 or 'expiration' not in df.columns:
+        return
+    d = df.sort('ts_event')
+    violations = d.filter(pl.col('expiration') < pl.col('expiration').shift(1))
+    if violations.height > 0:
+        raise ValueError(
+            f"{asset}: continuous front-month series has {violations.height} row(s) where "
+            f"expiration decreased from the prior date -- a stale contract-switch/flip-flop "
+            f"bug (see _CONTINUOUS_FRONT_MONTH_SQL's docstring). First offending date: "
+            f"{violations['ts_event'][0]}."
+        )
 
 
 @dataclass
@@ -77,7 +143,9 @@ class FuturesDataLoader(BaseDataLoader):
         """Lazy load and cache the continuous front-month futures daily OHLCV series."""
         if self.use_preprocessed and os.path.exists(self._daily_processed_path):
             logger.info(f"Loading {self._daily_processed_path}")
-            return pl.read_parquet(self._daily_processed_path)
+            df = pl.read_parquet(self._daily_processed_path)
+            assert_monotonic_expiration(df, self.asset)
+            return df
 
         con = duckdb.connect(self.db_path, read_only=True)
         try:
@@ -86,6 +154,7 @@ class FuturesDataLoader(BaseDataLoader):
             con.close()
 
         df = df.with_columns(pl.col('ts_event').cast(pl.Date)).sort('ts_event')
+        assert_monotonic_expiration(df, self.asset)
 
         if self.save_preprocessed:
             df.write_parquet(self._daily_processed_path)

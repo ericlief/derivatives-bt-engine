@@ -18,6 +18,7 @@ from derivatives_bt_engine.domain.position import FuturesPosition, SingleLegOpti
 from derivatives_bt_engine.domain.trade_result import OptionTradeResult
 from derivatives_bt_engine.domain.position import MultiLegOptionPosition
 from derivatives_bt_engine.domain.tsmom_signal import calculate_trend_strength, classify_regime
+from derivatives_bt_engine.domain.futures_dataloader import assert_monotonic_expiration
 from derivatives_bt_engine.utils.logger import setup_logger
 from derivatives_bt_engine.utils.price_utils import PriceUtils
 
@@ -45,6 +46,11 @@ class Backtester:
         """
         self.option_chain = data['option_chain']
         self.underlying = data['underlying']
+        # Defense-in-depth: FuturesDataLoader.daily already validates this at
+        # the source, but this catches a stale pre-fix cached parquet or any
+        # hand-built `data['underlying']` that bypasses that loader entirely
+        # (options paths have no 'expiration' column and no-op here).
+        assert_monotonic_expiration(self.underlying, 'underlying')
         self.vix = data['vix']
         self.save_trades = save_trades
         self.log_to_sheets = log_to_sheets

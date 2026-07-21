@@ -28,7 +28,7 @@ import duckdb
 import polars as pl
 
 from derivatives_bt_engine.domain.enums import TrendRegime, VolRegime
-from derivatives_bt_engine.domain.futures_dataloader import FuturesDataLoader
+from derivatives_bt_engine.domain.futures_dataloader import FuturesDataLoader, assert_monotonic_expiration
 from derivatives_bt_engine.domain.futures_signal_generator import FuturesSignalGenerator
 from derivatives_bt_engine.domain.instruments import get_spec, resolve_price_symbol
 from derivatives_bt_engine.domain.tsmom_signal import calculate_trend_strength, classify_regime, compute_position_scalar
@@ -165,6 +165,12 @@ def load_portfolio_data(symbols: list[str]) -> tuple[dict[str, pl.DataFrame], pl
     _validate_symbols_exist(set(price_symbols.values()), cache_dir)
     price_data = {s: FuturesDataLoader(asset=price_symbols[s], data_dir=cache_dir, use_preprocessed=True, save_preprocessed=True).daily
                   for s in symbols}
+    # Defense-in-depth: FuturesDataLoader.daily already validates this at the
+    # source (keyed by the resolved price symbol), but re-check here keyed by
+    # the raw traded symbol (MES, not ES) so a failure is unambiguous about
+    # which of this multi-symbol portfolio's series is the problem.
+    for s, df in price_data.items():
+        assert_monotonic_expiration(df, s)
     vix = pl.read_parquet(VIX_FILE_PATH).select(['date', 'close']).rename({'close': 'vix_close'}).sort('date')
     return price_data, vix
 

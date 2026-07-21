@@ -465,31 +465,37 @@ signal history):
 
 | `momentum_discount` | ann. ret | ann. vol | Sharpe | max DD | total fees |
 |---|---|---|---|---|---|
-| 0.5 (current default) | 2.0% | 3.9% | **0.51** | -4.5% | $2,101 |
-| 1.0 (discount disabled) | 1.9% | 4.1% | **0.46** | -5.7% | $2,352 |
+| 0.5 (current default) | 2.6% | 4.0% | **0.65** | -5.3% | $2,207 |
+| 1.0 (discount disabled) | 2.7% | 4.2% | **0.66** | -5.9% | $2,412 |
 
-All figures at actual (unscaled) portfolio scale — an earlier version of
-this table also reported a return rescaled to a 10% vol target, dropped
-after the user flagged it as inconsistent with the un-rescaled fee figure
-sitting next to it (see correction #2 below); script at
+All figures at actual (unscaled) portfolio scale, and as of the continuous
+front-month data-layer fix described in correction #3 below (numbers were
+re-run after that fix — the table originally read 0.51/0.46 before it). An
+earlier version of this table also reported a return rescaled to a 10%
+vol target, dropped after the user flagged it as inconsistent with the
+un-rescaled fee figure sitting next to it (see correction #2); script at
 `scripts/tsmom_binary_vol_parity_backtest.py`.
 
 Realized vol (~4%) landed well under the paper's 10% because this
 project's 14-symbol universe has less cross-asset diversification than
 Levine & Pedersen's 58 assets at the same flat per-asset target — expected,
 and irrelevant to the Sharpe comparison (Sharpe is invariant to a uniform
-leverage rescale). The discount does help at the margin here — Sharpe
-0.51 vs. 0.46, drawdown -4.5% vs. -5.7% — in the same *direction* the
-literature predicts, but the **effect size is small and, over only ~4.3
-years/1,079 days, not distinguishable from noise** (a Sharpe-difference
-this size has no claim to statistical significance at this sample length).
-Both absolute Sharpes (~0.5) are also modest, echoing the same point as
-the Table E.1 caveat above — this recent period doesn't show a strong edge
-either way, discount or no discount. This is a directionally-supportive,
-not confirmatory, result: enough to justify keeping some form of
-regime-based de-risking, not enough to justify strong claims about the
-flat-0.5-discount vs. a fully re-estimated `a_Co`/`a_Re` mattering much at
-this sample size.
+leverage rescale). **After the data-layer fix, the discount's effect
+essentially disappeared** — Sharpe 0.65 vs. 0.66, now negligibly *favoring*
+no discount, a reversal from the pre-fix 0.51 vs. 0.46 reading. This
+doesn't overturn the earlier reading so much as sharpen it: the effect was
+already flagged as "not distinguishable from noise" before the fix, and
+correcting two symbols' worth of corrupted recent price history (BRE and
+CL, both in this 14-symbol universe — see correction #3) removing the
+entire pre-fix gap between the two rows is a direct demonstration of
+exactly that noise, not a new finding. Both absolute Sharpes (~0.65) are
+still modest, echoing the same point as the Table E.1 caveat above — this
+recent period doesn't show a strong edge either way, discount or no
+discount. Net: directionally-supportive-at-best for the discount, and now
+even that direction doesn't survive a real data-quality fix — enough to
+justify keeping some form of regime-based de-risking as a reasonable prior
+(the literature's own case for it doesn't rest on this test), not enough
+to treat this specific empirical result as confirming it.
 
 **Three corrections made to the first version of this test, all flagged
 directly by the user rather than caught in review:**
@@ -523,15 +529,15 @@ directly by the user rather than caught in review:**
    and needs no such rescale; the table above now reports raw ann. return/
    vol/fees together, all at the same actual scale.
 
-3. **A deeper, pre-existing, shared data-layer bug — not fixed, flagged
-   separately.** Checking whether "the naked backtester" handles rolling
+3. **A deeper, pre-existing, shared data-layer bug — investigated further
+   and fixed.** Checking whether "the naked backtester" handles rolling
    differently surfaced that it doesn't avoid this the way it might seem
    to: `FuturesDataLoader.daily` (`_CONTINUOUS_FRONT_MONTH_SQL`) is the
    *same* continuous price series feeding `naked_futures.py`,
    `tsmom_backtester.py`, and this script alike — none of them hold a
    single physical contract's own price series through a position's life.
-   Its query picks, independently for **every date**, whichever
-   not-yet-expired contract has the soonest expiration *among those with a
+   Its query picked, independently for **every date**, whichever
+   not-yet-expired contract had the soonest expiration *among those with a
    printed bar that day* (`row_number() OVER (PARTITION BY ts_event ORDER
    BY expiration ASC)`) — with no memory of which contract was "front"
    yesterday. Confirmed directly against ZN, March 2023 (row-level query
@@ -540,20 +546,78 @@ directly by the user rather than caught in review:**
    even at its most active, had **no printed bar at all** on 2023-03-19 (so
    that day's price was silently read from the already-far-more-liquid
    Jun'23 contract instead, 1.6-2.5M contracts/day), printed one more trade
-   on 2023-03-20 (ranking flips back to Mar'23, a lower price level), then
-   went quiet for good from 2023-03-21 onward (ranking settles on Jun'23).
-   The result — `2023-03-19` prices off Jun'23 (115.19), `2023-03-20` drops
-   back to Mar'23 (114.42), `2023-03-22` jumps forward to Jun'23 again
-   (115.39) — is a pure contract-switch artifact, not a real price move,
-   and any held position across all three backtest paths gets marked-to-
-   market against it. Same root phenomenon as the BRE/6L stuck-roll bug
-   fixed earlier this project's history (a soon-to-expire contract going
-   quiet before its own listed expiration), surfacing as a different
-   defect here: there, a position got stuck waiting for an exact-date match
-   that never came; here, the continuous price series itself silently
-   swaps which contract it's quoting, day to day. Affects all three
-   backtest paths equally — worth its own separate investigation/fix, not
-   patched here.
+   on 2023-03-20 (ranking flipped back to Mar'23, a lower price level), then
+   went quiet for good from 2023-03-21 onward (ranking settled on Jun'23).
+   `2023-03-19` priced off Jun'23 (115.19), `2023-03-20` dropped back to
+   Mar'23 (114.42), `2023-03-22` jumped forward to Jun'23 again (115.39) —
+   a pure contract-switch artifact, not a real price move, and any held
+   position across all three backtest paths marked-to-market against it.
+
+   **Fix, in `futures_dataloader.py`** (`_CONTINUOUS_FRONT_MONTH_SQL`):
+   two changes, both needed. (a) Rank each date's candidate contracts by
+   **volume DESC** instead of expiration ASC — real liquidity decides
+   "front month," not calendar proximity, which also fixes a second,
+   separate failure mode found during validation: GC gold lists thin
+   non-primary "off months" that can win the old expiration-proximity rule
+   for *weeks* purely by printing a token trade (confirmed 2025-12-21: the
+   Jan'26 contract traded 20 lots, over a month before its own expiry,
+   while Feb'26 — the real active month — already traded 5,137). (b) Wrap
+   that in a **sticky/monotonic** guard — a running max of the naive pick's
+   own expiration — so the series can never revert to an earlier-expiring
+   contract once it's advanced, guarding against noise at genuine
+   crossover points the same way it fixes ZN's flip-flop. Added
+   `assert_monotonic_expiration()`, raising if a regression ever
+   reintroduces a decreasing-expiration row; wired into
+   `FuturesDataLoader.daily` itself (both the cache-hit and fresh-query
+   paths) and, as defense-in-depth per the user's request, into
+   `Backtester.__init__` and `tsmom_backtester.py`'s `load_portfolio_data`.
+
+   **Validation surfaced two more, genuinely separate bugs**, not caused by
+   this fix but exposed by it (the assertion/comparison caught them
+   immediately): BRE (`6L`) and CL each had exactly one `instrument_id`
+   whose expiration was wrong by almost exactly one year — `6LF6`
+   (instrument 141263, a Jan 2026 delivery contract) stamped `2026-12-31`
+   instead of `2025-12-31`; `CLF6` (instrument 240384, also Jan 2026)
+   stamped `2026-12-21` instead of `2025-12-21`. Both follow CME's
+   month-before-delivery expiration convention for these products — cross-
+   checked against every other same-month-code contract in each series
+   (e.g. `6LF0` through `6LF9`), all of which correctly wrap to the prior
+   year, confirming these two as isolated, not systemic, errors. Each was a
+   single, uniformly-wrong value across all of that `instrument_id`'s rows
+   (55 rows for 6L, 401 for CL), corrected directly in the production
+   duckdb (`UPDATE daily SET expiration = ... WHERE instrument_id = ...`,
+   backed up first) after confirming no primary-key/constraint complication
+   (unlike the earlier bulk `ohlcv` timezone migration this project did —
+   this table has no constraints at all, so a plain `UPDATE` was safe).
+   Before the fix, this made BRE's continuous series **stop advancing
+   entirely for the most recent 146 days** (2025-12-31 through the data's
+   current end, 2026-06-18) and CL's for 126 days (2025-12-21 through
+   2026-05-17) — the sticky rule, once it locked onto the wrongly-dated
+   far-future contract, had nothing else to ever be "later" than.
+
+   A broader scan (`instrument_id`s with more than one distinct expiration
+   value across their history) found 27 such cases in CL and 3 in NIY — on
+   inspection, nearly all are **legitimate, benign** instances of this
+   project's already-documented instrument-id recycling (the same numeric
+   id reused a decade later for a genuinely different real contract,
+   correctly time-bucketed by the `ts_event < expiration` filter, e.g.
+   `CLZ7` legitimately expiring 2007-11-19 for one era and 2017-11-20 for
+   another) — only the two fixed above were confirmed to actually corrupt
+   the continuous series. Given the user's concern that this might be
+   widespread across commodities generally: the same recent-blackout
+   diagnostic was re-run across **all 17 assets** present in the database
+   (not just this project's 14-symbol TSMOM universe, adding MGC/NIY/SOX),
+   and came back clean apart from the two now-fixed cases and one
+   negligible single-day drop in SOX (2023, unrelated) — this was isolated
+   to exactly these two rows, not a wider pattern.
+
+   Re-validated end to end after both fixes: all 14 symbols' caches
+   regenerated (`assert_monotonic_expiration` raised on none of them), full
+   `tests/` suite still shows the same 19 pre-existing failures with zero
+   new regressions (confirmed via `git stash`/`git stash pop` A/B, same
+   technique used earlier in this project's history), and the empirical
+   `momentum_discount` test above was re-run against the corrected data
+   (see the updated results table).
 
 ## 7. Price-space vs. return-space scaling, and correlation-only signal weighting
 
