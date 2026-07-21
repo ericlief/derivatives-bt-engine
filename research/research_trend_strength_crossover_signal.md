@@ -619,6 +619,59 @@ directly by the user rather than caught in review:**
    `momentum_discount` test above was re-run against the corrected data
    (see the updated results table).
 
+   **The direct `daily`-table row patches above were a temporary fix —
+   traced further back to the real, durable root cause and corrected
+   there.** `daily` is materialized from the separate `databento` project's
+   pipeline (`pipeline/build_db.py`'s `backfill_missing_asset_underlying` +
+   `create_daily_table`, `/home/dev/projects/databento`, branch `refactor`)
+   — a direct row edit would have been silently reverted the next time
+   that pipeline reruns (e.g. after a new data drop), since `daily` is a
+   full `CREATE OR REPLACE TABLE ... AS SELECT ... FROM ohlcv_enriched`
+   rebuild, not an incremental append. Checked first whether these two
+   `instrument_id`s had any row in the `instruments` (official Databento
+   definitions) table at all — neither did, meaning `daily`'s expiration
+   for both came entirely from this project's own regex/rule-based
+   fallback layer, not bad upstream reference data, so the bug was fixable
+   at the source.
+
+   Root cause, in `build_db.py`'s expiration `COALESCE` chain:
+   `COALESCE(j._i_expiration, el.expiration, re.expiration)` — `el`
+   (`expiry_lookup`) is a heuristic that borrows an expiration from any
+   other real, defined contract sharing the same `(rootmonth,
+   year(expiration))`; `re` (`rule_expirations`) is a per-asset,
+   empirically-fit calendar rule (both CL and 6L have one, with correct
+   month-before-delivery wraparound already built in via `month_delta=-1`
+   — see `_EXPIRATION_RULES`). `el`'s join keys on the *contract's own
+   delivery year* (`_target_year`, correctly parsed from the ticker), but
+   for a month-before-delivery product's **January-coded contract
+   specifically**, the true expiration falls in December of
+   `delivery_year - 1` — one year earlier than `_target_year`. So `el`'s
+   join silently matched the *next* delivery year's real sibling contract
+   instead (whose expiration year happens to equal `_target_year`) — a
+   wrong-but-non-null match that pre-empted the correct `re.expiration`
+   value in the `COALESCE` chain, purely because `el` was checked first.
+   Every other month code is unaffected (delivery year and expiration year
+   coincide when there's no December wraparound), which is exactly why
+   only January contracts of CL/6L showed this symptom.
+
+   **Fixed by reordering the `COALESCE` to prefer `re.expiration` over
+   `el.expiration`** in both branches of the expression (a no-op for any
+   asset with no `rule_expirations` entry, since `re.expiration` is simply
+   `NULL` there and `el` still applies as before). Rebuilt
+   `ohlcv_enriched`/`daily` against the live db with the fix: both
+   `instrument_id`s now derive correctly with **no manual patch needed** —
+   `6LF6`/141263 → `2025-12-31` (matching the manual fix exactly) and
+   `CLF6`/240384 → `2025-12-19` (two days earlier than the `2025-12-21`
+   manual estimate used above, since the empirically-fit rule accounts for
+   the exact weekday/session-count precisely where a hand estimate didn't
+   — a small, concrete demonstration of why tracing to the real source
+   beats patching the symptom). Row count unchanged after the rebuild
+   (11,097,611), and this repo's caches/tests/backtest were re-validated
+   against the rebuilt `daily` with identical results to the manual-patch
+   version (down to the CL Sharpe figures, since a 2-day shift in one
+   contract's expiration is far too small to move a multi-year backtest).
+   Committed in the `databento` repo (not this one) — not yet pushed.
+
 ## 7. Price-space vs. return-space scaling, and correlation-only signal weighting
 
 **Robert Carver's EWMAC construction** (*Systematic Trading*, 2015 — the
