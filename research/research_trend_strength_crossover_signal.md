@@ -320,6 +320,57 @@ same shrinkage instinct the current flat multiplier has, but applied
 per-state and per-asset rather than as one hardcoded global constant for
 both correction and rebound alike.
 
+**Exact estimator (Appendix C, eq. 8-10)**, for anyone implementing this
+rather than just reading the intuition above. `AVG[r|s]`/`AVG[r²|s]` are the
+average return / average squared *raw* asset return (not a signed
+directional strategy return) over all months prior to month `m` in state
+`s`; `FREQ[s]` is the frequency of state `s`:
+
+```
+a_Co = ½ · (1 − (1/C) · AVG[r|Co] / AVG[r²|Co])                          (8)
+a_Re = ½ · (1 − (1/C) · AVG[r|Re] / AVG[r²|Re])                          (9, as scanned -- see errata)
+
+C =  FREQ[Bu]/FREQ[Bu or Be] · AVG[r|Bu]/AVG[r²|Bu or Be]
+   − FREQ[Be]/FREQ[Bu or Be] · AVG[r|Be]/AVG[r²|Bu or Be]                (10)
+```
+
+`C` is a single shared scalar (computed once from Bull/Bear months only,
+not state-specific), "typically positive." Estimates update every 30 months
+on an inception-to-prior-month basis, requiring ≥12 months of history in
+each phase; either parameter falling outside `[0, 1]` gets clamped to the
+nearest endpoint.
+
+**Errata flag — eq. (9)'s sign as extracted does not match the paper's own
+prose.** Both (8) and (9) were extracted (independently, twice — once via
+this session's own PDF read, once via the user's separate copy-paste) with
+*identical* form, `1 − (1/C)·AVG[r|s]/AVG[r²|s]`. Taken literally, that
+makes `a_Co` and `a_Re` move in the *same* direction for a same-signed
+`AVG[r|s]`, since `AVG[r²|s] ≥ 0` always and `C` is one shared, "typically
+positive" scalar — e.g. positive `AVG[r|Re]` would push `a_Re` **below**
+0.5. That directly contradicts the paper's own explicit prose two
+paragraphs above these equations ("if returns tend to be positive [after
+rebounds]... `a_Re > 0.5`"). The prose is unambiguous, stated as what the
+equations are supposed to reflect, and mirrors the structural asymmetry
+already established in this section (slow and fast swap which one is
+"long" between Correction and Rebound) — so the prose, not the scanned
+sign, should be trusted. The self-consistent resolution is that eq. (9)
+actually carries a **`+`**, not a `−`:
+
+```
+a_Re = ½ · (1 + (1/C) · AVG[r|Re] / AVG[r²|Re])                          (9, corrected)
+```
+
+making (8) and (9) mirror-image formulas (tilt down for Correction, tilt up
+for Rebound) rather than identical ones. A `+`/`−` glyph in a small inline
+equation is genuinely hard to resolve at typical PDF-scan/render
+resolution — this should be treated as an extraction artifact, not a claim
+that the published paper contains an error. **Anyone implementing this
+should verify the actual sign directly against a high-zoom read of their
+own copy of the paper (Appendix C, eq. 9) before relying on it** — the
+corrected (`+`) form is given here only because it's the only version
+consistent with the paper's own stated intuition, not because the sign was
+confirmed at the source.
+
 **Cadence** — directly answers "immediately or monthly": their framework is
 monthly throughout (monthly signals, monthly rebalance, monthly turning-
 point observation) — a periodic reweight at the same cadence as the signal
