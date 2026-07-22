@@ -38,15 +38,31 @@ report raw ann_ret/ann_vol/fees together instead, all at the same actual
 scale, or explicitly rescale fees by the same factor if a vol-normalized
 return figure is ever needed again.
 
-Transaction costs: get_spec(symbol)['commission'] is charged per contract
-per side on every monthly resize (abs(new_target - held)), plus a
-mandatory quarterly roll charge (2 * abs(held) * commission, the same
-Mon-before-3rd-Friday Mar/Jun/Sep/Dec schedule FuturesPosition.roll_date
-uses) -- a roll is a real close-old/open-new round trip and costs
-commission twice even on a quarter where the continuous price series
-happens not to jump. An earlier version of this script had NO transaction
-costs at all, which inflated its Sharpe/return figures versus a realistic
-backtest; this was flagged directly and fixed.
+Transaction costs: get_spec(symbol)['commission'] is charged using the
+SAME asymmetric convention as tsmom_backtester.py's own _rebalance_to
+(mirrored from FuturesPosition.calculate_pnl) -- opening or adding to a
+position is free; only the closing/shrinking leg is charged, at
+2 * commission * closed_qty (both round-trip legs bundled into the
+close). A same-direction resize charges only the portion that shrinks
+back toward zero; a full close or a sign flip charges the entire prior
+side. Plus a mandatory quarterly roll charge (2 * abs(held) * commission,
+same Mon-before-3rd-Friday Mar/Jun/Sep/Dec schedule
+FuturesPosition.roll_date uses, same "close old + reopen new, reopening
+is free" logic as tsmom_backtester.py's _process_roll) -- a roll is a
+real close-old/open-new round trip and costs commission twice even on a
+quarter where the continuous price series happens not to jump.
+
+Two corrections here, both flagged directly by the user rather than
+caught in review: (1) an earlier version of this script had NO
+transaction costs at all, which inflated its Sharpe/return figures versus
+a realistic backtest; (2) the version right after that charged commission
+symmetrically on every monthly resize (abs(new_target - held) * 1x
+commission, in both directions) -- this overcharged every position
+INCREASE (which should be free, same as opening) and used the wrong
+quantity/multiplier on decreases and flips (e.g. a full sign flip from
++5 to -3 charged abs(-3-5)=8 units at 1x, instead of the correct
+closed_qty=5 at 2x -- closing the whole long side, with the new short
+open free). Fixed to match tsmom_backtester.py's _rebalance_to exactly.
 
 Known limitation NOT fixed here, and not unique to this script: the
 continuous front-month price series this project uses everywhere
@@ -178,7 +194,21 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
                 if dollar_vol_per_contract <= 0:
                     continue
                 new_target = round(weight * flat_per_asset_vol_target_usd / dollar_vol_per_contract)
-                fees += abs(new_target - held[s]) * spec['commission']
+                prior = held[s]
+                # Same asymmetric convention as tsmom_backtester.py's
+                # _rebalance_to: opening or adding to a position is free;
+                # only the closing/shrinking leg charges commission, at 2x
+                # (both round-trip legs bundled into the close), matching
+                # FuturesPosition.calculate_pnl's fee model. A same-
+                # direction resize only charges for the portion that
+                # shrinks back toward zero, not the portion added.
+                if prior == 0:
+                    closed_qty = 0
+                elif new_target == 0 or (prior > 0) != (new_target > 0):
+                    closed_qty = abs(prior)
+                else:
+                    closed_qty = max(0, abs(prior) - abs(new_target))
+                fees += 2 * closed_qty * spec['commission']
                 held[s] = new_target
             capital -= fees
             total_fees += fees

@@ -465,8 +465,8 @@ signal history):
 
 | `momentum_discount` | ann. ret | ann. vol | Sharpe | max DD | total fees |
 |---|---|---|---|---|---|
-| 0.5 (current default) | 2.6% | 4.0% | **0.65** | -5.3% | $2,207 |
-| 1.0 (discount disabled) | 2.7% | 4.2% | **0.66** | -5.9% | $2,412 |
+| 0.5 (current default) | 2.6% | 3.9% | **0.65** | -5.3% | $2,163 |
+| 1.0 (discount disabled) | 2.7% | 4.2% | **0.66** | -5.9% | $2,358 |
 
 All figures at actual (unscaled) portfolio scale, and as of the continuous
 front-month data-layer fix described in correction #3 below (numbers were
@@ -505,15 +505,12 @@ directly by the user rather than caught in review:**
    contract roll — unlike both `naked_futures.py`'s `FuturesPosition`/
    `TradeManager` path and `tsmom_backtester.py` itself (`net_pnl =
    mtm_pnl − fees`), which charge `get_spec(symbol)['commission']` on every
-   trade. Fixed: commission now applies to `abs(new_target − held)` on
-   every monthly resize, plus a mandatory quarterly roll charge (`2 ×
-   abs(held) × commission`, same Mon-before-3rd-Friday schedule
-   `FuturesPosition.roll_date` uses) — a roll is a real close-old/open-new
-   round trip and costs commission twice even when price doesn't move.
-   Impact here was modest (Sharpe 0.52→0.51 and 0.47→0.46, ~$2.1-2.4k total
-   fees over 4.3 years on $1M) because the flat per-asset vol target used
-   here sizes fairly small contract counts — this would matter far more at
-   larger size or with a tighter rebalance cadence.
+   trade. First fix (superseded by #4 below): commission applied to
+   `abs(new_target − held)` on every monthly resize, plus a mandatory
+   quarterly roll charge (`2 × abs(held) × commission`, same
+   Mon-before-3rd-Friday schedule `FuturesPosition.roll_date` uses) — a
+   roll is a real close-old/open-new round trip and costs commission
+   twice even when price doesn't move.
 
 2. **Vol-rescaling the return figure without rescaling fees.** The
    version right after fix #1 reported a return figure post-hoc rescaled
@@ -671,6 +668,30 @@ directly by the user rather than caught in review:**
    version (down to the CL Sharpe figures, since a 2-day shift in one
    contract's expiration is far too small to move a multi-year backtest).
    Committed in the `databento` repo (not this one) — not yet pushed.
+
+4. **Fee formula charged commission asymmetrically wrong — overcharged
+   opens, wrong quantity/multiplier on closes.** Correction #1's fee
+   formula (`abs(new_target − held) × commission`) charges 1x commission
+   on the raw delta, in **both** directions. But `tsmom_backtester.py`'s
+   own `_rebalance_to` (mirroring `FuturesPosition.calculate_pnl`) uses an
+   asymmetric convention: **opening or adding to a position is free; only
+   the closing/shrinking leg is charged, at `2 × commission × closed_qty`**
+   (both round-trip legs bundled into the close — the earlier-opened side
+   was never charged, so its cost is paid in full when it closes). A
+   same-direction resize charges only the portion that shrinks back toward
+   zero (`max(0, abs(prior) − abs(target))`); a full close or a sign flip
+   charges the *entire* prior side (`abs(prior)`), not the raw delta. The
+   old formula got this wrong on both ends — e.g. a flip from +5 to −3
+   charged `abs(−3−5)=8` units at 1x under the old formula, vs. the
+   correct `closed_qty=5` at 2x (close the whole long side; the new short
+   open is free) — and every plain increase (e.g. +5→+8) was charged
+   `3×commission` when it should have been free. Fixed to match
+   `_rebalance_to` exactly (see `scripts/tsmom_binary_vol_parity_backtest.py`).
+   Impact here was modest (total fees $2,207→$2,163 and $2,412→$2,358,
+   Sharpe unchanged at 0.65/0.66) since this flat-vol-parity sizing scale
+   trades fairly small contract counts — this convention matters far more
+   at larger size, a tighter rebalance cadence, or a strategy that resizes
+   upward more often than it closes out.
 
 ## 7. Price-space vs. return-space scaling, and correlation-only signal weighting
 
