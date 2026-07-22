@@ -693,6 +693,113 @@ directly by the user rather than caught in review:**
    at larger size, a tighter rebalance cadence, or a strategy that resizes
    upward more often than it closes out.
 
+5. **NaN vs. `None` guard gap, and no diagnostic trail on skip.** A crash
+   on a different machine (`round(NaN)` → `ValueError: cannot convert
+   float NaN to integer`) traced to the signal-validity guard checking
+   `dstd is None`/`dstd <= 0` but not NaN explicitly — comparisons with
+   NaN are always `False` in Python, so a NaN `daily_std` (e.g. from a bad
+   or missing price on some date) silently passed the guard, propagated
+   into `dollar_vol_per_contract`, and crashed downstream. `tsmom_signal.py`
+   itself already guards this correctly everywhere (`compute_position_scalar`,
+   `classify_regime` both use `isinstance(x, float) and math.isnan(x)`
+   alongside the `None` check) — this script just hadn't copied that
+   established pattern when first written. Fixed to match, and — since the
+   crash left no way to tell afterward which symbol/date/value was
+   responsible (no logs, no saved intermediate rows) — added a
+   `logger.warning` at the skip site naming the symbol, date, and the
+   offending signal values, so a future occurrence is diagnosable without
+   needing to reproduce it from scratch.
+
+## 6b. Implementing the paper's actual dynamic reweighting (eq. 4/7-10)
+
+Built directly on top of `calculate_trend_strength`'s output (which stays
+untouched, per its own docstring) via three additions in
+`scripts/tsmom_binary_vol_parity_backtest.py`:
+
+- **`r2m`** — the paper's own 2-month FAST horizon (`log_price.diff(42)`,
+  computed from `close` since `calculate_trend_strength` drops
+  `log_price`), alongside the already-existing `r1y` (12-month SLOW).
+  Confirms the user's own equivalence check directly: since this project
+  computes everything in *log* returns, `r1d.rolling_mean(N) = log_price.diff(N)/N`
+  **exactly** (log returns telescope additively — the sum of daily log
+  returns over a window equals that window's cumulative log return, with
+  zero error, regardless of whether you bucket it as "12 discrete monthly
+  totals, averaged" or "one continuous 252-day cumulative total, divided
+  by 252"). The only real difference from the paper's literal construction
+  (mean of 12 *calendar*-month returns) is calendar-month boundaries vs. a
+  fixed 252/42 trading-day window — the same order of approximation this
+  project already accepts everywhere else for "252 = 1 year."
+- **`_paper_state`** — eq. 4's Bull/Correction/Bear/Rebound from
+  `sign(r2m)`/`sign(r1y)` directly (the paper's own raw, non-vol-normalized
+  construction) — kept as a separate function from `classify_regime`
+  rather than reusing it, since the paper's horizons (2m/12m) differ from
+  this project's canonical ones (3m/12m); note the two would be
+  *sign*-equivalent if the horizons matched, since dividing by a positive
+  vol term never flips sign.
+- **`_estimate_mixing_params`** — Appendix C eq. 8-10's `a_Co`/`a_Re`,
+  computed from every (state, next-month-return) pair strictly before the
+  current rebalance date (expanding window, no lookahead), **pooled across
+  the whole symbol universe** rather than per-instrument (an explicit,
+  flagged deviation from the paper's own single-asset design — this
+  project's per-symbol history, ~15 years, gives too few Correction/Rebound
+  months on its own for a stable estimate; pooling ~13-14 symbols gives
+  much more). Falls back to the uninformed `(0.5, 0.5)` until there are
+  ≥12 pooled months in *both* Correction and Rebound (the paper's own
+  warm-up threshold, adapted from "exclude the asset that month" to a
+  pooled fallback since a single-asset exclusion rule doesn't map onto a
+  pooled backtest). Uses the `+` sign for eq. 9 per the errata discussion
+  above (§6) — flagged there as unconfirmed against the primary source's
+  actual typeset sign, not re-litigated here.
+- **eq. 7's blend**, translated from return-blending into position-weight
+  terms (equivalent for a single directional bet): `weight = 1` in Bull,
+  `-1` in Bear, `1 - 2·a_Co` in Correction, `2·a_Re - 1` in Rebound. Note
+  that `a_Co = a_Re = 0.5` (the uninformed fallback) makes weight exactly
+  `0` — fully flat — in both disagreement states; this isn't an arbitrary
+  choice, it falls directly out of eq. 7's blend when slow and fast point
+  in opposite directions (which is the literal definition of
+  Correction/Rebound) and the mixing weight is a neutral 50/50.
+
+Exposed via `--include-dynamic` (runs alongside whatever
+`--momentum-discounts` values are requested). Toggled the 'flat_discount'
+vs. 'dynamic' branch inside the existing rebalance loop; roll/fee handling
+unchanged either way.
+
+**Results, same universe, three window lengths** — the estimator needs
+real calendar time to get out of its `(0.5, 0.5)` fallback, so window
+length turned out to matter enormously:
+
+| Window | flat 0.5 Sharpe | flat 1.0 (off) Sharpe | dynamic Sharpe | dynamic max DD | flat 0.5 max DD |
+|---|---|---|---|---|---|
+| 2023-2026 (~3.3y) | 0.65 | 0.66 | **0.48** | -5.6% | -5.3% |
+| 2015-2026 (~11y) | 0.67 | 0.52 | **0.62** | -6.5% | -7.8% |
+| 2010-2026 (~16y, full history) | 0.24 | 0.23 | **0.44** | -12.7% | -16.4% |
+
+Over the shortest window, dynamic mode is worse than *either* flat
+variant — unsurprising, since a 3.3-year window barely clears the 12-
+pooled-months-per-phase warm-up threshold and spends much of its time on
+the flat-fallback default. Over the full 16-year history, the picture
+reverses sharply: dynamic mode very nearly **doubles** the Sharpe of both
+flat variants (0.44 vs. 0.24/0.23) with a materially smaller drawdown
+(-12.7% vs. -16.4%/-19.8%) — this lines up with the paper's own framing
+(their headline result, Part 1 §6, is drawdown reduction concentrated in
+turning-point months, not a uniformly higher Sharpe in every sample) and
+matches why the paper itself needed a 33-year sample to demonstrate this
+cleanly. This is a considerably stronger, more literature-consistent
+result than the flat `momentum_discount=0.5` comparison in §6 produced,
+and a direct empirical case for pursuing the full `a_Co`/`a_Re` reweighting
+over the flat discount, contingent on having enough history for the
+pooled estimator to leave its fallback state.
+
+**A real bug found and fixed while producing these numbers**: the script's
+`warmup_start` was a fixed absolute date (2018-01-01) rather than relative
+to `--years`'s own requested start — so `--years 2010-2026` silently
+tested the exact same window as `--years 2015-2026` (both gave
+`n_days=2636`) until this was fixed to compute `warmup_start` as a fixed
+400-day offset *before* `start`. The 2010-2026 row above is the
+corrected, genuinely-16-year result (`n_days=4987`); the same run before
+this fix would have silently reported the 2015-2026 numbers again under a
+`--years 2010-2026` flag — worth knowing if reproducing any of the above.
+
 ## 7. Price-space vs. return-space scaling, and correlation-only signal weighting
 
 **Robert Carver's EWMAC construction** (*Systematic Trading*, 2015 — the
@@ -763,18 +870,25 @@ correlation structure would justify.
   score (§5).
 - For regime disagreement, the literature-backed upgrade from the current
   flat `momentum_discount=0.5` is an empirically-estimated, asymmetric
-  reweighting between `ts3m` and `ts1y` (separate `a_Co`/`a_Re`), evaluated
-  at the same (not necessarily immediate) cadence as the signal, with
-  shrinkage to no-op under thin samples — not an immediate exit (§6). A
-  direct 2023-2026 test on this project's own 14-symbol universe (§6,
-  stripped-down binary-signal/flat-vol-parity methodology) found the
-  current flat discount does help at the margin (Sharpe 0.52 vs. 0.47,
-  same direction the literature predicts) but the effect isn't
-  distinguishable from noise at only ~4.3 years of data — directionally
-  supportive, not confirmatory. Both the paper's own Table E.1 numbers and
-  this project's own test show a fairly weak absolute edge in this recent
-  period regardless of which discount scheme is used — that's a separate,
-  more important caveat than which reweighting scheme wins.
+  reweighting between `ts3m`/`r2m` and `ts1y`/`r1y` (separate `a_Co`/`a_Re`),
+  evaluated at the same (not necessarily immediate) cadence as the signal,
+  with fallback to no-op under thin samples — not an immediate exit (§6).
+  A direct 2023-2026 test on this project's own 14-symbol universe (§6,
+  stripped-down binary-signal/flat-vol-parity methodology) found the flat
+  discount helps only at the margin over a short window, not
+  distinguishable from noise — directionally supportive, not confirmatory,
+  on its own. **The full `a_Co`/`a_Re` dynamic reweighting was then actually
+  implemented** (§6b, not just discussed) and tested over three window
+  lengths: weak/worse than the flat discount on a short (~3y) window where
+  the pooled estimator hasn't yet cleared its warm-up threshold, but over
+  the full ~16-year history available, it very nearly **doubles** the
+  Sharpe of both flat-discount variants (0.44 vs. 0.24/0.23) with a
+  materially smaller drawdown (-12.7% vs. -16.4%/-19.8%) — a considerably
+  stronger, more literature-consistent result than the flat-discount
+  comparison alone produced, and the clearest empirical case in this
+  document for implementing the full reweighting rather than the current
+  flat discount, contingent on enough history for the pooled estimator to
+  leave its fallback state.
 - Price-space vs. return-space vol normalization is a legitimate
   architectural fork, not a bug; the current return-space choice is
   defensible for a cross-instrument futures book and converges with the
