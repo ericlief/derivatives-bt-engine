@@ -110,8 +110,9 @@ from derivatives_bt_engine.domain.tsmom_backtester import _month_end_dates, load
 from derivatives_bt_engine.domain.tsmom_signal import calculate_trend_strength
 
 # ── Tunable defaults ────────────────────────────────────────────────────────
-DEFAULT_SYMBOLS = ['ES', 'NQ', 'CL', 'GC', 'SI', 'ZN', 'ZT', 'ZL', 'ZC', 'ZS', 'ZW', 'JPY', 'BRE', '6M']
-DEFAULT_YEARS = '2023-2026'
+# DEFAULT_SYMBOLS = ['ES', 'NQ', 'CL', 'GC', 'SI', 'ZN', 'ZT', 'ZL', 'ZC', 'ZS', 'ZW', 'JPY', 'BRE', '6M']
+DEFAULT_SYMBOLS = ['MES', 'MNQ', 'MCL', 'MGC', 'SIL', 'MTN', 'MZL', 'MZC', 'MZS', 'MZW', 'J7', 'BRE', '6M']
+DEFAULT_YEARS = '2010-2026'
 DEFAULT_WARMUP_START = date(2018, 1, 1)   # signal history buffer before --years' start
 DEFAULT_INITIAL_CAPITAL = 1_000_000.0
 DEFAULT_FLAT_PER_ASSET_VOL_TARGET_USD = 10_000.0  # 1% of default capital, same for every asset -- no clustering
