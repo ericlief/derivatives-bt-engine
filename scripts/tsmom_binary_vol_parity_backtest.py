@@ -99,6 +99,7 @@ Run:
 from __future__ import annotations
 
 import argparse
+import math
 from datetime import date
 
 import polars as pl
@@ -182,7 +183,15 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
                 if row.height == 0:
                     continue
                 ts_val, dstd, regime = row['ts'][0], row['daily_std'][0], row['regime'][0]
-                if ts_val is None or dstd is None or dstd <= 0:
+                # `dstd <= 0` alone doesn't catch NaN -- comparisons with NaN
+                # are always False in Python, so a NaN daily_std (e.g. from a
+                # bad/missing price on some date) silently slipped through
+                # this guard, propagated into dollar_vol_per_contract, and
+                # crashed round() downstream with "cannot convert float NaN
+                # to integer" -- confirmed on a real run.
+                if (ts_val is None or (isinstance(ts_val, float) and math.isnan(ts_val))
+                        or dstd is None or (isinstance(dstd, float) and math.isnan(dstd))
+                        or dstd <= 0):
                     continue
                 direction = 1.0 if ts_val > 0 else (-1.0 if ts_val < 0 else 0.0)
                 discount = momentum_discount if regime in ('correction', 'rebound') else 1.0
