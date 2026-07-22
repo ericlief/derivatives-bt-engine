@@ -258,7 +258,8 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
         initial_capital: float = DEFAULT_INITIAL_CAPITAL,
         flat_per_asset_vol_target_usd: float = DEFAULT_FLAT_PER_ASSET_VOL_TARGET_USD,
         warmup_start: Optional[date] = None,
-        weighting_mode: str = 'flat_discount') -> dict:
+        weighting_mode: str = 'flat_discount',
+        save_prefix: Optional[str] = None) -> dict:
     """weighting_mode:
         'flat_discount' -- existing behaviour: ts3m/ts1y-based `ts`/`regime`
             (calculate_trend_strength's canonical columns), momentum_discount
@@ -272,6 +273,14 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
 
     warmup_start defaults to WARMUP_DAYS_BEFORE_START before `start` (not a
     fixed absolute date -- see that constant's own comment for why).
+
+    save_prefix, if given, writes two CSVs for after-the-fact inspection --
+    "{save_prefix}_{mode}_daily.csv" (date, capital, ret) and
+    "{save_prefix}_{mode}_rebalances.csv" (one row per symbol actually
+    rebalanced: date, state/regime, a_co/a_re, ts/r1y/r2m, weight,
+    prior->target contracts, fee) -- neither existed anywhere before this,
+    so there was no way to audit what a given run actually did after the
+    fact, only the final summary numbers.
     """
     if warmup_start is None:
         warmup_start = start - timedelta(days=WARMUP_DAYS_BEFORE_START)
@@ -310,6 +319,13 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
     capital = initial_capital
     total_fees = 0.0
     rows = []
+    # One row per (rebalance date, symbol) actually acted on -- the only
+    # way to audit *why* a run's number came out the way it did (state,
+    # weight, a_Co/a_Re, prior->target, fee) instead of just trusting the
+    # final Sharpe. Nothing was saved anywhere before this -- confirmed
+    # there was no way to tell, after the fact, what a given run actually
+    # did at each rebalance.
+    rebalance_events = []
 
     for d in all_dates:
         # Mark-to-market with yesterday's held contracts against today's move.
@@ -356,6 +372,7 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
                 # to integer" -- confirmed on a real run.
                 dstd_bad = dstd is None or (isinstance(dstd, float) and math.isnan(dstd)) or dstd <= 0
 
+                state, r1y_val, r2m_val, ts_val, regime = None, None, None, None, None
                 if weighting_mode == 'dynamic':
                     r1y_val, r2m_val = row['r1y'][0], row['r2m'][0]
                     state = _paper_state(r2m_val, r1y_val)
@@ -403,7 +420,17 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
                     closed_qty = abs(prior)
                 else:
                     closed_qty = max(0, abs(prior) - abs(new_target))
-                fees += 2 * closed_qty * spec['commission']
+                event_fee = 2 * closed_qty * spec['commission']
+                fees += event_fee
+                rebalance_events.append({
+                    'date': d, 'symbol': s, 'mode': weighting_mode,
+                    'state': state if weighting_mode == 'dynamic' else regime,
+                    'a_co': a_co, 'a_re': a_re,
+                    'ts': ts_val, 'r1y': r1y_val, 'r2m': r2m_val,
+                    'weight': round(weight, 4), 'close': close, 'daily_std': dstd,
+                    'prior_contracts': prior, 'target_contracts': new_target,
+                    'fee': round(event_fee, 2),
+                })
                 held[s] = new_target
             capital -= fees
             total_fees += fees
@@ -419,6 +446,14 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
     sharpe = ann_ret / ann_vol if ann_vol else None
     running_max = stats['capital'].cum_max()
     dd_pct = ((stats['capital'] - running_max) / running_max * 100).min()
+
+    if save_prefix:
+        tag = f"{weighting_mode}" + (f"_{momentum_discount}" if weighting_mode == 'flat_discount' else '')
+        daily_path = f"{save_prefix}_{tag}_daily.csv"
+        events_path = f"{save_prefix}_{tag}_rebalances.csv"
+        stats.write_csv(daily_path)
+        pl.DataFrame(rebalance_events).write_csv(events_path)
+        logger.info(f"Saved {daily_path} ({stats.height} rows) and {events_path} ({len(rebalance_events)} rows)")
 
     return {
         'mode': weighting_mode,
@@ -446,6 +481,12 @@ def parse_args():
                     help="Also run the paper's own eq. 4/7-10 dynamic a_Co/a_Re "
                          "reweighting (Goulding/Harvey/Mazzoleni), alongside the "
                          "--momentum-discounts flat-discount run(s) (default: off)")
+    p.add_argument('--save-csv', default=None, metavar='PREFIX',
+                    help='Write per-run "{PREFIX}_{mode}_daily.csv" (date, capital, ret) and '
+                         '"{PREFIX}_{mode}_rebalances.csv" (one row per symbol actually rebalanced: '
+                         'state/regime, a_co/a_re, ts/r1y/r2m, weight, prior->target, fee) for '
+                         'after-the-fact inspection -- neither is saved anywhere without this '
+                         '(default: off, only the summary dict is printed)')
     return p.parse_args()
 
 
@@ -459,14 +500,16 @@ def main():
     for discount in discounts:
         result = run(symbols, start, end, discount,
                       initial_capital=args.initial_capital,
-                      flat_per_asset_vol_target_usd=args.flat_vol_target)
+                      flat_per_asset_vol_target_usd=args.flat_vol_target,
+                      save_prefix=args.save_csv)
         print(result)
 
     if args.include_dynamic:
         result = run(symbols, start, end, momentum_discount=1.0,
                       initial_capital=args.initial_capital,
                       flat_per_asset_vol_target_usd=args.flat_vol_target,
-                      weighting_mode='dynamic')
+                      weighting_mode='dynamic',
+                      save_prefix=args.save_csv)
         print(result)
 
 
