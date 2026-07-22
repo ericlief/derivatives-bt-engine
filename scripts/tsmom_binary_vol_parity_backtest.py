@@ -108,6 +108,9 @@ from derivatives_bt_engine.domain.futures_signal_generator import FuturesSignalG
 from derivatives_bt_engine.domain.instruments import get_spec
 from derivatives_bt_engine.domain.tsmom_backtester import _month_end_dates, load_portfolio_data
 from derivatives_bt_engine.domain.tsmom_signal import calculate_trend_strength
+from derivatives_bt_engine.utils.logger import setup_logger
+
+logger = setup_logger()
 
 # ── Tunable defaults ────────────────────────────────────────────────────────
 # DEFAULT_SYMBOLS = ['ES', 'NQ', 'CL', 'GC', 'SI', 'ZN', 'ZT', 'ZL', 'ZC', 'ZS', 'ZW', 'JPY', 'BRE', '6M']
@@ -193,6 +196,12 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
                 if (ts_val is None or (isinstance(ts_val, float) and math.isnan(ts_val))
                         or dstd is None or (isinstance(dstd, float) and math.isnan(dstd))
                         or dstd <= 0):
+                    # Log which symbol/date/values triggered the skip --
+                    # without this, a NaN/None signal is silently invisible
+                    # (confirmed the hard way: a prior crash left no trail to
+                    # tell which symbol or date was responsible).
+                    logger.warning(f"{s} on {d}: skipping rebalance, invalid signal "
+                                    f"(ts={ts_val}, daily_std={dstd})")
                     continue
                 direction = 1.0 if ts_val > 0 else (-1.0 if ts_val < 0 else 0.0)
                 discount = momentum_discount if regime in ('correction', 'rebound') else 1.0
