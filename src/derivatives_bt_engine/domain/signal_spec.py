@@ -159,9 +159,10 @@ class SignalSpec:
         """Convenience factory for Goulding et al.'s own parameterization
         (2-month fast / 12-month slow), CALENDAR basis by default since
         that's what the paper's own "N-month return" literally means --
-        pass window_basis=WindowBasis.OBSERVATIONS for the cheaper, already-
-        validated ~42-trading-day approximation instead (matches
-        scripts/tsmom_binary_vol_parity_backtest.py's PAPER_FAST_DAYS)."""
+        pass window_basis=WindowBasis.OBSERVATIONS for the cheaper
+        ~42-trading-day approximation instead (GOULDING_FAST_DAYS), which is
+        what scripts/tsmom_binary_vol_parity_backtest.py's own dynamic mode
+        calls directly."""
         return SignalSpec(
             model=SignalModel.GOULDING_DYNAMIC, window_basis=window_basis,
             fast_days=GOULDING_FAST_DAYS, slow_days=DEFAULT_SLOW_WINDOW,

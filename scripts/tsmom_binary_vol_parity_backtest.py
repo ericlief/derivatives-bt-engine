@@ -5,8 +5,10 @@ Table 1 methodology -- every asset gets the SAME flat annualized-$-vol
 target, no cluster/bucket hierarchy, no risk_scalar clamp, no cluster risk
 cap, no max_notional/max_contracts ceiling). Monthly rebalance, matching
 tsmom_backtester.py's cadence. Reuses only pure data-loading/signal
-functions (load_portfolio_data, calculate_trend_strength, _month_end_dates)
--- none of tsmom_backtester.py's own position-sizing.
+functions (load_portfolio_data, calculate_trend_strength, _month_end_dates,
+signal_spec.py's SignalSpec.goulding()/compute_signal() for the paper's own
+2m/12m state classification) -- none of tsmom_backtester.py's own
+position-sizing.
 
 Written to answer a specific question (see
 research/research_trend_strength_crossover_signal.md, Part 2 §6): does
@@ -105,8 +107,10 @@ from typing import Optional
 
 import polars as pl
 
+from derivatives_bt_engine.domain.enums import WindowBasis
 from derivatives_bt_engine.domain.futures_signal_generator import FuturesSignalGenerator
 from derivatives_bt_engine.domain.instruments import get_spec
+from derivatives_bt_engine.domain.signal_spec import SignalSpec, _goulding_weight, compute_signal
 from derivatives_bt_engine.domain.tsmom_backtester import _month_end_dates, load_portfolio_data
 from derivatives_bt_engine.domain.tsmom_signal import calculate_trend_strength
 from derivatives_bt_engine.utils.logger import setup_logger
@@ -124,7 +128,7 @@ logger = setup_logger()
 DEFAULT_SYMBOLS = ['MES', 'MNQ', 'MCL', 'MGC', 'SIL', 'MTN', 'MZL', 'MZC', 'MZS', 'MZW', 'J7', '6M']
 DEFAULT_YEARS = '2010-2026'
 # Signal history buffer before --years' own start, so ts_fast/ts_slow/
-# fast_return/slow_return are non-null from the test window's first rebalance -- a
+# r_fast/r_slow are non-null from the test window's first rebalance -- a
 # FIXED offset from `start`, not a fixed absolute date: an earlier version
 # hardcoded 2018-01-01 regardless of --years, which silently capped the
 # effective test window at 2018+ even when --years asked for an earlier
@@ -136,57 +140,33 @@ DEFAULT_INITIAL_CAPITAL = 1_000_000.0
 DEFAULT_FLAT_PER_ASSET_VOL_TARGET_USD = 10_000.0  # 1% of default capital, same for every asset -- no clustering
 DEFAULT_MOMENTUM_DISCOUNTS = [0.5, 1.0]
 
-# Goulding, Harvey & Mazzoleni (2023), "Breaking Bad Trends" -- fast/slow
-# horizons for the paper's OWN eq. 4 state classification (Bull/Correction/
-# Bear/Rebound) and eq. 8-10 a_Co/a_Re mixing-parameter estimator, kept
-# separate from calculate_trend_strength's existing 3m/12m ts_fast/ts_slow
-# (which stay canonical/untouched per that function's own docstring).
-# The paper's SLOW/FAST are literally averages of trailing calendar-month
-# returns (eq. 1-2); in this project's log-return convention that's exactly
-# proportional to log_price.diff(N)/N for N=252/42 days (log returns
-# telescope additively, so sum-of-daily = cumulative, with no error beyond
-# the calendar-month-vs-fixed-trading-day-window boundary this project
-# already accepts elsewhere for "252 = 1 year") -- so FAST_RETURN/SLOW_RETURN
-# below reuse calculate_trend_strength's own slow_return and a newly added
-# fast_return directly, not a separate rolling-mean recomputation.
-PAPER_FAST_DAYS = 42   # ~2 months, matching the paper's multi-asset FAST
-PAPER_SLOW_DAYS = 252  # ~12 months, matching the paper's SLOW
+# Goulding, Harvey & Mazzoleni (2023), "Breaking Bad Trends" -- eq. 4's
+# Bull/Correction/Bear/Rebound state classification and eq. 8-10's a_Co/a_Re
+# mixing-parameter estimator, kept separate from calculate_trend_strength's
+# existing 3m/12m ts_fast/ts_slow (which stay canonical/untouched per that
+# function's own docstring). The paper's own 2m/12m fast/slow horizons and
+# eq. 4/7 state/weight logic now come from signal_spec.py's
+# SignalSpec.goulding()/compute_signal() (GOULDING_FAST_DAYS/DEFAULT_SLOW_
+# WINDOW, _goulding_weight) rather than a duplicate hand-rolled
+# implementation here -- only the pooled, expanding-window a_Co/a_Re
+# ESTIMATION below stays script-local, since signal_spec.py's own docstring
+# explicitly keeps that out of scope (a caller estimates it separately and
+# passes the result in).
 MIN_MONTHS_PER_PHASE = 12  # paper's own warm-up requirement per Appendix C
-
-
-def _paper_state(fast_return: Optional[float], slow_ret: Optional[float]) -> Optional[str]:
-    """Eq. 4's Bull/Correction/Bear/Rebound, from the sign of the paper's
-    OWN raw (non-vol-normalized) fast/slow average returns -- distinct from
-    but sign-equivalent to tsmom_signal.classify_regime's ts_fast/ts_slow-
-    based version (dividing by a positive vol term never changes sign),
-    kept separate here only because the paper's own horizons (2m/12m)
-    differ from this project's canonical ones (3m/12m)."""
-    if fast_return is None or slow_ret is None:
-        return None
-    if (isinstance(fast_return, float) and math.isnan(fast_return)) or (isinstance(slow_ret, float) and math.isnan(slow_ret)):
-        return None
-    slow_up, fast_up = slow_ret >= 0, fast_return >= 0
-    if slow_up and fast_up:
-        return 'bull'
-    if slow_up and not fast_up:
-        return 'correction'
-    if not slow_up and not fast_up:
-        return 'bear'
-    return 'rebound'
 
 
 def _build_monthly_state_return_history(signals: dict[str, pl.DataFrame],
                                          rebal_dates: list[date]) -> pl.DataFrame:
     """One row per (symbol, rebalance date) with the state observed at the
-    START of that month (from the PRIOR rebalance date's fast_return/slow_return) paired
-    with that month's own realized log return (prior rebal_date's close to
-    this one's) -- i.e. exactly the (state, subsequent-month return) pairs
-    Appendix C's AVG[r|s]/AVG[r^2|s] are computed over. Pooled across every
-    symbol in `signals` (not per-instrument, unlike the paper's own
-    single-asset design) since this project's per-symbol history (~15
-    years) gives too few Correction/Rebound months on its own for a stable
-    estimate -- an explicit, flagged deviation from the paper, not an
-    oversight."""
+    START of that month (from the PRIOR rebalance date's g_regime, signal_spec.py's
+    Goulding eq. 4 classification) paired with that month's own realized log
+    return (prior rebal_date's close to this one's) -- i.e. exactly the
+    (state, subsequent-month return) pairs Appendix C's AVG[r|s]/AVG[r^2|s]
+    are computed over. Pooled across every symbol in `signals` (not per-
+    instrument, unlike the paper's own single-asset design) since this
+    project's per-symbol history (~15 years) gives too few Correction/
+    Rebound months on its own for a stable estimate -- an explicit, flagged
+    deviation from the paper, not an oversight."""
     rows = []
     for sym, sig in signals.items():
         prev_close: Optional[float] = None
@@ -195,8 +175,8 @@ def _build_monthly_state_return_history(signals: dict[str, pl.DataFrame],
             row = sig.filter(pl.col('ts_event') == d)
             if row.height == 0:
                 continue
-            close, slow_ret, fast_return = row['close'][0], row['slow_return'][0], row['fast_return'][0]
-            state = _paper_state(fast_return, slow_ret)
+            close, g_regime_val = row['close'][0], row['g_regime'][0]
+            state = g_regime_val.lower() if g_regime_val and g_regime_val != 'UNKNOWN' else None
             if prev_close is not None and prev_state is not None and prev_close > 0:
                 rows.append({'date': d, 'symbol': sym, 'state': prev_state,
                              'monthly_return': math.log(close / prev_close)})
@@ -284,7 +264,7 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
     save_prefix, if given, writes two CSVs for after-the-fact inspection --
     "{save_prefix}_{mode}_daily.csv" (date, capital, ret) and
     "{save_prefix}_{mode}_rebalances.csv" (one row per symbol actually
-    rebalanced: date, state/regime, a_co/a_re, ts/slow_return/fast_return, weight,
+    rebalanced: date, state/regime, a_co/a_re, ts/r_slow/r_fast, weight,
     prior->target contracts, fee) -- neither existed anywhere before this,
     so there was no way to audit what a given run actually did after the
     fact, only the final summary numbers.
@@ -296,12 +276,20 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
     signals = {}
     for sym, df in price_data.items():
         df = df.filter((pl.col('ts_event') >= warmup_start) & (pl.col('ts_event') <= end))
-        sig = calculate_trend_strength(df)
-        # fast_return: paper's own 2-month FAST horizon (calculate_trend_strength's
-        # canonical ts_fast/regime stay untouched -- this is an addition on top,
-        # from `close` directly since log_price is dropped by that function).
-        sig = sig.with_columns(fast_return=pl.col('close').log().diff(PAPER_FAST_DAYS))
-        signals[sym] = sig.select(['ts_event', 'close', 'ts', 'daily_std', 'regime', 'slow_return', 'fast_return']).sort('ts_event')
+        sig = calculate_trend_strength(df)  # canonical ts_fast/ts_slow/ts/regime, untouched
+        # Paper's own 2m/12m Bull/Correction/Bear/Rebound classification and
+        # r_fast/r_slow (GOULDING_FAST_DAYS/DEFAULT_SLOW_WINDOW) from
+        # signal_spec.py's SignalSpec.goulding()/compute_signal(), instead of
+        # a duplicate hand-rolled fast_return/state computation here -- the
+        # 'signal'/'ts_fast'/'ts_slow' columns it also produces are unused
+        # (this script computes its own weight from `g_regime` + the
+        # separately-estimated a_co/a_re, below).
+        goulding_sig = compute_signal(df, SignalSpec.goulding(window_basis=WindowBasis.OBSERVATIONS))
+        sig = sig.join(
+            goulding_sig.select(['ts_event', pl.col('regime').alias('g_regime'), 'r_fast', 'r_slow']),
+            on='ts_event', how='left',
+        )
+        signals[sym] = sig.select(['ts_event', 'close', 'ts', 'daily_std', 'regime', 'g_regime', 'r_fast', 'r_slow']).sort('ts_event')
 
     rebal_dates = sorted(d for d in _month_end_dates(price_data) if start <= d <= end)
     all_dates = sorted(set().union(*(set(df['ts_event'].to_list()) for df in signals.values())))
@@ -379,29 +367,24 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
                 # to integer" -- confirmed on a real run.
                 dstd_bad = dstd is None or (isinstance(dstd, float) and math.isnan(dstd)) or dstd <= 0
 
-                # slow_return/fast_return are computed unconditionally above
-                # (regardless of weighting_mode) so always read them here too
-                # -- audit rows should show the underlying fast/slow returns
-                # even on a flat_discount run, not just when 'dynamic' mode
-                # is the one actually consuming them for sizing.
-                slow_ret_val, fast_return_val = row['slow_return'][0], row['fast_return'][0]
+                # r_fast/r_slow (signal_spec.py's Goulding columns) are
+                # computed unconditionally above (regardless of
+                # weighting_mode) so always read them here too -- audit rows
+                # should show the underlying fast/slow returns even on a
+                # flat_discount run, not just when 'dynamic' mode is the one
+                # actually consuming them for sizing.
+                r_slow_val, r_fast_val, g_regime_val = row['r_slow'][0], row['r_fast'][0], row['g_regime'][0]
                 state, ts_val, regime = None, None, None
                 if weighting_mode == 'dynamic':
-                    state = _paper_state(fast_return_val, slow_ret_val)
+                    state = g_regime_val.lower() if g_regime_val and g_regime_val != 'UNKNOWN' else None
                     if state is None or dstd_bad:
                         logger.warning(f"{s} on {d}: skipping rebalance, invalid signal "
-                                        f"(fast_return={fast_return_val}, slow_return={slow_ret_val}, daily_std={dstd})")
+                                        f"(r_fast={r_fast_val}, r_slow={r_slow_val}, daily_std={dstd})")
                         continue
-                    if state == 'bull':
-                        weight = 1.0
-                    elif state == 'bear':
-                        weight = -1.0
-                    elif state == 'correction':
-                        # (1-a_co)*sign(slow=+1) + a_co*sign(fast=-1)
-                        weight = 1.0 - 2 * a_co
-                    else:  # rebound
-                        # (1-a_re)*sign(slow=-1) + a_re*sign(fast=+1)
-                        weight = 2 * a_re - 1.0
+                    # (1-a_co)*sign(slow)+a_co*sign(fast) in Correction, mirrored
+                    # in Rebound -- signal_spec.py's own eq. 7 weight formula,
+                    # reused here instead of a duplicate if/elif ladder.
+                    weight = _goulding_weight(g_regime_val, a_co, a_re)
                 else:
                     ts_val, regime = row['ts'][0], row['regime'][0]
                     if (ts_val is None or (isinstance(ts_val, float) and math.isnan(ts_val)) or dstd_bad):
@@ -438,7 +421,7 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
                     'date': d, 'symbol': s, 'mode': weighting_mode,
                     'state': state if weighting_mode == 'dynamic' else regime,
                     'a_co': a_co, 'a_re': a_re,
-                    'ts': ts_val, 'slow_return': slow_ret_val, 'fast_return': fast_return_val,
+                    'ts': ts_val, 'r_slow': r_slow_val, 'r_fast': r_fast_val,
                     'weight': round(weight, 4), 'close': close, 'daily_std': dstd,
                     'prior_contracts': prior, 'target_contracts': new_target,
                     'fee': round(event_fee, 2),
@@ -499,7 +482,7 @@ def parse_args():
     p.add_argument('--save-csv', default=None, metavar='PREFIX',
                     help='Write per-run "{PREFIX}_{mode}_daily.csv" (date, capital, ret) and '
                          '"{PREFIX}_{mode}_rebalances.csv" (one row per symbol actually rebalanced: '
-                         'state/regime, a_co/a_re, ts/slow_return/fast_return, weight, prior->target, fee) for '
+                         'state/regime, a_co/a_re, ts/r_slow/r_fast, weight, prior->target, fee) for '
                          'after-the-fact inspection -- neither is saved anywhere without this '
                          '(default: off, only the summary dict is printed)')
     return p.parse_args()
