@@ -123,8 +123,8 @@ logger = setup_logger()
 # DEFAULT_SYMBOLS = ['ES', 'NQ', 'CL', 'GC', 'SI', 'ZN', 'ZT', 'ZL', 'ZC', 'ZS', 'ZW', 'JPY', '6M']
 DEFAULT_SYMBOLS = ['MES', 'MNQ', 'MCL', 'MGC', 'SIL', 'MTN', 'MZL', 'MZC', 'MZS', 'MZW', 'J7', '6M']
 DEFAULT_YEARS = '2010-2026'
-# Signal history buffer before --years' own start, so ts_fast/ts_slow/r2m/
-# slow_return are non-null from the test window's first rebalance -- a
+# Signal history buffer before --years' own start, so ts_fast/ts_slow/
+# fast_return/slow_return are non-null from the test window's first rebalance -- a
 # FIXED offset from `start`, not a fixed absolute date: an earlier version
 # hardcoded 2018-01-01 regardless of --years, which silently capped the
 # effective test window at 2018+ even when --years asked for an earlier
@@ -146,26 +146,26 @@ DEFAULT_MOMENTUM_DISCOUNTS = [0.5, 1.0]
 # proportional to log_price.diff(N)/N for N=252/42 days (log returns
 # telescope additively, so sum-of-daily = cumulative, with no error beyond
 # the calendar-month-vs-fixed-trading-day-window boundary this project
-# already accepts elsewhere for "252 = 1 year") -- so R2M/SLOW_RETURN below
-# reuse calculate_trend_strength's own slow_return and a newly added r2m
-# directly, not a separate rolling-mean recomputation.
+# already accepts elsewhere for "252 = 1 year") -- so FAST_RETURN/SLOW_RETURN
+# below reuse calculate_trend_strength's own slow_return and a newly added
+# fast_return directly, not a separate rolling-mean recomputation.
 PAPER_FAST_DAYS = 42   # ~2 months, matching the paper's multi-asset FAST
 PAPER_SLOW_DAYS = 252  # ~12 months, matching the paper's SLOW
 MIN_MONTHS_PER_PHASE = 12  # paper's own warm-up requirement per Appendix C
 
 
-def _paper_state(r2m: Optional[float], slow_ret: Optional[float]) -> Optional[str]:
+def _paper_state(fast_return: Optional[float], slow_ret: Optional[float]) -> Optional[str]:
     """Eq. 4's Bull/Correction/Bear/Rebound, from the sign of the paper's
     OWN raw (non-vol-normalized) fast/slow average returns -- distinct from
     but sign-equivalent to tsmom_signal.classify_regime's ts_fast/ts_slow-
     based version (dividing by a positive vol term never changes sign),
     kept separate here only because the paper's own horizons (2m/12m)
     differ from this project's canonical ones (3m/12m)."""
-    if r2m is None or slow_ret is None:
+    if fast_return is None or slow_ret is None:
         return None
-    if (isinstance(r2m, float) and math.isnan(r2m)) or (isinstance(slow_ret, float) and math.isnan(slow_ret)):
+    if (isinstance(fast_return, float) and math.isnan(fast_return)) or (isinstance(slow_ret, float) and math.isnan(slow_ret)):
         return None
-    slow_up, fast_up = slow_ret >= 0, r2m >= 0
+    slow_up, fast_up = slow_ret >= 0, fast_return >= 0
     if slow_up and fast_up:
         return 'bull'
     if slow_up and not fast_up:
@@ -178,7 +178,7 @@ def _paper_state(r2m: Optional[float], slow_ret: Optional[float]) -> Optional[st
 def _build_monthly_state_return_history(signals: dict[str, pl.DataFrame],
                                          rebal_dates: list[date]) -> pl.DataFrame:
     """One row per (symbol, rebalance date) with the state observed at the
-    START of that month (from the PRIOR rebalance date's r2m/slow_return) paired
+    START of that month (from the PRIOR rebalance date's fast_return/slow_return) paired
     with that month's own realized log return (prior rebal_date's close to
     this one's) -- i.e. exactly the (state, subsequent-month return) pairs
     Appendix C's AVG[r|s]/AVG[r^2|s] are computed over. Pooled across every
@@ -195,8 +195,8 @@ def _build_monthly_state_return_history(signals: dict[str, pl.DataFrame],
             row = sig.filter(pl.col('ts_event') == d)
             if row.height == 0:
                 continue
-            close, slow_ret, r2m = row['close'][0], row['slow_return'][0], row['r2m'][0]
-            state = _paper_state(r2m, slow_ret)
+            close, slow_ret, fast_return = row['close'][0], row['slow_return'][0], row['fast_return'][0]
+            state = _paper_state(fast_return, slow_ret)
             if prev_close is not None and prev_state is not None and prev_close > 0:
                 rows.append({'date': d, 'symbol': sym, 'state': prev_state,
                              'monthly_return': math.log(close / prev_close)})
@@ -284,7 +284,7 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
     save_prefix, if given, writes two CSVs for after-the-fact inspection --
     "{save_prefix}_{mode}_daily.csv" (date, capital, ret) and
     "{save_prefix}_{mode}_rebalances.csv" (one row per symbol actually
-    rebalanced: date, state/regime, a_co/a_re, ts/slow_return/r2m, weight,
+    rebalanced: date, state/regime, a_co/a_re, ts/slow_return/fast_return, weight,
     prior->target contracts, fee) -- neither existed anywhere before this,
     so there was no way to audit what a given run actually did after the
     fact, only the final summary numbers.
@@ -297,11 +297,11 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
     for sym, df in price_data.items():
         df = df.filter((pl.col('ts_event') >= warmup_start) & (pl.col('ts_event') <= end))
         sig = calculate_trend_strength(df)
-        # r2m: paper's own 2-month FAST horizon (calculate_trend_strength's
+        # fast_return: paper's own 2-month FAST horizon (calculate_trend_strength's
         # canonical ts_fast/regime stay untouched -- this is an addition on top,
         # from `close` directly since log_price is dropped by that function).
-        sig = sig.with_columns(r2m=pl.col('close').log().diff(PAPER_FAST_DAYS))
-        signals[sym] = sig.select(['ts_event', 'close', 'ts', 'daily_std', 'regime', 'slow_return', 'r2m']).sort('ts_event')
+        sig = sig.with_columns(fast_return=pl.col('close').log().diff(PAPER_FAST_DAYS))
+        signals[sym] = sig.select(['ts_event', 'close', 'ts', 'daily_std', 'regime', 'slow_return', 'fast_return']).sort('ts_event')
 
     rebal_dates = sorted(d for d in _month_end_dates(price_data) if start <= d <= end)
     all_dates = sorted(set().union(*(set(df['ts_event'].to_list()) for df in signals.values())))
@@ -379,13 +379,18 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
                 # to integer" -- confirmed on a real run.
                 dstd_bad = dstd is None or (isinstance(dstd, float) and math.isnan(dstd)) or dstd <= 0
 
-                state, slow_ret_val, r2m_val, ts_val, regime = None, None, None, None, None
+                # slow_return/fast_return are computed unconditionally above
+                # (regardless of weighting_mode) so always read them here too
+                # -- audit rows should show the underlying fast/slow returns
+                # even on a flat_discount run, not just when 'dynamic' mode
+                # is the one actually consuming them for sizing.
+                slow_ret_val, fast_return_val = row['slow_return'][0], row['fast_return'][0]
+                state, ts_val, regime = None, None, None
                 if weighting_mode == 'dynamic':
-                    slow_ret_val, r2m_val = row['slow_return'][0], row['r2m'][0]
-                    state = _paper_state(r2m_val, slow_ret_val)
+                    state = _paper_state(fast_return_val, slow_ret_val)
                     if state is None or dstd_bad:
                         logger.warning(f"{s} on {d}: skipping rebalance, invalid signal "
-                                        f"(r2m={r2m_val}, slow_return={slow_ret_val}, daily_std={dstd})")
+                                        f"(fast_return={fast_return_val}, slow_return={slow_ret_val}, daily_std={dstd})")
                         continue
                     if state == 'bull':
                         weight = 1.0
@@ -433,7 +438,7 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
                     'date': d, 'symbol': s, 'mode': weighting_mode,
                     'state': state if weighting_mode == 'dynamic' else regime,
                     'a_co': a_co, 'a_re': a_re,
-                    'ts': ts_val, 'slow_return': slow_ret_val, 'r2m': r2m_val,
+                    'ts': ts_val, 'slow_return': slow_ret_val, 'fast_return': fast_return_val,
                     'weight': round(weight, 4), 'close': close, 'daily_std': dstd,
                     'prior_contracts': prior, 'target_contracts': new_target,
                     'fee': round(event_fee, 2),
@@ -491,7 +496,7 @@ def parse_args():
     p.add_argument('--save-csv', default=None, metavar='PREFIX',
                     help='Write per-run "{PREFIX}_{mode}_daily.csv" (date, capital, ret) and '
                          '"{PREFIX}_{mode}_rebalances.csv" (one row per symbol actually rebalanced: '
-                         'state/regime, a_co/a_re, ts/slow_return/r2m, weight, prior->target, fee) for '
+                         'state/regime, a_co/a_re, ts/slow_return/fast_return, weight, prior->target, fee) for '
                          'after-the-fact inspection -- neither is saved anywhere without this '
                          '(default: off, only the summary dict is printed)')
     return p.parse_args()
