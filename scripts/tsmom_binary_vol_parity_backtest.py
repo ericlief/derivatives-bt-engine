@@ -463,8 +463,11 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
         tag = f"{weighting_mode}" + (f"_{momentum_discount}" if weighting_mode == 'flat_discount' else '')
         daily_path = f"{save_prefix}_{tag}_daily.csv"
         events_path = f"{save_prefix}_{tag}_rebalances.csv"
-        stats.write_csv(daily_path)
-        pl.DataFrame(rebalance_events).write_csv(events_path)
+        # Round every float column to 4dp for CSV readability -- the raw
+        # values (e.g. daily_std=0.015278191541596027) are full float64
+        # precision and unreadable in a spreadsheet/terminal.
+        stats.with_columns(pl.col(pl.Float64).round(4)).write_csv(daily_path)
+        pl.DataFrame(rebalance_events).with_columns(pl.col(pl.Float64).round(4)).write_csv(events_path)
         logger.info(f"Saved {daily_path} ({stats.height} rows) and {events_path} ({len(rebalance_events)} rows)")
 
     return {
