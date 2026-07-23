@@ -35,7 +35,7 @@ def test_trend_strength_columns_present():
     df = calculate_trend_strength(_price_df(400, drift=0.001))
     # log_price/r1d are deliberately kept (compute_vol_ratio chains onto
     # them) -- only the truly disposable intermediates are dropped.
-    for col in ('signal', 'ts3m', 'ts1y', 'daily_std', 'avg_r3m', 'avg_r1y', 'r1y_pct', 'dd', 'peak', 'log_price', 'r1d'):
+    for col in ('signal', 'ts_fast', 'ts_slow', 'daily_std', 'avg_r_fast', 'avg_r_slow', 'r1y_pct', 'dd', 'peak', 'log_price', 'r1d'):
         assert col in df.columns
     for col in ('w3', 'w1'):
         assert col not in df.columns
@@ -43,7 +43,7 @@ def test_trend_strength_columns_present():
 
 def test_trend_strength_null_until_63_bars():
     df = calculate_trend_strength(_price_df(100, drift=0.0))
-    # before 63 bars, ts3m/signal must be null
+    # before 63 bars, ts_fast/signal must be null
     assert df['signal'][:63].null_count() == 63
     assert df['signal'][63:].null_count() == 0
 
@@ -67,28 +67,28 @@ def test_trend_strength_bounded():
     assert vals.max() <= 1.0
 
 
-def test_trend_strength_falls_back_to_ts3m_before_252_bars():
-    # between 63 and 252 bars, ts1y is null so w1=0 and the signal should
-    # equal tanh(ts3m) exactly (w3/(w3+0) == 1)
+def test_trend_strength_falls_back_to_ts_fast_before_252_bars():
+    # between 63 and 252 bars, ts_slow is null so w1=0 and the signal should
+    # equal tanh(ts_fast) exactly (w3/(w3+0) == 1)
     df = calculate_trend_strength(_price_df(150, drift=0.002, vol=0.005))
     row = df.tail(1)
-    ts3m = row['ts3m'][0]
-    ts1y = row['ts1y'][0]
+    ts_fast = row['ts_fast'][0]
+    ts_slow = row['ts_slow'][0]
     trend = row['signal'][0]
-    assert ts1y is None
-    assert math.isclose(trend, math.tanh(ts3m), rel_tol=1e-9)
+    assert ts_slow is None
+    assert math.isclose(trend, math.tanh(ts_fast), rel_tol=1e-9)
 
 
 # ── classify_regime ─────────────────────────────────────────────────────────
 
-@pytest.mark.parametrize('ts1y,ts3m,expected', [
+@pytest.mark.parametrize('slow,fast,expected', [
     (1.0, 1.0, TrendRegime.BULL),
     (1.0, -1.0, TrendRegime.CORRECTION),
     (-1.0, -1.0, TrendRegime.BEAR),
     (-1.0, 1.0, TrendRegime.REBOUND),
 ])
-def test_classify_regime(ts1y, ts3m, expected):
-    assert classify_regime(ts3m, ts1y) == expected
+def test_classify_regime(slow, fast, expected):
+    assert classify_regime(fast, slow) == expected
 
 
 def test_classify_regime_unknown_on_none():

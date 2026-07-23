@@ -26,7 +26,7 @@ from zoneinfo import ZoneInfo
 from ib_tools.ibpysync import IBPySync
 
 from derivatives_bt_engine.domain.enums import TrendRegime, VolRegime
-from derivatives_bt_engine.domain.instruments import resolve_signal_symbol
+from derivatives_bt_engine.domain.instruments import resolve_annualization_days, resolve_signal_symbol
 from derivatives_bt_engine.domain.tsmom_signal import (
     apply_cluster_risk_cap,
     calculate_trend_strength,
@@ -242,7 +242,7 @@ def _compute_signal(ib: IBPySync, instr: dict, min_days: int, vol_target: float,
     # Historical bars come from the continuous front-month contract, not the
     # dated one -- a single expiry-specific Future only has bars back to
     # when that contract was listed (well under a year), which silently
-    # starves the 252-day (ts1y) momentum calc and makes classify_regime()
+    # starves the 252-day (ts_slow) momentum calc and makes classify_regime()
     # return 'Unknown' for every symbol whose nearest contract hasn't been
     # listed a full year yet.
     #
@@ -258,17 +258,23 @@ def _compute_signal(ib: IBPySync, instr: dict, min_days: int, vol_target: float,
     if bars is None or bars.height < 64:
         raise RuntimeError(f"Insufficient bar history for {instr['symbol']} ({bars.height if bars is not None else 0} rows)")
 
-    df = calculate_trend_strength(bars)
+    # Real trading-days/year for this symbol's own continuous series
+    # (instruments.resolve_annualization_days) -- this project's confirmed
+    # universe splits 252 (CBOT grains) vs. 259 (everything else checked,
+    # post Sunday-session-merge fix); falls back to 252 for anything
+    # unconfirmed, unchanged from this module's prior universal-252 behavior.
+    annualization_days = resolve_annualization_days(instr['symbol'])
+    df = calculate_trend_strength(bars, annualization_days=annualization_days)
     last = df.tail(1)
     trend_strength = last['signal'][0]
-    ts3m = last['ts3m'][0]
-    ts1y = last['ts1y'][0]
+    ts_fast = last['ts_fast'][0]
+    ts_slow = last['ts_slow'][0]
     daily_std_last = last['daily_std'][0] if 'daily_std' in last.columns else None
     last_close = float(last['close'][0])
     dd_raw = last['dd'][0] if 'dd' in last.columns else None
     dd_pct = dd_raw * 100 if dd_raw is not None else None
 
-    regime = classify_regime(ts3m, ts1y)
+    regime = classify_regime(ts_fast, ts_slow)
 
     signal_for_scalar = trend_strength
     if long_only and signal_for_scalar is not None and not math.isnan(signal_for_scalar):
@@ -278,7 +284,7 @@ def _compute_signal(ib: IBPySync, instr: dict, min_days: int, vol_target: float,
     # position_scalar's own internal math) purely for reporting -- so the
     # printed report shows *why* a given trend_strength did or didn't turn
     # into a trade.
-    hv = daily_std_last * math.sqrt(252) if daily_std_last and daily_std_last > 0 else None
+    hv = daily_std_last * math.sqrt(annualization_days) if daily_std_last and daily_std_last > 0 else None
     risk_scalar = max(0.25, min(2.0, vol_target / hv)) if hv else 1.0
     momentum_discount = momentum_discount if regime in (TrendRegime.CORRECTION, TrendRegime.REBOUND) else 1.0
 
@@ -306,8 +312,8 @@ def _compute_signal(ib: IBPySync, instr: dict, min_days: int, vol_target: float,
         'contract': contract,
         'signal': trend_strength,
         'signal_for_scalar': signal_for_scalar,
-        'ts3m': ts3m,
-        'ts1y': ts1y,
+        'ts_fast': ts_fast,
+        'ts_slow': ts_slow,
         'daily_std': daily_std_last,
         'hv': hv,
         'risk_scalar': risk_scalar,
@@ -320,6 +326,7 @@ def _compute_signal(ib: IBPySync, instr: dict, min_days: int, vol_target: float,
         'regime': regime,
         'cluster': instr.get('cluster', 'other'),
         'multiplier': instr.get('multiplier'),
+        'annualization_days': annualization_days,
     }
 
 
@@ -492,6 +499,7 @@ def compute_rebalance_targets(ib: IBPySync, instruments: list[dict], config: dic
             scalar = compute_position_scalar(
                 s['signal_for_scalar'], s['daily_std'], vol_target, s['regime'],
                 momentum_discount=momentum_discount, signal_confidence=s['signal_confidence'],
+                annualization_days=s['annualization_days'],
             )
             scalar *= market_stress_scale
 
@@ -528,8 +536,8 @@ def compute_rebalance_targets(ib: IBPySync, instruments: list[dict], config: dic
                 'current_contracts': current_contracts,
                 'signal': s['signal'],
                 'scalar': scalar,
-                'ts3m': s['ts3m'],
-                'ts1y': s['ts1y'],
+                'ts_fast': s['ts_fast'],
+                'ts_slow': s['ts_slow'],
                 'daily_std': s['daily_std'],
                 'hv': s['hv'],
                 'risk_scalar': s['risk_scalar'],
@@ -615,7 +623,7 @@ def print_rebalance_report(targets: list[dict]) -> str:
         lines.append(
             f"{t['symbol']:6s}  target={t['target_contracts']!s:>4}  "
             f"current={t['current_contracts']!s:>4}  signal={_fmt(t.get('signal')):>7}  "
-            f"ts3m={_fmt(t.get('ts3m')):>7}  ts1y={_fmt(t.get('ts1y')):>7}  "
+            f"ts_fast={_fmt(t.get('ts_fast')):>7}  ts_slow={_fmt(t.get('ts_slow')):>7}  "
             f"close={_fmt(t.get('close'), '.2f'):>9}  dd_pct={_fmt(t.get('dd_pct'), '.2f'):>7}  "
             f"daily_std={_fmt(t.get('daily_std'), '.4f'):>7}  hv={_fmt(t.get('hv'), '.3f'):>6}  "
             f"risk_scalar={_fmt(t.get('risk_scalar'), '.3f'):>6}  momentum_discount={_fmt(t.get('momentum_discount'), '.2f'):>5}  "

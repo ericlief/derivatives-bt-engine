@@ -29,8 +29,9 @@ import polars as pl
 
 from derivatives_bt_engine.domain.enums import TrendRegime, VolRegime
 from derivatives_bt_engine.domain.futures_dataloader import FuturesDataLoader, assert_monotonic_expiration
-from derivatives_bt_engine.domain.futures_signal_generator import FuturesSignalGenerator
-from derivatives_bt_engine.domain.instruments import get_spec, resolve_price_symbol
+from derivatives_bt_engine.domain.instruments import (
+    CME_MONTH_NUM_TO_LETTER, get_spec, resolve_active_months, resolve_annualization_days, resolve_price_symbol,
+)
 from derivatives_bt_engine.domain.tsmom_signal import calculate_trend_strength, classify_regime, compute_position_scalar
 from derivatives_bt_engine.utils.logger import setup_logger
 
@@ -73,8 +74,8 @@ class TsmomBacktestConfig:
     # rather than a fixed config field, since a TSMOM symbol can go long or
     # short depending on the sign of its own signal. signal_gate_mode picks
     # the cadence at which the gate is checked -- 'monthly' only at the
-    # existing rebalance points (near-zero extra cost, reuses signal/ts3m/
-    # ts1y _compute_signal_row already computed that day); 'daily'
+    # existing rebalance points (near-zero extra cost, reuses signal/ts_fast/
+    # ts_slow _compute_signal_row already computed that day); 'daily'
     # additionally checks both entry AND exit every day in between,
     # off-cycle from the monthly resize, so a flat symbol can open the day
     # its entry gate first clears (not just at month-end) and a held
@@ -227,17 +228,17 @@ def _round(x: Optional[float], ndigits: int) -> Optional[float]:
     return None if x is None else round(x, ndigits)
 
 
-def _signal_gate_reason(sig_val, ts3m_val, ts1y_val, is_long: bool, threshold: Optional[float],
+def _signal_gate_reason(sig_val, ts_fast_val, ts_slow_val, is_long: bool, threshold: Optional[float],
                          exit_on_ts_crossover: bool) -> Optional[str]:
     """Same shape as TradeManager's per-position gate check
     (domain/trade_manager.py's _signal_gate_reason), standalone here since
     TSMOM has no per-position `self.config` to close over and this module
     is deliberately kept separate from TradeManager. Bails out (never
-    gates) if either ts3m or ts1y is still null -- calculate_trend_strength
-    only requires ts3m to be non-null to emit a `signal` value at all, so
+    gates) if either ts_fast or ts_slow is still null -- calculate_trend_strength
+    only requires ts_fast to be non-null to emit a `signal` value at all, so
     early in any backtest window `signal` can look like a real number
-    while being an unreliable ts3m-only estimate."""
-    if ts3m_val is None or ts1y_val is None:
+    while being an unreliable ts_fast-only estimate."""
+    if ts_fast_val is None or ts_slow_val is None:
         return None
     if threshold is not None and sig_val is not None:
         if is_long and sig_val < threshold:
@@ -245,9 +246,9 @@ def _signal_gate_reason(sig_val, ts3m_val, ts1y_val, is_long: bool, threshold: O
         if not is_long and sig_val > -threshold:
             return 'signal_ts_threshold'
     if exit_on_ts_crossover:
-        if is_long and ts3m_val < ts1y_val:
+        if is_long and ts_fast_val < ts_slow_val:
             return 'signal_crossover'
-        if not is_long and ts3m_val > ts1y_val:
+        if not is_long and ts_fast_val > ts_slow_val:
             return 'signal_crossover'
     return None
 
@@ -264,11 +265,11 @@ def _apply_signal_gate(prior_contracts: int, proposed_target: int, result: dict,
     Returns (final_target, gate_reason)."""
     if config.signal_gate_mode == 'off':
         return proposed_target, None
-    sig_val, ts3m_val, ts1y_val = result.get('signal'), result.get('ts3m'), result.get('ts1y')
+    sig_val, ts_fast_val, ts_slow_val = result.get('signal'), result.get('ts_fast'), result.get('ts_slow')
 
     if prior_contracts != 0:
         is_long = prior_contracts > 0
-        reason = _signal_gate_reason(sig_val, ts3m_val, ts1y_val, is_long,
+        reason = _signal_gate_reason(sig_val, ts_fast_val, ts_slow_val, is_long,
                                       config.ts_exit_threshold, config.exit_on_ts_crossover)
         if reason is not None:
             return 0, reason
@@ -279,8 +280,8 @@ def _apply_signal_gate(prior_contracts: int, proposed_target: int, result: dict,
             # an implicit sign flip driven by the raw composite signal's
             # own sign changing independently of whatever specific exit
             # condition is configured (e.g. exit_on_ts_crossover checks
-            # ts3m-vs-ts1y directly, which isn't guaranteed to coincide
-            # with tanh(0.4*ts3m+0.6*ts1y) crossing zero) -- stay held,
+            # ts_fast-vs-ts_slow directly, which isn't guaranteed to coincide
+            # with tanh(0.4*ts_fast+0.6*ts_slow) crossing zero) -- stay held,
             # unchanged; a flip must go through the gate, never happen
             # silently just because the vol-targeted path's own "let the
             # freshly computed target through" fallthrough doesn't
@@ -289,7 +290,7 @@ def _apply_signal_gate(prior_contracts: int, proposed_target: int, result: dict,
 
     if prior_contracts == 0 and proposed_target != 0:
         is_long = proposed_target > 0
-        blocked = _signal_gate_reason(sig_val, ts3m_val, ts1y_val, is_long,
+        blocked = _signal_gate_reason(sig_val, ts_fast_val, ts_slow_val, is_long,
                                        config.ts_entry_threshold, config.exit_on_ts_crossover) is not None
         if blocked:
             return 0, 'signal_entry_blocked'
@@ -308,6 +309,64 @@ def _month_end_dates(price_data: dict[str, pl.DataFrame]) -> set[date]:
     return set(month_ends['month_end'].to_list())
 
 
+def _detect_roll_dates(df: pl.DataFrame, start: date, end: date,
+                        active_months: Optional[list[str]], symbol: str) -> list[date]:
+    """Real per-symbol roll dates: every date within [start, end] where the
+    continuous front-month series' own selected contract's `expiration`
+    changes from the prior row -- an actual volume-driven front-month
+    crossover in FuturesDataLoader.daily's sticky/volume-ranked query (see
+    futures_dataloader.py's _CONTINUOUS_FRONT_MONTH_SQL), not a fixed
+    calendar assumption applied uniformly regardless of a symbol's real
+    roll cadence. Replaces the previous fixed-quarterly schedule
+    (FuturesSignalGenerator._get_quarterly_roll_dates, still used
+    unchanged by the naked single-symbol path), which was empirically
+    confirmed wrong for a meaningful chunk of this project's universe: GC,
+    SI, and the four grains each roll roughly monthly among their own 4-5
+    real active months, not quarterly, and none of their active-month sets
+    is a subset of Mar/Jun/Sep/Dec (see
+    research/research_futures_roll_logic_and_active_months.md §2, §4.2).
+
+    `df` must be the symbol's own unbounded (not date-windowed) continuous
+    series -- the first row of any slice always looks like "a change" (its
+    own prior row is unavailable), which would register a false roll right
+    at whatever date happens to start the slice, if `df` had already been
+    windowed before this runs.
+
+    `active_months` (instruments.resolve_active_months(symbol), when
+    confirmed) is used only as a validation guard on the DETECTED dates,
+    not to generate them: each crossover's target contract's month-letter
+    is checked against it, and a warning (not a raised error -- a hard
+    failure here risks reintroducing the "stuck-forever roll" class of bug
+    this project already hit once) is logged if a detected roll lands
+    outside the confirmed active set. That mismatch is exactly the shape
+    of a single spurious volume-spike hijacking the sticky series (the
+    still-open BRE/6L bug, research doc §1.2) -- surfaced here rather than
+    silently trusted, for every symbol this guard is available for, not
+    just BRE.
+
+    No-ops (returns an empty list, i.e. "no detected rolls") when `df` has
+    no `expiration` column at all -- mirrors assert_monotonic_expiration's
+    own defensive no-op for the same case (futures_dataloader.py), e.g. a
+    hand-built or synthetic price series (some of this module's own test
+    fixtures) that never carried contract-level metadata to begin with."""
+    if 'expiration' not in df.columns:
+        return []
+    d = df.sort('ts_event')
+    changed = d.filter(pl.col('expiration') != pl.col('expiration').shift(1))
+    changed = changed.filter((pl.col('ts_event') >= start) & (pl.col('ts_event') <= end))
+    if active_months:
+        for row in changed.iter_rows(named=True):
+            letter = CME_MONTH_NUM_TO_LETTER.get(row['expiration'].month)
+            if letter is not None and letter not in active_months:
+                logger.warning(
+                    "%s: detected roll on %s into a contract expiring %s (month %s) -- outside "
+                    "this symbol's confirmed active_months %s; possible spurious volume-spike "
+                    "crossover rather than a genuine roll.",
+                    symbol, row['ts_event'], row['expiration'], letter, active_months,
+                )
+    return changed['ts_event'].to_list()
+
+
 def _vix_regime_at(vix: pl.DataFrame, d: date) -> tuple[VolRegime, Optional[float], Optional[float]]:
     """(vol_regime, vix_close, vix_ratio) as of the latest available VIX
     row at or before `d`. (Normal, None, None) if no VIX data is
@@ -320,7 +379,7 @@ def _vix_regime_at(vix: pl.DataFrame, d: date) -> tuple[VolRegime, Optional[floa
 
 def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: date,
                          futures_types: dict[str, dict], config: TsmomBacktestConfig,
-                         market_stress_scale: float) -> Optional[dict]:
+                         market_stress_scale: float, annualization_days: int) -> Optional[dict]:
     """Signal + vol-targeted (or fixed-quantity) sizing for one symbol as of
     date `d`, reading from `precomputed` -- each symbol's full
     calculate_trend_strength output, computed ONCE for the whole unbounded
@@ -333,7 +392,7 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
     would otherwise need to run for every symbol on every calendar day to
     support daily entry/exit checking. None if there isn't yet enough
     history for a signal at all (calculate_trend_strength's own `signal`
-    column is null until ts3m has 63 bars)."""
+    column is null until ts_fast has 63 bars)."""
     row = precomputed[symbol].filter(pl.col('ts_event') == d)
     if row.height == 0:
         return None
@@ -344,7 +403,7 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
     trend_strength = _col('signal')
     if trend_strength is None:
         return None
-    ts3m, ts1y = _col('ts3m'), _col('ts1y')
+    ts_fast, ts_slow = _col('ts_fast'), _col('ts_slow')
     daily_std_last = _col('daily_std')
     last_close = float(row['close'][0])
     # `dd` is already a (close - peak) / peak fraction from
@@ -352,7 +411,7 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
     # `stats`' own drawdown_pct convention.
     dd_raw = _col('dd')
     dd_pct = dd_raw * 100 if dd_raw is not None else None
-    regime = classify_regime(ts3m, ts1y)
+    regime = classify_regime(ts_fast, ts_slow)
 
     signal_for_scalar = trend_strength
     if config.long_only and signal_for_scalar is not None and not (
@@ -364,13 +423,13 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
     # exactly) purely so the event log can show *why* a given
     # trend_strength did or didn't turn into a trade -- compute_position_
     # scalar itself stays untouched.
-    hv = daily_std_last * math.sqrt(252) if daily_std_last and daily_std_last > 0 else None
+    hv = daily_std_last * math.sqrt(annualization_days) if daily_std_last and daily_std_last > 0 else None
     risk_scalar = max(0.25, min(2.0, config.vol_target / hv)) if hv else 1.0
     momentum_discount = config.momentum_discount if regime in (TrendRegime.CORRECTION, TrendRegime.REBOUND) else 1.0
 
     scalar = compute_position_scalar(
         signal_for_scalar, daily_std_last, config.vol_target, regime,
-        momentum_discount=config.momentum_discount,
+        momentum_discount=config.momentum_discount, annualization_days=annualization_days,
     ) * market_stress_scale
 
     mult = futures_types[symbol]['multiplier']
@@ -400,8 +459,8 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
         'close': last_close, 'dd_pct': dd_pct,
         # Raw signal-row fields, straight from calculate_trend_strength,
         # purely for debugging/sanity-checking the sizing math end to end.
-        'peak': _col('peak'), 'avg_r3m': _col('avg_r3m'), 'avg_r1y': _col('avg_r1y'),
-        'r3m': _col('r3m'), 'r1y': _col('r1y'), 'ts3m': ts3m, 'ts1y': ts1y,
+        'peak': _col('peak'), 'avg_r_fast': _col('avg_r_fast'), 'avg_r_slow': _col('avg_r_slow'),
+        'fast_return': _col('fast_return'), 'slow_return': _col('slow_return'), 'ts_fast': ts_fast, 'ts_slow': ts_slow,
         'r1y_pct': _col('r1y_pct'),
     }
 
@@ -410,7 +469,7 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
     """Runs the monthly-rebalance TSMOM backtest. Returns a dict with
     'daily_mtm' (daily portfolio capital/drawdown, polars DataFrame -- same
     key name as the naked single-position path's Backtester.run() result),
-    'trend_signals' (per-rebalance trend/signal diagnostic log: ts3m, ts1y,
+    'trend_signals' (per-rebalance trend/signal diagnostic log: ts_fast, ts_slow,
     regime, risk_scalar, momentum_discount, gate_reason, etc., list of
     dicts), 'transactions' (one row per
     rebalance that actually changed a symbol's contract count -- what was
@@ -433,11 +492,21 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
     # range (and what counts as a rebalance/MTM date) is bounded.
     full_price_data, vix = load_portfolio_data(config.symbols)
     vix = _compute_vix_regime_series(vix)
+    # Real trading-days/year per symbol (instruments.resolve_annualization_days)
+    # -- this project's confirmed universe splits 252 (CBOT grains) vs. 259
+    # (everything else checked, post Sunday-session-merge fix); anything
+    # unconfirmed falls back to 252 (DEFAULT_ANNUALIZATION_DAYS), unchanged
+    # from this module's own prior universal-252 behavior.
+    annualization_by_symbol = {s: resolve_annualization_days(s) for s in config.symbols}
     # Precomputed once per symbol, unconditionally (not just for
     # signal_gate_mode == 'daily') -- see _compute_signal_row's own
     # docstring for why this is exactly equivalent to (and much cheaper
     # than) recomputing calculate_trend_strength fresh at every rebalance.
-    precomputed = {s: calculate_trend_strength(full_price_data[s].sort('ts_event')) for s in config.symbols}
+    precomputed = {
+        s: calculate_trend_strength(full_price_data[s].sort('ts_event'),
+                                     annualization_days=annualization_by_symbol[s])
+        for s in config.symbols
+    }
     futures_types = {s: get_spec(s) for s in config.symbols}
 
     windowed = {}
@@ -456,16 +525,20 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
     # in spirit: don't let the backtest take an action it can't show the
     # result of within the requested range.
     rebalance_dates = _month_end_dates(windowed) - ({all_dates[-1]} if all_dates else set())
-    # Quarterly contract roll schedule -- same static method (Monday prior
-    # to the third Friday of Mar/Jun/Sep/Dec) the naked single-position path
-    # already uses to tag FuturesPosition.roll_date. Unlike naked's roll_date
-    # (checked per-position via `current_date >= pos.roll_date`, so a
-    # non-trading scheduled date still fires on the next available day),
-    # this is fired via a monotonic pointer below rather than an `in` check,
-    # for the same reason.
-    sorted_roll_dates = FuturesSignalGenerator._get_quarterly_roll_dates(
-        all_dates[0], all_dates[-1]) if all_dates else []
-    roll_ptr = 0
+    # Real per-symbol roll dates -- every date THIS symbol's own continuous
+    # series actually switches contracts (volume-ranked/sticky crossover,
+    # see _detect_roll_dates), not a single fixed calendar schedule shared
+    # uniformly across every symbol regardless of its real roll cadence.
+    # Computed from full_price_data (unbounded history), not windowed, so
+    # the window's own start date can't masquerade as a false "roll" -- see
+    # _detect_roll_dates' own docstring. active_months (when confirmed) is
+    # consulted only as a validation guard on the detected dates here, not
+    # to generate them.
+    roll_dates_by_symbol: dict[str, set[date]] = {
+        s: set(_detect_roll_dates(full_price_data[s], all_dates[0], all_dates[-1],
+                                   resolve_active_months(s), s))
+        for s in config.symbols
+    } if all_dates else {s: set() for s in config.symbols}
 
     held_contracts = {s: 0 for s in config.symbols}
     prior_close = {s: None for s in config.symbols}
@@ -572,9 +645,9 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
             'date': rebalance_date, 'symbol': symbol,
             'close': _round(s.get('close'), 2), 'peak': _round(s.get('peak'), 2),
             'dd_pct': _round(s.get('dd_pct'), 2),
-            'avg_r3m': _round(s.get('avg_r3m'), 4), 'avg_r1y': _round(s.get('avg_r1y'), 4),
-            'r3m': _round(s.get('r3m'), 4), 'r1y': _round(s.get('r1y'), 4),
-            'ts3m': _round(s.get('ts3m'), 4), 'ts1y': _round(s.get('ts1y'), 4),
+            'avg_r_fast': _round(s.get('avg_r_fast'), 4), 'avg_r_slow': _round(s.get('avg_r_slow'), 4),
+            'fast_return': _round(s.get('fast_return'), 4), 'slow_return': _round(s.get('slow_return'), 4),
+            'ts_fast': _round(s.get('ts_fast'), 4), 'ts_slow': _round(s.get('ts_slow'), 4),
             'signal': _round(s.get('signal'), 4), 'r1y_pct': _round(s.get('r1y_pct'), 2),
             'regime': s.get('regime'), 'vix_close': _round(vix_close, 2), 'vix_ratio': _round(vix_ratio, 4),
             'vol_regime': vol_regime, 'hv': _round(s.get('hv'), 4), 'risk_scalar': _round(s.get('risk_scalar'), 4),
@@ -646,7 +719,8 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
             if vol_regime not in (VolRegime.SPIKE, VolRegime.EXTREME):  # held_contracts are all 0 here -- hold/halve would be a no-op anyway
                 market_stress_scale = VIX_ELEVATED_SCALE if vol_regime == VolRegime.ELEVATED else 1.0
                 for symbol in config.symbols:
-                    result = _compute_signal_row(symbol, precomputed, seed_date, futures_types, config, market_stress_scale)
+                    result = _compute_signal_row(symbol, precomputed, seed_date, futures_types, config,
+                                                  market_stress_scale, annualization_by_symbol[symbol])
                     if result is None:
                         continue
                     target, gate_reason = _apply_signal_gate(held_contracts[symbol], result['target'], result, config)
@@ -670,17 +744,19 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
                     ot['mtm_pnl'] += day_pnl
             prior_close[symbol] = close
 
-        # 1.25. Mandatory quarterly contract roll -- unconditional (not
+        # 1.25. Mandatory per-symbol contract roll -- unconditional (not
         # gated by signal_gate_mode/fixed_quantities), since it's a
         # mechanical consequence of the contract's own expiration, exactly
-        # like the naked path's FuturesPosition.roll_date. Fires on the
-        # first actual trading day >= each scheduled roll date (a monotonic
-        # pointer rather than an `in` check, in case the scheduled date
-        # itself isn't a trading day for these symbols).
-        while roll_ptr < len(sorted_roll_dates) and sorted_roll_dates[roll_ptr] <= d:
-            for symbol in config.symbols:
+        # like the naked path's FuturesPosition.roll_date. Each symbol rolls
+        # on its OWN detected real crossover dates (roll_dates_by_symbol --
+        # see _detect_roll_dates), not a single calendar schedule shared
+        # across every symbol: a plain set-membership check is enough here
+        # (no monotonic pointer needed) since each symbol's own set is
+        # already restricted to real dates present in its own continuous
+        # series.
+        for symbol in config.symbols:
+            if d in roll_dates_by_symbol[symbol]:
                 _process_roll(symbol, d)
-            roll_ptr += 1
 
         # 1.5. Daily signal-gate check (signal_gate_mode == 'daily' only),
         # off-cycle from the monthly resize below -- BOTH entry and exit,
@@ -702,13 +778,14 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
 
             for symbol in config.symbols:
                 prior = held_contracts[symbol]
-                result = _compute_signal_row(symbol, precomputed, d, futures_types, config, market_stress_scale_d)
+                result = _compute_signal_row(symbol, precomputed, d, futures_types, config,
+                                              market_stress_scale_d, annualization_by_symbol[symbol])
                 if result is None:
                     continue
 
                 if prior != 0:
                     is_long = prior > 0
-                    reason = _signal_gate_reason(result['signal'], result['ts3m'], result['ts1y'], is_long,
+                    reason = _signal_gate_reason(result['signal'], result['ts_fast'], result['ts_slow'], is_long,
                                                   config.ts_exit_threshold, config.exit_on_ts_crossover)
                     if reason is not None:
                         _rebalance_to(symbol, 0, d, vol_regime_d, vix_close=vix_close_d, vix_ratio=vix_ratio_d,
@@ -738,7 +815,8 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
             else:
                 market_stress_scale = VIX_ELEVATED_SCALE if vol_regime == VolRegime.ELEVATED else 1.0
                 for symbol in config.symbols:
-                    result = _compute_signal_row(symbol, precomputed, d, futures_types, config, market_stress_scale)
+                    result = _compute_signal_row(symbol, precomputed, d, futures_types, config,
+                                                  market_stress_scale, annualization_by_symbol[symbol])
                     if result is None:
                         continue
                     target, gate_reason = _apply_signal_gate(held_contracts[symbol], result['target'], result, config)

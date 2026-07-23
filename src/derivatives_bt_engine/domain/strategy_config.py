@@ -146,7 +146,7 @@ class FuturesStrategyConfig(BaseStrategyConfig):
     # threshold took ES 2010-2026 from 63 trades to 854-1402).
     ts_exit_threshold: Optional[float] = None
     ts_entry_threshold: Optional[float] = None
-    # ts3m/ts1y crossover has no natural "threshold" (it's a sign/ordering
+    # ts_fast/ts_slow crossover has no natural "threshold" (it's a sign/ordering
     # comparison, not a magnitude) -- entry is blocked by the mirrored
     # condition of whatever would trigger an exit, no separate parameter.
     exit_on_ts_crossover: bool = False

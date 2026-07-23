@@ -26,7 +26,13 @@ from derivatives_bt_engine.domain.instruments import INSTRUMENTS as KNOWN_INSTRU
 from derivatives_bt_engine.domain.instruments import DEFAULT_DB_PATH
 
 # ── Tunable defaults ────────────────────────────────────────────────────────
-DEFAULT_INSTRUMENTS = 'ES,NQ,CL,ZL,ZC,ZS,ZW,GC,SI,JPY,BRE,6M'
+# BRE (6L) deliberately excluded -- its continuous series has a known,
+# unresolved sticky-anchor bug (only 71.5% of dates survive the sticky join,
+# vs 100% for every other symbol here; see
+# research/research_futures_roll_logic_and_active_months.md §1.2/§2). 6M
+# stands in for FX-EM exposure instead: correlated, better volume, no known
+# data-quality issue.
+DEFAULT_INSTRUMENTS = 'ES,NQ,CL,ZL,ZC,ZS,ZW,GC,SI,JPY,6M'
 DEFAULT_OUT_PATH = 'research/term_structure_by_year.csv'
 
 # ── Infrastructure ──────────────────────────────────────────────────────────

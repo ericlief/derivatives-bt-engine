@@ -60,7 +60,7 @@ def parse_args():
                         'stronger than --ts-exit-threshold to avoid close/reopen thrashing at '
                         'one shared line (default: disabled)')
     p.add_argument('--exit-on-ts-crossover', action='store_true',
-                   help="Also gate on ts3m crossing to the wrong side of ts1y for the position's "
+                   help="Also gate on ts_fast crossing to the wrong side of ts_slow for the position's "
                         "direction (default: disabled)")
     p.add_argument('--disable-vix-gating', action='store_true',
                    help="Turn off the portfolio-wide VIX regime gate (spike/extreme hold-or-halve, "

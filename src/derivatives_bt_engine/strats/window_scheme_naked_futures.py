@@ -245,7 +245,7 @@ def parse_args():
                         '--ts-exit-threshold to avoid close/reopen thrashing at one shared '
                         'line (default: disabled)')
     p.add_argument('--exit-on-ts-crossover', action='store_true',
-                   help='Exit when ts3m crosses to the wrong side of ts1y for this position\'s '
+                   help='Exit when ts_fast crosses to the wrong side of ts_slow for this position\'s '
                         'direction, and block entry until it crosses back (default: disabled)')
     p.add_argument('--no-save', action='store_true', help='Skip saving trades/transactions/mtm to results/')
     p.add_argument('--no-sheets', action='store_true',

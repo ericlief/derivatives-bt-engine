@@ -170,3 +170,53 @@ class SignalConfidenceRegime(str, Enum):
     LOW = "low"
     NORMAL = "normal"
     HIGH = "high"
+
+
+class SignalModel(str, Enum):
+    """Which economic construction domain.signal_spec.compute_signal() uses
+    to turn a price series into a trend-strength score -- the "signal
+    formula" axis, independent of both WindowBasis (below) and
+    instruments.annualization_days (see tsmom_signal.py's own module
+    docstring for why those two are independent of each other and of this).
+
+    CLASSIC_TS   -- this project's original, canonical fast/slow (3m/12m)
+                    tanh-blend construction (tsmom_signal.calculate_trend_
+                    strength). Still the default everywhere; nothing about
+                    adding this enum changes its behavior.
+    GOULDING_DYNAMIC -- Goulding, Harvey & Mazzoleni (2023)'s bimonthly
+                    (fast) vs. annual (slow) construction with Bull/Bear/
+                    Correction/Rebound-conditioned dynamic reweighting
+                    (eq. 4/7-10) -- see research_trend_strength_crossover_
+                    signal.md Part 2 §6/§6b for the literature and the
+                    already-validated standalone-script implementation this
+                    formalizes into a reusable, swappable model."""
+    CLASSIC_TS = "classic_ts"
+    GOULDING_DYNAMIC = "goulding_dynamic"
+
+
+class WindowBasis(str, Enum):
+    """How domain.signal_spec.compute_signal() turns a signal's fast/slow
+    horizon into an actual lookback -- the "window representation" axis,
+    independent of SignalModel (above) and of instruments.annualization_days.
+
+    OBSERVATIONS -- a fixed trading-day ROW COUNT (e.g. 63/252), the same
+                    number of rows looked back regardless of how much real
+                    calendar time that spans for a given instrument or era.
+                    This project's long-standing convention
+                    (tsmom_signal.calculate_trend_strength); default here.
+    CALENDAR     -- a fixed CALENDAR interval (e.g. "3 months ago" by date,
+                    via a join_asof lookup), matching what a paper like
+                    Goulding et al. literally means by "N-month return" --
+                    the row count this actually spans varies by instrument/
+                    era (holidays, this project's own Sunday-session-merge
+                    fix, etc.), so the vol-scaling denominator becomes a
+                    per-row computed quantity instead of a fixed sqrt(N)
+                    constant. Only really adds precision over OBSERVATIONS
+                    at discrete (e.g. monthly) evaluation points -- a
+                    continuously daily-recomputed CALENDAR window converges
+                    to nearly the same values as OBSERVATIONS, since both
+                    smooth out to the same underlying trend at that
+                    frequency; see domain.signal_spec's own module
+                    docstring for the full tradeoff discussion."""
+    OBSERVATIONS = "observations"
+    CALENDAR = "calendar"

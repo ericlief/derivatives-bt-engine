@@ -151,10 +151,10 @@ class TradeManager:
                            or self.config.exit_on_ts_crossover):
             signal_df = (
                 calculate_trend_strength(underlying_price_history.sort(date_col))
-                .select([date_col, 'signal', 'ts3m', 'ts1y'])
+                .select([date_col, 'signal', 'ts_fast', 'ts_slow'])
             )
 
-        def _signal_gate_reason(sig_val, ts3m_val, ts1y_val, is_long: bool, threshold: Optional[float]) -> Optional[str]:
+        def _signal_gate_reason(sig_val, ts_fast_val, ts_slow_val, is_long: bool, threshold: Optional[float]) -> Optional[str]:
             """Which direction-aware weak-signal condition holds for
             `threshold` (an exit or entry threshold -- same shape, different
             value so entry can require a stronger bar than exit, avoiding
@@ -163,26 +163,26 @@ class TradeManager:
             callers can record *why* a position closed, not just that it
             did.
 
-            Bails out entirely (never gates) if either ts3m or ts1y is
-            still null -- calculate_trend_strength only requires ts3m to
+            Bails out entirely (never gates) if either ts_fast or ts_slow is
+            still null -- calculate_trend_strength only requires ts_fast to
             be non-null to emit a `signal` value at all (its `signal`
-            column formula zero-weights whichever of ts3m/ts1y is still
-            null rather than staying null itself), so early in any
+            column formula zero-weights whichever of ts_fast/ts_slow is
+            still null rather than staying null itself), so early in any
             backtest window (< ~1yr of available history) `signal` can
             already look like a real number while it's actually a
-            ts3m-only estimate with none of the intended 1yr weight --
+            ts_fast-only estimate with none of the intended slow weight --
             not reliable enough to force a real entry/exit decision on."""
-            if ts3m_val is None or ts1y_val is None:
+            if ts_fast_val is None or ts_slow_val is None:
                 return None
             if threshold is not None and sig_val is not None:
                 if is_long and sig_val < threshold:
                     return 'signal_ts_threshold'
                 if not is_long and sig_val > -threshold:
                     return 'signal_ts_threshold'
-            if self.config.exit_on_ts_crossover and ts3m_val is not None and ts1y_val is not None:
-                if is_long and ts3m_val < ts1y_val:
+            if self.config.exit_on_ts_crossover and ts_fast_val is not None and ts_slow_val is not None:
+                if is_long and ts_fast_val < ts_slow_val:
                     return 'signal_crossover'
-                if not is_long and ts3m_val > ts1y_val:
+                if not is_long and ts_fast_val > ts_slow_val:
                     return 'signal_crossover'
             return None
 
@@ -242,19 +242,19 @@ class TradeManager:
                 sig_match = signal_df.filter(pl.col(date_col) == current_date)
                 if sig_match.height > 0:
                     sig_val = sig_match['signal'][0]
-                    ts3m_val = sig_match['ts3m'][0]
-                    ts1y_val = sig_match['ts1y'][0]
+                    ts_fast_val = sig_match['ts_fast'][0]
+                    ts_slow_val = sig_match['ts_slow'][0]
                     is_long = self.config.position_side == PositionSide.LONG
 
                     signal_exit_reason = _signal_gate_reason(
-                        sig_val, ts3m_val, ts1y_val, is_long, self.config.ts_exit_threshold)
+                        sig_val, ts_fast_val, ts_slow_val, is_long, self.config.ts_exit_threshold)
                     signal_entry_blocked = _signal_gate_reason(
-                        sig_val, ts3m_val, ts1y_val, is_long, self.config.ts_entry_threshold) is not None
+                        sig_val, ts_fast_val, ts_slow_val, is_long, self.config.ts_entry_threshold) is not None
 
                     if signal_exit_reason is not None:
-                        logger.debug(f'Signal exit gate triggered ({signal_exit_reason}): signal={sig_val}, ts3m={ts3m_val}, ts1y={ts1y_val}')
+                        logger.debug(f'Signal exit gate triggered ({signal_exit_reason}): signal={sig_val}, ts_fast={ts_fast_val}, ts_slow={ts_slow_val}')
                     if signal_entry_blocked:
-                        logger.debug(f'Signal entry gate blocked: signal={sig_val}, ts3m={ts3m_val}, ts1y={ts1y_val}')
+                        logger.debug(f'Signal entry gate blocked: signal={sig_val}, ts_fast={ts_fast_val}, ts_slow={ts_slow_val}')
 
             # Close any expired positions
             n_open_positions = len(self.open_positions)

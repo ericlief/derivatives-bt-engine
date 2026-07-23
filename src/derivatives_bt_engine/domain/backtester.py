@@ -17,6 +17,7 @@ from derivatives_bt_engine.domain.trade_manager import TradeManager
 from derivatives_bt_engine.domain.position import FuturesPosition, SingleLegOptionPosition     
 from derivatives_bt_engine.domain.trade_result import OptionTradeResult
 from derivatives_bt_engine.domain.position import MultiLegOptionPosition
+from derivatives_bt_engine.domain.instruments import resolve_annualization_days
 from derivatives_bt_engine.domain.tsmom_signal import calculate_trend_strength, classify_regime
 from derivatives_bt_engine.domain.futures_dataloader import assert_monotonic_expiration
 from derivatives_bt_engine.utils.logger import setup_logger
@@ -666,8 +667,8 @@ class Backtester:
 
         start = date.fromisoformat(config.start_date)
         end = date.fromisoformat(config.end_date)
-        # Signal/vol overlay -- hv3m/hv1y, avg_r3m/avg_r1y ("mean"),
-        # sharpe3m/sharpe1y, ts3m/ts1y (fast/slow), signal (weighted
+        # Signal/vol overlay -- hv_fast/hv_slow, avg_r_fast/avg_r_slow ("mean"),
+        # sharpe_fast/sharpe_slow, ts_fast/ts_slow (fast/slow), signal (weighted
         # trend-strength score), regime (Bull/Bear/Correction/Rebound),
         # and vix_close -- computed on the FULL underlying series before
         # windowing to [start, end]: trimming first would starve the
@@ -676,7 +677,7 @@ class Backtester:
         # strategy's own signal actually saw at each date. Reuses
         # tsmom_signal.py's canonical calculate_trend_strength/
         # classify_regime (same functions the live TSMOM signal uses)
-        # rather than reimplementing rolling stats -- hv1y/sharpe1y are
+        # rather than reimplementing rolling stats -- hv_slow/sharpe_slow are
         # the one exception, computed here (not in calculate_trend_
         # strength, which stays untouched/canonical) directly off the
         # 'r1d' column it already retains for exactly this kind of
@@ -684,35 +685,43 @@ class Backtester:
         # same pattern).
         #
         # Suffixes (3m, 1y, ...) denote the rolling estimation window,
-        # not the reporting horizon. Volatility, Sharpe, and avg_r3m/
-        # avg_r1y all remain annualized -- hv3m/hv1y is annualized vol
-        # estimated from the last 63d/252d, avg_r3m/avg_r1y is annualized
-        # mean return estimated from the last 63d/252d, sharpe3m/sharpe1y
+        # not the reporting horizon. Volatility, Sharpe, and avg_r_fast/
+        # avg_r_slow all remain annualized -- hv_fast/hv_slow is annualized vol
+        # estimated from the last 63d/252d, avg_r_fast/avg_r_slow is annualized
+        # mean return estimated from the last 63d/252d, sharpe_fast/sharpe_slow
         # is annualized Sharpe estimated from the last 63d/252d.
-        overlay = calculate_trend_strength(self.underlying.select(['ts_event', 'close']).sort('ts_event'))
+        # Real trading-days/year for THIS single-symbol backtest's own
+        # instrument (instruments.resolve_annualization_days) -- 252 for the
+        # CBOT grains, 259 for the rest of this project's confirmed universe
+        # (post Sunday-session-merge fix), 252 as a safe fallback for
+        # anything unconfirmed -- unchanged from this method's prior
+        # universal-252 behavior.
+        annualization_days = resolve_annualization_days(config.futures_type)
+        overlay = calculate_trend_strength(self.underlying.select(['ts_event', 'close']).sort('ts_event'),
+                                            annualization_days=annualization_days)
         overlay = overlay.with_columns(
-            hv3m=(pl.col('daily_std') * (252 ** 0.5)).round(4),
-            hv1y=(pl.col('r1d').rolling_std(252) * (252 ** 0.5)).round(4),
-            regime=pl.struct(['ts3m', 'ts1y']).map_elements(
-                lambda s: classify_regime(s['ts3m'], s['ts1y']).value,
+            hv_fast=(pl.col('daily_std') * (annualization_days ** 0.5)).round(4),
+            hv_slow=(pl.col('r1d').rolling_std(252) * (annualization_days ** 0.5)).round(4),
+            regime=pl.struct(['ts_fast', 'ts_slow']).map_elements(
+                lambda s: classify_regime(s['ts_fast'], s['ts_slow']).value,
                 return_dtype=pl.Utf8,
             ),
-            **{c: pl.col(c).round(4) for c in ('ts3m', 'ts1y', 'signal', 'avg_r3m', 'avg_r1y')},
+            **{c: pl.col(c).round(4) for c in ('ts_fast', 'ts_slow', 'signal', 'avg_r_fast', 'avg_r_slow')},
         )
         overlay = overlay.with_columns(
-            # Rolling Sharpe on the same 3m/1y windows as hv3m/hv1y/ts3m/
-            # ts1y/regime, not whole-to-date -- keeps everything on the
+            # Rolling Sharpe on the same 3m/1y windows as hv_fast/hv_slow/ts_fast/
+            # ts_slow/regime, not whole-to-date -- keeps everything on the
             # same clock so a regime flip and a Sharpe/vol move are
             # comparable at a glance instead of drifting at different
-            # speeds. avg_r3m/avg_r1y are already annualized (see
+            # speeds. avg_r_fast/avg_r_slow are already annualized (see
             # calculate_trend_strength), so no extra *252 here -- both
             # numerator and denominator are annualized already.
-            sharpe3m=pl.when(pl.col('hv3m') > 0)
-            .then(pl.col('avg_r3m') / pl.col('hv3m'))
+            sharpe_fast=pl.when(pl.col('hv_fast') > 0)
+            .then(pl.col('avg_r_fast') / pl.col('hv_fast'))
             .otherwise(None)
             .round(4),
-            sharpe1y=pl.when(pl.col('hv1y') > 0)
-            .then(pl.col('avg_r1y') / pl.col('hv1y'))
+            sharpe_slow=pl.when(pl.col('hv_slow') > 0)
+            .then(pl.col('avg_r_slow') / pl.col('hv_slow'))
             .otherwise(None)
             .round(4),
         )
@@ -818,7 +827,7 @@ class Backtester:
             daily_ret=pl.col('mtm_capital') / pl.col('mtm_capital').shift(1) - 1
         )['daily_ret'].drop_nulls()
         sharpe = (
-            (daily_ret.mean() / daily_ret.std() * (252 ** 0.5))
+            (daily_ret.mean() / daily_ret.std() * (annualization_days ** 0.5))
             if daily_ret.std() and daily_ret.std() > 0 else None
         )
 
@@ -833,8 +842,8 @@ class Backtester:
         daily_mtm = daily.select([
             'ts_event', 'close', 'mtm_pnl', 'cum_pnl', 'cum_pnl_pct', 'mtm_capital',
             'running_max', 'dd_usd', 'dd_pct',
-            'avg_r3m', 'avg_r1y', 'hv3m', 'hv1y', 'sharpe3m', 'sharpe1y',
-            'ts3m', 'ts1y', 'signal', 'regime', 'vix_close',
+            'avg_r_fast', 'avg_r_slow', 'hv_fast', 'hv_slow', 'sharpe_fast', 'sharpe_slow',
+            'ts_fast', 'ts_slow', 'signal', 'regime', 'vix_close',
         ]).rename({
             'ts_event': 'date',
             'mtm_capital': 'capital',

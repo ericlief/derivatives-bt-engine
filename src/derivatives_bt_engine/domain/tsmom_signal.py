@@ -16,13 +16,37 @@ Horizon choice (do not revisit):
     signal at this cadence.
 
 Naming convention (applies wherever these columns are consumed, e.g.
-Backtester.calculate_futures_mtm_drawdown's hv3m/sharpe3m): suffixes (3m,
-1y, ...) denote the rolling estimation window, not the reporting horizon.
-Volatility, Sharpe, and avg_r3m/avg_r1y all remain annualized -- e.g.
-hv3m is annualized vol estimated from the last 63d, not a 3-month vol
-figure; avg_r3m is the annualized mean daily return estimated from the
-last 63d, not a 3-month return; sharpe3m is annualized Sharpe estimated
-from the last 63d.
+Backtester.calculate_futures_mtm_drawdown's hv_fast/sharpe_fast): "fast"/
+"slow" denote the rolling estimation window (fast_window/slow_window,
+whatever those are configured to), not a fixed reporting horizon -- renamed
+from the original ts3m/ts1y/r3m/r1y/avg3m/avg1y/avg_r3m/avg_r1y naming
+(2026-07) once fast_window/slow_window became genuinely configurable
+parameters rather than fixed constants: a column still called "ts3m" when
+fast_window=21 would be actively misleading about what it contains. Every
+call site and test was updated to match; see git history for the mechanical
+rename. Volatility, Sharpe, and avg_r_fast/avg_r_slow all remain
+annualized -- e.g. hv_fast is annualized vol estimated from the last
+fast_window days, not a "3-month vol" figure; avg_r_fast is the annualized
+mean daily return estimated from the last fast_window days; sharpe_fast is
+annualized Sharpe estimated over the same window.
+
+annualization_days vs. fast_window/slow_window (2026-07, added once this
+project confirmed real trading-days/year differs by cluster -- CBOT grains
+at 252, the rest of this project's universe at 259, post Sunday-session-
+merge fix -- see research/research_futures_roll_logic_and_active_months.md):
+these are two independent knobs, not one derived from the other.
+fast_window/slow_window (default 63/252, unchanged -- see "Horizon choice"
+above, still not being revisited) govern how many rows of history
+fast_return/slow_return/avg_fast/avg_slow/ts_fast/ts_slow's own internal
+same-horizon vol-scaling look back over; annualization_days governs only
+the genuinely per-calendar-year terms (hv, avg_r_fast, avg_r_slow, and
+compute_position_scalar's current_realized_vol). ts_fast/ts_slow's own
+sqrt(fast_window)/sqrt(slow_window) terms are NOT annualization -- they
+rescale the fast/current daily_std estimate up to the SAME horizon as
+fast_return/slow_return's own cumulative return, so they must track
+fast_window/slow_window, never annualization_days, even when the two
+window lengths still numerically coincide with a 252-day/year convention
+by historical accident.
 """
 
 import logging
@@ -33,6 +57,19 @@ import polars as pl
 from derivatives_bt_engine.domain.enums import SignalConfidenceRegime, TrendRegime
 
 log = logging.getLogger(__name__)
+
+# ── Tunable defaults ─────────────────────────────────────────────────────
+# Fallback trading-days/year for callers that don't pass their own
+# instrument-specific figure (see instruments.resolve_annualization_days) --
+# kept as a plain local default (not imported from instruments.py) so this
+# module stays usable standalone, per its own "no IB dependency" framing.
+DEFAULT_ANNUALIZATION_DAYS = 252
+# ts_fast/ts_slow's window lengths, in trading days -- "do not revisit" per the
+# Horizon choice note above; exposed as parameters (not hardcoded) purely so
+# a caller can experiment/compare, not because either default is expected to
+# change.
+DEFAULT_FAST_WINDOW = 63
+DEFAULT_SLOW_WINDOW = 252
 
 
 # def calculate_trend_strength(df: pl.DataFrame, w3m: float = 0.4, w1y: float = 0.6) -> pl.DataFrame:
@@ -89,7 +126,24 @@ log = logging.getLogger(__name__)
     # return df
 # import math
 
-def calculate_trend_strength(contract, w3m=0.4, w1y=0.6, discount=0.5):
+def calculate_trend_strength(contract, w3m=0.4, w1y=0.6, discount=0.5,
+                              annualization_days=DEFAULT_ANNUALIZATION_DAYS,
+                              fast_window=DEFAULT_FAST_WINDOW, slow_window=DEFAULT_SLOW_WINDOW):
+    """See this module's own docstring for the annualization_days vs.
+    fast_window/slow_window distinction -- annualization_days scales only
+    the genuinely per-calendar-year terms (hv, avg_r_fast, avg_r_slow);
+    fast_window/slow_window govern fast_return/slow_return/avg_fast/avg_slow/
+    daily_std's rolling windows AND ts_fast/ts_slow's own same-horizon
+    vol-scaling, independently of annualization_days. All three default to
+    this project's long-standing values (252, 63, 252) -- passing nothing
+    reproduces prior behavior exactly.
+
+    Column names (fast/slow, not the old fixed-horizon 3m/1y labels) reflect
+    fast_window/slow_window being genuinely configurable -- a caller passing
+    fast_window=21 gets a column named ts_fast, not a column still called
+    ts3m that's secretly a 21-day figure. Renamed from ts3m/ts1y/r3m/r1y/
+    avg3m/avg1y/avg_r3m/avg_r1y (every call site and test updated to match;
+    see git history for the mechanical rename)."""
     # df = ib.cont_future(contract)
     # df = ib.get_historical_bars(contract, duration=duration)
     df = contract
@@ -98,57 +152,57 @@ def calculate_trend_strength(contract, w3m=0.4, w1y=0.6, discount=0.5):
         peak      = pl.col('close').cum_max(),
     )
     df = df.with_columns(
-        dd    = ((pl.col('close') - pl.col('peak')) / pl.col('peak')).round(2),
-        r1d   = pl.col('log_price').diff(1),
-        avg3m = pl.col('close').rolling_mean(63).round(2),
-        avg1y = pl.col('close').rolling_mean(252).round(2),
+        dd        = ((pl.col('close') - pl.col('peak')) / pl.col('peak')).round(2),
+        r1d       = pl.col('log_price').diff(1),
+        avg_fast  = pl.col('close').rolling_mean(fast_window).round(2),
+        avg_slow  = pl.col('close').rolling_mean(slow_window).round(2),
 
-        r3m   = pl.col('log_price').diff(63),
-        r1y   = pl.col('log_price').diff(252),
+        fast_return = pl.col('log_price').diff(fast_window),
+        slow_return = pl.col('log_price').diff(slow_window),
     )
 
     df = df.with_columns(
-        avg_r3m = (pl.col('r1d').rolling_mean(63) * 252).round(2),
-        avg_r1y = (pl.col('r1d').rolling_mean(252) * 252).round(2),
-    
-        daily_std = pl.col('r1d').rolling_std(63)
+        avg_r_fast = (pl.col('r1d').rolling_mean(fast_window) * annualization_days).round(2),
+        avg_r_slow = (pl.col('r1d').rolling_mean(slow_window) * annualization_days).round(2),
+
+        daily_std = pl.col('r1d').rolling_std(fast_window)
     )
 
     df = df.with_columns(
-        hv = pl.col('daily_std') * 252 ** 0.5,
-        ts3m = pl.col('r3m') / (pl.col('daily_std') * math.sqrt(63)),
-        ts1y = pl.col('r1y') / (pl.col('daily_std') * math.sqrt(252)),
+        hv = pl.col('daily_std') * annualization_days ** 0.5,
+        ts_fast = pl.col('fast_return') / (pl.col('daily_std') * math.sqrt(fast_window)),
+        ts_slow = pl.col('slow_return') / (pl.col('daily_std') * math.sqrt(slow_window)),
     )
 
     df = df.with_columns(
-        w3 = pl.col('ts3m').is_not_null().cast(pl.Float64) * w3m,
-        w1 = pl.col('ts1y').is_not_null().cast(pl.Float64) * w1y,
+        w3 = pl.col('ts_fast').is_not_null().cast(pl.Float64) * w3m,
+        w1 = pl.col('ts_slow').is_not_null().cast(pl.Float64) * w1y,
     )
 
     df = df.with_columns(
         ts = (
-            pl.when(pl.col('ts1y').is_not_null())
+            pl.when(pl.col('ts_slow').is_not_null())
             .then(
                 ((
-                    pl.col('w3') * pl.col('ts3m').fill_null(0) +
-                    pl.col('w1') * pl.col('ts1y').fill_null(0)
+                    pl.col('w3') * pl.col('ts_fast').fill_null(0) +
+                    pl.col('w1') * pl.col('ts_slow').fill_null(0)
                 ) / (pl.col('w3') + pl.col('w1')).clip(lower_bound=1e-12)).tanh()
             )
             .otherwise(None)
         ),
-        # r1y_pct = (100 * (pl.col('r1y').exp() - 1)).round(2),
+        # slow_return_pct = (100 * (pl.col('slow_return').exp() - 1)).round(2),
         regime = (
-            pl.when((pl.col('ts3m') < 0) & (pl.col('ts1y') < 0))
+            pl.when((pl.col('ts_fast') < 0) & (pl.col('ts_slow') < 0))
             .then(pl.lit('bear'))
-            .when((pl.col('ts3m') >= 0) & (pl.col('ts1y') >= 0))
+            .when((pl.col('ts_fast') >= 0) & (pl.col('ts_slow') >= 0))
             .then(pl.lit('bull'))
-            .when((pl.col('ts3m') < 0) & (pl.col('ts1y') >= 0))
+            .when((pl.col('ts_fast') < 0) & (pl.col('ts_slow') >= 0))
             .then(pl.lit('correction'))
-            .when((pl.col('ts3m') >= 0) & (pl.col('ts1y') < 0))
+            .when((pl.col('ts_fast') >= 0) & (pl.col('ts_slow') < 0))
             .then(pl.lit('rebound'))
             # .otherwise(pl.lit('unknown'))
         ),
-        mom = (pl.col('ts3m') - pl.col('ts1y')).tanh().round(2)
+        mom = (pl.col('ts_fast') - pl.col('ts_slow')).tanh().round(2)
 
     )
     df = df.with_columns(
@@ -158,33 +212,36 @@ def calculate_trend_strength(contract, w3m=0.4, w1y=0.6, discount=0.5):
                 .otherwise(pl.col('ts'))
                 )
         )
-    
-                 
+
+
     df = df.drop(['open', 'high', 'low', 'log_price',
                    'volume', 'average', 'w3', 'w1'], strict=False)
 
     # Round only the bounded/display-scale columns (tanh scores, price
-    # averages, drawdown pct) to 2dp. r1d/daily_std/r3m/r1y/hv are return-
-    # scale (typically well under 0.01 for a quiet instrument -- a rates
-    # future like MTN, a quiet FX pair like BRE) and MUST stay full
-    # precision: a blanket round(2) here used to floor them to exactly
-    # 0.0, which propagated downstream into a silently-zeroed hv3m
+    # averages, drawdown pct) to 2dp. r1d/daily_std/fast_return/slow_return/
+    # hv are return-scale (typically well under 0.01 for a quiet instrument
+    # -- a rates future like MTN, a quiet FX pair like BRE) and MUST stay
+    # full precision: a blanket round(2) here used to floor them to exactly
+    # 0.0, which propagated downstream into a silently-zeroed hv_fast
     # (Backtester.calculate_futures_mtm_drawdown) and, worse, into
     # tsmom_backtester._compute_target/live.tsmom_rebalance._compute_signal
     # treating `daily_std_last == 0.0` as falsy and silently defaulting
     # risk_scalar to 1.0 (vol-targeting disabled) instead of the
     # up-scaled size a genuinely low-vol instrument should get.
-    _DISPLAY_SCALE_COLS = ['dd', 'avg3m', 'avg1y', 'ts3m', 'ts1y', 'ts', 'mom', 'signal']
+    _DISPLAY_SCALE_COLS = ['dd', 'avg_fast', 'avg_slow', 'ts_fast', 'ts_slow', 'ts', 'mom', 'signal']
     df = df.with_columns([pl.col(c).round(2) for c in _DISPLAY_SCALE_COLS if c in df.columns])
     return df
 
 
-def classify_regime(ts3m, ts1y) -> TrendRegime:
+def classify_regime(fast, slow) -> TrendRegime:
     """
     Classify into Bull/Correction/Bear/Rebound from the sign of the fast
-    (~3mo) and slow (~12mo) trend-strength scores.
+    (~3mo, or whatever fast_window/fast_months a caller configured) and slow
+    (~12mo) trend-strength scores. Args renamed from ts3m/ts1y -- positional
+    only everywhere in this codebase (grep-confirmed no keyword-arg callers),
+    so this rename doesn't break any call site.
 
-        ts1y  ts3m  state        meaning
+        slow  fast  state        meaning
          +     +    Bull         strong trend, high-confidence long
          +     -    Correction   short-term dip in uptrend (61% revert to Bull)
          -     -    Bear         strong downtrend, high-confidence short/flat
@@ -192,15 +249,15 @@ def classify_regime(ts3m, ts1y) -> TrendRegime:
 
     Exactly zero, None, or NaN on either input is ambiguous -> Unknown.
     """
-    if ts3m is None or ts1y is None:
+    if fast is None or slow is None:
         return TrendRegime.UNKNOWN
-    if (isinstance(ts3m, float) and math.isnan(ts3m)) or (isinstance(ts1y, float) and math.isnan(ts1y)):
+    if (isinstance(fast, float) and math.isnan(fast)) or (isinstance(slow, float) and math.isnan(slow)):
         return TrendRegime.UNKNOWN
-    if ts3m == 0 or ts1y == 0:
+    if fast == 0 or slow == 0:
         return TrendRegime.UNKNOWN
 
-    slow_up = ts1y > 0
-    fast_up = ts3m > 0
+    slow_up = slow > 0
+    fast_up = fast > 0
 
     if slow_up and fast_up:
         return TrendRegime.BULL
@@ -298,7 +355,8 @@ def compute_signal_confidence(vol_ratio, low_threshold: float, high_threshold: f
 
 def compute_position_scalar(trend_strength, daily_std_last, vol_target: float,
                              regime: TrendRegime, momentum_discount: float = 0.5,
-                             signal_confidence: float = 1.0) -> float:
+                             signal_confidence: float = 1.0,
+                             annualization_days=DEFAULT_ANNUALIZATION_DAYS) -> float:
     """
     Layers 2-4 of the position sizing framework (plus the opt-in layer 5,
     signal_confidence), combined into a single scalar in [-1, +1]:
@@ -312,7 +370,12 @@ def compute_position_scalar(trend_strength, daily_std_last, vol_target: float,
     risk_scalar = vol_target / current_realized_vol, clamped to [0.25, 2.0]
     -- a risk-equalization ratio driven by THIS instrument's own realized
     vol, nothing regime- or market-wide about it.
-    current_realized_vol = daily_std_last * sqrt(252) <= ** 63-day rolling **
+    current_realized_vol = daily_std_last * sqrt(annualization_days) <= ** 63-day rolling **
+    Callers should pass the SAME annualization_days used to compute
+    daily_std_last in the first place (instruments.resolve_annualization_days)
+    -- this project's confirmed universe splits 252 (CBOT grains) vs. 259
+    (everything else checked); the plain 252 default here reproduces prior
+    behavior exactly for anyone not passing an instrument-specific value.
 
     momentum_discount is applied only for Correction/Rebound (disagreement
     between the fast and slow momentum signal — lower conviction);
@@ -336,7 +399,7 @@ def compute_position_scalar(trend_strength, daily_std_last, vol_target: float,
     if daily_std_last is None or (isinstance(daily_std_last, float) and math.isnan(daily_std_last)) or daily_std_last <= 0:
         risk_scalar = 1.0   # insufficient history to size by vol — neutral
     else:
-        current_realized_vol = daily_std_last * math.sqrt(252) # 63 day not last month
+        current_realized_vol = daily_std_last * math.sqrt(annualization_days) # 63 day not last month
         risk_scalar = vol_target / current_realized_vol # 0.15/0.60 ~= 0.25, this is not hv_long here, but a param
         risk_scalar = max(0.25, min(2.0, risk_scalar))
 
