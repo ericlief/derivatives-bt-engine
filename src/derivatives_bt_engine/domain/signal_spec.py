@@ -109,6 +109,11 @@ class SignalSpec:
             raise ValueError("fast_window/slow_window must be positive")
         if self.fast_months <= 0 or self.slow_months <= 0:
             raise ValueError("fast_months/slow_months must be positive")
+        if self.w_fast + self.w_slow <= 0:
+            # continuous_momentum's ts denominator clips at 1e-12 so this
+            # wouldn't crash -- it would silently degenerate to ts=tanh(0)=0
+            # every row instead. Catch the misconfiguration loudly instead.
+            raise ValueError("w_fast + w_slow must be positive")
         if not (0.0 <= self.a_co <= 1.0) or not (0.0 <= self.a_re <= 1.0):
             raise ValueError("a_co/a_re must be in [0, 1] (eq. 7's own mixing-weight range)")
 
@@ -144,7 +149,13 @@ def build_features(df: pl.DataFrame) -> pl.DataFrame:
     belong here.
 
     r1d is a SIMPLE daily return (close/prev_close - 1), not a log return
-    -- this module uses simple returns throughout, never log returns."""
+    -- this module uses simple returns throughout, never log returns.
+
+    Sorts by ts_event first -- shift()/cum_max() are order-dependent, and
+    every downstream function (continuous_momentum, goulding_monthly)
+    inherits whatever order this leaves the frame in, so this is the one
+    place that guarantee needs to be established."""
+    df = df.sort('ts_event')
     df = df.with_columns(
         prev_close=pl.col('close').shift(1),
         peak=pl.col('close').cum_max(),
@@ -177,10 +188,16 @@ def continuous_momentum(df: pl.DataFrame, fast_window: int = DEFAULT_FAST_WINDOW
     caller passed. Pass them explicitly only to deliberately decouple the
     two (e.g. testing a fixed-vol-window variant).
 
+    ts_fast/ts_slow are horizon Sharpe-like statistics -- an n-day return
+    divided by that SAME n-day horizon's own estimated return std
+    (daily_std * sqrt(n)) -- NOT annualized Sharpe ratios; nothing here
+    scales them by annualization_days.
+
     annualization_days is a separate, per-instrument units-conversion
-    factor (avg_r_fast/avg_r_slow/hv_fast/hv_slow only) -- resolve it from
-    instrument config (instruments.resolve_annualization_days), don't
-    hardcode it. It never changes window length."""
+    factor for the genuinely per-calendar-year REPORTING diagnostics only
+    (avg_r_fast/avg_r_slow/hv_fast/hv_slow) -- resolve it from instrument
+    config (instruments.resolve_annualization_days), don't hardcode it. It
+    never changes window length and never touches ts_fast/ts_slow/ts/signal."""
     vol_fast_window = vol_fast_window or fast_window
     vol_slow_window = vol_slow_window or slow_window
 
@@ -241,17 +258,28 @@ def goulding_monthly(df: pl.DataFrame, fast_months: int = GOULDING_FAST_MONTHS,
     -- ret/fast/slow are pure arithmetic returns and their trailing
     averages.
 
-    Monthly return is a SIMPLE return between month-start and month-end
-    close (p2/p1 - 1), aggregated via group_by_dynamic('1mo'). fast/slow
-    are the trailing mean of the last fast_months/slow_months COMPLETED
-    months -- shift(1) before rolling_mean, so month m's own (still-
-    forming) return never leaks into its own signal; no lookahead."""
-    monthly = df.group_by_dynamic('ts_event', every='1mo', closed='left').agg(
-        pl.col('close').first().alias('p1'),
-        pl.col('close').last().alias('p2'),
+    Monthly return is a SIMPLE return between consecutive month-END closes
+    (this month's last close / prior month's last close - 1) -- the
+    standard academic-finance monthly-return convention (CRSP, Fama-
+    French, and by extension Goulding et al.'s own eq. 1-2), NOT an intra-
+    month first-to-last-trading-day return: that alternative would silently
+    exclude the single trading day's return spanning the prior month's
+    close -> this month's first trading day from every month's figure,
+    understating every single month's realized return by exactly one
+    day's move. fast/slow are the trailing mean of the last fast_months/
+    slow_months COMPLETED months -- shift(1) before rolling_mean, so month
+    m's own (still-forming) return never leaks into its own signal; no
+    lookahead.
+
+    Defensively sorts by ts_event first -- group_by_dynamic requires a
+    sorted temporal column, and this function is documented as
+    independently callable on bare OHLCV (not required to go through
+    build_features first), so it can't rely on a caller having sorted."""
+    monthly = df.sort('ts_event').group_by_dynamic('ts_event', every='1mo', closed='left').agg(
+        pl.col('close').last(),
     )
     monthly = monthly.with_columns(
-        ret=pl.col('p2') / pl.col('p1') - 1,
+        ret=pl.col('close') / pl.col('close').shift(1) - 1,
     )
     monthly = monthly.with_columns(
         fast=pl.col('ret').shift(1).rolling_mean(fast_months),

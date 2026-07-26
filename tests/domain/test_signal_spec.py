@@ -72,6 +72,16 @@ def test_signal_spec_rejects_bad_a_co_a_re():
         SignalSpec(a_re=-0.1)
 
 
+def test_signal_spec_rejects_non_positive_weight_sum():
+    # w_fast+w_slow<=0 wouldn't crash downstream (the ts denominator clips
+    # at 1e-12) -- it would silently degenerate to ts=tanh(0)=0 every row.
+    # Must be caught loudly here instead.
+    with pytest.raises(ValueError):
+        SignalSpec(w_fast=0.0, w_slow=0.0)
+    with pytest.raises(ValueError):
+        SignalSpec(w_fast=-0.5, w_slow=0.5)
+
+
 def test_goulding_factory_uses_paper_horizons():
     spec = SignalSpec.goulding()
     assert spec.fast_months == 2
@@ -114,6 +124,20 @@ def test_build_features_peak_and_drawdown():
     assert feat['peak'].to_list() == [100.0, 120.0, 120.0, 120.0]
     dd = feat['dd'].to_list()
     assert dd[2] == pytest.approx((90 - 120) / 120, abs=1e-2)
+
+
+def test_build_features_sorts_unsorted_input():
+    # shift()/cum_max() are order-dependent -- pass rows deliberately out
+    # of ts_event order and confirm build_features sorts before computing,
+    # rather than silently corrupting prev_close/peak/dd/r1d.
+    df = pl.DataFrame({
+        'ts_event': [date(2020, 1, 3), date(2020, 1, 1), date(2020, 1, 2)],
+        'close': [103.0, 100.0, 101.0],
+    })
+    feat = build_features(df).sort('ts_event')
+    assert feat['close'].to_list() == [100.0, 101.0, 103.0]
+    assert feat['prev_close'].to_list() == [None, 100.0, 101.0]
+    assert feat['peak'].to_list() == [100.0, 101.0, 103.0]
 
 
 # ── continuous_momentum: independent of goulding_monthly ─────────────────
@@ -214,12 +238,30 @@ def test_goulding_monthly_has_no_volatility_normalization_columns():
     assert not ({'std', 'std_fast', 'std_slow', 'ts_fast', 'ts_slow', 'hv'} & set(out.columns))
 
 
+def test_goulding_monthly_uses_month_end_close_not_first_day():
+    # Two rows per month with first != last -- locks in .last() (month-end
+    # close) as the value used, not .first() (which an intra-month
+    # first-to-last construction would silently prefer instead).
+    df = pl.DataFrame([
+        {'ts_event': date(2020, 1, 2), 'close': 100.0},   # Jan first day
+        {'ts_event': date(2020, 1, 31), 'close': 105.0},  # Jan LAST day
+        {'ts_event': date(2020, 2, 3), 'close': 108.0},   # Feb first day
+        {'ts_event': date(2020, 2, 28), 'close': 110.0},  # Feb LAST day
+    ])
+    out = goulding_monthly(df).sort('ts_event')
+    close = out['close'].to_list()
+    assert close == [105.0, 110.0]
+    ret = out['ret'].to_list()
+    # Month-end-to-month-end: Feb's ret = 110/105 - 1, NOT 110/108 - 1
+    # (which is what a first-to-last-day-of-Feb construction would give).
+    assert ret[1] == pytest.approx(110.0 / 105.0 - 1)
+
+
 def test_goulding_monthly_fast_slow_use_only_completed_months():
-    dates = _trading_dates(date(2020, 1, 1), 1)  # any single ts_event dtype anchor
-    # Six calendar months of flat, deterministic monthly returns via
-    # group_by_dynamic -- construct closes so each month's return is known
-    # exactly, then verify fast/slow (fast_months=1/slow_months=2) equal the
-    # PRIOR month(s)' return, not the current month's own.
+    # Six calendar months of deterministic monthly returns (one row per
+    # month, so each bucket's month-end close IS that row's value) --
+    # verify fast/slow (fast_months=1/slow_months=2) equal the PRIOR
+    # month(s)' return, not the current month's own.
     month_starts = [date(2020, m, 1) for m in range(1, 7)]
     rows = []
     price = 100.0
@@ -233,6 +275,7 @@ def test_goulding_monthly_fast_slow_use_only_completed_months():
     out = goulding_monthly(df, fast_months=1, slow_months=2).sort('ts_event')
     ret = out['ret'].to_list()
     fast = out['fast'].to_list()
+    assert ret[1:] == pytest.approx(monthly_rets)  # locks in the exact convention
     # fast[i] must equal ret[i-1] (fast_months=1 trailing mean of last
     # completed month), never ret[i] itself.
     for i in range(2, len(ret)):
