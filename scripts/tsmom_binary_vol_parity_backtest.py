@@ -6,9 +6,9 @@ target, no cluster/bucket hierarchy, no risk_scalar clamp, no cluster risk
 cap, no max_notional/max_contracts ceiling). Monthly rebalance, matching
 tsmom_backtester.py's cadence. Reuses only pure data-loading/signal
 functions (load_portfolio_data, calculate_trend_strength, _month_end_dates,
-signal_spec.py's SignalSpec.goulding()/compute_signal() for the paper's own
-2m/12m state classification) -- none of tsmom_backtester.py's own
-position-sizing.
+signal_spec.py's build_features()/goulding_monthly() for the paper's own
+genuine calendar-month 2m/12m state classification) -- none of
+tsmom_backtester.py's own position-sizing.
 
 Written to answer a specific question (see
 research/research_trend_strength_crossover_signal.md, Part 2 §6): does
@@ -107,10 +107,9 @@ from typing import Optional
 
 import polars as pl
 
-from derivatives_bt_engine.domain.enums import WindowBasis
 from derivatives_bt_engine.domain.futures_signal_generator import FuturesSignalGenerator
 from derivatives_bt_engine.domain.instruments import get_spec
-from derivatives_bt_engine.domain.signal_spec import SignalSpec, _goulding_weight, compute_signal
+from derivatives_bt_engine.domain.signal_spec import SignalSpec, _goulding_weight, build_features, goulding_monthly
 from derivatives_bt_engine.domain.tsmom_backtester import _month_end_dates, load_portfolio_data
 from derivatives_bt_engine.domain.tsmom_signal import calculate_trend_strength
 from derivatives_bt_engine.utils.logger import setup_logger
@@ -146,12 +145,12 @@ DEFAULT_MOMENTUM_DISCOUNTS = [0.5, 1.0]
 # existing 3m/12m ts_fast/ts_slow (which stay canonical/untouched per that
 # function's own docstring). The paper's own 2m/12m fast/slow horizons and
 # eq. 4/7 state/weight logic now come from signal_spec.py's
-# SignalSpec.goulding()/compute_signal() (GOULDING_FAST_DAYS/DEFAULT_SLOW_
-# WINDOW, _goulding_weight) rather than a duplicate hand-rolled
-# implementation here -- only the pooled, expanding-window a_Co/a_Re
-# ESTIMATION below stays script-local, since signal_spec.py's own docstring
-# explicitly keeps that out of scope (a caller estimates it separately and
-# passes the result in).
+# build_features()/goulding_monthly() (genuine calendar-month aggregation)
+# and _goulding_weight, rather than a duplicate hand-rolled implementation
+# here -- only the pooled, expanding-window a_Co/a_Re ESTIMATION below
+# stays script-local, since signal_spec.py's own docstring explicitly
+# keeps that out of scope (a caller estimates it separately and passes the
+# result in).
 MIN_MONTHS_PER_PHASE = 12  # paper's own warm-up requirement per Appendix C
 
 
@@ -176,7 +175,7 @@ def _build_monthly_state_return_history(signals: dict[str, pl.DataFrame],
             if row.height == 0:
                 continue
             close, g_regime_val = row['close'][0], row['g_regime'][0]
-            state = g_regime_val.lower() if g_regime_val and g_regime_val != 'UNKNOWN' else None
+            state = g_regime_val.lower() if g_regime_val else None
             if prev_close is not None and prev_state is not None and prev_close > 0:
                 rows.append({'date': d, 'symbol': sym, 'state': prev_state,
                              'monthly_return': math.log(close / prev_close)})
@@ -277,18 +276,22 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
     for sym, df in price_data.items():
         df = df.filter((pl.col('ts_event') >= warmup_start) & (pl.col('ts_event') <= end))
         sig = calculate_trend_strength(df)  # canonical ts_fast/ts_slow/ts/regime, untouched
-        # Paper's own 2m/12m Bull/Correction/Bear/Rebound classification and
-        # r_fast/r_slow (GOULDING_FAST_DAYS/DEFAULT_SLOW_WINDOW) from
-        # signal_spec.py's SignalSpec.goulding()/compute_signal(), instead of
-        # a duplicate hand-rolled fast_return/state computation here -- the
-        # 'signal'/'ts_fast'/'ts_slow' columns it also produces are unused
-        # (this script computes its own weight from `g_regime` + the
-        # separately-estimated a_co/a_re, below).
-        goulding_sig = compute_signal(df, SignalSpec.goulding(window_basis=WindowBasis.OBSERVATIONS))
-        sig = sig.join(
-            goulding_sig.select(['ts_event', pl.col('regime').alias('g_regime'), 'r_fast', 'r_slow']),
-            on='ts_event', how='left',
-        )
+        # Paper's own genuine calendar-month Bull/Correction/Bear/Rebound
+        # classification from signal_spec.py's goulding_monthly() (real
+        # group_by_dynamic('1mo') aggregation, not a fixed-trading-day
+        # approximation) instead of a duplicate hand-rolled computation
+        # here -- this script computes its own weight from `g_regime` +
+        # the separately-estimated a_co/a_re, below, via _goulding_weight.
+        # goulding_monthly returns one row per MONTH; join_asof(backward)
+        # maps each daily row onto the monthly period containing it, so
+        # r_fast/r_slow/g_regime repeat across every day of that month --
+        # each month's own fast/slow is already computed from strictly
+        # PRIOR completed months (goulding_monthly's own shift(1)), so this
+        # carries no lookahead.
+        monthly = goulding_monthly(build_features(df), **SignalSpec.goulding().goulding_kwargs())
+        monthly = monthly.rename({'fast': 'r_fast', 'slow': 'r_slow', 'regime': 'g_regime'})
+        monthly = monthly.select(['ts_event', 'r_fast', 'r_slow', 'g_regime']).sort('ts_event')
+        sig = sig.sort('ts_event').join_asof(monthly, on='ts_event', strategy='backward')
         signals[sym] = sig.select(['ts_event', 'close', 'ts', 'daily_std', 'regime', 'g_regime', 'r_fast', 'r_slow']).sort('ts_event')
 
     rebal_dates = sorted(d for d in _month_end_dates(price_data) if start <= d <= end)
@@ -376,7 +379,9 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
                 r_slow_val, r_fast_val, g_regime_val = row['r_slow'][0], row['r_fast'][0], row['g_regime'][0]
                 state, ts_val, regime = None, None, None
                 if weighting_mode == 'dynamic':
-                    state = g_regime_val.lower() if g_regime_val and g_regime_val != 'UNKNOWN' else None
+                    # g_regime is None whenever fast/slow lack enough completed
+                    # months of history yet (goulding_monthly's own rolling_mean).
+                    state = g_regime_val.lower() if g_regime_val else None
                     if state is None or dstd_bad:
                         logger.warning(f"{s} on {d}: skipping rebalance, invalid signal "
                                         f"(r_fast={r_fast_val}, r_slow={r_slow_val}, daily_std={dstd})")

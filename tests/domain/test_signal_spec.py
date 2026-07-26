@@ -1,7 +1,9 @@
 """
-Tests for domain.signal_spec -- the modular SignalModel/WindowBasis layer
-on top of tsmom_signal.calculate_trend_strength (which stays canonical and
-untouched).
+Tests for domain.signal_spec -- build_features/continuous_momentum/
+goulding_monthly, three independent, pure functions computed straight from
+raw OHLCV bars. Each model's own tests deliberately avoid touching the
+other model's columns, mirroring the "no model depends on another model's
+intermediate columns" requirement the module itself is built around.
 """
 
 from datetime import date, timedelta
@@ -10,14 +12,15 @@ import numpy as np
 import polars as pl
 import pytest
 
-from derivatives_bt_engine.domain.enums import SignalModel, TrendRegime, WindowBasis
 from derivatives_bt_engine.domain.signal_spec import (
     GOULDING_FAST_MONTHS,
     GOULDING_SLOW_MONTHS,
     SignalSpec,
-    compute_signal,
+    _goulding_weight,
+    build_features,
+    continuous_momentum,
+    goulding_monthly,
 )
-from derivatives_bt_engine.domain.tsmom_signal import calculate_trend_strength
 
 
 def _trading_dates(start: date, n: int) -> list[date]:
@@ -38,19 +41,28 @@ def _price_df(start: date, n: int, drift: float, vol: float = 0.01, seed: int = 
     return pl.DataFrame({'ts_event': dates, 'close': close})
 
 
-# ── SignalSpec validation ───────────────────────────────────────────────
+# ── SignalSpec ───────────────────────────────────────────────────────────
 
-def test_signal_spec_defaults_are_classic_observations():
+def test_signal_spec_defaults():
     spec = SignalSpec()
-    assert spec.model == SignalModel.CLASSIC_TS
-    assert spec.window_basis == WindowBasis.OBSERVATIONS
-    assert spec.fast_days == 63
-    assert spec.slow_days == 252
+    assert spec.fast_window == 63
+    assert spec.slow_window == 252
+    assert spec.vol_fast_window is None
+    assert spec.vol_slow_window is None
+    assert spec.w_fast == 0.4
+    assert spec.w_slow == 0.6
+    assert spec.discount == 0.5
+    assert spec.fast_months == GOULDING_FAST_MONTHS == 2
+    assert spec.slow_months == GOULDING_SLOW_MONTHS == 12
+    assert spec.a_co == 0.5
+    assert spec.a_re == 0.5
 
 
-def test_signal_spec_rejects_bad_model():
+def test_signal_spec_rejects_bad_windows():
     with pytest.raises(ValueError):
-        SignalSpec(model='not_a_model')
+        SignalSpec(fast_window=0)
+    with pytest.raises(ValueError):
+        SignalSpec(fast_months=-1)
 
 
 def test_signal_spec_rejects_bad_a_co_a_re():
@@ -62,106 +74,198 @@ def test_signal_spec_rejects_bad_a_co_a_re():
 
 def test_goulding_factory_uses_paper_horizons():
     spec = SignalSpec.goulding()
-    assert spec.model == SignalModel.GOULDING_DYNAMIC
-    assert spec.fast_months == GOULDING_FAST_MONTHS == 2
-    assert spec.slow_months == GOULDING_SLOW_MONTHS == 12
-    assert spec.window_basis == WindowBasis.CALENDAR
+    assert spec.fast_months == 2
+    assert spec.slow_months == 12
 
 
-# ── CLASSIC_TS + OBSERVATIONS: must reproduce calculate_trend_strength exactly ──
+def test_continuous_kwargs_and_goulding_kwargs_disjoint_and_complete():
+    spec = SignalSpec(fast_window=21, slow_window=100, fast_months=3, slow_months=9)
+    ck = spec.continuous_kwargs()
+    gk = spec.goulding_kwargs()
+    assert ck['fast_window'] == 21 and ck['slow_window'] == 100
+    assert gk['fast_months'] == 3 and gk['slow_months'] == 9
+    # No overlap -- each function only ever receives its own parameters.
+    assert set(ck.keys()).isdisjoint(gk.keys())
 
-def test_classic_observations_matches_calculate_trend_strength_exactly():
+
+# ── build_features: shared base only, no model-specific columns ─────────
+
+def test_build_features_adds_only_base_columns():
+    df = pl.DataFrame({'ts_event': _trading_dates(date(2020, 1, 1), 5),
+                        'close': [100.0, 102.0, 101.0, 105.0, 103.0]})
+    feat = build_features(df)
+    assert set(feat.columns) == {'ts_event', 'close', 'prev_close', 'peak', 'dd', 'r1d'}
+
+
+def test_build_features_r1d_is_simple_return_not_log():
+    df = pl.DataFrame({'ts_event': _trading_dates(date(2020, 1, 1), 3),
+                        'close': [100.0, 110.0, 99.0]})
+    feat = build_features(df)
+    r1d = feat['r1d'].to_list()
+    assert r1d[0] is None
+    assert r1d[1] == pytest.approx(0.10)   # 110/100 - 1, NOT log(110/100)
+    assert r1d[2] == pytest.approx(99 / 110 - 1)
+
+
+def test_build_features_peak_and_drawdown():
+    df = pl.DataFrame({'ts_event': _trading_dates(date(2020, 1, 1), 4),
+                        'close': [100.0, 120.0, 90.0, 110.0]})
+    feat = build_features(df)
+    assert feat['peak'].to_list() == [100.0, 120.0, 120.0, 120.0]
+    dd = feat['dd'].to_list()
+    assert dd[2] == pytest.approx((90 - 120) / 120, abs=1e-2)
+
+
+# ── continuous_momentum: independent of goulding_monthly ─────────────────
+
+def test_continuous_momentum_needs_only_build_features_output():
     df = _price_df(date(2018, 1, 1), 400, drift=0.001, seed=1)
-    direct = calculate_trend_strength(df.clone())
-    spec = SignalSpec()  # bare default
-    via_spec = compute_signal(df.clone(), spec)
-
-    for col in ('ts_fast', 'ts_slow', 'signal', 'dd', 'daily_std', 'hv'):
-        a = direct[col].fill_null(-999.0).to_list()
-        b = via_spec[col].fill_null(-999.0).to_list()
-        assert a == pytest.approx(b), f"{col} diverged between calculate_trend_strength and compute_signal"
+    feat = build_features(df)
+    # Deliberately does NOT call goulding_monthly first -- continuous_momentum
+    # must run from build_features' output alone.
+    out = continuous_momentum(feat)
+    assert 'ts_fast' in out.columns and 'ts_slow' in out.columns
+    assert out['signal'].drop_nulls().len() > 0
 
 
-def test_classic_observations_annualization_days_pass_through():
-    df = _price_df(date(2018, 1, 1), 400, drift=0.001, seed=2)
-    direct = calculate_trend_strength(df.clone(), annualization_days=259)
-    via_spec = compute_signal(df.clone(), SignalSpec(annualization_days=259))
-    a = direct['hv'].fill_null(-999.0).to_list()
-    b = via_spec['hv'].fill_null(-999.0).to_list()
+def test_continuous_momentum_signal_is_bounded():
+    df = _price_df(date(2018, 1, 1), 400, drift=0.0015, vol=0.005, seed=2)
+    out = continuous_momentum(build_features(df))
+    signal = out['signal'].drop_nulls()
+    assert len(signal) > 0
+    assert signal.min() >= -1.0 and signal.max() <= 1.0
+
+
+def test_continuous_momentum_regime_classification():
+    df = _price_df(date(2018, 1, 1), 400, drift=0.002, vol=0.004, seed=3)
+    out = continuous_momentum(build_features(df))
+    regimes = set(out['regime'].drop_nulls().unique().to_list())
+    assert regimes <= {'bull', 'bear', 'correction', 'rebound'}
+
+
+def test_continuous_momentum_discount_applied_in_transition_regimes():
+    df = _price_df(date(2018, 1, 1), 400, drift=0.0, vol=0.01, seed=4)
+    out = continuous_momentum(build_features(df), discount=0.25)
+    dis = out.filter(pl.col('regime').is_in(['correction', 'rebound']))
+    other = out.filter(~pl.col('regime').is_in(['correction', 'rebound']) & pl.col('ts').is_not_null())
+    if dis.height > 0:
+        ratio = (dis['signal'] / dis['ts']).drop_nulls()
+        assert ratio.len() > 0
+        assert all(pytest.approx(0.25) == r for r in ratio.to_list())
+    if other.height > 0:
+        assert (other['signal'] == other['ts']).all()
+
+
+def test_continuous_momentum_vol_window_defaults_to_return_window():
+    # Default behavior: vol normalization is horizon-matched to the return
+    # window, NOT an arbitrary fixed window (e.g. always 63 days) reused
+    # regardless of fast_window/slow_window.
+    df = _price_df(date(2018, 1, 1), 400, drift=0.001, vol=0.008, seed=5)
+    feat = build_features(df)
+    out_default = continuous_momentum(feat, fast_window=21, slow_window=126)
+    out_explicit = continuous_momentum(feat, fast_window=21, slow_window=126,
+                                        vol_fast_window=21, vol_slow_window=126)
+    a = out_default['std_fast'].fill_null(-999.0).to_list()
+    b = out_explicit['std_fast'].fill_null(-999.0).to_list()
     assert a == pytest.approx(b)
 
 
-# ── CLASSIC_TS + CALENDAR ────────────────────────────────────────────────
-
-def test_classic_calendar_window_days_roughly_match_fast_months():
-    df = _price_df(date(2018, 1, 1), 500, drift=0.0005, seed=3)
-    spec = SignalSpec(window_basis=WindowBasis.CALENDAR, fast_months=3, slow_months=12)
-    out = compute_signal(df, spec)
-    wd = out['window_days_3m'].drop_nulls()
-    assert len(wd) > 0
-    # ~21 trading days/month * 3 -- allow a wide band since calendar months
-    # vary in length and this is a business-day-only synthetic calendar.
-    assert 55 <= wd.median() <= 70
+def test_continuous_momentum_vol_window_can_be_decoupled_from_return_window():
+    df = _price_df(date(2018, 1, 1), 400, drift=0.001, vol=0.008, seed=6)
+    feat = build_features(df)
+    out_matched = continuous_momentum(feat, fast_window=21)
+    out_decoupled = continuous_momentum(feat, fast_window=21, vol_fast_window=63)
+    a = out_matched['std_fast'].fill_null(-999.0).to_list()
+    b = out_decoupled['std_fast'].fill_null(-999.0).to_list()
+    assert a != pytest.approx(b)
 
 
-def test_classic_calendar_produces_bounded_signal():
-    df = _price_df(date(2018, 1, 1), 500, drift=0.002, vol=0.005, seed=4)
-    spec = SignalSpec(window_basis=WindowBasis.CALENDAR)
-    out = compute_signal(df, spec)
-    signal = out['signal'].drop_nulls()
-    assert len(signal) > 0
-    assert signal.min() >= -1.0 and signal.max() <= 1.0
+def test_continuous_momentum_annualization_days_scales_avg_r():
+    df = _price_df(date(2018, 1, 1), 400, drift=0.001, seed=7)
+    feat = build_features(df)
+    out_252 = continuous_momentum(feat, annualization_days=252)
+    out_259 = continuous_momentum(feat, annualization_days=259)
+    a = out_252['avg_r_fast'].fill_null(-999.0).to_list()
+    b = out_259['avg_r_fast'].fill_null(-999.0).to_list()
+    assert a != pytest.approx(b)
+    ratio = 259 / 252
+    for x, y in zip(a, b):
+        if x != -999.0:
+            assert y == pytest.approx(x * ratio, rel=1e-6)
 
 
-# ── GOULDING_DYNAMIC ─────────────────────────────────────────────────────
+# ── goulding_monthly: independent of continuous_momentum ─────────────────
 
-def test_goulding_observations_runs_and_bounds_signal():
-    df = _price_df(date(2018, 1, 1), 400, drift=0.0015, vol=0.005, seed=5)
-    out = compute_signal(df, SignalSpec.goulding(window_basis=WindowBasis.OBSERVATIONS))
-    signal = out['signal'].drop_nulls()
-    assert len(signal) > 0
-    assert signal.min() >= -1.0 and signal.max() <= 1.0
-    assert set(out['regime'].drop_nulls().unique().to_list()) <= {'BULL', 'BEAR', 'CORRECTION', 'REBOUND', 'UNKNOWN'}
-
-
-def test_goulding_calendar_runs_and_bounds_signal():
-    df = _price_df(date(2018, 1, 1), 500, drift=0.0015, vol=0.005, seed=6)
-    out = compute_signal(df, SignalSpec.goulding(window_basis=WindowBasis.CALENDAR))
-    signal = out['signal'].drop_nulls()
-    assert len(signal) > 0
-    assert signal.min() >= -1.0 and signal.max() <= 1.0
+def test_goulding_monthly_needs_only_ts_event_and_close():
+    # Deliberately pass raw build_features output straight through --
+    # goulding_monthly must not require continuous_momentum's columns
+    # (ts_fast/ts_slow/regime/signal) to exist at all.
+    df = _price_df(date(2018, 1, 1), 400, drift=0.001, seed=8)
+    feat = build_features(df)
+    assert 'ts_fast' not in feat.columns  # sanity: continuous_momentum wasn't run
+    out = goulding_monthly(feat)
+    assert out.height > 0
 
 
-def test_goulding_flat_a_co_a_re_zeros_out_disagreement_states():
-    # a_co=a_re=0.5 (the default) must make Correction/Rebound rows exactly
-    # flat (weight 0), per eq. 7's own derivation.
-    df = _price_df(date(2018, 1, 1), 400, drift=0.0, vol=0.01, seed=7)
-    out = compute_signal(df, SignalSpec.goulding(window_basis=WindowBasis.OBSERVATIONS, a_co=0.5, a_re=0.5))
-    dis = out.filter(pl.col('regime').is_in(['CORRECTION', 'REBOUND']))
-    if dis.height > 0:
-        assert dis['signal'].abs().max() < 1e-9
+def test_goulding_monthly_has_no_volatility_normalization_columns():
+    df = _price_df(date(2018, 1, 1), 400, drift=0.001, seed=9)
+    out = goulding_monthly(build_features(df))
+    # Pure arithmetic-average signal -- no std/ts_fast/ts_slow/hv anywhere.
+    assert not ({'std', 'std_fast', 'std_slow', 'ts_fast', 'ts_slow', 'hv'} & set(out.columns))
 
 
-def test_goulding_nonflat_a_co_a_re_biases_disagreement_states():
-    df = _price_df(date(2018, 1, 1), 400, drift=0.0, vol=0.01, seed=7)
-    out = compute_signal(df, SignalSpec.goulding(window_basis=WindowBasis.OBSERVATIONS, a_co=0.2, a_re=0.8))
-    correction = out.filter(pl.col('regime') == 'CORRECTION')
-    rebound = out.filter(pl.col('regime') == 'REBOUND')
-    if correction.height > 0:
-        # a_co < 0.5 -> weight = 1 - 2*a_co > 0 (tilt toward slow/long)
-        assert (correction['signal'] > 0).all()
-    if rebound.height > 0:
-        # a_re > 0.5 -> weight = 2*a_re - 1 > 0 (tilt toward fast/long)
-        assert (rebound['signal'] > 0).all()
+def test_goulding_monthly_fast_slow_use_only_completed_months():
+    dates = _trading_dates(date(2020, 1, 1), 1)  # any single ts_event dtype anchor
+    # Six calendar months of flat, deterministic monthly returns via
+    # group_by_dynamic -- construct closes so each month's return is known
+    # exactly, then verify fast/slow (fast_months=1/slow_months=2) equal the
+    # PRIOR month(s)' return, not the current month's own.
+    month_starts = [date(2020, m, 1) for m in range(1, 7)]
+    rows = []
+    price = 100.0
+    monthly_rets = [0.05, -0.03, 0.02, 0.04, -0.01, 0.03]
+    for start, ret in zip(month_starts, monthly_rets):
+        rows.append({'ts_event': start, 'close': price})
+        price = price * (1 + ret)
+    # Add a final row to close out the last month's own return.
+    rows.append({'ts_event': date(2020, 7, 1), 'close': price})
+    df = pl.DataFrame(rows)
+    out = goulding_monthly(df, fast_months=1, slow_months=2).sort('ts_event')
+    ret = out['ret'].to_list()
+    fast = out['fast'].to_list()
+    # fast[i] must equal ret[i-1] (fast_months=1 trailing mean of last
+    # completed month), never ret[i] itself.
+    for i in range(2, len(ret)):
+        if fast[i] is not None and ret[i - 1] is not None:
+            assert fast[i] == pytest.approx(ret[i - 1])
 
 
-def test_unsupported_combination_raises():
-    # A valid spec must NOT raise from compute_signal's own dispatch.
-    compute_signal(_price_df(date(2018, 1, 1), 100, drift=0.0), SignalSpec())
-    # Bypassing __post_init__'s validation (direct attribute mutation after
-    # construction) and asking compute_signal to dispatch on it anyway must
-    # still fail loudly, not silently return something wrong.
-    spec = SignalSpec()
-    spec.model = 'bogus'
-    with pytest.raises(ValueError):
-        compute_signal(_price_df(date(2018, 1, 1), 100, drift=0.0), spec)
+def test_goulding_monthly_signal_bounds_and_regimes():
+    df = _price_df(date(2018, 1, 1), 500, drift=0.0015, vol=0.005, seed=10)
+    out = goulding_monthly(build_features(df))
+    regimes = set(out['regime'].drop_nulls().unique().to_list())
+    assert regimes <= {'bull', 'bear', 'correction', 'rebound'}
+
+
+# ── _goulding_weight (eq. 7), independent of both models above ──────────
+
+def test_goulding_weight_bull_bear_are_fully_directional():
+    assert _goulding_weight('bull', a_co=0.5, a_re=0.5) == 1.0
+    assert _goulding_weight('bear', a_co=0.5, a_re=0.5) == -1.0
+
+
+def test_goulding_weight_flat_a_co_a_re_zeros_out_disagreement_states():
+    assert _goulding_weight('correction', a_co=0.5, a_re=0.5) == pytest.approx(0.0)
+    assert _goulding_weight('rebound', a_co=0.5, a_re=0.5) == pytest.approx(0.0)
+
+
+def test_goulding_weight_nonflat_a_co_a_re_biases_disagreement_states():
+    # a_co < 0.5 -> weight = 1 - 2*a_co > 0 (tilt toward slow/long)
+    assert _goulding_weight('correction', a_co=0.2, a_re=0.5) > 0
+    # a_re > 0.5 -> weight = 2*a_re - 1 > 0 (tilt toward fast/long)
+    assert _goulding_weight('rebound', a_co=0.5, a_re=0.8) > 0
+
+
+def test_goulding_weight_none_and_unknown_regime():
+    assert _goulding_weight(None, a_co=0.5, a_re=0.5) is None
+    assert _goulding_weight('unknown', a_co=0.5, a_re=0.5) is None
