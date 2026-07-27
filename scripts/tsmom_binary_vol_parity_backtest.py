@@ -133,7 +133,8 @@ logger = setup_logger()
 DEFAULT_SYMBOLS = ['MES', 'MNQ', 'MCL', 'MGC', 'SIL', 'MTN', 'MZL', 'MZC', 'MZS', 'MZW', 'J7', '6M']
 DEFAULT_YEARS = '2010-2026'
 # Signal history buffer before --years' own start, so ts_fast/ts_slow/
-# r_fast/r_slow are non-null from the test window's first rebalance -- a
+# c_fast/c_slow/g_fast/g_slow are non-null from the test window's first
+# rebalance -- a
 # FIXED offset from `start`, not a fixed absolute date: an earlier version
 # hardcoded 2018-01-01 regardless of --years, which silently capped the
 # effective test window at 2018+ even when --years asked for an earlier
@@ -273,8 +274,9 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
     save_prefix, if given, writes two CSVs for after-the-fact inspection --
     "{save_prefix}_{mode}_daily.csv" (date, capital, ret) and
     "{save_prefix}_{mode}_rebalances.csv" (one row per symbol actually
-    rebalanced: date, state/regime, a_co/a_re, ts/r_slow/r_fast, weight,
-    prior->target contracts, fee) -- neither existed anywhere before this,
+    rebalanced: date, state, a_co/a_re, ts/continuous_regime/c_fast/c_slow,
+    g_regime/g_fast/g_slow, weight, prior->target contracts, fee) -- neither
+    existed anywhere before this,
     so there was no way to audit what a given run actually did after the
     fact, only the final summary numbers.
     """
@@ -291,15 +293,16 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
         # the other's intermediate columns, per signal_spec.py's own design.
         feat = build_features(df)
         sig = continuous_momentum(feat, **SignalSpec().continuous_kwargs())
-        # continuous_momentum's own output already has columns named
-        # r_fast/r_slow (its 63d/252d continuous returns) -- select only
-        # what flat_discount actually needs BEFORE the join below, so those
-        # don't collide with goulding_monthly's r_fast/r_slow (join_asof
-        # would otherwise silently suffix the Goulding side to
-        # r_fast_right/r_slow_right, and the final select would end up
-        # picking the continuous model's returns under the r_fast/r_slow
-        # names instead of Goulding's monthly ones).
-        sig = sig.select(['ts_event', 'close', 'ts', 'std_fast', 'regime'])
+        # continuous_momentum's own r_fast/r_slow (its 63d/252d continuous
+        # returns) are renamed c_fast/c_slow here -- not dropped -- so they
+        # sit alongside goulding_monthly's own g_fast/g_slow/g_regime below
+        # for direct comparison (matching the original notebook's
+        # contin_fast/contin_slow/reg_contin vs fast/slow/reg_monthly),
+        # without colliding once joined (join_asof would otherwise silently
+        # suffix one side to r_fast_right/r_slow_right and the final select
+        # would silently pick the wrong model's returns under a shared name).
+        sig = sig.select(['ts_event', 'close', 'ts', 'std_fast', 'regime',
+                           pl.col('r_fast').alias('c_fast'), pl.col('r_slow').alias('c_slow')])
         # Paper's own genuine calendar-month Bull/Correction/Bear/Rebound
         # classification from signal_spec.py's goulding_monthly() (real
         # group_by_dynamic('1mo') aggregation, not a fixed-trading-day
@@ -308,15 +311,16 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
         # the separately-estimated a_co/a_re, below, via _goulding_weight.
         # goulding_monthly returns one row per MONTH; join_asof(backward)
         # maps each daily row onto the monthly period containing it, so
-        # r_fast/r_slow/g_regime repeat across every day of that month --
+        # g_fast/g_slow/g_regime repeat across every day of that month --
         # each month's own fast/slow is already computed from strictly
         # PRIOR completed months (goulding_monthly's own shift(1)), so this
         # carries no lookahead.
         monthly = goulding_monthly(feat, **SignalSpec.goulding().goulding_kwargs())
-        monthly = monthly.rename({'fast': 'r_fast', 'slow': 'r_slow', 'regime': 'g_regime'})
-        monthly = monthly.select(['ts_event', 'r_fast', 'r_slow', 'g_regime']).sort('ts_event')
+        monthly = monthly.rename({'fast': 'g_fast', 'slow': 'g_slow', 'regime': 'g_regime'})
+        monthly = monthly.select(['ts_event', 'g_fast', 'g_slow', 'g_regime']).sort('ts_event')
         sig = sig.sort('ts_event').join_asof(monthly, on='ts_event', strategy='backward')
-        signals[sym] = sig.select(['ts_event', 'close', 'ts', 'std_fast', 'regime', 'g_regime', 'r_fast', 'r_slow']).sort('ts_event')
+        signals[sym] = sig.select(['ts_event', 'close', 'ts', 'std_fast', 'regime', 'c_fast', 'c_slow',
+                                    'g_regime', 'g_fast', 'g_slow']).sort('ts_event')
 
     rebal_dates = sorted(d for d in _month_end_dates(price_data) if start <= d <= end)
     all_dates = sorted(set().union(*(set(df['ts_event'].to_list()) for df in signals.values())))
@@ -394,28 +398,30 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
                 # to integer" -- confirmed on a real run.
                 dstd_bad = dstd is None or (isinstance(dstd, float) and math.isnan(dstd)) or dstd <= 0
 
-                # r_fast/r_slow (signal_spec.py's Goulding columns) are
-                # computed unconditionally above (regardless of
-                # weighting_mode) so always read them here too -- audit rows
-                # should show the underlying fast/slow returns even on a
-                # flat_discount run, not just when 'dynamic' mode is the one
-                # actually consuming them for sizing.
-                r_slow_val, r_fast_val, g_regime_val = row['r_slow'][0], row['r_fast'][0], row['g_regime'][0]
-                state, ts_val, regime = None, None, None
+                # Both models' fast/slow and regime are computed
+                # unconditionally above (regardless of weighting_mode) so
+                # always read them all here too -- audit rows should let
+                # continuous (ts/regime/c_fast/c_slow) and Goulding
+                # (g_regime/g_fast/g_slow) be compared side by side on every
+                # rebalance, not just whichever one is actually driving that
+                # run's sizing.
+                ts_val, regime = row['ts'][0], row['regime'][0]
+                c_fast_val, c_slow_val = row['c_fast'][0], row['c_slow'][0]
+                g_fast_val, g_slow_val, g_regime_val = row['g_fast'][0], row['g_slow'][0], row['g_regime'][0]
+                state = None
                 if weighting_mode == 'dynamic':
                     # g_regime is None whenever fast/slow lack enough completed
                     # months of history yet (goulding_monthly's own rolling_mean).
                     state = g_regime_val.lower() if g_regime_val else None
                     if state is None or dstd_bad:
                         logger.warning(f"{s} on {d}: skipping rebalance, invalid signal "
-                                        f"(r_fast={r_fast_val}, r_slow={r_slow_val}, std_fast={dstd})")
+                                        f"(g_fast={g_fast_val}, g_slow={g_slow_val}, std_fast={dstd})")
                         continue
                     # (1-a_co)*sign(slow)+a_co*sign(fast) in Correction, mirrored
                     # in Rebound -- signal_spec.py's own eq. 7 weight formula,
                     # reused here instead of a duplicate if/elif ladder.
                     weight = _goulding_weight(g_regime_val, a_co, a_re)
                 else:
-                    ts_val, regime = row['ts'][0], row['regime'][0]
                     if (ts_val is None or (isinstance(ts_val, float) and math.isnan(ts_val)) or dstd_bad):
                         logger.warning(f"{s} on {d}: skipping rebalance, invalid signal "
                                         f"(ts={ts_val}, std_fast={dstd})")
@@ -450,7 +456,8 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
                     'date': d, 'symbol': s, 'mode': weighting_mode,
                     'state': state if weighting_mode == 'dynamic' else regime,
                     'a_co': a_co, 'a_re': a_re,
-                    'ts': ts_val, 'r_slow': r_slow_val, 'r_fast': r_fast_val,
+                    'ts': ts_val, 'continuous_regime': regime, 'c_fast': c_fast_val, 'c_slow': c_slow_val,
+                    'g_regime': g_regime_val, 'g_fast': g_fast_val, 'g_slow': g_slow_val,
                     'weight': round(weight, 4), 'close': close, 'std_fast': dstd,
                     'prior_contracts': prior, 'target_contracts': new_target,
                     'fee': round(event_fee, 2),
@@ -511,7 +518,8 @@ def parse_args():
     p.add_argument('--save-csv', default=None, metavar='PREFIX',
                     help='Write per-run "{PREFIX}_{mode}_daily.csv" (date, capital, ret) and '
                          '"{PREFIX}_{mode}_rebalances.csv" (one row per symbol actually rebalanced: '
-                         'state/regime, a_co/a_re, ts/r_slow/r_fast, weight, prior->target, fee) for '
+                         'state, a_co/a_re, ts/continuous_regime/c_fast/c_slow, g_regime/g_fast/g_slow, '
+                         'weight, prior->target, fee) for '
                          'after-the-fact inspection -- neither is saved anywhere without this '
                          '(default: off, only the summary dict is printed)')
     return p.parse_args()
