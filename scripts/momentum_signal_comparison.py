@@ -14,10 +14,30 @@ Run:
 
 --model continuous: build_features + continuous_momentum only.
 --model goulding:    build_features + goulding_monthly only.
---model both:        both, independently, then join_asof on ts_event (each
-    continuous daily row matched to the Goulding monthly period containing
-    it) purely for comparison -- this is the only place the two models'
-    outputs ever meet.
+--model both:        both, independently, then join_asof on ts_event for
+    comparison -- the ONLY place the two models' outputs ever meet, and
+    the only join in this script.
+
+    Joined onto the MONTHLY (Goulding) frame, not the daily one: Goulding's
+    own signal only changes once a month, so joining it onto the daily
+    continuous frame (as an earlier version of this script did) just
+    repeats the same g_fast/g_slow/g_regime value ~21 times per month --
+    fine for a P&L simulation that needs a value on every trading day (see
+    tsmom_binary_vol_parity_backtest.py), useless bulk for a comparison
+    table. One row per month, with the continuous model's matching reading
+    pulled in via join_asof(backward), is the right granularity here.
+
+    allow_exact_matches=False on that join matters: strategy='backward'
+    means "the last right-frame row at or before the left key" -- INCLUDING
+    an exact match. A month's own group_by_dynamic label (e.g. 2023-11-01)
+    is sometimes itself a real trading day (Nov 1, 2023 was a Wednesday) --
+    without allow_exact_matches=False, that month's row would silently pick
+    up the continuous model's reading from the FIRST day of that same
+    month, i.e. a reading that already reflects the month you're supposed
+    to be looking at "as of entering." Goulding's own g_fast/g_slow never
+    have this problem (goulding_monthly's own shift(1) already excludes the
+    current month), so without this flag the two sides of the comparison
+    aren't held to the same no-lookahead standard.
 """
 from __future__ import annotations
 
@@ -39,11 +59,13 @@ DEFAULT_SYMBOLS = ['MES', 'MNQ', 'MCL', 'MGC']
 DEFAULT_YEARS = '2010-2026'
 DEFAULT_MODEL = 'both'
 
-_CONTINUOUS_COLS = {
-    'ts_fast': 'continuous_fast', 'ts_slow': 'continuous_slow',
-    'regime': 'continuous_regime', 'signal': 'continuous_signal',
-}
-_GOULDING_COLS = {'fast': 'goulding_fast', 'slow': 'goulding_slow', 'regime': 'goulding_regime'}
+# c_fast/c_slow (renamed from r_fast/r_slow) alongside std_fast/std_slow/
+# ts_fast/ts_slow/regime/ts kept native -- the full diagnostic set, not just
+# a reduced "signal" column, so both models' fast/slow AND regime call can
+# be compared directly.
+_CONTINUOUS_COLS = {'r_fast': 'c_fast', 'r_slow': 'c_slow'}
+_CONTINUOUS_PASSTHROUGH = ['std_fast', 'std_slow', 'ts_fast', 'ts_slow', 'regime', 'ts']
+_GOULDING_COLS = {'fast': 'g_fast', 'slow': 'g_slow', 'regime': 'g_regime'}
 
 
 def run(symbols: list[str], start: date, end: date, model: str, spec: SignalSpec,
@@ -70,7 +92,9 @@ def run(symbols: list[str], start: date, end: date, model: str, spec: SignalSpec
             kwargs = spec.continuous_kwargs()
             kwargs['annualization_days'] = resolve_annualization_days(sym)
             cm = continuous_momentum(feat, **kwargs)
-            continuous_out = cm.select(['ts_event', 'close', *_CONTINUOUS_COLS.keys()]).rename(_CONTINUOUS_COLS)
+            continuous_out = cm.select(
+                ['ts_event', 'close', *_CONTINUOUS_COLS.keys(), *_CONTINUOUS_PASSTHROUGH]
+            ).rename(_CONTINUOUS_COLS)
             if save_prefix:
                 path = f"{save_prefix}_{sym}_continuous.csv"
                 continuous_out.write_csv(path)
@@ -78,20 +102,25 @@ def run(symbols: list[str], start: date, end: date, model: str, spec: SignalSpec
 
         if model in ('goulding', 'both'):
             gm = goulding_monthly(feat, **spec.goulding_kwargs())
-            goulding_out = gm.select(['ts_event', *_GOULDING_COLS.keys()]).rename(_GOULDING_COLS)
+            goulding_out = gm.select(['ts_event', 'close', 'ret', *_GOULDING_COLS.keys()]).rename(_GOULDING_COLS)
             if save_prefix:
                 path = f"{save_prefix}_{sym}_goulding.csv"
                 goulding_out.write_csv(path)
                 logger.info(f"Saved {path} ({goulding_out.height} rows)")
 
         if model == 'both':
-            # Comparison only -- join_asof(backward) maps each continuous
-            # daily row onto the Goulding monthly period containing it, so
-            # goulding_fast/slow/regime repeat across every day of that
-            # month. This is the ONLY place the two models' outputs meet;
-            # neither calculation above used the other's columns.
-            joined = continuous_out.sort('ts_event').join_asof(
-                goulding_out.sort('ts_event'), on='ts_event', strategy='backward',
+            # Comparison only, joined onto the MONTHLY (Goulding) frame --
+            # see module docstring for why (granularity) and why
+            # allow_exact_matches=False (a month boundary landing on a real
+            # trading day must not pull in that day's own continuous
+            # reading). continuous_out's own 'close' is dropped here --
+            # Goulding's own close/ret already describe the month's own
+            # price data; the daily close is still in the standalone
+            # continuous CSV saved above.
+            continuous_for_join = continuous_out.drop('close')
+            joined = goulding_out.sort('ts_event').join_asof(
+                continuous_for_join.sort('ts_event'), on='ts_event',
+                strategy='backward', allow_exact_matches=False,
             )
             results[sym] = joined
             if save_prefix:
