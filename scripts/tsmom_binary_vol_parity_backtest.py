@@ -291,6 +291,15 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
         # the other's intermediate columns, per signal_spec.py's own design.
         feat = build_features(df)
         sig = continuous_momentum(feat, **SignalSpec().continuous_kwargs())
+        # continuous_momentum's own output already has columns named
+        # r_fast/r_slow (its 63d/252d continuous returns) -- select only
+        # what flat_discount actually needs BEFORE the join below, so those
+        # don't collide with goulding_monthly's r_fast/r_slow (join_asof
+        # would otherwise silently suffix the Goulding side to
+        # r_fast_right/r_slow_right, and the final select would end up
+        # picking the continuous model's returns under the r_fast/r_slow
+        # names instead of Goulding's monthly ones).
+        sig = sig.select(['ts_event', 'close', 'ts', 'std_fast', 'regime'])
         # Paper's own genuine calendar-month Bull/Correction/Bear/Rebound
         # classification from signal_spec.py's goulding_monthly() (real
         # group_by_dynamic('1mo') aggregation, not a fixed-trading-day
