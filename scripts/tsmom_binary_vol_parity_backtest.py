@@ -162,31 +162,41 @@ MIN_MONTHS_PER_PHASE = 12  # paper's own warm-up requirement per Appendix C
 
 
 def _build_monthly_state_return_history(signals: dict[str, pl.DataFrame],
+                                         rebal_monthly: dict[str, pl.DataFrame],
                                          rebal_dates: list[date]) -> pl.DataFrame:
-    """One row per (symbol, rebalance date) with the state observed at the
-    START of that month (from the PRIOR rebalance date's g_regime, signal_spec.py's
-    Goulding eq. 4 classification) paired with that month's own realized log
-    return (prior rebal_date's close to this one's) -- i.e. exactly the
-    (state, subsequent-month return) pairs Appendix C's AVG[r|s]/AVG[r^2|s]
-    are computed over. Pooled across every symbol in `signals` (not per-
-    instrument, unlike the paper's own single-asset design) since this
-    project's per-symbol history (~15 years) gives too few Correction/
-    Rebound months on its own for a stable estimate -- an explicit, flagged
-    deviation from the paper, not an oversight."""
+    """One row per (symbol, consecutive rebalance-date pair) with the state
+    read AT the EARLIER date `d` (rebal_monthly[sym] already forward-
+    matches `d` to the Goulding bucket for the month starting right after
+    it -- see run()'s own comment for why forward, not backward: `d` is a
+    month-END date, the bucket is labeled by month-START) paired with the
+    realized return from `d` to the NEXT rebal date `d_next` -- i.e.
+    exactly the (state, subsequent-period return) pairs Appendix C's
+    AVG[r|s]/AVG[r^2|s] are computed over. No separate prev_state/
+    prev_close carrying needed (an earlier version of this function had
+    that, from when g_regime was read via a backward join and was ALREADY
+    one month stale at `d` -- carrying it an extra rebalance on top of that
+    made it two months stale, not one). 'date' on each row is `d_next`,
+    since that's when this pair's own return actually became known --
+    _estimate_mixing_params's own `date < as_of` filter relies on this to
+    avoid lookahead. Pooled across every symbol (not per-instrument, unlike
+    the paper's own single-asset design) since this project's per-symbol
+    history (~15 years) gives too few Correction/Rebound months on its own
+    for a stable estimate -- an explicit, flagged deviation from the paper,
+    not an oversight."""
     rows = []
-    for sym, sig in signals.items():
-        prev_close: Optional[float] = None
-        prev_state: Optional[str] = None
-        for d in rebal_dates:
-            row = sig.filter(pl.col('ts_event') == d)
-            if row.height == 0:
+    for sym in signals:
+        sig, rm = signals[sym], rebal_monthly[sym]
+        for d, d_next in zip(rebal_dates[:-1], rebal_dates[1:]):
+            g_row = rm.filter(pl.col('ts_event') == d)
+            close_row, close_row_next = sig.filter(pl.col('ts_event') == d), sig.filter(pl.col('ts_event') == d_next)
+            if g_row.height == 0 or close_row.height == 0 or close_row_next.height == 0:
                 continue
-            close, g_regime_val = row['close'][0], row['g_regime'][0]
+            g_regime_val = g_row['g_regime'][0]
             state = g_regime_val.lower() if g_regime_val else None
-            if prev_close is not None and prev_state is not None and prev_close > 0:
-                rows.append({'date': d, 'symbol': sym, 'state': prev_state,
-                             'monthly_return': math.log(close / prev_close)})
-            prev_close, prev_state = close, state
+            close, close_next = close_row['close'][0], close_row_next['close'][0]
+            if state is not None and close is not None and close_next is not None and close > 0:
+                rows.append({'date': d_next, 'symbol': sym, 'state': state,
+                             'monthly_return': math.log(close_next / close)})
     if not rows:
         return pl.DataFrame(schema={'date': pl.Date, 'symbol': pl.Utf8,
                                      'state': pl.Utf8, 'monthly_return': pl.Float64})
@@ -283,8 +293,13 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
     if warmup_start is None:
         warmup_start = start - timedelta(days=WARMUP_DAYS_BEFORE_START)
     price_data, _ = load_portfolio_data(symbols)
+    # Computed before the per-symbol loop below -- needed there to build
+    # each symbol's own forward-matched rebal_monthly lookup.
+    rebal_dates = sorted(d for d in _month_end_dates(price_data) if start <= d <= end)
+    rebal_dates_df = pl.DataFrame({'ts_event': rebal_dates}).sort('ts_event')
 
     signals = {}
+    rebal_monthly = {}
     for sym, df in price_data.items():
         df = df.filter((pl.col('ts_event') >= warmup_start) & (pl.col('ts_event') <= end))
         # Both models computed independently from the same raw OHLCV via
@@ -301,33 +316,39 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
         # without colliding once joined (join_asof would otherwise silently
         # suffix one side to r_fast_right/r_slow_right and the final select
         # would silently pick the wrong model's returns under a shared name).
-        sig = sig.select(['ts_event', 'close', 'ts', 'std_fast', 'regime',
-                           pl.col('r_fast').alias('c_fast'), pl.col('r_slow').alias('c_slow')])
+        signals[sym] = sig.select(['ts_event', 'close', 'ts', 'std_fast', 'regime',
+                                    pl.col('r_fast').alias('c_fast'), pl.col('r_slow').alias('c_slow')]
+                                   ).sort('ts_event')
         # Paper's own genuine calendar-month Bull/Correction/Bear/Rebound
         # classification from signal_spec.py's goulding_monthly() (real
         # group_by_dynamic('1mo') aggregation, not a fixed-trading-day
         # approximation) instead of a duplicate hand-rolled computation
         # here -- this script computes its own weight from `g_regime` +
         # the separately-estimated a_co/a_re, below, via _goulding_weight.
-        # goulding_monthly returns one row per MONTH; join_asof(backward)
-        # maps each daily row onto the monthly period containing it, so
-        # g_fast/g_slow/g_regime repeat across every day of that month --
-        # each month's own fast/slow is already computed from strictly
-        # PRIOR completed months (goulding_monthly's own shift(1)), so this
-        # carries no lookahead.
+        #
+        # goulding_monthly returns one row per MONTH, labeled by that
+        # month's own START date (e.g. 2023-11-01). rebal_dates are month-
+        # END trading days (e.g. 2023-10-31) -- a rebalance on 2023-10-31
+        # decides what to hold GOING FORWARD (i.e. during November), so it
+        # needs November's own bucket (computed from October's now-complete
+        # data), NOT October's own bucket (computed from September's data,
+        # which is what a backward join_asof would silently pick, since
+        # Oct-31 < Nov-01). strategy='forward' finds the first monthly
+        # label >= each rebal date, which -- since a rebal date always
+        # falls strictly inside its own month, one full month before the
+        # NEXT month's label -- is always exactly that next month's bucket.
+        # Confirmed directly: without this, every rebalance read a signal
+        # one full calendar month stale.
         monthly = goulding_monthly(feat, **SignalSpec.goulding().goulding_kwargs())
         monthly = monthly.rename({'fast': 'g_fast', 'slow': 'g_slow', 'regime': 'g_regime'})
         monthly = monthly.select(['ts_event', 'g_fast', 'g_slow', 'g_regime']).sort('ts_event')
-        sig = sig.sort('ts_event').join_asof(monthly, on='ts_event', strategy='backward')
-        signals[sym] = sig.select(['ts_event', 'close', 'ts', 'std_fast', 'regime', 'c_fast', 'c_slow',
-                                    'g_regime', 'g_fast', 'g_slow']).sort('ts_event')
+        rebal_monthly[sym] = rebal_dates_df.join_asof(monthly, on='ts_event', strategy='forward')
 
-    rebal_dates = sorted(d for d in _month_end_dates(price_data) if start <= d <= end)
     all_dates = sorted(set().union(*(set(df['ts_event'].to_list()) for df in signals.values())))
     all_dates = [d for d in all_dates if start <= d <= end]
     rebal_set = set(rebal_dates)
 
-    monthly_history = (_build_monthly_state_return_history(signals, rebal_dates)
+    monthly_history = (_build_monthly_state_return_history(signals, rebal_monthly, rebal_dates)
                         if weighting_mode == 'dynamic' else None)
 
     # Mandatory quarterly contract roll (same schedule FuturesSignalGenerator/
@@ -404,10 +425,16 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
                 # continuous (ts/regime/c_fast/c_slow) and Goulding
                 # (g_regime/g_fast/g_slow) be compared side by side on every
                 # rebalance, not just whichever one is actually driving that
-                # run's sizing.
+                # run's sizing. g_fast/g_slow/g_regime come from
+                # rebal_monthly (forward-matched -- see its own construction
+                # above), NOT from `row`/`signals[s]` -- those would be the
+                # backward-joined, one-month-stale reading.
                 ts_val, regime = row['ts'][0], row['regime'][0]
                 c_fast_val, c_slow_val = row['c_fast'][0], row['c_slow'][0]
-                g_fast_val, g_slow_val, g_regime_val = row['g_fast'][0], row['g_slow'][0], row['g_regime'][0]
+                g_row = rebal_monthly[s].filter(pl.col('ts_event') == d)
+                g_fast_val = g_row['g_fast'][0] if g_row.height else None
+                g_slow_val = g_row['g_slow'][0] if g_row.height else None
+                g_regime_val = g_row['g_regime'][0] if g_row.height else None
                 state = None
                 if weighting_mode == 'dynamic':
                     # g_regime is None whenever fast/slow lack enough completed
