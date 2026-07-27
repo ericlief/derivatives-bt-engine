@@ -5,10 +5,11 @@ Table 1 methodology -- every asset gets the SAME flat annualized-$-vol
 target, no cluster/bucket hierarchy, no risk_scalar clamp, no cluster risk
 cap, no max_notional/max_contracts ceiling). Monthly rebalance, matching
 tsmom_backtester.py's cadence. Reuses only pure data-loading/signal
-functions (load_portfolio_data, calculate_trend_strength, _month_end_dates,
-signal_spec.py's build_features()/goulding_monthly() for the paper's own
-genuine calendar-month 2m/12m state classification) -- none of
-tsmom_backtester.py's own position-sizing.
+functions (load_portfolio_data, _month_end_dates, and signal_spec.py's
+build_features()/continuous_momentum()/goulding_monthly() -- both models
+computed independently from the same raw OHLCV, per that module's own
+"no model depends on another model's intermediate columns" design) --
+none of tsmom_backtester.py's own position-sizing.
 
 Written to answer a specific question (see
 research/research_trend_strength_crossover_signal.md, Part 2 §6): does
@@ -109,9 +110,14 @@ import polars as pl
 
 from derivatives_bt_engine.domain.futures_signal_generator import FuturesSignalGenerator
 from derivatives_bt_engine.domain.instruments import get_spec
-from derivatives_bt_engine.domain.signal_spec import SignalSpec, _goulding_weight, build_features, goulding_monthly
+from derivatives_bt_engine.domain.signal_spec import (
+    SignalSpec,
+    _goulding_weight,
+    build_features,
+    continuous_momentum,
+    goulding_monthly,
+)
 from derivatives_bt_engine.domain.tsmom_backtester import _month_end_dates, load_portfolio_data
-from derivatives_bt_engine.domain.tsmom_signal import calculate_trend_strength
 from derivatives_bt_engine.utils.logger import setup_logger
 
 logger = setup_logger()
@@ -248,8 +254,12 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
         save_prefix: Optional[str] = None) -> dict:
     """weighting_mode:
         'flat_discount' -- existing behaviour: ts_fast/ts_slow-based `ts`/`regime`
-            (calculate_trend_strength's canonical columns), momentum_discount
-            applied as a flat multiplier in Correction/Rebound.
+            from signal_spec.py's continuous_momentum, computed independently
+            from raw OHLCV via build_features -- NOT the old calculate_trend_
+            strength (which normalizes both ts_fast and ts_slow off a single
+            fast-window daily_std; continuous_momentum's std_fast/std_slow are
+            each horizon-matched to their own fast_window/slow_window instead).
+            momentum_discount applied as a flat multiplier in Correction/Rebound.
         'dynamic' -- Goulding/Harvey/Mazzoleni eq. 4/7-8-10: paper's own
             2m/12m raw-return state classification, and a_Co/a_Re mixing
             weights (re-estimated at every rebalance date from all PRIOR
@@ -275,7 +285,12 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
     signals = {}
     for sym, df in price_data.items():
         df = df.filter((pl.col('ts_event') >= warmup_start) & (pl.col('ts_event') <= end))
-        sig = calculate_trend_strength(df)  # canonical ts_fast/ts_slow/ts/regime, untouched
+        # Both models computed independently from the same raw OHLCV via
+        # build_features -- no dependence on the old calculate_trend_strength
+        # (which this script no longer calls at all) and no model depends on
+        # the other's intermediate columns, per signal_spec.py's own design.
+        feat = build_features(df)
+        sig = continuous_momentum(feat, **SignalSpec().continuous_kwargs())
         # Paper's own genuine calendar-month Bull/Correction/Bear/Rebound
         # classification from signal_spec.py's goulding_monthly() (real
         # group_by_dynamic('1mo') aggregation, not a fixed-trading-day
@@ -288,11 +303,11 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
         # each month's own fast/slow is already computed from strictly
         # PRIOR completed months (goulding_monthly's own shift(1)), so this
         # carries no lookahead.
-        monthly = goulding_monthly(build_features(df), **SignalSpec.goulding().goulding_kwargs())
+        monthly = goulding_monthly(feat, **SignalSpec.goulding().goulding_kwargs())
         monthly = monthly.rename({'fast': 'r_fast', 'slow': 'r_slow', 'regime': 'g_regime'})
         monthly = monthly.select(['ts_event', 'r_fast', 'r_slow', 'g_regime']).sort('ts_event')
         sig = sig.sort('ts_event').join_asof(monthly, on='ts_event', strategy='backward')
-        signals[sym] = sig.select(['ts_event', 'close', 'ts', 'daily_std', 'regime', 'g_regime', 'r_fast', 'r_slow']).sort('ts_event')
+        signals[sym] = sig.select(['ts_event', 'close', 'ts', 'std_fast', 'regime', 'g_regime', 'r_fast', 'r_slow']).sort('ts_event')
 
     rebal_dates = sorted(d for d in _month_end_dates(price_data) if start <= d <= end)
     all_dates = sorted(set().union(*(set(df['ts_event'].to_list()) for df in signals.values())))
@@ -361,9 +376,9 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
                 row = signals[s].filter(pl.col('ts_event') == d)
                 if row.height == 0:
                     continue
-                dstd = row['daily_std'][0]
+                dstd = row['std_fast'][0]
                 # `dstd <= 0` alone doesn't catch NaN -- comparisons with NaN
-                # are always False in Python, so a NaN daily_std (e.g. from a
+                # are always False in Python, so a NaN std_fast (e.g. from a
                 # bad/missing price on some date) silently slipped through
                 # this guard, propagated into dollar_vol_per_contract, and
                 # crashed round() downstream with "cannot convert float NaN
@@ -384,7 +399,7 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
                     state = g_regime_val.lower() if g_regime_val else None
                     if state is None or dstd_bad:
                         logger.warning(f"{s} on {d}: skipping rebalance, invalid signal "
-                                        f"(r_fast={r_fast_val}, r_slow={r_slow_val}, daily_std={dstd})")
+                                        f"(r_fast={r_fast_val}, r_slow={r_slow_val}, std_fast={dstd})")
                         continue
                     # (1-a_co)*sign(slow)+a_co*sign(fast) in Correction, mirrored
                     # in Rebound -- signal_spec.py's own eq. 7 weight formula,
@@ -394,7 +409,7 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
                     ts_val, regime = row['ts'][0], row['regime'][0]
                     if (ts_val is None or (isinstance(ts_val, float) and math.isnan(ts_val)) or dstd_bad):
                         logger.warning(f"{s} on {d}: skipping rebalance, invalid signal "
-                                        f"(ts={ts_val}, daily_std={dstd})")
+                                        f"(ts={ts_val}, std_fast={dstd})")
                         continue
                     direction = 1.0 if ts_val > 0 else (-1.0 if ts_val < 0 else 0.0)
                     discount = momentum_discount if regime in ('correction', 'rebound') else 1.0
@@ -427,7 +442,7 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
                     'state': state if weighting_mode == 'dynamic' else regime,
                     'a_co': a_co, 'a_re': a_re,
                     'ts': ts_val, 'r_slow': r_slow_val, 'r_fast': r_fast_val,
-                    'weight': round(weight, 4), 'close': close, 'daily_std': dstd,
+                    'weight': round(weight, 4), 'close': close, 'std_fast': dstd,
                     'prior_contracts': prior, 'target_contracts': new_target,
                     'fee': round(event_fee, 2),
                 })
