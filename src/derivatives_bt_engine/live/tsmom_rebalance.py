@@ -27,9 +27,9 @@ from ib_tools.ibpysync import IBPySync
 
 from derivatives_bt_engine.domain.enums import TrendRegime, VolRegime
 from derivatives_bt_engine.domain.instruments import resolve_annualization_days, resolve_signal_symbol
+from derivatives_bt_engine.domain.signal_spec import build_features, continuous_momentum
 from derivatives_bt_engine.domain.tsmom_signal import (
     apply_cluster_risk_cap,
-    calculate_trend_strength,
     classify_regime,
     classify_signal_confidence,
     compute_desired_risk_budget,
@@ -264,12 +264,18 @@ def _compute_signal(ib: IBPySync, instr: dict, min_days: int, vol_target: float,
     # post Sunday-session-merge fix); falls back to 252 for anything
     # unconfirmed, unchanged from this module's prior universal-252 behavior.
     annualization_days = resolve_annualization_days(instr['symbol'])
-    df = calculate_trend_strength(bars, annualization_days=annualization_days)
+    # ib_tools' get_historical_bars returns ib_insync BarData's own field
+    # names verbatim (a 'date' column, not 'ts_event') -- calculate_trend_
+    # strength never needed a date column at all (only 'close'), but
+    # build_features requires 'ts_event' (it sorts by it), so this is the
+    # one rename this migration needs that the old code never did.
+    df = continuous_momentum(build_features(bars.rename({'date': 'ts_event'})),
+                              annualization_days=annualization_days)
     last = df.tail(1)
     trend_strength = last['signal'][0]
     ts_fast = last['ts_fast'][0]
     ts_slow = last['ts_slow'][0]
-    daily_std_last = last['daily_std'][0] if 'daily_std' in last.columns else None
+    daily_std_last = last['std_fast'][0] if 'std_fast' in last.columns else None
     last_close = float(last['close'][0])
     dd_raw = last['dd'][0] if 'dd' in last.columns else None
     dd_pct = dd_raw * 100 if dd_raw is not None else None
