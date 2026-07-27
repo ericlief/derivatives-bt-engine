@@ -163,33 +163,44 @@ MIN_MONTHS_PER_PHASE = 12  # paper's own warm-up requirement per Appendix C
 
 def _build_monthly_state_return_history(rebal_monthly: dict[str, pl.DataFrame],
                                          rebal_dates: list[date]) -> pl.DataFrame:
-    """One row per (symbol, rebalance date `d`) with the state DECIDED at
-    `d` (rebal_monthly[sym] already forward-matches `d` to the Goulding
-    bucket for the month starting right after it -- see run()'s own
-    comment for why forward, not backward: `d` is a month-END date, the
-    bucket is labeled by month-START) paired with THAT SAME bucket's own
-    'ret' -- goulding_monthly's own simple month-end-to-month-end return
-    for the month this state applies to -- i.e. exactly the (state,
-    subsequent-period return) pairs Appendix C's AVG[r|s]/AVG[r^2|s] are
-    computed over. Reads 'ret' directly rather than recomputing a return
-    from daily closes -- besides being redundant, that would also mix log
-    and simple return conventions (this module uses simple returns
-    throughout).
+    """One row per (symbol, consecutive rebalance-date pair) with the state
+    DECIDED at `d` (rebal_monthly[sym] already forward-matches `d` to the
+    Goulding bucket for the month starting right after it -- see run()'s
+    own comment for why forward, not backward: `d` is a month-END date,
+    the bucket is labeled by month-START) paired with THAT SAME bucket's
+    own 'ret' -- goulding_monthly's own simple month-end-to-month-end
+    return for the month this state applies to -- i.e. exactly the
+    (state, subsequent-period return) pairs Appendix C's AVG[r|s]/
+    AVG[r^2|s] are computed over. Reads 'ret' directly rather than
+    recomputing a return from daily closes -- besides being redundant,
+    that would also mix log and simple return conventions (this module
+    uses simple returns throughout).
 
-    'date' on each output row is `d` itself (the rebalance date this
-    state/return pair was DECIDED at), not `d_next` -- an earlier version
-    used `d_next` reasoning that the return isn't "real" until realized,
-    but that mislabels every row: the (state, return) pair a human
-    audits as "July 31's decision" only ever showed up under the FOLLOWING
-    rebalance's date. Labeling with `d` is still lookahead-safe for
-    _estimate_mixing_params's `date < as_of` filter, which is only ever
-    called with as_of values equal to actual rebal_dates in ascending
-    order during the backtest: at as_of=d (this row's own decision date),
-    `date < as_of` is False (d is not < d), so the row is excluded --
-    correct, this period's own not-yet-realized outcome can't inform its
-    own decision. At as_of=d_next (the very next rebalance) or later,
-    `date < as_of` is True and the row IS included -- also correct, since
-    d_next is exactly when this period's return becomes fully realized.
+    Two separate date columns, deliberately not collapsed into one:
+
+    - 'date' = `d_next` (the NEXT rebal date after `d`) -- what
+      _estimate_mixing_params's own `date < as_of` filter uses. Kept at
+      `d_next`, not `d`, on purpose: at as_of=`d` itself (this pair's own
+      decision date), a row dated `d` would satisfy `d < d`... no, would
+      NOT (False, correctly excluded either way) -- but at as_of=`d_next`
+      (the very next rebalance), a row dated `d` WOULD satisfy `d <
+      d_next` and be included, meaning every single as_of throughout the
+      backtest would additionally see "the pair whose return concluded on
+      this exact same day" -- fully known by then (no lookahead in the
+      sense of using future information), but a materially more
+      aggressive reading of "prior history" than this function's own
+      docstring intends ("pairs STRICTLY before as_of"). Confirmed
+      directly: switching this column to `d` changes the row COUNT visible
+      at every as_of (k rows vs k-1 rows, in a sequence of n rebal dates)
+      -- not just a relabeling, an actual behavior change, so it stays at
+      `d_next` to preserve the original, more conservative estimation
+      scope.
+    - 'decided_at' = `d` -- audit/display only, never read by
+      _estimate_mixing_params. Exists purely so a human inspecting this
+      table can see "July 31: state=X, return=Y" as a single row instead
+      of that same pair only ever appearing under the FOLLOWING
+      rebalance's date.
+
     Pooled across every symbol (not per-instrument, unlike the paper's own
     single-asset design) since this project's per-symbol history (~15
     years) gives too few Correction/Rebound months on its own for a stable
@@ -197,17 +208,17 @@ def _build_monthly_state_return_history(rebal_monthly: dict[str, pl.DataFrame],
     oversight."""
     rows = []
     for sym, rm in rebal_monthly.items():
-        for d in rebal_dates[:-1]:
+        for d, d_next in zip(rebal_dates[:-1], rebal_dates[1:]):
             row = rm.filter(pl.col('ts_event') == d)
             if row.height == 0:
                 continue
             g_regime_val, monthly_return = row['g_regime'][0], row['ret'][0]
             state = g_regime_val.lower() if g_regime_val else None
             if state is not None and monthly_return is not None:
-                rows.append({'date': d, 'symbol': sym, 'state': state,
+                rows.append({'date': d_next, 'decided_at': d, 'symbol': sym, 'state': state,
                              'monthly_return': monthly_return})
     if not rows:
-        return pl.DataFrame(schema={'date': pl.Date, 'symbol': pl.Utf8,
+        return pl.DataFrame(schema={'date': pl.Date, 'decided_at': pl.Date, 'symbol': pl.Utf8,
                                      'state': pl.Utf8, 'monthly_return': pl.Float64})
     return pl.DataFrame(rows)
 
