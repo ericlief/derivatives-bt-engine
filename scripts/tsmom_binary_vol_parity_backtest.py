@@ -161,22 +161,24 @@ DEFAULT_MOMENTUM_DISCOUNTS = [0.5, 1.0]
 MIN_MONTHS_PER_PHASE = 12  # paper's own warm-up requirement per Appendix C
 
 
-def _build_monthly_state_return_history(signals: dict[str, pl.DataFrame],
-                                         rebal_monthly: dict[str, pl.DataFrame],
+def _build_monthly_state_return_history(rebal_monthly: dict[str, pl.DataFrame],
                                          rebal_dates: list[date]) -> pl.DataFrame:
-    """One row per (symbol, consecutive rebalance-date pair) with the state
-    read AT the EARLIER date `d` (rebal_monthly[sym] already forward-
-    matches `d` to the Goulding bucket for the month starting right after
-    it -- see run()'s own comment for why forward, not backward: `d` is a
-    month-END date, the bucket is labeled by month-START) paired with the
-    realized return from `d` to the NEXT rebal date `d_next` -- i.e.
-    exactly the (state, subsequent-period return) pairs Appendix C's
-    AVG[r|s]/AVG[r^2|s] are computed over. No separate prev_state/
-    prev_close carrying needed (an earlier version of this function had
-    that, from when g_regime was read via a backward join and was ALREADY
-    one month stale at `d` -- carrying it an extra rebalance on top of that
-    made it two months stale, not one). 'date' on each row is `d_next`,
-    since that's when this pair's own return actually became known --
+    """One row per (symbol, rebalance date `d`) with the state read AT `d`
+    (rebal_monthly[sym] already forward-matches `d` to the Goulding bucket
+    for the month starting right after it -- see run()'s own comment for
+    why forward, not backward: `d` is a month-END date, the bucket is
+    labeled by month-START) paired with THAT SAME bucket's own 'ret' --
+    goulding_monthly's own simple month-end-to-month-end return for the
+    month this state applies to -- i.e. exactly the (state, subsequent-
+    period return) pairs Appendix C's AVG[r|s]/AVG[r^2|s] are computed
+    over. Reads 'ret' directly rather than recomputing a return from daily
+    closes -- besides being redundant, that would also mix log and simple
+    return conventions (this module uses simple returns throughout).
+
+    'date' on each output row is `d_next` (the NEXT rebal date after `d`),
+    not `d` itself -- even though state and ret are both read from the
+    row forward-matched to `d`, that return isn't actually REALIZED/known
+    until the month it describes is over, i.e. at `d_next`.
     _estimate_mixing_params's own `date < as_of` filter relies on this to
     avoid lookahead. Pooled across every symbol (not per-instrument, unlike
     the paper's own single-asset design) since this project's per-symbol
@@ -184,19 +186,16 @@ def _build_monthly_state_return_history(signals: dict[str, pl.DataFrame],
     for a stable estimate -- an explicit, flagged deviation from the paper,
     not an oversight."""
     rows = []
-    for sym in signals:
-        sig, rm = signals[sym], rebal_monthly[sym]
+    for sym, rm in rebal_monthly.items():
         for d, d_next in zip(rebal_dates[:-1], rebal_dates[1:]):
-            g_row = rm.filter(pl.col('ts_event') == d)
-            close_row, close_row_next = sig.filter(pl.col('ts_event') == d), sig.filter(pl.col('ts_event') == d_next)
-            if g_row.height == 0 or close_row.height == 0 or close_row_next.height == 0:
+            row = rm.filter(pl.col('ts_event') == d)
+            if row.height == 0:
                 continue
-            g_regime_val = g_row['g_regime'][0]
+            g_regime_val, monthly_return = row['g_regime'][0], row['ret'][0]
             state = g_regime_val.lower() if g_regime_val else None
-            close, close_next = close_row['close'][0], close_row_next['close'][0]
-            if state is not None and close is not None and close_next is not None and close > 0:
+            if state is not None and monthly_return is not None:
                 rows.append({'date': d_next, 'symbol': sym, 'state': state,
-                             'monthly_return': math.log(close_next / close)})
+                             'monthly_return': monthly_return})
     if not rows:
         return pl.DataFrame(schema={'date': pl.Date, 'symbol': pl.Utf8,
                                      'state': pl.Utf8, 'monthly_return': pl.Float64})
@@ -341,14 +340,19 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
         # one full calendar month stale.
         monthly = goulding_monthly(feat, **SignalSpec.goulding().goulding_kwargs())
         monthly = monthly.rename({'fast': 'g_fast', 'slow': 'g_slow', 'regime': 'g_regime'})
-        monthly = monthly.select(['ts_event', 'g_fast', 'g_slow', 'g_regime']).sort('ts_event')
+        # 'ret' kept -- goulding_monthly's own simple month-end-to-month-end
+        # return for THIS bucket, already computed once; _build_monthly_
+        # state_return_history reads it directly instead of recomputing a
+        # return from daily closes (which would also mix log/simple
+        # conventions -- this module uses simple returns throughout).
+        monthly = monthly.select(['ts_event', 'ret', 'g_fast', 'g_slow', 'g_regime']).sort('ts_event')
         rebal_monthly[sym] = rebal_dates_df.join_asof(monthly, on='ts_event', strategy='forward')
 
     all_dates = sorted(set().union(*(set(df['ts_event'].to_list()) for df in signals.values())))
     all_dates = [d for d in all_dates if start <= d <= end]
     rebal_set = set(rebal_dates)
 
-    monthly_history = (_build_monthly_state_return_history(signals, rebal_monthly, rebal_dates)
+    monthly_history = (_build_monthly_state_return_history(rebal_monthly, rebal_dates)
                         if weighting_mode == 'dynamic' else None)
 
     # Mandatory quarterly contract roll (same schedule FuturesSignalGenerator/
