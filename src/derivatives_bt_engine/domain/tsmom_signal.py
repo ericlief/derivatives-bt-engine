@@ -1,8 +1,8 @@
 """
 Pure TSMOM (time-series momentum) signal computation — no IB dependency.
 
-calculate_trend_strength() is the canonical, finalized signal function — do
-not redesign it. It expects a pre-fetched daily-bar Polars DataFrame (one
+calculate_trend_strength() was the OLD (now retired) canonical, finalized signal function 
+It expects a pre-fetched daily-bar Polars DataFrame (one
 instrument) with at least a 'close' column, and is intentionally side-effect
 free so it can be unit tested without an IB connection.
 

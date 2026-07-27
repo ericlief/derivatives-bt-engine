@@ -32,7 +32,8 @@ from derivatives_bt_engine.domain.futures_dataloader import FuturesDataLoader, a
 from derivatives_bt_engine.domain.instruments import (
     CME_MONTH_NUM_TO_LETTER, get_spec, resolve_active_months, resolve_annualization_days, resolve_price_symbol,
 )
-from derivatives_bt_engine.domain.tsmom_signal import calculate_trend_strength, classify_regime, compute_position_scalar
+from derivatives_bt_engine.domain.signal_spec import build_features, continuous_momentum
+from derivatives_bt_engine.domain.tsmom_signal import classify_regime, compute_position_scalar
 from derivatives_bt_engine.utils.logger import setup_logger
 
 logger = setup_logger()
@@ -234,7 +235,7 @@ def _signal_gate_reason(sig_val, ts_fast_val, ts_slow_val, is_long: bool, thresh
     (domain/trade_manager.py's _signal_gate_reason), standalone here since
     TSMOM has no per-position `self.config` to close over and this module
     is deliberately kept separate from TradeManager. Bails out (never
-    gates) if either ts_fast or ts_slow is still null -- calculate_trend_strength
+    gates) if either ts_fast or ts_slow is still null -- continuous_momentum
     only requires ts_fast to be non-null to emit a `signal` value at all, so
     early in any backtest window `signal` can look like a real number
     while being an unreliable ts_fast-only estimate."""
@@ -382,8 +383,8 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
                          market_stress_scale: float, annualization_days: int) -> Optional[dict]:
     """Signal + vol-targeted (or fixed-quantity) sizing for one symbol as of
     date `d`, reading from `precomputed` -- each symbol's full
-    calculate_trend_strength output, computed ONCE for the whole unbounded
-    history (see run_tsmom_backtest). calculate_trend_strength's rolling/
+    continuous_momentum output, computed ONCE for the whole unbounded
+    history (see run_tsmom_backtest). continuous_momentum's rolling/
     diff functions are strictly backward-looking, so a given date's row is
     identical whether computed from the full series or from a series
     truncated to that date -- precomputing once and looking up by date is
@@ -391,7 +392,7 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
     per-call recompute, which used to run fresh at every rebalance and
     would otherwise need to run for every symbol on every calendar day to
     support daily entry/exit checking. None if there isn't yet enough
-    history for a signal at all (calculate_trend_strength's own `signal`
+    history for a signal at all (continuous_momentum's own `signal`
     column is null until ts_fast has 63 bars)."""
     row = precomputed[symbol].filter(pl.col('ts_event') == d)
     if row.height == 0:
@@ -404,10 +405,13 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
     if trend_strength is None:
         return None
     ts_fast, ts_slow = _col('ts_fast'), _col('ts_slow')
-    daily_std_last = _col('daily_std')
+    # std_fast (continuous_momentum) is the same fast-window daily_std the
+    # old calculate_trend_strength exposed under that name -- risk_scalar/
+    # vol-targeting below is unchanged, still fast-window-based.
+    daily_std_last = _col('std_fast')
     last_close = float(row['close'][0])
     # `dd` is already a (close - peak) / peak fraction from
-    # calculate_trend_strength -- express as a percentage to match
+    # continuous_momentum -- express as a percentage to match
     # `stats`' own drawdown_pct convention.
     dd_raw = _col('dd')
     dd_pct = dd_raw * 100 if dd_raw is not None else None
@@ -457,10 +461,13 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
         'target': target, 'signal': trend_strength, 'regime': regime,
         'hv': hv, 'risk_scalar': risk_scalar * market_stress_scale, 'momentum_discount': momentum_discount,
         'close': last_close, 'dd_pct': dd_pct,
-        # Raw signal-row fields, straight from calculate_trend_strength,
-        # purely for debugging/sanity-checking the sizing math end to end.
+        # Raw signal-row fields, straight from continuous_momentum, purely
+        # for debugging/sanity-checking the sizing math end to end.
+        # fast_return/slow_return named r_fast/r_slow in continuous_momentum's
+        # own output -- kept under their old dict keys here since downstream
+        # consumers (e.g. line ~655's _round(s.get(...))) already expect them.
         'peak': _col('peak'), 'avg_r_fast': _col('avg_r_fast'), 'avg_r_slow': _col('avg_r_slow'),
-        'fast_return': _col('fast_return'), 'slow_return': _col('slow_return'), 'ts_fast': ts_fast, 'ts_slow': ts_slow,
+        'fast_return': _col('r_fast'), 'slow_return': _col('r_slow'), 'ts_fast': ts_fast, 'ts_slow': ts_slow,
         'r1y_pct': _col('r1y_pct'),
     }
 
@@ -486,7 +493,7 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
     FuturesPosition's own roll_date handling, so 'trades' never reports a
     holding period spanning more than one actual futures contract even
     when the signal itself never triggers a close)."""
-    # `full_price_data` stays unbounded -- calculate_trend_strength's 252-day
+    # `full_price_data` stays unbounded -- continuous_momentum's 252-day
     # lookback needs real history before config.start_date, not just
     # whatever falls inside the requested window. Only the iterated date
     # range (and what counts as a rebalance/MTM date) is bounded.
@@ -501,10 +508,10 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
     # Precomputed once per symbol, unconditionally (not just for
     # signal_gate_mode == 'daily') -- see _compute_signal_row's own
     # docstring for why this is exactly equivalent to (and much cheaper
-    # than) recomputing calculate_trend_strength fresh at every rebalance.
+    # than) recomputing continuous_momentum fresh at every rebalance.
     precomputed = {
-        s: calculate_trend_strength(full_price_data[s].sort('ts_event'),
-                                     annualization_days=annualization_by_symbol[s])
+        s: continuous_momentum(build_features(full_price_data[s].sort('ts_event')),
+                                annualization_days=annualization_by_symbol[s])
         for s in config.symbols
     }
     futures_types = {s: get_spec(s) for s in config.symbols}

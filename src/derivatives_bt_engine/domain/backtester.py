@@ -18,7 +18,8 @@ from derivatives_bt_engine.domain.position import FuturesPosition, SingleLegOpti
 from derivatives_bt_engine.domain.trade_result import OptionTradeResult
 from derivatives_bt_engine.domain.position import MultiLegOptionPosition
 from derivatives_bt_engine.domain.instruments import resolve_annualization_days
-from derivatives_bt_engine.domain.tsmom_signal import calculate_trend_strength, classify_regime
+from derivatives_bt_engine.domain.signal_spec import build_features, continuous_momentum
+from derivatives_bt_engine.domain.tsmom_signal import classify_regime
 from derivatives_bt_engine.domain.futures_dataloader import assert_monotonic_expiration
 from derivatives_bt_engine.utils.logger import setup_logger
 from derivatives_bt_engine.utils.price_utils import PriceUtils
@@ -675,14 +676,14 @@ class Backtester:
         # 63/252-day rolling windows of real prior history and show
         # spurious nulls at the start of the window, unlike what the
         # strategy's own signal actually saw at each date. Reuses
-        # tsmom_signal.py's canonical calculate_trend_strength/
-        # classify_regime (same functions the live TSMOM signal uses)
-        # rather than reimplementing rolling stats -- hv_slow/sharpe_slow are
-        # the one exception, computed here (not in calculate_trend_
-        # strength, which stays untouched/canonical) directly off the
-        # 'r1d' column it already retains for exactly this kind of
-        # downstream chaining (see compute_vol_ratio's docstring for the
-        # same pattern).
+        # signal_spec.py's continuous_momentum/tsmom_signal.classify_regime
+        # (same functions the live TSMOM signal uses) rather than
+        # reimplementing rolling stats. hv_slow/sharpe_slow used to need a
+        # hand-rolled rolling_std(r1d, 252) here, since the old
+        # calculate_trend_strength only exposed a single fast-window
+        # daily_std for both fast and slow -- continuous_momentum provides
+        # hv_fast/hv_slow natively, each correctly horizon-matched to its
+        # own fast_window/slow_window, so that workaround is gone.
         #
         # Suffixes (3m, 1y, ...) denote the rolling estimation window,
         # not the reporting horizon. Volatility, Sharpe, and avg_r_fast/
@@ -697,16 +698,17 @@ class Backtester:
         # anything unconfirmed -- unchanged from this method's prior
         # universal-252 behavior.
         annualization_days = resolve_annualization_days(config.futures_type)
-        overlay = calculate_trend_strength(self.underlying.select(['ts_event', 'close']).sort('ts_event'),
-                                            annualization_days=annualization_days)
+        overlay = continuous_momentum(
+            build_features(self.underlying.select(['ts_event', 'close']).sort('ts_event')),
+            annualization_days=annualization_days,
+        )
         overlay = overlay.with_columns(
-            hv_fast=(pl.col('daily_std') * (annualization_days ** 0.5)).round(4),
-            hv_slow=(pl.col('r1d').rolling_std(252) * (annualization_days ** 0.5)).round(4),
             regime=pl.struct(['ts_fast', 'ts_slow']).map_elements(
                 lambda s: classify_regime(s['ts_fast'], s['ts_slow']).value,
                 return_dtype=pl.Utf8,
             ),
-            **{c: pl.col(c).round(4) for c in ('ts_fast', 'ts_slow', 'signal', 'avg_r_fast', 'avg_r_slow')},
+            **{c: pl.col(c).round(4) for c in
+               ('ts_fast', 'ts_slow', 'signal', 'avg_r_fast', 'avg_r_slow', 'hv_fast', 'hv_slow')},
         )
         overlay = overlay.with_columns(
             # Rolling Sharpe on the same 3m/1y windows as hv_fast/hv_slow/ts_fast/
@@ -714,8 +716,8 @@ class Backtester:
             # same clock so a regime flip and a Sharpe/vol move are
             # comparable at a glance instead of drifting at different
             # speeds. avg_r_fast/avg_r_slow are already annualized (see
-            # calculate_trend_strength), so no extra *252 here -- both
-            # numerator and denominator are annualized already.
+            # continuous_momentum), so no extra *252 here -- both numerator
+            # and denominator are annualized already.
             sharpe_fast=pl.when(pl.col('hv_fast') > 0)
             .then(pl.col('avg_r_fast') / pl.col('hv_fast'))
             .otherwise(None)

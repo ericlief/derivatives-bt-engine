@@ -5,7 +5,7 @@ import polars as pl
 from derivatives_bt_engine.domain.enums import *
 from derivatives_bt_engine.domain.position import SingleLegOptionPosition, MultiLegOptionPosition, FuturesPosition
 from derivatives_bt_engine.domain.trade_result import OptionTradeResult
-from derivatives_bt_engine.domain.tsmom_signal import calculate_trend_strength
+from derivatives_bt_engine.domain.signal_spec import build_features, continuous_momentum
 from derivatives_bt_engine.utils.logger import setup_logger
 from derivatives_bt_engine.domain.strategy_config import SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig, FuturesStrategyConfig
 
@@ -140,7 +140,7 @@ class TradeManager:
             return {'trade_results': pl.DataFrame(), 'transactions': pl.DataFrame()}
 
         # Precompute the full trend-strength series once (not re-derived
-        # per day in the loop below) -- calculate_trend_strength's rolling
+        # per day in the loop below) -- continuous_momentum's rolling
         # windows make a per-iteration recompute O(n^2) over a multi-year
         # daily backtest; a single pass up front plus a per-day lookup is
         # the same trick TSMOM's own _compute_target avoids needing only
@@ -150,7 +150,7 @@ class TradeManager:
                            or self.config.ts_entry_threshold is not None
                            or self.config.exit_on_ts_crossover):
             signal_df = (
-                calculate_trend_strength(underlying_price_history.sort(date_col))
+                continuous_momentum(build_features(underlying_price_history.sort(date_col)))
                 .select([date_col, 'signal', 'ts_fast', 'ts_slow'])
             )
 
@@ -164,7 +164,7 @@ class TradeManager:
             did.
 
             Bails out entirely (never gates) if either ts_fast or ts_slow is
-            still null -- calculate_trend_strength only requires ts_fast to
+            still null -- continuous_momentum only requires ts_fast to
             be non-null to emit a `signal` value at all (its `signal`
             column formula zero-weights whichever of ts_fast/ts_slow is
             still null rather than staying null itself), so early in any
