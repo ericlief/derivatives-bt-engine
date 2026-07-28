@@ -143,7 +143,20 @@ DEFAULT_YEARS = '2010-2026'
 # n_days=2636).
 WARMUP_DAYS_BEFORE_START = 400  # > 252 (slow_return's own lookback) with headroom
 DEFAULT_INITIAL_CAPITAL = 1_000_000.0
-DEFAULT_FLAT_PER_ASSET_VOL_TARGET_USD = 10_000.0  # 1% of default capital, same for every asset -- no clustering
+# Fraction of `initial_capital`, NOT a fixed dollar figure -- every asset
+# still gets the exact same flat target (that's the whole point of vol
+# parity, Levine & Pedersen 2016 Table 1's own methodology; this constant
+# doesn't vary by instrument), but it must scale with whatever capital a
+# given run actually uses. A prior version hardcoded a fixed $10,000
+# figure (documented only in a comment as "1% of default capital") that
+# stayed fixed regardless of --initial-capital -- passing e.g.
+# --initial-capital 100000 without also rescaling --flat-vol-target
+# silently turned "1% of capital per asset" into 10% per asset (12x the
+# intended leverage across the default 12-symbol universe), with no
+# warning. run() derives the actual USD figure from whatever capital it's
+# given unless a caller explicitly overrides it (see
+# flat_per_asset_vol_target_usd=None's own handling below).
+DEFAULT_VOL_TARGET_PCT_OF_CAPITAL = 0.01
 DEFAULT_MOMENTUM_DISCOUNTS = [0.5, 1.0]
 
 # ── Infrastructure ──────────────────────────────────────────────────────────
@@ -324,13 +337,22 @@ def _estimate_mixing_params(history: pl.DataFrame, as_of: date, cluster: Optiona
 
 def run(symbols: list[str], start: date, end: date, momentum_discount: float,
         initial_capital: float = DEFAULT_INITIAL_CAPITAL,
-        flat_per_asset_vol_target_usd: float = DEFAULT_FLAT_PER_ASSET_VOL_TARGET_USD,
+        flat_per_asset_vol_target_usd: Optional[float] = None,
         warmup_start: Optional[date] = None,
         weighting_mode: str = 'flat_discount',
         mixing_pool: str = DEFAULT_MIXING_POOL,
         save_results: bool = False,
         results_tag: Optional[str] = None) -> dict:
-    """weighting_mode:
+    """flat_per_asset_vol_target_usd: None (default) derives it as
+    DEFAULT_VOL_TARGET_PCT_OF_CAPITAL * initial_capital -- the SAME flat
+    USD figure applied to every asset either way (vol parity's whole
+    point), but scaled to whatever capital this run actually uses instead
+    of a fixed number that quietly stops meaning "1% of capital" the
+    moment --initial-capital changes. Pass an explicit value to override
+    this scaling entirely (e.g. to hold the USD target fixed while varying
+    --initial-capital deliberately, for some other comparison).
+
+    weighting_mode:
         'flat_discount' -- existing behaviour: ts_fast/ts_slow-based `ts`/`regime`
             from signal_spec.py's continuous_momentum, computed independently
             from raw OHLCV via build_features -- NOT the old calculate_trend_
@@ -388,6 +410,8 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
     """
     if mixing_pool not in ('cluster', 'global'):
         raise ValueError(f"mixing_pool must be 'cluster' or 'global', got {mixing_pool!r}")
+    if flat_per_asset_vol_target_usd is None:
+        flat_per_asset_vol_target_usd = DEFAULT_VOL_TARGET_PCT_OF_CAPITAL * initial_capital
     if warmup_start is None:
         warmup_start = start - timedelta(days=WARMUP_DAYS_BEFORE_START)
     price_data, _ = load_portfolio_data(symbols)
@@ -734,8 +758,11 @@ def parse_args():
     p.add_argument('--momentum-discounts', default=','.join(str(d) for d in DEFAULT_MOMENTUM_DISCOUNTS),
                     help='Comma-separated momentum_discount values to compare, one run each (default: %(default)s)')
     p.add_argument('--initial-capital', type=float, default=DEFAULT_INITIAL_CAPITAL)
-    p.add_argument('--flat-vol-target', type=float, default=DEFAULT_FLAT_PER_ASSET_VOL_TARGET_USD,
-                    help='Flat annualized $ vol target, same for every asset -- no clustering (default: %(default)s)')
+    p.add_argument('--flat-vol-target', type=float, default=None,
+                    help='Flat annualized $ vol target, same for every asset -- no clustering. '
+                         f'Default: derived as {DEFAULT_VOL_TARGET_PCT_OF_CAPITAL:.0%} of --initial-capital '
+                         '(scales with it) rather than a fixed number -- pass this explicitly to '
+                         'override that scaling and hold the USD target fixed instead')
     p.add_argument('--include-dynamic', action='store_true',
                     help="Also run the paper's own eq. 4/7-10 dynamic a_Co/a_Re "
                          "reweighting (Goulding/Harvey/Mazzoleni), alongside the "
