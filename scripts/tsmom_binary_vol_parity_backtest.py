@@ -787,12 +787,17 @@ def parse_args():
                     help='Write per-run CSVs into results/ (created if missing), auto-tagged '
                          'with a shared datetime stamp for this invocation -- no prefix needed. '
                          '"{tag}_{mode}_daily.csv" (date, capital, ret), "{tag}_{mode}_'
-                         'rebalances.csv" (one row per symbol actually rebalanced: state, '
-                         'cluster, a_co/a_re, ts/continuous_regime/c_fast/c_slow, g_regime/'
-                         'g_fast/g_slow, weight, prior->target, fee), and for --include-dynamic '
-                         'runs "{tag}_{mode}_yearly.csv" (mean a_co/a_re and Bull/Bear/'
-                         'Correction/Rebound month counts per year, per cluster) '
-                         '(default: off, only the summary dict is printed)')
+                         'rebalances.csv" (one row per symbol actually rebalanced: cluster, '
+                         'a_co/a_re, ts/continuous_regime/c_fast/c_slow, g_regime/g_fast/g_slow, '
+                         'weight, close, std_fast/std_slow, prior->target, fee), for '
+                         '--include-dynamic runs "{tag}_{mode}_yearly.csv" (mean a_co/a_re and '
+                         'Bull/Bear/Correction/Rebound month counts per year, per cluster), '
+                         '"{tag}_summary.csv" (one row per run: ann_ret/ann_vol/sharpe/max_dd/'
+                         'fees -- always printed too, saving is optional), and, when both a '
+                         'dynamic and at least one flat_discount run were executed, '
+                         '"{tag}_comparison.csv" (metric-by-metric dynamic vs. continuous '
+                         'deltas, also printed) (default: off, everything above is still '
+                         'printed regardless -- this only controls whether it is ALSO saved)')
     return p.parse_args()
 
 
@@ -832,12 +837,51 @@ def main():
         print(result)
         summary_rows.append(result)
 
+    # Printed as one unified table here (not just the individual per-run
+    # dicts already printed above as each run finished) -- and, when both
+    # a dynamic run and at least one flat_discount ("continuous") run were
+    # actually executed, a second table comparing them metric-by-metric,
+    # since eyeballing the deltas across separately-printed dicts is easy
+    # to get wrong by hand.
+    summary_df = pl.DataFrame(summary_rows).with_columns(
+        run_label=pl.when(pl.col('mode') == 'dynamic')
+                    .then(pl.lit('dynamic'))
+                    .otherwise(pl.lit('flat_discount_') + pl.col('discount').cast(pl.Utf8))
+    )
+    print()
+    print("=== Summary (all runs) ===")
+    print(summary_df)
+
+    comparison_df = None
+    run_labels = summary_df['run_label'].to_list()
+    flat_labels = [lbl for lbl in run_labels if lbl != 'dynamic']
+    if 'dynamic' in run_labels and flat_labels:
+        metrics = ['ann_ret_pct', 'ann_vol_pct', 'sharpe', 'max_dd_pct', 'total_fees']
+        # Transposed (one row per metric, one column per run) rather than
+        # the long format above -- reading a metric across a row is the
+        # actual comparison; reading it down a column of the long table
+        # isn't.
+        comparison_df = summary_df.select(['run_label'] + metrics).transpose(
+            include_header=True, header_name='metric', column_names='run_label'
+        )
+        for lbl in flat_labels:
+            comparison_df = comparison_df.with_columns(
+                (pl.col('dynamic') - pl.col(lbl)).round(4).alias(f'dynamic_minus_{lbl}')
+            )
+        print()
+        print("=== dynamic vs. continuous (flat_discount) ===")
+        print(comparison_df)
+
     if args.save_results:
         results_dir = Path(RESULTS_DIR)
         results_dir.mkdir(parents=True, exist_ok=True)
         summary_path = results_dir / f"{results_tag}_summary.csv"
-        pl.DataFrame(summary_rows).with_columns(pl.col(pl.Float64).round(4)).write_csv(summary_path)
+        summary_df.with_columns(pl.col(pl.Float64).round(4)).write_csv(summary_path)
         logger.info(f"Saved {summary_path} ({len(summary_rows)} rows)")
+        if comparison_df is not None:
+            comparison_path = results_dir / f"{results_tag}_comparison.csv"
+            comparison_df.write_csv(comparison_path)
+            logger.info(f"Saved {comparison_path} ({comparison_df.height} rows)")
 
 
 if __name__ == '__main__':
