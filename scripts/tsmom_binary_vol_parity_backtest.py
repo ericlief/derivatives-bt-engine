@@ -109,7 +109,7 @@ from typing import Optional
 
 import polars as pl
 
-from derivatives_bt_engine.domain.instruments import get_spec, resolve_active_months
+from derivatives_bt_engine.domain.instruments import get_spec, resolve_active_months, resolve_annualization_days
 from derivatives_bt_engine.domain.signal_spec import (
     SignalSpec,
     _goulding_weight,
@@ -163,6 +163,12 @@ RESULTS_DIR = 'results'  # always here -- no per-invocation prefix required
 # result in).
 MIN_MONTHS_PER_PHASE = 12  # paper's own warm-up requirement per Appendix C
 DEFAULT_MIXING_POOL = 'cluster'  # 'cluster' or 'global' -- see run()'s own docstring
+# Threshold below which a denominator in _estimate_mixing_params' eq. 8-10
+# arithmetic is treated as degenerate (fall back to (0.5, 0.5) rather than
+# let 1/x explode) -- an exact `== 0` float comparison would let a
+# near-zero-but-technically-nonzero mean-squared-return (e.g. 1e-12, from
+# a run of near-identical monthly returns) sail through undetected.
+_DEGENERATE_EPS = 1e-10
 
 
 def _build_monthly_state_return_history(rebal_monthly: dict[str, pl.DataFrame],
@@ -296,11 +302,16 @@ def _estimate_mixing_params(history: pl.DataFrame, as_of: date, cluster: Optiona
     if n_co < min_months or n_re < min_months:
         return 0.5, 0.5
     freq_tot = n_bu + n_be
-    if freq_tot == 0 or avg_r2_bu == 0 or avg_r2_be == 0:
+    # Exact `== 0` float equality is fragile here -- these are means of
+    # squared monthly returns, so a near-degenerate (but not exactly zero)
+    # value like 1e-12 would sail past an exact-zero check and then blow
+    # up the 1/x below. freq_tot is a plain integer count (n_bu + n_be),
+    # so exact-zero is fine and intentional for it specifically.
+    if freq_tot == 0 or abs(avg_r2_bu) < _DEGENERATE_EPS or abs(avg_r2_be) < _DEGENERATE_EPS:
         return 0.5, 0.5
 
     C = (n_bu / freq_tot) * (avg_r_bu / avg_r2_bu) - (n_be / freq_tot) * (avg_r_be / avg_r2_be)
-    if C == 0 or avg_r2_co == 0 or avg_r2_re == 0:
+    if abs(C) < _DEGENERATE_EPS or abs(avg_r2_co) < _DEGENERATE_EPS or abs(avg_r2_re) < _DEGENERATE_EPS:
         return 0.5, 0.5
 
     a_co = 0.5 * (1 - (1 / C) * (avg_r_co / avg_r2_co))
@@ -380,6 +391,15 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
     if warmup_start is None:
         warmup_start = start - timedelta(days=WARMUP_DAYS_BEFORE_START)
     price_data, _ = load_portfolio_data(symbols)
+    # Resolved once per symbol and reused both for the signal itself (so
+    # avg_r_fast/avg_r_slow/hv_fast/hv_slow report in each instrument's own
+    # real trading-days/year, per continuous_momentum's own docstring) AND
+    # for dollar_vol_per_contract's annualization below -- previously that
+    # sizing step hardcoded 252 unconditionally, inconsistent with the 259
+    # figure instruments.py carries for every non-grain cluster (equity/
+    # metal/rates/fx), understating dollar_vol_per_contract by sqrt(252/259)
+    # (~1.4%) and correspondingly oversizing positions for those symbols.
+    annualization_by_symbol = {s: resolve_annualization_days(s) for s in symbols}
     # Computed before the per-symbol loop below -- needed there to build
     # each symbol's own forward-matched rebal_monthly lookup.
     rebal_dates = sorted(d for d in _month_end_dates(price_data) if start <= d <= end)
@@ -394,7 +414,7 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
         # (which this script no longer calls at all) and no model depends on
         # the other's intermediate columns, per signal_spec.py's own design.
         feat = build_features(df)
-        sig = continuous_momentum(feat, **SignalSpec().continuous_kwargs())
+        sig = continuous_momentum(feat, **SignalSpec(annualization_days=annualization_by_symbol[sym]).continuous_kwargs())
         # continuous_momentum's own r_fast/r_slow (its 63d/252d continuous
         # returns) are renamed c_fast/c_slow here -- not dropped -- so they
         # sit alongside goulding_monthly's own g_fast/g_slow/g_regime below
@@ -523,6 +543,24 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
                 row = signals[s].filter(pl.col('ts_event') == d)
                 if row.height == 0:
                     continue
+                # Position SIZE always comes from the continuous model's
+                # own daily std_fast (vol-parity), in BOTH weighting_modes
+                # -- including 'dynamic', whose DIRECTION/weight instead
+                # comes from Goulding's monthly g_regime/g_fast/g_slow via
+                # _goulding_weight above. That's a deliberate split, not an
+                # oversight: the paper itself doesn't size positions at
+                # all (it studies raw dynamic-blend RETURNS, eq. 7, as a
+                # standalone return series -- see the class docstring's
+                # own "we form the ... portfolio return as a weighted
+                # average of individual asset returns"); this project
+                # layers that regime/blend logic onto its OWN vol-parity
+                # sizing framework instead, since a position needs a
+                # concrete contract count from *some* volatility estimate,
+                # and daily std_fast is what every other mode/path in this
+                # project already sizes off. Worth being explicit that
+                # "dynamic" here means "Goulding decides direction,
+                # vol-parity decides size" -- not a literal end-to-end
+                # reproduction of the paper's own portfolio construction.
                 dstd = row['std_fast'][0]
                 # `dstd <= 0` alone doesn't catch NaN -- comparisons with NaN
                 # are always False in Python, so a NaN std_fast (e.g. from a
@@ -587,7 +625,10 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
 
                 spec = get_spec(s)
                 close = row['close'][0]
-                dollar_vol_per_contract = close * spec['multiplier'] * dstd * (252 ** 0.5)
+                # This symbol's own resolved trading-days/year -- NOT a
+                # hardcoded 252 -- consistent with the annualization_days
+                # continuous_momentum was actually built with above.
+                dollar_vol_per_contract = close * spec['multiplier'] * dstd * (annualization_by_symbol[s] ** 0.5)
                 if dollar_vol_per_contract <= 0:
                     continue
                 new_target = round(weight * flat_per_asset_vol_target_usd / dollar_vol_per_contract)

@@ -65,6 +65,32 @@ def test_signal_spec_rejects_bad_windows():
         SignalSpec(fast_months=-1)
 
 
+def test_signal_spec_rejects_bad_vol_windows():
+    # Previously unvalidated -- vol_fast_window=0 would reach
+    # rolling_std(0) downstream; a negative value is equally nonsensical.
+    with pytest.raises(ValueError):
+        SignalSpec(vol_fast_window=0)
+    with pytest.raises(ValueError):
+        SignalSpec(vol_fast_window=-5)
+    with pytest.raises(ValueError):
+        SignalSpec(vol_slow_window=0)
+    # None (the default, meaning "horizon-matched to fast/slow_window") is
+    # still valid and must NOT raise.
+    SignalSpec(vol_fast_window=None, vol_slow_window=None)
+
+
+def test_signal_spec_rejects_fast_not_less_than_slow():
+    # fast_window/fast_months >= their slow counterpart contradicts the
+    # field names and is almost certainly a caller error (e.g. args
+    # swapped), not a valid config.
+    with pytest.raises(ValueError):
+        SignalSpec(fast_window=252, slow_window=63)
+    with pytest.raises(ValueError):
+        SignalSpec(fast_window=100, slow_window=100)
+    with pytest.raises(ValueError):
+        SignalSpec(fast_months=12, slow_months=2)
+
+
 def test_signal_spec_rejects_bad_a_co_a_re():
     with pytest.raises(ValueError):
         SignalSpec(a_co=1.5)
@@ -158,6 +184,25 @@ def test_continuous_momentum_signal_is_bounded():
     signal = out['signal'].drop_nulls()
     assert len(signal) > 0
     assert signal.min() >= -1.0 and signal.max() <= 1.0
+
+
+def test_continuous_momentum_zero_std_produces_null_not_inf():
+    # A perfectly FLAT price (every close identical) makes r1d exactly 0.0
+    # every day, and therefore std_fast/std_slow exactly 0.0 once the
+    # rolling window is full -- r_fast/(std_fast*sqrt(n)) would be NaN
+    # (0/0) without an explicit guard, and if r_fast were ever nonzero
+    # instead (e.g. a price series constant everywhere except the fast/
+    # slow return's own start/end points), the same division would be
+    # +-inf, with tanh(inf) == 1.0 silently reading as a genuine
+    # max-strength trend instead of an undefined one.
+    dates = _trading_dates(date(2018, 1, 1), 400)
+    df = pl.DataFrame({'ts_event': dates, 'close': [100.0] * 400})
+    out = continuous_momentum(build_features(df))
+    warmed_up = out.filter(pl.col('std_fast') == 0.0)
+    assert warmed_up.height > 0
+    assert warmed_up['ts_fast'].is_null().all()
+    assert warmed_up['ts'].is_null().all()
+    assert not out['ts_fast'].is_infinite().any()
 
 
 def test_continuous_momentum_regime_classification():

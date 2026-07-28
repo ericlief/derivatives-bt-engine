@@ -107,8 +107,22 @@ class SignalSpec:
     def __post_init__(self):
         if self.fast_window <= 0 or self.slow_window <= 0:
             raise ValueError("fast_window/slow_window must be positive")
+        if self.fast_window >= self.slow_window:
+            # Not mathematically required by continuous_momentum itself,
+            # but "fast" >= "slow" contradicts the field names and is
+            # almost certainly a caller error (e.g. args swapped) rather
+            # than an intentional config -- reject loudly instead of
+            # silently computing a "fast" trend slower than its own "slow"
+            # counterpart.
+            raise ValueError(f"fast_window ({self.fast_window}) must be < slow_window ({self.slow_window})")
+        if self.vol_fast_window is not None and self.vol_fast_window <= 0:
+            raise ValueError("vol_fast_window must be positive when set")
+        if self.vol_slow_window is not None and self.vol_slow_window <= 0:
+            raise ValueError("vol_slow_window must be positive when set")
         if self.fast_months <= 0 or self.slow_months <= 0:
             raise ValueError("fast_months/slow_months must be positive")
+        if self.fast_months >= self.slow_months:
+            raise ValueError(f"fast_months ({self.fast_months}) must be < slow_months ({self.slow_months})")
         if self.w_fast + self.w_slow <= 0:
             # continuous_momentum's ts denominator clips at 1e-12 so this
             # wouldn't crash -- it would silently degenerate to ts=tanh(0)=0
@@ -198,8 +212,15 @@ def continuous_momentum(df: pl.DataFrame, fast_window: int = DEFAULT_FAST_WINDOW
     (avg_r_fast/avg_r_slow/hv_fast/hv_slow) -- resolve it from instrument
     config (instruments.resolve_annualization_days), don't hardcode it. It
     never changes window length and never touches ts_fast/ts_slow/ts/signal."""
-    vol_fast_window = vol_fast_window or fast_window
-    vol_slow_window = vol_slow_window or slow_window
+    # Explicit None-check, not `vol_fast_window or fast_window` -- the
+    # truthiness idiom would also replace an explicitly-passed 0/False
+    # with the default, silently masking exactly the misconfiguration
+    # SignalSpec.__post_init__ now rejects (a caller bypassing SignalSpec
+    # and calling this function directly wouldn't get that guard).
+    if vol_fast_window is None:
+        vol_fast_window = fast_window
+    if vol_slow_window is None:
+        vol_slow_window = slow_window
 
     df = df.with_columns(
         r_fast=pl.col('close') / pl.col('close').shift(fast_window) - 1,
@@ -214,8 +235,22 @@ def continuous_momentum(df: pl.DataFrame, fast_window: int = DEFAULT_FAST_WINDOW
     df = df.with_columns(
         hv_fast=pl.col('std_fast') * annualization_days ** 0.5,
         hv_slow=pl.col('std_slow') * annualization_days ** 0.5,
-        ts_fast=pl.col('r_fast') / (pl.col('std_fast') * math.sqrt(fast_window)),
-        ts_slow=pl.col('r_slow') / (pl.col('std_slow') * math.sqrt(slow_window)),
+        # Guarded against std_fast/std_slow == 0 (a genuinely constant
+        # price over the whole window -- rare for real futures, but not
+        # impossible) explicitly, rather than dividing straight through:
+        # an unguarded division produces +-inf there instead of NaN
+        # (0/0 -> NaN, but any nonzero r_fast/0 -> inf), and
+        # tanh(inf) == 1.0 -- ts's own tanh squash below would silently
+        # read that as a genuine maximum-strength trend rather than an
+        # undefined signal. Null (matching every other "undefined here"
+        # case in this column, e.g. the pre-warmup nulls std_fast/std_slow
+        # already carry) is the correct value instead.
+        ts_fast=pl.when(pl.col('std_fast') > 0)
+                  .then(pl.col('r_fast') / (pl.col('std_fast') * math.sqrt(fast_window)))
+                  .otherwise(None),
+        ts_slow=pl.when(pl.col('std_slow') > 0)
+                  .then(pl.col('r_slow') / (pl.col('std_slow') * math.sqrt(slow_window)))
+                  .otherwise(None),
     )
     df = df.with_columns(
         _w_fast=pl.col('ts_fast').is_not_null().cast(pl.Float64) * w_fast,
