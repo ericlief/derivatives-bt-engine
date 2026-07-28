@@ -447,7 +447,7 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
         # without colliding once joined (join_asof would otherwise silently
         # suffix one side to r_fast_right/r_slow_right and the final select
         # would silently pick the wrong model's returns under a shared name).
-        signals[sym] = sig.select(['ts_event', 'close', 'ts', 'std_fast', 'regime',
+        signals[sym] = sig.select(['ts_event', 'close', 'ts', 'std_fast', 'std_slow', 'regime',
                                     pl.col('r_fast').alias('c_fast'), pl.col('r_slow').alias('c_slow')]
                                    ).sort('ts_event')
         # Paper's own genuine calendar-month Bull/Correction/Bear/Rebound
@@ -586,6 +586,7 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
                 # vol-parity decides size" -- not a literal end-to-end
                 # reproduction of the paper's own portfolio construction.
                 dstd = row['std_fast'][0]
+                dstd_slow = row['std_slow'][0]  # audit-only -- sizing itself still uses std_fast (dstd) above
                 # `dstd <= 0` alone doesn't catch NaN -- comparisons with NaN
                 # are always False in Python, so a NaN std_fast (e.g. from a
                 # bad/missing price on some date) silently slipped through
@@ -674,11 +675,15 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
                 fees += event_fee
                 rebalance_events.append({
                     'date': d, 'symbol': s, 'mode': weighting_mode,
-                    'state': state if weighting_mode == 'dynamic' else regime,
+                    # No separate 'state' column -- it was always exactly
+                    # continuous_regime (flat_discount mode) or g_regime
+                    # lowercased (dynamic mode), never independent
+                    # information given continuous_regime/g_regime are both
+                    # already here unconditionally.
                     'cluster': cluster, 'a_co': a_co, 'a_re': a_re,
                     'ts': ts_val, 'continuous_regime': regime, 'c_fast': c_fast_val, 'c_slow': c_slow_val,
                     'g_regime': g_regime_val, 'g_fast': g_fast_val, 'g_slow': g_slow_val,
-                    'weight': round(weight, 4), 'close': close, 'std_fast': dstd,
+                    'weight': round(weight, 4), 'close': close, 'std_fast': dstd, 'std_slow': dstd_slow,
                     'prior_contracts': prior, 'target_contracts': new_target,
                     'fee': round(event_fee, 2),
                 })
@@ -727,10 +732,14 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
                 .agg(
                     pl.col('a_co').mean().alias('a_co_mean'),
                     pl.col('a_re').mean().alias('a_re_mean'),
-                    (pl.col('state') == 'bull').sum().alias('n_bull'),
-                    (pl.col('state') == 'bear').sum().alias('n_bear'),
-                    (pl.col('state') == 'correction').sum().alias('n_correction'),
-                    (pl.col('state') == 'rebound').sum().alias('n_rebound'),
+                    # g_regime directly -- goulding_monthly's own regime
+                    # literals are already lowercase ('bull'/'bear'/
+                    # 'correction'/'rebound'), same values 'state' used to
+                    # duplicate in dynamic mode.
+                    (pl.col('g_regime') == 'bull').sum().alias('n_bull'),
+                    (pl.col('g_regime') == 'bear').sum().alias('n_bear'),
+                    (pl.col('g_regime') == 'correction').sum().alias('n_correction'),
+                    (pl.col('g_regime') == 'rebound').sum().alias('n_rebound'),
                 )
                 .sort(['cluster', 'year'])
             )
