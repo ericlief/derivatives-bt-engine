@@ -402,5 +402,19 @@ def _goulding_weight(regime_val: Optional[str], a_co: float, a_re: float,
             or (isinstance(r_fast, float) and math.isnan(r_fast))
             or (isinstance(r_slow, float) and math.isnan(r_slow))):
         return None
+    # Invariant check, not input validation (hence assert, not raise) --
+    # goulding_monthly's own classification is exactly Correction:
+    # fast<0<=slow, Rebound: fast>=0>slow, so a regime_val/r_fast/r_slow
+    # combination that violates this can only mean the caller's regime and
+    # signal came from different, inconsistent sources (a future refactor
+    # decoupling them, or corrupted/mismatched input), not a real Goulding
+    # month -- catch that loudly during development rather than silently
+    # blending a state that couldn't have produced this regime label.
+    assert (
+        (r == 'correction' and r_fast < 0 <= r_slow)
+        or (r == 'rebound' and r_slow < 0 <= r_fast)
+    ), (f"regime={regime_val!r} inconsistent with r_fast={r_fast}/r_slow={r_slow} -- "
+        "goulding_monthly's own classification requires Correction: fast<0<=slow, "
+        "Rebound: slow<0<=fast")
     r_dyn = (1.0 - weight) * r_slow + weight * r_fast
     return 1.0 if r_dyn > 0 else (-1.0 if r_dyn < 0 else 0.0)
