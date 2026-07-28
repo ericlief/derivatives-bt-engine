@@ -334,12 +334,30 @@ def goulding_monthly(df: pl.DataFrame, fast_months: int = GOULDING_FAST_MONTHS,
 def _goulding_weight(regime_val: Optional[str], a_co: float, a_re: float,
                       r_fast: Optional[float] = None, r_slow: Optional[float] = None) -> Optional[float]:
     """Eq. 7's blend: (1-a_Co)*r_SLOW + a_Co*r_FAST in Correction,
-    (1-a_Re)*r_SLOW + a_Re*r_FAST in Rebound -- blending the period's
-    ACTUAL fast/slow return VALUES, not their signs. This module's own
-    binary sign(signal) direction convention (matching Bull/Bear's
-    unconditional +-1, and scripts/tsmom_binary_vol_parity_backtest.py's
-    flat_discount mode's direction=sign(ts)) then takes sign(r_dyn) as the
-    position weight -- always +1/-1/0, never a magnitude in between.
+    (1-a_Re)*r_SLOW + a_Re*r_FAST in Rebound. r_fast/r_slow here are meant
+    to be Goulding's own r_FAST/r_SLOW -- the SAME lagged, trailing-average
+    momentum signals eq. 4 uses to classify Bull/Bear/Correction/Rebound in
+    the first place (this project's own goulding_monthly()'s `fast`/`slow`
+    columns: `ret.shift(1).rolling_mean(fast_months/slow_months)`, i.e. the
+    mean of the last N COMPLETED months, never including the current/
+    still-forming one) -- NOT the realized return of the period about to
+    be traded. Passing a same-period realized return instead would be
+    genuine look-ahead; this function has no way to detect that misuse
+    from the float values alone, so getting the caller's r_fast/r_slow
+    right is the caller's responsibility (see
+    scripts/tsmom_binary_vol_parity_backtest.py's own g_fast/g_slow, which
+    are goulding_monthly's `fast`/`slow` read via a forward-matched
+    rebalance-date join -- verified end to end, not merely assumed).
+
+    This module's own binary sign(signal) direction convention (matching
+    Bull/Bear's unconditional +-1, and scripts/tsmom_binary_vol_parity_
+    backtest.py's flat_discount mode's direction=sign(ts)) then takes
+    sign(r_dyn) as the position weight -- always +1/-1/0, never a
+    magnitude in between. r_dyn landing on EXACTLY 0.0 (routed to the flat
+    0.0 case below) is astronomically unlikely with real return data and
+    isn't divided by anywhere in this function, so it doesn't carry the
+    same numerical-stability risk an epsilon-guarded 1/x would; left as a
+    plain equality check deliberately, not tightened to an abs()-epsilon.
 
     CORRECTED from an earlier version that computed (1 - 2*a_co)/
     (2*a_re - 1) directly from a_co/a_re alone, with no r_fast/r_slow
@@ -350,14 +368,23 @@ def _goulding_weight(regime_val: Optional[str], a_co: float, a_re: float,
     period's real relative fast/slow magnitudes entirely. Two different
     Correction months with the same a_co but very different actual
     r_fast/r_slow values produced the identical weight under the old
-    formula; the paper's own eq. 7 blends the real return values and only
+    formula; the paper's own eq. 7 blends the real signal values and only
     takes the sign of the RESULT, not of each input beforehand. a_co=
     a_re=0.5 (the uninformed fallback) still makes eq. 7 degenerate to a
     flat 50/50 average of r_fast/r_slow -- no longer unconditionally zero,
-    since a genuine (non-degenerate) blended return can still be
-    nonzero -- but the flat-in-disagreement-states behavior at exactly
-    a_co=a_re=0.5 no longer holds the way the old, sign-only formula
-    guaranteed it would."""
+    since a genuine (non-degenerate) blended value can still be nonzero --
+    but the flat-in-disagreement-states behavior at exactly a_co=a_re=0.5
+    no longer holds the way the old, sign-only formula guaranteed it
+    would."""
+    if not (0.0 <= a_co <= 1.0) or not (0.0 <= a_re <= 1.0):
+        # SignalSpec.__post_init__ enforces this range when a caller goes
+        # through that dataclass, but this function is public and directly
+        # callable on its own (e.g. scripts/tsmom_binary_vol_parity_
+        # backtest.py's _estimate_mixing_params result is already clamped
+        # before it gets here, but nothing forces a caller to go through
+        # that path) -- reject an out-of-range mixing weight loudly rather
+        # than silently extrapolating eq. 7 outside its own [0, 1] domain.
+        raise ValueError(f"a_co/a_re must be in [0, 1] (eq. 7's own mixing-weight range), got a_co={a_co}, a_re={a_re}")
     if regime_val is None:
         return None
     r = regime_val.lower()

@@ -386,3 +386,14 @@ def test_goulding_weight_correction_rebound_require_r_fast_r_slow():
     assert _goulding_weight('correction', a_co=0.5, a_re=0.5) is None
     assert _goulding_weight('correction', a_co=0.5, a_re=0.5, r_fast=None, r_slow=0.1) is None
     assert _goulding_weight('correction', a_co=0.5, a_re=0.5, r_fast=float('nan'), r_slow=0.1) is None
+
+
+def test_goulding_weight_rejects_out_of_range_a_co_a_re():
+    # Public/standalone-callable -- not every caller goes through
+    # SignalSpec's own __post_init__ validation, so this function must
+    # reject an out-of-range mixing weight itself rather than silently
+    # extrapolating eq. 7 outside its [0, 1] domain.
+    with pytest.raises(ValueError):
+        _goulding_weight('correction', a_co=2.0, a_re=0.5, r_fast=0.1, r_slow=-0.1)
+    with pytest.raises(ValueError):
+        _goulding_weight('rebound', a_co=0.5, a_re=-0.1, r_fast=0.1, r_slow=-0.1)
