@@ -103,7 +103,8 @@ from __future__ import annotations
 
 import argparse
 import math
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import Optional
 
 import polars as pl
@@ -145,6 +146,9 @@ DEFAULT_INITIAL_CAPITAL = 1_000_000.0
 DEFAULT_FLAT_PER_ASSET_VOL_TARGET_USD = 10_000.0  # 1% of default capital, same for every asset -- no clustering
 DEFAULT_MOMENTUM_DISCOUNTS = [0.5, 1.0]
 
+# ── Infrastructure ──────────────────────────────────────────────────────────
+RESULTS_DIR = 'results'  # always here -- no per-invocation prefix required
+
 # Goulding, Harvey & Mazzoleni (2023), "Breaking Bad Trends" -- eq. 4's
 # Bull/Correction/Bear/Rebound state classification and eq. 8-10's a_Co/a_Re
 # mixing-parameter estimator, kept separate from calculate_trend_strength's
@@ -158,6 +162,7 @@ DEFAULT_MOMENTUM_DISCOUNTS = [0.5, 1.0]
 # keeps that out of scope (a caller estimates it separately and passes the
 # result in).
 MIN_MONTHS_PER_PHASE = 12  # paper's own warm-up requirement per Appendix C
+DEFAULT_MIXING_POOL = 'cluster'  # 'cluster' or 'global' -- see run()'s own docstring
 
 
 def _build_monthly_state_return_history(rebal_monthly: dict[str, pl.DataFrame],
@@ -200,13 +205,25 @@ def _build_monthly_state_return_history(rebal_monthly: dict[str, pl.DataFrame],
       of that same pair only ever appearing under the FOLLOWING
       rebalance's date.
 
-    Pooled across every symbol (not per-instrument, unlike the paper's own
-    single-asset design) since this project's per-symbol history (~15
-    years) gives too few Correction/Rebound months on its own for a stable
-    estimate -- an explicit, flagged deviation from the paper, not an
-    oversight."""
+    Pooled across every symbol WITHIN A CLUSTER (not the whole universe,
+    and not per-instrument either, unlike the paper's own single-asset
+    design) -- a_Co/a_Re is meant to capture how a given asset class
+    itself tends to behave in Correction/Rebound, which is exactly what
+    pooling across unrelated clusters (e.g. grains together with equity
+    index futures) destroys: it estimates one shared number that reflects
+    whichever cluster happens to dominate the pooled sample, not any
+    cluster's own real behavior. Per-instrument pooling was tried first and
+    discarded -- this project's per-symbol history (~15 years) gives too
+    few Correction/Rebound months on its own for a stable estimate; pooling
+    within a `cluster` (instruments.py's own grain/metal/equity/rates/fx/
+    energy grouping) is the middle ground: enough symbols to reach
+    min_months, without conflating asset classes that plausibly behave
+    differently in the same nominal regime. `cluster` is carried as its own
+    column here (not resolved later from `symbol` at estimation time) so
+    _estimate_mixing_params can filter directly."""
     rows = []
     for sym, rm in rebal_monthly.items():
+        cluster = get_spec(sym)['cluster']
         for d, d_next in zip(rebal_dates[:-1], rebal_dates[1:]):
             row = rm.filter(pl.col('ts_event') == d)
             if row.height == 0:
@@ -214,27 +231,40 @@ def _build_monthly_state_return_history(rebal_monthly: dict[str, pl.DataFrame],
             g_regime_val, monthly_return = row['g_regime'][0], row['ret'][0]
             state = g_regime_val.lower() if g_regime_val else None
             if state is not None and monthly_return is not None:
-                rows.append({'date': d_next, 'decided_at': d, 'symbol': sym, 'state': state,
-                             'monthly_return': monthly_return})
+                rows.append({'date': d_next, 'decided_at': d, 'symbol': sym, 'cluster': cluster,
+                             'state': state, 'monthly_return': monthly_return})
     if not rows:
         return pl.DataFrame(schema={'date': pl.Date, 'decided_at': pl.Date, 'symbol': pl.Utf8,
-                                     'state': pl.Utf8, 'monthly_return': pl.Float64})
+                                     'cluster': pl.Utf8, 'state': pl.Utf8, 'monthly_return': pl.Float64})
     return pl.DataFrame(rows)
 
 
-def _estimate_mixing_params(history: pl.DataFrame, as_of: date,
+def _estimate_mixing_params(history: pl.DataFrame, as_of: date, cluster: Optional[str],
                              min_months: int = MIN_MONTHS_PER_PHASE) -> tuple[float, float]:
     """Appendix C, eq. 8-10 -- a_Co/a_Re from every (state, monthly_return)
-    pair strictly before `as_of` (expanding window, no lookahead; pooled
-    across the whole universe, see _build_monthly_state_return_history).
-    Falls back to the uninformed (0.5, 0.5) -- equivalent to the flat
-    momentum_discount's no-op case -- whenever there isn't yet
-    `min_months` of pooled history in EITHER the Correction or Rebound
-    phase, or the normalizer C / either phase's mean-squared return is
-    degenerate (zero); the paper's own rule for insufficient per-asset
-    history is to exclude the asset for that month entirely, which doesn't
-    map cleanly onto a pooled, always-in-the-portfolio backtest, so this
-    is an explicit, flagged adaptation, not a literal reproduction.
+    pair strictly before `as_of`, restricted to `cluster` when given
+    (expanding window, no lookahead; pooled within one instruments.py
+    `cluster` -- grain/metal/equity/rates/fx/energy -- not across the
+    whole universe: a_Co/a_Re is supposed to capture how THAT asset class
+    behaves in Correction/Rebound, and pooling clusters together would
+    estimate one number dominated by whichever cluster has the most
+    history, not any of their real behavior). `cluster=None` disables the
+    restriction and pools across every symbol in `history` regardless of
+    cluster -- run()'s `mixing_pool='global'` option, kept for direct
+    comparison against the cluster-scoped default and to reproduce this
+    project's original (pre-cluster-split) behavior. Falls back to the
+    uninformed (0.5, 0.5) -- equivalent to the flat momentum_discount's
+    no-op case -- whenever there isn't yet `min_months` of the selected
+    pool's own history in EITHER the Correction or Rebound phase, or the
+    normalizer C / either phase's mean-squared return is degenerate
+    (zero); the paper's own rule for insufficient per-asset history is to
+    exclude the asset for that month entirely, which doesn't map cleanly
+    onto a pooled, always-in-the-portfolio backtest, so this is an
+    explicit, flagged adaptation, not a literal reproduction. A cluster
+    with too few symbols/too little history of its own simply stays at
+    (0.5, 0.5) longer (or indefinitely) under `mixing_pool='cluster'` --
+    an intentional consequence of not borrowing another cluster's
+    behavior, not a bug.
 
     Eq. 9's sign, as extracted from the scanned paper, appears identical in
     form to eq. 8's (both "1 - ...") -- which contradicts the paper's own
@@ -246,6 +276,8 @@ def _estimate_mixing_params(history: pl.DataFrame, as_of: date,
     full errata discussion; this is flagged, not confirmed against the
     primary source's actual typeset sign."""
     prior = history.filter(pl.col('date') < as_of)
+    if cluster is not None:
+        prior = prior.filter(pl.col('cluster') == cluster)
     if prior.height == 0:
         return 0.5, 0.5
 
@@ -284,7 +316,9 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
         flat_per_asset_vol_target_usd: float = DEFAULT_FLAT_PER_ASSET_VOL_TARGET_USD,
         warmup_start: Optional[date] = None,
         weighting_mode: str = 'flat_discount',
-        save_prefix: Optional[str] = None) -> dict:
+        mixing_pool: str = DEFAULT_MIXING_POOL,
+        save_results: bool = False,
+        results_tag: Optional[str] = None) -> dict:
     """weighting_mode:
         'flat_discount' -- existing behaviour: ts_fast/ts_slow-based `ts`/`regime`
             from signal_spec.py's continuous_momentum, computed independently
@@ -300,18 +334,49 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
             in Correction/Rebound instead of a flat discount. `momentum_discount`
             is ignored in this mode.
 
+    mixing_pool (only matters when weighting_mode == 'dynamic'):
+        'cluster' (default) -- a_Co/a_Re re-estimated separately per
+            instruments.py `cluster` (grain/metal/equity/rates/fx/energy),
+            each symbol using only its own cluster's pooled Correction/
+            Rebound history. The point of estimating these weights at all
+            is to capture how a given asset class behaves in each regime;
+            pooling across unrelated clusters would blend that behavior
+            into one number dominated by whichever cluster has the most
+            history, defeating the purpose. A cluster with few symbols/
+            little history of its own (e.g. a single-symbol cluster) stays
+            at the uninformed (0.5, 0.5) fallback longer, or for the whole
+            run -- an intentional consequence, not a bug (see
+            _estimate_mixing_params).
+        'global' -- original behaviour: one shared a_Co/a_Re pooled across
+            every symbol in `symbols` regardless of cluster. Kept for
+            direct before/after comparison against 'cluster', not the
+            default.
+
     warmup_start defaults to WARMUP_DAYS_BEFORE_START before `start` (not a
     fixed absolute date -- see that constant's own comment for why).
 
-    save_prefix, if given, writes two CSVs for after-the-fact inspection --
-    "{save_prefix}_{mode}_daily.csv" (date, capital, ret) and
-    "{save_prefix}_{mode}_rebalances.csv" (one row per symbol actually
-    rebalanced: date, state, a_co/a_re, ts/continuous_regime/c_fast/c_slow,
-    g_regime/g_fast/g_slow, weight, prior->target contracts, fee) -- neither
-    existed anywhere before this,
-    so there was no way to audit what a given run actually did after the
-    fact, only the final summary numbers.
+    save_results, if True, writes CSVs into RESULTS_DIR ("results/",
+    created if missing) -- no prefix required. Filenames are auto-tagged
+    with `results_tag` (a datetime stamp, e.g. "20260728_140512") plus this
+    run's own mode/discount label: "results/{results_tag}_{mode}_daily.csv"
+    (date, capital, ret), "results/{results_tag}_{mode}_rebalances.csv"
+    (one row per symbol actually rebalanced: date, state, cluster, a_co/
+    a_re, ts/continuous_regime/c_fast/c_slow, g_regime/g_fast/g_slow,
+    weight, prior->target contracts, fee), and, when weighting_mode ==
+    'dynamic', "results/{results_tag}_{mode}_yearly.csv" (one row per
+    (year, cluster): mean a_co/a_re actually used that year plus that
+    year's own Bull/Bear/Correction/Rebound month counts -- lets a_co/
+    a_re's evolution and each cluster's regime mix be read off directly
+    instead of eyeballing 12+ rebalance rows per year). `results_tag`
+    defaults to "now" (main() generates one shared tag up front instead
+    and passes it to every run() call in a single CLI invocation, so a
+    --momentum-discounts sweep's several runs land under the same tag
+    rather than each getting its own). None of this existed anywhere
+    before, so there was no way to audit what a given run actually did
+    after the fact, only the final summary numbers.
     """
+    if mixing_pool not in ('cluster', 'global'):
+        raise ValueError(f"mixing_pool must be 'cluster' or 'global', got {mixing_pool!r}")
     if warmup_start is None:
         warmup_start = start - timedelta(days=WARMUP_DAYS_BEFORE_START)
     price_data, _ = load_portfolio_data(symbols)
@@ -436,11 +501,24 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
         # Rebalance at month-end using today's just-observed signal.
         if d in rebal_set:
             fees = 0.0
-            # Pooled a_Co/a_Re re-estimated once per rebalance date (not
-            # per symbol -- see _build_monthly_state_return_history), from
-            # all history strictly before `d`.
-            a_co, a_re = (_estimate_mixing_params(monthly_history, d)
-                          if weighting_mode == 'dynamic' else (None, None))
+            # a_Co/a_Re re-estimated once per rebalance date -- per CLUSTER
+            # under mixing_pool='cluster' (each symbol only sees its own
+            # asset class's pooled Correction/Rebound history, since
+            # pooling across clusters would blend unrelated asset classes'
+            # behavior into one number), or once globally and shared by
+            # every symbol under mixing_pool='global' (this project's
+            # original behaviour, kept for direct comparison). See
+            # _build_monthly_state_return_history/_estimate_mixing_params.
+            if weighting_mode == 'dynamic':
+                clusters_needed = {get_spec(s)['cluster'] for s in symbols}
+                if mixing_pool == 'cluster':
+                    mixing_params_by_cluster = {c: _estimate_mixing_params(monthly_history, d, c)
+                                                 for c in clusters_needed}
+                else:
+                    global_params = _estimate_mixing_params(monthly_history, d, None)
+                    mixing_params_by_cluster = {c: global_params for c in clusters_needed}
+            else:
+                mixing_params_by_cluster = {}
             for s in symbols:
                 row = signals[s].filter(pl.col('ts_event') == d)
                 if row.height == 0:
@@ -471,6 +549,7 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
                 g_slow_val = g_row['g_slow'][0] if g_row.height else None
                 g_regime_val = g_row['g_regime'][0] if g_row.height else None
                 state = None
+                cluster = a_co = a_re = None
                 if weighting_mode == 'dynamic':
                     # g_regime is None whenever fast/slow lack enough completed
                     # months of history yet (goulding_monthly's own rolling_mean).
@@ -479,6 +558,11 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
                         logger.warning(f"{s} on {d}: skipping rebalance, invalid signal "
                                         f"(g_fast={g_fast_val}, g_slow={g_slow_val}, std_fast={dstd})")
                         continue
+                    # This symbol's own cluster's mixing params -- NOT a
+                    # shared global estimate -- see mixing_params_by_cluster
+                    # above.
+                    cluster = get_spec(s)['cluster']
+                    a_co, a_re = mixing_params_by_cluster[cluster]
                     # (1-a_co)*sign(slow)+a_co*sign(fast) in Correction, mirrored
                     # in Rebound -- signal_spec.py's own eq. 7 weight formula,
                     # reused here instead of a duplicate if/elif ladder.
@@ -517,7 +601,7 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
                 rebalance_events.append({
                     'date': d, 'symbol': s, 'mode': weighting_mode,
                     'state': state if weighting_mode == 'dynamic' else regime,
-                    'a_co': a_co, 'a_re': a_re,
+                    'cluster': cluster, 'a_co': a_co, 'a_re': a_re,
                     'ts': ts_val, 'continuous_regime': regime, 'c_fast': c_fast_val, 'c_slow': c_slow_val,
                     'g_regime': g_regime_val, 'g_fast': g_fast_val, 'g_slow': g_slow_val,
                     'weight': round(weight, 4), 'close': close, 'std_fast': dstd,
@@ -540,16 +624,45 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
     running_max = stats['capital'].cum_max()
     dd_pct = ((stats['capital'] - running_max) / running_max * 100).min()
 
-    if save_prefix:
+    if save_results:
         tag = f"{weighting_mode}" + (f"_{momentum_discount}" if weighting_mode == 'flat_discount' else '')
-        daily_path = f"{save_prefix}_{tag}_daily.csv"
-        events_path = f"{save_prefix}_{tag}_rebalances.csv"
+        ts = results_tag or datetime.now().strftime('%Y%m%d_%H%M%S')
+        results_dir = Path(RESULTS_DIR)
+        results_dir.mkdir(parents=True, exist_ok=True)
+        daily_path = results_dir / f"{ts}_{tag}_daily.csv"
+        events_path = results_dir / f"{ts}_{tag}_rebalances.csv"
+        events_df = pl.DataFrame(rebalance_events)
         # Round every float column to 4dp for CSV readability -- the raw
         # values (e.g. daily_std=0.015278191541596027) are full float64
         # precision and unreadable in a spreadsheet/terminal.
         stats.with_columns(pl.col(pl.Float64).round(4)).write_csv(daily_path)
-        pl.DataFrame(rebalance_events).with_columns(pl.col(pl.Float64).round(4)).write_csv(events_path)
-        logger.info(f"Saved {daily_path} ({stats.height} rows) and {events_path} ({len(rebalance_events)} rows)")
+        events_df.with_columns(pl.col(pl.Float64).round(4)).write_csv(events_path)
+        logger.info(f"Saved {daily_path} ({stats.height} rows) and {events_path} ({events_df.height} rows)")
+
+        if weighting_mode == 'dynamic' and events_df.height:
+            # One row per (year, cluster): mean a_co/a_re actually applied
+            # that year (re-estimated at every rebalance, so this averages
+            # however many distinct estimates fell in the year) alongside
+            # that year's own Bull/Bear/Correction/Rebound month counts --
+            # the same counts _estimate_mixing_params pools over, just
+            # sliced by year for readability instead of only ever seeing
+            # the final cumulative total.
+            yearly = (
+                events_df.with_columns(pl.col('date').dt.year().alias('year'))
+                .group_by(['year', 'cluster'])
+                .agg(
+                    pl.col('a_co').mean().alias('a_co_mean'),
+                    pl.col('a_re').mean().alias('a_re_mean'),
+                    (pl.col('state') == 'bull').sum().alias('n_bull'),
+                    (pl.col('state') == 'bear').sum().alias('n_bear'),
+                    (pl.col('state') == 'correction').sum().alias('n_correction'),
+                    (pl.col('state') == 'rebound').sum().alias('n_rebound'),
+                )
+                .sort(['cluster', 'year'])
+            )
+            yearly_path = results_dir / f"{ts}_{tag}_yearly.csv"
+            yearly.with_columns(pl.col(pl.Float64).round(4)).write_csv(yearly_path)
+            logger.info(f"Saved {yearly_path} ({yearly.height} rows)")
 
     return {
         'mode': weighting_mode,
@@ -577,12 +690,21 @@ def parse_args():
                     help="Also run the paper's own eq. 4/7-10 dynamic a_Co/a_Re "
                          "reweighting (Goulding/Harvey/Mazzoleni), alongside the "
                          "--momentum-discounts flat-discount run(s) (default: off)")
-    p.add_argument('--save-csv', default=None, metavar='PREFIX',
-                    help='Write per-run "{PREFIX}_{mode}_daily.csv" (date, capital, ret) and '
-                         '"{PREFIX}_{mode}_rebalances.csv" (one row per symbol actually rebalanced: '
-                         'state, a_co/a_re, ts/continuous_regime/c_fast/c_slow, g_regime/g_fast/g_slow, '
-                         'weight, prior->target, fee) for '
-                         'after-the-fact inspection -- neither is saved anywhere without this '
+    p.add_argument('--mixing-pool', choices=['cluster', 'global'], default=DEFAULT_MIXING_POOL,
+                    help="Only affects --include-dynamic runs. 'cluster' (default): a_Co/a_Re "
+                         "estimated separately per instruments.py cluster (grain/metal/equity/"
+                         "rates/fx/energy). 'global': one shared estimate pooled across every "
+                         "--symbols regardless of cluster (this project's original behaviour, "
+                         "kept for comparison) (default: %(default)s)")
+    p.add_argument('--save-results', action='store_true',
+                    help='Write per-run CSVs into results/ (created if missing), auto-tagged '
+                         'with a shared datetime stamp for this invocation -- no prefix needed. '
+                         '"{tag}_{mode}_daily.csv" (date, capital, ret), "{tag}_{mode}_'
+                         'rebalances.csv" (one row per symbol actually rebalanced: state, '
+                         'cluster, a_co/a_re, ts/continuous_regime/c_fast/c_slow, g_regime/'
+                         'g_fast/g_slow, weight, prior->target, fee), and for --include-dynamic '
+                         'runs "{tag}_{mode}_yearly.csv" (mean a_co/a_re and Bull/Bear/'
+                         'Correction/Rebound month counts per year, per cluster) '
                          '(default: off, only the summary dict is printed)')
     return p.parse_args()
 
@@ -593,21 +715,42 @@ def main():
     start_year, end_year = args.years.split('-')
     start, end = date(int(start_year), 1, 1), date(int(end_year), 12, 31)
     discounts = [float(d.strip()) for d in args.momentum_discounts.split(',') if d.strip()]
+    # One shared tag for every run() call in this invocation, so a
+    # --momentum-discounts sweep (and an --include-dynamic run alongside
+    # it) land together under the same results/ filename prefix instead of
+    # each call minting its own timestamp.
+    results_tag = datetime.now().strftime('%Y%m%d_%H%M%S')
+    # One row per run() call below -- the per-run summary dict (ann_ret/
+    # ann_vol/sharpe/max_dd/fees) was previously only ever printed to
+    # stdout and lost, unlike tsmom_backtest.py/the options param-search
+    # scripts (bull_put_param_search.py/iron_condor_param_search.py),
+    # which both write a "backtest_summary_..." CSV comparing every config
+    # tested in one table. Matches that convention here.
+    summary_rows = []
 
     for discount in discounts:
         result = run(symbols, start, end, discount,
                       initial_capital=args.initial_capital,
                       flat_per_asset_vol_target_usd=args.flat_vol_target,
-                      save_prefix=args.save_csv)
+                      save_results=args.save_results, results_tag=results_tag)
         print(result)
+        summary_rows.append(result)
 
     if args.include_dynamic:
         result = run(symbols, start, end, momentum_discount=1.0,
                       initial_capital=args.initial_capital,
                       flat_per_asset_vol_target_usd=args.flat_vol_target,
-                      weighting_mode='dynamic',
-                      save_prefix=args.save_csv)
+                      weighting_mode='dynamic', mixing_pool=args.mixing_pool,
+                      save_results=args.save_results, results_tag=results_tag)
         print(result)
+        summary_rows.append(result)
+
+    if args.save_results:
+        results_dir = Path(RESULTS_DIR)
+        results_dir.mkdir(parents=True, exist_ok=True)
+        summary_path = results_dir / f"{results_tag}_summary.csv"
+        pl.DataFrame(summary_rows).with_columns(pl.col(pl.Float64).round(4)).write_csv(summary_path)
+        logger.info(f"Saved {summary_path} ({len(summary_rows)} rows)")
 
 
 if __name__ == '__main__':
