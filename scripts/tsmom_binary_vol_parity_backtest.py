@@ -563,10 +563,19 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
                     # above.
                     cluster = get_spec(s)['cluster']
                     a_co, a_re = mixing_params_by_cluster[cluster]
-                    # (1-a_co)*sign(slow)+a_co*sign(fast) in Correction, mirrored
-                    # in Rebound -- signal_spec.py's own eq. 7 weight formula,
-                    # reused here instead of a duplicate if/elif ladder.
-                    weight = _goulding_weight(g_regime_val, a_co, a_re)
+                    # (1-a_co)*g_slow+a_co*g_fast in Correction, mirrored in
+                    # Rebound, sign of the blended RESULT taken as the
+                    # position weight -- signal_spec.py's own (corrected)
+                    # eq. 7 weight formula, reused here instead of a
+                    # duplicate if/elif ladder. Passes the period's own
+                    # actual g_fast/g_slow values -- NOT just regime/a_co/
+                    # a_re -- see _goulding_weight's own docstring for why
+                    # that distinction matters.
+                    weight = _goulding_weight(g_regime_val, a_co, a_re, g_fast_val, g_slow_val)
+                    if weight is None:
+                        logger.warning(f"{s} on {d}: skipping rebalance, invalid signal "
+                                        f"(g_fast={g_fast_val}, g_slow={g_slow_val} unusable for blend)")
+                        continue
                 else:
                     if (ts_val is None or (isinstance(ts_val, float) and math.isnan(ts_val)) or dstd_bad):
                         logger.warning(f"{s} on {d}: skipping rebalance, invalid signal "

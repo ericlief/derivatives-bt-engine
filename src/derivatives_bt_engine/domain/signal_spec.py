@@ -296,14 +296,33 @@ def goulding_monthly(df: pl.DataFrame, fast_months: int = GOULDING_FAST_MONTHS,
     return monthly
 
 
-def _goulding_weight(regime_val: Optional[str], a_co: float, a_re: float) -> Optional[float]:
-    """Eq. 7's blend, expressed as a position weight (equivalent to a
-    return-blend for a single directional bet -- see research doc Part 2
-    §6b): +1 Bull, -1 Bear, (1 - 2*a_co) Correction, (2*a_re - 1) Rebound.
-    a_co=a_re=0.5 (the paper's own uninformed fallback) collapses this to
-    exactly 0 -- fully flat -- in both disagreement states, which is the
-    literature-backed reason 0.5/0.5 is this module's own default rather
-    than an arbitrary placeholder."""
+def _goulding_weight(regime_val: Optional[str], a_co: float, a_re: float,
+                      r_fast: Optional[float] = None, r_slow: Optional[float] = None) -> Optional[float]:
+    """Eq. 7's blend: (1-a_Co)*r_SLOW + a_Co*r_FAST in Correction,
+    (1-a_Re)*r_SLOW + a_Re*r_FAST in Rebound -- blending the period's
+    ACTUAL fast/slow return VALUES, not their signs. This module's own
+    binary sign(signal) direction convention (matching Bull/Bear's
+    unconditional +-1, and scripts/tsmom_binary_vol_parity_backtest.py's
+    flat_discount mode's direction=sign(ts)) then takes sign(r_dyn) as the
+    position weight -- always +1/-1/0, never a magnitude in between.
+
+    CORRECTED from an earlier version that computed (1 - 2*a_co)/
+    (2*a_re - 1) directly from a_co/a_re alone, with no r_fast/r_slow
+    input at all. That formula is only reachable by substituting FIXED
+    unit signs for r_slow/r_fast into eq. 7 BEFORE blending (r_slow=+1,
+    r_fast=-1 in Correction; r_slow=-1, r_fast=+1 in Rebound) -- i.e. it
+    took the sign of each leg first and blended signs, discarding the
+    period's real relative fast/slow magnitudes entirely. Two different
+    Correction months with the same a_co but very different actual
+    r_fast/r_slow values produced the identical weight under the old
+    formula; the paper's own eq. 7 blends the real return values and only
+    takes the sign of the RESULT, not of each input beforehand. a_co=
+    a_re=0.5 (the uninformed fallback) still makes eq. 7 degenerate to a
+    flat 50/50 average of r_fast/r_slow -- no longer unconditionally zero,
+    since a genuine (non-degenerate) blended return can still be
+    nonzero -- but the flat-in-disagreement-states behavior at exactly
+    a_co=a_re=0.5 no longer holds the way the old, sign-only formula
+    guaranteed it would."""
     if regime_val is None:
         return None
     r = regime_val.lower()
@@ -312,7 +331,14 @@ def _goulding_weight(regime_val: Optional[str], a_co: float, a_re: float) -> Opt
     if r == 'bear':
         return -1.0
     if r == 'correction':
-        return 1.0 - 2.0 * a_co
-    if r == 'rebound':
-        return 2.0 * a_re - 1.0
-    return None
+        weight = a_co
+    elif r == 'rebound':
+        weight = a_re
+    else:
+        return None
+    if (r_fast is None or r_slow is None
+            or (isinstance(r_fast, float) and math.isnan(r_fast))
+            or (isinstance(r_slow, float) and math.isnan(r_slow))):
+        return None
+    r_dyn = (1.0 - weight) * r_slow + weight * r_fast
+    return 1.0 if r_dyn > 0 else (-1.0 if r_dyn < 0 else 0.0)

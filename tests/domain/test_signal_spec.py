@@ -291,24 +291,53 @@ def test_goulding_monthly_signal_bounds_and_regimes():
 
 
 # ── _goulding_weight (eq. 7), independent of both models above ──────────
+#
+# Eq. 7 blends the period's ACTUAL r_fast/r_slow return values -- (1-a)*
+# r_slow + a*r_fast -- and only takes the sign of that blended RESULT as
+# the position weight. Bull/Bear stay unconditionally +-1 regardless of
+# r_fast/r_slow (fast and slow already agree in sign by definition in
+# those states). Correction requires r_fast<0<=r_slow; Rebound requires
+# r_slow<0<=r_fast (goulding_monthly's own regime classification) -- test
+# fixtures below respect that, since passing an inconsistent sign
+# combination wouldn't correspond to a real classified month.
 
 def test_goulding_weight_bull_bear_are_fully_directional():
-    assert _goulding_weight('bull', a_co=0.5, a_re=0.5) == 1.0
-    assert _goulding_weight('bear', a_co=0.5, a_re=0.5) == -1.0
+    assert _goulding_weight('bull', a_co=0.5, a_re=0.5, r_fast=-0.5, r_slow=-0.5) == 1.0
+    assert _goulding_weight('bear', a_co=0.5, a_re=0.5, r_fast=0.5, r_slow=0.5) == -1.0
 
 
-def test_goulding_weight_flat_a_co_a_re_zeros_out_disagreement_states():
-    assert _goulding_weight('correction', a_co=0.5, a_re=0.5) == pytest.approx(0.0)
-    assert _goulding_weight('rebound', a_co=0.5, a_re=0.5) == pytest.approx(0.0)
+def test_goulding_weight_disagreement_states_use_blended_return_sign_not_just_a_co_a_re():
+    # Correction, a_co=0.5: plain average of r_slow/r_fast. Slow's positive
+    # magnitude dominates fast's small negative -> positive blend -> +1.
+    assert _goulding_weight('correction', a_co=0.5, a_re=0.5, r_fast=-0.01, r_slow=0.10) == 1.0
+    # Same a_co, but fast's negative magnitude now dominates -> -1. The OLD
+    # (1-2*a_co) formula would have returned the identical 0.0 for both of
+    # these -- proving it ignored r_fast/r_slow's actual magnitudes entirely.
+    assert _goulding_weight('correction', a_co=0.5, a_re=0.5, r_fast=-0.10, r_slow=0.01) == -1.0
+    # Rebound, a_re=0.5: symmetric check.
+    assert _goulding_weight('rebound', a_co=0.5, a_re=0.5, r_fast=0.10, r_slow=-0.01) == 1.0
+    assert _goulding_weight('rebound', a_co=0.5, a_re=0.5, r_fast=0.01, r_slow=-0.10) == -1.0
 
 
-def test_goulding_weight_nonflat_a_co_a_re_biases_disagreement_states():
-    # a_co < 0.5 -> weight = 1 - 2*a_co > 0 (tilt toward slow/long)
-    assert _goulding_weight('correction', a_co=0.2, a_re=0.5) > 0
-    # a_re > 0.5 -> weight = 2*a_re - 1 > 0 (tilt toward fast/long)
-    assert _goulding_weight('rebound', a_co=0.5, a_re=0.8) > 0
+def test_goulding_weight_nonflat_a_co_a_re_tilts_the_blend():
+    # a_co=0.2 in Correction weights r_slow (0.4) more than r_fast (-0.05):
+    # 0.8*0.4 + 0.2*(-0.05) = 0.31 > 0.
+    assert _goulding_weight('correction', a_co=0.2, a_re=0.5, r_fast=-0.05, r_slow=0.4) == 1.0
+    # a_re=0.8 in Rebound weights r_fast (0.4) more than r_slow (-0.05):
+    # 0.2*(-0.05) + 0.8*0.4 = 0.31 > 0.
+    assert _goulding_weight('rebound', a_co=0.5, a_re=0.8, r_fast=0.4, r_slow=-0.05) == 1.0
 
 
 def test_goulding_weight_none_and_unknown_regime():
-    assert _goulding_weight(None, a_co=0.5, a_re=0.5) is None
-    assert _goulding_weight('unknown', a_co=0.5, a_re=0.5) is None
+    assert _goulding_weight(None, a_co=0.5, a_re=0.5, r_fast=0.1, r_slow=0.1) is None
+    assert _goulding_weight('unknown', a_co=0.5, a_re=0.5, r_fast=0.1, r_slow=0.1) is None
+
+
+def test_goulding_weight_correction_rebound_require_r_fast_r_slow():
+    # Bull/Bear don't need them (unconditional +-1); Correction/Rebound do
+    # -- missing/NaN r_fast or r_slow means an invalid signal, not a
+    # silent fallback to some default weight.
+    assert _goulding_weight('bull', a_co=0.5, a_re=0.5) == 1.0
+    assert _goulding_weight('correction', a_co=0.5, a_re=0.5) is None
+    assert _goulding_weight('correction', a_co=0.5, a_re=0.5, r_fast=None, r_slow=0.1) is None
+    assert _goulding_weight('correction', a_co=0.5, a_re=0.5, r_fast=float('nan'), r_slow=0.1) is None
