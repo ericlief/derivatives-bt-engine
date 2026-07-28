@@ -680,11 +680,12 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
                     # lowercased (dynamic mode), never independent
                     # information given continuous_regime/g_regime are both
                     # already here unconditionally.
-                    'cluster': cluster, 'a_co': a_co, 'a_re': a_re,
-                    'ts': ts_val, 'continuous_regime': regime, 'c_fast': c_fast_val, 'c_slow': c_slow_val,
+                    'cluster': cluster, 
+                    'c_regime': regime, 'c_fast': c_fast_val, 'c_slow': c_slow_val, 'sig': ts_val, 
                     'g_regime': g_regime_val, 'g_fast': g_fast_val, 'g_slow': g_slow_val,
+                    'a_co': a_co, 'a_re': a_re,
                     'weight': round(weight, 4), 'close': close, 'std_fast': dstd, 'std_slow': dstd_slow,
-                    'prior_contracts': prior, 'target_contracts': new_target,
+                    'prior': prior, 'target': new_target, 'dol_vol': dollar_vol_per_contract,
                     'fee': round(event_fee, 2),
                 })
                 held[s] = new_target
