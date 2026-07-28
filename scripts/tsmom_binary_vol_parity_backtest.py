@@ -273,6 +273,8 @@ def _estimate_mixing_params(history: pl.DataFrame, as_of: date,
 
     a_co = 0.5 * (1 - (1 / C) * (avg_r_co / avg_r2_co))
     a_re = 0.5 * (1 + (1 / C) * (avg_r_re / avg_r2_re))
+    logger.info(f'Change in default params: n_bu {n_bu} | n_be {n_be} | n_co {n_co} ({a_co}) | n_re {n_re} ({a_re})')
+
     return max(0.0, min(1.0, a_co)), max(0.0, min(1.0, a_re))
 
 
