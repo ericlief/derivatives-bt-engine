@@ -108,8 +108,7 @@ from typing import Optional
 
 import polars as pl
 
-from derivatives_bt_engine.domain.futures_signal_generator import FuturesSignalGenerator
-from derivatives_bt_engine.domain.instruments import get_spec
+from derivatives_bt_engine.domain.instruments import get_spec, resolve_active_months
 from derivatives_bt_engine.domain.signal_spec import (
     SignalSpec,
     _goulding_weight,
@@ -117,7 +116,7 @@ from derivatives_bt_engine.domain.signal_spec import (
     continuous_momentum,
     goulding_monthly,
 )
-from derivatives_bt_engine.domain.tsmom_backtester import _month_end_dates, load_portfolio_data
+from derivatives_bt_engine.domain.tsmom_backtester import _detect_roll_dates, _month_end_dates, load_portfolio_data
 from derivatives_bt_engine.utils.logger import setup_logger
 
 logger = setup_logger()
@@ -376,15 +375,22 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
     monthly_history = (_build_monthly_state_return_history(rebal_monthly, rebal_dates)
                         if weighting_mode == 'dynamic' else None)
 
-    # Mandatory quarterly contract roll (same schedule FuturesSignalGenerator/
-    # tsmom_backtester.py use for FuturesPosition.roll_date -- Monday prior to
-    # the third Friday of Mar/Jun/Sep/Dec) -- a real close-old/open-new round
-    # trip that costs commission twice even when this project's continuous
-    # front-month price series (FuturesDataLoader.daily) doesn't itself show a
-    # price change that day. Snapped onto the nearest date actually present in
-    # the loaded data (a specific calendar roll_date can fall on a non-trading
-    # day for a given symbol).
-    roll_dates = set(FuturesSignalGenerator._get_quarterly_roll_dates(start, end))
+    # Mandatory contract roll: a real close-old/open-new round trip that costs
+    # commission twice even when this project's continuous front-month price
+    # series (FuturesDataLoader.daily) doesn't itself show a price change that
+    # day. Uses tsmom_backtester.py's _detect_roll_dates -- each symbol's own
+    # real volume-driven front-month crossovers (FuturesDataLoader.daily's own
+    # `expiration` column changes), cross-checked against instruments.
+    # resolve_active_months(), NOT a single fixed quarterly schedule shared
+    # across every symbol (empirically wrong for grains/metals -- see
+    # research/research_futures_roll_logic_and_active_months.md §2, §4.2).
+    # price_data[s] must be the unbounded series (not the warmup/end-windowed
+    # `df` used for signals above) -- _detect_roll_dates' own docstring warns
+    # a windowed slice's first row always looks like a false roll.
+    roll_dates_by_symbol = {
+        s: set(_detect_roll_dates(price_data[s], start, end, resolve_active_months(s), s))
+        for s in symbols
+    }
 
     held = {s: 0 for s in symbols}
     prev_close: dict[str, float] = {}
@@ -413,13 +419,14 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
             prev_close[s] = close
         capital += pnl
 
-        # Mandatory quarterly roll: commission on a full close+reopen of
-        # whatever is currently held, no price/quantity effect (see note above).
-        if d in roll_dates:
-            fees = 0.0
-            for s in symbols:
-                if held[s] != 0:
-                    fees += 2 * abs(held[s]) * get_spec(s)['commission']
+        # Mandatory roll: commission on a full close+reopen of whatever is
+        # currently held, no price/quantity effect (see note above). Each
+        # symbol rolls on its own detected date, not a shared calendar one.
+        fees = 0.0
+        for s in symbols:
+            if held[s] != 0 and d in roll_dates_by_symbol[s]:
+                fees += 2 * abs(held[s]) * get_spec(s)['commission']
+        if fees:
             capital -= fees
             total_fees += fees
 
