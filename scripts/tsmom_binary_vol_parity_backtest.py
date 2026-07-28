@@ -685,7 +685,7 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
                     'g_regime': g_regime_val, 'g_fast': g_fast_val, 'g_slow': g_slow_val,
                     'a_co': a_co, 'a_re': a_re,
                     'weight': round(weight, 4), 'close': close, 'std_fast': dstd, 'std_slow': dstd_slow,
-                    'prior': prior, 'target': new_target, 'dol_vol': dollar_vol_per_contract,
+                    'prior': prior, 'target': new_target, 'dol_vol': round(dollar_vol_per_contract, 2),
                     'fee': round(event_fee, 2),
                 })
                 held[s] = new_target
