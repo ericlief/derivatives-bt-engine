@@ -139,6 +139,25 @@ def summarize(df: pl.DataFrame) -> pl.DataFrame:
     )
 
 
+def _param_str(symbols: list[str], capital_levels: list[float],
+                weighting_mode: str, momentum_discount: float) -> str:
+    """Compact param string for the saved filenames -- same convention
+    bull_put_param_search.py/iron_condor_param_search.py already use
+    (param values embedded in the filename itself, not just a bare
+    timestamp), so a directory of saved runs is distinguishable without
+    opening each file. Symbols spelled out in full for a normal-sized
+    sweep; abbreviated to a count for a large universe (e.g. the full
+    12-symbol DEFAULT_SYMBOLS) so the filename doesn't become unwieldy."""
+    symbol_str = '-'.join(symbols) if len(symbols) <= 6 else f"{len(symbols)}syms"
+
+    def _fmt_cap(c: float) -> str:
+        return f"{c / 1_000_000:g}M" if c >= 1_000_000 else f"{int(c / 1000)}k"
+    cap_str = '-'.join(_fmt_cap(c) for c in capital_levels)
+
+    mode_str = weighting_mode if weighting_mode == 'dynamic' else f"{weighting_mode}{momentum_discount}"
+    return f"{symbol_str}_{mode_str}_cap{cap_str}"
+
+
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--symbols', default=','.join(DEFAULT_SYMBOLS),
@@ -150,8 +169,11 @@ def parse_args():
     p.add_argument('--momentum-discount', type=float, default=DEFAULT_WINDOW_MOMENTUM_DISCOUNT,
                     help='Only used when --weighting-mode flat_discount (default: %(default)s)')
     p.add_argument('--save-results', action='store_true',
-                    help='Write {tag}_window_scheme.csv (every run) and {tag}_window_scheme_summary.csv '
-                         '(per scheme/capital mean/std) to results/ (default: off, still printed)')
+                    help='Write {tag}_{params}_window_scheme.csv (every run) and '
+                         '{tag}_{params}_window_scheme_summary.csv (per scheme/capital mean/std) to '
+                         'results/ -- {params} encodes symbols/weighting_mode/capital_levels so a '
+                         "directory of saved runs is distinguishable without opening each file "
+                         '(default: off, still printed)')
     return p.parse_args()
 
 
@@ -177,8 +199,9 @@ def main():
         results_dir = Path(RESULTS_DIR)
         results_dir.mkdir(parents=True, exist_ok=True)
         ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-        detail_path = results_dir / f"{ts}_window_scheme.csv"
-        summary_path = results_dir / f"{ts}_window_scheme_summary.csv"
+        param_str = _param_str(symbols, capital_levels, args.weighting_mode, args.momentum_discount)
+        detail_path = results_dir / f"{ts}_{param_str}_window_scheme.csv"
+        summary_path = results_dir / f"{ts}_{param_str}_window_scheme_summary.csv"
         df.with_columns(pl.col(pl.Float64).round(4)).write_csv(detail_path)
         summary.write_csv(summary_path)
         logger.info(f"Saved {detail_path} ({df.height} rows) and {summary_path} ({summary.height} rows)")
