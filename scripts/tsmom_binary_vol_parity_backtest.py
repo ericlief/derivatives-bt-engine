@@ -183,6 +183,9 @@ DEFAULT_MIXING_POOL = 'cluster'  # 'cluster' or 'global' -- see run()'s own docs
 # near-zero-but-technically-nonzero mean-squared-return (e.g. 1e-12, from
 # a run of near-identical monthly returns) sail through undetected.
 _DEGENERATE_EPS = 1e-10
+# Warn when a symbol rounds to 0 target contracts on more than this
+# fraction of its own rebalances -- see the sizing_diag block in run()
+SIZING_ZERO_WARN_THRESHOLD = 0.2
 
 
 def _build_monthly_state_return_history(rebal_monthly: dict[str, pl.DataFrame],
@@ -714,6 +717,42 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
     running_max = stats['capital'].cum_max()
     dd_pct = ((stats['capital'] - running_max) / running_max * 100).min()
 
+    # Per-symbol contract-rounding diagnostic -- surfaced unconditionally
+    # (not just under save_results) since this is a correctness-adjacent
+    # warning, not an optional report: `round(weight * target_usd /
+    # dollar_vol_per_contract)` silently returns 0 whenever a symbol's own
+    # per-contract dollar vol exceeds flat_per_asset_vol_target_usd, and a
+    # symbol stuck at 0 most/all of the time is quietly opting itself out
+    # of the whole portfolio -- easy to miss without explicitly checking
+    # for it (this exact scenario took a long manual back-and-forth to
+    # diagnose by hand at low --initial-capital before this existed).
+    sizing_diag = None
+    if rebalance_events:
+        sizing_diag = (
+            pl.DataFrame(rebalance_events)
+            .group_by('symbol')
+            .agg(
+                pl.len().alias('n_rebals'),
+                (pl.col('target') == 0).mean().alias('pct_zero'),
+                pl.col('dol_vol').median().alias('median_dollar_vol_per_contract'),
+            )
+            .sort('pct_zero', descending=True)
+        )
+        high_zero = sizing_diag.filter(pl.col('pct_zero') > SIZING_ZERO_WARN_THRESHOLD)
+        if high_zero.height > 0:
+            # print(), not logger.warning() -- this project's shared
+            # setup_logger() filters WARNING/ERROR out of console output
+            # entirely (still reaches the log file, just not stdout), and
+            # this diagnostic specifically needs to be seen without
+            # digging through logs/ -- same reasoning as the summary/
+            # comparison tables below already using print().
+            print()
+            print(f"=== WARNING: {weighting_mode} -- {high_zero.height}/{sizing_diag.height} symbol(s) round to "
+                  f"0 contracts on >{SIZING_ZERO_WARN_THRESHOLD:.0%} of rebalances at "
+                  f"flat_per_asset_vol_target_usd=${flat_per_asset_vol_target_usd:,.0f} "
+                  f"(effectively opted out of the portfolio, not just occasionally rounding down) ===")
+            print(high_zero.with_columns(pl.col(pl.Float64).round(4)))
+
     if save_results:
         tag = f"{weighting_mode}" + (f"_{momentum_discount}" if weighting_mode == 'flat_discount' else '')
         ts = results_tag or datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -757,6 +796,11 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
             yearly_path = results_dir / f"{ts}_{tag}_yearly.csv"
             yearly.with_columns(pl.col(pl.Float64).round(4)).write_csv(yearly_path)
             logger.info(f"Saved {yearly_path} ({yearly.height} rows)")
+
+        if sizing_diag is not None:
+            sizing_path = results_dir / f"{ts}_{tag}_sizing.csv"
+            sizing_diag.with_columns(pl.col(pl.Float64).round(4)).write_csv(sizing_path)
+            logger.info(f"Saved {sizing_path} ({sizing_diag.height} rows)")
 
     return {
         'mode': weighting_mode,
