@@ -331,6 +331,59 @@ def goulding_monthly(df: pl.DataFrame, fast_months: int = GOULDING_FAST_MONTHS,
     return monthly
 
 
+def _goulding_blend(regime_val: Optional[str], a_co: float, a_re: float,
+                     r_fast: Optional[float] = None, r_slow: Optional[float] = None) -> Optional[float]:
+    """The raw eq. 7 blended value -- (1-a_Co)*r_SLOW + a_Co*r_FAST in
+    Correction, (1-a_Re)*r_SLOW + a_Re*r_FAST in Rebound -- BEFORE taking
+    its sign. Exposed separately from _goulding_weight (which calls this
+    internally and only ever returns sign(this)) purely for audit/display,
+    e.g. scripts/tsmom_binary_vol_parity_backtest.py's rebalance CSV
+    reporting the raw score alongside the actual +-1/0 position weight, so
+    a reader isn't left wondering how e.g. a_co=0.5 (which looks like it
+    should be a "neutral" input) produced a nonzero directional weight --
+    it's because the blend of the ACTUAL r_fast/r_slow landed nonzero, not
+    because a_co itself carried directional information at 0.5.
+
+    None for Bull/Bear (eq. 7 doesn't apply there -- they're
+    unconditionally +-1 in _goulding_weight, with no blend to report) or
+    when regime_val/r_fast/r_slow are missing/invalid. See
+    _goulding_weight's own docstring for the full r_fast/r_slow semantics
+    (Goulding's lagged trailing-average momentum signals, not a same-
+    period realized return) and the a_co/a_re range/regime-consistency
+    checks, both applied here too since this function is equally public
+    and independently callable."""
+    if not (0.0 <= a_co <= 1.0) or not (0.0 <= a_re <= 1.0):
+        raise ValueError(f"a_co/a_re must be in [0, 1] (eq. 7's own mixing-weight range), got a_co={a_co}, a_re={a_re}")
+    if regime_val is None:
+        return None
+    r = regime_val.lower()
+    if r == 'correction':
+        weight = a_co
+    elif r == 'rebound':
+        weight = a_re
+    else:
+        return None
+    if (r_fast is None or r_slow is None
+            or (isinstance(r_fast, float) and math.isnan(r_fast))
+            or (isinstance(r_slow, float) and math.isnan(r_slow))):
+        return None
+    # Invariant check, not input validation (hence assert, not raise) --
+    # goulding_monthly's own classification is exactly Correction:
+    # fast<0<=slow, Rebound: fast>=0>slow, so a regime_val/r_fast/r_slow
+    # combination that violates this can only mean the caller's regime and
+    # signal came from different, inconsistent sources (a future refactor
+    # decoupling them, or corrupted/mismatched input), not a real Goulding
+    # month -- catch that loudly during development rather than silently
+    # blending a state that couldn't have produced this regime label.
+    assert (
+        (r == 'correction' and r_fast < 0 <= r_slow)
+        or (r == 'rebound' and r_slow < 0 <= r_fast)
+    ), (f"regime={regime_val!r} inconsistent with r_fast={r_fast}/r_slow={r_slow} -- "
+        "goulding_monthly's own classification requires Correction: fast<0<=slow, "
+        "Rebound: slow<0<=fast")
+    return (1.0 - weight) * r_slow + weight * r_fast
+
+
 def _goulding_weight(regime_val: Optional[str], a_co: float, a_re: float,
                       r_fast: Optional[float] = None, r_slow: Optional[float] = None) -> Optional[float]:
     """Eq. 7's blend: (1-a_Co)*r_SLOW + a_Co*r_FAST in Correction,
@@ -384,6 +437,9 @@ def _goulding_weight(regime_val: Optional[str], a_co: float, a_re: float,
         # before it gets here, but nothing forces a caller to go through
         # that path) -- reject an out-of-range mixing weight loudly rather
         # than silently extrapolating eq. 7 outside its own [0, 1] domain.
+        # Checked here too (not just inside _goulding_blend below) so it
+        # still fires for Bull/Bear, which return before ever reaching
+        # _goulding_blend.
         raise ValueError(f"a_co/a_re must be in [0, 1] (eq. 7's own mixing-weight range), got a_co={a_co}, a_re={a_re}")
     if regime_val is None:
         return None
@@ -392,29 +448,7 @@ def _goulding_weight(regime_val: Optional[str], a_co: float, a_re: float,
         return 1.0
     if r == 'bear':
         return -1.0
-    if r == 'correction':
-        weight = a_co
-    elif r == 'rebound':
-        weight = a_re
-    else:
+    r_dyn = _goulding_blend(regime_val, a_co, a_re, r_fast, r_slow)
+    if r_dyn is None:
         return None
-    if (r_fast is None or r_slow is None
-            or (isinstance(r_fast, float) and math.isnan(r_fast))
-            or (isinstance(r_slow, float) and math.isnan(r_slow))):
-        return None
-    # Invariant check, not input validation (hence assert, not raise) --
-    # goulding_monthly's own classification is exactly Correction:
-    # fast<0<=slow, Rebound: fast>=0>slow, so a regime_val/r_fast/r_slow
-    # combination that violates this can only mean the caller's regime and
-    # signal came from different, inconsistent sources (a future refactor
-    # decoupling them, or corrupted/mismatched input), not a real Goulding
-    # month -- catch that loudly during development rather than silently
-    # blending a state that couldn't have produced this regime label.
-    assert (
-        (r == 'correction' and r_fast < 0 <= r_slow)
-        or (r == 'rebound' and r_slow < 0 <= r_fast)
-    ), (f"regime={regime_val!r} inconsistent with r_fast={r_fast}/r_slow={r_slow} -- "
-        "goulding_monthly's own classification requires Correction: fast<0<=slow, "
-        "Rebound: slow<0<=fast")
-    r_dyn = (1.0 - weight) * r_slow + weight * r_fast
     return 1.0 if r_dyn > 0 else (-1.0 if r_dyn < 0 else 0.0)

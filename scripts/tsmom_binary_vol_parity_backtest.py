@@ -112,6 +112,7 @@ import polars as pl
 from derivatives_bt_engine.domain.instruments import get_spec, resolve_active_months, resolve_annualization_days
 from derivatives_bt_engine.domain.signal_spec import (
     SignalSpec,
+    _goulding_blend,
     _goulding_weight,
     build_features,
     continuous_momentum,
@@ -612,7 +613,7 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
                 g_slow_val = g_row['g_slow'][0] if g_row.height else None
                 g_regime_val = g_row['g_regime'][0] if g_row.height else None
                 state = None
-                cluster = a_co = a_re = None
+                cluster = a_co = a_re = r_dyn = None
                 if weighting_mode == 'dynamic':
                     # g_regime is None whenever fast/slow lack enough completed
                     # months of history yet (goulding_monthly's own rolling_mean).
@@ -635,6 +636,13 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
                     # a_re -- see _goulding_weight's own docstring for why
                     # that distinction matters.
                     weight = _goulding_weight(g_regime_val, a_co, a_re, g_fast_val, g_slow_val)
+                    # Raw pre-sign eq. 7 value, audit-only -- e.g. a_co=0.5
+                    # ("uninformed") can still produce a nonzero +-1
+                    # weight, because the blend of the ACTUAL g_fast/
+                    # g_slow landed nonzero, not because a_co carried
+                    # directional information at 0.5. None for Bull/Bear
+                    # (no blend -- see _goulding_blend's own docstring).
+                    r_dyn = _goulding_blend(g_regime_val, a_co, a_re, g_fast_val, g_slow_val)
                     if weight is None:
                         logger.warning(f"{s} on {d}: skipping rebalance, invalid signal "
                                         f"(g_fast={g_fast_val}, g_slow={g_slow_val} unusable for blend)")
@@ -684,7 +692,9 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
                     'c_regime': regime, 'c_fast': c_fast_val, 'c_slow': c_slow_val, 'sig': ts_val, 
                     'g_regime': g_regime_val, 'g_fast': g_fast_val, 'g_slow': g_slow_val,
                     'a_co': a_co, 'a_re': a_re,
-                    'weight': round(weight, 4), 'close': close, 'std_fast': dstd, 'std_slow': dstd_slow,
+                    'weight': round(weight, 4),
+                    'r_dyn': round(r_dyn, 4) if r_dyn is not None else None,
+                    'close': close, 'std_fast': dstd, 'std_slow': dstd_slow,
                     'prior': prior, 'target': new_target, 'dol_vol': round(dollar_vol_per_contract, 2),
                     'fee': round(event_fee, 2),
                 })

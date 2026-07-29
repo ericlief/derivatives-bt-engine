@@ -16,6 +16,7 @@ from derivatives_bt_engine.domain.signal_spec import (
     GOULDING_FAST_MONTHS,
     GOULDING_SLOW_MONTHS,
     SignalSpec,
+    _goulding_blend,
     _goulding_weight,
     build_features,
     continuous_momentum,
@@ -397,3 +398,32 @@ def test_goulding_weight_rejects_out_of_range_a_co_a_re():
         _goulding_weight('correction', a_co=2.0, a_re=0.5, r_fast=0.1, r_slow=-0.1)
     with pytest.raises(ValueError):
         _goulding_weight('rebound', a_co=0.5, a_re=-0.1, r_fast=0.1, r_slow=-0.1)
+
+
+# ── _goulding_blend (eq. 7's raw pre-sign value, audit/display only) ────
+
+def test_goulding_blend_matches_goulding_weight_sign():
+    # _goulding_weight is defined as sign(_goulding_blend(...)) for
+    # Correction/Rebound -- verify that relationship holds, not just that
+    # each function individually looks reasonable.
+    for regime, r_fast, r_slow in [('correction', -0.01, 0.10), ('correction', -0.10, 0.01),
+                                    ('rebound', 0.10, -0.01), ('rebound', 0.01, -0.10)]:
+        blend = _goulding_blend(regime, a_co=0.5, a_re=0.5, r_fast=r_fast, r_slow=r_slow)
+        weight = _goulding_weight(regime, a_co=0.5, a_re=0.5, r_fast=r_fast, r_slow=r_slow)
+        assert blend is not None
+        expected_sign = 1.0 if blend > 0 else (-1.0 if blend < 0 else 0.0)
+        assert weight == expected_sign
+
+
+def test_goulding_blend_none_for_bull_bear():
+    # Eq. 7 doesn't apply to Bull/Bear (_goulding_weight returns +-1
+    # unconditionally there, with no blend at all) -- nothing to report.
+    assert _goulding_blend('bull', a_co=0.5, a_re=0.5, r_fast=0.1, r_slow=0.1) is None
+    assert _goulding_blend('bear', a_co=0.5, a_re=0.5, r_fast=-0.1, r_slow=-0.1) is None
+
+
+def test_goulding_blend_none_and_missing_inputs():
+    assert _goulding_blend(None, a_co=0.5, a_re=0.5, r_fast=0.1, r_slow=0.1) is None
+    assert _goulding_blend('correction', a_co=0.5, a_re=0.5) is None
+    with pytest.raises(ValueError):
+        _goulding_blend('correction', a_co=2.0, a_re=0.5, r_fast=0.1, r_slow=-0.1)
