@@ -22,10 +22,13 @@ window in both schemes -- a real, capital-driven effect should show a
 consistent ranking across windows; a fluke should show high std/no stable
 ranking.
 
-Run:
-    python -m scripts.tsmom_vol_parity_window_scheme
-    python -m scripts.tsmom_vol_parity_window_scheme --capital-levels 80000,150000,300000,1000000
-    python -m scripts.tsmom_vol_parity_window_scheme --weighting-mode flat_discount --momentum-discount 1.0
+Run (registered console script -- see pyproject.toml's [project.scripts];
+lives in strats/, not scripts/, specifically so this cross-import resolves
+as an installed package regardless of invocation directory -- scripts/
+only works via `python -m scripts.X` run from the repo root):
+    tsmom-vol-parity-windows
+    tsmom-vol-parity-windows --capital-levels 80000,150000,300000,1000000
+    tsmom-vol-parity-windows --weighting-mode flat_discount --momentum-discount 1.0
 """
 from __future__ import annotations
 
@@ -36,11 +39,11 @@ from typing import Optional
 
 import polars as pl
 
+from derivatives_bt_engine.strats.tsmom_binary_vol_parity_backtest import DEFAULT_SYMBOLS, RESULTS_DIR, run
 from derivatives_bt_engine.strats.window_scheme_naked_futures import (
     generate_capped_rolling_windows,
     generate_expanding_windows,
 )
-from scripts.tsmom_binary_vol_parity_backtest import DEFAULT_SYMBOLS, RESULTS_DIR, run
 from derivatives_bt_engine.domain.tsmom_backtester import load_portfolio_data
 from derivatives_bt_engine.utils.logger import setup_logger
 

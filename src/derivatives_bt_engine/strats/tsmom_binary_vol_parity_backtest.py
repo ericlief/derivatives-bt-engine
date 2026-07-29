@@ -94,15 +94,20 @@ path read from this exact same series, so this affects all three backtest
 paths equally -- worth its own separate investigation/fix, not patched
 here.
 
-Run:
-    python -m scripts.tsmom_binary_vol_parity_backtest
-    python -m scripts.tsmom_binary_vol_parity_backtest --momentum-discounts 0.5,1.0 --years 2023-2026
-    python -m scripts.tsmom_binary_vol_parity_backtest --symbols ES,NQ,GC --years 2015-2026
+Run (registered console script, works from any directory -- see
+pyproject.toml's [project.scripts]; moved here from scripts/ specifically
+because that directory isn't an installed package, so
+tsmom_vol_parity_window_scheme.py's `from ... import run` couldn't resolve
+except when invoked as `python -m scripts.X` from the repo root):
+    tsmom-vol-parity
+    tsmom-vol-parity --momentum-discounts 0.5,1.0 --years 2023-2026
+    tsmom-vol-parity --symbols ES,NQ,GC --years 2015-2026
 """
 from __future__ import annotations
 
 import argparse
 import math
+import os
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -161,7 +166,13 @@ DEFAULT_VOL_TARGET_PCT_OF_CAPITAL = 0.01
 DEFAULT_MOMENTUM_DISCOUNTS = [0.5, 1.0]
 
 # ── Infrastructure ──────────────────────────────────────────────────────────
-RESULTS_DIR = 'results'  # always here -- no per-invocation prefix required
+# Anchored to the project root, not a bare relative "results" -- now that
+# this lives in strats/ as a registered console script (tsmom-vol-parity),
+# it can be invoked from any CWD, and a bare relative path would silently
+# create results/results if ever run from inside results/ itself (e.g.
+# after cd-ing there to inspect prior output) -- same reasoning
+# tsmom_backtest.py's own main() already uses for the identical problem.
+RESULTS_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'results'))
 
 # Goulding, Harvey & Mazzoleni (2023), "Breaking Bad Trends" -- eq. 4's
 # Bull/Correction/Bear/Rebound state classification and eq. 8-10's a_Co/a_Re
@@ -824,7 +835,11 @@ def parse_args():
     p.add_argument('--initial-capital', type=float, default=DEFAULT_INITIAL_CAPITAL)
     p.add_argument('--flat-vol-target', type=float, default=None,
                     help='Flat annualized $ vol target, same for every asset -- no clustering. '
-                         f'Default: derived as {DEFAULT_VOL_TARGET_PCT_OF_CAPITAL:.0%} of --initial-capital '
+                         # argparse's own HelpFormatter does `help_string % params` --
+                         # a literal "%" from the f-string (e.g. "1%") needs escaping to
+                         # "%%" or that later substitution raises TypeError: %o format
+                         # (confirmed directly -- this crashed --help entirely until fixed).
+                         f'Default: derived as {DEFAULT_VOL_TARGET_PCT_OF_CAPITAL:.0%}% of --initial-capital '
                          '(scales with it) rather than a fixed number -- pass this explicitly to '
                          'override that scaling and hold the USD target fixed instead')
     p.add_argument('--include-dynamic', action='store_true',

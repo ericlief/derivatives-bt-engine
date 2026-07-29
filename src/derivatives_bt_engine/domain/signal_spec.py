@@ -97,7 +97,7 @@ class SignalSpec:
     # for _goulding_weight(), NOT estimated in this module. Pooled,
     # expanding-window a_Co/a_Re ESTIMATION (eq. 8-10) is a multi-symbol
     # process that doesn't fit this module's per-symbol, stateless
-    # functions -- see scripts/tsmom_binary_vol_parity_backtest.py's
+    # functions -- see src/derivatives_bt_engine/strats/tsmom_binary_vol_parity_backtest.py's
     # _estimate_mixing_params, which already implements it and passes the
     # result into _goulding_weight directly. 0.5/0.5 is the paper's own
     # uninformed fallback and collapses eq. 7 to a flat, no-op reweight.
@@ -337,7 +337,7 @@ def _goulding_blend(regime_val: Optional[str], a_co: float, a_re: float,
     Correction, (1-a_Re)*r_SLOW + a_Re*r_FAST in Rebound -- BEFORE taking
     its sign. Exposed separately from _goulding_weight (which calls this
     internally and only ever returns sign(this)) purely for audit/display,
-    e.g. scripts/tsmom_binary_vol_parity_backtest.py's rebalance CSV
+    e.g. src/derivatives_bt_engine/strats/tsmom_binary_vol_parity_backtest.py's rebalance CSV
     reporting the raw score alongside the actual +-1/0 position weight, so
     a reader isn't left wondering how e.g. a_co=0.5 (which looks like it
     should be a "neutral" input) produced a nonzero directional weight --
@@ -398,7 +398,7 @@ def _goulding_weight(regime_val: Optional[str], a_co: float, a_re: float,
     genuine look-ahead; this function has no way to detect that misuse
     from the float values alone, so getting the caller's r_fast/r_slow
     right is the caller's responsibility (see
-    scripts/tsmom_binary_vol_parity_backtest.py's own g_fast/g_slow, which
+    src/derivatives_bt_engine/strats/tsmom_binary_vol_parity_backtest.py's own g_fast/g_slow, which
     are goulding_monthly's `fast`/`slow` read via a forward-matched
     rebalance-date join -- verified end to end, not merely assumed).
 

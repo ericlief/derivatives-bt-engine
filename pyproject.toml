@@ -47,6 +47,8 @@ long-futures = "derivatives_bt_engine.strats.long_futures:main"
 window-naked = "derivatives_bt_engine.strats.window_scheme_naked_futures:main"
 window-bull-put = "derivatives_bt_engine.strats.window_scheme_bull_put:main"
 window-iron-condor = "derivatives_bt_engine.strats.window_scheme_iron_condor:main"
+tsmom-vol-parity = "derivatives_bt_engine.strats.tsmom_binary_vol_parity_backtest:main"
+tsmom-vol-parity-windows = "derivatives_bt_engine.strats.tsmom_vol_parity_window_scheme:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
