@@ -76,6 +76,7 @@ def _data_end(symbols: list[str]) -> str:
 def run_window_scheme(symbols: list[str], capital_levels: list[float],
                        weighting_mode: str = DEFAULT_WEIGHTING_MODE,
                        momentum_discount: float = DEFAULT_WINDOW_MOMENTUM_DISCOUNT,
+                       target_portfolio_vol: Optional[float] = None,
                        data_end: Optional[str] = None) -> pl.DataFrame:
     """One row per (scheme, window, capital). Each run() call is
     independent/stateless (same reasoning tsmom_grid_search.py's own
@@ -83,7 +84,20 @@ def run_window_scheme(symbols: list[str], capital_levels: list[float],
     (e.g. a window too short for any symbol to have data at all) is
     caught and recorded with sharpe=None rather than aborting the whole
     sweep -- matches window_scheme_naked_futures.py's run_windows' own
-    per-window try/except."""
+    per-window try/except.
+
+    target_portfolio_vol: None (default) leaves each capital level's own
+    flat_per_asset_vol_target_usd exactly as run()'s own default derives it
+    (DEFAULT_VOL_TARGET_PCT_OF_CAPITAL of that capital). When set (e.g.
+    0.15), every (window, capital) combo instead calibrates its own budget
+    to hit this SAME realized portfolio vol -- see run()'s own docstring.
+    Directly answers the capital-level Sharpe investigation's open
+    question: once every capital level targets the same realized vol
+    (removing the confound of low capital implicitly running at LOWER
+    effective leverage/vol than high capital), does the earlier
+    capital-driven Sharpe gap (e.g. $80k trailing $300k) shrink, or
+    persist as a genuinely separate effect (rounding/cluster-floor
+    breadth, not leverage)?"""
     if data_end is None:
         data_end = _data_end(symbols)
     windows_b = generate_expanding_windows(ANCHOR_START_DATE, data_end, STEP_YEARS)
@@ -101,7 +115,8 @@ def run_window_scheme(symbols: list[str], capital_levels: list[float],
                 done += 1
                 try:
                     result = run(symbols, start, end, momentum_discount,
-                                 weighting_mode=weighting_mode, initial_capital=cap)
+                                 weighting_mode=weighting_mode, initial_capital=cap,
+                                 target_portfolio_vol=target_portfolio_vol)
                     row = {'scheme': scheme_name, 'window_start': w_start, 'window_end': w_end,
                            'window_years': window_years, 'capital': cap, 'error': None, **result}
                 except Exception as e:
@@ -140,7 +155,8 @@ def summarize(df: pl.DataFrame) -> pl.DataFrame:
 
 
 def _param_str(symbols: list[str], capital_levels: list[float],
-                weighting_mode: str, momentum_discount: float) -> str:
+                weighting_mode: str, momentum_discount: float,
+                target_portfolio_vol: Optional[float] = None) -> str:
     """Compact param string for the saved filenames -- same convention
     bull_put_param_search.py/iron_condor_param_search.py already use
     (param values embedded in the filename itself, not just a bare
@@ -155,7 +171,8 @@ def _param_str(symbols: list[str], capital_levels: list[float],
     cap_str = '-'.join(_fmt_cap(c) for c in capital_levels)
 
     mode_str = weighting_mode if weighting_mode == 'dynamic' else f"{weighting_mode}{momentum_discount}"
-    return f"{symbol_str}_{mode_str}_cap{cap_str}"
+    vol_str = f"_vt{target_portfolio_vol:g}" if target_portfolio_vol is not None else ''
+    return f"{symbol_str}_{mode_str}_cap{cap_str}{vol_str}"
 
 
 def parse_args():
@@ -168,6 +185,12 @@ def parse_args():
                     help='(default: %(default)s)')
     p.add_argument('--momentum-discount', type=float, default=DEFAULT_WINDOW_MOMENTUM_DISCOUNT,
                     help='Only used when --weighting-mode flat_discount (default: %(default)s)')
+    p.add_argument('--target-portfolio-vol', type=float, default=None,
+                    help='Calibrate every (window, capital) combo\'s own flat_per_asset_vol_target_usd '
+                         'to hit this SAME realized annualized portfolio vol (e.g. 0.15), instead of '
+                         "each capital level using run()'s own default (a fixed %% of that capital) "
+                         'as-is -- see run_window_scheme()/run()\'s own docstrings. Roughly doubles '
+                         'this sweep\'s total runtime (default: off)')
     p.add_argument('--save-results', action='store_true',
                     help='Write {tag}_{params}_window_scheme.csv (every run) and '
                          '{tag}_{params}_window_scheme_summary.csv (per scheme/capital mean/std) to '
@@ -183,7 +206,8 @@ def main():
     capital_levels = [float(c.strip()) for c in args.capital_levels.split(',') if c.strip()]
 
     df = run_window_scheme(symbols, capital_levels, weighting_mode=args.weighting_mode,
-                            momentum_discount=args.momentum_discount)
+                            momentum_discount=args.momentum_discount,
+                            target_portfolio_vol=args.target_portfolio_vol)
     summary = summarize(df)
 
     print()
@@ -199,7 +223,8 @@ def main():
         results_dir = Path(RESULTS_DIR)
         results_dir.mkdir(parents=True, exist_ok=True)
         ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-        param_str = _param_str(symbols, capital_levels, args.weighting_mode, args.momentum_discount)
+        param_str = _param_str(symbols, capital_levels, args.weighting_mode, args.momentum_discount,
+                                target_portfolio_vol=args.target_portfolio_vol)
         detail_path = results_dir / f"{ts}_{param_str}_window_scheme.csv"
         summary_path = results_dir / f"{ts}_{param_str}_window_scheme_summary.csv"
         df.with_columns(pl.col(pl.Float64).round(4)).write_csv(detail_path)

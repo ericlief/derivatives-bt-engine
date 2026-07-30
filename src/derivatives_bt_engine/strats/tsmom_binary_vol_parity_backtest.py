@@ -381,14 +381,45 @@ def _estimate_mixing_params(history: pl.DataFrame, as_of: date, cluster: Optiona
 def run(symbols: list[str], start: date, end: date, momentum_discount: float,
         initial_capital: float = DEFAULT_INITIAL_CAPITAL,
         flat_per_asset_vol_target_usd: Optional[float] = None,
+        target_portfolio_vol: Optional[float] = None,
         warmup_start: Optional[date] = None,
         weighting_mode: str = 'flat_discount',
         mixing_pool: str = DEFAULT_MIXING_POOL,
         active_set_redistribution: bool = DEFAULT_ACTIVE_SET_REDISTRIBUTION,
         guarantee_cluster_representation: bool = DEFAULT_GUARANTEE_CLUSTER_REPRESENTATION,
         save_results: bool = False,
-        results_tag: Optional[str] = None) -> dict:
-    """flat_per_asset_vol_target_usd: None (default) derives it as
+        results_tag: Optional[str] = None,
+        _quiet: bool = False) -> dict:
+    """target_portfolio_vol: None (default) leaves flat_per_asset_vol_target_usd
+    exactly as given/derived (this project's original behaviour). When set
+    (e.g. 0.15, matching the live system's own target_portfolio_vol
+    convention -- see scripts/tsmom_risk_budget_diagnostic.py's identical
+    default), run() instead calibrates flat_per_asset_vol_target_usd so the
+    backtest's REALIZED annualized portfolio vol (ann_vol_pct) lands at this
+    target: it first simulates once at the flat/uncalibrated budget purely
+    to measure realized vol, then rescales the budget by
+    (target_portfolio_vol / realized_vol) and simulates again for the
+    actual, returned result. Implemented as a single internal recursive
+    call (with _quiet=True, an internal-only flag that also suppresses this
+    calibration pass's own console output) rather than an iterated fixed
+    point -- this module's own top docstring already establishes Sharpe is
+    invariant to a uniform leverage rescale in a frictionless world, so one
+    rescale gets close; it isn't exact here because rounding/cluster-floor
+    effects are nonlinear in budget, but re-running to full convergence
+    would cost yet another full simulation for a typically small remaining
+    error, not worth it for a backtest utility. If the calibration pass's
+    own realized vol comes out exactly 0 (e.g. every symbol rounds to 0
+    contracts even at the flat budget), there is nothing sensible to scale
+    by, so flat_per_asset_vol_target_usd is left unchanged and only
+    simulated once. Directly motivated by the capital-level Sharpe
+    investigation earlier in this project's history: raising the flat
+    per-asset budget at low capital (implicitly, more leverage) measurably
+    improves Sharpe by shrinking contract-rounding distortion, but doing
+    that via trial-and-error --flat-vol-target values has no natural
+    stopping point -- targeting a specific portfolio vol (the same
+    methodology already used live) gives a principled, comparable one.
+
+    flat_per_asset_vol_target_usd: None (default) derives it as
     DEFAULT_VOL_TARGET_PCT_OF_CAPITAL * initial_capital -- the SAME flat
     USD figure applied to every asset either way (vol parity's whole
     point), but scaled to whatever capital this run actually uses instead
@@ -495,6 +526,30 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
         raise ValueError(f"mixing_pool must be 'cluster' or 'global', got {mixing_pool!r}")
     if flat_per_asset_vol_target_usd is None:
         flat_per_asset_vol_target_usd = DEFAULT_VOL_TARGET_PCT_OF_CAPITAL * initial_capital
+
+    if target_portfolio_vol is not None and not _quiet:
+        # See target_portfolio_vol's own docstring above for the full
+        # rationale -- single calibration pass, not an iterated fixed
+        # point. `not _quiet` guards against this calibration call itself
+        # recursing again (it always passes _quiet=True below, so this
+        # branch is never entered a second time no matter what
+        # target_portfolio_vol the caller passed).
+        baseline = run(symbols, start, end, momentum_discount,
+                        initial_capital=initial_capital,
+                        flat_per_asset_vol_target_usd=flat_per_asset_vol_target_usd,
+                        warmup_start=warmup_start, weighting_mode=weighting_mode,
+                        mixing_pool=mixing_pool,
+                        active_set_redistribution=active_set_redistribution,
+                        guarantee_cluster_representation=guarantee_cluster_representation,
+                        save_results=False, results_tag=None, _quiet=True)
+        realized_vol = (baseline['ann_vol_pct'] or 0) / 100
+        if realized_vol > 0:
+            flat_per_asset_vol_target_usd = flat_per_asset_vol_target_usd * (target_portfolio_vol / realized_vol)
+        # else: realized_vol == 0 (e.g. every symbol rounds to 0 contracts
+        # even at the flat budget) -- nothing sensible to scale by; fall
+        # through and simulate once, below, at the ORIGINAL
+        # flat_per_asset_vol_target_usd unchanged.
+
     if warmup_start is None:
         warmup_start = start - timedelta(days=WARMUP_DAYS_BEFORE_START)
     price_data, _ = load_portfolio_data(symbols)
@@ -979,13 +1034,18 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
             .sort('pct_zero', descending=True)
         )
         high_zero = sizing_diag.filter(pl.col('pct_zero') > SIZING_ZERO_WARN_THRESHOLD)
-        if high_zero.height > 0:
+        if high_zero.height > 0 and not _quiet:
             # print(), not logger.warning() -- this project's shared
             # setup_logger() filters WARNING/ERROR out of console output
             # entirely (still reaches the log file, just not stdout), and
             # this diagnostic specifically needs to be seen without
             # digging through logs/ -- same reasoning as the summary/
-            # comparison tables below already using print().
+            # comparison tables below already using print(). `not _quiet`
+            # additionally suppresses this during target_portfolio_vol's
+            # own internal calibration pass, whose diagnostics are about a
+            # budget that's about to be rescaled away and would otherwise
+            # print twice (once for the calibration pass, once for the
+            # real, final result) for every calibrated run.
             print()
             print(f"=== WARNING: {weighting_mode} -- {high_zero.height}/{sizing_diag.height} symbol(s) round to "
                   f"0 contracts on >{SIZING_ZERO_WARN_THRESHOLD:.0%} of rebalances at "
@@ -1071,6 +1131,14 @@ def parse_args():
                          f'Default: derived as {DEFAULT_VOL_TARGET_PCT_OF_CAPITAL:.0%}% of --initial-capital '
                          '(scales with it) rather than a fixed number -- pass this explicitly to '
                          'override that scaling and hold the USD target fixed instead')
+    p.add_argument('--target-portfolio-vol', type=float, default=None,
+                    help="Calibrate --flat-vol-target so REALIZED annualized portfolio vol lands "
+                         "at this target (e.g. 0.15 -- matches the live system's own "
+                         "target_portfolio_vol convention, see "
+                         "scripts/tsmom_risk_budget_diagnostic.py), instead of using --flat-vol-target's "
+                         "own value/default as-is. Runs one internal calibration pass first (see run()'s "
+                         "own docstring) -- roughly doubles this run's time. Default: off (--flat-vol-target "
+                         "is used exactly as given/derived)")
     p.add_argument('--include-dynamic', action='store_true',
                     help="Also run the paper's own eq. 4/7-10 dynamic a_Co/a_Re "
                          "reweighting (Goulding/Harvey/Mazzoleni), alongside the "
@@ -1142,6 +1210,7 @@ def main():
         result = run(symbols, start, end, discount,
                       initial_capital=args.initial_capital,
                       flat_per_asset_vol_target_usd=args.flat_vol_target,
+                      target_portfolio_vol=args.target_portfolio_vol,
                       active_set_redistribution=not args.no_active_set_redistribution,
                       guarantee_cluster_representation=not args.no_cluster_floor,
                       save_results=args.save_results, results_tag=results_tag)
@@ -1152,6 +1221,7 @@ def main():
         result = run(symbols, start, end, momentum_discount=1.0,
                       initial_capital=args.initial_capital,
                       flat_per_asset_vol_target_usd=args.flat_vol_target,
+                      target_portfolio_vol=args.target_portfolio_vol,
                       weighting_mode='dynamic', mixing_pool=args.mixing_pool,
                       active_set_redistribution=not args.no_active_set_redistribution,
                       guarantee_cluster_representation=not args.no_cluster_floor,
