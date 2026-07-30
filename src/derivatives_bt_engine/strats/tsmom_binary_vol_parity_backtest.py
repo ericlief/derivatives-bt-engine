@@ -106,16 +106,15 @@ except when invoked as `python -m scripts.X` from the repo root):
 from __future__ import annotations
 
 import argparse
-import itertools
 import math
 import os
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
-import numpy as np
 import polars as pl
 
+from derivatives_bt_engine.domain.allocation import _bounded_ewm_correlation_matrix, compute_idm
 from derivatives_bt_engine.domain.instruments import get_spec, resolve_active_months, resolve_annualization_days
 from derivatives_bt_engine.domain.signal_spec import (
     SignalSpec,
@@ -246,9 +245,6 @@ DEFAULT_IDM_HALFLIFE_DAYS = 63.0    # matches this project's existing
                                      # halflife is plausibly more
                                      # appropriate (correlation is slower-
                                      # moving than vol) but untested here
-MIN_IDM_WINDOW_ROWS = 63             # minimum rows in the bounded window
-                                     # before trusting a correlation
-                                     # estimate at all
 
 
 def _build_returns_wide(price_data: dict[str, pl.DataFrame]) -> pl.DataFrame:
@@ -268,102 +264,6 @@ def _build_returns_wide(price_data: dict[str, pl.DataFrame]) -> pl.DataFrame:
         s = df.sort('ts_event').select('ts_event', pl.col('close').pct_change().alias(sym))
         wide = s if wide is None else wide.join(s, on='ts_event', how='inner')
     return wide.sort('ts_event').drop_nulls()
-
-
-def _bounded_ewm_correlation_matrix(returns_wide: pl.DataFrame, symbols: list[str], as_of: date,
-                                     window_years: float, halflife: float,
-                                     min_rows: int = MIN_IDM_WINDOW_ROWS) -> Optional[dict[tuple[str, str], float]]:
-    """Pairwise EWM-weighted correlation among `symbols`, computed ONLY
-    from the trailing `window_years` slice of returns_wide ending
-    STRICTLY before `as_of` (`< as_of`, matching _estimate_mixing_params's
-    own no-lookahead `date < as_of` convention elsewhere in this module) --
-    a genuinely BOUNDED window, not an unbounded full-history EWM. This
-    distinction matters: a plain `.ewm_mean(half_life=h)` applied to the
-    ENTIRE historical series never fully zeroes out old data -- it decays
-    toward negligible weight but asymptotically, so a few percent of a
-    2026 correlation estimate could technically still trace back to 2010
-    even at a short halflife. Slicing to a bounded window FIRST, then
-    computing the EWM only within that slice, guarantees exactly zero
-    weight on anything older than `window_years` -- the EWM only supplies
-    the within-window recency emphasis (Carver's "regime" weighting),
-    not the outer bound on history.
-
-    EWM correlation itself is the standard product-moment formula (no
-    pandas .ewm().cov() equivalent needed -- polars' own
-    `.ewm_mean(half_life=...)` is sufficient to build it directly):
-        ewm_cov(x, y)  = ewm_mean(x*y) - ewm_mean(x) * ewm_mean(y)
-        ewm_var(x)     = ewm_mean(x*x) - ewm_mean(x) ** 2
-        ewm_corr(x, y) = ewm_cov(x, y) / sqrt(ewm_var(x) * ewm_var(y))
-    evaluated at the LAST row of the bounded slice (i.e. the most recent
-    EWM value as of the end of that window).
-
-    Returns {(a, b): corr} for every pair of `symbols` present as columns
-    in returns_wide (a symbol missing from returns_wide -- e.g. too new to
-    have a synchronized row yet -- is silently excluded from all pairs,
-    not errored); an empty dict if fewer than 2 symbols are present; or
-    None if the bounded slice itself has fewer than `min_rows` (too little
-    history this early in the backtest to trust any correlation
-    estimate)."""
-    window_start = as_of - timedelta(days=int(window_years * 365.25))
-    sl = returns_wide.filter((pl.col('ts_event') >= window_start) & (pl.col('ts_event') < as_of))
-    if sl.height < min_rows:
-        return None
-
-    present = [s for s in symbols if s in sl.columns]
-    if len(present) < 2:
-        return {}
-
-    pairs = list(itertools.combinations(present, 2))
-    exprs = []
-    for a, b in pairs:
-        mean_a = pl.col(a).ewm_mean(half_life=halflife)
-        mean_b = pl.col(b).ewm_mean(half_life=halflife)
-        mean_ab = (pl.col(a) * pl.col(b)).ewm_mean(half_life=halflife)
-        mean_a2 = (pl.col(a) * pl.col(a)).ewm_mean(half_life=halflife)
-        mean_b2 = (pl.col(b) * pl.col(b)).ewm_mean(half_life=halflife)
-        cov = mean_ab - mean_a * mean_b
-        var_a = mean_a2 - mean_a ** 2
-        var_b = mean_b2 - mean_b ** 2
-        exprs.append((cov / (var_a * var_b).sqrt()).last().alias(f'{a}__{b}'))
-
-    row = sl.select(exprs).row(0)
-    return {pair: val for pair, val in zip(pairs, row) if val is not None and not math.isnan(val)}
-
-
-def compute_idm(active_symbols: list[str], corr_pairs: Optional[dict[tuple[str, str], float]]) -> float:
-    """Carver's Instrument Diversification Multiplier, exact matrix form:
-    IDM = 1 / sqrt(W @ H @ W_t) -- W the equal-weight vector (1/n each,
-    matching this script's own flat vol-parity design: every symbol
-    already gets the same nominal budget here, so W is uniform -- not yet
-    informed by e.g. apply_cluster_risk_cap's own conviction-priority
-    weighting, which this script doesn't have), H the REAL pairwise
-    correlation matrix (1.0 on the diagonal, corr_pairs off it) -- NOT the
-    average-correlation algebraic shortcut (1/sqrt(1/N + (1-1/N)*avg_corr)),
-    which is only exactly equivalent to this when every pairwise
-    correlation happens to be identical. Since
-    _bounded_ewm_correlation_matrix already computes every individual
-    pair, using the real matrix costs nothing extra over averaging them
-    down to one scalar first.
-
-    Falls back to 1.0 (no diversification adjustment -- this script's
-    pre-IDM behaviour) whenever there's nothing meaningful to compute
-    from: fewer than 2 active_symbols, or corr_pairs is None/empty (not
-    enough bounded-window history yet, or fewer than 2 symbols had
-    synchronized return data)."""
-    n = len(active_symbols)
-    if n < 2 or not corr_pairs:
-        return 1.0
-    idx = {s: i for i, s in enumerate(active_symbols)}
-    h = np.eye(n)
-    for (a, b), corr in corr_pairs.items():
-        if a in idx and b in idx:
-            i, j = idx[a], idx[b]
-            h[i, j] = h[j, i] = corr
-    w = np.full(n, 1.0 / n)
-    port_var = w @ h @ w
-    if port_var <= 0:
-        return 1.0
-    return 1.0 / math.sqrt(port_var)
 
 
 def _build_monthly_state_return_history(rebal_monthly: dict[str, pl.DataFrame],

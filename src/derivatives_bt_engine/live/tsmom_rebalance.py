@@ -27,13 +27,11 @@ from ib_tools.ibpysync import IBPySync
 
 from derivatives_bt_engine.domain.enums import TrendRegime, VolRegime
 from derivatives_bt_engine.domain.instruments import resolve_annualization_days, resolve_signal_symbol
+from derivatives_bt_engine.domain.allocation import apply_cluster_risk_cap, compute_desired_risk_budget, compute_n_effective
 from derivatives_bt_engine.domain.signal_spec import build_features, continuous_momentum
 from derivatives_bt_engine.domain.tsmom_signal import (
-    apply_cluster_risk_cap,
     classify_regime,
     classify_signal_confidence,
-    compute_desired_risk_budget,
-    compute_n_effective,
     compute_position_scalar,
     compute_signal_confidence,
     compute_vol_ratio,
