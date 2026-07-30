@@ -223,6 +223,26 @@ def apply_cluster_risk_cap(targets: list[dict], max_cluster_risk_pct: float,
 MIN_IDM_WINDOW_ROWS = 63
 
 
+def build_returns_wide(price_data: dict[str, pl.DataFrame]) -> pl.DataFrame:
+    """One row per date (inner-joined across every symbol's own daily
+    close -- only dates common to ALL symbols survive), one column per
+    symbol, values = that symbol's own simple daily return
+    (close.pct_change()). Pure polars -- no pandas, per this project's own
+    CLAUDE.md convention (pandas stays scoped to a single library call
+    site, e.g. HRPOpt, never leaks into general data-handling code).
+    Shared by every caller of _bounded_ewm_correlation_matrix (both TSMOM
+    backtesters) -- build ONCE per backtest run and reuse at every
+    rebalance date's own bounded-window slice; recomputing the raw return
+    series per rebalance would be pure waste, only the EWM calc itself
+    genuinely needs to run once per (rebalance date, bounded window)
+    pair."""
+    wide = None
+    for sym, df in price_data.items():
+        s = df.sort('ts_event').select('ts_event', pl.col('close').pct_change().alias(sym))
+        wide = s if wide is None else wide.join(s, on='ts_event', how='inner')
+    return wide.sort('ts_event').drop_nulls()
+
+
 def _bounded_ewm_correlation_matrix(returns_wide: pl.DataFrame, symbols: list[str], as_of: date,
                                      window_years: float, halflife: float,
                                      min_rows: int = MIN_IDM_WINDOW_ROWS) -> Optional[dict[tuple[str, str], float]]:

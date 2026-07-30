@@ -114,7 +114,7 @@ from typing import Optional
 
 import polars as pl
 
-from derivatives_bt_engine.domain.allocation import _bounded_ewm_correlation_matrix, compute_idm
+from derivatives_bt_engine.domain.allocation import _bounded_ewm_correlation_matrix, build_returns_wide, compute_idm
 from derivatives_bt_engine.domain.instruments import get_spec, resolve_active_months, resolve_annualization_days
 from derivatives_bt_engine.domain.signal_spec import (
     SignalSpec,
@@ -245,25 +245,6 @@ DEFAULT_IDM_HALFLIFE_DAYS = 63.0    # matches this project's existing
                                      # halflife is plausibly more
                                      # appropriate (correlation is slower-
                                      # moving than vol) but untested here
-
-
-def _build_returns_wide(price_data: dict[str, pl.DataFrame]) -> pl.DataFrame:
-    """One row per date (inner-joined across every symbol's own daily
-    close -- only dates common to ALL symbols survive), one column per
-    symbol, values = that symbol's own simple daily return
-    (close.pct_change()). Pure polars -- no pandas, per this project's own
-    CLAUDE.md convention (pandas stays scoped to a single library call
-    site, e.g. HRPOpt, never leaks into general data-handling code).
-    Built ONCE per run() call (when idm_scaling is on) and reused at every
-    rebalance date's own bounded-window slice inside
-    _bounded_ewm_correlation_matrix -- recomputing the raw return series
-    per rebalance would be pure waste; only the EWM calc itself genuinely
-    needs to run once per (rebalance date, bounded window) pair."""
-    wide = None
-    for sym, df in price_data.items():
-        s = df.sort('ts_event').select('ts_event', pl.col('close').pct_change().alias(sym))
-        wide = s if wide is None else wide.join(s, on='ts_event', how='inner')
-    return wide.sort('ts_event').drop_nulls()
 
 
 def _build_monthly_state_return_history(rebal_monthly: dict[str, pl.DataFrame],
@@ -623,7 +604,7 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
     # when idm_scaling is actually requested, since this is an extra
     # inner-join + pct_change pass over every symbol's full history that
     # every other weighting_mode/toggle combination has no use for.
-    returns_wide = _build_returns_wide(price_data) if idm_scaling else None
+    returns_wide = build_returns_wide(price_data) if idm_scaling else None
     # Resolved once per symbol and reused both for the signal itself (so
     # avg_r_fast/avg_r_slow/hv_fast/hv_slow report in each instrument's own
     # real trading-days/year, per continuous_momentum's own docstring) AND

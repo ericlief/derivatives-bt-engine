@@ -67,6 +67,21 @@ def parse_args():
                         "elevated de-risking) entirely -- isolates the effect of "
                         "ts-exit/entry-threshold/exit-on-ts-crossover alone, without VIX interference "
                         "(default: VIX gating on, matching all prior behavior)")
+    p.add_argument('--target-portfolio-vol', type=float, default=None,
+                   help="Correlation-aware sizing (default: off, reproducing this module's original "
+                        "per-symbol max-notional sizing, which has NO cross-instrument diversification "
+                        "correction at all). When set (e.g. 0.15), each rebalance's per-symbol budget "
+                        "is instead derived from current capital * this value * a real Carver-style IDM "
+                        "computed from a bounded trailing-window EWM correlation matrix over that "
+                        "rebalance's own active symbols -- see TsmomBacktestConfig's own docstring for "
+                        "the full derivation and a confirmed, honestly-documented calibration caveat "
+                        "(fixes the unbounded-overstatement direction of the bug, not exactly precise)")
+    p.add_argument('--idm-window-years', type=float, default=3.0,
+                   help='Only used with --target-portfolio-vol: bounded trailing window for the EWM '
+                        'correlation estimate (default: %(default)s)')
+    p.add_argument('--idm-halflife-days', type=float, default=63.0,
+                   help='Only used with --target-portfolio-vol: EWM halflife within the bounded window '
+                        '(default: %(default)s)')
     p.add_argument('--no-save', action='store_true', help='Skip saving daily_mtm/trend_signals to results/')
     return p.parse_args()
 
@@ -105,6 +120,9 @@ def main():
         exit_on_ts_crossover=args.exit_on_ts_crossover,
         fixed_quantities=fixed_quantities,
         vix_gating=not args.disable_vix_gating,
+        target_portfolio_vol=args.target_portfolio_vol,
+        idm_window_years=args.idm_window_years,
+        idm_halflife_days=args.idm_halflife_days,
     )
 
     result = run_tsmom_backtest(config)

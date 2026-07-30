@@ -27,6 +27,7 @@ from typing import Optional
 import duckdb
 import polars as pl
 
+from derivatives_bt_engine.domain.allocation import _bounded_ewm_correlation_matrix, build_returns_wide, compute_idm
 from derivatives_bt_engine.domain.enums import TrendRegime, VolRegime
 from derivatives_bt_engine.domain.futures_dataloader import FuturesDataLoader, assert_monotonic_expiration
 from derivatives_bt_engine.domain.instruments import (
@@ -114,6 +115,60 @@ class TsmomBacktestConfig:
     # differently-cadenced portfolio-wide gate makes it harder to isolate
     # what's actually being tested.
     vix_gating: bool = True
+    # Correlation-aware sizing -- None (default) preserves this module's
+    # original behaviour exactly: every symbol independently sized to
+    # config.max_notional * scalar / contract_notional, with NOTHING
+    # scaling the book down for holding multiple symbols at once. Confirmed
+    # directly (2026-07) that this has no diversification correction of any
+    # kind anywhere -- no n_effective, no sqrt(N), no correlation term --
+    # which is exactly why a correlated multi-symbol backtest run here
+    # overstated realized vol 82-90% against a 15% target (see
+    # derivatives_bt_engine.strats.tsmom_binary_vol_parity_backtest's own
+    # module docstring, which documents this as the reason that script was
+    # built with a deliberately simpler sizing scheme instead of reusing
+    # this one).
+    #
+    # When set (e.g. 0.15), run_tsmom_backtest instead derives EACH
+    # rebalance's own per-symbol notional_budget from
+    # domain.allocation.compute_idm/build_returns_wide/
+    # _bounded_ewm_correlation_matrix: total_budget = current capital *
+    # target_portfolio_vol * IDM (IDM computed from that rebalance's own
+    # signal-active symbols' REAL correlation, over a bounded trailing EWM
+    # window -- idm_window_years/idm_halflife_days below), split equally
+    # across those active symbols. At the degenerate zero-correlation case
+    # this reduces exactly to
+    # account_equity * target_portfolio_vol / sqrt(n_effective) -- the same
+    # formula the live system's own compute_desired_risk_budget already
+    # uses (see derivatives_bt_engine.domain.allocation) -- so this is a
+    # strict generalization of that existing, live-validated formula to
+    # the REAL measured correlation, not a novel scheme invented here.
+    #
+    # Scope: only affects the standard monthly-rebalance vol-targeted path
+    # (the branch this module's documented overstated-vol finding was
+    # actually measured on). Deliberately NOT wired into the pre-start_date
+    # seed rebalance or the signal_gate_mode='daily' off-cycle path -- both
+    # are separate, less-used code paths; extending this into them is a
+    # deliberate follow-up, not an oversight, kept out of this change to
+    # stay scoped to the diagnosed bug. Has no effect when fixed_quantities
+    # is set (that mode never reads max_notional/notional_budget at all).
+    #
+    # Confirmed directly this FIXES the unbounded-overstatement direction of
+    # the bug (a 12-symbol/$500k-notional run that overstated realized vol
+    # at 25.37% against a 15% target came down to 7.16% with this on) but is
+    # NOT precisely calibrated to target_portfolio_vol -- it undershot by
+    # roughly 2x in that same test. Same root cause as the single-shot
+    # calibration imprecision already documented in
+    # tsmom_binary_vol_parity_backtest.py's own target_portfolio_vol
+    # feature: a point-in-time bounded-window IDM/correlation estimate,
+    # re-estimated at each rebalance, won't exactly match whatever
+    # correlation structure the FULL backtest period actually realizes.
+    # Treat this as "no longer structurally broken," not "hits its target
+    # precisely" -- tightening that (e.g. an iterated rescale, matching the
+    # sibling script's own calibration pattern) is a deliberate follow-up,
+    # not implemented here.
+    target_portfolio_vol: Optional[float] = None
+    idm_window_years: float = 3.0
+    idm_halflife_days: float = 63.0
 
     def __post_init__(self):
         if self.signal_gate_mode not in ('off', 'monthly', 'daily'):
@@ -380,7 +435,8 @@ def _vix_regime_at(vix: pl.DataFrame, d: date) -> tuple[VolRegime, Optional[floa
 
 def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: date,
                          futures_types: dict[str, dict], config: TsmomBacktestConfig,
-                         market_stress_scale: float, annualization_days: int) -> Optional[dict]:
+                         market_stress_scale: float, annualization_days: int,
+                         notional_budget: Optional[float] = None) -> Optional[dict]:
     """Signal + vol-targeted (or fixed-quantity) sizing for one symbol as of
     date `d`, reading from `precomputed` -- each symbol's full
     continuous_momentum output, computed ONCE for the whole unbounded
@@ -393,7 +449,14 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
     would otherwise need to run for every symbol on every calendar day to
     support daily entry/exit checking. None if there isn't yet enough
     history for a signal at all (continuous_momentum's own `signal`
-    column is null until ts_fast has 63 bars)."""
+    column is null until ts_fast has 63 bars).
+
+    notional_budget: None (default) uses config.max_notional, exactly as
+    before. A caller doing correlation-aware sizing (see
+    run_tsmom_backtest's own target_portfolio_vol handling) passes an
+    explicit per-rebalance, IDM-derived override instead -- only affects
+    the non-fixed_quantities branch below (fixed_quantities' own sizing
+    never reads max_notional/notional_budget at all)."""
     row = precomputed[symbol].filter(pl.col('ts_event') == d)
     if row.height == 0:
         return None
@@ -453,12 +516,21 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
             direction = 1 if signal_for_scalar > 0 else -1
             target = direction * round(fixed_qty * market_stress_scale)
     else:
+        budget = notional_budget if notional_budget is not None else config.max_notional
         contract_notional = last_close * mult
-        target = round((config.max_notional * scalar) / contract_notional) if contract_notional else 0
+        target = round((budget * scalar) / contract_notional) if contract_notional else 0
     target = max(-config.max_contracts, min(config.max_contracts, target))
 
     return {
         'target': target, 'signal': trend_strength, 'regime': regime,
+        # scalar itself (pre-notional-conversion, post-market_stress_scale) --
+        # not printed/logged anywhere before this, needed by
+        # run_tsmom_backtest's target_portfolio_vol handling to decide which
+        # symbols are genuinely signal-active (scalar != 0) independent of
+        # any particular notional_budget's own rounding, since a symbol that
+        # rounds to 0 contracts at one budget can still be "active" at a
+        # bigger one (see run_tsmom_backtest's own two-pass comment).
+        'scalar': scalar,
         'hv': hv, 'risk_scalar': risk_scalar * market_stress_scale, 'momentum_discount': momentum_discount,
         'close': last_close, 'dd_pct': dd_pct,
         # Raw signal-row fields, straight from continuous_momentum, purely
@@ -515,6 +587,12 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
         for s in config.symbols
     }
     futures_types = {s: get_spec(s) for s in config.symbols}
+    # Built once (reusing full_price_data already loaded above), reused at
+    # every rebalance date's own bounded-window slice -- only when
+    # target_portfolio_vol is actually set, since this is an extra
+    # inner-join + pct_change pass over every symbol's full history that
+    # the module's original (default) sizing has no use for.
+    returns_wide = build_returns_wide(full_price_data) if config.target_portfolio_vol is not None else None
 
     windowed = {}
     for symbol, df in full_price_data.items():
@@ -821,14 +899,102 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
                                   signal={'close': close})
             else:
                 market_stress_scale = VIX_ELEVATED_SCALE if vol_regime == VolRegime.ELEVATED else 1.0
-                for symbol in config.symbols:
-                    result = _compute_signal_row(symbol, precomputed, d, futures_types, config,
-                                                  market_stress_scale, annualization_by_symbol[symbol])
-                    if result is None:
-                        continue
-                    target, gate_reason = _apply_signal_gate(held_contracts[symbol], result['target'], result, config)
-                    _rebalance_to(symbol, target, d, vol_regime, vix_close=vix_close,
-                                  vix_ratio=vix_ratio, signal={**result, 'gate_reason': gate_reason})
+
+                if config.target_portfolio_vol is not None and config.fixed_quantities is None:
+                    # Correlation-aware sizing -- see TsmomBacktestConfig.
+                    # target_portfolio_vol's own docstring for the full
+                    # derivation. Two passes are needed because "which
+                    # symbols are active" (and therefore n_effective/the
+                    # correlation matrix/IDM) can only be known AFTER
+                    # computing everyone's own scalar, but the FINAL target
+                    # for those active symbols depends on the IDM-derived
+                    # budget computed FROM that same active set -- a single
+                    # pass can't do both in one order.
+                    #
+                    # Pass 1 (probe): config.max_notional stands in as a
+                    # placeholder budget purely to get each symbol's own
+                    # `scalar` (and other signal fields) -- never used for
+                    # the FINAL target of an active symbol, only to decide
+                    # who's active (scalar != 0). An inactive symbol's
+                    # target is 0 regardless of budget (0 * anything == 0),
+                    # so its probe result is reused as final directly, no
+                    # second call needed.
+                    probe_results = {}
+                    for symbol in config.symbols:
+                        result = _compute_signal_row(symbol, precomputed, d, futures_types, config,
+                                                      market_stress_scale, annualization_by_symbol[symbol])
+                        if result is not None:
+                            probe_results[symbol] = result
+
+                    active_symbols = [s for s, r in probe_results.items() if r['scalar'] != 0]
+
+                    per_symbol_budget = 0.0
+                    if active_symbols and returns_wide is not None:
+                        corr_pairs = _bounded_ewm_correlation_matrix(
+                            returns_wide, active_symbols, d,
+                            config.idm_window_years, config.idm_halflife_days)
+                        idm_multiplier = compute_idm(active_symbols, corr_pairs)
+                        # Target total portfolio-level DOLLAR VOL (not
+                        # notional) for these active_symbols, given their
+                        # REAL diversification, split equally across them --
+                        # at rho=0 (IDM = sqrt(n)) this reduces exactly to
+                        # capital * target_portfolio_vol / sqrt(n), i.e.
+                        # compute_desired_risk_budget's own formula; IDM
+                        # generalizes that to the real measured correlation
+                        # instead of assuming zero.
+                        total_dollar_vol_target = capital * config.target_portfolio_vol * idm_multiplier
+                        per_symbol_dollar_vol_target = total_dollar_vol_target / len(active_symbols)
+                        # Divide by config.vol_target to get from a DOLLAR
+                        # VOL target to the notional_budget _compute_signal_row
+                        # actually expects: scalar already contains
+                        # risk_scalar = config.vol_target / current_realized_vol
+                        # (compute_position_scalar's own per-instrument vol-
+                        # equalization), so position_dollar_vol ends up
+                        # ~= notional_budget * |trend_strength| *
+                        # momentum_discount * config.vol_target -- the
+                        # instrument's OWN realized vol cancels out (that's
+                        # vol-targeting's whole point), but config.vol_target
+                        # does NOT. Passing per_symbol_dollar_vol_target
+                        # straight through as notional_budget would apply
+                        # config.vol_target a SECOND time on top of this
+                        # already-vol-target-derived figure (confirmed
+                        # directly: an earlier version of this did exactly
+                        # that and undershot a 15% target by ~24x, both
+                        # config.vol_target and config.target_portfolio_vol
+                        # having compounded together instead of composing
+                        # correctly) -- dividing here cancels that out so
+                        # config.target_portfolio_vol (not config.vol_target)
+                        # is the one number actually controlling the realized
+                        # portfolio-level outcome.
+                        per_symbol_budget = per_symbol_dollar_vol_target / config.vol_target
+                    # else: no active symbols, or too little history yet
+                    # for a bounded-window correlation estimate -- nobody
+                    # trades this month regardless (every probe result's
+                    # own target is already 0 in that case).
+
+                    for symbol in config.symbols:
+                        result = probe_results.get(symbol)
+                        if result is None:
+                            continue
+                        if symbol in active_symbols:
+                            # Recompute with the REAL, IDM-derived budget --
+                            # the probe pass's own target (implicitly sized
+                            # off config.max_notional) is discarded here.
+                            result = _compute_signal_row(symbol, precomputed, d, futures_types, config,
+                                                          market_stress_scale, annualization_by_symbol[symbol],
+                                                          notional_budget=per_symbol_budget)
+                        target, gate_reason = _apply_signal_gate(held_contracts[symbol], result['target'], result, config)
+                        _rebalance_to(symbol, target, d, vol_regime, vix_close=vix_close,
+                                      vix_ratio=vix_ratio, signal={**result, 'gate_reason': gate_reason})
+                else:
+                    for symbol in config.symbols:
+                        result = _compute_signal_row(symbol, precomputed, d, futures_types, config,
+                                                      market_stress_scale, annualization_by_symbol[symbol])
+                        if result is None:
+                            continue
+                        target, gate_reason = _apply_signal_gate(held_contracts[symbol], result['target'], result, config)
+                        _rebalance_to(symbol, target, d, vol_regime, vix_close=vix_close,
+                                      vix_ratio=vix_ratio, signal={**result, 'gate_reason': gate_reason})
 
         daily_rows.append({'date': d, 'capital': round(capital, 2)})
 
