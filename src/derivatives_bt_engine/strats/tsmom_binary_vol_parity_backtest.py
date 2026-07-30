@@ -106,12 +106,14 @@ except when invoked as `python -m scripts.X` from the repo root):
 from __future__ import annotations
 
 import argparse
+import itertools
 import math
 import os
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 import polars as pl
 
 from derivatives_bt_engine.domain.instruments import get_spec, resolve_active_months, resolve_annualization_days
@@ -225,6 +227,143 @@ DEFAULT_GUARANTEE_CLUSTER_REPRESENTATION = True
 # point of use in run() for why exactly 0.5 silently fails (Python's
 # round() is round-half-to-even, so round(0.5) == 0).
 _CLUSTER_FLOOR_RATIO = 0.51
+# Defaults for run()'s idm_scaling feature -- Carver-style Instrument
+# Diversification Multiplier (IDM = 1/sqrt(W H W_t)), see compute_idm's own
+# docstring. New/unvalidated relative to active_set_redistribution and
+# guarantee_cluster_representation (both already confirmed to help at low
+# capital), so DEFAULT_IDM_SCALING is False -- opt in explicitly for
+# comparison, not a silent behavior change.
+DEFAULT_IDM_SCALING = False
+DEFAULT_IDM_WINDOW_YEARS = 3.0      # bounded trailing window -- see
+                                     # _bounded_ewm_correlation_matrix's own
+                                     # docstring for why bounded, not an
+                                     # unbounded full-history EWM
+DEFAULT_IDM_HALFLIFE_DAYS = 63.0    # matches this project's existing
+                                     # per-instrument vol-estimation default
+                                     # (tsmom_risk_budget_diagnostic.py) --
+                                     # not independently tuned for
+                                     # correlation specifically; a longer
+                                     # halflife is plausibly more
+                                     # appropriate (correlation is slower-
+                                     # moving than vol) but untested here
+MIN_IDM_WINDOW_ROWS = 63             # minimum rows in the bounded window
+                                     # before trusting a correlation
+                                     # estimate at all
+
+
+def _build_returns_wide(price_data: dict[str, pl.DataFrame]) -> pl.DataFrame:
+    """One row per date (inner-joined across every symbol's own daily
+    close -- only dates common to ALL symbols survive), one column per
+    symbol, values = that symbol's own simple daily return
+    (close.pct_change()). Pure polars -- no pandas, per this project's own
+    CLAUDE.md convention (pandas stays scoped to a single library call
+    site, e.g. HRPOpt, never leaks into general data-handling code).
+    Built ONCE per run() call (when idm_scaling is on) and reused at every
+    rebalance date's own bounded-window slice inside
+    _bounded_ewm_correlation_matrix -- recomputing the raw return series
+    per rebalance would be pure waste; only the EWM calc itself genuinely
+    needs to run once per (rebalance date, bounded window) pair."""
+    wide = None
+    for sym, df in price_data.items():
+        s = df.sort('ts_event').select('ts_event', pl.col('close').pct_change().alias(sym))
+        wide = s if wide is None else wide.join(s, on='ts_event', how='inner')
+    return wide.sort('ts_event').drop_nulls()
+
+
+def _bounded_ewm_correlation_matrix(returns_wide: pl.DataFrame, symbols: list[str], as_of: date,
+                                     window_years: float, halflife: float,
+                                     min_rows: int = MIN_IDM_WINDOW_ROWS) -> Optional[dict[tuple[str, str], float]]:
+    """Pairwise EWM-weighted correlation among `symbols`, computed ONLY
+    from the trailing `window_years` slice of returns_wide ending
+    STRICTLY before `as_of` (`< as_of`, matching _estimate_mixing_params's
+    own no-lookahead `date < as_of` convention elsewhere in this module) --
+    a genuinely BOUNDED window, not an unbounded full-history EWM. This
+    distinction matters: a plain `.ewm_mean(half_life=h)` applied to the
+    ENTIRE historical series never fully zeroes out old data -- it decays
+    toward negligible weight but asymptotically, so a few percent of a
+    2026 correlation estimate could technically still trace back to 2010
+    even at a short halflife. Slicing to a bounded window FIRST, then
+    computing the EWM only within that slice, guarantees exactly zero
+    weight on anything older than `window_years` -- the EWM only supplies
+    the within-window recency emphasis (Carver's "regime" weighting),
+    not the outer bound on history.
+
+    EWM correlation itself is the standard product-moment formula (no
+    pandas .ewm().cov() equivalent needed -- polars' own
+    `.ewm_mean(half_life=...)` is sufficient to build it directly):
+        ewm_cov(x, y)  = ewm_mean(x*y) - ewm_mean(x) * ewm_mean(y)
+        ewm_var(x)     = ewm_mean(x*x) - ewm_mean(x) ** 2
+        ewm_corr(x, y) = ewm_cov(x, y) / sqrt(ewm_var(x) * ewm_var(y))
+    evaluated at the LAST row of the bounded slice (i.e. the most recent
+    EWM value as of the end of that window).
+
+    Returns {(a, b): corr} for every pair of `symbols` present as columns
+    in returns_wide (a symbol missing from returns_wide -- e.g. too new to
+    have a synchronized row yet -- is silently excluded from all pairs,
+    not errored); an empty dict if fewer than 2 symbols are present; or
+    None if the bounded slice itself has fewer than `min_rows` (too little
+    history this early in the backtest to trust any correlation
+    estimate)."""
+    window_start = as_of - timedelta(days=int(window_years * 365.25))
+    sl = returns_wide.filter((pl.col('ts_event') >= window_start) & (pl.col('ts_event') < as_of))
+    if sl.height < min_rows:
+        return None
+
+    present = [s for s in symbols if s in sl.columns]
+    if len(present) < 2:
+        return {}
+
+    pairs = list(itertools.combinations(present, 2))
+    exprs = []
+    for a, b in pairs:
+        mean_a = pl.col(a).ewm_mean(half_life=halflife)
+        mean_b = pl.col(b).ewm_mean(half_life=halflife)
+        mean_ab = (pl.col(a) * pl.col(b)).ewm_mean(half_life=halflife)
+        mean_a2 = (pl.col(a) * pl.col(a)).ewm_mean(half_life=halflife)
+        mean_b2 = (pl.col(b) * pl.col(b)).ewm_mean(half_life=halflife)
+        cov = mean_ab - mean_a * mean_b
+        var_a = mean_a2 - mean_a ** 2
+        var_b = mean_b2 - mean_b ** 2
+        exprs.append((cov / (var_a * var_b).sqrt()).last().alias(f'{a}__{b}'))
+
+    row = sl.select(exprs).row(0)
+    return {pair: val for pair, val in zip(pairs, row) if val is not None and not math.isnan(val)}
+
+
+def compute_idm(active_symbols: list[str], corr_pairs: Optional[dict[tuple[str, str], float]]) -> float:
+    """Carver's Instrument Diversification Multiplier, exact matrix form:
+    IDM = 1 / sqrt(W @ H @ W_t) -- W the equal-weight vector (1/n each,
+    matching this script's own flat vol-parity design: every symbol
+    already gets the same nominal budget here, so W is uniform -- not yet
+    informed by e.g. apply_cluster_risk_cap's own conviction-priority
+    weighting, which this script doesn't have), H the REAL pairwise
+    correlation matrix (1.0 on the diagonal, corr_pairs off it) -- NOT the
+    average-correlation algebraic shortcut (1/sqrt(1/N + (1-1/N)*avg_corr)),
+    which is only exactly equivalent to this when every pairwise
+    correlation happens to be identical. Since
+    _bounded_ewm_correlation_matrix already computes every individual
+    pair, using the real matrix costs nothing extra over averaging them
+    down to one scalar first.
+
+    Falls back to 1.0 (no diversification adjustment -- this script's
+    pre-IDM behaviour) whenever there's nothing meaningful to compute
+    from: fewer than 2 active_symbols, or corr_pairs is None/empty (not
+    enough bounded-window history yet, or fewer than 2 symbols had
+    synchronized return data)."""
+    n = len(active_symbols)
+    if n < 2 or not corr_pairs:
+        return 1.0
+    idx = {s: i for i, s in enumerate(active_symbols)}
+    h = np.eye(n)
+    for (a, b), corr in corr_pairs.items():
+        if a in idx and b in idx:
+            i, j = idx[a], idx[b]
+            h[i, j] = h[j, i] = corr
+    w = np.full(n, 1.0 / n)
+    port_var = w @ h @ w
+    if port_var <= 0:
+        return 1.0
+    return 1.0 / math.sqrt(port_var)
 
 
 def _build_monthly_state_return_history(rebal_monthly: dict[str, pl.DataFrame],
@@ -387,6 +526,9 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
         mixing_pool: str = DEFAULT_MIXING_POOL,
         active_set_redistribution: bool = DEFAULT_ACTIVE_SET_REDISTRIBUTION,
         guarantee_cluster_representation: bool = DEFAULT_GUARANTEE_CLUSTER_REPRESENTATION,
+        idm_scaling: bool = DEFAULT_IDM_SCALING,
+        idm_window_years: float = DEFAULT_IDM_WINDOW_YEARS,
+        idm_halflife_days: float = DEFAULT_IDM_HALFLIFE_DAYS,
         save_results: bool = False,
         results_tag: Optional[str] = None,
         _quiet: bool = False) -> dict:
@@ -499,6 +641,27 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
         ever rescued by it alone). Set to False to disable this floor and
         rely solely on active_set_redistribution's plain equal-split.
 
+    idm_scaling (default False -- new, unvalidated relative to
+        active_set_redistribution/guarantee_cluster_representation, opt in
+        explicitly): Carver-style Instrument Diversification Multiplier,
+        IDM = 1/sqrt(W H W_t) -- see compute_idm's own docstring. Recomputed
+        at EVERY rebalance date from that date's own signal-active symbols
+        and a bounded trailing-window EWM correlation matrix (see
+        _bounded_ewm_correlation_matrix, no lookahead), then multiplies
+        that rebalance's own effective budget (every symbol's flat target,
+        cluster-floor reservations, and active-set redistribution all
+        scale off this SAME per-rebalance budget when idm_scaling is on --
+        a pure no-op, idm_multiplier == 1.0 always, when off). Generalizes
+        the live system's own compute_desired_risk_budget, whose
+        1/sqrt(n_effective) is exactly this same formula under the
+        assumption every active cluster is uncorrelated (rho=0) -- this
+        uses the REAL measured correlation instead. idm_window_years
+        (default 3.0) and idm_halflife_days (default 60.0, matching this
+        project's existing per-instrument vol-estimation default -- NOT
+        independently tuned for correlation, which is plausibly
+        slower-moving and might want a longer halflife; untested here)
+        control that bounded window.
+
     warmup_start defaults to WARMUP_DAYS_BEFORE_START before `start` (not a
     fixed absolute date -- see that constant's own comment for why).
 
@@ -541,6 +704,8 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
                         mixing_pool=mixing_pool,
                         active_set_redistribution=active_set_redistribution,
                         guarantee_cluster_representation=guarantee_cluster_representation,
+                        idm_scaling=idm_scaling, idm_window_years=idm_window_years,
+                        idm_halflife_days=idm_halflife_days,
                         save_results=False, results_tag=None, _quiet=True)
         realized_vol = (baseline['ann_vol_pct'] or 0) / 100
         if realized_vol > 0:
@@ -553,6 +718,12 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
     if warmup_start is None:
         warmup_start = start - timedelta(days=WARMUP_DAYS_BEFORE_START)
     price_data, _ = load_portfolio_data(symbols)
+    # Built once (reusing the same price_data already loaded above) and
+    # reused at every rebalance date's own bounded-window slice -- only
+    # when idm_scaling is actually requested, since this is an extra
+    # inner-join + pct_change pass over every symbol's full history that
+    # every other weighting_mode/toggle combination has no use for.
+    returns_wide = _build_returns_wide(price_data) if idm_scaling else None
     # Resolved once per symbol and reused both for the signal itself (so
     # avg_r_fast/avg_r_slow/hv_fast/hv_slow report in each instrument's own
     # real trading-days/year, per continuous_momentum's own docstring) AND
@@ -819,6 +990,31 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
                     'a_co': a_co, 'a_re': a_re, 'r_dyn': r_dyn, 'std_fast': dstd, 'std_slow': dstd_slow,
                 })
 
+            # Carver-style IDM (Instrument Diversification Multiplier):
+            # 1/sqrt(W H W_t), W the (equal, 1/n) weight vector over this
+            # rebalance's own signal-active symbols, H their REAL pairwise
+            # correlation matrix from a BOUNDED trailing EWM window ending
+            # strictly before `d` (no lookahead -- see
+            # _bounded_ewm_correlation_matrix's own docstring for why
+            # bounded, not an unbounded full-history EWM). Scales this
+            # rebalance's own effective budget UP when active instruments
+            # are genuinely diversified (lower correlation), reflecting
+            # that a diversified book can run bigger individual positions
+            # while still landing on the SAME target portfolio vol --
+            # exactly the sqrt(n_effective) logic compute_desired_risk_
+            # budget already uses live, generalized from an assumed ρ=0 to
+            # the REAL measured correlation. idm_scaling defaults to False
+            # (new, not yet validated against the cluster-floor/active-set
+            # baseline this run() already has) -- when off, idm_multiplier
+            # is always 1.0, a pure no-op on every line below that uses it.
+            idm_multiplier = 1.0
+            if idm_scaling:
+                active_symbols_for_idm = [c['s'] for c in candidates if c['weight'] != 0]
+                corr_pairs = _bounded_ewm_correlation_matrix(
+                    returns_wide, active_symbols_for_idm, d, idm_window_years, idm_halflife_days)
+                idm_multiplier = compute_idm(active_symbols_for_idm, corr_pairs)
+            budget_this_rebal = flat_per_asset_vol_target_usd * idm_multiplier
+
             # Cluster-floor guarantee: before any further redistribution,
             # reserve enough budget for EACH instruments.py `cluster` that
             # has at least one live (nonzero-weight) signal this month to
@@ -863,9 +1059,9 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
                 for members in by_cluster.values():
                     rep = min(members, key=lambda c: c['dollar_vol_per_contract'])
                     needed = _CLUSTER_FLOOR_RATIO * rep['dollar_vol_per_contract'] / abs(rep['weight'])
-                    reserved_budget[rep['s']] = max(flat_per_asset_vol_target_usd, needed)
+                    reserved_budget[rep['s']] = max(budget_this_rebal, needed)
 
-                total_nominal = flat_per_asset_vol_target_usd * len(signal_active_all)
+                total_nominal = budget_this_rebal * len(signal_active_all)
                 total_reserved = sum(reserved_budget.values())
                 if total_reserved > total_nominal > 0:
                     # Can't fund every cluster's floor in full this month
@@ -900,23 +1096,23 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
             # independently) so "zeroed by rounding" is defined identically
             # to how new_target itself is actually computed below.
             zeroed_symbols: set[str] = set()
-            effective_target_usd = flat_per_asset_vol_target_usd
+            effective_target_usd = budget_this_rebal
             if active_set_redistribution:
                 signal_active = [c for c in candidates
                                   if c['weight'] != 0 and c['s'] not in reserved_budget]
                 zeroed_symbols = {
                     c['s'] for c in signal_active
-                    if round(c['weight'] * flat_per_asset_vol_target_usd / c['dollar_vol_per_contract']) == 0
+                    if round(c['weight'] * budget_this_rebal / c['dollar_vol_per_contract']) == 0
                 }
                 n_survivors = len(signal_active) - len(zeroed_symbols)
                 if zeroed_symbols and n_survivors > 0:
                     # Equivalent to splitting the WHOLE (non-rep) signal-active
-                    # budget (flat_per_asset_vol_target_usd * len(signal_active))
-                    # equally across just the survivors, derived here as
-                    # "keep the flat target, plus an equal share of what the
-                    # zeroed symbols would have used."
-                    freed = flat_per_asset_vol_target_usd * len(zeroed_symbols)
-                    effective_target_usd = flat_per_asset_vol_target_usd + freed / n_survivors
+                    # budget (budget_this_rebal * len(signal_active)) equally
+                    # across just the survivors, derived here as "keep the
+                    # flat target, plus an equal share of what the zeroed
+                    # symbols would have used."
+                    freed = budget_this_rebal * len(zeroed_symbols)
+                    effective_target_usd = budget_this_rebal + freed / n_survivors
                 # If every non-rep signal-active symbol would zero out
                 # (n_survivors == 0), there's no one to redistribute to --
                 # leave effective_target_usd at the flat value; every such
@@ -1169,6 +1365,22 @@ def parse_args():
                          "equity/energy/metal/fx at low capital (it just leverages up whichever "
                          "grains already cleared rounding). Pass this flag to disable the floor "
                          "and rely solely on the plain active-set equal-split, for comparison")
+    p.add_argument('--idm-scaling', action='store_true',
+                    help="Enable Carver-style IDM (Instrument Diversification Multiplier, "
+                         "1/sqrt(W H W_t)) scaling of this rebalance's own effective budget, from "
+                         "a bounded trailing-window EWM correlation matrix over that rebalance's "
+                         "own signal-active symbols (default: off -- new, not yet validated the "
+                         "way --no-active-set-redistribution/--no-cluster-floor's defaults are). "
+                         "See run()'s own docstring and compute_idm's docstring for the full "
+                         "derivation")
+    p.add_argument('--idm-window-years', type=float, default=DEFAULT_IDM_WINDOW_YEARS,
+                    help='Only used with --idm-scaling: bounded trailing window for the EWM '
+                         'correlation estimate -- data older than this contributes exactly 0, '
+                         'unlike an unbounded full-history EWM (default: %(default)s)')
+    p.add_argument('--idm-halflife-days', type=float, default=DEFAULT_IDM_HALFLIFE_DAYS,
+                    help='Only used with --idm-scaling: EWM halflife within the bounded window '
+                         '(default: %(default)s -- matches this project\'s existing per-instrument '
+                         'vol-estimation default, not independently tuned for correlation)')
     p.add_argument('--save-results', action='store_true',
                     help='Write per-run CSVs into results/ (created if missing), auto-tagged '
                          'with a shared datetime stamp for this invocation -- no prefix needed. '
@@ -1213,6 +1425,8 @@ def main():
                       target_portfolio_vol=args.target_portfolio_vol,
                       active_set_redistribution=not args.no_active_set_redistribution,
                       guarantee_cluster_representation=not args.no_cluster_floor,
+                      idm_scaling=args.idm_scaling, idm_window_years=args.idm_window_years,
+                      idm_halflife_days=args.idm_halflife_days,
                       save_results=args.save_results, results_tag=results_tag)
         print(result)
         summary_rows.append(result)
@@ -1225,6 +1439,8 @@ def main():
                       weighting_mode='dynamic', mixing_pool=args.mixing_pool,
                       active_set_redistribution=not args.no_active_set_redistribution,
                       guarantee_cluster_representation=not args.no_cluster_floor,
+                      idm_scaling=args.idm_scaling, idm_window_years=args.idm_window_years,
+                      idm_halflife_days=args.idm_halflife_days,
                       save_results=args.save_results, results_tag=results_tag)
         print(result)
         summary_rows.append(result)
