@@ -197,6 +197,15 @@ _DEGENERATE_EPS = 1e-10
 # Warn when a symbol rounds to 0 target contracts on more than this
 # fraction of its own rebalances -- see the sizing_diag block in run()
 SIZING_ZERO_WARN_THRESHOLD = 0.2
+# Default for run()'s active_set_redistribution param -- see that param's
+# own docstring and the inline comment at its point of use in run() for the
+# full rationale (empirically confirmed structural opt-out at low capital,
+# not a novel idea being introduced speculatively). True is the default
+# because it strictly improves capital utilization at any capital level (at
+# high capital, zeroed_symbols is empty every rebalance, so this is a no-op)
+# -- kept toggleable, not made unconditional, so a before/after comparison
+# stays possible the same way mixing_pool='cluster' vs 'global' already is.
+DEFAULT_ACTIVE_SET_REDISTRIBUTION = True
 
 
 def _build_monthly_state_return_history(rebal_monthly: dict[str, pl.DataFrame],
@@ -356,6 +365,7 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
         warmup_start: Optional[date] = None,
         weighting_mode: str = 'flat_discount',
         mixing_pool: str = DEFAULT_MIXING_POOL,
+        active_set_redistribution: bool = DEFAULT_ACTIVE_SET_REDISTRIBUTION,
         save_results: bool = False,
         results_tag: Optional[str] = None) -> dict:
     """flat_per_asset_vol_target_usd: None (default) derives it as
@@ -399,6 +409,27 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
             every symbol in `symbols` regardless of cluster. Kept for
             direct before/after comparison against 'cluster', not the
             default.
+
+    active_set_redistribution (default True): each rebalance, a symbol with
+        a real nonzero directional weight whose own target still rounds to
+        0 contracts (per-contract dollar vol > flat_per_asset_vol_target_usd)
+        is dropped from that rebalance's active set, and its unused share of
+        the flat budget is redistributed (equal-split, GLOBALLY across the
+        whole symbol universe, not scoped per cluster -- same-cluster
+        symbols tend to round to 0 together, so a cluster-scoped version
+        would usually have no cluster-mate left to receive it) across
+        whichever symbols DO clear a whole contract. Confirmed empirically
+        that without this, some symbols (e.g. thin/expensive-per-contract
+        ones like J7/6M/SIL at $80k) round to 0 on effectively 100% of
+        rebalances for the WHOLE backtest -- a structural opt-out, not
+        occasional rounding-down -- silently collapsing a nominally
+        N-symbol diversified portfolio into whichever smaller-notional
+        subset happens to survive rounding (e.g. just the grains), which
+        directly hurts both mean Sharpe and its stability across capital
+        levels/window-scheme runs. Set to False to reproduce the original
+        (pre-redistribution) sizing behaviour, for direct comparison -- see
+        the inline comment at this parameter's point of use in the
+        rebalance loop for the full derivation.
 
     warmup_start defaults to WARMUP_DAYS_BEFORE_START before `start` (not a
     fixed absolute date -- see that constant's own comment for why).
@@ -578,6 +609,16 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
                     mixing_params_by_cluster = {c: global_params for c in clusters_needed}
             else:
                 mixing_params_by_cluster = {}
+            # First pass: compute each symbol's weight/dollar_vol_per_contract
+            # (everything needed to decide contract targets) WITHOUT yet
+            # rounding to a final target -- active_set_redistribution (below)
+            # needs to see every valid candidate's raw numbers before any
+            # target is committed, since it reallocates budget FROM symbols
+            # that would round to 0 TO the ones that survive. Skip-conditions
+            # (invalid signal) are identical to the prior single-pass version
+            # -- a symbol failing them here is excluded entirely, same as
+            # before, not merely "zeroed by rounding."
+            candidates = []
             for s in symbols:
                 row = signals[s].filter(pl.col('ts_event') == d)
                 if row.height == 0:
@@ -678,7 +719,88 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
                 dollar_vol_per_contract = close * spec['multiplier'] * dstd * (annualization_by_symbol[s] ** 0.5)
                 if dollar_vol_per_contract <= 0:
                     continue
-                new_target = round(weight * flat_per_asset_vol_target_usd / dollar_vol_per_contract)
+                candidates.append({
+                    's': s, 'spec': spec, 'close': close, 'weight': weight,
+                    'dollar_vol_per_contract': dollar_vol_per_contract,
+                    'cluster': cluster, 'c_regime': regime, 'c_fast': c_fast_val, 'c_slow': c_slow_val,
+                    'sig': ts_val, 'g_regime': g_regime_val, 'g_fast': g_fast_val, 'g_slow': g_slow_val,
+                    'a_co': a_co, 'a_re': a_re, 'r_dyn': r_dyn, 'std_fast': dstd, 'std_slow': dstd_slow,
+                })
+
+            # Active-set redistribution: a symbol with a real, nonzero
+            # directional weight whose OWN target still rounds to 0 contracts
+            # (its per-contract dollar vol exceeds flat_per_asset_vol_target_usd)
+            # is dropped from this rebalance's active set, and its unused
+            # share of the flat budget is redistributed (equal-split) across
+            # whichever symbols DO clear a whole contract, instead of quietly
+            # evaporating. Confirmed empirically (see the sizing_diag block
+            # below / results/*_sizing.csv at low --initial-capital) that
+            # without this, some symbols (e.g. J7/6M/SIL at $80k) round to 0
+            # on 100% of rebalances for the ENTIRE backtest -- not occasional
+            # rounding-down but a structural opt-out that silently collapses
+            # a nominally N-symbol diversified portfolio into whichever
+            # smaller-notional subset (e.g. the grains) happens to survive
+            # rounding, which directly degrades both mean Sharpe and its
+            # stability across window-scheme runs.
+            #
+            # Redistributed GLOBALLY across the whole active set, not scoped
+            # per instruments.py `cluster` (unlike mixing_pool): symbols
+            # within one cluster tend to be correlated and round to 0
+            # together (e.g. MES/MNQ both equity, both frequently zeroed at
+            # once at low capital), so a same-cluster-only redistribution
+            # would usually have no surviving cluster-mate to receive the
+            # freed budget -- exactly the clusters that need help (equity,
+            # energy, metal, fx at low capital) are the ones a cluster-scoped
+            # version would fail to fix. A global redistribution is also what
+            # the empirical fix requires: the freed budget needs to reach the
+            # grains/rates cluster, which is the only one with low enough
+            # per-contract dollar vol to consistently clear rounding.
+            #
+            # `round(...) == 0` here mirrors new_target's own rounding rule
+            # exactly (not a separate |raw| < 0.5 threshold computed
+            # independently) so "zeroed by rounding" is defined identically
+            # to how new_target itself is actually computed below.
+            zeroed_symbols: set[str] = set()
+            effective_target_usd = flat_per_asset_vol_target_usd
+            if active_set_redistribution:
+                signal_active = [c for c in candidates if c['weight'] != 0]
+                zeroed_symbols = {
+                    c['s'] for c in signal_active
+                    if round(c['weight'] * flat_per_asset_vol_target_usd / c['dollar_vol_per_contract']) == 0
+                }
+                n_survivors = len(signal_active) - len(zeroed_symbols)
+                if zeroed_symbols and n_survivors > 0:
+                    # Equivalent to splitting the WHOLE signal-active budget
+                    # (flat_per_asset_vol_target_usd * len(signal_active))
+                    # equally across just the survivors, derived here as
+                    # "keep the flat target, plus an equal share of what the
+                    # zeroed symbols would have used."
+                    freed = flat_per_asset_vol_target_usd * len(zeroed_symbols)
+                    effective_target_usd = flat_per_asset_vol_target_usd + freed / n_survivors
+                # If every signal-active symbol would zero out (n_survivors
+                # == 0), there's no one to redistribute to -- leave
+                # effective_target_usd at the flat value; every candidate
+                # target still rounds to 0 for this rebalance either way.
+
+            for c in candidates:
+                s, spec, close = c['s'], c['spec'], c['close']
+                weight, dollar_vol_per_contract = c['weight'], c['dollar_vol_per_contract']
+                regime, c_fast_val, c_slow_val, ts_val = c['c_regime'], c['c_fast'], c['c_slow'], c['sig']
+                g_regime_val, g_fast_val, g_slow_val = c['g_regime'], c['g_fast'], c['g_slow']
+                a_co, a_re, r_dyn = c['a_co'], c['a_re'], c['r_dyn']
+                dstd, dstd_slow = c['std_fast'], c['std_slow']
+                cluster = c['cluster']
+
+                # Dropped by active-set redistribution: target forced to 0
+                # for this rebalance rather than recomputed off
+                # effective_target_usd (which was already confirmed, above,
+                # to still round to 0 for this symbol at the UNBOOSTED flat
+                # target -- boosting only the survivors' budget, never this
+                # symbol's own, is the whole point of "dropped").
+                if s in zeroed_symbols:
+                    new_target = 0
+                else:
+                    new_target = round(weight * effective_target_usd / dollar_vol_per_contract)
                 prior = held[s]
                 # Same asymmetric convention as tsmom_backtester.py's
                 # _rebalance_to: opening or adding to a position is free;
@@ -702,14 +824,21 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
                     # lowercased (dynamic mode), never independent
                     # information given continuous_regime/g_regime are both
                     # already here unconditionally.
-                    'cluster': cluster, 
-                    'c_regime': regime, 'c_fast': c_fast_val, 'c_slow': c_slow_val, 'sig': ts_val, 
+                    'cluster': cluster,
+                    'c_regime': regime, 'c_fast': c_fast_val, 'c_slow': c_slow_val, 'sig': ts_val,
                     'g_regime': g_regime_val, 'g_fast': g_fast_val, 'g_slow': g_slow_val,
                     'a_co': a_co, 'a_re': a_re,
                     'weight': round(weight, 4),
                     'r_dyn': round(r_dyn, 4) if r_dyn is not None else None,
                     'close': close, 'std_fast': dstd, 'std_slow': dstd_slow,
                     'prior': prior, 'target': new_target, 'dol_vol': round(dollar_vol_per_contract, 2),
+                    # budget_usd -- effective_target_usd actually used for
+                    # THIS symbol (flat_per_asset_vol_target_usd unless
+                    # active-set redistribution boosted it, or forced to
+                    # 0/excluded entirely) -- audit-only, lets a saved
+                    # rebalances.csv show exactly when/how much
+                    # redistribution occurred without recomputing it by hand.
+                    'budget_usd': round(0.0 if s in zeroed_symbols else effective_target_usd, 2),
                     'fee': round(event_fee, 2),
                 })
                 held[s] = new_target
@@ -852,6 +981,16 @@ def parse_args():
                          "rates/fx/energy). 'global': one shared estimate pooled across every "
                          "--symbols regardless of cluster (this project's original behaviour, "
                          "kept for comparison) (default: %(default)s)")
+    p.add_argument('--no-active-set-redistribution', action='store_true',
+                    help="Disable active-set redistribution (default: enabled -- see run()'s own "
+                         "docstring). With it enabled (the default), a symbol whose target rounds "
+                         "to 0 contracts at flat_per_asset_vol_target_usd is dropped from that "
+                         "rebalance and its unused budget share is redistributed across whichever "
+                         "symbols DO clear a whole contract, instead of silently evaporating -- "
+                         "confirmed to matter most at low --initial-capital, where some symbols "
+                         "(e.g. J7/6M/SIL at $80k) otherwise round to 0 on ~100%% of rebalances for "
+                         "the whole backtest. Pass this flag to reproduce the original, "
+                         "non-redistributed sizing for direct before/after comparison")
     p.add_argument('--save-results', action='store_true',
                     help='Write per-run CSVs into results/ (created if missing), auto-tagged '
                          'with a shared datetime stamp for this invocation -- no prefix needed. '
@@ -893,6 +1032,7 @@ def main():
         result = run(symbols, start, end, discount,
                       initial_capital=args.initial_capital,
                       flat_per_asset_vol_target_usd=args.flat_vol_target,
+                      active_set_redistribution=not args.no_active_set_redistribution,
                       save_results=args.save_results, results_tag=results_tag)
         print(result)
         summary_rows.append(result)
@@ -902,6 +1042,7 @@ def main():
                       initial_capital=args.initial_capital,
                       flat_per_asset_vol_target_usd=args.flat_vol_target,
                       weighting_mode='dynamic', mixing_pool=args.mixing_pool,
+                      active_set_redistribution=not args.no_active_set_redistribution,
                       save_results=args.save_results, results_tag=results_tag)
         print(result)
         summary_rows.append(result)
