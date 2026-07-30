@@ -3,9 +3,10 @@ TSMOM monthly rebalancing orchestrator — has an IB dependency (contract
 resolution, historical bars, live VX/VIX fallback, current positions),
 via the ib_tools.ibpysync connectivity layer.
 
-Pure signal math lives in derivatives_bt_engine.domain.tsmom_signal (used by both this
-live orchestrator and the duckdb-backed backtest); this module wires that
-signal up to IBPySync, applies the VX vol-spike gate, and turns the result
+Pure signal math lives in derivatives_bt_engine.domain.signal (used by both this
+live orchestrator and the duckdb-backed backtest); cross-instrument risk
+allocation lives in derivatives_bt_engine.domain.allocation. This module wires
+that signal up to IBPySync, applies the VX vol-spike gate, and turns the result
 into a per-instrument rebalance plan (contract counts), without placing any
 orders itself.
 
@@ -28,13 +29,14 @@ from ib_tools.ibpysync import IBPySync
 from derivatives_bt_engine.domain.enums import TrendRegime, VolRegime
 from derivatives_bt_engine.domain.instruments import resolve_annualization_days, resolve_signal_symbol
 from derivatives_bt_engine.domain.allocation import apply_cluster_risk_cap, compute_desired_risk_budget, compute_n_effective
-from derivatives_bt_engine.domain.signal_spec import build_features, continuous_momentum
-from derivatives_bt_engine.domain.tsmom_signal import (
+from derivatives_bt_engine.domain.signal import (
+    build_features,
     classify_regime,
     classify_signal_confidence,
     compute_position_scalar,
     compute_signal_confidence,
     compute_vol_ratio,
+    continuous_momentum,
 )
 
 log = logging.getLogger(__name__)
@@ -193,7 +195,7 @@ def check_vol_regime(vx_ratio: float) -> VolRegime:
     looks dangerous" is, so nothing here classifies it. (Per-instrument,
     asset-specific vol state -- including a low-vol-ratio bucket -- is a
     different, independent mechanism: see SignalConfidenceRegime /
-    classify_signal_confidence in tsmom_signal.py.)"""
+    classify_signal_confidence in signal.py.)"""
     if vx_ratio > VX_EXTREME_RATIO:
         return VolRegime.EXTREME
     if vx_ratio > VX_SPIKE_RATIO:

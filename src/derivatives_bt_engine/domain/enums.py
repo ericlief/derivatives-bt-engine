@@ -173,14 +173,14 @@ class SignalConfidenceRegime(str, Enum):
 
 
 class SignalModel(str, Enum):
-    """Which economic construction domain.signal_spec uses to turn a price
+    """Which economic construction domain.signal uses to turn a price
     series into a trend-strength score -- CONTINUOUS (daily,
-    volatility-normalized fast/slow tanh-blend, signal_spec.continuous_momentum)
+    volatility-normalized fast/slow tanh-blend, signal.continuous_momentum)
     vs. GOULDING_MONTHLY (Goulding, Harvey & Mazzoleni (2023)'s bimonthly/
-    annual arithmetic-average construction, signal_spec.goulding_monthly).
-    The two are computed independently from signal_spec.build_features'
+    annual arithmetic-average construction, signal.goulding_monthly).
+    The two are computed independently from signal.build_features'
     output and compared afterward via a join -- neither depends on the
-    other's intermediate columns; see signal_spec.py's own module
+    other's intermediate columns; see signal.py's own module
     docstring."""
     CONTINUOUS = "continuous"
     GOULDING_MONTHLY = "goulding_monthly"

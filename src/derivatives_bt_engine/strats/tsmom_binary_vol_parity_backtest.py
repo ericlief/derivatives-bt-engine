@@ -116,12 +116,14 @@ import polars as pl
 
 from derivatives_bt_engine.domain.allocation import _bounded_ewm_correlation_matrix, build_returns_wide, compute_idm
 from derivatives_bt_engine.domain.instruments import get_spec, resolve_active_months, resolve_annualization_days
-from derivatives_bt_engine.domain.signal_spec import (
+from derivatives_bt_engine.domain.signal import (
     SignalSpec,
     _goulding_blend,
     _goulding_weight,
     build_features,
+    build_monthly_state_return_history,
     continuous_momentum,
+    estimate_mixing_params,
     goulding_monthly,
 )
 from derivatives_bt_engine.domain.tsmom_backtester import _detect_roll_dates, _month_end_dates, load_portfolio_data
@@ -180,21 +182,13 @@ RESULTS_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', '..
 # mixing-parameter estimator, kept separate from calculate_trend_strength's
 # existing 3m/12m ts_fast/ts_slow (which stay canonical/untouched per that
 # function's own docstring). The paper's own 2m/12m fast/slow horizons and
-# eq. 4/7 state/weight logic now come from signal_spec.py's
-# build_features()/goulding_monthly() (genuine calendar-month aggregation)
-# and _goulding_weight, rather than a duplicate hand-rolled implementation
-# here -- only the pooled, expanding-window a_Co/a_Re ESTIMATION below
-# stays script-local, since signal_spec.py's own docstring explicitly
-# keeps that out of scope (a caller estimates it separately and passes the
-# result in).
-MIN_MONTHS_PER_PHASE = 12  # paper's own warm-up requirement per Appendix C
+# eq. 4/7 state/weight logic come from domain/signal.py's
+# build_features()/goulding_monthly()/_goulding_weight (genuine calendar-
+# month aggregation) and build_monthly_state_return_history/
+# estimate_mixing_params (the pooled, expanding-window a_Co/a_Re
+# ESTIMATION, moved there from this script once tsmom_backtester.py needed
+# the same estimation logic too -- one canonical implementation, not two).
 DEFAULT_MIXING_POOL = 'cluster'  # 'cluster' or 'global' -- see run()'s own docstring
-# Threshold below which a denominator in _estimate_mixing_params' eq. 8-10
-# arithmetic is treated as degenerate (fall back to (0.5, 0.5) rather than
-# let 1/x explode) -- an exact `== 0` float comparison would let a
-# near-zero-but-technically-nonzero mean-squared-return (e.g. 1e-12, from
-# a run of near-identical monthly returns) sail through undetected.
-_DEGENERATE_EPS = 1e-10
 # Warn when a symbol rounds to 0 target contracts on more than this
 # fraction of its own rebalances -- see the sizing_diag block in run()
 SIZING_ZERO_WARN_THRESHOLD = 0.2
@@ -245,157 +239,6 @@ DEFAULT_IDM_HALFLIFE_DAYS = 63.0    # matches this project's existing
                                      # halflife is plausibly more
                                      # appropriate (correlation is slower-
                                      # moving than vol) but untested here
-
-
-def _build_monthly_state_return_history(rebal_monthly: dict[str, pl.DataFrame],
-                                         rebal_dates: list[date]) -> pl.DataFrame:
-    """One row per (symbol, consecutive rebalance-date pair) with the state
-    DECIDED at `d` (rebal_monthly[sym] already forward-matches `d` to the
-    Goulding bucket for the month starting right after it -- see run()'s
-    own comment for why forward, not backward: `d` is a month-END date,
-    the bucket is labeled by month-START) paired with THAT SAME bucket's
-    own 'ret' -- goulding_monthly's own simple month-end-to-month-end
-    return for the month this state applies to -- i.e. exactly the
-    (state, subsequent-period return) pairs Appendix C's AVG[r|s]/
-    AVG[r^2|s] are computed over. Reads 'ret' directly rather than
-    recomputing a return from daily closes -- besides being redundant,
-    that would also mix log and simple return conventions (this module
-    uses simple returns throughout).
-
-    Two separate date columns, deliberately not collapsed into one:
-
-    - 'date' = `d_next` (the NEXT rebal date after `d`) -- what
-      _estimate_mixing_params's own `date < as_of` filter uses. Kept at
-      `d_next`, not `d`, on purpose: at as_of=`d` itself (this pair's own
-      decision date), a row dated `d` would satisfy `d < d`... no, would
-      NOT (False, correctly excluded either way) -- but at as_of=`d_next`
-      (the very next rebalance), a row dated `d` WOULD satisfy `d <
-      d_next` and be included, meaning every single as_of throughout the
-      backtest would additionally see "the pair whose return concluded on
-      this exact same day" -- fully known by then (no lookahead in the
-      sense of using future information), but a materially more
-      aggressive reading of "prior history" than this function's own
-      docstring intends ("pairs STRICTLY before as_of"). Confirmed
-      directly: switching this column to `d` changes the row COUNT visible
-      at every as_of (k rows vs k-1 rows, in a sequence of n rebal dates)
-      -- not just a relabeling, an actual behavior change, so it stays at
-      `d_next` to preserve the original, more conservative estimation
-      scope.
-    - 'decided_at' = `d` -- audit/display only, never read by
-      _estimate_mixing_params. Exists purely so a human inspecting this
-      table can see "July 31: state=X, return=Y" as a single row instead
-      of that same pair only ever appearing under the FOLLOWING
-      rebalance's date.
-
-    Pooled across every symbol WITHIN A CLUSTER (not the whole universe,
-    and not per-instrument either, unlike the paper's own single-asset
-    design) -- a_Co/a_Re is meant to capture how a given asset class
-    itself tends to behave in Correction/Rebound, which is exactly what
-    pooling across unrelated clusters (e.g. grains together with equity
-    index futures) destroys: it estimates one shared number that reflects
-    whichever cluster happens to dominate the pooled sample, not any
-    cluster's own real behavior. Per-instrument pooling was tried first and
-    discarded -- this project's per-symbol history (~15 years) gives too
-    few Correction/Rebound months on its own for a stable estimate; pooling
-    within a `cluster` (instruments.py's own grain/metal/equity/rates/fx/
-    energy grouping) is the middle ground: enough symbols to reach
-    min_months, without conflating asset classes that plausibly behave
-    differently in the same nominal regime. `cluster` is carried as its own
-    column here (not resolved later from `symbol` at estimation time) so
-    _estimate_mixing_params can filter directly."""
-    rows = []
-    for sym, rm in rebal_monthly.items():
-        cluster = get_spec(sym)['cluster']
-        for d, d_next in zip(rebal_dates[:-1], rebal_dates[1:]):
-            row = rm.filter(pl.col('ts_event') == d)
-            if row.height == 0:
-                continue
-            g_regime_val, monthly_return = row['g_regime'][0], row['ret'][0]
-            state = g_regime_val.lower() if g_regime_val else None
-            if state is not None and monthly_return is not None:
-                rows.append({'date': d_next, 'decided_at': d, 'symbol': sym, 'cluster': cluster,
-                             'state': state, 'monthly_return': monthly_return})
-    if not rows:
-        return pl.DataFrame(schema={'date': pl.Date, 'decided_at': pl.Date, 'symbol': pl.Utf8,
-                                     'cluster': pl.Utf8, 'state': pl.Utf8, 'monthly_return': pl.Float64})
-    return pl.DataFrame(rows)
-
-
-def _estimate_mixing_params(history: pl.DataFrame, as_of: date, cluster: Optional[str],
-                             min_months: int = MIN_MONTHS_PER_PHASE) -> tuple[float, float]:
-    """Appendix C, eq. 8-10 -- a_Co/a_Re from every (state, monthly_return)
-    pair strictly before `as_of`, restricted to `cluster` when given
-    (expanding window, no lookahead; pooled within one instruments.py
-    `cluster` -- grain/metal/equity/rates/fx/energy -- not across the
-    whole universe: a_Co/a_Re is supposed to capture how THAT asset class
-    behaves in Correction/Rebound, and pooling clusters together would
-    estimate one number dominated by whichever cluster has the most
-    history, not any of their real behavior). `cluster=None` disables the
-    restriction and pools across every symbol in `history` regardless of
-    cluster -- run()'s `mixing_pool='global'` option, kept for direct
-    comparison against the cluster-scoped default and to reproduce this
-    project's original (pre-cluster-split) behavior. Falls back to the
-    uninformed (0.5, 0.5) -- equivalent to the flat momentum_discount's
-    no-op case -- whenever there isn't yet `min_months` of the selected
-    pool's own history in EITHER the Correction or Rebound phase, or the
-    normalizer C / either phase's mean-squared return is degenerate
-    (zero); the paper's own rule for insufficient per-asset history is to
-    exclude the asset for that month entirely, which doesn't map cleanly
-    onto a pooled, always-in-the-portfolio backtest, so this is an
-    explicit, flagged adaptation, not a literal reproduction. A cluster
-    with too few symbols/too little history of its own simply stays at
-    (0.5, 0.5) longer (or indefinitely) under `mixing_pool='cluster'` --
-    an intentional consequence of not borrowing another cluster's
-    behavior, not a bug.
-
-    Eq. 9's sign, as extracted from the scanned paper, appears identical in
-    form to eq. 8's (both "1 - ...") -- which contradicts the paper's own
-    prose ("if returns tend to be positive after rebounds... a_Re > 0.5")
-    given a single shared, "typically positive" C. Uses the "+" form here
-    (a_Re = 1/2*(1 + (1/C)*AVG[r|Re]/AVG[r^2|Re])) as the only version
-    self-consistent with that prose -- see
-    research/research_trend_strength_crossover_signal.md Part 2 §6 for the
-    full errata discussion; this is flagged, not confirmed against the
-    primary source's actual typeset sign."""
-    prior = history.filter(pl.col('date') < as_of)
-    if cluster is not None:
-        prior = prior.filter(pl.col('cluster') == cluster)
-    if prior.height == 0:
-        return 0.5, 0.5
-
-    def _stats(state: str) -> tuple[int, float, float]:
-        sub = prior.filter(pl.col('state') == state)
-        if sub.height == 0:
-            return 0, 0.0, 0.0
-        r = sub['monthly_return']
-        return sub.height, r.mean(), (r * r).mean()
-
-    n_bu, avg_r_bu, avg_r2_bu = _stats('bull')
-    n_be, avg_r_be, avg_r2_be = _stats('bear')
-    n_co, avg_r_co, avg_r2_co = _stats('correction')
-    n_re, avg_r_re, avg_r2_re = _stats('rebound')
-
-    if n_co < min_months or n_re < min_months:
-        return 0.5, 0.5
-    freq_tot = n_bu + n_be
-    # Exact `== 0` float equality is fragile here -- these are means of
-    # squared monthly returns, so a near-degenerate (but not exactly zero)
-    # value like 1e-12 would sail past an exact-zero check and then blow
-    # up the 1/x below. freq_tot is a plain integer count (n_bu + n_be),
-    # so exact-zero is fine and intentional for it specifically.
-    if freq_tot == 0 or abs(avg_r2_bu) < _DEGENERATE_EPS or abs(avg_r2_be) < _DEGENERATE_EPS:
-        return 0.5, 0.5
-
-    C = (n_bu / freq_tot) * (avg_r_bu / avg_r2_bu) - (n_be / freq_tot) * (avg_r_be / avg_r2_be)
-    if abs(C) < _DEGENERATE_EPS or abs(avg_r2_co) < _DEGENERATE_EPS or abs(avg_r2_re) < _DEGENERATE_EPS:
-        return 0.5, 0.5
-
-    a_co = 0.5 * (1 - (1 / C) * (avg_r_co / avg_r2_co))
-    a_re = 0.5 * (1 + (1 / C) * (avg_r_re / avg_r2_re))
-    logger.info(f'Change in default params: n_bu {n_bu} | n_be {n_be} | n_co {n_co} ({a_co}) | n_re {n_re} ({a_re})')
-    logger.info(f'avg_r_bu {avg_r_bu} | avg_r_be {avg_r_be} | avg_r_co {avg_r_co} | avg_r_re {avg_r_re}')
-
-    return max(0.0, min(1.0, a_co)), max(0.0, min(1.0, a_re))
 
 
 def run(symbols: list[str], start: date, end: date, momentum_discount: float,
@@ -674,7 +517,8 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
     all_dates = [d for d in all_dates if start <= d <= end]
     rebal_set = set(rebal_dates)
 
-    monthly_history = (_build_monthly_state_return_history(rebal_monthly, rebal_dates)
+    monthly_history = (build_monthly_state_return_history(
+                            rebal_monthly, rebal_dates, {s: get_spec(s)['cluster'] for s in symbols})
                         if weighting_mode == 'dynamic' else None)
 
     # Mandatory contract roll: a real close-old/open-new round trip that costs
@@ -742,14 +586,14 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
             # behavior into one number), or once globally and shared by
             # every symbol under mixing_pool='global' (this project's
             # original behaviour, kept for direct comparison). See
-            # _build_monthly_state_return_history/_estimate_mixing_params.
+            # domain/signal.py's build_monthly_state_return_history/estimate_mixing_params.
             if weighting_mode == 'dynamic':
                 clusters_needed = {get_spec(s)['cluster'] for s in symbols}
                 if mixing_pool == 'cluster':
-                    mixing_params_by_cluster = {c: _estimate_mixing_params(monthly_history, d, c)
+                    mixing_params_by_cluster = {c: estimate_mixing_params(monthly_history, d, c)
                                                  for c in clusters_needed}
                 else:
-                    global_params = _estimate_mixing_params(monthly_history, d, None)
+                    global_params = estimate_mixing_params(monthly_history, d, None)
                     mixing_params_by_cluster = {c: global_params for c in clusters_needed}
             else:
                 mixing_params_by_cluster = {}

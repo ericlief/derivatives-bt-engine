@@ -5,7 +5,7 @@ import polars as pl
 from derivatives_bt_engine.domain.enums import *
 from derivatives_bt_engine.domain.position import SingleLegOptionPosition, MultiLegOptionPosition, FuturesPosition
 from derivatives_bt_engine.domain.trade_result import OptionTradeResult
-from derivatives_bt_engine.domain.signal_spec import build_features, continuous_momentum
+from derivatives_bt_engine.domain.signal import build_features, continuous_momentum
 from derivatives_bt_engine.utils.logger import setup_logger
 from derivatives_bt_engine.domain.strategy_config import SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig, FuturesStrategyConfig
 

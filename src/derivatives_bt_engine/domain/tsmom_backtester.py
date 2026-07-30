@@ -8,7 +8,7 @@ close" trades, shared with the still-pandas option backtest path. TSMOM's
 lifecycle (continuously-sized monthly rebalance toward a target contract
 count, no roll/expiry-driven open-close cycle) doesn't fit that model, and
 retrofitting it would risk regressing the shared option path. This module
-reuses the existing pure signal math (tsmom_signal.py) and FuturesDataLoader
+reuses the existing pure signal math (signal.py) and FuturesDataLoader
 but implements its own portfolio loop.
 
 No VX futures (CFE) history is available locally (the Globex MDP3.0 duckdb
@@ -33,8 +33,7 @@ from derivatives_bt_engine.domain.futures_dataloader import FuturesDataLoader, a
 from derivatives_bt_engine.domain.instruments import (
     CME_MONTH_NUM_TO_LETTER, get_spec, resolve_active_months, resolve_annualization_days, resolve_price_symbol,
 )
-from derivatives_bt_engine.domain.signal_spec import build_features, continuous_momentum
-from derivatives_bt_engine.domain.tsmom_signal import classify_regime, compute_position_scalar
+from derivatives_bt_engine.domain.signal import build_features, classify_regime, compute_position_scalar, continuous_momentum
 from derivatives_bt_engine.utils.logger import setup_logger
 
 logger = setup_logger()
@@ -190,7 +189,7 @@ def check_vol_regime(vix_ratio: Optional[float]) -> VolRegime:
     management gate (feeds market_stress_scale / the spike-extreme hold-
     or-halve bypass), not a regime-confidence detector. Per-instrument,
     asset-specific vol state (including a low-vol bucket) is a separate
-    mechanism -- see SignalConfidenceRegime in tsmom_signal.py."""
+    mechanism -- see SignalConfidenceRegime in signal.py."""
     if vix_ratio is None:
         return VolRegime.NORMAL
     if vix_ratio > VIX_EXTREME_RATIO:
