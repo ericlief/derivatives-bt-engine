@@ -2,11 +2,11 @@
 CLI for the multi-symbol TSMOM monthly-rebalance backtest.
 
 Run:
-    tsmom-bt --symbols ES,NQ --years 2015-2022
-    tsmom-bt --symbols ES,NQ --years 2015-2022 --vol-target 0.10 --long-only
-    tsmom-bt --symbols ES,GC --years 2010-2026 --signal-gate-mode monthly --ts-exit-threshold 0 --ts-entry-threshold 0.5
-    tsmom-bt --symbols ES,GC --years 2010-2026 --signal-gate-mode daily --ts-exit-threshold 0 --ts-entry-threshold 0.5
-    tsmom-bt --symbols ES,GC,CL --years 2010-2026 --fixed-quantities 4,3,2 --signal-gate-mode monthly --ts-exit-threshold 0 --ts-entry-threshold 0.5
+    tsmom --symbols ES,NQ --years 2015-2022
+    tsmom --symbols ES,NQ --years 2015-2022 --vol-target 0.10 --long-only
+    tsmom --symbols ES,GC --years 2010-2026 --signal-gate-mode monthly --ts-exit-threshold 0 --ts-entry-threshold 0.5
+    tsmom --symbols ES,GC --years 2010-2026 --signal-gate-mode daily --ts-exit-threshold 0 --ts-entry-threshold 0.5
+    tsmom --symbols ES,GC,CL --years 2010-2026 --fixed-quantities 4,3,2 --signal-gate-mode monthly --ts-exit-threshold 0 --ts-entry-threshold 0.5
 
 Note: MES/MNQ (the live system's default micro-contract universe) have no
 data in the local Globex duckdb -- only the full-size ES/NQ contracts are

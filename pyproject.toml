@@ -33,9 +33,9 @@ dependencies = [
 ]
 
 [project.scripts]
-tsmom = "derivatives_bt_engine.live.run_tsmom_rebalance:main"
+rebal = "derivatives_bt_engine.live.run_tsmom_rebalance:main"
 naked = "derivatives_bt_engine.strats.naked_futures:main"
-tsmom-bt = "derivatives_bt_engine.strats.tsmom_backtest:main"
+tsmom = "derivatives_bt_engine.strats.tsmom:main"
 tsmom-grid-search = "derivatives_bt_engine.strats.tsmom_grid_search:main"
 bear-call = "derivatives_bt_engine.strats.bear_call:main"
 bull-put = "derivatives_bt_engine.strats.bull_put:main"

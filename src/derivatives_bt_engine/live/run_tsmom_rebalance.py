@@ -119,7 +119,7 @@ def _build_instruments(spec: str, max_notional: float, max_contracts: int) -> li
 def _save_report(report: str, targets: list[dict]) -> None:
     """Persists each run's report (plain text, matches stdout) and targets
     (CSV, one row per instrument) to results/ at the project root,
-    timestamped -- mirrors tsmom_backtest.py's results dir so live and
+    timestamped -- mirrors tsmom.py's results dir so live and
     backtest output live in the same place. Previously this only ever
     printed to stdout/Telegram and was lost the moment the terminal
     scrolled."""

@@ -15,9 +15,10 @@ Written to answer a specific question (see
 research/research_trend_strength_crossover_signal.md, Part 2 §6): does
 regime_discount (the flat Correction/Rebound de-risking multiplier in
 tsmom_signal.py's compute_position_scalar) actually help on this project's
-own recent data? The existing tsmom-bt CLI (tsmom_backtester.py) turned out
-to be unsuitable for this -- it sizes each symbol independently against its
-own vol_target/max_notional/max_contracts with NO cross-instrument risk
+own recent data? The existing tsmom CLI (strats/tsmom.py, wrapping
+domain/tsmom_backtester.py) turned out to be unsuitable for this -- it
+sizes each symbol independently against its own
+vol_target/max_notional/max_contracts with NO cross-instrument risk
 cap (unlike live/tsmom_rebalance.py's compute_desired_risk_budget/
 apply_cluster_risk_cap), so a correlated multi-symbol run there produces
 wildly overstated realized vol (82-90% against a 15% target was observed).
@@ -174,7 +175,7 @@ DEFAULT_REGIME_DISCOUNTS = [0.5, 1.0]
 # it can be invoked from any CWD, and a bare relative path would silently
 # create results/results if ever run from inside results/ itself (e.g.
 # after cd-ing there to inspect prior output) -- same reasoning
-# tsmom_backtest.py's own main() already uses for the identical problem.
+# tsmom.py's own main() already uses for the identical problem.
 RESULTS_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'results'))
 
 # Goulding, Harvey & Mazzoleni (2023), "Breaking Bad Trends" -- eq. 4's
@@ -1137,7 +1138,7 @@ def main():
     results_tag = datetime.now().strftime('%Y%m%d_%H%M%S')
     # One row per run() call below -- the per-run summary dict (ann_ret/
     # ann_vol/sharpe/max_dd/fees) was previously only ever printed to
-    # stdout and lost, unlike tsmom_backtest.py/the options param-search
+    # stdout and lost, unlike tsmom.py/the options param-search
     # scripts (bull_put_param_search.py/iron_condor_param_search.py),
     # which both write a "backtest_summary_..." CSV comparing every config
     # tested in one table. Matches that convention here.
