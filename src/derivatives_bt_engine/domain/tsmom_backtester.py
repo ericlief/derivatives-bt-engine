@@ -64,6 +64,19 @@ VIX_ELEVATED_RATIO = 1.3
 VIX_SPIKE_RATIO = 1.5
 VIX_EXTREME_RATIO = 2.0
 VIX_ELEVATED_SCALE = 0.6
+# Decimal places for genuinely PRICE-scale fields (entry_price/exit_price/
+# transaction price/close/peak) -- NOT dollar amounts (fees/pnl/capital,
+# which stay at 2dp) or ratios/percentages (ts_fast/vix_ratio/etc., which
+# keep their own existing precision). 2dp was fine for equity-index-scale
+# instruments (MES ~3700) but silently collapsed FX futures like J7 (quoted
+# ~0.0097, USD per JPY) to a flat 0.01 for every single row -- confirmed
+# directly: a real -0.0001315 price move (a genuine, correctly-computed
+# -$824.60 PnL on full-precision internal math) displayed as
+# entry_price == exit_price == 0.01, making a real loss look like a
+# flat/impossible trade. 6dp keeps equity/metal/grain instruments perfectly
+# readable (just trailing zeros) while actually distinguishing consecutive
+# FX-scale price observations from each other.
+_PRICE_ROUND_NDIGITS = 6
 
 
 @dataclass
@@ -792,8 +805,8 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
         net_pnl = round(ot['mtm_pnl'] - ot['fees'], 2)
         trades.append({
             'symbol': symbol, 'direction': ot['direction'],
-            'entry_date': ot['entry_date'], 'entry_price': _round(ot['entry_price'], 2),
-            'exit_date': exit_date, 'exit_price': _round(exit_price, 2),
+            'entry_date': ot['entry_date'], 'entry_price': _round(ot['entry_price'], _PRICE_ROUND_NDIGITS),
+            'exit_date': exit_date, 'exit_price': _round(exit_price, _PRICE_ROUND_NDIGITS),
             'days_held': (exit_date - ot['entry_date']).days,
             'max_contracts': ot['max_contracts'], 'fees': round(ot['fees'], 2),
             'pnl': net_pnl, 'close_reason': ot['close_reason'],
@@ -831,7 +844,7 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
             transactions.append({
                 'symbol': symbol, 'date': rebalance_date,
                 'action': 'buy' if target > prior else 'sell',
-                'quantity': abs(target - prior), 'price': _round(price, 2),
+                'quantity': abs(target - prior), 'price': _round(price, _PRICE_ROUND_NDIGITS),
                 'fee': round(fee, 2), 'prior_contracts': prior, 'target_contracts': target,
                 'gate_reason': s.get('gate_reason'), 'is_seed': is_seed,
             })
@@ -875,7 +888,7 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
         held_contracts[symbol] = target
         events.append({
             'date': rebalance_date, 'symbol': symbol,
-            'close': _round(s.get('close'), 2), 'peak': _round(s.get('peak'), 2),
+            'close': _round(s.get('close'), _PRICE_ROUND_NDIGITS), 'peak': _round(s.get('peak'), _PRICE_ROUND_NDIGITS),
             'dd_pct': _round(s.get('dd_pct'), 2),
             'avg_r_fast': _round(s.get('avg_r_fast'), 4), 'avg_r_slow': _round(s.get('avg_r_slow'), 4),
             'fast_return': _round(s.get('fast_return'), 4), 'slow_return': _round(s.get('slow_return'), 4),
@@ -918,7 +931,7 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
         capital -= fee
         transactions.append({
             'symbol': symbol, 'date': roll_date, 'action': 'roll',
-            'quantity': abs(prior), 'price': _round(price, 2),
+            'quantity': abs(prior), 'price': _round(price, _PRICE_ROUND_NDIGITS),
             'fee': round(fee, 2), 'prior_contracts': prior, 'target_contracts': prior,
             'gate_reason': None, 'is_seed': False,
         })
