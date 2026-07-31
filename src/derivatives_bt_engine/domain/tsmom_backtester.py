@@ -1023,8 +1023,31 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
         .otherwise(0.0)
     )
 
+    # Summary stats -- same shape/naming as
+    # tsmom_binary_vol_parity_backtest.py's own run() return dict
+    # (ann_ret_pct/ann_vol_pct/sharpe/max_dd_pct/total_fees). This module
+    # previously had no equivalent anywhere: main() printed final
+    # capital/cum_pnl/max_dd_usd but never computed an actual Sharpe ratio,
+    # and nothing was ever saved to a summary CSV -- confirmed there was no
+    # way to compare runs' risk-adjusted performance without recomputing
+    # this by hand from daily_mtm every time.
+    daily_ret = stats.with_columns(
+        ret=pl.col('capital') / pl.col('capital').shift(1) - 1
+    ).drop_nulls('ret')
+    mean_ret, std_ret = daily_ret['ret'].mean(), daily_ret['ret'].std()
+    ann_ret = (mean_ret or 0.0) * 252
+    ann_vol = (std_ret or 0.0) * (252 ** 0.5)
+    sharpe = ann_ret / ann_vol if ann_vol else None
+    total_fees = sum(t['fee'] for t in transactions)
+
     return {
         'daily_mtm': stats, 'trend_signals': events,
         'transactions': pl.DataFrame(transactions),
         'trades': pl.DataFrame(trades).sort('entry_date') if trades else pl.DataFrame(trades),
+        'n_days': stats.height,
+        'ann_ret_pct': round(ann_ret * 100, 2),
+        'ann_vol_pct': round(ann_vol * 100, 2),
+        'sharpe': round(sharpe, 2) if sharpe else None,
+        'max_dd_pct': round(stats['drawdown_pct'].min(), 2) if stats.height else None,
+        'total_fees': round(total_fees, 2),
     }

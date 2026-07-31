@@ -16,6 +16,8 @@ contract is ~$130k+ notional, vs MES's ~$13k).
 import argparse
 import os
 
+import polars as pl
+
 from derivatives_bt_engine.domain.tsmom_backtester import TsmomBacktestConfig, run_tsmom_backtest
 
 
@@ -150,6 +152,23 @@ def main():
     if trades.height > 0:
         print(trades.tail(10))
 
+    # Summary table -- same shape as tsmom_binary_vol_parity_backtest.py's
+    # own "=== Summary (all runs) ===" print/save (ann_ret_pct/ann_vol_pct/
+    # sharpe/max_dd_pct/total_fees/n_days), which this CLI previously had
+    # no equivalent of: only final capital/cum_pnl/max_dd_usd were ever
+    # printed, no Sharpe ratio was computed anywhere, and nothing was saved
+    # to a comparable summary CSV.
+    summary_df = pl.DataFrame([{
+        'symbols': ','.join(symbols), 'years': args.years,
+        'target_portfolio_vol': args.target_portfolio_vol,
+        'n_days': result['n_days'], 'ann_ret_pct': result['ann_ret_pct'],
+        'ann_vol_pct': result['ann_vol_pct'], 'sharpe': result['sharpe'],
+        'max_dd_pct': result['max_dd_pct'], 'total_fees': result['total_fees'],
+    }])
+    print()
+    print("=== Summary ===")
+    print(summary_df)
+
     if not args.no_save:
         # Anchored to the project root rather than a bare relative
         # "results" -- a bare relative path silently creates results/results
@@ -160,11 +179,12 @@ def main():
         os.makedirs(results_dir, exist_ok=True)
         symbol_str = '_'.join(symbols)
         stats.write_csv(os.path.join(results_dir, f"tsmom_mtm_{symbol_str}_{start_year}-{end_year}.csv"))
-        import polars as pl
         pl.DataFrame(events).write_csv(
             os.path.join(results_dir, f"tsmom_signals_{symbol_str}_{start_year}-{end_year}.csv"))
         transactions.write_csv(os.path.join(results_dir, f"tsmom_transactions_{symbol_str}_{start_year}-{end_year}.csv"))
         trades.write_csv(os.path.join(results_dir, f"tsmom_trades_{symbol_str}_{start_year}-{end_year}.csv"))
+        summary_df.write_csv(os.path.join(results_dir, f"tsmom_summary_{symbol_str}_{start_year}-{end_year}.csv"))
+        print(f"\nSaved summary to {os.path.join(results_dir, f'tsmom_summary_{symbol_str}_{start_year}-{end_year}.csv')}")
 
 
 if __name__ == "__main__":
