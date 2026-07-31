@@ -58,14 +58,14 @@ include = ["derivatives_bt_engine*"]
 # URL in `dependencies` above since pip's pyproject.toml parsing doesn't
 # expand environment variables the way pip's own requirements.txt reader
 # does (that's a requirements-file-specific feature, not honored for
-# PEP 621 dependency specifiers). Install it separately, pointing
-# PROJECT_DIR at the parent directory holding your sibling project
-# checkouts (e.g. /home/dev/projects):
-#   pip install -e "$PROJECT_DIR/fin-tools/ib-tools"
-# Only needed for the live/IB-connected paths (live/run_tsmom_rebalance.py,
-# live/tsmom_rebalance.py, domain/ib_futures_dataloader.py,
-# strats/naked_futures.py import it at module level) -- everything else
-# (the duckdb-backed backtests) doesn't need it at all.
+# PEP 621 dependency specifiers). Install it separately -- see the
+# Makefile's install-ib/install-all targets (PROJECT_DIR must point at the
+# parent directory holding your sibling project checkouts, e.g.
+# /home/dev/projects). Only needed for the live/IB-connected paths
+# (live/run_tsmom_rebalance.py, live/tsmom_rebalance.py,
+# domain/ib_futures_dataloader.py, strats/naked_futures.py import it at
+# module level) -- everything else (the duckdb-backed backtests) doesn't
+# need it at all.
 
 # options_engine is a separate, not-yet-wired-up Rust extension crate (no
 # Python code in this project imports it). It isn't part of this package's
