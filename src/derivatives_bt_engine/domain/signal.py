@@ -31,11 +31,11 @@ even earlier version that wrapped calculate_trend_strength and dispatched
 on a (SignalModel, WindowBasis) pair): that design tangled the monthly
 Goulding signal with the continuous model's own intermediate columns and
 only let a caller pick ONE model at a time. Here, both models take only
-build_features' output (prev_close/peak/dd/r1d) and are run/saved/compared
+build_features' output (peak/dd/r1d) and are run/saved/compared
 independently -- see scripts/momentum_signal_comparison.py's --model
 continuous/goulding/both for the comparison workflow this enables.
 
-Simple (arithmetic) returns throughout -- close/prev_close - 1, never log
+Simple (arithmetic) returns throughout -- close.pct_change(), never log
 returns -- one convention, no mixing. (calculate_trend_strength, the older
 function below, is the one exception -- it predates this convention and
 uses log returns; kept as-is, not retrofitted, since it's already marked
@@ -441,10 +441,12 @@ def build_features(df: pl.DataFrame) -> pl.DataFrame:
     model-specific features (no fast/slow windows, no vol normalization)
     belong here.
 
-    r1d is a SIMPLE daily return (close/prev_close - 1), not a log return
-    -- this module uses simple returns throughout (except
-    calculate_trend_strength, the old retired function above, which
-    predates this convention), never log returns.
+    r1d is a SIMPLE daily return (close.pct_change(), i.e. close/prev_close
+    - 1), not a log return -- this module uses simple returns throughout
+    (except calculate_trend_strength, the old retired function above,
+    which predates this convention), never log returns. No caller needs
+    prev_close itself (only r1d), so it's never materialized as its own
+    column.
 
     Sorts by ts_event first -- shift()/cum_max() are order-dependent, and
     every downstream function (continuous_momentum, goulding_monthly)
@@ -452,12 +454,11 @@ def build_features(df: pl.DataFrame) -> pl.DataFrame:
     place that guarantee needs to be established."""
     df = df.sort('ts_event')
     df = df.with_columns(
-        prev_close=pl.col('close').shift(1),
         peak=pl.col('close').cum_max(),
+        r1d=pl.col('close').pct_change(),
     )
     df = df.with_columns(
         dd=((pl.col('close') - pl.col('peak')) / pl.col('peak')).round(2),
-        r1d=pl.col('close') / pl.col('prev_close') - 1,
     )
     return df
 
@@ -469,7 +470,7 @@ def continuous_momentum(df: pl.DataFrame, fast_window: int = DEFAULT_FAST_WINDOW
                          w_fast: float = 0.4, w_slow: float = 0.6, discount: float = 0.5) -> pl.DataFrame:
     """Continuous, daily, volatility-normalized fast/slow trend-strength
     model -- independent of goulding_monthly; takes only build_features'
-    output (prev_close/dd/r1d), no shared intermediate state between
+    output (peak/dd/r1d), no shared intermediate state between
     models.
 
     fast_window/slow_window control the return horizon (the numerator):
@@ -568,7 +569,7 @@ def goulding_monthly(df: pl.DataFrame, fast_months: int = GOULDING_FAST_MONTHS,
                       slow_months: int = GOULDING_SLOW_MONTHS) -> pl.DataFrame:
     """Goulding, Harvey & Mazzoleni's own monthly momentum construction --
     independent of continuous_momentum; takes only build_features' output
-    and uses only 'ts_event'/'close' from it (ignores r1d/dd/prev_close
+    and uses only 'ts_event'/'close' from it (ignores r1d/dd/peak
     entirely). NO volatility normalization anywhere in this function
     (contrast continuous_momentum's ts_fast/ts_slow, which are vol-scaled)
     -- ret/fast/slow are pure arithmetic returns and their trailing

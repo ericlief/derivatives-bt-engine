@@ -336,7 +336,7 @@ def test_build_features_adds_only_base_columns():
     df = pl.DataFrame({'ts_event': _trading_dates(date(2020, 1, 1), 5),
                         'close': [100.0, 102.0, 101.0, 105.0, 103.0]})
     feat = build_features(df)
-    assert set(feat.columns) == {'ts_event', 'close', 'prev_close', 'peak', 'dd', 'r1d'}
+    assert set(feat.columns) == {'ts_event', 'close', 'peak', 'dd', 'r1d'}
 
 
 def test_build_features_r1d_is_simple_return_not_log():
@@ -359,16 +359,16 @@ def test_build_features_peak_and_drawdown():
 
 
 def test_build_features_sorts_unsorted_input():
-    # shift()/cum_max() are order-dependent -- pass rows deliberately out
-    # of ts_event order and confirm build_features sorts before computing,
-    # rather than silently corrupting prev_close/peak/dd/r1d.
+    # pct_change()/cum_max() are order-dependent -- pass rows deliberately
+    # out of ts_event order and confirm build_features sorts before
+    # computing, rather than silently corrupting peak/dd/r1d.
     df = pl.DataFrame({
         'ts_event': [date(2020, 1, 3), date(2020, 1, 1), date(2020, 1, 2)],
         'close': [103.0, 100.0, 101.0],
     })
     feat = build_features(df).sort('ts_event')
     assert feat['close'].to_list() == [100.0, 101.0, 103.0]
-    assert feat['prev_close'].to_list() == [None, 100.0, 101.0]
+    assert feat['r1d'].to_list() == [None, pytest.approx(0.01), pytest.approx(103 / 101 - 1)]
     assert feat['peak'].to_list() == [100.0, 101.0, 103.0]
 
 
