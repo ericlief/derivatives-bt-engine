@@ -28,10 +28,9 @@ import duckdb
 import polars as pl
 
 from derivatives_bt_engine.domain.allocation import (
-    _bounded_ewm_correlation_matrix,
     build_returns_wide,
-    compute_idm,
     compute_position_scalar,
+    compute_symbol_notional_budget,
 )
 from derivatives_bt_engine.domain.enums import TrendRegime, VolRegime
 from derivatives_bt_engine.domain.futures_dataloader import FuturesDataLoader, assert_monotonic_expiration
@@ -1153,49 +1152,18 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
 
                     active_symbols = [s for s, r in probe_results.items() if r['scalar'] != 0]
 
-                    per_symbol_budget = 0.0
-                    if active_symbols and returns_wide is not None:
-                        corr_pairs = _bounded_ewm_correlation_matrix(
-                            returns_wide, active_symbols, d,
-                            config.idm_window_years, config.idm_halflife_days)
-                        idm_multiplier = compute_idm(active_symbols, corr_pairs)
-                        # Target total portfolio-level DOLLAR VOL (not
-                        # notional) for these active_symbols, given their
-                        # REAL diversification, split equally across them --
-                        # at rho=0 (IDM = sqrt(n)) this reduces exactly to
-                        # capital * target_portfolio_vol / sqrt(n), i.e.
-                        # compute_desired_risk_budget's own formula; IDM
-                        # generalizes that to the real measured correlation
-                        # instead of assuming zero.
-                        total_dollar_vol_target = capital * config.target_portfolio_vol * idm_multiplier
-                        per_symbol_dollar_vol_target = total_dollar_vol_target / len(active_symbols)
-                        # Divide by config.vol_target to get from a DOLLAR
-                        # VOL target to the notional_budget _compute_signal_row
-                        # actually expects: scalar already contains
-                        # risk_scalar = config.vol_target / current_realized_vol
-                        # (compute_position_scalar's own per-instrument vol-
-                        # equalization), so position_dollar_vol ends up
-                        # ~= notional_budget * |trend_strength| *
-                        # momentum_discount * config.vol_target -- the
-                        # instrument's OWN realized vol cancels out (that's
-                        # vol-targeting's whole point), but config.vol_target
-                        # does NOT. Passing per_symbol_dollar_vol_target
-                        # straight through as notional_budget would apply
-                        # config.vol_target a SECOND time on top of this
-                        # already-vol-target-derived figure (confirmed
-                        # directly: an earlier version of this did exactly
-                        # that and undershot a 15% target by ~24x, both
-                        # config.vol_target and config.target_portfolio_vol
-                        # having compounded together instead of composing
-                        # correctly) -- dividing here cancels that out so
-                        # config.target_portfolio_vol (not config.vol_target)
-                        # is the one number actually controlling the realized
-                        # portfolio-level outcome.
-                        per_symbol_budget = per_symbol_dollar_vol_target / config.vol_target
-                    # else: no active symbols, or too little history yet
-                    # for a bounded-window correlation estimate -- nobody
-                    # trades this month regardless (every probe result's
-                    # own target is already 0 in that case).
+                    # IDM-derived, correlation-aware per-symbol budget -- see
+                    # compute_symbol_notional_budget's own docstring for the
+                    # full derivation (capital * target_portfolio_vol * IDM,
+                    # split equally across active_symbols, converted back to
+                    # a notional_budget by dividing out config.vol_target).
+                    # Returns 0.0 if there are no active symbols, or too
+                    # little history yet for a bounded-window correlation
+                    # estimate -- nobody trades this month regardless (every
+                    # probe result's own target is already 0 in that case).
+                    per_symbol_budget = compute_symbol_notional_budget(
+                        active_symbols, returns_wide, d, capital, config.target_portfolio_vol,
+                        config.vol_target, config.idm_window_years, config.idm_halflife_days)
 
                     for symbol in config.symbols:
                         result = probe_results.get(symbol)

@@ -371,6 +371,44 @@ def _bounded_ewm_correlation_matrix(returns_wide: pl.DataFrame, symbols: list[st
     return {pair: val for pair, val in zip(pairs, row) if val is not None and not math.isnan(val)}
 
 
+def compute_symbol_notional_budget(active_symbols: list[str], returns_wide: Optional[pl.DataFrame],
+                                    as_of: date, capital: float, target_portfolio_vol: float,
+                                    vol_target: float, idm_window_years: float,
+                                    idm_halflife_days: float) -> float:
+    """IDM-derived per-symbol notional_budget for TsmomBacktestConfig's
+    target_portfolio_vol path (tsmom_backtester.py's run_tsmom_backtest) --
+    the correlation-aware alternative to sizing off a flat config.max_notional.
+    Splits a total target DOLLAR VOL budget (capital * target_portfolio_vol *
+    IDM, where IDM captures active_symbols' REAL measured correlation rather
+    than assuming independence) equally across active_symbols, then divides
+    by vol_target to convert that dollar-vol figure back into the
+    notional_budget _compute_signal_row actually expects.
+
+    The division by vol_target matters: scalar already folds in
+    risk_scalar = vol_target / current_realized_vol (compute_position_scalar's
+    own per-instrument vol-equalization), so passing the dollar-vol target
+    straight through as notional_budget would apply vol_target a SECOND
+    time on top of an already-vol-target-derived figure -- confirmed
+    directly during this function's extraction from tsmom_backtester.py,
+    where an earlier version did exactly that and undershot a 15% target by
+    ~24x.
+
+    Returns 0.0 if active_symbols is empty or returns_wide is None -- the
+    caller's own probe pass already means every such symbol's target is 0
+    regardless of budget, so there's nobody to size for. A too-short
+    bounded correlation window (_bounded_ewm_correlation_matrix's own
+    min_rows floor) instead makes compute_idm fall back to IDM=1.0, not an
+    early return here."""
+    if not active_symbols or returns_wide is None:
+        return 0.0
+    corr_pairs = _bounded_ewm_correlation_matrix(returns_wide, active_symbols, as_of,
+                                                  idm_window_years, idm_halflife_days)
+    idm_multiplier = compute_idm(active_symbols, corr_pairs)
+    total_dollar_vol_target = capital * target_portfolio_vol * idm_multiplier
+    per_symbol_dollar_vol_target = total_dollar_vol_target / len(active_symbols)
+    return per_symbol_dollar_vol_target / vol_target
+
+
 def compute_idm(active_symbols: list[str], corr_pairs: Optional[dict[tuple[str, str], float]],
                  weights: Optional[dict[str, float]] = None) -> float:
     """Carver's Instrument Diversification Multiplier, exact matrix form:
