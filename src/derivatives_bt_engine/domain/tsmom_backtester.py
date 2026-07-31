@@ -971,6 +971,28 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
                     target, gate_reason = _apply_signal_gate(held_contracts[symbol], result['target'], result, config)
                     _rebalance_to(symbol, target, seed_date, vol_regime, vix_close=vix_close,
                                   vix_ratio=vix_ratio, signal={**result, 'gate_reason': gate_reason}, is_seed=True)
+                    if held_contracts[symbol] != 0:
+                        # Confirmed bug fix (2026-07): without this,
+                        # prior_close[symbol] stays None going into the day
+                        # loop below, whose own "1. Mark existing holdings"
+                        # step skips day 1's mark-to-market entirely when
+                        # prior_close is None and only sets prior_close
+                        # AFTER that skip, to the first IN-WINDOW day's own
+                        # close -- silently dropping the ENTIRE
+                        # seed_date -> first-in-window-day price move from
+                        # PnL, while the trade record's own entry_price
+                        # still (correctly) shows the seed's real price.
+                        # Confirmed directly: a seeded MES long recorded
+                        # entry 3748.75 -> exit 3696.5 (a real
+                        # -52.25pt/-$783.75 loss on 3 contracts) but
+                        # reported pnl=+$45.09 -- exactly the number that
+                        # results from silently substituting the first
+                        # trading day's close as the effective entry price
+                        # instead of the seed's own. result['close'] here is
+                        # the SAME value _rebalance_to just used as this
+                        # trade's entry_price (signal={**result, ...} ->
+                        # s.get('close')), so this guarantees they agree.
+                        prior_close[symbol] = result['close']
 
     for d in all_dates:
         # 1. Mark existing holdings to market: today's close vs yesterday's,
