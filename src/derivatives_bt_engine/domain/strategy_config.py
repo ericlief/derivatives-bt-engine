@@ -132,7 +132,7 @@ class FuturesStrategyConfig(BaseStrategyConfig):
     # Signal-based entry/exit gates (checked daily by TradeManager, same
     # early_closure/entry-gating path as vix_max/vix_range) -- use the raw
     # tsmom_signal.calculate_trend_strength() values, with no vol-target
-    # scalar/momentum_discount/risk-budget applied (those are TSMOM
+    # scalar/regime_discount/risk-budget applied (those are TSMOM
     # position-sizing concerns, not exit conditions). Direction-aware: a
     # LONG position exits/is blocked from entry on weakness, a SHORT
     # position on the mirrored condition.

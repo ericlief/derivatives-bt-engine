@@ -45,7 +45,7 @@ def parse_args():
                         '--max-notional are ignored (default: disabled, normal vol-targeted sizing)')
     p.add_argument('--long-only', action='store_true',
                    help='Disable short positions (signal_scalar = max(0, trend_strength))')
-    p.add_argument('--momentum-discount', type=float, default=0.5,
+    p.add_argument('--regime-discount', type=float, default=0.5,
                    help='Position discount for Correction/Rebound regimes; 1.0 disables (default: %(default)s)')
     p.add_argument('--signal-gate-mode', choices=['off', 'monthly', 'daily'], default='off',
                    help="'off': no gate (default). 'monthly': check ts-exit/entry-threshold and "
@@ -87,10 +87,10 @@ def parse_args():
                         '(default: %(default)s)')
     p.add_argument('--weighting-mode', choices=['continuous', 'goulding'], default='continuous',
                    help="Signal DIRECTION source (default: %(default)s). 'continuous': "
-                        "continuous_momentum's daily trend_strength + --momentum-discount. "
+                        "continuous_momentum's daily trend_strength + --regime-discount. "
                         "'goulding': Goulding/Harvey/Mazzoleni (2023)'s own monthly Bull/Correction/"
                         "Bear/Rebound classification with a_Co/a_Re mixing weights re-estimated at "
-                        "every rebalance from all prior pooled history -- --momentum-discount is "
+                        "every rebalance from all prior pooled history -- --regime-discount is "
                         "ignored in this mode. Position size/vol-targeting is unaffected either way; "
                         "see TsmomBacktestConfig.weighting_mode's own docstring")
     p.add_argument('--mixing-pool', choices=['cluster', 'global'], default='cluster',
@@ -126,7 +126,7 @@ def main():
         max_contracts=args.max_contracts,
         max_notional=args.max_notional,
         long_only=args.long_only,
-        momentum_discount=args.momentum_discount,
+        regime_discount=args.regime_discount,
         start_date=date(int(start_year), 1, 1),
         end_date=date(int(end_year), 12, 31),
         signal_gate_mode=args.signal_gate_mode,

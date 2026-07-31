@@ -46,14 +46,14 @@ log = logging.getLogger(__name__)
 
 
 def compute_position_scalar(trend_strength, daily_std_last, vol_target: float,
-                             regime: TrendRegime, momentum_discount: float = 0.5,
+                             regime: TrendRegime, regime_discount: float = 0.5,
                              signal_confidence: float = 1.0,
                              annualization_days=DEFAULT_ANNUALIZATION_DAYS) -> float:
     """
     Layers 2-4 of the position sizing framework (plus the opt-in layer 5,
     signal_confidence), combined into a single scalar in [-1, +1]:
 
-        scalar = trend_strength * risk_scalar * momentum_discount * signal_confidence
+        scalar = trend_strength * risk_scalar * regime_discount * signal_confidence
 
     Long-only filtering (signal_scalar = max(0, trend_strength)) is the
     caller's responsibility — pass the already-filtered trend_strength in
@@ -69,21 +69,20 @@ def compute_position_scalar(trend_strength, daily_std_last, vol_target: float,
     (everything else checked); the plain 252 default here reproduces prior
     behavior exactly for anyone not passing an instrument-specific value.
 
-    momentum_discount is applied only for Correction/Rebound (disagreement
+    regime_discount is applied only for Correction/Rebound (disagreement
     between the fast and slow momentum signal — lower conviction);
     Bull/Bear/Unknown get a discount factor of 1.0. Despite the similar
-    "discount" shape, this is unrelated to market_stress_scale (the
+    "discount" shape, this is unrelated to vix_scalar (the
     portfolio-wide, VX-driven de-risking lever applied by the caller in
-    derivatives_bt_engine.live.tsmom_rebalance, not in here) -- the two were
-    conflated in earlier design review, hence the explicit naming.
+    derivatives_bt_engine.live.tsmom_rebalance, not in here).
 
     signal_confidence (default 1.0, no-op) is a separate, opt-in, per-
     instrument discount on trust in THIS instrument's signal when its own
     vol_ratio (short-window/long-window realized vol, asset-specific, NOT
     VIX/VX-driven) is unusual relative to its own history -- see
-    compute_signal_confidence() in signal.py. Orthogonal to momentum_discount
+    compute_signal_confidence() in signal.py. Orthogonal to regime_discount
     (which is about fast/slow sign disagreement, not vol) and to
-    market_stress_scale (which is portfolio-wide, not per-instrument).
+    vix_scalar (which is portfolio-wide, not per-instrument).
     """
     if trend_strength is None or (isinstance(trend_strength, float) and math.isnan(trend_strength)):
         return 0.0
@@ -95,9 +94,9 @@ def compute_position_scalar(trend_strength, daily_std_last, vol_target: float,
         risk_scalar = vol_target / current_realized_vol # 0.15/0.60 ~= 0.25, this is not hv_long here, but a param
         risk_scalar = max(0.25, min(2.0, risk_scalar))
 
-    momentum_discount = momentum_discount if regime in (TrendRegime.CORRECTION, TrendRegime.REBOUND) else 1.0
+    regime_discount = regime_discount if regime in (TrendRegime.CORRECTION, TrendRegime.REBOUND) else 1.0
 
-    scalar = trend_strength * risk_scalar * momentum_discount * signal_confidence
+    scalar = trend_strength * risk_scalar * regime_discount * signal_confidence
     return max(-1.0, min(1.0, scalar))
 
 

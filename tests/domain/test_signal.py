@@ -147,8 +147,8 @@ def test_classify_regime_unknown_on_zero():
 # Per-instrument, asset-specific vol-regime ratio (hv_short/hv_long of THIS
 # instrument's own daily returns) -- NOT VIX/VX-driven. Feeds
 # signal_confidence, an opt-in (default 1.0/no-op) discount on trust in a
-# specific instrument's trend signal, orthogonal to momentum_discount
-# (fast/slow sign disagreement) and market_stress_scale (portfolio-wide,
+# specific instrument's trend signal, orthogonal to regime_discount
+# (fast/slow sign disagreement) and vix_scalar (portfolio-wide,
 # VX-driven, applied by the caller separately).
 
 def _vol_series(n_calm: int, n_shock: int, calm_vol: float, shock_vol: float,
@@ -418,7 +418,7 @@ def test_continuous_momentum_regime_classification():
     assert regimes <= {'bull', 'bear', 'correction', 'rebound'}
 
 
-def test_continuous_momentum_discount_applied_in_transition_regimes():
+def test_continuous_regime_discount_applied_in_transition_regimes():
     df = _price_df_dated(date(2018, 1, 1), 400, drift=0.0, vol=0.01, seed=4)
     out = continuous_momentum(build_features(df), discount=0.25)
     dis = out.filter(pl.col('regime').is_in(['correction', 'rebound']))

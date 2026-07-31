@@ -137,8 +137,8 @@ def _save_report(report: str, targets: list[dict]) -> None:
     # the order you'd actually want to follow the calculation, everything
     # else after in a stable, predictable order.
     priority = ['symbol', 'current_contracts', 'target_contracts', 'infeasible', 'signal',
-                'regime', 'vol_regime', 'scalar', 'risk_scalar', 'momentum_discount',
-                'signal_confidence_regime', 'signal_confidence', 'vol_ratio', 'market_stress_scale',
+                'regime', 'vol_regime', 'scalar', 'risk_scalar', 'regime_discount',
+                'signal_confidence_regime', 'signal_confidence', 'vol_ratio', 'vix_scalar',
                 'account_equity', 'n_effective',
                 'risk_budget', 'vol_target', 'target_portfolio_vol', 'budget_constant',
                 'position_risk', 'raw_notional', 'target_notional', 'max_cluster_risk_pct',
@@ -215,7 +215,7 @@ def parse_args():
                    help='VX futures expiry YYYYMM or "auto" for nearest >=3d (default: %(default)s)')
     p.add_argument('--long-only', action='store_true',
                    help='Disable short positions (signal_scalar = max(0, trend_strength))')
-    p.add_argument('--momentum-discount', type=float, default=0.5,
+    p.add_argument('--regime-discount', type=float, default=0.5,
                    help='Position discount for Correction/Rebound regimes (fast/slow trend sign '
                         'disagreement); 1.0 disables (default: %(default)s)')
     p.add_argument('--enable-signal-confidence', action='store_true',
@@ -262,7 +262,7 @@ def main():
         'max_contracts': args.max_contracts,
         'vx_expiry': args.vx_expiry,
         'long_only': args.long_only,
-        'momentum_discount': args.momentum_discount,
+        'regime_discount': args.regime_discount,
         'account_equity': args.account_equity,
         'target_portfolio_vol': args.target_portfolio_vol,
         'max_cluster_risk_pct': args.max_cluster_risk_pct,

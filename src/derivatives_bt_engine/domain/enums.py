@@ -150,7 +150,7 @@ class TrendRegime(str, Enum):
 class VolRegime(str, Enum):
     """TSMOM vol-spike regime from check_vol_regime() -- current vol
     (VX front-month live, or spot VIX in the backtest) vs its trailing
-    63-day MA. Portfolio-wide and VIX/VX-driven -- feeds market_stress_scale,
+    63-day MA. Portfolio-wide and VIX/VX-driven -- feeds vix_scalar,
     not signal_confidence (see SignalConfidenceRegime, which is per-
     instrument and asset-specific instead)."""
     NORMAL = "normal"

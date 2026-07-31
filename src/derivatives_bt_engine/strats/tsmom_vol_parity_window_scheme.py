@@ -28,7 +28,7 @@ as an installed package regardless of invocation directory -- scripts/
 only works via `python -m scripts.X` run from the repo root):
     tsmom-vol-parity-windows
     tsmom-vol-parity-windows --capital-levels 80000,150000,300000,1000000
-    tsmom-vol-parity-windows --weighting-mode flat_discount --momentum-discount 1.0
+    tsmom-vol-parity-windows --weighting-mode flat_discount --regime-discount 1.0
 """
 from __future__ import annotations
 
@@ -58,7 +58,7 @@ STEP_YEARS               = 1
 SCHEME_C_MAX_WIDTH_YEARS = 5
 DEFAULT_CAPITAL_LEVELS   = [80_000.0, 150_000.0, 300_000.0, 1_000_000.0]
 DEFAULT_WEIGHTING_MODE   = 'dynamic'
-DEFAULT_WINDOW_MOMENTUM_DISCOUNT = 1.0  # only used when --weighting-mode flat_discount
+DEFAULT_WINDOW_REGIME_DISCOUNT = 1.0  # only used when --weighting-mode flat_discount
 
 
 def _data_end(symbols: list[str]) -> str:
@@ -75,7 +75,7 @@ def _data_end(symbols: list[str]) -> str:
 
 def run_window_scheme(symbols: list[str], capital_levels: list[float],
                        weighting_mode: str = DEFAULT_WEIGHTING_MODE,
-                       momentum_discount: float = DEFAULT_WINDOW_MOMENTUM_DISCOUNT,
+                       regime_discount: float = DEFAULT_WINDOW_REGIME_DISCOUNT,
                        target_portfolio_vol: Optional[float] = None,
                        data_end: Optional[str] = None) -> pl.DataFrame:
     """One row per (scheme, window, capital). Each run() call is
@@ -114,7 +114,7 @@ def run_window_scheme(symbols: list[str], capital_levels: list[float],
             for cap in capital_levels:
                 done += 1
                 try:
-                    result = run(symbols, start, end, momentum_discount,
+                    result = run(symbols, start, end, regime_discount,
                                  weighting_mode=weighting_mode, initial_capital=cap,
                                  target_portfolio_vol=target_portfolio_vol)
                     row = {'scheme': scheme_name, 'window_start': w_start, 'window_end': w_end,
@@ -155,7 +155,7 @@ def summarize(df: pl.DataFrame) -> pl.DataFrame:
 
 
 def _param_str(symbols: list[str], capital_levels: list[float],
-                weighting_mode: str, momentum_discount: float,
+                weighting_mode: str, regime_discount: float,
                 target_portfolio_vol: Optional[float] = None) -> str:
     """Compact param string for the saved filenames -- same convention
     bull_put_param_search.py/iron_condor_param_search.py already use
@@ -170,7 +170,7 @@ def _param_str(symbols: list[str], capital_levels: list[float],
         return f"{c / 1_000_000:g}M" if c >= 1_000_000 else f"{int(c / 1000)}k"
     cap_str = '-'.join(_fmt_cap(c) for c in capital_levels)
 
-    mode_str = weighting_mode if weighting_mode == 'dynamic' else f"{weighting_mode}{momentum_discount}"
+    mode_str = weighting_mode if weighting_mode == 'dynamic' else f"{weighting_mode}{regime_discount}"
     vol_str = f"_vt{target_portfolio_vol:g}" if target_portfolio_vol is not None else ''
     return f"{symbol_str}_{mode_str}_cap{cap_str}{vol_str}"
 
@@ -183,7 +183,7 @@ def parse_args():
                     help='Comma-separated --initial-capital values to sweep per window (default: %(default)s)')
     p.add_argument('--weighting-mode', choices=['flat_discount', 'dynamic'], default=DEFAULT_WEIGHTING_MODE,
                     help='(default: %(default)s)')
-    p.add_argument('--momentum-discount', type=float, default=DEFAULT_WINDOW_MOMENTUM_DISCOUNT,
+    p.add_argument('--regime-discount', type=float, default=DEFAULT_WINDOW_REGIME_DISCOUNT,
                     help='Only used when --weighting-mode flat_discount (default: %(default)s)')
     p.add_argument('--target-portfolio-vol', type=float, default=None,
                     help='Calibrate every (window, capital) combo\'s own flat_per_asset_vol_target_usd '
@@ -206,7 +206,7 @@ def main():
     capital_levels = [float(c.strip()) for c in args.capital_levels.split(',') if c.strip()]
 
     df = run_window_scheme(symbols, capital_levels, weighting_mode=args.weighting_mode,
-                            momentum_discount=args.momentum_discount,
+                            regime_discount=args.regime_discount,
                             target_portfolio_vol=args.target_portfolio_vol)
     summary = summarize(df)
 
@@ -223,7 +223,7 @@ def main():
         results_dir = Path(RESULTS_DIR)
         results_dir.mkdir(parents=True, exist_ok=True)
         ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-        param_str = _param_str(symbols, capital_levels, args.weighting_mode, args.momentum_discount,
+        param_str = _param_str(symbols, capital_levels, args.weighting_mode, args.regime_discount,
                                 target_portfolio_vol=args.target_portfolio_vol)
         detail_path = results_dir / f"{ts}_{param_str}_window_scheme.csv"
         summary_path = results_dir / f"{ts}_{param_str}_window_scheme_summary.csv"

@@ -75,14 +75,14 @@ def test_position_scalar_vol_scalar_clamp_floor():
 
 
 def test_position_scalar_discount_applied_for_disagreement_regimes():
-    bull = compute_position_scalar(0.5, 0.02, vol_target=0.15, regime=TrendRegime.BULL, momentum_discount=0.5)
-    correction = compute_position_scalar(0.5, 0.02, vol_target=0.15, regime=TrendRegime.CORRECTION, momentum_discount=0.5)
+    bull = compute_position_scalar(0.5, 0.02, vol_target=0.15, regime=TrendRegime.BULL, regime_discount=0.5)
+    correction = compute_position_scalar(0.5, 0.02, vol_target=0.15, regime=TrendRegime.CORRECTION, regime_discount=0.5)
     assert math.isclose(correction, bull * 0.5, rel_tol=1e-9)
 
 
 def test_position_scalar_discount_disabled_at_1():
-    correction = compute_position_scalar(0.5, 0.02, vol_target=0.15, regime=TrendRegime.CORRECTION, momentum_discount=1.0)
-    bull = compute_position_scalar(0.5, 0.02, vol_target=0.15, regime=TrendRegime.BULL, momentum_discount=1.0)
+    correction = compute_position_scalar(0.5, 0.02, vol_target=0.15, regime=TrendRegime.CORRECTION, regime_discount=1.0)
+    bull = compute_position_scalar(0.5, 0.02, vol_target=0.15, regime=TrendRegime.BULL, regime_discount=1.0)
     assert math.isclose(correction, bull, rel_tol=1e-9)
 
 
@@ -527,16 +527,16 @@ def test_position_scalar_signal_confidence_defaults_to_noop():
     """signal_confidence must default to 1.0 -- existing callers that don't
     pass it get byte-identical behavior to before Phase 2 existed."""
     with_default = compute_position_scalar(0.6, 0.01, vol_target=0.15, regime=TrendRegime.BULL,
-                                            momentum_discount=0.5)
+                                            regime_discount=0.5)
     explicit_noop = compute_position_scalar(0.6, 0.01, vol_target=0.15, regime=TrendRegime.BULL,
-                                             momentum_discount=0.5, signal_confidence=1.0)
+                                             regime_discount=0.5, signal_confidence=1.0)
     assert with_default == explicit_noop
 
 
 def test_position_scalar_signal_confidence_discounts_multiplicatively():
-    base = compute_position_scalar(0.6, 0.01, vol_target=0.15, regime=TrendRegime.BULL, momentum_discount=0.5)
+    base = compute_position_scalar(0.6, 0.01, vol_target=0.15, regime=TrendRegime.BULL, regime_discount=0.5)
     discounted = compute_position_scalar(0.6, 0.01, vol_target=0.15, regime=TrendRegime.BULL,
-                                          momentum_discount=0.5, signal_confidence=0.5)
+                                          regime_discount=0.5, signal_confidence=0.5)
     assert math.isclose(discounted, base * 0.5, rel_tol=1e-9)
 
 
@@ -544,8 +544,8 @@ def test_signal_confidence_instrument_specific_spike_discounts_only_that_instrum
     """The core Phase 2 case: an instrument-specific vol spike (high
     hv_short/hv_long) discounts THAT instrument's scalar, while a sibling
     instrument with calm own-history vol is untouched -- even when both
-    share the exact same market_stress_scale (portfolio-wide VX state).
-    This is the JPY-/corn-spike blind spot market_stress_scale alone can't
+    share the exact same vix_scalar (portfolio-wide VX state).
+    This is the JPY-/corn-spike blind spot vix_scalar alone can't
     see, since it only looks at VIX/VX, not at corn's or JPY's own vol."""
     spiking_df = _vol_series(379, 21, calm_vol=0.01, shock_vol=0.08, seed=4)
     calm_df = _vol_series(379, 21, calm_vol=0.01, shock_vol=0.01, seed=5)
@@ -561,18 +561,18 @@ def test_signal_confidence_instrument_specific_spike_discounts_only_that_instrum
     assert calm_confidence == 1.0     # untouched
 
     # Same trend_strength/daily_std/regime for both instruments -- only
-    # signal_confidence differs -- and the SAME market_stress_scale
+    # signal_confidence differs -- and the SAME vix_scalar
     # applied afterward to both (simulating one portfolio-wide VX state
     # that's calm, i.e. 1.0, so it doesn't mask the per-instrument effect).
-    market_stress_scale = 1.0
+    vix_scalar = 1.0
     spiking_scalar = compute_position_scalar(
         0.6, 0.01, vol_target=0.15, regime=TrendRegime.BULL,
-        momentum_discount=1.0, signal_confidence=spiking_confidence,
-    ) * market_stress_scale
+        regime_discount=1.0, signal_confidence=spiking_confidence,
+    ) * vix_scalar
     calm_scalar = compute_position_scalar(
         0.6, 0.01, vol_target=0.15, regime=TrendRegime.BULL,
-        momentum_discount=1.0, signal_confidence=calm_confidence,
-    ) * market_stress_scale
+        regime_discount=1.0, signal_confidence=calm_confidence,
+    ) * vix_scalar
 
     assert spiking_scalar < calm_scalar
     assert math.isclose(calm_scalar, 0.6 * max(0.25, min(2.0, 0.15 / (0.01 * math.sqrt(252)))), rel_tol=1e-9)

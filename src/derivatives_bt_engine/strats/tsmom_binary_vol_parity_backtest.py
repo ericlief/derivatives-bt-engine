@@ -13,7 +13,7 @@ none of tsmom_backtester.py's own position-sizing.
 
 Written to answer a specific question (see
 research/research_trend_strength_crossover_signal.md, Part 2 §6): does
-momentum_discount (the flat Correction/Rebound de-risking multiplier in
+regime_discount (the flat Correction/Rebound de-risking multiplier in
 tsmom_signal.py's compute_position_scalar) actually help on this project's
 own recent data? The existing tsmom-bt CLI (tsmom_backtester.py) turned out
 to be unsuitable for this -- it sizes each symbol independently against its
@@ -27,7 +27,7 @@ literal sizing scheme instead of trying to patch it.
 Sharpe is invariant to FLAT_PER_ASSET_VOL_TARGET_USD's absolute level (a
 uniform leverage rescale) -- the specific value only matters for realistic
 contract-count rounding, not for the Sharpe comparison across
---momentum-discounts. An earlier version also reported a return figure
+--regime-discounts. An earlier version also reported a return figure
 post-hoc rescaled to a 10% vol target (matching Figure 4's own stated
 methodology in Goulding/Harvey/Mazzoleni, "returns scaled to achieve 10%
 annualized monthly volatility") -- this was REMOVED after it was flagged
@@ -100,7 +100,7 @@ because that directory isn't an installed package, so
 tsmom_vol_parity_window_scheme.py's `from ... import run` couldn't resolve
 except when invoked as `python -m scripts.X` from the repo root):
     tsmom-vol-parity
-    tsmom-vol-parity --momentum-discounts 0.5,1.0 --years 2023-2026
+    tsmom-vol-parity --regime-discounts 0.5,1.0 --years 2023-2026
     tsmom-vol-parity --symbols ES,NQ,GC --years 2015-2026
 """
 from __future__ import annotations
@@ -166,7 +166,7 @@ DEFAULT_INITIAL_CAPITAL = 1_000_000.0
 # given unless a caller explicitly overrides it (see
 # flat_per_asset_vol_target_usd=None's own handling below).
 DEFAULT_VOL_TARGET_PCT_OF_CAPITAL = 0.01
-DEFAULT_MOMENTUM_DISCOUNTS = [0.5, 1.0]
+DEFAULT_REGIME_DISCOUNTS = [0.5, 1.0]
 
 # ── Infrastructure ──────────────────────────────────────────────────────────
 # Anchored to the project root, not a bare relative "results" -- now that
@@ -241,7 +241,7 @@ DEFAULT_IDM_HALFLIFE_DAYS = 63.0    # matches this project's existing
                                      # moving than vol) but untested here
 
 
-def run(symbols: list[str], start: date, end: date, momentum_discount: float,
+def run(symbols: list[str], start: date, end: date, regime_discount: float,
         initial_capital: float = DEFAULT_INITIAL_CAPITAL,
         flat_per_asset_vol_target_usd: Optional[float] = None,
         target_portfolio_vol: Optional[float] = None,
@@ -301,12 +301,12 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
             strength (which normalizes both ts_fast and ts_slow off a single
             fast-window daily_std; continuous_momentum's std_fast/std_slow are
             each horizon-matched to their own fast_window/slow_window instead).
-            momentum_discount applied as a flat multiplier in Correction/Rebound.
+            regime_discount applied as a flat multiplier in Correction/Rebound.
         'dynamic' -- Goulding/Harvey/Mazzoleni eq. 4/7-8-10: paper's own
             2m/12m raw-return state classification, and a_Co/a_Re mixing
             weights (re-estimated at every rebalance date from all PRIOR
             pooled history, no lookahead) blending the slow/fast direction
-            in Correction/Rebound instead of a flat discount. `momentum_discount`
+            in Correction/Rebound instead of a flat discount. `regime_discount`
             is ignored in this mode.
 
     mixing_pool (only matters when weighting_mode == 'dynamic'):
@@ -404,7 +404,7 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
     instead of eyeballing 12+ rebalance rows per year). `results_tag`
     defaults to "now" (main() generates one shared tag up front instead
     and passes it to every run() call in a single CLI invocation, so a
-    --momentum-discounts sweep's several runs land under the same tag
+    --regime-discounts sweep's several runs land under the same tag
     rather than each getting its own). None of this existed anywhere
     before, so there was no way to audit what a given run actually did
     after the fact, only the final summary numbers.
@@ -421,7 +421,7 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
         # recursing again (it always passes _quiet=True below, so this
         # branch is never entered a second time no matter what
         # target_portfolio_vol the caller passed).
-        baseline = run(symbols, start, end, momentum_discount,
+        baseline = run(symbols, start, end, regime_discount,
                         initial_capital=initial_capital,
                         flat_per_asset_vol_target_usd=flat_per_asset_vol_target_usd,
                         warmup_start=warmup_start, weighting_mode=weighting_mode,
@@ -696,7 +696,7 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
                                         f"(ts={ts_val}, std_fast={dstd})")
                         continue
                     direction = 1.0 if ts_val > 0 else (-1.0 if ts_val < 0 else 0.0)
-                    discount = momentum_discount if regime in ('correction', 'rebound') else 1.0
+                    discount = regime_discount if regime in ('correction', 'rebound') else 1.0
                     weight = direction * discount
 
                 spec = get_spec(s)
@@ -975,7 +975,7 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
             print(high_zero.with_columns(pl.col(pl.Float64).round(4)))
 
     if save_results:
-        tag = f"{weighting_mode}" + (f"_{momentum_discount}" if weighting_mode == 'flat_discount' else '')
+        tag = f"{weighting_mode}" + (f"_{regime_discount}" if weighting_mode == 'flat_discount' else '')
         ts = results_tag or datetime.now().strftime('%Y%m%d_%H%M%S')
         results_dir = Path(RESULTS_DIR)
         results_dir.mkdir(parents=True, exist_ok=True)
@@ -1025,7 +1025,7 @@ def run(symbols: list[str], start: date, end: date, momentum_discount: float,
 
     return {
         'mode': weighting_mode,
-        'discount': momentum_discount if weighting_mode == 'flat_discount' else None,
+        'discount': regime_discount if weighting_mode == 'flat_discount' else None,
         'n_days': stats.height,
         'ann_ret_pct': round(ann_ret * 100, 2),
         'ann_vol_pct': round(ann_vol * 100, 2),
@@ -1040,8 +1040,8 @@ def parse_args():
     p.add_argument('--symbols', default=','.join(DEFAULT_SYMBOLS),
                     help='Comma-separated futures symbols, must be known instruments.py symbols (default: %(default)s)')
     p.add_argument('--years', default=DEFAULT_YEARS, help='Year range as START-END, inclusive (default: %(default)s)')
-    p.add_argument('--momentum-discounts', default=','.join(str(d) for d in DEFAULT_MOMENTUM_DISCOUNTS),
-                    help='Comma-separated momentum_discount values to compare, one run each (default: %(default)s)')
+    p.add_argument('--regime-discounts', default=','.join(str(d) for d in DEFAULT_REGIME_DISCOUNTS),
+                    help='Comma-separated regime_discount values to compare, one run each (default: %(default)s)')
     p.add_argument('--initial-capital', type=float, default=DEFAULT_INITIAL_CAPITAL)
     p.add_argument('--flat-vol-target', type=float, default=None,
                     help='Flat annualized $ vol target, same for every asset -- no clustering. '
@@ -1063,7 +1063,7 @@ def parse_args():
     p.add_argument('--include-dynamic', action='store_true',
                     help="Also run the paper's own eq. 4/7-10 dynamic a_Co/a_Re "
                          "reweighting (Goulding/Harvey/Mazzoleni), alongside the "
-                         "--momentum-discounts flat-discount run(s) (default: off)")
+                         "--regime-discounts flat-discount run(s) (default: off)")
     p.add_argument('--mixing-pool', choices=['cluster', 'global'], default=DEFAULT_MIXING_POOL,
                     help="Only affects --include-dynamic runs. 'cluster' (default): a_Co/a_Re "
                          "estimated separately per instruments.py cluster (grain/metal/equity/"
@@ -1129,9 +1129,9 @@ def main():
     symbols = [s.strip().upper() for s in args.symbols.split(',') if s.strip()]
     start_year, end_year = args.years.split('-')
     start, end = date(int(start_year), 1, 1), date(int(end_year), 12, 31)
-    discounts = [float(d.strip()) for d in args.momentum_discounts.split(',') if d.strip()]
+    discounts = [float(d.strip()) for d in args.regime_discounts.split(',') if d.strip()]
     # One shared tag for every run() call in this invocation, so a
-    # --momentum-discounts sweep (and an --include-dynamic run alongside
+    # --regime-discounts sweep (and an --include-dynamic run alongside
     # it) land together under the same results/ filename prefix instead of
     # each call minting its own timestamp.
     results_tag = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -1157,7 +1157,7 @@ def main():
         summary_rows.append(result)
 
     if args.include_dynamic:
-        result = run(symbols, start, end, momentum_discount=1.0,
+        result = run(symbols, start, end, regime_discount=1.0,
                       initial_capital=args.initial_capital,
                       flat_per_asset_vol_target_usd=args.flat_vol_target,
                       target_portfolio_vol=args.target_portfolio_vol,

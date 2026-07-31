@@ -90,7 +90,7 @@ class TsmomBacktestConfig:
     max_contracts: int = 5
     max_notional: float = 25_000.0
     long_only: bool = False
-    momentum_discount: float = 0.5
+    regime_discount: float = 0.5
     start_date: Optional[date] = None
     end_date: Optional[date] = None
     # Signal-based entry/exit gate -- same mechanism as FuturesStrategyConfig/
@@ -121,7 +121,7 @@ class TsmomBacktestConfig:
     # _compute_target skips vol-targeted/notional-scaled sizing entirely --
     # direction still comes from the sign of that symbol's own raw signal
     # (there's no other principled way to know when to go short without
-    # it), but magnitude is just this fixed count (times market_stress_scale
+    # it), but magnitude is just this fixed count (times vix_scalar
     # during an elevated-VIX regime, rounded, same as the vol-targeted
     # path's own elevated-VIX scaling) instead of vol_target/max_notional
     # math. Entry/exit gates (ts_exit_threshold/ts_entry_threshold/
@@ -131,7 +131,7 @@ class TsmomBacktestConfig:
     # the rest of the day loop.
     fixed_quantities: Optional[list[int]] = None
     # Portfolio-wide VIX regime gate (spot-VIX-vs-63d-MA spike/extreme
-    # hold-or-halve override, elevated -> market_stress_scale de-risking)
+    # hold-or-halve override, elevated -> vix_scalar de-risking)
     # -- on by default (matches all prior behavior). Toggle off to isolate
     # the effect of ts_exit_threshold/ts_entry_threshold/exit_on_ts_crossover
     # alone, without VIX-driven interference -- particularly relevant for
@@ -196,14 +196,14 @@ class TsmomBacktestConfig:
     idm_halflife_days: float = 63.0
     # Signal DIRECTION source -- 'continuous' (default, unchanged prior
     # behaviour): continuous_momentum's daily, vol-normalized trend_strength
-    # + classify_regime(ts_fast, ts_slow) + a flat momentum_discount in
+    # + classify_regime(ts_fast, ts_slow) + a flat regime_discount in
     # Correction/Rebound. 'goulding': Goulding/Harvey/Mazzoleni (2023)'s own
     # monthly Bull/Correction/Bear/Rebound classification (goulding_monthly)
     # with a_Co/a_Re mixing weights re-estimated at EVERY rebalance from all
     # prior pooled history (domain.signal's build_monthly_state_return_
     # history/estimate_mixing_params, no lookahead) blending the slow/fast
     # direction in Correction/Rebound instead of a flat discount --
-    # momentum_discount is ignored in this mode (the a_Co/a_Re blend IS the
+    # regime_discount is ignored in this mode (the a_Co/a_Re blend IS the
     # discount mechanism; applying a second flat one on top would double-
     # discount). Position SIZE/vol-targeting is unaffected either way --
     # this only changes which model decides the +-1/0 direction, mirroring
@@ -242,7 +242,7 @@ def check_vol_regime(vix_ratio: Optional[float]) -> VolRegime:
     Deliberately one-sided (mirrors derivatives_bt_engine.live.tsmom_rebalance's
     version): every threshold checks vix_ratio being HIGH -- no symmetric
     low-vix_ratio bucket, not an oversight. This is a portfolio-wide risk-
-    management gate (feeds market_stress_scale / the spike-extreme hold-
+    management gate (feeds vix_scalar / the spike-extreme hold-
     or-halve bypass), not a regime-confidence detector. Per-instrument,
     asset-specific vol state (including a low-vol bucket) is a separate
     mechanism -- see SignalConfidenceRegime in signal.py."""
@@ -490,7 +490,7 @@ def _vix_regime_at(vix: pl.DataFrame, d: date) -> tuple[VolRegime, Optional[floa
 
 def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: date,
                          futures_types: dict[str, dict], config: TsmomBacktestConfig,
-                         market_stress_scale: float, annualization_days: int,
+                         vix_scalar: float, annualization_days: int,
                          notional_budget: Optional[float] = None,
                          g_regime_val: Optional[str] = None, g_fast_val: Optional[float] = None,
                          g_slow_val: Optional[float] = None, a_co: Optional[float] = None,
@@ -570,11 +570,11 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
         if trend_strength is None:
             return None
         # a_Co/a_Re IS the Correction/Rebound discount mechanism here --
-        # applying config.momentum_discount on top would double-discount
+        # applying config.regime_discount on top would double-discount
         # a decision eq. 7 already made. Mirrors weighting_mode='dynamic'
-        # in tsmom_binary_vol_parity_backtest.py, where momentum_discount
+        # in tsmom_binary_vol_parity_backtest.py, where regime_discount
         # is likewise ignored.
-        momentum_discount = 1.0
+        regime_discount = 1.0
     else:
         trend_strength = _col('signal')
         if trend_strength is None:
@@ -584,7 +584,7 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
         # math exactly) purely so the event log can show *why* a given
         # trend_strength did or didn't turn into a trade -- compute_
         # position_scalar itself stays untouched.
-        momentum_discount = config.momentum_discount if regime in (TrendRegime.CORRECTION, TrendRegime.REBOUND) else 1.0
+        regime_discount = config.regime_discount if regime in (TrendRegime.CORRECTION, TrendRegime.REBOUND) else 1.0
 
     signal_for_scalar = trend_strength
     if config.long_only and signal_for_scalar is not None and not (
@@ -594,15 +594,15 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
 
     scalar = compute_position_scalar(
         signal_for_scalar, daily_std_last, config.vol_target, regime,
-        momentum_discount=momentum_discount, annualization_days=annualization_days,
-    ) * market_stress_scale
+        regime_discount=regime_discount, annualization_days=annualization_days,
+    ) * vix_scalar
 
     mult = futures_types[symbol]['multiplier']
     if config.fixed_quantities is not None:
         # No-rebalancing mode: direction is still signal-driven (there's no
         # other principled way to know when to go short without it), but
         # magnitude is this symbol's own fixed contract count -- scaled by
-        # market_stress_scale (the same elevated-VIX de-risking the vol-
+        # vix_scalar (the same elevated-VIX de-risking the vol-
         # targeted path applies) and rounded, not derived from vol_target/
         # max_notional at all. max_contracts still clamps as a sanity
         # backstop (raise it if it's below your configured fixed_quantities
@@ -612,7 +612,7 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
             target = 0
         else:
             direction = 1 if signal_for_scalar > 0 else -1
-            target = direction * round(fixed_qty * market_stress_scale)
+            target = direction * round(fixed_qty * vix_scalar)
     else:
         budget = notional_budget if notional_budget is not None else config.max_notional
         contract_notional = last_close * mult
@@ -621,7 +621,7 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
 
     return {
         'target': target, 'signal': trend_strength, 'regime': regime,
-        # scalar itself (pre-notional-conversion, post-market_stress_scale) --
+        # scalar itself (pre-notional-conversion, post-vix_scalar) --
         # not printed/logged anywhere before this, needed by
         # run_tsmom_backtest's target_portfolio_vol handling to decide which
         # symbols are genuinely signal-active (scalar != 0) independent of
@@ -629,7 +629,7 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
         # rounds to 0 contracts at one budget can still be "active" at a
         # bigger one (see run_tsmom_backtest's own two-pass comment).
         'scalar': scalar,
-        'hv': hv, 'risk_scalar': risk_scalar * market_stress_scale, 'momentum_discount': momentum_discount,
+        'hv': hv, 'risk_scalar': risk_scalar * vix_scalar, 'regime_discount': regime_discount,
         'close': last_close, 'dd_pct': dd_pct,
         # Raw signal-row fields, straight from continuous_momentum, purely
         # for debugging/sanity-checking the sizing math end to end.
@@ -654,7 +654,7 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
     'daily_mtm' (daily portfolio capital/drawdown, polars DataFrame -- same
     key name as the naked single-position path's Backtester.run() result),
     'trend_signals' (per-rebalance trend/signal diagnostic log: ts_fast, ts_slow,
-    regime, risk_scalar, momentum_discount, gate_reason, etc., list of
+    regime, risk_scalar, regime_discount, gate_reason, etc., list of
     dicts), 'transactions' (one row per
     rebalance that actually changed a symbol's contract count -- what was
     bought/sold, when, at what price/fee), and 'trades' (reconstructed
@@ -918,7 +918,7 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
             'signal': _round(s.get('signal'), 4), 'r1y_pct': _round(s.get('r1y_pct'), 2),
             'regime': s.get('regime'), 'vix_close': _round(vix_close, 2), 'vix_ratio': _round(vix_ratio, 4),
             'vol_regime': vol_regime, 'hv': _round(s.get('hv'), 4), 'risk_scalar': _round(s.get('risk_scalar'), 4),
-            'momentum_discount': _round(s.get('momentum_discount'), 2),
+            'regime_discount': _round(s.get('regime_discount'), 2),
             'prior_contracts': prior, 'target_contracts': target, 'is_seed': is_seed,
             'gate_reason': s.get('gate_reason'),
             # Portfolio-level capital snapshot as of this event (after
@@ -997,10 +997,10 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
             if not config.vix_gating:
                 vol_regime = VolRegime.NORMAL  # vix_close/vix_ratio still logged, just not acted on
             if vol_regime not in (VolRegime.SPIKE, VolRegime.EXTREME):  # held_contracts are all 0 here -- hold/halve would be a no-op anyway
-                market_stress_scale = VIX_ELEVATED_SCALE if vol_regime == VolRegime.ELEVATED else 1.0
+                vix_scalar = VIX_ELEVATED_SCALE if vol_regime == VolRegime.ELEVATED else 1.0
                 for symbol in config.symbols:
                     result = _compute_signal_row(symbol, precomputed, seed_date, futures_types, config,
-                                                  market_stress_scale, annualization_by_symbol[symbol])
+                                                  vix_scalar, annualization_by_symbol[symbol])
                     if result is None:
                         continue
                     target, gate_reason = _apply_signal_gate(held_contracts[symbol], result['target'], result, config)
@@ -1076,13 +1076,13 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
             vol_regime_d, vix_close_d, vix_ratio_d = _vix_regime_at(vix, d)
             if not config.vix_gating:
                 vol_regime_d = VolRegime.NORMAL
-            market_stress_scale_d = VIX_ELEVATED_SCALE if vol_regime_d == VolRegime.ELEVATED else 1.0
+            vix_scalar_d = VIX_ELEVATED_SCALE if vol_regime_d == VolRegime.ELEVATED else 1.0
             mixing_params_by_cluster_d = _mixing_params_for_date(d)
 
             for symbol in config.symbols:
                 prior = held_contracts[symbol]
                 result = _compute_signal_row(symbol, precomputed, d, futures_types, config,
-                                              market_stress_scale_d, annualization_by_symbol[symbol],
+                                              vix_scalar_d, annualization_by_symbol[symbol],
                                               **_goulding_kwargs_for(symbol, d, mixing_params_by_cluster_d))
                 if result is None:
                     continue
@@ -1117,7 +1117,7 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
                     _rebalance_to(symbol, target, d, vol_regime, vix_close=vix_close, vix_ratio=vix_ratio,
                                   signal={'close': close})
             else:
-                market_stress_scale = VIX_ELEVATED_SCALE if vol_regime == VolRegime.ELEVATED else 1.0
+                vix_scalar = VIX_ELEVATED_SCALE if vol_regime == VolRegime.ELEVATED else 1.0
                 # Computed once per rebalance date, shared by both branches
                 # below -- a_Co/a_Re only needs estimating once per date,
                 # not once per symbol or per branch.
@@ -1145,7 +1145,7 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
                     probe_results = {}
                     for symbol in config.symbols:
                         result = _compute_signal_row(symbol, precomputed, d, futures_types, config,
-                                                      market_stress_scale, annualization_by_symbol[symbol],
+                                                      vix_scalar, annualization_by_symbol[symbol],
                                                       **_goulding_kwargs_for(symbol, d, mixing_params_by_cluster))
                         if result is not None:
                             probe_results[symbol] = result
@@ -1174,7 +1174,7 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
                             # the probe pass's own target (implicitly sized
                             # off config.max_notional) is discarded here.
                             result = _compute_signal_row(symbol, precomputed, d, futures_types, config,
-                                                          market_stress_scale, annualization_by_symbol[symbol],
+                                                          vix_scalar, annualization_by_symbol[symbol],
                                                           notional_budget=per_symbol_budget,
                                                           **_goulding_kwargs_for(symbol, d, mixing_params_by_cluster))
                         target, gate_reason = _apply_signal_gate(held_contracts[symbol], result['target'], result, config)
@@ -1183,7 +1183,7 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
                 else:
                     for symbol in config.symbols:
                         result = _compute_signal_row(symbol, precomputed, d, futures_types, config,
-                                                      market_stress_scale, annualization_by_symbol[symbol],
+                                                      vix_scalar, annualization_by_symbol[symbol],
                                                       **_goulding_kwargs_for(symbol, d, mixing_params_by_cluster))
                         if result is None:
                             continue

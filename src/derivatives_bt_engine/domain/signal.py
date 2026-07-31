@@ -320,8 +320,8 @@ def compute_signal_confidence(vol_ratio, low_threshold: float, high_threshold: f
     """
     Per-instrument discount on trust in THIS instrument's trend signal,
     triggered when its own vol_ratio is unusual relative to its own
-    history -- distinct from momentum_discount (fast/slow sign
-    disagreement) and from market_stress_scale (portfolio-wide, VX-
+    history -- distinct from regime_discount (fast/slow sign
+    disagreement) and from vix_scalar (portfolio-wide, VX-
     driven; applied by the caller, not in here).
 
     high_vol_discount and low_vol_discount are independent, free
@@ -827,7 +827,7 @@ def estimate_mixing_params(history: pl.DataFrame, as_of: date, cluster: Optional
     cluster -- a caller's `mixing_pool='global'` option, kept for direct
     comparison against the cluster-scoped default and to reproduce this
     project's original (pre-cluster-split) behavior. Falls back to the
-    uninformed (0.5, 0.5) -- equivalent to the flat momentum_discount's
+    uninformed (0.5, 0.5) -- equivalent to the flat regime_discount's
     no-op case -- whenever there isn't yet `min_months` of the selected
     pool's own history in EITHER the Correction or Rebound phase, or the
     normalizer C / either phase's mean-squared return is degenerate
