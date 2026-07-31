@@ -85,6 +85,18 @@ def parse_args():
     p.add_argument('--idm-halflife-days', type=float, default=63.0,
                    help='Only used with --target-portfolio-vol: EWM halflife within the bounded window '
                         '(default: %(default)s)')
+    p.add_argument('--weighting-mode', choices=['continuous', 'goulding'], default='continuous',
+                   help="Signal DIRECTION source (default: %(default)s). 'continuous': "
+                        "continuous_momentum's daily trend_strength + --momentum-discount. "
+                        "'goulding': Goulding/Harvey/Mazzoleni (2023)'s own monthly Bull/Correction/"
+                        "Bear/Rebound classification with a_Co/a_Re mixing weights re-estimated at "
+                        "every rebalance from all prior pooled history -- --momentum-discount is "
+                        "ignored in this mode. Position size/vol-targeting is unaffected either way; "
+                        "see TsmomBacktestConfig.weighting_mode's own docstring")
+    p.add_argument('--mixing-pool', choices=['cluster', 'global'], default='cluster',
+                   help="Only used with --weighting-mode goulding. 'cluster' (default): a_Co/a_Re "
+                        "estimated separately per instruments.py cluster. 'global': one shared "
+                        "estimate pooled across every --symbols regardless of cluster")
     p.add_argument('--no-save', action='store_true', help='Skip saving daily_mtm/trend_signals to results/')
     return p.parse_args()
 
@@ -126,6 +138,8 @@ def main():
         target_portfolio_vol=args.target_portfolio_vol,
         idm_window_years=args.idm_window_years,
         idm_halflife_days=args.idm_halflife_days,
+        weighting_mode=args.weighting_mode,
+        mixing_pool=args.mixing_pool,
     )
 
     result = run_tsmom_backtest(config)
@@ -161,6 +175,7 @@ def main():
     # to a comparable summary CSV.
     summary_df = pl.DataFrame([{
         'symbols': ','.join(symbols), 'years': args.years,
+        'weighting_mode': args.weighting_mode,
         'target_portfolio_vol': args.target_portfolio_vol,
         'n_days': result['n_days'], 'ann_ret_pct': result['ann_ret_pct'],
         'ann_vol_pct': result['ann_vol_pct'], 'sharpe': result['sharpe'],
