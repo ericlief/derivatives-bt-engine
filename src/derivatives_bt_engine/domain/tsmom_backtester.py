@@ -649,6 +649,248 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
     }
 
 
+def _mixing_params_for_date(config: TsmomBacktestConfig, monthly_history: Optional[pl.DataFrame],
+                             d: date) -> dict[str, tuple[float, float]]:
+    """{cluster: (a_co, a_re)} as of rebalance date `d` -- estimated once
+    per rebalance date (shared across every symbol in that cluster), not
+    once per symbol. Empty dict (never read) outside 'goulding' mode."""
+    if config.weighting_mode != 'goulding':
+        return {}
+    clusters_needed = {get_spec(s)['cluster'] for s in config.symbols}
+    if config.mixing_pool == 'cluster':
+        return {c: estimate_mixing_params(monthly_history, d, c) for c in clusters_needed}
+    global_params = estimate_mixing_params(monthly_history, d, None)
+    return {c: global_params for c in clusters_needed}
+
+
+def _goulding_kwargs_for(config: TsmomBacktestConfig, rebal_monthly: dict[str, pl.DataFrame],
+                         symbol: str, d: date, mixing_params_by_cluster: dict[str, tuple[float, float]]) -> dict:
+    """This symbol's own g_regime_val/g_fast_val/g_slow_val/a_co/a_re as of
+    `d`, ready to **-unpack straight into _compute_signal_row. Empty dict
+    outside 'goulding' mode -- _compute_signal_row's own defaults (all
+    None) then apply, matching its 'continuous'-mode behaviour exactly."""
+    if config.weighting_mode != 'goulding':
+        return {}
+    g_row = rebal_monthly[symbol].filter(pl.col('ts_event') == d)
+    g_regime_val = g_row['g_regime'][0] if g_row.height else None
+    g_fast_val = g_row['g_fast'][0] if g_row.height else None
+    g_slow_val = g_row['g_slow'][0] if g_row.height else None
+    a_co, a_re = mixing_params_by_cluster.get(get_spec(symbol)['cluster'], (0.5, 0.5))
+    return {'g_regime_val': g_regime_val, 'g_fast_val': g_fast_val, 'g_slow_val': g_slow_val,
+            'a_co': a_co, 'a_re': a_re}
+
+
+class _PortfolioLedger:
+    """Owns every piece of run_tsmom_backtest's own mutable portfolio
+    state (capital, held contracts, last-seen close, open trade spans,
+    and the events/transactions/trades logs) plus every mutation of it
+    (mark-to-market, rebalance, roll, close). Previously these were five
+    separate closures (_close_trade/_rebalance_to/_process_roll plus the
+    plain dicts/lists they closed over via `nonlocal`) defined inline
+    inside run_tsmom_backtest, ahead of the day loop -- readable in
+    isolation but, taken together with the goulding-mixing helpers, over
+    200 lines a reader had to scroll past before reaching the loop itself.
+    Pulling them out here lets the day loop read as a sequence of named
+    steps against `ledger` instead."""
+
+    def __init__(self, symbols: list[str], initial_capital: float, futures_types: dict[str, dict]):
+        self.futures_types = futures_types
+        self.initial_capital = initial_capital
+        self.capital = initial_capital
+        self.held_contracts: dict[str, int] = {s: 0 for s in symbols}
+        self.prior_close: dict[str, Optional[float]] = {s: None for s in symbols}
+        # Per-symbol open trade accumulator: None when flat, else a dict
+        # tracking the currently-open span's entry info plus running
+        # realized MTM pnl/fees, closed out (appended to `trades`) on a
+        # return to flat, a direct sign flip, or a final force-close after
+        # the day loop ends.
+        self.open_trade: dict[str, Optional[dict]] = {s: None for s in symbols}
+        self.events: list[dict] = []
+        self.transactions: list[dict] = []
+        self.trades: list[dict] = []
+
+    def mark_to_market(self, symbol: str, close: float) -> None:
+        """Today's close vs yesterday's, the same diff-based daily MTM
+        approach Backtester.calculate_futures_mtm_drawdown already uses
+        for single-symbol. No-op on capital/open_trade the first time a
+        symbol is seen (prior_close still None) -- prior_close is still
+        recorded so the NEXT call has something to diff against."""
+        if self.prior_close[symbol] is not None and self.held_contracts[symbol] != 0:
+            day_pnl = (self.held_contracts[symbol] * (close - self.prior_close[symbol])
+                       * self.futures_types[symbol]['multiplier'])
+            self.capital += day_pnl
+            ot = self.open_trade[symbol]
+            if ot is not None:
+                ot['mtm_pnl'] += day_pnl
+        self.prior_close[symbol] = close
+
+    def close_trade(self, symbol: str, exit_date: date, exit_price: Optional[float]) -> None:
+        ot = self.open_trade[symbol]
+        if ot is None:
+            return
+        net_pnl = round(ot['mtm_pnl'] - ot['fees'], 2)
+        self.trades.append({
+            'symbol': symbol, 'direction': ot['direction'],
+            'entry_date': ot['entry_date'], 'entry_price': _round(ot['entry_price'], _PRICE_ROUND_NDIGITS),
+            'exit_date': exit_date, 'exit_price': _round(exit_price, _PRICE_ROUND_NDIGITS),
+            'days_held': (exit_date - ot['entry_date']).days,
+            'max_contracts': ot['max_contracts'],
+            # Total contracts shed via MID-TRADE resizes (same-direction
+            # downsizes), NOT counting the final close itself -- 0 whenever
+            # the position was held at a constant size its whole life.
+            # Exists specifically so entry_price/exit_price/max_contracts
+            # alone don't invite a naive (exit-entry)*max_contracts*mult
+            # sanity check that silently overstates PnL whenever the
+            # position was actually smaller for part of its life (confirmed
+            # directly: MZW opened at 7, resized down to 1 partway through,
+            # and the naive full-max_contracts calc overstated the real PnL
+            # by exactly the exposure lost in that resize) -- a nonzero
+            # value here is a direct signal that max_contracts wasn't held
+            # the entire time, so a manual check needs transactions.csv's
+            # own resize-by-resize history, not this summary row alone.
+            'lots_closed_pre_exit': ot['lots_closed_pre_exit'],
+            'fees': round(ot['fees'], 2),
+            'pnl': net_pnl, 'close_reason': ot['close_reason'],
+        })
+        self.open_trade[symbol] = None
+
+    def rebalance_to(self, symbol: str, target: int, rebalance_date: date, vol_regime,
+                      vix_close=None, vix_ratio=None, signal: Optional[dict] = None, is_seed=False) -> None:
+        """`signal` is _compute_signal_row's full result dict (or None on a
+        spike/extreme-gated event, where signal computation is skipped
+        entirely -- every signal-derived field below is then None, same
+        as before)."""
+        s = signal or {}
+        prior = self.held_contracts[symbol]
+        fee = 0.0
+        if target != prior:
+            # Commission is charged only on the quantity actually closed out
+            # -- opening a position, or adding to one, is free (matches
+            # FuturesPosition.calculate_pnl / _process_roll's convention:
+            # fees = commission * 2 * quantity, charged entirely at close).
+            # A flip closes the *entire* prior side (the new opposite-
+            # direction open that follows is then free, same as any other
+            # open); a same-direction resize only charges for the portion
+            # that shrinks back toward zero, not the portion added.
+            if prior == 0:
+                closed_qty = 0
+            elif target == 0 or (prior > 0) != (target > 0):
+                closed_qty = abs(prior)
+            else:
+                closed_qty = max(0, abs(prior) - abs(target))
+            fee = self.futures_types[symbol]['commission'] * 2 * closed_qty
+            self.capital -= fee
+            price = s.get('close')
+            self.transactions.append({
+                'symbol': symbol, 'date': rebalance_date,
+                'action': 'buy' if target > prior else 'sell',
+                'quantity': abs(target - prior), 'price': _round(price, _PRICE_ROUND_NDIGITS),
+                'fee': round(fee, 2), 'prior_contracts': prior, 'target_contracts': target,
+                'gate_reason': s.get('gate_reason'), 'is_seed': is_seed,
+            })
+
+            flipped = prior != 0 and target != 0 and (prior > 0) != (target > 0)
+            if flipped or target == 0:
+                # This transaction's fee is the closing leg's cost alone (the
+                # whole prior side on a flip -- the new opposite-direction
+                # open that follows is free, same as any other open) --
+                # must be folded in before close_trade reads ot['fees'], or
+                # it's silently dropped from the trade's own total (portfolio
+                # capital stays correct regardless, since that deduction
+                # already happened above; only the per-trade fees/pnl
+                # fields were at risk of undercounting).
+                ot = self.open_trade[symbol]
+                if ot is not None:
+                    ot['fees'] += fee
+                self.close_trade(symbol, rebalance_date, price)
+            ot = self.open_trade[symbol]  # re-read post-close: close_trade above may have just cleared it
+            if target != 0 and ot is None:
+                self.open_trade[symbol] = {
+                    'entry_date': rebalance_date, 'entry_price': price,
+                    'direction': 'long' if target > 0 else 'short',
+                    'max_contracts': abs(target), 'mtm_pnl': 0.0,
+                    'fees': 0.0 if flipped else fee,
+                    'close_reason': None, 'lots_closed_pre_exit': 0,
+                }
+            elif target != 0 and ot is not None:
+                # Resize within the same direction -- extend the existing
+                # span rather than starting a new trade; fold in this
+                # resize's own fee (zero unless this shrank toward zero),
+                # track the largest size held, and accumulate any quantity
+                # shed by a downsize (closed_qty, computed above) into
+                # lots_closed_pre_exit -- see close_trade's own comment for
+                # why this is tracked separately from max_contracts.
+                ot['fees'] += fee
+                ot['max_contracts'] = max(ot['max_contracts'], abs(target))
+                ot['lots_closed_pre_exit'] += closed_qty
+            if (flipped or target == 0) and s.get('gate_reason'):
+                # close_trade already ran above and cleared open_trade;
+                # the reason belongs on the trade that just closed, so
+                # patch the just-appended row rather than re-opening it.
+                self.trades[-1]['close_reason'] = s.get('gate_reason')
+
+        self.held_contracts[symbol] = target
+        self.events.append({
+            'date': rebalance_date, 'symbol': symbol,
+            'close': _round(s.get('close'), _PRICE_ROUND_NDIGITS), 'peak': _round(s.get('peak'), _PRICE_ROUND_NDIGITS),
+            'dd_pct': _round(s.get('dd_pct'), 2),
+            'avg_r_fast': _round(s.get('avg_r_fast'), 4), 'avg_r_slow': _round(s.get('avg_r_slow'), 4),
+            'fast_return': _round(s.get('fast_return'), 4), 'slow_return': _round(s.get('slow_return'), 4),
+            'ts_fast': _round(s.get('ts_fast'), 4), 'ts_slow': _round(s.get('ts_slow'), 4),
+            'signal': _round(s.get('signal'), 4), 'r1y_pct': _round(s.get('r1y_pct'), 2),
+            'regime': s.get('regime'), 'vix_close': _round(vix_close, 2), 'vix_ratio': _round(vix_ratio, 4),
+            'vol_regime': vol_regime, 'hv': _round(s.get('hv'), 4), 'risk_scalar': _round(s.get('risk_scalar'), 4),
+            'regime_discount': _round(s.get('regime_discount'), 2),
+            'prior_contracts': prior, 'target_contracts': target, 'is_seed': is_seed,
+            'gate_reason': s.get('gate_reason'),
+            # Portfolio-level capital snapshot as of this event (after
+            # today's mark-to-market and this event's own commission fee,
+            # both already applied above) -- previously only available in
+            # the separate daily `stats` table (keyed by date only, not
+            # per-symbol), so reading an event required cross-referencing
+            # a different table by date to see its $ context.
+            'capital': round(self.capital, 2),
+            'cum_pnl': round(self.capital - self.initial_capital, 2),
+        })
+
+    def process_roll(self, symbol: str, roll_date: date) -> None:
+        """Mandatory quarterly contract roll for a currently-held symbol:
+        close the expiring contract (full round-trip commission on its own
+        quantity, close_reason='roll') and immediately reopen the identical
+        size under the new contract at the same price -- net zero PnL/size
+        effect, cost is the fee alone. Mirrors FuturesPosition.close()
+        (position.py:1785-1877): a roll is a mechanical consequence of the
+        contract's own expiration, not a signal decision, so it fires
+        regardless of signal_gate_mode/fixed_quantities and doesn't touch
+        held_contracts or go through rebalance_to (which would incorrectly
+        charge a second commission for the "reopen" leg -- opening a
+        position is free in this fee model, only closing charges, exactly
+        as in FuturesPosition.calculate_pnl)."""
+        prior = self.held_contracts[symbol]
+        if prior == 0:
+            return
+        price = self.prior_close[symbol]
+        fee = self.futures_types[symbol]['commission'] * 2 * abs(prior)
+        self.capital -= fee
+        self.transactions.append({
+            'symbol': symbol, 'date': roll_date, 'action': 'roll',
+            'quantity': abs(prior), 'price': _round(price, _PRICE_ROUND_NDIGITS),
+            'fee': round(fee, 2), 'prior_contracts': prior, 'target_contracts': prior,
+            'gate_reason': None, 'is_seed': False,
+        })
+        ot = self.open_trade[symbol]
+        if ot is not None:
+            ot['fees'] += fee
+            ot['close_reason'] = 'roll'
+            self.close_trade(symbol, roll_date, price)
+        self.open_trade[symbol] = {
+            'entry_date': roll_date, 'entry_price': price,
+            'direction': 'long' if prior > 0 else 'short',
+            'max_contracts': abs(prior), 'mtm_pnl': 0.0, 'lots_closed_pre_exit': 0,
+            'fees': 0.0, 'close_reason': None,
+        }
+
+
 def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
     """Runs the monthly-rebalance TSMOM backtest. Returns a dict with
     'daily_mtm' (daily portfolio capital/drawdown, polars DataFrame -- same
@@ -759,215 +1001,8 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
         cluster_by_symbol = {s: get_spec(s)['cluster'] for s in config.symbols}
         monthly_history = build_monthly_state_return_history(rebal_monthly, rebal_dates_sorted, cluster_by_symbol)
 
-    def _mixing_params_for_date(d: date) -> dict[str, tuple[float, float]]:
-        """{cluster: (a_co, a_re)} as of rebalance date `d` -- estimated
-        once per rebalance date (shared across every symbol in that
-        cluster), not once per symbol. Empty dict (never read) outside
-        'goulding' mode."""
-        if config.weighting_mode != 'goulding':
-            return {}
-        clusters_needed = {get_spec(s)['cluster'] for s in config.symbols}
-        if config.mixing_pool == 'cluster':
-            return {c: estimate_mixing_params(monthly_history, d, c) for c in clusters_needed}
-        global_params = estimate_mixing_params(monthly_history, d, None)
-        return {c: global_params for c in clusters_needed}
-
-    def _goulding_kwargs_for(symbol: str, d: date, mixing_params_by_cluster: dict[str, tuple[float, float]]) -> dict:
-        """This symbol's own g_regime_val/g_fast_val/g_slow_val/a_co/a_re
-        as of `d`, ready to **-unpack straight into _compute_signal_row.
-        Empty dict outside 'goulding' mode -- _compute_signal_row's own
-        defaults (all None) then apply, matching its 'continuous'-mode
-        behaviour exactly."""
-        if config.weighting_mode != 'goulding':
-            return {}
-        g_row = rebal_monthly[symbol].filter(pl.col('ts_event') == d)
-        g_regime_val = g_row['g_regime'][0] if g_row.height else None
-        g_fast_val = g_row['g_fast'][0] if g_row.height else None
-        g_slow_val = g_row['g_slow'][0] if g_row.height else None
-        a_co, a_re = mixing_params_by_cluster.get(get_spec(symbol)['cluster'], (0.5, 0.5))
-        return {'g_regime_val': g_regime_val, 'g_fast_val': g_fast_val, 'g_slow_val': g_slow_val,
-                'a_co': a_co, 'a_re': a_re}
-
-    held_contracts = {s: 0 for s in config.symbols}
-    prior_close = {s: None for s in config.symbols}
-    events: list[dict] = []
-    transactions: list[dict] = []
-    trades: list[dict] = []
-    # Per-symbol open trade accumulator: None when flat, else a dict
-    # tracking the currently-open span's entry info plus running realized
-    # MTM pnl/fees, closed out (appended to `trades`) on a return to flat,
-    # a direct sign flip, or a final force-close after the day loop ends.
-    open_trade: dict[str, Optional[dict]] = {s: None for s in config.symbols}
+    ledger = _PortfolioLedger(config.symbols, config.initial_capital, futures_types)
     daily_rows = []
-    capital = config.initial_capital
-
-    def _close_trade(symbol: str, exit_date: date, exit_price: Optional[float]) -> None:
-        ot = open_trade[symbol]
-        if ot is None:
-            return
-        net_pnl = round(ot['mtm_pnl'] - ot['fees'], 2)
-        trades.append({
-            'symbol': symbol, 'direction': ot['direction'],
-            'entry_date': ot['entry_date'], 'entry_price': _round(ot['entry_price'], _PRICE_ROUND_NDIGITS),
-            'exit_date': exit_date, 'exit_price': _round(exit_price, _PRICE_ROUND_NDIGITS),
-            'days_held': (exit_date - ot['entry_date']).days,
-            'max_contracts': ot['max_contracts'],
-            # Total contracts shed via MID-TRADE resizes (same-direction
-            # downsizes), NOT counting the final close itself -- 0 whenever
-            # the position was held at a constant size its whole life.
-            # Exists specifically so entry_price/exit_price/max_contracts
-            # alone don't invite a naive (exit-entry)*max_contracts*mult
-            # sanity check that silently overstates PnL whenever the
-            # position was actually smaller for part of its life (confirmed
-            # directly: MZW opened at 7, resized down to 1 partway through,
-            # and the naive full-max_contracts calc overstated the real PnL
-            # by exactly the exposure lost in that resize) -- a nonzero
-            # value here is a direct signal that max_contracts wasn't held
-            # the entire time, so a manual check needs transactions.csv's
-            # own resize-by-resize history, not this summary row alone.
-            'lots_closed_pre_exit': ot['lots_closed_pre_exit'],
-            'fees': round(ot['fees'], 2),
-            'pnl': net_pnl, 'close_reason': ot['close_reason'],
-        })
-        open_trade[symbol] = None
-
-    def _rebalance_to(symbol: str, target: int, rebalance_date: date, vol_regime,
-                       vix_close=None, vix_ratio=None, signal: Optional[dict] = None, is_seed=False):
-        """`signal` is _compute_target's full result dict (or None on a
-        spike/extreme-gated event, where signal computation is skipped
-        entirely -- every signal-derived field below is then None, same
-        as before)."""
-        nonlocal capital
-        s = signal or {}
-        prior = held_contracts[symbol]
-        fee = 0.0
-        if target != prior:
-            # Commission is charged only on the quantity actually closed out
-            # -- opening a position, or adding to one, is free (matches
-            # FuturesPosition.calculate_pnl / _process_roll's convention:
-            # fees = commission * 2 * quantity, charged entirely at close).
-            # A flip closes the *entire* prior side (the new opposite-
-            # direction open that follows is then free, same as any other
-            # open); a same-direction resize only charges for the portion
-            # that shrinks back toward zero, not the portion added.
-            if prior == 0:
-                closed_qty = 0
-            elif target == 0 or (prior > 0) != (target > 0):
-                closed_qty = abs(prior)
-            else:
-                closed_qty = max(0, abs(prior) - abs(target))
-            fee = futures_types[symbol]['commission'] * 2 * closed_qty
-            capital -= fee
-            price = s.get('close')
-            transactions.append({
-                'symbol': symbol, 'date': rebalance_date,
-                'action': 'buy' if target > prior else 'sell',
-                'quantity': abs(target - prior), 'price': _round(price, _PRICE_ROUND_NDIGITS),
-                'fee': round(fee, 2), 'prior_contracts': prior, 'target_contracts': target,
-                'gate_reason': s.get('gate_reason'), 'is_seed': is_seed,
-            })
-
-            flipped = prior != 0 and target != 0 and (prior > 0) != (target > 0)
-            if flipped or target == 0:
-                # This transaction's fee is the closing leg's cost alone (the
-                # whole prior side on a flip -- the new opposite-direction
-                # open that follows is free, same as any other open) --
-                # must be folded in before _close_trade reads ot['fees'], or
-                # it's silently dropped from the trade's own total (portfolio
-                # capital stays correct regardless, since that deduction
-                # already happened above; only the per-trade fees/pnl
-                # fields were at risk of undercounting).
-                ot = open_trade[symbol]
-                if ot is not None:
-                    ot['fees'] += fee
-                _close_trade(symbol, rebalance_date, price)
-            ot = open_trade[symbol]  # re-read post-close: _close_trade above may have just cleared it
-            if target != 0 and ot is None:
-                open_trade[symbol] = {
-                    'entry_date': rebalance_date, 'entry_price': price,
-                    'direction': 'long' if target > 0 else 'short',
-                    'max_contracts': abs(target), 'mtm_pnl': 0.0,
-                    'fees': 0.0 if flipped else fee,
-                    'close_reason': None, 'lots_closed_pre_exit': 0,
-                }
-            elif target != 0 and ot is not None:
-                # Resize within the same direction -- extend the existing
-                # span rather than starting a new trade; fold in this
-                # resize's own fee (zero unless this shrank toward zero),
-                # track the largest size held, and accumulate any quantity
-                # shed by a downsize (closed_qty, computed above) into
-                # lots_closed_pre_exit -- see _close_trade's own comment for
-                # why this is tracked separately from max_contracts.
-                ot['fees'] += fee
-                ot['max_contracts'] = max(ot['max_contracts'], abs(target))
-                ot['lots_closed_pre_exit'] += closed_qty
-            if (flipped or target == 0) and s.get('gate_reason'):
-                # _close_trade already ran above and cleared open_trade;
-                # the reason belongs on the trade that just closed, so
-                # patch the just-appended row rather than re-opening it.
-                trades[-1]['close_reason'] = s.get('gate_reason')
-
-        held_contracts[symbol] = target
-        events.append({
-            'date': rebalance_date, 'symbol': symbol,
-            'close': _round(s.get('close'), _PRICE_ROUND_NDIGITS), 'peak': _round(s.get('peak'), _PRICE_ROUND_NDIGITS),
-            'dd_pct': _round(s.get('dd_pct'), 2),
-            'avg_r_fast': _round(s.get('avg_r_fast'), 4), 'avg_r_slow': _round(s.get('avg_r_slow'), 4),
-            'fast_return': _round(s.get('fast_return'), 4), 'slow_return': _round(s.get('slow_return'), 4),
-            'ts_fast': _round(s.get('ts_fast'), 4), 'ts_slow': _round(s.get('ts_slow'), 4),
-            'signal': _round(s.get('signal'), 4), 'r1y_pct': _round(s.get('r1y_pct'), 2),
-            'regime': s.get('regime'), 'vix_close': _round(vix_close, 2), 'vix_ratio': _round(vix_ratio, 4),
-            'vol_regime': vol_regime, 'hv': _round(s.get('hv'), 4), 'risk_scalar': _round(s.get('risk_scalar'), 4),
-            'regime_discount': _round(s.get('regime_discount'), 2),
-            'prior_contracts': prior, 'target_contracts': target, 'is_seed': is_seed,
-            'gate_reason': s.get('gate_reason'),
-            # Portfolio-level capital snapshot as of this event (after
-            # today's mark-to-market and this event's own commission fee,
-            # both already applied above) -- previously only available in
-            # the separate daily `stats` table (keyed by date only, not
-            # per-symbol), so reading an event required cross-referencing
-            # a different table by date to see its $ context.
-            'capital': round(capital, 2),
-            'cum_pnl': round(capital - config.initial_capital, 2),
-        })
-
-    def _process_roll(symbol: str, roll_date: date) -> None:
-        """Mandatory quarterly contract roll for a currently-held symbol:
-        close the expiring contract (full round-trip commission on its own
-        quantity, close_reason='roll') and immediately reopen the identical
-        size under the new contract at the same price -- net zero PnL/size
-        effect, cost is the fee alone. Mirrors FuturesPosition.close()
-        (position.py:1785-1877): a roll is a mechanical consequence of the
-        contract's own expiration, not a signal decision, so it fires
-        regardless of signal_gate_mode/fixed_quantities and doesn't touch
-        held_contracts or go through _rebalance_to (which would incorrectly
-        charge a second commission for the "reopen" leg -- opening a
-        position is free in this fee model, only closing charges, exactly
-        as in FuturesPosition.calculate_pnl)."""
-        nonlocal capital
-        prior = held_contracts[symbol]
-        if prior == 0:
-            return
-        price = prior_close[symbol]
-        fee = futures_types[symbol]['commission'] * 2 * abs(prior)
-        capital -= fee
-        transactions.append({
-            'symbol': symbol, 'date': roll_date, 'action': 'roll',
-            'quantity': abs(prior), 'price': _round(price, _PRICE_ROUND_NDIGITS),
-            'fee': round(fee, 2), 'prior_contracts': prior, 'target_contracts': prior,
-            'gate_reason': None, 'is_seed': False,
-        })
-        ot = open_trade[symbol]
-        if ot is not None:
-            ot['fees'] += fee
-            ot['close_reason'] = 'roll'
-            _close_trade(symbol, roll_date, price)
-        open_trade[symbol] = {
-            'entry_date': roll_date, 'entry_price': price,
-            'direction': 'long' if prior > 0 else 'short',
-            'max_contracts': abs(prior), 'mtm_pnl': 0.0, 'lots_closed_pre_exit': 0,
-            'fees': 0.0, 'close_reason': None,
-        }
 
     # Seed the position from the last completed month-end *before*
     # start_date, using full unbounded history -- otherwise the backtest
@@ -1003,10 +1038,10 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
                                                   vix_scalar, annualization_by_symbol[symbol])
                     if result is None:
                         continue
-                    target, gate_reason = _apply_signal_gate(held_contracts[symbol], result['target'], result, config)
-                    _rebalance_to(symbol, target, seed_date, vol_regime, vix_close=vix_close,
-                                  vix_ratio=vix_ratio, signal={**result, 'gate_reason': gate_reason}, is_seed=True)
-                    if held_contracts[symbol] != 0:
+                    target, gate_reason = _apply_signal_gate(ledger.held_contracts[symbol], result['target'], result, config)
+                    ledger.rebalance_to(symbol, target, seed_date, vol_regime, vix_close=vix_close,
+                                        vix_ratio=vix_ratio, signal={**result, 'gate_reason': gate_reason}, is_seed=True)
+                    if ledger.held_contracts[symbol] != 0:
                         # Confirmed bug fix (2026-07): without this,
                         # prior_close[symbol] stays None going into the day
                         # loop below, whose own "1. Mark existing holdings"
@@ -1024,10 +1059,10 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
                         # results from silently substituting the first
                         # trading day's close as the effective entry price
                         # instead of the seed's own. result['close'] here is
-                        # the SAME value _rebalance_to just used as this
+                        # the SAME value rebalance_to just used as this
                         # trade's entry_price (signal={**result, ...} ->
                         # s.get('close')), so this guarantees they agree.
-                        prior_close[symbol] = result['close']
+                        ledger.prior_close[symbol] = result['close']
 
     for d in all_dates:
         # 1. Mark existing holdings to market: today's close vs yesterday's,
@@ -1037,14 +1072,7 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
             row = windowed[symbol].filter(pl.col('ts_event') == d)
             if row.height == 0:
                 continue
-            close = row['close'][0]
-            if prior_close[symbol] is not None and held_contracts[symbol] != 0:
-                day_pnl = held_contracts[symbol] * (close - prior_close[symbol]) * futures_types[symbol]['multiplier']
-                capital += day_pnl
-                ot = open_trade[symbol]
-                if ot is not None:
-                    ot['mtm_pnl'] += day_pnl
-            prior_close[symbol] = close
+            ledger.mark_to_market(symbol, row['close'][0])
 
         # 1.25. Mandatory per-symbol contract roll -- unconditional (not
         # gated by signal_gate_mode/fixed_quantities), since it's a
@@ -1058,7 +1086,7 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
         # series.
         for symbol in config.symbols:
             if d in roll_dates_by_symbol[symbol]:
-                _process_roll(symbol, d)
+                ledger.process_roll(symbol, d)
 
         # 1.5. Daily signal-gate check (signal_gate_mode == 'daily' only),
         # off-cycle from the monthly resize below -- BOTH entry and exit,
@@ -1077,13 +1105,13 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
             if not config.vix_gating:
                 vol_regime_d = VolRegime.NORMAL
             vix_scalar_d = VIX_ELEVATED_SCALE if vol_regime_d == VolRegime.ELEVATED else 1.0
-            mixing_params_by_cluster_d = _mixing_params_for_date(d)
+            mixing_params_by_cluster_d = _mixing_params_for_date(config, monthly_history, d)
 
             for symbol in config.symbols:
-                prior = held_contracts[symbol]
+                prior = ledger.held_contracts[symbol]
                 result = _compute_signal_row(symbol, precomputed, d, futures_types, config,
                                               vix_scalar_d, annualization_by_symbol[symbol],
-                                              **_goulding_kwargs_for(symbol, d, mixing_params_by_cluster_d))
+                                              **_goulding_kwargs_for(config, rebal_monthly, symbol, d, mixing_params_by_cluster_d))
                 if result is None:
                     continue
 
@@ -1092,13 +1120,13 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
                     reason = _signal_gate_reason(result['signal'], result['ts_fast'], result['ts_slow'], is_long,
                                                   config.ts_exit_threshold, config.exit_on_ts_crossover)
                     if reason is not None:
-                        _rebalance_to(symbol, 0, d, vol_regime_d, vix_close=vix_close_d, vix_ratio=vix_ratio_d,
-                                      signal={**result, 'gate_reason': reason})
+                        ledger.rebalance_to(symbol, 0, d, vol_regime_d, vix_close=vix_close_d, vix_ratio=vix_ratio_d,
+                                            signal={**result, 'gate_reason': reason})
                 elif result['target'] != 0:
                     target, gate_reason = _apply_signal_gate(0, result['target'], result, config)
                     if target != 0:
-                        _rebalance_to(symbol, target, d, vol_regime_d, vix_close=vix_close_d,
-                                      vix_ratio=vix_ratio_d, signal={**result, 'gate_reason': gate_reason})
+                        ledger.rebalance_to(symbol, target, d, vol_regime_d, vix_close=vix_close_d,
+                                            vix_ratio=vix_ratio_d, signal={**result, 'gate_reason': gate_reason})
 
         # 2. On rebalance dates, resize toward the vol-targeted signal,
         # gated by the spot-VIX regime (mirrors
@@ -1110,18 +1138,18 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
 
             if vol_regime in (VolRegime.SPIKE, VolRegime.EXTREME):
                 for symbol in config.symbols:
-                    prior = held_contracts[symbol]
+                    prior = ledger.held_contracts[symbol]
                     target = round(prior / 2) if vol_regime == VolRegime.EXTREME else prior
                     close_row = full_price_data[symbol].filter(pl.col('ts_event') <= d).tail(1)
                     close = float(close_row['close'][0]) if close_row.height > 0 else None
-                    _rebalance_to(symbol, target, d, vol_regime, vix_close=vix_close, vix_ratio=vix_ratio,
-                                  signal={'close': close})
+                    ledger.rebalance_to(symbol, target, d, vol_regime, vix_close=vix_close, vix_ratio=vix_ratio,
+                                        signal={'close': close})
             else:
                 vix_scalar = VIX_ELEVATED_SCALE if vol_regime == VolRegime.ELEVATED else 1.0
                 # Computed once per rebalance date, shared by both branches
                 # below -- a_Co/a_Re only needs estimating once per date,
                 # not once per symbol or per branch.
-                mixing_params_by_cluster = _mixing_params_for_date(d)
+                mixing_params_by_cluster = _mixing_params_for_date(config, monthly_history, d)
 
                 if config.target_portfolio_vol is not None and config.fixed_quantities is None:
                     # Correlation-aware sizing -- see TsmomBacktestConfig.
@@ -1146,7 +1174,7 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
                     for symbol in config.symbols:
                         result = _compute_signal_row(symbol, precomputed, d, futures_types, config,
                                                       vix_scalar, annualization_by_symbol[symbol],
-                                                      **_goulding_kwargs_for(symbol, d, mixing_params_by_cluster))
+                                                      **_goulding_kwargs_for(config, rebal_monthly, symbol, d, mixing_params_by_cluster))
                         if result is not None:
                             probe_results[symbol] = result
 
@@ -1162,7 +1190,7 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
                     # estimate -- nobody trades this month regardless (every
                     # probe result's own target is already 0 in that case).
                     per_symbol_budget = compute_symbol_notional_budget(
-                        active_symbols, returns_wide, d, capital, config.target_portfolio_vol,
+                        active_symbols, returns_wide, d, ledger.capital, config.target_portfolio_vol,
                         config.vol_target, config.idm_window_years, config.idm_halflife_days)
 
                     for symbol in config.symbols:
@@ -1176,22 +1204,22 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
                             result = _compute_signal_row(symbol, precomputed, d, futures_types, config,
                                                           vix_scalar, annualization_by_symbol[symbol],
                                                           notional_budget=per_symbol_budget,
-                                                          **_goulding_kwargs_for(symbol, d, mixing_params_by_cluster))
-                        target, gate_reason = _apply_signal_gate(held_contracts[symbol], result['target'], result, config)
-                        _rebalance_to(symbol, target, d, vol_regime, vix_close=vix_close,
-                                      vix_ratio=vix_ratio, signal={**result, 'gate_reason': gate_reason})
+                                                          **_goulding_kwargs_for(config, rebal_monthly, symbol, d, mixing_params_by_cluster))
+                        target, gate_reason = _apply_signal_gate(ledger.held_contracts[symbol], result['target'], result, config)
+                        ledger.rebalance_to(symbol, target, d, vol_regime, vix_close=vix_close,
+                                            vix_ratio=vix_ratio, signal={**result, 'gate_reason': gate_reason})
                 else:
                     for symbol in config.symbols:
                         result = _compute_signal_row(symbol, precomputed, d, futures_types, config,
                                                       vix_scalar, annualization_by_symbol[symbol],
-                                                      **_goulding_kwargs_for(symbol, d, mixing_params_by_cluster))
+                                                      **_goulding_kwargs_for(config, rebal_monthly, symbol, d, mixing_params_by_cluster))
                         if result is None:
                             continue
-                        target, gate_reason = _apply_signal_gate(held_contracts[symbol], result['target'], result, config)
-                        _rebalance_to(symbol, target, d, vol_regime, vix_close=vix_close,
-                                      vix_ratio=vix_ratio, signal={**result, 'gate_reason': gate_reason})
+                        target, gate_reason = _apply_signal_gate(ledger.held_contracts[symbol], result['target'], result, config)
+                        ledger.rebalance_to(symbol, target, d, vol_regime, vix_close=vix_close,
+                                            vix_ratio=vix_ratio, signal={**result, 'gate_reason': gate_reason})
 
-        daily_rows.append({'date': d, 'capital': round(capital, 2)})
+        daily_rows.append({'date': d, 'capital': round(ledger.capital, 2)})
 
     # Force-close any position still open at the end of the window -- same
     # spirit as Backtester's close_all sweep: a trade that's still running
@@ -1200,12 +1228,12 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
     if all_dates:
         last_date = all_dates[-1]
         for symbol in config.symbols:
-            ot = open_trade[symbol]
+            ot = ledger.open_trade[symbol]
             if ot is not None:
                 close_row = full_price_data[symbol].filter(pl.col('ts_event') <= last_date).tail(1)
                 last_price = float(close_row['close'][0]) if close_row.height > 0 else None
                 ot['close_reason'] = 'end_of_backtest'
-                _close_trade(symbol, last_date, last_price)
+                ledger.close_trade(symbol, last_date, last_price)
 
     stats = pl.DataFrame(daily_rows)
     stats = stats.with_columns(running_max=pl.col('capital').cum_max())
@@ -1234,12 +1262,12 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
     ann_ret = (mean_ret or 0.0) * 252
     ann_vol = (std_ret or 0.0) * (252 ** 0.5)
     sharpe = ann_ret / ann_vol if ann_vol else None
-    total_fees = sum(t['fee'] for t in transactions)
+    total_fees = sum(t['fee'] for t in ledger.transactions)
 
     return {
-        'daily_mtm': stats, 'trend_signals': events,
-        'transactions': pl.DataFrame(transactions),
-        'trades': pl.DataFrame(trades).sort('entry_date') if trades else pl.DataFrame(trades),
+        'daily_mtm': stats, 'trend_signals': ledger.events,
+        'transactions': pl.DataFrame(ledger.transactions),
+        'trades': pl.DataFrame(ledger.trades).sort('entry_date') if ledger.trades else pl.DataFrame(ledger.trades),
         'n_days': stats.height,
         'ann_ret_pct': round(ann_ret * 100, 2),
         'ann_vol_pct': round(ann_vol * 100, 2),
