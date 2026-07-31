@@ -15,6 +15,7 @@ contract is ~$130k+ notional, vs MES's ~$13k).
 """
 import argparse
 import os
+from datetime import datetime
 
 import polars as pl
 
@@ -183,8 +184,18 @@ def main():
             os.path.join(results_dir, f"tsmom_signals_{symbol_str}_{start_year}-{end_year}.csv"))
         transactions.write_csv(os.path.join(results_dir, f"tsmom_transactions_{symbol_str}_{start_year}-{end_year}.csv"))
         trades.write_csv(os.path.join(results_dir, f"tsmom_trades_{symbol_str}_{start_year}-{end_year}.csv"))
-        summary_df.write_csv(os.path.join(results_dir, f"tsmom_summary_{symbol_str}_{start_year}-{end_year}.csv"))
-        print(f"\nSaved summary to {os.path.join(results_dir, f'tsmom_summary_{symbol_str}_{start_year}-{end_year}.csv')}")
+        # Timestamped, unlike the four files above -- so re-running the same
+        # --symbols/--years with different other params (e.g. a --vol-target
+        # or --target-portfolio-vol sweep) accumulates a comparable summary
+        # per run instead of each one silently overwriting the last (the
+        # mtm/signals/transactions/trades files still only ever hold the
+        # MOST RECENT run's own detail, which is fine -- rerunning is cheap
+        # and those aren't meant to be compared across runs the way the
+        # summary is).
+        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        summary_path = os.path.join(results_dir, f"{ts}_tsmom_summary_{symbol_str}_{start_year}-{end_year}.csv")
+        summary_df.write_csv(summary_path)
+        print(f"\nSaved summary to {summary_path}")
 
 
 if __name__ == "__main__":
