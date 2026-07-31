@@ -697,7 +697,8 @@ def fetch_ib_prices(
     and one column per symbol.  Pass volume to run_quality_check to enable Step 2.
     """
     from ib_tools.ibpysync import IBPySync
-    from scripts.tsmom_risk_budget_diagnostic import resolve_signal_symbol
+
+    from derivatives_bt_engine.domain.instruments import resolve_signal_symbol
 
     price_frames: dict[str, pl.DataFrame] = {}
     vol_frames: dict[str, pl.DataFrame] = {}
