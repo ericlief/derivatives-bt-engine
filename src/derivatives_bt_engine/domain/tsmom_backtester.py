@@ -27,7 +27,12 @@ from typing import Optional
 import duckdb
 import polars as pl
 
-from derivatives_bt_engine.domain.allocation import _bounded_ewm_correlation_matrix, build_returns_wide, compute_idm
+from derivatives_bt_engine.domain.allocation import (
+    _bounded_ewm_correlation_matrix,
+    build_returns_wide,
+    compute_idm,
+    compute_position_scalar,
+)
 from derivatives_bt_engine.domain.enums import TrendRegime, VolRegime
 from derivatives_bt_engine.domain.futures_dataloader import FuturesDataLoader, assert_monotonic_expiration
 from derivatives_bt_engine.domain.instruments import (
@@ -39,7 +44,6 @@ from derivatives_bt_engine.domain.signal import (
     build_features,
     build_monthly_state_return_history,
     classify_regime,
-    compute_position_scalar,
     continuous_momentum,
     estimate_mixing_params,
     goulding_monthly,

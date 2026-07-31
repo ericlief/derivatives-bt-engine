@@ -1,14 +1,18 @@
 """
-Cross-instrument risk allocation -- how much risk/budget each instrument or
-cluster gets relative to the others, given they aren't independent bets.
+Risk allocation -- how much risk/budget each POSITION gets, both at the
+single-instrument level (compute_position_scalar: this instrument's own
+vol-targeted risk_scalar) and across instruments/clusters relative to each
+other (everything else here), given they aren't independent bets.
 
-Split out from tsmom_signal.py (2026-07), which is about a SINGLE
-instrument's own signal-to-scalar math (compute_position_scalar) -- these
-functions are a genuinely different concern: given several instruments each
-already have their own signal, how do you size them RELATIVE to each other.
+compute_position_scalar moved here (2026-07) from domain/signal.py, which
+had held it since before this module existed -- it's genuinely risk-SIZING
+math (vol-targeting, momentum/signal-confidence discounts), not signal
+CONSTRUCTION (trend detection), so it belongs in the risk module, not
+alongside build_features/continuous_momentum/goulding_monthly. This was the
+second half of the same split that originally created this module:
 compute_n_effective/compute_desired_risk_budget/apply_cluster_risk_cap moved
-here unchanged from tsmom_signal.py (see git history for the mechanical
-move); _bounded_ewm_correlation_matrix/compute_idm moved here from
+here unchanged from the old tsmom_signal.py (see git history for that
+mechanical move); _bounded_ewm_correlation_matrix/compute_idm moved here from
 derivatives_bt_engine.strats.tsmom_binary_vol_parity_backtest, which
 originally built them for its own idm_scaling feature -- this is now the one
 canonical implementation, not a duplicate, so any other caller (the live
@@ -35,7 +39,66 @@ from typing import Optional
 import numpy as np
 import polars as pl
 
+from derivatives_bt_engine.domain.enums import TrendRegime
+from derivatives_bt_engine.domain.signal import DEFAULT_ANNUALIZATION_DAYS
+
 log = logging.getLogger(__name__)
+
+
+def compute_position_scalar(trend_strength, daily_std_last, vol_target: float,
+                             regime: TrendRegime, momentum_discount: float = 0.5,
+                             signal_confidence: float = 1.0,
+                             annualization_days=DEFAULT_ANNUALIZATION_DAYS) -> float:
+    """
+    Layers 2-4 of the position sizing framework (plus the opt-in layer 5,
+    signal_confidence), combined into a single scalar in [-1, +1]:
+
+        scalar = trend_strength * risk_scalar * momentum_discount * signal_confidence
+
+    Long-only filtering (signal_scalar = max(0, trend_strength)) is the
+    caller's responsibility — pass the already-filtered trend_strength in
+    for long-only accounts. This function stays pure w.r.t. direction.
+
+    risk_scalar = vol_target / current_realized_vol, clamped to [0.25, 2.0]
+    -- a risk-equalization ratio driven by THIS instrument's own realized
+    vol, nothing regime- or market-wide about it.
+    current_realized_vol = daily_std_last * sqrt(annualization_days) <= ** 63-day rolling **
+    Callers should pass the SAME annualization_days used to compute
+    daily_std_last in the first place (instruments.resolve_annualization_days)
+    -- this project's confirmed universe splits 252 (CBOT grains) vs. 259
+    (everything else checked); the plain 252 default here reproduces prior
+    behavior exactly for anyone not passing an instrument-specific value.
+
+    momentum_discount is applied only for Correction/Rebound (disagreement
+    between the fast and slow momentum signal — lower conviction);
+    Bull/Bear/Unknown get a discount factor of 1.0. Despite the similar
+    "discount" shape, this is unrelated to market_stress_scale (the
+    portfolio-wide, VX-driven de-risking lever applied by the caller in
+    derivatives_bt_engine.live.tsmom_rebalance, not in here) -- the two were
+    conflated in earlier design review, hence the explicit naming.
+
+    signal_confidence (default 1.0, no-op) is a separate, opt-in, per-
+    instrument discount on trust in THIS instrument's signal when its own
+    vol_ratio (short-window/long-window realized vol, asset-specific, NOT
+    VIX/VX-driven) is unusual relative to its own history -- see
+    compute_signal_confidence() in signal.py. Orthogonal to momentum_discount
+    (which is about fast/slow sign disagreement, not vol) and to
+    market_stress_scale (which is portfolio-wide, not per-instrument).
+    """
+    if trend_strength is None or (isinstance(trend_strength, float) and math.isnan(trend_strength)):
+        return 0.0
+
+    if daily_std_last is None or (isinstance(daily_std_last, float) and math.isnan(daily_std_last)) or daily_std_last <= 0:
+        risk_scalar = 1.0   # insufficient history to size by vol — neutral
+    else:
+        current_realized_vol = daily_std_last * math.sqrt(annualization_days) # 63 day not last month
+        risk_scalar = vol_target / current_realized_vol # 0.15/0.60 ~= 0.25, this is not hv_long here, but a param
+        risk_scalar = max(0.25, min(2.0, risk_scalar))
+
+    momentum_discount = momentum_discount if regime in (TrendRegime.CORRECTION, TrendRegime.REBOUND) else 1.0
+
+    scalar = trend_strength * risk_scalar * momentum_discount * signal_confidence
+    return max(-1.0, min(1.0, scalar))
 
 
 def compute_n_effective(active_clusters: set) -> int:
