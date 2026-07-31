@@ -141,6 +141,42 @@ def test_long_uptrend_produces_long_position(monkeypatch):
     assert any(e['target_contracts'] > 0 for e in later_events)
 
 
+def test_goulding_weighting_mode_produces_long_position_with_audit_fields(monkeypatch):
+    """weighting_mode='goulding' must actually drive direction (same strong
+    synthetic uptrend as test_long_uptrend_produces_long_position above,
+    just under the goulding model instead of continuous) and must populate
+    the goulding audit fields (g_regime/g_fast/g_slow/a_co/a_re) on
+    trend_signals events. These are computed by _compute_signal_row
+    specifically so a saved trend_signals CSV shows what drove a given
+    rebalance's direction, but were previously silently dropped before
+    reaching ledger.events -- confirmed and fixed alongside this test."""
+    price_data = {'X': _price_df(date(2018, 1, 1), 500, drift=0.0015, vol=0.005, seed=1)}
+    vix = _vix_df(date(2018, 1, 1), 500, level=15.0)
+    _patch_data(monkeypatch, price_data, vix)
+    monkeypatch.setattr(tb, 'get_spec', lambda s: get_spec('ES'))
+
+    config = TsmomBacktestConfig(symbols=['X'], max_notional=50_000, max_contracts=5,
+                                  weighting_mode='goulding')
+    result = run_tsmom_backtest(config)
+
+    later_events = [e for e in result['trend_signals'] if e['target_contracts'] is not None][-5:]
+    assert any(e['target_contracts'] > 0 for e in later_events)
+
+    # Outside 'goulding' mode these fields are always None (see
+    # _goulding_kwargs_for's own empty-dict short-circuit) -- filtering for
+    # "populated" here specifically isolates goulding-mode events, and
+    # confirms they're no longer silently dropped before reaching
+    # trend_signals.
+    populated = [e for e in result['trend_signals'] if e['g_regime'] is not None]
+    assert populated, "expected at least one event with goulding audit fields populated"
+    for e in populated[-5:]:
+        assert e['g_regime'] in ('bull', 'bear', 'correction', 'rebound')
+        assert e['g_fast'] is not None
+        assert e['g_slow'] is not None
+        assert e['a_co'] is not None
+        assert e['a_re'] is not None
+
+
 def test_portfolio_capital_aggregates_across_symbols(monkeypatch):
     a = _price_df(date(2018, 1, 1), 400, drift=0.001, vol=0.005, seed=2)
     b = _price_df(date(2018, 1, 1), 400, drift=0.001, vol=0.005, seed=3)

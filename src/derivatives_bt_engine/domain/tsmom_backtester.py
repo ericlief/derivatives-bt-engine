@@ -843,6 +843,17 @@ class _PortfolioLedger:
             'regime_discount': _round(s.get('regime_discount'), 2),
             'prior_contracts': prior, 'target_contracts': target, 'is_seed': is_seed,
             'gate_reason': s.get('gate_reason'),
+            # Goulding audit fields -- None in 'continuous' mode (nothing to
+            # report; _compute_signal_row's own result dict already carries
+            # None for all of these there), populated in 'goulding' mode.
+            # Previously computed by _compute_signal_row but never actually
+            # threaded through to this event dict, so a saved trend_signals
+            # CSV in goulding mode silently never showed what drove a given
+            # rebalance's direction, despite _compute_signal_row's own
+            # docstring promising exactly that.
+            'g_regime': s.get('g_regime'), 'g_fast': _round(s.get('g_fast'), 4),
+            'g_slow': _round(s.get('g_slow'), 4),
+            'a_co': _round(s.get('a_co'), 4), 'a_re': _round(s.get('a_re'), 4),
             # Portfolio-level capital snapshot as of this event (after
             # today's mark-to-market and this event's own commission fee,
             # both already applied above) -- previously only available in
