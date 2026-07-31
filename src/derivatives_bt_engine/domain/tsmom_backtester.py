@@ -808,7 +808,22 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
             'entry_date': ot['entry_date'], 'entry_price': _round(ot['entry_price'], _PRICE_ROUND_NDIGITS),
             'exit_date': exit_date, 'exit_price': _round(exit_price, _PRICE_ROUND_NDIGITS),
             'days_held': (exit_date - ot['entry_date']).days,
-            'max_contracts': ot['max_contracts'], 'fees': round(ot['fees'], 2),
+            'max_contracts': ot['max_contracts'],
+            # Total contracts shed via MID-TRADE resizes (same-direction
+            # downsizes), NOT counting the final close itself -- 0 whenever
+            # the position was held at a constant size its whole life.
+            # Exists specifically so entry_price/exit_price/max_contracts
+            # alone don't invite a naive (exit-entry)*max_contracts*mult
+            # sanity check that silently overstates PnL whenever the
+            # position was actually smaller for part of its life (confirmed
+            # directly: MZW opened at 7, resized down to 1 partway through,
+            # and the naive full-max_contracts calc overstated the real PnL
+            # by exactly the exposure lost in that resize) -- a nonzero
+            # value here is a direct signal that max_contracts wasn't held
+            # the entire time, so a manual check needs transactions.csv's
+            # own resize-by-resize history, not this summary row alone.
+            'lots_closed_pre_exit': ot['lots_closed_pre_exit'],
+            'fees': round(ot['fees'], 2),
             'pnl': net_pnl, 'close_reason': ot['close_reason'],
         })
         open_trade[symbol] = None
@@ -870,15 +885,19 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
                     'direction': 'long' if target > 0 else 'short',
                     'max_contracts': abs(target), 'mtm_pnl': 0.0,
                     'fees': 0.0 if flipped else fee,
-                    'close_reason': None,
+                    'close_reason': None, 'lots_closed_pre_exit': 0,
                 }
             elif target != 0 and ot is not None:
                 # Resize within the same direction -- extend the existing
                 # span rather than starting a new trade; fold in this
-                # resize's own fee (zero unless this shrank toward zero) and
-                # track the largest size held.
+                # resize's own fee (zero unless this shrank toward zero),
+                # track the largest size held, and accumulate any quantity
+                # shed by a downsize (closed_qty, computed above) into
+                # lots_closed_pre_exit -- see _close_trade's own comment for
+                # why this is tracked separately from max_contracts.
                 ot['fees'] += fee
                 ot['max_contracts'] = max(ot['max_contracts'], abs(target))
+                ot['lots_closed_pre_exit'] += closed_qty
             if (flipped or target == 0) and s.get('gate_reason'):
                 # _close_trade already ran above and cleared open_trade;
                 # the reason belongs on the trade that just closed, so
@@ -943,7 +962,7 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
         open_trade[symbol] = {
             'entry_date': roll_date, 'entry_price': price,
             'direction': 'long' if prior > 0 else 'short',
-            'max_contracts': abs(prior), 'mtm_pnl': 0.0,
+            'max_contracts': abs(prior), 'mtm_pnl': 0.0, 'lots_closed_pre_exit': 0,
             'fees': 0.0, 'close_reason': None,
         }
 
