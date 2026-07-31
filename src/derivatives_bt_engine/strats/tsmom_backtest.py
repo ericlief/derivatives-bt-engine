@@ -179,20 +179,22 @@ def main():
         results_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'results'))
         os.makedirs(results_dir, exist_ok=True)
         symbol_str = '_'.join(symbols)
-        stats.write_csv(os.path.join(results_dir, f"tsmom_mtm_{symbol_str}_{start_year}-{end_year}.csv"))
-        pl.DataFrame(events).write_csv(
-            os.path.join(results_dir, f"tsmom_signals_{symbol_str}_{start_year}-{end_year}.csv"))
-        transactions.write_csv(os.path.join(results_dir, f"tsmom_transactions_{symbol_str}_{start_year}-{end_year}.csv"))
-        trades.write_csv(os.path.join(results_dir, f"tsmom_trades_{symbol_str}_{start_year}-{end_year}.csv"))
-        # Timestamped, unlike the four files above -- so re-running the same
-        # --symbols/--years with different other params (e.g. a --vol-target
-        # or --target-portfolio-vol sweep) accumulates a comparable summary
-        # per run instead of each one silently overwriting the last (the
-        # mtm/signals/transactions/trades files still only ever hold the
-        # MOST RECENT run's own detail, which is fine -- rerunning is cheap
-        # and those aren't meant to be compared across runs the way the
-        # summary is).
+        # All five files timestamped -- confirmed directly that without
+        # this, re-running the same --symbols/--years with different other
+        # params (e.g. --signal-gate-mode/--target-portfolio-vol variants
+        # in the same shell script, back to back) silently overwrote the
+        # PREVIOUS run's mtm/signals/transactions/trades files, since their
+        # names only ever encoded symbols+years: only summary_df had a
+        # timestamp in an earlier version of this, so two runs in the same
+        # script left two summary CSVs but only one (the last) set of
+        # detail files -- not the intended behavior, fixed by timestamping
+        # all five the same way.
         ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        stats.write_csv(os.path.join(results_dir, f"{ts}_tsmom_mtm_{symbol_str}_{start_year}-{end_year}.csv"))
+        pl.DataFrame(events).write_csv(
+            os.path.join(results_dir, f"{ts}_tsmom_signals_{symbol_str}_{start_year}-{end_year}.csv"))
+        transactions.write_csv(os.path.join(results_dir, f"{ts}_tsmom_transactions_{symbol_str}_{start_year}-{end_year}.csv"))
+        trades.write_csv(os.path.join(results_dir, f"{ts}_tsmom_trades_{symbol_str}_{start_year}-{end_year}.csv"))
         summary_path = os.path.join(results_dir, f"{ts}_tsmom_summary_{symbol_str}_{start_year}-{end_year}.csv")
         summary_df.write_csv(summary_path)
         print(f"\nSaved summary to {summary_path}")
