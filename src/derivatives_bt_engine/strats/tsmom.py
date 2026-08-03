@@ -85,16 +85,27 @@ def parse_args():
     p.add_argument('--idm-halflife-days', type=float, default=63.0,
                    help='Only used with --target-portfolio-vol: EWM halflife within the bounded window '
                         '(default: %(default)s)')
-    p.add_argument('--weighting-mode', choices=['continuous', 'goulding'], default='continuous',
+    p.add_argument('--notional-weighting', choices=['flat', 'erc', 'hrp'], default='flat',
+                   help="Only used with --target-portfolio-vol: how the total IDM-derived dollar-vol "
+                        "budget is split ACROSS active symbols (default: %(default)s). 'flat': every "
+                        "active symbol gets the same budget, regardless of correlation structure -- "
+                        "IDM itself already prices the whole active set's own diversification, but a "
+                        "correlated cluster's members each separately claim an equal share of the "
+                        "result. 'erc'/'hrp': data-driven alternatives (Equal Risk Contribution / "
+                        "Hierarchical Risk Parity, solved on that same bounded correlation matrix) "
+                        "that split so a correlated cluster collectively earns roughly one "
+                        "undiversified bet's worth of budget instead -- see "
+                        "compute_symbol_notional_budget's own docstring")
+    p.add_argument('--signal-weighting', choices=['continuous', 'goulding'], default='continuous',
                    help="Signal DIRECTION source (default: %(default)s). 'continuous': "
                         "continuous_momentum's daily trend_strength + --regime-discount. "
                         "'goulding': Goulding/Harvey/Mazzoleni (2023)'s own monthly Bull/Correction/"
                         "Bear/Rebound classification with a_Co/a_Re mixing weights re-estimated at "
                         "every rebalance from all prior pooled history -- --regime-discount is "
                         "ignored in this mode. Position size/vol-targeting is unaffected either way; "
-                        "see TsmomBacktestConfig.weighting_mode's own docstring")
+                        "see TsmomBacktestConfig.signal_weighting's own docstring")
     p.add_argument('--mixing-pool', choices=['cluster', 'global'], default='cluster',
-                   help="Only used with --weighting-mode goulding. 'cluster' (default): a_Co/a_Re "
+                   help="Only used with --signal-weighting goulding. 'cluster' (default): a_Co/a_Re "
                         "estimated separately per instruments.py cluster. 'global': one shared "
                         "estimate pooled across every --symbols regardless of cluster")
     p.add_argument('--no-save', action='store_true', help='Skip saving daily_mtm/trend_signals to results/')
@@ -138,7 +149,8 @@ def main():
         target_portfolio_vol=args.target_portfolio_vol,
         idm_window_years=args.idm_window_years,
         idm_halflife_days=args.idm_halflife_days,
-        weighting_mode=args.weighting_mode,
+        notional_weighting=args.notional_weighting,
+        signal_weighting=args.signal_weighting,
         mixing_pool=args.mixing_pool,
     )
 
@@ -175,7 +187,8 @@ def main():
     # to a comparable summary CSV.
     summary_df = pl.DataFrame([{
         'symbols': ','.join(symbols), 'years': args.years,
-        'weighting_mode': args.weighting_mode,
+        'signal_weighting': args.signal_weighting,
+        'notional_weighting': args.notional_weighting,
         'target_portfolio_vol': args.target_portfolio_vol,
         'n_days': result['n_days'], 'ann_ret_pct': result['ann_ret_pct'],
         'ann_vol_pct': result['ann_vol_pct'], 'sharpe': result['sharpe'],

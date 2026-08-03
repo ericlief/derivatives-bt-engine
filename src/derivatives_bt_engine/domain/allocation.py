@@ -38,6 +38,9 @@ from typing import Optional
 
 import numpy as np
 import polars as pl
+import scipy.cluster.hierarchy as sch
+from scipy.optimize import minimize
+from scipy.spatial.distance import squareform
 
 from derivatives_bt_engine.domain.enums import TrendRegime
 from derivatives_bt_engine.domain.signal import DEFAULT_ANNUALIZATION_DAYS
@@ -290,6 +293,10 @@ def apply_cluster_risk_cap(targets: list[dict], max_cluster_risk_pct: float,
 # estimate at all -- see _bounded_ewm_correlation_matrix's own docstring.
 MIN_IDM_WINDOW_ROWS = 63
 
+# compute_symbol_notional_budget's notional_weighting choices -- see that
+# function's own docstring for what each one does.
+NOTIONAL_WEIGHTING_SCHEMES = ('flat', 'erc', 'hrp')
+
 
 def build_returns_wide(price_data: dict[str, pl.DataFrame]) -> pl.DataFrame:
     """One row per date (inner-joined across every symbol's own daily
@@ -384,18 +391,181 @@ def _bounded_ewm_correlation_matrix(returns_wide: pl.DataFrame, symbols: list[st
     }
 
 
+def _corr_matrix_from_pairs(active_symbols: list[str],
+                             corr_pairs: Optional[dict[tuple[str, str], float]]) -> np.ndarray:
+    """Dense n x n correlation matrix (1.0 on the diagonal, corr_pairs off
+    it, in active_symbols' own order) -- shared by compute_idm,
+    compute_erc_weights, and compute_hrp_weights so all three price
+    diversification off exactly the same pairwise correlation estimate,
+    not three independently-reconstructed copies of it."""
+    n = len(active_symbols)
+    idx = {s: i for i, s in enumerate(active_symbols)}
+    h = np.eye(n)
+    for (a, b), corr in (corr_pairs or {}).items():
+        if a in idx and b in idx:
+            i, j = idx[a], idx[b]
+            h[i, j] = h[j, i] = corr
+    return h
+
+
+def compute_erc_weights(active_symbols: list[str],
+                         corr_pairs: Optional[dict[tuple[str, str], float]]) -> dict[str, float]:
+    """Equal Risk Contribution weights (Maillard, Roncalli & Teiletche,
+    2010), solved on the CORRELATION matrix directly rather than a raw
+    covariance matrix -- deliberately, not a simplification of convenience:
+    every instrument reaching this system's portfolio-level sizing has
+    ALREADY been vol-equalized by compute_position_scalar's own
+    risk_scalar (vol_target / current_realized_vol), so folding in each
+    instrument's raw variance a second time here would double-count that
+    normalization. Treating the correlation matrix (1.0 diagonal) as the
+    relevant "covariance" is exactly the same simplification compute_idm's
+    own W @ H @ W_t already makes.
+
+    scipy.optimize.minimize (SLSQP) -- the same textbook formulation as
+    scripts/tsmom_risk_budget_diagnostic.py's own compute_erc_weights (see
+    that module's docstring for the original brief and why PyPortfolioOpt/
+    riskfolio-lib weren't used there either): long-only, weights summing to
+    1, minimizing the spread of each asset's risk contribution
+    RC_i = w_i * (H @ w)_i / sqrt(w' H w). Unlike that read-only, manually-
+    run diagnostic, this runs once per rebalance date across an entire
+    backtest, so a non-convergent solve falls back to flat 1/n (logged),
+    rather than raising -- one bad date's numerical hiccup shouldn't abort
+    an otherwise-multi-year backtest run.
+
+    Falls back to uniform 1/n (matching compute_idm's own fallback
+    convention) when fewer than 2 active_symbols or corr_pairs is
+    empty/None."""
+    n = len(active_symbols)
+    if n < 2 or not corr_pairs:
+        return {s: 1.0 / n for s in active_symbols} if n > 0 else {}
+    h = _corr_matrix_from_pairs(active_symbols, corr_pairs)
+
+    def risk_contributions(w):
+        port_var = w @ h @ w
+        if port_var <= 0:
+            return np.zeros(n)
+        marginal = h @ w
+        return w * marginal / math.sqrt(port_var)
+
+    def objective(w):
+        rc = risk_contributions(w)
+        return np.sum((rc - rc.mean()) ** 2)
+
+    w0 = np.full(n, 1.0 / n)
+    bounds = [(1e-6, 1.0)] * n
+    constraints = [{'type': 'eq', 'fun': lambda w: np.sum(w) - 1.0}]
+    result = minimize(objective, w0, method='SLSQP', bounds=bounds, constraints=constraints,
+                      options={'maxiter': 1000, 'ftol': 1e-12})
+    if not result.success:
+        log.warning("ERC optimization failed to converge (%s) -- falling back to flat 1/n weights",
+                    result.message)
+        return {s: 1.0 / n for s in active_symbols}
+    return dict(zip(active_symbols, result.x))
+
+
+def _cluster_var(h: np.ndarray, cluster_idx: list[int]) -> float:
+    """Inverse-variance-weighted cluster variance (Lopez de Prado's own
+    getClusterVar) -- degenerates to a plain average of h's sub-block since
+    every diagonal entry of h is 1.0 by construction (see
+    compute_hrp_weights' own docstring for why that's the correct
+    simplification here, not an oversight). Clamped to a small positive
+    floor: h's off-diagonal entries are independently-estimated pairwise
+    correlations, not guaranteed to form a jointly positive-semidefinite
+    matrix for cluster sizes > 2, so this quadratic form can land a hair
+    below zero on a near-degenerate block -- the caller's own alpha
+    computation divides by (var_left + var_right), so a floor here matters
+    more than it would for a lone diagonal read."""
+    sub = h[np.ix_(cluster_idx, cluster_idx)]
+    ivp = 1.0 / np.diag(sub)
+    ivp /= ivp.sum()
+    return max(float(ivp @ sub @ ivp), 1e-12)
+
+
+def _hrp_recursive_bisection(h: np.ndarray, order: list[int]) -> np.ndarray:
+    """Lopez de Prado's getRecBipart (2016), translated from his own
+    pandas-Series reference implementation to a plain numpy array indexed
+    by original (pre-reorder) position -- `order` (the dendrogram leaf
+    order) determines split structure only; weights are written back at
+    each element's original index either way, so the returned array is
+    already aligned to the caller's own active_symbols order."""
+    w = np.ones(len(order))
+    clusters = [order]
+    while clusters:
+        clusters = [c[i:j] for c in clusters
+                    for i, j in ((0, len(c) // 2), (len(c) // 2, len(c)))
+                    if len(c) > 1]
+        for i in range(0, len(clusters), 2):
+            left, right = clusters[i], clusters[i + 1]
+            var_left = _cluster_var(h, left)
+            var_right = _cluster_var(h, right)
+            alpha = min(1.0, max(0.0, 1.0 - var_left / (var_left + var_right)))
+            w[left] *= alpha
+            w[right] *= 1.0 - alpha
+    # Guaranteed to sum to ~1 already by the recursive halving/complement
+    # property (alpha + (1 - alpha) == 1 at every split); normalizing is
+    # just a floating-point-drift correction, not a structural fix.
+    return w / w.sum()
+
+
+def compute_hrp_weights(active_symbols: list[str],
+                         corr_pairs: Optional[dict[tuple[str, str], float]]) -> dict[str, float]:
+    """Hierarchical Risk Parity (Lopez de Prado, 2016), reimplemented here
+    in pure numpy/scipy rather than calling PyPortfolioOpt's HRPOpt
+    (scripts/tsmom_risk_budget_diagnostic.py's own choice, for a one-off,
+    manually-run comparison). Two reasons this needs its own
+    implementation instead of reusing that one: HRPOpt requires a pandas
+    DataFrame input (this project's CLAUDE.md keeps pandas scoped to a
+    single library call site, not a per-rebalance-date hot path across an
+    entire backtest), and HRPOpt.optimize() guards its linkage_method
+    argument against a private scipy attribute that scipy >= 1.18 removed
+    entirely, needing its own compatibility shim. scipy.cluster.hierarchy's
+    linkage/leaves_list gives the same dendrogram leaf order directly, with
+    no pandas and no plotting dependency (dendrogram() itself is never
+    called here -- leaves_list reads the leaf order straight off the
+    linkage matrix).
+
+    Like compute_erc_weights, operates on the correlation matrix directly
+    rather than a raw covariance matrix, for the same reason: every
+    instrument is already vol-equalized upstream by compute_position_
+    scalar's own risk_scalar. The one accepted consequence (see
+    _cluster_var's own docstring): HRP's usual "size inversely to each
+    cluster member's own variance" step degenerates to an equal split
+    within a cluster, since every diagonal entry of the correlation matrix
+    is 1.0 -- exactly consistent with that vol-equalization having already
+    happened, not a lost feature.
+
+    Falls back to uniform 1/n (matching compute_idm's own fallback
+    convention) when fewer than 2 active_symbols or corr_pairs is
+    empty/None."""
+    n = len(active_symbols)
+    if n < 2 or not corr_pairs:
+        return {s: 1.0 / n for s in active_symbols} if n > 0 else {}
+    h = _corr_matrix_from_pairs(active_symbols, corr_pairs)
+
+    distance = np.sqrt(np.clip(0.5 * (1.0 - h), 0.0, None))
+    np.fill_diagonal(distance, 0.0)
+    condensed = squareform(distance, checks=False)
+    link = sch.linkage(condensed, method='single')
+    order = sch.leaves_list(link).tolist()
+
+    w = _hrp_recursive_bisection(h, order)
+    return dict(zip(active_symbols, w))
+
+
 def compute_symbol_notional_budget(active_symbols: list[str], returns_wide: Optional[pl.DataFrame],
                                     as_of: date, capital: float, target_portfolio_vol: float,
                                     vol_target: float, idm_window_years: float,
-                                    idm_halflife_days: float) -> float:
+                                    idm_halflife_days: float,
+                                    notional_weighting: str = 'flat') -> dict[str, float]:
     """IDM-derived per-symbol notional_budget for TsmomBacktestConfig's
     target_portfolio_vol path (tsmom_backtester.py's run_tsmom_backtest) --
     the correlation-aware alternative to sizing off a flat config.max_notional.
-    Splits a total target DOLLAR VOL budget (capital * target_portfolio_vol *
+    Computes a total target DOLLAR VOL budget (capital * target_portfolio_vol *
     IDM, where IDM captures active_symbols' REAL measured correlation rather
-    than assuming independence) equally across active_symbols, then divides
-    by vol_target to convert that dollar-vol figure back into the
-    notional_budget _compute_signal_row actually expects.
+    than assuming independence), splits it across active_symbols per
+    `notional_weighting`, then divides by vol_target to convert each
+    symbol's own dollar-vol share back into the notional_budget
+    _compute_signal_row actually expects.
 
     The division by vol_target matters: scalar already folds in
     risk_scalar = vol_target / current_realized_vol (compute_position_scalar's
@@ -406,20 +576,49 @@ def compute_symbol_notional_budget(active_symbols: list[str], returns_wide: Opti
     where an earlier version did exactly that and undershot a 15% target by
     ~24x.
 
-    Returns 0.0 if active_symbols is empty or returns_wide is None -- the
+    notional_weighting (NOTIONAL_WEIGHTING_SCHEMES) selects how the total
+    dollar-vol budget is split ACROSS active_symbols -- independent of the
+    IDM multiplier itself, which always uses the flat 1/n weight vector
+    (see compute_idm's own docstring): IDM answers "how much total budget
+    does this active set earn from being diversified," not "how should
+    that total be divided up among its members."
+      'flat' (default -- exact prior behavior, unchanged): the total is
+        split equally across active_symbols regardless of correlation
+        structure -- every symbol gets the same budget.
+      'erc' / 'hrp': split via compute_erc_weights/compute_hrp_weights on
+        the SAME bounded correlation matrix already built for IDM -- a
+        correlated cluster's members collectively end up with roughly one
+        undiversified bet's worth of budget, rather than each member
+        separately claiming an equal share of the whole book. This is the
+        automated, data-driven alternative to Carver's hand-assigned
+        subgroups that research/cta-layer-separation-risk-budgeting.md
+        flags as this system's least-precedented, unaddressed gap.
+
+    Returns {} if active_symbols is empty or returns_wide is None -- the
     caller's own probe pass already means every such symbol's target is 0
     regardless of budget, so there's nobody to size for. A too-short
     bounded correlation window (_bounded_ewm_correlation_matrix's own
-    min_rows floor) instead makes compute_idm fall back to IDM=1.0, not an
-    early return here."""
+    min_rows floor) instead makes compute_idm (and, under 'erc'/'hrp',
+    the weighting itself) fall back to its own flat/no-adjustment default,
+    not an early return here."""
+    if notional_weighting not in NOTIONAL_WEIGHTING_SCHEMES:
+        raise ValueError(f"notional_weighting must be one of {NOTIONAL_WEIGHTING_SCHEMES}, "
+                          f"got {notional_weighting!r}")
     if not active_symbols or returns_wide is None:
-        return 0.0
+        return {}
     corr_pairs = _bounded_ewm_correlation_matrix(returns_wide, active_symbols, as_of,
                                                   idm_window_years, idm_halflife_days)
     idm_multiplier = compute_idm(active_symbols, corr_pairs)
     total_dollar_vol_target = capital * target_portfolio_vol * idm_multiplier
-    per_symbol_dollar_vol_target = total_dollar_vol_target / len(active_symbols)
-    return per_symbol_dollar_vol_target / vol_target
+
+    if notional_weighting == 'flat':
+        split = {s: 1.0 / len(active_symbols) for s in active_symbols}
+    elif notional_weighting == 'erc':
+        split = compute_erc_weights(active_symbols, corr_pairs)
+    else:
+        split = compute_hrp_weights(active_symbols, corr_pairs)
+
+    return {s: (total_dollar_vol_target * split[s]) / vol_target for s in active_symbols}
 
 
 def compute_idm(active_symbols: list[str], corr_pairs: Optional[dict[tuple[str, str], float]],
@@ -443,12 +642,7 @@ def compute_idm(active_symbols: list[str], corr_pairs: Optional[dict[tuple[str, 
     n = len(active_symbols)
     if n < 2 or not corr_pairs:
         return 1.0
-    idx = {s: i for i, s in enumerate(active_symbols)}
-    h = np.eye(n)
-    for (a, b), corr in corr_pairs.items():
-        if a in idx and b in idx:
-            i, j = idx[a], idx[b]
-            h[i, j] = h[j, i] = corr
+    h = _corr_matrix_from_pairs(active_symbols, corr_pairs)
     if weights is None:
         w = np.full(n, 1.0 / n)
     else:

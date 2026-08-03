@@ -141,8 +141,8 @@ def test_long_uptrend_produces_long_position(monkeypatch):
     assert any(e['target_contracts'] > 0 for e in later_events)
 
 
-def test_goulding_weighting_mode_produces_long_position_with_audit_fields(monkeypatch):
-    """weighting_mode='goulding' must actually drive direction (same strong
+def test_goulding_signal_weighting_produces_long_position_with_audit_fields(monkeypatch):
+    """signal_weighting='goulding' must actually drive direction (same strong
     synthetic uptrend as test_long_uptrend_produces_long_position above,
     just under the goulding model instead of continuous) and must populate
     the goulding audit fields (g_regime/g_fast/g_slow/a_co/a_re) on
@@ -156,7 +156,7 @@ def test_goulding_weighting_mode_produces_long_position_with_audit_fields(monkey
     monkeypatch.setattr(tb, 'get_spec', lambda s: get_spec('ES'))
 
     config = TsmomBacktestConfig(symbols=['X'], max_notional=50_000, max_contracts=5,
-                                  weighting_mode='goulding')
+                                  signal_weighting='goulding')
     result = run_tsmom_backtest(config)
 
     later_events = [e for e in result['trend_signals'] if e['target_contracts'] is not None][-5:]
@@ -198,6 +198,54 @@ def test_portfolio_capital_aggregates_across_symbols(monkeypatch):
 
     combined_pnl = result_a['daily_mtm']['cum_pnl'][-1] + result_b['daily_mtm']['cum_pnl'][-1]
     assert result_ab['daily_mtm']['cum_pnl'][-1] == pytest.approx(combined_pnl, abs=1.0)
+
+
+def test_notional_weighting_erc_favors_independent_symbol_over_correlated_pair(monkeypatch):
+    """target_portfolio_vol's notional_weighting='erc' path, end-to-end:
+    A and B are the SAME price series (correlation exactly 1.0, the
+    starkest possible "correlated cluster"), C is an independent uptrend.
+    Spies on domain.allocation.compute_symbol_notional_budget (still the
+    real implementation underneath -- monkeypatch just records its return
+    value) to confirm the per-symbol budget dict it computes each
+    rebalance gives C, the uncorrelated diversifier, a bigger individual
+    share than A or B once all three are active simultaneously -- exactly
+    the property compute_erc_weights' own unit tests check in isolation,
+    now confirmed wired all the way through run_tsmom_backtest."""
+    same_series = _price_df(date(2018, 1, 1), 500, drift=0.0015, vol=0.005, seed=1)
+    price_data = {
+        'A': same_series,
+        'B': same_series,
+        'C': _price_df(date(2018, 1, 1), 500, drift=0.0015, vol=0.005, seed=2),
+    }
+    vix = _vix_df(date(2018, 1, 1), 500, level=15.0)
+    _patch_data(monkeypatch, price_data, vix)
+    monkeypatch.setattr(tb, 'get_spec', lambda s: get_spec('ES'))
+
+    captured_budgets = []
+    real_compute_budget = tb.compute_symbol_notional_budget
+
+    def spy(*args, **kwargs):
+        result = real_compute_budget(*args, **kwargs)
+        if result:
+            captured_budgets.append(result)
+        return result
+
+    monkeypatch.setattr(tb, 'compute_symbol_notional_budget', spy)
+
+    config = TsmomBacktestConfig(symbols=['A', 'B', 'C'], max_contracts=50, max_notional=500_000,
+                                  target_portfolio_vol=0.15, notional_weighting='erc')
+    run_tsmom_backtest(config)
+
+    all_three_active = [b for b in captured_budgets if set(b) == {'A', 'B', 'C'}]
+    assert all_three_active, "expected at least one rebalance with all three symbols simultaneously active"
+    for budget in all_three_active:
+        assert budget['C'] > budget['A']
+        assert budget['C'] > budget['B']
+
+
+def test_notional_weighting_rejects_unknown_scheme():
+    with pytest.raises(ValueError):
+        TsmomBacktestConfig(symbols=['X'], target_portfolio_vol=0.15, notional_weighting='bogus')
 
 
 def test_vix_spike_holds_positions_unchanged(monkeypatch):

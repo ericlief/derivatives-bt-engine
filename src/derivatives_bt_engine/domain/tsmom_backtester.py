@@ -28,6 +28,7 @@ import duckdb
 import polars as pl
 
 from derivatives_bt_engine.domain.allocation import (
+    NOTIONAL_WEIGHTING_SCHEMES,
     build_returns_wide,
     compute_position_scalar,
     compute_symbol_notional_budget,
@@ -159,8 +160,9 @@ class TsmomBacktestConfig:
     # _bounded_ewm_correlation_matrix: total_budget = current capital *
     # target_portfolio_vol * IDM (IDM computed from that rebalance's own
     # signal-active symbols' REAL correlation, over a bounded trailing EWM
-    # window -- idm_window_years/idm_halflife_days below), split equally
-    # across those active symbols. At the degenerate zero-correlation case
+    # window -- idm_window_years/idm_halflife_days below), split across
+    # those active symbols per notional_weighting below (flat by default).
+    # At the degenerate zero-correlation case
     # this reduces exactly to
     # account_equity * target_portfolio_vol / sqrt(n_effective) -- the same
     # formula the live system's own compute_desired_risk_budget already
@@ -194,6 +196,20 @@ class TsmomBacktestConfig:
     target_portfolio_vol: Optional[float] = None
     idm_window_years: float = 3.0
     idm_halflife_days: float = 63.0
+    # How the total IDM-derived dollar-vol budget is split ACROSS active
+    # symbols -- only matters when target_portfolio_vol is set. 'flat'
+    # (default, unchanged prior behavior): every active symbol gets the
+    # same budget, regardless of correlation structure. 'erc'/'hrp':
+    # data-driven alternatives (allocation.compute_erc_weights/
+    # compute_hrp_weights) that split by each symbol's OWN measured
+    # correlation to the rest of the active set, so a correlated cluster
+    # collectively earns roughly one undiversified bet's worth of budget
+    # instead of each member separately claiming an equal share -- see
+    # compute_symbol_notional_budget's own docstring for the full
+    # derivation. IDM itself is unaffected by this choice either way (it
+    # always assumes an equal-weight vector -- see compute_idm's own
+    # docstring); this only controls how the resulting total gets divided.
+    notional_weighting: str = 'flat'
     # Signal DIRECTION source -- 'continuous' (default, unchanged prior
     # behaviour): continuous_momentum's daily, vol-normalized trend_strength
     # + classify_regime(ts_fast, ts_slow) + a flat regime_discount in
@@ -211,8 +227,8 @@ class TsmomBacktestConfig:
     # ("Goulding decides direction, vol-parity decides size"), now shared
     # via domain/signal.py instead of being that script's own local
     # implementation.
-    weighting_mode: str = 'continuous'
-    # Only matters when weighting_mode == 'goulding'. 'cluster' (default):
+    signal_weighting: str = 'continuous'
+    # Only matters when signal_weighting == 'goulding'. 'cluster' (default):
     # a_Co/a_Re re-estimated separately per instruments.py cluster (each
     # symbol using only its own cluster's pooled Correction/Rebound
     # history -- pooling across unrelated clusters would blend one asset
@@ -224,10 +240,13 @@ class TsmomBacktestConfig:
     def __post_init__(self):
         if self.signal_gate_mode not in ('off', 'monthly', 'daily'):
             raise ValueError(f"signal_gate_mode must be 'off', 'monthly', or 'daily', got {self.signal_gate_mode!r}")
-        if self.weighting_mode not in ('continuous', 'goulding'):
-            raise ValueError(f"weighting_mode must be 'continuous' or 'goulding', got {self.weighting_mode!r}")
+        if self.signal_weighting not in ('continuous', 'goulding'):
+            raise ValueError(f"signal_weighting must be 'continuous' or 'goulding', got {self.signal_weighting!r}")
         if self.mixing_pool not in ('cluster', 'global'):
             raise ValueError(f"mixing_pool must be 'cluster' or 'global', got {self.mixing_pool!r}")
+        if self.notional_weighting not in NOTIONAL_WEIGHTING_SCHEMES:
+            raise ValueError(f"notional_weighting must be one of {NOTIONAL_WEIGHTING_SCHEMES}, "
+                              f"got {self.notional_weighting!r}")
         if self.fixed_quantities is not None and len(self.fixed_quantities) != len(self.symbols):
             raise ValueError(
                 f"fixed_quantities must have exactly one entry per symbol (positional, same order): "
@@ -518,7 +537,7 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
     never reads max_notional/notional_budget at all).
 
     g_regime_val/g_fast_val/g_slow_val/a_co/a_re: only read when
-    config.weighting_mode == 'goulding' -- the caller resolves these from
+    config.signal_weighting == 'goulding' -- the caller resolves these from
     its own precomputed, forward-matched goulding_monthly output and that
     rebalance date's own (per-cluster or global) estimate_mixing_params
     result, since a_Co/a_Re is shared across every symbol in a cluster and
@@ -537,7 +556,7 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
 
     # Sizing inputs -- daily_std_last/hv/risk_scalar/close/dd -- ALWAYS
     # come from continuous_momentum's own output regardless of
-    # weighting_mode: "Goulding decides direction, vol-parity decides
+    # signal_weighting: "Goulding decides direction, vol-parity decides
     # size" (mirrors tsmom_binary_vol_parity_backtest.py's own
     # weighting_mode='dynamic' design), not a literal end-to-end
     # reproduction of the paper's own portfolio construction (which
@@ -558,7 +577,7 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
     hv = daily_std_last * math.sqrt(annualization_days) if daily_std_last and daily_std_last > 0 else None
     risk_scalar = max(0.25, min(2.0, config.vol_target / hv)) if hv else 1.0
 
-    if config.weighting_mode == 'goulding':
+    if config.signal_weighting == 'goulding':
         if g_regime_val is None:
             return None
         regime = TrendRegime(g_regime_val.lower())
@@ -571,7 +590,7 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
             return None
         # a_Co/a_Re IS the Correction/Rebound discount mechanism here --
         # applying config.regime_discount on top would double-discount
-        # a decision eq. 7 already made. Mirrors weighting_mode='dynamic'
+        # a decision eq. 7 already made. Mirrors signal_weighting='dynamic'
         # in tsmom_binary_vol_parity_backtest.py, where regime_discount
         # is likewise ignored.
         regime_discount = 1.0
@@ -654,7 +673,7 @@ def _mixing_params_for_date(config: TsmomBacktestConfig, monthly_history: Option
     """{cluster: (a_co, a_re)} as of rebalance date `d` -- estimated once
     per rebalance date (shared across every symbol in that cluster), not
     once per symbol. Empty dict (never read) outside 'goulding' mode."""
-    if config.weighting_mode != 'goulding':
+    if config.signal_weighting != 'goulding':
         return {}
     clusters_needed = {get_spec(s)['cluster'] for s in config.symbols}
     if config.mixing_pool == 'cluster':
@@ -669,7 +688,7 @@ def _goulding_kwargs_for(config: TsmomBacktestConfig, rebal_monthly: dict[str, p
     `d`, ready to **-unpack straight into _compute_signal_row. Empty dict
     outside 'goulding' mode -- _compute_signal_row's own defaults (all
     None) then apply, matching its 'continuous'-mode behaviour exactly."""
-    if config.weighting_mode != 'goulding':
+    if config.signal_weighting != 'goulding':
         return {}
     g_row = rebal_monthly[symbol].filter(pl.col('ts_event') == d)
     g_regime_val = g_row['g_regime'][0] if g_row.height else None
@@ -983,7 +1002,7 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
         for s in config.symbols
     } if all_dates else {s: set() for s in config.symbols}
 
-    # Precomputed once, only when weighting_mode == 'goulding' -- Goulding's
+    # Precomputed once, only when signal_weighting == 'goulding' -- Goulding's
     # own genuine calendar-month Bull/Correction/Bear/Rebound classification
     # (goulding_monthly), forward-matched to each rebalance date (a rebalance
     # on month-end date `d` decides what to hold GOING FORWARD, i.e. during
@@ -1000,7 +1019,7 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
     # instead of a duplicate implementation.
     rebal_monthly: dict[str, pl.DataFrame] = {}
     monthly_history: Optional[pl.DataFrame] = None
-    if config.weighting_mode == 'goulding':
+    if config.signal_weighting == 'goulding':
         rebal_dates_sorted = sorted(rebalance_dates)
         rebal_dates_df = pl.DataFrame({'ts_event': rebal_dates_sorted}).sort('ts_event')
         for s in config.symbols:
@@ -1023,7 +1042,7 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
     # month-end. This makes start_date behave like "continuing an
     # already-running strategy," not "day one of trading."
     #
-    # Deliberately NOT wired up for weighting_mode == 'goulding' (no
+    # Deliberately NOT wired up for signal_weighting == 'goulding' (no
     # _goulding_kwargs_for call below, same scope limitation
     # target_portfolio_vol's own docstring already documents for this
     # block) -- seed_date falls strictly before config.start_date, outside
@@ -1194,15 +1213,20 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
                     # IDM-derived, correlation-aware per-symbol budget -- see
                     # compute_symbol_notional_budget's own docstring for the
                     # full derivation (capital * target_portfolio_vol * IDM,
-                    # split equally across active_symbols, converted back to
-                    # a notional_budget by dividing out config.vol_target).
-                    # Returns 0.0 if there are no active symbols, or too
-                    # little history yet for a bounded-window correlation
+                    # split across active_symbols per config.notional_weighting,
+                    # converted back to a notional_budget by dividing out
+                    # config.vol_target). One entry per active symbol -- NOT
+                    # a single shared float -- since 'erc'/'hrp' give
+                    # different symbols different budgets ('flat' is the
+                    # only scheme where every symbol happens to get the same
+                    # value). Returns {} if there are no active symbols, or
+                    # too little history yet for a bounded-window correlation
                     # estimate -- nobody trades this month regardless (every
                     # probe result's own target is already 0 in that case).
                     per_symbol_budget = compute_symbol_notional_budget(
                         active_symbols, returns_wide, d, ledger.capital, config.target_portfolio_vol,
-                        config.vol_target, config.idm_window_years, config.idm_halflife_days)
+                        config.vol_target, config.idm_window_years, config.idm_halflife_days,
+                        config.notional_weighting)
 
                     for symbol in config.symbols:
                         result = probe_results.get(symbol)
@@ -1214,7 +1238,7 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
                             # off config.max_notional) is discarded here.
                             result = _compute_signal_row(symbol, precomputed, d, futures_types, config,
                                                           vix_scalar, annualization_by_symbol[symbol],
-                                                          notional_budget=per_symbol_budget,
+                                                          notional_budget=per_symbol_budget[symbol],
                                                           **_goulding_kwargs_for(config, rebal_monthly, symbol, d, mixing_params_by_cluster))
                         target, gate_reason = _apply_signal_gate(ledger.held_contracts[symbol], result['target'], result, config)
                         ledger.rebalance_to(symbol, target, d, vol_regime, vix_close=vix_close,

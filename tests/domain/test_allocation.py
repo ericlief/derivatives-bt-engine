@@ -18,6 +18,7 @@ split properly.
 """
 
 import math
+from datetime import date, timedelta
 
 import numpy as np
 import polars as pl
@@ -25,9 +26,13 @@ import pytest
 
 from derivatives_bt_engine.domain.allocation import (
     apply_cluster_risk_cap,
+    build_returns_wide,
     compute_desired_risk_budget,
+    compute_erc_weights,
+    compute_hrp_weights,
     compute_n_effective,
     compute_position_scalar,
+    compute_symbol_notional_budget,
 )
 from derivatives_bt_engine.domain.enums import TrendRegime
 from derivatives_bt_engine.domain.signal import (
@@ -122,6 +127,137 @@ def test_desired_risk_budget_fewer_active_clusters_means_bigger_budget_each():
     budget_1_cluster = compute_desired_risk_budget(100_000, 0.15, 1)
     budget_5_clusters = compute_desired_risk_budget(100_000, 0.15, 5)
     assert budget_1_cluster > budget_5_clusters
+
+
+# ── compute_erc_weights / compute_hrp_weights ────────────────────────────────
+# Data-driven alternatives to a flat 1/n notional split -- both solve on the
+# same correlation matrix compute_idm already builds, so a cluster of
+# correlated instruments collectively earns roughly one undiversified bet's
+# worth of budget instead of each member claiming an equal individual share.
+
+_SYMBOLS = ['A', 'B', 'C']
+_CORRELATED_PAIR_CORR = {('A', 'B'): 0.9, ('A', 'C'): 0.0, ('B', 'C'): 0.0}
+_EQUAL_CORR = {('A', 'B'): 0.3, ('A', 'C'): 0.3, ('B', 'C'): 0.3}
+
+
+@pytest.mark.parametrize('weight_fn', [compute_erc_weights, compute_hrp_weights])
+def test_weights_sum_to_one(weight_fn):
+    w = weight_fn(_SYMBOLS, _CORRELATED_PAIR_CORR)
+    assert math.isclose(sum(w.values()), 1.0, abs_tol=1e-6)
+
+
+@pytest.mark.parametrize('weight_fn', [compute_erc_weights, compute_hrp_weights])
+def test_weights_down_weight_correlated_pair_relative_to_diversifier(weight_fn):
+    # A/B move together (corr 0.9); C is uncorrelated with either -- C
+    # should get a bigger individual share than A or B get individually,
+    # since A and B are collectively closer to one bet than two.
+    w = weight_fn(_SYMBOLS, _CORRELATED_PAIR_CORR)
+    assert w['C'] > w['A']
+    assert w['C'] > w['B']
+
+
+def test_erc_weights_equal_under_uniform_correlation():
+    # ERC is exactly symmetric under a fully symmetric correlation
+    # structure (every pair equally correlated) -- unlike HRP (below),
+    # which isn't guaranteed tie-free at its clustering step.
+    w = compute_erc_weights(_SYMBOLS, _EQUAL_CORR)
+    assert w['A'] == pytest.approx(1 / 3, abs=1e-6)
+    assert w['B'] == pytest.approx(1 / 3, abs=1e-6)
+    assert w['C'] == pytest.approx(1 / 3, abs=1e-6)
+
+
+def test_hrp_weights_sum_to_one_under_uniform_correlation():
+    # HRP's clustering step still has to pick some pair to merge first even
+    # when every pairwise correlation is tied -- it isn't guaranteed to
+    # reproduce ERC's exact 1/3-each symmetry here, just a valid, properly
+    # normalized split.
+    w = compute_hrp_weights(_SYMBOLS, _EQUAL_CORR)
+    assert math.isclose(sum(w.values()), 1.0, abs_tol=1e-6)
+    assert all(v > 0 for v in w.values())
+
+
+@pytest.mark.parametrize('weight_fn', [compute_erc_weights, compute_hrp_weights])
+def test_weights_fall_back_to_flat_when_corr_pairs_missing(weight_fn):
+    assert weight_fn(_SYMBOLS, None) == {s: pytest.approx(1 / 3) for s in _SYMBOLS}
+    assert weight_fn(_SYMBOLS, {}) == {s: pytest.approx(1 / 3) for s in _SYMBOLS}
+
+
+@pytest.mark.parametrize('weight_fn', [compute_erc_weights, compute_hrp_weights])
+def test_weights_fall_back_to_flat_under_two_symbols(weight_fn):
+    assert weight_fn(['A'], None) == {'A': 1.0}
+    assert weight_fn([], None) == {}
+
+
+# ── compute_symbol_notional_budget (notional_weighting) ──────────────────────
+
+def _corr_price_data(n: int = 300, seed: int = 0) -> dict[str, pl.DataFrame]:
+    """Three symbols on a synced date range: A and B share the SAME
+    underlying random walk (near-perfectly correlated, plus small
+    idiosyncratic noise so they aren't numerically identical), C is an
+    independent random walk with the same drift/vol -- the minimal
+    "correlated cluster vs. lone diversifier" scenario compute_erc_weights/
+    compute_hrp_weights are meant to detect."""
+    rng = np.random.default_rng(seed)
+    dates = [date(2018, 1, 1) + timedelta(days=i) for i in range(n)]
+    shared_rets = rng.normal(0.0005, 0.01, n)
+    idio_a = rng.normal(0.0, 0.0005, n)
+    idio_b = rng.normal(0.0, 0.0005, n)
+    indep_rets = rng.normal(0.0005, 0.01, n)
+
+    def _df(rets):
+        return pl.DataFrame({'ts_event': dates, 'close': 100 * np.exp(np.cumsum(rets))})
+
+    return {
+        'A': _df(shared_rets + idio_a),
+        'B': _df(shared_rets + idio_b),
+        'C': _df(indep_rets),
+    }
+
+
+def _notional_budget(notional_weighting: str) -> dict[str, float]:
+    price_data = _corr_price_data()
+    returns_wide = build_returns_wide(price_data)
+    as_of = price_data['A']['ts_event'][-1]
+    return compute_symbol_notional_budget(
+        ['A', 'B', 'C'], returns_wide, as_of, capital=100_000, target_portfolio_vol=0.15,
+        vol_target=0.15, idm_window_years=3.0, idm_halflife_days=63.0,
+        notional_weighting=notional_weighting,
+    )
+
+
+def test_notional_budget_flat_gives_every_symbol_the_same_budget():
+    budget = _notional_budget('flat')
+    assert budget['A'] == pytest.approx(budget['B'])
+    assert budget['A'] == pytest.approx(budget['C'])
+
+
+@pytest.mark.parametrize('notional_weighting', ['erc', 'hrp'])
+def test_notional_budget_data_driven_schemes_favor_independent_symbol(notional_weighting):
+    # Same intuition as compute_erc_weights/compute_hrp_weights' own tests
+    # above, now through the full compute_symbol_notional_budget path
+    # (bounded EWM correlation matrix -> weighting -> dollar-vol split ->
+    # notional_budget): C (uncorrelated with A/B) should end up with a
+    # bigger individual budget than A or B under either data-driven scheme.
+    budget = _notional_budget(notional_weighting)
+    assert budget['C'] > budget['A']
+    assert budget['C'] > budget['B']
+
+
+def test_notional_budget_empty_active_symbols_returns_empty_dict():
+    price_data = _corr_price_data()
+    returns_wide = build_returns_wide(price_data)
+    as_of = price_data['A']['ts_event'][-1]
+    assert compute_symbol_notional_budget([], returns_wide, as_of, 100_000, 0.15, 0.15, 3.0, 63.0) == {}
+    assert compute_symbol_notional_budget(['A'], None, as_of, 100_000, 0.15, 0.15, 3.0, 63.0) == {}
+
+
+def test_notional_budget_rejects_unknown_weighting_scheme():
+    price_data = _corr_price_data()
+    returns_wide = build_returns_wide(price_data)
+    as_of = price_data['A']['ts_event'][-1]
+    with pytest.raises(ValueError):
+        compute_symbol_notional_budget(['A', 'B', 'C'], returns_wide, as_of, 100_000, 0.15, 0.15,
+                                        3.0, 63.0, 'bogus')
 
 
 # ── apply_cluster_risk_cap ───────────────────────────────────────────────────
