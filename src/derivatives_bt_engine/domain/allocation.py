@@ -62,7 +62,10 @@ def compute_position_scalar(trend_strength, daily_std_last, vol_target: float,
     risk_scalar = vol_target / current_realized_vol, clamped to [0.25, 2.0]
     -- a risk-equalization ratio driven by THIS instrument's own realized
     vol, nothing regime- or market-wide about it.
-    current_realized_vol = daily_std_last * sqrt(annualization_days) <= ** 63-day rolling **
+    current_realized_vol = daily_std_last * sqrt(annualization_days) -- the
+    annualization is scaling daily_std_last up to an annual figure; the
+    window daily_std_last happened to be estimated over (63-day rolling, in
+    this project's callers) is irrelevant to that scaling itself.
     Callers should pass the SAME annualization_days used to compute
     daily_std_last in the first place (instruments.resolve_annualization_days)
     -- this project's confirmed universe splits 252 (CBOT grains) vs. 259
@@ -90,7 +93,7 @@ def compute_position_scalar(trend_strength, daily_std_last, vol_target: float,
     if daily_std_last is None or (isinstance(daily_std_last, float) and math.isnan(daily_std_last)) or daily_std_last <= 0:
         risk_scalar = 1.0   # insufficient history to size by vol — neutral
     else:
-        current_realized_vol = daily_std_last * math.sqrt(annualization_days) # 63 day not last month
+        current_realized_vol = daily_std_last * math.sqrt(annualization_days) # annualized realized vol, estimated from daily_std_last's own trailing window
         risk_scalar = vol_target / current_realized_vol # 0.15/0.60 ~= 0.25, this is not hv_long here, but a param
         risk_scalar = max(0.25, min(2.0, risk_scalar))
 
@@ -192,12 +195,12 @@ def apply_cluster_risk_cap(targets: list[dict], max_cluster_risk_pct: float,
         and t.get('cluster') is not None
         and t.get('close') is not None
         and t.get('multiplier') is not None
+        and t.get('hv') is not None
     ]
 
     cluster_risk: dict[str, float] = {}
     for t in valid:
-        hv = t.get('hv') or 0.0
-        position_risk = abs(t['continuous_contracts']) * t['close'] * t['multiplier'] * hv
+        position_risk = abs(t['continuous_contracts']) * t['close'] * t['multiplier'] * t['hv']
         cluster_risk[t['cluster']] = cluster_risk.get(t['cluster'], 0.0) + position_risk
 
     if total_risk_target is None or total_risk_target <= 0:
@@ -221,7 +224,7 @@ def apply_cluster_risk_cap(targets: list[dict], max_cluster_risk_pct: float,
         for i, t in enumerate(members_sorted):
             is_first = (i == 0)
             orig = original_continuous[t['symbol']]
-            single_contract_risk = t['close'] * t['multiplier'] * (t.get('hv') or 0.0)
+            single_contract_risk = t['close'] * t['multiplier'] * t['hv']
 
             if remaining_budget <= 0:
                 contracts = 0
@@ -233,7 +236,10 @@ def apply_cluster_risk_cap(targets: list[dict], max_cluster_risk_pct: float,
                         and single_contract_risk <= cap * (1 + max_lot_overrun_pct)):
                     contracts = 1
                 else:
-                    contracts = round(usable_continuous) if usable_continuous >= 0.5 else 0
+                    # math.floor(x + 0.5), not round(): round() ties to even
+                    # (round(2.5) == 2), which would silently under-allocate
+                    # a genuine 0.5-contract signal half the time.
+                    contracts = math.floor(usable_continuous + 0.5) if usable_continuous >= 0.5 else 0
 
             sign = 1 if orig > 0 else (-1 if orig < 0 else 0)
             t['target_contracts'] = sign * contracts
@@ -248,7 +254,7 @@ def apply_cluster_risk_cap(targets: list[dict], max_cluster_risk_pct: float,
             continue
         scaled = t['continuous_contracts']
         sign = 1 if scaled > 0 else (-1 if scaled < 0 else 0)
-        magnitude = 0 if abs(scaled) < 0.5 else round(abs(scaled))
+        magnitude = 0 if abs(scaled) < 0.5 else math.floor(abs(scaled) + 0.5)
         t['target_contracts'] = sign * magnitude
 
     # max_contracts clamp is the true last step, after sizing is otherwise
@@ -257,7 +263,7 @@ def apply_cluster_risk_cap(targets: list[dict], max_cluster_risk_pct: float,
         max_contracts = t.get('max_contracts')
         if max_contracts is not None:
             t['target_contracts'] = max(-max_contracts, min(max_contracts, t['target_contracts']))
-        t['position_risk'] = abs(t['target_contracts']) * t['close'] * t['multiplier'] * (t.get('hv') or 0.0)
+        t['position_risk'] = abs(t['target_contracts']) * t['close'] * t['multiplier'] * t['hv']
 
     # Outcome-based infeasibility: every instrument in the cluster ended up
     # at zero despite at least one having a genuine (>=0.5) pre-cap signal.
@@ -362,12 +368,20 @@ def _bounded_ewm_correlation_matrix(returns_wide: pl.DataFrame, symbols: list[st
         mean_a2 = (pl.col(a) * pl.col(a)).ewm_mean(half_life=halflife)
         mean_b2 = (pl.col(b) * pl.col(b)).ewm_mean(half_life=halflife)
         cov = mean_ab - mean_a * mean_b
-        var_a = mean_a2 - mean_a ** 2
-        var_b = mean_b2 - mean_b ** 2
+        # E[x^2] - E[x]^2 is mathematically >= 0 but can land a hair below
+        # zero on floating-point noise (e.g. -2e-16 for a near-constant or
+        # perfectly self-correlated series) -- clip before the sqrt so that
+        # noise doesn't turn into a NaN correlation.
+        var_a = (mean_a2 - mean_a ** 2).clip(lower_bound=0)
+        var_b = (mean_b2 - mean_b ** 2).clip(lower_bound=0)
         exprs.append((cov / (var_a * var_b).sqrt()).last().alias(f'{a}__{b}'))
 
     row = sl.select(exprs).row(0)
-    return {pair: val for pair, val in zip(pairs, row) if val is not None and not math.isnan(val)}
+    return {
+        pair: max(-1.0, min(1.0, val))
+        for pair, val in zip(pairs, row)
+        if val is not None and not math.isnan(val)
+    }
 
 
 def compute_symbol_notional_budget(active_symbols: list[str], returns_wide: Optional[pl.DataFrame],
