@@ -248,6 +248,41 @@ def test_notional_weighting_rejects_unknown_scheme():
         TsmomBacktestConfig(symbols=['X'], target_portfolio_vol=0.15, notional_weighting='bogus')
 
 
+def test_use_idm_defaults_true_and_is_wired_through_to_compute_symbol_notional_budget(monkeypatch):
+    """use_idm defaults to True (unchanged prior behavior), and
+    run_tsmom_backtest passes config.use_idm straight through to
+    compute_symbol_notional_budget's own use_idm param -- spy on the real
+    call and check the captured positional arg matches config.use_idm for
+    both True (default) and an explicit False."""
+    assert TsmomBacktestConfig(symbols=['X']).use_idm is True
+
+    price_data = {
+        'A': _price_df(date(2018, 1, 1), 400, drift=0.0015, vol=0.005, seed=1),
+        'B': _price_df(date(2018, 1, 1), 400, drift=0.0015, vol=0.005, seed=2),
+    }
+    vix = _vix_df(date(2018, 1, 1), 400, level=15.0)
+    _patch_data(monkeypatch, price_data, vix)
+    monkeypatch.setattr(tb, 'get_spec', lambda s: get_spec('ES'))
+
+    captured_use_idm = []
+    real_compute_budget = tb.compute_symbol_notional_budget
+
+    def spy(*args, **kwargs):
+        result = real_compute_budget(*args, **kwargs)
+        if args:
+            captured_use_idm.append(args[-1] if len(args) >= 9 else kwargs.get('use_idm'))
+        return result
+
+    monkeypatch.setattr(tb, 'compute_symbol_notional_budget', spy)
+
+    config = TsmomBacktestConfig(symbols=['A', 'B'], max_contracts=50, max_notional=500_000,
+                                  target_portfolio_vol=0.15, use_idm=False)
+    run_tsmom_backtest(config)
+
+    assert captured_use_idm, "expected compute_symbol_notional_budget to be called at least once"
+    assert all(v is False for v in captured_use_idm)
+
+
 def test_vix_spike_holds_positions_unchanged(monkeypatch):
     """ratio ~25/15=1.67 lands in the 'spike' band (not 'extreme') -- the
     gate should hold prior positions exactly, with signal computation

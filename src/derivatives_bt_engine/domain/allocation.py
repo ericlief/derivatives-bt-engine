@@ -556,7 +556,8 @@ def compute_symbol_notional_budget(active_symbols: list[str], returns_wide: Opti
                                     as_of: date, capital: float, target_portfolio_vol: float,
                                     vol_target: float, idm_window_years: float,
                                     idm_halflife_days: float,
-                                    notional_weighting: str = 'flat') -> dict[str, float]:
+                                    notional_weighting: str = 'flat',
+                                    use_idm: bool = True) -> dict[str, float]:
     """IDM-derived per-symbol notional_budget for TsmomBacktestConfig's
     target_portfolio_vol path (tsmom_backtester.py's run_tsmom_backtest) --
     the correlation-aware alternative to sizing off a flat config.max_notional.
@@ -577,11 +578,7 @@ def compute_symbol_notional_budget(active_symbols: list[str], returns_wide: Opti
     ~24x.
 
     notional_weighting (NOTIONAL_WEIGHTING_SCHEMES) selects how the total
-    dollar-vol budget is split ACROSS active_symbols -- independent of the
-    IDM multiplier itself, which always uses the flat 1/n weight vector
-    (see compute_idm's own docstring): IDM answers "how much total budget
-    does this active set earn from being diversified," not "how should
-    that total be divided up among its members."
+    dollar-vol budget is split ACROSS active_symbols:
       'flat' (default -- exact prior behavior, unchanged): the total is
         split equally across active_symbols regardless of correlation
         structure -- every symbol gets the same budget.
@@ -593,6 +590,29 @@ def compute_symbol_notional_budget(active_symbols: list[str], returns_wide: Opti
         automated, data-driven alternative to Carver's hand-assigned
         subgroups that research/cta-layer-separation-risk-budgeting.md
         flags as this system's least-precedented, unaddressed gap.
+
+    The split is computed FIRST and then fed into compute_idm as `weights`
+    (when use_idm=True) -- NOT the flat 1/n vector regardless of
+    notional_weighting, as an earlier version of this function did. Using
+    mismatched weights would double-count diversification: IDM would credit
+    the active set's correlation structure once (sized as if the total were
+    about to be split flat), and then 'erc'/'hrp' would credit it again by
+    reshaping that same total's distribution to reduce correlated exposure
+    further, systematically undershooting target_portfolio_vol beyond the
+    imprecision this module's own docstring already documents for 'flat'.
+    Feeding the SAME weight vector into both the multiplier and the split
+    means IDM answers "how diversified is the portfolio given the weights
+    I'm actually about to use," not a hypothetical flat one -- exactly one
+    diversification adjustment, self-consistently applied. For 'flat' this
+    is numerically identical to the prior flat-vector behavior.
+
+    use_idm: True (default) applies the IDM multiplier as described above.
+    False skips it entirely (total_dollar_vol_target = capital *
+    target_portfolio_vol, no correlation-based up/down-sizing of the total)
+    -- for notional_weighting='erc'/'hrp' this isolates the diversification
+    adjustment to the split alone (closer to Option B in
+    research/cta-layer-separation-risk-budgeting.md's IDM-vs-allocation
+    framing); for 'flat' it removes correlation-awareness altogether.
 
     Returns {} if active_symbols is empty or returns_wide is None -- the
     caller's own probe pass already means every such symbol's target is 0
@@ -608,8 +628,6 @@ def compute_symbol_notional_budget(active_symbols: list[str], returns_wide: Opti
         return {}
     corr_pairs = _bounded_ewm_correlation_matrix(returns_wide, active_symbols, as_of,
                                                   idm_window_years, idm_halflife_days)
-    idm_multiplier = compute_idm(active_symbols, corr_pairs)
-    total_dollar_vol_target = capital * target_portfolio_vol * idm_multiplier
 
     if notional_weighting == 'flat':
         split = {s: 1.0 / len(active_symbols) for s in active_symbols}
@@ -617,6 +635,9 @@ def compute_symbol_notional_budget(active_symbols: list[str], returns_wide: Opti
         split = compute_erc_weights(active_symbols, corr_pairs)
     else:
         split = compute_hrp_weights(active_symbols, corr_pairs)
+
+    idm_multiplier = compute_idm(active_symbols, corr_pairs, weights=split) if use_idm else 1.0
+    total_dollar_vol_target = capital * target_portfolio_vol * idm_multiplier
 
     return {s: (total_dollar_vol_target * split[s]) / vol_target for s in active_symbols}
 

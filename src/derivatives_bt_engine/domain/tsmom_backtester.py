@@ -206,10 +206,27 @@ class TsmomBacktestConfig:
     # collectively earns roughly one undiversified bet's worth of budget
     # instead of each member separately claiming an equal share -- see
     # compute_symbol_notional_budget's own docstring for the full
-    # derivation. IDM itself is unaffected by this choice either way (it
-    # always assumes an equal-weight vector -- see compute_idm's own
-    # docstring); this only controls how the resulting total gets divided.
+    # derivation. When use_idm=True (below), this SAME split is also fed
+    # into IDM as its weight vector -- not a flat 1/n vector regardless of
+    # this choice, which would double-count diversification (IDM crediting
+    # the active set's correlation once for the total, 'erc'/'hrp'
+    # crediting it again for the split) -- see compute_symbol_notional_
+    # budget's own docstring for the full argument.
     notional_weighting: str = 'flat'
+    # Whether the total dollar-vol budget (capital * target_portfolio_vol)
+    # gets scaled by IDM at all before being split per notional_weighting
+    # above. True (default): total_budget = capital * target_portfolio_vol
+    # * IDM, IDM computed with weights=<the notional_weighting split
+    # itself> (see notional_weighting's own comment and compute_symbol_
+    # notional_budget's docstring for why the weights must match). False:
+    # total_budget = capital * target_portfolio_vol, no correlation-based
+    # up/down-sizing of the total -- for 'erc'/'hrp' this isolates
+    # diversification to the split alone instead of applying it twice at
+    # two different levels; for 'flat' it removes correlation-awareness
+    # from sizing altogether. Only matters when target_portfolio_vol is
+    # set. See research/cta-layer-separation-risk-budgeting.md for the
+    # IDM-vs-allocation-level framing this toggle exists to let you compare.
+    use_idm: bool = True
     # Signal DIRECTION source -- 'continuous' (default, unchanged prior
     # behaviour): continuous_momentum's daily, vol-normalized trend_strength
     # + classify_regime(ts_fast, ts_slow) + a flat regime_discount in
@@ -1226,7 +1243,7 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
                     per_symbol_budget = compute_symbol_notional_budget(
                         active_symbols, returns_wide, d, ledger.capital, config.target_portfolio_vol,
                         config.vol_target, config.idm_window_years, config.idm_halflife_days,
-                        config.notional_weighting)
+                        config.notional_weighting, config.use_idm)
 
                     for symbol in config.symbols:
                         result = probe_results.get(symbol)

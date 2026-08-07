@@ -96,6 +96,15 @@ def parse_args():
                         "that split so a correlated cluster collectively earns roughly one "
                         "undiversified bet's worth of budget instead -- see "
                         "compute_symbol_notional_budget's own docstring")
+    p.add_argument('--use-idm', action=argparse.BooleanOptionalAction, default=True,
+                   help="Only used with --target-portfolio-vol (default: %(default)s). Whether the "
+                        "total dollar-vol budget is scaled by IDM before being split per "
+                        "--notional-weighting, or left as capital * --target-portfolio-vol with no "
+                        "correlation-based up/down-sizing. Feeding IDM the SAME weights as the "
+                        "--notional-weighting split (the default when this is on) avoids "
+                        "double-counting diversification across the two steps; --no-use-idm isolates "
+                        "diversification to the --notional-weighting split alone -- see "
+                        "TsmomBacktestConfig.use_idm's own docstring")
     p.add_argument('--signal-weighting', choices=['continuous', 'goulding'], default='continuous',
                    help="Signal DIRECTION source (default: %(default)s). 'continuous': "
                         "continuous_momentum's daily trend_strength + --regime-discount. "
@@ -150,6 +159,7 @@ def main():
         idm_window_years=args.idm_window_years,
         idm_halflife_days=args.idm_halflife_days,
         notional_weighting=args.notional_weighting,
+        use_idm=args.use_idm,
         signal_weighting=args.signal_weighting,
         mixing_pool=args.mixing_pool,
     )
@@ -189,6 +199,7 @@ def main():
         'symbols': ','.join(symbols), 'years': args.years,
         'signal_weighting': args.signal_weighting,
         'notional_weighting': args.notional_weighting,
+        'use_idm': args.use_idm,
         'target_portfolio_vol': args.target_portfolio_vol,
         'n_days': result['n_days'], 'ann_ret_pct': result['ann_ret_pct'],
         'ann_vol_pct': result['ann_vol_pct'], 'sharpe': result['sharpe'],

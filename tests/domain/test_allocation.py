@@ -25,11 +25,13 @@ import polars as pl
 import pytest
 
 from derivatives_bt_engine.domain.allocation import (
+    _bounded_ewm_correlation_matrix,
     apply_cluster_risk_cap,
     build_returns_wide,
     compute_desired_risk_budget,
     compute_erc_weights,
     compute_hrp_weights,
+    compute_idm,
     compute_n_effective,
     compute_position_scalar,
     compute_symbol_notional_budget,
@@ -214,14 +216,14 @@ def _corr_price_data(n: int = 300, seed: int = 0) -> dict[str, pl.DataFrame]:
     }
 
 
-def _notional_budget(notional_weighting: str) -> dict[str, float]:
+def _notional_budget(notional_weighting: str, use_idm: bool = True) -> dict[str, float]:
     price_data = _corr_price_data()
     returns_wide = build_returns_wide(price_data)
     as_of = price_data['A']['ts_event'][-1]
     return compute_symbol_notional_budget(
         ['A', 'B', 'C'], returns_wide, as_of, capital=100_000, target_portfolio_vol=0.15,
         vol_target=0.15, idm_window_years=3.0, idm_halflife_days=63.0,
-        notional_weighting=notional_weighting,
+        notional_weighting=notional_weighting, use_idm=use_idm,
     )
 
 
@@ -241,6 +243,50 @@ def test_notional_budget_data_driven_schemes_favor_independent_symbol(notional_w
     budget = _notional_budget(notional_weighting)
     assert budget['C'] > budget['A']
     assert budget['C'] > budget['B']
+
+
+@pytest.mark.parametrize('notional_weighting', ['erc', 'hrp'])
+def test_notional_budget_idm_uses_the_same_split_as_weights(notional_weighting):
+    # Regression test for the weight-consistency fix: compute_idm must be
+    # called with weights=<the actual notional_weighting split>, not a flat
+    # 1/n vector regardless of notional_weighting -- otherwise the total
+    # budget is sized for a flat split that never actually gets used,
+    # double-counting diversification once via IDM (assuming flat) and
+    # again via erc/hrp (reshaping the split). Reconstruct the expected
+    # total independently (split first, then IDM on that same split) and
+    # confirm compute_symbol_notional_budget's actual output matches it --
+    # not the flat-weights IDM value.
+    price_data = _corr_price_data()
+    returns_wide = build_returns_wide(price_data)
+    as_of = price_data['A']['ts_event'][-1]
+    symbols = ['A', 'B', 'C']
+    corr_pairs = _bounded_ewm_correlation_matrix(returns_wide, symbols, as_of, 3.0, 63.0)
+    weight_fn = compute_erc_weights if notional_weighting == 'erc' else compute_hrp_weights
+    split = weight_fn(symbols, corr_pairs)
+
+    idm_consistent = compute_idm(symbols, corr_pairs, weights=split)
+    idm_flat = compute_idm(symbols, corr_pairs)
+    assert idm_consistent != pytest.approx(idm_flat), \
+        "test fixture must produce a non-flat split for this regression check to be meaningful"
+
+    budget = _notional_budget(notional_weighting)
+    expected_total = 100_000 * 0.15 * idm_consistent
+    actual_total = sum(budget.values()) * 0.15
+    assert actual_total == pytest.approx(expected_total, rel=1e-9)
+
+
+def test_notional_budget_use_idm_false_skips_the_multiplier():
+    budget_flat = _notional_budget('flat', use_idm=False)
+    # With no IDM adjustment, the total dollar-vol budget is exactly
+    # capital * target_portfolio_vol, split flat -- no correlation-based
+    # up/down-sizing at all.
+    assert sum(budget_flat.values()) * 0.15 == pytest.approx(100_000 * 0.15, rel=1e-9)
+
+    budget_erc = _notional_budget('erc', use_idm=False)
+    weight_fn_total = sum(budget_erc.values()) * 0.15
+    assert weight_fn_total == pytest.approx(100_000 * 0.15, rel=1e-9)
+    # The split itself still favors the independent symbol even with IDM off.
+    assert budget_erc['C'] > budget_erc['A']
 
 
 def test_notional_budget_empty_active_symbols_returns_empty_dict():
