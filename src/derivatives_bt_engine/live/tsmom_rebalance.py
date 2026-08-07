@@ -72,6 +72,12 @@ VX_ELEVATED_SCALE = 0.6   # reduce all positions to this fraction of target when
 
 # ── Tunable defaults ─────────────────────────────────────────────────────
 DEFAULT_BAR_YEARS = 3.0
+# Trailing window for the VX/VIX moving average the spike gate compares
+# vx_current against (vx_ratio = vx_current / vx_ma) -- same window used by
+# domain.tsmom_backtester's own vix_ma_window_days (see that module's
+# TsmomBacktestConfig field), which this project's VX_ELEVATED_RATIO/
+# VX_SPIKE_RATIO/VX_EXTREME_RATIO bands above were calibrated against.
+DEFAULT_VX_MA_WINDOW_DAYS = 63
 
 # ── Config validation ────────────────────────────────────────────────────
 SIGNAL_WEIGHTINGS = ('continuous', 'goulding')
@@ -169,6 +175,13 @@ class TsmomLiveConfig:
     vx_expiry: str = 'auto'  # only used when data_source == 'ib'
     min_days: int = 7        # only used when data_source == 'ib' (expiry-resolution margin)
     bar_years: float = DEFAULT_BAR_YEARS  # historical window: IB request duration / database lookback
+    # Trailing window (calendar days) for the VX/VIX moving average the
+    # spike gate compares vx_current against -- used in BOTH data_source
+    # modes (fetch_vx_spike_ratio's IB bars / _vx_spike_ratio_from_db's
+    # local VIX parquet). VX_ELEVATED_RATIO/VX_SPIKE_RATIO/VX_EXTREME_RATIO
+    # above were calibrated against the 63-day default; changing this
+    # changes what those bands actually mean.
+    vx_ma_window_days: int = DEFAULT_VX_MA_WINDOW_DAYS
     as_of: Optional[date] = None  # only used when data_source == 'database'; None = latest available bar
 
     def __post_init__(self):
@@ -269,12 +282,13 @@ def get_nearest_quarterly_expiry(ib: IBPySync, symbol: str, exchange: str, min_d
 # VX vol-spike gate
 # ------------------------------------------------------------------
 
-def fetch_vx_spike_ratio(ib: IBPySync, vx_expiry: str = 'auto', min_days: int = 3) -> tuple[float, float]:
+def fetch_vx_spike_ratio(ib: IBPySync, vx_expiry: str = 'auto', min_days: int = 3,
+                          ma_window_days: int = DEFAULT_VX_MA_WINDOW_DAYS) -> tuple[float, float]:
     """
-    Returns (vx_current, vx_ma63). Raises RuntimeError if no usable VX/VIX
+    Returns (vx_current, vx_ma). Raises RuntimeError if no usable VX/VIX
     data is available at all.
 
-    vx_ma63 always comes from VX historical daily bars (historical data is
+    vx_ma always comes from VX historical daily bars (historical data is
     available even when the market/contract has no live price, e.g.
     weekends). vx_current prefers the live VX front-month price; if that is
     unavailable (stale/weekend close) it falls back to VIX spot's last
@@ -283,14 +297,18 @@ def fetch_vx_spike_ratio(ib: IBPySync, vx_expiry: str = 'auto', min_days: int = 
     expiry = _get_nearest_vx_expiry(ib, min_days) if vx_expiry == 'auto' else vx_expiry
     vx = _get_vx_future(ib, expiry)
 
-    bars = ib.get_historical_bars(vx, duration='90 d', bar_size='1 day')
+    # +27 calendar-day buffer above ma_window_days (matches the prior fixed
+    # 90d-for-a-63d-window margin) -- covers non-trading days plus the
+    # small extra history the tail(ma_window_days + 7) slice below reads
+    # from for the last-resort vx_current fallback.
+    bars = ib.get_historical_bars(vx, duration=f'{ma_window_days + 27} d', bar_size='1 day')
     if bars is None or bars.height == 0:
-        raise RuntimeError('No VX historical bars available — cannot compute vx_ma63')
+        raise RuntimeError('No VX historical bars available — cannot compute vx_ma')
 
-    closes = bars['close'].tail(70)
-    vx_ma63 = closes.tail(63).mean()
-    if vx_ma63 is None or math.isnan(vx_ma63) or vx_ma63 <= 0:
-        raise RuntimeError('Insufficient VX history to compute a 63-day MA')
+    closes = bars['close'].tail(ma_window_days + 7)
+    vx_ma = closes.tail(ma_window_days).mean()
+    if vx_ma is None or math.isnan(vx_ma) or vx_ma <= 0:
+        raise RuntimeError(f'Insufficient VX history to compute a {ma_window_days}-day MA')
 
     # Delayed data type, not live: this account has no CFE/CBOE real-time
     # subscription, so reqMktData on VX/VIX would otherwise hit error 10168
@@ -315,35 +333,36 @@ def fetch_vx_spike_ratio(ib: IBPySync, vx_expiry: str = 'auto', min_days: int = 
             log.warning('VIX spot also unavailable (%s) — using last VX historical close', exc)
             vx_current = float(closes[-1])
 
-    return float(vx_current), float(vx_ma63)
+    return float(vx_current), float(vx_ma)
 
 
-def _vx_spike_ratio_from_db(as_of: Optional[date] = None) -> tuple[float, float]:
+def _vx_spike_ratio_from_db(as_of: Optional[date] = None,
+                             ma_window_days: int = DEFAULT_VX_MA_WINDOW_DAYS) -> tuple[float, float]:
     """Local spot-VIX analog to fetch_vx_spike_ratio, for
     TsmomLiveConfig(data_source='database') -- no VX futures (CFE) history
     is available locally (same reason domain.tsmom_backtester's own module
     docstring gives), so this reads the same VIX spot parquet the backtest
-    uses instead: current close vs its own trailing 63-day MA. Filtered to
-    <= as_of when given (no lookahead); None uses the full available
-    series, i.e. "as of today". Raises RuntimeError if there isn't yet a
-    full 63-day window."""
+    uses instead: current close vs its own trailing ma_window_days MA.
+    Filtered to <= as_of when given (no lookahead); None uses the full
+    available series, i.e. "as of today". Raises RuntimeError if there
+    isn't yet a full ma_window_days window."""
     vix = pl.read_parquet(VIX_FILE_PATH).select(['date', 'close']).rename({'close': 'vix_close'}).sort('date')
     if as_of is not None:
         vix = vix.filter(pl.col('date') <= as_of)
-    vix = vix.with_columns(vix_ma63=pl.col('vix_close').rolling_mean(63))
+    vix = vix.with_columns(vix_ma=pl.col('vix_close').rolling_mean(ma_window_days))
     last = vix.tail(1)
-    if last.height == 0 or last['vix_ma63'][0] is None:
-        raise RuntimeError('Insufficient local VIX history to compute a 63-day MA')
-    return float(last['vix_close'][0]), float(last['vix_ma63'][0])
+    if last.height == 0 or last['vix_ma'][0] is None:
+        raise RuntimeError(f'Insufficient local VIX history to compute a {ma_window_days}-day MA')
+    return float(last['vix_close'][0]), float(last['vix_ma'][0])
 
 
 def _get_vx_spike_ratio(ib: Optional[IBPySync], config: TsmomLiveConfig) -> tuple[float, float]:
     """Dispatches to the live VX-futures gate or the local spot-VIX analog
-    per config.data_source -- same (vx_current, vx_ma63) shape either way,
+    per config.data_source -- same (vx_current, vx_ma) shape either way,
     so check_vol_regime below is unaware of which source produced it."""
     if config.data_source == 'ib':
-        return fetch_vx_spike_ratio(ib, config.vx_expiry)
-    return _vx_spike_ratio_from_db(config.as_of)
+        return fetch_vx_spike_ratio(ib, config.vx_expiry, ma_window_days=config.vx_ma_window_days)
+    return _vx_spike_ratio_from_db(config.as_of, config.vx_ma_window_days)
 
 
 def check_vol_regime(vx_ratio: float) -> VolRegime:

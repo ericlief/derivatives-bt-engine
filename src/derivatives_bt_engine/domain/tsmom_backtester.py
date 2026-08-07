@@ -67,6 +67,11 @@ VIX_ELEVATED_RATIO = 1.3
 VIX_SPIKE_RATIO = 1.5
 VIX_EXTREME_RATIO = 2.0
 VIX_ELEVATED_SCALE = 0.6
+# Trailing window (calendar days) for the spot-VIX moving average
+# vix_ratio is computed against -- see TsmomBacktestConfig.vix_ma_window_days.
+# The bands above were calibrated against this default; changing it changes
+# what "elevated"/"spike"/"extreme" actually mean.
+DEFAULT_VIX_MA_WINDOW_DAYS = 63
 # Decimal places for genuinely PRICE-scale fields (entry_price/exit_price/
 # transaction price/close/peak) -- NOT dollar amounts (fees/pnl/capital,
 # which stay at 2dp) or ratios/percentages (ts_fast/vix_ratio/etc., which
@@ -140,6 +145,12 @@ class TsmomBacktestConfig:
     # differently-cadenced portfolio-wide gate makes it harder to isolate
     # what's actually being tested.
     vix_gating: bool = True
+    # Trailing window (calendar days) for the spot-VIX moving average
+    # vix_ratio is computed against -- see DEFAULT_VIX_MA_WINDOW_DAYS above
+    # and derivatives_bt_engine.live.tsmom_rebalance's own
+    # TsmomLiveConfig.vx_ma_window_days, which this mirrors so a live run
+    # and a backtest comparison use the same window when you want them to.
+    vix_ma_window_days: int = DEFAULT_VIX_MA_WINDOW_DAYS
     # Correlation-aware sizing -- None (default) preserves this module's
     # original behaviour exactly: every symbol independently sized to
     # config.max_notional * scalar / contract_notional, with NOTHING
@@ -356,9 +367,13 @@ def _validate_symbols_exist(price_symbols, cache_dir: str) -> None:
         )
 
 
-def _compute_vix_regime_series(vix: pl.DataFrame) -> pl.DataFrame:
-    """Adds vix_ma63 / vix_ratio / vol_regime columns to a raw VIX frame."""
-    vix = vix.with_columns(vix_ma63=pl.col('vix_close').rolling_mean(63))
+def _compute_vix_regime_series(vix: pl.DataFrame,
+                                window_days: int = DEFAULT_VIX_MA_WINDOW_DAYS) -> pl.DataFrame:
+    """Adds vix_ma63 / vix_ratio / vol_regime columns to a raw VIX frame --
+    the column stays named vix_ma63 regardless of window_days (matches this
+    project's live counterpart, which keeps its own vx_ma63 field name the
+    same way); only the rolling window LENGTH used to compute it varies."""
+    vix = vix.with_columns(vix_ma63=pl.col('vix_close').rolling_mean(window_days))
     vix = vix.with_columns(
         vix_ratio=pl.when(pl.col('vix_ma63') > 0)
         .then(pl.col('vix_close') / pl.col('vix_ma63'))
@@ -945,7 +960,7 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
     # whatever falls inside the requested window. Only the iterated date
     # range (and what counts as a rebalance/MTM date) is bounded.
     full_price_data, vix = load_portfolio_data(config.symbols)
-    vix = _compute_vix_regime_series(vix)
+    vix = _compute_vix_regime_series(vix, config.vix_ma_window_days)
     # Real trading-days/year per symbol (instruments.resolve_annualization_days)
     # -- this project's confirmed universe splits 252 (CBOT grains) vs. 259
     # (everything else checked, post Sunday-session-merge fix); anything

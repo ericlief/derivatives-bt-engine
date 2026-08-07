@@ -292,6 +292,11 @@ def parse_args():
                         '(no lookahead past this date) -- default: latest available bar')
     p.add_argument('--bar-years', type=float, default=3.0,
                    help='Historical window: IB request duration / database lookback (default: %(default)s)')
+    p.add_argument('--vx-ma-window-days', type=int, default=63,
+                   help="Trailing window for the VX/VIX moving average the spike gate compares "
+                        "vx_current against, in BOTH --data-source modes (default: %(default)s) -- "
+                        "the VX_ELEVATED_RATIO/VX_SPIKE_RATIO/VX_EXTREME_RATIO bands were calibrated "
+                        "against this default; changing it changes what those bands mean")
     p.add_argument('--dry-run', action='store_true', default=True,
                    help='Print targets only, no orders (default — this is the safe default)')
     p.add_argument('--no-save', action='store_true',
@@ -343,6 +348,7 @@ def main():
         idm_halflife_days=args.idm_halflife_days,
         data_source=args.data_source,
         bar_years=args.bar_years,
+        vx_ma_window_days=args.vx_ma_window_days,
         as_of=as_of,
     )
 

@@ -60,7 +60,7 @@ def _patch_db(monkeypatch, price_data: dict[str, pl.DataFrame], vx: tuple[float,
 
     monkeypatch.setattr(tr, 'FuturesDataLoader', _FakeLoader)
     monkeypatch.setattr(tr, 'assert_monotonic_expiration', lambda df, sym: None)
-    monkeypatch.setattr(tr, '_vx_spike_ratio_from_db', lambda as_of=None: vx)
+    monkeypatch.setattr(tr, '_vx_spike_ratio_from_db', lambda as_of=None, ma_window_days=63: vx)
 
 
 # ── TsmomLiveConfig validation ───────────────────────────────────────────────

@@ -70,6 +70,11 @@ def parse_args():
                         "elevated de-risking) entirely -- isolates the effect of "
                         "ts-exit/entry-threshold/exit-on-ts-crossover alone, without VIX interference "
                         "(default: VIX gating on, matching all prior behavior)")
+    p.add_argument('--vix-ma-window-days', type=int, default=63,
+                   help="Trailing window for the spot-VIX moving average vix_ratio is computed "
+                        "against (default: %(default)s) -- matches "
+                        "live.tsmom_rebalance.TsmomLiveConfig.vx_ma_window_days when you want an "
+                        "apples-to-apples comparison against a live run")
     p.add_argument('--target-portfolio-vol', type=float, default=None,
                    help="Correlation-aware sizing (default: off, reproducing this module's original "
                         "per-symbol max-notional sizing, which has NO cross-instrument diversification "
@@ -155,6 +160,7 @@ def main():
         exit_on_ts_crossover=args.exit_on_ts_crossover,
         fixed_quantities=fixed_quantities,
         vix_gating=not args.disable_vix_gating,
+        vix_ma_window_days=args.vix_ma_window_days,
         target_portfolio_vol=args.target_portfolio_vol,
         idm_window_years=args.idm_window_years,
         idm_halflife_days=args.idm_halflife_days,
