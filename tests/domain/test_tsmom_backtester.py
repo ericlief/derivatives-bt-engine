@@ -64,7 +64,7 @@ def test_check_vol_regime_bands():
 def test_compute_vix_regime_series_flat_is_normal():
     vix = _vix_df(date(2020, 1, 1), 100, level=15.0)
     out = _compute_vix_regime_series(vix)
-    assert 'vix_ma63' in out.columns and 'vix_ratio' in out.columns and 'vol_regime' in out.columns
+    assert 'vix_ma' in out.columns and 'vix_ratio' in out.columns and 'vol_regime' in out.columns
     last = out.tail(1)
     assert last['vix_ratio'][0] == pytest.approx(1.0)
     assert last['vol_regime'][0] == 'normal'

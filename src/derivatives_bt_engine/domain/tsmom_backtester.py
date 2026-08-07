@@ -283,7 +283,7 @@ class TsmomBacktestConfig:
 
 
 def check_vol_regime(vix_ratio: Optional[float]) -> VolRegime:
-    """Normal | Elevated | Spike | Extreme from vix_current / vix_ma63.
+    """Normal | Elevated | Spike | Extreme from vix_current / vix_ma.
 
     Deliberately one-sided (mirrors derivatives_bt_engine.live.tsmom_rebalance's
     version): every threshold checks vix_ratio being HIGH -- no symmetric
@@ -369,14 +369,15 @@ def _validate_symbols_exist(price_symbols, cache_dir: str) -> None:
 
 def _compute_vix_regime_series(vix: pl.DataFrame,
                                 window_days: int = DEFAULT_VIX_MA_WINDOW_DAYS) -> pl.DataFrame:
-    """Adds vix_ma63 / vix_ratio / vol_regime columns to a raw VIX frame --
-    the column stays named vix_ma63 regardless of window_days (matches this
-    project's live counterpart, which keeps its own vx_ma63 field name the
-    same way); only the rolling window LENGTH used to compute it varies."""
-    vix = vix.with_columns(vix_ma63=pl.col('vix_close').rolling_mean(window_days))
+    """Adds vix_ma / vix_ratio / vol_regime columns to a raw VIX frame --
+    the column stays named vix_ma regardless of window_days (matches this
+    project's live counterpart, derivatives_bt_engine.live.tsmom_rebalance's
+    own vx_current/vx_ma fields, which keep their names the same way); only
+    the rolling window LENGTH used to compute it varies."""
+    vix = vix.with_columns(vix_ma=pl.col('vix_close').rolling_mean(window_days))
     vix = vix.with_columns(
-        vix_ratio=pl.when(pl.col('vix_ma63') > 0)
-        .then(pl.col('vix_close') / pl.col('vix_ma63'))
+        vix_ratio=pl.when(pl.col('vix_ma') > 0)
+        .then(pl.col('vix_close') / pl.col('vix_ma'))
         .otherwise(None)
     )
     regimes = [check_vol_regime(r) for r in vix['vix_ratio'].to_list()]

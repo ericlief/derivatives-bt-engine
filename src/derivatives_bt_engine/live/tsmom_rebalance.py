@@ -64,7 +64,7 @@ log = logging.getLogger(__name__)
 
 ET = ZoneInfo('America/New_York')
 
-# VX spike ratio bands (vx_current / vx_ma63) -> regime
+# VX spike ratio bands (vx_current / vx_ma) -> regime
 VX_ELEVATED_RATIO = 1.3
 VX_SPIKE_RATIO    = 1.5
 VX_EXTREME_RATIO  = 2.0
@@ -366,7 +366,7 @@ def _get_vx_spike_ratio(ib: Optional[IBPySync], config: TsmomLiveConfig) -> tupl
 
 
 def check_vol_regime(vx_ratio: float) -> VolRegime:
-    """Normal | Elevated | Spike | Extreme from vx_current / vx_ma63.
+    """Normal | Elevated | Spike | Extreme from vx_current / vx_ma.
 
     Deliberately one-sided: every threshold here checks vx_ratio being
     HIGH (1.3/1.5/2.0) -- there is no symmetric low-vx_ratio bucket, and
@@ -690,11 +690,11 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
         'low_vol': config.signal_confidence_low_vol,
     }
 
-    vx_current, vx_ma63 = _get_vx_spike_ratio(ib, config)
-    vx_ratio = vx_current / vx_ma63
+    vx_current, vx_ma = _get_vx_spike_ratio(ib, config)
+    vx_ratio = vx_current / vx_ma
     vol_regime = check_vol_regime(vx_ratio)
-    log.info('VX spike gate — vx_current=%.2f  vx_ma63=%.2f  ratio=%.3f  regime=%s',
-             vx_current, vx_ma63, vx_ratio, vol_regime.value)
+    log.info('VX spike gate — vx_current=%.2f  vx_ma=%.2f  ratio=%.3f  regime=%s',
+             vx_current, vx_ma, vx_ratio, vol_regime.value)
 
     if vol_regime in (VolRegime.SPIKE, VolRegime.EXTREME):
         log.warning('VX %s detected (ratio=%.3f) — holding existing positions, skipping rebalance',
@@ -720,7 +720,7 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
                 'signal': None,
                 'regime': None,
                 'vx_current': vx_current,
-                'vx_ma63': vx_ma63,
+                'vx_ma': vx_ma,
                 'vx_ratio': vx_ratio,
                 'vol_regime': vol_regime,
                 # n_effective/risk_budget/budget_constant aren't computed on
@@ -903,7 +903,7 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
                 'dd_pct': s['dd_pct'],
                 'regime': s['regime'],
                 'vx_current': vx_current,
-                'vx_ma63': vx_ma63,
+                'vx_ma': vx_ma,
                 'vx_ratio': vx_ratio,
                 'vol_regime': vol_regime,
                 # Goulding audit fields -- None in 'continuous' mode.
@@ -985,7 +985,7 @@ def print_rebalance_report(targets: list[dict]) -> str:
             f"risk_scalar={_fmt(t.get('risk_scalar'), '.3f'):>6}  regime_discount={_fmt(t.get('regime_discount'), '.2f'):>5}  "
             f"signal_confidence={_fmt(t.get('signal_confidence'), '.2f'):>5}  "
             f"regime={t['regime'].capitalize() if t.get('regime') else 'N/A':<10}  "
-            f"vx_current={_fmt(t.get('vx_current'), '.2f'):>6}  vx_ma63={_fmt(t.get('vx_ma63'), '.2f'):>6}  "
+            f"vx_current={_fmt(t.get('vx_current'), '.2f'):>6}  vx_ma={_fmt(t.get('vx_ma'), '.2f'):>6}  "
             f"vx_ratio={t['vx_ratio']:.3f}  vol_regime={t['vol_regime'].capitalize()}  "
             f"vix_scalar={_fmt(t.get('vix_scalar'), '.2f')}"
             + (f"  g_regime={t['g_regime']}  a_co={_fmt(t.get('a_co'), '.2f')}  a_re={_fmt(t.get('a_re'), '.2f')}"
