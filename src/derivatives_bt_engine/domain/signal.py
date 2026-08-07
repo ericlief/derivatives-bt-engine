@@ -735,6 +735,54 @@ def _goulding_weight(regime_val: Optional[str], a_co: float, a_re: float,
     return 1.0 if r_dyn > 0 else (-1.0 if r_dyn < 0 else 0.0)
 
 
+def resolve_trend_direction(signal_weighting: str, continuous_signal: Optional[float],
+                             ts_fast: Optional[float], ts_slow: Optional[float],
+                             regime_discount_cfg: float,
+                             g_regime_val: Optional[str] = None, g_fast_val: Optional[float] = None,
+                             g_slow_val: Optional[float] = None,
+                             a_co: float = 0.5, a_re: float = 0.5,
+                             ) -> Optional[tuple[float, TrendRegime, float]]:
+    """(trend_strength, regime, regime_discount) for either signal_weighting
+    mode -- "Goulding decides direction, vol-parity decides size" in
+    'goulding' mode, continuous_momentum's own signal + classify_regime in
+    'continuous' mode. Factored out of tsmom_backtester.py's
+    _compute_signal_row so that module and live.tsmom_rebalance's own
+    per-instrument signal computation share ONE implementation of this
+    branch instead of two independently-maintained copies that could drift
+    apart on exactly the subtlety _goulding_weight's own docstring warns
+    about (g_fast_val/g_slow_val must be goulding_monthly's lagged
+    fast/slow, not a same-period realized return).
+
+    'goulding': g_regime_val is goulding_monthly's own `regime` column
+    value for the bucket in question; g_fast_val/g_slow_val its `fast`/
+    `slow`; a_co/a_re that cluster's (or global pool's) own estimated
+    mixing weights (see estimate_mixing_params). regime_discount is always
+    1.0 in this mode -- a_co/a_re IS the Correction/Rebound discount
+    mechanism; applying regime_discount_cfg on top would double-discount a
+    decision eq. 7 already made. Returns None when g_regime_val is None or
+    _goulding_weight itself can't resolve a direction (missing/invalid
+    g_fast_val/g_slow_val).
+
+    'continuous': continuous_signal is continuous_momentum's own `signal`
+    column value; regime is classify_regime(ts_fast, ts_slow);
+    regime_discount is regime_discount_cfg in Correction/Rebound, 1.0
+    otherwise. Returns None when continuous_signal is None (not yet
+    enough history for a signal at all)."""
+    if signal_weighting == 'goulding':
+        if g_regime_val is None:
+            return None
+        regime = TrendRegime(g_regime_val.lower())
+        trend_strength = _goulding_weight(g_regime_val, a_co, a_re, g_fast_val, g_slow_val)
+        if trend_strength is None:
+            return None
+        return trend_strength, regime, 1.0
+    if continuous_signal is None:
+        return None
+    regime = classify_regime(ts_fast, ts_slow)
+    regime_discount = regime_discount_cfg if regime in (TrendRegime.CORRECTION, TrendRegime.REBOUND) else 1.0
+    return continuous_signal, regime, regime_discount
+
+
 def build_monthly_state_return_history(rebal_monthly: dict[str, pl.DataFrame],
                                         rebal_dates: list[date], cluster_by_symbol: dict[str, str]) -> pl.DataFrame:
     """One row per (symbol, consecutive rebalance-date pair) with the state

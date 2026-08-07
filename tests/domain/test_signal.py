@@ -39,6 +39,7 @@ from derivatives_bt_engine.domain.signal import (
     compute_vol_ratio,
     continuous_momentum,
     goulding_monthly,
+    resolve_trend_direction,
 )
 
 def _price_df(n: int, drift: float, vol: float = 0.01, seed: int = 0) -> pl.DataFrame:
@@ -632,3 +633,53 @@ def test_goulding_blend_none_and_missing_inputs():
     assert _goulding_blend('correction', a_co=0.5, a_re=0.5) is None
     with pytest.raises(ValueError):
         _goulding_blend('correction', a_co=2.0, a_re=0.5, r_fast=0.1, r_slow=-0.1)
+
+
+# ── resolve_trend_direction (shared continuous/goulding branch) ─────────────
+
+def test_resolve_trend_direction_continuous_mode_uses_classify_regime():
+    # ts_fast/ts_slow both positive -> Bull, regime_discount stays 1.0
+    # (Bull/Bear are never discounted).
+    trend, regime, discount = resolve_trend_direction('continuous', 0.42, ts_fast=0.5, ts_slow=0.5,
+                                                        regime_discount_cfg=0.5)
+    assert trend == 0.42
+    assert regime == TrendRegime.BULL
+    assert discount == 1.0
+
+
+def test_resolve_trend_direction_continuous_mode_discounts_correction():
+    # slow>0, fast<0 -> Correction -> regime_discount_cfg applies.
+    trend, regime, discount = resolve_trend_direction('continuous', 0.3, ts_fast=-0.1, ts_slow=0.2,
+                                                        regime_discount_cfg=0.5)
+    assert regime == TrendRegime.CORRECTION
+    assert discount == 0.5
+
+
+def test_resolve_trend_direction_continuous_mode_none_signal_returns_none():
+    assert resolve_trend_direction('continuous', None, ts_fast=0.1, ts_slow=0.1,
+                                    regime_discount_cfg=0.5) is None
+
+
+def test_resolve_trend_direction_goulding_mode_blends_and_never_discounts():
+    # Correction: fast<0<=slow -- eq. 7 blend then sign(); regime_discount
+    # is always 1.0 in goulding mode (a_co/a_re IS the discount mechanism).
+    trend, regime, discount = resolve_trend_direction('goulding', continuous_signal=None,
+                                                        ts_fast=None, ts_slow=None,
+                                                        regime_discount_cfg=0.5,
+                                                        g_regime_val='correction', g_fast_val=-0.01,
+                                                        g_slow_val=0.10, a_co=0.5, a_re=0.5)
+    assert regime == TrendRegime.CORRECTION
+    assert discount == 1.0
+    assert trend in (-1.0, 0.0, 1.0)
+
+
+def test_resolve_trend_direction_goulding_mode_bull_bear_ignore_a_co_a_re():
+    trend, regime, discount = resolve_trend_direction('goulding', None, None, None, 0.5,
+                                                        g_regime_val='bull', a_co=0.9, a_re=0.1)
+    assert trend == 1.0
+    assert regime == TrendRegime.BULL
+    assert discount == 1.0
+
+
+def test_resolve_trend_direction_goulding_mode_none_regime_returns_none():
+    assert resolve_trend_direction('goulding', None, None, None, 0.5, g_regime_val=None) is None

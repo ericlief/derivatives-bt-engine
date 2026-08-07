@@ -34,7 +34,17 @@ from ib_insync import Order
 from ib_tools.alerts import send_telegram
 from ib_tools.ibpysync import IBPySync
 
-from derivatives_bt_engine.live.tsmom_rebalance import compute_rebalance_targets, print_rebalance_report, _resolve_contract
+from derivatives_bt_engine.live.tsmom_rebalance import (
+    DATA_SOURCES,
+    MIXING_POOLS,
+    RISK_BUDGET_MODES,
+    SIGNAL_WEIGHTINGS,
+    TsmomLiveConfig,
+    compute_rebalance_targets,
+    print_rebalance_report,
+    _resolve_contract,
+)
+from derivatives_bt_engine.domain.allocation import NOTIONAL_WEIGHTING_SCHEMES
 
 load_dotenv()
 
@@ -236,6 +246,52 @@ def parse_args():
                    help='Discount factor applied when vol_ratio is "low" -- no settled answer for '
                         'whether low vol should discount trend confidence, so this defaults to a '
                         'no-op (default: %(default)s)')
+    p.add_argument('--signal-weighting', choices=SIGNAL_WEIGHTINGS, default='continuous',
+                   help="Signal DIRECTION source (default: %(default)s). 'continuous': "
+                        "continuous_momentum's daily trend_strength + --regime-discount. "
+                        "'goulding': monthly Bull/Correction/Bear/Rebound classification with "
+                        "a_Co/a_Re mixing weights re-estimated from all available prior history "
+                        "(--mixing-pool) -- --regime-discount is ignored in this mode. Position "
+                        "size/vol-targeting is unaffected either way; see "
+                        "TsmomLiveConfig.signal_weighting's own docstring")
+    p.add_argument('--mixing-pool', choices=MIXING_POOLS, default='cluster',
+                   help="Only used with --signal-weighting goulding (default: %(default)s). 'cluster': "
+                        "a_Co/a_Re estimated separately per instrument cluster. 'global': one shared "
+                        "estimate pooled across every --instruments regardless of cluster")
+    p.add_argument('--risk-budget-mode', choices=RISK_BUDGET_MODES, default='cluster',
+                   help="How the risk budget is derived (default: %(default)s). 'cluster': "
+                        "compute_n_effective/compute_desired_risk_budget -- one shared budget per "
+                        "active cluster (zero-correlation assumption). 'idm': "
+                        "compute_symbol_notional_budget -- one correlation-aware budget PER ACTIVE "
+                        "SYMBOL, via a bounded trailing EWM correlation matrix (see "
+                        "--notional-weighting/--use-idm/--idm-window-years/--idm-halflife-days)")
+    p.add_argument('--notional-weighting', choices=NOTIONAL_WEIGHTING_SCHEMES, default='flat',
+                   help="Only used with --risk-budget-mode idm (default: %(default)s). How the "
+                        "IDM-derived total is split across active symbols -- 'flat': equal split. "
+                        "'erc'/'hrp': data-driven, correlation-aware splits -- see "
+                        "domain.allocation.compute_symbol_notional_budget's own docstring")
+    p.add_argument('--use-idm', action=argparse.BooleanOptionalAction, default=True,
+                   help="Only used with --risk-budget-mode idm (default: %(default)s). Whether the "
+                        "total budget is scaled by IDM before being split, or left as account_equity "
+                        "* --target-portfolio-vol with no correlation-based up/down-sizing")
+    p.add_argument('--idm-window-years', type=float, default=3.0,
+                   help='Only used with --risk-budget-mode idm: bounded trailing window for the EWM '
+                        'correlation estimate (default: %(default)s)')
+    p.add_argument('--idm-halflife-days', type=float, default=63.0,
+                   help='Only used with --risk-budget-mode idm: EWM halflife within the bounded '
+                        'window (default: %(default)s)')
+    p.add_argument('--data-source', choices=DATA_SOURCES, default='ib',
+                   help="Where signal/correlation/mixing-param history comes from (default: "
+                        "%(default)s). 'ib': live IB historical bars + the live VX/VIX spike gate -- "
+                        "requires a connection. 'database': the same local futures duckdb/VIX parquet "
+                        "the backtest reads from, no IB connection anywhere -- runnable in a notebook "
+                        "for signal/regime inspection with no live account (current_contracts is "
+                        "always None in this mode; --live/order placement requires 'ib')")
+    p.add_argument('--as-of', default=None,
+                   help='Only used with --data-source database: YYYY-MM-DD to compute signals as of '
+                        '(no lookahead past this date) -- default: latest available bar')
+    p.add_argument('--bar-years', type=float, default=3.0,
+                   help='Historical window: IB request duration / database lookback (default: %(default)s)')
     p.add_argument('--dry-run', action='store_true', default=True,
                    help='Print targets only, no orders (default — this is the safe default)')
     p.add_argument('--no-save', action='store_true',
@@ -254,26 +310,41 @@ def main():
     args = parse_args()
     dry_run = not args.live
 
+    if args.live and args.data_source != 'ib':
+        sys.exit(f"--live requires --data-source ib (real orders need a live account) — got "
+                 f"--data-source {args.data_source!r}")
+
     configure_logging()
 
     instruments = _build_instruments(args.instruments, args.max_notional, args.max_contracts)
-    config = {
-        'vol_target': args.vol_target,
-        'max_contracts': args.max_contracts,
-        'vx_expiry': args.vx_expiry,
-        'long_only': args.long_only,
-        'regime_discount': args.regime_discount,
-        'account_equity': args.account_equity,
-        'target_portfolio_vol': args.target_portfolio_vol,
-        'max_cluster_risk_pct': args.max_cluster_risk_pct,
-        'min_conviction': args.min_conviction,
-        'max_lot_overrun_pct': args.max_lot_overrun_pct,
-        'enable_signal_confidence': args.enable_signal_confidence,
-        'signal_confidence_low_threshold': args.signal_confidence_low_threshold,
-        'signal_confidence_high_threshold': args.signal_confidence_high_threshold,
-        'signal_confidence_high_vol': args.signal_confidence_high_vol,
-        'signal_confidence_low_vol': args.signal_confidence_low_vol,
-    }
+    as_of = datetime.strptime(args.as_of, '%Y-%m-%d').date() if args.as_of else None
+    config = TsmomLiveConfig(
+        vol_target=args.vol_target,
+        max_contracts=args.max_contracts,
+        vx_expiry=args.vx_expiry,
+        long_only=args.long_only,
+        regime_discount=args.regime_discount,
+        account_equity=args.account_equity,
+        target_portfolio_vol=args.target_portfolio_vol,
+        max_cluster_risk_pct=args.max_cluster_risk_pct,
+        min_conviction=args.min_conviction,
+        max_lot_overrun_pct=args.max_lot_overrun_pct,
+        enable_signal_confidence=args.enable_signal_confidence,
+        signal_confidence_low_threshold=args.signal_confidence_low_threshold,
+        signal_confidence_high_threshold=args.signal_confidence_high_threshold,
+        signal_confidence_high_vol=args.signal_confidence_high_vol,
+        signal_confidence_low_vol=args.signal_confidence_low_vol,
+        signal_weighting=args.signal_weighting,
+        mixing_pool=args.mixing_pool,
+        risk_budget_mode=args.risk_budget_mode,
+        notional_weighting=args.notional_weighting,
+        use_idm=args.use_idm,
+        idm_window_years=args.idm_window_years,
+        idm_halflife_days=args.idm_halflife_days,
+        data_source=args.data_source,
+        bar_years=args.bar_years,
+        as_of=as_of,
+    )
 
     if args.live:
         print('=' * 60)
@@ -288,15 +359,19 @@ def main():
     else:
         print('DRY RUN — targets only, no orders will be placed')
 
-    ib = IBPySync()
-    host      = '127.0.0.1' if args.paper else args.host
-    ports     = [4002, 7497] if args.paper else [7496, 4001]
-    client_id = 2            if args.paper else args.client_id
+    ib = None
+    if config.data_source == 'ib':
+        ib = IBPySync()
+        host      = '127.0.0.1' if args.paper else args.host
+        ports     = [4002, 7497] if args.paper else [7496, 4001]
+        client_id = 2            if args.paper else args.client_id
 
-    connect_with_retry(ib, host, ports, client_id)
-    atexit.register(ib.disconnect)
+        connect_with_retry(ib, host, ports, client_id)
+        atexit.register(ib.disconnect)
+    else:
+        log.info('data_source=database — no IB connection made')
 
-    targets = compute_rebalance_targets(ib, instruments, config)
+    targets = compute_rebalance_targets(instruments, config, ib=ib)
     report = print_rebalance_report(targets)
 
     if not args.no_save:
@@ -322,7 +397,8 @@ def main():
             status = trade.orderStatus.status
             log.info('%s order status: %s', t['symbol'], status)
 
-    ib.disconnect()
+    if ib is not None:
+        ib.disconnect()
 
 
 if __name__ == '__main__':

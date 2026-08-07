@@ -33,20 +33,19 @@ from derivatives_bt_engine.domain.allocation import (
     compute_position_scalar,
     compute_symbol_notional_budget,
 )
-from derivatives_bt_engine.domain.enums import TrendRegime, VolRegime
+from derivatives_bt_engine.domain.enums import VolRegime
 from derivatives_bt_engine.domain.futures_dataloader import FuturesDataLoader, assert_monotonic_expiration
 from derivatives_bt_engine.domain.instruments import (
     CME_MONTH_NUM_TO_LETTER, get_spec, resolve_active_months, resolve_annualization_days, resolve_price_symbol,
 )
 from derivatives_bt_engine.domain.signal import (
     SignalSpec,
-    _goulding_weight,
     build_features,
     build_monthly_state_return_history,
-    classify_regime,
     continuous_momentum,
     estimate_mixing_params,
     goulding_monthly,
+    resolve_trend_direction,
 )
 from derivatives_bt_engine.utils.logger import setup_logger
 
@@ -585,7 +584,7 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
     # script's own "both models computed unconditionally" convention.
     ts_fast, ts_slow = _col('ts_fast'), _col('ts_slow')
     daily_std_last = _col('std_fast')
-    last_close = float(row['close'][0])
+    last_close = _col('close')
     # `dd` is already a (close - peak) / peak fraction from
     # continuous_momentum -- express as a percentage to match
     # `stats`' own drawdown_pct convention.
@@ -594,33 +593,15 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
     hv = daily_std_last * math.sqrt(annualization_days) if daily_std_last and daily_std_last > 0 else None
     risk_scalar = max(0.25, min(2.0, config.vol_target / hv)) if hv else 1.0
 
-    if config.signal_weighting == 'goulding':
-        if g_regime_val is None:
-            return None
-        regime = TrendRegime(g_regime_val.lower())
-        # _goulding_weight already returns sign(blended eq. 7 value) --
-        # always +1.0/-1.0/0.0, never a magnitude in between (matches this
-        # module's own binary sign(trend_strength) direction convention
-        # for 'continuous' mode too, just from a different model).
-        trend_strength = _goulding_weight(g_regime_val, a_co, a_re, g_fast_val, g_slow_val)
-        if trend_strength is None:
-            return None
-        # a_Co/a_Re IS the Correction/Rebound discount mechanism here --
-        # applying config.regime_discount on top would double-discount
-        # a decision eq. 7 already made. Mirrors signal_weighting='dynamic'
-        # in tsmom_binary_vol_parity_backtest.py, where regime_discount
-        # is likewise ignored.
-        regime_discount = 1.0
-    else:
-        trend_strength = _col('signal')
-        if trend_strength is None:
-            return None
-        regime = classify_regime(ts_fast, ts_slow)
-        # Recomputed here (mirrors compute_position_scalar's own internal
-        # math exactly) purely so the event log can show *why* a given
-        # trend_strength did or didn't turn into a trade -- compute_
-        # position_scalar itself stays untouched.
-        regime_discount = config.regime_discount if regime in (TrendRegime.CORRECTION, TrendRegime.REBOUND) else 1.0
+    # resolve_trend_direction (domain.signal) -- shared with
+    # live.tsmom_rebalance's own per-instrument signal computation, so both
+    # modules implement this continuous-vs-goulding branch exactly once.
+    resolved = resolve_trend_direction(config.signal_weighting, _col('signal'), ts_fast, ts_slow,
+                                        config.regime_discount, g_regime_val, g_fast_val, g_slow_val,
+                                        a_co, a_re)
+    if resolved is None:
+        return None
+    trend_strength, regime, regime_discount = resolved
 
     signal_for_scalar = trend_strength
     if config.long_only and signal_for_scalar is not None and not (

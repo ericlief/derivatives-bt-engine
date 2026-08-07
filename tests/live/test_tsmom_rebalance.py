@@ -1,0 +1,217 @@
+"""
+Tests for derivatives_bt_engine.live.tsmom_rebalance -- focused on
+data_source='database' (no IB dependency at all, monkeypatched
+FuturesDataLoader/VIX in place of a real duckdb/parquet read) plus
+TsmomLiveConfig validation. The data_source='ib' path makes real IBPySync
+calls (contract resolution, live bars/prices) with no local equivalent to
+fake out cheaply -- 'database' is what makes this module testable, and is
+also the notebook-runnable, no-live-account path the tests below exercise
+end to end.
+"""
+
+from datetime import date, timedelta
+
+import numpy as np
+import polars as pl
+import pytest
+
+from derivatives_bt_engine.live import tsmom_rebalance as tr
+from derivatives_bt_engine.live.tsmom_rebalance import TsmomLiveConfig, compute_rebalance_targets
+
+
+def _trading_dates(start: date, n: int) -> list[date]:
+    dates = []
+    d = start
+    while len(dates) < n:
+        if d.weekday() < 5:
+            dates.append(d)
+        d += timedelta(days=1)
+    return dates
+
+
+def _price_df(start: date, n: int, drift: float, vol: float = 0.01, seed: int = 0) -> pl.DataFrame:
+    rng = np.random.default_rng(seed)
+    rets = rng.normal(drift, vol, n)
+    close = 100 * np.exp(np.cumsum(rets))
+    dates = _trading_dates(start, n)
+    return pl.DataFrame({'ts_event': dates, 'close': close})
+
+
+def _instrument(symbol: str, cluster: str = 'other', multiplier: float = 50.0) -> dict:
+    return {
+        'symbol': symbol, 'ib_symbol': symbol, 'signal_symbol': symbol, 'db_symbol': symbol,
+        'exchange': 'CME', 'expiry': 'auto', 'multiplier': multiplier, 'cluster': cluster,
+        'max_contracts': 50, 'max_notional': None,
+    }
+
+
+def _patch_db(monkeypatch, price_data: dict[str, pl.DataFrame], vx: tuple[float, float] = (15.0, 15.0)):
+    """Fakes both data sources compute_rebalance_targets(data_source=
+    'database') reads: FuturesDataLoader (per-instrument bars) and
+    _vx_spike_ratio_from_db (local spot-VIX gate) -- no duckdb/parquet
+    file needed."""
+    class _FakeLoader:
+        def __init__(self, asset, **kwargs):
+            self.asset = asset
+
+        @property
+        def daily(self):
+            return price_data[self.asset]
+
+    monkeypatch.setattr(tr, 'FuturesDataLoader', _FakeLoader)
+    monkeypatch.setattr(tr, 'assert_monotonic_expiration', lambda df, sym: None)
+    monkeypatch.setattr(tr, '_vx_spike_ratio_from_db', lambda as_of=None: vx)
+
+
+# ── TsmomLiveConfig validation ───────────────────────────────────────────────
+
+@pytest.mark.parametrize('field,value', [
+    ('signal_weighting', 'bogus'),
+    ('mixing_pool', 'bogus'),
+    ('risk_budget_mode', 'bogus'),
+    ('notional_weighting', 'bogus'),
+    ('data_source', 'bogus'),
+])
+def test_tsmom_live_config_rejects_unknown_values(field, value):
+    with pytest.raises(ValueError):
+        TsmomLiveConfig(**{field: value})
+
+
+def test_tsmom_live_config_defaults_match_prior_behavior():
+    config = TsmomLiveConfig()
+    assert config.signal_weighting == 'continuous'
+    assert config.risk_budget_mode == 'cluster'
+    assert config.data_source == 'ib'
+    assert config.notional_weighting == 'flat'
+    assert config.use_idm is True
+
+
+# ── compute_rebalance_targets: ib/database dispatch ──────────────────────────
+
+def test_compute_rebalance_targets_requires_ib_connection_for_ib_data_source():
+    config = TsmomLiveConfig(account_equity=100_000, data_source='ib')
+    with pytest.raises(ValueError):
+        compute_rebalance_targets([_instrument('X')], config, ib=None)
+
+
+def test_compute_rebalance_targets_database_mode_needs_no_ib(monkeypatch):
+    price_data = {'X': _price_df(date(2018, 1, 1), 500, drift=0.0015, vol=0.005, seed=1)}
+    _patch_db(monkeypatch, price_data)
+
+    config = TsmomLiveConfig(account_equity=100_000, data_source='database')
+    targets = compute_rebalance_targets([_instrument('X')], config, ib=None)
+
+    assert len(targets) == 1
+    t = targets[0]
+    assert t.get('error') is None
+    # No IB connection anywhere in this mode -- current_contracts is
+    # unknowable without one, reported as None rather than a misleading 0.
+    assert t['current_contracts'] is None
+    assert t['target_contracts'] is not None
+
+
+def test_compute_rebalance_targets_database_mode_respects_as_of(monkeypatch):
+    price_data = {'X': _price_df(date(2018, 1, 1), 500, drift=0.0015, vol=0.005, seed=1)}
+    _patch_db(monkeypatch, price_data)
+
+    early_as_of = price_data['X']['ts_event'][300]
+    config = TsmomLiveConfig(account_equity=100_000, data_source='database', as_of=early_as_of)
+    targets = compute_rebalance_targets([_instrument('X')], config, ib=None)
+
+    assert targets[0].get('error') is None
+    assert targets[0]['close'] == pytest.approx(price_data['X'].filter(pl.col('ts_event') <= early_as_of)
+                                                 .tail(1)['close'][0])
+
+
+# ── risk_budget_mode: 'cluster' vs 'idm' ─────────────────────────────────────
+
+def test_risk_budget_mode_cluster_gives_every_active_instrument_the_same_budget(monkeypatch):
+    price_data = {
+        'X': _price_df(date(2018, 1, 1), 500, drift=0.0015, vol=0.005, seed=1),
+        'Y': _price_df(date(2018, 1, 1), 500, drift=0.0015, vol=0.005, seed=2),
+    }
+    _patch_db(monkeypatch, price_data)
+
+    config = TsmomLiveConfig(account_equity=1_000_000, data_source='database', risk_budget_mode='cluster')
+    targets = compute_rebalance_targets([_instrument('X'), _instrument('Y')], config, ib=None)
+
+    budgets = {t['symbol']: t['budget_constant'] for t in targets if t.get('error') is None}
+    assert len(budgets) == 2
+    assert budgets['X'] == pytest.approx(budgets['Y'])
+
+
+def test_risk_budget_mode_idm_favors_independent_symbol_over_correlated_pair(monkeypatch):
+    # A and B are the SAME series (correlation exactly 1.0), C is
+    # independent -- same "correlated cluster vs. lone diversifier" setup
+    # as domain.allocation's own compute_erc_weights tests, now exercised
+    # end to end through the live rebalance's 'idm' risk_budget_mode.
+    same_series = _price_df(date(2018, 1, 1), 500, drift=0.0015, vol=0.005, seed=1)
+    price_data = {
+        'A': same_series,
+        'B': same_series,
+        'C': _price_df(date(2018, 1, 1), 500, drift=0.0015, vol=0.005, seed=2),
+    }
+    _patch_db(monkeypatch, price_data)
+
+    # as_of pinned to the synthetic data's own last date -- the bounded EWM
+    # correlation window (default 3y back from as_of) would otherwise find
+    # zero overlap against config.as_of's default of date.today(), miles
+    # past this synthetic 2018-19 series, and silently fall back to a flat
+    # split (compute_erc_weights' own no-corr-data default) instead of
+    # actually exercising the correlation-aware path this test is for.
+    as_of = price_data['A']['ts_event'][-1]
+    config = TsmomLiveConfig(account_equity=1_000_000, data_source='database', risk_budget_mode='idm',
+                              notional_weighting='erc', as_of=as_of)
+    targets = compute_rebalance_targets(
+        [_instrument('A'), _instrument('B'), _instrument('C')], config, ib=None)
+
+    budgets = {t['symbol']: t['budget_constant'] for t in targets if t.get('error') is None}
+    assert set(budgets) == {'A', 'B', 'C'}
+    assert budgets['C'] > budgets['A']
+    assert budgets['C'] > budgets['B']
+
+
+def test_risk_budget_mode_idm_use_idm_false_skips_multiplier(monkeypatch):
+    price_data = {
+        'X': _price_df(date(2018, 1, 1), 500, drift=0.0015, vol=0.005, seed=1),
+        'Y': _price_df(date(2018, 1, 1), 500, drift=0.0015, vol=0.005, seed=2),
+    }
+    _patch_db(monkeypatch, price_data)
+
+    config = TsmomLiveConfig(account_equity=1_000_000, target_portfolio_vol=0.15, vol_target=0.15,
+                              data_source='database', risk_budget_mode='idm', notional_weighting='flat',
+                              use_idm=False)
+    targets = compute_rebalance_targets([_instrument('X'), _instrument('Y')], config, ib=None)
+
+    budgets = [t['budget_constant'] for t in targets if t.get('error') is None]
+    assert len(budgets) == 2
+    # No IDM adjustment, flat split -- total dollar-vol budget is exactly
+    # account_equity * target_portfolio_vol, split evenly.
+    assert sum(budgets) * 0.15 == pytest.approx(1_000_000 * 0.15, rel=1e-6)
+
+
+# ── signal_weighting: 'goulding' ─────────────────────────────────────────────
+
+def test_signal_weighting_goulding_populates_audit_fields(monkeypatch):
+    price_data = {'X': _price_df(date(2018, 1, 1), 500, drift=0.0015, vol=0.005, seed=1)}
+    _patch_db(monkeypatch, price_data)
+
+    config = TsmomLiveConfig(account_equity=100_000, data_source='database', signal_weighting='goulding')
+    targets = compute_rebalance_targets([_instrument('X')], config, ib=None)
+
+    assert targets[0].get('error') is None
+    assert targets[0]['g_regime'] in ('bull', 'bear', 'correction', 'rebound')
+    assert targets[0]['a_co'] is not None
+    assert targets[0]['a_re'] is not None
+
+
+def test_signal_weighting_continuous_leaves_audit_fields_none(monkeypatch):
+    price_data = {'X': _price_df(date(2018, 1, 1), 500, drift=0.0015, vol=0.005, seed=1)}
+    _patch_db(monkeypatch, price_data)
+
+    config = TsmomLiveConfig(account_equity=100_000, data_source='database', signal_weighting='continuous')
+    targets = compute_rebalance_targets([_instrument('X')], config, ib=None)
+
+    assert targets[0]['g_regime'] is None
+    assert targets[0]['a_co'] is None
+    assert targets[0]['a_re'] is None

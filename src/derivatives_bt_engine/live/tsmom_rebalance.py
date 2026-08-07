@@ -21,27 +21,44 @@ from __future__ import annotations
 
 import logging
 import math
+import os
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from typing import Optional
 from zoneinfo import ZoneInfo
 
+import polars as pl
 from ib_tools.ibpysync import IBPySync
 
 from derivatives_bt_engine.domain.enums import TrendRegime, VolRegime
 from derivatives_bt_engine.domain.instruments import resolve_annualization_days, resolve_signal_symbol
 from derivatives_bt_engine.domain.allocation import (
+    NOTIONAL_WEIGHTING_SCHEMES,
     apply_cluster_risk_cap,
+    build_returns_wide,
     compute_desired_risk_budget,
     compute_n_effective,
     compute_position_scalar,
+    compute_symbol_notional_budget,
 )
+from derivatives_bt_engine.domain.futures_dataloader import FuturesDataLoader, assert_monotonic_expiration
 from derivatives_bt_engine.domain.signal import (
     build_features,
-    classify_regime,
     classify_signal_confidence,
     compute_signal_confidence,
     compute_vol_ratio,
     continuous_momentum,
+    estimate_mixing_params,
+    goulding_monthly,
+    resolve_trend_direction,
 )
+# VIX_FILE_PATH: the same local spot-VIX parquet the backtest reads (see
+# that module's own docstring for why -- no VX futures/CFE history is
+# available locally, so spot-VIX-vs-its-own-63d-MA is the closest available
+# analog to this module's live VX-front-month/VX-63d-MA ratio). Reused here
+# (not duplicated) so data_source='database' stays byte-for-byte consistent
+# with what the backtest itself would compute for the same date.
+from derivatives_bt_engine.domain.tsmom_backtester import VIX_FILE_PATH
 
 log = logging.getLogger(__name__)
 
@@ -52,6 +69,120 @@ VX_ELEVATED_RATIO = 1.3
 VX_SPIKE_RATIO    = 1.5
 VX_EXTREME_RATIO  = 2.0
 VX_ELEVATED_SCALE = 0.6   # reduce all positions to this fraction of target when 'elevated'
+
+# ── Tunable defaults ─────────────────────────────────────────────────────
+DEFAULT_BAR_YEARS = 3.0
+
+# ── Config validation ────────────────────────────────────────────────────
+SIGNAL_WEIGHTINGS = ('continuous', 'goulding')
+MIXING_POOLS = ('cluster', 'global')
+RISK_BUDGET_MODES = ('cluster', 'idm')
+DATA_SOURCES = ('ib', 'database')
+
+# ── Infrastructure ───────────────────────────────────────────────────────
+# Same futures-bar parquet cache the backtest uses (domain.tsmom_backtester's
+# own load_portfolio_data) -- sharing it means a symbol already cached by a
+# backtest run doesn't need re-fetching here, and vice versa.
+_DB_CACHE_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', '..', '..', '.cache', 'futures'))
+
+
+@dataclass
+class TsmomLiveConfig:
+    """Portfolio-level config for compute_rebalance_targets.
+
+    Deliberately named/shaped after domain.tsmom_backtester.TsmomBacktestConfig
+    -- signal_weighting/mixing_pool/notional_weighting/use_idm/
+    idm_window_years/idm_halflife_days/vol_target/target_portfolio_vol share
+    both name AND meaning with that dataclass, so the same mental model
+    (and the same config values) transfer directly between a backtest run
+    and a live rebalance. Fields with no backtest equivalent
+    (account_equity, max_cluster_risk_pct, min_conviction,
+    max_lot_overrun_pct, signal_confidence_*, vx_expiry, data_source,
+    risk_budget_mode, as_of) are live-specific portfolio-risk-management or
+    data-sourcing concerns the backtest has no need of.
+
+    Per-instrument metadata (exchange, expiry, multiplier, cluster,
+    max_contracts, max_notional, ib_symbol/signal_symbol/db_symbol) stays
+    in the separate `instruments` list compute_rebalance_targets also
+    takes -- unlike vol_target/target_portfolio_vol/etc., those are
+    genuinely per-instrument, not portfolio-level, so folding them into
+    this dataclass would just mean threading a list through it anyway."""
+    vol_target: float = 0.15
+    long_only: bool = False
+    regime_discount: float = 0.5
+    max_contracts: int = 15
+    account_equity: Optional[float] = None
+    target_portfolio_vol: float = 0.15
+    max_cluster_risk_pct: float = 0.25
+    min_conviction: float = 0.05
+    max_lot_overrun_pct: float = 0.5
+    enable_signal_confidence: bool = False
+    signal_confidence_low_threshold: float = 0.7
+    signal_confidence_high_threshold: float = 1.5
+    signal_confidence_high_vol: float = 0.5
+    signal_confidence_low_vol: float = 1.0
+    # Signal DIRECTION source -- see domain.signal.resolve_trend_direction
+    # (shared with TsmomBacktestConfig.signal_weighting, same semantics):
+    # 'continuous' (default): continuous_momentum's daily trend_strength +
+    # classify_regime + regime_discount. 'goulding': Goulding/Harvey/
+    # Mazzoleni (2023)'s own monthly Bull/Correction/Bear/Rebound
+    # classification with a_Co/a_Re mixing weights re-estimated from all
+    # available prior history (mixing_pool below) -- "Goulding decides
+    # direction, vol-parity decides size"; regime_discount is ignored in
+    # this mode (a_Co/a_Re IS the discount mechanism).
+    signal_weighting: str = 'continuous'
+    # Only used when signal_weighting == 'goulding'. 'cluster' (default):
+    # a_Co/a_Re estimated separately per instrument cluster (pooled across
+    # only the instruments passed to this rebalance, not the full
+    # instruments.py universe). 'global': one shared estimate pooled
+    # across every instrument regardless of cluster.
+    mixing_pool: str = 'cluster'
+    # 'cluster' (default, unchanged prior behavior): compute_n_effective/
+    # compute_desired_risk_budget -- one shared risk budget per ACTIVE
+    # CLUSTER (zero-correlation assumption), replicated across every
+    # instrument in that cluster. 'idm': domain.allocation.
+    # compute_symbol_notional_budget -- one risk budget PER ACTIVE SYMBOL,
+    # correlation-aware (bounded trailing EWM correlation matrix over the
+    # active set, IDM-scaled total split via notional_weighting/use_idm
+    # below) -- the same machinery TsmomBacktestConfig.target_portfolio_vol
+    # drives in the backtest, now also available live.
+    risk_budget_mode: str = 'cluster'
+    # Only used when risk_budget_mode == 'idm' -- see
+    # domain.allocation.compute_symbol_notional_budget's own docstring for
+    # the full derivation of both (including why the split is fed into IDM
+    # as its own weight vector, not a flat one, to avoid double-counting
+    # diversification across the two steps).
+    notional_weighting: str = 'flat'
+    use_idm: bool = True
+    idm_window_years: float = 3.0
+    idm_halflife_days: float = 63.0
+    # 'ib' (default, unchanged prior behavior): live IB historical bars +
+    # live VX/VIX spike gate, via IBPySync -- requires an active connection
+    # (compute_rebalance_targets' own `ib` argument). 'database': the same
+    # local futures duckdb (FuturesDataLoader) and VIX parquet the backtest
+    # reads from, no IB connection anywhere -- notebook-runnable, for
+    # inspecting signals/regimes without a live account. current_contracts
+    # is always None in this mode (no position source without IB) --
+    # compute_rebalance_targets still reports what target_contracts WOULD
+    # be, just not a delta against a real position.
+    data_source: str = 'ib'
+    vx_expiry: str = 'auto'  # only used when data_source == 'ib'
+    min_days: int = 7        # only used when data_source == 'ib' (expiry-resolution margin)
+    bar_years: float = DEFAULT_BAR_YEARS  # historical window: IB request duration / database lookback
+    as_of: Optional[date] = None  # only used when data_source == 'database'; None = latest available bar
+
+    def __post_init__(self):
+        if self.signal_weighting not in SIGNAL_WEIGHTINGS:
+            raise ValueError(f"signal_weighting must be one of {SIGNAL_WEIGHTINGS}, got {self.signal_weighting!r}")
+        if self.mixing_pool not in MIXING_POOLS:
+            raise ValueError(f"mixing_pool must be one of {MIXING_POOLS}, got {self.mixing_pool!r}")
+        if self.risk_budget_mode not in RISK_BUDGET_MODES:
+            raise ValueError(f"risk_budget_mode must be one of {RISK_BUDGET_MODES}, got {self.risk_budget_mode!r}")
+        if self.notional_weighting not in NOTIONAL_WEIGHTING_SCHEMES:
+            raise ValueError(f"notional_weighting must be one of {NOTIONAL_WEIGHTING_SCHEMES}, "
+                              f"got {self.notional_weighting!r}")
+        if self.data_source not in DATA_SOURCES:
+            raise ValueError(f"data_source must be one of {DATA_SOURCES}, got {self.data_source!r}")
 
 
 # ------------------------------------------------------------------
@@ -187,6 +318,34 @@ def fetch_vx_spike_ratio(ib: IBPySync, vx_expiry: str = 'auto', min_days: int = 
     return float(vx_current), float(vx_ma63)
 
 
+def _vx_spike_ratio_from_db(as_of: Optional[date] = None) -> tuple[float, float]:
+    """Local spot-VIX analog to fetch_vx_spike_ratio, for
+    TsmomLiveConfig(data_source='database') -- no VX futures (CFE) history
+    is available locally (same reason domain.tsmom_backtester's own module
+    docstring gives), so this reads the same VIX spot parquet the backtest
+    uses instead: current close vs its own trailing 63-day MA. Filtered to
+    <= as_of when given (no lookahead); None uses the full available
+    series, i.e. "as of today". Raises RuntimeError if there isn't yet a
+    full 63-day window."""
+    vix = pl.read_parquet(VIX_FILE_PATH).select(['date', 'close']).rename({'close': 'vix_close'}).sort('date')
+    if as_of is not None:
+        vix = vix.filter(pl.col('date') <= as_of)
+    vix = vix.with_columns(vix_ma63=pl.col('vix_close').rolling_mean(63))
+    last = vix.tail(1)
+    if last.height == 0 or last['vix_ma63'][0] is None:
+        raise RuntimeError('Insufficient local VIX history to compute a 63-day MA')
+    return float(last['vix_close'][0]), float(last['vix_ma63'][0])
+
+
+def _get_vx_spike_ratio(ib: Optional[IBPySync], config: TsmomLiveConfig) -> tuple[float, float]:
+    """Dispatches to the live VX-futures gate or the local spot-VIX analog
+    per config.data_source -- same (vx_current, vx_ma63) shape either way,
+    so check_vol_regime below is unaware of which source produced it."""
+    if config.data_source == 'ib':
+        return fetch_vx_spike_ratio(ib, config.vx_expiry)
+    return _vx_spike_ratio_from_db(config.as_of)
+
+
 def check_vol_regime(vx_ratio: float) -> VolRegime:
     """Normal | Elevated | Spike | Extreme from vx_current / vx_ma63.
 
@@ -231,36 +390,59 @@ def _current_contracts(ib: IBPySync, contract) -> int:
 # Main orchestration
 # ------------------------------------------------------------------
 
-def _compute_signal(ib: IBPySync, instr: dict, min_days: int, vol_target: float, long_only: bool,
-                     regime_discount: float, signal_confidence_cfg: dict):
-    """Stage 1: resolve the contract, fetch bars, compute the TSMOM signal
-    for one instrument. No budget/sizing here -- that needs to know every
-    instrument's signal first (to derive n_effective), so it happens in a
-    later pass. Returns a dict of everything sizing/reporting need.
+def _fetch_signal_inputs(ib: Optional[IBPySync], instr: dict, config: TsmomLiveConfig) -> dict:
+    """Stage 1a: resolve the contract (IB mode only) and fetch this
+    instrument's own OHLCV history, sourced per config.data_source --
+    everything downstream (continuous_momentum, goulding_monthly,
+    returns_wide for risk_budget_mode='idm') is pure polars either way, so
+    only bar-sourcing itself differs between 'ib' and 'database'. Returns
+    the FULL continuous_momentum/goulding_monthly frames (not just the
+    latest row) -- compute_vol_ratio needs trailing history for
+    signal_confidence, and goulding's own mixing-param estimation needs
+    every prior (state, monthly_return) pair, not just the current one.
 
-    signal_confidence_cfg: {'enabled': bool, 'low_threshold': float,
-    'high_threshold': float, 'high_vol': float, 'low_vol': float} -- see
-    compute_signal_confidence(). When disabled (the default), this stage
-    still returns signal_confidence=1.0 (no-op) and vol_ratio=None."""
-    contract = _resolve_contract(ib, instr, min_days)
-    # Historical bars come from the continuous front-month contract, not the
-    # dated one -- a single expiry-specific Future only has bars back to
-    # when that contract was listed (well under a year), which silently
-    # starves the 252-day (ts_slow) momentum calc and makes classify_regime()
-    # return 'Unknown' for every symbol whose nearest contract hasn't been
-    # listed a full year yet.
-    #
-    # signal_symbol lets a recently-listed thin contract (e.g. the CBOT
-    # micro grains, all launched ~Feb 2025) borrow the full-size contract's
-    # much longer history instead -- same cents/bushel quote scale, just a
-    # different multiplier -- while sizing/orders still use the actually-
-    # traded micro contract (instr['ib_symbol']/`contract` above).
-    signal_symbol = resolve_signal_symbol(instr)
-    cont = IBPySync.cont_future(signal_symbol, exchange=instr.get('exchange', 'CME'))
-    ib.qualify_contracts(cont)
-    bars = ib.get_historical_bars(cont, duration='3 y', bar_size='1 day')
-    if bars is None or bars.height < 64:
-        raise RuntimeError(f"Insufficient bar history for {instr['symbol']} ({bars.height if bars is not None else 0} rows)")
+    'ib': continuous front-month historical bars via IBPySync
+    (config.bar_years back) -- NOT the dated/expiry-specific contract,
+    which only has bars back to its own listing (well under a year),
+    silently starving the 252-day (ts_slow) momentum calc. signal_symbol
+    lets a recently-listed thin contract (e.g. the CBOT micro grains)
+    borrow its full-size sibling's much longer history instead -- same
+    quote scale, just a different multiplier -- while sizing/orders still
+    use the actually-traded contract (`contract` below).
+
+    'database': the local futures duckdb via FuturesDataLoader, keyed by
+    instr['db_symbol'] (already resolved by the caller -- either
+    _build_instruments' own KNOWN_INSTRUMENTS lookup or an explicit JSON
+    instrument config) -- no IB connection needed at all. Filtered to
+    config.as_of when given (no lookahead); None uses the full available
+    history, i.e. "as of today"."""
+    if config.data_source == 'ib':
+        if ib is None:
+            raise ValueError("data_source='ib' requires an IBPySync connection "
+                              "(compute_rebalance_targets' own ib= argument)")
+        contract = _resolve_contract(ib, instr, config.min_days)
+        signal_symbol = resolve_signal_symbol(instr)
+        cont = IBPySync.cont_future(signal_symbol, exchange=instr.get('exchange', 'CME'))
+        ib.qualify_contracts(cont)
+        bars = ib.get_historical_bars(cont, duration=f'{int(config.bar_years)} y', bar_size='1 day')
+        if bars is None or bars.height < 64:
+            raise RuntimeError(f"Insufficient bar history for {instr['symbol']} "
+                                f"({bars.height if bars is not None else 0} rows)")
+        # ib_tools' get_historical_bars returns ib_insync BarData's own field
+        # names verbatim (a 'date' column, not 'ts_event') -- build_features
+        # requires 'ts_event' (it sorts by it).
+        bars = bars.rename({'date': 'ts_event'})
+    else:
+        contract = None
+        db_symbol = instr.get('db_symbol') or instr.get('signal_symbol') or instr.get('ib_symbol') or instr['symbol']
+        bars = FuturesDataLoader(asset=db_symbol, data_dir=_DB_CACHE_DIR, use_preprocessed=True,
+                                 save_preprocessed=True).daily
+        assert_monotonic_expiration(bars, instr['symbol'])
+        if config.as_of is not None:
+            bars = bars.filter(pl.col('ts_event') <= config.as_of)
+        bars = bars.sort('ts_event')
+        if bars.height < 64:
+            raise RuntimeError(f"Insufficient bar history for {instr['symbol']} ({bars.height} rows)")
 
     # Real trading-days/year for this symbol's own continuous series
     # (instruments.resolve_annualization_days) -- this project's confirmed
@@ -268,15 +450,59 @@ def _compute_signal(ib: IBPySync, instr: dict, min_days: int, vol_target: float,
     # post Sunday-session-merge fix); falls back to 252 for anything
     # unconfirmed, unchanged from this module's prior universal-252 behavior.
     annualization_days = resolve_annualization_days(instr['symbol'])
-    # ib_tools' get_historical_bars returns ib_insync BarData's own field
-    # names verbatim (a 'date' column, not 'ts_event') -- calculate_trend_
-    # strength never needed a date column at all (only 'close'), but
-    # build_features requires 'ts_event' (it sorts by it), so this is the
-    # one rename this migration needs that the old code never did.
-    df = continuous_momentum(build_features(bars.rename({'date': 'ts_event'})),
-                              annualization_days=annualization_days)
-    last = df.tail(1)
-    trend_strength = last['signal'][0]
+    feat = build_features(bars)
+    cm_df = continuous_momentum(feat, annualization_days=annualization_days)
+    g_df = goulding_monthly(feat) if config.signal_weighting == 'goulding' else None
+
+    return {
+        'contract': contract,
+        'annualization_days': annualization_days,
+        'cm_df': cm_df,
+        'g_df': g_df,
+        # ts_event/close only -- the minimal columns build_returns_wide
+        # needs for risk_budget_mode='idm's correlation matrix.
+        'closes': bars.select('ts_event', 'close'),
+    }
+
+
+def _goulding_history_frame(cluster: str, g_df: pl.DataFrame) -> pl.DataFrame:
+    """All-but-the-most-recent row of goulding_monthly's own output, in the
+    {date, cluster, state, monthly_return} schema estimate_mixing_params
+    expects -- the live equivalent of domain.tsmom_backtester's
+    build_monthly_state_return_history, simplified for a single as-of
+    snapshot: there's no separate backtest-style rebalance-date calendar
+    to forward-match against here, so goulding_monthly's own 'ts_event'
+    (month-start, already the bucket a `regime`/`ret` pair applies to) IS
+    the date. The most recent row is excluded -- it's the row
+    _finalize_signal itself reads as "now" (still using its own regime for
+    THIS rebalance's direction); using it as its own training example
+    would be a lookahead."""
+    hist = g_df[:-1] if g_df.height > 0 else g_df
+    hist = hist.filter(pl.col('regime').is_not_null() & pl.col('ret').is_not_null())
+    return hist.select(
+        pl.col('ts_event').alias('date'),
+        pl.lit(cluster).alias('cluster'),
+        pl.col('regime').str.to_lowercase().alias('state'),
+        pl.col('ret').alias('monthly_return'),
+    )
+
+
+def _finalize_signal(instr: dict, raw: dict, config: TsmomLiveConfig, vix_scalar: float,
+                      mixing_params_by_cluster: dict[str, tuple[float, float]],
+                      signal_confidence_cfg: dict) -> dict:
+    """Stage 1c: resolves this instrument's final trend_strength/regime
+    (continuous vs goulding, via domain.signal.resolve_trend_direction --
+    shared with the backtest's own _compute_signal_row) and every
+    reporting/sizing field downstream stages need. Takes `raw` from
+    _fetch_signal_inputs and, when signal_weighting == 'goulding',
+    mixing_params_by_cluster (from _mixing_params_for_instruments) --
+    empty in 'continuous' mode, never read.
+
+    signal_confidence_cfg: {'enabled': bool, 'low_threshold': float,
+    'high_threshold': float, 'high_vol': float, 'low_vol': float} -- see
+    compute_signal_confidence(). When disabled (the default), this stage
+    still returns signal_confidence=1.0 (no-op) and vol_ratio=None."""
+    last = raw['cm_df'].tail(1)
     ts_fast = last['ts_fast'][0]
     ts_slow = last['ts_slow'][0]
     daily_std_last = last['std_fast'][0] if 'std_fast' in last.columns else None
@@ -284,31 +510,46 @@ def _compute_signal(ib: IBPySync, instr: dict, min_days: int, vol_target: float,
     dd_raw = last['dd'][0] if 'dd' in last.columns else None
     dd_pct = dd_raw * 100 if dd_raw is not None else None
 
-    regime = classify_regime(ts_fast, ts_slow)
+    g_regime_val = g_fast_val = g_slow_val = None
+    cluster = instr.get('cluster', 'other')
+    a_co, a_re = mixing_params_by_cluster.get(cluster, (0.5, 0.5))
+    if config.signal_weighting == 'goulding' and raw['g_df'] is not None and raw['g_df'].height > 0:
+        g_last = raw['g_df'].tail(1)
+        g_regime_val = g_last['regime'][0]
+        g_fast_val = g_last['fast'][0]
+        g_slow_val = g_last['slow'][0]
+
+    resolved = resolve_trend_direction(config.signal_weighting, last['signal'][0] if 'signal' in last.columns else None,
+                                        ts_fast, ts_slow, config.regime_discount,
+                                        g_regime_val, g_fast_val, g_slow_val, a_co, a_re)
+    if resolved is not None:
+        trend_strength, regime, regime_discount = resolved
+    else:
+        trend_strength, regime, regime_discount = None, TrendRegime.UNKNOWN, 1.0
 
     signal_for_scalar = trend_strength
-    if long_only and signal_for_scalar is not None and not math.isnan(signal_for_scalar):
+    if config.long_only and signal_for_scalar is not None and not (
+        isinstance(signal_for_scalar, float) and math.isnan(signal_for_scalar)
+    ):
         signal_for_scalar = max(0.0, signal_for_scalar)
 
-    # hv/risk_scalar/regime_discount recomputed here (mirrors compute_
-    # position_scalar's own internal math) purely for reporting -- so the
-    # printed report shows *why* a given trend_strength did or didn't turn
-    # into a trade.
-    hv = daily_std_last * math.sqrt(annualization_days) if daily_std_last and daily_std_last > 0 else None
-    risk_scalar = max(0.25, min(2.0, vol_target / hv)) if hv else 1.0
-    regime_discount = regime_discount if regime in (TrendRegime.CORRECTION, TrendRegime.REBOUND) else 1.0
+    # hv/risk_scalar recomputed here (mirrors compute_position_scalar's own
+    # internal math) purely for reporting -- so the printed report shows
+    # *why* a given trend_strength did or didn't turn into a trade.
+    hv = daily_std_last * math.sqrt(raw['annualization_days']) if daily_std_last and daily_std_last > 0 else None
+    risk_scalar = max(0.25, min(2.0, config.vol_target / hv)) if hv else 1.0
 
     # signal_confidence: opt-in, per-instrument discount on trust in THIS
     # instrument's signal when ITS OWN vol_ratio (short/long realized vol,
     # asset-specific) is unusual -- not VIX/VX-driven, orthogonal to
-    # vix_scalar (portfolio-wide) and regime_discount (fast/
-    # slow sign disagreement). Computed off the same continuous-front-
-    # month bars already fetched above, no extra IB calls.
+    # vix_scalar (portfolio-wide) and regime_discount (fast/slow sign
+    # disagreement). Computed off the same bars already fetched in stage
+    # 1a, no extra IB calls.
     vol_ratio = None
     signal_confidence_regime = None
     signal_confidence = 1.0
     if signal_confidence_cfg.get('enabled'):
-        conf_df = compute_vol_ratio(df)
+        conf_df = compute_vol_ratio(raw['cm_df'])
         vol_ratio = conf_df.tail(1)['vol_ratio'][0]
         signal_confidence_regime = classify_signal_confidence(
             vol_ratio, signal_confidence_cfg['low_threshold'], signal_confidence_cfg['high_threshold'],
@@ -319,7 +560,7 @@ def _compute_signal(ib: IBPySync, instr: dict, min_days: int, vol_target: float,
         )
 
     return {
-        'contract': contract,
+        'contract': raw['contract'],
         'signal': trend_strength,
         'signal_for_scalar': signal_for_scalar,
         'ts_fast': ts_fast,
@@ -334,67 +575,103 @@ def _compute_signal(ib: IBPySync, instr: dict, min_days: int, vol_target: float,
         'close': last_close,
         'dd_pct': dd_pct,
         'regime': regime,
-        'cluster': instr.get('cluster', 'other'),
+        'cluster': cluster,
         'multiplier': instr.get('multiplier'),
-        'annualization_days': annualization_days,
+        'annualization_days': raw['annualization_days'],
+        # Goulding audit fields -- None in 'continuous' mode (nothing to
+        # report), populated in 'goulding' mode so a saved report shows
+        # exactly what drove that rebalance's direction: this instrument's
+        # cluster's own a_Co/a_Re as of now, and the raw g_fast/g_slow/
+        # g_regime inputs resolve_trend_direction blended.
+        'g_regime': g_regime_val, 'g_fast': g_fast_val, 'g_slow': g_slow_val,
+        'a_co': a_co if config.signal_weighting == 'goulding' else None,
+        'a_re': a_re if config.signal_weighting == 'goulding' else None,
     }
 
 
-def compute_rebalance_targets(ib: IBPySync, instruments: list[dict], config: dict) -> list[dict]:
+def _mixing_params_for_instruments(config: TsmomLiveConfig, raw_by_symbol: dict[str, dict],
+                                    instruments: list[dict]) -> dict[str, tuple[float, float]]:
+    """{cluster: (a_co, a_re)} pooled ONLY across the instruments passed to
+    THIS rebalance (not the full instruments.py universe) -- estimated
+    once, shared across every symbol in that cluster, not once per symbol.
+    Empty dict (never read) outside 'goulding' mode."""
+    if config.signal_weighting != 'goulding':
+        return {}
+    instr_by_symbol = {i['symbol']: i for i in instruments}
+    frames = [
+        _goulding_history_frame(instr_by_symbol[sym].get('cluster', 'other'), raw['g_df'])
+        for sym, raw in raw_by_symbol.items() if raw['g_df'] is not None
+    ]
+    monthly_history = (
+        pl.concat(frames, how='vertical') if frames
+        else pl.DataFrame(schema={'date': pl.Date, 'cluster': pl.Utf8, 'state': pl.Utf8, 'monthly_return': pl.Float64})
+    )
+    as_of = config.as_of or date.today()
+    clusters_needed = {i.get('cluster', 'other') for i in instruments}
+    if config.mixing_pool == 'cluster':
+        return {c: estimate_mixing_params(monthly_history, as_of, c) for c in clusters_needed}
+    global_params = estimate_mixing_params(monthly_history, as_of, None)
+    return {c: global_params for c in clusters_needed}
+
+
+def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
+                               ib: Optional[IBPySync] = None) -> list[dict]:
     """
     Runs the VX spike gate first. If a spike/extreme regime is detected,
     returns early with target_contracts == current_contracts (held
     unchanged), halved on 'extreme', and skips signal computation entirely.
 
     Otherwise this runs in three stages:
-      1. _compute_signal() for every instrument -- resolves the contract,
-         fetches bars, computes trend_strength/regime/hv. No budget yet.
-      2. Determine which clusters have a live signal (abs(signal_for_scalar)
-         above min_conviction) -> n_effective -> desired_risk_budget
-         (account_equity * target_portfolio_vol / sqrt(n_effective)) ->
-         budget_constant = desired_risk_budget / vol_target. This replaces
-         the old flat --max-notional as the dollar figure that converts
-         scalar -> target_notional, so instruments aren't all sized off the
-         same flat budget regardless of how many other clusters are active.
-      3. Per instrument: scalar -> target_notional (budget_constant * scalar,
-         optionally capped by instr['max_notional'] if set as a hard
-         ceiling) -> target_contracts, clamped to max_contracts (now just a
-         sanity backstop). Then apply_cluster_risk_cap() rescales any
-         cluster whose aggregate dollar-vol risk exceeds
-         max_cluster_risk_pct of total portfolio risk -- e.g. 4 grain
-         micros that each individually look fine can still collectively be
-         one oversized bet on the shared ag-complex factor.
+      1. Signal for every instrument, no sizing yet -- _fetch_signal_inputs
+         (bars, sourced per config.data_source) then, in 'goulding' mode,
+         _mixing_params_for_instruments (needs every instrument's bars
+         first) then _finalize_signal (trend_strength/regime/hv per
+         instrument, via domain.signal.resolve_trend_direction -- shared
+         with the backtest's own _compute_signal_row).
+      2. Derive the risk budget, per config.risk_budget_mode:
+         'cluster' (default, unchanged prior behavior): which CLUSTERS have
+         a live signal (abs(signal_for_scalar) above min_conviction) ->
+         n_effective -> desired_risk_budget (account_equity *
+         target_portfolio_vol / sqrt(n_effective)) -> ONE shared
+         budget_constant for every instrument (zero-correlation
+         assumption). 'idm': which SYMBOLS have a live signal ->
+         domain.allocation.compute_symbol_notional_budget over that active
+         set (correlation-aware, via a bounded trailing EWM correlation
+         matrix built from the same config.data_source's own price
+         history) -> a budget_constant PER ACTIVE SYMBOL instead of one
+         shared figure.
+      3. Per instrument: scalar -> target_notional (that instrument's own
+         budget_constant * scalar, optionally capped by
+         instr['max_notional'] if set as a hard ceiling) -> target_contracts,
+         clamped to max_contracts (now just a sanity backstop). Then
+         apply_cluster_risk_cap() rescales any cluster whose aggregate
+         dollar-vol risk exceeds max_cluster_risk_pct of total portfolio
+         risk -- e.g. 4 grain micros that each individually look fine can
+         still collectively be one oversized bet on the shared ag-complex
+         factor. Applies in BOTH risk_budget_mode values -- it's a
+         secondary guard on top of whichever primary budget derivation
+         stage 2 used, not a replacement for either.
 
-    config keys: vol_target (float), max_contracts (int, per-instrument
-    default/backstop), vx_expiry (str, 'auto' or YYYYMM), long_only (bool),
-    regime_discount (float), min_days (int, expiry-resolution margin),
-    account_equity (float, required for sizing), target_portfolio_vol
-    (float), max_cluster_risk_pct (float), min_conviction (float),
-    max_lot_overrun_pct (float, lot-size exception tolerance for
-    apply_cluster_risk_cap's conviction-priority allocation),
-    enable_signal_confidence (bool, default False), signal_confidence_
-    low_threshold/signal_confidence_high_threshold (float), signal_
-    confidence_high_vol/signal_confidence_low_vol (float, discount factors).
-    """
-    vol_target = config.get('vol_target', 0.15)
-    long_only = config.get('long_only', False)
-    regime_discount = config.get('regime_discount', 0.5)
-    default_max_contracts = config.get('max_contracts', 15)
-    min_days = config.get('min_days', 7)
-    account_equity = config.get('account_equity')
-    target_portfolio_vol = config.get('target_portfolio_vol', 0.15)
-    max_cluster_risk_pct = config.get('max_cluster_risk_pct', 0.25)
-    min_conviction = config.get('min_conviction', 0.05)
-    max_lot_overrun_pct = config.get('max_lot_overrun_pct', 0.5)
+    ib: required (and used) only when config.data_source == 'ib'. None is
+    valid and expected for config.data_source == 'database' -- that mode
+    makes no IB calls anywhere, which is what makes this notebook-runnable
+    for signal/regime inspection with no live account at all.
+    current_contracts is always None in 'database' mode (no position
+    source without IB); target_contracts/target_notional/etc. are still
+    computed and reported."""
+    if config.data_source == 'ib' and ib is None:
+        raise ValueError("config.data_source == 'ib' requires an IBPySync connection (pass ib=...) "
+                          "-- use data_source='database' for a no-IB, notebook-runnable signal inspection")
+
     signal_confidence_cfg = {
-        'enabled': config.get('enable_signal_confidence', False),
-        'low_threshold': config.get('signal_confidence_low_threshold', 0.7),
-        'high_threshold': config.get('signal_confidence_high_threshold', 1.5),
-        'high_vol': config.get('signal_confidence_high_vol', 0.5),
-        'low_vol': config.get('signal_confidence_low_vol', 1.0),
+        'enabled': config.enable_signal_confidence,
+        'low_threshold': config.signal_confidence_low_threshold,
+        'high_threshold': config.signal_confidence_high_threshold,
+        'high_vol': config.signal_confidence_high_vol,
+        'low_vol': config.signal_confidence_low_vol,
     }
 
-    vx_current, vx_ma63 = fetch_vx_spike_ratio(ib, config.get('vx_expiry', 'auto'))
+    vx_current, vx_ma63 = _get_vx_spike_ratio(ib, config)
     vx_ratio = vx_current / vx_ma63
     vol_regime = check_vol_regime(vx_ratio)
     log.info('VX spike gate — vx_current=%.2f  vx_ma63=%.2f  ratio=%.3f  regime=%s',
@@ -405,14 +682,18 @@ def compute_rebalance_targets(ib: IBPySync, instruments: list[dict], config: dic
                      vol_regime.value, vx_ratio)
         targets = []
         for instr in instruments:
-            try:
-                contract = _resolve_contract(ib, instr, min_days)
-                current = _current_contracts(ib, contract)
-            except Exception as exc:
-                log.warning('Could not resolve %s during VX %s (%s) — reporting current=0',
-                            instr['symbol'], vol_regime.value, exc)
-                current = 0
-            target = round(current / 2) if vol_regime == VolRegime.EXTREME else current
+            current = None
+            if config.data_source == 'ib':
+                try:
+                    contract = _resolve_contract(ib, instr, config.min_days)
+                    current = _current_contracts(ib, contract)
+                except Exception as exc:
+                    log.warning('Could not resolve %s during VX %s (%s) — reporting current=0',
+                                instr['symbol'], vol_regime.value, exc)
+                    current = 0
+            target = None
+            if current is not None:
+                target = round(current / 2) if vol_regime == VolRegime.EXTREME else current
             targets.append({
                 'symbol': instr['symbol'],
                 'target_contracts': target,
@@ -427,47 +708,80 @@ def compute_rebalance_targets(ib: IBPySync, instruments: list[dict], config: dic
                 # this early-return path (signal computation, which they
                 # depend on, is skipped entirely during a spike/extreme) --
                 # only what's already in scope from config is available.
-                'account_equity': account_equity,
-                'vol_target': vol_target,
-                'target_portfolio_vol': target_portfolio_vol,
-                'max_cluster_risk_pct': max_cluster_risk_pct,
-                'max_lot_overrun_pct': max_lot_overrun_pct,
+                'account_equity': config.account_equity,
+                'vol_target': config.vol_target,
+                'target_portfolio_vol': config.target_portfolio_vol,
+                'max_cluster_risk_pct': config.max_cluster_risk_pct,
+                'max_lot_overrun_pct': config.max_lot_overrun_pct,
             })
         return targets
 
     vix_scalar = VX_ELEVATED_SCALE if vol_regime == VolRegime.ELEVATED else 1.0
 
-    # Stage 1: signal for every instrument, no sizing yet.
-    signals: dict[str, dict] = {}
+    # Stage 1a: raw bars/features for every instrument, no signal resolved
+    # yet -- goulding's mixing-param estimation (1b) needs every
+    # instrument's own goulding_monthly output first.
+    raw_by_symbol: dict[str, dict] = {}
     errors: dict[str, str] = {}
     for instr in instruments:
         symbol = instr['symbol']
         try:
-            signals[symbol] = _compute_signal(ib, instr, min_days, vol_target, long_only, regime_discount,
-                                              signal_confidence_cfg)
+            raw_by_symbol[symbol] = _fetch_signal_inputs(ib, instr, config)
         except Exception as exc:
-            log.error('Failed to compute signal for %s: %s', symbol, exc)
+            log.error('Failed to fetch signal inputs for %s: %s', symbol, exc)
             errors[symbol] = str(exc)
 
-    # Stage 2: derive the risk budget from which clusters actually have a
-    # live signal right now, not from the raw instrument count.
-    active_clusters = {
-        s['cluster'] for s in signals.values()
-        if s['signal_for_scalar'] is not None
-        and not (isinstance(s['signal_for_scalar'], float) and math.isnan(s['signal_for_scalar']))
-        and abs(s['signal_for_scalar']) > min_conviction
-    }
-    n_effective = compute_n_effective(active_clusters)
-    if account_equity:
-        desired_risk_budget = compute_desired_risk_budget(account_equity, target_portfolio_vol, n_effective)
-        budget_constant = desired_risk_budget / vol_target if vol_target else 0.0
-    else:
-        desired_risk_budget = None
-        budget_constant = None
-    log.info('Risk budget — active_clusters=%s  n_effective=%d  desired_risk_budget=%s  budget_constant=%s',
-             sorted(active_clusters), n_effective,
-             f'{desired_risk_budget:.0f}' if desired_risk_budget is not None else 'N/A (no account_equity)',
-             f'{budget_constant:.0f}' if budget_constant is not None else 'N/A')
+    # Stage 1b (goulding only): a_Co/a_Re, pooled per mixing_params_for_instruments.
+    mixing_params_by_cluster = _mixing_params_for_instruments(config, raw_by_symbol, instruments)
+
+    # Stage 1c: resolve each instrument's final trend_strength/regime/hv.
+    instr_by_symbol = {i['symbol']: i for i in instruments}
+    signals: dict[str, dict] = {}
+    for symbol, raw in raw_by_symbol.items():
+        try:
+            signals[symbol] = _finalize_signal(instr_by_symbol[symbol], raw, config, vix_scalar,
+                                               mixing_params_by_cluster, signal_confidence_cfg)
+        except Exception as exc:
+            log.error('Failed to finalize signal for %s: %s', symbol, exc)
+            errors[symbol] = str(exc)
+
+    def _is_active(sig: dict) -> bool:
+        v = sig['signal_for_scalar']
+        return v is not None and not (isinstance(v, float) and math.isnan(v)) and abs(v) > config.min_conviction
+
+    # Stage 2: derive the risk budget, per config.risk_budget_mode.
+    n_effective = None
+    desired_risk_budget = None
+    budget_constant_by_symbol: dict[str, Optional[float]] = {}
+    if config.risk_budget_mode == 'cluster':
+        active_clusters = {s['cluster'] for s in signals.values() if _is_active(s)}
+        n_effective = compute_n_effective(active_clusters)
+        if config.account_equity:
+            desired_risk_budget = compute_desired_risk_budget(config.account_equity, config.target_portfolio_vol,
+                                                               n_effective)
+            shared_budget_constant = desired_risk_budget / config.vol_target if config.vol_target else 0.0
+        else:
+            shared_budget_constant = None
+        budget_constant_by_symbol = {s: shared_budget_constant for s in signals}
+        log.info('Risk budget (cluster) — active_clusters=%s  n_effective=%d  desired_risk_budget=%s  budget_constant=%s',
+                 sorted(active_clusters), n_effective,
+                 f'{desired_risk_budget:.0f}' if desired_risk_budget is not None else 'N/A (no account_equity)',
+                 f'{shared_budget_constant:.0f}' if shared_budget_constant is not None else 'N/A')
+    else:  # 'idm'
+        active_symbols = [s for s, sig in signals.items() if _is_active(sig)]
+        n_effective = compute_n_effective({signals[s]['cluster'] for s in active_symbols})
+        if config.account_equity and active_symbols:
+            returns_wide = build_returns_wide({s: raw['closes'] for s, raw in raw_by_symbol.items()})
+            as_of = config.as_of or date.today()
+            budget_constant_by_symbol = compute_symbol_notional_budget(
+                active_symbols, returns_wide, as_of, config.account_equity, config.target_portfolio_vol,
+                config.vol_target, config.idm_window_years, config.idm_halflife_days,
+                config.notional_weighting, config.use_idm,
+            )
+        log.info('Risk budget (idm) — active_symbols=%s  n_effective=%d  notional_weighting=%s  use_idm=%s  '
+                 'budget_constant=%s',
+                 sorted(active_symbols), n_effective, config.notional_weighting, config.use_idm,
+                 {s: round(v, 0) for s, v in budget_constant_by_symbol.items()} or 'N/A (no account_equity or no active symbols)')
 
     # Stage 3: per-instrument sizing off the derived budget, then the
     # cluster risk cap as a second pass.
@@ -484,31 +798,33 @@ def compute_rebalance_targets(ib: IBPySync, instruments: list[dict], config: dic
                 'vx_ratio': vx_ratio,
                 'vol_regime': vol_regime,
                 'error': errors[symbol],
-                'account_equity': account_equity,
+                'account_equity': config.account_equity,
                 'n_effective': n_effective,
                 'risk_budget': desired_risk_budget,
-                'vol_target': vol_target,
-                'target_portfolio_vol': target_portfolio_vol,
-                'budget_constant': budget_constant,
-                'max_cluster_risk_pct': max_cluster_risk_pct,
-                'max_lot_overrun_pct': max_lot_overrun_pct,
+                'vol_target': config.vol_target,
+                'target_portfolio_vol': config.target_portfolio_vol,
+                'budget_constant': budget_constant_by_symbol.get(symbol),
+                'max_cluster_risk_pct': config.max_cluster_risk_pct,
+                'max_lot_overrun_pct': config.max_lot_overrun_pct,
             })
             continue
 
         s = signals[symbol]
         try:
             multiplier = s['multiplier']
-            max_contracts = instr.get('max_contracts', default_max_contracts)
+            max_contracts = instr.get('max_contracts', config.max_contracts)
             max_notional_ceiling = instr.get('max_notional')
+            budget_constant = budget_constant_by_symbol.get(symbol)
 
             if multiplier is None:
                 raise ValueError(f'{symbol}: instrument config missing multiplier')
             if budget_constant is None:
-                raise ValueError(f'{symbol}: account_equity not configured — cannot derive a risk budget')
+                raise ValueError(f'{symbol}: account_equity not configured (or symbol not active under '
+                                  f"risk_budget_mode={config.risk_budget_mode!r}) — cannot derive a risk budget")
 
             scalar = compute_position_scalar(
-                s['signal_for_scalar'], s['daily_std'], vol_target, s['regime'],
-                regime_discount=regime_discount, signal_confidence=s['signal_confidence'],
+                s['signal_for_scalar'], s['daily_std'], config.vol_target, s['regime'],
+                regime_discount=s['regime_discount'], signal_confidence=s['signal_confidence'],
                 annualization_days=s['annualization_days'],
             )
             scalar *= vix_scalar
@@ -536,7 +852,11 @@ def compute_rebalance_targets(ib: IBPySync, instruments: list[dict], config: dic
             target_contracts = round(target_notional / contract_notional_value) if contract_notional_value else 0
             target_contracts = max(-max_contracts, min(max_contracts, target_contracts))
 
-            current_contracts = _current_contracts(ib, s['contract'])
+            # No IB connection in 'database' mode -- current_contracts is
+            # unknowable without one, reported as None rather than a
+            # misleading 0 (this is pure signal inspection, not a claim
+            # about any real position).
+            current_contracts = _current_contracts(ib, s['contract']) if config.data_source == 'ib' else None
 
             targets.append({
                 'symbol': symbol,
@@ -567,18 +887,25 @@ def compute_rebalance_targets(ib: IBPySync, instruments: list[dict], config: dic
                 'vx_ma63': vx_ma63,
                 'vx_ratio': vx_ratio,
                 'vol_regime': vol_regime,
-                # Portfolio-level context, identical across every
-                # instrument this run -- included per-row so each CSV row
-                # is self-contained (no need to cross-reference the log for
+                # Goulding audit fields -- None in 'continuous' mode.
+                'g_regime': s['g_regime'], 'g_fast': s['g_fast'], 'g_slow': s['g_slow'],
+                'a_co': s['a_co'], 'a_re': s['a_re'],
+                # Portfolio-level context -- identical across every
+                # instrument under risk_budget_mode='cluster', per-symbol
+                # under 'idm' -- included per-row so each CSV row is
+                # self-contained (no need to cross-reference the log for
                 # what budget/equity this run used).
-                'account_equity': account_equity,
+                'account_equity': config.account_equity,
                 'n_effective': n_effective,
                 'risk_budget': desired_risk_budget,
-                'vol_target': vol_target,
-                'target_portfolio_vol': target_portfolio_vol,
+                'vol_target': config.vol_target,
+                'target_portfolio_vol': config.target_portfolio_vol,
                 'budget_constant': budget_constant,
-                'max_cluster_risk_pct': max_cluster_risk_pct,
-                'max_lot_overrun_pct': max_lot_overrun_pct,
+                'risk_budget_mode': config.risk_budget_mode,
+                'notional_weighting': config.notional_weighting if config.risk_budget_mode == 'idm' else None,
+                'use_idm': config.use_idm if config.risk_budget_mode == 'idm' else None,
+                'max_cluster_risk_pct': config.max_cluster_risk_pct,
+                'max_lot_overrun_pct': config.max_lot_overrun_pct,
             })
         except Exception as exc:
             log.error('Failed to compute rebalance target for %s: %s', symbol, exc)
@@ -593,9 +920,9 @@ def compute_rebalance_targets(ib: IBPySync, instruments: list[dict], config: dic
                 'error': str(exc),
             })
 
-    total_risk_target = account_equity * target_portfolio_vol if account_equity else None
-    apply_cluster_risk_cap(targets, max_cluster_risk_pct, total_risk_target, n_effective,
-                          max_lot_overrun_pct=max_lot_overrun_pct)
+    total_risk_target = config.account_equity * config.target_portfolio_vol if config.account_equity else None
+    apply_cluster_risk_cap(targets, config.max_cluster_risk_pct, total_risk_target, n_effective,
+                          max_lot_overrun_pct=config.max_lot_overrun_pct)
     return targets
 
 
@@ -642,6 +969,8 @@ def print_rebalance_report(targets: list[dict]) -> str:
             f"vx_current={_fmt(t.get('vx_current'), '.2f'):>6}  vx_ma63={_fmt(t.get('vx_ma63'), '.2f'):>6}  "
             f"vx_ratio={t['vx_ratio']:.3f}  vol_regime={t['vol_regime'].capitalize()}  "
             f"vix_scalar={_fmt(t.get('vix_scalar'), '.2f')}"
+            + (f"  g_regime={t['g_regime']}  a_co={_fmt(t.get('a_co'), '.2f')}  a_re={_fmt(t.get('a_re'), '.2f')}"
+               if t.get('a_co') is not None else "")
             + ("  INFEASIBLE (cluster cap < min contract risk in this cluster)" if t.get('infeasible') else "")
         )
     report = '\n'.join(lines)
