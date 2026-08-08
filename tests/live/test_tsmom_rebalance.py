@@ -123,6 +123,39 @@ def test_compute_rebalance_targets_database_mode_respects_as_of(monkeypatch):
                                                  .tail(1)['close'][0])
 
 
+def test_vix_gating_false_skips_the_vx_read_entirely(monkeypatch):
+    # No VIX/VX source configured at all (unlike _patch_db's other callers,
+    # _vx_spike_ratio_from_db is deliberately left unpatched here) --
+    # vix_gating=False must mean compute_rebalance_targets never calls it,
+    # not just that it tolerates it failing.
+    price_data = {'X': _price_df(date(2018, 1, 1), 500, drift=0.0015, vol=0.005, seed=1)}
+
+    class _FakeLoader:
+        def __init__(self, asset, **kwargs):
+            self.asset = asset
+
+        @property
+        def daily(self):
+            return price_data[self.asset]
+
+    monkeypatch.setattr(tr, 'FuturesDataLoader', _FakeLoader)
+    monkeypatch.setattr(tr, 'assert_monotonic_expiration', lambda df, sym: None)
+
+    def _unreachable(*args, **kwargs):
+        raise AssertionError("_vx_spike_ratio_from_db should not be called when vix_gating=False")
+
+    monkeypatch.setattr(tr, '_vx_spike_ratio_from_db', _unreachable)
+
+    config = TsmomLiveConfig(account_equity=100_000, data_source='database', vix_gating=False)
+    targets = compute_rebalance_targets([_instrument('X')], config, ib=None)
+
+    assert targets[0].get('error') is None
+    assert targets[0]['vol_regime'] == tr.VolRegime.NORMAL
+    assert targets[0]['vx_current'] is None
+    assert targets[0]['vx_ma'] is None
+    assert targets[0]['vix_scalar'] == 1.0
+
+
 # ── risk_budget_mode: 'cluster' vs 'idm' ─────────────────────────────────────
 
 def test_risk_budget_mode_cluster_gives_every_active_instrument_the_same_budget(monkeypatch):

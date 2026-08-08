@@ -223,6 +223,11 @@ def parse_args():
                         'beyond the derived risk budget)')
     p.add_argument('--vx-expiry', default='auto',
                    help='VX futures expiry YYYYMM or "auto" for nearest >=3d (default: %(default)s)')
+    p.add_argument('--disable-vix-gating', action='store_true',
+                   help="Turn off the portfolio-wide VX/VIX spike gate entirely -- no read of any "
+                        "VX/VIX source is attempted (proceeds as vol_regime=Normal). Use this when no "
+                        "VX/VIX data source is available at all (default: gating on, matching all "
+                        "prior behavior)")
     p.add_argument('--long-only', action='store_true',
                    help='Disable short positions (signal_scalar = max(0, trend_strength))')
     p.add_argument('--regime-discount', type=float, default=0.5,
@@ -327,6 +332,7 @@ def main():
         vol_target=args.vol_target,
         max_contracts=args.max_contracts,
         vx_expiry=args.vx_expiry,
+        vix_gating=not args.disable_vix_gating,
         long_only=args.long_only,
         regime_discount=args.regime_discount,
         account_equity=args.account_equity,

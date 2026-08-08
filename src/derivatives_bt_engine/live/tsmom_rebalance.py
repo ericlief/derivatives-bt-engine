@@ -127,6 +127,23 @@ class TsmomLiveConfig:
     signal_confidence_high_threshold: float = 1.5
     signal_confidence_high_vol: float = 0.5
     signal_confidence_low_vol: float = 1.0
+    # Portfolio-wide VX/VIX spike gate -- on by default (matches all prior
+    # behavior). Toggle off when no VX/VIX data source is available at all
+    # (data_source='database' needs a local spot-VIX parquet that may not
+    # exist in every environment -- VX/VIX aren't in the CME futures
+    # duckdb FuturesDataLoader reads for everything else, so there's no
+    # way to derive this gate from that db; data_source='ib' needs a live
+    # CFE/CBOE subscription). Unlike TsmomBacktestConfig.vix_gating (which
+    # still READS vix data and just doesn't act on it -- cheap when that
+    # data is already being loaded for the whole backtest anyway), False
+    # here SKIPS the read entirely (_get_vx_spike_ratio is never called) --
+    # compute_rebalance_targets proceeds as vol_regime=Normal,
+    # vx_current/vx_ma=None, vix_scalar=1.0, no VX/VIX dependency of any
+    # kind. Caching VX/VIX from IB into a local file to work around a
+    # missing data source was considered and rejected -- a cached snapshot
+    # goes stale the moment it's reused for a later as_of/rebalance date,
+    # silently gating on old data instead of not gating at all.
+    vix_gating: bool = True
     # Signal DIRECTION source -- see domain.signal.resolve_trend_direction
     # (shared with TsmomBacktestConfig.signal_weighting, same semantics):
     # 'continuous' (default): continuous_momentum's daily trend_strength +
@@ -171,6 +188,19 @@ class TsmomLiveConfig:
     # is always None in this mode (no position source without IB) --
     # compute_rebalance_targets still reports what target_contracts WOULD
     # be, just not a delta against a real position.
+    #
+    # Staleness caveat specific to 'database' used for something CLOSE TO
+    # live (not a historical backtest as_of): the local futures duckdb and
+    # VIX parquet are snapshots as of whenever they were last refreshed --
+    # fine for a backtest, which always names an explicit historical as_of
+    # and never claims to be "now". Using 'database' with as_of=None (or
+    # an as_of near today) implicitly assumes those snapshots are also
+    # near-current; if they haven't been refreshed recently, the resulting
+    # signals/regimes are stale without anything here telling you so. Keep
+    # those sources refreshed yourself if you're using 'database' this
+    # way, or set vix_gating=False below and treat 'database' output as
+    # what-if analysis on whatever the snapshot happens to hold, not a
+    # live signal.
     data_source: str = 'ib'
     vx_expiry: str = 'auto'  # only used when data_source == 'ib'
     min_days: int = 7        # only used when data_source == 'ib' (expiry-resolution margin)
@@ -690,11 +720,19 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
         'low_vol': config.signal_confidence_low_vol,
     }
 
-    vx_current, vx_ma = _get_vx_spike_ratio(ib, config)
-    vx_ratio = vx_current / vx_ma
-    vol_regime = check_vol_regime(vx_ratio)
-    log.info('VX spike gate — vx_current=%.2f  vx_ma=%.2f  ratio=%.3f  regime=%s',
-             vx_current, vx_ma, vx_ratio, vol_regime.value)
+    if config.vix_gating:
+        vx_current, vx_ma = _get_vx_spike_ratio(ib, config)
+        vx_ratio = vx_current / vx_ma
+        vol_regime = check_vol_regime(vx_ratio)
+        log.info('VX spike gate — vx_current=%.2f  vx_ma=%.2f  ratio=%.3f  regime=%s',
+                 vx_current, vx_ma, vx_ratio, vol_regime.value)
+    else:
+        # No read at all -- not even an attempt against a VX/VIX source
+        # that may not exist in this environment (see TsmomLiveConfig.
+        # vix_gating's own docstring).
+        vx_current, vx_ma, vx_ratio = None, None, 1.0
+        vol_regime = VolRegime.NORMAL
+        log.info('VX spike gate disabled (config.vix_gating=False) — proceeding as vol_regime=Normal')
 
     if vol_regime in (VolRegime.SPIKE, VolRegime.EXTREME):
         log.warning('VX %s detected (ratio=%.3f) — holding existing positions, skipping rebalance',
