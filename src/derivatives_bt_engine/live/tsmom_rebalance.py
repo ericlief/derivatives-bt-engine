@@ -1107,7 +1107,9 @@ def print_rebalance_report(targets: list[dict]) -> str:
             continue
         lines.append(
             f"{t['symbol']:6s}  target={t['target_contracts']!s:>4}  "
-            f"current={t['current_contracts']!s:>4}  signal={_fmt(t.get('signal')):>7}  "
+            f"current={t['current_contracts']!s:>4}  "
+            f"continuous={_fmt(t.get('continuous_contracts'), '.3f'):>7}  "
+            f"scalar={_fmt(t.get('scalar'), '.3f'):>6}  signal={_fmt(t.get('signal')):>7}  "
             f"ts_fast={_fmt(t.get('ts_fast')):>7}  ts_slow={_fmt(t.get('ts_slow')):>7}  "
             f"close={_fmt(t.get('close'), '.2f'):>9}  dd_pct={_fmt(t.get('dd_pct'), '.2f'):>7}  "
             f"daily_std={_fmt(t.get('daily_std'), '.4f'):>7}  hv={_fmt(t.get('hv'), '.3f'):>6}  "
