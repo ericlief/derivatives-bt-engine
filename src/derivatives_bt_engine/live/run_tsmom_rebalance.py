@@ -40,6 +40,7 @@ from derivatives_bt_engine.live.tsmom_rebalance import (
     RISK_BUDGET_MODES,
     SIGNAL_WEIGHTINGS,
     TsmomLiveConfig,
+    build_instruments,
     compute_rebalance_targets,
     print_rebalance_report,
     _resolve_contract,
@@ -49,8 +50,6 @@ from derivatives_bt_engine.domain.allocation import NOTIONAL_WEIGHTING_SCHEMES
 load_dotenv()
 
 log = logging.getLogger(__name__)
-
-from derivatives_bt_engine.domain.instruments import INSTRUMENTS as KNOWN_INSTRUMENTS  # noqa: E402
 
 DEFAULT_MAX_NOTIONAL = float(os.getenv('TSMOM_DEFAULT_MAX_NOTIONAL', '0')) or None
 
@@ -88,42 +87,16 @@ def connect_with_retry(ib: IBPySync, host, ports, client_id, interval=30):
 
 
 def _build_instruments(spec: str, max_notional: float, max_contracts: int) -> list[dict]:
+    """CLI-only wrapper: --instruments accepts either a comma-separated
+    symbol list OR a JSON config path, unlike tsmom_rebalance.py's own
+    build_instruments (symbol list only, notebook-facing, no CLI/JSON
+    concerns). Delegates the symbol-list case to that shared function
+    instead of duplicating its KNOWN_INSTRUMENTS lookup/fallback logic."""
     path = Path(spec)
     if path.exists() and path.suffix == '.json':
         with open(path) as f:
             return json.load(f)
-
-    instruments = []
-    for symbol in (s.strip().upper() for s in spec.split(',') if s.strip()):
-        if symbol not in KNOWN_INSTRUMENTS:
-            raise ValueError(
-                f'Unknown symbol {symbol!r} — pass a JSON config path for '
-                f'instruments outside {sorted(KNOWN_INSTRUMENTS)}'
-            )
-        known = KNOWN_INSTRUMENTS[symbol]
-        ib_symbol = known.get('ib_symbol') or symbol
-        signal_symbol = known.get('signal_symbol') or ib_symbol
-        # db_symbol: Globex root symbol in the duckdb (daily.asset).
-        # Explicit when IB and Globex names diverge (e.g. J7→6J, BRE→6L);
-        # falls back to signal_symbol (thin contracts borrow their full-size
-        # sibling's duckdb data too) then ib_symbol.
-        db_symbol = known.get('db_symbol') or signal_symbol
-        instruments.append({
-            'symbol': symbol,
-            'ib_symbol': ib_symbol,
-            'signal_symbol': signal_symbol,
-            'db_symbol': db_symbol,
-            'exchange': known['exchange'],
-            'expiry': 'auto',
-            'multiplier': known['multiplier'],
-            'cluster': known.get('cluster', 'other'),
-            'max_contracts': max_contracts,
-            # max_notional is now an optional hard per-instrument ceiling,
-            # not the main sizing lever (see --account-equity) -- None
-            # unless the caller explicitly passed one.
-            'max_notional': max_notional,
-        })
-    return instruments
+    return build_instruments(spec.split(','), max_notional=max_notional, max_contracts=max_contracts)
 
 
 def _save_report(report: str, targets: list[dict]) -> None:

@@ -19,7 +19,7 @@ import polars as pl
 import pytest
 
 from derivatives_bt_engine.live import tsmom_rebalance as tr
-from derivatives_bt_engine.live.tsmom_rebalance import TsmomLiveConfig, compute_rebalance_targets
+from derivatives_bt_engine.live.tsmom_rebalance import TsmomLiveConfig, build_instruments, compute_rebalance_targets
 
 
 def _trading_dates(start: date, n: int) -> list[date]:
@@ -112,6 +112,35 @@ def test_module_imports_and_runs_database_mode_without_ib_tools_installed():
     result = subprocess.run([sys.executable, '-c', script], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert 'OK' in result.stdout
+
+
+# ── build_instruments ─────────────────────────────────────────────────────
+
+def test_build_instruments_resolves_known_symbols():
+    instruments = build_instruments(['MES', 'J7'])
+    by_symbol = {i['symbol']: i for i in instruments}
+    assert set(by_symbol) == {'MES', 'J7'}
+    # MES: db_symbol falls back through signal_symbol to the full-size ES
+    # sibling's own duckdb history.
+    assert by_symbol['MES']['signal_symbol'] == 'ES'
+    assert by_symbol['MES']['db_symbol'] == 'ES'
+    # J7: explicit db_symbol divergence (IBKR ticker vs Globex root).
+    assert by_symbol['J7']['db_symbol'] == '6J'
+    for i in instruments:
+        assert i['expiry'] == 'auto'
+        assert i['max_notional'] is None
+        assert i['max_contracts'] == tr.DEFAULT_MAX_CONTRACTS
+
+
+def test_build_instruments_rejects_unknown_symbol():
+    with pytest.raises(ValueError):
+        build_instruments(['NOT_A_REAL_SYMBOL'])
+
+
+def test_build_instruments_passes_through_max_notional_and_max_contracts():
+    instruments = build_instruments(['MES'], max_notional=25_000.0, max_contracts=7)
+    assert instruments[0]['max_notional'] == 25_000.0
+    assert instruments[0]['max_contracts'] == 7
 
 
 # ── TsmomLiveConfig validation ───────────────────────────────────────────────

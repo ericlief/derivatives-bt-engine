@@ -44,7 +44,7 @@ if TYPE_CHECKING:
     from ib_tools.ibpysync import IBPySync
 
 from derivatives_bt_engine.domain.enums import TrendRegime, VolRegime
-from derivatives_bt_engine.domain.instruments import resolve_annualization_days, resolve_signal_symbol
+from derivatives_bt_engine.domain.instruments import INSTRUMENTS, resolve_annualization_days, resolve_signal_symbol
 from derivatives_bt_engine.domain.allocation import (
     NOTIONAL_WEIGHTING_SCHEMES,
     apply_cluster_risk_cap,
@@ -91,6 +91,8 @@ DEFAULT_BAR_YEARS = 3.0
 # TsmomBacktestConfig field), which this project's VX_ELEVATED_RATIO/
 # VX_SPIKE_RATIO/VX_EXTREME_RATIO bands above were calibrated against.
 DEFAULT_VX_MA_WINDOW_DAYS = 63
+
+DEFAULT_MAX_CONTRACTS = 15
 
 # ── Config validation ────────────────────────────────────────────────────
 SIGNAL_WEIGHTINGS = ('continuous', 'goulding')
@@ -239,6 +241,54 @@ class TsmomLiveConfig:
                               f"got {self.notional_weighting!r}")
         if self.data_source not in DATA_SOURCES:
             raise ValueError(f"data_source must be one of {DATA_SOURCES}, got {self.data_source!r}")
+
+
+def build_instruments(symbols: list[str], max_notional: Optional[float] = None,
+                       max_contracts: int = DEFAULT_MAX_CONTRACTS) -> list[dict]:
+    """The `instruments` list compute_rebalance_targets expects, built from
+    a plain symbol list against domain.instruments.INSTRUMENTS -- the
+    equivalent of domain.tsmom_backtester.load_portfolio_data(symbols) for
+    this module's own instrument-dict shape, not a price/VIX frame.
+    INSTRUMENTS.get(s) alone isn't enough: this also resolves each known
+    spec's ib_symbol/signal_symbol/db_symbol fallback chain and fills in
+    expiry/max_contracts/max_notional, which compute_rebalance_targets'
+    per-instrument fields (_resolve_contract, _fetch_signal_inputs, ...)
+    all read directly. No IB dependency -- domain.instruments has none.
+
+    Raises ValueError on any symbol not in INSTRUMENTS -- for anything
+    outside that known universe, build the dict(s) yourself instead (same
+    fields this function produces: symbol, ib_symbol, signal_symbol,
+    db_symbol, exchange, expiry, multiplier, cluster, max_contracts,
+    max_notional)."""
+    instruments = []
+    for symbol in (s.strip().upper() for s in symbols if s.strip()):
+        if symbol not in INSTRUMENTS:
+            raise ValueError(f'Unknown symbol {symbol!r} -- not in domain.instruments.INSTRUMENTS '
+                              f'({sorted(INSTRUMENTS)}); build its dict manually instead')
+        known = INSTRUMENTS[symbol]
+        ib_symbol = known.get('ib_symbol') or symbol
+        signal_symbol = known.get('signal_symbol') or ib_symbol
+        # db_symbol: Globex root symbol in the duckdb (daily.asset).
+        # Explicit when IB and Globex names diverge (e.g. J7->6J, BRE->6L);
+        # falls back to signal_symbol (thin contracts borrow their full-size
+        # sibling's duckdb data too) then ib_symbol.
+        db_symbol = known.get('db_symbol') or signal_symbol
+        instruments.append({
+            'symbol': symbol,
+            'ib_symbol': ib_symbol,
+            'signal_symbol': signal_symbol,
+            'db_symbol': db_symbol,
+            'exchange': known['exchange'],
+            'expiry': 'auto',
+            'multiplier': known['multiplier'],
+            'cluster': known.get('cluster', 'other'),
+            'max_contracts': max_contracts,
+            # max_notional is an optional hard per-instrument ceiling, not
+            # the main sizing lever (see account_equity) -- None unless
+            # explicitly passed.
+            'max_notional': max_notional,
+        })
+    return instruments
 
 
 # ------------------------------------------------------------------
