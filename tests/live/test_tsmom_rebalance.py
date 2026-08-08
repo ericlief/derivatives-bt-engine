@@ -9,6 +9,9 @@ also the notebook-runnable, no-live-account path the tests below exercise
 end to end.
 """
 
+import subprocess
+import sys
+import textwrap
 from datetime import date, timedelta
 
 import numpy as np
@@ -61,6 +64,54 @@ def _patch_db(monkeypatch, price_data: dict[str, pl.DataFrame], vx: tuple[float,
     monkeypatch.setattr(tr, 'FuturesDataLoader', _FakeLoader)
     monkeypatch.setattr(tr, 'assert_monotonic_expiration', lambda df, sym: None)
     monkeypatch.setattr(tr, '_vx_spike_ratio_from_db', lambda as_of=None, ma_window_days=63: vx)
+
+
+# ── No ib_tools dependency for data_source='database' ────────────────────────
+
+def test_module_imports_and_runs_database_mode_without_ib_tools_installed():
+    # Regression test for the module-level `from ib_tools.ibpysync import
+    # IBPySync` this module used to have -- that made even importing
+    # TsmomLiveConfig/compute_rebalance_targets require ib_tools/ib_insync
+    # to be installed, defeating the point of a notebook-runnable, no-IB
+    # data_source='database' path for an environment that doesn't have
+    # them. IBPySync is now imported lazily, only inside the functions that
+    # actually touch it (all on the data_source='ib' path) -- verified here
+    # in a genuinely fresh subprocess (this test file's own module-level
+    # import already pulled ib_tools in for THIS process, so testing it
+    # in-process would prove nothing) with ib_tools/ib_insync imports
+    # blocked outright.
+    script = textwrap.dedent("""
+        import builtins
+        real_import = builtins.__import__
+        def blocked_import(name, *args, **kwargs):
+            if name == 'ib_tools' or name.startswith('ib_tools.') or name == 'ib_insync':
+                raise ImportError(f'blocked for test: {name}')
+            return real_import(name, *args, **kwargs)
+        builtins.__import__ = blocked_import
+
+        from derivatives_bt_engine.live.tsmom_rebalance import TsmomLiveConfig, compute_rebalance_targets
+
+        instr = {'symbol': 'X', 'ib_symbol': 'X', 'signal_symbol': 'X', 'db_symbol': 'X',
+                 'exchange': 'CME', 'expiry': 'auto', 'multiplier': 1.0, 'cluster': 'other',
+                 'max_contracts': 50, 'max_notional': None}
+        config = TsmomLiveConfig(account_equity=100_000, data_source='database', vix_gating=False)
+        # No FuturesDataLoader available (real duckdb may not be cached for
+        # 'X') is fine to fail on -- the point is the IMPORT and the
+        # up-front data_source/ib dispatch succeed without ib_tools; a
+        # RuntimeError from the instrument-not-found path is an acceptable
+        # (expected) outcome here, an ImportError of ib_tools is not.
+        try:
+            compute_rebalance_targets([instr], config, ib=None)
+        except ImportError as exc:
+            if 'ib_tools' in str(exc) or 'ib_insync' in str(exc):
+                raise
+        except Exception:
+            pass
+        print('OK')
+    """)
+    result = subprocess.run([sys.executable, '-c', script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert 'OK' in result.stdout
 
 
 # ── TsmomLiveConfig validation ───────────────────────────────────────────────

@@ -1,14 +1,20 @@
 """
-TSMOM monthly rebalancing orchestrator — has an IB dependency (contract
-resolution, historical bars, live VX/VIX fallback, current positions),
-via the ib_tools.ibpysync connectivity layer.
+TSMOM monthly rebalancing orchestrator -- has an IB dependency (contract
+resolution, historical bars, live VX/VIX fallback, current positions), via
+the ib_tools.ibpysync connectivity layer, but ONLY on the data_source='ib'
+code path (see TsmomLiveConfig). ib_tools is imported lazily, inside the
+functions that actually touch IBPySync, rather than at module level -- this
+module (TsmomLiveConfig, compute_rebalance_targets, ...) is importable and
+fully usable with data_source='database' in an environment that has no
+ib_tools/ib_insync installed at all, which is what makes it runnable in a
+plain notebook kernel with zero IB dependency.
 
 Pure signal math lives in derivatives_bt_engine.domain.signal (used by both this
 live orchestrator and the duckdb-backed backtest); cross-instrument risk
 allocation lives in derivatives_bt_engine.domain.allocation. This module wires
-that signal up to IBPySync, applies the VX vol-spike gate, and turns the result
-into a per-instrument rebalance plan (contract counts), without placing any
-orders itself.
+that signal up to IBPySync (data_source='ib' only), applies the VX/VIX
+vol-spike gate, and turns the result into a per-instrument rebalance plan
+(contract counts), without placing any orders itself.
 
 The VX/expiry-resolution helpers below intentionally mirror the equivalent
 logic in ib_tools' combined_monitor.py (live VX front-month via CFE, fall
@@ -24,11 +30,18 @@ import math
 import os
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 from zoneinfo import ZoneInfo
 
 import polars as pl
-from ib_tools.ibpysync import IBPySync
+
+if TYPE_CHECKING:
+    # Type-hint only -- from __future__ import annotations above means this
+    # is never evaluated at runtime, so it doesn't force ib_tools to be
+    # installed just to import this module. Actual runtime usages of
+    # IBPySync each do their own local `from ib_tools.ibpysync import
+    # IBPySync`, scoped to the data_source='ib' functions that need it.
+    from ib_tools.ibpysync import IBPySync
 
 from derivatives_bt_engine.domain.enums import TrendRegime, VolRegime
 from derivatives_bt_engine.domain.instruments import resolve_annualization_days, resolve_signal_symbol
@@ -247,6 +260,7 @@ def _vx_is_stale() -> bool:
 
 
 def _get_nearest_vx_expiry(ib: IBPySync, min_days: int = 3) -> str:
+    from ib_tools.ibpysync import IBPySync
     vx = IBPySync.future('VIX', exchange='CFE')
     vx.tradingClass = 'VX'
     details = ib.req_contract_details(vx)
@@ -268,6 +282,7 @@ def _get_nearest_vx_expiry(ib: IBPySync, min_days: int = 3) -> str:
 
 
 def _get_vx_future(ib: IBPySync, expiry: str):
+    from ib_tools.ibpysync import IBPySync
     vx = IBPySync.future('VIX', exchange='CFE', expiration=expiry)
     vx.tradingClass = 'VX'
     ib.qualify_contracts(vx)
@@ -284,6 +299,7 @@ def get_nearest_quarterly_expiry(ib: IBPySync, symbol: str, exchange: str, min_d
     exact same month was a real, listed contract a moment earlier; passing
     back the untruncated date IB itself returned avoids that re-resolution
     step entirely."""
+    from ib_tools.ibpysync import IBPySync
     c = IBPySync.future(symbol, exchange=exchange, multiplier=multiplier)
     details = ib.req_contract_details(c)
     log.debug(
@@ -324,6 +340,7 @@ def fetch_vx_spike_ratio(ib: IBPySync, vx_expiry: str = 'auto', min_days: int = 
     unavailable (stale/weekend close) it falls back to VIX spot's last
     close, then as a last resort to the most recent VX historical close.
     """
+    from ib_tools.ibpysync import IBPySync
     expiry = _get_nearest_vx_expiry(ib, min_days) if vx_expiry == 'auto' else vx_expiry
     vx = _get_vx_future(ib, expiry)
 
@@ -466,6 +483,7 @@ def _fetch_signal_inputs(ib: Optional[IBPySync], instr: dict, config: TsmomLiveC
     config.as_of when given (no lookahead); None uses the full available
     history, i.e. "as of today"."""
     if config.data_source == 'ib':
+        from ib_tools.ibpysync import IBPySync
         if ib is None:
             raise ValueError("data_source='ib' requires an IBPySync connection "
                               "(compute_rebalance_targets' own ib= argument)")
@@ -984,6 +1002,7 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
 
 
 def _resolve_contract(ib: IBPySync, instr: dict, min_days: int):
+    from ib_tools.ibpysync import IBPySync
     ib_symbol = instr.get('ib_symbol') or instr['symbol']
     # Only pass multiplier when ib_symbol diverges from our local symbol
     # (i.e. a genuine same-ticker collision like SI/SIL) -- passing it
