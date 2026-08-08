@@ -639,20 +639,23 @@ def test_goulding_blend_none_and_missing_inputs():
 
 def test_resolve_trend_direction_continuous_mode_uses_classify_regime():
     # ts_fast/ts_slow both positive -> Bull, regime_discount stays 1.0
-    # (Bull/Bear are never discounted).
-    trend, regime, discount = resolve_trend_direction('continuous', 0.42, ts_fast=0.5, ts_slow=0.5,
-                                                        regime_discount_cfg=0.5)
+    # (Bull/Bear are never discounted). blend is always None outside
+    # goulding mode.
+    trend, regime, discount, blend = resolve_trend_direction('continuous', 0.42, ts_fast=0.5, ts_slow=0.5,
+                                                               regime_discount_cfg=0.5)
     assert trend == 0.42
     assert regime == TrendRegime.BULL
     assert discount == 1.0
+    assert blend is None
 
 
 def test_resolve_trend_direction_continuous_mode_discounts_correction():
     # slow>0, fast<0 -> Correction -> regime_discount_cfg applies.
-    trend, regime, discount = resolve_trend_direction('continuous', 0.3, ts_fast=-0.1, ts_slow=0.2,
-                                                        regime_discount_cfg=0.5)
+    trend, regime, discount, blend = resolve_trend_direction('continuous', 0.3, ts_fast=-0.1, ts_slow=0.2,
+                                                               regime_discount_cfg=0.5)
     assert regime == TrendRegime.CORRECTION
     assert discount == 0.5
+    assert blend is None
 
 
 def test_resolve_trend_direction_continuous_mode_none_signal_returns_none():
@@ -663,22 +666,28 @@ def test_resolve_trend_direction_continuous_mode_none_signal_returns_none():
 def test_resolve_trend_direction_goulding_mode_blends_and_never_discounts():
     # Correction: fast<0<=slow -- eq. 7 blend then sign(); regime_discount
     # is always 1.0 in goulding mode (a_co/a_re IS the discount mechanism).
-    trend, regime, discount = resolve_trend_direction('goulding', continuous_signal=None,
-                                                        ts_fast=None, ts_slow=None,
-                                                        regime_discount_cfg=0.5,
-                                                        g_regime_val='correction', g_fast_val=-0.01,
-                                                        g_slow_val=0.10, a_co=0.5, a_re=0.5)
+    # blend is the raw pre-sign eq. 7 value, matching _goulding_blend
+    # called directly with the same inputs.
+    trend, regime, discount, blend = resolve_trend_direction('goulding', continuous_signal=None,
+                                                               ts_fast=None, ts_slow=None,
+                                                               regime_discount_cfg=0.5,
+                                                               g_regime_val='correction', g_fast_val=-0.01,
+                                                               g_slow_val=0.10, a_co=0.5, a_re=0.5)
     assert regime == TrendRegime.CORRECTION
     assert discount == 1.0
     assert trend in (-1.0, 0.0, 1.0)
+    assert blend == pytest.approx(_goulding_blend('correction', 0.5, 0.5, -0.01, 0.10))
 
 
 def test_resolve_trend_direction_goulding_mode_bull_bear_ignore_a_co_a_re():
-    trend, regime, discount = resolve_trend_direction('goulding', None, None, None, 0.5,
-                                                        g_regime_val='bull', a_co=0.9, a_re=0.1)
+    # blend is always None in Bull/Bear -- eq. 7 doesn't apply there, even
+    # though trend_strength itself still resolves (unconditional +-1).
+    trend, regime, discount, blend = resolve_trend_direction('goulding', None, None, None, 0.5,
+                                                               g_regime_val='bull', a_co=0.9, a_re=0.1)
     assert trend == 1.0
     assert regime == TrendRegime.BULL
     assert discount == 1.0
+    assert blend is None
 
 
 def test_resolve_trend_direction_goulding_mode_none_regime_returns_none():

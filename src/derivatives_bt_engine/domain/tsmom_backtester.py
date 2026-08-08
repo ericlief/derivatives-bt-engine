@@ -617,7 +617,7 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
                                         a_co, a_re)
     if resolved is None:
         return None
-    trend_strength, regime, regime_discount = resolved
+    trend_strength, regime, regime_discount, g_blend = resolved
 
     signal_for_scalar = trend_strength
     if config.long_only and signal_for_scalar is not None and not (
@@ -675,10 +675,14 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
         # Goulding audit fields -- None in 'continuous' mode (nothing to
         # report), populated in 'goulding' mode so a saved trend_signals
         # CSV shows exactly what drove that rebalance's direction: this
-        # rebalance's cluster's own a_Co/a_Re as of this date, and the raw
-        # g_fast/g_slow/g_regime inputs _goulding_weight blended.
+        # rebalance's cluster's own a_Co/a_Re as of this date, the raw
+        # g_fast/g_slow/g_regime inputs _goulding_weight blended, and
+        # g_blend itself -- the raw pre-sign eq. 7 value (resolve_trend_
+        # direction's own 4th return, via _goulding_blend), None in
+        # Bull/Bear (eq. 7 doesn't apply there) even though trend_strength
+        # still resolves in that case.
         'g_regime': g_regime_val, 'g_fast': g_fast_val, 'g_slow': g_slow_val,
-        'a_co': a_co, 'a_re': a_re,
+        'g_blend': g_blend, 'a_co': a_co, 'a_re': a_re,
     }
 
 

@@ -552,6 +552,31 @@ def compute_hrp_weights(active_symbols: list[str],
     return dict(zip(active_symbols, w))
 
 
+def compute_notional_split(active_symbols: list[str], corr_pairs: Optional[dict[tuple[str, str], float]],
+                            notional_weighting: str) -> dict[str, float]:
+    """The 'flat'/'erc'/'hrp' fraction of the total dollar-vol budget each
+    active symbol gets -- the same split compute_symbol_notional_budget
+    computes internally (and, when use_idm=True, feeds into compute_idm as
+    its own weight vector), pulled out into its own function so a caller
+    that already has active_symbols/corr_pairs can inspect the split
+    itself directly (e.g. reporting/diagnostics -- what fraction of the
+    book did ERC/HRP actually give this symbol), not just the resulting
+    dollar figure. 'flat': 1/n each. 'erc'/'hrp': compute_erc_weights/
+    compute_hrp_weights on corr_pairs -- see either's own docstring for
+    the fallback-to-flat behavior when corr_pairs is None/empty or
+    n < 2."""
+    if notional_weighting not in NOTIONAL_WEIGHTING_SCHEMES:
+        raise ValueError(f"notional_weighting must be one of {NOTIONAL_WEIGHTING_SCHEMES}, "
+                          f"got {notional_weighting!r}")
+    if not active_symbols:
+        return {}
+    if notional_weighting == 'flat':
+        return {s: 1.0 / len(active_symbols) for s in active_symbols}
+    if notional_weighting == 'erc':
+        return compute_erc_weights(active_symbols, corr_pairs)
+    return compute_hrp_weights(active_symbols, corr_pairs)
+
+
 def compute_symbol_notional_budget(active_symbols: list[str], returns_wide: Optional[pl.DataFrame],
                                     as_of: date, capital: float, target_portfolio_vol: float,
                                     vol_target: float, idm_window_years: float,
@@ -628,14 +653,7 @@ def compute_symbol_notional_budget(active_symbols: list[str], returns_wide: Opti
         return {}
     corr_pairs = _bounded_ewm_correlation_matrix(returns_wide, active_symbols, as_of,
                                                   idm_window_years, idm_halflife_days)
-
-    if notional_weighting == 'flat':
-        split = {s: 1.0 / len(active_symbols) for s in active_symbols}
-    elif notional_weighting == 'erc':
-        split = compute_erc_weights(active_symbols, corr_pairs)
-    else:
-        split = compute_hrp_weights(active_symbols, corr_pairs)
-
+    split = compute_notional_split(active_symbols, corr_pairs, notional_weighting)
     idm_multiplier = compute_idm(active_symbols, corr_pairs, weights=split) if use_idm else 1.0
     total_dollar_vol_target = capital * target_portfolio_vol * idm_multiplier
 

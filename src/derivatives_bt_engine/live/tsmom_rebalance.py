@@ -47,10 +47,12 @@ from derivatives_bt_engine.domain.enums import TrendRegime, VolRegime
 from derivatives_bt_engine.domain.instruments import INSTRUMENTS, resolve_annualization_days, resolve_signal_symbol
 from derivatives_bt_engine.domain.allocation import (
     NOTIONAL_WEIGHTING_SCHEMES,
+    _bounded_ewm_correlation_matrix,
     apply_cluster_risk_cap,
     build_returns_wide,
     compute_desired_risk_budget,
     compute_n_effective,
+    compute_notional_split,
     compute_position_scalar,
     compute_symbol_notional_budget,
 )
@@ -640,9 +642,9 @@ def _finalize_signal(instr: dict, raw: dict, config: TsmomLiveConfig, vix_scalar
                                         ts_fast, ts_slow, config.regime_discount,
                                         g_regime_val, g_fast_val, g_slow_val, a_co, a_re)
     if resolved is not None:
-        trend_strength, regime, regime_discount = resolved
+        trend_strength, regime, regime_discount, g_blend = resolved
     else:
-        trend_strength, regime, regime_discount = None, TrendRegime.UNKNOWN, 1.0
+        trend_strength, regime, regime_discount, g_blend = None, TrendRegime.UNKNOWN, 1.0, None
 
     signal_for_scalar = trend_strength
     if config.long_only and signal_for_scalar is not None and not (
@@ -698,9 +700,11 @@ def _finalize_signal(instr: dict, raw: dict, config: TsmomLiveConfig, vix_scalar
         # Goulding audit fields -- None in 'continuous' mode (nothing to
         # report), populated in 'goulding' mode so a saved report shows
         # exactly what drove that rebalance's direction: this instrument's
-        # cluster's own a_Co/a_Re as of now, and the raw g_fast/g_slow/
-        # g_regime inputs resolve_trend_direction blended.
-        'g_regime': g_regime_val, 'g_fast': g_fast_val, 'g_slow': g_slow_val,
+        # cluster's own a_Co/a_Re as of now, the raw g_fast/g_slow/
+        # g_regime inputs resolve_trend_direction blended, and g_blend
+        # itself (the raw pre-sign eq. 7 value -- None in Bull/Bear, where
+        # eq. 7 doesn't apply, even though trend_strength still resolves).
+        'g_regime': g_regime_val, 'g_fast': g_fast_val, 'g_slow': g_slow_val, 'g_blend': g_blend,
         'a_co': a_co if config.signal_weighting == 'goulding' else None,
         'a_re': a_re if config.signal_weighting == 'goulding' else None,
     }
@@ -878,6 +882,14 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
     n_effective = None
     desired_risk_budget = None
     budget_constant_by_symbol: dict[str, Optional[float]] = {}
+    # Only populated under risk_budget_mode='idm' -- the notional_weighting
+    # SPLIT fraction each active symbol got of the total dollar-vol budget
+    # (compute_notional_split -- the same split compute_symbol_
+    # notional_budget computes internally, exposed here so a caller can
+    # see the actual ERC/HRP weights, not just the resulting dollar
+    # figure). Empty under 'cluster' -- that mode has no such split at all
+    # (every instrument in a cluster shares one flat budget_constant).
+    notional_weight_by_symbol: dict[str, float] = {}
     if config.risk_budget_mode == 'cluster':
         active_clusters = {s['cluster'] for s in signals.values() if _is_active(s)}
         n_effective = compute_n_effective(active_clusters)
@@ -898,6 +910,15 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
         if config.account_equity and active_symbols:
             returns_wide = build_returns_wide({s: raw['closes'] for s, raw in raw_by_symbol.items()})
             as_of = config.as_of or date.today()
+            # corr_pairs computed here (for notional_weight_by_symbol) AND
+            # again inside compute_symbol_notional_budget below (for the
+            # dollar budget) -- a harmless duplicate for a once-per-
+            # rebalance call, not worth threading a shared corr_pairs
+            # param through that function's own public signature just to
+            # save it.
+            corr_pairs = _bounded_ewm_correlation_matrix(returns_wide, active_symbols, as_of,
+                                                          config.idm_window_years, config.idm_halflife_days)
+            notional_weight_by_symbol = compute_notional_split(active_symbols, corr_pairs, config.notional_weighting)
             budget_constant_by_symbol = compute_symbol_notional_budget(
                 active_symbols, returns_wide, as_of, config.account_equity, config.target_portfolio_vol,
                 config.vol_target, config.idm_window_years, config.idm_halflife_days,
@@ -1014,7 +1035,7 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
                 'vol_regime': vol_regime,
                 # Goulding audit fields -- None in 'continuous' mode.
                 'g_regime': s['g_regime'], 'g_fast': s['g_fast'], 'g_slow': s['g_slow'],
-                'a_co': s['a_co'], 'a_re': s['a_re'],
+                'g_blend': s['g_blend'], 'a_co': s['a_co'], 'a_re': s['a_re'],
                 # Portfolio-level context -- identical across every
                 # instrument under risk_budget_mode='cluster', per-symbol
                 # under 'idm' -- included per-row so each CSV row is
@@ -1026,6 +1047,7 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
                 'vol_target': config.vol_target,
                 'target_portfolio_vol': config.target_portfolio_vol,
                 'budget_constant': budget_constant,
+                'notional_weight': notional_weight_by_symbol.get(symbol),
                 'risk_budget_mode': config.risk_budget_mode,
                 'notional_weighting': config.notional_weighting if config.risk_budget_mode == 'idm' else None,
                 'use_idm': config.use_idm if config.risk_budget_mode == 'idm' else None,
@@ -1094,8 +1116,12 @@ def print_rebalance_report(targets: list[dict]) -> str:
             f"regime={t['regime'].capitalize() if t.get('regime') else 'N/A':<10}  "
             f"vx_current={_fmt(t.get('vx_current'), '.2f'):>6}  vx_ma={_fmt(t.get('vx_ma'), '.2f'):>6}  "
             f"vx_ratio={t['vx_ratio']:.3f}  vol_regime={t['vol_regime'].capitalize()}  "
-            f"vix_scalar={_fmt(t.get('vix_scalar'), '.2f')}"
-            + (f"  g_regime={t['g_regime']}  a_co={_fmt(t.get('a_co'), '.2f')}  a_re={_fmt(t.get('a_re'), '.2f')}"
+            f"vix_scalar={_fmt(t.get('vix_scalar'), '.2f')}  "
+            f"budget={_fmt(t.get('budget_constant'), '.0f')}"
+            + (f"  weight={_fmt(t.get('notional_weight'), '.3f')}" if t.get('notional_weight') is not None else "")
+            + (f"  g_regime={t['g_regime']}  g_fast={_fmt(t.get('g_fast'), '.4f')}  "
+               f"g_slow={_fmt(t.get('g_slow'), '.4f')}  g_blend={_fmt(t.get('g_blend'), '.4f')}  "
+               f"a_co={_fmt(t.get('a_co'), '.2f')}  a_re={_fmt(t.get('a_re'), '.2f')}"
                if t.get('a_co') is not None else "")
             + ("  INFEASIBLE (cluster cap < min contract risk in this cluster)" if t.get('infeasible') else "")
         )

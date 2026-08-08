@@ -122,8 +122,9 @@ def _save_report(report: str, targets: list[dict]) -> None:
     priority = ['symbol', 'current_contracts', 'target_contracts', 'infeasible', 'signal',
                 'regime', 'vol_regime', 'scalar', 'risk_scalar', 'regime_discount',
                 'signal_confidence_regime', 'signal_confidence', 'vol_ratio', 'vix_scalar',
+                'g_regime', 'g_fast', 'g_slow', 'g_blend', 'a_co', 'a_re',
                 'account_equity', 'n_effective',
-                'risk_budget', 'vol_target', 'target_portfolio_vol', 'budget_constant',
+                'risk_budget', 'vol_target', 'target_portfolio_vol', 'budget_constant', 'notional_weight',
                 'position_risk', 'raw_notional', 'target_notional', 'max_cluster_risk_pct',
                 'max_lot_overrun_pct']
     all_keys = {key for t in targets for key in t}
