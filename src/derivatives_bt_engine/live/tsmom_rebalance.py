@@ -956,6 +956,7 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
             continue
 
         s = signals[symbol]
+        active = _is_active(s)
         try:
             multiplier = s['multiplier']
             max_contracts = instr.get('max_contracts', config.max_contracts)
@@ -965,8 +966,44 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
             if multiplier is None:
                 raise ValueError(f'{symbol}: instrument config missing multiplier')
             if budget_constant is None:
-                raise ValueError(f'{symbol}: account_equity not configured (or symbol not active under '
-                                  f"risk_budget_mode={config.risk_budget_mode!r}) — cannot derive a risk budget")
+                if config.account_equity is None:
+                    raise ValueError(f'{symbol}: account_equity not configured — cannot derive a risk budget')
+                # risk_budget_mode='idm' and this symbol simply isn't in
+                # active_symbols (below min_conviction) -- not a config
+                # error, just nothing to size against. Report a clean
+                # target=0 rather than raising -- mirrors
+                # risk_budget_mode='cluster', where an inactive symbol
+                # still gets sized (possibly to 0 on its own merits) off
+                # the shared cluster budget instead of being excluded
+                # from the report outright.
+                targets.append({
+                    'symbol': symbol, 'target_contracts': 0, 'continuous_contracts': 0.0,
+                    'max_contracts': max_contracts,
+                    'current_contracts': (_current_contracts(ib, s['contract'])
+                                          if config.data_source == 'ib' else None),
+                    'active': active,
+                    'signal': s['signal'], 'scalar': None,
+                    'ts_fast': s['ts_fast'], 'ts_slow': s['ts_slow'],
+                    'daily_std': s['daily_std'], 'hv': s['hv'], 'risk_scalar': s['risk_scalar'],
+                    'regime_discount': s['regime_discount'], 'vol_ratio': s['vol_ratio'],
+                    'signal_confidence_regime': s['signal_confidence_regime'],
+                    'signal_confidence': s['signal_confidence'], 'vix_scalar': vix_scalar,
+                    'close': s['close'], 'multiplier': multiplier,
+                    'raw_notional': None, 'target_notional': None,
+                    'cluster': s['cluster'], 'dd_pct': s['dd_pct'], 'regime': s['regime'],
+                    'vx_current': vx_current, 'vx_ma': vx_ma, 'vx_ratio': vx_ratio, 'vol_regime': vol_regime,
+                    'g_regime': s['g_regime'], 'g_fast': s['g_fast'], 'g_slow': s['g_slow'],
+                    'g_blend': s['g_blend'], 'a_co': s['a_co'], 'a_re': s['a_re'],
+                    'account_equity': config.account_equity, 'n_effective': n_effective,
+                    'risk_budget': desired_risk_budget, 'vol_target': config.vol_target,
+                    'target_portfolio_vol': config.target_portfolio_vol,
+                    'budget_constant': None, 'notional_weight': None,
+                    'risk_budget_mode': config.risk_budget_mode,
+                    'notional_weighting': config.notional_weighting, 'use_idm': config.use_idm,
+                    'max_cluster_risk_pct': config.max_cluster_risk_pct,
+                    'max_lot_overrun_pct': config.max_lot_overrun_pct,
+                })
+                continue
 
             scalar = compute_position_scalar(
                 s['signal_for_scalar'], s['daily_std'], config.vol_target, s['regime'],
@@ -1010,6 +1047,7 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
                 'continuous_contracts': continuous_contracts,
                 'max_contracts': max_contracts,
                 'current_contracts': current_contracts,
+                'active': active,
                 'signal': s['signal'],
                 'scalar': scalar,
                 'ts_fast': s['ts_fast'],
@@ -1108,6 +1146,7 @@ def print_rebalance_report(targets: list[dict]) -> str:
         lines.append(
             f"{t['symbol']:6s}  target={t['target_contracts']!s:>4}  "
             f"current={t['current_contracts']!s:>4}  "
+            f"active={str(t.get('active')):>5}  "
             f"continuous={_fmt(t.get('continuous_contracts'), '.3f'):>7}  "
             f"scalar={_fmt(t.get('scalar'), '.3f'):>6}  signal={_fmt(t.get('signal')):>7}  "
             f"ts_fast={_fmt(t.get('ts_fast')):>7}  ts_slow={_fmt(t.get('ts_slow')):>7}  "

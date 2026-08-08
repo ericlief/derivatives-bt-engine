@@ -303,6 +303,31 @@ def test_risk_budget_mode_idm_use_idm_false_skips_multiplier(monkeypatch):
     assert sum(budgets) * 0.15 == pytest.approx(1_000_000 * 0.15, rel=1e-6)
 
 
+def test_active_field_reflects_min_conviction_and_inactive_symbol_gets_clean_zero(monkeypatch):
+    # Regression test: an 'idm'-mode symbol that fails min_conviction used
+    # to fall through to budget_constant_by_symbol.get(symbol) is None ->
+    # a spurious "account_equity not configured" ValueError, surfacing as
+    # an ERROR row even though account_equity WAS configured -- the symbol
+    # just wasn't in active_symbols. Must now be a clean target=0,
+    # active=False row instead, with no 'error' key at all.
+    price_data = {
+        'X': _price_df(date(2018, 1, 1), 500, drift=0.0015, vol=0.005, seed=1),
+        'Y': _price_df(date(2018, 1, 1), 500, drift=0.0015, vol=0.005, seed=2),
+    }
+    _patch_db(monkeypatch, price_data)
+
+    config = TsmomLiveConfig(account_equity=100_000, data_source='database', risk_budget_mode='idm',
+                              notional_weighting='erc', min_conviction=999.0)
+    targets = compute_rebalance_targets([_instrument('X'), _instrument('Y')], config, ib=None)
+
+    for t in targets:
+        assert t.get('error') is None
+        assert t['active'] is False
+        assert t['target_contracts'] == 0
+        assert t['budget_constant'] is None
+        assert t['notional_weight'] is None
+
+
 # ── signal_weighting: 'goulding' ─────────────────────────────────────────────
 
 def test_signal_weighting_goulding_populates_audit_fields(monkeypatch):
