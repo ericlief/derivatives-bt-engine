@@ -30,7 +30,7 @@ import math
 import os
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Mapping, Optional
 from zoneinfo import ZoneInfo
 
 import polars as pl
@@ -881,7 +881,15 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
     # Stage 2: derive the risk budget, per config.risk_budget_mode.
     n_effective = None
     desired_risk_budget = None
-    budget_constant_by_symbol: dict[str, Optional[float]] = {}
+    # Mapping, not dict: 'cluster' assigns a dict[str, Optional[float]]
+    # (shared_budget_constant can be None with no account_equity), 'idm'
+    # assigns compute_symbol_notional_budget's dict[str, float] -- dict is
+    # invariant in its value type so a dict[str, float] isn't assignable
+    # to a dict[str, Optional[float]]-typed variable even though every
+    # float is a valid Optional[float]; Mapping is covariant and this
+    # variable is only ever read (.get()/.items()) after assignment, never
+    # mutated in place, so covariance is sound here.
+    budget_constant_by_symbol: Mapping[str, Optional[float]] = {}
     # Only populated under risk_budget_mode='idm' -- the notional_weighting
     # SPLIT fraction each active symbol got of the total dollar-vol budget
     # (compute_notional_split -- the same split compute_symbol_
@@ -893,8 +901,9 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
     if config.risk_budget_mode == 'cluster':
         active_clusters = {s['cluster'] for s in signals.values() if _is_active(s)}
         n_effective = compute_n_effective(active_clusters)
-        if config.account_equity:
-            desired_risk_budget = compute_desired_risk_budget(config.account_equity, config.target_portfolio_vol,
+        account_equity = config.account_equity
+        if account_equity:
+            desired_risk_budget = compute_desired_risk_budget(account_equity, config.target_portfolio_vol,
                                                                n_effective)
             shared_budget_constant = desired_risk_budget / config.vol_target if config.vol_target else 0.0
         else:
@@ -907,22 +916,22 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
     else:  # 'idm'
         active_symbols = [s for s, sig in signals.items() if _is_active(sig)]
         n_effective = compute_n_effective({signals[s]['cluster'] for s in active_symbols})
-        if config.account_equity and active_symbols:
+        account_equity = config.account_equity
+        if account_equity and active_symbols:
             returns_wide = build_returns_wide({s: raw['closes'] for s, raw in raw_by_symbol.items()})
             as_of = config.as_of or date.today()
-            # corr_pairs computed here (for notional_weight_by_symbol) AND
-            # again inside compute_symbol_notional_budget below (for the
-            # dollar budget) -- a harmless duplicate for a once-per-
-            # rebalance call, not worth threading a shared corr_pairs
-            # param through that function's own public signature just to
-            # save it.
-            corr_pairs = _bounded_ewm_correlation_matrix(returns_wide, active_symbols, as_of,
-                                                          config.idm_window_years, config.idm_halflife_days)
-            notional_weight_by_symbol = compute_notional_split(active_symbols, corr_pairs, config.notional_weighting)
+            corr_pairs, h = _bounded_ewm_correlation_matrix(returns_wide, active_symbols, as_of,
+                                                             config.idm_window_years, config.idm_halflife_days)
+            notional_weight_by_symbol = compute_notional_split(active_symbols, corr_pairs, config.notional_weighting, h)
+            # corr_pairs/h passed straight through -- compute_symbol_notional_budget
+            # would otherwise rerun the EWM estimation over returns_wide a
+            # second time for the exact same (active_symbols, as_of, window)
+            # this function just computed above.
             budget_constant_by_symbol = compute_symbol_notional_budget(
-                active_symbols, returns_wide, as_of, config.account_equity, config.target_portfolio_vol,
+                active_symbols, returns_wide, as_of, account_equity, config.target_portfolio_vol,
                 config.vol_target, config.idm_window_years, config.idm_halflife_days,
                 config.notional_weighting, config.use_idm,
+                corr_pairs=corr_pairs, h=h,
             )
         log.info('Risk budget (idm) — active_symbols=%s  n_effective=%d  notional_weighting=%s  use_idm=%s  '
                  'budget_constant=%s',

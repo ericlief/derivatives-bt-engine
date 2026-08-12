@@ -260,7 +260,7 @@ def test_notional_budget_idm_uses_the_same_split_as_weights(notional_weighting):
     returns_wide = build_returns_wide(price_data)
     as_of = price_data['A']['ts_event'][-1]
     symbols = ['A', 'B', 'C']
-    corr_pairs = _bounded_ewm_correlation_matrix(returns_wide, symbols, as_of, 3.0, 63.0)
+    corr_pairs, _ = _bounded_ewm_correlation_matrix(returns_wide, symbols, as_of, 3.0, 63.0)
     weight_fn = compute_erc_weights if notional_weighting == 'erc' else compute_hrp_weights
     split = weight_fn(symbols, corr_pairs)
 
