@@ -260,13 +260,13 @@ def test_notional_budget_idm_uses_the_same_split_as_weights(notional_weighting):
     returns_wide = build_returns_wide(price_data)
     as_of = price_data['A']['ts_event'][-1]
     symbols = ['A', 'B', 'C']
-    h, has_corr_data = _bounded_ewm_correlation_matrix(returns_wide, symbols, as_of, 3.0, 63.0)
+    H, has_corr_data = _bounded_ewm_correlation_matrix(returns_wide, symbols, as_of, 3.0, 63.0)
     assert has_corr_data
     weight_fn = compute_erc_weights if notional_weighting == 'erc' else compute_hrp_weights
-    split = weight_fn(symbols, None, h=h)
+    split = weight_fn(symbols, None, H=H)
 
-    idm_consistent = compute_idm(symbols, None, weights=split, h=h)
-    idm_flat = compute_idm(symbols, None, h=h)
+    idm_consistent = compute_idm(symbols, None, weights=split, H=H)
+    idm_flat = compute_idm(symbols, None, H=H)
     assert idm_consistent != pytest.approx(idm_flat), \
         "test fixture must produce a non-flat split for this regression check to be meaningful"
 
@@ -321,8 +321,8 @@ def test_bounded_ewm_correlation_matches_independent_pandas_ewm():
     symbols = ['A', 'B', 'C']
     as_of = price_data['A']['ts_event'][-1]
 
-    h, has_corr_data = _bounded_ewm_correlation_matrix(returns_wide, symbols, as_of, 3.0, 63.0)
-    assert has_corr_data and h is not None
+    H, has_corr_data = _bounded_ewm_correlation_matrix(returns_wide, symbols, as_of, 3.0, 63.0)
+    assert has_corr_data and H is not None
 
     window_start = as_of - timedelta(days=int(3.0 * 365.25))
     sl = returns_wide.filter((pl.col('ts_event') >= window_start) & (pl.col('ts_event') < as_of))
@@ -332,7 +332,7 @@ def test_bounded_ewm_correlation_matches_independent_pandas_ewm():
     std = np.sqrt(np.diag(cov))
     expected = (cov.to_numpy() / np.outer(std, std))
 
-    np.testing.assert_allclose(h, expected, atol=1e-9)
+    np.testing.assert_allclose(H, expected, atol=1e-9)
 
 
 # ── apply_cluster_risk_cap ───────────────────────────────────────────────────

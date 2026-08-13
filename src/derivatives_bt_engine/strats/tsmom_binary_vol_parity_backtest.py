@@ -736,10 +736,10 @@ def run(symbols: list[str], start: date, end: date, regime_discount: float,
             idm_multiplier = 1.0
             if idm_scaling:
                 active_symbols_for_idm = [c['s'] for c in candidates if c['weight'] != 0]
-                h, has_corr_data = _bounded_ewm_correlation_matrix(
+                H, has_corr_data = _bounded_ewm_correlation_matrix(
                     returns_wide, active_symbols_for_idm, d, idm_window_years, idm_halflife_days)
-                h = h if has_corr_data else None
-                idm_multiplier = compute_idm(active_symbols_for_idm, None, h=h)
+                H = H if has_corr_data else None
+                idm_multiplier = compute_idm(active_symbols_for_idm, None, H=H)
             budget_this_rebal = flat_per_asset_vol_target_usd * idm_multiplier
 
             # Cluster-floor guarantee: before any further redistribution,

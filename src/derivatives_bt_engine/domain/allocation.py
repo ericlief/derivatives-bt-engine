@@ -324,7 +324,7 @@ def _bounded_ewm_correlation_matrix(returns_wide: pl.DataFrame, symbols: list[st
     """EWM-weighted correlation among `symbols`, computed ONLY from the
     trailing `window_years` slice of returns_wide ending STRICTLY before
     `as_of` (no lookahead) -- a genuinely BOUNDED window, not an unbounded
-    full-history EWM. This distinction matters: a plain `.ewm_mean(half_life=h)`
+    full-history EWM. This distinction matters: a plain `.ewm_mean(half_life=hl)`
     applied to the ENTIRE historical series never fully zeroes out old data
     -- it decays toward negligible weight but asymptotically, so a few
     percent of a 2026 correlation estimate could technically still trace
@@ -360,7 +360,7 @@ def _bounded_ewm_correlation_matrix(returns_wide: pl.DataFrame, symbols: list[st
     returns (a caller-built, synchronized wide frame -- e.g.
     tsmom_binary_vol_parity_backtest.py's own _build_returns_wide).
 
-    Returns (h, has_corr_data). h is a dense n x n matrix (n = len(symbols),
+    Returns (H, has_corr_data). H is a dense n x n matrix (n = len(symbols),
     1.0 diagonal, 0.0 for any symbol missing from returns_wide, in
     `symbols`' own order) -- the canonical output now that this function
     builds one joint matrix rather than independently-estimated pairs (see
@@ -375,18 +375,18 @@ def _bounded_ewm_correlation_matrix(returns_wide: pl.DataFrame, symbols: list[st
     here actually consumes.
 
     has_corr_data is an EXPLICIT usability signal, not something a caller
-    should infer from h being None vs. eye(n): h alone can't distinguish
-    "trust this window, but fewer than 2 symbols had data in it" (h =
+    should infer from H being None vs. eye(n): H alone can't distinguish
+    "trust this window, but fewer than 2 symbols had data in it" (H =
     np.eye(len(symbols)), a mathematically valid "assume independent"
-    matrix) from "don't trust this window at all" (h = None, too few
+    matrix) from "don't trust this window at all" (H = None, too few
     rows). Both cases should be treated as NO usable correlation data by
     every caller (crediting independence for a symbol with zero return
     history in-window would grant it diversification credit with no
     actual evidence) -- has_corr_data is False for both, so a caller can
-    always just do `h = h if has_corr_data else None` immediately after
-    calling this, then forward that single, unambiguous `h` on: None means
+    always just do `H = H if has_corr_data else None` immediately after
+    calling this, then forward that single, unambiguous `H` on: None means
     "nothing usable" to compute_idm/compute_erc_weights/compute_hrp_
-    weights/compute_notional_split's own `h is None` fallback path, a real
+    weights/compute_notional_split's own `H is None` fallback path, a real
     matrix means use it directly. This replaces the old implicit
     contract, where corr_pairs' OWN dict truthiness (None vs. {} vs.
     non-empty) was the only thing distinguishing these states -- accidental,
@@ -397,7 +397,7 @@ def _bounded_ewm_correlation_matrix(returns_wide: pl.DataFrame, symbols: list[st
     (too little history this early in the backtest to trust any
     correlation estimate); (np.eye(len(symbols)), False) if fewer than 2
     symbols have data in that slice (trust the window, but nothing to
-    correlate); (h, True) otherwise."""
+    correlate); (H, True) otherwise."""
     window_start = as_of - timedelta(days=int(window_years * 365.25))
     sl = returns_wide.filter((pl.col('ts_event') >= window_start) & (pl.col('ts_event') < as_of))
     if sl.height < min_rows:
@@ -419,10 +419,10 @@ def _bounded_ewm_correlation_matrix(returns_wide: pl.DataFrame, symbols: list[st
     X = sl.select(present).to_numpy()
     mu = weights @ X
     Z = np.sqrt(weights)[:, None] * (X - mu)
-    cov = Z.T @ Z
-    d = np.sqrt(np.diag(cov))
+    C = Z.T @ Z
+    d = np.sqrt(np.diag(C))
     with np.errstate(invalid='ignore', divide='ignore'):
-        corr_present = cov / np.outer(d, d)
+        corr_present = C / np.outer(d, d)
     # nan (0/0, a zero-variance/constant column in-window) defaults to the
     # same 0.0 off-diagonal np.eye already carries for an absent symbol;
     # +-inf can't arise mathematically here (Cauchy-Schwarz bounds |cov_ij|
@@ -436,7 +436,7 @@ def _bounded_ewm_correlation_matrix(returns_wide: pl.DataFrame, symbols: list[st
     # Sized/ordered to the FULL requested `symbols`, not just `present` --
     # a symbol missing from returns_wide keeps its np.eye default (1.0
     # diag, 0.0 off-diag), matching _corr_matrix_from_pairs' own fallback
-    # for a symbol absent from corr_pairs, so h is directly usable by any
+    # for a symbol absent from corr_pairs, so H is directly usable by any
     # active_symbols-ordered caller without reindexing. Embedded via one
     # vectorized fancy-index assignment, not a Python-level double loop --
     # the whole point of building corr_present as a matrix in the first
@@ -444,10 +444,10 @@ def _bounded_ewm_correlation_matrix(returns_wide: pl.DataFrame, symbols: list[st
     n = len(symbols)
     idx = {s: i for i, s in enumerate(symbols)}
     present_idx = np.array([idx[s] for s in present])
-    h = np.eye(n)
-    h[np.ix_(present_idx, present_idx)] = corr_present
+    H = np.eye(n)
+    H[np.ix_(present_idx, present_idx)] = corr_present
 
-    return h, True
+    return H, True
 
 
 def _corr_matrix_from_pairs(active_symbols: list[str],
@@ -459,17 +459,17 @@ def _corr_matrix_from_pairs(active_symbols: list[str],
     not three independently-reconstructed copies of it."""
     n = len(active_symbols)
     idx = {s: i for i, s in enumerate(active_symbols)}
-    h = np.eye(n)
+    H = np.eye(n)
     for (a, b), corr in (corr_pairs or {}).items():
         if a in idx and b in idx:
             i, j = idx[a], idx[b]
-            h[i, j] = h[j, i] = corr
-    return h
+            H[i, j] = H[j, i] = corr
+    return H
 
 
 def compute_erc_weights(active_symbols: list[str],
                          corr_pairs: Optional[dict[tuple[str, str], float]],
-                         h: Optional[np.ndarray] = None) -> dict[str, float]:
+                         H: Optional[np.ndarray] = None) -> dict[str, float]:
     """Equal Risk Contribution weights (Maillard, Roncalli & Teiletche,
     2010), solved on the CORRELATION matrix directly rather than a raw
     covariance matrix -- deliberately, not a simplification of convenience:
@@ -494,25 +494,25 @@ def compute_erc_weights(active_symbols: list[str],
 
     Falls back to uniform 1/n (matching compute_idm's own fallback
     convention) when fewer than 2 active_symbols, or neither corr_pairs
-    nor h carries any usable correlation data.
+    nor H carries any usable correlation data.
 
-    `h`: pass the dense matrix directly if a caller already built it (e.g.
+    `H`: pass the dense matrix directly if a caller already built it (e.g.
     _bounded_ewm_correlation_matrix's own output, or compute_symbol_
     notional_budget, which also needs it for compute_idm) -- skips
     _corr_matrix_from_pairs' otherwise-redundant rebuild, and works even
     when the caller has no corr_pairs dict at all. Built from corr_pairs
     when omitted."""
     n = len(active_symbols)
-    if n < 2 or (not corr_pairs and h is None):
+    if n < 2 or (not corr_pairs and H is None):
         return {s: 1.0 / n for s in active_symbols} if n > 0 else {}
-    if h is None:
-        h = _corr_matrix_from_pairs(active_symbols, corr_pairs)
+    if H is None:
+        H = _corr_matrix_from_pairs(active_symbols, corr_pairs)
 
     def risk_contributions(w):
-        port_var = w @ h @ w
+        port_var = w @ H @ w
         if port_var <= 0:
             return np.zeros(n)
-        marginal = h @ w
+        marginal = H @ w
         return w * marginal / math.sqrt(port_var)
 
     def objective(w):
@@ -531,25 +531,25 @@ def compute_erc_weights(active_symbols: list[str],
     return dict(zip(active_symbols, result.x))
 
 
-def _cluster_var(h: np.ndarray, cluster_idx: list[int]) -> float:
+def _cluster_var(H: np.ndarray, cluster_idx: list[int]) -> float:
     """Inverse-variance-weighted cluster variance (Lopez de Prado's own
-    getClusterVar) -- degenerates to a plain average of h's sub-block since
-    every diagonal entry of h is 1.0 by construction (see
+    getClusterVar) -- degenerates to a plain average of H's sub-block since
+    every diagonal entry of H is 1.0 by construction (see
     compute_hrp_weights' own docstring for why that's the correct
     simplification here, not an oversight). Clamped to a small positive
-    floor: h's off-diagonal entries are independently-estimated pairwise
+    floor: H's off-diagonal entries are independently-estimated pairwise
     correlations, not guaranteed to form a jointly positive-semidefinite
     matrix for cluster sizes > 2, so this quadratic form can land a hair
     below zero on a near-degenerate block -- the caller's own alpha
     computation divides by (var_left + var_right), so a floor here matters
     more than it would for a lone diagonal read."""
-    sub = h[np.ix_(cluster_idx, cluster_idx)]
+    sub = H[np.ix_(cluster_idx, cluster_idx)]
     ivp = 1.0 / np.diag(sub)
     ivp /= ivp.sum()
     return max(float(ivp @ sub @ ivp), 1e-12)
 
 
-def _hrp_recursive_bisection(h: np.ndarray, order: list[int]) -> np.ndarray:
+def _hrp_recursive_bisection(H: np.ndarray, order: list[int]) -> np.ndarray:
     """Lopez de Prado's getRecBipart (2016), translated from his own
     pandas-Series reference implementation to a plain numpy array indexed
     by original (pre-reorder) position -- `order` (the dendrogram leaf
@@ -564,8 +564,8 @@ def _hrp_recursive_bisection(h: np.ndarray, order: list[int]) -> np.ndarray:
                     if len(c) > 1]
         for i in range(0, len(clusters), 2):
             left, right = clusters[i], clusters[i + 1]
-            var_left = _cluster_var(h, left)
-            var_right = _cluster_var(h, right)
+            var_left = _cluster_var(H, left)
+            var_right = _cluster_var(H, right)
             alpha = min(1.0, max(0.0, 1.0 - var_left / (var_left + var_right)))
             w[left] *= alpha
             w[right] *= 1.0 - alpha
@@ -577,7 +577,7 @@ def _hrp_recursive_bisection(h: np.ndarray, order: list[int]) -> np.ndarray:
 
 def compute_hrp_weights(active_symbols: list[str],
                          corr_pairs: Optional[dict[tuple[str, str], float]],
-                         h: Optional[np.ndarray] = None) -> dict[str, float]:
+                         H: Optional[np.ndarray] = None) -> dict[str, float]:
     """Hierarchical Risk Parity (Lopez de Prado, 2016), reimplemented here
     in pure numpy/scipy rather than calling PyPortfolioOpt's HRPOpt
     (scripts/tsmom_risk_budget_diagnostic.py's own choice, for a one-off,
@@ -605,30 +605,30 @@ def compute_hrp_weights(active_symbols: list[str],
 
     Falls back to uniform 1/n (matching compute_idm's own fallback
     convention) when fewer than 2 active_symbols, or neither corr_pairs
-    nor h carries any usable correlation data.
+    nor H carries any usable correlation data.
 
-    `h`: pass the dense matrix directly if a caller already built it --
+    `H`: pass the dense matrix directly if a caller already built it --
     skips _corr_matrix_from_pairs' otherwise-redundant rebuild, and works
     even when the caller has no corr_pairs dict at all. Built from
     corr_pairs when omitted."""
     n = len(active_symbols)
-    if n < 2 or (not corr_pairs and h is None):
+    if n < 2 or (not corr_pairs and H is None):
         return {s: 1.0 / n for s in active_symbols} if n > 0 else {}
-    if h is None:
-        h = _corr_matrix_from_pairs(active_symbols, corr_pairs)
+    if H is None:
+        H = _corr_matrix_from_pairs(active_symbols, corr_pairs)
 
-    distance = np.sqrt(np.clip(0.5 * (1.0 - h), 0.0, None))
+    distance = np.sqrt(np.clip(0.5 * (1.0 - H), 0.0, None))
     np.fill_diagonal(distance, 0.0)
     condensed = squareform(distance, checks=False)
     link = sch.linkage(condensed, method='single')
     order = sch.leaves_list(link).tolist()
 
-    w = _hrp_recursive_bisection(h, order)
+    w = _hrp_recursive_bisection(H, order)
     return dict(zip(active_symbols, w))
 
 
 def compute_notional_split(active_symbols: list[str], corr_pairs: Optional[dict[tuple[str, str], float]],
-                            notional_weighting: str, h: Optional[np.ndarray] = None) -> dict[str, float]:
+                            notional_weighting: str, H: Optional[np.ndarray] = None) -> dict[str, float]:
     """The 'flat'/'erc'/'hrp' fraction of the total dollar-vol budget each
     active symbol gets -- the same split compute_symbol_notional_budget
     computes internally (and, when use_idm=True, feeds into compute_idm as
@@ -641,7 +641,7 @@ def compute_notional_split(active_symbols: list[str], corr_pairs: Optional[dict[
     the fallback-to-flat behavior when corr_pairs is None/empty or
     n < 2.
 
-    `h`: forwarded to compute_erc_weights/compute_hrp_weights if a caller
+    `H`: forwarded to compute_erc_weights/compute_hrp_weights if a caller
     already built the dense matrix from this same `corr_pairs` -- see
     either's own docstring. Ignored for 'flat'."""
     if notional_weighting not in NOTIONAL_WEIGHTING_SCHEMES:
@@ -652,8 +652,8 @@ def compute_notional_split(active_symbols: list[str], corr_pairs: Optional[dict[
     if notional_weighting == 'flat':
         return {s: 1.0 / len(active_symbols) for s in active_symbols}
     if notional_weighting == 'erc':
-        return compute_erc_weights(active_symbols, corr_pairs, h)
-    return compute_hrp_weights(active_symbols, corr_pairs, h)
+        return compute_erc_weights(active_symbols, corr_pairs, H)
+    return compute_hrp_weights(active_symbols, corr_pairs, H)
 
 
 def compute_symbol_notional_budget(active_symbols: list[str], returns_wide: Optional[pl.DataFrame],
@@ -662,7 +662,7 @@ def compute_symbol_notional_budget(active_symbols: list[str], returns_wide: Opti
                                     idm_halflife_days: float,
                                     notional_weighting: str = 'flat',
                                     use_idm: bool = True,
-                                    h: Optional[np.ndarray] = None) -> dict[str, float]:
+                                    H: Optional[np.ndarray] = None) -> dict[str, float]:
     """IDM-derived per-symbol notional_budget for TsmomBacktestConfig's
     target_portfolio_vol path (tsmom_backtester.py's run_tsmom_backtest) --
     the correlation-aware alternative to sizing off a flat config.max_notional.
@@ -727,28 +727,28 @@ def compute_symbol_notional_budget(active_symbols: list[str], returns_wide: Opti
     the weighting itself) fall back to its own flat/no-adjustment default,
     not an early return here.
 
-    `h`: pass it directly if a caller already ran
+    `H`: pass it directly if a caller already ran
     _bounded_ewm_correlation_matrix for this exact (active_symbols, as_of,
     idm_window_years, idm_halflife_days) -- e.g. the live rebalance report,
-    which needs h itself for notional_weight_by_symbol before ever calling
+    which needs H itself for notional_weight_by_symbol before ever calling
     this function. Skips rerunning the EWM estimation over returns_wide a
     second time. None here always means "no usable correlation data" (the
     caller must have already squashed a False has_corr_data into None --
     see _bounded_ewm_correlation_matrix's own docstring), which is exactly
     what triggers compute_notional_split/compute_idm's own flat/no-
-    adjustment fallback below. Recomputed from returns_wide when h is
+    adjustment fallback below. Recomputed from returns_wide when H is
     omitted (the default)."""
     if notional_weighting not in NOTIONAL_WEIGHTING_SCHEMES:
         raise ValueError(f"notional_weighting must be one of {NOTIONAL_WEIGHTING_SCHEMES}, "
                           f"got {notional_weighting!r}")
     if not active_symbols or returns_wide is None:
         return {}
-    if h is None:
-        h, has_corr_data = _bounded_ewm_correlation_matrix(returns_wide, active_symbols, as_of,
+    if H is None:
+        H, has_corr_data = _bounded_ewm_correlation_matrix(returns_wide, active_symbols, as_of,
                                                             idm_window_years, idm_halflife_days)
-        h = h if has_corr_data else None
-    split = compute_notional_split(active_symbols, None, notional_weighting, h)
-    idm_multiplier = compute_idm(active_symbols, None, weights=split, h=h) if use_idm else 1.0
+        H = H if has_corr_data else None
+    split = compute_notional_split(active_symbols, None, notional_weighting, H)
+    idm_multiplier = compute_idm(active_symbols, None, weights=split, H=H) if use_idm else 1.0
     total_dollar_vol_target = capital * target_portfolio_vol * idm_multiplier
 
     return {s: (total_dollar_vol_target * split[s]) / vol_target for s in active_symbols}
@@ -756,7 +756,7 @@ def compute_symbol_notional_budget(active_symbols: list[str], returns_wide: Opti
 
 def compute_idm(active_symbols: list[str], corr_pairs: Optional[dict[tuple[str, str], float]],
                  weights: Optional[dict[str, float]] = None,
-                 h: Optional[np.ndarray] = None) -> float:
+                 H: Optional[np.ndarray] = None) -> float:
     """Carver's Instrument Diversification Multiplier, exact matrix form:
     IDM = 1 / sqrt(W @ H @ W_t) -- W the weight vector (equal, 1/n each,
     when `weights` is None; otherwise `weights` normalized so
@@ -783,31 +783,31 @@ def compute_idm(active_symbols: list[str], corr_pairs: Optional[dict[tuple[str, 
 
     Falls back to 1.0 (no diversification adjustment) whenever there's
     nothing meaningful to compute from: fewer than 2 active_symbols, or
-    neither corr_pairs nor h carries any usable correlation data (not
+    neither corr_pairs nor H carries any usable correlation data (not
     enough bounded-window history yet, or fewer than 2 symbols had
     synchronized return data).
 
-    `h`: pass the dense (real, signed) matrix directly if a caller already
+    `H`: pass the dense (real, signed) matrix directly if a caller already
     built it (e.g. compute_symbol_notional_budget, which also needs it
     for compute_erc_weights/compute_hrp_weights) -- skips
     _corr_matrix_from_pairs' otherwise-redundant rebuild, and works even
     when the caller has no corr_pairs dict at all. The 0-floor above is
-    still applied here regardless of which path `h` came from -- it's an
+    still applied here regardless of which path `H` came from -- it's an
     IDM-specific adjustment, not a property of the shared matrix itself.
     Built from corr_pairs when omitted."""
     n = len(active_symbols)
-    if n < 2 or (not corr_pairs and h is None):
+    if n < 2 or (not corr_pairs and H is None):
         return 1.0
-    if h is None:
-        h = _corr_matrix_from_pairs(active_symbols, corr_pairs)
-    h = np.clip(h, 0.0, 1.0)
+    if H is None:
+        H = _corr_matrix_from_pairs(active_symbols, corr_pairs)
+    H = np.clip(H, 0.0, 1.0)
     if weights is None:
         w = np.full(n, 1.0 / n)
     else:
         raw = np.array([weights.get(s, 0.0) for s in active_symbols])
         total_abs = np.abs(raw).sum()
         w = raw / total_abs if total_abs > 0 else np.full(n, 1.0 / n)
-    port_var = w @ h @ w
+    port_var = w @ H @ w
     if port_var <= 0:
         return 1.0
     return 1.0 / math.sqrt(port_var)
