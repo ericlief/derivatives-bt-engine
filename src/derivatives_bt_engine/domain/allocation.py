@@ -406,23 +406,29 @@ def _bounded_ewm_correlation_matrix(returns_wide: pl.DataFrame, symbols: list[st
     d = np.sqrt(np.diag(cov))
     with np.errstate(invalid='ignore', divide='ignore'):
         corr_present = cov / np.outer(d, d)
+    # nan (0/0, a zero-variance/constant column in-window) defaults to the
+    # same 0.0 off-diagonal np.eye already carries for an absent symbol;
+    # +-inf can't arise mathematically here (Cauchy-Schwarz bounds |cov_ij|
+    # by d_i*d_j, so a zero denominator forces a zero numerator too) but is
+    # guarded the same way as a defensive floor against float noise, same
+    # as the explicit clip below.
+    corr_present = np.nan_to_num(corr_present, nan=0.0, posinf=0.0, neginf=0.0)
+    np.clip(corr_present, -1.0, 1.0, out=corr_present)
+    np.fill_diagonal(corr_present, 1.0)
 
     # Sized/ordered to the FULL requested `symbols`, not just `present` --
     # a symbol missing from returns_wide keeps its np.eye default (1.0
     # diag, 0.0 off-diag), matching _corr_matrix_from_pairs' own fallback
     # for a symbol absent from corr_pairs, so h is directly usable by any
-    # active_symbols-ordered caller without reindexing.
+    # active_symbols-ordered caller without reindexing. Embedded via one
+    # vectorized fancy-index assignment, not a Python-level double loop --
+    # the whole point of building corr_present as a matrix in the first
+    # place was to get this out of per-element Python overhead.
     n = len(symbols)
     idx = {s: i for i, s in enumerate(symbols)}
+    present_idx = np.array([idx[s] for s in present])
     h = np.eye(n)
-    for i, x in enumerate(present):
-        for j, y in enumerate(present):
-            if x == y:
-                continue
-            val = corr_present[i, j]
-            if np.isnan(val):  # zero-variance (e.g. constant) column in-window
-                continue
-            h[idx[x], idx[y]] = max(-1.0, min(1.0, val))
+    h[np.ix_(present_idx, present_idx)] = corr_present
 
     corr_pairs = {(x, y): h[idx[x], idx[y]] for i, x in enumerate(present) for y in present[i + 1:]}
     return corr_pairs, h
