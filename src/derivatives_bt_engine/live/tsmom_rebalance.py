@@ -920,10 +920,11 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
         if account_equity and active_symbols:
             returns_wide = build_returns_wide({s: raw['closes'] for s, raw in raw_by_symbol.items()})
             as_of = config.as_of or date.today()
-            corr_pairs, h = _bounded_ewm_correlation_matrix(returns_wide, active_symbols, as_of,
-                                                             config.idm_window_years, config.idm_halflife_days)
-            notional_weight_by_symbol = compute_notional_split(active_symbols, corr_pairs, config.notional_weighting, h)
-            # corr_pairs/h passed straight through -- compute_symbol_notional_budget
+            h, has_corr_data = _bounded_ewm_correlation_matrix(returns_wide, active_symbols, as_of,
+                                                                config.idm_window_years, config.idm_halflife_days)
+            h = h if has_corr_data else None
+            notional_weight_by_symbol = compute_notional_split(active_symbols, None, config.notional_weighting, h)
+            # h passed straight through -- compute_symbol_notional_budget
             # would otherwise rerun the EWM estimation over returns_wide a
             # second time for the exact same (active_symbols, as_of, window)
             # this function just computed above.
@@ -931,7 +932,7 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
                 active_symbols, returns_wide, as_of, account_equity, config.target_portfolio_vol,
                 config.vol_target, config.idm_window_years, config.idm_halflife_days,
                 config.notional_weighting, config.use_idm,
-                corr_pairs=corr_pairs, h=h,
+                h=h,
             )
         log.info('Risk budget (idm) — active_symbols=%s  n_effective=%d  notional_weighting=%s  use_idm=%s  '
                  'budget_constant=%s',
