@@ -306,6 +306,34 @@ def test_notional_budget_rejects_unknown_weighting_scheme():
                                         3.0, 63.0, 'bogus')
 
 
+def test_bounded_ewm_correlation_matches_independent_pandas_ewm():
+    # Independent oracle for _bounded_ewm_correlation_matrix's own Gram-
+    # matrix construction: pandas' .ewm(halflife=..., adjust=True).cov(),
+    # a completely separate implementation of the same "EWM correlation
+    # evaluated at the last row" definition. Pandas is scoped to just this
+    # one test call site, per this project's CLAUDE.md convention -- not a
+    # general dependency.
+    import pandas as pd
+
+    price_data = _corr_price_data()
+    returns_wide = build_returns_wide(price_data)
+    symbols = ['A', 'B', 'C']
+    as_of = price_data['A']['ts_event'][-1]
+
+    corr_pairs, h = _bounded_ewm_correlation_matrix(returns_wide, symbols, as_of, 3.0, 63.0)
+    assert corr_pairs is not None and h is not None
+
+    window_start = as_of - timedelta(days=int(3.0 * 365.25))
+    sl = returns_wide.filter((pl.col('ts_event') >= window_start) & (pl.col('ts_event') < as_of))
+    pdf = sl.select(symbols).to_pandas()
+    cov = pdf.ewm(halflife=63.0, adjust=True).cov().iloc[-len(symbols):]
+    cov.index = cov.index.droplevel(0)
+    std = np.sqrt(np.diag(cov))
+    expected = (cov.to_numpy() / np.outer(std, std))
+
+    np.testing.assert_allclose(h, expected, atol=1e-9)
+
+
 # ── apply_cluster_risk_cap ───────────────────────────────────────────────────
 #
 # The cap is taken against a FIXED total_risk_target (account_equity *
