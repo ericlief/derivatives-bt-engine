@@ -922,7 +922,7 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
             as_of = config.as_of or date.today()
             H, covered = _bounded_ewm_correlation_matrix(returns_wide, active_symbols, as_of,
                                                           config.idm_window_years, config.idm_halflife_days)
-            notional_weight_by_symbol = compute_notional_split(active_symbols, None, config.notional_weighting,
+            notional_weight_by_symbol = compute_notional_split(active_symbols, config.notional_weighting,
                                                                 H, covered)
             # H/covered passed straight through -- compute_symbol_notional_budget
             # would otherwise rerun the EWM estimation over returns_wide a

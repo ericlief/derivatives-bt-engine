@@ -143,13 +143,20 @@ def test_desired_risk_budget_fewer_active_clusters_means_bigger_budget_each():
 # worth of budget instead of each member claiming an equal individual share.
 
 _SYMBOLS = ['A', 'B', 'C']
+# Dicts stay as the readable, hand-editable fixture format (see
+# compute_erc_weights' own docstring on why H, not a dict, is these
+# functions' actual input) -- built into H once here via
+# _corr_matrix_from_pairs, same as any other caller with only a dict
+# would do.
 _CORRELATED_PAIR_CORR = {('A', 'B'): 0.9, ('A', 'C'): 0.0, ('B', 'C'): 0.0}
+_CORRELATED_PAIR_H = _corr_matrix_from_pairs(_SYMBOLS, _CORRELATED_PAIR_CORR)
 _EQUAL_CORR = {('A', 'B'): 0.3, ('A', 'C'): 0.3, ('B', 'C'): 0.3}
+_EQUAL_CORR_H = _corr_matrix_from_pairs(_SYMBOLS, _EQUAL_CORR)
 
 
 @pytest.mark.parametrize('weight_fn', [compute_erc_weights, compute_hrp_weights])
 def test_weights_sum_to_one(weight_fn):
-    w = weight_fn(_SYMBOLS, _CORRELATED_PAIR_CORR)
+    w = weight_fn(_SYMBOLS, _CORRELATED_PAIR_H)
     assert math.isclose(sum(w.values()), 1.0, abs_tol=1e-6)
 
 
@@ -158,7 +165,7 @@ def test_weights_down_weight_correlated_pair_relative_to_diversifier(weight_fn):
     # A/B move together (corr 0.9); C is uncorrelated with either -- C
     # should get a bigger individual share than A or B get individually,
     # since A and B are collectively closer to one bet than two.
-    w = weight_fn(_SYMBOLS, _CORRELATED_PAIR_CORR)
+    w = weight_fn(_SYMBOLS, _CORRELATED_PAIR_H)
     assert w['C'] > w['A']
     assert w['C'] > w['B']
 
@@ -167,7 +174,7 @@ def test_erc_weights_equal_under_uniform_correlation():
     # ERC is exactly symmetric under a fully symmetric correlation
     # structure (every pair equally correlated) -- unlike HRP (below),
     # which isn't guaranteed tie-free at its clustering step.
-    w = compute_erc_weights(_SYMBOLS, _EQUAL_CORR)
+    w = compute_erc_weights(_SYMBOLS, _EQUAL_CORR_H)
     assert w['A'] == pytest.approx(1 / 3, abs=1e-6)
     assert w['B'] == pytest.approx(1 / 3, abs=1e-6)
     assert w['C'] == pytest.approx(1 / 3, abs=1e-6)
@@ -178,15 +185,14 @@ def test_hrp_weights_sum_to_one_under_uniform_correlation():
     # when every pairwise correlation is tied -- it isn't guaranteed to
     # reproduce ERC's exact 1/3-each symmetry here, just a valid, properly
     # normalized split.
-    w = compute_hrp_weights(_SYMBOLS, _EQUAL_CORR)
+    w = compute_hrp_weights(_SYMBOLS, _EQUAL_CORR_H)
     assert math.isclose(sum(w.values()), 1.0, abs_tol=1e-6)
     assert all(v > 0 for v in w.values())
 
 
 @pytest.mark.parametrize('weight_fn', [compute_erc_weights, compute_hrp_weights])
-def test_weights_fall_back_to_flat_when_corr_pairs_missing(weight_fn):
+def test_weights_fall_back_to_flat_when_h_missing(weight_fn):
     assert weight_fn(_SYMBOLS, None) == {s: pytest.approx(1 / 3) for s in _SYMBOLS}
-    assert weight_fn(_SYMBOLS, {}) == {s: pytest.approx(1 / 3) for s in _SYMBOLS}
 
 
 @pytest.mark.parametrize('weight_fn', [compute_erc_weights, compute_hrp_weights])
@@ -390,10 +396,10 @@ def test_notional_budget_idm_uses_the_same_split_as_weights(notional_weighting):
     H, covered = _bounded_ewm_correlation_matrix(returns_wide, symbols, as_of, 3.0, 63.0)
     assert covered.all()
     weight_fn = compute_erc_weights if notional_weighting == 'erc' else compute_hrp_weights
-    split = weight_fn(symbols, None, H=H)
+    split = weight_fn(symbols, H)
 
-    idm_consistent = compute_idm(symbols, None, weights=split, H=H)
-    idm_flat = compute_idm(symbols, None, H=H)
+    idm_consistent = compute_idm(symbols, H, weights=split)
+    idm_flat = compute_idm(symbols, H)
     assert idm_consistent != pytest.approx(idm_flat), \
         "test fixture must produce a non-flat split for this regression check to be meaningful"
 
@@ -493,12 +499,12 @@ def test_coverage_restricted_idm_ignores_uncovered_symbol():
     covered = np.array([True, True, False])
 
     idm_with_newsym = _coverage_restricted_idm(symbols, H, covered)
-    idm_covered_only = compute_idm(['A', 'B'], None, H=H[:2, :2])
+    idm_covered_only = compute_idm(['A', 'B'], H[:2, :2])
 
     assert idm_with_newsym == pytest.approx(idm_covered_only, abs=1e-9)
     # Sanity check on the bug itself: naively passing the full H/weights
     # through (the old behavior) DOES inflate IDM relative to this.
-    idm_naive = compute_idm(symbols, None, H=H)
+    idm_naive = compute_idm(symbols, H)
     assert idm_naive > idm_with_newsym
 
 
@@ -509,7 +515,7 @@ def test_notional_split_caps_uncovered_symbol_budget():
     H = _corr_matrix_from_pairs(symbols, _CORRELATED_PAIR_CORR)
     covered = np.array([True, True, True, False])
 
-    split = compute_notional_split(symbols, None, 'erc', H, covered)
+    split = compute_notional_split(symbols, 'erc', H, covered)
 
     assert sum(split.values()) == pytest.approx(1.0, abs=1e-9)
     # |uncovered|/n = 1/4 = 0.25 exceeds the cap, so NEWSYM is held at
