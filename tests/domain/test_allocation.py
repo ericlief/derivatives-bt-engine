@@ -29,6 +29,7 @@ from derivatives_bt_engine.domain.allocation import (
     _bounded_ewm_correlation_matrix,
     _corr_matrix_from_pairs,
     _coverage_restricted_idm,
+    _spinu_erc_newton,
     apply_cluster_risk_cap,
     build_returns_wide,
     compute_desired_risk_budget,
@@ -192,6 +193,128 @@ def test_weights_fall_back_to_flat_when_corr_pairs_missing(weight_fn):
 def test_weights_fall_back_to_flat_under_two_symbols(weight_fn):
     assert weight_fn(['A'], None) == {'A': 1.0}
     assert weight_fn([], None) == {}
+
+
+def _random_correlation_matrix(n: int, seed: int) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    A = rng.normal(size=(n, n))
+    cov = A @ A.T
+    d = np.sqrt(np.diag(cov))
+    return cov / np.outer(d, d)
+
+
+def _risk_contributions(w: np.ndarray, H: np.ndarray) -> np.ndarray:
+    return w * (H @ w) / np.sqrt(w @ H @ w)
+
+
+def _slsqp_erc_oracle(H: np.ndarray) -> np.ndarray:
+    """Fresh, independent ERC solve via generic scipy.optimize.minimize/
+    SLSQP -- the textbook simplex-search formulation, NOT the retired
+    compute_erc_weights implementation -- used only as a cross-check
+    oracle for _spinu_erc_newton's convex reformulation."""
+    from scipy.optimize import minimize
+
+    n = H.shape[0]
+
+    def objective(w):
+        rc = _risk_contributions(w, H)
+        return np.sum((rc - rc.mean()) ** 2)
+
+    result = minimize(objective, np.full(n, 1.0 / n), method='SLSQP',
+                      bounds=[(1e-6, 1.0)] * n,
+                      constraints=[{'type': 'eq', 'fun': lambda w: np.sum(w) - 1.0}],
+                      options={'maxiter': 1000, 'ftol': 1e-12})
+    assert result.success
+    return result.x
+
+
+@pytest.mark.parametrize('seed', [0, 1, 2, 3, 4])
+def test_spinu_newton_matches_independent_slsqp_oracle_on_risk_contributions(seed):
+    # The thing that actually defines "solved ERC" is equal risk
+    # contribution, not any particular weight vector -- two different
+    # correlation matrices could in principle have close-but-not-identical
+    # weight solutions that both satisfy RC_i ~ equal, so compare RC
+    # directly, not just weights (weights are also checked, as a bonus).
+    n = 8
+    H = _random_correlation_matrix(n, seed)
+    b = np.full(n, 1.0 / n)
+
+    w_newton = _spinu_erc_newton(H, b)
+    w_slsqp = _slsqp_erc_oracle(H)
+
+    assert w_newton is not None
+    np.testing.assert_allclose(w_newton, w_slsqp, atol=1e-5)
+
+    rc_newton = _risk_contributions(w_newton, H)
+    rc_slsqp = _risk_contributions(w_slsqp, H)
+    np.testing.assert_allclose(rc_newton, rc_slsqp, atol=1e-5)
+    # Equal risk contribution: every asset's RC should be ~1/n of total risk.
+    sigma_p = math.sqrt(w_newton @ H @ w_newton)
+    np.testing.assert_allclose(rc_newton, sigma_p / n, atol=1e-5)
+
+
+def test_spinu_newton_converges_across_many_matrices():
+    # Regression test for a real bug found while tuning ERC_NEWTON_TOL:
+    # an initial tolerance of 1e-10 (then 1e-9) caused _spinu_erc_newton
+    # to spuriously return None (non-convergence) on a meaningful fraction
+    # of random well-conditioned matrices, because Newton's own quadratic
+    # convergence hits a floating-point noise floor before the gradient
+    # ever gets that tight -- not a correctness issue, but a tolerance set
+    # beyond what double-precision arithmetic can reliably achieve. Covers
+    # both ordinary random correlation matrices AND adversarial near-
+    # singular ones (a tight cluster of near +-1 correlations), which
+    # additionally exercises the ERC_NEWTON_STALL_TOL backtracking-stall
+    # path.
+    rng = np.random.default_rng(0)
+    for n in (2, 3, 5, 8, 12, 20, 30):
+        for seed in range(20):
+            H = _random_correlation_matrix(n, seed * 1000 + n)
+            b = np.full(n, 1.0 / n)
+            w = _spinu_erc_newton(H, b)
+            assert w is not None, f'failed to converge: n={n} seed={seed}'
+            assert w.sum() == pytest.approx(1.0, abs=1e-6)
+            assert np.all(w > 0)
+
+    for n in (2, 5, 12, 20):
+        for _ in range(20):
+            base_corr = rng.uniform(0.90, 0.999)
+            H = np.full((n, n), base_corr)
+            noise = rng.normal(0, 0.01, (n, n))
+            noise = (noise + noise.T) / 2
+            np.fill_diagonal(noise, 0.0)
+            H = np.clip(H + noise, -0.999, 0.999)
+            np.fill_diagonal(H, 1.0)
+            eigvals, eigvecs = np.linalg.eigh(H)
+            H = eigvecs @ np.diag(np.clip(eigvals, 1e-6, None)) @ eigvecs.T
+            d = np.sqrt(np.diag(H))
+            H = H / np.outer(d, d)
+
+            b = np.full(n, 1.0 / n)
+            w = _spinu_erc_newton(H, b)
+            assert w is not None, f'failed to converge: n={n} cond(H)={np.linalg.cond(H):.2e}'
+            rc = _risk_contributions(w, H)
+            assert np.allclose(rc, rc.mean(), atol=1e-3)
+
+
+def test_spinu_newton_solves_non_equal_risk_budgets():
+    # compute_erc_weights itself always calls _spinu_erc_newton with a
+    # uniform b = 1/n, so its own tests can't distinguish "this solver
+    # genuinely solves risk budgeting" from "it coincidentally works
+    # because b happens to be uniform" -- exercise the solver directly
+    # with a non-uniform budget and confirm RC_i is proportional to b_i,
+    # not just equal, which is the actual mathematical claim behind
+    # Spinu's reformulation.
+    n = 6
+    H = _random_correlation_matrix(n, seed=42)
+    b = np.array([0.05, 0.10, 0.15, 0.20, 0.20, 0.30])
+    assert b.sum() == pytest.approx(1.0)
+
+    w = _spinu_erc_newton(H, b)
+    assert w is not None
+
+    rc = _risk_contributions(w, H)
+    sigma_p = math.sqrt(w @ H @ w)
+    np.testing.assert_allclose(rc, b * sigma_p, atol=1e-6)
 
 
 # ── compute_symbol_notional_budget (notional_weighting) ──────────────────────
