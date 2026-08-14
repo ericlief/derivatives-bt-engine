@@ -296,6 +296,16 @@ MIN_IDM_WINDOW_ROWS = 63
 # function's own docstring for what each one does.
 NOTIONAL_WEIGHTING_SCHEMES = ('flat', 'erc', 'hrp')
 
+# Ceiling on the total notional-budget share collectively given to symbols
+# with NO correlation coverage (a live signal, but missing/insufficient
+# return history -- see `covered` in _bounded_ewm_correlation_matrix's own
+# docstring) under 'erc'/'hrp' notional_weighting: min(this, |uncovered| /
+# |active_symbols|), so a single new instrument gets roughly its proportional
+# headcount share (not artificially punished), but a wave of simultaneously-
+# uncovered instruments can't collectively claim more than this fraction of
+# the book regardless of how many there are.
+UNCOVERED_BUDGET_CAP_FRACTION = 0.10
+
 
 def build_returns_wide(price_data: dict[str, pl.DataFrame]) -> pl.DataFrame:
     """One row per date (inner-joined across every symbol's own daily
@@ -320,7 +330,7 @@ def build_returns_wide(price_data: dict[str, pl.DataFrame]) -> pl.DataFrame:
 def _bounded_ewm_correlation_matrix(returns_wide: pl.DataFrame, symbols: list[str], as_of: date,
                                      window_years: float, halflife: float,
                                      min_rows: int = MIN_IDM_WINDOW_ROWS
-                                     ) -> tuple[Optional[np.ndarray], bool]:
+                                     ) -> tuple[np.ndarray, np.ndarray]:
     """EWM-weighted correlation among `symbols`, computed ONLY from the
     trailing `window_years` slice of returns_wide ending STRICTLY before
     `as_of` (no lookahead) -- a genuinely BOUNDED window, not an unbounded
@@ -360,52 +370,66 @@ def _bounded_ewm_correlation_matrix(returns_wide: pl.DataFrame, symbols: list[st
     returns (a caller-built, synchronized wide frame -- e.g.
     tsmom_binary_vol_parity_backtest.py's own _build_returns_wide).
 
-    Returns (H, has_corr_data). H is a dense n x n matrix (n = len(symbols),
-    1.0 diagonal, 0.0 for any symbol missing from returns_wide, in
-    `symbols`' own order) -- the canonical output now that this function
-    builds one joint matrix rather than independently-estimated pairs (see
-    above); there's no pairwise dict anywhere in this estimator to hand
-    back. compute_idm/compute_erc_weights/compute_hrp_weights/
-    compute_notional_split still accept a hand-built corr_pairs dict as an
-    alternative input on their own signatures (a genuine ergonomic win for
-    a test fixture or any other caller that doesn't have this function's
-    output -- see e.g. test_allocation.py's _EQUAL_CORR) -- but that's
-    those functions' own public interface, not something this internal
-    estimator should round-trip through just to hand back a dict nothing
-    here actually consumes.
+    Returns (H, covered). H is ALWAYS a dense n x n matrix (n = len(symbols),
+    never None -- np.eye(n) is a real, usable "nothing measured" placeholder,
+    not an error signal); the canonical output now that this function builds
+    one joint matrix rather than independently-estimated pairs (see above),
+    so there's no pairwise dict anywhere in this estimator to hand back.
+    compute_idm/compute_erc_weights/compute_hrp_weights/compute_notional_
+    split still accept a hand-built corr_pairs dict as an alternative input
+    on their own signatures (a genuine ergonomic win for a test fixture or
+    any other caller that doesn't have this function's output -- see e.g.
+    test_allocation.py's _EQUAL_CORR) -- but that's those functions' own
+    public interface, not something this internal estimator should
+    round-trip through just to hand back a dict nothing here actually
+    consumes.
 
-    has_corr_data is an EXPLICIT usability signal, not something a caller
-    should infer from H being None vs. eye(n): H alone can't distinguish
-    "trust this window, but fewer than 2 symbols had data in it" (H =
-    np.eye(len(symbols)), a mathematically valid "assume independent"
-    matrix) from "don't trust this window at all" (H = None, too few
-    rows). Both cases should be treated as NO usable correlation data by
-    every caller (crediting independence for a symbol with zero return
-    history in-window would grant it diversification credit with no
-    actual evidence) -- has_corr_data is False for both, so a caller can
-    always just do `H = H if has_corr_data else None` immediately after
-    calling this, then forward that single, unambiguous `H` on: None means
-    "nothing usable" to compute_idm/compute_erc_weights/compute_hrp_
-    weights/compute_notional_split's own `H is None` fallback path, a real
-    matrix means use it directly. This replaces the old implicit
-    contract, where corr_pairs' OWN dict truthiness (None vs. {} vs.
-    non-empty) was the only thing distinguishing these states -- accidental,
-    since nothing about a dict being empty vs. None is inherently
-    meaningful, just a side effect of what {} happened to mean here.
+    covered is a length-n boolean array (True where `symbols[i]` actually
+    had return data in this window, `symbols`' own order) -- an EXPLICIT,
+    PER-SYMBOL usability signal, not something a caller should infer from H
+    itself. This matters because H's identity-default entries (1.0 diag,
+    0.0 off-diag) for an uncovered symbol are a computational placeholder,
+    not a measurement: H[i, j] = 0 for an uncovered symbol i means "no
+    correlation was measured," NOT "this symbol was measured and found to
+    be uncorrelated with j." Treating those two as the same thing silently
+    manufactures fake diversification credit -- confirmed directly: adding
+    one zero-history symbol to an otherwise-real 2-asset correlation matrix
+    inflated IDM by 34% and handed that symbol the largest individual ERC
+    weight of the three, purely because "unknown" was encoded as "measured
+    independent." Every caller that cares about this distinction (currently
+    compute_notional_split/compute_symbol_notional_budget, both of which
+    accept `covered` and route uncovered symbols to a capped, correlation-
+    blind fallback allocation instead of letting them participate in H at
+    all -- see UNCOVERED_BUDGET_CAP_FRACTION) must consult `covered`
+    directly rather than trusting H's own entries for an uncovered symbol.
 
-    (None, False) if the bounded slice itself has fewer than `min_rows`
-    (too little history this early in the backtest to trust any
-    correlation estimate); (np.eye(len(symbols)), False) if fewer than 2
-    symbols have data in that slice (trust the window, but nothing to
-    correlate); (H, True) otherwise."""
+    A caller that doesn't care about the covered/uncovered distinction (or
+    is calling compute_idm/compute_erc_weights/compute_hrp_weights
+    directly, without going through compute_notional_split/compute_symbol_
+    notional_budget) should still guard against the DEGENERATE case where
+    NOTHING is covered (covered.all() is False and covered.any() is False,
+    i.e. `covered.sum() == 0`): H is np.eye(n) there too, and passing it
+    straight through would manufacture the same fake-independence credit
+    for the WHOLE active set, not just one symbol -- squash H to None in
+    that case (`H = None if not covered.any() else H`) so compute_idm's
+    etc. own `H is None` fallback fires instead.
+
+    (np.eye(len(symbols)), all-False) if the bounded slice itself has fewer
+    than `min_rows` (too little history this early in the backtest to trust
+    ANY correlation estimate, regardless of which symbols technically have
+    a column) or if fewer than 2 symbols have data in that slice; (H,
+    per-symbol coverage) otherwise, where H's covered rows/columns are real
+    measurements and its uncovered ones are the identity placeholder."""
     window_start = as_of - timedelta(days=int(window_years * 365.25))
     sl = returns_wide.filter((pl.col('ts_event') >= window_start) & (pl.col('ts_event') < as_of))
+    n = len(symbols)
     if sl.height < min_rows:
-        return None, False
+        return np.eye(n), np.zeros(n, dtype=bool)
 
     present = [s for s in symbols if s in sl.columns]
+    covered = np.array([s in present for s in symbols])
     if len(present) < 2:
-        return np.eye(len(symbols)), False
+        return np.eye(n), covered
 
     # Static weight vector equivalent to ewm_mean(half_life=..., adjust=True)
     # evaluated at the last row of the slice: row t (0-indexed from the
@@ -433,21 +457,18 @@ def _bounded_ewm_correlation_matrix(returns_wide: pl.DataFrame, symbols: list[st
     np.clip(corr_present, -1.0, 1.0, out=corr_present)
     np.fill_diagonal(corr_present, 1.0)
 
-    # Sized/ordered to the FULL requested `symbols`, not just `present` --
-    # a symbol missing from returns_wide keeps its np.eye default (1.0
-    # diag, 0.0 off-diag), matching _corr_matrix_from_pairs' own fallback
-    # for a symbol absent from corr_pairs, so H is directly usable by any
-    # active_symbols-ordered caller without reindexing. Embedded via one
-    # vectorized fancy-index assignment, not a Python-level double loop --
-    # the whole point of building corr_present as a matrix in the first
-    # place was to get this out of per-element Python overhead.
-    n = len(symbols)
+    # Embed the correlation matrix for symbols with data into the FULL
+    # requested symbol universe, preserving `symbols` order. Symbols with
+    # no data retain the identity fallback (diag=1, off-diag=0) -- a
+    # placeholder for "unmeasured," not evidence of independence; `covered`
+    # (built above, before this block) is what tells a caller which is
+    # which.
     idx = {s: i for i, s in enumerate(symbols)}
     present_idx = np.array([idx[s] for s in present])
     H = np.eye(n)
     H[np.ix_(present_idx, present_idx)] = corr_present
 
-    return H, True
+    return H, covered
 
 
 def _corr_matrix_from_pairs(active_symbols: list[str],
@@ -627,8 +648,92 @@ def compute_hrp_weights(active_symbols: list[str],
     return dict(zip(active_symbols, w))
 
 
+def _partial_coverage(active_symbols: list[str], covered: Optional[np.ndarray]) -> bool:
+    """True iff `covered` (see _bounded_ewm_correlation_matrix's own
+    docstring) marks SOME but not all of active_symbols -- the only
+    situation needing special covered/uncovered handling. Fully-covered
+    (nothing to protect against) and fully-uncovered (nothing to protect
+    -- see _squash_fully_uncovered_H) both degenerate to the ordinary
+    single-pool path."""
+    if covered is None:
+        return False
+    n_covered = int(covered.sum())
+    return 0 < n_covered < len(active_symbols)
+
+
+def _squash_fully_uncovered_H(H: Optional[np.ndarray],
+                               covered: Optional[np.ndarray]) -> Optional[np.ndarray]:
+    """H is _bounded_ewm_correlation_matrix's np.eye(n) placeholder when
+    `covered` is present but entirely False (no symbol had usable data at
+    all, whether from too few window rows or too few present columns) --
+    squash to None so compute_idm/compute_erc_weights/compute_hrp_weights
+    fall back to their own flat/1.0 default instead of treating "identity
+    matrix" as measured independence for the WHOLE active set."""
+    if covered is not None and not covered.any():
+        return None
+    return H
+
+
+def _blend_covered_uncovered_split(active_symbols: list[str], covered: np.ndarray,
+                                    notional_weighting: str, H: Optional[np.ndarray]) -> dict[str, float]:
+    """The 'erc'/'hrp' split when coverage is PARTIAL (see
+    _partial_coverage): uncovered symbols never participate in the
+    correlation-aware optimization at all (their row/column in H is a
+    placeholder, not a measurement -- see _bounded_ewm_correlation_matrix's
+    own docstring), so they can't inherit an inflated share the way
+    passing the full H straight through would let them. Instead:
+
+    - covered symbols split B_c = 1 - B_u of the total via the ordinary
+      compute_erc_weights/compute_hrp_weights call, restricted to just
+      their own sub-block of H (H_c) -- i.e. exactly as if the uncovered
+      symbols didn't exist for this calculation.
+    - uncovered symbols split B_u = min(UNCOVERED_BUDGET_CAP_FRACTION,
+      |uncovered| / |active_symbols|) flat among themselves -- a single
+      new instrument gets roughly its proportional headcount share, but a
+      wave of simultaneously-uncovered instruments can't collectively
+      claim more than UNCOVERED_BUDGET_CAP_FRACTION regardless of count."""
+    covered_symbols = [s for s, c in zip(active_symbols, covered) if c]
+    uncovered_symbols = [s for s, c in zip(active_symbols, covered) if not c]
+    covered_idx = [i for i, c in enumerate(covered) if c]
+    H_c = H[np.ix_(covered_idx, covered_idx)] if H is not None else None
+
+    budget_uncovered = min(UNCOVERED_BUDGET_CAP_FRACTION, len(uncovered_symbols) / len(active_symbols))
+    budget_covered = 1.0 - budget_uncovered
+
+    weight_fn = compute_erc_weights if notional_weighting == 'erc' else compute_hrp_weights
+    split_covered = weight_fn(covered_symbols, None, H_c)
+
+    split = {s: budget_covered * w for s, w in split_covered.items()}
+    flat_uncovered = budget_uncovered / len(uncovered_symbols)
+    split.update({s: flat_uncovered for s in uncovered_symbols})
+    return split
+
+
+def _coverage_restricted_idm(active_symbols: list[str], H: Optional[np.ndarray],
+                              covered: Optional[np.ndarray],
+                              weights: Optional[dict[str, float]] = None) -> float:
+    """compute_idm, restricted to the covered subset when coverage is
+    partial -- IDM answers "how much bigger can the book be, given
+    MEASURED diversification," so a symbol with no correlation evidence
+    must contribute nothing to that estimate, not even at a small weight
+    (compare _blend_covered_uncovered_split, which still gives an
+    uncovered symbol a capped NOTIONAL share -- IDM is a different
+    question, entirely about what's been measured). Fully covered/
+    uncovered both degenerate to the ordinary single-pool compute_idm
+    call (via _squash_fully_uncovered_H for the fully-uncovered case)."""
+    if _partial_coverage(active_symbols, covered):
+        assert covered is not None
+        covered_symbols = [s for s, c in zip(active_symbols, covered) if c]
+        covered_idx = [i for i, c in enumerate(covered) if c]
+        H_c = H[np.ix_(covered_idx, covered_idx)] if H is not None else None
+        covered_weights = {s: weights[s] for s in covered_symbols} if weights else None
+        return compute_idm(covered_symbols, None, weights=covered_weights, H=H_c)
+    return compute_idm(active_symbols, None, weights=weights, H=_squash_fully_uncovered_H(H, covered))
+
+
 def compute_notional_split(active_symbols: list[str], corr_pairs: Optional[dict[tuple[str, str], float]],
-                            notional_weighting: str, H: Optional[np.ndarray] = None) -> dict[str, float]:
+                            notional_weighting: str, H: Optional[np.ndarray] = None,
+                            covered: Optional[np.ndarray] = None) -> dict[str, float]:
     """The 'flat'/'erc'/'hrp' fraction of the total dollar-vol budget each
     active symbol gets -- the same split compute_symbol_notional_budget
     computes internally (and, when use_idm=True, feeds into compute_idm as
@@ -636,14 +741,25 @@ def compute_notional_split(active_symbols: list[str], corr_pairs: Optional[dict[
     that already has active_symbols/corr_pairs can inspect the split
     itself directly (e.g. reporting/diagnostics -- what fraction of the
     book did ERC/HRP actually give this symbol), not just the resulting
-    dollar figure. 'flat': 1/n each. 'erc'/'hrp': compute_erc_weights/
-    compute_hrp_weights on corr_pairs -- see either's own docstring for
-    the fallback-to-flat behavior when corr_pairs is None/empty or
-    n < 2.
+    dollar figure. 'flat': 1/n each, ALWAYS -- correlation-blind by
+    definition, so `covered` doesn't apply (there's no fake-diversification
+    credit to protect against when nothing depends on correlation). 'erc'/
+    'hrp': compute_erc_weights/compute_hrp_weights on corr_pairs -- see
+    either's own docstring for the fallback-to-flat behavior when
+    corr_pairs is None/empty or n < 2.
 
     `H`: forwarded to compute_erc_weights/compute_hrp_weights if a caller
     already built the dense matrix from this same `corr_pairs` -- see
-    either's own docstring. Ignored for 'flat'."""
+    either's own docstring. Ignored for 'flat'.
+
+    `covered`: _bounded_ewm_correlation_matrix's own per-symbol coverage
+    mask (see its docstring). When coverage is PARTIAL under 'erc'/'hrp',
+    delegates to _blend_covered_uncovered_split instead of letting an
+    uncovered symbol inherit a share of the split from H's identity
+    placeholder. Ignored (H used as-is, or squashed to None if NOTHING is
+    covered) when coverage is uniform or `covered` is omitted -- e.g. a
+    caller with a hand-built corr_pairs fixture that has no concept of
+    per-symbol coverage at all."""
     if notional_weighting not in NOTIONAL_WEIGHTING_SCHEMES:
         raise ValueError(f"notional_weighting must be one of {NOTIONAL_WEIGHTING_SCHEMES}, "
                           f"got {notional_weighting!r}")
@@ -651,6 +767,10 @@ def compute_notional_split(active_symbols: list[str], corr_pairs: Optional[dict[
         return {}
     if notional_weighting == 'flat':
         return {s: 1.0 / len(active_symbols) for s in active_symbols}
+    if _partial_coverage(active_symbols, covered):
+        assert covered is not None
+        return _blend_covered_uncovered_split(active_symbols, covered, notional_weighting, H)
+    H = _squash_fully_uncovered_H(H, covered)
     if notional_weighting == 'erc':
         return compute_erc_weights(active_symbols, corr_pairs, H)
     return compute_hrp_weights(active_symbols, corr_pairs, H)
@@ -662,7 +782,8 @@ def compute_symbol_notional_budget(active_symbols: list[str], returns_wide: Opti
                                     idm_halflife_days: float,
                                     notional_weighting: str = 'flat',
                                     use_idm: bool = True,
-                                    H: Optional[np.ndarray] = None) -> dict[str, float]:
+                                    H: Optional[np.ndarray] = None,
+                                    covered: Optional[np.ndarray] = None) -> dict[str, float]:
     """IDM-derived per-symbol notional_budget for TsmomBacktestConfig's
     target_portfolio_vol path (tsmom_backtester.py's run_tsmom_backtest) --
     the correlation-aware alternative to sizing off a flat config.max_notional.
@@ -727,28 +848,31 @@ def compute_symbol_notional_budget(active_symbols: list[str], returns_wide: Opti
     the weighting itself) fall back to its own flat/no-adjustment default,
     not an early return here.
 
-    `H`: pass it directly if a caller already ran
+    `H`/`covered`: pass both if a caller already ran
     _bounded_ewm_correlation_matrix for this exact (active_symbols, as_of,
     idm_window_years, idm_halflife_days) -- e.g. the live rebalance report,
-    which needs H itself for notional_weight_by_symbol before ever calling
-    this function. Skips rerunning the EWM estimation over returns_wide a
-    second time. None here always means "no usable correlation data" (the
-    caller must have already squashed a False has_corr_data into None --
-    see _bounded_ewm_correlation_matrix's own docstring), which is exactly
-    what triggers compute_notional_split/compute_idm's own flat/no-
-    adjustment fallback below. Recomputed from returns_wide when H is
-    omitted (the default)."""
+    which needs them itself for notional_weight_by_symbol before ever
+    calling this function. Skips rerunning the EWM estimation over
+    returns_wide a second time. `covered` is what actually protects an
+    uncovered symbol (a live signal but no correlation data -- see
+    _bounded_ewm_correlation_matrix's own docstring) from inheriting a
+    fake diversification-credited share via H's identity placeholder: the
+    split routes through compute_notional_split's own covered-aware
+    blending, and use_idm's multiplier is computed via
+    _coverage_restricted_idm, which excludes uncovered symbols from the
+    measurement entirely rather than crediting them at a merely-smaller
+    weight. Both recomputed from returns_wide when H is omitted (the
+    default)."""
     if notional_weighting not in NOTIONAL_WEIGHTING_SCHEMES:
         raise ValueError(f"notional_weighting must be one of {NOTIONAL_WEIGHTING_SCHEMES}, "
                           f"got {notional_weighting!r}")
     if not active_symbols or returns_wide is None:
         return {}
     if H is None:
-        H, has_corr_data = _bounded_ewm_correlation_matrix(returns_wide, active_symbols, as_of,
-                                                            idm_window_years, idm_halflife_days)
-        H = H if has_corr_data else None
-    split = compute_notional_split(active_symbols, None, notional_weighting, H)
-    idm_multiplier = compute_idm(active_symbols, None, weights=split, H=H) if use_idm else 1.0
+        H, covered = _bounded_ewm_correlation_matrix(returns_wide, active_symbols, as_of,
+                                                       idm_window_years, idm_halflife_days)
+    split = compute_notional_split(active_symbols, None, notional_weighting, H, covered)
+    idm_multiplier = _coverage_restricted_idm(active_symbols, H, covered, weights=split) if use_idm else 1.0
     total_dollar_vol_target = capital * target_portfolio_vol * idm_multiplier
 
     return {s: (total_dollar_vol_target * split[s]) / vol_target for s in active_symbols}

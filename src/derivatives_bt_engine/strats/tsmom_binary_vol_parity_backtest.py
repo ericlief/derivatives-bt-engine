@@ -115,7 +115,11 @@ from typing import Optional
 
 import polars as pl
 
-from derivatives_bt_engine.domain.allocation import _bounded_ewm_correlation_matrix, build_returns_wide, compute_idm
+from derivatives_bt_engine.domain.allocation import (
+    _bounded_ewm_correlation_matrix,
+    _coverage_restricted_idm,
+    build_returns_wide,
+)
 from derivatives_bt_engine.domain.instruments import get_spec, resolve_active_months, resolve_annualization_days
 from derivatives_bt_engine.domain.signal import (
     SignalSpec,
@@ -736,10 +740,16 @@ def run(symbols: list[str], start: date, end: date, regime_discount: float,
             idm_multiplier = 1.0
             if idm_scaling:
                 active_symbols_for_idm = [c['s'] for c in candidates if c['weight'] != 0]
-                H, has_corr_data = _bounded_ewm_correlation_matrix(
+                H, covered = _bounded_ewm_correlation_matrix(
                     returns_wide, active_symbols_for_idm, d, idm_window_years, idm_halflife_days)
-                H = H if has_corr_data else None
-                idm_multiplier = compute_idm(active_symbols_for_idm, None, H=H)
+                # _coverage_restricted_idm, not a bare compute_idm call: a
+                # signal-active symbol with no correlation coverage (e.g.
+                # just added to the universe, too little history yet) must
+                # not contribute to this measurement at all -- see
+                # _bounded_ewm_correlation_matrix's own docstring on
+                # `covered` for why H's identity-default entries for it
+                # aren't real zero-correlation evidence.
+                idm_multiplier = _coverage_restricted_idm(active_symbols_for_idm, H, covered)
             budget_this_rebal = flat_per_asset_vol_target_usd * idm_multiplier
 
             # Cluster-floor guarantee: before any further redistribution,

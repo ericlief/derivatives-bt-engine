@@ -25,7 +25,10 @@ import polars as pl
 import pytest
 
 from derivatives_bt_engine.domain.allocation import (
+    UNCOVERED_BUDGET_CAP_FRACTION,
     _bounded_ewm_correlation_matrix,
+    _corr_matrix_from_pairs,
+    _coverage_restricted_idm,
     apply_cluster_risk_cap,
     build_returns_wide,
     compute_desired_risk_budget,
@@ -33,6 +36,7 @@ from derivatives_bt_engine.domain.allocation import (
     compute_hrp_weights,
     compute_idm,
     compute_n_effective,
+    compute_notional_split,
     compute_position_scalar,
     compute_symbol_notional_budget,
 )
@@ -260,8 +264,8 @@ def test_notional_budget_idm_uses_the_same_split_as_weights(notional_weighting):
     returns_wide = build_returns_wide(price_data)
     as_of = price_data['A']['ts_event'][-1]
     symbols = ['A', 'B', 'C']
-    H, has_corr_data = _bounded_ewm_correlation_matrix(returns_wide, symbols, as_of, 3.0, 63.0)
-    assert has_corr_data
+    H, covered = _bounded_ewm_correlation_matrix(returns_wide, symbols, as_of, 3.0, 63.0)
+    assert covered.all()
     weight_fn = compute_erc_weights if notional_weighting == 'erc' else compute_hrp_weights
     split = weight_fn(symbols, None, H=H)
 
@@ -321,8 +325,8 @@ def test_bounded_ewm_correlation_matches_independent_pandas_ewm():
     symbols = ['A', 'B', 'C']
     as_of = price_data['A']['ts_event'][-1]
 
-    H, has_corr_data = _bounded_ewm_correlation_matrix(returns_wide, symbols, as_of, 3.0, 63.0)
-    assert has_corr_data and H is not None
+    H, covered = _bounded_ewm_correlation_matrix(returns_wide, symbols, as_of, 3.0, 63.0)
+    assert covered.all()
 
     window_start = as_of - timedelta(days=int(3.0 * 365.25))
     sl = returns_wide.filter((pl.col('ts_event') >= window_start) & (pl.col('ts_event') < as_of))
@@ -333,6 +337,91 @@ def test_bounded_ewm_correlation_matches_independent_pandas_ewm():
     expected = (cov.to_numpy() / np.outer(std, std))
 
     np.testing.assert_allclose(H, expected, atol=1e-9)
+
+
+# ── uncovered-symbol handling (missing correlation data != measured independence) ─
+
+def test_bounded_ewm_correlation_covered_mask_flags_missing_symbol():
+    # NEWSYM has no column in returns_wide at all (e.g. a failed price
+    # fetch, or an instrument too new to have synchronized data yet) --
+    # `covered` must flag it False even though H still returns a usable
+    # (identity-placeholder) row/column for it.
+    price_data = _corr_price_data()
+    returns_wide = build_returns_wide(price_data)
+    as_of = price_data['A']['ts_event'][-1]
+    symbols = ['A', 'B', 'C', 'NEWSYM']
+
+    H, covered = _bounded_ewm_correlation_matrix(returns_wide, symbols, as_of, 3.0, 63.0)
+
+    assert covered.tolist() == [True, True, True, False]
+    assert H[3, 3] == 1.0
+    assert H[3, 0] == 0.0 and H[0, 3] == 0.0
+
+
+def test_coverage_restricted_idm_ignores_uncovered_symbol():
+    # Regression test for the bug this session found: without covered-
+    # awareness, an uncovered symbol's identity row (0.0 correlation to
+    # everything) gets read as MEASURED independence, inflating IDM.
+    # _coverage_restricted_idm must produce the exact same IDM as running
+    # the calculation on the covered symbols alone -- NEWSYM contributes
+    # nothing, not even at a small weight.
+    symbols = ['A', 'B', 'NEWSYM']
+    H = _corr_matrix_from_pairs(symbols, {('A', 'B'): 0.998})
+    covered = np.array([True, True, False])
+
+    idm_with_newsym = _coverage_restricted_idm(symbols, H, covered)
+    idm_covered_only = compute_idm(['A', 'B'], None, H=H[:2, :2])
+
+    assert idm_with_newsym == pytest.approx(idm_covered_only, abs=1e-9)
+    # Sanity check on the bug itself: naively passing the full H/weights
+    # through (the old behavior) DOES inflate IDM relative to this.
+    idm_naive = compute_idm(symbols, None, H=H)
+    assert idm_naive > idm_with_newsym
+
+
+def test_notional_split_caps_uncovered_symbol_budget():
+    # Same regression, at the notional-split level: NEWSYM must not out-
+    # earn every real, measured symbol just because it has no data.
+    symbols = ['A', 'B', 'C', 'NEWSYM']
+    H = _corr_matrix_from_pairs(symbols, _CORRELATED_PAIR_CORR)
+    covered = np.array([True, True, True, False])
+
+    split = compute_notional_split(symbols, None, 'erc', H, covered)
+
+    assert sum(split.values()) == pytest.approx(1.0, abs=1e-9)
+    # |uncovered|/n = 1/4 = 0.25 exceeds the cap, so NEWSYM is held at
+    # exactly UNCOVERED_BUDGET_CAP_FRACTION, not a proportional 25% share.
+    assert split['NEWSYM'] == pytest.approx(UNCOVERED_BUDGET_CAP_FRACTION, abs=1e-9)
+    assert split['NEWSYM'] < split['A']
+    assert split['NEWSYM'] < split['B']
+    assert split['NEWSYM'] < split['C']
+    # Covered symbols still show the ordinary ERC qualitative behavior
+    # (the independent diversifier C outweighs the correlated A/B pair)
+    # among themselves, just scaled down to fit the remaining budget.
+    assert split['C'] > split['A']
+    assert split['C'] > split['B']
+
+
+def test_notional_budget_caps_uncovered_symbol_end_to_end():
+    # Full compute_symbol_notional_budget path: NEWSYM has a live signal
+    # (it's in active_symbols) but no price data at all (absent from
+    # price_data, so absent from returns_wide).
+    price_data = _corr_price_data()
+    returns_wide = build_returns_wide(price_data)
+    as_of = price_data['A']['ts_event'][-1]
+    symbols = ['A', 'B', 'C', 'NEWSYM']
+
+    budget = compute_symbol_notional_budget(
+        symbols, returns_wide, as_of, capital=100_000, target_portfolio_vol=0.15,
+        vol_target=0.15, idm_window_years=3.0, idm_halflife_days=63.0,
+        notional_weighting='erc', use_idm=True,
+    )
+
+    total = sum(budget.values())
+    assert budget['NEWSYM'] / total == pytest.approx(UNCOVERED_BUDGET_CAP_FRACTION, abs=1e-6)
+    assert budget['NEWSYM'] < budget['A']
+    assert budget['NEWSYM'] < budget['B']
+    assert budget['NEWSYM'] < budget['C']
 
 
 # ── apply_cluster_risk_cap ───────────────────────────────────────────────────
