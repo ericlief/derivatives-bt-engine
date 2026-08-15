@@ -1255,7 +1255,8 @@ def print_rebalance_report(targets: list[dict]) -> str:
             f"vx_current={_fmt(t.get('vx_current'), '.2f'):>6}  vx_ma={_fmt(t.get('vx_ma'), '.2f'):>6}  "
             f"vx_ratio={t['vx_ratio']:.3f}  vol_regime={t['vol_regime'].capitalize()}  "
             f"vix_scalar={_fmt(t.get('vix_scalar'), '.2f')}  "
-            f"budget={_fmt(t.get('budget_constant'), '.0f')}"
+            f"budget_constant={_fmt(t.get('budget_constant'), '.0f')}  "
+            f"target_notional={_fmt(t.get('target_notional'), '.0f')}"
             + (f"  weight={_fmt(t.get('notional_weight'), '.3f')}" if t.get('notional_weight') is not None else "")
             + (f"  g_regime={t['g_regime']}  g_fast={_fmt(t.get('g_fast'), '.4f')}  "
                f"g_slow={_fmt(t.get('g_slow'), '.4f')}  g_blend={_fmt(t.get('g_blend'), '.4f')}  "
