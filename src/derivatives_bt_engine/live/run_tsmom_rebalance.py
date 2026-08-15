@@ -54,6 +54,14 @@ log = logging.getLogger(__name__)
 
 DEFAULT_MAX_NOTIONAL = float(os.getenv('TSMOM_DEFAULT_MAX_NOTIONAL', '0')) or None
 
+# CSV-column relabeling only -- the underlying targets dict keeps 'signal'/
+# 'scalar' (apply_cluster_risk_cap sorts by 'scalar', and tsmom_backtester.py
+# shares that naming for cross-system parity), but print_rebalance_report
+# labels them trend_strength/combined_scalar for a human reader. Applying
+# the same rename at the CSV boundary keeps both saved artifacts from a
+# single run consistent with each other.
+_CSV_COLUMN_RENAME = {'signal': 'trend_strength', 'scalar': 'combined_scalar'}
+
 
 def configure_logging():
     fmt = logging.Formatter('%(asctime)s %(name)s [%(levelname)s] %(message)s')
@@ -131,20 +139,21 @@ def _save_report(report: str, targets: list[dict], cluster_report: str = '') -> 
     # (scalar -> budget inputs -> raw/target notional -> position risk) in
     # the order you'd actually want to follow the calculation, everything
     # else after in a stable, predictable order.
-    priority = ['symbol', 'current_contracts', 'target_contracts', 'continuous_contracts', 'infeasible', 'signal',
-                'regime', 'vol_regime', 'scalar', 'risk_scalar', 'regime_discount',
+    priority = ['symbol', 'current_contracts', 'target_contracts', 'continuous_contracts', 'infeasible',
+                'trend_strength', 'regime', 'vol_regime', 'combined_scalar', 'risk_scalar', 'regime_discount',
                 'signal_confidence_regime', 'signal_confidence', 'vol_ratio', 'vix_scalar',
                 'g_regime', 'g_fast', 'g_slow', 'g_blend', 'a_co', 'a_re',
                 'account_equity', 'n_effective',
                 'risk_budget', 'vol_target', 'target_portfolio_vol', 'budget_constant', 'notional_weight',
                 'position_risk', 'risk_contribution', 'raw_notional', 'target_notional', 'max_cluster_risk_pct',
                 'max_lot_overrun_pct']
-    all_keys = {key for t in targets for key in t}
-    fieldnames = [k for k in priority if k in all_keys] + sorted(all_keys - set(priority))
     rounded_rows = [
-        {k: (round(v, 4) if isinstance(v, float) and not math.isnan(v) else v) for k, v in t.items()}
+        {_CSV_COLUMN_RENAME.get(k, k): (round(v, 4) if isinstance(v, float) and not math.isnan(v) else v)
+         for k, v in t.items()}
         for t in targets
     ]
+    all_keys = {key for row in rounded_rows for key in row}
+    fieldnames = [k for k in priority if k in all_keys] + sorted(all_keys - set(priority))
     csv_path = os.path.join(results_dir, f'tsmom_live_rebalance_{ts}.csv')
     with open(csv_path, 'w', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
