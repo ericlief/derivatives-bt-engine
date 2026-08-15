@@ -403,11 +403,11 @@ def _bounded_ewm_correlation_matrix(returns_wide: pl.DataFrame, symbols: list[st
     one joint matrix rather than independently-estimated pairs (see above).
     compute_idm/compute_erc_weights/compute_hrp_weights/compute_notional_
     split all take H directly too (H is their sole correlation-data input --
-    a hand-built corr_pairs dict is no longer accepted on those functions'
-    own signatures either; a caller with only a dict, e.g. a test fixture
-    like test_allocation.py's _EQUAL_CORR, builds H from it once via
-    _corr_matrix_from_pairs), so there's no pairwise dict anywhere in this
-    path at all -- one representation, not two that could drift apart.
+    no hand-built corr_pairs dict accepted on those functions' own
+    signatures either; a caller with only pairwise correlations writes H
+    directly, e.g. test_allocation.py's own fixtures), so there's no
+    pairwise dict anywhere in this path at all -- one representation, not
+    two that could drift apart.
 
     covered is a length-n boolean array (True where `symbols[i]` actually
     had return data in this window, `symbols`' own order) -- an EXPLICIT,
@@ -494,27 +494,6 @@ def _bounded_ewm_correlation_matrix(returns_wide: pl.DataFrame, symbols: list[st
     H[np.ix_(present_idx, present_idx)] = corr_present
 
     return H, covered
-
-
-def _corr_matrix_from_pairs(active_symbols: list[str],
-                             corr_pairs: Optional[dict[tuple[str, str], float]]) -> np.ndarray:
-    """Dense n x n correlation matrix (1.0 on the diagonal, corr_pairs off
-    it, in active_symbols' own order) -- the one place a hand-built
-    corr_pairs dict becomes H, this module's sole correlation-data
-    representation everywhere else (see compute_erc_weights' own
-    docstring). NOT called internally by compute_idm/compute_erc_weights/
-    compute_hrp_weights/compute_notional_split anymore -- those only take
-    H directly now; this exists purely for a caller (currently only
-    test_allocation.py's own fixtures) that starts with a dict and needs
-    to build H once before calling one of them."""
-    n = len(active_symbols)
-    idx = {s: i for i, s in enumerate(active_symbols)}
-    H = np.eye(n)
-    for (a, b), corr in (corr_pairs or {}).items():
-        if a in idx and b in idx:
-            i, j = idx[a], idx[b]
-            H[i, j] = H[j, i] = corr
-    return H
 
 
 def _spinu_erc_newton(H: np.ndarray, b: np.ndarray) -> Optional[np.ndarray]:
@@ -634,12 +613,11 @@ def compute_erc_weights(active_symbols: list[str],
     otherwise-multi-year backtest run.
 
     `H` is the sole correlation-data input -- a hand-built corr_pairs dict
-    (e.g. a test fixture) is no longer accepted directly; build H from one
-    first via _corr_matrix_from_pairs(active_symbols, corr_pairs). Keeping
-    two accepted representations of the same data (a dict AND a matrix)
-    was a redundancy this whole module's H-primary refactor was meant to
-    eliminate -- it just hadn't reached this function's own public
-    signature yet."""
+    (e.g. a test fixture) is no longer accepted directly; write H itself.
+    Keeping two accepted representations of the same data (a dict AND a
+    matrix) was a redundancy this whole module's H-primary refactor was
+    meant to eliminate -- it just hadn't reached this function's own
+    public signature yet."""
     n = len(active_symbols)
     if n < 2 or H is None:
         return {s: 1.0 / n for s in active_symbols} if n > 0 else {}
@@ -729,8 +707,7 @@ def compute_hrp_weights(active_symbols: list[str],
 
     `H` is the sole correlation-data input -- see compute_erc_weights' own
     docstring for why a hand-built corr_pairs dict isn't accepted directly
-    here anymore; build H from one first via
-    _corr_matrix_from_pairs(active_symbols, corr_pairs)."""
+    here anymore; write H itself."""
     n = len(active_symbols)
     if n < 2 or H is None:
         return {s: 1.0 / n for s in active_symbols} if n > 0 else {}
@@ -850,8 +827,8 @@ def compute_notional_split(active_symbols: list[str], notional_weighting: str,
     uncovered symbol inherit a share of the split from H's identity
     placeholder. Ignored (H used as-is, or squashed to None if NOTHING is
     covered) when coverage is uniform or `covered` is omitted -- e.g. a
-    caller with an H built by hand (via _corr_matrix_from_pairs or
-    otherwise) that has no concept of per-symbol coverage at all."""
+    caller with a hand-written H that has no concept of per-symbol
+    coverage at all."""
     if notional_weighting not in NOTIONAL_WEIGHTING_SCHEMES:
         raise ValueError(f"notional_weighting must be one of {NOTIONAL_WEIGHTING_SCHEMES}, "
                           f"got {notional_weighting!r}")
@@ -1003,9 +980,8 @@ def compute_idm(active_symbols: list[str], H: Optional[np.ndarray] = None,
 
     `H` is the sole correlation-data input -- see compute_erc_weights' own
     docstring for why a hand-built corr_pairs dict isn't accepted directly
-    here anymore; build H from one first via
-    _corr_matrix_from_pairs(active_symbols, corr_pairs). The 0-floor above
-    is applied to whatever H is passed -- it's an IDM-specific adjustment,
+    here anymore; write H itself. The 0-floor above is applied to whatever
+    H is passed -- it's an IDM-specific adjustment,
     not a property of the shared matrix itself."""
     n = len(active_symbols)
     if n < 2 or H is None:

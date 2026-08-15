@@ -27,7 +27,6 @@ import pytest
 from derivatives_bt_engine.domain.allocation import (
     UNCOVERED_BUDGET_CAP_FRACTION,
     _bounded_ewm_correlation_matrix,
-    _corr_matrix_from_pairs,
     _coverage_restricted_idm,
     _spinu_erc_newton,
     apply_cluster_risk_cap,
@@ -143,15 +142,18 @@ def test_desired_risk_budget_fewer_active_clusters_means_bigger_budget_each():
 # worth of budget instead of each member claiming an equal individual share.
 
 _SYMBOLS = ['A', 'B', 'C']
-# Dicts stay as the readable, hand-editable fixture format (see
-# compute_erc_weights' own docstring on why H, not a dict, is these
-# functions' actual input) -- built into H once here via
-# _corr_matrix_from_pairs, same as any other caller with only a dict
-# would do.
-_CORRELATED_PAIR_CORR = {('A', 'B'): 0.9, ('A', 'C'): 0.0, ('B', 'C'): 0.0}
-_CORRELATED_PAIR_H = _corr_matrix_from_pairs(_SYMBOLS, _CORRELATED_PAIR_CORR)
-_EQUAL_CORR = {('A', 'B'): 0.3, ('A', 'C'): 0.3, ('B', 'C'): 0.3}
-_EQUAL_CORR_H = _corr_matrix_from_pairs(_SYMBOLS, _EQUAL_CORR)
+# H is these functions' sole input (see compute_erc_weights' own
+# docstring) -- built directly, no dict intermediary.
+_CORRELATED_PAIR_H = np.array([
+    [1.0, 0.9, 0.0],
+    [0.9, 1.0, 0.0],
+    [0.0, 0.0, 1.0],
+])
+_EQUAL_CORR_H = np.array([
+    [1.0, 0.3, 0.3],
+    [0.3, 1.0, 0.3],
+    [0.3, 0.3, 1.0],
+])
 
 
 @pytest.mark.parametrize('weight_fn', [compute_erc_weights, compute_hrp_weights])
@@ -495,7 +497,11 @@ def test_coverage_restricted_idm_ignores_uncovered_symbol():
     # the calculation on the covered symbols alone -- NEWSYM contributes
     # nothing, not even at a small weight.
     symbols = ['A', 'B', 'NEWSYM']
-    H = _corr_matrix_from_pairs(symbols, {('A', 'B'): 0.998})
+    H = np.array([
+        [1.0, 0.998, 0.0],
+        [0.998, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+    ])
     covered = np.array([True, True, False])
 
     idm_with_newsym = _coverage_restricted_idm(symbols, H, covered)
@@ -512,7 +518,8 @@ def test_notional_split_caps_uncovered_symbol_budget():
     # Same regression, at the notional-split level: NEWSYM must not out-
     # earn every real, measured symbol just because it has no data.
     symbols = ['A', 'B', 'C', 'NEWSYM']
-    H = _corr_matrix_from_pairs(symbols, _CORRELATED_PAIR_CORR)
+    H = np.eye(4)
+    H[:3, :3] = _CORRELATED_PAIR_H
     covered = np.array([True, True, True, False])
 
     split = compute_notional_split(symbols, 'erc', H, covered)
