@@ -1272,6 +1272,10 @@ def print_cluster_risk_report(targets: list[dict]) -> str:
     rebalance_targets' own docstring) -- 'cluster' mode's report falls back
     to position_risk totals alone, no risk_contribution column.
 
+    Each cluster header is followed by its member instruments (sorted by
+    symbol), so the totals can be traced back to what's actually driving
+    them, then a per-cluster subtotal line.
+
     Computed from whatever `targets` actually ended up being -- capped or
     not, per TsmomLiveConfig.apply_cluster_cap -- not itself gated by that
     flag; this is informational either way, exactly the comparison that
@@ -1285,10 +1289,22 @@ def print_cluster_risk_report(targets: list[dict]) -> str:
     cluster_position_risk = group_by_cluster(cluster_by_symbol, position_risk)
     cluster_risk_contribution = group_by_cluster(cluster_by_symbol, risk_contribution) if risk_contribution else {}
 
+    symbols_by_cluster: dict[str, list[str]] = {}
+    for symbol, cluster in cluster_by_symbol.items():
+        symbols_by_cluster.setdefault(cluster, []).append(symbol)
+
     lines = ['TSMOM Cluster Risk Report', '=' * 60]
     for cluster in sorted(set(cluster_position_risk) | set(cluster_risk_contribution)):
+        lines.append(f"{cluster}:")
+        for symbol in sorted(symbols_by_cluster.get(cluster, [])):
+            pr = position_risk.get(symbol, 0.0)
+            line = f"  {symbol:10s}  position_risk={pr:>12,.0f}"
+            if risk_contribution:
+                rc = risk_contribution.get(symbol, 0.0)
+                line += f"  risk_contribution={rc:>12,.0f}"
+            lines.append(line)
         pr = cluster_position_risk.get(cluster, 0.0)
-        line = f"{cluster:12s}  position_risk={pr:>12,.0f}"
+        line = f"  {'subtotal':10s}  position_risk={pr:>12,.0f}"
         if cluster_risk_contribution:
             rc = cluster_risk_contribution.get(cluster, 0.0)
             line += f"  risk_contribution={rc:>12,.0f}"
