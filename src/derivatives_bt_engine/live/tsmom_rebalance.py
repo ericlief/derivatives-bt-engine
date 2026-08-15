@@ -1234,7 +1234,34 @@ def _fmt(v, spec='+.3f'):
 
 
 def print_rebalance_report(targets: list[dict]) -> str:
-    """Pretty-print (and return as a string) the rebalancing plan."""
+    """Pretty-print (and return as a string) the rebalancing plan, grouped
+    as a left-to-right narrative: identity/result -> raw direction+regime
+    -> (goulding audit, when applicable) -> vol inputs -> VX context ->
+    the four multiplicative sizing components -> their product -> notional
+    sizing -> the contract-count conversion.
+
+    Label disambiguation (the same-sounding fields this grouping/labelling
+    exists to untangle):
+      trend_strength (targets' 'signal' field): the raw direction/magnitude
+        call -- compute_position_scalar's first input, NOT the final sizing
+        multiplier. Under signal_weighting='goulding' this is ALWAYS
+        exactly +-1 by construction ("Goulding decides direction,
+        vol-parity decides size" -- resolve_trend_direction's own
+        docstring): direction and size are deliberately separate decisions
+        in that mode, so seeing trend_strength pinned to +-1 run after run
+        is expected, not a sign anything's broken. Under 'continuous' it
+        instead carries continuous_momentum's own signal magnitude.
+      risk_scalar / regime_discount / signal_confidence / vix_scalar: the
+        four independent multiplicative components -- vol-equalization,
+        Correction/Rebound conviction discount, per-instrument signal
+        trust discount, and portfolio-wide VX de-risking, respectively.
+        None of these alone is "the" scalar; each is one ingredient.
+      combined_scalar (targets' 'scalar' field): EXACTLY the product
+        trend_strength * risk_scalar * regime_discount * signal_confidence
+        (clamped to [-1, 1]) * vix_scalar -- entirely reconstructable from
+        the five fields already printed to its left, kept here as a
+        convenience total rather than making every reader do that
+        multiplication by hand."""
     lines = ['TSMOM Rebalance Report', '=' * 60]
     for t in targets:
         if t.get('error'):
@@ -1244,24 +1271,27 @@ def print_rebalance_report(targets: list[dict]) -> str:
             f"{t['symbol']:6s}  target={t['target_contracts']!s:>4}  "
             f"current={t['current_contracts']!s:>4}  "
             f"active={str(t.get('active')):>5}  "
-            f"continuous={_fmt(t.get('continuous_contracts'), '.3f'):>7}  "
-            f"scalar={_fmt(t.get('scalar'), '.3f'):>6}  signal={_fmt(t.get('signal')):>7}  "
-            f"ts_fast={_fmt(t.get('ts_fast')):>7}  ts_slow={_fmt(t.get('ts_slow')):>7}  "
-            f"close={_fmt(t.get('close'), '.2f'):>9}  dd_pct={_fmt(t.get('dd_pct'), '.2f'):>7}  "
-            f"daily_std={_fmt(t.get('daily_std'), '.4f'):>7}  hv={_fmt(t.get('hv'), '.3f'):>6}  "
-            f"risk_scalar={_fmt(t.get('risk_scalar'), '.3f'):>6}  regime_discount={_fmt(t.get('regime_discount'), '.2f'):>5}  "
-            f"signal_confidence={_fmt(t.get('signal_confidence'), '.2f'):>5}  "
+            f"trend_strength={_fmt(t.get('signal')):>7}  "
             f"regime={t['regime'].capitalize() if t.get('regime') else 'N/A':<10}  "
-            f"vx_current={_fmt(t.get('vx_current'), '.2f'):>6}  vx_ma={_fmt(t.get('vx_ma'), '.2f'):>6}  "
-            f"vx_ratio={t['vx_ratio']:.3f}  vol_regime={t['vol_regime'].capitalize()}  "
-            f"vix_scalar={_fmt(t.get('vix_scalar'), '.2f')}  "
-            f"budget_constant={_fmt(t.get('budget_constant'), '.0f')}  "
-            f"target_notional={_fmt(t.get('target_notional'), '.0f')}"
-            + (f"  weight={_fmt(t.get('notional_weight'), '.3f')}" if t.get('notional_weight') is not None else "")
+            f"ts_fast={_fmt(t.get('ts_fast')):>7}  ts_slow={_fmt(t.get('ts_slow')):>7}  "
+            f"dd_pct={_fmt(t.get('dd_pct'), '.2f'):>7}"
             + (f"  g_regime={t['g_regime']}  g_fast={_fmt(t.get('g_fast'), '.4f')}  "
                f"g_slow={_fmt(t.get('g_slow'), '.4f')}  g_blend={_fmt(t.get('g_blend'), '.4f')}  "
                f"a_co={_fmt(t.get('a_co'), '.2f')}  a_re={_fmt(t.get('a_re'), '.2f')}"
                if t.get('a_co') is not None else "")
+            + f"  daily_std={_fmt(t.get('daily_std'), '.4f'):>7}  hv={_fmt(t.get('hv'), '.3f'):>6}  "
+              f"vx_current={_fmt(t.get('vx_current'), '.2f'):>6}  vx_ma={_fmt(t.get('vx_ma'), '.2f'):>6}  "
+              f"vx_ratio={t['vx_ratio']:.3f}  vol_regime={t['vol_regime'].capitalize()}  "
+              f"risk_scalar={_fmt(t.get('risk_scalar'), '.3f'):>6}  "
+              f"regime_discount={_fmt(t.get('regime_discount'), '.2f'):>5}  "
+              f"signal_confidence={_fmt(t.get('signal_confidence'), '.2f'):>5}  "
+              f"vix_scalar={_fmt(t.get('vix_scalar'), '.2f')}  "
+              f"combined_scalar={_fmt(t.get('scalar'), '.3f'):>6}  "
+              f"budget_constant={_fmt(t.get('budget_constant'), '.0f')}"
+            + (f"  weight={_fmt(t.get('notional_weight'), '.3f')}" if t.get('notional_weight') is not None else "")
+            + f"  target_notional={_fmt(t.get('target_notional'), '.0f')}  "
+              f"close={_fmt(t.get('close'), '.2f'):>9}  "
+              f"continuous={_fmt(t.get('continuous_contracts'), '.3f'):>7}"
             + ("  INFEASIBLE (cluster cap < min contract risk in this cluster)" if t.get('infeasible') else "")
         )
     report = '\n'.join(lines)
