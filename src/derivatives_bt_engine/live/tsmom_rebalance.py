@@ -33,6 +33,7 @@ from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING, Mapping, Optional
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import polars as pl
 
 if TYPE_CHECKING:
@@ -48,13 +49,16 @@ from derivatives_bt_engine.domain.instruments import INSTRUMENTS, resolve_annual
 from derivatives_bt_engine.domain.allocation import (
     NOTIONAL_WEIGHTING_SCHEMES,
     _bounded_ewm_correlation_matrix,
+    _coverage_restricted_idm,
     apply_cluster_risk_cap,
     build_returns_wide,
     compute_desired_risk_budget,
     compute_n_effective,
     compute_notional_split,
     compute_position_scalar,
+    compute_realized_portfolio_risk,
     compute_symbol_notional_budget,
+    group_by_cluster,
 )
 from derivatives_bt_engine.domain.futures_dataloader import FuturesDataLoader, assert_monotonic_expiration
 from derivatives_bt_engine.domain.signal import (
@@ -196,6 +200,20 @@ class TsmomLiveConfig:
     use_idm: bool = True
     idm_window_years: float = 3.0
     idm_halflife_days: float = 63.0
+    # Whether apply_cluster_risk_cap's cluster-level cap/redistribution
+    # runs at all (whole-contract rounding always happens regardless --
+    # see that function's own `apply_cap` docstring). Default OFF: under
+    # risk_budget_mode='idm', that cap re-imposes a hand-assigned-cluster,
+    # zero-correlation assumption on top of sizing that's already
+    # correlation-aware, and can silently claw back most of IDM's own
+    # diversification credit -- confirmed directly in a live check where
+    # it cut a genuine hedge position to 21% of its IDM-intended size.
+    # When True and risk_budget_mode='idm', the cap's own total_risk_target
+    # is scaled by the SAME idm_multiplier compute_symbol_notional_budget
+    # used to size positions, so the cap stays a consistency backstop
+    # (e.g. against a stale/broken correlation estimate) rather than
+    # silently re-imposing the assumption idm mode exists to replace.
+    apply_cluster_cap: bool = False
     # 'ib' (default, unchanged prior behavior): live IB historical bars +
     # live VX/VIX spike gate, via IBPySync -- requires an active connection
     # (compute_rebalance_targets' own `ib` argument). 'database': the same
@@ -764,14 +782,28 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
       3. Per instrument: scalar -> target_notional (that instrument's own
          budget_constant * scalar, optionally capped by
          instr['max_notional'] if set as a hard ceiling) -> target_contracts,
-         clamped to max_contracts (now just a sanity backstop). Then
-         apply_cluster_risk_cap() rescales any cluster whose aggregate
+         clamped to max_contracts (now just a sanity backstop). Whole-
+         contract rounding and position_risk always happen next via
+         apply_cluster_risk_cap, regardless of config.apply_cluster_cap
+         (see that function's own `apply_cap` docstring); the cluster-level
+         cap/redistribution itself (rescaling any cluster whose aggregate
          dollar-vol risk exceeds max_cluster_risk_pct of total portfolio
          risk -- e.g. 4 grain micros that each individually look fine can
          still collectively be one oversized bet on the shared ag-complex
-         factor. Applies in BOTH risk_budget_mode values -- it's a
-         secondary guard on top of whichever primary budget derivation
-         stage 2 used, not a replacement for either.
+         factor) only runs when config.apply_cluster_cap is True (default
+         False -- see that field's own docstring for why: under
+         risk_budget_mode='idm', this cap re-imposes a hand-assigned-
+         cluster, zero-correlation assumption directly on top of sizing
+         that already measured real correlation, and can silently claw
+         back most of that credit). When True and risk_budget_mode='idm',
+         the cap's own total_risk_target is scaled by the same
+         idm_multiplier stage 2 already used, so it stays a consistency
+         backstop rather than reversing IDM's own credit. Finally, when
+         risk_budget_mode='idm', compute_realized_portfolio_risk computes
+         each symbol's ACTUAL (post-rounding, post-cap-or-not) risk
+         contribution -- attached to each target as 'risk_contribution',
+         informational, unconditional on config.apply_cluster_cap -- see
+         print_cluster_risk_report for the per-cluster view of it.
 
     ib: required (and used) only when config.data_source == 'ib'. None is
     valid and expected for config.data_source == 'database' -- that mode
@@ -898,6 +930,17 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
     # figure). Empty under 'cluster' -- that mode has no such split at all
     # (every instrument in a cluster shares one flat budget_constant).
     notional_weight_by_symbol: dict[str, float] = {}
+    # Only populated under risk_budget_mode='idm' with account_equity and at
+    # least one active symbol -- used below both to scale total_risk_target
+    # (when config.apply_cluster_cap) and to compute realized per-symbol/
+    # per-cluster risk contributions for the report, after apply_cluster_
+    # risk_cap has finalized target_contracts/position_risk. idm_multiplier
+    # stays 1.0 under 'cluster' mode or when IDM has nothing to compute from
+    # -- both correctly leave total_risk_target unscaled below.
+    idm_multiplier = 1.0
+    active_symbols: list[str] = []
+    H: Optional[np.ndarray] = None
+    covered: Optional[np.ndarray] = None
     if config.risk_budget_mode == 'cluster':
         active_clusters = {s['cluster'] for s in signals.values() if _is_active(s)}
         n_effective = compute_n_effective(active_clusters)
@@ -934,9 +977,18 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
                 config.notional_weighting, config.use_idm,
                 H=H, covered=covered,
             )
+            # Same (active_symbols, H, covered, notional_weight_by_symbol)
+            # compute_symbol_notional_budget already used internally to size
+            # positions -- recomputed here (cheap: a handful of matrix ops on
+            # an n<=a few dozen matrix, not the expensive EWM estimation
+            # above) so total_risk_target below can be scaled consistently
+            # with it, if config.apply_cluster_cap actually uses it.
+            if config.use_idm:
+                idm_multiplier = _coverage_restricted_idm(active_symbols, H, covered,
+                                                           weights=notional_weight_by_symbol)
         log.info('Risk budget (idm) — active_symbols=%s  n_effective=%d  notional_weighting=%s  use_idm=%s  '
-                 'budget_constant=%s',
-                 sorted(active_symbols), n_effective, config.notional_weighting, config.use_idm,
+                 'idm_multiplier=%.3f  budget_constant=%s',
+                 sorted(active_symbols), n_effective, config.notional_weighting, config.use_idm, idm_multiplier,
                  {s: round(v, 0) for s, v in budget_constant_by_symbol.items()} or 'N/A (no account_equity or no active symbols)')
 
     # Stage 3: per-instrument sizing off the derived budget, then the
@@ -1116,8 +1168,37 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
             })
 
     total_risk_target = config.account_equity * config.target_portfolio_vol if config.account_equity else None
+    if config.risk_budget_mode == 'idm' and total_risk_target is not None:
+        # Keep the cap consistent with the diversification credit
+        # compute_symbol_notional_budget already used to size these
+        # positions -- see TsmomLiveConfig.apply_cluster_cap's own
+        # docstring for why leaving this unscaled silently claws that
+        # credit back.
+        total_risk_target *= idm_multiplier
     apply_cluster_risk_cap(targets, config.max_cluster_risk_pct, total_risk_target, n_effective,
-                          max_lot_overrun_pct=config.max_lot_overrun_pct)
+                          max_lot_overrun_pct=config.max_lot_overrun_pct,
+                          apply_cap=config.apply_cluster_cap)
+
+    # Realized per-symbol risk contribution -- informational, computed from
+    # whatever targets actually ended up being (capped or not, per
+    # config.apply_cluster_cap above), not gated by it. Only possible under
+    # risk_budget_mode='idm', where H is the real measured correlation
+    # matrix active_symbols was built from ('cluster' mode never computes
+    # H at all, so there's nothing to feed compute_realized_portfolio_risk
+    # here -- H stays None, this is skipped, print_cluster_risk_report
+    # falls back to position_risk totals only). See compute_realized_
+    # portfolio_risk's own docstring: this is a different question from
+    # idm_multiplier above -- not "how much can the book be scaled up",
+    # but "given the ACTUAL rounded positions, what does each symbol
+    # really contribute to total portfolio risk."
+    if H is not None and active_symbols:
+        position_risk = {t['symbol']: t['position_risk'] for t in targets
+                         if not t.get('error') and t.get('position_risk') is not None}
+        realized = compute_realized_portfolio_risk(active_symbols, H, position_risk)
+        for t in targets:
+            if t['symbol'] in realized['risk_contribution']:
+                t['risk_contribution'] = realized['risk_contribution'][t['symbol']]
+
     return targets
 
 
@@ -1176,6 +1257,47 @@ def print_rebalance_report(targets: list[dict]) -> str:
                if t.get('a_co') is not None else "")
             + ("  INFEASIBLE (cluster cap < min contract risk in this cluster)" if t.get('infeasible') else "")
         )
+    report = '\n'.join(lines)
+    print(report)
+    return report
+
+
+def print_cluster_risk_report(targets: list[dict]) -> str:
+    """Pretty-print (and return as a string) per-cluster totals: position_risk
+    (each symbol's own undiversified, standalone dollar risk, summed by
+    cluster) alongside risk_contribution (diversification-aware -- what
+    each symbol/cluster ACTUALLY contributes to total portfolio risk, per
+    compute_realized_portfolio_risk) when available. risk_contribution is
+    only ever populated under risk_budget_mode='idm' (compute_
+    rebalance_targets' own docstring) -- 'cluster' mode's report falls back
+    to position_risk totals alone, no risk_contribution column.
+
+    Computed from whatever `targets` actually ended up being -- capped or
+    not, per TsmomLiveConfig.apply_cluster_cap -- not itself gated by that
+    flag; this is informational either way, exactly the comparison that
+    surfaced apply_cluster_risk_cap silently reversing IDM's own
+    diversification credit in the first place."""
+    cluster_by_symbol = {t['symbol']: t['cluster'] for t in targets if t.get('cluster')}
+    position_risk = {t['symbol']: t['position_risk'] for t in targets if t.get('position_risk') is not None}
+    risk_contribution = {t['symbol']: t['risk_contribution'] for t in targets
+                         if t.get('risk_contribution') is not None}
+
+    cluster_position_risk = group_by_cluster(cluster_by_symbol, position_risk)
+    cluster_risk_contribution = group_by_cluster(cluster_by_symbol, risk_contribution) if risk_contribution else {}
+
+    lines = ['TSMOM Cluster Risk Report', '=' * 60]
+    for cluster in sorted(set(cluster_position_risk) | set(cluster_risk_contribution)):
+        pr = cluster_position_risk.get(cluster, 0.0)
+        line = f"{cluster:12s}  position_risk={pr:>12,.0f}"
+        if cluster_risk_contribution:
+            rc = cluster_risk_contribution.get(cluster, 0.0)
+            line += f"  risk_contribution={rc:>12,.0f}"
+        lines.append(line)
+    lines.append('-' * 60)
+    total_line = f"{'TOTAL':12s}  position_risk={sum(cluster_position_risk.values()):>12,.0f}"
+    if cluster_risk_contribution:
+        total_line += f"  risk_contribution={sum(cluster_risk_contribution.values()):>12,.0f}"
+    lines.append(total_line)
     report = '\n'.join(lines)
     print(report)
     return report

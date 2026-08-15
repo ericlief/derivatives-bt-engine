@@ -124,8 +124,8 @@ def compute_desired_risk_budget(account_equity: float, target_portfolio_vol: flo
 
 
 def apply_cluster_risk_cap(targets: list[dict], max_cluster_risk_pct: float,
-                            total_risk_target: float, n_active_clusters: int,
-                            max_lot_overrun_pct: float = 0.5) -> list[dict]:
+                            total_risk_target: Optional[float], n_active_clusters: int,
+                            max_lot_overrun_pct: float = 0.5, apply_cap: bool = True) -> list[dict]:
     """
     Second pass over an already-sized targets list: for any cluster whose
     aggregate dollar-vol risk exceeds its share of a fixed, account-equity-
@@ -188,7 +188,22 @@ def apply_cluster_risk_cap(targets: list[dict], max_cluster_risk_pct: float,
     are left untouched and excluded from the risk totals. Mutates and
     returns the same list (adds/overwrites 'target_contracts' and
     'position_risk', and 'infeasible' where applicable).
-    """
+
+    `apply_cap` (default True, unchanged prior behavior): whole-contract
+    ROUNDING and 'position_risk' always happen regardless -- those aren't
+    part of "the cap," they're just how a continuous target becomes a
+    tradeable integer. False (or total_risk_target being None/<=0) skips
+    only the cluster-level cap/redistribution walk-down itself, treating
+    every cluster as within budget (the same "round the continuous value
+    directly" path already used for any cluster that doesn't exceed the
+    cap) -- e.g. for risk_budget_mode='idm', where compute_symbol_
+    notional_budget's own IDM/ERC/HRP sizing is already correlation-aware,
+    and re-capping against a hand-assigned-cluster, zero-correlation-
+    assumption total_risk_target on top of that would re-impose exactly
+    the assumption IDM was used to move past (confirmed directly: it can
+    silently claw back the majority of IDM's own diversification credit,
+    hitting hardest whichever position is the real hedge -- see the
+    caller's own docstring)."""
     valid = [
         t for t in targets
         if not t.get('error')
@@ -204,15 +219,20 @@ def apply_cluster_risk_cap(targets: list[dict], max_cluster_risk_pct: float,
         position_risk = abs(t['continuous_contracts']) * t['close'] * t['multiplier'] * t['hv']
         cluster_risk[t['cluster']] = cluster_risk.get(t['cluster'], 0.0) + position_risk
 
-    if total_risk_target is None or total_risk_target <= 0:
-        return targets
+    if apply_cap and total_risk_target is not None and total_risk_target > 0:
+        effective_cap_pct = max(max_cluster_risk_pct, 1.0 / n_active_clusters) if n_active_clusters > 0 else max_cluster_risk_pct
+        cap = effective_cap_pct * total_risk_target
+    else:
+        cap = None
 
-    effective_cap_pct = max(max_cluster_risk_pct, 1.0 / n_active_clusters) if n_active_clusters > 0 else max_cluster_risk_pct
-    cap = effective_cap_pct * total_risk_target
-
-    over_budget_clusters = {cluster for cluster, risk in cluster_risk.items() if risk > cap}
+    over_budget_clusters = {cluster for cluster, risk in cluster_risk.items() if risk > cap} if cap is not None else set()
 
     for cluster in over_budget_clusters:
+        # over_budget_clusters is only ever non-empty when cap is not None
+        # (see its own construction above), so cap is guaranteed a real
+        # float whenever this loop body runs -- not something a type
+        # checker infers across the two separate expressions on its own.
+        assert cap is not None
         members = [t for t in valid if t['cluster'] == cluster]
         # Priority order is fixed before any mutation -- read each
         # instrument's original, unscaled continuous_contracts once, up
@@ -1061,3 +1081,19 @@ def compute_realized_portfolio_risk(active_symbols: list[str], H: np.ndarray,
     marginal = H @ w
     rc = w * marginal / port_vol
     return {'port_vol': port_vol, 'risk_contribution': dict(zip(active_symbols, rc))}
+
+
+def group_by_cluster(cluster_by_symbol: dict[str, str], values: dict[str, float]) -> dict[str, float]:
+    """Sum a per-symbol dollar figure -- position_risk (undiversified,
+    standalone) or compute_realized_portfolio_risk's own risk_contribution
+    (diversification-aware) are the two this project actually uses -- into
+    per-cluster totals. Generic aggregation, not tied to either one
+    specifically: whatever `values` means per-symbol, this sums it by
+    cluster the same way. A symbol present in `values` but missing from
+    `cluster_by_symbol` falls into an 'other' bucket, matching
+    build_instruments' own cluster-default convention."""
+    totals: dict[str, float] = {}
+    for symbol, value in values.items():
+        cluster = cluster_by_symbol.get(symbol, 'other')
+        totals[cluster] = totals.get(cluster, 0.0) + value
+    return totals

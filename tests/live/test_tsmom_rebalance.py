@@ -303,6 +303,112 @@ def test_risk_budget_mode_idm_use_idm_false_skips_multiplier(monkeypatch):
     assert sum(budgets) * 0.15 == pytest.approx(1_000_000 * 0.15, rel=1e-6)
 
 
+def test_apply_cluster_cap_defaults_to_false():
+    assert TsmomLiveConfig(account_equity=100_000).apply_cluster_cap is False
+
+
+def test_apply_cluster_cap_wiring_reaches_apply_cluster_risk_cap(monkeypatch):
+    # Spy on the real apply_cluster_risk_cap to confirm config.
+    # apply_cluster_cap actually reaches its apply_cap kwarg, not just that
+    # the config field exists.
+    price_data = {
+        'X': _price_df(date(2018, 1, 1), 500, drift=0.0015, vol=0.005, seed=1),
+        'Y': _price_df(date(2018, 1, 1), 500, drift=0.0015, vol=0.005, seed=2),
+    }
+    _patch_db(monkeypatch, price_data)
+
+    captured = {}
+    original = tr.apply_cluster_risk_cap
+
+    def spy(*args, **kwargs):
+        captured['apply_cap'] = kwargs.get('apply_cap')
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(tr, 'apply_cluster_risk_cap', spy)
+
+    config = TsmomLiveConfig(account_equity=1_000_000, data_source='database', risk_budget_mode='idm',
+                             notional_weighting='erc', apply_cluster_cap=True)
+    compute_rebalance_targets([_instrument('X'), _instrument('Y')], config, ib=None)
+
+    assert captured['apply_cap'] is True
+
+
+def test_total_risk_target_scaled_by_idm_multiplier_when_cap_enabled(monkeypatch):
+    # When apply_cluster_cap=True and risk_budget_mode='idm', the cap's own
+    # total_risk_target must be scaled by the same idm_multiplier used to
+    # size positions -- otherwise the cap silently claws back IDM's own
+    # diversification credit (the bug this whole feature exists to fix).
+    same_series = _price_df(date(2018, 1, 1), 500, drift=0.0015, vol=0.005, seed=1)
+    price_data = {
+        'A': same_series, 'B': same_series,
+        'C': _price_df(date(2018, 1, 1), 500, drift=0.0015, vol=0.005, seed=2),
+    }
+    _patch_db(monkeypatch, price_data)
+    as_of = price_data['A']['ts_event'][-1]
+
+    captured = {}
+    original = tr.apply_cluster_risk_cap
+
+    def spy(targets, max_cluster_risk_pct, total_risk_target, n_active_clusters, **kwargs):
+        captured['total_risk_target'] = total_risk_target
+        return original(targets, max_cluster_risk_pct, total_risk_target, n_active_clusters, **kwargs)
+
+    monkeypatch.setattr(tr, 'apply_cluster_risk_cap', spy)
+
+    config = TsmomLiveConfig(account_equity=1_000_000, data_source='database', risk_budget_mode='idm',
+                             notional_weighting='erc', as_of=as_of, apply_cluster_cap=True)
+    compute_rebalance_targets([_instrument('A'), _instrument('B'), _instrument('C')], config, ib=None)
+
+    flat_total_risk_target = 1_000_000 * config.target_portfolio_vol
+    # Real diversification exists (A/B correlated, C independent) -- the
+    # scaled cap must be strictly bigger than the flat, uncredited figure.
+    assert captured['total_risk_target'] > flat_total_risk_target
+
+
+def test_risk_contribution_attached_to_targets_under_idm_mode(monkeypatch):
+    same_series = _price_df(date(2018, 1, 1), 500, drift=0.0015, vol=0.005, seed=1)
+    price_data = {
+        'A': same_series, 'B': same_series,
+        'C': _price_df(date(2018, 1, 1), 500, drift=0.0015, vol=0.005, seed=2),
+    }
+    _patch_db(monkeypatch, price_data)
+    as_of = price_data['A']['ts_event'][-1]
+
+    config = TsmomLiveConfig(account_equity=1_000_000, data_source='database', risk_budget_mode='idm',
+                             notional_weighting='erc', as_of=as_of)
+    targets = compute_rebalance_targets([_instrument('A'), _instrument('B'), _instrument('C')], config, ib=None)
+
+    for t in targets:
+        if not t.get('error'):
+            assert 'risk_contribution' in t
+
+    report = tr.print_cluster_risk_report(targets)
+    assert 'risk_contribution=' in report
+    assert 'position_risk=' in report
+
+
+def test_risk_contribution_absent_under_cluster_mode(monkeypatch):
+    # 'cluster' mode never computes H (no correlation-aware sizing at
+    # all), so there's nothing for compute_realized_portfolio_risk to use
+    # -- print_cluster_risk_report should fall back to position_risk
+    # totals only, no risk_contribution column.
+    price_data = {
+        'X': _price_df(date(2018, 1, 1), 500, drift=0.0015, vol=0.005, seed=1),
+        'Y': _price_df(date(2018, 1, 1), 500, drift=0.0015, vol=0.005, seed=2),
+    }
+    _patch_db(monkeypatch, price_data)
+
+    config = TsmomLiveConfig(account_equity=1_000_000, data_source='database', risk_budget_mode='cluster')
+    targets = compute_rebalance_targets([_instrument('X'), _instrument('Y')], config, ib=None)
+
+    for t in targets:
+        assert 'risk_contribution' not in t
+
+    report = tr.print_cluster_risk_report(targets)
+    assert 'position_risk=' in report
+    assert 'risk_contribution=' not in report
+
+
 def test_active_field_reflects_min_conviction_and_inactive_symbol_gets_clean_zero(monkeypatch):
     # Regression test: an 'idm'-mode symbol that fails min_conviction used
     # to fall through to budget_constant_by_symbol.get(symbol) is None ->

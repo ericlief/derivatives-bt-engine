@@ -42,6 +42,7 @@ from derivatives_bt_engine.live.tsmom_rebalance import (
     TsmomLiveConfig,
     build_instruments,
     compute_rebalance_targets,
+    print_cluster_risk_report,
     print_rebalance_report,
     _resolve_contract,
 )
@@ -99,13 +100,21 @@ def _build_instruments(spec: str, max_notional: float, max_contracts: int) -> li
     return build_instruments(spec.split(','), max_notional=max_notional, max_contracts=max_contracts)
 
 
-def _save_report(report: str, targets: list[dict]) -> None:
+def _save_report(report: str, targets: list[dict], cluster_report: str = '') -> None:
     """Persists each run's report (plain text, matches stdout) and targets
     (CSV, one row per instrument) to results/ at the project root,
     timestamped -- mirrors tsmom.py's results dir so live and
     backtest output live in the same place. Previously this only ever
     printed to stdout/Telegram and was lost the moment the terminal
-    scrolled."""
+    scrolled.
+
+    `cluster_report`: print_cluster_risk_report's own output (empty string
+    when the caller has none, e.g. an early VX-spike return with no
+    targets computed at all) -- appended to the same .txt file rather than
+    a separate one; risk_contribution (when present -- only under
+    risk_budget_mode='idm', see compute_rebalance_targets' own docstring)
+    already flows into the CSV automatically via all_keys below, no
+    separate handling needed there."""
     results_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'results'))
     os.makedirs(results_dir, exist_ok=True)
     ts = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -113,6 +122,9 @@ def _save_report(report: str, targets: list[dict]) -> None:
     txt_path = os.path.join(results_dir, f'tsmom_live_rebalance_{ts}.txt')
     with open(txt_path, 'w') as f:
         f.write(report)
+        if cluster_report:
+            f.write('\n\n')
+            f.write(cluster_report)
 
     # symbol -> current/target position -> signal/regime first (the columns
     # you actually scan a rebalance report for), then the sizing-math trail
@@ -125,7 +137,7 @@ def _save_report(report: str, targets: list[dict]) -> None:
                 'g_regime', 'g_fast', 'g_slow', 'g_blend', 'a_co', 'a_re',
                 'account_equity', 'n_effective',
                 'risk_budget', 'vol_target', 'target_portfolio_vol', 'budget_constant', 'notional_weight',
-                'position_risk', 'raw_notional', 'target_notional', 'max_cluster_risk_pct',
+                'position_risk', 'risk_contribution', 'raw_notional', 'target_notional', 'max_cluster_risk_pct',
                 'max_lot_overrun_pct']
     all_keys = {key for t in targets for key in t}
     fieldnames = [k for k in priority if k in all_keys] + sorted(all_keys - set(priority))
@@ -253,6 +265,16 @@ def parse_args():
                    help="Only used with --risk-budget-mode idm (default: %(default)s). Whether the "
                         "total budget is scaled by IDM before being split, or left as account_equity "
                         "* --target-portfolio-vol with no correlation-based up/down-sizing")
+    p.add_argument('--apply-cluster-cap', action=argparse.BooleanOptionalAction, default=False,
+                   help="Whether apply_cluster_risk_cap's cluster-level cap/redistribution runs at all "
+                        "(default: %(default)s; whole-contract rounding always happens regardless). "
+                        "Default off because under --risk-budget-mode idm, that cap re-imposes a "
+                        "hand-assigned-cluster, zero-correlation assumption on top of sizing that's "
+                        "already correlation-aware, and can silently claw back most of IDM's own "
+                        "diversification credit -- see TsmomLiveConfig.apply_cluster_cap's own "
+                        "docstring. When on with --risk-budget-mode idm, the cap's own total risk "
+                        "target is scaled by the same idm_multiplier used to size positions, so it "
+                        "stays a consistency backstop rather than reversing that credit")
     p.add_argument('--idm-window-years', type=float, default=3.0,
                    help='Only used with --risk-budget-mode idm: bounded trailing window for the EWM '
                         'correlation estimate (default: %(default)s)')
@@ -324,6 +346,7 @@ def main():
         risk_budget_mode=args.risk_budget_mode,
         notional_weighting=args.notional_weighting,
         use_idm=args.use_idm,
+        apply_cluster_cap=args.apply_cluster_cap,
         idm_window_years=args.idm_window_years,
         idm_halflife_days=args.idm_halflife_days,
         data_source=args.data_source,
@@ -359,9 +382,10 @@ def main():
 
     targets = compute_rebalance_targets(instruments, config, ib=ib)
     report = print_rebalance_report(targets)
+    cluster_report = print_cluster_risk_report(targets)
 
     if not args.no_save:
-        _save_report(report, targets)
+        _save_report(report, targets, cluster_report)
 
     if not dry_run:
         send_telegram(f'TSMOM Rebalance\n{report}')

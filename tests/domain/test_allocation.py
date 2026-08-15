@@ -40,6 +40,7 @@ from derivatives_bt_engine.domain.allocation import (
     compute_position_scalar,
     compute_realized_portfolio_risk,
     compute_symbol_notional_budget,
+    group_by_cluster,
 )
 from derivatives_bt_engine.domain.enums import TrendRegime
 from derivatives_bt_engine.domain.signal import (
@@ -668,9 +669,12 @@ def _target(symbol, cluster, continuous_contracts, close=100.0, multiplier=10.0,
         'symbol': symbol, 'cluster': cluster, 'continuous_contracts': continuous_contracts,
         'scalar': scalar,
         # target_contracts simulates whatever the caller (tsmom_rebalance.py)
-        # already computed upstream, pre-cluster-cap -- only actually
-        # observable in tests that exercise the early-return (no budget)
-        # path, since the normal path always overwrites it at the end.
+        # already computed upstream, pre-cluster-cap -- rounding+position_risk
+        # always overwrite it (see apply_cluster_risk_cap's own `apply_cap`
+        # docstring: even with the cap fully disabled, only the cluster-level
+        # redistribution is skipped, not rounding), so a sentinel value here
+        # is only meaningful in a test that explicitly checks it gets
+        # overwritten, not one relying on it staying untouched.
         'target_contracts': target_contracts if target_contracts is not None else round(continuous_contracts),
         'close': close, 'multiplier': multiplier, 'hv': hv, 'max_contracts': max_contracts,
     }
@@ -777,20 +781,61 @@ def test_cluster_cap_skips_error_targets():
     assert errored['target_contracts'] is None
 
 
-def test_cluster_cap_zero_total_risk_target_is_no_op():
-    targets = [_target('MES', 'equity', continuous_contracts=5.3, target_contracts=5,
+def test_cluster_cap_zero_total_risk_target_skips_cap_not_rounding():
+    # A None/zero total_risk_target disables the CAP, not rounding -- use a
+    # sentinel target_contracts that would only survive if the function
+    # genuinely didn't touch it, to prove it's NOT a true no-op: rounding
+    # and position_risk still get (re)computed from continuous_contracts.
+    targets = [_target('MES', 'equity', continuous_contracts=5.3, target_contracts=999,
                        close=100, multiplier=10, hv=0.1)]
     out = apply_cluster_risk_cap(targets, max_cluster_risk_pct=0.25,
                                  total_risk_target=0.0, n_active_clusters=1)
     assert out[0]['target_contracts'] == 5
+    assert out[0]['position_risk'] == pytest.approx(5 * 100 * 10 * 0.1)
 
 
-def test_cluster_cap_none_total_risk_target_is_no_op():
-    targets = [_target('MES', 'equity', continuous_contracts=5.3, target_contracts=5,
+def test_cluster_cap_none_total_risk_target_skips_cap_not_rounding():
+    targets = [_target('MES', 'equity', continuous_contracts=5.3, target_contracts=999,
                        close=100, multiplier=10, hv=0.1)]
     out = apply_cluster_risk_cap(targets, max_cluster_risk_pct=0.25,
                                  total_risk_target=None, n_active_clusters=1)
     assert out[0]['target_contracts'] == 5
+    assert out[0]['position_risk'] == pytest.approx(5 * 100 * 10 * 0.1)
+
+
+def test_cluster_cap_apply_cap_false_skips_cap_not_rounding():
+    # Same as the total_risk_target=None/0 cases, but via the explicit
+    # apply_cap=False toggle with a genuinely valid, over-budget
+    # total_risk_target -- proves apply_cap, not just total_risk_target's
+    # own value, controls whether the cap fires. Two MES-cluster instruments
+    # whose combined risk would exceed a tiny cap if the cap were active.
+    targets = [
+        _target('A', 'equity', continuous_contracts=10, target_contracts=999,
+               close=100, multiplier=10, hv=0.1, scalar=0.9),   # risk=10,000
+        _target('B', 'equity', continuous_contracts=10, target_contracts=999,
+               close=100, multiplier=10, hv=0.1, scalar=0.5),   # risk=10,000
+    ]
+    out = apply_cluster_risk_cap(targets, max_cluster_risk_pct=0.01, total_risk_target=100.0,
+                                 n_active_clusters=1, apply_cap=False)
+    # Would be aggressively capped/reprioritized if apply_cap were True
+    # (cap = 0.01*100 = $1) -- instead both round their continuous value
+    # directly, untouched by any cluster-level redistribution.
+    assert out[0]['target_contracts'] == 10
+    assert out[1]['target_contracts'] == 10
+    assert not out[0].get('infeasible')
+    assert not out[1].get('infeasible')
+
+
+def test_group_by_cluster_sums_per_symbol_values():
+    cluster_by_symbol = {'MES': 'equity', 'MNQ': 'equity', 'MCL': 'energy'}
+    values = {'MES': 100.0, 'MNQ': 50.0, 'MCL': 30.0}
+    assert group_by_cluster(cluster_by_symbol, values) == {'equity': 150.0, 'energy': 30.0}
+
+
+def test_group_by_cluster_unknown_symbol_falls_back_to_other():
+    cluster_by_symbol = {'MES': 'equity'}
+    values = {'MES': 100.0, 'ZZZ': 25.0}
+    assert group_by_cluster(cluster_by_symbol, values) == {'equity': 100.0, 'other': 25.0}
 
 
 def test_cluster_cap_zero_n_active_clusters_falls_back_to_max_cluster_risk_pct():
