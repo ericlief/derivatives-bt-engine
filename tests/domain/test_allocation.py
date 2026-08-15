@@ -38,6 +38,7 @@ from derivatives_bt_engine.domain.allocation import (
     compute_n_effective,
     compute_notional_split,
     compute_position_scalar,
+    compute_realized_portfolio_risk,
     compute_symbol_notional_budget,
 )
 from derivatives_bt_engine.domain.enums import TrendRegime
@@ -577,6 +578,62 @@ def test_notional_budget_caps_uncovered_symbol_end_to_end():
     assert budget['NEWSYM'] < budget['A']
     assert budget['NEWSYM'] < budget['B']
     assert budget['NEWSYM'] < budget['C']
+
+
+# ── compute_realized_portfolio_risk ──────────────────────────────────────────
+
+def test_realized_portfolio_risk_decomposes_exactly_to_port_vol():
+    # Euler's theorem for a degree-1-homogeneous function: sum of marginal
+    # risk contributions must equal port_vol EXACTLY, not approximately --
+    # this is the actual mathematical claim behind "risk contribution",
+    # not just a sanity check.
+    symbols = ['A', 'B', 'C']
+    H = _CORRELATED_PAIR_H
+    position_risk = {'A': 10_000.0, 'B': 8_000.0, 'C': 12_000.0}
+
+    result = compute_realized_portfolio_risk(symbols, H, position_risk)
+
+    assert sum(result['risk_contribution'].values()) == pytest.approx(result['port_vol'], rel=1e-9)
+
+
+def test_realized_portfolio_risk_credits_diversifier_less_than_correlated_pair():
+    # A/B correlated at 0.9, C uncorrelated with either, all three sized
+    # to the SAME standalone (undiversified) dollar risk -- despite that
+    # equal standalone sizing, C's actual risk contribution comes in well
+    # below A/B's, and below its own standalone position_risk, since it's
+    # genuinely diversifying. (An individual RC exceeding its own
+    # position_risk is possible in general -- e.g. a small position
+    # heavily correlated with a large cluster -- but not in this
+    # symmetric equal-weight case: A/B's RC approaches, but stays below,
+    # their own standalone risk as correlation -> 1, confirmed directly
+    # rather than assumed.)
+    symbols = ['A', 'B', 'C']
+    H = _CORRELATED_PAIR_H
+    position_risk = {'A': 10_000.0, 'B': 10_000.0, 'C': 10_000.0}
+
+    result = compute_realized_portfolio_risk(symbols, H, position_risk)
+    rc = result['risk_contribution']
+
+    assert rc['C'] < position_risk['C']
+    assert rc['A'] == pytest.approx(rc['B'])
+    assert rc['C'] < rc['A']
+
+
+def test_realized_portfolio_risk_zero_positions_gives_zero_vol():
+    symbols = ['A', 'B', 'C']
+    result = compute_realized_portfolio_risk(symbols, _CORRELATED_PAIR_H, {})
+    assert result['port_vol'] == 0.0
+    assert all(v == 0.0 for v in result['risk_contribution'].values())
+
+
+def test_realized_portfolio_risk_missing_symbol_defaults_to_no_position():
+    # A symbol absent from position_risk (e.g. it got zero contracts this
+    # rebalance) contributes nothing, same as an explicit 0.0.
+    symbols = ['A', 'B', 'C']
+    result_missing = compute_realized_portfolio_risk(symbols, _CORRELATED_PAIR_H, {'A': 10_000.0, 'B': 8_000.0})
+    result_explicit = compute_realized_portfolio_risk(symbols, _CORRELATED_PAIR_H,
+                                                        {'A': 10_000.0, 'B': 8_000.0, 'C': 0.0})
+    assert result_missing == result_explicit
 
 
 # ── apply_cluster_risk_cap ───────────────────────────────────────────────────

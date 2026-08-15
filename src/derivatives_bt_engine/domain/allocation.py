@@ -1007,3 +1007,57 @@ def compute_idm(active_symbols: list[str], H: Optional[np.ndarray] = None,
     if port_var <= 0:
         return 1.0
     return 1.0 / math.sqrt(port_var)
+
+
+def compute_realized_portfolio_risk(active_symbols: list[str], H: np.ndarray,
+                                     position_risk: dict[str, float]) -> dict:
+    """Realized (post-sizing) portfolio dollar vol and each symbol's
+    marginal dollar risk contribution -- a diagnostic, NOT a sizing input:
+    answers "given the positions this rebalance actually ended up with
+    (after lot-size rounding and apply_cluster_risk_cap), what is the
+    book's true correlation-aware vol," as opposed to compute_idm/
+    compute_erc_weights/compute_hrp_weights, which all answer sizing
+    questions about a HYPOTHETICAL weight vector before any rounding
+    happens.
+
+    `position_risk`: {symbol: dollar risk}, e.g. {t['symbol']:
+    t['position_risk'] for t in targets if not t.get('error')} from
+    apply_cluster_risk_cap's own output -- already in DOLLAR-VOL units
+    (abs(target_contracts) * close * multiplier * hv), which matters:
+    H is a CORRELATION matrix (1.0 diagonal), so it has no notion of any
+    instrument's own vol built in -- the vector multiplied through it
+    must already carry that, unlike a raw notional or contract-count
+    weight. Missing symbols default to 0.0 (no position).
+
+    port_var = w' H w, port_vol = sqrt(port_var) (0.0 if port_var <= 0,
+    e.g. every position_risk is 0). marginal = H @ w; risk_contribution_i
+    = w_i * marginal_i / port_vol -- by construction (Euler's theorem for
+    a degree-1-homogeneous function), sum(risk_contribution.values()) ==
+    port_vol exactly, so it's a genuine decomposition of the book's total
+    risk across symbols, not an approximation.
+
+    The point of comparing risk_contribution against the SAME symbol's
+    raw position_risk input: position_risk is each instrument's
+    UNDIVERSIFIED standalone dollar vol (what it would contribute alone);
+    risk_contribution is what it ACTUALLY contributes given today's
+    measured correlation -- exactly the gap compute_idm/ERC/HRP sizing is
+    meant to account for UP FRONT, so this is also a live check on
+    whether that sizing is holding up against realized (rounded)
+    positions, not just the pre-rounding theoretical split. A genuine
+    diversifier's risk_contribution comes in BELOW its own position_risk
+    (confirmed directly in test_allocation.py); a symbol correlated with
+    the rest of the book approaches, but is bounded above by, its own
+    position_risk when weights are comparable in size (sum(risk_
+    contribution) <= sum(position_risk) always, since correlation entries
+    are bounded by 1 -- Cauchy-Schwarz) -- an individual risk_contribution
+    exceeding its own position_risk IS possible in principle (e.g. a
+    small position heavily correlated with a much larger cluster), just
+    not in a symmetric, comparably-weighted case."""
+    w = np.array([position_risk.get(s, 0.0) for s in active_symbols])
+    port_var = w @ H @ w
+    if port_var <= 0:
+        return {'port_vol': 0.0, 'risk_contribution': {s: 0.0 for s in active_symbols}}
+    port_vol = math.sqrt(port_var)
+    marginal = H @ w
+    rc = w * marginal / port_vol
+    return {'port_vol': port_vol, 'risk_contribution': dict(zip(active_symbols, rc))}
