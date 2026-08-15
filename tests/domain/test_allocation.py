@@ -433,6 +433,25 @@ def test_notional_budget_empty_active_symbols_returns_empty_dict():
     assert compute_symbol_notional_budget(['A'], None, as_of, 100_000, 0.15, 0.15, 3.0, 63.0) == {}
 
 
+def test_notional_budget_works_with_precomputed_h_and_no_returns_wide():
+    # Regression test: a caller that already ran _bounded_ewm_correlation_
+    # matrix itself (e.g. the live rebalance report) shouldn't need
+    # returns_wide at all -- that's the documented point of the H/covered
+    # params. The early-return guard used to check `returns_wide is None`
+    # unconditionally, silently discarding a caller-supplied H and
+    # returning {} even when H made returns_wide unnecessary.
+    symbols = ['A', 'B', 'C']
+    H = np.array([[1.0, 0.9, 0.0], [0.9, 1.0, 0.0], [0.0, 0.0, 1.0]])
+    budget = compute_symbol_notional_budget(
+        symbols, None, date(2024, 1, 1), 100_000, 0.15, 0.15, 3.0, 63.0,
+        notional_weighting='erc', H=H,
+    )
+    assert budget != {}
+    assert sum(budget.values()) > 0
+    # ERC split still favors the independent symbol C over the correlated A/B.
+    assert budget['C'] > budget['A']
+
+
 def test_notional_budget_rejects_unknown_weighting_scheme():
     price_data = _corr_price_data()
     returns_wide = build_returns_wide(price_data)

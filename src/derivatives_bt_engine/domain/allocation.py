@@ -909,13 +909,17 @@ def compute_symbol_notional_budget(active_symbols: list[str], returns_wide: Opti
     research/cta-layer-separation-risk-budgeting.md's IDM-vs-allocation
     framing); for 'flat' it removes correlation-awareness altogether.
 
-    Returns {} if active_symbols is empty or returns_wide is None -- the
-    caller's own probe pass already means every such symbol's target is 0
-    regardless of budget, so there's nobody to size for. A too-short
-    bounded correlation window (_bounded_ewm_correlation_matrix's own
-    min_rows floor) instead makes compute_idm (and, under 'erc'/'hrp',
-    the weighting itself) fall back to its own flat/no-adjustment default,
-    not an early return here.
+    Returns {} if active_symbols is empty, or if there's no way to get a
+    correlation matrix at all (returns_wide is None AND H wasn't already
+    supplied) -- the caller's own probe pass already means every such
+    symbol's target is 0 regardless of budget, so there's nobody to size
+    for. A too-short bounded correlation window
+    (_bounded_ewm_correlation_matrix's own min_rows floor) instead makes
+    compute_idm (and, under 'erc'/'hrp', the weighting itself) fall back
+    to its own flat/no-adjustment default, not an early return here --
+    and neither does passing H directly without returns_wide (the whole
+    point of the H/covered params below is to let a caller skip needing
+    returns_wide at all once they already have H).
 
     `H`/`covered`: pass both if a caller already ran
     _bounded_ewm_correlation_matrix for this exact (active_symbols, as_of,
@@ -935,9 +939,15 @@ def compute_symbol_notional_budget(active_symbols: list[str], returns_wide: Opti
     if notional_weighting not in NOTIONAL_WEIGHTING_SCHEMES:
         raise ValueError(f"notional_weighting must be one of {NOTIONAL_WEIGHTING_SCHEMES}, "
                           f"got {notional_weighting!r}")
-    if not active_symbols or returns_wide is None:
+    if not active_symbols or (H is None and returns_wide is None):
         return {}
     if H is None:
+        # returns_wide is guaranteed non-None here: the guard above only
+        # returns early when BOTH H and returns_wide are None, and this
+        # branch is H is None -- but that's a fact about the two guards
+        # together, not something a type checker narrows across separate
+        # if-statements on its own.
+        assert returns_wide is not None
         H, covered = _bounded_ewm_correlation_matrix(returns_wide, active_symbols, as_of,
                                                        idm_window_years, idm_halflife_days)
     split = compute_notional_split(active_symbols, notional_weighting, H, covered)
