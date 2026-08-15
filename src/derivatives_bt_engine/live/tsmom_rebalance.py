@@ -1192,9 +1192,15 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
     # but "given the ACTUAL rounded positions, what does each symbol
     # really contribute to total portfolio risk."
     if H is not None and active_symbols:
-        position_risk = {t['symbol']: t['position_risk'] for t in targets
-                         if not t.get('error') and t.get('position_risk') is not None}
-        realized = compute_realized_portfolio_risk(active_symbols, H, position_risk)
+        # Signed by target_contracts' direction -- see compute_realized_
+        # portfolio_risk's own docstring for why an unsigned magnitude
+        # here would silently drop every short's netting (or compounding)
+        # interaction with the rest of the book.
+        dollar_exposure = {t['symbol']: math.copysign(t['position_risk'], t['target_contracts'])
+                           for t in targets
+                           if not t.get('error') and t.get('position_risk') is not None
+                           and t.get('target_contracts') is not None}
+        realized = compute_realized_portfolio_risk(active_symbols, H, dollar_exposure)
         for t in targets:
             if t['symbol'] in realized['risk_contribution']:
                 t['risk_contribution'] = realized['risk_contribution'][t['symbol']]
@@ -1262,7 +1268,7 @@ def print_rebalance_report(targets: list[dict]) -> str:
     return report
 
 
-def print_cluster_risk_report(targets: list[dict]) -> str:
+def print_cluster_risk_report(targets: list[dict], account_equity: Optional[float] = None) -> str:
     """Pretty-print (and return as a string) per-cluster totals: position_risk
     (each symbol's own undiversified, standalone dollar risk, summed by
     cluster) alongside risk_contribution (diversification-aware -- what
@@ -1275,6 +1281,13 @@ def print_cluster_risk_report(targets: list[dict]) -> str:
     Each cluster header is followed by its member instruments (sorted by
     symbol), so the totals can be traced back to what's actually driving
     them, then a per-cluster subtotal line.
+
+    account_equity (optional): when given, the TOTAL line also shows each
+    figure as a % of equity. Only risk_contribution's pct is a true
+    portfolio-vol read (Euler's theorem: sum(risk_contribution) == realized
+    port_vol) -- position_risk's pct sums standalone per-symbol risk
+    ignoring correlation, so it overstates actual vol for any correlated
+    book and should not be read as "the" vol figure.
 
     Computed from whatever `targets` actually ended up being -- capped or
     not, per TsmomLiveConfig.apply_cluster_cap -- not itself gated by that
@@ -1310,9 +1323,15 @@ def print_cluster_risk_report(targets: list[dict]) -> str:
             line += f"  risk_contribution={rc:>12,.0f}"
         lines.append(line)
     lines.append('-' * 60)
-    total_line = f"{'TOTAL':12s}  position_risk={sum(cluster_position_risk.values()):>12,.0f}"
+    total_position_risk = sum(cluster_position_risk.values())
+    total_line = f"{'TOTAL':12s}  position_risk={total_position_risk:>12,.0f}"
+    if account_equity:
+        total_line += f" ({total_position_risk / account_equity:>5.1%})"
     if cluster_risk_contribution:
-        total_line += f"  risk_contribution={sum(cluster_risk_contribution.values()):>12,.0f}"
+        total_risk_contribution = sum(cluster_risk_contribution.values())
+        total_line += f"  risk_contribution={total_risk_contribution:>12,.0f}"
+        if account_equity:
+            total_line += f" ({total_risk_contribution / account_equity:>5.1%})"
     lines.append(total_line)
     report = '\n'.join(lines)
     print(report)

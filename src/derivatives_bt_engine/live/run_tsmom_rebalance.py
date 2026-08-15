@@ -382,7 +382,7 @@ def main():
 
     targets = compute_rebalance_targets(instruments, config, ib=ib)
     report = print_rebalance_report(targets)
-    cluster_report = print_cluster_risk_report(targets)
+    cluster_report = print_cluster_risk_report(targets, account_equity=args.account_equity)
 
     if not args.no_save:
         _save_report(report, targets, cluster_report)

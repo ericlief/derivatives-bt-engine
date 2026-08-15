@@ -1030,7 +1030,7 @@ def compute_idm(active_symbols: list[str], H: Optional[np.ndarray] = None,
 
 
 def compute_realized_portfolio_risk(active_symbols: list[str], H: np.ndarray,
-                                     position_risk: dict[str, float]) -> dict:
+                                     dollar_exposure: dict[str, float]) -> dict:
     """Realized (post-sizing) portfolio dollar vol and each symbol's
     marginal dollar risk contribution -- a diagnostic, NOT a sizing input:
     answers "given the positions this rebalance actually ended up with
@@ -1040,40 +1040,58 @@ def compute_realized_portfolio_risk(active_symbols: list[str], H: np.ndarray,
     questions about a HYPOTHETICAL weight vector before any rounding
     happens.
 
-    `position_risk`: {symbol: dollar risk}, e.g. {t['symbol']:
-    t['position_risk'] for t in targets if not t.get('error')} from
-    apply_cluster_risk_cap's own output -- already in DOLLAR-VOL units
-    (abs(target_contracts) * close * multiplier * hv), which matters:
-    H is a CORRELATION matrix (1.0 diagonal), so it has no notion of any
-    instrument's own vol built in -- the vector multiplied through it
+    `dollar_exposure`: {symbol: SIGNED dollar risk}, positive for a long,
+    negative for a short -- e.g. {t['symbol']: math.copysign(t
+    ['position_risk'], t['target_contracts']) for t in targets if not t.
+    get('error')}. This is deliberately NOT the same as apply_cluster_
+    risk_cap's own `position_risk` field (abs(target_contracts) * close *
+    multiplier * hv, always >= 0): w' H w only nets a short against a
+    positively-correlated long (or compounds it against a negatively-
+    correlated one) if direction is actually in the vector. Feed this
+    function unsigned magnitudes instead and you silently get the
+    variance of a hypothetical all-long book -- every short's hedging (or
+    anti-hedging) interaction with the rest of the portfolio disappears,
+    and any resulting negative risk_contribution reflects H's raw
+    correlation sign against an artificially all-positive w, not the
+    symbol's actual direction. Missing symbols default to 0.0 (no
+    position). H is a CORRELATION matrix (1.0 diagonal) with no notion of
+    any instrument's own vol built in -- the vector multiplied through it
     must already carry that, unlike a raw notional or contract-count
-    weight. Missing symbols default to 0.0 (no position).
+    weight.
 
     port_var = w' H w, port_vol = sqrt(port_var) (0.0 if port_var <= 0,
-    e.g. every position_risk is 0). marginal = H @ w; risk_contribution_i
-    = w_i * marginal_i / port_vol -- by construction (Euler's theorem for
-    a degree-1-homogeneous function), sum(risk_contribution.values()) ==
+    e.g. every exposure is 0). marginal = H @ w; risk_contribution_i =
+    w_i * marginal_i / port_vol -- by construction (Euler's theorem for a
+    degree-1-homogeneous function), sum(risk_contribution.values()) ==
     port_vol exactly, so it's a genuine decomposition of the book's total
-    risk across symbols, not an approximation.
+    risk across symbols, not an approximation. Because w is signed here,
+    risk_contribution can legitimately be negative for a real reason now:
+    a short position that's net diversifying (or a long that's net
+    diversifying against the book's shorts) marginally REDUCES total
+    portfolio variance, not just "correlated with a low weight."
 
     The point of comparing risk_contribution against the SAME symbol's
-    raw position_risk input: position_risk is each instrument's
-    UNDIVERSIFIED standalone dollar vol (what it would contribute alone);
-    risk_contribution is what it ACTUALLY contributes given today's
-    measured correlation -- exactly the gap compute_idm/ERC/HRP sizing is
-    meant to account for UP FRONT, so this is also a live check on
-    whether that sizing is holding up against realized (rounded)
-    positions, not just the pre-rounding theoretical split. A genuine
-    diversifier's risk_contribution comes in BELOW its own position_risk
-    (confirmed directly in test_allocation.py); a symbol correlated with
-    the rest of the book approaches, but is bounded above by, its own
-    position_risk when weights are comparable in size (sum(risk_
-    contribution) <= sum(position_risk) always, since correlation entries
-    are bounded by 1 -- Cauchy-Schwarz) -- an individual risk_contribution
-    exceeding its own position_risk IS possible in principle (e.g. a
-    small position heavily correlated with a much larger cluster), just
-    not in a symmetric, comparably-weighted case."""
-    w = np.array([position_risk.get(s, 0.0) for s in active_symbols])
+    UNSIGNED position_risk (apply_cluster_risk_cap's field, not this
+    function's input): position_risk is each instrument's UNDIVERSIFIED
+    standalone dollar vol (what it would contribute alone, direction
+    stripped out since a standalone position has no portfolio to net
+    against); risk_contribution is what it ACTUALLY contributes given
+    today's measured correlation AND its own direction -- exactly the gap
+    compute_idm/ERC/HRP sizing is meant to account for UP FRONT, so this
+    is also a live check on whether that sizing is holding up against
+    realized (rounded) positions, not just the pre-rounding theoretical
+    split. A genuine diversifier's risk_contribution comes in BELOW its
+    own position_risk (confirmed directly in test_allocation.py); a
+    symbol correlated with the rest of the book AND held in the same net
+    direction approaches, but is bounded above by, its own position_risk
+    when weights are comparable in size (sum(risk_contribution) <=
+    sum(position_risk) in that same-direction case, since correlation
+    entries are bounded by 1 -- Cauchy-Schwarz) -- an individual risk_
+    contribution exceeding its own position_risk IS possible in general
+    (e.g. a small position heavily correlated with a much larger
+    cluster), just not in a symmetric, comparably-weighted, same-
+    direction case."""
+    w = np.array([dollar_exposure.get(s, 0.0) for s in active_symbols])
     port_var = w @ H @ w
     if port_var <= 0:
         return {'port_vol': 0.0, 'risk_contribution': {s: 0.0 for s in active_symbols}}

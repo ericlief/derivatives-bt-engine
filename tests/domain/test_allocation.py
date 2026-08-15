@@ -637,6 +637,40 @@ def test_realized_portfolio_risk_missing_symbol_defaults_to_no_position():
     assert result_missing == result_explicit
 
 
+def test_realized_portfolio_risk_short_nets_against_correlated_long():
+    # A/B correlated at 0.9. Same-signed (both long) -- correlation
+    # compounds, port_var = wA^2 + wB^2 + 2*wA*wB*rho. Opposite-signed
+    # (long A, short B) -- correlation nets, port_var = wA^2 + wB^2 -
+    # 2*wA*wB*rho. This is the whole point of feeding SIGNED exposure
+    # into w' H w rather than the unsigned position_risk magnitude: a
+    # short position that's genuinely hedging a correlated long must
+    # produce a materially SMALLER port_vol, not the same one abs(w)
+    # would give regardless of direction.
+    symbols = ['A', 'B', 'C']
+    same_signed = compute_realized_portfolio_risk(symbols, _CORRELATED_PAIR_H, {'A': 10_000.0, 'B': 10_000.0})
+    opposite_signed = compute_realized_portfolio_risk(symbols, _CORRELATED_PAIR_H, {'A': 10_000.0, 'B': -10_000.0})
+
+    assert opposite_signed['port_vol'] < same_signed['port_vol']
+
+
+def test_realized_portfolio_risk_small_hedge_gets_negative_contribution():
+    # A big long (A) plus a SMALL short (B) in something correlated at 0.9:
+    # increasing B's short further, at the margin, still reduces total
+    # portfolio variance (B hasn't "used up" its hedging capacity against
+    # A's much larger size yet) -- Euler decomposition assigns that a
+    # genuine negative risk_contribution. This is the direction-driven
+    # negative RC compute_realized_portfolio_risk is meant to surface;
+    # it requires SIGNED exposure (an unsigned magnitude can never
+    # produce it here, since B is the smaller position -- with unsigned
+    # w every marginal contribution in this symmetric-sign H is
+    # non-negative).
+    symbols = ['A', 'B', 'C']
+    result = compute_realized_portfolio_risk(symbols, _CORRELATED_PAIR_H, {'A': 10_000.0, 'B': -2_000.0})
+
+    assert result['risk_contribution']['B'] < 0
+    assert sum(result['risk_contribution'].values()) == pytest.approx(result['port_vol'], rel=1e-9)
+
+
 # ── apply_cluster_risk_cap ───────────────────────────────────────────────────
 #
 # The cap is taken against a FIXED total_risk_target (account_equity *
