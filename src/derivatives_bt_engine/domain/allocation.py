@@ -499,10 +499,14 @@ def _bounded_ewm_correlation_matrix(returns_wide: pl.DataFrame, symbols: list[st
 def _corr_matrix_from_pairs(active_symbols: list[str],
                              corr_pairs: Optional[dict[tuple[str, str], float]]) -> np.ndarray:
     """Dense n x n correlation matrix (1.0 on the diagonal, corr_pairs off
-    it, in active_symbols' own order) -- shared by compute_idm,
-    compute_erc_weights, and compute_hrp_weights so all three price
-    diversification off exactly the same pairwise correlation estimate,
-    not three independently-reconstructed copies of it."""
+    it, in active_symbols' own order) -- the one place a hand-built
+    corr_pairs dict becomes H, this module's sole correlation-data
+    representation everywhere else (see compute_erc_weights' own
+    docstring). NOT called internally by compute_idm/compute_erc_weights/
+    compute_hrp_weights/compute_notional_split anymore -- those only take
+    H directly now; this exists purely for a caller (currently only
+    test_allocation.py's own fixtures) that starts with a dict and needs
+    to build H once before calling one of them."""
     n = len(active_symbols)
     idx = {s: i for i, s in enumerate(active_symbols)}
     H = np.eye(n)
