@@ -773,12 +773,15 @@ def _splice_live_front_month_bar(ib: Optional[IBPySync], instr: dict, db_symbol:
 
         new_row = picked_bars.tail(1).select('ts_event', 'open', 'high', 'low', 'close', 'volume')
         new_ts = new_row['ts_event'][0]
+        replaced_existing = (bars['ts_event'] == new_ts).any()
         merged = pl.concat(
             [bars.filter(pl.col('ts_event') != new_ts), new_row],
             how='diagonal_relaxed',
         ).sort('ts_event')
-        log.info('%s: spliced live bar for %s (close=%s, volume=%s) onto DB series (%d rows)',
-                 symbol, new_ts, new_row['close'][0], new_row['volume'][0], merged.height)
+        log.info('%s: spliced live bar for %s (close=%s, volume=%s) -- %s, DB series %d -> %d rows',
+                 symbol, new_ts, new_row['close'][0], new_row['volume'][0],
+                 'replaced existing row' if replaced_existing else 'appended new row',
+                 bars.height, merged.height)
         return merged
     except Exception as exc:
         log.warning('%s: live price splice failed (%s) -- falling back to unspliced DB bars', symbol, exc)
