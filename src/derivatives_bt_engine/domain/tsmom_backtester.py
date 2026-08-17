@@ -172,7 +172,7 @@ class TsmomBacktestConfig:
     # _bounded_ewm_correlation_matrix: total_budget = current capital *
     # target_portfolio_vol * IDM (IDM computed from that rebalance's own
     # signal-active symbols' REAL correlation, over a bounded trailing EWM
-    # window -- idm_window_years/idm_halflife_days below), split across
+    # window -- corr_window_years/corr_halflife_days below), split across
     # those active symbols per notional_weighting below (flat by default).
     # At the degenerate zero-correlation case
     # this reduces exactly to
@@ -206,8 +206,8 @@ class TsmomBacktestConfig:
     # sibling script's own calibration pattern) is a deliberate follow-up,
     # not implemented here.
     target_portfolio_vol: Optional[float] = None
-    idm_window_years: float = 3.0
-    idm_halflife_days: float = 63.0
+    corr_window_years: float = 3.0
+    corr_halflife_days: float = 63.0
     # How the total IDM-derived dollar-vol budget is split ACROSS active
     # symbols -- only matters when target_portfolio_vol is set. 'flat'
     # (default, unchanged prior behavior): every active symbol gets the
@@ -1266,7 +1266,7 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
                     # probe result's own target is already 0 in that case).
                     per_symbol_budget = compute_symbol_notional_budget(
                         active_symbols, returns_wide, d, ledger.capital, config.target_portfolio_vol,
-                        config.vol_target, config.idm_window_years, config.idm_halflife_days,
+                        config.vol_target, config.corr_window_years, config.corr_halflife_days,
                         config.notional_weighting, config.use_idm)
 
                     for symbol in config.symbols:

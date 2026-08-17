@@ -867,8 +867,8 @@ def compute_notional_split(active_symbols: list[str], notional_weighting: str,
 
 def compute_symbol_notional_budget(active_symbols: list[str], returns_wide: Optional[pl.DataFrame],
                                     as_of: date, capital: float, target_portfolio_vol: float,
-                                    vol_target: float, idm_window_years: float,
-                                    idm_halflife_days: float,
+                                    vol_target: float, corr_window_years: float,
+                                    corr_halflife_days: float,
                                     notional_weighting: str = 'flat',
                                     use_idm: bool = True,
                                     H: Optional[np.ndarray] = None,
@@ -943,7 +943,7 @@ def compute_symbol_notional_budget(active_symbols: list[str], returns_wide: Opti
 
     `H`/`covered`: pass both if a caller already ran
     _bounded_ewm_correlation_matrix for this exact (active_symbols, as_of,
-    idm_window_years, idm_halflife_days) -- e.g. the live rebalance report,
+    corr_window_years, corr_halflife_days) -- e.g. the live rebalance report,
     which needs them itself for notional_weight_by_symbol before ever
     calling this function. Skips rerunning the EWM estimation over
     returns_wide a second time. `covered` is what actually protects an
@@ -969,7 +969,7 @@ def compute_symbol_notional_budget(active_symbols: list[str], returns_wide: Opti
         # if-statements on its own.
         assert returns_wide is not None
         H, covered = _bounded_ewm_correlation_matrix(returns_wide, active_symbols, as_of,
-                                                       idm_window_years, idm_halflife_days)
+                                                       corr_window_years, corr_halflife_days)
     split = compute_notional_split(active_symbols, notional_weighting, H, covered)
     idm_multiplier = _coverage_restricted_idm(active_symbols, H, covered, weights=split) if use_idm else 1.0
     total_dollar_vol_target = capital * target_portfolio_vol * idm_multiplier

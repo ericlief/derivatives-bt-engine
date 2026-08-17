@@ -84,10 +84,10 @@ def parse_args():
                         "rebalance's own active symbols -- see TsmomBacktestConfig's own docstring for "
                         "the full derivation and a confirmed, honestly-documented calibration caveat "
                         "(fixes the unbounded-overstatement direction of the bug, not exactly precise)")
-    p.add_argument('--idm-window-years', type=float, default=3.0,
+    p.add_argument('--corr-window-years', type=float, default=3.0,
                    help='Only used with --target-portfolio-vol: bounded trailing window for the EWM '
                         'correlation estimate (default: %(default)s)')
-    p.add_argument('--idm-halflife-days', type=float, default=63.0,
+    p.add_argument('--corr-halflife-days', type=float, default=63.0,
                    help='Only used with --target-portfolio-vol: EWM halflife within the bounded window '
                         '(default: %(default)s)')
     p.add_argument('--notional-weighting', choices=['flat', 'erc', 'hrp'], default='flat',
@@ -176,8 +176,8 @@ def main():
         vix_gating=not args.disable_vix_gating,
         vix_ma_window_days=args.vix_ma_window_days,
         target_portfolio_vol=args.target_portfolio_vol,
-        idm_window_years=args.idm_window_years,
-        idm_halflife_days=args.idm_halflife_days,
+        corr_window_years=args.corr_window_years,
+        corr_halflife_days=args.corr_halflife_days,
         notional_weighting=args.notional_weighting,
         use_idm=args.use_idm,
         signal_weighting=args.signal_weighting,

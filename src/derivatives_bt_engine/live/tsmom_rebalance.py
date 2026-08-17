@@ -130,7 +130,7 @@ class TsmomLiveConfig:
 
     Deliberately named/shaped after domain.tsmom_backtester.TsmomBacktestConfig
     -- signal_weighting/mixing_pool/notional_weighting/use_idm/
-    idm_window_years/idm_halflife_days/vol_target/target_portfolio_vol share
+    corr_window_years/corr_halflife_days/vol_target/target_portfolio_vol share
     both name AND meaning with that dataclass, so the same mental model
     (and the same config values) transfer directly between a backtest run
     and a live rebalance. Fields with no backtest equivalent
@@ -223,8 +223,8 @@ class TsmomLiveConfig:
     # diversification across the two steps).
     notional_weighting: str = 'flat'
     use_idm: bool = True
-    idm_window_years: float = 3.0
-    idm_halflife_days: float = 63.0
+    corr_window_years: float = 3.0
+    corr_halflife_days: float = 63.0
     # Whether apply_cluster_risk_cap's cluster-level cap/redistribution
     # runs at all (whole-contract rounding always happens regardless --
     # see that function's own `apply_cap` docstring). Default OFF: under
@@ -1317,7 +1317,7 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
             returns_wide = build_returns_wide({s: raw['closes'] for s, raw in raw_by_symbol.items()})
             as_of = config.as_of or date.today()
             H, covered = _bounded_ewm_correlation_matrix(returns_wide, active_symbols, as_of,
-                                                          config.idm_window_years, config.idm_halflife_days)
+                                                          config.corr_window_years, config.corr_halflife_days)
             notional_weight_by_symbol = compute_notional_split(active_symbols, config.notional_weighting,
                                                                 H, covered)
             # H/covered passed straight through -- compute_symbol_notional_budget
@@ -1326,7 +1326,7 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
             # this function just computed above.
             budget_constant_by_symbol = compute_symbol_notional_budget(
                 active_symbols, returns_wide, as_of, account_equity, config.target_portfolio_vol,
-                config.vol_target, config.idm_window_years, config.idm_halflife_days,
+                config.vol_target, config.corr_window_years, config.corr_halflife_days,
                 config.notional_weighting, config.use_idm,
                 H=H, covered=covered,
             )

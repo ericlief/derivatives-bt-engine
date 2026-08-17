@@ -232,18 +232,18 @@ _CLUSTER_FLOOR_RATIO = 0.51
 # capital), so DEFAULT_IDM_SCALING is False -- opt in explicitly for
 # comparison, not a silent behavior change.
 DEFAULT_IDM_SCALING = False
-DEFAULT_IDM_WINDOW_YEARS = 3.0      # bounded trailing window -- see
-                                     # _bounded_ewm_correlation_matrix's own
-                                     # docstring for why bounded, not an
-                                     # unbounded full-history EWM
-DEFAULT_IDM_HALFLIFE_DAYS = 63.0    # matches this project's existing
-                                     # per-instrument vol-estimation default
-                                     # (tsmom_risk_budget_diagnostic.py) --
-                                     # not independently tuned for
-                                     # correlation specifically; a longer
-                                     # halflife is plausibly more
-                                     # appropriate (correlation is slower-
-                                     # moving than vol) but untested here
+DEFAULT_CORR_WINDOW_YEARS = 3.0       # bounded trailing window -- see
+                                      # _bounded_ewm_correlation_matrix's own
+                                      # docstring for why bounded, not an
+                                      # unbounded full-history EWM
+DEFAULT_CORR_HALFLIFE_DAYS = 63.0     # matches this project's existing
+                                      # per-instrument vol-estimation default
+                                      # (tsmom_risk_budget_diagnostic.py) --
+                                      # not independently tuned for
+                                      # correlation specifically; a longer
+                                      # halflife is plausibly more
+                                      # appropriate (correlation is slower-
+                                      # moving than vol) but untested here
 
 
 def run(symbols: list[str], start: date, end: date, regime_discount: float,
@@ -256,8 +256,8 @@ def run(symbols: list[str], start: date, end: date, regime_discount: float,
         active_set_redistribution: bool = DEFAULT_ACTIVE_SET_REDISTRIBUTION,
         guarantee_cluster_representation: bool = DEFAULT_GUARANTEE_CLUSTER_REPRESENTATION,
         idm_scaling: bool = DEFAULT_IDM_SCALING,
-        idm_window_years: float = DEFAULT_IDM_WINDOW_YEARS,
-        idm_halflife_days: float = DEFAULT_IDM_HALFLIFE_DAYS,
+        corr_window_years: float = DEFAULT_CORR_WINDOW_YEARS,
+        corr_halflife_days: float = DEFAULT_CORR_HALFLIFE_DAYS,
         save_results: bool = False,
         results_tag: Optional[str] = None,
         _quiet: bool = False) -> dict:
@@ -384,8 +384,8 @@ def run(symbols: list[str], start: date, end: date, regime_discount: float,
         the live system's own compute_desired_risk_budget, whose
         1/sqrt(n_effective) is exactly this same formula under the
         assumption every active cluster is uncorrelated (rho=0) -- this
-        uses the REAL measured correlation instead. idm_window_years
-        (default 3.0) and idm_halflife_days (default 60.0, matching this
+        uses the REAL measured correlation instead. corr_window_years
+        (default 3.0) and corr_halflife_days (default 60.0, matching this
         project's existing per-instrument vol-estimation default -- NOT
         independently tuned for correlation, which is plausibly
         slower-moving and might want a longer halflife; untested here)
@@ -433,8 +433,8 @@ def run(symbols: list[str], start: date, end: date, regime_discount: float,
                         mixing_pool=mixing_pool,
                         active_set_redistribution=active_set_redistribution,
                         guarantee_cluster_representation=guarantee_cluster_representation,
-                        idm_scaling=idm_scaling, idm_window_years=idm_window_years,
-                        idm_halflife_days=idm_halflife_days,
+                        idm_scaling=idm_scaling, corr_window_years=corr_window_years,
+                        corr_halflife_days=corr_halflife_days,
                         save_results=False, results_tag=None, _quiet=True)
         realized_vol = (baseline['ann_vol_pct'] or 0) / 100
         if realized_vol > 0:
@@ -741,7 +741,7 @@ def run(symbols: list[str], start: date, end: date, regime_discount: float,
             if idm_scaling:
                 active_symbols_for_idm = [c['s'] for c in candidates if c['weight'] != 0]
                 H, covered = _bounded_ewm_correlation_matrix(
-                    returns_wide, active_symbols_for_idm, d, idm_window_years, idm_halflife_days)
+                    returns_wide, active_symbols_for_idm, d, corr_window_years, corr_halflife_days)
                 # _coverage_restricted_idm, not a bare compute_idm call: a
                 # signal-active symbol with no correlation coverage (e.g.
                 # just added to the universe, too little history yet) must
@@ -1110,11 +1110,11 @@ def parse_args():
                          "way --no-active-set-redistribution/--no-cluster-floor's defaults are). "
                          "See run()'s own docstring and compute_idm's docstring for the full "
                          "derivation")
-    p.add_argument('--idm-window-years', type=float, default=DEFAULT_IDM_WINDOW_YEARS,
+    p.add_argument('--corr-window-years', type=float, default=DEFAULT_CORR_WINDOW_YEARS,
                     help='Only used with --idm-scaling: bounded trailing window for the EWM '
                          'correlation estimate -- data older than this contributes exactly 0, '
                          'unlike an unbounded full-history EWM (default: %(default)s)')
-    p.add_argument('--idm-halflife-days', type=float, default=DEFAULT_IDM_HALFLIFE_DAYS,
+    p.add_argument('--corr-halflife-days', type=float, default=DEFAULT_CORR_HALFLIFE_DAYS,
                     help='Only used with --idm-scaling: EWM halflife within the bounded window '
                          '(default: %(default)s -- matches this project\'s existing per-instrument '
                          'vol-estimation default, not independently tuned for correlation)')
@@ -1162,8 +1162,8 @@ def main():
                       target_portfolio_vol=args.target_portfolio_vol,
                       active_set_redistribution=not args.no_active_set_redistribution,
                       guarantee_cluster_representation=not args.no_cluster_floor,
-                      idm_scaling=args.idm_scaling, idm_window_years=args.idm_window_years,
-                      idm_halflife_days=args.idm_halflife_days,
+                      idm_scaling=args.idm_scaling, corr_window_years=args.corr_window_years,
+                      corr_halflife_days=args.corr_halflife_days,
                       save_results=args.save_results, results_tag=results_tag)
         print(result)
         summary_rows.append(result)
@@ -1176,8 +1176,8 @@ def main():
                       weighting_mode='dynamic', mixing_pool=args.mixing_pool,
                       active_set_redistribution=not args.no_active_set_redistribution,
                       guarantee_cluster_representation=not args.no_cluster_floor,
-                      idm_scaling=args.idm_scaling, idm_window_years=args.idm_window_years,
-                      idm_halflife_days=args.idm_halflife_days,
+                      idm_scaling=args.idm_scaling, corr_window_years=args.corr_window_years,
+                      corr_halflife_days=args.corr_halflife_days,
                       save_results=args.save_results, results_tag=results_tag)
         print(result)
         summary_rows.append(result)

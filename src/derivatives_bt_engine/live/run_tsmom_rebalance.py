@@ -278,7 +278,7 @@ def parse_args():
                         "active cluster (zero-correlation assumption). 'idm': "
                         "compute_symbol_notional_budget -- one correlation-aware budget PER ACTIVE "
                         "SYMBOL, via a bounded trailing EWM correlation matrix (see "
-                        "--notional-weighting/--use-idm/--idm-window-years/--idm-halflife-days)")
+                        "--notional-weighting/--use-idm/--corr-window-years/--corr-halflife-days)")
     p.add_argument('--notional-weighting', choices=NOTIONAL_WEIGHTING_SCHEMES, default='flat',
                    help="Only used with --risk-budget-mode idm (default: %(default)s). How the "
                         "IDM-derived total is split across active symbols -- 'flat': equal split. "
@@ -298,10 +298,10 @@ def parse_args():
                         "docstring. When on with --risk-budget-mode idm, the cap's own total risk "
                         "target is scaled by the same idm_multiplier used to size positions, so it "
                         "stays a consistency backstop rather than reversing that credit")
-    p.add_argument('--idm-window-years', type=float, default=3.0,
+    p.add_argument('--corr-window-years', type=float, default=3.0,
                    help='Only used with --risk-budget-mode idm: bounded trailing window for the EWM '
                         'correlation estimate (default: %(default)s)')
-    p.add_argument('--idm-halflife-days', type=float, default=63.0,
+    p.add_argument('--corr-halflife-days', type=float, default=63.0,
                    help='Only used with --risk-budget-mode idm: EWM halflife within the bounded '
                         'window (default: %(default)s)')
     p.add_argument('--data-source', choices=DATA_SOURCES, default='ib',
@@ -385,8 +385,8 @@ def main():
         notional_weighting=args.notional_weighting,
         use_idm=args.use_idm,
         apply_cluster_cap=args.apply_cluster_cap,
-        idm_window_years=args.idm_window_years,
-        idm_halflife_days=args.idm_halflife_days,
+        corr_window_years=args.corr_window_years,
+        corr_halflife_days=args.corr_halflife_days,
         data_source=args.data_source,
         bar_years=args.bar_years,
         vx_ma_window_days=args.vx_ma_window_days,

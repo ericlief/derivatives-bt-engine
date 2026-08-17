@@ -359,7 +359,7 @@ def _notional_budget(notional_weighting: str, use_idm: bool = True) -> dict[str,
     as_of = price_data['A']['ts_event'][-1]
     return compute_symbol_notional_budget(
         ['A', 'B', 'C'], returns_wide, as_of, capital=100_000, target_portfolio_vol=0.15,
-        vol_target=0.15, idm_window_years=3.0, idm_halflife_days=63.0,
+        vol_target=0.15, corr_window_years=3.0, corr_halflife_days=63.0,
         notional_weighting=notional_weighting, use_idm=use_idm,
     )
 
@@ -570,7 +570,7 @@ def test_notional_budget_caps_uncovered_symbol_end_to_end():
 
     budget = compute_symbol_notional_budget(
         symbols, returns_wide, as_of, capital=100_000, target_portfolio_vol=0.15,
-        vol_target=0.15, idm_window_years=3.0, idm_halflife_days=63.0,
+        vol_target=0.15, corr_window_years=3.0, corr_halflife_days=63.0,
         notional_weighting='erc', use_idm=True,
     )
 
