@@ -271,8 +271,8 @@ class TsmomLiveConfig:
     # corrupts them instead of actually fixing the staleness). Requires a
     # live `ib` connection even though data_source='database' (compute_
     # rebalance_targets raises if splice_live_price=True and ib is None).
-    # Default OFF: costs up to 4 extra IB round-trips per spliced symbol
-    # per run (2 candidate contracts x qualify+historical-bars, to
+    # Default OFF: costs up to 6 extra IB round-trips per spliced symbol
+    # per run (3 candidate contracts x qualify+historical-bars, to
     # replicate the DB's own volume-based front-month rule live) and any
     # splice failure for a symbol silently falls back to that symbol's
     # plain (possibly stale) DB bars rather than failing the run -- see
@@ -585,10 +585,21 @@ def _next_active_month_yyyymm(active_months: list[str], last_expiration: date) -
 
 
 def _live_front_month_candidates(active_months: list[str], last_expiration: date, today: date,
-                                  max_candidates: int = 2) -> list[str]:
-    """Up to `max_candidates` YYYYMM months to compare live IB volume
-    across, starting from the first one that isn't almost certainly
-    already expired.
+                                  max_candidates: int = 3) -> list[str]:
+    """Up to `max_candidates` YYYYMM months (default 3: the first
+    not-obviously-expired one, plus the 2 after it) to compare live IB
+    volume across, starting from the first one that isn't almost
+    certainly already expired.
+
+    3 (not 2): matters most for a symbol with NO restricted cycle (e.g.
+    CL, `active_months` deliberately set to all 12 CME months --
+    instruments.py's own comment on that entry) where "the next month"
+    isn't necessarily the true volume leader the way it reliably is for a
+    sparse, well-separated cycle (grains/metals/financials roll onto the
+    literal next confirmed month with nothing in between to compete) --
+    WTI's real front-month convention can roll multiple months out ahead
+    of nominal expiration, so checking only 1 month ahead risks picking a
+    contract that's already lost the crossover to one further out.
 
     Walks forward through active_months from last_expiration's own month,
     SKIPPING any month whose own calendar month is already strictly
@@ -814,9 +825,14 @@ def _splice_live_front_month_bar(ib: Optional[IBPySync], instr: dict, db_symbol:
 
         if picked_bars is None:
             raise RuntimeError(f"no live candidate contract available among {candidate_months}")
+        assert picked_month is not None  # picked alongside picked_bars, always set together
         if picked_month != candidate_months[0]:
+            # Every candidate STRICTLY nearer than the one actually
+            # picked -- not candidate_months[:-1] (wrong once there are
+            # 3+ candidates and the pick isn't the very last one).
+            nearer = candidate_months[:candidate_months.index(picked_month)]
             log.warning('%s: live roll detected since DB was last refreshed -- picked %s (vol=%s) '
-                        'over nearer candidate(s) %s', symbol, picked_month, picked_vol, candidate_months[:-1])
+                        'over nearer candidate(s) %s', symbol, picked_month, picked_vol, nearer)
 
         # >= (not >): also picks up a same-day refresh of the DB's own
         # last cached row (e.g. IB has a more current intraday close for

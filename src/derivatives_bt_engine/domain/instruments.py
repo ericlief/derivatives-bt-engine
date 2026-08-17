@@ -174,13 +174,26 @@ INSTRUMENTS: dict[str, dict] = {
     # CL/MCL clear on NYMEX (crude oil), not COMEX (metals only). MCL
     # (launched 2021) borrows CL's via signal_symbol, same reasoning as
     # MES/MNQ above.
-    # CL: active_months deliberately left unset -- confirmed empirically
-    # (research doc §2.2) to have NO restriction at all (all 12 CME month
-    # codes win the daily volume race in comparable numbers, unlike every
-    # other cluster surveyed); "missing" here means "no filter needed,"
-    # not "not yet checked."
+    # CL: confirmed empirically (research doc §2.2) to have NO restriction
+    # at all -- all 12 CME month codes win the daily volume race in
+    # comparable numbers, unlike every other cluster surveyed. Unlike
+    # every other confirmed active_months entry, this doesn't narrow the
+    # live splice's candidate search (splice_live_price) -- it's set to
+    # the full 12-month list specifically so resolve_active_months
+    # doesn't return None (which the splice reads as "unconfirmed, skip
+    # this symbol entirely," the right call for a genuinely-unconfirmed
+    # case like BRE but wrong here, where "no restriction" IS the
+    # confirmed finding) while still giving _live_front_month_candidates
+    # a real cycle to walk. Because there's no sparse, well-separated
+    # cycle to anchor a "next month" guess the way grains/metals/
+    # financials have, WTI's front-month convention can roll multiple
+    # months out ahead of nominal expiration -- see
+    # _live_front_month_candidates' own docstring on why it checks 3
+    # candidates (not the usual 2) for exactly this reason.
     'CL':  {'exchange': 'NYMEX', 'multiplier': 1000,       'cluster': 'energy',
-            'initial_margin': 16602.40, 'commission': 2.36, 'annualization_days': 259},
+            'initial_margin': 16602.40, 'commission': 2.36,
+            'active_months': ['F', 'G', 'H', 'J', 'K', 'M', 'N', 'Q', 'U', 'V', 'X', 'Z'],
+            'annualization_days': 259},
     'MCL': {'exchange': 'NYMEX', 'multiplier': 100,        'cluster': 'energy',
             'initial_margin': 1660.24, 'commission': 0.76, 'signal_symbol': 'CL'},
 

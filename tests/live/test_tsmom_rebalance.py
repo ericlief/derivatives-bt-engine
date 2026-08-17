@@ -563,7 +563,7 @@ def test_live_front_month_candidates_not_expired_stays_put():
     last_expiration = date(2026, 6, 20)
     today = date(2026, 6, 10)
     candidates = tr._live_front_month_candidates(active_months, last_expiration, today)
-    assert candidates == ['202606', '202609']
+    assert candidates == ['202606', '202609', '202612']
 
 
 def test_live_front_month_candidates_walks_past_expired_months():
@@ -573,7 +573,7 @@ def test_live_front_month_candidates_walks_past_expired_months():
     last_expiration = date(2026, 3, 20)
     today = date(2026, 6, 10)
     candidates = tr._live_front_month_candidates(active_months, last_expiration, today)
-    assert candidates == ['202606', '202609']
+    assert candidates == ['202606', '202609', '202612']
 
 
 def test_live_front_month_candidates_walks_across_year_boundary():
@@ -581,7 +581,15 @@ def test_live_front_month_candidates_walks_across_year_boundary():
     last_expiration = date(2025, 3, 20)
     today = date(2026, 1, 15)
     candidates = tr._live_front_month_candidates(active_months, last_expiration, today)
-    assert candidates == ['202603', '202606']
+    assert candidates == ['202603', '202606', '202609']
+
+
+def test_live_front_month_candidates_respects_explicit_max_candidates():
+    active_months = ['H', 'M', 'U', 'Z']
+    last_expiration = date(2026, 6, 20)
+    today = date(2026, 6, 10)
+    candidates = tr._live_front_month_candidates(active_months, last_expiration, today, max_candidates=2)
+    assert candidates == ['202606', '202609']
 
 
 def test_splice_live_price_requires_ib_even_in_database_mode():
@@ -659,11 +667,13 @@ def test_splice_uses_blank_multiplier_not_instrument_or_db_symbol_own(monkeypatc
     expiration = _not_stale_expiration()
     current_month = expiration.strftime('%Y%m')
     next_month = tr._next_active_month_yyyymm(_TEST_CYCLE, expiration)
+    next_month_date = date(int(next_month[:4]), int(next_month[4:6]), 1)
+    third_month = tr._next_active_month_yyyymm(_TEST_CYCLE, next_month_date)
     price_data = {'ES': _full_price_df(date(2018, 1, 1), 500, drift=0.0015, expiration=expiration, seed=1)}
     _patch_db(monkeypatch, price_data)
     monkeypatch.setattr(tr, 'resolve_active_months', lambda symbol: _TEST_CYCLE)
     monkeypatch.setattr(tr, 'get_spec', lambda symbol: {'exchange': 'CME', 'multiplier': 50})
-    fake_ib = _FakeIB(volumes_by_month={current_month: 1000, next_month: 500})
+    fake_ib = _FakeIB(volumes_by_month={current_month: 1000, next_month: 500, third_month: 100})
 
     mes = _instrument('MES', multiplier=5.0)
     mes['db_symbol'] = 'ES'
@@ -764,6 +774,67 @@ def test_splice_skipped_when_active_months_unconfirmed(monkeypatch):
 
     assert targets[0].get('error') is None
     assert fake_ib.calls == []
+
+
+def test_splice_no_restriction_symbol_like_cl_now_gets_spliced(monkeypatch):
+    # Regression test: CL (crude oil) has NO restricted active_months
+    # cycle -- confirmed empirically to trade all 12 CME months in
+    # comparable volume, unlike every other product surveyed. It used to
+    # get skipped entirely (resolve_active_months returned None, read as
+    # "unconfirmed"), even though "no restriction" is itself a confirmed
+    # finding, not an unknown. instruments.py now sets CL's active_months
+    # to the full 12-month list specifically so it isn't treated the same
+    # as a genuinely-unconfirmed symbol (e.g. BRE) -- this proves the
+    # fix: a full-12-month cycle symbol actually gets spliced now.
+    all_months = ['F', 'G', 'H', 'J', 'K', 'M', 'N', 'Q', 'U', 'V', 'X', 'Z']
+    expiration = _not_stale_expiration()
+    current_month = expiration.strftime('%Y%m')
+    price_data = {'CL': _full_price_df(date(2018, 1, 1), 500, drift=0.0015, expiration=expiration, seed=1)}
+    _patch_db(monkeypatch, price_data)
+    monkeypatch.setattr(tr, 'resolve_active_months', lambda symbol: all_months)
+    monkeypatch.setattr(tr, 'get_spec', lambda symbol: {'exchange': 'NYMEX'})
+    fake_ib = _FakeIB(volumes_by_month={current_month: 1000})
+
+    mcl = _instrument('MCL', multiplier=100.0)
+    mcl['db_symbol'] = 'CL'
+    mcl['signal_symbol'] = 'CL'
+    config = TsmomLiveConfig(account_equity=100_000, data_source='database', splice_live_price=True)
+    targets = compute_rebalance_targets([mcl], config, ib=fake_ib)
+
+    assert targets[0].get('error') is None
+    assert fake_ib.calls != []  # actually attempted, not skipped like the unconfirmed case above
+
+
+def test_splice_widened_search_finds_winner_two_months_out(monkeypatch, caplog):
+    # The concrete scenario this widened search (3 candidates, not 2) was
+    # built for: a no-restriction product's true volume leader can be
+    # further out than just "the next month" -- confirmed live can't be
+    # exercised here (needs real IB volume data), but this proves the
+    # mechanism: the 3rd candidate (2 months out) wins the comparison,
+    # and a 2-candidate search would have missed it entirely.
+    all_months = ['F', 'G', 'H', 'J', 'K', 'M', 'N', 'Q', 'U', 'V', 'X', 'Z']
+    expiration = _not_stale_expiration()
+    current_month = expiration.strftime('%Y%m')
+    next_month = tr._next_active_month_yyyymm(all_months, expiration)
+    next_month_date = date(int(next_month[:4]), int(next_month[4:6]), 1)
+    third_month = tr._next_active_month_yyyymm(all_months, next_month_date)
+    price_data = {'CL': _full_price_df(date(2018, 1, 1), 500, drift=0.0015, expiration=expiration, seed=1)}
+    _patch_db(monkeypatch, price_data)
+    monkeypatch.setattr(tr, 'resolve_active_months', lambda symbol: all_months)
+    monkeypatch.setattr(tr, 'get_spec', lambda symbol: {'exchange': 'NYMEX'})
+    fake_ib = _FakeIB(volumes_by_month={current_month: 500, next_month: 700, third_month: 5000},
+                      bar_by_month={third_month: (date.today(), 77.0)})
+
+    mcl = _instrument('MCL', multiplier=100.0)
+    mcl['db_symbol'] = 'CL'
+    mcl['signal_symbol'] = 'CL'
+    config = TsmomLiveConfig(account_equity=100_000, data_source='database', splice_live_price=True)
+    with caplog.at_level('WARNING'):
+        targets = compute_rebalance_targets([mcl], config, ib=fake_ib)
+
+    assert targets[0].get('error') is None
+    assert targets[0]['close'] == pytest.approx(77.0)
+    assert any('roll detected' in r.message for r in caplog.records)
 
 
 def test_splice_falls_back_gracefully_on_ib_error(monkeypatch, caplog):
