@@ -165,6 +165,35 @@ def test_tsmom_live_config_defaults_match_prior_behavior():
     assert config.data_source == 'ib'
     assert config.notional_weighting == 'flat'
     assert config.use_idm is True
+    assert config.fast_window == 63
+    assert config.slow_window == 252
+    assert config.vol_fast_window is None
+    assert config.vol_slow_window is None
+
+
+def test_tsmom_live_config_rejects_bad_windows():
+    with pytest.raises(ValueError):
+        TsmomLiveConfig(fast_window=0)
+    with pytest.raises(ValueError):
+        TsmomLiveConfig(fast_window=252, slow_window=63)
+
+
+def test_fetch_signal_inputs_respects_custom_windows(monkeypatch):
+    price_data = {'X': _price_df(date(2018, 1, 1), 500, drift=0.0015, vol=0.005, seed=1)}
+    _patch_db(monkeypatch, price_data)
+
+    default_config = TsmomLiveConfig(account_equity=100_000, data_source='database')
+    custom_config = TsmomLiveConfig(account_equity=100_000, data_source='database',
+                                     fast_window=21, slow_window=100)
+    instr = _instrument('X')
+
+    default_raw = tr._fetch_signal_inputs(None, instr, default_config)
+    custom_raw = tr._fetch_signal_inputs(None, instr, custom_config)
+
+    # Different windows -> different ts_fast/ts_slow for the same series
+    # (would only coincidentally match if the underlying r1d series were
+    # perfectly flat, which _price_df's random walk isn't).
+    assert default_raw['cm_df'].tail(1)['ts_fast'][0] != custom_raw['cm_df'].tail(1)['ts_fast'][0]
 
 
 # ── compute_rebalance_targets: ib/database dispatch ──────────────────────────

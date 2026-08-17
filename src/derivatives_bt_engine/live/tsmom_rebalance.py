@@ -71,6 +71,8 @@ from derivatives_bt_engine.domain.allocation import (
 )
 from derivatives_bt_engine.domain.futures_dataloader import FuturesDataLoader, assert_monotonic_expiration
 from derivatives_bt_engine.domain.signal import (
+    DEFAULT_FAST_WINDOW,
+    DEFAULT_SLOW_WINDOW,
     build_features,
     classify_signal_confidence,
     compute_signal_confidence,
@@ -190,6 +192,20 @@ class TsmomLiveConfig:
     # instruments.py universe). 'global': one shared estimate pooled
     # across every instrument regardless of cluster.
     mixing_pool: str = 'cluster'
+    # continuous_momentum's own return-horizon windows -- only matters
+    # when signal_weighting == 'continuous' (goulding_monthly ignores
+    # these, using its own fast_months/slow_months, not exposed here).
+    # vol_fast_window/vol_slow_window default to None -> horizon-matched
+    # to fast_window/slow_window (see continuous_momentum's own docstring
+    # on why that pairing matters: ts_fast/ts_slow are horizon Sharpe-like
+    # statistics, and an unmatched vol window breaks that clean n-day-
+    # return-over-n-day-vol correspondence) -- pass them explicitly only
+    # to deliberately decouple the two. Shared with TsmomBacktestConfig's
+    # own identically-named fields, same semantics/defaults.
+    fast_window: int = DEFAULT_FAST_WINDOW
+    slow_window: int = DEFAULT_SLOW_WINDOW
+    vol_fast_window: Optional[int] = None
+    vol_slow_window: Optional[int] = None
     # 'cluster' (default, unchanged prior behavior): compute_n_effective/
     # compute_desired_risk_budget -- one shared risk budget per ACTIVE
     # CLUSTER (zero-correlation assumption), replicated across every
@@ -295,6 +311,10 @@ class TsmomLiveConfig:
                               f"got {self.notional_weighting!r}")
         if self.data_source not in DATA_SOURCES:
             raise ValueError(f"data_source must be one of {DATA_SOURCES}, got {self.data_source!r}")
+        if self.fast_window <= 0 or self.slow_window <= 0:
+            raise ValueError("fast_window/slow_window must be positive")
+        if self.fast_window >= self.slow_window:
+            raise ValueError(f"fast_window ({self.fast_window}) must be < slow_window ({self.slow_window})")
 
 
 def build_instruments(symbols: list[str], max_notional: Optional[float] = None,
@@ -915,7 +935,9 @@ def _fetch_signal_inputs(ib: Optional[IBPySync], instr: dict, config: TsmomLiveC
     # unconfirmed, unchanged from this module's prior universal-252 behavior.
     annualization_days = resolve_annualization_days(instr['symbol'])
     feat = build_features(bars)
-    cm_df = continuous_momentum(feat, annualization_days=annualization_days)
+    cm_df = continuous_momentum(feat, fast_window=config.fast_window, slow_window=config.slow_window,
+                                 vol_fast_window=config.vol_fast_window, vol_slow_window=config.vol_slow_window,
+                                 annualization_days=annualization_days)
     g_df = goulding_monthly(feat) if config.signal_weighting == 'goulding' else None
 
     return {

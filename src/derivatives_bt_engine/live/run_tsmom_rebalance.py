@@ -258,6 +258,20 @@ def parse_args():
                    help="Only used with --signal-weighting goulding (default: %(default)s). 'cluster': "
                         "a_Co/a_Re estimated separately per instrument cluster. 'global': one shared "
                         "estimate pooled across every --instruments regardless of cluster")
+    p.add_argument('--fast-window', type=int, default=63,
+                   help="Only used with --signal-weighting continuous: continuous_momentum's fast "
+                        "return-horizon window in trading days (default: %(default)s)")
+    p.add_argument('--slow-window', type=int, default=252,
+                   help="Only used with --signal-weighting continuous: continuous_momentum's slow "
+                        "return-horizon window in trading days (default: %(default)s)")
+    p.add_argument('--vol-fast-window', type=int, default=None,
+                   help="Only used with --signal-weighting continuous: vol-normalization window for "
+                        "the fast leg (default: None -> horizon-matched to --fast-window). Pass "
+                        "explicitly only to deliberately decouple the return horizon from the vol "
+                        "estimation horizon")
+    p.add_argument('--vol-slow-window', type=int, default=None,
+                   help="Only used with --signal-weighting continuous: vol-normalization window for "
+                        "the slow leg (default: None -> horizon-matched to --slow-window)")
     p.add_argument('--risk-budget-mode', choices=RISK_BUDGET_MODES, default='cluster',
                    help="How the risk budget is derived (default: %(default)s). 'cluster': "
                         "compute_n_effective/compute_desired_risk_budget -- one shared budget per "
@@ -363,6 +377,10 @@ def main():
         signal_confidence_low_vol=args.signal_confidence_low_vol,
         signal_weighting=args.signal_weighting,
         mixing_pool=args.mixing_pool,
+        fast_window=args.fast_window,
+        slow_window=args.slow_window,
+        vol_fast_window=args.vol_fast_window,
+        vol_slow_window=args.vol_slow_window,
         risk_budget_mode=args.risk_budget_mode,
         notional_weighting=args.notional_weighting,
         use_idm=args.use_idm,

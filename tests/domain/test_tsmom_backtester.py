@@ -248,6 +248,44 @@ def test_notional_weighting_rejects_unknown_scheme():
         TsmomBacktestConfig(symbols=['X'], target_portfolio_vol=0.15, notional_weighting='bogus')
 
 
+def test_fast_slow_window_defaults_and_validation():
+    config = TsmomBacktestConfig(symbols=['X'])
+    assert config.fast_window == 63
+    assert config.slow_window == 252
+    assert config.vol_fast_window is None
+    assert config.vol_slow_window is None
+
+    with pytest.raises(ValueError):
+        TsmomBacktestConfig(symbols=['X'], fast_window=0)
+    with pytest.raises(ValueError):
+        TsmomBacktestConfig(symbols=['X'], fast_window=252, slow_window=63)
+
+
+def test_fast_slow_window_wired_through_to_continuous_momentum(monkeypatch):
+    price_data = {'X': _price_df(date(2018, 1, 1), 400, drift=0.0015, vol=0.005, seed=1)}
+    vix = _vix_df(date(2018, 1, 1), 400, level=15.0)
+    _patch_data(monkeypatch, price_data, vix)
+    monkeypatch.setattr(tb, 'get_spec', lambda s: get_spec('ES'))
+
+    captured = {}
+    real_continuous_momentum = tb.continuous_momentum
+
+    def spy(df, **kwargs):
+        captured.update(kwargs)
+        return real_continuous_momentum(df, **kwargs)
+
+    monkeypatch.setattr(tb, 'continuous_momentum', spy)
+
+    config = TsmomBacktestConfig(symbols=['X'], max_notional=50_000, max_contracts=5,
+                                  fast_window=21, slow_window=100, vol_fast_window=10, vol_slow_window=50)
+    run_tsmom_backtest(config)
+
+    assert captured['fast_window'] == 21
+    assert captured['slow_window'] == 100
+    assert captured['vol_fast_window'] == 10
+    assert captured['vol_slow_window'] == 50
+
+
 def test_use_idm_defaults_true_and_is_wired_through_to_compute_symbol_notional_budget(monkeypatch):
     """use_idm defaults to True (unchanged prior behavior), and
     run_tsmom_backtest passes config.use_idm straight through to

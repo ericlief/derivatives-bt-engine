@@ -39,6 +39,8 @@ from derivatives_bt_engine.domain.instruments import (
     CME_MONTH_NUM_TO_LETTER, get_spec, resolve_active_months, resolve_annualization_days, resolve_price_symbol,
 )
 from derivatives_bt_engine.domain.signal import (
+    DEFAULT_FAST_WINDOW,
+    DEFAULT_SLOW_WINDOW,
     SignalSpec,
     build_features,
     build_monthly_state_return_history,
@@ -263,12 +265,31 @@ class TsmomBacktestConfig:
     # pooled across every symbol regardless of cluster, kept for direct
     # comparison. See estimate_mixing_params's own docstring.
     mixing_pool: str = 'cluster'
+    # continuous_momentum's own return-horizon windows -- only matters
+    # when signal_weighting == 'continuous' (goulding_monthly ignores
+    # these entirely, using fast_months/slow_months instead, hardcoded
+    # elsewhere -- not plumbed through this dataclass since nothing here
+    # currently overrides them). vol_fast_window/vol_slow_window default
+    # to None -> horizon-matched to fast_window/slow_window (see
+    # continuous_momentum's own docstring on why that pairing matters:
+    # ts_fast/ts_slow are horizon Sharpe-like statistics, and an
+    # unmatched vol window breaks that clean n-day-return-over-n-day-vol
+    # correspondence) -- pass them explicitly only to deliberately
+    # decouple the two.
+    fast_window: int = DEFAULT_FAST_WINDOW
+    slow_window: int = DEFAULT_SLOW_WINDOW
+    vol_fast_window: Optional[int] = None
+    vol_slow_window: Optional[int] = None
 
     def __post_init__(self):
         if self.signal_gate_mode not in ('off', 'monthly', 'daily'):
             raise ValueError(f"signal_gate_mode must be 'off', 'monthly', or 'daily', got {self.signal_gate_mode!r}")
         if self.signal_weighting not in ('continuous', 'goulding'):
             raise ValueError(f"signal_weighting must be 'continuous' or 'goulding', got {self.signal_weighting!r}")
+        if self.fast_window <= 0 or self.slow_window <= 0:
+            raise ValueError("fast_window/slow_window must be positive")
+        if self.fast_window >= self.slow_window:
+            raise ValueError(f"fast_window ({self.fast_window}) must be < slow_window ({self.slow_window})")
         if self.mixing_pool not in ('cluster', 'global'):
             raise ValueError(f"mixing_pool must be 'cluster' or 'global', got {self.mixing_pool!r}")
         if self.notional_weighting not in NOTIONAL_WEIGHTING_SCHEMES:
@@ -978,6 +999,8 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
     # than) recomputing continuous_momentum fresh at every rebalance.
     precomputed = {
         s: continuous_momentum(build_features(full_price_data[s].sort('ts_event')),
+                                fast_window=config.fast_window, slow_window=config.slow_window,
+                                vol_fast_window=config.vol_fast_window, vol_slow_window=config.vol_slow_window,
                                 annualization_days=annualization_by_symbol[s])
         for s in config.symbols
     }
