@@ -300,6 +300,15 @@ def parse_args():
     p.add_argument('--as-of', default=None,
                    help='Only used with --data-source database: YYYY-MM-DD to compute signals as of '
                         '(no lookahead past this date) -- default: latest available bar')
+    p.add_argument('--splice-live-price', action='store_true', default=False,
+                   help="Only meaningful with --data-source database and no --as-of: splices one fresh "
+                        "IB daily bar (a plain dated Future, not ContFuture -- see TsmomLiveConfig."
+                        "splice_live_price's own docstring) onto the DB series' tail for symbols with "
+                        "confirmed active_months, closing the staleness gap when the local db cache "
+                        "hasn't been refreshed today. Requires a live IB connection even though "
+                        "--data-source database (opens one automatically when this flag is set). "
+                        "Default off -- costs extra IB round-trips per spliced symbol per run, and any "
+                        "per-symbol splice failure silently falls back to that symbol's plain DB bars.")
     p.add_argument('--bar-years', type=float, default=3.0,
                    help='Historical window: IB request duration / database lookback (default: %(default)s)')
     p.add_argument('--vx-ma-window-days', type=int, default=63,
@@ -362,6 +371,7 @@ def main():
         bar_years=args.bar_years,
         vx_ma_window_days=args.vx_ma_window_days,
         as_of=as_of,
+        splice_live_price=args.splice_live_price,
     )
 
     if args.live:
@@ -378,7 +388,7 @@ def main():
         print('DRY RUN — targets only, no orders will be placed')
 
     ib = None
-    if config.data_source == 'ib':
+    if config.data_source == 'ib' or config.splice_live_price:
         ib = IBPySync()
         host      = '127.0.0.1' if args.paper else args.host
         ports     = [4002, 7497] if args.paper else [7496, 4001]
@@ -387,7 +397,7 @@ def main():
         connect_with_retry(ib, host, ports, client_id)
         atexit.register(ib.disconnect)
     else:
-        log.info('data_source=database — no IB connection made')
+        log.info('data_source=database, splice_live_price=False — no IB connection made')
 
     targets = compute_rebalance_targets(instruments, config, ib=ib)
     report = print_rebalance_report(targets)

@@ -45,7 +45,14 @@ if TYPE_CHECKING:
     from ib_tools.ibpysync import IBPySync
 
 from derivatives_bt_engine.domain.enums import TrendRegime, VolRegime
-from derivatives_bt_engine.domain.instruments import INSTRUMENTS, resolve_annualization_days, resolve_signal_symbol
+from derivatives_bt_engine.domain.instruments import (
+    CME_MONTH_LETTERS,
+    CME_MONTH_NUM_TO_LETTER,
+    INSTRUMENTS,
+    resolve_active_months,
+    resolve_annualization_days,
+    resolve_signal_symbol,
+)
 from derivatives_bt_engine.domain.allocation import (
     NOTIONAL_WEIGHTING_SCHEMES,
     _bounded_ewm_correlation_matrix,
@@ -248,6 +255,25 @@ class TsmomLiveConfig:
     # changes what those bands actually mean.
     vx_ma_window_days: int = DEFAULT_VX_MA_WINDOW_DAYS
     as_of: Optional[date] = None  # only used when data_source == 'database'; None = latest available bar
+    # Only meaningful when data_source == 'database' and as_of is None --
+    # splices ONE fresh IB daily bar (a plain DATED Future, e.g. today's
+    # actual ZCZ6, NOT ContFuture -- see research/research_ib_continuous_
+    # futures_data_reliability.md for why ContFuture's back-adjustment is
+    # unusable here) onto the tail of the DB-sourced series for each
+    # symbol with confirmed active_months (instruments.resolve_active_
+    # months), closing exactly the staleness gap the caveat above
+    # describes. Requires a live `ib` connection even though
+    # data_source='database' (compute_rebalance_targets raises if
+    # splice_live_price=True and ib is None). Default OFF: costs up to 4
+    # extra IB round-trips per spliced symbol per run (2 candidate
+    # contracts x qualify+historical-bars, to replicate the DB's own
+    # volume-based front-month rule live) and any splice failure for a
+    # symbol silently falls back to that symbol's plain (possibly stale)
+    # DB bars rather than failing the run -- see _splice_live_front_
+    # month_bar's own docstring. Never touches H/IDM's correlation
+    # machinery directly; H incidentally sees the fresher close too,
+    # since it's built from the same per-symbol `bars` this splices.
+    splice_live_price: bool = False
 
     def __post_init__(self):
         if self.signal_weighting not in SIGNAL_WEIGHTINGS:
@@ -526,6 +552,139 @@ def _current_contracts(ib: IBPySync, contract) -> int:
 # Main orchestration
 # ------------------------------------------------------------------
 
+def _next_active_month_yyyymm(active_months: list[str], last_expiration: date) -> str:
+    """Next confirmed-active CME contract month strictly after
+    last_expiration's own month, in IB's YYYYMM lastTradeDateOrContractMonth
+    format -- the live equivalent of "what would the DB's sticky-front-month
+    rule roll into next" for a symbol whose active cycle is `active_months`
+    (instruments.resolve_active_months). Wraps to the next calendar year
+    when last_expiration's month is the cycle's last one.
+
+    Raises ValueError if last_expiration's own month isn't itself in
+    active_months -- an anomaly (the DB's last-known front-month contract
+    falls outside its own confirmed cycle) callers should treat as a splice
+    failure, not silently guess past."""
+    months_sorted = sorted(active_months, key=lambda letter: CME_MONTH_LETTERS[letter])
+    current_letter = CME_MONTH_NUM_TO_LETTER[last_expiration.month]
+    if current_letter not in months_sorted:
+        raise ValueError(f"DB's last-known front-month contract ({last_expiration}, month "
+                          f"{current_letter}) is not in the confirmed active_months cycle {months_sorted}")
+    idx = months_sorted.index(current_letter)
+    if idx == len(months_sorted) - 1:
+        next_letter, next_year = months_sorted[0], last_expiration.year + 1
+    else:
+        next_letter, next_year = months_sorted[idx + 1], last_expiration.year
+    return f'{next_year}{CME_MONTH_LETTERS[next_letter]:02d}'
+
+
+def _qualify_and_pull_recent_bar(ib: IBPySync, db_symbol: str, exchange: str, multiplier: str,
+                                  month_yyyymm: str) -> tuple:
+    """Qualifies a plain DATED Future (IBPySync.future -- NOT cont_future/
+    ContFuture, see _splice_live_front_month_bar's own docstring for why)
+    for db_symbol/month_yyyymm and pulls its most recent ~2 trading days of
+    daily bars. `month_yyyymm` (not a full YYYYMMDD) lets IB resolve the
+    specific dated contract for that month itself, avoiding an exact-day
+    mismatch against the DB's own `expiration` (a different data vendor).
+    Returns (qualified_contract, bars) with bars renamed 'date'->'ts_event'
+    (same convention as this module's 'ib' data_source branch). Raises on
+    any qualification/data failure, a resolved month mismatch (catches a
+    wrong contract), or an empty bar result -- makes no fallback decisions
+    itself; the caller (_splice_live_front_month_bar) owns that."""
+    from ib_tools.ibpysync import IBPySync
+    contract = IBPySync.future(db_symbol, exchange=exchange, expiration=month_yyyymm, multiplier=multiplier)
+    ib.qualify_contracts(contract)
+    resolved_month = contract.lastTradeDateOrContractMonth[:6]
+    if resolved_month != month_yyyymm:
+        raise RuntimeError(f"{db_symbol}: qualified contract's own expiry month {resolved_month} "
+                            f"!= requested {month_yyyymm}")
+    bars = ib.get_historical_bars(contract, duration='2 D', bar_size='1 day', what_to_show='TRADES', use_rth=True)
+    if bars is None or bars.height == 0:
+        raise RuntimeError(f"{db_symbol} ({month_yyyymm}): no historical bars returned")
+    return contract, bars.rename({'date': 'ts_event'})
+
+
+def _splice_live_front_month_bar(ib: Optional[IBPySync], instr: dict, db_symbol: str,
+                                  bars: pl.DataFrame) -> pl.DataFrame:
+    """Splices ONE fresh IB daily bar onto the tail of `bars` (the DB-sourced
+    continuous front-month series), in memory only -- never written back to
+    FuturesDataLoader's cached parquet. Closes the staleness gap
+    TsmomLiveConfig.splice_live_price's own docstring describes: the local
+    duckdb cache isn't refreshed every day, so a symbol's trend_strength/hv/
+    regime can be computed off a stale close without anything flagging it.
+
+    Deliberately uses a plain DATED Future (IBPySync.future, e.g. today's
+    actual ZCZ6), never ContFuture/cont_future: research/research_ib_
+    continuous_futures_data_reliability.md found ContFuture/reqHistoricalData
+    pulls are back-adjusted with a compounding, non-reconstructable
+    adjustment that diverges from this project's raw/unadjusted DB series by
+    up to 23% on real dates, and IB's own two continuous surfaces don't even
+    agree with each other. A single DATED contract's own raw print needs no
+    adjustment to match the DB's own raw series.
+
+    Replicates the DB's own volume-based sticky-front-month rule
+    (_CONTINUOUS_FRONT_MONTH_SQL's `ORDER BY volume DESC`) live, by
+    comparing fresh IB volume between (a) the DB's last-known front-month
+    contract and (b) the next contract in the symbol's confirmed
+    active_months cycle -- whichever has higher volume wins, exactly this
+    project's own roll rule, just evaluated live instead of from the DB's
+    own bar history. Ties/nulls stay on the DB's last-known contract
+    (mirrors _CONTINUOUS_FRONT_MONTH_SQL's own `expiration ASC` tie-break).
+
+    Deliberately never raises: any failure anywhere (no active_months
+    confirmed for this symbol, an IB round-trip error, a missing/ambiguous
+    volume) logs and falls back to returning `bars` UNCHANGED -- matches
+    this module's existing soft-fallback philosophy elsewhere (e.g.
+    fetch_vx_spike_ratio's vx_current fallback chain) of flagging loudly
+    without failing a whole rebalance over one enrichment step."""
+    symbol = instr['symbol']
+    if ib is None:
+        log.warning('%s: splice_live_price requested but no IB connection available -- '
+                    'skipping live price splice, using DB bars as-is', symbol)
+        return bars
+
+    active_months = resolve_active_months(symbol)
+    if active_months is None:
+        log.info('%s: no confirmed active_months -- skipping live price splice, using DB bars as-is', symbol)
+        return bars
+
+    try:
+        last = bars.tail(1)
+        last_expiration = last['expiration'][0]
+        if last_expiration is None:
+            raise ValueError("DB bars' tail row has no expiration")
+        exchange = instr.get('exchange', 'CME')
+        multiplier = str(instr.get('multiplier', '') or '')
+
+        current_month = last_expiration.strftime('%Y%m')
+        _, current_bars = _qualify_and_pull_recent_bar(ib, db_symbol, exchange, multiplier, current_month)
+        current_vol = current_bars.tail(1)['volume'][0]
+
+        next_month = _next_active_month_yyyymm(active_months, last_expiration)
+        _, next_bars = _qualify_and_pull_recent_bar(ib, db_symbol, exchange, multiplier, next_month)
+        next_vol = next_bars.tail(1)['volume'][0]
+
+        if next_vol is not None and current_vol is not None and next_vol > current_vol:
+            log.warning('%s: live roll detected since DB was last refreshed -- DB front month %s '
+                        '(vol=%s) vs next %s (vol=%s); using %s', symbol, current_month, current_vol,
+                        next_month, next_vol, next_month)
+            picked_bars = next_bars
+        else:
+            picked_bars = current_bars
+
+        new_row = picked_bars.tail(1).select('ts_event', 'open', 'high', 'low', 'close', 'volume')
+        new_ts = new_row['ts_event'][0]
+        merged = pl.concat(
+            [bars.filter(pl.col('ts_event') != new_ts), new_row],
+            how='diagonal_relaxed',
+        ).sort('ts_event')
+        log.info('%s: spliced live bar for %s (close=%s, volume=%s) onto DB series (%d rows)',
+                 symbol, new_ts, new_row['close'][0], new_row['volume'][0], merged.height)
+        return merged
+    except Exception as exc:
+        log.warning('%s: live price splice failed (%s) -- falling back to unspliced DB bars', symbol, exc)
+        return bars
+
+
 def _fetch_signal_inputs(ib: Optional[IBPySync], instr: dict, config: TsmomLiveConfig) -> dict:
     """Stage 1a: resolve the contract (IB mode only) and fetch this
     instrument's own OHLCV history, sourced per config.data_source --
@@ -549,9 +708,15 @@ def _fetch_signal_inputs(ib: Optional[IBPySync], instr: dict, config: TsmomLiveC
     'database': the local futures duckdb via FuturesDataLoader, keyed by
     instr['db_symbol'] (already resolved by the caller -- either
     _build_instruments' own KNOWN_INSTRUMENTS lookup or an explicit JSON
-    instrument config) -- no IB connection needed at all. Filtered to
+    instrument config) -- no IB connection needed at all, UNLESS
+    config.splice_live_price is also set (see its own docstring), in which
+    case one fresh dated-contract bar is spliced onto this series' tail via
+    _splice_live_front_month_bar -- an `ib` connection becomes required in
+    that case even though data_source == 'database'. Filtered to
     config.as_of when given (no lookahead); None uses the full available
-    history, i.e. "as of today"."""
+    history, i.e. "as of today" (splice_live_price is only ever attempted
+    when as_of is None -- splicing "today" onto a run pinned to a past
+    as_of would be a lookahead bug)."""
     if config.data_source == 'ib':
         from ib_tools.ibpysync import IBPySync
         if ib is None:
@@ -580,6 +745,8 @@ def _fetch_signal_inputs(ib: Optional[IBPySync], instr: dict, config: TsmomLiveC
         bars = bars.sort('ts_event')
         if bars.height < 64:
             raise RuntimeError(f"Insufficient bar history for {instr['symbol']} ({bars.height} rows)")
+        if config.splice_live_price and config.as_of is None:
+            bars = _splice_live_front_month_bar(ib, instr, db_symbol, bars)
 
     # Real trading-days/year for this symbol's own continuous series
     # (instruments.resolve_annualization_days) -- this project's confirmed
@@ -815,6 +982,10 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
     if config.data_source == 'ib' and ib is None:
         raise ValueError("config.data_source == 'ib' requires an IBPySync connection (pass ib=...) "
                           "-- use data_source='database' for a no-IB, notebook-runnable signal inspection")
+    if config.splice_live_price and config.data_source == 'database' and ib is None:
+        raise ValueError("config.splice_live_price=True requires an IBPySync connection (pass ib=...) "
+                          "even though data_source='database' -- disable splice_live_price for a pure "
+                          "no-IB notebook run")
 
     signal_confidence_cfg = {
         'enabled': config.enable_signal_confidence,

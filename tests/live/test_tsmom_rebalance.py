@@ -459,3 +459,185 @@ def test_signal_weighting_continuous_leaves_audit_fields_none(monkeypatch):
     assert targets[0]['g_regime'] is None
     assert targets[0]['a_co'] is None
     assert targets[0]['a_re'] is None
+
+
+# ── splice_live_price: live IB bar spliced onto the DB series' tail ──────────
+
+def _full_price_df(start: date, n: int, drift: float, expiration: date, instrument_id: int = 1,
+                    vol: float = 0.01, seed: int = 0) -> pl.DataFrame:
+    """Like _price_df but with the full FuturesDataLoader.daily schema
+    (open/high/low/volume/instrument_id/expiration) the splice path reads
+    from `bars.tail(1)` -- _price_df's bare ts_event/close is enough for
+    every OTHER test in this file since splice_live_price defaults False."""
+    base = _price_df(start, n, drift, vol=vol, seed=seed)
+    return base.with_columns(
+        pl.col('close').alias('open'), pl.col('close').alias('high'), pl.col('close').alias('low'),
+        pl.lit(100_000).alias('volume'), pl.lit(instrument_id).alias('instrument_id'),
+        pl.lit(expiration).alias('expiration'),
+    )
+
+
+class _FakeIB:
+    """Fakes only the two IBPySync round-trip methods _qualify_and_pull_
+    recent_bar touches (qualify_contracts, get_historical_bars).
+    IBPySync.future(...) itself is called for real -- a pure, network-free
+    ib_insync.Future construction (ib_tools is a real editable install in
+    this dev env), so only the round-trip calls need faking.
+
+    volumes_by_month/bar_by_month: {'YYYYMM': ...} keyed by the requested
+    contract month. raise_for: months whose get_historical_bars call raises
+    (simulates an IB error). mangle_month: a month whose qualified contract
+    gets its lastTradeDateOrContractMonth corrupted, to trigger the
+    resolved-month-mismatch guard."""
+
+    def __init__(self, volumes_by_month, bar_by_month=None, raise_for=frozenset(), mangle_month=None):
+        self.volumes_by_month = volumes_by_month
+        self.bar_by_month = bar_by_month or {}
+        self.raise_for = raise_for
+        self.mangle_month = mangle_month
+        self.calls: list[tuple] = []
+
+    def qualify_contracts(self, contract):
+        month = contract.lastTradeDateOrContractMonth[:6]
+        self.calls.append(('qualify', month))
+        if month == self.mangle_month:
+            contract.lastTradeDateOrContractMonth = '209912'
+
+    def get_historical_bars(self, contract, end_date='', duration='2 D', bar_size='1 day',
+                             what_to_show='TRADES', use_rth=True):
+        month = contract.lastTradeDateOrContractMonth[:6]
+        self.calls.append(('bars', month))
+        if month in self.raise_for:
+            raise RuntimeError('simulated IB error')
+        vol = self.volumes_by_month.get(month)
+        if vol is None:
+            return pl.DataFrame()
+        ts_event, close = self.bar_by_month.get(month, (date(2026, 8, 15), 100.0))
+        return pl.DataFrame({'date': [ts_event], 'open': [close], 'high': [close],
+                             'low': [close], 'close': [close], 'volume': [vol]})
+
+
+def test_next_active_month_yyyymm_mid_cycle():
+    assert tr._next_active_month_yyyymm(['H', 'M', 'U', 'Z'], date(2026, 3, 18)) == '202606'
+
+
+def test_next_active_month_yyyymm_wraps_to_next_year():
+    assert tr._next_active_month_yyyymm(['H', 'M', 'U', 'Z'], date(2026, 12, 18)) == '202703'
+
+
+def test_next_active_month_yyyymm_raises_when_month_not_in_cycle():
+    with pytest.raises(ValueError):
+        tr._next_active_month_yyyymm(['H', 'M', 'U', 'Z'], date(2026, 1, 18))
+
+
+def test_splice_live_price_requires_ib_even_in_database_mode():
+    config = TsmomLiveConfig(account_equity=100_000, data_source='database', splice_live_price=True)
+    with pytest.raises(ValueError):
+        compute_rebalance_targets([_instrument('X')], config, ib=None)
+
+
+def test_splice_disabled_by_default_makes_no_ib_calls(monkeypatch):
+    price_data = {'X': _price_df(date(2018, 1, 1), 500, drift=0.0015, vol=0.005, seed=1)}
+    _patch_db(monkeypatch, price_data)
+    calls = []
+    monkeypatch.setattr(tr, '_splice_live_front_month_bar', lambda *a, **k: calls.append(1) or a[-1])
+
+    config = TsmomLiveConfig(account_equity=100_000, data_source='database')  # splice_live_price defaults False
+    targets = compute_rebalance_targets([_instrument('X')], config, ib=None)
+
+    assert calls == []
+    assert targets[0].get('error') is None
+
+
+def test_splice_enabled_db_contract_still_front_appends_new_row(monkeypatch):
+    price_data = {'X': _full_price_df(date(2018, 1, 1), 500, drift=0.0015, expiration=date(2026, 3, 20), seed=1)}
+    _patch_db(monkeypatch, price_data)
+    monkeypatch.setattr(tr, 'resolve_active_months', lambda symbol: ['H', 'M', 'U', 'Z'])
+    fake_ib = _FakeIB(volumes_by_month={'202603': 1000, '202606': 500},
+                      bar_by_month={'202603': (date(2026, 8, 15), 111.0)})
+
+    config = TsmomLiveConfig(account_equity=100_000, data_source='database', splice_live_price=True)
+    targets = compute_rebalance_targets([_instrument('X')], config, ib=fake_ib)
+
+    assert targets[0].get('error') is None
+    assert targets[0]['close'] == pytest.approx(111.0)
+    assert ('qualify', '202606') in fake_ib.calls  # next contract WAS checked...
+    assert ('bars', '202606') in fake_ib.calls      # ...just lost the volume comparison
+
+
+def test_splice_enabled_roll_detected_uses_next_contract(monkeypatch, caplog):
+    price_data = {'X': _full_price_df(date(2018, 1, 1), 500, drift=0.0015, expiration=date(2026, 3, 20), seed=1)}
+    _patch_db(monkeypatch, price_data)
+    monkeypatch.setattr(tr, 'resolve_active_months', lambda symbol: ['H', 'M', 'U', 'Z'])
+    fake_ib = _FakeIB(volumes_by_month={'202603': 500, '202606': 2000},
+                      bar_by_month={'202606': (date(2026, 8, 15), 222.0)})
+
+    config = TsmomLiveConfig(account_equity=100_000, data_source='database', splice_live_price=True)
+    with caplog.at_level('WARNING'):
+        targets = compute_rebalance_targets([_instrument('X')], config, ib=fake_ib)
+
+    assert targets[0].get('error') is None
+    assert targets[0]['close'] == pytest.approx(222.0)
+    assert any('roll detected' in r.message for r in caplog.records)
+
+
+def test_splice_skipped_when_active_months_unconfirmed(monkeypatch):
+    price_data = {'X': _full_price_df(date(2018, 1, 1), 500, drift=0.0015, expiration=date(2026, 3, 20), seed=1)}
+    _patch_db(monkeypatch, price_data)
+    monkeypatch.setattr(tr, 'resolve_active_months', lambda symbol: None)
+    fake_ib = _FakeIB(volumes_by_month={})
+
+    config = TsmomLiveConfig(account_equity=100_000, data_source='database', splice_live_price=True)
+    targets = compute_rebalance_targets([_instrument('X')], config, ib=fake_ib)
+
+    assert targets[0].get('error') is None
+    assert fake_ib.calls == []
+
+
+def test_splice_falls_back_gracefully_on_ib_error(monkeypatch, caplog):
+    price_data = {'X': _full_price_df(date(2018, 1, 1), 500, drift=0.0015, expiration=date(2026, 3, 20), seed=1)}
+    _patch_db(monkeypatch, price_data)
+    monkeypatch.setattr(tr, 'resolve_active_months', lambda symbol: ['H', 'M', 'U', 'Z'])
+    fake_ib = _FakeIB(volumes_by_month={'202603': 1000, '202606': 500}, raise_for={'202603'})
+
+    config = TsmomLiveConfig(account_equity=100_000, data_source='database', splice_live_price=True)
+    with caplog.at_level('WARNING'):
+        targets = compute_rebalance_targets([_instrument('X')], config, ib=fake_ib)
+
+    # No exception propagates -- the whole rebalance still completes normally.
+    assert targets[0].get('error') is None
+    assert targets[0]['target_contracts'] is not None
+    assert any('live price splice failed' in r.message for r in caplog.records)
+
+
+def test_splice_replaces_existing_same_day_row_not_duplicates(monkeypatch):
+    price_data = {'X': _full_price_df(date(2024, 1, 1), 500, drift=0.0015, expiration=date(2026, 3, 20), seed=1)}
+    original_height = price_data['X'].height
+    same_day = price_data['X'].tail(1)['ts_event'][0]
+    _patch_db(monkeypatch, price_data)
+    monkeypatch.setattr(tr, 'resolve_active_months', lambda symbol: ['H', 'M', 'U', 'Z'])
+    fake_ib = _FakeIB(volumes_by_month={'202603': 1000, '202606': 500},
+                      bar_by_month={'202603': (same_day, 333.0)})
+
+    config = TsmomLiveConfig(account_equity=100_000, data_source='database', splice_live_price=True)
+    targets = compute_rebalance_targets([_instrument('X')], config, ib=fake_ib)
+
+    assert targets[0].get('error') is None
+    assert targets[0]['close'] == pytest.approx(333.0)
+    # Replaced, not appended -- row count unchanged.
+    assert price_data['X'].height == original_height
+
+
+def test_splice_skipped_when_as_of_is_set(monkeypatch):
+    price_data = {'X': _price_df(date(2018, 1, 1), 500, drift=0.0015, vol=0.005, seed=1)}
+    _patch_db(monkeypatch, price_data)
+    calls = []
+    monkeypatch.setattr(tr, '_splice_live_front_month_bar', lambda *a, **k: calls.append(1) or a[-1])
+    early_as_of = price_data['X']['ts_event'][300]
+
+    config = TsmomLiveConfig(account_equity=100_000, data_source='database', splice_live_price=True,
+                              as_of=early_as_of)
+    targets = compute_rebalance_targets([_instrument('X')], config, ib=_FakeIB(volumes_by_month={}))
+
+    assert calls == []
+    assert targets[0].get('error') is None
