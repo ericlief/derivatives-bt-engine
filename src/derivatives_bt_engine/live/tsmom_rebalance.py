@@ -820,8 +820,10 @@ def _splice_live_front_month_bar(ib: Optional[IBPySync], instr: dict, db_symbol:
         # a date the DB already has a stale print for), same as this
         # function's original single-bar behavior -- while still
         # backfilling everything strictly newer via the same filter.
+        picked_expiration = datetime.strptime(picked_date, '%Y%m%d').date()
         new_rows = (picked_bars.filter(pl.col('ts_event') >= last_ts_event)
-                    .select('ts_event', 'open', 'high', 'low', 'close', 'volume'))
+                    .select('ts_event', 'open', 'high', 'low', 'close', 'volume')
+                    .with_columns(pl.lit(picked_expiration).alias('expiration')))
         if new_rows.height == 0:
             raise RuntimeError(f"no bars at or after {last_ts_event} in picked contract {picked_date} "
                                 f"(duration={duration})")

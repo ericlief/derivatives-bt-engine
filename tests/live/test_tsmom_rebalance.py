@@ -966,6 +966,26 @@ def test_splice_replaces_existing_same_day_row_not_duplicates(monkeypatch):
     assert price_data['X'].height == original_height
 
 
+def test_splice_sets_expiration_on_spliced_rows(monkeypatch):
+    # Spliced rows used to leave `expiration` null (diagonal_relaxed fills
+    # missing columns with nulls) -- now set explicitly from the picked
+    # candidate's own confirmed date, so a notebook stacking cm_df/closes
+    # across symbols doesn't lose it for exactly the freshest rows.
+    current = _nearest_cycle_date_from_today(_TEST_CYCLE)
+    current_month = current.strftime('%Y%m')
+    price_data = {'X': _full_price_df(date(2018, 1, 1), 500, drift=0.0015,
+                                       expiration=_not_stale_expiration(), seed=1)}
+    monkeypatch.setattr(tr, 'resolve_active_months', lambda symbol: _TEST_CYCLE)
+    monkeypatch.setattr(tr, 'get_spec', lambda symbol: {'exchange': 'CME'})
+    fake_ib = _FakeIB(volumes_by_month={current_month: 1000}, listed_months=_cycle_listed_months(_TEST_CYCLE),
+                      bar_by_month={current_month: (date.today(), 111.0)})
+
+    merged = tr._splice_live_front_month_bar(fake_ib, _instrument('X'), 'X', price_data['X'])
+
+    spliced_row = merged.filter(pl.col('ts_event') == date.today())
+    assert spliced_row['expiration'][0] == current
+
+
 def _trading_dates_ending(end: date, n: int) -> list[date]:
     dates = []
     d = end
