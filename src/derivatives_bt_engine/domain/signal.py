@@ -108,6 +108,12 @@ DEFAULT_SLOW_WINDOW = 252
 # fast_window/slow_window.
 GOULDING_FAST_MONTHS = 2
 GOULDING_SLOW_MONTHS = 12
+# continuous_momentum's MACD signal-line smoothing -- deliberately its own
+# small, fixed halflife, NOT derived from fast_window/slow_window the way
+# the MACD line itself is (see continuous_momentum's own docstring): the
+# signal line's job is to be a fast-reacting smoother of the MACD line's
+# own crossovers, not another multi-month trend estimate.
+DEFAULT_MACD_SIGNAL_HALFLIFE = 10.0
 # Paper's own warm-up requirement per Appendix C -- estimate_mixing_params
 # falls back to the uninformed (0.5, 0.5) below this many months of pooled
 # Correction/Rebound history.
@@ -467,7 +473,8 @@ def continuous_momentum(df: pl.DataFrame, fast_window: int = DEFAULT_FAST_WINDOW
                          slow_window: int = DEFAULT_SLOW_WINDOW,
                          vol_fast_window: Optional[int] = None, vol_slow_window: Optional[int] = None,
                          annualization_days: int = DEFAULT_ANNUALIZATION_DAYS,
-                         w_fast: float = 0.4, w_slow: float = 0.6, discount: float = 0.5) -> pl.DataFrame:
+                         w_fast: float = 0.4, w_slow: float = 0.6, discount: float = 0.5,
+                         macd_signal_halflife: float = DEFAULT_MACD_SIGNAL_HALFLIFE) -> pl.DataFrame:
     """Continuous, daily, volatility-normalized fast/slow trend-strength
     model -- independent of goulding_monthly; takes only build_features'
     output (peak/dd/r1d), no shared intermediate state between
@@ -487,7 +494,39 @@ def continuous_momentum(df: pl.DataFrame, fast_window: int = DEFAULT_FAST_WINDOW
     ts_fast/ts_slow are horizon Sharpe-like statistics -- an n-day return
     divided by that SAME n-day horizon's own estimated return std
     (daily_std * sqrt(n)) -- NOT annualized Sharpe ratios; nothing here
-    scales them by annualization_days.
+    scales them by annualization_days. std_fast/std_slow (their
+    denominator) stay a plain, equal-weighted rolling_std deliberately
+    horizon-matched to fast_window/slow_window -- see this project's own
+    design discussion on why an EWM estimate would break that clean
+    n-day-return-over-n-day-vol correspondence. avg_r_fast/avg_r_slow and
+    macd/macd_signal/macd_diff below are NOT part of this -- reporting/
+    charting diagnostics only, never touching ts_fast/ts_slow/ts/signal.
+
+    avg_r_fast/avg_r_slow: EXPONENTIALLY-weighted mean daily return
+    (r1d.ewm_mean(half_life=fast_window/slow_window)), annualized --
+    intentionally NOT the same equal-weighted rolling_mean convention
+    std_fast/std_slow use; this is a pure reporting figure with no
+    horizon-matching constraint to preserve, so EWM's smoother, more
+    recency-weighted average is preferred here.
+
+    ewm_fast/ewm_slow = close.ewm_mean(half_life=fast_window/slow_window)
+    -- the underlying fast/slow EMA PRICE lines themselves, exposed as
+    their own columns (e.g. for a standard price+EMA chart), not just
+    embedded inside macd. macd = ewm_fast - ewm_slow. Reuses fast_window/
+    slow_window as EWM half-lives rather than introducing a second,
+    independent pair of MACD-specific windows, so "fast"/"slow" mean one
+    consistent pair of numbers across every feature in this function.
+    Flag this explicitly though: an EWM half-life of N behaves nothing
+    like ts_fast/ts_slow's own N-day lookback (a half-life-N EWM's
+    effective memory extends well past N days, unlike a hard N-day
+    window) -- macd is a genuinely different kind of "fast"/"slow" than
+    ts_fast/ts_slow, just sharing the same config numbers by deliberate
+    choice, not because the underlying math is equivalent. macd_signal
+    is macd's own EWM smoothing at a separate, much shorter half-life
+    (macd_signal_halflife, default 10 days -- deliberately NOT derived
+    from fast_window/slow_window,
+    see DEFAULT_MACD_SIGNAL_HALFLIFE's own comment). macd_diff = macd -
+    macd_signal, the standard MACD histogram.
 
     annualization_days is a separate, per-instrument units-conversion
     factor for the genuinely per-calendar-year REPORTING diagnostics only
@@ -509,10 +548,21 @@ def continuous_momentum(df: pl.DataFrame, fast_window: int = DEFAULT_FAST_WINDOW
         r_slow=pl.col('close') / pl.col('close').shift(slow_window) - 1,
     )
     df = df.with_columns(
-        avg_r_fast=pl.col('r1d').rolling_mean(fast_window) * annualization_days,
-        avg_r_slow=pl.col('r1d').rolling_mean(slow_window) * annualization_days,
+        avg_r_fast=pl.col('r1d').ewm_mean(half_life=fast_window) * annualization_days,
+        avg_r_slow=pl.col('r1d').ewm_mean(half_life=slow_window) * annualization_days,
         std_fast=pl.col('r1d').rolling_std(vol_fast_window),
         std_slow=pl.col('r1d').rolling_std(vol_slow_window),
+        ewm_fast=pl.col('close').ewm_mean(half_life=fast_window),
+        ewm_slow=pl.col('close').ewm_mean(half_life=slow_window),
+    )
+    df = df.with_columns(
+        macd=pl.col('ewm_fast') - pl.col('ewm_slow'),
+    )
+    df = df.with_columns(
+        macd_signal=pl.col('macd').ewm_mean(half_life=macd_signal_halflife),
+    )
+    df = df.with_columns(
+        macd_diff=pl.col('macd') - pl.col('macd_signal'),
     )
     df = df.with_columns(
         hv_fast=pl.col('std_fast') * annualization_days ** 0.5,

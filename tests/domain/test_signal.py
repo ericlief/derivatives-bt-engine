@@ -26,6 +26,8 @@ import pytest
 
 from derivatives_bt_engine.domain.enums import SignalConfidenceRegime, TrendRegime
 from derivatives_bt_engine.domain.signal import (
+    DEFAULT_FAST_WINDOW,
+    DEFAULT_SLOW_WINDOW,
     GOULDING_FAST_MONTHS,
     GOULDING_SLOW_MONTHS,
     SignalSpec,
@@ -468,6 +470,75 @@ def test_continuous_momentum_annualization_days_scales_avg_r():
     for x, y in zip(a, b):
         if x != -999.0:
             assert y == pytest.approx(x * ratio, rel=1e-6)
+
+
+def test_continuous_momentum_avg_r_is_ewm_not_equal_weighted():
+    # Regression test: avg_r_fast/avg_r_slow switched from an equal-
+    # weighted rolling_mean to an EWM (half_life=fast_window/slow_window)
+    # -- same underlying r1d data, different weighting -- confirmed
+    # directly against a fresh independent computation rather than just
+    # checking it differs from the old value (which could pass by
+    # accident if the change were reverted to some OTHER wrong formula).
+    df = _price_df_dated(date(2018, 1, 1), 400, drift=0.0015, vol=0.005, seed=5)
+    feat = build_features(df)
+    out = continuous_momentum(feat, annualization_days=252)
+    expected = (feat['r1d'].ewm_mean(half_life=DEFAULT_FAST_WINDOW) * 252).to_list()
+    actual = out['avg_r_fast'].to_list()
+    for e, a in zip(expected, actual):
+        if e is None:
+            assert a is None
+        else:
+            assert a == pytest.approx(e, rel=1e-9)
+
+
+def test_continuous_momentum_ewm_fast_slow_match_price_ewm():
+    df = _price_df_dated(date(2018, 1, 1), 400, drift=0.0015, vol=0.005, seed=6)
+    feat = build_features(df)
+    out = continuous_momentum(feat)
+    expected_fast = feat['close'].ewm_mean(half_life=DEFAULT_FAST_WINDOW).to_list()
+    expected_slow = feat['close'].ewm_mean(half_life=DEFAULT_SLOW_WINDOW).to_list()
+    for e, a in zip(expected_fast, out['ewm_fast'].to_list()):
+        assert a == pytest.approx(e, rel=1e-9)
+    for e, a in zip(expected_slow, out['ewm_slow'].to_list()):
+        assert a == pytest.approx(e, rel=1e-9)
+
+
+def test_continuous_momentum_macd_is_ewm_fast_minus_slow():
+    df = _price_df_dated(date(2018, 1, 1), 400, drift=0.0015, vol=0.005, seed=6)
+    out = continuous_momentum(build_features(df))
+    expected = (out['ewm_fast'] - out['ewm_slow']).to_list()
+    actual = out['macd'].to_list()
+    for e, a in zip(expected, actual):
+        assert a == pytest.approx(e, rel=1e-9)
+
+
+def test_continuous_momentum_macd_signal_is_ewm_of_macd():
+    df = _price_df_dated(date(2018, 1, 1), 400, drift=0.0015, vol=0.005, seed=7)
+    out = continuous_momentum(build_features(df), macd_signal_halflife=10.0)
+    expected = out['macd'].ewm_mean(half_life=10.0).to_list()
+    actual = out['macd_signal'].to_list()
+    for e, a in zip(expected, actual):
+        assert a == pytest.approx(e, rel=1e-9)
+
+
+def test_continuous_momentum_macd_diff_is_macd_minus_signal():
+    df = _price_df_dated(date(2018, 1, 1), 400, drift=0.0015, vol=0.005, seed=8)
+    out = continuous_momentum(build_features(df))
+    expected = (out['macd'] - out['macd_signal']).to_list()
+    actual = out['macd_diff'].to_list()
+    for e, a in zip(expected, actual):
+        assert a == pytest.approx(e, rel=1e-9)
+
+
+def test_continuous_momentum_macd_signal_halflife_is_configurable():
+    df = _price_df_dated(date(2018, 1, 1), 400, drift=0.0015, vol=0.005, seed=9)
+    feat = build_features(df)
+    out_10 = continuous_momentum(feat, macd_signal_halflife=10.0)
+    out_20 = continuous_momentum(feat, macd_signal_halflife=20.0)
+    # macd itself is unaffected by macd_signal_halflife...
+    assert out_10['macd'].to_list() == pytest.approx(out_20['macd'].to_list())
+    # ...but macd_signal (and therefore macd_diff) is.
+    assert out_10['macd_signal'].to_list() != pytest.approx(out_20['macd_signal'].to_list())
 
 
 # ── goulding_monthly: independent of continuous_momentum ─────────────────
