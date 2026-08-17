@@ -49,6 +49,7 @@ from derivatives_bt_engine.domain.instruments import (
     CME_MONTH_LETTERS,
     CME_MONTH_NUM_TO_LETTER,
     INSTRUMENTS,
+    _FX_TICKER_TO_KEY,
     get_spec,
     resolve_active_months,
     resolve_annualization_days,
@@ -615,30 +616,59 @@ def _live_front_month_candidates(active_months: list[str], last_expiration: date
     return candidates
 
 
-def _qualify_and_pull_recent_bar(ib: IBPySync, db_symbol: str, exchange: str, multiplier: str,
+def _qualify_and_pull_recent_bar(ib: IBPySync, ib_symbol: str, exchange: str, multiplier: str,
                                   month_yyyymm: str) -> tuple:
     """Qualifies a plain DATED Future (IBPySync.future -- NOT cont_future/
     ContFuture, see _splice_live_front_month_bar's own docstring for why)
-    for db_symbol/month_yyyymm and pulls its most recent ~2 trading days of
-    daily bars. `month_yyyymm` (not a full YYYYMMDD) lets IB resolve the
-    specific dated contract for that month itself, avoiding an exact-day
-    mismatch against the DB's own `expiration` (a different data vendor).
-    Returns (qualified_contract, bars) with bars renamed 'date'->'ts_event'
-    (same convention as this module's 'ib' data_source branch). Raises on
-    any qualification/data failure, a resolved month mismatch (catches a
-    wrong contract), or an empty bar result -- makes no fallback decisions
-    itself; the caller (_splice_live_front_month_bar) owns that."""
+    for ib_symbol/month_yyyymm and pulls its most recent ~2 trading days of
+    daily bars. `ib_symbol` must be IB's OWN facing ticker, not necessarily
+    the DB's `db_symbol` -- they diverge for the 3 FX contracts
+    instruments._FX_TICKER_TO_KEY exists to translate (e.g. the DB stores
+    JPY's continuous series under the raw Globex root '6J', but IB's own
+    API only resolves it under 'JPY' -- confirmed live this session,
+    passing '6J' straight to IB got "No security definition has been
+    found" for every candidate month). `month_yyyymm` (not a full
+    YYYYMMDD) lets IB resolve the specific dated contract for that month
+    itself, avoiding an exact-day mismatch against the DB's own
+    `expiration` (a different data vendor). Returns (qualified_contract,
+    bars) with bars renamed 'date'->'ts_event' (same convention as this
+    module's 'ib' data_source branch). Raises on any qualification/data
+    failure, a resolved month mismatch (catches a wrong contract), or an
+    empty bar result -- makes no fallback decisions itself; the caller
+    owns that."""
     from ib_tools.ibpysync import IBPySync
-    contract = IBPySync.future(db_symbol, exchange=exchange, expiration=month_yyyymm, multiplier=multiplier)
+    contract = IBPySync.future(ib_symbol, exchange=exchange, expiration=month_yyyymm, multiplier=multiplier)
     ib.qualify_contracts(contract)
     resolved_month = contract.lastTradeDateOrContractMonth[:6]
     if resolved_month != month_yyyymm:
-        raise RuntimeError(f"{db_symbol}: qualified contract's own expiry month {resolved_month} "
+        raise RuntimeError(f"{ib_symbol}: qualified contract's own expiry month {resolved_month} "
                             f"!= requested {month_yyyymm}")
     bars = ib.get_historical_bars(contract, duration='2 D', bar_size='1 day', what_to_show='TRADES', use_rth=True)
     if bars is None or bars.height == 0:
-        raise RuntimeError(f"{db_symbol} ({month_yyyymm}): no historical bars returned")
+        raise RuntimeError(f"{ib_symbol} ({month_yyyymm}): no historical bars returned")
     return contract, bars.rename({'date': 'ts_event'})
+
+
+def _qualify_and_pull_recent_bar_with_fallback(ib: IBPySync, ib_symbol: str, exchange: str,
+                                                fallback_multiplier: str, month_yyyymm: str) -> tuple:
+    """Tries _qualify_and_pull_recent_bar with a BLANK multiplier first
+    (correct for the overwhelming majority of symbols -- see
+    _splice_live_front_month_bar's own docstring on why multiplier is
+    dropped by default), and only on failure retries once with
+    `fallback_multiplier` (db_symbol's own registry value). Handles the
+    genuine exception: some IB-listed roots are truly ambiguous without
+    one (confirmed live this session -- 'SI' alone resolves to BOTH
+    full-size silver (multiplier=5000, tradingClass='SI') AND micro silver
+    (multiplier=1000, tradingClass='SIL') under the SAME bare symbol,
+    and IB refuses to pick one; the blank attempt there returns zero bars,
+    not an outright reject, so this can't be distinguished from a genuine
+    "no data" case ahead of time -- the retry is what actually
+    disambiguates it). Re-raises the SECOND attempt's exception if that
+    also fails."""
+    try:
+        return _qualify_and_pull_recent_bar(ib, ib_symbol, exchange, '', month_yyyymm)
+    except Exception:
+        return _qualify_and_pull_recent_bar(ib, ib_symbol, exchange, fallback_multiplier, month_yyyymm)
 
 
 def _splice_live_front_month_bar(ib: Optional[IBPySync], instr: dict, db_symbol: str,
@@ -701,25 +731,33 @@ def _splice_live_front_month_bar(ib: Optional[IBPySync], instr: dict, db_symbol:
         # borrowing its full-size sibling's history (ES) needs THAT
         # sibling's own exchange to qualify against IB (get_spec is the
         # same lookup point used elsewhere in this codebase for this).
-        # multiplier deliberately left blank always, NOT db_symbol's own
-        # registry value either: this project's internal `multiplier` is
-        # a $-per-point P&L-scaling convention that happens to coincide
-        # with IB's own contract multiplier for some products (ES/NQ/GC)
-        # but diverges for others (confirmed live: grains, silver, JPY
-        # all got "No security definition has been found" until this was
-        # dropped). _resolve_contract's own proven pattern already only
-        # ever passes multiplier for a genuinely ticker-renamed instrument
-        # (ib_symbol != symbol); db_symbol here is always the CANONICAL
-        # root already, so symbol + exchange + an explicit month is
-        # sufficient for IB to resolve it unambiguously without one.
-        exchange = get_spec(db_symbol).get('exchange', 'CME')
-        multiplier = ''
+        # db_symbol is the DB-side (Databento/Globex) root, which for 3 FX
+        # contracts diverges from IB's own facing ticker (instruments.
+        # _FX_TICKER_TO_KEY -- e.g. the DB stores JPY's series under raw
+        # Globex root '6J', but IB's API only resolves it under 'JPY';
+        # confirmed live this session, passing '6J' straight through got
+        # "No security definition has been found" for every candidate
+        # month). Translate before any IB call; db_symbol itself stays
+        # unchanged for the FuturesDataLoader/get_spec lookups above,
+        # which already key off the DB-side root correctly.
+        ib_symbol = _FX_TICKER_TO_KEY.get(db_symbol.upper(), db_symbol.upper())
+        db_spec = get_spec(db_symbol)
+        exchange = db_spec.get('exchange', 'CME')
+        # Blank multiplier is tried FIRST (correct for the overwhelming
+        # majority -- this project's internal $-per-point convention
+        # doesn't universally match IB's own contract multiplier, see
+        # _qualify_and_pull_recent_bar's own docstring), db_symbol's own
+        # registry multiplier only as a fallback for the genuinely
+        # ambiguous case (confirmed live: bare 'SI' resolves to BOTH
+        # full-size silver and the SIL micro under IB without one).
+        registry_multiplier = str(db_spec.get('multiplier', '') or '')
 
         candidate_months = _live_front_month_candidates(active_months, last_expiration, date.today())
         picked_month = picked_bars = picked_vol = None
         for month in candidate_months:
             try:
-                _, month_bars = _qualify_and_pull_recent_bar(ib, db_symbol, exchange, multiplier, month)
+                _, month_bars = _qualify_and_pull_recent_bar_with_fallback(ib, ib_symbol, exchange,
+                                                                            registry_multiplier, month)
             except Exception as exc:
                 log.warning('%s: candidate contract %s unavailable (%s) -- skipping', symbol, month, exc)
                 continue

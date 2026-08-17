@@ -488,20 +488,28 @@ class _FakeIB:
     contract month. raise_for: months whose get_historical_bars call raises
     (simulates an IB error). mangle_month: a month whose qualified contract
     gets its lastTradeDateOrContractMonth corrupted, to trigger the
-    resolved-month-mismatch guard."""
+    resolved-month-mismatch guard. ambiguous_without_multiplier: months
+    whose BLANK-multiplier request returns zero bars (simulating real IB's
+    observed behavior for a genuinely ambiguous root like bare 'SI' --
+    no exception, just an empty result) but succeeds once ANY multiplier
+    is set, to test _qualify_and_pull_recent_bar_with_fallback's retry."""
 
-    def __init__(self, volumes_by_month, bar_by_month=None, raise_for=frozenset(), mangle_month=None):
+    def __init__(self, volumes_by_month, bar_by_month=None, raise_for=frozenset(), mangle_month=None,
+                 ambiguous_without_multiplier=frozenset()):
         self.volumes_by_month = volumes_by_month
         self.bar_by_month = bar_by_month or {}
         self.raise_for = raise_for
         self.mangle_month = mangle_month
+        self.ambiguous_without_multiplier = ambiguous_without_multiplier
         self.calls: list[tuple] = []
         self.multipliers_seen: list[str] = []
+        self.symbols_seen: list[str] = []
 
     def qualify_contracts(self, contract):
         month = contract.lastTradeDateOrContractMonth[:6]
         self.calls.append(('qualify', month))
         self.multipliers_seen.append(contract.multiplier)
+        self.symbols_seen.append(contract.symbol)
         if month == self.mangle_month:
             contract.lastTradeDateOrContractMonth = '209912'
 
@@ -511,6 +519,8 @@ class _FakeIB:
         self.calls.append(('bars', month))
         if month in self.raise_for:
             raise RuntimeError('simulated IB error')
+        if month in self.ambiguous_without_multiplier and not contract.multiplier:
+            return pl.DataFrame()
         vol = self.volumes_by_month.get(month)
         if vol is None:
             return pl.DataFrame()
@@ -649,6 +659,63 @@ def test_splice_uses_blank_multiplier_not_instrument_or_db_symbol_own(monkeypatc
 
     assert targets[0].get('error') is None
     assert all(m == '' for m in fake_ib.multipliers_seen)
+
+
+def test_splice_retries_with_registry_multiplier_when_blank_is_ambiguous(monkeypatch):
+    # Regression test: confirmed live this session, bare 'SI' resolves to
+    # BOTH full-size silver (multiplier=5000) and the SIL micro
+    # (multiplier=1000) on IB -- an ambiguous-contract case that returns
+    # ZERO bars (not an exception) on the blank-multiplier attempt, so it
+    # can't be told apart from genuine "no data" ahead of time. The retry
+    # with db_symbol's own registry multiplier is what actually
+    # disambiguates it.
+    expiration = _not_stale_expiration()
+    current_month = expiration.strftime('%Y%m')
+    next_month = tr._next_active_month_yyyymm(_TEST_CYCLE, expiration)
+    price_data = {'SI': _full_price_df(date(2018, 1, 1), 500, drift=0.0015, expiration=expiration, seed=1)}
+    _patch_db(monkeypatch, price_data)
+    monkeypatch.setattr(tr, 'resolve_active_months', lambda symbol: _TEST_CYCLE)
+    monkeypatch.setattr(tr, 'get_spec', lambda symbol: {'exchange': 'COMEX', 'multiplier': 5000})
+    fake_ib = _FakeIB(volumes_by_month={current_month: 1000, next_month: 500},
+                      ambiguous_without_multiplier={current_month, next_month})
+
+    sil = _instrument('SIL', multiplier=1000.0)
+    sil['db_symbol'] = 'SI'
+    sil['signal_symbol'] = 'SI'
+    config = TsmomLiveConfig(account_equity=100_000, data_source='database', splice_live_price=True)
+    targets = compute_rebalance_targets([sil], config, ib=fake_ib)
+
+    assert targets[0].get('error') is None
+    # Both attempts happened for the picked contract: blank first, then
+    # the registry multiplier that actually resolved it.
+    assert '' in fake_ib.multipliers_seen
+    assert '5000' in fake_ib.multipliers_seen
+
+
+def test_splice_translates_fx_db_symbol_to_ib_facing_ticker(monkeypatch):
+    # Regression test: confirmed live this session, the DB stores JPY's
+    # continuous series under the raw Globex root '6J', but IB's own API
+    # only resolves it under 'JPY' (instruments._FX_TICKER_TO_KEY) --
+    # passing '6J' straight through got "No security definition has been
+    # found" for every candidate month.
+    expiration = _not_stale_expiration()
+    current_month = expiration.strftime('%Y%m')
+    next_month = tr._next_active_month_yyyymm(_TEST_CYCLE, expiration)
+    price_data = {'6J': _full_price_df(date(2018, 1, 1), 500, drift=0.0015, expiration=expiration, seed=1)}
+    _patch_db(monkeypatch, price_data)
+    monkeypatch.setattr(tr, 'resolve_active_months', lambda symbol: _TEST_CYCLE)
+    monkeypatch.setattr(tr, 'get_spec', lambda symbol: {'exchange': 'CME', 'multiplier': 12_500_000})
+    fake_ib = _FakeIB(volumes_by_month={current_month: 1000, next_month: 500})
+
+    j7 = _instrument('J7', multiplier=6_250_000.0)
+    j7['db_symbol'] = '6J'
+    j7['signal_symbol'] = 'JPY'
+    config = TsmomLiveConfig(account_equity=100_000, data_source='database', splice_live_price=True)
+    targets = compute_rebalance_targets([j7], config, ib=fake_ib)
+
+    assert targets[0].get('error') is None
+    assert fake_ib.symbols_seen == ['JPY'] * len(fake_ib.symbols_seen)
+    assert '6J' not in fake_ib.symbols_seen
 
 
 def test_splice_enabled_roll_detected_uses_next_contract(monkeypatch, caplog):
