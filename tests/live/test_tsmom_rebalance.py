@@ -496,10 +496,12 @@ class _FakeIB:
         self.raise_for = raise_for
         self.mangle_month = mangle_month
         self.calls: list[tuple] = []
+        self.multipliers_seen: list[str] = []
 
     def qualify_contracts(self, contract):
         month = contract.lastTradeDateOrContractMonth[:6]
         self.calls.append(('qualify', month))
+        self.multipliers_seen.append(contract.multiplier)
         if month == self.mangle_month:
             contract.lastTradeDateOrContractMonth = '209912'
 
@@ -553,6 +555,7 @@ def test_splice_enabled_db_contract_still_front_appends_new_row(monkeypatch):
     price_data = {'X': _full_price_df(date(2018, 1, 1), 500, drift=0.0015, expiration=date(2026, 3, 20), seed=1)}
     _patch_db(monkeypatch, price_data)
     monkeypatch.setattr(tr, 'resolve_active_months', lambda symbol: ['H', 'M', 'U', 'Z'])
+    monkeypatch.setattr(tr, 'get_spec', lambda symbol: {'exchange': 'CME', 'multiplier': 50})
     fake_ib = _FakeIB(volumes_by_month={'202603': 1000, '202606': 500},
                       bar_by_month={'202603': (date(2026, 8, 15), 111.0)})
 
@@ -565,10 +568,35 @@ def test_splice_enabled_db_contract_still_front_appends_new_row(monkeypatch):
     assert ('bars', '202606') in fake_ib.calls      # ...just lost the volume comparison
 
 
+def test_splice_uses_db_symbol_own_multiplier_not_instrument_own(monkeypatch):
+    # Regression test: a micro/mini instrument (e.g. real MES, multiplier=5)
+    # borrowing its full-size sibling's history (real ES, multiplier=50)
+    # must qualify IB contracts with the SIBLING's own multiplier, not the
+    # calling instrument's -- confirmed live this session as the actual
+    # cause of IB rejecting every splice-enabled symbol with "No security
+    # definition has been found" (MES was requesting multiplier='5' against
+    # root symbol 'ES', which only resolves under multiplier='50').
+    price_data = {'ES': _full_price_df(date(2018, 1, 1), 500, drift=0.0015, expiration=date(2026, 3, 20), seed=1)}
+    _patch_db(monkeypatch, price_data)
+    monkeypatch.setattr(tr, 'resolve_active_months', lambda symbol: ['H', 'M', 'U', 'Z'])
+    monkeypatch.setattr(tr, 'get_spec', lambda symbol: {'exchange': 'CME', 'multiplier': 50})
+    fake_ib = _FakeIB(volumes_by_month={'202603': 1000, '202606': 500})
+
+    mes = _instrument('MES', multiplier=5.0)
+    mes['db_symbol'] = 'ES'
+    mes['signal_symbol'] = 'ES'
+    config = TsmomLiveConfig(account_equity=100_000, data_source='database', splice_live_price=True)
+    targets = compute_rebalance_targets([mes], config, ib=fake_ib)
+
+    assert targets[0].get('error') is None
+    assert all(m == '50' for m in fake_ib.multipliers_seen)
+
+
 def test_splice_enabled_roll_detected_uses_next_contract(monkeypatch, caplog):
     price_data = {'X': _full_price_df(date(2018, 1, 1), 500, drift=0.0015, expiration=date(2026, 3, 20), seed=1)}
     _patch_db(monkeypatch, price_data)
     monkeypatch.setattr(tr, 'resolve_active_months', lambda symbol: ['H', 'M', 'U', 'Z'])
+    monkeypatch.setattr(tr, 'get_spec', lambda symbol: {'exchange': 'CME', 'multiplier': 50})
     fake_ib = _FakeIB(volumes_by_month={'202603': 500, '202606': 2000},
                       bar_by_month={'202606': (date(2026, 8, 15), 222.0)})
 
@@ -598,6 +626,7 @@ def test_splice_falls_back_gracefully_on_ib_error(monkeypatch, caplog):
     price_data = {'X': _full_price_df(date(2018, 1, 1), 500, drift=0.0015, expiration=date(2026, 3, 20), seed=1)}
     _patch_db(monkeypatch, price_data)
     monkeypatch.setattr(tr, 'resolve_active_months', lambda symbol: ['H', 'M', 'U', 'Z'])
+    monkeypatch.setattr(tr, 'get_spec', lambda symbol: {'exchange': 'CME', 'multiplier': 50})
     fake_ib = _FakeIB(volumes_by_month={'202603': 1000, '202606': 500}, raise_for={'202603'})
 
     config = TsmomLiveConfig(account_equity=100_000, data_source='database', splice_live_price=True)
@@ -616,6 +645,7 @@ def test_splice_replaces_existing_same_day_row_not_duplicates(monkeypatch):
     same_day = price_data['X'].tail(1)['ts_event'][0]
     _patch_db(monkeypatch, price_data)
     monkeypatch.setattr(tr, 'resolve_active_months', lambda symbol: ['H', 'M', 'U', 'Z'])
+    monkeypatch.setattr(tr, 'get_spec', lambda symbol: {'exchange': 'CME', 'multiplier': 50})
     fake_ib = _FakeIB(volumes_by_month={'202603': 1000, '202606': 500},
                       bar_by_month={'202603': (same_day, 333.0)})
 

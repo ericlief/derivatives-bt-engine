@@ -49,6 +49,7 @@ from derivatives_bt_engine.domain.instruments import (
     CME_MONTH_LETTERS,
     CME_MONTH_NUM_TO_LETTER,
     INSTRUMENTS,
+    get_spec,
     resolve_active_months,
     resolve_annualization_days,
     resolve_signal_symbol,
@@ -652,8 +653,18 @@ def _splice_live_front_month_bar(ib: Optional[IBPySync], instr: dict, db_symbol:
         last_expiration = last['expiration'][0]
         if last_expiration is None:
             raise ValueError("DB bars' tail row has no expiration")
-        exchange = instr.get('exchange', 'CME')
-        multiplier = str(instr.get('multiplier', '') or '')
+        # db_symbol's OWN spec, not instr's -- a micro/mini (e.g. MES,
+        # multiplier=5) borrowing its full-size sibling's history (ES,
+        # multiplier=50) needs THAT sibling's real contract spec to
+        # qualify against IB. Using instr's own multiplier here is wrong
+        # whenever db_symbol diverges from instr['symbol'] (confirmed
+        # directly: IB rejected every splice-enabled symbol this session
+        # with "No security definition has been found" until this was
+        # fixed -- MES was requesting Future(symbol='ES', multiplier='5',
+        # ...) instead of the correct multiplier='50').
+        db_spec = get_spec(db_symbol)
+        exchange = db_spec.get('exchange', 'CME')
+        multiplier = str(db_spec.get('multiplier', '') or '')
 
         current_month = last_expiration.strftime('%Y%m')
         _, current_bars = _qualify_and_pull_recent_bar(ib, db_symbol, exchange, multiplier, current_month)
