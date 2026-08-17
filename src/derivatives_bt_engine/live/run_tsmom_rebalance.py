@@ -301,11 +301,13 @@ def parse_args():
                    help='Only used with --data-source database: YYYY-MM-DD to compute signals as of '
                         '(no lookahead past this date) -- default: latest available bar')
     p.add_argument('--splice-live-price', action='store_true', default=False,
-                   help="Only meaningful with --data-source database and no --as-of: splices one fresh "
-                        "IB daily bar (a plain dated Future, not ContFuture -- see TsmomLiveConfig."
-                        "splice_live_price's own docstring) onto the DB series' tail for symbols with "
-                        "confirmed active_months, closing the staleness gap when the local db cache "
-                        "hasn't been refreshed today. Requires a live IB connection even though "
+                   help="Only meaningful with --data-source database and no --as-of: backfills every "
+                        "fresh IB daily bar since the DB series' own last cached row (a plain dated "
+                        "Future, not ContFuture -- see TsmomLiveConfig.splice_live_price's own "
+                        "docstring), not just today's, for symbols with confirmed active_months -- "
+                        "closes the staleness gap when the local db cache hasn't been refreshed in a "
+                        "while, without corrupting the rolling-window signal calcs a single-bar patch "
+                        "would leave silently distorted. Requires a live IB connection even though "
                         "--data-source database (opens one automatically when this flag is set). "
                         "Default off -- costs extra IB round-trips per spliced symbol per run, and any "
                         "per-symbol splice failure silently falls back to that symbol's plain DB bars.")

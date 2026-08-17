@@ -485,22 +485,31 @@ class _FakeIB:
     this dev env), so only the round-trip calls need faking.
 
     volumes_by_month/bar_by_month: {'YYYYMM': ...} keyed by the requested
-    contract month. raise_for: months whose get_historical_bars call raises
-    (simulates an IB error). mangle_month: a month whose qualified contract
-    gets its lastTradeDateOrContractMonth corrupted, to trigger the
-    resolved-month-mismatch guard. ambiguous_without_multiplier: months
-    whose BLANK-multiplier request returns zero bars (simulating real IB's
-    observed behavior for a genuinely ambiguous root like bare 'SI' --
-    no exception, just an empty result) but succeeds once ANY multiplier
-    is set, to test _qualify_and_pull_recent_bar_with_fallback's retry."""
+    contract month -- bar_by_month's single (ts_event, close) becomes the
+    LATEST (last) row of a single-row result; volumes_by_month's value is
+    that latest row's own volume, used for the roll-detection comparison
+    regardless of how many rows bars_by_month (plural, see below) returns
+    for the same month. raise_for: months whose get_historical_bars call
+    raises (simulates an IB error). mangle_month: a month whose qualified
+    contract gets its lastTradeDateOrContractMonth corrupted, to trigger
+    the resolved-month-mismatch guard. ambiguous_without_multiplier:
+    months whose BLANK-multiplier request returns zero bars (simulating
+    real IB's observed behavior for a genuinely ambiguous root like bare
+    'SI' -- no exception, just an empty result) but succeeds once ANY
+    multiplier is set, to test _qualify_and_pull_recent_bar_with_fallback's
+    retry. bars_by_month (plural): {'YYYYMM': [(ts_event, close), ...]} --
+    when set for a month, returns ALL of these rows (ascending ts_event,
+    volume taken from volumes_by_month for every row) instead of the
+    single-row bar_by_month/default -- for testing multi-day backfill."""
 
     def __init__(self, volumes_by_month, bar_by_month=None, raise_for=frozenset(), mangle_month=None,
-                 ambiguous_without_multiplier=frozenset()):
+                 ambiguous_without_multiplier=frozenset(), bars_by_month=None):
         self.volumes_by_month = volumes_by_month
         self.bar_by_month = bar_by_month or {}
         self.raise_for = raise_for
         self.mangle_month = mangle_month
         self.ambiguous_without_multiplier = ambiguous_without_multiplier
+        self.bars_by_month = bars_by_month or {}
         self.calls: list[tuple] = []
         self.multipliers_seen: list[str] = []
         self.symbols_seen: list[str] = []
@@ -524,6 +533,11 @@ class _FakeIB:
         vol = self.volumes_by_month.get(month)
         if vol is None:
             return pl.DataFrame()
+        if month in self.bars_by_month:
+            rows = self.bars_by_month[month]
+            return pl.DataFrame({'date': [r[0] for r in rows], 'open': [r[1] for r in rows],
+                                 'high': [r[1] for r in rows], 'low': [r[1] for r in rows],
+                                 'close': [r[1] for r in rows], 'volume': [vol] * len(rows)})
         ts_event, close = self.bar_by_month.get(month, (date(2026, 8, 15), 100.0))
         return pl.DataFrame({'date': [ts_event], 'open': [close], 'high': [close],
                              'low': [close], 'close': [close], 'volume': [vol]})
@@ -846,6 +860,59 @@ def test_splice_replaces_existing_same_day_row_not_duplicates(monkeypatch):
     assert targets[0]['close'] == pytest.approx(333.0)
     # Replaced, not appended -- row count unchanged.
     assert price_data['X'].height == original_height
+
+
+def _trading_dates_ending(end: date, n: int) -> list[date]:
+    dates = []
+    d = end
+    while len(dates) < n:
+        if d.weekday() < 5:
+            dates.append(d)
+        d -= timedelta(days=1)
+    return list(reversed(dates))
+
+
+def test_splice_backfills_entire_gap_not_just_latest_bar(monkeypatch):
+    # Regression test for the actual point of this feature: a DB cache
+    # stale by MORE than a day or two needs every missing trading day
+    # backfilled, not just today's -- continuous_momentum's rolling
+    # windows are row-count-based, not calendar-aware, so splicing only
+    # the latest bar while N days are missing silently compresses those N
+    # days out of the window instead of actually filling the gap. Calls
+    # _splice_live_front_month_bar directly (not through
+    # compute_rebalance_targets) to inspect the merged frame row-by-row --
+    # the public pipeline only ever exposes the LATEST computed values.
+    expiration = _not_stale_expiration()
+    current_month = expiration.strftime('%Y%m')
+    next_month = tr._next_active_month_yyyymm(_TEST_CYCLE, expiration)
+    gap_start = date.today() - timedelta(days=12)  # DB stale by ~12 calendar days
+    hist_dates = _trading_dates_ending(gap_start, 100)
+    rng = np.random.default_rng(1)
+    hist_close = 100 * np.exp(np.cumsum(rng.normal(0.0, 0.01, len(hist_dates))))
+    db_bars = pl.DataFrame({
+        'ts_event': hist_dates, 'open': hist_close, 'high': hist_close, 'low': hist_close,
+        'close': hist_close, 'volume': [100_000] * len(hist_dates),
+        'instrument_id': [1] * len(hist_dates), 'expiration': [expiration] * len(hist_dates),
+    })
+    monkeypatch.setattr(tr, 'resolve_active_months', lambda symbol: _TEST_CYCLE)
+    monkeypatch.setattr(tr, 'get_spec', lambda symbol: {'exchange': 'CME'})
+
+    # IB has every trading day from the gap start through today -- more
+    # than what's actually missing (gap_start itself is already in the
+    # DB), so this also exercises the >= same-day-refresh overlap.
+    ib_dates = _trading_dates_ending(date.today(), 20)
+    ib_dates = [d for d in ib_dates if d >= gap_start]
+    new_days = [d for d in ib_dates if d > gap_start]
+    assert len(new_days) > 1  # sanity: this test is actually exercising a multi-day gap
+    fake_ib = _FakeIB(volumes_by_month={current_month: 1000, next_month: 500},
+                      bars_by_month={current_month: [(d, 200.0 + i) for i, d in enumerate(ib_dates)]})
+
+    merged = tr._splice_live_front_month_bar(fake_ib, _instrument('X'), 'X', db_bars)
+
+    assert merged.height == db_bars.height + len(new_days)
+    assert set(merged['ts_event'].to_list()) == set(hist_dates) | set(new_days)
+    for i, d in enumerate(ib_dates):
+        assert merged.filter(pl.col('ts_event') == d)['close'][0] == pytest.approx(200.0 + i)
 
 
 def test_splice_skipped_when_as_of_is_set(monkeypatch):

@@ -258,23 +258,28 @@ class TsmomLiveConfig:
     vx_ma_window_days: int = DEFAULT_VX_MA_WINDOW_DAYS
     as_of: Optional[date] = None  # only used when data_source == 'database'; None = latest available bar
     # Only meaningful when data_source == 'database' and as_of is None --
-    # splices ONE fresh IB daily bar (a plain DATED Future, e.g. today's
-    # actual ZCZ6, NOT ContFuture -- see research/research_ib_continuous_
-    # futures_data_reliability.md for why ContFuture's back-adjustment is
-    # unusable here) onto the tail of the DB-sourced series for each
-    # symbol with confirmed active_months (instruments.resolve_active_
-    # months), closing exactly the staleness gap the caveat above
-    # describes. Requires a live `ib` connection even though
-    # data_source='database' (compute_rebalance_targets raises if
-    # splice_live_price=True and ib is None). Default OFF: costs up to 4
-    # extra IB round-trips per spliced symbol per run (2 candidate
-    # contracts x qualify+historical-bars, to replicate the DB's own
-    # volume-based front-month rule live) and any splice failure for a
-    # symbol silently falls back to that symbol's plain (possibly stale)
-    # DB bars rather than failing the run -- see _splice_live_front_
-    # month_bar's own docstring. Never touches H/IDM's correlation
-    # machinery directly; H incidentally sees the fresher close too,
-    # since it's built from the same per-symbol `bars` this splices.
+    # backfills EVERY fresh IB daily bar strictly newer than the DB's own
+    # last cached row (a plain DATED Future, e.g. today's actual ZCZ6, NOT
+    # ContFuture -- see research/research_ib_continuous_futures_data_
+    # reliability.md for why ContFuture's back-adjustment is unusable
+    # here) onto the tail of the DB-sourced series for each symbol with
+    # confirmed active_months (instruments.resolve_active_months), closing
+    # exactly the staleness gap the caveat above describes -- the WHOLE
+    # gap, not just today, since continuous_momentum's rolling windows are
+    # row-count-based, not calendar-aware (see _splice_live_front_month_
+    # bar's own docstring for why a single latest-bar splice silently
+    # corrupts them instead of actually fixing the staleness). Requires a
+    # live `ib` connection even though data_source='database' (compute_
+    # rebalance_targets raises if splice_live_price=True and ib is None).
+    # Default OFF: costs up to 4 extra IB round-trips per spliced symbol
+    # per run (2 candidate contracts x qualify+historical-bars, to
+    # replicate the DB's own volume-based front-month rule live) and any
+    # splice failure for a symbol silently falls back to that symbol's
+    # plain (possibly stale) DB bars rather than failing the run -- see
+    # _splice_live_front_month_bar's own docstring. Never touches H/IDM's
+    # correlation machinery directly; H incidentally sees the fresher
+    # close too, since it's built from the same per-symbol `bars` this
+    # splices.
     splice_live_price: bool = False
 
     def __post_init__(self):
@@ -617,17 +622,19 @@ def _live_front_month_candidates(active_months: list[str], last_expiration: date
 
 
 def _qualify_and_pull_recent_bar(ib: IBPySync, ib_symbol: str, exchange: str, multiplier: str,
-                                  month_yyyymm: str) -> tuple:
+                                  month_yyyymm: str, duration: str = '2 D') -> tuple:
     """Qualifies a plain DATED Future (IBPySync.future -- NOT cont_future/
     ContFuture, see _splice_live_front_month_bar's own docstring for why)
-    for ib_symbol/month_yyyymm and pulls its most recent ~2 trading days of
-    daily bars. `ib_symbol` must be IB's OWN facing ticker, not necessarily
-    the DB's `db_symbol` -- they diverge for the 3 FX contracts
-    instruments._FX_TICKER_TO_KEY exists to translate (e.g. the DB stores
-    JPY's continuous series under the raw Globex root '6J', but IB's own
-    API only resolves it under 'JPY' -- confirmed live this session,
-    passing '6J' straight to IB got "No security definition has been
-    found" for every candidate month). `month_yyyymm` (not a full
+    for ib_symbol/month_yyyymm and pulls `duration` worth of trailing daily
+    bars (default '2 D' -- just enough for a same-day volume comparison;
+    _splice_live_front_month_bar passes a gap-sized duration when it needs
+    more than the single latest bar). `ib_symbol` must be IB's OWN facing
+    ticker, not necessarily the DB's `db_symbol` -- they diverge for the 3
+    FX contracts instruments._FX_TICKER_TO_KEY exists to translate (e.g.
+    the DB stores JPY's continuous series under the raw Globex root '6J',
+    but IB's own API only resolves it under 'JPY' -- confirmed live this
+    session, passing '6J' straight to IB got "No security definition has
+    been found" for every candidate month). `month_yyyymm` (not a full
     YYYYMMDD) lets IB resolve the specific dated contract for that month
     itself, avoiding an exact-day mismatch against the DB's own
     `expiration` (a different data vendor). Returns (qualified_contract,
@@ -643,14 +650,15 @@ def _qualify_and_pull_recent_bar(ib: IBPySync, ib_symbol: str, exchange: str, mu
     if resolved_month != month_yyyymm:
         raise RuntimeError(f"{ib_symbol}: qualified contract's own expiry month {resolved_month} "
                             f"!= requested {month_yyyymm}")
-    bars = ib.get_historical_bars(contract, duration='2 D', bar_size='1 day', what_to_show='TRADES', use_rth=True)
+    bars = ib.get_historical_bars(contract, duration=duration, bar_size='1 day', what_to_show='TRADES', use_rth=True)
     if bars is None or bars.height == 0:
         raise RuntimeError(f"{ib_symbol} ({month_yyyymm}): no historical bars returned")
     return contract, bars.rename({'date': 'ts_event'})
 
 
 def _qualify_and_pull_recent_bar_with_fallback(ib: IBPySync, ib_symbol: str, exchange: str,
-                                                fallback_multiplier: str, month_yyyymm: str) -> tuple:
+                                                fallback_multiplier: str, month_yyyymm: str,
+                                                duration: str = '2 D') -> tuple:
     """Tries _qualify_and_pull_recent_bar with a BLANK multiplier first
     (correct for the overwhelming majority of symbols -- see
     _splice_live_front_month_bar's own docstring on why multiplier is
@@ -666,19 +674,45 @@ def _qualify_and_pull_recent_bar_with_fallback(ib: IBPySync, ib_symbol: str, exc
     disambiguates it). Re-raises the SECOND attempt's exception if that
     also fails."""
     try:
-        return _qualify_and_pull_recent_bar(ib, ib_symbol, exchange, '', month_yyyymm)
+        return _qualify_and_pull_recent_bar(ib, ib_symbol, exchange, '', month_yyyymm, duration=duration)
     except Exception:
-        return _qualify_and_pull_recent_bar(ib, ib_symbol, exchange, fallback_multiplier, month_yyyymm)
+        return _qualify_and_pull_recent_bar(ib, ib_symbol, exchange, fallback_multiplier, month_yyyymm,
+                                             duration=duration)
 
 
 def _splice_live_front_month_bar(ib: Optional[IBPySync], instr: dict, db_symbol: str,
                                   bars: pl.DataFrame) -> pl.DataFrame:
-    """Splices ONE fresh IB daily bar onto the tail of `bars` (the DB-sourced
-    continuous front-month series), in memory only -- never written back to
-    FuturesDataLoader's cached parquet. Closes the staleness gap
-    TsmomLiveConfig.splice_live_price's own docstring describes: the local
-    duckdb cache isn't refreshed every day, so a symbol's trend_strength/hv/
-    regime can be computed off a stale close without anything flagging it.
+    """Splices EVERY fresh IB daily bar strictly newer than `bars`' own
+    last cached row onto its tail (the DB-sourced continuous front-month
+    series), in memory only -- never written back to FuturesDataLoader's
+    cached parquet. Closes the staleness gap TsmomLiveConfig.
+    splice_live_price's own docstring describes: the local duckdb cache
+    isn't refreshed every day, so a symbol's trend_strength/hv/regime can
+    be computed off a stale close without anything flagging it.
+
+    Backfills the WHOLE gap, not just the single latest bar: continuous_
+    momentum's rolling windows (ts_fast/ts_slow/daily_std/hv,
+    signal.py's rolling_mean/rolling_std) are plain ROW-COUNT windows,
+    calendar-agnostic -- splicing on only today's bar while the DB is
+    stale by N days doesn't "skip" those N missing days, it silently
+    compresses them out of the window entirely (the newest computed
+    signal ends up a window of "62 stale rows + 1 fresh row" for a
+    63-row window, not a real 63-trading-day lookback). A DB cache stale
+    by weeks (confirmed this session) needs those weeks' worth of real
+    bars actually present, not approximated by one point.
+
+    Approximation/tradeoff to flag: every backfilled day in the gap uses
+    the SAME single contract this function ultimately picks as current
+    front-month (via the volume comparison below) -- it does NOT
+    re-derive which contract was genuinely front on each individual day
+    the way _CONTINUOUS_FRONT_MONTH_SQL does (that would mean replicating
+    the full day-by-day sticky-crossover rule live across every candidate
+    contract, a much larger undertaking). If a real roll happened partway
+    through the gap, the days before that roll get backfilled with the
+    NEW contract's prices rather than the (technically correct for that
+    date) old one -- a small, usually minor discontinuity right at the
+    roll boundary, traded off against the much larger error of leaving
+    those days out of the rolling windows entirely.
 
     Deliberately uses a plain DATED Future (IBPySync.future, e.g. today's
     actual ZCZ6), never ContFuture/cont_future: research/research_ib_
@@ -725,8 +759,20 @@ def _splice_live_front_month_bar(ib: Optional[IBPySync], instr: dict, db_symbol:
     try:
         last = bars.tail(1)
         last_expiration = last['expiration'][0]
+        last_ts_event = last['ts_event'][0]
         if last_expiration is None:
             raise ValueError("DB bars' tail row has no expiration")
+        if last_ts_event is None:
+            raise ValueError("DB bars' tail row has no ts_event")
+        # Enough trailing days to cover the ENTIRE gap since the DB's own
+        # last cached row, not just today -- see this function's own
+        # docstring for why a single latest-bar splice isn't enough. +5
+        # calendar days of margin for weekends/holidays inside the gap;
+        # capped at 400 to keep a pathologically stale cache from
+        # generating an enormous IB request (a gap that large means the
+        # cache needs a real refresh, not a live patch).
+        gap_days = max(2, (date.today() - last_ts_event).days + 5)
+        duration = f'{min(gap_days, 400)} D'
         # db_symbol's OWN exchange, not instr's -- a micro/mini (e.g. MES)
         # borrowing its full-size sibling's history (ES) needs THAT
         # sibling's own exchange to qualify against IB (get_spec is the
@@ -757,7 +803,8 @@ def _splice_live_front_month_bar(ib: Optional[IBPySync], instr: dict, db_symbol:
         for month in candidate_months:
             try:
                 _, month_bars = _qualify_and_pull_recent_bar_with_fallback(ib, ib_symbol, exchange,
-                                                                            registry_multiplier, month)
+                                                                            registry_multiplier, month,
+                                                                            duration=duration)
             except Exception as exc:
                 log.warning('%s: candidate contract %s unavailable (%s) -- skipping', symbol, month, exc)
                 continue
@@ -771,17 +818,28 @@ def _splice_live_front_month_bar(ib: Optional[IBPySync], instr: dict, db_symbol:
             log.warning('%s: live roll detected since DB was last refreshed -- picked %s (vol=%s) '
                         'over nearer candidate(s) %s', symbol, picked_month, picked_vol, candidate_months[:-1])
 
-        new_row = picked_bars.tail(1).select('ts_event', 'open', 'high', 'low', 'close', 'volume')
-        new_ts = new_row['ts_event'][0]
-        replaced_existing = (bars['ts_event'] == new_ts).any()
+        # >= (not >): also picks up a same-day refresh of the DB's own
+        # last cached row (e.g. IB has a more current intraday close for
+        # a date the DB already has a stale print for), same as this
+        # function's original single-bar behavior -- while still
+        # backfilling everything strictly newer via the same filter.
+        new_rows = (picked_bars.filter(pl.col('ts_event') >= last_ts_event)
+                    .select('ts_event', 'open', 'high', 'low', 'close', 'volume'))
+        if new_rows.height == 0:
+            raise RuntimeError(f"no bars at or after {last_ts_event} in picked contract {picked_month} "
+                                f"(duration={duration})")
+        new_ts_list = new_rows['ts_event'].to_list()
+        replaced = bars.filter(pl.col('ts_event').is_in(new_ts_list)).height
+        appended = new_rows.height - replaced
         merged = pl.concat(
-            [bars.filter(pl.col('ts_event') != new_ts), new_row],
+            [bars.filter(~pl.col('ts_event').is_in(new_ts_list)), new_rows],
             how='diagonal_relaxed',
         ).sort('ts_event')
-        log.info('%s: spliced live bar for %s (close=%s, volume=%s) -- %s, DB series %d -> %d rows',
-                 symbol, new_ts, new_row['close'][0], new_row['volume'][0],
-                 'replaced existing row' if replaced_existing else 'appended new row',
-                 bars.height, merged.height)
+        latest = new_rows.tail(1)
+        log.info('%s: backfilled %d day(s) from %s (gap since %s; %d replaced, %d appended) -- '
+                 'latest %s close=%s volume=%s -- DB series %d -> %d rows',
+                 symbol, new_rows.height, picked_month, last_ts_event, replaced, appended,
+                 latest['ts_event'][0], latest['close'][0], latest['volume'][0], bars.height, merged.height)
         return merged
     except Exception as exc:
         log.warning('%s: live price splice failed (%s) -- falling back to unspliced DB bars', symbol, exc)
