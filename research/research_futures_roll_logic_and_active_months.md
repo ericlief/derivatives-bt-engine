@@ -651,6 +651,80 @@ should be excluded by the same mechanism or is a separate problem.
   is a proposal only — not implemented, and deliberately left for the user to decide
   whether/when to build, per the task's explicit framing.
 
+## 6. `splice_live_price` (§5's proposal, now implemented) — two live bugs, and a full
+   `active_months` re-verification
+
+§5's proposal was eventually implemented as `TsmomLiveConfig.splice_live_price` /
+`_splice_live_front_month_bar` (`live/tsmom_rebalance.py`) — splices one fresh IB daily
+bar for the DB's own currently-considered-front dated contract onto the tail of the local
+duckdb-sourced series, closing a real staleness gap (the local cache found ~3 weeks stale
+during this session). Running it live against real IB surfaced two bugs, both fixed and
+covered by regression tests (`tests/live/test_tsmom_rebalance.py`):
+
+**6.1 Wrong IB contract multiplier.** This project's internal `multiplier` field is a
+$-per-point P&L-scaling convention (used for `position_risk`, notional sizing, etc.), not
+IB's own `Contract.multiplier`. It happened to coincide for ES/NQ/GC (both conventions
+land on the same number), but diverged for grains/silver/JPY — IB rejected every one with
+"No security definition has been found for the request" until `multiplier` was dropped
+from the qualification request entirely. This matches `_resolve_contract`'s own existing,
+proven pattern (`live/tsmom_rebalance.py`, live-order-routing contract resolution): it
+only ever passes `multiplier` for a genuinely ticker-renamed instrument
+(`ib_symbol != symbol`), empty otherwise — `db_symbol` in the splice path is always
+already the canonical root, so symbol + exchange + an explicit contract month is
+sufficient for IB to resolve it unambiguously without one.
+
+**6.2 DB cache stale by more than one roll.** The splice originally assumed the DB's
+last-known front-month contract was at most one roll behind reality, and queried it
+unconditionally. Confirmed live: `ZL`'s DB-cached front month was `202607` (July),
+already fully expired by the time this ran in mid-August — IB correctly rejected it, and
+since the original two-candidate comparison wasn't per-candidate fault-tolerant, the
+whole splice aborted right there without ever trying December (the genuinely correct next
+month). Fixed with `_live_front_month_candidates`, which walks forward past any
+already-expired candidate (approximated via calendar month, not exact listed expiry day)
+before ever calling IB, with each candidate now pulled independently so one dead contract
+can't hide a working later one.
+
+**6.3 Full `active_months` re-verification, all 12 confirmed-list symbols.** Diagnosing
+6.2 raised a live question — "is the roll from GC's August contract straight to December,
+skipping October, actually correct, or is `active_months` itself wrong/incomplete?" —
+re-run directly against `/home/dev/fin/db/globex_mdp_3.0.duckdb` using the EXACT
+production `_CONTINUOUS_FRONT_MONTH_SQL` query (not §2's naive, non-sticky version), for
+every symbol currently carrying a confirmed `active_months` list in `instruments.py`:
+grouping the resulting sticky front-month series' own `expiration` month across its full
+~2010–2026 history and comparing the set of months that ever actually win against the
+registry's claimed list.
+
+11 of 12 matched exactly:
+- `ES`/`NQ`/`ZN`/`ZT`/`6J`(JPY)/`6M`: all `{03,06,09,12}` = `['H','M','U','Z']`, confirmed.
+- `GC`: `{02,04,06,08,12}` = `['G','J','M','Q','Z']`, confirmed. October (`V`) never once
+  won the crossover in the full history, despite carrying real (if much thinner) volume
+  — 2025-10 alone totaled 482K vs. 7-19M for the confirmed months that same period.
+- `ZL`: `{01,03,05,07,12}` = `['F','H','K','N','Z']`, confirmed. August/September/October
+  never won either, despite each carrying real, non-trivial volume (roughly 15-25% of an
+  active month's total in a typical year) — this was the ORIGINAL live symptom (a stale
+  `202607` DB row skipping straight to December), and it turns out that skip is correct,
+  not a registry gap; the actual bug was 6.2 (querying the stale month unconditionally),
+  not the registry.
+- `ZS`, `ZW`, `SI`: all matched their registry lists exactly.
+
+**One genuine registry bug found**: `ZC` (corn) claims `active_months: ['H', 'K', 'N',
+'U', 'Z']` (includes `U`/September), but the DB's actual sticky-crossover history shows
+September has **never once** won the front-month crossover across the full dataset
+(2010–2026) — only `{03,05,07,12}` (`H`,`K`,`N`,`Z`) ever appear. This isn't a data
+availability artifact either: September ZC is genuinely liquid in its own right (91.7M
+total raw volume across the dataset, the same order of magnitude as March/May/July's
+130-180M) — it just never manages to out-volume whatever the currently-sticky contract is
+on any single day, likely because corn's trading activity concentrates disproportionately
+onto the "big" months (December alone: 316.9M). Fixed in `instruments.py`: `ZC`'s
+`active_months` is now `['H', 'K', 'N', 'Z']`.
+
+Caveats specific to this section: single DB snapshot, no live/paper IB cross-check beyond
+what 6.1/6.2 already confirmed empirically against real IB during this session; the
+GC/ZL "never wins despite real volume" framing is aggregate-total-vs-daily-crossover
+reasoning, not a symbol-by-symbol replay of every individual day (the ZC finding IS a
+full, exhaustive day-by-day sticky-series re-derivation via the actual production SQL,
+not a sample).
+
 ## Caveats on verification
 
 - §1.2's severity figures (1,184 of 4,446 dates dropped, 26.6%; the 1,534-day contiguous

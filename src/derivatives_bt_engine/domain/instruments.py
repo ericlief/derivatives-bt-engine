@@ -229,15 +229,23 @@ INSTRUMENTS: dict[str, dict] = {
     # signal_symbol so the duckdb path uses the same full-size asset.
     # active_months confirmed empirically for all four grains -- research
     # doc §2.2 -- none follows the financial quarterly cycle; each has its
-    # own standard CBOT ag listing calendar (corn/wheat: Mar/May/Jul/Sep/Dec;
-    # soybeans/soy oil: Jan/Mar/May/Jul/Nov, roughly).
+    # own standard CBOT ag listing calendar (wheat: Mar/May/Jul/Sep/Dec;
+    # soybeans/soy oil: Jan/Mar/May/Jul/Nov, roughly). Corn nominally
+    # shares wheat's Mar/May/Jul/Sep/Dec listing calendar too, but a full
+    # re-derivation of the DB's own sticky-crossover series (research doc
+    # §6.3, this project's own duckdb, full ~2010-2026 history) found
+    # September has never once actually won corn's front-month crossover
+    # -- genuinely liquid in its own right (91.7M total volume, same order
+    # of magnitude as March/May/July), just never the single highest-
+    # volume day -- unlike wheat, where September DOES win. ZC's own
+    # active_months excludes it accordingly; ZW's below does not.
     'ZL':  {'exchange': 'CBOT',  'multiplier': 600,        'cluster': 'grain', # notional ~= 43K
             'initial_margin': 5102.79, 'commission': 3.01, 'active_months': ['F', 'H', 'K', 'N', 'Z'],
             'annualization_days': 252},
     'MZL': {'exchange': 'CBOT',  'multiplier': 60,         'cluster': 'grain',
             'initial_margin': 525.16, 'commission': 0.76, 'signal_symbol': 'ZL'},
     'ZC':  {'exchange': 'CBOT',  'multiplier': 50,         'cluster': 'grain',
-            'initial_margin': 1855.76, 'commission': 3.01, 'active_months': ['H', 'K', 'N', 'U', 'Z'],
+            'initial_margin': 1855.76, 'commission': 3.01, 'active_months': ['H', 'K', 'N', 'Z'],
             'annualization_days': 252},
     'MZC': {'exchange': 'CBOT',  'multiplier': 5,          'cluster': 'grain',
             'initial_margin': 166.51, 'commission': 0.76, 'signal_symbol': 'ZC'},
