@@ -578,6 +578,43 @@ def _next_active_month_yyyymm(active_months: list[str], last_expiration: date) -
     return f'{next_year}{CME_MONTH_LETTERS[next_letter]:02d}'
 
 
+def _live_front_month_candidates(active_months: list[str], last_expiration: date, today: date,
+                                  max_candidates: int = 2) -> list[str]:
+    """Up to `max_candidates` YYYYMM months to compare live IB volume
+    across, starting from the first one that isn't almost certainly
+    already expired.
+
+    Walks forward through active_months from last_expiration's own month,
+    SKIPPING any month whose own calendar month is already strictly
+    before `today`'s (an approximation -- exact listed expiry days aren't
+    known here without a further IB round trip; conservative enough since
+    a contract's real last-trade date is always within, or shortly
+    before, its own named delivery month). This matters because the DB
+    cache last_expiration comes from can be stale by MORE than one roll:
+    confirmed live (this session) a DB-cached front month can already be
+    fully in the past by the time this runs (e.g. a July contract queried
+    in mid-August) -- without this skip, the ORIGINAL month gets queried
+    anyway, IB correctly rejects the now-delisted contract, and (absent
+    per-candidate fault tolerance in the caller) the whole splice used to
+    abort right there without ever trying the next, genuinely-live month."""
+    month = last_expiration
+    # 4 full cycles' worth of steps -- comfortably covers a DB cache stale
+    # by up to ~4 years regardless of where in the cycle `today` falls
+    # (a single cycle's worth of steps can undershoot by nearly a full
+    # cycle depending on the starting offset within it).
+    for _ in range(4 * len(active_months)):
+        if (month.year, month.month) >= (today.year, today.month):
+            break
+        next_month_str = _next_active_month_yyyymm(active_months, month)
+        month = date(int(next_month_str[:4]), int(next_month_str[4:6]), 1)
+    candidates = [month.strftime('%Y%m')]
+    for _ in range(max_candidates - 1):
+        next_month_str = _next_active_month_yyyymm(active_months, month)
+        month = date(int(next_month_str[:4]), int(next_month_str[4:6]), 1)
+        candidates.append(next_month_str)
+    return candidates
+
+
 def _qualify_and_pull_recent_bar(ib: IBPySync, db_symbol: str, exchange: str, multiplier: str,
                                   month_yyyymm: str) -> tuple:
     """Qualifies a plain DATED Future (IBPySync.future -- NOT cont_future/
@@ -623,20 +660,27 @@ def _splice_live_front_month_bar(ib: Optional[IBPySync], instr: dict, db_symbol:
     adjustment to match the DB's own raw series.
 
     Replicates the DB's own volume-based sticky-front-month rule
-    (_CONTINUOUS_FRONT_MONTH_SQL's `ORDER BY volume DESC`) live, by
-    comparing fresh IB volume between (a) the DB's last-known front-month
-    contract and (b) the next contract in the symbol's confirmed
-    active_months cycle -- whichever has higher volume wins, exactly this
-    project's own roll rule, just evaluated live instead of from the DB's
-    own bar history. Ties/nulls stay on the DB's last-known contract
-    (mirrors _CONTINUOUS_FRONT_MONTH_SQL's own `expiration ASC` tie-break).
+    (_CONTINUOUS_FRONT_MONTH_SQL's `ORDER BY volume DESC`) live, over
+    _live_front_month_candidates' own candidate list -- starting from the
+    DB's last-known front-month contract UNLESS that's already expired
+    (a stale-by-more-than-one-roll DB cache is real, confirmed live this
+    session: a July contract queried in mid-August), in which case it
+    walks forward to the first still-live one -- whichever candidate has
+    the highest fresh IB volume wins, exactly this project's own roll
+    rule, just evaluated live instead of from the DB's own bar history.
+    Each candidate is pulled independently and fault-tolerantly (one dead/
+    delisted candidate is skipped with a warning, not allowed to abort the
+    whole splice); ties/nulls favor the nearer candidate (mirrors
+    _CONTINUOUS_FRONT_MONTH_SQL's own `expiration ASC` tie-break, since
+    only a STRICTLY greater volume ever overwrites an earlier pick).
 
     Deliberately never raises: any failure anywhere (no active_months
-    confirmed for this symbol, an IB round-trip error, a missing/ambiguous
-    volume) logs and falls back to returning `bars` UNCHANGED -- matches
-    this module's existing soft-fallback philosophy elsewhere (e.g.
-    fetch_vx_spike_ratio's vx_current fallback chain) of flagging loudly
-    without failing a whole rebalance over one enrichment step."""
+    confirmed for this symbol, every candidate contract unavailable, a
+    missing/ambiguous volume) logs and falls back to returning `bars`
+    UNCHANGED -- matches this module's existing soft-fallback philosophy
+    elsewhere (e.g. fetch_vx_spike_ratio's vx_current fallback chain) of
+    flagging loudly without failing a whole rebalance over one enrichment
+    step."""
     symbol = instr['symbol']
     if ib is None:
         log.warning('%s: splice_live_price requested but no IB connection available -- '
@@ -653,34 +697,41 @@ def _splice_live_front_month_bar(ib: Optional[IBPySync], instr: dict, db_symbol:
         last_expiration = last['expiration'][0]
         if last_expiration is None:
             raise ValueError("DB bars' tail row has no expiration")
-        # db_symbol's OWN spec, not instr's -- a micro/mini (e.g. MES,
-        # multiplier=5) borrowing its full-size sibling's history (ES,
-        # multiplier=50) needs THAT sibling's real contract spec to
-        # qualify against IB. Using instr's own multiplier here is wrong
-        # whenever db_symbol diverges from instr['symbol'] (confirmed
-        # directly: IB rejected every splice-enabled symbol this session
-        # with "No security definition has been found" until this was
-        # fixed -- MES was requesting Future(symbol='ES', multiplier='5',
-        # ...) instead of the correct multiplier='50').
-        db_spec = get_spec(db_symbol)
-        exchange = db_spec.get('exchange', 'CME')
-        multiplier = str(db_spec.get('multiplier', '') or '')
+        # db_symbol's OWN exchange, not instr's -- a micro/mini (e.g. MES)
+        # borrowing its full-size sibling's history (ES) needs THAT
+        # sibling's own exchange to qualify against IB (get_spec is the
+        # same lookup point used elsewhere in this codebase for this).
+        # multiplier deliberately left blank always, NOT db_symbol's own
+        # registry value either: this project's internal `multiplier` is
+        # a $-per-point P&L-scaling convention that happens to coincide
+        # with IB's own contract multiplier for some products (ES/NQ/GC)
+        # but diverges for others (confirmed live: grains, silver, JPY
+        # all got "No security definition has been found" until this was
+        # dropped). _resolve_contract's own proven pattern already only
+        # ever passes multiplier for a genuinely ticker-renamed instrument
+        # (ib_symbol != symbol); db_symbol here is always the CANONICAL
+        # root already, so symbol + exchange + an explicit month is
+        # sufficient for IB to resolve it unambiguously without one.
+        exchange = get_spec(db_symbol).get('exchange', 'CME')
+        multiplier = ''
 
-        current_month = last_expiration.strftime('%Y%m')
-        _, current_bars = _qualify_and_pull_recent_bar(ib, db_symbol, exchange, multiplier, current_month)
-        current_vol = current_bars.tail(1)['volume'][0]
+        candidate_months = _live_front_month_candidates(active_months, last_expiration, date.today())
+        picked_month = picked_bars = picked_vol = None
+        for month in candidate_months:
+            try:
+                _, month_bars = _qualify_and_pull_recent_bar(ib, db_symbol, exchange, multiplier, month)
+            except Exception as exc:
+                log.warning('%s: candidate contract %s unavailable (%s) -- skipping', symbol, month, exc)
+                continue
+            vol = month_bars.tail(1)['volume'][0]
+            if picked_vol is None or (vol is not None and vol > picked_vol):
+                picked_month, picked_bars, picked_vol = month, month_bars, vol
 
-        next_month = _next_active_month_yyyymm(active_months, last_expiration)
-        _, next_bars = _qualify_and_pull_recent_bar(ib, db_symbol, exchange, multiplier, next_month)
-        next_vol = next_bars.tail(1)['volume'][0]
-
-        if next_vol is not None and current_vol is not None and next_vol > current_vol:
-            log.warning('%s: live roll detected since DB was last refreshed -- DB front month %s '
-                        '(vol=%s) vs next %s (vol=%s); using %s', symbol, current_month, current_vol,
-                        next_month, next_vol, next_month)
-            picked_bars = next_bars
-        else:
-            picked_bars = current_bars
+        if picked_bars is None:
+            raise RuntimeError(f"no live candidate contract available among {candidate_months}")
+        if picked_month != candidate_months[0]:
+            log.warning('%s: live roll detected since DB was last refreshed -- picked %s (vol=%s) '
+                        'over nearer candidate(s) %s', symbol, picked_month, picked_vol, candidate_months[:-1])
 
         new_row = picked_bars.tail(1).select('ts_event', 'open', 'high', 'low', 'close', 'volume')
         new_ts = new_row['ts_event'][0]

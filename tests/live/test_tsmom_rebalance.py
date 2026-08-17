@@ -532,6 +532,34 @@ def test_next_active_month_yyyymm_raises_when_month_not_in_cycle():
         tr._next_active_month_yyyymm(['H', 'M', 'U', 'Z'], date(2026, 1, 18))
 
 
+def test_live_front_month_candidates_not_expired_stays_put():
+    # today's own month IS the DB's last-known contract's month -- not
+    # expired, no walking needed, candidates[0] is exactly that month.
+    active_months = ['H', 'M', 'U', 'Z']
+    last_expiration = date(2026, 6, 20)
+    today = date(2026, 6, 10)
+    candidates = tr._live_front_month_candidates(active_months, last_expiration, today)
+    assert candidates == ['202606', '202609']
+
+
+def test_live_front_month_candidates_walks_past_expired_months():
+    # DB's last-known contract (March) is already 3 months stale relative
+    # to today (June) -- must walk forward to June, not stay on March.
+    active_months = ['H', 'M', 'U', 'Z']
+    last_expiration = date(2026, 3, 20)
+    today = date(2026, 6, 10)
+    candidates = tr._live_front_month_candidates(active_months, last_expiration, today)
+    assert candidates == ['202606', '202609']
+
+
+def test_live_front_month_candidates_walks_across_year_boundary():
+    active_months = ['H', 'M', 'U', 'Z']
+    last_expiration = date(2025, 3, 20)
+    today = date(2026, 1, 15)
+    candidates = tr._live_front_month_candidates(active_months, last_expiration, today)
+    assert candidates == ['202603', '202606']
+
+
 def test_splice_live_price_requires_ib_even_in_database_mode():
     config = TsmomLiveConfig(account_equity=100_000, data_source='database', splice_live_price=True)
     with pytest.raises(ValueError):
@@ -551,36 +579,67 @@ def test_splice_disabled_by_default_makes_no_ib_calls(monkeypatch):
     assert targets[0].get('error') is None
 
 
+_TEST_CYCLE = ['H', 'M', 'U', 'Z']  # Mar/Jun/Sep/Dec
+
+
+def _not_stale_expiration() -> date:
+    """A _TEST_CYCLE month safely >= date.today() regardless of when tests
+    actually run (December of next year) -- so _live_front_month_candidates
+    never needs to walk it forward as already-expired. Use for "DB is
+    current, not stale" test scenarios."""
+    return date(date.today().year + 1, 12, 20)
+
+
+def _stale_expiration() -> date:
+    """A _TEST_CYCLE month safely IN THE PAST relative to date.today()
+    regardless of when tests actually run (March two years ago) -- forces
+    _live_front_month_candidates to walk forward past several
+    already-expired months before reaching a live one. Use for "DB cache
+    is stale by more than one roll" test scenarios (confirmed live this
+    session: a DB-cached front month can already be fully expired by the
+    time a run happens, not just one roll behind)."""
+    return date(date.today().year - 2, 3, 20)
+
+
 def test_splice_enabled_db_contract_still_front_appends_new_row(monkeypatch):
-    price_data = {'X': _full_price_df(date(2018, 1, 1), 500, drift=0.0015, expiration=date(2026, 3, 20), seed=1)}
+    expiration = _not_stale_expiration()
+    current_month = expiration.strftime('%Y%m')
+    next_month = tr._next_active_month_yyyymm(_TEST_CYCLE, expiration)
+    price_data = {'X': _full_price_df(date(2018, 1, 1), 500, drift=0.0015, expiration=expiration, seed=1)}
     _patch_db(monkeypatch, price_data)
-    monkeypatch.setattr(tr, 'resolve_active_months', lambda symbol: ['H', 'M', 'U', 'Z'])
-    monkeypatch.setattr(tr, 'get_spec', lambda symbol: {'exchange': 'CME', 'multiplier': 50})
-    fake_ib = _FakeIB(volumes_by_month={'202603': 1000, '202606': 500},
-                      bar_by_month={'202603': (date(2026, 8, 15), 111.0)})
+    monkeypatch.setattr(tr, 'resolve_active_months', lambda symbol: _TEST_CYCLE)
+    monkeypatch.setattr(tr, 'get_spec', lambda symbol: {'exchange': 'CME'})
+    fake_ib = _FakeIB(volumes_by_month={current_month: 1000, next_month: 500},
+                      bar_by_month={current_month: (date.today(), 111.0)})
 
     config = TsmomLiveConfig(account_equity=100_000, data_source='database', splice_live_price=True)
     targets = compute_rebalance_targets([_instrument('X')], config, ib=fake_ib)
 
     assert targets[0].get('error') is None
     assert targets[0]['close'] == pytest.approx(111.0)
-    assert ('qualify', '202606') in fake_ib.calls  # next contract WAS checked...
-    assert ('bars', '202606') in fake_ib.calls      # ...just lost the volume comparison
+    assert ('qualify', next_month) in fake_ib.calls  # next contract WAS checked...
+    assert ('bars', next_month) in fake_ib.calls      # ...just lost the volume comparison
 
 
-def test_splice_uses_db_symbol_own_multiplier_not_instrument_own(monkeypatch):
-    # Regression test: a micro/mini instrument (e.g. real MES, multiplier=5)
-    # borrowing its full-size sibling's history (real ES, multiplier=50)
-    # must qualify IB contracts with the SIBLING's own multiplier, not the
-    # calling instrument's -- confirmed live this session as the actual
-    # cause of IB rejecting every splice-enabled symbol with "No security
-    # definition has been found" (MES was requesting multiplier='5' against
-    # root symbol 'ES', which only resolves under multiplier='50').
-    price_data = {'ES': _full_price_df(date(2018, 1, 1), 500, drift=0.0015, expiration=date(2026, 3, 20), seed=1)}
+def test_splice_uses_blank_multiplier_not_instrument_or_db_symbol_own(monkeypatch):
+    # Regression test: this project's internal `multiplier` field is a
+    # $-per-point P&L-scaling convention, not necessarily IB's own
+    # contract multiplier -- passing EITHER the calling instrument's own
+    # value (e.g. MES's 5) or even db_symbol's own registry value (ES's
+    # 50) caused IB to reject "No security definition has been found" for
+    # several real products this session (grains, silver, JPY, where our
+    # internal convention diverges from IB's). Confirmed live: dropping
+    # multiplier entirely (symbol + exchange + explicit month) is what
+    # actually works, matching _resolve_contract's own proven pattern for
+    # a canonical (non ticker-renamed) root.
+    expiration = _not_stale_expiration()
+    current_month = expiration.strftime('%Y%m')
+    next_month = tr._next_active_month_yyyymm(_TEST_CYCLE, expiration)
+    price_data = {'ES': _full_price_df(date(2018, 1, 1), 500, drift=0.0015, expiration=expiration, seed=1)}
     _patch_db(monkeypatch, price_data)
-    monkeypatch.setattr(tr, 'resolve_active_months', lambda symbol: ['H', 'M', 'U', 'Z'])
+    monkeypatch.setattr(tr, 'resolve_active_months', lambda symbol: _TEST_CYCLE)
     monkeypatch.setattr(tr, 'get_spec', lambda symbol: {'exchange': 'CME', 'multiplier': 50})
-    fake_ib = _FakeIB(volumes_by_month={'202603': 1000, '202606': 500})
+    fake_ib = _FakeIB(volumes_by_month={current_month: 1000, next_month: 500})
 
     mes = _instrument('MES', multiplier=5.0)
     mes['db_symbol'] = 'ES'
@@ -589,16 +648,19 @@ def test_splice_uses_db_symbol_own_multiplier_not_instrument_own(monkeypatch):
     targets = compute_rebalance_targets([mes], config, ib=fake_ib)
 
     assert targets[0].get('error') is None
-    assert all(m == '50' for m in fake_ib.multipliers_seen)
+    assert all(m == '' for m in fake_ib.multipliers_seen)
 
 
 def test_splice_enabled_roll_detected_uses_next_contract(monkeypatch, caplog):
-    price_data = {'X': _full_price_df(date(2018, 1, 1), 500, drift=0.0015, expiration=date(2026, 3, 20), seed=1)}
+    expiration = _not_stale_expiration()
+    current_month = expiration.strftime('%Y%m')
+    next_month = tr._next_active_month_yyyymm(_TEST_CYCLE, expiration)
+    price_data = {'X': _full_price_df(date(2018, 1, 1), 500, drift=0.0015, expiration=expiration, seed=1)}
     _patch_db(monkeypatch, price_data)
-    monkeypatch.setattr(tr, 'resolve_active_months', lambda symbol: ['H', 'M', 'U', 'Z'])
-    monkeypatch.setattr(tr, 'get_spec', lambda symbol: {'exchange': 'CME', 'multiplier': 50})
-    fake_ib = _FakeIB(volumes_by_month={'202603': 500, '202606': 2000},
-                      bar_by_month={'202606': (date(2026, 8, 15), 222.0)})
+    monkeypatch.setattr(tr, 'resolve_active_months', lambda symbol: _TEST_CYCLE)
+    monkeypatch.setattr(tr, 'get_spec', lambda symbol: {'exchange': 'CME'})
+    fake_ib = _FakeIB(volumes_by_month={current_month: 500, next_month: 2000},
+                      bar_by_month={next_month: (date.today(), 222.0)})
 
     config = TsmomLiveConfig(account_equity=100_000, data_source='database', splice_live_price=True)
     with caplog.at_level('WARNING'):
@@ -610,7 +672,8 @@ def test_splice_enabled_roll_detected_uses_next_contract(monkeypatch, caplog):
 
 
 def test_splice_skipped_when_active_months_unconfirmed(monkeypatch):
-    price_data = {'X': _full_price_df(date(2018, 1, 1), 500, drift=0.0015, expiration=date(2026, 3, 20), seed=1)}
+    price_data = {'X': _full_price_df(date(2018, 1, 1), 500, drift=0.0015,
+                                       expiration=_not_stale_expiration(), seed=1)}
     _patch_db(monkeypatch, price_data)
     monkeypatch.setattr(tr, 'resolve_active_months', lambda symbol: None)
     fake_ib = _FakeIB(volumes_by_month={})
@@ -623,31 +686,91 @@ def test_splice_skipped_when_active_months_unconfirmed(monkeypatch):
 
 
 def test_splice_falls_back_gracefully_on_ib_error(monkeypatch, caplog):
-    price_data = {'X': _full_price_df(date(2018, 1, 1), 500, drift=0.0015, expiration=date(2026, 3, 20), seed=1)}
+    expiration = _not_stale_expiration()
+    current_month = expiration.strftime('%Y%m')
+    next_month = tr._next_active_month_yyyymm(_TEST_CYCLE, expiration)
+    price_data = {'X': _full_price_df(date(2018, 1, 1), 500, drift=0.0015, expiration=expiration, seed=1)}
     _patch_db(monkeypatch, price_data)
-    monkeypatch.setattr(tr, 'resolve_active_months', lambda symbol: ['H', 'M', 'U', 'Z'])
-    monkeypatch.setattr(tr, 'get_spec', lambda symbol: {'exchange': 'CME', 'multiplier': 50})
-    fake_ib = _FakeIB(volumes_by_month={'202603': 1000, '202606': 500}, raise_for={'202603'})
+    monkeypatch.setattr(tr, 'resolve_active_months', lambda symbol: _TEST_CYCLE)
+    monkeypatch.setattr(tr, 'get_spec', lambda symbol: {'exchange': 'CME'})
+    fake_ib = _FakeIB(volumes_by_month={current_month: 1000, next_month: 500}, raise_for={current_month})
 
     config = TsmomLiveConfig(account_equity=100_000, data_source='database', splice_live_price=True)
     with caplog.at_level('WARNING'):
         targets = compute_rebalance_targets([_instrument('X')], config, ib=fake_ib)
 
-    # No exception propagates -- the whole rebalance still completes normally.
+    # No exception propagates -- the whole rebalance still completes
+    # normally, and the still-live next candidate is used instead of the
+    # one that errored.
     assert targets[0].get('error') is None
     assert targets[0]['target_contracts'] is not None
+    assert any('candidate contract' in r.message and 'unavailable' in r.message for r in caplog.records)
+
+
+def test_splice_all_candidates_unavailable_falls_back_gracefully(monkeypatch, caplog):
+    expiration = _not_stale_expiration()
+    current_month = expiration.strftime('%Y%m')
+    next_month = tr._next_active_month_yyyymm(_TEST_CYCLE, expiration)
+    price_data = {'X': _full_price_df(date(2018, 1, 1), 500, drift=0.0015, expiration=expiration, seed=1)}
+    _patch_db(monkeypatch, price_data)
+    monkeypatch.setattr(tr, 'resolve_active_months', lambda symbol: _TEST_CYCLE)
+    monkeypatch.setattr(tr, 'get_spec', lambda symbol: {'exchange': 'CME'})
+    fake_ib = _FakeIB(volumes_by_month={current_month: 1000, next_month: 500},
+                      raise_for={current_month, next_month})
+
+    config = TsmomLiveConfig(account_equity=100_000, data_source='database', splice_live_price=True)
+    with caplog.at_level('WARNING'):
+        targets = compute_rebalance_targets([_instrument('X')], config, ib=fake_ib)
+
+    assert targets[0].get('error') is None
     assert any('live price splice failed' in r.message for r in caplog.records)
 
 
+def test_splice_walks_forward_past_already_expired_db_contract(monkeypatch, caplog):
+    # Regression test for the real bug this session: a DB cache stale by
+    # MORE than one roll (confirmed live -- a July ZL contract queried in
+    # mid-August) used to get queried unconditionally as "current," IB
+    # correctly rejected the now-delisted contract, and the whole splice
+    # aborted right there without ever trying a genuinely live month.
+    # Here the DB's last-known contract is 2 years stale; the splice must
+    # walk forward (skipping every already-expired candidate along the
+    # way, none of which should even be queried) to the first live one.
+    stale_expiration = _stale_expiration()
+    price_data = {'X': _full_price_df(date(2018, 1, 1), 500, drift=0.0015, expiration=stale_expiration, seed=1)}
+    _patch_db(monkeypatch, price_data)
+    monkeypatch.setattr(tr, 'resolve_active_months', lambda symbol: _TEST_CYCLE)
+    monkeypatch.setattr(tr, 'get_spec', lambda symbol: {'exchange': 'CME'})
+
+    # Whatever _live_front_month_candidates actually resolves as live,
+    # independently recomputed here from the same pure function under
+    # test -- this test is about the WALK skipping expired months, not
+    # about re-deriving that arithmetic by hand.
+    live_candidates = tr._live_front_month_candidates(_TEST_CYCLE, stale_expiration, date.today())
+    assert live_candidates[0] != stale_expiration.strftime('%Y%m')  # confirms it actually walked forward
+    fake_ib = _FakeIB(volumes_by_month={live_candidates[0]: 1000, live_candidates[1]: 500},
+                      bar_by_month={live_candidates[0]: (date.today(), 444.0)})
+
+    config = TsmomLiveConfig(account_equity=100_000, data_source='database', splice_live_price=True)
+    targets = compute_rebalance_targets([_instrument('X')], config, ib=fake_ib)
+
+    assert targets[0].get('error') is None
+    assert targets[0]['close'] == pytest.approx(444.0)
+    # The stale, already-expired month was never even queried.
+    assert stale_expiration.strftime('%Y%m') not in [month for _, month in fake_ib.calls]
+
+
 def test_splice_replaces_existing_same_day_row_not_duplicates(monkeypatch):
-    price_data = {'X': _full_price_df(date(2024, 1, 1), 500, drift=0.0015, expiration=date(2026, 3, 20), seed=1)}
+    expiration = _not_stale_expiration()
+    current_month = expiration.strftime('%Y%m')
+    next_month = tr._next_active_month_yyyymm(_TEST_CYCLE, expiration)
+    price_data = {'X': _full_price_df(date(2024, 1, 1), 500, drift=0.0015, expiration=expiration, seed=1)}
     original_height = price_data['X'].height
     same_day = price_data['X'].tail(1)['ts_event'][0]
     _patch_db(monkeypatch, price_data)
-    monkeypatch.setattr(tr, 'resolve_active_months', lambda symbol: ['H', 'M', 'U', 'Z'])
-    monkeypatch.setattr(tr, 'get_spec', lambda symbol: {'exchange': 'CME', 'multiplier': 50})
-    fake_ib = _FakeIB(volumes_by_month={'202603': 1000, '202606': 500},
-                      bar_by_month={'202603': (same_day, 333.0)})
+    monkeypatch.setattr(tr, 'resolve_active_months', lambda symbol: _TEST_CYCLE)
+    monkeypatch.setattr(tr, 'get_spec', lambda symbol: {'exchange': 'CME'})
+    fake_ib = _FakeIB(volumes_by_month={current_month: 1000, next_month: 500},
+                      bar_by_month={current_month: (same_day, 333.0)})
 
     config = TsmomLiveConfig(account_equity=100_000, data_source='database', splice_live_price=True)
     targets = compute_rebalance_targets([_instrument('X')], config, ib=fake_ib)
