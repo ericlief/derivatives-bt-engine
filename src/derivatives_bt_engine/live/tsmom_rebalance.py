@@ -271,9 +271,10 @@ class TsmomLiveConfig:
     # corrupts them instead of actually fixing the staleness). Requires a
     # live `ib` connection even though data_source='database' (compute_
     # rebalance_targets raises if splice_live_price=True and ib is None).
-    # Default OFF: costs up to 6 extra IB round-trips per spliced symbol
-    # per run (3 candidate contracts x qualify+historical-bars, to
-    # replicate the DB's own volume-based front-month rule live) and any
+    # Default OFF: costs up to 7 extra IB round-trips per spliced symbol
+    # per run (1 req_contract_details to discover real listed months, up
+    # to 3 candidate contracts x qualify+historical-bars, to replicate
+    # the DB's own volume-based front-month rule live) and any
     # splice failure for a symbol silently falls back to that symbol's
     # plain (possibly stale) DB bars rather than failing the run -- see
     # _splice_live_front_month_bar's own docstring. Never touches H/IDM's
@@ -559,116 +560,73 @@ def _current_contracts(ib: IBPySync, contract) -> int:
 # Main orchestration
 # ------------------------------------------------------------------
 
-def _next_active_month_yyyymm(active_months: list[str], last_expiration: date) -> str:
-    """Next confirmed-active CME contract month strictly after
-    last_expiration's own month, in IB's YYYYMM lastTradeDateOrContractMonth
-    format -- the live equivalent of "what would the DB's sticky-front-month
-    rule roll into next" for a symbol whose active cycle is `active_months`
-    (instruments.resolve_active_months). Wraps to the next calendar year
-    when last_expiration's month is the cycle's last one.
-
-    Raises ValueError if last_expiration's own month isn't itself in
-    active_months -- an anomaly (the DB's last-known front-month contract
-    falls outside its own confirmed cycle) callers should treat as a splice
-    failure, not silently guess past."""
-    months_sorted = sorted(active_months, key=lambda letter: CME_MONTH_LETTERS[letter])
-    current_letter = CME_MONTH_NUM_TO_LETTER[last_expiration.month]
-    if current_letter not in months_sorted:
-        raise ValueError(f"DB's last-known front-month contract ({last_expiration}, month "
-                          f"{current_letter}) is not in the confirmed active_months cycle {months_sorted}")
-    idx = months_sorted.index(current_letter)
-    if idx == len(months_sorted) - 1:
-        next_letter, next_year = months_sorted[0], last_expiration.year + 1
-    else:
-        next_letter, next_year = months_sorted[idx + 1], last_expiration.year
-    return f'{next_year}{CME_MONTH_LETTERS[next_letter]:02d}'
-
-
-def _live_front_month_candidates(active_months: list[str], last_expiration: date, today: date,
-                                  max_candidates: int = 3) -> list[str]:
-    """Up to `max_candidates` YYYYMM months (default 3: the first
-    not-obviously-expired one, plus the 2 after it) to compare live IB
-    volume across, starting from the first one that isn't almost
-    certainly already expired.
-
-    3 (not 2): matters most for a symbol with NO restricted cycle (e.g.
-    CL, `active_months` deliberately set to all 12 CME months --
-    instruments.py's own comment on that entry) where "the next month"
-    isn't necessarily the true volume leader the way it reliably is for a
-    sparse, well-separated cycle (grains/metals/financials roll onto the
-    literal next confirmed month with nothing in between to compete) --
-    WTI's real front-month convention can roll multiple months out ahead
-    of nominal expiration, so checking only 1 month ahead risks picking a
-    contract that's already lost the crossover to one further out.
-
-    Walks forward through active_months from last_expiration's own month,
-    SKIPPING any month whose own calendar month is already strictly
-    before `today`'s (an approximation -- exact listed expiry days aren't
-    known here without a further IB round trip; conservative enough since
-    a contract's real last-trade date is always within, or shortly
-    before, its own named delivery month). This matters because the DB
-    cache last_expiration comes from can be stale by MORE than one roll:
-    confirmed live (this session) a DB-cached front month can already be
-    fully in the past by the time this runs (e.g. a July contract queried
-    in mid-August) -- without this skip, the ORIGINAL month gets queried
-    anyway, IB correctly rejects the now-delisted contract, and (absent
-    per-candidate fault tolerance in the caller) the whole splice used to
-    abort right there without ever trying the next, genuinely-live month."""
-    month = last_expiration
-    # 4 full cycles' worth of steps -- comfortably covers a DB cache stale
-    # by up to ~4 years regardless of where in the cycle `today` falls
-    # (a single cycle's worth of steps can undershoot by nearly a full
-    # cycle depending on the starting offset within it).
-    for _ in range(4 * len(active_months)):
-        if (month.year, month.month) >= (today.year, today.month):
-            break
-        next_month_str = _next_active_month_yyyymm(active_months, month)
-        month = date(int(next_month_str[:4]), int(next_month_str[4:6]), 1)
-    candidates = [month.strftime('%Y%m')]
-    for _ in range(max_candidates - 1):
-        next_month_str = _next_active_month_yyyymm(active_months, month)
-        month = date(int(next_month_str[:4]), int(next_month_str[4:6]), 1)
-        candidates.append(next_month_str)
-    return candidates
+def _list_live_dated_contracts(ib: IBPySync, ib_symbol: str, exchange: str, multiplier: str = '') -> list:
+    """Every currently-listed dated Future for ib_symbol/exchange, as
+    (expiry_date, full YYYYMMDD) tuples sorted ascending by expiry --
+    mirrors get_nearest_quarterly_expiry's own already-proven pattern
+    (this module) of enumerating req_contract_details rather than
+    guessing a bare YYYYMM and letting IB re-resolve it from the partial
+    month: that function's own docstring documents this exact failure
+    mode (MCL/MZC/MZW), and it recurred here too -- confirmed live this
+    session against CL specifically, where a guessed '202608' correctly
+    got rejected (WTI's real last-trade date is roughly a MONTH BEFORE
+    its own named delivery month, an early-expiry convention no other
+    product in this registry has, so an already-expired August contract
+    doesn't look expired under a same-calendar-month heuristic) but
+    '202609'/'202610' silently mis-resolved back to August's own contract
+    instead of erroring. Passing IB's own untruncated date straight back
+    to IBPySync.future avoids the re-resolution step that causes both.
+    Includes every returned listing regardless of expiry -- callers
+    filter for "not yet expired" against their own `today`."""
+    from ib_tools.ibpysync import IBPySync
+    c = IBPySync.future(ib_symbol, exchange=exchange, multiplier=multiplier)
+    details = ib.req_contract_details(c)
+    out = []
+    for d in details:
+        raw = d.contract.lastTradeDateOrContractMonth
+        if not raw:
+            continue
+        out.append((datetime.strptime(raw[:8], '%Y%m%d').date(), raw[:8]))
+    return sorted(out)
 
 
 def _qualify_and_pull_recent_bar(ib: IBPySync, ib_symbol: str, exchange: str, multiplier: str,
-                                  month_yyyymm: str, duration: str = '2 D') -> tuple:
+                                  expiration_yyyymmdd: str, duration: str = '2 D') -> tuple:
     """Qualifies a plain DATED Future (IBPySync.future -- NOT cont_future/
     ContFuture, see _splice_live_front_month_bar's own docstring for why)
-    for ib_symbol/month_yyyymm and pulls `duration` worth of trailing daily
-    bars (default '2 D' -- just enough for a same-day volume comparison;
-    _splice_live_front_month_bar passes a gap-sized duration when it needs
-    more than the single latest bar). `ib_symbol` must be IB's OWN facing
-    ticker, not necessarily the DB's `db_symbol` -- they diverge for the 3
-    FX contracts instruments._FX_TICKER_TO_KEY exists to translate (e.g.
-    the DB stores JPY's continuous series under the raw Globex root '6J',
-    but IB's own API only resolves it under 'JPY' -- confirmed live this
-    session, passing '6J' straight to IB got "No security definition has
-    been found" for every candidate month). `month_yyyymm` (not a full
-    YYYYMMDD) lets IB resolve the specific dated contract for that month
-    itself, avoiding an exact-day mismatch against the DB's own
-    `expiration` (a different data vendor). Returns (qualified_contract,
-    bars) with bars renamed 'date'->'ts_event' (same convention as this
-    module's 'ib' data_source branch). Raises on any qualification/data
-    failure, a resolved month mismatch (catches a wrong contract), or an
-    empty bar result -- makes no fallback decisions itself; the caller
-    owns that."""
+    for ib_symbol/expiration_yyyymmdd and pulls `duration` worth of
+    trailing daily bars (default '2 D' -- just enough for a same-day
+    volume comparison; _splice_live_front_month_bar passes a gap-sized
+    duration when it needs more than the single latest bar).
+    `expiration_yyyymmdd` must be a FULL, untruncated date IB itself
+    already confirmed exists (via _list_live_dated_contracts) -- NOT a
+    bare YYYYMM guess, which was observed to unreliably mis-resolve or
+    outright fail qualification (see _list_live_dated_contracts' own
+    docstring). `ib_symbol` must be IB's OWN facing ticker, not
+    necessarily the DB's `db_symbol` -- they diverge for the 3 FX
+    contracts instruments._FX_TICKER_TO_KEY exists to translate (e.g. the
+    DB stores JPY's continuous series under the raw Globex root '6J', but
+    IB's own API only resolves it under 'JPY'). Returns (qualified_
+    contract, bars) with bars renamed 'date'->'ts_event' (same convention
+    as this module's 'ib' data_source branch). Raises on any
+    qualification/data failure, a resolved date mismatch (catches a
+    wrong contract), or an empty bar result -- makes no fallback
+    decisions itself; the caller owns that."""
     from ib_tools.ibpysync import IBPySync
-    contract = IBPySync.future(ib_symbol, exchange=exchange, expiration=month_yyyymm, multiplier=multiplier)
+    contract = IBPySync.future(ib_symbol, exchange=exchange, expiration=expiration_yyyymmdd, multiplier=multiplier)
     ib.qualify_contracts(contract)
-    resolved_month = contract.lastTradeDateOrContractMonth[:6]
-    if resolved_month != month_yyyymm:
-        raise RuntimeError(f"{ib_symbol}: qualified contract's own expiry month {resolved_month} "
-                            f"!= requested {month_yyyymm}")
+    resolved = contract.lastTradeDateOrContractMonth[:8]
+    if resolved != expiration_yyyymmdd:
+        raise RuntimeError(f"{ib_symbol}: qualified contract's own expiry {resolved} "
+                            f"!= requested {expiration_yyyymmdd}")
     bars = ib.get_historical_bars(contract, duration=duration, bar_size='1 day', what_to_show='TRADES', use_rth=True)
     if bars is None or bars.height == 0:
-        raise RuntimeError(f"{ib_symbol} ({month_yyyymm}): no historical bars returned")
+        raise RuntimeError(f"{ib_symbol} ({expiration_yyyymmdd}): no historical bars returned")
     return contract, bars.rename({'date': 'ts_event'})
 
 
 def _qualify_and_pull_recent_bar_with_fallback(ib: IBPySync, ib_symbol: str, exchange: str,
-                                                fallback_multiplier: str, month_yyyymm: str,
+                                                fallback_multiplier: str, expiration_yyyymmdd: str,
                                                 duration: str = '2 D') -> tuple:
     """Tries _qualify_and_pull_recent_bar with a BLANK multiplier first
     (correct for the overwhelming majority of symbols -- see
@@ -685,9 +643,9 @@ def _qualify_and_pull_recent_bar_with_fallback(ib: IBPySync, ib_symbol: str, exc
     disambiguates it). Re-raises the SECOND attempt's exception if that
     also fails."""
     try:
-        return _qualify_and_pull_recent_bar(ib, ib_symbol, exchange, '', month_yyyymm, duration=duration)
+        return _qualify_and_pull_recent_bar(ib, ib_symbol, exchange, '', expiration_yyyymmdd, duration=duration)
     except Exception:
-        return _qualify_and_pull_recent_bar(ib, ib_symbol, exchange, fallback_multiplier, month_yyyymm,
+        return _qualify_and_pull_recent_bar(ib, ib_symbol, exchange, fallback_multiplier, expiration_yyyymmdd,
                                              duration=duration)
 
 
@@ -735,15 +693,23 @@ def _splice_live_front_month_bar(ib: Optional[IBPySync], instr: dict, db_symbol:
     adjustment to match the DB's own raw series.
 
     Replicates the DB's own volume-based sticky-front-month rule
-    (_CONTINUOUS_FRONT_MONTH_SQL's `ORDER BY volume DESC`) live, over
-    _live_front_month_candidates' own candidate list -- starting from the
-    DB's last-known front-month contract UNLESS that's already expired
-    (a stale-by-more-than-one-roll DB cache is real, confirmed live this
-    session: a July contract queried in mid-August), in which case it
-    walks forward to the first still-live one -- whichever candidate has
-    the highest fresh IB volume wins, exactly this project's own roll
-    rule, just evaluated live instead of from the DB's own bar history.
-    Each candidate is pulled independently and fault-tolerantly (one dead/
+    (_CONTINUOUS_FRONT_MONTH_SQL's `ORDER BY volume DESC`) live, over up
+    to 3 candidates drawn from _list_live_dated_contracts' own REAL,
+    IB-confirmed listing (not a guessed/walked month -- see that
+    function's own docstring for why guessing is unreliable), filtered to
+    not-yet-expired and, for a symbol with a genuinely restricted cycle
+    (active_months != all 12 CME months, e.g. grains/metals/financials),
+    to months whose letter is actually in that confirmed cycle -- a
+    symbol like CL with NO restriction (active_months deliberately set to
+    all 12) skips that filter entirely, just takes the 3 nearest live
+    listings. 3 candidates (not 1): matters most for CL specifically,
+    where "the next listed month" isn't necessarily the true volume
+    leader the way it reliably is for a sparse, well-separated cycle --
+    WTI's real front-month convention can roll multiple months out ahead
+    of nominal expiration. Whichever candidate has the highest fresh IB
+    volume wins, exactly this project's own roll rule, just evaluated
+    live instead of from the DB's own bar history. Each candidate is
+    pulled independently and fault-tolerantly (one dead/
     delisted candidate is skipped with a warning, not allowed to abort the
     whole splice); ties/nulls favor the nearer candidate (mirrors
     _CONTINUOUS_FRONT_MONTH_SQL's own `expiration ASC` tie-break, since
@@ -769,10 +735,7 @@ def _splice_live_front_month_bar(ib: Optional[IBPySync], instr: dict, db_symbol:
 
     try:
         last = bars.tail(1)
-        last_expiration = last['expiration'][0]
         last_ts_event = last['ts_event'][0]
-        if last_expiration is None:
-            raise ValueError("DB bars' tail row has no expiration")
         if last_ts_event is None:
             raise ValueError("DB bars' tail row has no ts_event")
         # Enough trailing days to cover the ENTIRE gap since the DB's own
@@ -809,30 +772,48 @@ def _splice_live_front_month_bar(ib: Optional[IBPySync], instr: dict, db_symbol:
         # full-size silver and the SIL micro under IB without one).
         registry_multiplier = str(db_spec.get('multiplier', '') or '')
 
-        candidate_months = _live_front_month_candidates(active_months, last_expiration, date.today())
-        picked_month = picked_bars = picked_vol = None
-        for month in candidate_months:
+        # REAL, IB-confirmed listings -- not a guessed/walked month (see
+        # _list_live_dated_contracts' own docstring for why guessing is
+        # unreliable, confirmed live against CL this session). Filtered
+        # to not-yet-expired; further filtered to the confirmed
+        # active_months cycle UNLESS this symbol has none (CL-style "no
+        # restriction", active_months == all 12 CME months), in which
+        # case every live listing is a genuine candidate.
+        listed = _list_live_dated_contracts(ib, ib_symbol, exchange)
+        today = date.today()
+        live_listed = [(exp, yyyymmdd) for exp, yyyymmdd in listed if exp >= today]
+        if set(active_months) != set(CME_MONTH_LETTERS):
+            live_listed = [(exp, yyyymmdd) for exp, yyyymmdd in live_listed
+                           if CME_MONTH_NUM_TO_LETTER.get(exp.month) in active_months]
+        if not live_listed:
+            raise RuntimeError(f"no live listed contracts found for {ib_symbol} ({exchange})")
+        candidate_dates = [yyyymmdd for _, yyyymmdd in live_listed[:3]]
+
+        picked_date = picked_bars = picked_vol = None
+        for expiration_yyyymmdd in candidate_dates:
             try:
                 _, month_bars = _qualify_and_pull_recent_bar_with_fallback(ib, ib_symbol, exchange,
-                                                                            registry_multiplier, month,
+                                                                            registry_multiplier,
+                                                                            expiration_yyyymmdd,
                                                                             duration=duration)
             except Exception as exc:
-                log.warning('%s: candidate contract %s unavailable (%s) -- skipping', symbol, month, exc)
+                log.warning('%s: candidate contract %s unavailable (%s) -- skipping', symbol,
+                            expiration_yyyymmdd, exc)
                 continue
             vol = month_bars.tail(1)['volume'][0]
             if picked_vol is None or (vol is not None and vol > picked_vol):
-                picked_month, picked_bars, picked_vol = month, month_bars, vol
+                picked_date, picked_bars, picked_vol = expiration_yyyymmdd, month_bars, vol
 
         if picked_bars is None:
-            raise RuntimeError(f"no live candidate contract available among {candidate_months}")
-        assert picked_month is not None  # picked alongside picked_bars, always set together
-        if picked_month != candidate_months[0]:
+            raise RuntimeError(f"no live candidate contract available among {candidate_dates}")
+        assert picked_date is not None  # picked alongside picked_bars, always set together
+        if picked_date != candidate_dates[0]:
             # Every candidate STRICTLY nearer than the one actually
-            # picked -- not candidate_months[:-1] (wrong once there are
+            # picked -- not candidate_dates[:-1] (wrong once there are
             # 3+ candidates and the pick isn't the very last one).
-            nearer = candidate_months[:candidate_months.index(picked_month)]
+            nearer = candidate_dates[:candidate_dates.index(picked_date)]
             log.warning('%s: live roll detected since DB was last refreshed -- picked %s (vol=%s) '
-                        'over nearer candidate(s) %s', symbol, picked_month, picked_vol, nearer)
+                        'over nearer candidate(s) %s', symbol, picked_date, picked_vol, nearer)
 
         # >= (not >): also picks up a same-day refresh of the DB's own
         # last cached row (e.g. IB has a more current intraday close for
@@ -842,7 +823,7 @@ def _splice_live_front_month_bar(ib: Optional[IBPySync], instr: dict, db_symbol:
         new_rows = (picked_bars.filter(pl.col('ts_event') >= last_ts_event)
                     .select('ts_event', 'open', 'high', 'low', 'close', 'volume'))
         if new_rows.height == 0:
-            raise RuntimeError(f"no bars at or after {last_ts_event} in picked contract {picked_month} "
+            raise RuntimeError(f"no bars at or after {last_ts_event} in picked contract {picked_date} "
                                 f"(duration={duration})")
         new_ts_list = new_rows['ts_event'].to_list()
         replaced = bars.filter(pl.col('ts_event').is_in(new_ts_list)).height
@@ -854,7 +835,7 @@ def _splice_live_front_month_bar(ib: Optional[IBPySync], instr: dict, db_symbol:
         latest = new_rows.tail(1)
         log.info('%s: backfilled %d day(s) from %s (gap since %s; %d replaced, %d appended) -- '
                  'latest %s close=%s volume=%s -- DB series %d -> %d rows',
-                 symbol, new_rows.height, picked_month, last_ts_event, replaced, appended,
+                 symbol, new_rows.height, picked_date, last_ts_event, replaced, appended,
                  latest['ts_event'][0], latest['close'][0], latest['volume'][0], bars.height, merged.height)
         return merged
     except Exception as exc:

@@ -13,6 +13,7 @@ import subprocess
 import sys
 import textwrap
 from datetime import date, timedelta
+from types import SimpleNamespace
 
 import numpy as np
 import polars as pl
@@ -478,33 +479,41 @@ def _full_price_df(start: date, n: int, drift: float, expiration: date, instrume
 
 
 class _FakeIB:
-    """Fakes only the two IBPySync round-trip methods _qualify_and_pull_
-    recent_bar touches (qualify_contracts, get_historical_bars).
+    """Fakes the three IBPySync round-trip methods the splice path touches
+    (req_contract_details, qualify_contracts, get_historical_bars).
     IBPySync.future(...) itself is called for real -- a pure, network-free
     ib_insync.Future construction (ib_tools is a real editable install in
     this dev env), so only the round-trip calls need faking.
 
-    volumes_by_month/bar_by_month: {'YYYYMM': ...} keyed by the requested
-    contract month -- bar_by_month's single (ts_event, close) becomes the
-    LATEST (last) row of a single-row result; volumes_by_month's value is
-    that latest row's own volume, used for the roll-detection comparison
-    regardless of how many rows bars_by_month (plural, see below) returns
-    for the same month. raise_for: months whose get_historical_bars call
-    raises (simulates an IB error). mangle_month: a month whose qualified
+    listed_months: ['YYYYMMDD', ...] -- what req_contract_details returns,
+    simulating IB's own real listed-contract enumeration (see
+    _list_live_dated_contracts' own docstring for why this replaced
+    guessing a bare YYYYMM and letting IB re-resolve it). volumes_by_month/
+    bar_by_month: {'YYYYMM': ...} keyed by the requested contract's own
+    month (qualify_contracts/get_historical_bars both re-derive this from
+    whatever full YYYYMMDD they were actually asked to qualify, so these
+    dicts stay 6-char regardless of which exact listed date got picked) --
+    bar_by_month's single (ts_event, close) becomes the LATEST (last) row
+    of a single-row result; volumes_by_month's value is that latest row's
+    own volume, used for the roll-detection comparison regardless of how
+    many rows bars_by_month (plural, see below) returns for the same
+    month. raise_for: months whose get_historical_bars call raises
+    (simulates an IB error). mangle_month: a month whose qualified
     contract gets its lastTradeDateOrContractMonth corrupted, to trigger
-    the resolved-month-mismatch guard. ambiguous_without_multiplier:
-    months whose BLANK-multiplier request returns zero bars (simulating
-    real IB's observed behavior for a genuinely ambiguous root like bare
-    'SI' -- no exception, just an empty result) but succeeds once ANY
-    multiplier is set, to test _qualify_and_pull_recent_bar_with_fallback's
-    retry. bars_by_month (plural): {'YYYYMM': [(ts_event, close), ...]} --
-    when set for a month, returns ALL of these rows (ascending ts_event,
-    volume taken from volumes_by_month for every row) instead of the
-    single-row bar_by_month/default -- for testing multi-day backfill."""
+    the resolved-date-mismatch guard. ambiguous_without_multiplier: months
+    whose BLANK-multiplier request returns zero bars (simulating real IB's
+    observed behavior for a genuinely ambiguous root like bare 'SI' -- no
+    exception, just an empty result) but succeeds once ANY multiplier is
+    set, to test _qualify_and_pull_recent_bar_with_fallback's retry.
+    bars_by_month (plural): {'YYYYMM': [(ts_event, close), ...]} -- when
+    set for a month, returns ALL of these rows (ascending ts_event, volume
+    taken from volumes_by_month for every row) instead of the single-row
+    bar_by_month/default -- for testing multi-day backfill."""
 
-    def __init__(self, volumes_by_month, bar_by_month=None, raise_for=frozenset(), mangle_month=None,
-                 ambiguous_without_multiplier=frozenset(), bars_by_month=None):
+    def __init__(self, volumes_by_month, listed_months=None, bar_by_month=None, raise_for=frozenset(),
+                 mangle_month=None, ambiguous_without_multiplier=frozenset(), bars_by_month=None):
         self.volumes_by_month = volumes_by_month
+        self.listed_months = listed_months or []
         self.bar_by_month = bar_by_month or {}
         self.raise_for = raise_for
         self.mangle_month = mangle_month
@@ -514,13 +523,18 @@ class _FakeIB:
         self.multipliers_seen: list[str] = []
         self.symbols_seen: list[str] = []
 
+    def req_contract_details(self, contract):
+        self.calls.append(('contract_details', contract.symbol))
+        return [SimpleNamespace(contract=SimpleNamespace(lastTradeDateOrContractMonth=d))
+                for d in self.listed_months]
+
     def qualify_contracts(self, contract):
         month = contract.lastTradeDateOrContractMonth[:6]
         self.calls.append(('qualify', month))
         self.multipliers_seen.append(contract.multiplier)
         self.symbols_seen.append(contract.symbol)
         if month == self.mangle_month:
-            contract.lastTradeDateOrContractMonth = '209912'
+            contract.lastTradeDateOrContractMonth = '20991231'
 
     def get_historical_bars(self, contract, end_date='', duration='2 D', bar_size='1 day',
                              what_to_show='TRADES', use_rth=True):
@@ -543,53 +557,83 @@ class _FakeIB:
                              'low': [close], 'close': [close], 'volume': [vol]})
 
 
-def test_next_active_month_yyyymm_mid_cycle():
-    assert tr._next_active_month_yyyymm(['H', 'M', 'U', 'Z'], date(2026, 3, 18)) == '202606'
+_TEST_CYCLE = ['H', 'M', 'U', 'Z']  # Mar/Jun/Sep/Dec
+_ALL_MONTHS = ['F', 'G', 'H', 'J', 'K', 'M', 'N', 'Q', 'U', 'V', 'X', 'Z']  # CL's "no restriction" case
 
 
-def test_next_active_month_yyyymm_wraps_to_next_year():
-    assert tr._next_active_month_yyyymm(['H', 'M', 'U', 'Z'], date(2026, 12, 18)) == '202703'
+def _cycle_listed_months(cycle_letters: list[str], day: int = 20, years=None) -> list[str]:
+    """Full YYYYMMDD strings for every cycle_letters month across `years`
+    (default: today's year - 1 through +3) -- what a real IB
+    req_contract_details response would return for a symbol whose listed
+    months follow `cycle_letters`. Used to build _FakeIB's listed_months."""
+    if years is None:
+        y0 = date.today().year
+        years = range(y0 - 1, y0 + 4)
+    months = sorted(tr.CME_MONTH_LETTERS[letter] for letter in cycle_letters)
+    return [f'{y}{m:02d}{day:02d}' for y in years for m in months]
 
 
-def test_next_active_month_yyyymm_raises_when_month_not_in_cycle():
-    with pytest.raises(ValueError):
-        tr._next_active_month_yyyymm(['H', 'M', 'U', 'Z'], date(2026, 1, 18))
+def _next_cycle_date(cycle_letters: list[str], d: date, day: int = 20) -> date:
+    """Test-local helper (independent of production code) -- the next
+    cycle_letters month strictly after d's own month, wrapping to next
+    year past the cycle's last month. Only used to build expected/fixture
+    dates in these tests, not to re-derive the mechanism under test."""
+    months = sorted(tr.CME_MONTH_LETTERS[letter] for letter in cycle_letters)
+    idx = months.index(d.month)
+    if idx == len(months) - 1:
+        return date(d.year + 1, months[0], day)
+    return date(d.year, months[idx + 1], day)
 
 
-def test_live_front_month_candidates_not_expired_stays_put():
-    # today's own month IS the DB's last-known contract's month -- not
-    # expired, no walking needed, candidates[0] is exactly that month.
-    active_months = ['H', 'M', 'U', 'Z']
-    last_expiration = date(2026, 6, 20)
-    today = date(2026, 6, 10)
-    candidates = tr._live_front_month_candidates(active_months, last_expiration, today)
-    assert candidates == ['202606', '202609', '202612']
+def _nearest_cycle_date_from_today(cycle_letters: list[str], day: int = 20) -> date:
+    """Test-local helper -- the cycle_letters date _list_live_dated_
+    contracts would ACTUALLY pick as the nearest live candidate right now
+    (candidate selection is driven entirely by real IB listings filtered
+    against date.today(), not by any date baked into a test fixture -- see
+    test_splice_ignores_db_own_stale_expiration_column). Tests anchor
+    their volumes_by_month/bar_by_month keys off this, not off an
+    arbitrary fixed-future date, so they stay correct regardless of when
+    they actually run."""
+    today = date.today()
+    months = sorted(tr.CME_MONTH_LETTERS[letter] for letter in cycle_letters)
+    for m in months:
+        candidate = date(today.year, m, day)
+        if candidate >= today:
+            return candidate
+    return date(today.year + 1, months[0], day)
 
 
-def test_live_front_month_candidates_walks_past_expired_months():
-    # DB's last-known contract (March) is already 3 months stale relative
-    # to today (June) -- must walk forward to June, not stay on March.
-    active_months = ['H', 'M', 'U', 'Z']
-    last_expiration = date(2026, 3, 20)
-    today = date(2026, 6, 10)
-    candidates = tr._live_front_month_candidates(active_months, last_expiration, today)
-    assert candidates == ['202606', '202609', '202612']
+def _not_stale_expiration() -> date:
+    """A _TEST_CYCLE month safely >= date.today() regardless of when tests
+    actually run (December of next year). Use for "DB is current, not
+    stale" test scenarios."""
+    return date(date.today().year + 1, 12, 20)
 
 
-def test_live_front_month_candidates_walks_across_year_boundary():
-    active_months = ['H', 'M', 'U', 'Z']
-    last_expiration = date(2025, 3, 20)
-    today = date(2026, 1, 15)
-    candidates = tr._live_front_month_candidates(active_months, last_expiration, today)
-    assert candidates == ['202603', '202606', '202609']
+def _stale_expiration() -> date:
+    """A _TEST_CYCLE month safely IN THE PAST relative to date.today()
+    regardless of when tests actually run (March two years ago). Use for
+    "DB's own recorded expiration is very stale" test scenarios -- the
+    splice no longer reads this column for candidate selection at all
+    (see test_splice_ignores_db_own_stale_expiration_column below), so
+    this now exists to prove exactly that, not to test a walk-forward
+    mechanism (there isn't one anymore -- candidates come from IB's own
+    live listing, not from extrapolating off the DB's last-known
+    contract)."""
+    return date(date.today().year - 2, 3, 20)
 
 
-def test_live_front_month_candidates_respects_explicit_max_candidates():
-    active_months = ['H', 'M', 'U', 'Z']
-    last_expiration = date(2026, 6, 20)
-    today = date(2026, 6, 10)
-    candidates = tr._live_front_month_candidates(active_months, last_expiration, today, max_candidates=2)
-    assert candidates == ['202606', '202609']
+def test_list_live_dated_contracts_sorts_ascending_by_expiry(monkeypatch):
+    fake_ib = _FakeIB(volumes_by_month={}, listed_months=['20260920', '20260620', '20261220'])
+    result = tr._list_live_dated_contracts(fake_ib, 'CL', 'NYMEX')
+    assert result == [(date(2026, 6, 20), '20260620'), (date(2026, 9, 20), '20260920'),
+                       (date(2026, 12, 20), '20261220')]
+
+
+def test_list_live_dated_contracts_skips_blank_entries():
+    fake_ib = _FakeIB(volumes_by_month={}, listed_months=['20260920', '', '20261220'])
+    result = tr._list_live_dated_contracts(fake_ib, 'CL', 'NYMEX')
+    assert result == [(date(2026, 9, 20), '20260920'), (date(2026, 12, 20), '20261220')]
 
 
 def test_splice_live_price_requires_ib_even_in_database_mode():
@@ -611,37 +655,18 @@ def test_splice_disabled_by_default_makes_no_ib_calls(monkeypatch):
     assert targets[0].get('error') is None
 
 
-_TEST_CYCLE = ['H', 'M', 'U', 'Z']  # Mar/Jun/Sep/Dec
-
-
-def _not_stale_expiration() -> date:
-    """A _TEST_CYCLE month safely >= date.today() regardless of when tests
-    actually run (December of next year) -- so _live_front_month_candidates
-    never needs to walk it forward as already-expired. Use for "DB is
-    current, not stale" test scenarios."""
-    return date(date.today().year + 1, 12, 20)
-
-
-def _stale_expiration() -> date:
-    """A _TEST_CYCLE month safely IN THE PAST relative to date.today()
-    regardless of when tests actually run (March two years ago) -- forces
-    _live_front_month_candidates to walk forward past several
-    already-expired months before reaching a live one. Use for "DB cache
-    is stale by more than one roll" test scenarios (confirmed live this
-    session: a DB-cached front month can already be fully expired by the
-    time a run happens, not just one roll behind)."""
-    return date(date.today().year - 2, 3, 20)
-
-
 def test_splice_enabled_db_contract_still_front_appends_new_row(monkeypatch):
-    expiration = _not_stale_expiration()
-    current_month = expiration.strftime('%Y%m')
-    next_month = tr._next_active_month_yyyymm(_TEST_CYCLE, expiration)
-    price_data = {'X': _full_price_df(date(2018, 1, 1), 500, drift=0.0015, expiration=expiration, seed=1)}
+    current = _nearest_cycle_date_from_today(_TEST_CYCLE)
+    current_month = current.strftime('%Y%m')
+    next_month_date = _next_cycle_date(_TEST_CYCLE, current)
+    next_month = next_month_date.strftime('%Y%m')
+    price_data = {'X': _full_price_df(date(2018, 1, 1), 500, drift=0.0015,
+                                       expiration=_not_stale_expiration(), seed=1)}
     _patch_db(monkeypatch, price_data)
     monkeypatch.setattr(tr, 'resolve_active_months', lambda symbol: _TEST_CYCLE)
     monkeypatch.setattr(tr, 'get_spec', lambda symbol: {'exchange': 'CME'})
     fake_ib = _FakeIB(volumes_by_month={current_month: 1000, next_month: 500},
+                      listed_months=_cycle_listed_months(_TEST_CYCLE),
                       bar_by_month={current_month: (date.today(), 111.0)})
 
     config = TsmomLiveConfig(account_equity=100_000, data_source='database', splice_live_price=True)
@@ -661,19 +686,21 @@ def test_splice_uses_blank_multiplier_not_instrument_or_db_symbol_own(monkeypatc
     # 50) caused IB to reject "No security definition has been found" for
     # several real products this session (grains, silver, JPY, where our
     # internal convention diverges from IB's). Confirmed live: dropping
-    # multiplier entirely (symbol + exchange + explicit month) is what
+    # multiplier entirely (symbol + exchange + explicit date) is what
     # actually works, matching _resolve_contract's own proven pattern for
     # a canonical (non ticker-renamed) root.
-    expiration = _not_stale_expiration()
-    current_month = expiration.strftime('%Y%m')
-    next_month = tr._next_active_month_yyyymm(_TEST_CYCLE, expiration)
-    next_month_date = date(int(next_month[:4]), int(next_month[4:6]), 1)
-    third_month = tr._next_active_month_yyyymm(_TEST_CYCLE, next_month_date)
-    price_data = {'ES': _full_price_df(date(2018, 1, 1), 500, drift=0.0015, expiration=expiration, seed=1)}
+    current = _nearest_cycle_date_from_today(_TEST_CYCLE)
+    current_month = current.strftime('%Y%m')
+    next_month_date = _next_cycle_date(_TEST_CYCLE, current)
+    next_month = next_month_date.strftime('%Y%m')
+    third_month = _next_cycle_date(_TEST_CYCLE, next_month_date).strftime('%Y%m')
+    price_data = {'ES': _full_price_df(date(2018, 1, 1), 500, drift=0.0015,
+                                        expiration=_not_stale_expiration(), seed=1)}
     _patch_db(monkeypatch, price_data)
     monkeypatch.setattr(tr, 'resolve_active_months', lambda symbol: _TEST_CYCLE)
     monkeypatch.setattr(tr, 'get_spec', lambda symbol: {'exchange': 'CME', 'multiplier': 50})
-    fake_ib = _FakeIB(volumes_by_month={current_month: 1000, next_month: 500, third_month: 100})
+    fake_ib = _FakeIB(volumes_by_month={current_month: 1000, next_month: 500, third_month: 100},
+                      listed_months=_cycle_listed_months(_TEST_CYCLE))
 
     mes = _instrument('MES', multiplier=5.0)
     mes['db_symbol'] = 'ES'
@@ -695,12 +722,13 @@ def test_splice_retries_with_registry_multiplier_when_blank_is_ambiguous(monkeyp
     # disambiguates it.
     expiration = _not_stale_expiration()
     current_month = expiration.strftime('%Y%m')
-    next_month = tr._next_active_month_yyyymm(_TEST_CYCLE, expiration)
+    next_month = _next_cycle_date(_TEST_CYCLE, expiration).strftime('%Y%m')
     price_data = {'SI': _full_price_df(date(2018, 1, 1), 500, drift=0.0015, expiration=expiration, seed=1)}
     _patch_db(monkeypatch, price_data)
     monkeypatch.setattr(tr, 'resolve_active_months', lambda symbol: _TEST_CYCLE)
     monkeypatch.setattr(tr, 'get_spec', lambda symbol: {'exchange': 'COMEX', 'multiplier': 5000})
     fake_ib = _FakeIB(volumes_by_month={current_month: 1000, next_month: 500},
+                      listed_months=_cycle_listed_months(_TEST_CYCLE),
                       ambiguous_without_multiplier={current_month, next_month})
 
     sil = _instrument('SIL', multiplier=1000.0)
@@ -724,12 +752,13 @@ def test_splice_translates_fx_db_symbol_to_ib_facing_ticker(monkeypatch):
     # found" for every candidate month.
     expiration = _not_stale_expiration()
     current_month = expiration.strftime('%Y%m')
-    next_month = tr._next_active_month_yyyymm(_TEST_CYCLE, expiration)
+    next_month = _next_cycle_date(_TEST_CYCLE, expiration).strftime('%Y%m')
     price_data = {'6J': _full_price_df(date(2018, 1, 1), 500, drift=0.0015, expiration=expiration, seed=1)}
     _patch_db(monkeypatch, price_data)
     monkeypatch.setattr(tr, 'resolve_active_months', lambda symbol: _TEST_CYCLE)
     monkeypatch.setattr(tr, 'get_spec', lambda symbol: {'exchange': 'CME', 'multiplier': 12_500_000})
-    fake_ib = _FakeIB(volumes_by_month={current_month: 1000, next_month: 500})
+    fake_ib = _FakeIB(volumes_by_month={current_month: 1000, next_month: 500},
+                      listed_months=_cycle_listed_months(_TEST_CYCLE))
 
     j7 = _instrument('J7', multiplier=6_250_000.0)
     j7['db_symbol'] = '6J'
@@ -743,14 +772,16 @@ def test_splice_translates_fx_db_symbol_to_ib_facing_ticker(monkeypatch):
 
 
 def test_splice_enabled_roll_detected_uses_next_contract(monkeypatch, caplog):
-    expiration = _not_stale_expiration()
-    current_month = expiration.strftime('%Y%m')
-    next_month = tr._next_active_month_yyyymm(_TEST_CYCLE, expiration)
-    price_data = {'X': _full_price_df(date(2018, 1, 1), 500, drift=0.0015, expiration=expiration, seed=1)}
+    current = _nearest_cycle_date_from_today(_TEST_CYCLE)
+    current_month = current.strftime('%Y%m')
+    next_month = _next_cycle_date(_TEST_CYCLE, current).strftime('%Y%m')
+    price_data = {'X': _full_price_df(date(2018, 1, 1), 500, drift=0.0015,
+                                       expiration=_not_stale_expiration(), seed=1)}
     _patch_db(monkeypatch, price_data)
     monkeypatch.setattr(tr, 'resolve_active_months', lambda symbol: _TEST_CYCLE)
     monkeypatch.setattr(tr, 'get_spec', lambda symbol: {'exchange': 'CME'})
     fake_ib = _FakeIB(volumes_by_month={current_month: 500, next_month: 2000},
+                      listed_months=_cycle_listed_months(_TEST_CYCLE),
                       bar_by_month={next_month: (date.today(), 222.0)})
 
     config = TsmomLiveConfig(account_equity=100_000, data_source='database', splice_live_price=True)
@@ -786,14 +817,14 @@ def test_splice_no_restriction_symbol_like_cl_now_gets_spliced(monkeypatch):
     # to the full 12-month list specifically so it isn't treated the same
     # as a genuinely-unconfirmed symbol (e.g. BRE) -- this proves the
     # fix: a full-12-month cycle symbol actually gets spliced now.
-    all_months = ['F', 'G', 'H', 'J', 'K', 'M', 'N', 'Q', 'U', 'V', 'X', 'Z']
-    expiration = _not_stale_expiration()
-    current_month = expiration.strftime('%Y%m')
-    price_data = {'CL': _full_price_df(date(2018, 1, 1), 500, drift=0.0015, expiration=expiration, seed=1)}
+    current_month = _nearest_cycle_date_from_today(_ALL_MONTHS).strftime('%Y%m')
+    price_data = {'CL': _full_price_df(date(2018, 1, 1), 500, drift=0.0015,
+                                        expiration=_not_stale_expiration(), seed=1)}
     _patch_db(monkeypatch, price_data)
-    monkeypatch.setattr(tr, 'resolve_active_months', lambda symbol: all_months)
+    monkeypatch.setattr(tr, 'resolve_active_months', lambda symbol: _ALL_MONTHS)
     monkeypatch.setattr(tr, 'get_spec', lambda symbol: {'exchange': 'NYMEX'})
-    fake_ib = _FakeIB(volumes_by_month={current_month: 1000})
+    fake_ib = _FakeIB(volumes_by_month={current_month: 1000}, listed_months=_cycle_listed_months(_ALL_MONTHS),
+                      bar_by_month={current_month: (date.today(), 55.0)})
 
     mcl = _instrument('MCL', multiplier=100.0)
     mcl['db_symbol'] = 'CL'
@@ -803,26 +834,28 @@ def test_splice_no_restriction_symbol_like_cl_now_gets_spliced(monkeypatch):
 
     assert targets[0].get('error') is None
     assert fake_ib.calls != []  # actually attempted, not skipped like the unconfirmed case above
+    assert targets[0]['close'] == pytest.approx(55.0)  # and actually succeeded, not just attempted
 
 
 def test_splice_widened_search_finds_winner_two_months_out(monkeypatch, caplog):
-    # The concrete scenario this widened search (3 candidates, not 2) was
+    # The concrete scenario this widened search (3 candidates, not 1) was
     # built for: a no-restriction product's true volume leader can be
     # further out than just "the next month" -- confirmed live can't be
     # exercised here (needs real IB volume data), but this proves the
     # mechanism: the 3rd candidate (2 months out) wins the comparison,
-    # and a 2-candidate search would have missed it entirely.
-    all_months = ['F', 'G', 'H', 'J', 'K', 'M', 'N', 'Q', 'U', 'V', 'X', 'Z']
-    expiration = _not_stale_expiration()
-    current_month = expiration.strftime('%Y%m')
-    next_month = tr._next_active_month_yyyymm(all_months, expiration)
-    next_month_date = date(int(next_month[:4]), int(next_month[4:6]), 1)
-    third_month = tr._next_active_month_yyyymm(all_months, next_month_date)
-    price_data = {'CL': _full_price_df(date(2018, 1, 1), 500, drift=0.0015, expiration=expiration, seed=1)}
+    # and a narrower search would have missed it entirely.
+    current = _nearest_cycle_date_from_today(_ALL_MONTHS)
+    current_month = current.strftime('%Y%m')
+    next_month_date = _next_cycle_date(_ALL_MONTHS, current)
+    next_month = next_month_date.strftime('%Y%m')
+    third_month = _next_cycle_date(_ALL_MONTHS, next_month_date).strftime('%Y%m')
+    price_data = {'CL': _full_price_df(date(2018, 1, 1), 500, drift=0.0015,
+                                        expiration=_not_stale_expiration(), seed=1)}
     _patch_db(monkeypatch, price_data)
-    monkeypatch.setattr(tr, 'resolve_active_months', lambda symbol: all_months)
+    monkeypatch.setattr(tr, 'resolve_active_months', lambda symbol: _ALL_MONTHS)
     monkeypatch.setattr(tr, 'get_spec', lambda symbol: {'exchange': 'NYMEX'})
     fake_ib = _FakeIB(volumes_by_month={current_month: 500, next_month: 700, third_month: 5000},
+                      listed_months=_cycle_listed_months(_ALL_MONTHS),
                       bar_by_month={third_month: (date.today(), 77.0)})
 
     mcl = _instrument('MCL', multiplier=100.0)
@@ -840,12 +873,13 @@ def test_splice_widened_search_finds_winner_two_months_out(monkeypatch, caplog):
 def test_splice_falls_back_gracefully_on_ib_error(monkeypatch, caplog):
     expiration = _not_stale_expiration()
     current_month = expiration.strftime('%Y%m')
-    next_month = tr._next_active_month_yyyymm(_TEST_CYCLE, expiration)
+    next_month = _next_cycle_date(_TEST_CYCLE, expiration).strftime('%Y%m')
     price_data = {'X': _full_price_df(date(2018, 1, 1), 500, drift=0.0015, expiration=expiration, seed=1)}
     _patch_db(monkeypatch, price_data)
     monkeypatch.setattr(tr, 'resolve_active_months', lambda symbol: _TEST_CYCLE)
     monkeypatch.setattr(tr, 'get_spec', lambda symbol: {'exchange': 'CME'})
-    fake_ib = _FakeIB(volumes_by_month={current_month: 1000, next_month: 500}, raise_for={current_month})
+    fake_ib = _FakeIB(volumes_by_month={current_month: 1000, next_month: 500},
+                      listed_months=_cycle_listed_months(_TEST_CYCLE), raise_for={current_month})
 
     config = TsmomLiveConfig(account_equity=100_000, data_source='database', splice_live_price=True)
     with caplog.at_level('WARNING'):
@@ -862,13 +896,16 @@ def test_splice_falls_back_gracefully_on_ib_error(monkeypatch, caplog):
 def test_splice_all_candidates_unavailable_falls_back_gracefully(monkeypatch, caplog):
     expiration = _not_stale_expiration()
     current_month = expiration.strftime('%Y%m')
-    next_month = tr._next_active_month_yyyymm(_TEST_CYCLE, expiration)
+    next_month_date = _next_cycle_date(_TEST_CYCLE, expiration)
+    next_month = next_month_date.strftime('%Y%m')
+    third_month = _next_cycle_date(_TEST_CYCLE, next_month_date).strftime('%Y%m')
     price_data = {'X': _full_price_df(date(2018, 1, 1), 500, drift=0.0015, expiration=expiration, seed=1)}
     _patch_db(monkeypatch, price_data)
     monkeypatch.setattr(tr, 'resolve_active_months', lambda symbol: _TEST_CYCLE)
     monkeypatch.setattr(tr, 'get_spec', lambda symbol: {'exchange': 'CME'})
     fake_ib = _FakeIB(volumes_by_month={current_month: 1000, next_month: 500},
-                      raise_for={current_month, next_month})
+                      listed_months=_cycle_listed_months(_TEST_CYCLE),
+                      raise_for={current_month, next_month, third_month})
 
     config = TsmomLiveConfig(account_equity=100_000, data_source='database', splice_live_price=True)
     with caplog.at_level('WARNING'):
@@ -878,50 +915,46 @@ def test_splice_all_candidates_unavailable_falls_back_gracefully(monkeypatch, ca
     assert any('live price splice failed' in r.message for r in caplog.records)
 
 
-def test_splice_walks_forward_past_already_expired_db_contract(monkeypatch, caplog):
-    # Regression test for the real bug this session: a DB cache stale by
-    # MORE than one roll (confirmed live -- a July ZL contract queried in
-    # mid-August) used to get queried unconditionally as "current," IB
-    # correctly rejected the now-delisted contract, and the whole splice
-    # aborted right there without ever trying a genuinely live month.
-    # Here the DB's last-known contract is 2 years stale; the splice must
-    # walk forward (skipping every already-expired candidate along the
-    # way, none of which should even be queried) to the first live one.
+def test_splice_ignores_db_own_stale_expiration_column(monkeypatch):
+    # Confirms candidate selection is now driven entirely by IB's own live
+    # listing (_list_live_dated_contracts), NOT by extrapolating off the
+    # DB's own `expiration` column -- which can be arbitrarily stale
+    # (confirmed live this session: a DB cache stale by more than one roll
+    # used to feed a now-delisted month straight into IB and abort the
+    # whole splice when it was unconditionally rejected). Here the DB
+    # fixture's own recorded expiration is 2 years stale; the splice must
+    # still succeed correctly using only real, current IB listings.
     stale_expiration = _stale_expiration()
+    current_month = _nearest_cycle_date_from_today(_TEST_CYCLE).strftime('%Y%m')
     price_data = {'X': _full_price_df(date(2018, 1, 1), 500, drift=0.0015, expiration=stale_expiration, seed=1)}
     _patch_db(monkeypatch, price_data)
     monkeypatch.setattr(tr, 'resolve_active_months', lambda symbol: _TEST_CYCLE)
     monkeypatch.setattr(tr, 'get_spec', lambda symbol: {'exchange': 'CME'})
-
-    # Whatever _live_front_month_candidates actually resolves as live,
-    # independently recomputed here from the same pure function under
-    # test -- this test is about the WALK skipping expired months, not
-    # about re-deriving that arithmetic by hand.
-    live_candidates = tr._live_front_month_candidates(_TEST_CYCLE, stale_expiration, date.today())
-    assert live_candidates[0] != stale_expiration.strftime('%Y%m')  # confirms it actually walked forward
-    fake_ib = _FakeIB(volumes_by_month={live_candidates[0]: 1000, live_candidates[1]: 500},
-                      bar_by_month={live_candidates[0]: (date.today(), 444.0)})
+    fake_ib = _FakeIB(volumes_by_month={current_month: 1000}, listed_months=_cycle_listed_months(_TEST_CYCLE),
+                      bar_by_month={current_month: (date.today(), 444.0)})
 
     config = TsmomLiveConfig(account_equity=100_000, data_source='database', splice_live_price=True)
     targets = compute_rebalance_targets([_instrument('X')], config, ib=fake_ib)
 
     assert targets[0].get('error') is None
     assert targets[0]['close'] == pytest.approx(444.0)
-    # The stale, already-expired month was never even queried.
+    # The DB's own (2-years-stale) recorded month was never even queried.
     assert stale_expiration.strftime('%Y%m') not in [month for _, month in fake_ib.calls]
 
 
 def test_splice_replaces_existing_same_day_row_not_duplicates(monkeypatch):
-    expiration = _not_stale_expiration()
-    current_month = expiration.strftime('%Y%m')
-    next_month = tr._next_active_month_yyyymm(_TEST_CYCLE, expiration)
-    price_data = {'X': _full_price_df(date(2024, 1, 1), 500, drift=0.0015, expiration=expiration, seed=1)}
+    current = _nearest_cycle_date_from_today(_TEST_CYCLE)
+    current_month = current.strftime('%Y%m')
+    next_month = _next_cycle_date(_TEST_CYCLE, current).strftime('%Y%m')
+    price_data = {'X': _full_price_df(date(2024, 1, 1), 500, drift=0.0015,
+                                       expiration=_not_stale_expiration(), seed=1)}
     original_height = price_data['X'].height
     same_day = price_data['X'].tail(1)['ts_event'][0]
     _patch_db(monkeypatch, price_data)
     monkeypatch.setattr(tr, 'resolve_active_months', lambda symbol: _TEST_CYCLE)
     monkeypatch.setattr(tr, 'get_spec', lambda symbol: {'exchange': 'CME'})
     fake_ib = _FakeIB(volumes_by_month={current_month: 1000, next_month: 500},
+                      listed_months=_cycle_listed_months(_TEST_CYCLE),
                       bar_by_month={current_month: (same_day, 333.0)})
 
     config = TsmomLiveConfig(account_equity=100_000, data_source='database', splice_live_price=True)
@@ -953,9 +986,8 @@ def test_splice_backfills_entire_gap_not_just_latest_bar(monkeypatch):
     # _splice_live_front_month_bar directly (not through
     # compute_rebalance_targets) to inspect the merged frame row-by-row --
     # the public pipeline only ever exposes the LATEST computed values.
-    expiration = _not_stale_expiration()
-    current_month = expiration.strftime('%Y%m')
-    next_month = tr._next_active_month_yyyymm(_TEST_CYCLE, expiration)
+    expiration = _not_stale_expiration()  # DB fixture placeholder only -- unread by candidate selection
+    current_month = _nearest_cycle_date_from_today(_TEST_CYCLE).strftime('%Y%m')
     gap_start = date.today() - timedelta(days=12)  # DB stale by ~12 calendar days
     hist_dates = _trading_dates_ending(gap_start, 100)
     rng = np.random.default_rng(1)
@@ -975,7 +1007,7 @@ def test_splice_backfills_entire_gap_not_just_latest_bar(monkeypatch):
     ib_dates = [d for d in ib_dates if d >= gap_start]
     new_days = [d for d in ib_dates if d > gap_start]
     assert len(new_days) > 1  # sanity: this test is actually exercising a multi-day gap
-    fake_ib = _FakeIB(volumes_by_month={current_month: 1000, next_month: 500},
+    fake_ib = _FakeIB(volumes_by_month={current_month: 1000}, listed_months=_cycle_listed_months(_TEST_CYCLE),
                       bars_by_month={current_month: [(d, 200.0 + i) for i, d in enumerate(ib_dates)]})
 
     merged = tr._splice_live_front_month_bar(fake_ib, _instrument('X'), 'X', db_bars)

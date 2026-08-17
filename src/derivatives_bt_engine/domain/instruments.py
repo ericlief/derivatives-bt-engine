@@ -183,13 +183,15 @@ INSTRUMENTS: dict[str, dict] = {
     # doesn't return None (which the splice reads as "unconfirmed, skip
     # this symbol entirely," the right call for a genuinely-unconfirmed
     # case like BRE but wrong here, where "no restriction" IS the
-    # confirmed finding) while still giving _live_front_month_candidates
-    # a real cycle to walk. Because there's no sparse, well-separated
-    # cycle to anchor a "next month" guess the way grains/metals/
-    # financials have, WTI's front-month convention can roll multiple
-    # months out ahead of nominal expiration -- see
-    # _live_front_month_candidates' own docstring on why it checks 3
-    # candidates (not the usual 2) for exactly this reason.
+    # confirmed finding); tsmom_rebalance._splice_live_front_month_bar
+    # detects the full-12-month case and skips filtering its (REAL,
+    # IB-confirmed, not guessed) candidate listing by month letter
+    # entirely, taking the 3 nearest live contracts regardless of which
+    # ones they are -- see that function's own docstring for why WTI
+    # specifically needs 3 candidates, not the usual fewer: there's no
+    # sparse, well-separated cycle to anchor "the next listed month" as
+    # the presumed volume leader, and WTI's real front-month convention
+    # can roll multiple months out ahead of nominal expiration.
     'CL':  {'exchange': 'NYMEX', 'multiplier': 1000,       'cluster': 'energy',
             'initial_margin': 16602.40, 'commission': 2.36,
             'active_months': ['F', 'G', 'H', 'J', 'K', 'M', 'N', 'Q', 'U', 'V', 'X', 'Z'],
