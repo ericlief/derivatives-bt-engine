@@ -148,7 +148,7 @@ def _save_report(cluster_report: str, targets: list[dict]) -> None:
     # domain.allocation.apply_cluster_risk_cap (shared with the backtest
     # CSV), which was updated to read/write these exact abbreviated key
     # names on this same targets list.
-    priority = ['symbol', 'current_con', 'target_con', 'contin_con', 'infeasible',
+    priority = ['symbol', 'cur_con', 'target_con', 'contin_con', 'infeasible',
                 'g_regime', 'g_fast', 'g_slow', 'a_co', 'a_re', 'g_blend', 'g_sig',
                 'regime', 'vol_regime', 'ts_fast', 'ts_slow', 'ts', 'contin_sig',
                 'risk_scalar', 'reg_discount',
@@ -176,7 +176,7 @@ def _save_report(cluster_report: str, targets: list[dict]) -> None:
 
 def _execute_rebalance_order(ib: IBPySync, contract, delta_contracts: int):
     """Simple limit-at-mid (falls back to market) order for the size delta
-    needed to reach target_contracts from current_contracts."""
+    needed to reach target_con from cur_con."""
     action = 'BUY' if delta_contracts > 0 else 'SELL'
     qty = abs(delta_contracts)
     ticker = ib.req_mkt_data(contract)
@@ -320,7 +320,7 @@ def parse_args():
                         "%(default)s). 'ib': live IB historical bars + the live VX/VIX spike gate -- "
                         "requires a connection. 'database': the same local futures duckdb/VIX parquet "
                         "the backtest reads from, no IB connection anywhere -- runnable in a notebook "
-                        "for signal/regime inspection with no live account (current_contracts is "
+                        "for signal/regime inspection with no live account (cur_con is "
                         "always None in this mode; --live/order placement requires 'ib')")
     p.add_argument('--as-of', default=None,
                    help='Only used with --data-source database: YYYY-MM-DD to compute signals as of '
@@ -442,17 +442,17 @@ def main():
 
         instr_by_symbol = {i['symbol']: i for i in instruments}
         for t in targets:
-            if t.get('error') or t['target_con'] is None or t['current_con'] is None:
+            if t.get('error') or t['target_con'] is None or t['cur_con'] is None:
                 log.warning('Skipping %s — no valid target', t['symbol'])
                 continue
-            delta = t['target_con'] - t['current_con']
+            delta = t['target_con'] - t['cur_con']
             if delta == 0:
                 log.info('%s already at target (%d) — no order', t['symbol'], t['target_con'])
                 continue
             instr = instr_by_symbol[t['symbol']]
             contract = _resolve_contract(ib, instr, min_days=7)
             log.info('%s: current=%d target=%d delta=%+d', t['symbol'],
-                     t['current_con'], t['target_con'], delta)
+                     t['cur_con'], t['target_con'], delta)
             trade = _execute_rebalance_order(ib, contract, delta)
             status = trade.orderStatus.status
             log.info('%s order status: %s', t['symbol'], status)

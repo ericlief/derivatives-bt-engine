@@ -214,9 +214,9 @@ def test_compute_rebalance_targets_database_mode_needs_no_ib(monkeypatch):
     assert len(targets) == 1
     t = targets[0]
     assert t.get('error') is None
-    # No IB connection anywhere in this mode -- current_con is
+    # No IB connection anywhere in this mode -- cur_con is
     # unknowable without one, reported as None rather than a misleading 0.
-    assert t['current_con'] is None
+    assert t['cur_con'] is None
     assert t['target_con'] is not None
 
 

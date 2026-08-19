@@ -244,7 +244,7 @@ class TsmomLiveConfig:
     # (compute_rebalance_targets' own `ib` argument). 'database': the same
     # local futures duckdb (FuturesDataLoader) and VIX parquet the backtest
     # reads from, no IB connection anywhere -- notebook-runnable, for
-    # inspecting signals/regimes without a live account. current_con
+    # inspecting signals/regimes without a live account. cur_con
     # is always None in this mode (no position source without IB) --
     # compute_rebalance_targets still reports what target_con WOULD
     # be, just not a delta against a real position.
@@ -1116,7 +1116,7 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
                                ib: Optional[IBPySync] = None) -> list[dict]:
     """
     Runs the VX spike gate first. If a spike/extreme regime is detected,
-    returns early with target_con == current_con (held
+    returns early with target_con == cur_con (held
     unchanged), halved on 'extreme', and skips signal computation entirely.
 
     Otherwise this runs in three stages:
@@ -1168,7 +1168,7 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
     valid and expected for config.data_source == 'database' -- that mode
     makes no IB calls anywhere, which is what makes this notebook-runnable
     for signal/regime inspection with no live account at all.
-    current_con is always None in 'database' mode (no position
+    cur_con is always None in 'database' mode (no position
     source without IB); target_con/targ_not/etc. are still
     computed and reported."""
     if config.data_source == 'ib' and ib is None:
@@ -1221,7 +1221,7 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
             targets.append({
                 'symbol': instr['symbol'],
                 'target_con': target,
-                'current_con': current,
+                'cur_con': current,
                 'signal': None,
                 'regime': None,
                 'vx_current': vx_current,
@@ -1363,7 +1363,7 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
             targets.append({
                 'symbol': symbol,
                 'target_con': None,
-                'current_con': None,
+                'cur_con': None,
                 'signal': None,
                 'regime': None,
                 'vx_ratio': vx_ratio,
@@ -1404,7 +1404,7 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
                 targets.append({
                     'symbol': symbol, 'target_con': 0, 'contin_con': 0.0,
                     'max_con': max_contracts,
-                    'current_con': (_current_contracts(ib, s['contract'])
+                    'cur_con': (_current_contracts(ib, s['contract'])
                                     if config.data_source == 'ib' else None),
                     'active': active,
                     'signal': s['signal'], 'scalar': None,
@@ -1473,7 +1473,7 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
                 'target_con': target_contracts,
                 'contin_con': continuous_contracts,
                 'max_con': max_contracts,
-                'current_con': current_contracts,
+                'cur_con': current_contracts,
                 'active': active,
                 'signal': s['signal'],
                 'scalar': scalar,
@@ -1527,7 +1527,7 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
             targets.append({
                 'symbol': symbol,
                 'target_con': None,
-                'current_con': None,
+                'cur_con': None,
                 'signal': None,
                 'regime': None,
                 'vx_ratio': vx_ratio,
@@ -1649,7 +1649,7 @@ def print_rebalance_report(targets: list[dict]) -> str:
             continue
         lines.append(
             f"{t['symbol']:6s}  target={t['target_con']!s:>4}  "
-            f"current={t['current_con']!s:>4}  "
+            f"current={t['cur_con']!s:>4}  "
             f"active={str(t.get('active')):>5}"
             + (f"  |  g_regime={t['g_regime']}  g_fast={_fmt(t.get('g_fast'), '.4f')}  "
                f"g_slow={_fmt(t.get('g_slow'), '.4f')}  a_co={_fmt(t.get('a_co'), '.2f')}  "
