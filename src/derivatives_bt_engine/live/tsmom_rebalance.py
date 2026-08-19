@@ -78,7 +78,7 @@ from derivatives_bt_engine.domain.signal import (
     compute_signal_confidence,
     compute_vol_ratio,
     continuous_momentum,
-    estimate_mixing_params,
+    estimate_mixing_params_diagnostics,
     goulding_monthly,
     resolve_trend_direction,
 )
@@ -1087,12 +1087,34 @@ def _finalize_signal(instr: dict, raw: dict, config: TsmomLiveConfig, vix_scalar
     }
 
 
+def _log_mixing_params_diag(key: str, diag: dict) -> None:
+    log.info('mixing_params[%s]: n_bull=%d n_bear=%d n_correction=%d n_rebound=%d  '
+             'C=%s inv_C=%s  a_co_raw=%s a_re_raw=%s -> a_co=%.4f a_re=%.4f  fallback=%s',
+             key, diag['n_bull'], diag['n_bear'], diag['n_correction'], diag['n_rebound'],
+             diag['C'], diag['inv_C'], diag['a_co_raw'], diag['a_re_raw'],
+             diag['a_co'], diag['a_re'], diag['fallback_reason'])
+
+
 def _mixing_params_for_instruments(config: TsmomLiveConfig, raw_by_symbol: dict[str, dict],
-                                    instruments: list[dict]) -> dict[str, tuple[float, float]]:
+                                    instruments: list[dict],
+                                    diagnostics: Optional[dict] = None) -> dict[str, tuple[float, float]]:
     """{cluster: (a_co, a_re)} pooled ONLY across the instruments passed to
     THIS rebalance (not the full instruments.py universe) -- estimated
     once, shared across every symbol in that cluster, not once per symbol.
-    Empty dict (never read) outside 'goulding' mode."""
+    Empty dict (never read) outside 'goulding' mode.
+
+    `diagnostics`, when given a dict, gets populated {key: diag} -- one
+    entry per cluster under config.mixing_pool='cluster', a single
+    'global' entry under 'global' -- from estimate_mixing_params_
+    diagnostics: every intermediate value (C, 1/C, per-state avg_r/
+    avg_r2, the RAW pre-clamp a_co/a_re, which fallback if any) behind
+    each returned (a_co, a_re), logged here too (once per key, per live
+    rebalance -- NOT inside estimate_mixing_params_diagnostics itself,
+    since that function is also called once per rebalance-MONTH per
+    cluster from the backtest's own monthly loop, where logging every
+    call would flood a multi-year run's log). None (default) skips both
+    the population and the logging -- existing callers that don't pass it
+    see no behavior change."""
     if config.signal_weighting != 'goulding':
         return {}
     instr_by_symbol = {i['symbol']: i for i in instruments}
@@ -1107,17 +1129,36 @@ def _mixing_params_for_instruments(config: TsmomLiveConfig, raw_by_symbol: dict[
     as_of = config.as_of or date.today()
     clusters_needed = {i.get('cluster', 'other') for i in instruments}
     if config.mixing_pool == 'cluster':
-        return {c: estimate_mixing_params(monthly_history, as_of, c) for c in clusters_needed}
-    global_params = estimate_mixing_params(monthly_history, as_of, None)
+        params = {}
+        for c in clusters_needed:
+            diag = estimate_mixing_params_diagnostics(monthly_history, as_of, c)
+            params[c] = (diag['a_co'], diag['a_re'])
+            if diagnostics is not None:
+                diagnostics[c] = diag
+                _log_mixing_params_diag(c, diag)
+        return params
+    diag = estimate_mixing_params_diagnostics(monthly_history, as_of, None)
+    if diagnostics is not None:
+        diagnostics['global'] = diag
+        _log_mixing_params_diag('global', diag)
+    global_params = (diag['a_co'], diag['a_re'])
     return {c: global_params for c in clusters_needed}
 
 
 def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
-                               ib: Optional[IBPySync] = None) -> list[dict]:
+                               ib: Optional[IBPySync] = None,
+                               mixing_diagnostics: Optional[dict] = None) -> list[dict]:
     """
     Runs the VX spike gate first. If a spike/extreme regime is detected,
     returns early with target_con == cur_con (held
     unchanged), halved on 'extreme', and skips signal computation entirely.
+
+    `mixing_diagnostics`, when given a dict, gets passed straight through
+    to _mixing_params_for_instruments -- see that function's own docstring
+    -- to audit/verify a 'goulding'-mode run's per-cluster a_co/a_re
+    estimate (C, 1/C, per-state avg_r/avg_r2, the raw pre-clamp value,
+    which fallback if any). None (default, and the only option outside
+    'goulding' mode, where it's never populated) skips this entirely.
 
     Otherwise this runs in three stages:
       1. Signal for every instrument, no sizing yet -- _fetch_signal_inputs
@@ -1256,7 +1297,8 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
             errors[symbol] = str(exc)
 
     # Stage 1b (goulding only): a_Co/a_Re, pooled per mixing_params_for_instruments.
-    mixing_params_by_cluster = _mixing_params_for_instruments(config, raw_by_symbol, instruments)
+    mixing_params_by_cluster = _mixing_params_for_instruments(config, raw_by_symbol, instruments,
+                                                                diagnostics=mixing_diagnostics)
 
     # Stage 1c: resolve each instrument's final trend_strength/regime/hv.
     instr_by_symbol = {i['symbol']: i for i in instruments}

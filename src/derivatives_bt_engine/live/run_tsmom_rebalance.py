@@ -27,6 +27,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 from dotenv import load_dotenv
 from ib_insync import Order
@@ -110,7 +111,7 @@ def _build_instruments(spec: str, max_notional: float, max_contracts: int) -> li
     return build_instruments(spec.split(','), max_notional=max_notional, max_contracts=max_contracts)
 
 
-def _save_report(cluster_report: str, targets: list[dict]) -> None:
+def _save_report(cluster_report: str, targets: list[dict], mixing_diagnostics: Optional[dict] = None) -> None:
     """Persists each run's cluster risk report (plain text, matches stdout)
     and targets (CSV, one row per instrument) to results/ at the project
     root, timestamped -- mirrors tsmom.py's results dir so live and
@@ -124,7 +125,20 @@ def _save_report(cluster_report: str, targets: list[dict]) -> None:
     every field the cluster report doesn't already summarize; risk_contrib
     (when present -- only under risk_budget_mode='idm', see
     compute_rebalance_targets' own docstring) already flows into the CSV
-    automatically via all_keys below, no separate handling needed there."""
+    automatically via all_keys below, no separate handling needed there.
+
+    `mixing_diagnostics` (compute_rebalance_targets' own out-param, {cluster
+    or 'global': diag}, populated only under signal_weighting='goulding')
+    -- when non-empty, ALSO saves a small tsmom_mixing_params_{ts}.csv, one
+    row per cluster (or a single 'global' row under mixing_pool='global'),
+    with every intermediate value behind that cluster's a_co/a_re (C, 1/C,
+    per-state avg_r/avg_r2, the RAW pre-clamp a_co_raw/a_re_raw, which
+    fallback if any) -- see estimate_mixing_params_diagnostics' own
+    docstring. Lets a saturated a_co/a_re (== exactly 0.0 or 1.0 in the
+    main CSV) be traced back to the small/noisy pooled sample that
+    produced it, instead of looking identical to a genuine interior
+    calibration. None/empty (e.g. 'continuous' mode, or a caller that
+    doesn't pass mixing_diagnostics at all) skips this file entirely."""
     results_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'results'))
     os.makedirs(results_dir, exist_ok=True)
     ts = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -132,6 +146,23 @@ def _save_report(cluster_report: str, targets: list[dict]) -> None:
     txt_path = os.path.join(results_dir, f'tsmom_live_rebalance_{ts}.txt')
     with open(txt_path, 'w') as f:
         f.write(cluster_report)
+
+    if mixing_diagnostics:
+        mixing_fieldnames = ['cluster', 'fallback_reason', 'a_co', 'a_re', 'a_co_raw', 'a_re_raw', 'C', 'inv_C',
+                              'n_bull', 'n_bear', 'n_correction', 'n_rebound',
+                              'avg_r_bull', 'avg_r2_bull', 'avg_r_bear', 'avg_r2_bear',
+                              'avg_r_correction', 'avg_r2_correction', 'avg_r_rebound', 'avg_r2_rebound']
+        mixing_rows = [
+            {'cluster': key, **{k: (round(v, 6) if isinstance(v, float) else v) for k, v in diag.items()
+                                 if k != 'cluster'}}
+            for key, diag in sorted(mixing_diagnostics.items())
+        ]
+        mixing_csv_path = os.path.join(results_dir, f'tsmom_mixing_params_{ts}.csv')
+        with open(mixing_csv_path, 'w', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=mixing_fieldnames)
+            writer.writeheader()
+            writer.writerows(mixing_rows)
+        log.info('Saved per-cluster mixing-params diagnostics to %s', mixing_csv_path)
 
     # symbol -> current/target position first (the columns you actually
     # scan a rebalance report for), THEN one dedicated goulding-decision
@@ -430,12 +461,13 @@ def main():
     else:
         log.info('data_source=database, splice_live_price=False — no IB connection made')
 
-    targets = compute_rebalance_targets(instruments, config, ib=ib)
+    mixing_diagnostics: dict = {}
+    targets = compute_rebalance_targets(instruments, config, ib=ib, mixing_diagnostics=mixing_diagnostics)
     report = print_rebalance_report(targets)
     cluster_report = print_cluster_risk_report(targets, account_equity=args.account_equity)
 
     if not args.no_save:
-        _save_report(cluster_report, targets)
+        _save_report(cluster_report, targets, mixing_diagnostics)
 
     if not dry_run:
         send_telegram(f'TSMOM Rebalance\n{report}')

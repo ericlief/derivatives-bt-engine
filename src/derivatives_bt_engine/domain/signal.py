@@ -980,17 +980,71 @@ def estimate_mixing_params(history: pl.DataFrame, as_of: date, cluster: Optional
     self-consistent with that prose -- see
     research/research_trend_strength_crossover_signal.md Part 2 §6 for the
     full errata discussion; this is flagged, not confirmed against the
-    primary source's actual typeset sign."""
+    primary source's actual typeset sign.
+
+    Thin wrapper around estimate_mixing_params_diagnostics -- see that
+    function if you need C/1/C/the per-state avg_r/avg_r2 values/the RAW
+    pre-clamp a_co/a_re/which (if any) fallback fired, e.g. to audit why a
+    particular cluster's a_co or a_re landed exactly at 0.0 or 1.0 (a
+    clamp on this formula's own raw output, not a masking of r_fast/r_slow
+    -- this function never reads either)."""
+    diag = estimate_mixing_params_diagnostics(history, as_of, cluster, min_months)
+    return diag['a_co'], diag['a_re']
+
+
+def estimate_mixing_params_diagnostics(history: pl.DataFrame, as_of: date, cluster: Optional[str],
+                                        min_months: int = MIN_MONTHS_PER_PHASE) -> dict:
+    """Every intermediate value behind estimate_mixing_params's (a_co, a_re)
+    -- per-state counts/means/mean-squares, the eq. 8-10 normalizer C (and
+    1/C), the RAW pre-clamp a_co/a_re, and which (if any) fallback path
+    fired -- so a cluster's estimate can be audited rather than trusted as
+    an opaque pair of floats. estimate_mixing_params is a thin (a_co,
+    a_re) = (result['a_co'], result['a_re']) wrapper around this function;
+    the two share one implementation, not two. Deliberately NOT logged
+    from in here (this is also called once per rebalance-month per
+    cluster from the backtest's own monthly mixing-param loop -- see
+    tsmom_backtester.py/tsmom_binary_vol_parity_backtest.py -- so logging
+    on every call here would flood a multi-year backtest's log; the live
+    path's own _mixing_params_for_instruments logs a per-cluster summary
+    itself, once per rebalance, from this function's return value).
+
+    'fallback_reason' is None when the full eq. 8-10 computation ran
+    (a_co/a_re below came from the formula, possibly clamped -- see
+    a_co_raw/a_re_raw), otherwise one of 'no_history' (prior.height == 0,
+    no rows at all before as_of/within cluster), 'insufficient_months'
+    (fewer than min_months of pooled Correction or Rebound history), or
+    'degenerate' (freq_tot == 0, a Bull/Bear/Correction/Rebound mean-
+    squared return near zero, or the C normalizer itself near zero -- see
+    estimate_mixing_params's own docstring for why each is checked). a_co/
+    a_re are (0.5, 0.5) whenever fallback_reason is set; every other field
+    is None/0 unless it was actually computed on the way to that fallback
+    (e.g. n_bull/n_bear are still populated even when the fallback fires
+    on n_correction/n_rebound).
+
+    a_co_raw/a_re_raw are the UNCLAMPED eq. 8-10 values -- None whenever
+    fallback_reason is set, otherwise possibly outside [0, 1] even though
+    a_co/a_re (the clamped, actually-used values) never are. A raw value
+    landing outside [0, 1] and getting silently pinned to the nearest
+    boundary is the actual mechanism behind a_co/a_re == 0.0 or 1.0 in a
+    saved report."""
+    diag = {
+        'cluster': cluster, 'n_bull': 0, 'n_bear': 0, 'n_correction': 0, 'n_rebound': 0,
+        'avg_r_bull': None, 'avg_r2_bull': None, 'avg_r_bear': None, 'avg_r2_bear': None,
+        'avg_r_correction': None, 'avg_r2_correction': None, 'avg_r_rebound': None, 'avg_r2_rebound': None,
+        'C': None, 'inv_C': None, 'a_co_raw': None, 'a_re_raw': None,
+        'a_co': 0.5, 'a_re': 0.5, 'fallback_reason': None,
+    }
     prior = history.filter(pl.col('date') < as_of)
     if cluster is not None:
         prior = prior.filter(pl.col('cluster') == cluster)
     if prior.height == 0:
-        return 0.5, 0.5
+        diag['fallback_reason'] = 'no_history'
+        return diag
 
-    def _stats(state: str) -> tuple[int, float, float]:
+    def _stats(state: str) -> tuple[int, Optional[float], Optional[float]]:
         sub = prior.filter(pl.col('state') == state)
         if sub.height == 0:
-            return 0, 0.0, 0.0
+            return 0, None, None
         r = sub['monthly_return']
         return sub.height, r.mean(), (r * r).mean()
 
@@ -998,9 +1052,14 @@ def estimate_mixing_params(history: pl.DataFrame, as_of: date, cluster: Optional
     n_be, avg_r_be, avg_r2_be = _stats('bear')
     n_co, avg_r_co, avg_r2_co = _stats('correction')
     n_re, avg_r_re, avg_r2_re = _stats('rebound')
+    diag.update(n_bull=n_bu, n_bear=n_be, n_correction=n_co, n_rebound=n_re,
+                avg_r_bull=avg_r_bu, avg_r2_bull=avg_r2_bu, avg_r_bear=avg_r_be, avg_r2_bear=avg_r2_be,
+                avg_r_correction=avg_r_co, avg_r2_correction=avg_r2_co,
+                avg_r_rebound=avg_r_re, avg_r2_rebound=avg_r2_re)
 
     if n_co < min_months or n_re < min_months:
-        return 0.5, 0.5
+        diag['fallback_reason'] = 'insufficient_months'
+        return diag
     freq_tot = n_bu + n_be
     # Exact `== 0` float equality is fragile here -- these are means of
     # squared monthly returns, so a near-degenerate (but not exactly zero)
@@ -1008,16 +1067,17 @@ def estimate_mixing_params(history: pl.DataFrame, as_of: date, cluster: Optional
     # up the 1/x below. freq_tot is a plain integer count (n_bu + n_be),
     # so exact-zero is fine and intentional for it specifically.
     if freq_tot == 0 or abs(avg_r2_bu) < _DEGENERATE_EPS or abs(avg_r2_be) < _DEGENERATE_EPS:
-        return 0.5, 0.5
+        diag['fallback_reason'] = 'degenerate'
+        return diag
 
     C = (n_bu / freq_tot) * (avg_r_bu / avg_r2_bu) - (n_be / freq_tot) * (avg_r_be / avg_r2_be)
     if abs(C) < _DEGENERATE_EPS or abs(avg_r2_co) < _DEGENERATE_EPS or abs(avg_r2_re) < _DEGENERATE_EPS:
-        return 0.5, 0.5
+        diag['fallback_reason'] = 'degenerate'
+        diag['C'] = C
+        return diag
 
-    a_co = 0.5 * (1 - (1 / C) * (avg_r_co / avg_r2_co))
-    a_re = 0.5 * (1 + (1 / C) * (avg_r_re / avg_r2_re))
-    log.info('Change in default params: n_bu %d | n_be %d | n_co %d (%s) | n_re %d (%s)',
-             n_bu, n_be, n_co, a_co, n_re, a_re)
-    log.info('avg_r_bu %s | avg_r_be %s | avg_r_co %s | avg_r_re %s', avg_r_bu, avg_r_be, avg_r_co, avg_r_re)
-
-    return max(0.0, min(1.0, a_co)), max(0.0, min(1.0, a_re))
+    a_co_raw = 0.5 * (1 - (1 / C) * (avg_r_co / avg_r2_co))
+    a_re_raw = 0.5 * (1 + (1 / C) * (avg_r_re / avg_r2_re))
+    diag.update(C=C, inv_C=1.0 / C, a_co_raw=a_co_raw, a_re_raw=a_re_raw,
+                a_co=max(0.0, min(1.0, a_co_raw)), a_re=max(0.0, min(1.0, a_re_raw)))
+    return diag
