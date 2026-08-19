@@ -991,6 +991,14 @@ def _finalize_signal(instr: dict, raw: dict, config: TsmomLiveConfig, vix_scalar
     last = raw['cm_df'].tail(1)
     ts_fast = last['ts_fast'][0]
     ts_slow = last['ts_slow'][0]
+    # continuous_momentum's own weighted ts_fast/ts_slow combination (pre
+    # regime-discount) and its post-discount 'signal' -- ALWAYS computed
+    # (continuous_momentum runs regardless of config.signal_weighting), so
+    # these are available as a continuous-mode audit trail even in
+    # 'goulding' mode, where trend_strength itself comes from goulding_
+    # monthly instead and is pinned to +-1.
+    ts = last['ts'][0] if 'ts' in last.columns else None
+    contin_signal = last['signal'][0] if 'signal' in last.columns else None
     daily_std_last = last['std_fast'][0] if 'std_fast' in last.columns else None
     last_close = float(last['close'][0])
     dd_raw = last['dd'][0] if 'dd' in last.columns else None
@@ -1005,7 +1013,7 @@ def _finalize_signal(instr: dict, raw: dict, config: TsmomLiveConfig, vix_scalar
         g_fast_val = g_last['fast'][0]
         g_slow_val = g_last['slow'][0]
 
-    resolved = resolve_trend_direction(config.signal_weighting, last['signal'][0] if 'signal' in last.columns else None,
+    resolved = resolve_trend_direction(config.signal_weighting, contin_signal,
                                         ts_fast, ts_slow, config.regime_discount,
                                         g_regime_val, g_fast_val, g_slow_val, a_co, a_re)
     if resolved is not None:
@@ -1051,6 +1059,8 @@ def _finalize_signal(instr: dict, raw: dict, config: TsmomLiveConfig, vix_scalar
         'signal_for_scalar': signal_for_scalar,
         'ts_fast': ts_fast,
         'ts_slow': ts_slow,
+        'ts': ts,
+        'contin_signal': contin_signal,
         'daily_std': daily_std_last,
         'hv': hv,
         'risk_scalar': risk_scalar,
@@ -1399,6 +1409,7 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
                     'active': active,
                     'signal': s['signal'], 'scalar': None,
                     'ts_fast': s['ts_fast'], 'ts_slow': s['ts_slow'],
+                    'ts': s['ts'], 'contin_signal': s['contin_signal'],
                     'daily_std': s['daily_std'], 'hv': s['hv'], 'risk_scalar': s['risk_scalar'],
                     'regime_discount': s['regime_discount'], 'vol_ratio': s['vol_ratio'],
                     'signal_confidence_regime': s['signal_confidence_regime'],
@@ -1468,6 +1479,8 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
                 'scalar': scalar,
                 'ts_fast': s['ts_fast'],
                 'ts_slow': s['ts_slow'],
+                'ts': s['ts'],
+                'contin_signal': s['contin_signal'],
                 'daily_std': s['daily_std'],
                 'hv': s['hv'],
                 'risk_scalar': s['risk_scalar'],
@@ -1616,7 +1629,16 @@ def print_rebalance_report(targets: list[dict]) -> str:
         (clamped to [-1, 1]) * vix_scalar -- entirely reconstructable from
         the five fields already printed to its left, kept here as a
         convenience total rather than making every reader do that
-        multiplication by hand."""
+        multiplication by hand.
+      ts / contin_signal: continuous_momentum's own ts_fast/ts_slow
+        combination -- ts is the tanh-squashed weighted blend BEFORE the
+        correction/rebound discount, contin_signal is that same blend
+        AFTER it (continuous_momentum's own 'ts'/'signal' columns).
+        ALWAYS computed regardless of signal_weighting, so under
+        'goulding' these are a continuous-mode audit trail (what
+        trend_strength WOULD read if signal_weighting='continuous' were
+        selected instead) -- kept grouped with ts_fast/ts_slow/the scalar
+        block, apart from the goulding-only audit fields below."""
     lines = ['TSMOM Rebalance Report', '=' * 60]
     for t in targets:
         if t.get('error'):
@@ -1629,12 +1651,9 @@ def print_rebalance_report(targets: list[dict]) -> str:
             f"trend_strength={_fmt(t.get('signal')):>7}  "
             f"regime={t['regime'].capitalize() if t.get('regime') else 'N/A':<10}  "
             f"ts_fast={_fmt(t.get('ts_fast')):>7}  ts_slow={_fmt(t.get('ts_slow')):>7}  "
-            f"dd_pct={_fmt(t.get('dd_pct'), '.2f'):>7}"
-            + (f"  g_regime={t['g_regime']}  g_fast={_fmt(t.get('g_fast'), '.4f')}  "
-               f"g_slow={_fmt(t.get('g_slow'), '.4f')}  g_blend={_fmt(t.get('g_blend'), '.4f')}  "
-               f"a_co={_fmt(t.get('a_co'), '.2f')}  a_re={_fmt(t.get('a_re'), '.2f')}"
-               if t.get('a_co') is not None else "")
-            + f"  daily_std={_fmt(t.get('daily_std'), '.4f'):>7}  hv={_fmt(t.get('hv'), '.3f'):>6}  "
+            f"ts={_fmt(t.get('ts')):>7}  "
+            f"dd_pct={_fmt(t.get('dd_pct'), '.2f'):>7}  "
+            f"daily_std={_fmt(t.get('daily_std'), '.4f'):>7}  hv={_fmt(t.get('hv'), '.3f'):>6}  "
               f"vx_current={_fmt(t.get('vx_current'), '.2f'):>6}  vx_ma={_fmt(t.get('vx_ma'), '.2f'):>6}  "
               f"vx_ratio={t['vx_ratio']:.3f}  vol_regime={t['vol_regime'].capitalize()}  "
               f"risk_scalar={_fmt(t.get('risk_scalar'), '.3f'):>6}  "
@@ -1645,9 +1664,14 @@ def print_rebalance_report(targets: list[dict]) -> str:
               f"budget_constant={_fmt(t.get('budget_constant'), '.0f')}"
             + (f"  weight={_fmt(t.get('notional_weight'), '.3f')}" if t.get('notional_weight') is not None else "")
             + (f"  idm_multiplier={_fmt(t.get('idm_multiplier'), '.3f')}" if t.get('idm_multiplier') is not None else "")
-            + f"  target_notional={_fmt(t.get('target_notional'), '.0f')}  "
+            + f"  contin_signal={_fmt(t.get('contin_signal')):>7}  "
+            + f"target_notional={_fmt(t.get('target_notional'), '.0f')}  "
               f"close={_fmt(t.get('close'), '.2f'):>9}  "
               f"continuous={_fmt(t.get('continuous_contracts'), '.3f'):>7}"
+            + (f"  |  g_regime={t['g_regime']}  g_fast={_fmt(t.get('g_fast'), '.4f')}  "
+               f"g_slow={_fmt(t.get('g_slow'), '.4f')}  g_blend={_fmt(t.get('g_blend'), '.4f')}  "
+               f"a_co={_fmt(t.get('a_co'), '.2f')}  a_re={_fmt(t.get('a_re'), '.2f')}"
+               if t.get('a_co') is not None else "")
             + ("  INFEASIBLE (cluster cap < min contract risk in this cluster)" if t.get('infeasible') else "")
         )
     report = '\n'.join(lines)

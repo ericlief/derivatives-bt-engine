@@ -108,31 +108,28 @@ def _build_instruments(spec: str, max_notional: float, max_contracts: int) -> li
     return build_instruments(spec.split(','), max_notional=max_notional, max_contracts=max_contracts)
 
 
-def _save_report(report: str, targets: list[dict], cluster_report: str = '') -> None:
-    """Persists each run's report (plain text, matches stdout) and targets
-    (CSV, one row per instrument) to results/ at the project root,
-    timestamped -- mirrors tsmom.py's results dir so live and
+def _save_report(cluster_report: str, targets: list[dict]) -> None:
+    """Persists each run's cluster risk report (plain text, matches stdout)
+    and targets (CSV, one row per instrument) to results/ at the project
+    root, timestamped -- mirrors tsmom.py's results dir so live and
     backtest output live in the same place. Previously this only ever
     printed to stdout/Telegram and was lost the moment the terminal
     scrolled.
 
-    `cluster_report`: print_cluster_risk_report's own output (empty string
-    when the caller has none, e.g. an early VX-spike return with no
-    targets computed at all) -- appended to the same .txt file rather than
-    a separate one; risk_contribution (when present -- only under
-    risk_budget_mode='idm', see compute_rebalance_targets' own docstring)
-    already flows into the CSV automatically via all_keys below, no
-    separate handling needed there."""
+    Only print_cluster_risk_report's output goes to the .txt file --
+    print_rebalance_report's own per-instrument dump is redundant with the
+    CSV (every field it prints, plus more, is a CSV column) and duplicated
+    every field the cluster report doesn't already summarize; risk_
+    contribution (when present -- only under risk_budget_mode='idm', see
+    compute_rebalance_targets' own docstring) already flows into the CSV
+    automatically via all_keys below, no separate handling needed there."""
     results_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'results'))
     os.makedirs(results_dir, exist_ok=True)
     ts = datetime.now().strftime('%Y%m%d_%H%M%S')
 
     txt_path = os.path.join(results_dir, f'tsmom_live_rebalance_{ts}.txt')
     with open(txt_path, 'w') as f:
-        f.write(report)
-        if cluster_report:
-            f.write('\n\n')
-            f.write(cluster_report)
+        f.write(cluster_report)
 
     # symbol -> current/target position -> signal/regime first (the columns
     # you actually scan a rebalance report for), then the sizing-math trail
@@ -140,12 +137,20 @@ def _save_report(report: str, targets: list[dict], cluster_report: str = '') -> 
     # the order you'd actually want to follow the calculation, everything
     # else after in a stable, predictable order.
     priority = ['symbol', 'current_contracts', 'target_contracts', 'continuous_contracts', 'infeasible',
-                'trend_strength', 'regime', 'vol_regime', 'combined_scalar', 'risk_scalar', 'regime_discount',
+                'trend_strength', 'regime', 'vol_regime',
+                # continuous-mode group -- ts_fast/ts_slow/ts/contin_signal are
+                # ALWAYS computed (continuous_momentum runs regardless of
+                # signal_weighting), kept together and apart from the
+                # goulding-only audit fields below.
+                'ts_fast', 'ts_slow', 'ts',
+                'combined_scalar', 'risk_scalar', 'regime_discount',
                 'signal_confidence_regime', 'signal_confidence', 'vol_ratio', 'vix_scalar',
+                'idm_multiplier', 'contin_signal',
+                # goulding-only audit fields -- None under signal_weighting='continuous'.
                 'g_regime', 'g_fast', 'g_slow', 'g_blend', 'a_co', 'a_re',
                 'account_equity', 'n_effective',
                 'risk_budget', 'vol_target', 'target_portfolio_vol', 'budget_constant', 'notional_weight',
-                'idm_multiplier', 'position_risk', 'risk_contribution', 'raw_notional', 'target_notional',
+                'position_risk', 'risk_contribution', 'raw_notional', 'target_notional',
                 'max_cluster_risk_pct', 'max_lot_overrun_pct']
     rounded_rows = [
         {_CSV_COLUMN_RENAME.get(k, k): (round(v, 4) if isinstance(v, float) and not math.isnan(v) else v)
@@ -424,7 +429,7 @@ def main():
     cluster_report = print_cluster_risk_report(targets, account_equity=args.account_equity)
 
     if not args.no_save:
-        _save_report(report, targets, cluster_report)
+        _save_report(cluster_report, targets)
 
     if not dry_run:
         send_telegram(f'TSMOM Rebalance\n{report}')
