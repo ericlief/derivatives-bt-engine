@@ -145,8 +145,8 @@ def _save_report(report: str, targets: list[dict], cluster_report: str = '') -> 
                 'g_regime', 'g_fast', 'g_slow', 'g_blend', 'a_co', 'a_re',
                 'account_equity', 'n_effective',
                 'risk_budget', 'vol_target', 'target_portfolio_vol', 'budget_constant', 'notional_weight',
-                'position_risk', 'risk_contribution', 'raw_notional', 'target_notional', 'max_cluster_risk_pct',
-                'max_lot_overrun_pct']
+                'idm_multiplier', 'position_risk', 'risk_contribution', 'raw_notional', 'target_notional',
+                'max_cluster_risk_pct', 'max_lot_overrun_pct']
     rounded_rows = [
         {_CSV_COLUMN_RENAME.get(k, k): (round(v, 4) if isinstance(v, float) and not math.isnan(v) else v)
          for k, v in t.items()}

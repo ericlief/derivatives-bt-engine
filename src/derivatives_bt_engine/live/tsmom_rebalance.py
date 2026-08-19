@@ -1413,6 +1413,7 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
                     'risk_budget': desired_risk_budget, 'vol_target': config.vol_target,
                     'target_portfolio_vol': config.target_portfolio_vol,
                     'budget_constant': None, 'notional_weight': None,
+                    'idm_multiplier': idm_multiplier if config.risk_budget_mode == 'idm' else None,
                     'risk_budget_mode': config.risk_budget_mode,
                     'notional_weighting': config.notional_weighting, 'use_idm': config.use_idm,
                     'max_cluster_risk_pct': config.max_cluster_risk_pct,
@@ -1501,6 +1502,7 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
                 'target_portfolio_vol': config.target_portfolio_vol,
                 'budget_constant': budget_constant,
                 'notional_weight': notional_weight_by_symbol.get(symbol),
+                'idm_multiplier': idm_multiplier if config.risk_budget_mode == 'idm' else None,
                 'risk_budget_mode': config.risk_budget_mode,
                 'notional_weighting': config.notional_weighting if config.risk_budget_mode == 'idm' else None,
                 'use_idm': config.use_idm if config.risk_budget_mode == 'idm' else None,
@@ -1642,6 +1644,7 @@ def print_rebalance_report(targets: list[dict]) -> str:
               f"combined_scalar={_fmt(t.get('scalar'), '.3f'):>6}  "
               f"budget_constant={_fmt(t.get('budget_constant'), '.0f')}"
             + (f"  weight={_fmt(t.get('notional_weight'), '.3f')}" if t.get('notional_weight') is not None else "")
+            + (f"  idm_multiplier={_fmt(t.get('idm_multiplier'), '.3f')}" if t.get('idm_multiplier') is not None else "")
             + f"  target_notional={_fmt(t.get('target_notional'), '.0f')}  "
               f"close={_fmt(t.get('close'), '.2f'):>9}  "
               f"continuous={_fmt(t.get('continuous_contracts'), '.3f'):>7}"
