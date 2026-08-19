@@ -121,8 +121,8 @@ def _save_report(cluster_report: str, targets: list[dict]) -> None:
     Only print_cluster_risk_report's output goes to the .txt file --
     print_rebalance_report's own per-instrument dump is redundant with the
     CSV (every field it prints, plus more, is a CSV column) and duplicated
-    every field the cluster report doesn't already summarize; risk_
-    contribution (when present -- only under risk_budget_mode='idm', see
+    every field the cluster report doesn't already summarize; risk_contrib
+    (when present -- only under risk_budget_mode='idm', see
     compute_rebalance_targets' own docstring) already flows into the CSV
     automatically via all_keys below, no separate handling needed there."""
     results_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'results'))
@@ -143,13 +143,12 @@ def _save_report(cluster_report: str, targets: list[dict]) -> None:
     # even in 'goulding' mode -- kept apart from the goulding block above
     # so the two models' columns never interleave), and finally the
     # sizing-math trail / run-level (CLI-echoed) params, in the order
-    # you'd actually want to follow that calculation. NOTE: 'target_
-    # contracts'/'continuous_contracts'/'multiplier'/'max_contracts' are
-    # NOT abbreviated like their neighbors -- domain.allocation.
-    # apply_cluster_risk_cap (shared with the backtest CSV) reads/writes
-    # those exact key names on this same targets list, so renaming them
-    # here would silently break live position sizing, not just cosmetics.
-    priority = ['symbol', 'current_con', 'target_contracts', 'continuous_contracts', 'infeasible',
+    # you'd actually want to follow that calculation. target_con/
+    # contin_con/mult/max_con are also abbreviated here -- see
+    # domain.allocation.apply_cluster_risk_cap (shared with the backtest
+    # CSV), which was updated to read/write these exact abbreviated key
+    # names on this same targets list.
+    priority = ['symbol', 'current_con', 'target_con', 'contin_con', 'infeasible',
                 'g_regime', 'g_fast', 'g_slow', 'a_co', 'a_re', 'g_blend', 'g_sig',
                 'regime', 'vol_regime', 'ts_fast', 'ts_slow', 'ts', 'contin_sig',
                 'risk_scalar', 'reg_discount',
@@ -157,7 +156,7 @@ def _save_report(cluster_report: str, targets: list[dict]) -> None:
                 'combined_scalar', 'idm_mult',
                 'acct_equity', 'n_effect',
                 'risk_budget', 'vol_target', 'targ_port_vol', 'budg_const', 'not_weight',
-                'position_risk', 'risk_contribution', 'raw_not', 'targ_not',
+                'pos_risk', 'risk_contrib', 'raw_not', 'targ_not',
                 'max_clust_risk_pct', 'max_lot_over_pct']
     rounded_rows = [
         {_CSV_COLUMN_RENAME.get(k, k): (round(v, 4) if isinstance(v, float) and not math.isnan(v) else v)
@@ -443,17 +442,17 @@ def main():
 
         instr_by_symbol = {i['symbol']: i for i in instruments}
         for t in targets:
-            if t.get('error') or t['target_contracts'] is None or t['current_con'] is None:
+            if t.get('error') or t['target_con'] is None or t['current_con'] is None:
                 log.warning('Skipping %s — no valid target', t['symbol'])
                 continue
-            delta = t['target_contracts'] - t['current_con']
+            delta = t['target_con'] - t['current_con']
             if delta == 0:
-                log.info('%s already at target (%d) — no order', t['symbol'], t['target_contracts'])
+                log.info('%s already at target (%d) — no order', t['symbol'], t['target_con'])
                 continue
             instr = instr_by_symbol[t['symbol']]
             contract = _resolve_contract(ib, instr, min_days=7)
             log.info('%s: current=%d target=%d delta=%+d', t['symbol'],
-                     t['current_con'], t['target_contracts'], delta)
+                     t['current_con'], t['target_con'], delta)
             trade = _execute_rebalance_order(ib, contract, delta)
             status = trade.orderStatus.status
             log.info('%s order status: %s', t['symbol'], status)

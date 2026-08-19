@@ -174,23 +174,23 @@ def apply_cluster_risk_cap(targets: list[dict], max_cluster_risk_pct: float,
 
     infeasible is an OUTCOME-based flag, computed after every cluster's
     walk-down (or no-op) is final: True for every instrument in a cluster
-    where ALL instruments end up at target_contracts == 0 despite at least
-    one having abs(continuous_contracts) >= 0.5 pre-cap -- i.e. a real
+    where ALL instruments end up at target_con == 0 despite at least
+    one having abs(contin_con) >= 0.5 pre-cap -- i.e. a real
     signal existed but the cluster genuinely captured no exposure. This is
     NOT decided by a cap-vs-single-contract-risk precomputation (the top-
     priority instrument may still land a contract via the lot exception
     even when that precomputed check would have said "infeasible") --
     only the actual result matters.
 
-    Each target dict must carry 'cluster', 'continuous_contracts', 'scalar',
-    'close', 'multiplier', 'hv' (already computed per-instrument by the
+    Each target dict must carry 'cluster', 'contin_con', 'scalar',
+    'close', 'mult', 'hv' (already computed per-instrument by the
     caller). Targets with an 'error' key, or missing one of those fields,
     are left untouched and excluded from the risk totals. Mutates and
-    returns the same list (adds/overwrites 'target_contracts' and
-    'position_risk', and 'infeasible' where applicable).
+    returns the same list (adds/overwrites 'target_con' and
+    'pos_risk', and 'infeasible' where applicable).
 
     `apply_cap` (default True, unchanged prior behavior): whole-contract
-    ROUNDING and 'position_risk' always happen regardless -- those aren't
+    ROUNDING and 'pos_risk' always happen regardless -- those aren't
     part of "the cap," they're just how a continuous target becomes a
     tradeable integer. False (or total_risk_target being None/<=0) skips
     only the cluster-level cap/redistribution walk-down itself, treating
@@ -207,16 +207,16 @@ def apply_cluster_risk_cap(targets: list[dict], max_cluster_risk_pct: float,
     valid = [
         t for t in targets
         if not t.get('error')
-        and t.get('continuous_contracts') is not None
+        and t.get('contin_con') is not None
         and t.get('cluster') is not None
         and t.get('close') is not None
-        and t.get('multiplier') is not None
+        and t.get('mult') is not None
         and t.get('hv') is not None
     ]
 
     cluster_risk: dict[str, float] = {}
     for t in valid:
-        position_risk = abs(t['continuous_contracts']) * t['close'] * t['multiplier'] * t['hv']
+        position_risk = abs(t['contin_con']) * t['close'] * t['mult'] * t['hv']
         cluster_risk[t['cluster']] = cluster_risk.get(t['cluster'], 0.0) + position_risk
 
     if apply_cap and total_risk_target is not None and total_risk_target > 0:
@@ -239,13 +239,13 @@ def apply_cluster_risk_cap(targets: list[dict], max_cluster_risk_pct: float,
         # front, so later iterations of this loop can't see a value
         # another instrument's walk step already changed.
         members_sorted = sorted(members, key=lambda t: abs(t.get('scalar') or 0.0), reverse=True)
-        original_continuous = {t['symbol']: t['continuous_contracts'] for t in members_sorted}
+        original_continuous = {t['symbol']: t['contin_con'] for t in members_sorted}
 
         remaining_budget = cap
         for i, t in enumerate(members_sorted):
             is_first = (i == 0)
             orig = original_continuous[t['symbol']]
-            single_contract_risk = t['close'] * t['multiplier'] * t['hv']
+            single_contract_risk = t['close'] * t['mult'] * t['hv']
 
             if remaining_budget <= 0:
                 contracts = 0
@@ -263,7 +263,7 @@ def apply_cluster_risk_cap(targets: list[dict], max_cluster_risk_pct: float,
                     contracts = math.floor(usable_continuous + 0.5) if usable_continuous >= 0.5 else 0
 
             sign = 1 if orig > 0 else (-1 if orig < 0 else 0)
-            t['target_contracts'] = sign * contracts
+            t['target_con'] = sign * contracts
             remaining_budget -= contracts * single_contract_risk
 
     # Clusters within budget (and any target not part of an over-budget
@@ -273,25 +273,25 @@ def apply_cluster_risk_cap(targets: list[dict], max_cluster_risk_pct: float,
     for t in valid:
         if t['cluster'] in over_budget_clusters:
             continue
-        scaled = t['continuous_contracts']
+        scaled = t['contin_con']
         sign = 1 if scaled > 0 else (-1 if scaled < 0 else 0)
         magnitude = 0 if abs(scaled) < 0.5 else math.floor(abs(scaled) + 0.5)
-        t['target_contracts'] = sign * magnitude
+        t['target_con'] = sign * magnitude
 
-    # max_contracts clamp is the true last step, after sizing is otherwise
-    # final, then position_risk is recomputed from that final value.
+    # max_con clamp is the true last step, after sizing is otherwise
+    # final, then pos_risk is recomputed from that final value.
     for t in valid:
-        max_contracts = t.get('max_contracts')
-        if max_contracts is not None:
-            t['target_contracts'] = max(-max_contracts, min(max_contracts, t['target_contracts']))
-        t['position_risk'] = abs(t['target_contracts']) * t['close'] * t['multiplier'] * t['hv']
+        max_con = t.get('max_con')
+        if max_con is not None:
+            t['target_con'] = max(-max_con, min(max_con, t['target_con']))
+        t['pos_risk'] = abs(t['target_con']) * t['close'] * t['mult'] * t['hv']
 
     # Outcome-based infeasibility: every instrument in the cluster ended up
     # at zero despite at least one having a genuine (>=0.5) pre-cap signal.
     for cluster in over_budget_clusters:
         members = [t for t in valid if t['cluster'] == cluster]
-        had_real_signal = any(abs(t['continuous_contracts']) >= 0.5 for t in members)
-        all_zero = all(t['target_contracts'] == 0 for t in members)
+        had_real_signal = any(abs(t['contin_con']) >= 0.5 for t in members)
+        all_zero = all(t['target_con'] == 0 for t in members)
         if had_real_signal and all_zero:
             log.warning(
                 "%s cluster captured zero exposure despite a live signal -- cap ($%.0f) "
@@ -1042,10 +1042,10 @@ def compute_realized_portfolio_risk(active_symbols: list[str], H: np.ndarray,
 
     `dollar_exposure`: {symbol: SIGNED dollar risk}, positive for a long,
     negative for a short -- e.g. {t['symbol']: math.copysign(t
-    ['position_risk'], t['target_contracts']) for t in targets if not t.
+    ['pos_risk'], t['target_con']) for t in targets if not t.
     get('error')}. This is deliberately NOT the same as apply_cluster_
-    risk_cap's own `position_risk` field (abs(target_contracts) * close *
-    multiplier * hv, always >= 0), and NOT the same vector as compute_idm/
+    risk_cap's own `pos_risk` field (abs(target_con) * close *
+    mult * hv, always >= 0), and NOT the same vector as compute_idm/
     compute_notional_split's own `weights` (a pre-sizing, always-
     nonnegative ERC/HRP BUDGET SPLIT, one pipeline stage earlier -- see
     those functions' own docstrings). This function's own vector -- called
@@ -1058,7 +1058,7 @@ def compute_realized_portfolio_risk(active_symbols: list[str], H: np.ndarray,
     function unsigned magnitudes instead and you silently get the
     variance of a hypothetical all-long book -- every short's hedging (or
     anti-hedging) interaction with the rest of the portfolio disappears,
-    and any resulting negative risk_contribution reflects H's raw
+    and any resulting negative risk_contrib reflects H's raw
     correlation sign against an artificially all-positive x, not the
     symbol's actual direction. Missing symbols default to 0.0 (no
     position). H is a CORRELATION matrix (1.0 diagonal, PSD) with no
@@ -1070,52 +1070,52 @@ def compute_realized_portfolio_risk(active_symbols: list[str], H: np.ndarray,
     e.g. every exposure is 0). H being PSD guarantees x' H x >= 0 for ANY
     signed x, so port_var can never go negative here regardless of how the
     book is split long/short -- the individual Euler terms below are what
-    can be negative, not the total. marginal = H @ x; risk_contribution_i
+    can be negative, not the total. marginal = H @ x; risk_contrib_i
     = x_i * marginal_i / port_vol -- by construction (Euler's theorem for
-    a degree-1-homogeneous function), sum(risk_contribution.values()) ==
+    a degree-1-homogeneous function), sum(risk_contrib.values()) ==
     port_vol exactly, so it's a genuine decomposition of the book's total
     risk across symbols, not an approximation. Because x is signed here,
-    risk_contribution can legitimately be negative for a real reason now:
+    risk_contrib can legitimately be negative for a real reason now:
     a short position that's net diversifying (or a long that's net
     diversifying against the book's shorts) marginally REDUCES total
     portfolio variance -- diversification/hedging showing up exactly as
     it should, not a contradiction of H's own PSD-ness -- not just
     "correlated with a low weight."
 
-    The point of comparing risk_contribution against the SAME symbol's
-    UNSIGNED position_risk (apply_cluster_risk_cap's field, not this
-    function's input): position_risk is each instrument's UNDIVERSIFIED
+    The point of comparing risk_contrib against the SAME symbol's
+    UNSIGNED pos_risk (apply_cluster_risk_cap's field, not this
+    function's input): pos_risk is each instrument's UNDIVERSIFIED
     standalone dollar vol (what it would contribute alone, direction
     stripped out since a standalone position has no portfolio to net
-    against); risk_contribution is what it ACTUALLY contributes given
+    against); risk_contrib is what it ACTUALLY contributes given
     today's measured correlation AND its own direction -- exactly the gap
     compute_idm/ERC/HRP sizing is meant to account for UP FRONT, so this
     is also a live check on whether that sizing is holding up against
     realized (rounded) positions, not just the pre-rounding theoretical
-    split. A genuine diversifier's risk_contribution comes in BELOW its
-    own position_risk (confirmed directly in test_allocation.py); a
+    split. A genuine diversifier's risk_contrib comes in BELOW its
+    own pos_risk (confirmed directly in test_allocation.py); a
     symbol correlated with the rest of the book AND held in the same net
-    direction approaches, but is bounded above by, its own position_risk
-    when exposures are comparable in size (sum(risk_contribution) <=
-    sum(position_risk) in that same-direction case, since correlation
+    direction approaches, but is bounded above by, its own pos_risk
+    when exposures are comparable in size (sum(risk_contrib) <=
+    sum(pos_risk) in that same-direction case, since correlation
     entries are bounded by 1 -- Cauchy-Schwarz) -- an individual risk_
-    contribution exceeding its own position_risk IS possible in general
+    contrib exceeding its own pos_risk IS possible in general
     (e.g. a small position heavily correlated with a much larger
     cluster), just not in a symmetric, comparably-weighted, same-
     direction case."""
     risk_exposure = np.array([dollar_exposure.get(s, 0.0) for s in active_symbols])
     port_var = risk_exposure @ H @ risk_exposure
     if port_var <= 0:
-        return {'port_vol': 0.0, 'risk_contribution': {s: 0.0 for s in active_symbols}}
+        return {'port_vol': 0.0, 'risk_contrib': {s: 0.0 for s in active_symbols}}
     port_vol = math.sqrt(port_var)
     marginal = H @ risk_exposure
     rc = risk_exposure * marginal / port_vol
-    return {'port_vol': port_vol, 'risk_contribution': dict(zip(active_symbols, rc))}
+    return {'port_vol': port_vol, 'risk_contrib': dict(zip(active_symbols, rc))}
 
 
 def group_by_cluster(cluster_by_symbol: dict[str, str], values: dict[str, float]) -> dict[str, float]:
-    """Sum a per-symbol dollar figure -- position_risk (undiversified,
-    standalone) or compute_realized_portfolio_risk's own risk_contribution
+    """Sum a per-symbol dollar figure -- pos_risk (undiversified,
+    standalone) or compute_realized_portfolio_risk's own risk_contrib
     (diversification-aware) are the two this project actually uses -- into
     per-cluster totals. Generic aggregation, not tied to either one
     specifically: whatever `values` means per-symbol, this sums it by

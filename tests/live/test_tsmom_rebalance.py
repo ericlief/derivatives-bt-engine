@@ -217,7 +217,7 @@ def test_compute_rebalance_targets_database_mode_needs_no_ib(monkeypatch):
     # No IB connection anywhere in this mode -- current_con is
     # unknowable without one, reported as None rather than a misleading 0.
     assert t['current_con'] is None
-    assert t['target_contracts'] is not None
+    assert t['target_con'] is not None
 
 
 def test_compute_rebalance_targets_database_mode_respects_as_of(monkeypatch):
@@ -410,18 +410,18 @@ def test_risk_contribution_attached_to_targets_under_idm_mode(monkeypatch):
 
     for t in targets:
         if not t.get('error'):
-            assert 'risk_contribution' in t
+            assert 'risk_contrib' in t
 
     report = tr.print_cluster_risk_report(targets)
-    assert 'risk_contribution=' in report
-    assert 'position_risk=' in report
+    assert 'risk_contrib=' in report
+    assert 'pos_risk=' in report
 
 
 def test_risk_contribution_absent_under_cluster_mode(monkeypatch):
     # 'cluster' mode never computes H (no correlation-aware sizing at
     # all), so there's nothing for compute_realized_portfolio_risk to use
-    # -- print_cluster_risk_report should fall back to position_risk
-    # totals only, no risk_contribution column.
+    # -- print_cluster_risk_report should fall back to pos_risk
+    # totals only, no risk_contrib column.
     price_data = {
         'X': _price_df(date(2018, 1, 1), 500, drift=0.0015, vol=0.005, seed=1),
         'Y': _price_df(date(2018, 1, 1), 500, drift=0.0015, vol=0.005, seed=2),
@@ -432,11 +432,11 @@ def test_risk_contribution_absent_under_cluster_mode(monkeypatch):
     targets = compute_rebalance_targets([_instrument('X'), _instrument('Y')], config, ib=None)
 
     for t in targets:
-        assert 'risk_contribution' not in t
+        assert 'risk_contrib' not in t
 
     report = tr.print_cluster_risk_report(targets)
-    assert 'position_risk=' in report
-    assert 'risk_contribution=' not in report
+    assert 'pos_risk=' in report
+    assert 'risk_contrib=' not in report
 
 
 def test_active_field_reflects_min_conviction_and_inactive_symbol_gets_clean_zero(monkeypatch):
@@ -459,7 +459,7 @@ def test_active_field_reflects_min_conviction_and_inactive_symbol_gets_clean_zer
     for t in targets:
         assert t.get('error') is None
         assert t['active'] is False
-        assert t['target_contracts'] == 0
+        assert t['target_con'] == 0
         assert t['budg_const'] is None
         assert t['not_weight'] is None
 
@@ -918,7 +918,7 @@ def test_splice_falls_back_gracefully_on_ib_error(monkeypatch, caplog):
     # normally, and the still-live next candidate is used instead of the
     # one that errored.
     assert targets[0].get('error') is None
-    assert targets[0]['target_contracts'] is not None
+    assert targets[0]['target_con'] is not None
     assert any('candidate contract' in r.message and 'unavailable' in r.message for r in caplog.records)
 
 
