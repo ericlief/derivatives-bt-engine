@@ -57,10 +57,12 @@ DEFAULT_MAX_NOTIONAL = float(os.getenv('TSMOM_DEFAULT_MAX_NOTIONAL', '0')) or No
 # CSV-column relabeling only -- the underlying targets dict keeps 'signal'/
 # 'scalar' (apply_cluster_risk_cap sorts by 'scalar', and tsmom_backtester.py
 # shares that naming for cross-system parity), but print_rebalance_report
-# labels them trend_strength/combined_scalar for a human reader. Applying
-# the same rename at the CSV boundary keeps both saved artifacts from a
-# single run consistent with each other.
-_CSV_COLUMN_RENAME = {'signal': 'trend_strength', 'scalar': 'combined_scalar'}
+# labels them g_sig/combined_scalar for a human reader (g_sig to match
+# contin_sig's naming, even though under signal_weighting='continuous' it
+# carries continuous_momentum's own signal, not a goulding-only value).
+# Applying the same rename at the CSV boundary keeps both saved artifacts
+# from a single run consistent with each other.
+_CSV_COLUMN_RENAME = {'signal': 'g_sig', 'scalar': 'combined_scalar'}
 
 
 def configure_logging():
@@ -131,27 +133,32 @@ def _save_report(cluster_report: str, targets: list[dict]) -> None:
     with open(txt_path, 'w') as f:
         f.write(cluster_report)
 
-    # symbol -> current/target position -> signal/regime first (the columns
-    # you actually scan a rebalance report for), then the sizing-math trail
-    # (scalar -> budget inputs -> raw/target notional -> position risk) in
-    # the order you'd actually want to follow the calculation, everything
-    # else after in a stable, predictable order.
-    priority = ['symbol', 'current_contracts', 'target_contracts', 'continuous_contracts', 'infeasible',
-                'trend_strength', 'regime', 'vol_regime',
-                # continuous-mode group -- ts_fast/ts_slow/ts/contin_signal are
-                # ALWAYS computed (continuous_momentum runs regardless of
-                # signal_weighting), kept together and apart from the
-                # goulding-only audit fields below.
-                'ts_fast', 'ts_slow', 'ts',
-                'combined_scalar', 'risk_scalar', 'regime_discount',
-                'signal_confidence_regime', 'signal_confidence', 'vol_ratio', 'vix_scalar',
-                'idm_multiplier', 'contin_signal',
-                # goulding-only audit fields -- None under signal_weighting='continuous'.
-                'g_regime', 'g_fast', 'g_slow', 'g_blend', 'a_co', 'a_re',
-                'account_equity', 'n_effective',
-                'risk_budget', 'vol_target', 'target_portfolio_vol', 'budget_constant', 'notional_weight',
-                'position_risk', 'risk_contribution', 'raw_notional', 'target_notional',
-                'max_cluster_risk_pct', 'max_lot_overrun_pct']
+    # symbol -> current/target position first (the columns you actually
+    # scan a rebalance report for), THEN one dedicated goulding-decision
+    # block (regime -> raw g_fast/g_slow -> mixing weights a_co/a_re ->
+    # blend -> the resolved direction, g_sig -- None under
+    # signal_weighting='continuous'), THEN a fully separate continuous-
+    # momentum-only block (ts_fast/ts_slow/ts/contin_sig are ALWAYS
+    # computed regardless of signal_weighting, so this block is populated
+    # even in 'goulding' mode -- kept apart from the goulding block above
+    # so the two models' columns never interleave), and finally the
+    # sizing-math trail / run-level (CLI-echoed) params, in the order
+    # you'd actually want to follow that calculation. NOTE: 'target_
+    # contracts'/'continuous_contracts'/'multiplier'/'max_contracts' are
+    # NOT abbreviated like their neighbors -- domain.allocation.
+    # apply_cluster_risk_cap (shared with the backtest CSV) reads/writes
+    # those exact key names on this same targets list, so renaming them
+    # here would silently break live position sizing, not just cosmetics.
+    priority = ['symbol', 'current_con', 'target_contracts', 'continuous_contracts', 'infeasible',
+                'g_regime', 'g_fast', 'g_slow', 'a_co', 'a_re', 'g_blend', 'g_sig',
+                'regime', 'vol_regime', 'ts_fast', 'ts_slow', 'ts', 'contin_sig',
+                'risk_scalar', 'reg_discount',
+                'sig_confid_reg', 'sig_confid', 'vol_ratio', 'vix_scalar',
+                'combined_scalar', 'idm_mult',
+                'acct_equity', 'n_effect',
+                'risk_budget', 'vol_target', 'targ_port_vol', 'budg_const', 'not_weight',
+                'position_risk', 'risk_contribution', 'raw_not', 'targ_not',
+                'max_clust_risk_pct', 'max_lot_over_pct']
     rounded_rows = [
         {_CSV_COLUMN_RENAME.get(k, k): (round(v, 4) if isinstance(v, float) and not math.isnan(v) else v)
          for k, v in t.items()}
@@ -436,17 +443,17 @@ def main():
 
         instr_by_symbol = {i['symbol']: i for i in instruments}
         for t in targets:
-            if t.get('error') or t['target_contracts'] is None or t['current_contracts'] is None:
+            if t.get('error') or t['target_contracts'] is None or t['current_con'] is None:
                 log.warning('Skipping %s — no valid target', t['symbol'])
                 continue
-            delta = t['target_contracts'] - t['current_contracts']
+            delta = t['target_contracts'] - t['current_con']
             if delta == 0:
                 log.info('%s already at target (%d) — no order', t['symbol'], t['target_contracts'])
                 continue
             instr = instr_by_symbol[t['symbol']]
             contract = _resolve_contract(ib, instr, min_days=7)
             log.info('%s: current=%d target=%d delta=%+d', t['symbol'],
-                     t['current_contracts'], t['target_contracts'], delta)
+                     t['current_con'], t['target_contracts'], delta)
             trade = _execute_rebalance_order(ib, contract, delta)
             status = trade.orderStatus.status
             log.info('%s order status: %s', t['symbol'], status)

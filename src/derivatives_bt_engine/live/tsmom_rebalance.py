@@ -1221,22 +1221,22 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
             targets.append({
                 'symbol': instr['symbol'],
                 'target_contracts': target,
-                'current_contracts': current,
+                'current_con': current,
                 'signal': None,
                 'regime': None,
                 'vx_current': vx_current,
                 'vx_ma': vx_ma,
                 'vx_ratio': vx_ratio,
                 'vol_regime': vol_regime,
-                # n_effective/risk_budget/budget_constant aren't computed on
-                # this early-return path (signal computation, which they
-                # depend on, is skipped entirely during a spike/extreme) --
-                # only what's already in scope from config is available.
-                'account_equity': config.account_equity,
+                # n_effect/risk_budget/budg_const aren't computed on this
+                # early-return path (signal computation, which they depend
+                # on, is skipped entirely during a spike/extreme) -- only
+                # what's already in scope from config is available.
+                'acct_equity': config.account_equity,
                 'vol_target': config.vol_target,
-                'target_portfolio_vol': config.target_portfolio_vol,
-                'max_cluster_risk_pct': config.max_cluster_risk_pct,
-                'max_lot_overrun_pct': config.max_lot_overrun_pct,
+                'targ_port_vol': config.target_portfolio_vol,
+                'max_clust_risk_pct': config.max_cluster_risk_pct,
+                'max_lot_over_pct': config.max_lot_overrun_pct,
             })
         return targets
 
@@ -1363,20 +1363,20 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
             targets.append({
                 'symbol': symbol,
                 'target_contracts': None,
-                'current_contracts': None,
+                'current_con': None,
                 'signal': None,
                 'regime': None,
                 'vx_ratio': vx_ratio,
                 'vol_regime': vol_regime,
                 'error': errors[symbol],
-                'account_equity': config.account_equity,
-                'n_effective': n_effective,
+                'acct_equity': config.account_equity,
+                'n_effect': n_effective,
                 'risk_budget': desired_risk_budget,
                 'vol_target': config.vol_target,
-                'target_portfolio_vol': config.target_portfolio_vol,
-                'budget_constant': budget_constant_by_symbol.get(symbol),
-                'max_cluster_risk_pct': config.max_cluster_risk_pct,
-                'max_lot_overrun_pct': config.max_lot_overrun_pct,
+                'targ_port_vol': config.target_portfolio_vol,
+                'budg_const': budget_constant_by_symbol.get(symbol),
+                'max_clust_risk_pct': config.max_cluster_risk_pct,
+                'max_lot_over_pct': config.max_lot_overrun_pct,
             })
             continue
 
@@ -1404,31 +1404,31 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
                 targets.append({
                     'symbol': symbol, 'target_contracts': 0, 'continuous_contracts': 0.0,
                     'max_contracts': max_contracts,
-                    'current_contracts': (_current_contracts(ib, s['contract'])
-                                          if config.data_source == 'ib' else None),
+                    'current_con': (_current_contracts(ib, s['contract'])
+                                    if config.data_source == 'ib' else None),
                     'active': active,
                     'signal': s['signal'], 'scalar': None,
                     'ts_fast': s['ts_fast'], 'ts_slow': s['ts_slow'],
-                    'ts': s['ts'], 'contin_signal': s['contin_signal'],
+                    'ts': s['ts'], 'contin_sig': s['contin_signal'],
                     'daily_std': s['daily_std'], 'hv': s['hv'], 'risk_scalar': s['risk_scalar'],
-                    'regime_discount': s['regime_discount'], 'vol_ratio': s['vol_ratio'],
-                    'signal_confidence_regime': s['signal_confidence_regime'],
-                    'signal_confidence': s['signal_confidence'], 'vix_scalar': vix_scalar,
+                    'reg_discount': s['regime_discount'], 'vol_ratio': s['vol_ratio'],
+                    'sig_confid_reg': s['signal_confidence_regime'],
+                    'sig_confid': s['signal_confidence'], 'vix_scalar': vix_scalar,
                     'close': s['close'], 'multiplier': multiplier,
-                    'raw_notional': None, 'target_notional': None,
+                    'raw_not': None, 'targ_not': None,
                     'cluster': s['cluster'], 'dd_pct': s['dd_pct'], 'regime': s['regime'],
                     'vx_current': vx_current, 'vx_ma': vx_ma, 'vx_ratio': vx_ratio, 'vol_regime': vol_regime,
                     'g_regime': s['g_regime'], 'g_fast': s['g_fast'], 'g_slow': s['g_slow'],
                     'g_blend': s['g_blend'], 'a_co': s['a_co'], 'a_re': s['a_re'],
-                    'account_equity': config.account_equity, 'n_effective': n_effective,
+                    'acct_equity': config.account_equity, 'n_effect': n_effective,
                     'risk_budget': desired_risk_budget, 'vol_target': config.vol_target,
-                    'target_portfolio_vol': config.target_portfolio_vol,
-                    'budget_constant': None, 'notional_weight': None,
-                    'idm_multiplier': idm_multiplier if config.risk_budget_mode == 'idm' else None,
-                    'risk_budget_mode': config.risk_budget_mode,
-                    'notional_weighting': config.notional_weighting, 'use_idm': config.use_idm,
-                    'max_cluster_risk_pct': config.max_cluster_risk_pct,
-                    'max_lot_overrun_pct': config.max_lot_overrun_pct,
+                    'targ_port_vol': config.target_portfolio_vol,
+                    'budg_const': None, 'not_weight': None,
+                    'idm_mult': idm_multiplier if config.risk_budget_mode == 'idm' else None,
+                    'risk_budg_mode': config.risk_budget_mode,
+                    'not_weighting': config.notional_weighting, 'use_idm': config.use_idm,
+                    'max_clust_risk_pct': config.max_cluster_risk_pct,
+                    'max_lot_over_pct': config.max_lot_overrun_pct,
                 })
                 continue
 
@@ -1473,26 +1473,26 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
                 'target_contracts': target_contracts,
                 'continuous_contracts': continuous_contracts,
                 'max_contracts': max_contracts,
-                'current_contracts': current_contracts,
+                'current_con': current_contracts,
                 'active': active,
                 'signal': s['signal'],
                 'scalar': scalar,
                 'ts_fast': s['ts_fast'],
                 'ts_slow': s['ts_slow'],
                 'ts': s['ts'],
-                'contin_signal': s['contin_signal'],
+                'contin_sig': s['contin_signal'],
                 'daily_std': s['daily_std'],
                 'hv': s['hv'],
                 'risk_scalar': s['risk_scalar'],
-                'regime_discount': s['regime_discount'],
+                'reg_discount': s['regime_discount'],
                 'vol_ratio': s['vol_ratio'],
-                'signal_confidence_regime': s['signal_confidence_regime'],
-                'signal_confidence': s['signal_confidence'],
+                'sig_confid_reg': s['signal_confidence_regime'],
+                'sig_confid': s['signal_confidence'],
                 'vix_scalar': vix_scalar,
                 'close': s['close'],
                 'multiplier': multiplier,
-                'raw_notional': raw_notional,
-                'target_notional': target_notional,
+                'raw_not': raw_notional,
+                'targ_not': target_notional,
                 'cluster': s['cluster'],
                 'dd_pct': s['dd_pct'],
                 'regime': s['regime'],
@@ -1508,26 +1508,26 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
                 # under 'idm' -- included per-row so each CSV row is
                 # self-contained (no need to cross-reference the log for
                 # what budget/equity this run used).
-                'account_equity': config.account_equity,
-                'n_effective': n_effective,
+                'acct_equity': config.account_equity,
+                'n_effect': n_effective,
                 'risk_budget': desired_risk_budget,
                 'vol_target': config.vol_target,
-                'target_portfolio_vol': config.target_portfolio_vol,
-                'budget_constant': budget_constant,
-                'notional_weight': notional_weight_by_symbol.get(symbol),
-                'idm_multiplier': idm_multiplier if config.risk_budget_mode == 'idm' else None,
-                'risk_budget_mode': config.risk_budget_mode,
-                'notional_weighting': config.notional_weighting if config.risk_budget_mode == 'idm' else None,
+                'targ_port_vol': config.target_portfolio_vol,
+                'budg_const': budget_constant,
+                'not_weight': notional_weight_by_symbol.get(symbol),
+                'idm_mult': idm_multiplier if config.risk_budget_mode == 'idm' else None,
+                'risk_budg_mode': config.risk_budget_mode,
+                'not_weighting': config.notional_weighting if config.risk_budget_mode == 'idm' else None,
                 'use_idm': config.use_idm if config.risk_budget_mode == 'idm' else None,
-                'max_cluster_risk_pct': config.max_cluster_risk_pct,
-                'max_lot_overrun_pct': config.max_lot_overrun_pct,
+                'max_clust_risk_pct': config.max_cluster_risk_pct,
+                'max_lot_over_pct': config.max_lot_overrun_pct,
             })
         except Exception as exc:
             log.error('Failed to compute rebalance target for %s: %s', symbol, exc)
             targets.append({
                 'symbol': symbol,
                 'target_contracts': None,
-                'current_contracts': None,
+                'current_con': None,
                 'signal': None,
                 'regime': None,
                 'vx_ratio': vx_ratio,
@@ -1603,42 +1603,45 @@ def _fmt(v, spec='+.3f'):
 
 def print_rebalance_report(targets: list[dict]) -> str:
     """Pretty-print (and return as a string) the rebalancing plan, grouped
-    as a left-to-right narrative: identity/result -> raw direction+regime
-    -> (goulding audit, when applicable) -> vol inputs -> VX context ->
-    the four multiplicative sizing components -> their product -> notional
-    sizing -> the contract-count conversion.
+    as a left-to-right narrative: identity/result -> the goulding block
+    (regime -> raw g_fast/g_slow -> mixing weights a_co/a_re -> blend ->
+    g_sig, the resolved direction; None under signal_weighting=
+    'continuous') -> a fully separate continuous-momentum block (ALWAYS
+    populated regardless of signal_weighting) -> VX context -> the four
+    multiplicative sizing components -> their product -> notional sizing
+    -> the contract-count conversion.
 
     Label disambiguation (the same-sounding fields this grouping/labelling
     exists to untangle):
-      trend_strength (targets' 'signal' field): the raw direction/magnitude
-        call -- compute_position_scalar's first input, NOT the final sizing
+      g_sig (targets' 'signal' field): the raw direction/magnitude call --
+        compute_position_scalar's first input, NOT the final sizing
         multiplier. Under signal_weighting='goulding' this is ALWAYS
         exactly +-1 by construction ("Goulding decides direction,
         vol-parity decides size" -- resolve_trend_direction's own
         docstring): direction and size are deliberately separate decisions
-        in that mode, so seeing trend_strength pinned to +-1 run after run
-        is expected, not a sign anything's broken. Under 'continuous' it
-        instead carries continuous_momentum's own signal magnitude.
-      risk_scalar / regime_discount / signal_confidence / vix_scalar: the
-        four independent multiplicative components -- vol-equalization,
+        in that mode, so seeing g_sig pinned to +-1 run after run is
+        expected, not a sign anything's broken. Under 'continuous' it
+        instead carries continuous_momentum's own signal magnitude --
+        named to match contin_sig below, not because it's exclusively a
+        goulding-mode value.
+      risk_scalar / reg_discount / sig_confid / vix_scalar: the four
+        independent multiplicative components -- vol-equalization,
         Correction/Rebound conviction discount, per-instrument signal
         trust discount, and portfolio-wide VX de-risking, respectively.
         None of these alone is "the" scalar; each is one ingredient.
       combined_scalar (targets' 'scalar' field): EXACTLY the product
-        trend_strength * risk_scalar * regime_discount * signal_confidence
-        (clamped to [-1, 1]) * vix_scalar -- entirely reconstructable from
-        the five fields already printed to its left, kept here as a
-        convenience total rather than making every reader do that
-        multiplication by hand.
-      ts / contin_signal: continuous_momentum's own ts_fast/ts_slow
+        g_sig * risk_scalar * reg_discount * sig_confid (clamped to
+        [-1, 1]) * vix_scalar -- entirely reconstructable from the fields
+        already printed to its left, kept here as a convenience total
+        rather than making every reader do that multiplication by hand.
+      ts / contin_sig: continuous_momentum's own ts_fast/ts_slow
         combination -- ts is the tanh-squashed weighted blend BEFORE the
-        correction/rebound discount, contin_signal is that same blend
-        AFTER it (continuous_momentum's own 'ts'/'signal' columns).
-        ALWAYS computed regardless of signal_weighting, so under
-        'goulding' these are a continuous-mode audit trail (what
-        trend_strength WOULD read if signal_weighting='continuous' were
-        selected instead) -- kept grouped with ts_fast/ts_slow/the scalar
-        block, apart from the goulding-only audit fields below."""
+        correction/rebound discount, contin_sig is that same blend AFTER
+        it (continuous_momentum's own 'ts'/'signal' columns). ALWAYS
+        computed regardless of signal_weighting, so under 'goulding' these
+        are a continuous-mode audit trail (what g_sig WOULD read if
+        signal_weighting='continuous' were selected instead) -- kept in
+        their own block, entirely apart from the goulding block above."""
     lines = ['TSMOM Rebalance Report', '=' * 60]
     for t in targets:
         if t.get('error'):
@@ -1646,32 +1649,31 @@ def print_rebalance_report(targets: list[dict]) -> str:
             continue
         lines.append(
             f"{t['symbol']:6s}  target={t['target_contracts']!s:>4}  "
-            f"current={t['current_contracts']!s:>4}  "
-            f"active={str(t.get('active')):>5}  "
-            f"trend_strength={_fmt(t.get('signal')):>7}  "
-            f"regime={t['regime'].capitalize() if t.get('regime') else 'N/A':<10}  "
-            f"ts_fast={_fmt(t.get('ts_fast')):>7}  ts_slow={_fmt(t.get('ts_slow')):>7}  "
-            f"ts={_fmt(t.get('ts')):>7}  "
-            f"dd_pct={_fmt(t.get('dd_pct'), '.2f'):>7}  "
-            f"daily_std={_fmt(t.get('daily_std'), '.4f'):>7}  hv={_fmt(t.get('hv'), '.3f'):>6}  "
+            f"current={t['current_con']!s:>4}  "
+            f"active={str(t.get('active')):>5}"
+            + (f"  |  g_regime={t['g_regime']}  g_fast={_fmt(t.get('g_fast'), '.4f')}  "
+               f"g_slow={_fmt(t.get('g_slow'), '.4f')}  a_co={_fmt(t.get('a_co'), '.2f')}  "
+               f"a_re={_fmt(t.get('a_re'), '.2f')}  g_blend={_fmt(t.get('g_blend'), '.4f')}  "
+               f"g_sig={_fmt(t.get('signal')):>7}"
+               if t.get('a_co') is not None else f"  g_sig={_fmt(t.get('signal')):>7}")
+            + f"  |  regime={t['regime'].capitalize() if t.get('regime') else 'N/A':<10}  "
+              f"ts_fast={_fmt(t.get('ts_fast')):>7}  ts_slow={_fmt(t.get('ts_slow')):>7}  "
+              f"ts={_fmt(t.get('ts')):>7}  contin_sig={_fmt(t.get('contin_sig')):>7}  "
+              f"dd_pct={_fmt(t.get('dd_pct'), '.2f'):>7}  "
+              f"daily_std={_fmt(t.get('daily_std'), '.4f'):>7}  hv={_fmt(t.get('hv'), '.3f'):>6}  "
               f"vx_current={_fmt(t.get('vx_current'), '.2f'):>6}  vx_ma={_fmt(t.get('vx_ma'), '.2f'):>6}  "
               f"vx_ratio={t['vx_ratio']:.3f}  vol_regime={t['vol_regime'].capitalize()}  "
               f"risk_scalar={_fmt(t.get('risk_scalar'), '.3f'):>6}  "
-              f"regime_discount={_fmt(t.get('regime_discount'), '.2f'):>5}  "
-              f"signal_confidence={_fmt(t.get('signal_confidence'), '.2f'):>5}  "
+              f"reg_discount={_fmt(t.get('reg_discount'), '.2f'):>5}  "
+              f"sig_confid={_fmt(t.get('sig_confid'), '.2f'):>5}  "
               f"vix_scalar={_fmt(t.get('vix_scalar'), '.2f')}  "
               f"combined_scalar={_fmt(t.get('scalar'), '.3f'):>6}  "
-              f"budget_constant={_fmt(t.get('budget_constant'), '.0f')}"
-            + (f"  weight={_fmt(t.get('notional_weight'), '.3f')}" if t.get('notional_weight') is not None else "")
-            + (f"  idm_multiplier={_fmt(t.get('idm_multiplier'), '.3f')}" if t.get('idm_multiplier') is not None else "")
-            + f"  contin_signal={_fmt(t.get('contin_signal')):>7}  "
-            + f"target_notional={_fmt(t.get('target_notional'), '.0f')}  "
+              f"budg_const={_fmt(t.get('budg_const'), '.0f')}"
+            + (f"  weight={_fmt(t.get('not_weight'), '.3f')}" if t.get('not_weight') is not None else "")
+            + (f"  idm_mult={_fmt(t.get('idm_mult'), '.3f')}" if t.get('idm_mult') is not None else "")
+            + f"  targ_not={_fmt(t.get('targ_not'), '.0f')}  "
               f"close={_fmt(t.get('close'), '.2f'):>9}  "
               f"continuous={_fmt(t.get('continuous_contracts'), '.3f'):>7}"
-            + (f"  |  g_regime={t['g_regime']}  g_fast={_fmt(t.get('g_fast'), '.4f')}  "
-               f"g_slow={_fmt(t.get('g_slow'), '.4f')}  g_blend={_fmt(t.get('g_blend'), '.4f')}  "
-               f"a_co={_fmt(t.get('a_co'), '.2f')}  a_re={_fmt(t.get('a_re'), '.2f')}"
-               if t.get('a_co') is not None else "")
             + ("  INFEASIBLE (cluster cap < min contract risk in this cluster)" if t.get('infeasible') else "")
         )
     report = '\n'.join(lines)

@@ -214,9 +214,9 @@ def test_compute_rebalance_targets_database_mode_needs_no_ib(monkeypatch):
     assert len(targets) == 1
     t = targets[0]
     assert t.get('error') is None
-    # No IB connection anywhere in this mode -- current_contracts is
+    # No IB connection anywhere in this mode -- current_con is
     # unknowable without one, reported as None rather than a misleading 0.
-    assert t['current_contracts'] is None
+    assert t['current_con'] is None
     assert t['target_contracts'] is not None
 
 
@@ -278,7 +278,7 @@ def test_risk_budget_mode_cluster_gives_every_active_instrument_the_same_budget(
     config = TsmomLiveConfig(account_equity=1_000_000, data_source='database', risk_budget_mode='cluster')
     targets = compute_rebalance_targets([_instrument('X'), _instrument('Y')], config, ib=None)
 
-    budgets = {t['symbol']: t['budget_constant'] for t in targets if t.get('error') is None}
+    budgets = {t['symbol']: t['budg_const'] for t in targets if t.get('error') is None}
     assert len(budgets) == 2
     assert budgets['X'] == pytest.approx(budgets['Y'])
 
@@ -308,7 +308,7 @@ def test_risk_budget_mode_idm_favors_independent_symbol_over_correlated_pair(mon
     targets = compute_rebalance_targets(
         [_instrument('A'), _instrument('B'), _instrument('C')], config, ib=None)
 
-    budgets = {t['symbol']: t['budget_constant'] for t in targets if t.get('error') is None}
+    budgets = {t['symbol']: t['budg_const'] for t in targets if t.get('error') is None}
     assert set(budgets) == {'A', 'B', 'C'}
     assert budgets['C'] > budgets['A']
     assert budgets['C'] > budgets['B']
@@ -326,7 +326,7 @@ def test_risk_budget_mode_idm_use_idm_false_skips_multiplier(monkeypatch):
                               use_idm=False)
     targets = compute_rebalance_targets([_instrument('X'), _instrument('Y')], config, ib=None)
 
-    budgets = [t['budget_constant'] for t in targets if t.get('error') is None]
+    budgets = [t['budg_const'] for t in targets if t.get('error') is None]
     assert len(budgets) == 2
     # No IDM adjustment, flat split -- total dollar-vol budget is exactly
     # account_equity * target_portfolio_vol, split evenly.
@@ -460,8 +460,8 @@ def test_active_field_reflects_min_conviction_and_inactive_symbol_gets_clean_zer
         assert t.get('error') is None
         assert t['active'] is False
         assert t['target_contracts'] == 0
-        assert t['budget_constant'] is None
-        assert t['notional_weight'] is None
+        assert t['budg_const'] is None
+        assert t['not_weight'] is None
 
 
 # ── signal_weighting: 'goulding' ─────────────────────────────────────────────
