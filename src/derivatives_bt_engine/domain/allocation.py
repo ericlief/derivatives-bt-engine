@@ -1045,30 +1045,42 @@ def compute_realized_portfolio_risk(active_symbols: list[str], H: np.ndarray,
     ['position_risk'], t['target_contracts']) for t in targets if not t.
     get('error')}. This is deliberately NOT the same as apply_cluster_
     risk_cap's own `position_risk` field (abs(target_contracts) * close *
-    multiplier * hv, always >= 0): w' H w only nets a short against a
-    positively-correlated long (or compounds it against a negatively-
+    multiplier * hv, always >= 0), and NOT the same vector as compute_idm/
+    compute_notional_split's own `weights` (a pre-sizing, always-
+    nonnegative ERC/HRP BUDGET SPLIT, one pipeline stage earlier -- see
+    those functions' own docstrings). This function's own vector -- called
+    `risk_exposure` (mathematically x) below, not `w`, specifically to
+    keep the two apart -- is the REALIZED, signed dollar-vol exposure each
+    symbol ended up with, downstream of that budget split, sizing,
+    rounding, and apply_cluster_risk_cap: x' H x only nets a short against
+    a positively-correlated long (or compounds it against a negatively-
     correlated one) if direction is actually in the vector. Feed this
     function unsigned magnitudes instead and you silently get the
     variance of a hypothetical all-long book -- every short's hedging (or
     anti-hedging) interaction with the rest of the portfolio disappears,
     and any resulting negative risk_contribution reflects H's raw
-    correlation sign against an artificially all-positive w, not the
+    correlation sign against an artificially all-positive x, not the
     symbol's actual direction. Missing symbols default to 0.0 (no
-    position). H is a CORRELATION matrix (1.0 diagonal) with no notion of
-    any instrument's own vol built in -- the vector multiplied through it
-    must already carry that, unlike a raw notional or contract-count
-    weight.
+    position). H is a CORRELATION matrix (1.0 diagonal, PSD) with no
+    notion of any instrument's own vol built in -- the vector multiplied
+    through it must already carry that, unlike a raw notional or
+    contract-count weight.
 
-    port_var = w' H w, port_vol = sqrt(port_var) (0.0 if port_var <= 0,
-    e.g. every exposure is 0). marginal = H @ w; risk_contribution_i =
-    w_i * marginal_i / port_vol -- by construction (Euler's theorem for a
-    degree-1-homogeneous function), sum(risk_contribution.values()) ==
+    port_var = x' H x, port_vol = sqrt(port_var) (0.0 if port_var <= 0,
+    e.g. every exposure is 0). H being PSD guarantees x' H x >= 0 for ANY
+    signed x, so port_var can never go negative here regardless of how the
+    book is split long/short -- the individual Euler terms below are what
+    can be negative, not the total. marginal = H @ x; risk_contribution_i
+    = x_i * marginal_i / port_vol -- by construction (Euler's theorem for
+    a degree-1-homogeneous function), sum(risk_contribution.values()) ==
     port_vol exactly, so it's a genuine decomposition of the book's total
-    risk across symbols, not an approximation. Because w is signed here,
+    risk across symbols, not an approximation. Because x is signed here,
     risk_contribution can legitimately be negative for a real reason now:
     a short position that's net diversifying (or a long that's net
     diversifying against the book's shorts) marginally REDUCES total
-    portfolio variance, not just "correlated with a low weight."
+    portfolio variance -- diversification/hedging showing up exactly as
+    it should, not a contradiction of H's own PSD-ness -- not just
+    "correlated with a low weight."
 
     The point of comparing risk_contribution against the SAME symbol's
     UNSIGNED position_risk (apply_cluster_risk_cap's field, not this
@@ -1084,20 +1096,20 @@ def compute_realized_portfolio_risk(active_symbols: list[str], H: np.ndarray,
     own position_risk (confirmed directly in test_allocation.py); a
     symbol correlated with the rest of the book AND held in the same net
     direction approaches, but is bounded above by, its own position_risk
-    when weights are comparable in size (sum(risk_contribution) <=
+    when exposures are comparable in size (sum(risk_contribution) <=
     sum(position_risk) in that same-direction case, since correlation
     entries are bounded by 1 -- Cauchy-Schwarz) -- an individual risk_
     contribution exceeding its own position_risk IS possible in general
     (e.g. a small position heavily correlated with a much larger
     cluster), just not in a symmetric, comparably-weighted, same-
     direction case."""
-    w = np.array([dollar_exposure.get(s, 0.0) for s in active_symbols])
-    port_var = w @ H @ w
+    risk_exposure = np.array([dollar_exposure.get(s, 0.0) for s in active_symbols])
+    port_var = risk_exposure @ H @ risk_exposure
     if port_var <= 0:
         return {'port_vol': 0.0, 'risk_contribution': {s: 0.0 for s in active_symbols}}
     port_vol = math.sqrt(port_var)
-    marginal = H @ w
-    rc = w * marginal / port_vol
+    marginal = H @ risk_exposure
+    rc = risk_exposure * marginal / port_vol
     return {'port_vol': port_vol, 'risk_contribution': dict(zip(active_symbols, rc))}
 
 
