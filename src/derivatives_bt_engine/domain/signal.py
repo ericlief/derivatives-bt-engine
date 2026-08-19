@@ -380,11 +380,11 @@ class SignalSpec:
     slow_months: int = GOULDING_SLOW_MONTHS
 
     # Goulding's eq. 7 dynamic-reweight inputs -- plain pass-through values
-    # for _goulding_weight(), NOT estimated here. Pooled, expanding-window
+    # for _goulding_direction(), NOT estimated here. Pooled, expanding-window
     # a_Co/a_Re ESTIMATION (eq. 8-10) is a multi-symbol process that doesn't
     # fit this dataclass's per-symbol, stateless fields -- see this same
     # module's estimate_mixing_params, which implements it and passes the
-    # result into _goulding_weight directly. 0.5/0.5 is the paper's own
+    # result into _goulding_direction directly. 0.5/0.5 is the paper's own
     # uninformed fallback and collapses eq. 7 to a flat, no-op reweight.
     a_co: float = 0.5
     a_re: float = 0.5
@@ -667,23 +667,29 @@ def _goulding_blend(regime_val: Optional[str], a_co: float, a_re: float,
                      r_fast: Optional[float] = None, r_slow: Optional[float] = None) -> Optional[float]:
     """The raw eq. 7 blended value -- (1-a_Co)*r_SLOW + a_Co*r_FAST in
     Correction, (1-a_Re)*r_SLOW + a_Re*r_FAST in Rebound -- BEFORE taking
-    its sign. Exposed separately from _goulding_weight (which calls this
-    internally and only ever returns sign(this)) purely for audit/display,
-    e.g. src/derivatives_bt_engine/strats/tsmom_binary_vol_parity_backtest.py's rebalance CSV
-    reporting the raw score alongside the actual +-1/0 position weight, so
-    a reader isn't left wondering how e.g. a_co=0.5 (which looks like it
-    should be a "neutral" input) produced a nonzero directional weight --
-    it's because the blend of the ACTUAL r_fast/r_slow landed nonzero, not
-    because a_co itself carried directional information at 0.5.
+    its sign. _goulding_direction calls this internally and returns
+    sign(this) alongside this raw value itself, in a single (direction,
+    blend) call, so a caller never needs to invoke this function a second
+    time just to get the audit value -- e.g.
+    src/derivatives_bt_engine/strats/tsmom_binary_vol_parity_backtest.py's rebalance CSV
+    reports the raw score alongside the actual +-1/0 position weight from
+    that one call, so a reader isn't left wondering how e.g. a_co=0.5
+    (which looks like it should be a "neutral" input) produced a nonzero
+    directional weight -- it's because the blend of the ACTUAL r_fast/
+    r_slow landed nonzero, not because a_co itself carried directional
+    information at 0.5. Still exposed as its own function (rather than
+    folded entirely into _goulding_direction) because it's independently
+    unit-tested and is the single place eq. 7's math and its input
+    validation live.
 
     None for Bull/Bear (eq. 7 doesn't apply there -- they're
-    unconditionally +-1 in _goulding_weight, with no blend to report) or
-    when regime_val/r_fast/r_slow are missing/invalid. See
-    _goulding_weight's own docstring for the full r_fast/r_slow semantics
-    (Goulding's lagged trailing-average momentum signals, not a same-
-    period realized return) and the a_co/a_re range/regime-consistency
-    checks, both applied here too since this function is equally public
-    and independently callable."""
+    unconditionally +-1 in _goulding_direction, with no blend to report)
+    or when regime_val/r_fast/r_slow are missing/invalid. See
+    _goulding_direction's own docstring for the full r_fast/r_slow
+    semantics (Goulding's lagged trailing-average momentum signals, not a
+    same-period realized return) and the a_co/a_re range/regime-
+    consistency checks, both applied here too since this function is
+    equally public and independently callable."""
     if not (0.0 <= a_co <= 1.0) or not (0.0 <= a_re <= 1.0):
         raise ValueError(f"a_co/a_re must be in [0, 1] (eq. 7's own mixing-weight range), got a_co={a_co}, a_re={a_re}")
     if regime_val is None:
@@ -716,11 +722,13 @@ def _goulding_blend(regime_val: Optional[str], a_co: float, a_re: float,
     return (1.0 - weight) * r_slow + weight * r_fast
 
 
-def _goulding_weight(regime_val: Optional[str], a_co: float, a_re: float,
-                      r_fast: Optional[float] = None, r_slow: Optional[float] = None) -> Optional[float]:
-    """Eq. 7's blend: (1-a_Co)*r_SLOW + a_Co*r_FAST in Correction,
-    (1-a_Re)*r_SLOW + a_Re*r_FAST in Rebound. r_fast/r_slow here are meant
-    to be Goulding's own r_FAST/r_SLOW -- the SAME lagged, trailing-average
+def _goulding_direction(regime_val: Optional[str], a_co: float, a_re: float,
+                         r_fast: Optional[float] = None, r_slow: Optional[float] = None,
+                         ) -> Optional[tuple[float, Optional[float]]]:
+    """(direction, blend). direction is eq. 7's sign(blend): (1-a_Co)*
+    r_SLOW + a_Co*r_FAST in Correction, (1-a_Re)*r_SLOW + a_Re*r_FAST in
+    Rebound, sign taken AFTER blending. r_fast/r_slow here are meant to be
+    Goulding's own r_FAST/r_SLOW -- the SAME lagged, trailing-average
     momentum signals eq. 4 uses to classify Bull/Bear/Correction/Rebound in
     the first place (this project's own goulding_monthly()'s `fast`/`slow`
     columns: `ret.shift(1).rolling_mean(fast_months/slow_months)`, i.e. the
@@ -734,15 +742,29 @@ def _goulding_weight(regime_val: Optional[str], a_co: float, a_re: float,
     are goulding_monthly's `fast`/`slow` read via a forward-matched
     rebalance-date join -- verified end to end, not merely assumed).
 
-    This module's own binary sign(signal) direction convention (matching
-    Bull/Bear's unconditional +-1, and scripts/tsmom_binary_vol_parity_
-    backtest.py's flat_discount mode's direction=sign(ts)) then takes
-    sign(r_dyn) as the position weight -- always +1/-1/0, never a
-    magnitude in between. r_dyn landing on EXACTLY 0.0 (routed to the flat
-    0.0 case below) is astronomically unlikely with real return data and
-    isn't divided by anywhere in this function, so it doesn't carry the
-    same numerical-stability risk an epsilon-guarded 1/x would; left as a
-    plain equality check deliberately, not tightened to an abs()-epsilon.
+    This is "direction" and not "weight": Goulding's eq. 7 decides which
+    way a position points (+1/-1/0), never its size -- see resolve_trend_
+    direction's own docstring's "Goulding decides direction, vol-parity
+    decides size". This module's own binary sign(signal) direction
+    convention (matching Bull/Bear's unconditional +-1, and scripts/
+    tsmom_binary_vol_parity_backtest.py's flat_discount mode's direction=
+    sign(ts)) then takes sign(blend) as that direction -- always +1/-1/0,
+    never a magnitude in between. blend landing on EXACTLY 0.0 (routed to
+    the flat 0.0 case below) is astronomically unlikely with real return
+    data and isn't divided by anywhere in this function, so it doesn't
+    carry the same numerical-stability risk an epsilon-guarded 1/x would;
+    left as a plain equality check deliberately, not tightened to an
+    abs()-epsilon.
+
+    blend (the raw eq. 7 value BEFORE taking its sign, i.e.
+    _goulding_blend's own return value) is surfaced here too -- rather
+    than making a caller call _goulding_blend a second time with the same
+    args just to get the audit value alongside direction -- always None in
+    Bull/Bear (eq. 7 doesn't apply there -- direction is unconditionally
+    +-1, nothing to blend), never None whenever direction itself resolves
+    in Correction/Rebound (the None-input/invalid-regime cases below
+    return the whole tuple as None, not a (None, None) pair, so a caller
+    checking direction alone still catches every unresolvable case).
 
     CORRECTED from an earlier version that computed (1 - 2*a_co)/
     (2*a_re - 1) directly from a_co/a_re alone, with no r_fast/r_slow
@@ -752,7 +774,7 @@ def _goulding_weight(regime_val: Optional[str], a_co: float, a_re: float,
     took the sign of each leg first and blended signs, discarding the
     period's real relative fast/slow magnitudes entirely. Two different
     Correction months with the same a_co but very different actual
-    r_fast/r_slow values produced the identical weight under the old
+    r_fast/r_slow values produced the identical direction under the old
     formula; the paper's own eq. 7 blends the real signal values and only
     takes the sign of the RESULT, not of each input beforehand. a_co=
     a_re=0.5 (the uninformed fallback) still makes eq. 7 degenerate to a
@@ -770,19 +792,20 @@ def _goulding_weight(regime_val: Optional[str], a_co: float, a_re: float,
         # loudly rather than silently extrapolating eq. 7 outside its own
         # [0, 1] domain. Checked here too (not just inside _goulding_blend
         # below) so it still fires for Bull/Bear, which return before ever
-        # reaching _goulding_blend.
+        # reaching _goulding_blend at all.
         raise ValueError(f"a_co/a_re must be in [0, 1] (eq. 7's own mixing-weight range), got a_co={a_co}, a_re={a_re}")
     if regime_val is None:
         return None
     r = regime_val.lower()
     if r == 'bull':
-        return 1.0
+        return 1.0, None
     if r == 'bear':
-        return -1.0
-    r_dyn = _goulding_blend(regime_val, a_co, a_re, r_fast, r_slow)
-    if r_dyn is None:
+        return -1.0, None
+    blend = _goulding_blend(regime_val, a_co, a_re, r_fast, r_slow)
+    if blend is None:
         return None
-    return 1.0 if r_dyn > 0 else (-1.0 if r_dyn < 0 else 0.0)
+    direction = 1.0 if blend > 0 else (-1.0 if blend < 0 else 0.0)
+    return direction, blend
 
 
 def resolve_trend_direction(signal_weighting: str, continuous_signal: Optional[float],
@@ -800,7 +823,7 @@ def resolve_trend_direction(signal_weighting: str, continuous_signal: Optional[f
     live.tsmom_rebalance's own per-instrument signal computation share ONE
     implementation of this branch instead of two independently-maintained
     copies that could drift apart on exactly the subtlety
-    _goulding_weight's own docstring warns about (g_fast_val/g_slow_val
+    _goulding_direction's own docstring warns about (g_fast_val/g_slow_val
     must be goulding_monthly's lagged fast/slow, not a same-period
     realized return).
 
@@ -810,15 +833,16 @@ def resolve_trend_direction(signal_weighting: str, continuous_signal: Optional[f
     mixing weights (see estimate_mixing_params). regime_discount is always
     1.0 in this mode -- a_co/a_re IS the Correction/Rebound discount
     mechanism; applying regime_discount_cfg on top would double-discount a
-    decision eq. 7 already made. `blend` is _goulding_blend's own raw,
-    pre-sign eq. 7 value -- (1-a_Co)*r_SLOW + a_Co*r_FAST in Correction,
-    (1-a_Re)*r_SLOW + a_Re*r_FAST in Rebound -- for audit/display (e.g. a
-    saved report showing *why* trend_strength came out +1/-1, not just
-    that it did); always None in Bull/Bear (eq. 7 doesn't apply there --
-    trend_strength is unconditionally +-1, nothing to blend) even though
-    trend_strength itself is resolved in that case. Returns None (the
-    whole tuple) when g_regime_val is None or _goulding_weight itself
-    can't resolve a direction (missing/invalid g_fast_val/g_slow_val).
+    decision eq. 7 already made. `blend` is _goulding_direction's own raw,
+    pre-sign eq. 7 value, returned alongside trend_strength from that same
+    call -- (1-a_Co)*r_SLOW + a_Co*r_FAST in Correction, (1-a_Re)*r_SLOW +
+    a_Re*r_FAST in Rebound -- for audit/display (e.g. a saved report
+    showing *why* trend_strength came out +1/-1, not just that it did);
+    always None in Bull/Bear (eq. 7 doesn't apply there -- trend_strength
+    is unconditionally +-1, nothing to blend) even though trend_strength
+    itself is resolved in that case. Returns None (the whole tuple) when
+    g_regime_val is None or _goulding_direction itself can't resolve a
+    direction (missing/invalid g_fast_val/g_slow_val).
 
     'continuous': continuous_signal is continuous_momentum's own `signal`
     column value; regime is classify_regime(ts_fast, ts_slow);
@@ -830,10 +854,10 @@ def resolve_trend_direction(signal_weighting: str, continuous_signal: Optional[f
         if g_regime_val is None:
             return None
         regime = TrendRegime(g_regime_val.lower())
-        trend_strength = _goulding_weight(g_regime_val, a_co, a_re, g_fast_val, g_slow_val)
-        if trend_strength is None:
+        resolved = _goulding_direction(g_regime_val, a_co, a_re, g_fast_val, g_slow_val)
+        if resolved is None:
             return None
-        blend = _goulding_blend(g_regime_val, a_co, a_re, g_fast_val, g_slow_val)
+        trend_strength, blend = resolved
         return trend_strength, regime, 1.0, blend
     if continuous_signal is None:
         return None

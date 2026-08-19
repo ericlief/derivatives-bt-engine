@@ -123,8 +123,7 @@ from derivatives_bt_engine.domain.allocation import (
 from derivatives_bt_engine.domain.instruments import get_spec, resolve_active_months, resolve_annualization_days
 from derivatives_bt_engine.domain.signal import (
     SignalSpec,
-    _goulding_blend,
-    _goulding_weight,
+    _goulding_direction,
     build_features,
     build_monthly_state_return_history,
     continuous_momentum,
@@ -187,8 +186,8 @@ RESULTS_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', '..
 # mixing-parameter estimator, kept separate from calculate_trend_strength's
 # existing 3m/12m ts_fast/ts_slow (which stay canonical/untouched per that
 # function's own docstring). The paper's own 2m/12m fast/slow horizons and
-# eq. 4/7 state/weight logic come from domain/signal.py's
-# build_features()/goulding_monthly()/_goulding_weight (genuine calendar-
+# eq. 4/7 state/direction logic come from domain/signal.py's
+# build_features()/goulding_monthly()/_goulding_direction (genuine calendar-
 # month aggregation) and build_monthly_state_return_history/
 # estimate_mixing_params (the pooled, expanding-window a_Co/a_Re
 # ESTIMATION, moved there from this script once tsmom_backtester.py needed
@@ -492,8 +491,8 @@ def run(symbols: list[str], start: date, end: date, regime_discount: float,
         # classification from signal_spec.py's goulding_monthly() (real
         # group_by_dynamic('1mo') aggregation, not a fixed-trading-day
         # approximation) instead of a duplicate hand-rolled computation
-        # here -- this script computes its own weight from `g_regime` +
-        # the separately-estimated a_co/a_re, below, via _goulding_weight.
+        # here -- this script computes its own direction from `g_regime` +
+        # the separately-estimated a_co/a_re, below, via _goulding_direction.
         #
         # goulding_monthly returns one row per MONTH, labeled by that
         # month's own START date (e.g. 2023-11-01). rebal_dates are month-
@@ -620,7 +619,7 @@ def run(symbols: list[str], start: date, end: date, regime_discount: float,
                 # own daily std_fast (vol-parity), in BOTH weighting_modes
                 # -- including 'dynamic', whose DIRECTION/weight instead
                 # comes from Goulding's monthly g_regime/g_fast/g_slow via
-                # _goulding_weight above. That's a deliberate split, not an
+                # _goulding_direction above. That's a deliberate split, not an
                 # oversight: the paper itself doesn't size positions at
                 # all (it studies raw dynamic-blend RETURNS, eq. 7, as a
                 # standalone return series -- see the class docstring's
@@ -677,24 +676,26 @@ def run(symbols: list[str], start: date, end: date, regime_discount: float,
                     a_co, a_re = mixing_params_by_cluster[cluster]
                     # (1-a_co)*g_slow+a_co*g_fast in Correction, mirrored in
                     # Rebound, sign of the blended RESULT taken as the
-                    # position weight -- signal_spec.py's own (corrected)
-                    # eq. 7 weight formula, reused here instead of a
+                    # position direction -- signal_spec.py's own (corrected)
+                    # eq. 7 direction formula, reused here instead of a
                     # duplicate if/elif ladder. Passes the period's own
                     # actual g_fast/g_slow values -- NOT just regime/a_co/
-                    # a_re -- see _goulding_weight's own docstring for why
-                    # that distinction matters.
-                    weight = _goulding_weight(g_regime_val, a_co, a_re, g_fast_val, g_slow_val)
-                    # Raw pre-sign eq. 7 value, audit-only -- e.g. a_co=0.5
-                    # ("uninformed") can still produce a nonzero +-1
-                    # weight, because the blend of the ACTUAL g_fast/
-                    # g_slow landed nonzero, not because a_co carried
-                    # directional information at 0.5. None for Bull/Bear
-                    # (no blend -- see _goulding_blend's own docstring).
-                    r_dyn = _goulding_blend(g_regime_val, a_co, a_re, g_fast_val, g_slow_val)
-                    if weight is None:
+                    # a_re -- see _goulding_direction's own docstring for why
+                    # that distinction matters. Returns (direction, blend)
+                    # from this ONE call -- blend is the raw pre-sign eq. 7
+                    # value, audit-only (e.g. a_co=0.5 "uninformed" can
+                    # still produce a nonzero +-1 direction, because the
+                    # blend of the ACTUAL g_fast/g_slow landed nonzero, not
+                    # because a_co carried directional information at 0.5;
+                    # None for Bull/Bear, no blend there) -- rather than a
+                    # second call re-deriving the same blend _goulding_
+                    # direction already computed internally.
+                    resolved = _goulding_direction(g_regime_val, a_co, a_re, g_fast_val, g_slow_val)
+                    if resolved is None:
                         logger.warning(f"{s} on {d}: skipping rebalance, invalid signal "
                                         f"(g_fast={g_fast_val}, g_slow={g_slow_val} unusable for blend)")
                         continue
+                    weight, r_dyn = resolved
                 else:
                     if (ts_val is None or (isinstance(ts_val, float) and math.isnan(ts_val)) or dstd_bad):
                         logger.warning(f"{s} on {d}: skipping rebalance, invalid signal "

@@ -598,7 +598,7 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
     call. g_fast_val/g_slow_val here are goulding_monthly's own `fast`/
     `slow` -- Goulding's lagged trailing-average momentum signals (already
     shift(1)'d, no lookahead), NOT the realized return of the period about
-    to be traded; see _goulding_weight's own docstring for why that
+    to be traded; see _goulding_direction's own docstring for why that
     distinction matters."""
     row = precomputed[symbol].filter(pl.col('ts_event') == d)
     if row.height == 0:
@@ -697,9 +697,9 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
         # report), populated in 'goulding' mode so a saved trend_signals
         # CSV shows exactly what drove that rebalance's direction: this
         # rebalance's cluster's own a_Co/a_Re as of this date, the raw
-        # g_fast/g_slow/g_regime inputs _goulding_weight blended, and
+        # g_fast/g_slow/g_regime inputs _goulding_direction blended, and
         # g_blend itself -- the raw pre-sign eq. 7 value (resolve_trend_
-        # direction's own 4th return, via _goulding_blend), None in
+        # direction's own 4th return, via _goulding_direction), None in
         # Bull/Bear (eq. 7 doesn't apply there) even though trend_strength
         # still resolves in that case.
         'g_regime': g_regime_val, 'g_fast': g_fast_val, 'g_slow': g_slow_val,

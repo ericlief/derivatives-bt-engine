@@ -7,7 +7,7 @@ merged into signal.py.
 Covers: calculate_trend_strength/classify_regime/compute_vol_ratio/
 classify_signal_confidence/compute_signal_confidence (the old
 tsmom_signal.py half) and build_features/continuous_momentum/
-goulding_monthly/SignalSpec/_goulding_blend/_goulding_weight (the newer
+goulding_monthly/SignalSpec/_goulding_blend/_goulding_direction (the newer
 signal_spec.py half) -- each model's own tests deliberately avoid touching
 the other model's columns, mirroring the "no model depends on another
 model's intermediate columns" requirement the module itself is built
@@ -32,7 +32,7 @@ from derivatives_bt_engine.domain.signal import (
     GOULDING_SLOW_MONTHS,
     SignalSpec,
     _goulding_blend,
-    _goulding_weight,
+    _goulding_direction,
     build_features,
     calculate_trend_strength,
     classify_regime,
@@ -613,87 +613,100 @@ def test_goulding_monthly_signal_bounds_and_regimes():
     assert regimes <= {'bull', 'bear', 'correction', 'rebound'}
 
 
-# ── _goulding_weight (eq. 7), independent of both models above ──────────
+# ── _goulding_direction (eq. 7), independent of both models above ───────
 #
 # Eq. 7 blends the period's ACTUAL r_fast/r_slow return values -- (1-a)*
 # r_slow + a*r_fast -- and only takes the sign of that blended RESULT as
-# the position weight. Bull/Bear stay unconditionally +-1 regardless of
+# the position direction. Bull/Bear stay unconditionally +-1 regardless of
 # r_fast/r_slow (fast and slow already agree in sign by definition in
 # those states). Correction requires r_fast<0<=r_slow; Rebound requires
 # r_slow<0<=r_fast (goulding_monthly's own regime classification) -- test
 # fixtures below respect that, since passing an inconsistent sign
 # combination wouldn't correspond to a real classified month.
+#
+# _goulding_direction returns (direction, blend) in one call -- these
+# tests check `[0]` (direction) unless the point of the test is blend
+# itself.
 
-def test_goulding_weight_bull_bear_are_fully_directional():
-    assert _goulding_weight('bull', a_co=0.5, a_re=0.5, r_fast=-0.5, r_slow=-0.5) == 1.0
-    assert _goulding_weight('bear', a_co=0.5, a_re=0.5, r_fast=0.5, r_slow=0.5) == -1.0
+def test_goulding_direction_bull_bear_are_fully_directional():
+    assert _goulding_direction('bull', a_co=0.5, a_re=0.5, r_fast=-0.5, r_slow=-0.5)[0] == 1.0
+    assert _goulding_direction('bear', a_co=0.5, a_re=0.5, r_fast=0.5, r_slow=0.5)[0] == -1.0
 
 
-def test_goulding_weight_disagreement_states_use_blended_return_sign_not_just_a_co_a_re():
+def test_goulding_direction_disagreement_states_use_blended_return_sign_not_just_a_co_a_re():
     # Correction, a_co=0.5: plain average of r_slow/r_fast. Slow's positive
     # magnitude dominates fast's small negative -> positive blend -> +1.
-    assert _goulding_weight('correction', a_co=0.5, a_re=0.5, r_fast=-0.01, r_slow=0.10) == 1.0
+    assert _goulding_direction('correction', a_co=0.5, a_re=0.5, r_fast=-0.01, r_slow=0.10)[0] == 1.0
     # Same a_co, but fast's negative magnitude now dominates -> -1. The OLD
     # (1-2*a_co) formula would have returned the identical 0.0 for both of
     # these -- proving it ignored r_fast/r_slow's actual magnitudes entirely.
-    assert _goulding_weight('correction', a_co=0.5, a_re=0.5, r_fast=-0.10, r_slow=0.01) == -1.0
+    assert _goulding_direction('correction', a_co=0.5, a_re=0.5, r_fast=-0.10, r_slow=0.01)[0] == -1.0
     # Rebound, a_re=0.5: symmetric check.
-    assert _goulding_weight('rebound', a_co=0.5, a_re=0.5, r_fast=0.10, r_slow=-0.01) == 1.0
-    assert _goulding_weight('rebound', a_co=0.5, a_re=0.5, r_fast=0.01, r_slow=-0.10) == -1.0
+    assert _goulding_direction('rebound', a_co=0.5, a_re=0.5, r_fast=0.10, r_slow=-0.01)[0] == 1.0
+    assert _goulding_direction('rebound', a_co=0.5, a_re=0.5, r_fast=0.01, r_slow=-0.10)[0] == -1.0
 
 
-def test_goulding_weight_nonflat_a_co_a_re_tilts_the_blend():
+def test_goulding_direction_nonflat_a_co_a_re_tilts_the_blend():
     # a_co=0.2 in Correction weights r_slow (0.4) more than r_fast (-0.05):
     # 0.8*0.4 + 0.2*(-0.05) = 0.31 > 0.
-    assert _goulding_weight('correction', a_co=0.2, a_re=0.5, r_fast=-0.05, r_slow=0.4) == 1.0
+    assert _goulding_direction('correction', a_co=0.2, a_re=0.5, r_fast=-0.05, r_slow=0.4)[0] == 1.0
     # a_re=0.8 in Rebound weights r_fast (0.4) more than r_slow (-0.05):
     # 0.2*(-0.05) + 0.8*0.4 = 0.31 > 0.
-    assert _goulding_weight('rebound', a_co=0.5, a_re=0.8, r_fast=0.4, r_slow=-0.05) == 1.0
+    assert _goulding_direction('rebound', a_co=0.5, a_re=0.8, r_fast=0.4, r_slow=-0.05)[0] == 1.0
 
 
-def test_goulding_weight_none_and_unknown_regime():
-    assert _goulding_weight(None, a_co=0.5, a_re=0.5, r_fast=0.1, r_slow=0.1) is None
-    assert _goulding_weight('unknown', a_co=0.5, a_re=0.5, r_fast=0.1, r_slow=0.1) is None
+def test_goulding_direction_none_and_unknown_regime():
+    assert _goulding_direction(None, a_co=0.5, a_re=0.5, r_fast=0.1, r_slow=0.1) is None
+    assert _goulding_direction('unknown', a_co=0.5, a_re=0.5, r_fast=0.1, r_slow=0.1) is None
 
 
-def test_goulding_weight_correction_rebound_require_r_fast_r_slow():
+def test_goulding_direction_correction_rebound_require_r_fast_r_slow():
     # Bull/Bear don't need them (unconditional +-1); Correction/Rebound do
     # -- missing/NaN r_fast or r_slow means an invalid signal, not a
-    # silent fallback to some default weight.
-    assert _goulding_weight('bull', a_co=0.5, a_re=0.5) == 1.0
-    assert _goulding_weight('correction', a_co=0.5, a_re=0.5) is None
-    assert _goulding_weight('correction', a_co=0.5, a_re=0.5, r_fast=None, r_slow=0.1) is None
-    assert _goulding_weight('correction', a_co=0.5, a_re=0.5, r_fast=float('nan'), r_slow=0.1) is None
+    # silent fallback to some default direction.
+    assert _goulding_direction('bull', a_co=0.5, a_re=0.5)[0] == 1.0
+    assert _goulding_direction('correction', a_co=0.5, a_re=0.5) is None
+    assert _goulding_direction('correction', a_co=0.5, a_re=0.5, r_fast=None, r_slow=0.1) is None
+    assert _goulding_direction('correction', a_co=0.5, a_re=0.5, r_fast=float('nan'), r_slow=0.1) is None
 
 
-def test_goulding_weight_rejects_out_of_range_a_co_a_re():
+def test_goulding_direction_rejects_out_of_range_a_co_a_re():
     # Public/standalone-callable -- not every caller goes through
     # SignalSpec's own __post_init__ validation, so this function must
     # reject an out-of-range mixing weight itself rather than silently
     # extrapolating eq. 7 outside its [0, 1] domain.
     with pytest.raises(ValueError):
-        _goulding_weight('correction', a_co=2.0, a_re=0.5, r_fast=0.1, r_slow=-0.1)
+        _goulding_direction('correction', a_co=2.0, a_re=0.5, r_fast=0.1, r_slow=-0.1)
     with pytest.raises(ValueError):
-        _goulding_weight('rebound', a_co=0.5, a_re=-0.1, r_fast=0.1, r_slow=-0.1)
+        _goulding_direction('rebound', a_co=0.5, a_re=-0.1, r_fast=0.1, r_slow=-0.1)
+
+
+def test_goulding_direction_bull_bear_blend_is_none():
+    # Eq. 7 doesn't apply to Bull/Bear (direction is unconditionally +-1
+    # there) -- the blend half of the tuple has nothing to report.
+    assert _goulding_direction('bull', a_co=0.5, a_re=0.5, r_fast=0.1, r_slow=0.1) == (1.0, None)
+    assert _goulding_direction('bear', a_co=0.5, a_re=0.5, r_fast=-0.1, r_slow=-0.1) == (-1.0, None)
+
+
+def test_goulding_direction_matches_goulding_blend_sign():
+    # direction is defined as sign(blend) for Correction/Rebound -- verify
+    # that relationship holds against _goulding_blend called directly with
+    # the same inputs, not just that _goulding_direction looks reasonable
+    # on its own.
+    for regime, r_fast, r_slow in [('correction', -0.01, 0.10), ('correction', -0.10, 0.01),
+                                    ('rebound', 0.10, -0.01), ('rebound', 0.01, -0.10)]:
+        expected_blend = _goulding_blend(regime, a_co=0.5, a_re=0.5, r_fast=r_fast, r_slow=r_slow)
+        direction, blend = _goulding_direction(regime, a_co=0.5, a_re=0.5, r_fast=r_fast, r_slow=r_slow)
+        assert expected_blend is not None
+        assert blend == expected_blend
+        expected_sign = 1.0 if expected_blend > 0 else (-1.0 if expected_blend < 0 else 0.0)
+        assert direction == expected_sign
 
 
 # ── _goulding_blend (eq. 7's raw pre-sign value, audit/display only) ────
 
-def test_goulding_blend_matches_goulding_weight_sign():
-    # _goulding_weight is defined as sign(_goulding_blend(...)) for
-    # Correction/Rebound -- verify that relationship holds, not just that
-    # each function individually looks reasonable.
-    for regime, r_fast, r_slow in [('correction', -0.01, 0.10), ('correction', -0.10, 0.01),
-                                    ('rebound', 0.10, -0.01), ('rebound', 0.01, -0.10)]:
-        blend = _goulding_blend(regime, a_co=0.5, a_re=0.5, r_fast=r_fast, r_slow=r_slow)
-        weight = _goulding_weight(regime, a_co=0.5, a_re=0.5, r_fast=r_fast, r_slow=r_slow)
-        assert blend is not None
-        expected_sign = 1.0 if blend > 0 else (-1.0 if blend < 0 else 0.0)
-        assert weight == expected_sign
-
-
 def test_goulding_blend_none_for_bull_bear():
-    # Eq. 7 doesn't apply to Bull/Bear (_goulding_weight returns +-1
+    # Eq. 7 doesn't apply to Bull/Bear (_goulding_direction returns +-1
     # unconditionally there, with no blend at all) -- nothing to report.
     assert _goulding_blend('bull', a_co=0.5, a_re=0.5, r_fast=0.1, r_slow=0.1) is None
     assert _goulding_blend('bear', a_co=0.5, a_re=0.5, r_fast=-0.1, r_slow=-0.1) is None
