@@ -1275,7 +1275,6 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
                 'target_con': target,
                 'cur_con': current,
                 'signal': None,
-                'regime': None,
                 'vx_current': vx_current,
                 'vx_ma': vx_ma,
                 'vx_ratio': vx_ratio,
@@ -1418,7 +1417,6 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
                 'target_con': None,
                 'cur_con': None,
                 'signal': None,
-                'regime': None,
                 'vx_ratio': vx_ratio,
                 'vol_regime': vol_regime,
                 'error': errors[symbol],
@@ -1469,7 +1467,7 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
                     'sig_confid': s['signal_confidence'], 'vix_scalar': vix_scalar,
                     'close': s['close'], 'mult': multiplier,
                     'raw_not': None, 'targ_not': None,
-                    'cluster': s['cluster'], 'dd_pct': s['dd_pct'], 'regime': s['regime'],
+                    'cluster': s['cluster'], 'dd_pct': s['dd_pct'],
                     'vx_current': vx_current, 'vx_ma': vx_ma, 'vx_ratio': vx_ratio, 'vol_regime': vol_regime,
                     'g_regime': s['g_regime'], 'g_fast': s['g_fast'], 'g_slow': s['g_slow'],
                     'g_blend': s['g_blend'], 'a_co': s['a_co'], 'a_re': s['a_re'],
@@ -1549,7 +1547,6 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
                 'targ_not': target_notional,
                 'cluster': s['cluster'],
                 'dd_pct': s['dd_pct'],
-                'regime': s['regime'],
                 'vx_current': vx_current,
                 'vx_ma': vx_ma,
                 'vx_ratio': vx_ratio,
@@ -1583,7 +1580,6 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
                 'target_con': None,
                 'cur_con': None,
                 'signal': None,
-                'regime': None,
                 'vx_ratio': vx_ratio,
                 'vol_regime': vol_regime,
                 'error': str(exc),
@@ -1700,12 +1696,17 @@ def print_rebalance_report(targets: list[dict]) -> str:
         sign(ts_fast)/sign(ts_slow) only (Bull/Bear/Correction/Rebound),
         computed independently of signal_weighting. THIS is what gates
         contin_sig's correction/rebound discount (contin_sig = ts * 0.5
-        when ts_regime is Correction or Rebound, unchanged otherwise) --
-        NOT the headline regime= field to its left, which under
-        'goulding' is goulding_monthly's own regime instead (a different
-        fast/slow pair -- monthly returns, no vol-scaling). The two can
-        and do disagree; ts_regime explains contin_sig, regime= explains
-        g_sig/trend_strength."""
+        when ts_regime is Correction or Rebound, unchanged otherwise).
+        There used to be a separate top-level regime= field here too, but
+        it was always exactly redundant -- under 'goulding' it was a
+        verbatim copy of g_regime (resolve_trend_direction just passes
+        g_regime_val through), and under 'continuous' it was
+        classify_regime(ts_fast, ts_slow), the exact same formula
+        ts_regime already computes. Dropped rather than kept as a third
+        near-duplicate name; g_regime is the goulding-mode regime,
+        ts_regime is the continuous-mode one, and under 'goulding' they
+        can (and do) disagree -- that's real information, not
+        redundancy."""
     lines = ['TSMOM Rebalance Report', '=' * 60]
     for t in targets:
         if t.get('error'):
@@ -1720,8 +1721,7 @@ def print_rebalance_report(targets: list[dict]) -> str:
                f"a_re={_fmt(t.get('a_re'), '.2f')}  g_blend={_fmt(t.get('g_blend'), '.4f')}  "
                f"g_sig={_fmt(t.get('signal')):>7}"
                if t.get('a_co') is not None else f"  g_sig={_fmt(t.get('signal')):>7}")
-            + f"  |  regime={t['regime'].capitalize() if t.get('regime') else 'N/A':<10}  "
-              f"ts_fast={_fmt(t.get('ts_fast')):>7}  ts_slow={_fmt(t.get('ts_slow')):>7}  "
+            + f"  |  ts_fast={_fmt(t.get('ts_fast')):>7}  ts_slow={_fmt(t.get('ts_slow')):>7}  "
               f"ts={_fmt(t.get('ts')):>7}  contin_sig={_fmt(t.get('contin_sig')):>7}  "
               f"ts_regime={t['ts_regime'].capitalize() if t.get('ts_regime') else 'N/A':<10}  "
               f"dd_pct={_fmt(t.get('dd_pct'), '.2f'):>7}  "
