@@ -1026,11 +1026,24 @@ def estimate_mixing_params_diagnostics(history: pl.DataFrame, as_of: date, clust
     a_co/a_re (the clamped, actually-used values) never are. A raw value
     landing outside [0, 1] and getting silently pinned to the nearest
     boundary is the actual mechanism behind a_co/a_re == 0.0 or 1.0 in a
-    saved report."""
+    saved report.
+
+    kelly_bull/kelly_bear/kelly_correction/kelly_rebound are each state's
+    own avg_r/avg_r2 -- the SAME per-state ratio C and a_co_raw/a_re_raw
+    are built from (mean-over-mean-square, i.e. mean/variance for a
+    typically-small monthly mean -- the Kelly-optimal-fraction form, NOT
+    mean/std/Sharpe), surfaced here as its own named field rather than
+    making a reader manually divide avg_r_state/avg_r2_state. Sign always
+    matches avg_r_state's own sign (avg_r2 >= 0 always) -- a HIGHER kelly_
+    bear, say, means a MORE POSITIVE average return followed that state
+    historically, not a more negative one. None whenever that state's own
+    avg_r/avg_r2 is None (zero months in that state) -- populated
+    independent of fallback_reason, same as avg_r_bull/etc. above."""
     diag = {
         'cluster': cluster, 'n_bull': 0, 'n_bear': 0, 'n_correction': 0, 'n_rebound': 0,
         'avg_r_bull': None, 'avg_r2_bull': None, 'avg_r_bear': None, 'avg_r2_bear': None,
         'avg_r_correction': None, 'avg_r2_correction': None, 'avg_r_rebound': None, 'avg_r2_rebound': None,
+        'kelly_bull': None, 'kelly_bear': None, 'kelly_correction': None, 'kelly_rebound': None,
         'C': None, 'inv_C': None, 'a_co_raw': None, 'a_re_raw': None,
         'a_co': 0.5, 'a_re': 0.5, 'fallback_reason': None,
     }
@@ -1048,6 +1061,9 @@ def estimate_mixing_params_diagnostics(history: pl.DataFrame, as_of: date, clust
         r = sub['monthly_return']
         return sub.height, r.mean(), (r * r).mean()
 
+    def _kelly(avg_r: Optional[float], avg_r2: Optional[float]) -> Optional[float]:
+        return avg_r / avg_r2 if avg_r is not None and avg_r2 else None
+
     n_bu, avg_r_bu, avg_r2_bu = _stats('bull')
     n_be, avg_r_be, avg_r2_be = _stats('bear')
     n_co, avg_r_co, avg_r2_co = _stats('correction')
@@ -1055,7 +1071,9 @@ def estimate_mixing_params_diagnostics(history: pl.DataFrame, as_of: date, clust
     diag.update(n_bull=n_bu, n_bear=n_be, n_correction=n_co, n_rebound=n_re,
                 avg_r_bull=avg_r_bu, avg_r2_bull=avg_r2_bu, avg_r_bear=avg_r_be, avg_r2_bear=avg_r2_be,
                 avg_r_correction=avg_r_co, avg_r2_correction=avg_r2_co,
-                avg_r_rebound=avg_r_re, avg_r2_rebound=avg_r2_re)
+                avg_r_rebound=avg_r_re, avg_r2_rebound=avg_r2_re,
+                kelly_bull=_kelly(avg_r_bu, avg_r2_bu), kelly_bear=_kelly(avg_r_be, avg_r2_be),
+                kelly_correction=_kelly(avg_r_co, avg_r2_co), kelly_rebound=_kelly(avg_r_re, avg_r2_re))
 
     if n_co < min_months or n_re < min_months:
         diag['fallback_reason'] = 'insufficient_months'

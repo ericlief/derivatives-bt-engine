@@ -132,8 +132,8 @@ def _save_report(cluster_report: str, targets: list[dict], mixing_diagnostics: O
     -- when non-empty, ALSO saves a small tsmom_mixing_params_{ts}.csv, one
     row per cluster (or a single 'global' row under mixing_pool='global'),
     with every intermediate value behind that cluster's a_co/a_re (C, 1/C,
-    per-state avg_r/avg_r2, the RAW pre-clamp a_co_raw/a_re_raw, which
-    fallback if any) -- see estimate_mixing_params_diagnostics' own
+    per-state avg_r/avg_r2/kelly, the RAW pre-clamp a_co_raw/a_re_raw,
+    which fallback if any) -- see estimate_mixing_params_diagnostics' own
     docstring. Lets a saturated a_co/a_re (== exactly 0.0 or 1.0 in the
     main CSV) be traced back to the small/noisy pooled sample that
     produced it, instead of looking identical to a genuine interior
@@ -150,8 +150,10 @@ def _save_report(cluster_report: str, targets: list[dict], mixing_diagnostics: O
     if mixing_diagnostics:
         mixing_fieldnames = ['cluster', 'fallback_reason', 'a_co', 'a_re', 'a_co_raw', 'a_re_raw', 'C', 'inv_C',
                               'n_bull', 'n_bear', 'n_correction', 'n_rebound',
-                              'avg_r_bull', 'avg_r2_bull', 'avg_r_bear', 'avg_r2_bear',
-                              'avg_r_correction', 'avg_r2_correction', 'avg_r_rebound', 'avg_r2_rebound']
+                              'avg_r_bull', 'avg_r2_bull', 'kelly_bull',
+                              'avg_r_bear', 'avg_r2_bear', 'kelly_bear',
+                              'avg_r_correction', 'avg_r2_correction', 'kelly_correction',
+                              'avg_r_rebound', 'avg_r2_rebound', 'kelly_rebound']
         mixing_rows = [
             {'cluster': key, **{k: (round(v, 6) if isinstance(v, float) else v) for k, v in diag.items()
                                  if k != 'cluster'}}
