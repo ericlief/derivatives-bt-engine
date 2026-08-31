@@ -999,6 +999,16 @@ def _finalize_signal(instr: dict, raw: dict, config: TsmomLiveConfig, vix_scalar
     # monthly instead and is pinned to +-1.
     ts = last['ts'][0] if 'ts' in last.columns else None
     contin_signal = last['signal'][0] if 'signal' in last.columns else None
+    # continuous_momentum's OWN regime classification -- sign(ts_fast)/
+    # sign(ts_slow) only, computed independently of whatever signal_
+    # weighting mode this run actually uses. This is the regime that
+    # gates contin_signal's correction/rebound discount (signal = ts *
+    # discount) -- NOT the same thing as the 'regime' key returned below,
+    # which under 'goulding' is goulding_monthly's own regime instead. The
+    # two can disagree (e.g. goulding's monthly fast/slow says Correction
+    # while ts_fast/ts_slow are both >=0, so continuous_momentum's own
+    # regime is Bull and contin_signal comes out un-discounted).
+    ts_regime = last['regime'][0] if 'regime' in last.columns else None
     daily_std_last = last['std_fast'][0] if 'std_fast' in last.columns else None
     last_close = float(last['close'][0])
     dd_raw = last['dd'][0] if 'dd' in last.columns else None
@@ -1061,6 +1071,7 @@ def _finalize_signal(instr: dict, raw: dict, config: TsmomLiveConfig, vix_scalar
         'ts_slow': ts_slow,
         'ts': ts,
         'contin_signal': contin_signal,
+        'ts_regime': ts_regime,
         'daily_std': daily_std_last,
         'hv': hv,
         'risk_scalar': risk_scalar,
@@ -1451,7 +1462,7 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
                     'active': active,
                     'signal': s['signal'], 'scalar': None,
                     'ts_fast': s['ts_fast'], 'ts_slow': s['ts_slow'],
-                    'ts': s['ts'], 'contin_sig': s['contin_signal'],
+                    'ts': s['ts'], 'contin_sig': s['contin_signal'], 'ts_regime': s['ts_regime'],
                     'daily_std': s['daily_std'], 'hv': s['hv'], 'risk_scalar': s['risk_scalar'],
                     'reg_discount': s['regime_discount'], 'vol_ratio': s['vol_ratio'],
                     'sig_confid_reg': s['signal_confidence_regime'],
@@ -1523,6 +1534,7 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
                 'ts_slow': s['ts_slow'],
                 'ts': s['ts'],
                 'contin_sig': s['contin_signal'],
+                'ts_regime': s['ts_regime'],
                 'daily_std': s['daily_std'],
                 'hv': s['hv'],
                 'risk_scalar': s['risk_scalar'],
@@ -1683,7 +1695,17 @@ def print_rebalance_report(targets: list[dict]) -> str:
         computed regardless of signal_weighting, so under 'goulding' these
         are a continuous-mode audit trail (what g_sig WOULD read if
         signal_weighting='continuous' were selected instead) -- kept in
-        their own block, entirely apart from the goulding block above."""
+        their own block, entirely apart from the goulding block above.
+      ts_regime: continuous_momentum's OWN regime classification --
+        sign(ts_fast)/sign(ts_slow) only (Bull/Bear/Correction/Rebound),
+        computed independently of signal_weighting. THIS is what gates
+        contin_sig's correction/rebound discount (contin_sig = ts * 0.5
+        when ts_regime is Correction or Rebound, unchanged otherwise) --
+        NOT the headline regime= field to its left, which under
+        'goulding' is goulding_monthly's own regime instead (a different
+        fast/slow pair -- monthly returns, no vol-scaling). The two can
+        and do disagree; ts_regime explains contin_sig, regime= explains
+        g_sig/trend_strength."""
     lines = ['TSMOM Rebalance Report', '=' * 60]
     for t in targets:
         if t.get('error'):
@@ -1701,6 +1723,7 @@ def print_rebalance_report(targets: list[dict]) -> str:
             + f"  |  regime={t['regime'].capitalize() if t.get('regime') else 'N/A':<10}  "
               f"ts_fast={_fmt(t.get('ts_fast')):>7}  ts_slow={_fmt(t.get('ts_slow')):>7}  "
               f"ts={_fmt(t.get('ts')):>7}  contin_sig={_fmt(t.get('contin_sig')):>7}  "
+              f"ts_regime={t['ts_regime'].capitalize() if t.get('ts_regime') else 'N/A':<10}  "
               f"dd_pct={_fmt(t.get('dd_pct'), '.2f'):>7}  "
               f"daily_std={_fmt(t.get('daily_std'), '.4f'):>7}  hv={_fmt(t.get('hv'), '.3f'):>6}  "
               f"vx_current={_fmt(t.get('vx_current'), '.2f'):>6}  vx_ma={_fmt(t.get('vx_ma'), '.2f'):>6}  "

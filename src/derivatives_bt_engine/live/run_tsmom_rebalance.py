@@ -181,7 +181,7 @@ def _save_report(cluster_report: str, targets: list[dict], mixing_diagnostics: O
     # names on this same targets list.
     priority = ['symbol', 'cur_con', 'target_con', 'contin_con', 'infeasible',
                 'g_regime', 'g_fast', 'g_slow', 'a_co', 'a_re', 'g_blend', 'g_sig',
-                'regime', 'vol_regime', 'ts_fast', 'ts_slow', 'ts', 'contin_sig',
+                'regime', 'vol_regime', 'ts_fast', 'ts_slow', 'ts', 'contin_sig', 'ts_regime',
                 'risk_scalar', 'reg_discount',
                 'sig_confid_reg', 'sig_confid', 'vol_ratio', 'vix_scalar',
                 'combined_scalar', 'idm_mult',
