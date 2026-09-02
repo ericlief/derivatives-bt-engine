@@ -1093,6 +1093,12 @@ def estimate_mixing_params_diagnostics(history: pl.DataFrame, as_of: date, clust
         diag['fallback_reason'] = 'degenerate'
         return diag
 
+    # Each state has a Kelly-style ratio K = avg_r / avg_r2: its average return
+    # scaled by its average squared return. The bull/bear counts turn their
+    # two K values into a probability-weighted bull-minus-bear contrast: C.
+    # In other words, C is the signed expected Kelly contribution of the
+    # Bull/Bear partition, and 1/C is the inverse scale used for comparison.
+
     C = (n_bu / freq_tot) * (avg_r_bu / avg_r2_bu) - (n_be / freq_tot) * (avg_r_be / avg_r2_be)
     if (avg_r_co is None or avg_r2_co is None or avg_r_re is None or avg_r2_re is None or
             abs(C) < _DEGENERATE_EPS or abs(avg_r2_co) < _DEGENERATE_EPS or
@@ -1100,6 +1106,14 @@ def estimate_mixing_params_diagnostics(history: pl.DataFrame, as_of: date, clust
         diag['fallback_reason'] = 'degenerate'
         diag['C'] = C
         return diag
+
+    # The raw weights start at 0.5, meaning no preference between slow and
+    # fast momentum. K_co/C and K_re/C compare phase-specific Kelly evidence
+    # with the Bull/Bear baseline. Specifically, a_co_raw = 0.5 *
+    # (1 - K_co/C) and a_re_raw = 0.5 * (1 + K_re/C). When C is positive,
+    # positive Correction evidence lowers a_co, while positive Rebound evidence
+    # raises a_re. The raw values are retained for auditability before clamping
+    # to [0, 1].
 
     a_co_raw = 0.5 * (1 - (1 / C) * (avg_r_co / avg_r2_co))
     a_re_raw = 0.5 * (1 + (1 / C) * (avg_r_re / avg_r2_re))

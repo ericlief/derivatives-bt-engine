@@ -29,6 +29,7 @@
 
 - Treat this repository as private.
 - Treat `.env` files and credentials as sensitive.
+
 ## Workflow
 
 - After each completed task, commit the task changes and push the commit to the configured remote.
