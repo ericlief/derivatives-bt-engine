@@ -76,7 +76,7 @@ import logging
 import math
 from dataclasses import dataclass
 from datetime import date
-from typing import Optional
+from typing import Optional, cast
 
 import polars as pl
 
@@ -1059,7 +1059,10 @@ def estimate_mixing_params_diagnostics(history: pl.DataFrame, as_of: date, clust
         if sub.height == 0:
             return 0, None, None
         r = sub['monthly_return']
-        return sub.height, r.mean(), (r * r).mean()
+        avg_r = cast(Optional[float], r.mean())
+        avg_r2 = cast(Optional[float], (r * r).mean())
+        return (sub.height, float(avg_r) if avg_r is not None else None,
+                float(avg_r2) if avg_r2 is not None else None)
 
     def _kelly(avg_r: Optional[float], avg_r2: Optional[float]) -> Optional[float]:
         return avg_r / avg_r2 if avg_r is not None and avg_r2 else None
@@ -1084,12 +1087,16 @@ def estimate_mixing_params_diagnostics(history: pl.DataFrame, as_of: date, clust
     # value like 1e-12 would sail past an exact-zero check and then blow
     # up the 1/x below. freq_tot is a plain integer count (n_bu + n_be),
     # so exact-zero is fine and intentional for it specifically.
-    if freq_tot == 0 or abs(avg_r2_bu) < _DEGENERATE_EPS or abs(avg_r2_be) < _DEGENERATE_EPS:
+    if (freq_tot == 0 or avg_r_bu is None or avg_r2_bu is None or
+            avg_r_be is None or avg_r2_be is None or
+            abs(avg_r2_bu) < _DEGENERATE_EPS or abs(avg_r2_be) < _DEGENERATE_EPS):
         diag['fallback_reason'] = 'degenerate'
         return diag
 
     C = (n_bu / freq_tot) * (avg_r_bu / avg_r2_bu) - (n_be / freq_tot) * (avg_r_be / avg_r2_be)
-    if abs(C) < _DEGENERATE_EPS or abs(avg_r2_co) < _DEGENERATE_EPS or abs(avg_r2_re) < _DEGENERATE_EPS:
+    if (avg_r_co is None or avg_r2_co is None or avg_r_re is None or avg_r2_re is None or
+            abs(C) < _DEGENERATE_EPS or abs(avg_r2_co) < _DEGENERATE_EPS or
+            abs(avg_r2_re) < _DEGENERATE_EPS):
         diag['fallback_reason'] = 'degenerate'
         diag['C'] = C
         return diag
