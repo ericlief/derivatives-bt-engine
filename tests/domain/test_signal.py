@@ -41,6 +41,7 @@ from derivatives_bt_engine.domain.signal import (
     compute_vol_ratio,
     continuous_momentum,
     goulding_monthly,
+    estimate_mixing_params_diagnostics,
     resolve_trend_direction,
 )
 
@@ -776,3 +777,37 @@ def test_resolve_trend_direction_goulding_mode_bull_bear_ignore_a_co_a_re():
 
 def test_resolve_trend_direction_goulding_mode_none_regime_returns_none():
     assert resolve_trend_direction('goulding', None, None, None, 0.5, g_regime_val=None) is None
+
+# ── Proposition 9 dynamic mixing estimator ──────────────────────────────────
+
+def test_mixing_params_uses_proposition_9_d_and_q():
+    history = pl.DataFrame({
+        'date': [date(2020, 1, i) for i in range(1, 7)],
+        'cluster': ['test'] * 6,
+        'state': ['bull', 'bull', 'bear', 'bear', 'correction', 'rebound'],
+        'monthly_return': [0.10, 0.20, -0.05, -0.10, 0.01, 0.02],
+    })
+    diag = estimate_mixing_params_diagnostics(history, date(2021, 1, 1), 'test', min_months=1)
+
+    expected_d = 0.5 * 0.15 - 0.5 * -0.075
+    expected_q = (0.5 * 0.025) / expected_d
+    assert diag['D'] == pytest.approx(expected_d)
+    assert diag['Q'] == pytest.approx(expected_q)
+    assert diag['a_co_raw'] == pytest.approx(0.5 * (1 - expected_q * (0.01 / 0.0001)))
+    assert diag['a_re_raw'] == pytest.approx(0.5 * (1 + expected_q * (0.02 / 0.0004)))
+
+
+def test_mixing_params_falls_back_when_bull_bear_baseline_is_nonpositive():
+    history = pl.DataFrame({
+        'date': [date(2020, 1, i) for i in range(1, 7)],
+        'cluster': ['test'] * 6,
+        'state': ['bull', 'bull', 'bear', 'bear', 'correction', 'rebound'],
+        'monthly_return': [-0.01, -0.02, 0.03, 0.04, 0.01, 0.01],
+    })
+    diag = estimate_mixing_params_diagnostics(history, date(2021, 1, 1), 'test', min_months=1)
+
+    assert diag['fallback_reason'] == 'nonpositive_baseline'
+    assert diag['D'] < 0
+    assert diag['Q'] is None
+    assert diag['a_co'] == 0.5
+    assert diag['a_re'] == 0.5

@@ -947,7 +947,7 @@ def build_monthly_state_return_history(rebal_monthly: dict[str, pl.DataFrame],
 
 def estimate_mixing_params(history: pl.DataFrame, as_of: date, cluster: Optional[str],
                             min_months: int = MIN_MONTHS_PER_PHASE) -> tuple[float, float]:
-    """Appendix C, eq. 8-10 -- a_Co/a_Re from every (state, monthly_return)
+    """Proposition 9 / Appendix C -- a_Co/a_Re from every (state, monthly_return)
     pair strictly before `as_of`, restricted to `cluster` when given
     (expanding window, no lookahead; pooled within one instruments.py
     `cluster` -- grain/metal/equity/rates/fx/energy -- not across the
@@ -962,9 +962,9 @@ def estimate_mixing_params(history: pl.DataFrame, as_of: date, cluster: Optional
     uninformed (0.5, 0.5) -- equivalent to the flat regime_discount's
     no-op case -- whenever there isn't yet `min_months` of the selected
     pool's own history in EITHER the Correction or Rebound phase, or the
-    normalizer C / either phase's mean-squared return is degenerate
-    (zero); the paper's own rule for insufficient per-asset history is to
-    exclude the asset for that month entirely, which doesn't map cleanly
+    Bull/Bear baseline D is non-positive, or either phase's mean-squared return
+    is degenerate (zero); the paper's own rule for insufficient per-asset history is to
+    exclude the asset for that month entirely, which does not map cleanly
     onto a pooled, always-in-the-portfolio backtest, so this is an
     explicit, flagged adaptation, not a literal reproduction. A cluster
     with too few symbols/too little history of its own simply stays at
@@ -975,15 +975,15 @@ def estimate_mixing_params(history: pl.DataFrame, as_of: date, cluster: Optional
     Eq. 9's sign, as extracted from the scanned paper, appears identical in
     form to eq. 8's (both "1 - ...") -- which contradicts the paper's own
     prose ("if returns tend to be positive after rebounds... a_Re > 0.5")
-    given a single shared, "typically positive" C. Uses the "+" form here
-    (a_Re = 1/2*(1 + (1/C)*AVG[r|Re]/AVG[r^2|Re])) as the only version
+    given a positive Q. Uses the "+" form here
+    (a_Re = 1/2*(1 + Q*AVG[r|Re]/AVG[r^2|Re])) as the only version
     self-consistent with that prose -- see
     research/research_trend_strength_crossover_signal.md Part 2 §6 for the
     full errata discussion; this is flagged, not confirmed against the
     primary source's actual typeset sign.
 
     Thin wrapper around estimate_mixing_params_diagnostics -- see that
-    function if you need C/1/C/the per-state avg_r/avg_r2 values/the RAW
+    function if you need D/Q/the per-state avg_r/avg_r2 values/the RAW
     pre-clamp a_co/a_re/which (if any) fallback fired, e.g. to audit why a
     particular cluster's a_co or a_re landed exactly at 0.0 or 1.0 (a
     clamp on this formula's own raw output, not a masking of r_fast/r_slow
@@ -995,8 +995,8 @@ def estimate_mixing_params(history: pl.DataFrame, as_of: date, cluster: Optional
 def estimate_mixing_params_diagnostics(history: pl.DataFrame, as_of: date, cluster: Optional[str],
                                         min_months: int = MIN_MONTHS_PER_PHASE) -> dict:
     """Every intermediate value behind estimate_mixing_params's (a_co, a_re)
-    -- per-state counts/means/mean-squares, the eq. 8-10 normalizer C (and
-    1/C), the RAW pre-clamp a_co/a_re, and which (if any) fallback path
+    -- per-state counts/means/mean-squares, the Proposition 9 baseline D and
+    scale Q, the RAW pre-clamp a_co/a_re, and which (if any) fallback path
     fired -- so a cluster's estimate can be audited rather than trusted as
     an opaque pair of floats. estimate_mixing_params is a thin (a_co,
     a_re) = (result['a_co'], result['a_re']) wrapper around this function;
@@ -1013,12 +1013,12 @@ def estimate_mixing_params_diagnostics(history: pl.DataFrame, as_of: date, clust
     a_co_raw/a_re_raw), otherwise one of 'no_history' (prior.height == 0,
     no rows at all before as_of/within cluster), 'insufficient_months'
     (fewer than min_months of pooled Correction or Rebound history), or
-    'degenerate' (freq_tot == 0, a Bull/Bear/Correction/Rebound mean-
-    squared return near zero, or the C normalizer itself near zero -- see
-    estimate_mixing_params's own docstring for why each is checked). a_co/
-    a_re are (0.5, 0.5) whenever fallback_reason is set; every other field
-    is None/0 unless it was actually computed on the way to that fallback
-    (e.g. n_bull/n_bear are still populated even when the fallback fires
+    'degenerate' (freq_tot == 0 or a Bull/Bear/Correction/Rebound mean-
+    squared return near zero). A non-positive or near-zero D is reported as
+    'nonpositive_baseline' because Proposition 9 no longer guarantees a
+    maximizer. a_co/a_re are (0.5, 0.5) whenever fallback_reason is set;
+    every other field is None/0 unless it was actually computed on the way
+    to that fallback (e.g. n_bull/n_bear are still populated even when the fallback fires
     on n_correction/n_rebound).
 
     a_co_raw/a_re_raw are the UNCLAMPED eq. 8-10 values -- None whenever
@@ -1029,7 +1029,7 @@ def estimate_mixing_params_diagnostics(history: pl.DataFrame, as_of: date, clust
     saved report.
 
     kelly_bull/kelly_bear/kelly_correction/kelly_rebound are each state's
-    own avg_r/avg_r2 -- the SAME per-state ratio C and a_co_raw/a_re_raw
+    own avg_r/avg_r2 -- the state-specific Kelly ratios and a_co_raw/a_re_raw
     are built from (mean-over-mean-square, i.e. mean/variance for a
     typically-small monthly mean -- the Kelly-optimal-fraction form, NOT
     mean/std/Sharpe), surfaced here as its own named field rather than
@@ -1044,7 +1044,7 @@ def estimate_mixing_params_diagnostics(history: pl.DataFrame, as_of: date, clust
         'avg_r_bull': None, 'avg_r2_bull': None, 'avg_r_bear': None, 'avg_r2_bear': None,
         'avg_r_correction': None, 'avg_r2_correction': None, 'avg_r_rebound': None, 'avg_r2_rebound': None,
         'kelly_bull': None, 'kelly_bear': None, 'kelly_correction': None, 'kelly_rebound': None,
-        'C': None, 'inv_C': None, 'a_co_raw': None, 'a_re_raw': None,
+        'D': None, 'Q': None, 'a_co_raw': None, 'a_re_raw': None,
         'a_co': 0.5, 'a_re': 0.5, 'fallback_reason': None,
     }
     prior = history.filter(pl.col('date') < as_of)
@@ -1093,30 +1093,35 @@ def estimate_mixing_params_diagnostics(history: pl.DataFrame, as_of: date, clust
         diag['fallback_reason'] = 'degenerate'
         return diag
 
-    # Each state has a Kelly-style ratio K = avg_r / avg_r2: its average return
-    # scaled by its average squared return. The bull/bear counts turn their
-    # two K values into a probability-weighted bull-minus-bear contrast: C.
-    # In other words, C is the signed expected Kelly contribution of the
-    # Bull/Bear partition, and 1/C is the inverse scale used for comparison.
+    # Proposition 9 separates the calculation into a signed baseline and a
+    # positive scale. D is the expected return of the Bull/Bear partition:
+    # Bull contributes its forward return, while Bear is subtracted because
+    # the trend strategy is short after Bear. The theorem requires D > 0.
+    D = (n_bu / freq_tot) * avg_r_bu - (n_be / freq_tot) * avg_r_be
+    if D <= _DEGENERATE_EPS:
+        diag['fallback_reason'] = 'nonpositive_baseline'
+        diag['D'] = D
+        return diag
 
-    C = (n_bu / freq_tot) * (avg_r_bu / avg_r2_bu) - (n_be / freq_tot) * (avg_r_be / avg_r2_be)
+    # Q converts each phase's Kelly-style ratio K_s = E[r|s]/E[r^2|s]
+    # into a dimensionless adjustment to the neutral 0.5 fast weight.
+    # Its numerator is the Bull state's probability-weighted second moment;
+    # its denominator is D, the signed Bull/Bear expected-return baseline.
+    Q = (n_bu / freq_tot) * avg_r2_bu / D
     if (avg_r_co is None or avg_r2_co is None or avg_r_re is None or avg_r2_re is None or
-            abs(C) < _DEGENERATE_EPS or abs(avg_r2_co) < _DEGENERATE_EPS or
-            abs(avg_r2_re) < _DEGENERATE_EPS):
+            abs(avg_r2_co) < _DEGENERATE_EPS or abs(avg_r2_re) < _DEGENERATE_EPS):
         diag['fallback_reason'] = 'degenerate'
-        diag['C'] = C
+        diag.update(D=D, Q=Q)
         return diag
 
     # The raw weights start at 0.5, meaning no preference between slow and
-    # fast momentum. K_co/C and K_re/C compare phase-specific Kelly evidence
-    # with the Bull/Bear baseline. Specifically, a_co_raw = 0.5 *
-    # (1 - K_co/C) and a_re_raw = 0.5 * (1 + K_re/C). When C is positive,
-    # positive Correction evidence lowers a_co, while positive Rebound evidence
-    # raises a_re. The raw values are retained for auditability before clamping
-    # to [0, 1].
-
-    a_co_raw = 0.5 * (1 - (1 / C) * (avg_r_co / avg_r2_co))
-    a_re_raw = 0.5 * (1 + (1 / C) * (avg_r_re / avg_r2_re))
-    diag.update(C=C, inv_C=1.0 / C, a_co_raw=a_co_raw, a_re_raw=a_re_raw,
+    # fast momentum. Q*K_co and Q*K_re compare phase evidence with the
+    # Bull/Bear baseline. Specifically, a_co_raw = 0.5 * (1 - Q*K_co)
+    # and a_re_raw = 0.5 * (1 + Q*K_re). With Q positive, positive
+    # Correction evidence lowers the fast weight, while positive Rebound
+    # evidence raises it. Raw values are retained before clamping to [0, 1].
+    a_co_raw = 0.5 * (1 - Q * (avg_r_co / avg_r2_co))
+    a_re_raw = 0.5 * (1 + Q * (avg_r_re / avg_r2_re))
+    diag.update(D=D, Q=Q, a_co_raw=a_co_raw, a_re_raw=a_re_raw,
                 a_co=max(0.0, min(1.0, a_co_raw)), a_re=max(0.0, min(1.0, a_re_raw)))
     return diag

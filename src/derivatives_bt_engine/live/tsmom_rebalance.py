@@ -1100,9 +1100,9 @@ def _finalize_signal(instr: dict, raw: dict, config: TsmomLiveConfig, vix_scalar
 
 def _log_mixing_params_diag(key: str, diag: dict) -> None:
     log.info('mixing_params[%s]: n_bull=%d n_bear=%d n_correction=%d n_rebound=%d  '
-             'C=%s inv_C=%s  a_co_raw=%s a_re_raw=%s -> a_co=%.4f a_re=%.4f  fallback=%s',
+             'D=%s Q=%s  a_co_raw=%s a_re_raw=%s -> a_co=%.4f a_re=%.4f  fallback=%s',
              key, diag['n_bull'], diag['n_bear'], diag['n_correction'], diag['n_rebound'],
-             diag['C'], diag['inv_C'], diag['a_co_raw'], diag['a_re_raw'],
+             diag['D'], diag['Q'], diag['a_co_raw'], diag['a_re_raw'],
              diag['a_co'], diag['a_re'], diag['fallback_reason'])
 
 
@@ -1117,7 +1117,7 @@ def _mixing_params_for_instruments(config: TsmomLiveConfig, raw_by_symbol: dict[
     `diagnostics`, when given a dict, gets populated {key: diag} -- one
     entry per cluster under config.mixing_pool='cluster', a single
     'global' entry under 'global' -- from estimate_mixing_params_
-    diagnostics: every intermediate value (C, 1/C, per-state avg_r/
+    diagnostics: every intermediate value (D, Q, per-state avg_r/
     avg_r2, the RAW pre-clamp a_co/a_re, which fallback if any) behind
     each returned (a_co, a_re), logged here too (once per key, per live
     rebalance -- NOT inside estimate_mixing_params_diagnostics itself,
@@ -1167,7 +1167,7 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
     `mixing_diagnostics`, when given a dict, gets passed straight through
     to _mixing_params_for_instruments -- see that function's own docstring
     -- to audit/verify a 'goulding'-mode run's per-cluster a_co/a_re
-    estimate (C, 1/C, per-state avg_r/avg_r2, the raw pre-clamp value,
+    estimate (D, Q, per-state avg_r/avg_r2, the raw pre-clamp value,
     which fallback if any). None (default, and the only option outside
     'goulding' mode, where it's never populated) skips this entirely.
 

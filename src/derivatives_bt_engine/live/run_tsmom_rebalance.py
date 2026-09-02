@@ -131,7 +131,7 @@ def _save_report(cluster_report: str, targets: list[dict], mixing_diagnostics: O
     or 'global': diag}, populated only under signal_weighting='goulding')
     -- when non-empty, ALSO saves a small tsmom_mixing_params_{ts}.csv, one
     row per cluster (or a single 'global' row under mixing_pool='global'),
-    with every intermediate value behind that cluster's a_co/a_re (C, 1/C,
+    with every intermediate value behind that cluster's a_co/a_re (D, Q,
     per-state avg_r/avg_r2/kelly, the RAW pre-clamp a_co_raw/a_re_raw,
     which fallback if any) -- see estimate_mixing_params_diagnostics' own
     docstring. Lets a saturated a_co/a_re (== exactly 0.0 or 1.0 in the
@@ -148,7 +148,7 @@ def _save_report(cluster_report: str, targets: list[dict], mixing_diagnostics: O
         f.write(cluster_report)
 
     if mixing_diagnostics:
-        mixing_fieldnames = ['cluster', 'fallback_reason', 'a_co', 'a_re', 'a_co_raw', 'a_re_raw', 'C', 'inv_C',
+        mixing_fieldnames = ['cluster', 'fallback_reason', 'a_co', 'a_re', 'a_co_raw', 'a_re_raw', 'D', 'Q',
                               'n_bull', 'n_bear', 'n_correction', 'n_rebound',
                               'avg_r_bull', 'avg_r2_bull', 'kelly_bull',
                               'avg_r_bear', 'avg_r2_bear', 'kelly_bear',
