@@ -780,7 +780,7 @@ def test_resolve_trend_direction_goulding_mode_none_regime_returns_none():
 
 # ── Proposition 9 dynamic mixing estimator ──────────────────────────────────
 
-def test_mixing_params_uses_proposition_9_d_and_q():
+def test_mixing_params_uses_proposition_9_c_and_inv_c():
     history = pl.DataFrame({
         'date': [date(2020, 1, i) for i in range(1, 7)],
         'cluster': ['test'] * 6,
@@ -791,11 +791,12 @@ def test_mixing_params_uses_proposition_9_d_and_q():
 
     expected_d = (2 / 6) * 0.15 - (2 / 6) * -0.075
     expected_avg_r2_bu_be = (0.10 ** 2 + 0.20 ** 2 + 0.05 ** 2 + 0.10 ** 2) / 4
-    expected_q = ((4 / 6) * expected_avg_r2_bu_be) / expected_d
-    assert diag['D'] == pytest.approx(expected_d)
-    assert diag['Q'] == pytest.approx(expected_q)
-    assert diag['a_co_raw'] == pytest.approx(0.5 * (1 - expected_q * (0.01 / 0.0001)))
-    assert diag['a_re_raw'] == pytest.approx(0.5 * (1 + expected_q * (0.02 / 0.0004)))
+    expected_inv_c = ((4 / 6) * expected_avg_r2_bu_be) / expected_d
+    expected_c = 1 / expected_inv_c
+    assert diag['C'] == pytest.approx(expected_c)
+    assert diag['inv_C'] == pytest.approx(expected_inv_c)
+    assert diag['a_co_raw'] == pytest.approx(0.5 * (1 - expected_inv_c * (0.01 / 0.0001)))
+    assert diag['a_re_raw'] == pytest.approx(0.5 * (1 + expected_inv_c * (0.02 / 0.0004)))
 
 
 def test_mixing_params_falls_back_when_bull_bear_baseline_is_nonpositive():
@@ -808,7 +809,7 @@ def test_mixing_params_falls_back_when_bull_bear_baseline_is_nonpositive():
     diag = estimate_mixing_params_diagnostics(history, date(2021, 1, 1), 'test', min_months=1)
 
     assert diag['fallback_reason'] == 'nonpositive_baseline'
-    assert diag['D'] < 0
-    assert diag['Q'] is None
+    assert diag['C'] < 0
+    assert diag['inv_C'] is None
     assert diag['a_co'] == 0.5
     assert diag['a_re'] == 0.5

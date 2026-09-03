@@ -975,15 +975,15 @@ def estimate_mixing_params(history: pl.DataFrame, as_of: date, cluster: Optional
     Eq. 9's sign, as extracted from the scanned paper, appears identical in
     form to eq. 8's (both "1 - ...") -- which contradicts the paper's own
     prose ("if returns tend to be positive after rebounds... a_Re > 0.5")
-    given a positive Q. Uses the "+" form here
-    (a_Re = 1/2*(1 + Q*AVG[r|Re]/AVG[r^2|Re])) as the only version
+    given a positive 1/C. Uses the "+" form here
+    (a_Re = 1/2*(1 + (1/C)*AVG[r|Re]/AVG[r^2|Re])) as the only version
     self-consistent with that prose -- see
     research/research_trend_strength_crossover_signal.md Part 2 §6 for the
     full errata discussion; this is flagged, not confirmed against the
     primary source's actual typeset sign.
 
     Thin wrapper around estimate_mixing_params_diagnostics -- see that
-    function if you need D/Q/the per-state avg_r/avg_r2 values/the RAW
+    function if you need C/1/C/the per-state avg_r/avg_r2 values/the RAW
     pre-clamp a_co/a_re/which (if any) fallback fired, e.g. to audit why a
     particular cluster's a_co or a_re landed exactly at 0.0 or 1.0 (a
     clamp on this formula's own raw output, not a masking of r_fast/r_slow
@@ -995,8 +995,8 @@ def estimate_mixing_params(history: pl.DataFrame, as_of: date, cluster: Optional
 def estimate_mixing_params_diagnostics(history: pl.DataFrame, as_of: date, cluster: Optional[str],
                                         min_months: int = MIN_MONTHS_PER_PHASE) -> dict:
     """Every intermediate value behind estimate_mixing_params's (a_co, a_re)
-    -- per-state counts/means/mean-squares, the Proposition 9 baseline D and
-    scale Q, the RAW pre-clamp a_co/a_re, and which (if any) fallback path
+    -- per-state counts/means/mean-squares, the Proposition 9 normalizer C and
+    inverse 1/C, the RAW pre-clamp a_co/a_re, and which (if any) fallback path
     fired -- so a cluster's estimate can be audited rather than trusted as
     an opaque pair of floats. estimate_mixing_params is a thin (a_co,
     a_re) = (result['a_co'], result['a_re']) wrapper around this function;
@@ -1045,7 +1045,7 @@ def estimate_mixing_params_diagnostics(history: pl.DataFrame, as_of: date, clust
         'avg_r_bull': None, 'avg_r2_bull': None, 'avg_r_bear': None, 'avg_r2_bear': None,
         'avg_r_correction': None, 'avg_r2_correction': None, 'avg_r_rebound': None, 'avg_r2_rebound': None,
         'kelly_bull': None, 'kelly_bear': None, 'kelly_correction': None, 'kelly_rebound': None,
-        'D': None, 'Q': None, 'a_co_raw': None, 'a_re_raw': None,
+        'C': None, 'inv_C': None, 'a_co_raw': None, 'a_re_raw': None,
         'a_co': 0.5, 'a_re': 0.5, 'fallback_reason': None,
     }
     prior = history.filter(pl.col('date') < as_of)
@@ -1105,7 +1105,7 @@ def estimate_mixing_params_diagnostics(history: pl.DataFrame, as_of: date, clust
     # below are over every prior state, as in the paper:
     #
     #   D = P(Bu) E[r|Bu] - P(Be) E[r|Be]
-    #   Q = P(Bu or Be) E[r^2|Bu or Be] / D
+    #   C = D / (P(Bu or Be) E[r^2|Bu or Be])
     #
     # Bull contributes its forward return, while Bear is subtracted because
     # the trend strategy is short after Bear. The theorem requires D > 0.
@@ -1113,30 +1113,36 @@ def estimate_mixing_params_diagnostics(history: pl.DataFrame, as_of: date, clust
     p_be = n_be / n_total
     p_bu_be = n_bu_be / n_total
     D = p_bu * avg_r_bu - p_be * avg_r_be
+    scale_bu_be = p_bu_be * avg_r2_bu_be
     if D <= _DEGENERATE_EPS:
         diag['fallback_reason'] = 'nonpositive_baseline'
-        diag['D'] = D
+        diag['C'] = D / scale_bu_be
         return diag
 
-    # Q converts each phase's Kelly-style ratio K_s = E[r|s]/E[r^2|s]
-    # into a dimensionless adjustment to the neutral 0.5 fast weight. Its
-    # numerator is the probability-weighted second moment over the Bull/Bear
-    # union, and its denominator is D.
-    Q = p_bu_be * avg_r2_bu_be / D
+    # C is the paper's normalizer: the signed Bull/Bear return baseline D
+    # divided by the probability-weighted second moment over their union.
+    # Its inverse is the scale applied to each phase's Kelly-style ratio
+    # K_s = E[r|s]/E[r^2|s].
+    C = D / scale_bu_be
+    if abs(C) < _DEGENERATE_EPS:
+        diag['fallback_reason'] = 'degenerate'
+        diag['C'] = C
+        return diag
+    inv_C = 1.0 / C
     if (avg_r_co is None or avg_r2_co is None or avg_r_re is None or avg_r2_re is None or
             abs(avg_r2_co) < _DEGENERATE_EPS or abs(avg_r2_re) < _DEGENERATE_EPS):
         diag['fallback_reason'] = 'degenerate'
-        diag.update(D=D, Q=Q)
+        diag.update(C=C, inv_C=inv_C)
         return diag
 
     # The raw weights start at 0.5, meaning no preference between slow and
-    # fast momentum. Q*K_co and Q*K_re compare phase evidence with the
-    # Bull/Bear baseline. Specifically, a_co_raw = 0.5 * (1 - Q*K_co)
-    # and a_re_raw = 0.5 * (1 + Q*K_re). With Q positive, positive
+    # fast momentum. (1/C)*K_co and (1/C)*K_re compare phase evidence with
+    # the Bull/Bear baseline. Specifically, a_co_raw = 0.5 * (1 - K_co/C)
+    # and a_re_raw = 0.5 * (1 + K_re/C). With positive C, positive
     # Correction evidence lowers the fast weight, while positive Rebound
     # evidence raises it. Raw values are retained before clamping to [0, 1].
-    a_co_raw = 0.5 * (1 - Q * k_co)
-    a_re_raw = 0.5 * (1 + Q * k_re)
-    diag.update(D=D, Q=Q, a_co_raw=a_co_raw, a_re_raw=a_re_raw,
+    a_co_raw = 0.5 * (1 - k_co / C)
+    a_re_raw = 0.5 * (1 + k_re / C)
+    diag.update(C=C, inv_C=inv_C, a_co_raw=a_co_raw, a_re_raw=a_re_raw,
                 a_co=max(0.0, min(1.0, a_co_raw)), a_re=max(0.0, min(1.0, a_re_raw)))
     return diag
