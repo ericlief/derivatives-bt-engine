@@ -1013,8 +1013,9 @@ def estimate_mixing_params_diagnostics(history: pl.DataFrame, as_of: date, clust
     a_co_raw/a_re_raw), otherwise one of 'no_history' (prior.height == 0,
     no rows at all before as_of/within cluster), 'insufficient_months'
     (fewer than min_months of pooled Correction or Rebound history), or
-    'degenerate' (freq_tot == 0 or a Bull/Bear/Correction/Rebound mean-
-    squared return near zero). A non-positive or near-zero D is reported as
+    'degenerate' (the Bull-or-Bear union is empty or its pooled mean-
+    squared return, or a Correction/Rebound mean-squared return, is near
+    zero). A non-positive or near-zero D is reported as
     'nonpositive_baseline' because Proposition 9 no longer guarantees a
     maximizer. a_co/a_re are (0.5, 0.5) whenever fallback_reason is set;
     every other field is None/0 unless it was actually computed on the way
@@ -1054,8 +1055,9 @@ def estimate_mixing_params_diagnostics(history: pl.DataFrame, as_of: date, clust
         diag['fallback_reason'] = 'no_history'
         return diag
 
-    def _stats(state: str) -> tuple[int, Optional[float], Optional[float]]:
-        sub = prior.filter(pl.col('state') == state)
+    def _stats(states: str | tuple[str, ...]) -> tuple[int, Optional[float], Optional[float]]:
+        state_values = [states] if isinstance(states, str) else list(states)
+        sub = prior.filter(pl.col('state').is_in(state_values))
         if sub.height == 0:
             return 0, None, None
         r = sub['monthly_return']
@@ -1069,6 +1071,7 @@ def estimate_mixing_params_diagnostics(history: pl.DataFrame, as_of: date, clust
 
     n_bu, avg_r_bu, avg_r2_bu = _stats('bull')
     n_be, avg_r_be, avg_r2_be = _stats('bear')
+    n_bu_be, _, avg_r2_bu_be = _stats(('bull', 'bear'))
     n_co, avg_r_co, avg_r2_co = _stats('correction')
     n_re, avg_r_re, avg_r2_re = _stats('rebound')
     diag.update(n_bull=n_bu, n_bear=n_be, n_correction=n_co, n_rebound=n_re,
@@ -1081,33 +1084,41 @@ def estimate_mixing_params_diagnostics(history: pl.DataFrame, as_of: date, clust
     if n_co < min_months or n_re < min_months:
         diag['fallback_reason'] = 'insufficient_months'
         return diag
-    freq_tot = n_bu + n_be
+    n_total = prior.height
     # Exact `== 0` float equality is fragile here -- these are means of
     # squared monthly returns, so a near-degenerate (but not exactly zero)
     # value like 1e-12 would sail past an exact-zero check and then blow
-    # up the 1/x below. freq_tot is a plain integer count (n_bu + n_be),
-    # so exact-zero is fine and intentional for it specifically.
-    if (freq_tot == 0 or avg_r_bu is None or avg_r2_bu is None or
-            avg_r_be is None or avg_r2_be is None or
-            abs(avg_r2_bu) < _DEGENERATE_EPS or abs(avg_r2_be) < _DEGENERATE_EPS):
+    # up the 1/x below. n_total is prior.height because Proposition 9 uses
+    # unconditional state probabilities, not probabilities conditional on
+    # being in the Bull/Bear union.
+    if (n_bu_be == 0 or avg_r_bu is None or avg_r_be is None or
+            avg_r2_bu_be is None or abs(avg_r2_bu_be) < _DEGENERATE_EPS):
         diag['fallback_reason'] = 'degenerate'
         return diag
 
-    # Proposition 9 separates the calculation into a signed baseline and a
-    # positive scale. D is the expected return of the Bull/Bear partition:
+    # Proposition 9 separates the calculation into a signed Bull/Bear
+    # baseline and a Bull-or-Bear second-moment scale. The probabilities
+    # below are over every prior state, as in the paper:
+    #
+    #   D = P(Bu) E[r|Bu] - P(Be) E[r|Be]
+    #   Q = P(Bu or Be) E[r^2|Bu or Be] / D
+    #
     # Bull contributes its forward return, while Bear is subtracted because
     # the trend strategy is short after Bear. The theorem requires D > 0.
-    D = (n_bu / freq_tot) * avg_r_bu - (n_be / freq_tot) * avg_r_be
+    p_bu = n_bu / n_total
+    p_be = n_be / n_total
+    p_bu_be = n_bu_be / n_total
+    D = p_bu * avg_r_bu - p_be * avg_r_be
     if D <= _DEGENERATE_EPS:
         diag['fallback_reason'] = 'nonpositive_baseline'
         diag['D'] = D
         return diag
 
     # Q converts each phase's Kelly-style ratio K_s = E[r|s]/E[r^2|s]
-    # into a dimensionless adjustment to the neutral 0.5 fast weight.
-    # Its numerator is the Bull state's probability-weighted second moment;
-    # its denominator is D, the signed Bull/Bear expected-return baseline.
-    Q = (n_bu / freq_tot) * avg_r2_bu / D
+    # into a dimensionless adjustment to the neutral 0.5 fast weight. Its
+    # numerator is the probability-weighted second moment over the Bull/Bear
+    # union, and its denominator is D.
+    Q = p_bu_be * avg_r2_bu_be / D
     if (avg_r_co is None or avg_r2_co is None or avg_r_re is None or avg_r2_re is None or
             abs(avg_r2_co) < _DEGENERATE_EPS or abs(avg_r2_re) < _DEGENERATE_EPS):
         diag['fallback_reason'] = 'degenerate'

@@ -789,8 +789,9 @@ def test_mixing_params_uses_proposition_9_d_and_q():
     })
     diag = estimate_mixing_params_diagnostics(history, date(2021, 1, 1), 'test', min_months=1)
 
-    expected_d = 0.5 * 0.15 - 0.5 * -0.075
-    expected_q = (0.5 * 0.025) / expected_d
+    expected_d = (2 / 6) * 0.15 - (2 / 6) * -0.075
+    expected_avg_r2_bu_be = (0.10 ** 2 + 0.20 ** 2 + 0.05 ** 2 + 0.10 ** 2) / 4
+    expected_q = ((4 / 6) * expected_avg_r2_bu_be) / expected_d
     assert diag['D'] == pytest.approx(expected_d)
     assert diag['Q'] == pytest.approx(expected_q)
     assert diag['a_co_raw'] == pytest.approx(0.5 * (1 - expected_q * (0.01 / 0.0001)))
