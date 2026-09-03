@@ -1074,12 +1074,16 @@ def estimate_mixing_params_diagnostics(history: pl.DataFrame, as_of: date, clust
     n_bu_be, _, avg_r2_bu_be = _stats(('bull', 'bear'))
     n_co, avg_r_co, avg_r2_co = _stats('correction')
     n_re, avg_r_re, avg_r2_re = _stats('rebound')
+    k_bu = _kelly(avg_r_bu, avg_r2_bu)
+    k_be = _kelly(avg_r_be, avg_r2_be)
+    k_co = _kelly(avg_r_co, avg_r2_co)
+    k_re = _kelly(avg_r_re, avg_r2_re)
     diag.update(n_bull=n_bu, n_bear=n_be, n_correction=n_co, n_rebound=n_re,
                 avg_r_bull=avg_r_bu, avg_r2_bull=avg_r2_bu, avg_r_bear=avg_r_be, avg_r2_bear=avg_r2_be,
                 avg_r_correction=avg_r_co, avg_r2_correction=avg_r2_co,
                 avg_r_rebound=avg_r_re, avg_r2_rebound=avg_r2_re,
-                kelly_bull=_kelly(avg_r_bu, avg_r2_bu), kelly_bear=_kelly(avg_r_be, avg_r2_be),
-                kelly_correction=_kelly(avg_r_co, avg_r2_co), kelly_rebound=_kelly(avg_r_re, avg_r2_re))
+                kelly_bull=k_bu, kelly_bear=k_be,
+                kelly_correction=k_co, kelly_rebound=k_re)
 
     if n_co < min_months or n_re < min_months:
         diag['fallback_reason'] = 'insufficient_months'
@@ -1131,8 +1135,8 @@ def estimate_mixing_params_diagnostics(history: pl.DataFrame, as_of: date, clust
     # and a_re_raw = 0.5 * (1 + Q*K_re). With Q positive, positive
     # Correction evidence lowers the fast weight, while positive Rebound
     # evidence raises it. Raw values are retained before clamping to [0, 1].
-    a_co_raw = 0.5 * (1 - Q * (avg_r_co / avg_r2_co))
-    a_re_raw = 0.5 * (1 + Q * (avg_r_re / avg_r2_re))
+    a_co_raw = 0.5 * (1 - Q * k_co)
+    a_re_raw = 0.5 * (1 + Q * k_re)
     diag.update(D=D, Q=Q, a_co_raw=a_co_raw, a_re_raw=a_re_raw,
                 a_co=max(0.0, min(1.0, a_co_raw)), a_re=max(0.0, min(1.0, a_re_raw)))
     return diag
