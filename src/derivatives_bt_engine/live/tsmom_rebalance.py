@@ -1873,10 +1873,12 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
             n_active_clusters=n_effective,
             apply_cluster_cap=config.apply_cluster_cap,
         )
-    else:
+    elif config.discrete_allocation == 'independent':
         apply_cluster_risk_cap(targets, config.max_cluster_risk_pct, total_risk_target, n_effective,
                               max_lot_overrun_pct=config.max_lot_overrun_pct,
                               apply_cap=config.apply_cluster_cap)
+    else:  # Defensive: TsmomLiveConfig validates this before computation.
+        raise ValueError(f'Unhandled discrete_allocation policy: {config.discrete_allocation!r}')
 
     # Realized per-symbol risk contribution -- informational, computed from
     # whatever targets actually ended up being (capped or not, per
