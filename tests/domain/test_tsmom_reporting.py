@@ -31,8 +31,8 @@ def test_clean_signal_rows_share_live_backtest_schema_without_config_echoes():
 
     assert tuple(rows[0]) == SIGNAL_COLUMNS
     assert rows[0]['as_of'] == '2026-09-15'
-    assert rows[0]['frac_tgt_not'] == pytest.approx(.4294 * 7685.75 * 5)
-    assert rows[0]['frac_tgt_dvol'] == pytest.approx(.4294 * 7685.75 * 5 * .1177)
+    assert rows[0]['frac_tgt_not'] == 16_501.31
+    assert rows[0]['frac_tgt_dvol'] == 1_942.20
     assert rows[0]['pos_dvol'] == 0.0
     assert rows[0]['not_weighting'] == 'erc'
     assert rows[0]['not_alloc_w'] == pytest.approx(.0714)
@@ -58,7 +58,7 @@ def test_portfolio_rows_are_one_snapshot_per_as_of_date():
 
     assert len(portfolio) == 1
     assert tuple(portfolio[0]) == PORTFOLIO_COLUMNS
-    assert portfolio[0]['n_active_symbols'] == 3
-    assert portfolio[0]['n_active_clusters'] == 2
-    assert portfolio[0]['gross_position_dvol'] == 3_140
-    assert portfolio[0]['portfolio_risk_target'] == 13_500
+    assert portfolio[0]['n_act_symb'] == 3
+    assert portfolio[0]['n_act_clus'] == 2
+    assert portfolio[0]['gross_pos_dvol'] == 3_140.00
+    assert portfolio[0]['port_risk_tgt'] == 13_500.00

@@ -149,6 +149,19 @@ _CSV_COLUMN_LABEL = {
     'error': 'error',
 }
 
+# USD amounts are spreadsheet-facing accounting values and consistently use
+# cents. Prices deliberately stay out of this set: an FX close such as J7
+# needs more than two decimals to remain meaningful.
+_DOLLAR_REPORT_FIELDS = {
+    'account_equity', 'portfolio_risk_target', 'idm_risk_target',
+    'realized_portfolio_risk', 'integer_risk_limit',
+    'cluster_dollar_vol_budget', 'pre_scalar_notional_budget',
+    'pre_scalar_dollar_vol_budget', 'fractional_target_dollar_vol',
+    'standalone_position_dollar_vol', 'portfolio_risk_contribution',
+    'uncapped_fractional_target_notional', 'fractional_target_notional',
+    'one_contract_notional', 'one_contract_dollar_vol',
+}
+
 
 def _csv_label(key: str) -> str:
     """Compact CSV label for a descriptive target-dictionary field name."""
@@ -290,7 +303,8 @@ def _save_report(cluster_report: str, targets: list[dict], config: TsmomLiveConf
                 'rounding_gap', 'scalar_capped', 'zero_reason',
                 'max_cluster_risk_pct', 'max_lot_overrun_pct']
     rounded_rows = [
-        {_csv_label(k): (round(v, 4) if isinstance(v, float) and not math.isnan(v) else v)
+        {_csv_label(k): (round(v, 2 if k in _DOLLAR_REPORT_FIELDS else 4)
+                         if isinstance(v, float) and not math.isnan(v) else v)
          for k, v in t.items()}
         for t in targets
     ]

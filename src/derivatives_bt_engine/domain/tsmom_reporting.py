@@ -25,9 +25,9 @@ SIGNAL_COLUMNS = (
 )
 
 PORTFOLIO_COLUMNS = (
-    'run_id', 'as_of', 'equity', 'n_active_symbols', 'n_active_clusters',
-    'gross_position_dvol', 'portfolio_risk_target', 'idm_risk_target',
-    'realized_portfolio_risk', 'idm_multiplier',
+    'run_id', 'as_of', 'equity', 'n_act_symb', 'n_act_clus',
+    'gross_pos_dvol', 'port_risk_tgt', 'idm_risk_tgt',
+    'real_port_risk', 'idm_mult',
 )
 
 
@@ -54,6 +54,12 @@ def _as_of(value) -> Optional[str]:
     if isinstance(value, (date, datetime)):
         return value.isoformat()
     return str(value)
+
+
+def _dollars(value) -> Optional[float]:
+    """Two-decimal USD/reporting amount; prices retain their quote precision."""
+    value = _number(value)
+    return round(value, 2) if value is not None else None
 
 
 def clean_signal_rows(rows: Iterable[Mapping], run_id: str, *, as_of=None) -> list[dict]:
@@ -114,12 +120,12 @@ def clean_signal_rows(rows: Iterable[Mapping], run_id: str, *, as_of=None) -> li
             'clust_score': _number(_value(source, 'cluster_universe_score', 'clust_score')),
             'clust_excl': bool(_value(source, 'cluster_universe_excluded', 'clust_excl') or False),
             'not_weighting': _value(source, 'notional_weighting', 'not_weighting'),
-            'pre_sc_not_bud': _number(_value(source, 'pre_scalar_notional_budget')),
+            'pre_sc_not_bud': _dollars(_value(source, 'pre_scalar_notional_budget')),
             'not_alloc_w': _number(_value(source, 'notional_allocation_weight', 'not_alloc_w')),
-            'frac_tgt_not': fractional_notional,
-            'frac_tgt_dvol': fractional_dvol,
-            'pos_dvol': position_dvol,
-            'port_risk_con': _number(_value(source, 'portfolio_risk_contribution')),
+            'frac_tgt_not': _dollars(fractional_notional),
+            'frac_tgt_dvol': _dollars(fractional_dvol),
+            'pos_dvol': _dollars(position_dvol),
+            'port_risk_con': _dollars(_value(source, 'portfolio_risk_contribution')),
         }
         output.append({key: row[key] for key in SIGNAL_COLUMNS})
     return output
@@ -138,13 +144,13 @@ def portfolio_rows_from_signals(signal_rows: Iterable[Mapping], run_id: str, *, 
         result.append({
             'run_id': run_id,
             'as_of': as_of,
-            'equity': (equity_by_as_of or {}).get(as_of),
-            'n_active_symbols': len(active),
-            'n_active_clusters': len({row['cluster'] for row in active if row.get('cluster') is not None}),
-            'gross_position_dvol': sum(_number(row.get('pos_dvol')) or 0.0 for row in active),
-            'portfolio_risk_target': _number(extra.get('portfolio_risk_target')),
-            'idm_risk_target': _number(extra.get('idm_risk_target')),
-            'realized_portfolio_risk': _number(extra.get('realized_portfolio_risk')),
-            'idm_multiplier': _number(extra.get('idm_multiplier')),
+            'equity': _dollars((equity_by_as_of or {}).get(as_of)),
+            'n_act_symb': len(active),
+            'n_act_clus': len({row['cluster'] for row in active if row.get('cluster') is not None}),
+            'gross_pos_dvol': _dollars(sum(_number(row.get('pos_dvol')) or 0.0 for row in active)),
+            'port_risk_tgt': _dollars(extra.get('portfolio_risk_target')),
+            'idm_risk_tgt': _dollars(extra.get('idm_risk_target')),
+            'real_port_risk': _dollars(extra.get('realized_portfolio_risk')),
+            'idm_mult': _number(extra.get('idm_multiplier')),
         })
     return result

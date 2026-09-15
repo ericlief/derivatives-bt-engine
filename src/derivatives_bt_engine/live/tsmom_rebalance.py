@@ -2040,17 +2040,17 @@ def print_rebalance_report(targets: list[dict]) -> str:
               f"sig_confid={_fmt(t.get('sig_confid'), '.2f'):>5}  "
               f"vix_scalar={_fmt(t.get('vix_scalar'), '.2f')}  "
               f"combined_scalar={_fmt(t.get('combined_scalar'), '.3f'):>6}  "
-              f"pre_scalar_notional_budget={_fmt(t.get('pre_scalar_notional_budget'), '.0f')}"
+              f"pre_scalar_notional_budget={_fmt(t.get('pre_scalar_notional_budget'), '.2f')}"
             + (f"  notional_allocation_weight={_fmt(t.get('notional_allocation_weight'), '.3f')}"
                if t.get('notional_allocation_weight') is not None else "")
             + (f"  idm_multiplier={_fmt(t.get('idm_multiplier'), '.3f')}"
                if t.get('idm_multiplier') is not None else "")
-            + f"  pre_scalar_dollar_vol_budget={_fmt(t.get('pre_scalar_dollar_vol_budget'), '.0f')}  "
-              f"fractional_target_dollar_vol={_fmt(t.get('fractional_target_dollar_vol'), '.0f')}  "
-              f"fractional_target_notional={_fmt(t.get('fractional_target_notional'), '.0f')}  "
+            + f"  pre_scalar_dollar_vol_budget={_fmt(t.get('pre_scalar_dollar_vol_budget'), '.2f')}  "
+              f"fractional_target_dollar_vol={_fmt(t.get('fractional_target_dollar_vol'), '.2f')}  "
+              f"fractional_target_notional={_fmt(t.get('fractional_target_notional'), '.2f')}  "
               f"close={_fmt(t.get('close'), '.2f'):>9}  "
-              f"one_contract_notional={_fmt(t.get('one_contract_notional'), '.0f')}  "
-              f"one_contract_dollar_vol={_fmt(t.get('one_contract_dollar_vol'), '.0f')}  "
+              f"one_contract_notional={_fmt(t.get('one_contract_notional'), '.2f')}  "
+              f"one_contract_dollar_vol={_fmt(t.get('one_contract_dollar_vol'), '.2f')}  "
               f"fractional_target_contracts={_fmt(t.get('fractional_target_contracts'), '.3f'):>7}  "
               f"rounding_gap={_fmt(t.get('rounding_gap'), '.3f')}  "
               f"scalar_capped={t.get('scalar_capped')}"
@@ -2114,44 +2114,44 @@ def print_cluster_risk_report(targets: list[dict], account_equity: Optional[floa
         lines.append(f"{cluster}:")
         for symbol in sorted(symbols_by_cluster.get(cluster, [])):
             standalone = standalone_position_dollar_vol.get(symbol, 0.0)
-            line = f"  {symbol:10s}  standalone_position_dollar_vol={standalone:>12,.0f}"
+            line = f"  {symbol:10s}  standalone_position_dollar_vol={standalone:>12,.2f}"
             if portfolio_risk_contribution:
                 contribution = portfolio_risk_contribution.get(symbol, 0.0)
-                line += f"  portfolio_risk_contribution={contribution:>12,.0f}"
+                line += f"  portfolio_risk_contribution={contribution:>12,.2f}"
             lines.append(line)
         standalone = cluster_standalone_dollar_vol.get(cluster, 0.0)
-        line = f"  {'subtotal':10s}  standalone_position_dollar_vol={standalone:>12,.0f}"
+        line = f"  {'subtotal':10s}  standalone_position_dollar_vol={standalone:>12,.2f}"
         if cluster_portfolio_risk_contribution:
             contribution = cluster_portfolio_risk_contribution.get(cluster, 0.0)
-            line += f"  portfolio_risk_contribution={contribution:>12,.0f}"
+            line += f"  portfolio_risk_contribution={contribution:>12,.2f}"
         lines.append(line)
     lines.append('-' * 60)
     total_standalone_dollar_vol = sum(cluster_standalone_dollar_vol.values())
     total_line = (
-        f"{'TOTAL':12s}  standalone_position_dollar_vol={total_standalone_dollar_vol:>12,.0f}"
+        f"{'TOTAL':12s}  standalone_position_dollar_vol={total_standalone_dollar_vol:>12,.2f}"
     )
     if account_equity:
         total_line += f" ({total_standalone_dollar_vol / account_equity:>5.1%})"
     if cluster_portfolio_risk_contribution:
         total_portfolio_risk_contribution = sum(cluster_portfolio_risk_contribution.values())
-        total_line += f"  portfolio_risk_contribution={total_portfolio_risk_contribution:>12,.0f}"
+        total_line += f"  portfolio_risk_contribution={total_portfolio_risk_contribution:>12,.2f}"
         if account_equity:
             total_line += f" ({total_portfolio_risk_contribution / account_equity:>5.1%})"
     lines.append(total_line)
     context = next((t for t in targets if t.get('portfolio_risk_target') is not None), None)
     if context is not None:
         lines.append(
-            f"TARGETS       portfolio_risk_target={context['portfolio_risk_target']:,.0f}"
+            f"TARGETS       portfolio_risk_target={context['portfolio_risk_target']:,.2f}"
             + (f"  discrete_allocation={context.get('discrete_allocation')}"
                if context.get('discrete_allocation') is not None else '')
             + (f"  min_fractional_contracts={context['min_fractional_contracts']:.2f}"
                if context.get('discrete_allocation') == 'lot-aware'
                and context.get('min_fractional_contracts') is not None else '')
-            + (f"  integer_risk_limit={context['integer_risk_limit']:,.0f}"
+            + (f"  integer_risk_limit={context['integer_risk_limit']:,.2f}"
                if context.get('integer_risk_limit') is not None else '')
-            + (f"  idm_risk_target={context['idm_risk_target']:,.0f}"
+            + (f"  idm_risk_target={context['idm_risk_target']:,.2f}"
                if context.get('idm_risk_target') is not None else '')
-            + (f"  realized_portfolio_risk={context['realized_portfolio_risk']:,.0f}"
+            + (f"  realized_portfolio_risk={context['realized_portfolio_risk']:,.2f}"
                if context.get('realized_portfolio_risk') is not None else '')
         )
     report = '\n'.join(lines)
