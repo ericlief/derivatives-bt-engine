@@ -26,6 +26,7 @@ import os
 import sys
 import time
 from datetime import datetime
+from dataclasses import asdict
 from pathlib import Path
 from typing import Optional
 
@@ -49,6 +50,12 @@ from derivatives_bt_engine.live.tsmom_rebalance import (
     _resolve_contract,
 )
 from derivatives_bt_engine.domain.allocation import NOTIONAL_WEIGHTING_SCHEMES
+from derivatives_bt_engine.domain.tsmom_reporting import (
+    PORTFOLIO_COLUMNS,
+    SIGNAL_COLUMNS,
+    clean_signal_rows,
+    portfolio_rows_from_signals,
+)
 from derivatives_bt_engine.utils.logger import setup_logger
 
 load_dotenv()
@@ -186,13 +193,15 @@ def _build_instruments(spec: str, max_notional: float, max_contracts: int) -> li
     return build_instruments(spec.split(','), max_notional=max_notional, max_contracts=max_contracts)
 
 
-def _save_report(cluster_report: str, targets: list[dict], mixing_diagnostics: Optional[dict] = None) -> None:
+def _save_report(cluster_report: str, targets: list[dict], config: TsmomLiveConfig,
+                 instruments: list[dict], mixing_diagnostics: Optional[dict] = None) -> None:
     """Persists each run's cluster risk report (plain text, matches stdout)
-    and targets (CSV, one row per instrument) to results/ at the project
-    root, timestamped -- mirrors tsmom.py's results dir so live and
-    backtest output live in the same place. Previously this only ever
-    printed to stdout/Telegram and was lost the moment the terminal
-    scrolled.
+    and the legacy exhaustive target CSV to results/ at the project root,
+    timestamped -- mirrors tsmom.py's results dir so live and backtest
+    output live in the same place. It additionally writes the common clean
+    signal sheet, one portfolio snapshot, and a run manifest. Previously
+    this only ever printed to stdout/Telegram and was lost the moment the
+    terminal scrolled.
 
     Only print_cluster_risk_report's output goes to the .txt file --
     print_rebalance_report's own per-instrument dump is redundant with the
@@ -220,7 +229,10 @@ def _save_report(cluster_report: str, targets: list[dict], mixing_diagnostics: O
     doesn't pass mixing_diagnostics at all) skips this file entirely."""
     results_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'results'))
     os.makedirs(results_dir, exist_ok=True)
-    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+    created_at = datetime.now()
+    ts = created_at.strftime('%Y%m%d_%H%M%S')
+    run_id = f'live_{ts}'
+    as_of = config.as_of or created_at.date()
 
     txt_path = os.path.join(results_dir, f'tsmom_live_rebalance_{ts}.txt')
     with open(txt_path, 'w') as f:
@@ -291,7 +303,47 @@ def _save_report(cluster_report: str, targets: list[dict], mixing_diagnostics: O
         writer.writeheader()
         writer.writerows(rounded_rows)
 
-    log.info('Saved rebalance report to %s, %s', txt_path, csv_path)
+    # The legacy rebalance CSV above remains the exhaustive raw target
+    # audit. These three artifacts are the stable Sheets-facing contract:
+    # a compact per-symbol signal sheet, one portfolio snapshot, and a
+    # manifest containing static configuration exactly once.
+    signal_rows = clean_signal_rows(targets, run_id, as_of=as_of)
+    signal_path = os.path.join(results_dir, f'tsmom_live_signals_{ts}.csv')
+    with open(signal_path, 'w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=SIGNAL_COLUMNS)
+        writer.writeheader()
+        writer.writerows(signal_rows)
+
+    first_target = targets[0] if targets else {}
+    portfolio_rows = portfolio_rows_from_signals(
+        signal_rows, run_id,
+        equity_by_as_of={as_of.isoformat(): config.account_equity},
+        portfolio_fields_by_as_of={as_of.isoformat(): {
+            'portfolio_risk_target': first_target.get('portfolio_risk_target'),
+            'idm_risk_target': first_target.get('idm_risk_target'),
+            'realized_portfolio_risk': first_target.get('realized_portfolio_risk'),
+            'idm_multiplier': first_target.get('idm_multiplier'),
+        }},
+    )
+    portfolio_path = os.path.join(results_dir, f'tsmom_live_portfolio_{ts}.csv')
+    with open(portfolio_path, 'w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=PORTFOLIO_COLUMNS)
+        writer.writeheader()
+        writer.writerows(portfolio_rows)
+
+    manifest_path = os.path.join(results_dir, f'tsmom_live_run_{ts}.json')
+    with open(manifest_path, 'w') as f:
+        json.dump({
+            'run_id': run_id,
+            'mode': 'live',
+            'created_at': created_at.isoformat(timespec='seconds'),
+            'as_of': as_of.isoformat(),
+            'symbols': [instrument['symbol'] for instrument in instruments],
+            'config': asdict(config),
+        }, f, indent=2, default=str)
+
+    log.info('Saved rebalance report to %s, %s; clean signal/portfolio/manifest run_id=%s',
+             txt_path, csv_path, run_id)
 
 
 def _execute_rebalance_order(ib: IBPySync, contract, delta_contracts: int):
@@ -581,7 +633,7 @@ def main():
     cluster_report = print_cluster_risk_report(targets, account_equity=args.account_equity)
 
     if not args.no_save:
-        _save_report(cluster_report, targets, mixing_diagnostics)
+        _save_report(cluster_report, targets, config, instruments, mixing_diagnostics)
 
     if not dry_run:
         send_telegram(f'TSMOM Rebalance\n{report}')
