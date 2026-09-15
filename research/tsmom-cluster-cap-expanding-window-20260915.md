@@ -1,4 +1,10 @@
-# Goulding cluster-cap window-scheme check — 2026-09-15
+# Archived: Goulding cluster-cap cold-start window-scheme check — 2026-09-15
+
+> **Interpretation:** this is retained as a cold-start/history-sensitivity
+> experiment. It reruns and resets the strategy at every row boundary, so it
+> is not the Carver-style causal expanding/rolling return-window report. Use
+> `domain.tsmom_window_reporting.score_causal_windows` on one full strategy
+> path for that comparison.
 
 This is a robustness check of the live-policy-parity path in the main `tsmom`
 backtester. It uses the same two date-window generators as

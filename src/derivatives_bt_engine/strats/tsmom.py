@@ -17,12 +17,16 @@ import argparse
 import json
 import os
 from dataclasses import asdict
-from datetime import datetime
+from datetime import date, datetime
 
 import polars as pl
 
 from derivatives_bt_engine.domain.tsmom_backtester import TsmomBacktestConfig, run_tsmom_backtest
 from derivatives_bt_engine.domain.tsmom_reporting import clean_signal_rows, portfolio_rows_from_signals
+from derivatives_bt_engine.domain.tsmom_window_reporting import (
+    score_causal_windows,
+    summarize_causal_windows,
+)
 
 
 def parse_args():
@@ -153,6 +157,14 @@ def parse_args():
     p.add_argument('--vol-slow-window', type=int, default=None,
                    help="Only used with --signal-weighting continuous: vol-normalization window for "
                         "the slow leg (default: None -> horizon-matched to --slow-window)")
+    p.add_argument('--window-report', action='store_true',
+                   help='Score annual OOS, anchored-expanding, and capped-rolling return windows from '
+                        'this one causal backtest path; requires --oos-start')
+    p.add_argument('--oos-start', default=None,
+                   help='Shared YYYY-MM-DD evaluation boundary for --window-report; it must be the '
+                        'same across grid parameter combinations')
+    p.add_argument('--window-report-max-years', type=int, default=5,
+                   help='Capped rolling-window width used by --window-report (default: %(default)s)')
     p.add_argument('--no-save', action='store_true',
                    help='Skip saving MTM, clean signals, portfolio snapshots, trades, transactions, and run manifest to results/')
     return p.parse_args()
@@ -175,7 +187,6 @@ def main():
     if args.fixed_quantities:
         fixed_quantities = [int(q.strip()) for q in args.fixed_quantities.split(',') if q.strip()]
 
-    from datetime import date
     config = TsmomBacktestConfig(
         symbols=symbols,
         initial_capital=args.initial_capital,
@@ -252,6 +263,20 @@ def main():
     print("=== Summary ===")
     print(summary_df)
 
+    window_metrics = window_summary = None
+    if args.window_report:
+        if args.oos_start is None:
+            raise ValueError('--window-report requires --oos-start YYYY-MM-DD')
+        oos_start = date.fromisoformat(args.oos_start)
+        window_metrics = score_causal_windows(
+            result, initial_capital=config.initial_capital, oos_start=oos_start,
+            max_width_years=args.window_report_max_years,
+        )
+        window_summary = summarize_causal_windows(window_metrics)
+        print('\n=== Causal OOS window summary ===')
+        with pl.Config(tbl_rows=-1):
+            print(window_summary)
+
     if not args.no_save:
         # Anchored to the project root rather than a bare relative
         # "results" -- a bare relative path silently creates results/results
@@ -304,6 +329,17 @@ def main():
         trades.write_csv(os.path.join(results_dir, f"{ts}_tsmom_trades_{symbol_str}_{start_year}-{end_year}.csv"))
         summary_path = os.path.join(results_dir, f"{ts}_tsmom_summary_{symbol_str}_{start_year}-{end_year}.csv")
         summary_df.write_csv(summary_path)
+        if window_metrics is not None:
+            window_metrics.with_columns(run_id=pl.lit(run_id)).select(
+                'run_id', *window_metrics.columns
+            ).write_csv(os.path.join(
+                results_dir, f"{ts}_tsmom_window_metrics_{symbol_str}_{start_year}-{end_year}.csv"
+            ))
+            window_summary.with_columns(run_id=pl.lit(run_id)).select(
+                'run_id', *window_summary.columns
+            ).write_csv(os.path.join(
+                results_dir, f"{ts}_tsmom_window_summary_{symbol_str}_{start_year}-{end_year}.csv"
+            ))
         manifest_path = os.path.join(results_dir, f"{ts}_tsmom_run_{symbol_str}_{start_year}-{end_year}.json")
         with open(manifest_path, 'w') as f:
             json.dump({
@@ -313,6 +349,10 @@ def main():
                 'data_start': str(stats['date'][0]),
                 'data_end': str(stats['date'][-1]),
                 'config': asdict(config),
+                'window_report': {
+                    'oos_start': args.oos_start,
+                    'max_width_years': args.window_report_max_years,
+                } if args.window_report else None,
             }, f, indent=2, default=str)
         print(f"\nSaved summary to {summary_path}; clean signal, portfolio, and run-manifest files share {run_id}")
 

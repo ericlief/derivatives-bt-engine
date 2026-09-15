@@ -16,12 +16,17 @@ import itertools
 import multiprocessing
 import os
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any, Iterable, Optional
 
 import polars as pl
 
 from derivatives_bt_engine.domain.tsmom_backtester import TsmomBacktestConfig, load_portfolio_data, run_tsmom_backtest
+from derivatives_bt_engine.domain.tsmom_window_reporting import (
+    score_causal_windows,
+    summarize_causal_windows,
+)
 from derivatives_bt_engine.utils.logger import setup_logger
 
 logger = setup_logger()
@@ -63,9 +68,29 @@ def _direction_switches(events: list[dict], symbol: str) -> list[dict]:
             and (e['prior_contracts'] > 0) != (e['target_contracts'] > 0)]
 
 
-def _run_one(combo: dict, symbols: list[str], start_date: date, end_date: date) -> list[dict]:
+@dataclass
+class GridResults:
+    """One full-path summary, per-window scores, and legacy symbol diagnostics."""
+    summary: pl.DataFrame
+    window_metrics: pl.DataFrame
+    symbol_details: pl.DataFrame
+
+
+def _summary_fields(window_summary: pl.DataFrame) -> dict:
+    """Flatten window-scheme aggregates into one grid-ranking row."""
+    fields = {}
+    for row in window_summary.to_dicts():
+        prefix = row.pop('scheme')
+        fields.update({f'{prefix}_{key}': value for key, value in row.items()})
+    return fields
+
+
+def _run_one(combo_id: int, combo: dict, symbols: list[str], start_date: date,
+             end_date: date, oos_start: date, max_width_years: int) -> tuple[dict, list[dict], list[dict]]:
     """Top-level, picklable worker: build a config from `combo`, run the
-    backtest, return one summary row per symbol. Assumes the parquet/VIX
+    backtest, then score all reporting windows from that single causal path.
+    Returns a portfolio summary, per-window metrics, and per-symbol diagnostics.
+    Assumes the parquet/VIX
     cache is already warm (run_grid does this once in the parent process
     before spawning workers, to avoid concurrent writes to the same cache
     file from multiple processes)."""
@@ -80,10 +105,29 @@ def _run_one(combo: dict, symbols: list[str], start_date: date, end_date: date) 
     result = run_tsmom_backtest(config)
     stats = result['daily_mtm']
     all_dates = stats['date'].to_list()
-    rows = []
+    window_metrics = score_causal_windows(
+        result, initial_capital=config.initial_capital, oos_start=oos_start,
+        max_width_years=max_width_years,
+    )
+    window_summary = summarize_causal_windows(window_metrics)
+    summary = {
+        'combo_id': combo_id,
+        **combo,
+        'final_capital': stats['capital'][-1],
+        'cum_pnl': stats['cum_pnl'][-1],
+        'max_drawdown_pct': stats['drawdown_pct'].min(),
+        'n_days': result['n_days'],
+        'ann_ret_pct': result['ann_ret_pct'],
+        'ann_vol_pct': result['ann_vol_pct'],
+        'sharpe': result['sharpe'],
+        'total_fees': result['total_fees'],
+        **_summary_fields(window_summary),
+    }
+    symbol_rows = []
     for symbol in symbols:
         switches = _direction_switches(result['trend_signals'], symbol)
-        rows.append({
+        symbol_rows.append({
+            'combo_id': combo_id,
             **combo,
             'symbol': symbol,
             'final_capital': stats['capital'][-1],
@@ -92,11 +136,16 @@ def _run_one(combo: dict, symbols: list[str], start_date: date, end_date: date) 
             'time_in_trade_pct': round(_time_in_trade_pct(result['trend_signals'], all_dates, symbol), 1),
             'n_direction_switches': len(switches),
         })
-    return rows
+    metric_rows = [
+        {'combo_id': combo_id, **combo, **row}
+        for row in window_metrics.to_dicts()
+    ]
+    return summary, metric_rows, symbol_rows
 
 
 def run_grid(symbols: list[str], start_date: date, end_date: date, param_grid: dict,
-             max_workers: Optional[int] = None) -> pl.DataFrame:
+             *, oos_start: date, max_width_years: int = 5,
+             max_workers: Optional[int] = None) -> GridResults:
     combos = product_dict(param_grid)
     logger.info(f"Running {len(combos)} combos across {symbols} ({start_date} to {end_date})")
 
@@ -113,15 +162,26 @@ def run_grid(symbols: list[str], start_date: date, end_date: date, param_grid: d
     # spawn starts each worker as a fresh interpreter instead, sidestepping
     # the inherited-lock problem entirely.
     ctx = multiprocessing.get_context('spawn')
-    rows = []
+    summaries, window_rows, symbol_rows = [], [], []
     with ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx) as ex:
-        futures = {ex.submit(_run_one, combo, symbols, start_date, end_date): combo for combo in combos}
+        futures = {
+            ex.submit(_run_one, combo_id, combo, symbols, start_date, end_date,
+                      oos_start, max_width_years): combo
+            for combo_id, combo in enumerate(combos)
+        }
         for i, fut in enumerate(as_completed(futures), 1):
-            rows.extend(fut.result())
+            summary, metrics, diagnostics = fut.result()
+            summaries.append(summary)
+            window_rows.extend(metrics)
+            symbol_rows.extend(diagnostics)
             if i % 10 == 0 or i == len(combos):
                 logger.info(f"Completed {i}/{len(combos)} combos")
 
-    return pl.DataFrame(rows)
+    return GridResults(
+        summary=pl.DataFrame(summaries).sort('combo_id'),
+        window_metrics=pl.DataFrame(window_rows).sort(['combo_id', 'scheme', 'window_start']),
+        symbol_details=pl.DataFrame(symbol_rows).sort(['combo_id', 'symbol']),
+    )
 
 
 def parse_args():
@@ -131,6 +191,11 @@ def parse_args():
                    help='Comma-separated futures symbols (default: %(default)s)')
     p.add_argument('--years', default='2015-2025',
                    help='Year range as START-END or a single YEAR (default: %(default)s)')
+    p.add_argument('--oos-start', default=None,
+                   help='Shared YYYY-MM-DD OOS boundary for every parameter combination; defaults to '
+                        'January 1 of the year after --years starts')
+    p.add_argument('--window-report-max-years', type=int, default=5,
+                   help='Capped rolling-window width for causal OOS scoring (default: %(default)s)')
     p.add_argument('--max-workers', type=int, default=None,
                    help='Process pool size (default: os.cpu_count())')
     p.add_argument('--no-save', action='store_true', help='Skip saving the results CSV')
@@ -145,6 +210,9 @@ def main():
     start_year, end_year = (parts[0], parts[0]) if len(parts) == 1 else (parts[0], parts[1])
     start_date = date(int(start_year), 1, 1)
     end_date = date(int(end_year), 12, 31)
+    oos_start = date.fromisoformat(args.oos_start) if args.oos_start else date(int(start_year) + 1, 1, 1)
+    if not start_date <= oos_start <= end_date:
+        raise ValueError('--oos-start must fall within --years')
 
     param_grid = {
         'vol_target': [0.10, 0.15, 0.20],
@@ -152,9 +220,12 @@ def main():
         'long_only': [False, True],
     }
 
-    df = run_grid(symbols, start_date, end_date, param_grid, max_workers=args.max_workers)
+    results = run_grid(
+        symbols, start_date, end_date, param_grid, oos_start=oos_start,
+        max_width_years=args.window_report_max_years, max_workers=args.max_workers,
+    )
     with pl.Config(tbl_rows=-1):
-        print(df.sort('cum_pnl', descending=True))
+        print(results.summary.sort('C_capped_rolling_sharpe_mean', descending=True))
 
     if not args.no_save:
         results_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'results'))
@@ -162,8 +233,17 @@ def main():
         ts = datetime.now().strftime('%Y%m%d_%H%M%S')
         symbol_str = '_'.join(symbols)
         path = os.path.join(results_dir, f"tsmom_grid_{symbol_str}_{start_year}-{end_year}_{ts}.csv")
-        df.write_csv(path)
-        print(f"\nSaved {len(df)} rows to {path}")
+        metrics_path = os.path.join(
+            results_dir, f"tsmom_grid_window_metrics_{symbol_str}_{start_year}-{end_year}_{ts}.csv"
+        )
+        symbols_path = os.path.join(
+            results_dir, f"tsmom_grid_symbols_{symbol_str}_{start_year}-{end_year}_{ts}.csv"
+        )
+        results.summary.write_csv(path)
+        results.window_metrics.write_csv(metrics_path)
+        results.symbol_details.write_csv(symbols_path)
+        print(f"\nSaved {results.summary.height} parameter rows to {path}")
+        print(f"Saved {results.window_metrics.height} causal OOS window rows to {metrics_path}")
 
 
 if __name__ == "__main__":

@@ -1,11 +1,12 @@
-"""Scheme-B/Scheme-C robustness sweep for the main correlation-aware TSMOM backtest.
+"""Cold-start Scheme-B/Scheme-C sensitivity sweep for main TSMOM.
 
 Uses the same expanding and expand-then-cap-and-roll generators as
 ``tsmom_vol_parity_window_scheme``.  Each row is a fresh, independent
-backtest over that row's date bounds; Scheme B therefore answers sensitivity
-to an expanding available-history sample, while Scheme C caps the sample at a
-rolling width once it reaches that width.  Mean/std Sharpe across a scheme's
-overlapping rows are stability diagnostics, not independent observations.
+backtest over that row's date bounds. That deliberately resets Goulding's
+available mixing history, capital path, and portfolio state at each row's
+start. It is therefore a cold-start/history-sensitivity experiment, *not* the
+normal causal performance-window report; use
+``domain.tsmom_window_reporting.score_causal_windows`` for the latter.
 """
 from __future__ import annotations
 
