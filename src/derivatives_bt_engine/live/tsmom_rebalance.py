@@ -244,8 +244,8 @@ class TsmomLiveConfig:
     apply_cluster_cap: bool = False
     # Optional ex-ante universe limit used with apply_cluster_cap. Before
     # budgeting, retain at most this many active signals per cluster, ranked
-    # by the same abs(combined_scalar) priority the cap uses for walk-down.
-    # None preserves the full active universe.
+    # by raw model conviction (Goulding's fast/slow average or eq. 7 blend;
+    # continuous momentum's contin_signal). None preserves the full universe.
     max_active_per_cluster: Optional[int] = None
     # Whole-contract conversion policy. 'independent' preserves the existing
     # per-symbol rounding behavior. 'lot-aware' rounds the complete target
@@ -400,35 +400,63 @@ def build_instruments(symbols: list[str], max_notional: Optional[float] = None,
     return instruments
 
 
-def _select_cluster_cap_universe(signals: Mapping[str, dict], active_symbols: list[str],
-                                 config: TsmomLiveConfig, vix_scalar: float) -> tuple[set[str], dict[str, int], dict[str, float]]:
-    """Keep the top active signals per cluster using normal cluster-cap priority.
+def _cluster_cap_rank_score(signal: Mapping[str, object], config: TsmomLiveConfig) -> float:
+    """Raw model conviction used for cluster selection and cap walk-down.
 
-    This runs before the IDM matrix, ERC/HRP weights, and risk budgets exist.
-    Reconstructing ``combined_scalar`` here is exact: it needs only the
-    finalized instrument signal, realized vol, regime discount, confidence,
-    and common VIX scalar--not the later notional budget. The cluster-cap
-    walk-down therefore sees the same ``abs(combined_scalar)`` ranking.
+    This deliberately excludes risk_scalar, VIX, confidence, and all budget
+    fields. They are position-sizing controls, and risk_scalar's later
+    multiplication by realized volatility ordinarily cancels in dollar-vol.
+    Goulding's binary direction must therefore be ranked by its underlying
+    monthly-return evidence: the equal fast/slow average in agreeing states,
+    or its actual eq. 7 blend in disagreement states.
     """
-    if config.max_active_per_cluster is None:
-        return set(active_symbols), {}, {}
+    def finite(value: object) -> Optional[float]:
+        if value is None:
+            return None
+        value = float(value)
+        return value if math.isfinite(value) else None
+
+    if config.signal_weighting == 'continuous':
+        return abs(finite(signal.get('contin_signal')) or 0.0)
+
+    regime_value = signal.get('g_regime')
+    regime = (regime_value.value if isinstance(regime_value, TrendRegime)
+              else str(regime_value or '')).lower()
+    fast = finite(signal.get('g_fast'))
+    slow = finite(signal.get('g_slow'))
+    if fast is None or slow is None:
+        return 0.0
+    if regime in ('bull', 'bear'):
+        return abs((fast + slow) / 2.0)
+    if regime in ('correction', 'rebound'):
+        blend = finite(signal.get('g_blend'))
+        if blend is None:
+            weight = finite(signal.get('a_co' if regime == 'correction' else 'a_re'))
+            if weight is None:
+                return 0.0
+            blend = (1.0 - weight) * slow + weight * fast
+        return abs(blend)
+    return 0.0
+
+
+def _select_cluster_cap_universe(signals: Mapping[str, dict], active_symbols: list[str],
+                                 config: TsmomLiveConfig) -> tuple[set[str], dict[str, int], dict[str, float]]:
+    """Optionally keep top active signals per cluster by raw model conviction."""
 
     by_cluster: dict[str, list[str]] = {}
     score_by_symbol: dict[str, float] = {}
     for symbol in active_symbols:
         signal = signals[symbol]
-        score_by_symbol[symbol] = abs(compute_position_scalar(
-            signal['signal_for_scalar'], signal['daily_std'], config.vol_target, signal['regime'],
-            regime_discount=signal['regime_discount'], signal_confidence=signal['signal_confidence'],
-            annualization_days=signal['annualization_days'],
-        ) * vix_scalar)
+        score_by_symbol[symbol] = _cluster_cap_rank_score(signal, config)
         by_cluster.setdefault(signal['cluster'], []).append(symbol)
+
+    if config.max_active_per_cluster is None:
+        return set(active_symbols), {}, score_by_symbol
 
     selected: set[str] = set()
     rank_by_symbol: dict[str, int] = {}
     for cluster, members in sorted(by_cluster.items()):
-        # Symbol is only a deterministic tie-breaker. The score is the cap's
-        # established priority rather than a second economic signal metric.
+        # Symbol is only a deterministic tie-breaker, never an economic score.
         ranked = sorted(members, key=lambda symbol: (-score_by_symbol[symbol], symbol))
         for rank, symbol in enumerate(ranked, start=1):
             rank_by_symbol[symbol] = rank
@@ -1542,7 +1570,7 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
     # in the report with an explicit inactive diagnostic but receive no risk.
     initial_active_symbols = [symbol for symbol, signal in signals.items() if _is_active(signal)]
     selected_active_symbols, cluster_universe_rank, cluster_universe_score = (
-        _select_cluster_cap_universe(signals, initial_active_symbols, config, vix_scalar)
+        _select_cluster_cap_universe(signals, initial_active_symbols, config)
     )
 
     # Stage 2: derive the risk budget, per config.risk_budget_mode.

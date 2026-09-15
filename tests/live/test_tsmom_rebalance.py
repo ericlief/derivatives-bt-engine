@@ -199,35 +199,36 @@ def test_tsmom_live_config_validates_cluster_cap_universe_limit(
         )
 
 
-def test_cluster_cap_universe_keeps_top_n_by_normal_combined_scalar_priority():
+def test_cluster_cap_universe_keeps_top_n_by_raw_goulding_conviction():
     config = TsmomLiveConfig(
         discrete_allocation='independent', apply_cluster_cap=True, max_active_per_cluster=2,
+        signal_weighting='goulding',
     )
-    # Same realized vol/regime means score order is signal-strength order;
-    # B/C share a cluster, while D demonstrates that the limit is per cluster.
+    # B/C share a cluster, while D demonstrates that the limit is per
+    # cluster. Bull/Bear use the equal fast/slow average; Correction uses
+    # the actual eq. 7 blend, not binary g_sig or risk_scalar.
     signals = {
-        symbol: {
-            'cluster': cluster,
-            'signal_for_scalar': strength,
-            'daily_std': 0.01,
-            'regime': tr.TrendRegime.BULL,
-            'regime_discount': 0.5,
-            'signal_confidence': 1.0,
-            'annualization_days': 252,
-        }
-        for symbol, cluster, strength in [
-            ('A', 'grain', 0.90), ('B', 'grain', -0.70), ('C', 'grain', 0.40),
-            ('D', 'metal', 0.10),
-        ]
+        'A': {'cluster': 'grain', 'g_regime': 'bull', 'g_fast': 0.04, 'g_slow': 0.02},
+        'B': {'cluster': 'grain', 'g_regime': 'bear', 'g_fast': -0.10, 'g_slow': -0.08},
+        'C': {'cluster': 'grain', 'g_regime': 'correction', 'g_fast': -0.10, 'g_slow': 0.20,
+              'g_blend': 0.05, 'a_co': 0.5},
+        'D': {'cluster': 'metal', 'g_regime': 'bull', 'g_fast': 0.01, 'g_slow': 0.03},
     }
 
     selected, ranks, scores = tr._select_cluster_cap_universe(
-        signals, ['A', 'B', 'C', 'D'], config, vix_scalar=1.0,
+        signals, ['A', 'B', 'C', 'D'], config,
     )
 
-    assert selected == {'A', 'B', 'D'}
-    assert ranks == {'A': 1, 'B': 2, 'C': 3, 'D': 1}
-    assert scores['A'] > scores['B'] > scores['C']
+    assert selected == {'B', 'C', 'D'}
+    assert ranks == {'B': 1, 'C': 2, 'A': 3, 'D': 1}
+    assert scores == pytest.approx({'A': 0.03, 'B': 0.09, 'C': 0.05, 'D': 0.02})
+
+
+def test_cluster_cap_rank_score_uses_continuous_signal_without_sizing_scalars():
+    config = TsmomLiveConfig(signal_weighting='continuous')
+    signal = {'contin_signal': -0.42}
+
+    assert tr._cluster_cap_rank_score(signal, config) == pytest.approx(0.42)
 
 
 @pytest.mark.parametrize('value', [0.0, -0.25, 0.51])

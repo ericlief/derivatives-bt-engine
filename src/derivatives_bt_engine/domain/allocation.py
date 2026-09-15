@@ -157,9 +157,10 @@ def apply_cluster_risk_cap(targets: list[dict], max_cluster_risk_pct: float,
     rounding threshold at once, even when the top-conviction instrument
     alone would easily survive on the full cap):
 
-      1. Sort the cluster's instruments by priority = abs(combined_scalar),
-         descending -- combined_scalar (not raw signal) since it already folds in
-         vol-targeting, regime discount, and the long-only filter.
+      1. Sort the cluster's instruments by a caller-supplied raw model
+         conviction score (``cluster_universe_score``), descending. When a
+         caller does not supply it, retain the legacy fallback priority
+         ``abs(combined_scalar)``.
       2. Walk the sorted list with remaining_budget starting at the cap.
          For each instrument: affordable_continuous = remaining_budget /
          single_contract_risk (0 if remaining_budget <= 0); usable =
@@ -179,8 +180,9 @@ def apply_cluster_risk_cap(targets: list[dict], max_cluster_risk_pct: float,
          down the sorted list.
 
     Clusters within budget (risk <= cap) are untouched. Mixed-sign
-    clusters work without special-casing -- risk is abs()-based, priority
-    is abs(combined_scalar), direction is sign(original_continuous).
+    clusters work without special-casing -- risk is abs()-based, priority is
+    the raw score (or legacy combined-scalar fallback), direction is sign of
+    original_continuous.
 
     infeasible is an OUTCOME-based flag, computed after every cluster's
     walk-down (or no-op) is final: True for every instrument in a cluster
@@ -193,7 +195,7 @@ def apply_cluster_risk_cap(targets: list[dict], max_cluster_risk_pct: float,
     only the actual result matters.
 
     Each target dict must carry 'cluster', 'fractional_target_contracts',
-    'combined_scalar',
+    'combined_scalar', and optionally 'cluster_universe_score',
     'close', 'mult', 'hv' (already computed per-instrument by the
     caller). Targets with an 'error' key, or missing one of those fields,
     are left untouched and excluded from the risk totals. Mutates and
@@ -249,7 +251,19 @@ def apply_cluster_risk_cap(targets: list[dict], max_cluster_risk_pct: float,
         # instrument's original, unscaled continuous_contracts once, up
         # front, so later iterations of this loop can't see a value
         # another instrument's walk step already changed.
-        members_sorted = sorted(members, key=lambda t: abs(t.get('combined_scalar') or 0.0), reverse=True)
+        def priority(target: dict) -> float:
+            raw_score = target.get('cluster_universe_score')
+            if raw_score is not None and math.isfinite(float(raw_score)):
+                return abs(float(raw_score))
+            return abs(float(target.get('combined_scalar') or 0.0))
+
+        members_sorted = sorted(members, key=priority, reverse=True)
+        log.info(
+            'Cluster-cap walk-down: cluster=%s cap_dvol=$%.0f priority=[%s]',
+            cluster, cap,
+            ', '.join(f"{target['symbol']} raw_score={priority(target):.4f}"
+                      for target in members_sorted),
+        )
         original_continuous = {t['symbol']: t['fractional_target_contracts'] for t in members_sorted}
 
         remaining_budget = cap

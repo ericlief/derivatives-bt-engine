@@ -275,11 +275,12 @@ integer sizing:
 
 This is selection rather than a post-sizing haircut: it retains at most two
 active instruments from each cluster, then recomputes the correlation matrix
-and allocation on those survivors. The ranking is the cap's normal conviction
-priority, `abs(combined_scalar)`, reconstructed before budgeting from the
-signal, own-vol risk scalar, regime discount, confidence, and VIX scalar.
-The symbol is only a deterministic tie-breaker. It is intentionally separate
-from standard lot-aware, which has no cluster policy.
+and allocation on those survivors. The ranking is raw model conviction,
+separate from position sizing: Goulding uses `abs((g_fast + g_slow) / 2)` in
+Bull/Bear and `abs(g_blend)` in Correction/Rebound; continuous mode uses
+`abs(contin_sig)`. The same score orders an over-budget cluster's cap
+walk-down. The symbol is only a deterministic tie-breaker. It is
+intentionally separate from standard lot-aware, which has no cluster policy.
 
 The account risk limit is hard by default and can be relaxed explicitly with
 `--discrete-risk-overrun-pct`. A symbol that has a live signal but cannot fit

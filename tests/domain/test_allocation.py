@@ -923,6 +923,25 @@ def test_cluster_cap_no_op_when_all_clusters_within_budget():
     assert all(t['final_target_contracts'] == 1 for t in out)
 
 
+def test_cluster_cap_prefers_supplied_raw_universe_score_over_combined_scalar():
+    # The live pipeline attaches raw model conviction before it calls the
+    # cap. It must win over the legacy sizing scalar: B has stronger trend
+    # evidence despite A's larger combined scalar.
+    targets = [
+        _target('A', 'grain', continuous_contracts=1, close=100, multiplier=1, hv=1, scalar=0.9),
+        _target('B', 'grain', continuous_contracts=1, close=100, multiplier=1, hv=1, scalar=0.1),
+    ]
+    targets[0]['cluster_universe_score'] = 0.02
+    targets[1]['cluster_universe_score'] = 0.08
+
+    out = apply_cluster_risk_cap(
+        targets, max_cluster_risk_pct=0.25, total_risk_target=100, n_active_clusters=1,
+    )
+
+    assert out[0]['final_target_contracts'] == 0
+    assert out[1]['final_target_contracts'] == 1
+
+
 def test_cluster_cap_within_budget_cluster_untouched():
     # Explicit, isolated within-budget case: continuous=1.3 with a cap so
     # large the cluster never needs the walk-down -- rounds directly,

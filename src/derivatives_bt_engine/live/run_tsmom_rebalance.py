@@ -433,7 +433,8 @@ def parse_args():
     p.add_argument('--max-active-per-cluster', type=int, default=None,
                    help="Only used with --apply-cluster-cap: retain at most this many active "
                         "symbols per cluster before IDM/ERC and sizing (default: no limit). "
-                        "Ranks by abs(combined_scalar), the cap's normal conviction priority")
+                        "Ranks by raw model conviction: Goulding's fast/slow average or eq. 7 "
+                        "blend, and continuous mode's contin_signal")
     p.add_argument('--discrete-allocation', choices=DISCRETE_ALLOCATIONS, default='lot-aware',
                    help="Whole-contract sizing policy (default: %(default)s). 'independent' keeps "
                         "the existing per-symbol rounding. 'lot-aware' rounds all targets at the "
