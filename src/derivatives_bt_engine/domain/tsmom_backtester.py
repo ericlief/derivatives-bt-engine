@@ -670,6 +670,7 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
     mult = futures_types[symbol]['multiplier']
     one_contract_notional = last_close * mult if last_close is not None else None
     fractional_target_contracts = None
+    budget = None
     if config.fixed_quantities is not None:
         # No-rebalancing mode: direction is still signal-driven (there's no
         # other principled way to know when to go short without it), but
@@ -710,6 +711,15 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
         'max_contracts': config.max_contracts,
         'cluster': get_spec(symbol)['cluster'],
         'contin_signal': _col('signal'),
+        'ts': _col('ts'),
+        'ts_regime': _col('regime'),
+        'daily_std': daily_std_last,
+        'vix_scalar': vix_scalar,
+        'pre_scalar_notional_budget': budget,
+        'fractional_target_notional': (
+            fractional_target_contracts * one_contract_notional
+            if fractional_target_contracts is not None and one_contract_notional is not None else None
+        ),
         'hv': hv, 'risk_scalar': risk_scalar * vix_scalar, 'regime_discount': regime_discount,
         'close': last_close, 'dd_pct': dd_pct,
         # Raw signal-row fields, straight from continuous_momentum, purely
@@ -977,6 +987,13 @@ class _PortfolioLedger:
             'a_co': _round(s.get('a_co'), 4), 'a_re': _round(s.get('a_re'), 4),
             'g_blend': _round(s.get('g_blend'), 4),
             'fractional_target_contracts': _round(s.get('fractional_target_contracts'), 4),
+            'fractional_target_notional': _round(s.get('fractional_target_notional'), 2),
+            'pre_scalar_notional_budget': _round(s.get('pre_scalar_notional_budget'), 2),
+            'combined_scalar': _round(s.get('combined_scalar'), 6),
+            'vix_scalar': _round(s.get('vix_scalar'), 4),
+            'ts': _round(s.get('ts'), 4), 'contin_signal': _round(s.get('contin_signal'), 4),
+            'ts_regime': s.get('ts_regime'), 'daily_std': _round(s.get('daily_std'), 6),
+            'cluster': s.get('cluster'), 'mult': _round(s.get('mult'), 6),
             'cluster_universe_rank': s.get('cluster_universe_rank'),
             'cluster_universe_score': _round(s.get('cluster_universe_score'), 6),
             'cluster_universe_excluded': s.get('cluster_universe_excluded', False),

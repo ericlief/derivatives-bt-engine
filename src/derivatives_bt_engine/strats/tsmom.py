@@ -14,12 +14,15 @@ available, so --max-notional needs to be sized accordingly (a single ES
 contract is ~$130k+ notional, vs MES's ~$13k).
 """
 import argparse
+import json
 import os
+from dataclasses import asdict
 from datetime import datetime
 
 import polars as pl
 
 from derivatives_bt_engine.domain.tsmom_backtester import TsmomBacktestConfig, run_tsmom_backtest
+from derivatives_bt_engine.domain.tsmom_reporting import clean_signal_rows, portfolio_rows_from_signals
 
 
 def parse_args():
@@ -150,7 +153,8 @@ def parse_args():
     p.add_argument('--vol-slow-window', type=int, default=None,
                    help="Only used with --signal-weighting continuous: vol-normalization window for "
                         "the slow leg (default: None -> horizon-matched to --slow-window)")
-    p.add_argument('--no-save', action='store_true', help='Skip saving daily_mtm/trend_signals to results/')
+    p.add_argument('--no-save', action='store_true',
+                   help='Skip saving MTM, clean signals, portfolio snapshots, trades, transactions, and run manifest to results/')
     return p.parse_args()
 
 
@@ -237,19 +241,13 @@ def main():
     # no equivalent of: only final capital/cum_pnl/max_dd_usd were ever
     # printed, no Sharpe ratio was computed anywhere, and nothing was saved
     # to a comparable summary CSV.
-    summary_df = pl.DataFrame([{
+    summary_values = {
         'symbols': ','.join(symbols), 'years': args.years,
-        'signal_weighting': args.signal_weighting,
-        'notional_weighting': args.notional_weighting,
-        'use_idm': args.use_idm,
-        'target_portfolio_vol': args.target_portfolio_vol,
-        'apply_cluster_cap': args.apply_cluster_cap,
-        'max_active_per_cluster': args.max_active_per_cluster,
-        'max_cluster_risk_pct': args.max_cluster_risk_pct,
         'n_days': result['n_days'], 'ann_ret_pct': result['ann_ret_pct'],
         'ann_vol_pct': result['ann_vol_pct'], 'sharpe': result['sharpe'],
         'max_dd_pct': result['max_dd_pct'], 'total_fees': result['total_fees'],
-    }])
+    }
+    summary_df = pl.DataFrame([summary_values])
     print()
     print("=== Summary ===")
     print(summary_df)
@@ -263,7 +261,7 @@ def main():
         results_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'results'))
         os.makedirs(results_dir, exist_ok=True)
         symbol_str = '_'.join(symbols)
-        # All five files timestamped -- confirmed directly that without
+        # Every artifact is timestamped -- confirmed directly that without
         # this, re-running the same --symbols/--years with different other
         # params (e.g. --signal-gate-mode/--target-portfolio-vol variants
         # in the same shell script, back to back) silently overwrote the
@@ -272,16 +270,50 @@ def main():
         # timestamp in an earlier version of this, so two runs in the same
         # script left two summary CSVs but only one (the last) set of
         # detail files -- not the intended behavior, fixed by timestamping
-        # all five the same way.
+        # all artifacts the same way.
         ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        run_id = f'backtest_{ts}'
+        clean_signals = clean_signal_rows(events, run_id)
+        equity_by_as_of = {}
+        portfolio_fields_by_as_of = {}
+        for event in events:
+            as_of = event['date'].isoformat()
+            # Events are emitted in symbol order after all daily MTM. The
+            # final symbol's value is the post-rebalance account equity for
+            # that whole rebalance snapshot.
+            equity_by_as_of[as_of] = event['capital']
+        for as_of, equity in equity_by_as_of.items():
+            portfolio_fields_by_as_of[as_of] = {
+                'portfolio_risk_target': (
+                    equity * config.target_portfolio_vol
+                    if config.target_portfolio_vol is not None else None
+                ),
+            }
+        portfolio_rows = portfolio_rows_from_signals(
+            clean_signals, run_id, equity_by_as_of=equity_by_as_of,
+            portfolio_fields_by_as_of=portfolio_fields_by_as_of,
+        )
+        summary_df = pl.DataFrame([{'run_id': run_id, **summary_values}])
         stats.write_csv(os.path.join(results_dir, f"{ts}_tsmom_mtm_{symbol_str}_{start_year}-{end_year}.csv"))
-        pl.DataFrame(events).write_csv(
+        pl.DataFrame(clean_signals).write_csv(
             os.path.join(results_dir, f"{ts}_tsmom_signals_{symbol_str}_{start_year}-{end_year}.csv"))
+        pl.DataFrame(portfolio_rows).write_csv(
+            os.path.join(results_dir, f"{ts}_tsmom_portfolio_{symbol_str}_{start_year}-{end_year}.csv"))
         transactions.write_csv(os.path.join(results_dir, f"{ts}_tsmom_transactions_{symbol_str}_{start_year}-{end_year}.csv"))
         trades.write_csv(os.path.join(results_dir, f"{ts}_tsmom_trades_{symbol_str}_{start_year}-{end_year}.csv"))
         summary_path = os.path.join(results_dir, f"{ts}_tsmom_summary_{symbol_str}_{start_year}-{end_year}.csv")
         summary_df.write_csv(summary_path)
-        print(f"\nSaved summary to {summary_path}")
+        manifest_path = os.path.join(results_dir, f"{ts}_tsmom_run_{symbol_str}_{start_year}-{end_year}.json")
+        with open(manifest_path, 'w') as f:
+            json.dump({
+                'run_id': run_id,
+                'mode': 'backtest',
+                'created_at': datetime.now().isoformat(timespec='seconds'),
+                'data_start': str(stats['date'][0]),
+                'data_end': str(stats['date'][-1]),
+                'config': asdict(config),
+            }, f, indent=2, default=str)
+        print(f"\nSaved summary to {summary_path}; clean signal, portfolio, and run-manifest files share {run_id}")
 
 
 if __name__ == "__main__":
