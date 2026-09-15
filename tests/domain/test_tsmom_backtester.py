@@ -15,6 +15,7 @@ from derivatives_bt_engine.domain import tsmom_backtester as tb
 from derivatives_bt_engine.domain.instruments import get_spec
 from derivatives_bt_engine.domain.tsmom_backtester import (
     TsmomBacktestConfig,
+    _select_cluster_cap_universe,
     check_vol_regime,
     _compute_vix_regime_series,
     _month_end_dates,
@@ -246,6 +247,35 @@ def test_notional_weighting_erc_favors_independent_symbol_over_correlated_pair(m
 def test_notional_weighting_rejects_unknown_scheme():
     with pytest.raises(ValueError):
         TsmomBacktestConfig(symbols=['X'], target_portfolio_vol=0.15, notional_weighting='bogus')
+
+
+def test_cluster_universe_selects_goulding_raw_evidence_before_sizing():
+    """Bull/Bear must not tie merely because each resolved direction is +/-1."""
+    config = TsmomBacktestConfig(
+        symbols=['MZC', 'MZS', 'MES'], signal_weighting='goulding', max_active_per_cluster=1,
+    )
+    probes = {
+        'MZC': {'cluster': 'grain', 'g_regime': 'bull', 'g_fast': .02, 'g_slow': .04,
+                'scalar': 2.0, 'contin_signal': .1},
+        'MZS': {'cluster': 'grain', 'g_regime': 'bull', 'g_fast': .08, 'g_slow': .12,
+                'scalar': .25, 'contin_signal': .1},
+        'MES': {'cluster': 'equity', 'g_regime': 'bear', 'g_fast': -.03, 'g_slow': -.05,
+                'scalar': -1.0, 'contin_signal': -.1},
+    }
+
+    selected, ranks, scores = _select_cluster_cap_universe(probes, list(probes), config)
+
+    assert selected == {'MZS', 'MES'}
+    assert ranks == {'MZS': 1, 'MZC': 2, 'MES': 1}
+    assert scores['MZS'] == pytest.approx(.10)
+    assert scores['MZC'] == pytest.approx(.03)
+
+
+def test_cluster_cap_config_rejects_invalid_limits():
+    with pytest.raises(ValueError, match='max_active_per_cluster'):
+        TsmomBacktestConfig(symbols=['X'], max_active_per_cluster=0)
+    with pytest.raises(ValueError, match='max_cluster_risk_pct'):
+        TsmomBacktestConfig(symbols=['X'], max_cluster_risk_pct=0)
 
 
 def test_fast_slow_window_defaults_and_validation():

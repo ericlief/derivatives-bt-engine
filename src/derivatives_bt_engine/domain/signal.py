@@ -76,7 +76,7 @@ import logging
 import math
 from dataclasses import dataclass
 from datetime import date
-from typing import Optional, cast
+from typing import Mapping, Optional, cast
 
 import polars as pl
 
@@ -806,6 +806,44 @@ def _goulding_direction(regime_val: Optional[str], a_co: float, a_re: float,
         return None
     direction = 1.0 if blend > 0 else (-1.0 if blend < 0 else 0.0)
     return direction, blend
+
+
+def cluster_conviction_score(signal_weighting: str, signal: Mapping[str, object]) -> float:
+    """Return the raw model evidence used to rank a capped cluster universe.
+
+    This is deliberately signal-only: volatility scaling, VIX, confidence,
+    and risk budgets decide *size*, not which underlying trend is strongest.
+    Goulding's Bull/Bear direction is binary, so agreeing states use the
+    absolute equal-weighted fast/slow monthly-return average; disagreement
+    states use the absolute raw equation-7 blend.
+    """
+    def finite(value: object) -> Optional[float]:
+        if value is None:
+            return None
+        value = float(value)
+        return value if math.isfinite(value) else None
+
+    if signal_weighting == 'continuous':
+        return abs(finite(signal.get('contin_signal')) or 0.0)
+
+    regime_value = signal.get('g_regime')
+    regime = (regime_value.value if isinstance(regime_value, TrendRegime)
+              else str(regime_value or '')).lower()
+    fast = finite(signal.get('g_fast'))
+    slow = finite(signal.get('g_slow'))
+    if fast is None or slow is None:
+        return 0.0
+    if regime in ('bull', 'bear'):
+        return abs((fast + slow) / 2.0)
+    if regime in ('correction', 'rebound'):
+        blend = finite(signal.get('g_blend'))
+        if blend is None:
+            weight = finite(signal.get('a_co' if regime == 'correction' else 'a_re'))
+            if weight is None:
+                return 0.0
+            blend = (1.0 - weight) * slow + weight * fast
+        return abs(blend)
+    return 0.0
 
 
 def resolve_trend_direction(signal_weighting: str, continuous_signal: Optional[float],

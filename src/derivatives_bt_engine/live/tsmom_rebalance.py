@@ -79,6 +79,7 @@ from derivatives_bt_engine.domain.signal import (
     classify_signal_confidence,
     compute_signal_confidence,
     compute_vol_ratio,
+    cluster_conviction_score,
     continuous_momentum,
     estimate_mixing_params_diagnostics,
     goulding_monthly,
@@ -410,33 +411,7 @@ def _cluster_cap_rank_score(signal: Mapping[str, object], config: TsmomLiveConfi
     monthly-return evidence: the equal fast/slow average in agreeing states,
     or its actual eq. 7 blend in disagreement states.
     """
-    def finite(value: object) -> Optional[float]:
-        if value is None:
-            return None
-        value = float(value)
-        return value if math.isfinite(value) else None
-
-    if config.signal_weighting == 'continuous':
-        return abs(finite(signal.get('contin_signal')) or 0.0)
-
-    regime_value = signal.get('g_regime')
-    regime = (regime_value.value if isinstance(regime_value, TrendRegime)
-              else str(regime_value or '')).lower()
-    fast = finite(signal.get('g_fast'))
-    slow = finite(signal.get('g_slow'))
-    if fast is None or slow is None:
-        return 0.0
-    if regime in ('bull', 'bear'):
-        return abs((fast + slow) / 2.0)
-    if regime in ('correction', 'rebound'):
-        blend = finite(signal.get('g_blend'))
-        if blend is None:
-            weight = finite(signal.get('a_co' if regime == 'correction' else 'a_re'))
-            if weight is None:
-                return 0.0
-            blend = (1.0 - weight) * slow + weight * fast
-        return abs(blend)
-    return 0.0
+    return cluster_conviction_score(config.signal_weighting, signal)
 
 
 def _select_cluster_cap_universe(signals: Mapping[str, dict], active_symbols: list[str],

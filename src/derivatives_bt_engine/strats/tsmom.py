@@ -110,6 +110,20 @@ def parse_args():
                         "double-counting diversification across the two steps; --no-use-idm isolates "
                         "diversification to the --notional-weighting split alone -- see "
                         "TsmomBacktestConfig.use_idm's own docstring")
+    p.add_argument('--apply-cluster-cap', action='store_true',
+                   help="After IDM/ERC sizing, cap a cluster's aggregate dollar-vol at "
+                        "--max-cluster-risk-pct of account equity × --target-portfolio-vol, "
+                        "redistributing an over-budget cluster by raw model conviction "
+                        "(default: off; only meaningful with --target-portfolio-vol)")
+    p.add_argument('--max-active-per-cluster', type=int, default=None,
+                   help="Before IDM/ERC sizing, retain only the top N active raw-conviction "
+                        "signals in each instrument cluster (default: unlimited). Goulding "
+                        "ranks Bull/Bear by |(g_fast + g_slow)/2| and Correction/Rebound "
+                        "by |g_blend|; it never ranks the binary +/-1 direction.")
+    p.add_argument('--max-cluster-risk-pct', type=float, default=0.25,
+                   help='Cluster cap as a fraction of portfolio dollar-vol target (default: %(default)s)')
+    p.add_argument('--max-lot-overrun-pct', type=float, default=0.5,
+                   help='Allow the cap priority leader one lot this far over its cap (default: %(default)s)')
     p.add_argument('--signal-weighting', choices=['continuous', 'goulding'], default='continuous',
                    help="Signal DIRECTION source (default: %(default)s). 'continuous': "
                         "continuous_momentum's daily trend_strength + --regime-discount. "
@@ -180,6 +194,10 @@ def main():
         corr_halflife_days=args.corr_halflife_days,
         notional_weighting=args.notional_weighting,
         use_idm=args.use_idm,
+        apply_cluster_cap=args.apply_cluster_cap,
+        max_active_per_cluster=args.max_active_per_cluster,
+        max_cluster_risk_pct=args.max_cluster_risk_pct,
+        max_lot_overrun_pct=args.max_lot_overrun_pct,
         signal_weighting=args.signal_weighting,
         mixing_pool=args.mixing_pool,
         fast_window=args.fast_window,
@@ -225,6 +243,9 @@ def main():
         'notional_weighting': args.notional_weighting,
         'use_idm': args.use_idm,
         'target_portfolio_vol': args.target_portfolio_vol,
+        'apply_cluster_cap': args.apply_cluster_cap,
+        'max_active_per_cluster': args.max_active_per_cluster,
+        'max_cluster_risk_pct': args.max_cluster_risk_pct,
         'n_days': result['n_days'], 'ann_ret_pct': result['ann_ret_pct'],
         'ann_vol_pct': result['ann_vol_pct'], 'sharpe': result['sharpe'],
         'max_dd_pct': result['max_dd_pct'], 'total_fees': result['total_fees'],

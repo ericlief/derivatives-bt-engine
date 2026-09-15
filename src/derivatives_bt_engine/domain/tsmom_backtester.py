@@ -29,6 +29,7 @@ import polars as pl
 
 from derivatives_bt_engine.domain.allocation import (
     NOTIONAL_WEIGHTING_SCHEMES,
+    apply_cluster_risk_cap,
     build_returns_wide,
     compute_position_scalar,
     compute_symbol_notional_budget,
@@ -44,6 +45,7 @@ from derivatives_bt_engine.domain.signal import (
     SignalSpec,
     build_features,
     build_monthly_state_return_history,
+    cluster_conviction_score,
     continuous_momentum,
     estimate_mixing_params,
     goulding_monthly,
@@ -280,6 +282,14 @@ class TsmomBacktestConfig:
     slow_window: int = DEFAULT_SLOW_WINDOW
     vol_fast_window: Optional[int] = None
     vol_slow_window: Optional[int] = None
+    # Optional live-parity cluster policy. Selection happens before IDM/ERC
+    # budgeting; the cap then redistributes an over-budget cluster by that
+    # same raw signal conviction. Off by default so established backtests
+    # retain their unconstrained universe.
+    apply_cluster_cap: bool = False
+    max_active_per_cluster: Optional[int] = None
+    max_cluster_risk_pct: float = 0.25
+    max_lot_overrun_pct: float = 0.5
 
     def __post_init__(self):
         if self.signal_gate_mode not in ('off', 'monthly', 'daily'):
@@ -301,6 +311,12 @@ class TsmomBacktestConfig:
                 f"got {len(self.fixed_quantities)} quantities for {len(self.symbols)} symbols "
                 f"({self.symbols})"
             )
+        if self.max_active_per_cluster is not None and self.max_active_per_cluster <= 0:
+            raise ValueError("max_active_per_cluster must be positive when set")
+        if not 0 < self.max_cluster_risk_pct <= 1:
+            raise ValueError("max_cluster_risk_pct must be in (0, 1]")
+        if self.max_lot_overrun_pct < 0:
+            raise ValueError("max_lot_overrun_pct must be non-negative")
 
 
 def check_vol_regime(vix_ratio: Optional[float]) -> VolRegime:
@@ -652,6 +668,8 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
     ) * vix_scalar
 
     mult = futures_types[symbol]['multiplier']
+    one_contract_notional = last_close * mult if last_close is not None else None
+    fractional_target_contracts = None
     if config.fixed_quantities is not None:
         # No-rebalancing mode: direction is still signal-driven (there's no
         # other principled way to know when to go short without it), but
@@ -669,12 +687,12 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
             target = direction * round(fixed_qty * vix_scalar)
     else:
         budget = notional_budget if notional_budget is not None else config.max_notional
-        one_contract_notional = last_close * mult
-        target = round((budget * scalar) / one_contract_notional) if one_contract_notional else 0
+        fractional_target_contracts = (budget * scalar) / one_contract_notional if one_contract_notional else 0.0
+        target = round(fractional_target_contracts)
     target = max(-config.max_contracts, min(config.max_contracts, target))
 
     return {
-        'target': target, 'signal': trend_strength, 'regime': regime,
+        'symbol': symbol, 'target': target, 'signal': trend_strength, 'regime': regime,
         # scalar itself (pre-notional-conversion, post-vix_scalar) --
         # not printed/logged anywhere before this, needed by
         # run_tsmom_backtest's target_portfolio_vol handling to decide which
@@ -683,6 +701,15 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
         # rounds to 0 contracts at one budget can still be "active" at a
         # bigger one (see run_tsmom_backtest's own two-pass comment).
         'scalar': scalar,
+        # Preserve the continuous contract target independently of Python's
+        # integer round() so the optional cluster-cap pass can allocate its
+        # finite dollar-vol budget before one-lot discreteness takes over.
+        'fractional_target_contracts': fractional_target_contracts,
+        'combined_scalar': scalar,
+        'mult': mult,
+        'max_contracts': config.max_contracts,
+        'cluster': get_spec(symbol)['cluster'],
+        'contin_signal': _col('signal'),
         'hv': hv, 'risk_scalar': risk_scalar * vix_scalar, 'regime_discount': regime_discount,
         'close': last_close, 'dd_pct': dd_pct,
         # Raw signal-row fields, straight from continuous_momentum, purely
@@ -736,6 +763,42 @@ def _goulding_kwargs_for(config: TsmomBacktestConfig, rebal_monthly: dict[str, p
     a_co, a_re = mixing_params_by_cluster.get(get_spec(symbol)['cluster'], (0.5, 0.5))
     return {'g_regime_val': g_regime_val, 'g_fast_val': g_fast_val, 'g_slow_val': g_slow_val,
             'a_co': a_co, 'a_re': a_re}
+
+
+def _select_cluster_cap_universe(probe_results: dict[str, dict], active_symbols: list[str],
+                                 config: TsmomBacktestConfig) -> tuple[set[str], dict[str, int], dict[str, float]]:
+    """Keep the top raw-conviction active signals per cluster, if requested.
+
+    This is intentionally performed on probe results before IDM/ERC: an
+    excluded symbol must not enter the correlation matrix or consume any of
+    the portfolio dollar-vol budget. The score is model evidence only, not
+    a post-vol-targeting scalar.
+    """
+    by_cluster: dict[str, list[str]] = {}
+    score_by_symbol: dict[str, float] = {}
+    for symbol in active_symbols:
+        result = probe_results[symbol]
+        score_by_symbol[symbol] = cluster_conviction_score(config.signal_weighting, result)
+        by_cluster.setdefault(result['cluster'], []).append(symbol)
+
+    if config.max_active_per_cluster is None:
+        return set(active_symbols), {}, score_by_symbol
+
+    selected: set[str] = set()
+    rank_by_symbol: dict[str, int] = {}
+    for cluster, members in sorted(by_cluster.items()):
+        ranked = sorted(members, key=lambda symbol: (-score_by_symbol[symbol], symbol))
+        for rank, symbol in enumerate(ranked, start=1):
+            rank_by_symbol[symbol] = rank
+            if rank <= config.max_active_per_cluster:
+                selected.add(symbol)
+        logger.info(
+            'Cluster-cap universe: cluster=%s max_active=%d ranked=[%s] selected=[%s]',
+            cluster, config.max_active_per_cluster,
+            ', '.join(f'{symbol} score={score_by_symbol[symbol]:.4f}' for symbol in ranked),
+            ', '.join(ranked[:config.max_active_per_cluster]) or 'none',
+        )
+    return selected, rank_by_symbol, score_by_symbol
 
 
 class _PortfolioLedger:
@@ -912,6 +975,12 @@ class _PortfolioLedger:
             'g_regime': s.get('g_regime'), 'g_fast': _round(s.get('g_fast'), 4),
             'g_slow': _round(s.get('g_slow'), 4),
             'a_co': _round(s.get('a_co'), 4), 'a_re': _round(s.get('a_re'), 4),
+            'g_blend': _round(s.get('g_blend'), 4),
+            'fractional_target_contracts': _round(s.get('fractional_target_contracts'), 4),
+            'cluster_universe_rank': s.get('cluster_universe_rank'),
+            'cluster_universe_score': _round(s.get('cluster_universe_score'), 6),
+            'cluster_universe_excluded': s.get('cluster_universe_excluded', False),
+            'infeasible': s.get('infeasible', False),
             # Portfolio-level capital snapshot as of this event (after
             # today's mark-to-market and this event's own commission fee,
             # both already applied above) -- previously only available in
@@ -1249,7 +1318,11 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
                         if result is not None:
                             probe_results[symbol] = result
 
-                    active_symbols = [s for s, r in probe_results.items() if r['scalar'] != 0]
+                    initial_active_symbols = [s for s, r in probe_results.items() if r['scalar'] != 0]
+                    active_symbols, cluster_universe_rank, cluster_universe_score = _select_cluster_cap_universe(
+                        probe_results, initial_active_symbols, config,
+                    )
+                    active_symbols = sorted(active_symbols)
 
                     # IDM-derived, correlation-aware per-symbol budget -- see
                     # compute_symbol_notional_budget's own docstring for the
@@ -1269,6 +1342,7 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
                         config.vol_target, config.corr_window_years, config.corr_halflife_days,
                         config.notional_weighting, config.use_idm)
 
+                    final_results: dict[str, dict] = {}
                     for symbol in config.symbols:
                         result = probe_results.get(symbol)
                         if result is None:
@@ -1281,6 +1355,40 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
                                                           vix_scalar, annualization_by_symbol[symbol],
                                                           notional_budget=per_symbol_budget[symbol],
                                                           **_goulding_kwargs_for(config, rebal_monthly, symbol, d, mixing_params_by_cluster))
+                        result['cluster_universe_rank'] = cluster_universe_rank.get(symbol)
+                        result['cluster_universe_score'] = cluster_universe_score.get(symbol)
+                        result['cluster_universe_excluded'] = (
+                            symbol in initial_active_symbols and symbol not in active_symbols
+                        )
+                        if symbol not in active_symbols:
+                            # The raw model signal remains in the audit row,
+                            # but it receives no IDM/ERC budget and must be
+                            # flat before any cluster cap is considered.
+                            result['target'] = 0
+                            result['fractional_target_contracts'] = 0.0
+                        final_results[symbol] = result
+
+                    if config.apply_cluster_cap and active_symbols:
+                        # Match the live cap's denominator: account equity
+                        # times target portfolio vol, rather than the
+                        # post-IDM sum of component dollar-vol budgets.
+                        # The selected universe is already the actual IDM/
+                        # ERC universe, so its cluster count is the one the
+                        # 1/n floor should use.
+                        n_active_clusters = len({final_results[s]['cluster'] for s in active_symbols})
+                        apply_cluster_risk_cap(
+                            list(final_results.values()), config.max_cluster_risk_pct,
+                            ledger.capital * config.target_portfolio_vol, n_active_clusters,
+                            max_lot_overrun_pct=config.max_lot_overrun_pct, apply_cap=True,
+                        )
+                        for symbol in active_symbols:
+                            result = final_results[symbol]
+                            result['target'] = result['final_target_contracts']
+
+                    for symbol in config.symbols:
+                        result = final_results.get(symbol)
+                        if result is None:
+                            continue
                         target, gate_reason = _apply_signal_gate(ledger.held_contracts[symbol], result['target'], result, config)
                         ledger.rebalance_to(symbol, target, d, vol_regime, vix_close=vix_close,
                                             vix_ratio=vix_ratio, signal={**result, 'gate_reason': gate_reason})
