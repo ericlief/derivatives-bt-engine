@@ -378,6 +378,26 @@ def test_notional_budget_flat_gives_every_symbol_the_same_budget():
     assert budget['A'] == pytest.approx(budget['C'])
 
 
+def test_notional_budget_exposes_the_exact_idm_diagnostics_when_requested():
+    price_data = _corr_price_data()
+    returns_wide = build_returns_wide(price_data)
+    as_of = price_data['A']['ts_event'][-1]
+    diagnostics = {}
+
+    budget = compute_symbol_notional_budget(
+        ['A', 'B', 'C'], returns_wide, as_of, capital=100_000, target_portfolio_vol=0.15,
+        vol_target=0.15, corr_window_years=3.0, corr_halflife_days=63.0,
+        notional_weighting='erc', use_idm=True, diagnostics=diagnostics,
+    )
+
+    assert diagnostics['H'].shape == (3, 3)
+    assert diagnostics['idm_multiplier'] > 0
+    assert diagnostics['total_dollar_vol_target'] == pytest.approx(
+        100_000 * .15 * diagnostics['idm_multiplier']
+    )
+    assert sum(budget.values()) * .15 == pytest.approx(diagnostics['total_dollar_vol_target'])
+
+
 @pytest.mark.parametrize('notional_weighting', ['erc', 'hrp'])
 def test_notional_budget_data_driven_schemes_favor_independent_symbol(notional_weighting):
     # Same intuition as compute_erc_weights/compute_hrp_weights' own tests

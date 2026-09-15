@@ -283,11 +283,12 @@ def main():
             # that whole rebalance snapshot.
             equity_by_as_of[as_of] = event['capital']
         for as_of, equity in equity_by_as_of.items():
+            last_event = next(event for event in reversed(events) if event['date'].isoformat() == as_of)
             portfolio_fields_by_as_of[as_of] = {
-                'portfolio_risk_target': (
-                    equity * config.target_portfolio_vol
-                    if config.target_portfolio_vol is not None else None
-                ),
+                'portfolio_risk_target': last_event.get('portfolio_risk_target'),
+                'idm_risk_target': last_event.get('idm_risk_target'),
+                'realized_portfolio_risk': last_event.get('realized_portfolio_risk'),
+                'idm_multiplier': last_event.get('idm_multiplier'),
             }
         portfolio_rows = portfolio_rows_from_signals(
             clean_signals, run_id, equity_by_as_of=equity_by_as_of,

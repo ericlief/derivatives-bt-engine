@@ -31,6 +31,7 @@ from derivatives_bt_engine.domain.allocation import (
     NOTIONAL_WEIGHTING_SCHEMES,
     apply_cluster_risk_cap,
     build_returns_wide,
+    compute_realized_portfolio_risk,
     compute_position_scalar,
     compute_symbol_notional_budget,
 )
@@ -998,6 +999,11 @@ class _PortfolioLedger:
             'cluster_universe_score': _round(s.get('cluster_universe_score'), 6),
             'cluster_universe_excluded': s.get('cluster_universe_excluded', False),
             'infeasible': s.get('infeasible', False),
+            'portfolio_risk_target': _round(s.get('portfolio_risk_target'), 2),
+            'idm_risk_target': _round(s.get('idm_risk_target'), 2),
+            'realized_portfolio_risk': _round(s.get('realized_portfolio_risk'), 2),
+            'idm_multiplier': _round(s.get('idm_multiplier'), 6),
+            'portfolio_risk_contribution': _round(s.get('portfolio_risk_contribution'), 2),
             # Portfolio-level capital snapshot as of this event (after
             # today's mark-to-market and this event's own commission fee,
             # both already applied above) -- previously only available in
@@ -1354,10 +1360,11 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
                     # too little history yet for a bounded-window correlation
                     # estimate -- nobody trades this month regardless (every
                     # probe result's own target is already 0 in that case).
+                    budget_diagnostics: dict = {}
                     per_symbol_budget = compute_symbol_notional_budget(
                         active_symbols, returns_wide, d, ledger.capital, config.target_portfolio_vol,
                         config.vol_target, config.corr_window_years, config.corr_halflife_days,
-                        config.notional_weighting, config.use_idm)
+                        config.notional_weighting, config.use_idm, diagnostics=budget_diagnostics)
 
                     final_results: dict[str, dict] = {}
                     for symbol in config.symbols:
@@ -1401,6 +1408,41 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
                         for symbol in active_symbols:
                             result = final_results[symbol]
                             result['target'] = result['final_target_contracts']
+
+                    # Preserve the exact sizing diagnostics from the budget
+                    # pass, then measure the final *integer* book against
+                    # that same H. Re-estimating H here would risk reporting
+                    # a different correlation window than the one actually
+                    # used to allocate this rebalance.
+                    portfolio_risk_target = ledger.capital * config.target_portfolio_vol
+                    idm_multiplier = budget_diagnostics.get('idm_multiplier')
+                    idm_risk_target = budget_diagnostics.get('total_dollar_vol_target')
+                    H = budget_diagnostics.get('H')
+                    realized_portfolio_risk = None
+                    risk_contribution_by_symbol: dict[str, float] = {}
+                    if H is not None and active_symbols:
+                        dollar_exposure = {}
+                        for symbol in active_symbols:
+                            result = final_results[symbol]
+                            one_contract_dvol = (
+                                abs(float(result['close']) * float(result['mult']) * float(result['hv']))
+                                if result.get('close') is not None and result.get('mult') is not None
+                                and result.get('hv') is not None else 0.0
+                            )
+                            dollar_exposure[symbol] = math.copysign(
+                                abs(float(result['target'])) * one_contract_dvol,
+                                float(result['target']),
+                            ) if result['target'] else 0.0
+                        realized = compute_realized_portfolio_risk(active_symbols, H, dollar_exposure)
+                        realized_portfolio_risk = realized['port_vol']
+                        risk_contribution_by_symbol = realized['portfolio_risk_contribution']
+
+                    for symbol, result in final_results.items():
+                        result['portfolio_risk_target'] = portfolio_risk_target
+                        result['idm_risk_target'] = idm_risk_target
+                        result['idm_multiplier'] = idm_multiplier
+                        result['realized_portfolio_risk'] = realized_portfolio_risk
+                        result['portfolio_risk_contribution'] = risk_contribution_by_symbol.get(symbol)
 
                     for symbol in config.symbols:
                         result = final_results.get(symbol)

@@ -1602,7 +1602,8 @@ def compute_symbol_notional_budget(active_symbols: list[str], returns_wide: Opti
                                     notional_weighting: str = 'flat',
                                     use_idm: bool = True,
                                     H: Optional[np.ndarray] = None,
-                                    covered: Optional[np.ndarray] = None) -> dict[str, float]:
+                                    covered: Optional[np.ndarray] = None,
+                                    diagnostics: Optional[dict] = None) -> dict[str, float]:
     """IDM-derived per-symbol notional_budget for TsmomBacktestConfig's
     target_portfolio_vol path (tsmom_backtester.py's run_tsmom_backtest) --
     the correlation-aware alternative to sizing off a flat config.max_notional.
@@ -1685,7 +1686,17 @@ def compute_symbol_notional_budget(active_symbols: list[str], returns_wide: Opti
     _coverage_restricted_idm, which excludes uncovered symbols from the
     measurement entirely rather than crediting them at a merely-smaller
     weight. Both recomputed from returns_wide when H is omitted (the
-    default)."""
+    default).
+
+    `diagnostics`, when supplied, is cleared then populated with the exact
+    ``H``, coverage mask, split, IDM multiplier, and total dollar-vol target
+    used for this budget. The return type deliberately remains the original
+    ``dict[symbol, notional_budget]`` so established callers remain stable;
+    this opt-in out-parameter exists for reporting the same sizing state
+    rather than reconstructing it later with a potentially different window.
+    """
+    if diagnostics is not None:
+        diagnostics.clear()
     if notional_weighting not in NOTIONAL_WEIGHTING_SCHEMES:
         raise ValueError(f"notional_weighting must be one of {NOTIONAL_WEIGHTING_SCHEMES}, "
                           f"got {notional_weighting!r}")
@@ -1703,6 +1714,15 @@ def compute_symbol_notional_budget(active_symbols: list[str], returns_wide: Opti
     split = compute_notional_split(active_symbols, notional_weighting, H, covered)
     idm_multiplier = _coverage_restricted_idm(active_symbols, H, covered, weights=split) if use_idm else 1.0
     total_dollar_vol_target = capital * target_portfolio_vol * idm_multiplier
+
+    if diagnostics is not None:
+        diagnostics.update({
+            'H': H,
+            'covered': covered,
+            'notional_split': split,
+            'idm_multiplier': idm_multiplier,
+            'total_dollar_vol_target': total_dollar_vol_target,
+        })
 
     return {s: (total_dollar_vol_target * split[s]) / vol_target for s in active_symbols}
 
