@@ -20,7 +20,8 @@ SIGNAL_COLUMNS = (
     'day_std', 'hv', 'dd_pct', 'risk_sc', 'reg_disc', 'vx_sc', 'comb_sc',
     'cur_con', 'frac_con', 'tgt_con', 'max_con', 'rnd_gap', 'zero_why',
     'clust_rank', 'clust_score', 'clust_excl',
-    'pre_sc_not_bud', 'frac_tgt_not', 'frac_tgt_dvol', 'pos_dvol', 'port_risk_con',
+    'not_weighting', 'pre_sc_not_bud', 'not_alloc_w',
+    'frac_tgt_not', 'frac_tgt_dvol', 'pos_dvol', 'port_risk_con',
 )
 
 PORTFOLIO_COLUMNS = (
@@ -112,7 +113,9 @@ def clean_signal_rows(rows: Iterable[Mapping], run_id: str, *, as_of=None) -> li
             'clust_rank': _number(_value(source, 'cluster_universe_rank', 'clust_rank')),
             'clust_score': _number(_value(source, 'cluster_universe_score', 'clust_score')),
             'clust_excl': bool(_value(source, 'cluster_universe_excluded', 'clust_excl') or False),
+            'not_weighting': _value(source, 'notional_weighting', 'not_weighting'),
             'pre_sc_not_bud': _number(_value(source, 'pre_scalar_notional_budget')),
+            'not_alloc_w': _number(_value(source, 'notional_allocation_weight', 'not_alloc_w')),
             'frac_tgt_not': fractional_notional,
             'frac_tgt_dvol': fractional_dvol,
             'pos_dvol': position_dvol,

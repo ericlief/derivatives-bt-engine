@@ -20,7 +20,8 @@ def test_clean_signal_rows_share_live_backtest_schema_without_config_echoes():
         'current_contracts': 0, 'fractional_target_contracts': .4294,
         'final_target_contracts': 0, 'max_contracts': 15,
         'cluster_universe_rank': 1, 'cluster_universe_score': .015,
-        'pre_scalar_notional_budget': 12944.96,
+            'notional_weighting': 'erc', 'pre_scalar_notional_budget': 12944.96,
+            'notional_allocation_weight': .0714,
         # Static configuration is intentionally present in raw targets but
         # must live only in the run manifest after projection.
         'use_idm': True, 'notional_weighting': 'erc', 'max_active_per_cluster': 2,
@@ -33,6 +34,8 @@ def test_clean_signal_rows_share_live_backtest_schema_without_config_echoes():
     assert rows[0]['frac_tgt_not'] == pytest.approx(.4294 * 7685.75 * 5)
     assert rows[0]['frac_tgt_dvol'] == pytest.approx(.4294 * 7685.75 * 5 * .1177)
     assert rows[0]['pos_dvol'] == 0.0
+    assert rows[0]['not_weighting'] == 'erc'
+    assert rows[0]['not_alloc_w'] == pytest.approx(.0714)
     assert 'use_idm' not in rows[0]
     assert 'notional_weighting' not in rows[0]
     assert 'max_active_per_cluster' not in rows[0]

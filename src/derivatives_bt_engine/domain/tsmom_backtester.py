@@ -990,6 +990,8 @@ class _PortfolioLedger:
             'fractional_target_contracts': _round(s.get('fractional_target_contracts'), 4),
             'fractional_target_notional': _round(s.get('fractional_target_notional'), 2),
             'pre_scalar_notional_budget': _round(s.get('pre_scalar_notional_budget'), 2),
+            'notional_weighting': s.get('notional_weighting'),
+            'notional_allocation_weight': _round(s.get('notional_allocation_weight'), 6),
             'combined_scalar': _round(s.get('combined_scalar'), 6),
             'vix_scalar': _round(s.get('vix_scalar'), 4),
             'ts': _round(s.get('ts'), 4), 'contin_signal': _round(s.get('contin_signal'), 4),
@@ -1383,6 +1385,10 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
                         result['cluster_universe_score'] = cluster_universe_score.get(symbol)
                         result['cluster_universe_excluded'] = (
                             symbol in initial_active_symbols and symbol not in active_symbols
+                        )
+                        result['notional_weighting'] = config.notional_weighting
+                        result['notional_allocation_weight'] = (
+                            budget_diagnostics.get('notional_split', {}).get(symbol)
                         )
                         if symbol not in active_symbols:
                             # The raw model signal remains in the audit row,
