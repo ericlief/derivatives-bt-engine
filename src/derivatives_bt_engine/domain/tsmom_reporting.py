@@ -21,7 +21,7 @@ SIGNAL_COLUMNS = (
     'cur_con', 'frac_con', 'tgt_con', 'max_con', 'rnd_gap', 'zero_why',
     'clust_rank', 'clust_score', 'clust_excl',
     'not_weighting', 'pre_sc_not_bud', 'not_alloc_w',
-    'frac_tgt_not', 'frac_tgt_dvol', 'pos_dvol', 'port_risk_con',
+    'one_con_not', 'frac_tgt_not', 'frac_tgt_dvol', 'pos_dvol', 'port_risk_con',
 )
 
 PORTFOLIO_COLUMNS = (
@@ -74,6 +74,9 @@ def clean_signal_rows(rows: Iterable[Mapping], run_id: str, *, as_of=None) -> li
         fractional_notional = _number(_value(source, 'fractional_target_notional'))
         if fractional_notional is None and fractional_contracts is not None and close is not None and mult is not None:
             fractional_notional = fractional_contracts * close * mult
+        one_contract_notional = _number(_value(source, 'one_contract_notional', 'one_con_not'))
+        if one_contract_notional is None and close is not None and mult is not None:
+            one_contract_notional = abs(close * mult)
         fractional_dvol = _number(_value(source, 'fractional_target_dollar_vol'))
         if fractional_dvol is None and fractional_notional is not None and hv is not None:
             fractional_dvol = abs(fractional_notional) * hv
@@ -122,6 +125,7 @@ def clean_signal_rows(rows: Iterable[Mapping], run_id: str, *, as_of=None) -> li
             'not_weighting': _value(source, 'notional_weighting', 'not_weighting'),
             'pre_sc_not_bud': _dollars(_value(source, 'pre_scalar_notional_budget')),
             'not_alloc_w': _number(_value(source, 'notional_allocation_weight', 'not_alloc_w')),
+            'one_con_not': _dollars(one_contract_notional),
             'frac_tgt_not': _dollars(fractional_notional),
             'frac_tgt_dvol': _dollars(fractional_dvol),
             'pos_dvol': _dollars(position_dvol),

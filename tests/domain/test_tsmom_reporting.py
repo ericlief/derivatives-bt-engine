@@ -34,6 +34,7 @@ def test_clean_signal_rows_share_live_backtest_schema_without_config_echoes():
     assert rows[0]['frac_tgt_not'] == 16_501.31
     assert rows[0]['frac_tgt_dvol'] == 1_942.20
     assert rows[0]['pos_dvol'] == 0.0
+    assert rows[0]['one_con_not'] == 38_428.75
     assert rows[0]['not_weighting'] == 'erc'
     assert rows[0]['not_alloc_w'] == pytest.approx(.0714)
     assert 'use_idm' not in rows[0]
