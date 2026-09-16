@@ -42,6 +42,23 @@ def test_clean_signal_rows_share_live_backtest_schema_without_config_echoes():
     assert 'max_active_per_cluster' not in rows[0]
 
 
+def test_clean_signal_rows_round_non_dollar_floats_to_four_decimals():
+    rows = clean_signal_rows([{
+        'date': date(2026, 9, 15), 'symbol': 'MES', 'close': 7685.751234,
+        'mult': 5.123456, 'g_fast': .0123456, 'daily_std': .0073456,
+        'hv': .117756, 'fractional_target_contracts': .429456,
+        'notional_allocation_weight': .071456,
+    }], 'live_20260915')
+
+    assert rows[0]['close'] == 7685.7512
+    assert rows[0]['mult'] == 5.1235
+    assert rows[0]['g_fast'] == .0123
+    assert rows[0]['day_std'] == .0073
+    assert rows[0]['hv'] == .1178
+    assert rows[0]['frac_con'] == .4295
+    assert rows[0]['not_alloc_w'] == .0715
+
+
 def test_portfolio_rows_are_one_snapshot_per_as_of_date():
     rows = clean_signal_rows([
         {'date': date(2026, 9, 15), 'symbol': 'MES', 'cluster': 'equity',
