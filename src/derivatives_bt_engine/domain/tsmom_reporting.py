@@ -85,7 +85,7 @@ def clean_signal_rows(rows: Iterable[Mapping], run_id: str, *, as_of=None) -> li
             position_dvol = abs(target_contracts * close * mult * hv)
         rounding_gap = _number(_value(source, 'rounding_gap'))
         if rounding_gap is None and fractional_contracts is not None and target_contracts is not None:
-            rounding_gap = abs(fractional_contracts - target_contracts)
+            rounding_gap = abs(round(fractional_contracts - target_contracts, 2))
 
         row = {
             'run_id': run_id,
