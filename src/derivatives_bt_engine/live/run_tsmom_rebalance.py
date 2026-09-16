@@ -70,105 +70,29 @@ log = logging.getLogger('derivatives_bt_engine.live.run_tsmom_rebalance')
 
 DEFAULT_MAX_NOTIONAL = float(os.getenv('TSMOM_DEFAULT_MAX_NOTIONAL', '0')) or None
 
-# CSV-column labels only -- target dictionaries deliberately keep descriptive
-# canonical names for code/API use, while the saved, wide rebalance CSV uses
-# compact names that remain specific about sizing stage and units. Keeping
-# this at the output boundary avoids reviving ambiguous internal names such as
-# `raw_not` or `budg_const`.
-_CSV_COLUMN_LABEL = {
-    'symbol': 'symbol',
-    'current_contracts': 'cur_con',
-    'final_target_contracts': 'tgt_con',
-    'fractional_target_contracts': 'frac_con',
-    'max_contracts': 'max_con',
-    'infeasible': 'infeas',
-    'active': 'active',
-    'cluster': 'cluster',
-    'close': 'close',
-    'mult': 'mult',
-    'daily_std': 'day_std',
-    'hv': 'hv',
-    'dd_pct': 'dd_pct',
-    'g_regime': 'g_regime',
-    'g_fast': 'g_fast',
-    'g_slow': 'g_slow',
-    'a_co': 'a_co',
-    'a_re': 'a_re',
-    'g_blend': 'g_blend',
-    'signal': 'g_sig',
-    'vol_regime': 'vol_reg',
-    'ts_fast': 'ts_fast',
-    'ts_slow': 'ts_slow',
-    'ts': 'ts',
-    'contin_sig': 'contin_sig',
-    'ts_regime': 'ts_reg',
-    'risk_scalar': 'risk_sc',
-    'reg_discount': 'reg_disc',
-    'sig_confid_reg': 'sig_conf_reg',
-    'sig_confid': 'sig_conf',
-    'vol_ratio': 'vol_ratio',
-    'vix_scalar': 'vx_sc',
-    'combined_scalar': 'comb_sc',
-    'idm_multiplier': 'idm_mult',
-    'account_equity': 'acct_eq',
-    'n_effective_clusters': 'n_eff',
-    'portfolio_risk_target': 'port_risk_tgt',
-    'idm_risk_target': 'idm_risk_tgt',
-    'realized_portfolio_risk': 'real_port_risk',
-    'discrete_allocation': 'disc_alloc',
-    'discrete_risk_overrun_pct': 'disc_over_pct',
-    'min_fractional_contracts': 'min_frac_con',
-    'max_active_per_cluster': 'max_act_clust',
-    'cluster_universe_rank': 'clust_rank',
-    'cluster_universe_score': 'clust_score',
-    'cluster_universe_excluded': 'clust_excl',
-    'integer_risk_limit': 'int_risk_lim',
-    'integer_zero_reason': 'int_zero_why',
-    'cluster_dollar_vol_budget': 'clust_dvol_bud',
-    'vol_target': 'vol_tgt',
-    'target_portfolio_vol': 'port_vol_tgt',
-    'pre_scalar_notional_budget': 'pre_sc_not_bud',
-    'notional_allocation_weight': 'not_alloc_w',
-    'pre_scalar_dollar_vol_budget': 'pre_sc_dvol_bud',
-    'fractional_target_dollar_vol': 'frac_tgt_dvol',
-    'standalone_position_dollar_vol': 'pos_dvol',
-    'portfolio_risk_contribution': 'port_risk_con',
-    'uncapped_fractional_target_notional': 'uncap_frac_tgt_not',
-    'fractional_target_notional': 'frac_tgt_not',
-    'one_contract_notional': 'one_con_not',
-    'one_contract_dollar_vol': 'one_con_dvol',
-    'rounding_gap': 'rnd_gap',
-    'scalar_capped': 'risk_sc_bound',
-    'zero_reason': 'zero_why',
-    'max_cluster_risk_pct': 'max_clust_risk_pct',
-    'max_lot_overrun_pct': 'max_lot_over_pct',
-    'risk_budget_mode': 'risk_budg_mode',
-    'notional_weighting': 'not_weighting',
-    'use_idm': 'use_idm',
-    'vx_current': 'vx_cur',
-    'vx_ma': 'vx_ma',
-    'vx_ratio': 'vx_ratio',
-    'error': 'error',
-}
-
-# USD amounts are spreadsheet-facing accounting values and consistently use
-# cents. Prices deliberately stay out of this set: an FX close such as J7
-# needs more than two decimals to remain meaningful.
-_DOLLAR_REPORT_FIELDS = {
-    'account_equity', 'portfolio_risk_target', 'idm_risk_target',
-    'realized_portfolio_risk', 'integer_risk_limit',
-    'cluster_dollar_vol_budget', 'pre_scalar_notional_budget',
-    'pre_scalar_dollar_vol_budget', 'fractional_target_dollar_vol',
-    'standalone_position_dollar_vol', 'portfolio_risk_contribution',
-    'uncapped_fractional_target_notional', 'fractional_target_notional',
-    'one_contract_notional', 'one_contract_dollar_vol',
-}
+REBALANCE_COLUMNS = ('symbol', 'cluster', 'cur_con', 'tgt_con', 'delta_con', 'action')
 
 
-def _csv_label(key: str) -> str:
-    """Compact CSV label for a descriptive target-dictionary field name."""
-    return _CSV_COLUMN_LABEL.get(key, key)
-
+def _rebalance_delta_rows(targets: list[dict]) -> list[dict]:
+    """Return only actionable current-to-target contract changes."""
+    rows = []
+    for target in targets:
+        current = target.get('current_contracts')
+        final = target.get('final_target_contracts')
+        if current is None or final is None:
+            continue
+        delta = final - current
+        if delta == 0:
+            continue
+        rows.append({
+            'symbol': target.get('symbol'),
+            'cluster': target.get('cluster'),
+            'cur_con': current,
+            'tgt_con': final,
+            'delta_con': delta,
+            'action': 'BUY' if delta > 0 else 'SELL',
+        })
+    return rows
 
 def configure_logging() -> str:
     """Use the package-wide file handler shared by live and backtest modules."""
@@ -275,58 +199,21 @@ def _save_report(cluster_report: str, targets: list[dict], config: TsmomLiveConf
             writer.writerows(mixing_rows)
         log.info('Saved per-cluster mixing-params diagnostics to %s', mixing_csv_path)
 
-    # symbol -> current/target position first (the columns you actually
-    # scan a rebalance report for), THEN one dedicated goulding-decision
-    # block (regime -> raw g_fast/g_slow -> mixing weights a_co/a_re ->
-    # blend -> the resolved direction, g_sig -- None under
-    # signal_weighting='continuous'), THEN a fully separate continuous-
-    # momentum-only block (ts_fast/ts_slow/ts/contin_sig are ALWAYS
-    # computed regardless of signal_weighting, so this block is populated
-    # even in 'goulding' mode -- kept apart from the goulding block above
-    # so the two models' columns never interleave), and finally the
-    # sizing-math trail / run-level (CLI-echoed) params, in the order
-    # you'd actually want to follow that calculation.
-    priority = ['symbol', 'current_contracts', 'final_target_contracts',
-                'fractional_target_contracts', 'max_contracts', 'infeasible',
-                'g_regime', 'g_fast', 'g_slow', 'a_co', 'a_re', 'g_blend', 'g_sig',
-                'vol_regime', 'ts_fast', 'ts_slow', 'ts', 'contin_sig', 'ts_regime',
-                'risk_scalar', 'reg_discount',
-                'sig_confid_reg', 'sig_confid', 'vol_ratio', 'vix_scalar',
-                'combined_scalar', 'idm_multiplier',
-                'account_equity', 'n_effective_clusters',
-                'portfolio_risk_target', 'idm_risk_target', 'realized_portfolio_risk',
-                'discrete_allocation', 'discrete_risk_overrun_pct', 'min_fractional_contracts',
-                'integer_risk_limit', 'max_active_per_cluster', 'cluster_universe_rank',
-                'cluster_universe_score', 'cluster_universe_excluded',
-                'integer_zero_reason',
-                'cluster_dollar_vol_budget', 'vol_target', 'target_portfolio_vol',
-                'pre_scalar_notional_budget', 'notional_allocation_weight',
-                'pre_scalar_dollar_vol_budget', 'fractional_target_dollar_vol',
-                'standalone_position_dollar_vol', 'portfolio_risk_contribution',
-                'uncapped_fractional_target_notional', 'fractional_target_notional', 'one_contract_notional',
-                'one_contract_dollar_vol',
-                'rounding_gap', 'scalar_capped', 'zero_reason',
-                'max_cluster_risk_pct', 'max_lot_overrun_pct']
-    rounded_rows = [
-        {_csv_label(k): (round(v, 2 if k in _DOLLAR_REPORT_FIELDS else 4)
-                         if isinstance(v, float) and not math.isnan(v) else v)
-         for k, v in t.items()}
-        for t in targets
-    ]
-    all_keys = {key for row in rounded_rows for key in row}
-    compact_priority = [_csv_label(key) for key in priority]
-    fieldnames = [key for key in compact_priority if key in all_keys] + sorted(all_keys - set(compact_priority))
+    # The rebalance report is an execution blotter, deliberately not a
+    # second copy of the full per-symbol signal and sizing sheet below.
+    # Flat/no-change rows cannot produce an order, so omit them entirely.
+    rebalance_rows = _rebalance_delta_rows(targets)
     if save_local:
         csv_path = os.path.join(results_dir, f'tsmom_live_rebalance_{ts}.csv')
         with open(csv_path, 'w', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer = csv.DictWriter(
+                f, fieldnames=REBALANCE_COLUMNS,
+            )
             writer.writeheader()
-            writer.writerows(rounded_rows)
+            writer.writerows(rebalance_rows)
 
-    # The legacy rebalance CSV above remains the exhaustive raw target
-    # audit. These three artifacts are the stable Sheets-facing contract:
-    # a compact per-symbol signal sheet, one portfolio snapshot, and a
-    # manifest containing static configuration exactly once.
+    # The clean signal and portfolio sheets are the stable diagnostic
+    # contract; static configuration lives only in the run manifest.
     signal_rows = clean_signal_rows(targets, run_id, as_of=as_of)
     if save_local:
         signal_path = os.path.join(results_dir, f'tsmom_live_signals_{ts}.csv')
