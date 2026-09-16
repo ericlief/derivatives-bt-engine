@@ -165,6 +165,10 @@ def parse_args():
                         'same across grid parameter combinations')
     p.add_argument('--window-report-max-years', type=int, default=5,
                    help='Capped rolling-window width used by --window-report (default: %(default)s)')
+    p.add_argument('--sheets-spreadsheet', default=None, metavar='NAME',
+                   help='Upload compact TSMOM report tabs to this existing Google spreadsheet. '
+                        'Requires GSPREAD_KEY and the service account to have Editor access; '
+                        'omitting this flag keeps the run local-only.')
     p.add_argument('--no-save', action='store_true',
                    help='Skip saving MTM, clean signals, portfolio snapshots, trades, transactions, and run manifest to results/')
     return p.parse_args()
@@ -277,6 +281,44 @@ def main():
         with pl.Config(tbl_rows=-1):
             print(window_summary)
 
+    # Build the compact cross-mode report contract once. --no-save controls
+    # local files only; an explicitly named spreadsheet remains an opt-in
+    # external destination for the same report frames.
+    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+    run_id = f'backtest_{ts}'
+    symbol_str = '_'.join(symbols)
+    clean_signals = clean_signal_rows(events, run_id)
+    equity_by_as_of = {}
+    portfolio_fields_by_as_of = {}
+    for event in events:
+        as_of = event['date'].isoformat()
+        equity_by_as_of[as_of] = event['capital']
+    for as_of in equity_by_as_of:
+        last_event = next(event for event in reversed(events) if event['date'].isoformat() == as_of)
+        portfolio_fields_by_as_of[as_of] = {
+            'portfolio_risk_target': last_event.get('portfolio_risk_target'),
+            'idm_risk_target': last_event.get('idm_risk_target'),
+            'realized_portfolio_risk': last_event.get('realized_portfolio_risk'),
+            'idm_multiplier': last_event.get('idm_multiplier'),
+        }
+    portfolio_rows = portfolio_rows_from_signals(
+        clean_signals, run_id, equity_by_as_of=equity_by_as_of,
+        portfolio_fields_by_as_of=portfolio_fields_by_as_of,
+    )
+    summary_df = pl.DataFrame([{'run_id': run_id, **summary_values}])
+    sheet_frames = {
+        'signals': pl.DataFrame(clean_signals),
+        'portfolio': pl.DataFrame(portfolio_rows),
+        'summary': summary_df,
+    }
+    if window_metrics is not None:
+        sheet_frames['window_metrics'] = window_metrics.with_columns(run_id=pl.lit(run_id)).select(
+            'run_id', *window_metrics.columns
+        )
+        sheet_frames['window_summary'] = window_summary.with_columns(run_id=pl.lit(run_id)).select(
+            'run_id', *window_summary.columns
+        )
+
     if not args.no_save:
         # Anchored to the project root rather than a bare relative
         # "results" -- a bare relative path silently creates results/results
@@ -285,7 +327,6 @@ def main():
         # prior output.
         results_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'results'))
         os.makedirs(results_dir, exist_ok=True)
-        symbol_str = '_'.join(symbols)
         # Every artifact is timestamped -- confirmed directly that without
         # this, re-running the same --symbols/--years with different other
         # params (e.g. --signal-gate-mode/--target-portfolio-vol variants
@@ -296,30 +337,6 @@ def main():
         # script left two summary CSVs but only one (the last) set of
         # detail files -- not the intended behavior, fixed by timestamping
         # all artifacts the same way.
-        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-        run_id = f'backtest_{ts}'
-        clean_signals = clean_signal_rows(events, run_id)
-        equity_by_as_of = {}
-        portfolio_fields_by_as_of = {}
-        for event in events:
-            as_of = event['date'].isoformat()
-            # Events are emitted in symbol order after all daily MTM. The
-            # final symbol's value is the post-rebalance account equity for
-            # that whole rebalance snapshot.
-            equity_by_as_of[as_of] = event['capital']
-        for as_of, equity in equity_by_as_of.items():
-            last_event = next(event for event in reversed(events) if event['date'].isoformat() == as_of)
-            portfolio_fields_by_as_of[as_of] = {
-                'portfolio_risk_target': last_event.get('portfolio_risk_target'),
-                'idm_risk_target': last_event.get('idm_risk_target'),
-                'realized_portfolio_risk': last_event.get('realized_portfolio_risk'),
-                'idm_multiplier': last_event.get('idm_multiplier'),
-            }
-        portfolio_rows = portfolio_rows_from_signals(
-            clean_signals, run_id, equity_by_as_of=equity_by_as_of,
-            portfolio_fields_by_as_of=portfolio_fields_by_as_of,
-        )
-        summary_df = pl.DataFrame([{'run_id': run_id, **summary_values}])
         stats.write_csv(os.path.join(results_dir, f"{ts}_tsmom_mtm_{symbol_str}_{start_year}-{end_year}.csv"))
         pl.DataFrame(clean_signals).write_csv(
             os.path.join(results_dir, f"{ts}_tsmom_signals_{symbol_str}_{start_year}-{end_year}.csv"))
@@ -330,14 +347,10 @@ def main():
         summary_path = os.path.join(results_dir, f"{ts}_tsmom_summary_{symbol_str}_{start_year}-{end_year}.csv")
         summary_df.write_csv(summary_path)
         if window_metrics is not None:
-            window_metrics.with_columns(run_id=pl.lit(run_id)).select(
-                'run_id', *window_metrics.columns
-            ).write_csv(os.path.join(
+            sheet_frames['window_metrics'].write_csv(os.path.join(
                 results_dir, f"{ts}_tsmom_window_metrics_{symbol_str}_{start_year}-{end_year}.csv"
             ))
-            window_summary.with_columns(run_id=pl.lit(run_id)).select(
-                'run_id', *window_summary.columns
-            ).write_csv(os.path.join(
+            sheet_frames['window_summary'].write_csv(os.path.join(
                 results_dir, f"{ts}_tsmom_window_summary_{symbol_str}_{start_year}-{end_year}.csv"
             ))
         manifest_path = os.path.join(results_dir, f"{ts}_tsmom_run_{symbol_str}_{start_year}-{end_year}.json")
@@ -355,6 +368,13 @@ def main():
                 } if args.window_report else None,
             }, f, indent=2, default=str)
         print(f"\nSaved summary to {summary_path}; clean signal, portfolio, and run-manifest files share {run_id}")
+
+    if args.sheets_spreadsheet:
+        from derivatives_bt_engine.utils.tsmom_sheets import upload_tsmom_frames
+        upload_tsmom_frames(
+            spreadsheet_name=args.sheets_spreadsheet,
+            run_label=f'tsmom_backtest_{symbol_str}', frames=sheet_frames,
+        )
 
 
 if __name__ == "__main__":

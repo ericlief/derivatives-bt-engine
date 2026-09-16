@@ -198,6 +198,9 @@ def parse_args():
                    help='Capped rolling-window width for causal OOS scoring (default: %(default)s)')
     p.add_argument('--max-workers', type=int, default=None,
                    help='Process pool size (default: os.cpu_count())')
+    p.add_argument('--sheets-spreadsheet', default=None, metavar='NAME',
+                   help='Upload grid summary, causal-window metrics, and symbol diagnostics to this '
+                        'existing Google spreadsheet. Requires GSPREAD_KEY and service-account Editor access.')
     p.add_argument('--no-save', action='store_true', help='Skip saving the results CSV')
     return p.parse_args()
 
@@ -227,11 +230,12 @@ def main():
     with pl.Config(tbl_rows=-1):
         print(results.summary.sort('C_capped_rolling_sharpe_mean', descending=True))
 
+    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+    symbol_str = '_'.join(symbols)
+
     if not args.no_save:
         results_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'results'))
         os.makedirs(results_dir, exist_ok=True)
-        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-        symbol_str = '_'.join(symbols)
         path = os.path.join(results_dir, f"tsmom_grid_{symbol_str}_{start_year}-{end_year}_{ts}.csv")
         metrics_path = os.path.join(
             results_dir, f"tsmom_grid_window_metrics_{symbol_str}_{start_year}-{end_year}_{ts}.csv"
@@ -244,6 +248,18 @@ def main():
         results.symbol_details.write_csv(symbols_path)
         print(f"\nSaved {results.summary.height} parameter rows to {path}")
         print(f"Saved {results.window_metrics.height} causal OOS window rows to {metrics_path}")
+
+    if args.sheets_spreadsheet:
+        from derivatives_bt_engine.utils.tsmom_sheets import upload_tsmom_frames
+        upload_tsmom_frames(
+            spreadsheet_name=args.sheets_spreadsheet,
+            run_label=f'tsmom_grid_{symbol_str}',
+            frames={
+                'summary': results.summary,
+                'window_metrics': results.window_metrics,
+                'symbol_details': results.symbol_details,
+            },
+        )
 
 
 if __name__ == "__main__":
