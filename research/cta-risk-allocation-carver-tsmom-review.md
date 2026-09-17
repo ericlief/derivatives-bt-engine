@@ -35,14 +35,13 @@ canonical Moskowitz-Ooi-Pedersen (MOP) TSMOM nor a complete Carver system.
   baseline should therefore be slow, whole-universe, grouped/equal strategic risk
   budgets plus a separate covariance-based risk overlay and the existing
   lot-aware implementation. Shrinkage ERC is the first challenger. A Carver-style
-  bootstrap on weekly subsystem returns is a research challenger, not the default.
+  bootstrap on pre-cost weekly subsystem returns, with costs handled separately,
+  is a research challenger, not the default.
 
-There is also a material implementation issue that must be frozen or fixed before
-the signal comparison: the continuous correction/rebound discount is apparently
-applied twice. `continuous_momentum.signal` already equals `ts * discount` in
-those regimes, but `resolve_trend_direction` returns the discount again and
-`compute_position_scalar` multiplies by it. The effective exposure is therefore
-proportional to `ts * discount^2`, before confidence and VIX overlays.
+The formerly identified continuous correction/rebound double-discount defect is
+now fixed: `continuous_momentum.signal` remains the one discounted value and
+`resolve_trend_direction` returns a position-layer discount of 1.0. Historical
+runs produced before that fix must not be mixed with the corrected candidates.
 
 ## Direct answers to the motivating questions
 
@@ -113,8 +112,8 @@ There is no single correct `H`, because there are several distinct decisions:
 
 | Decision | Appropriate history | Preferred observations | Return object |
 |---|---|---|---|
-| Strategic instrument weights | Expanding history; update annually | Weekly synchronized returns | Net subsystem P&L after frozen forecast blend and instrument-vol scaling |
-| Forecast-rule weights | Expanding/poolable history; update annually | Weekly rule P&L | Net P&L for each normalized rule on a common instrument/risk basis |
+| Strategic instrument weights | Expanding history; update annually | Weekly synchronized returns | Pre-cost subsystem P&L for correlation/risk; expected costs applied separately to eligibility and weight economics |
+| Forecast-rule weights | Expanding/poolable history; update annually | Weekly rule P&L | Pre-cost P&L for dependence; net expected return or an explicit cost penalty for selection/weights |
 | Forecast diversification multiplier | Expanding or long EWM; update/smooth slowly | Weekly forecast values | Correlation of normalized forecast values, not market returns |
 | Monthly risk budget/IDM | Bounded recent history, e.g. current 3 years with 63- or 126-day half-life | Synchronized daily or weekly returns | Raw or dynamically volatility-normalized underlying returns |
 | Realized active-book risk | Same covariance snapshot used for sizing | Current positions | Signed post-rounding dollar-vol exposures through the covariance/correlation matrix |
@@ -163,27 +162,27 @@ throws away the blend magnitude and retains direction. The code is therefore a
 weight from the paper. The raw blend is already retained for audit and is a
 natural pre-registered continuous challenger.
 
-#### Confirmed double discount
+#### Resolved double discount
 
-[`resolve_trend_direction`](../src/derivatives_bt_engine/domain/signal.py#L849)
-receives `continuous_momentum.signal`, then returns `regime_discount_cfg` again
-for correction/rebound. Both live and backtest call
+[`resolve_trend_direction`](../src/derivatives_bt_engine/domain/signal.py#L943)
+receives `continuous_momentum.signal`, which is already discounted in
+correction/rebound, and now returns `regime_discount=1.0` in continuous mode.
+Both live and backtest call
 [`compute_position_scalar`](../src/derivatives_bt_engine/domain/allocation.py#L49),
-which multiplies the returned trend strength by that discount. Subject to no
-other cap, continuous correction/rebound exposure is currently
+so subject to no other cap the corrected exposure is
 
 \[
 \text{position scalar}
-= ts\;d^2\;\frac{\sigma^*}{\hat\sigma}\;c\;v,
+= ts\;d\;\frac{\sigma^*}{\hat\sigma}\;c\;v,
 \]
 
-where `d` is the regime discount, `c` confidence, and `v` the VIX overlay.
-Comments in both functions describe only one discount, so this appears
-unintentional. The Goulding path correctly returns a regime discount of 1.
+where `d` is the regime discount, `c` confidence, and `v` the VIX overlay. The
+Goulding path also returns a position-layer regime discount of 1 because its
+mixing rule already determines the disagreement-state forecast.
 
 ### 1.2 Allocation and `H`
 
-[`build_returns_wide`](../src/derivatives_bt_engine/domain/allocation.py#L1087)
+[`build_returns_wide`](../src/derivatives_bt_engine/domain/allocation.py#L1092)
 computes daily close-to-close simple returns and inner-joins every supplied
 symbol. This has two implications:
 
@@ -191,19 +190,19 @@ symbol. This has two implications:
 2. dates missing for any symbol in the supplied dictionary are discarded before
    the active subset is passed to `H`.
 
-[`_bounded_ewm_correlation_matrix`](../src/derivatives_bt_engine/domain/allocation.py#L1107)
+[`_bounded_ewm_correlation_matrix`](../src/derivatives_bt_engine/domain/allocation.py#L1112)
 uses only rows strictly before the rebalance date, first bounds the history, and
 then applies recency weights. The joint weighted Gram construction produces a PSD
 correlation matrix. Current defaults are a three-year outer window and 63-trading-
 day half-life. An explicit coverage vector distinguishes “unmeasured” from a true
 zero correlation.
 
-[`compute_erc_weights`](../src/derivatives_bt_engine/domain/allocation.py#L1313)
+[`compute_erc_weights`](../src/derivatives_bt_engine/domain/allocation.py#L1318)
 solves equal risk contribution on this correlation matrix. Using correlation
 rather than raw covariance is deliberate because per-instrument inverse-volatility
 sizing already equalizes standalone risk.
 
-[`compute_symbol_notional_budget`](../src/derivatives_bt_engine/domain/allocation.py#L1598):
+[`compute_symbol_notional_budget`](../src/derivatives_bt_engine/domain/allocation.py#L1610):
 
 1. obtains flat, ERC, or HRP risk-budget shares `w`;
 2. computes `IDM = 1/sqrt(w' H w)` when enabled;
@@ -218,9 +217,9 @@ For a fractional pre-signal book, this algebra is coherent: component risks
 Forecast attenuation, overlays, caps, changing signs, and integer lots mean the
 implemented book need not hit that target.
 
-[`compute_idm`](../src/derivatives_bt_engine/domain/allocation.py#L1730) floors
+[`compute_idm`](../src/derivatives_bt_engine/domain/allocation.py#L1737) floors
 negative correlations at zero only for the multiplier. ERC and HRP use the signed
-matrix. [`compute_realized_portfolio_risk`](../src/derivatives_bt_engine/domain/allocation.py#L1782)
+matrix. [`compute_realized_portfolio_risk`](../src/derivatives_bt_engine/domain/allocation.py#L1789)
 correctly passes signed post-sizing dollar-vol exposure through `H` and produces
 Euler risk contributions.
 
@@ -418,7 +417,58 @@ portfolio risk after instruments are combined. They do not determine the same
 relative weights as forecast/instrument optimization. They should not be used to
 count the same diversification twice.
 
-### 4.4 Why the 2015 demo is not a turnkey replacement here
+### 4.4 Fees are not diversification
+
+Contract commissions, bid/ask slippage, and roll costs determine whether a rule
+or market is economical and what the investor ultimately earns. They do not
+normally describe an economic diversification relationship. Feeding fee debits
+into `H` can be actively misleading: if every market is resized on the same
+monthly date, simultaneous negative fee observations mechanically raise measured
+correlation even though the markets themselves did not become more related.
+
+The clean subsystem return for `H_subsystem` is therefore pre-cost:
+
+```text
+lagged normalized forecast position
+× lagged instrument-volatility scale
+× economic futures return
+```
+
+It excludes instrument portfolio weight, IDM, the portfolio risk scalar,
+integer-lot rounding, commissions, and slippage. Daily pre-cost subsystem P&L is
+then summed into non-overlapping weekly observations. For binary Goulding the
+forecast term is `+1` or `-1`; for a continuous rule it contains the normalized
+forecast magnitude as well as direction.
+
+Costs still enter three important places:
+
+1. exclude rules or markets whose expected cost overwhelms their plausible
+   gross edge;
+2. penalize expected returns in forecast/instrument weight estimation; and
+3. calculate final net backtest and implemented-account P&L using actual lots.
+
+Current `pysystemtrade` happens to pass
+`pandl_across_subsystems().to_frame()` into its instrument-correlation estimator,
+and its account curves default to net P&L. Its cash-cost engine infers fills from
+position changes, charges configured spread/slippage and commission, adds roll
+pseudo-fills, and only then aggregates daily P&L to weekly. This is an
+implementation convention, not a mathematical requirement of IDM
+([portfolio path](https://github.com/pst-group/pysystemtrade/blob/develop/systems/portfolio.py),
+[account-curve default](https://github.com/pst-group/pysystemtrade/blob/develop/systems/accounts/curves/account_curve.py),
+[cash-cost calculation](https://github.com/pst-group/pysystemtrade/blob/develop/systems/accounts/pandl_calculators/pandl_cash_costs.py)).
+Exact replication should report that net version, but this project's primary
+`H_subsystem` should remain pre-cost and report gross-versus-net `H` only as a
+sensitivity.
+
+The repository's current fee convention reinforces that choice. It charges a
+full round-trip commission when contracts are reduced or closed while opening or
+increasing is free, and it does not model bid/ask slippage in this path. Lifetime
+commission can be approximately right, but deferring the entry-side cost until
+exit makes the weekly timing unsuitable for estimating dependence. Preserve this
+model for the current net-P&L baseline until separately revised; do not inject it
+into `H`.
+
+### 4.5 Why the 2015 demo is not a turnkey replacement here
 
 The three-asset 2015 post demonstrates estimation methods. It assumes a mostly
 dense portfolio and warns that bootstrapping is problematic for sparse selection.
@@ -431,7 +481,8 @@ profitability
 
 For this project, a faithful Carver challenger would therefore use:
 
-- weekly, synchronized **subsystem returns**, preferably net of realistic costs;
+- weekly, synchronized **pre-cost subsystem returns** for dependence, with
+  realistic costs treated separately in optimization and net performance;
 - whole eligible-universe strategic weights rather than each month's signal-
   active set;
 - expanding estimation with annual updates and smoothing/buffering;
@@ -550,7 +601,7 @@ Recommendations:
 
 1. Rename conceptually, even if not yet in code:
    - `H_market`: recent underlying/vol-normalized returns for monthly live risk;
-   - `H_subsystem`: weekly subsystem P&L for annual strategic weights;
+   - `H_subsystem`: pre-cost weekly subsystem P&L for annual strategic weights;
    - `H_forecast`: normalized forecast-value correlations for FDM.
 2. Preserve complete same-date cross-sections in resampling. If a date row is
    selected, select all markets together.
@@ -561,6 +612,73 @@ Recommendations:
    `x'Hx`; that double-applies direction.
 5. Audit pairwise availability. The current all-symbol inner join discards a date
    even if only an irrelevant inactive market is missing.
+
+### 6.1 Daily-versus-weekly IDM diagnostic
+
+[`scripts/weekly_idm_diagnostic.py`](../scripts/weekly_idm_diagnostic.py) is a
+read-only, Polars-based reproduction of the repository's current `H`, ERC, and
+IDM calculations. It compares:
+
+- current daily returns with a literal 63-trading-day half-life;
+- weekly returns with pandas `ewm(span=25)`, matching current
+  `pysystemtrade`'s instrument-correlation frequency and decay;
+- weekly returns with a calendar-matched `63 / 5 = 12.6`-week half-life;
+- slower 26-week and deliberately mis-unitized 63-week sensitivities.
+
+The script compounds only completed Monday-Sunday weeks, labels them at Sunday,
+and relies on `_bounded_ewm_correlation_matrix`'s strict-before-`as_of` slice, so
+an incomplete week cannot enter an estimate. All inputs are pre-cost. Run:
+
+```bash
+.venv/bin/python -m scripts.weekly_idm_diagnostic
+.venv/bin/python -m scripts.weekly_idm_diagnostic --show-roll-audit
+```
+
+On the default twelve markets, the synchronized sample contained 4,032 daily
+rows and 837 weekly rows from June 2010 through June 2026. After a full
+three-year burn-in there were 157 monthly estimates from June 2013 through June
+2026:
+
+| Estimator | Mean flat-weight IDM | Standard deviation | Mean absolute monthly change | Mean positive-floored pair correlation | Approximate EWM effective observations |
+|---|---:|---:|---:|---:|---:|
+| Daily, half-life 63 days | 2.0122 | 0.0916 | 0.0328 | 0.1803 | 181.7 daily |
+| Weekly, span 25 | 1.9205 | 0.1402 | 0.0771 | 0.2100 | 25.0 weekly |
+| Weekly, half-life 12.6 weeks | 1.9430 | 0.1332 | 0.0586 | 0.2025 | 36.4 weekly |
+| Weekly, half-life 26 weeks | 1.9641 | 0.1237 | 0.0333 | 0.1955 | 72.7 weekly |
+| Weekly, half-life 63 weeks | 1.9614 | 0.1207 | 0.0192 | 0.1960 | 126.4 weekly |
+
+The terminology matters. `pysystemtrade`'s weekly `ewm(span=25)` is a half-life
+of approximately 8.66 weekly observations, or about 43 trading days. Passing
+`63` directly as the half-life after changing the rows from daily to weekly
+would mean 63 **weeks**, not 63 trading days.
+
+Relative to the current daily estimator, weekly span 25 produced:
+
+- mean flat-weight IDM lower by `0.0917`, about 4.6%;
+- a 12-month circular-block-bootstrap 95% interval of `[-0.1302, -0.0577]` for
+  that mean difference;
+- mean ERC-weight L1 distance of `0.1583`; and
+- latest available flat-weight IDM of `1.6775`, versus `1.9793` daily.
+
+The weekly estimator was therefore more conservative but also markedly less
+stable when recomputed monthly. A simple next-63-daily-observation calibration
+check produced mean realized-risk/target ratios of `0.936` daily versus `0.894`
+weekly span 25, with mean absolute errors of `0.094` and `0.122`, respectively.
+Those forward windows overlap and realized risk is measured on daily closes, so
+this is diagnostic evidence, not an independent performance test. It provides no
+basis for replacing the daily `H_market` baseline yet.
+
+This test is also not a full Carver replication. Its weekly rows are compounded
+raw underlying returns. A genuine `H_subsystem` challenger must first construct
+pre-cost, volatility-scaled strategy P&L with lagged binary or continuous
+forecasts and correct same-contract roll economics. The current unadjusted
+front-contract close series can put contract-switch level changes into both daily
+and weekly returns; weekly resampling does not repair them. The optional roll
+audit confirms material contamination in the default sample: corn's absolute
+roll-day return has a 95th percentile of `10.73%`, versus a `5.07%` 99th
+percentile on non-roll days; soybeans show `6.15%` versus `3.86%`, and wheat
+`7.38%` versus `5.78%`. These are diagnostics of the raw series, not economic
+subsystem returns.
 
 ## 7. Universe and inactivity policies
 
@@ -710,7 +828,7 @@ grid would consume the 16-year sample through data snooping.
 | B0 | Goulding binary direction | Equal top-level cluster risk; equal within cluster | Shrunk `H_market` for monitoring/portfolio scale; whole eligible universe | Annual budgets, monthly risk | `±10` convention only; no economic change | None | Ignores strength; discrete cluster imbalance |
 | B1 | Corrected continuous `tanh` | Same as B0 | Same as B0; zero signal leaves cash | Annual/monthly | Causal pooled forecast-10 calibration, cap once | None | Calibration/tanh redundancy; attenuation underuses risk |
 | C1 | B0 and B1 reported separately | Whole-universe shrinkage ERC | Three-year EWM, 63-day half-life; 126-day sensitivity | Monthly ERC, buffered | As above | None | Correlation noise and weight turnover |
-| C2 | B0 and B1 reported separately | Whole-universe Carver bootstrap on net weekly subsystem P&L, equal means | `H_market` only for risk overlay | Annual, smoothed | As above | None | Short history; bootstrap randomness; small weights |
+| C2 | B0 and B1 reported separately | Whole-universe Carver bootstrap on pre-cost weekly subsystem P&L, equal means; explicit cost penalty | `H_market` only for risk overlay | Annual, smoothed | As above | None | Short history; bootstrap randomness; small weights |
 | S1 | Same as C2 | Carver bootstrap with sample means | Same | Annual | Same | None | Mean-estimation error; corner/cumulative selection bias |
 | U1 | Best robust signal/weight pair from prior stage | Recalculate ERC on above-threshold active set | Current three-year EWM `H` | Monthly | Same fixed calibration | None | Endogenous threshold and forced redeployment |
 | A1 | Frozen trend winner + normalized outright carry | Fixed grouped or shrinkage ERC | Whole-universe, style-aware subsystem risk | Annual/monthly | Normalize rules separately; FDM | Outright carry only | Trend/carry correlation and cost mismeasurement |
@@ -799,8 +917,8 @@ Pre-register these estimator details:
 | Slower ERC | trailing 5 years where available | daily | half-life 126 days | same |
 | Shrinkage ERC | trailing 3 years | daily/weekly sensitivity | analytic or frozen prior-data shrinkage toward constant correlation | same |
 | Min variance | trailing 3 years | dynamically vol-normalized returns | same shrinkage | 2.5%–20% weight bounds, sum 1 |
-| Carver IID | expanding | weekly subsystem returns | 500 resamples; 104 rows per resample; fixed seed; equal vols and equal means | long-only, 2.5%–20%, sum 1 |
-| Stationary bootstrap | expanding | weekly subsystem returns | 500 resamples; expected block length 4 weeks; fixed seed | same |
+| Carver IID | expanding | pre-cost weekly subsystem returns; costs penalized separately | 500 resamples; 104 rows per resample; fixed seed; equal vols and equal means | long-only, 2.5%–20%, sum 1 |
+| Stationary bootstrap | expanding | same pre-cost weekly subsystem returns | 500 resamples; expected block length 4 weeks; fixed seed | same |
 
 Carver's public defaults are 200 × 250 daily rows in the illustrative code and
 104 weekly rows in the later system example. The proposed 500 × 104 weekly design
@@ -962,11 +1080,12 @@ baseline without letting activity gates redefine the universe.
 
 ### 3. Second empirical challenger
 
-Annual expanding Carver-style bootstrap on costed weekly subsystem returns, equal
-volatility, equal or heavily shrunk means, fixed seed, bounded weights, and
-smoothed transitions. This is the right Carver comparison. The unrestricted
-sample-mean version is diagnostic because 13 scored years are too little for
-confident mean ranking.
+Annual expanding Carver-style bootstrap on pre-cost weekly subsystem returns,
+equal volatility, equal or heavily shrunk gross means, fixed seed, bounded
+weights, smoothed transitions, and an explicit expected-cost penalty or
+eligibility ceiling. This keeps dependence and execution economics separate
+while still selecting on net plausibility. The unrestricted sample-mean version
+is diagnostic because 13 scored years are too little for confident mean ranking.
 
 ### 4. Legacy/behavioral challenger
 
@@ -1118,8 +1237,14 @@ market database.
 - Carver, R. “Portfolio Construction Through Handcrafting: Empirical Tests.”
   2019.
   [Post](https://qoppac.blogspot.com/2019/02/portfolio-construction-through_9.html).
+- Carver, R. “Optimising Weights with Costs.” 2016.
+  [Post](https://qoppac.blogspot.com/2016/05/optimising-weights-with-costs.html).
+- Carver, R. “How Fast Should We Trade?” 2020.
+  [Post](https://qoppac.blogspot.com/2020/04/how-fast-should-we-trade.html).
 - `pysystemtrade` project documentation.
-  [Backtesting documentation](https://github.com/pst-group/pysystemtrade/blob/master/docs/backtesting.md).
+  [Backtesting documentation](https://github.com/pst-group/pysystemtrade/blob/develop/docs/backtesting.md),
+  [instrument-correlation defaults](https://github.com/pst-group/pysystemtrade/blob/develop/sysdata/config/defaults.yaml),
+  and [exponential-correlation implementation](https://github.com/pst-group/pysystemtrade/blob/develop/sysquant/estimators/exponential_correlation.py).
 
 ### Inference and backtest selection
 
