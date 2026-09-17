@@ -8,6 +8,7 @@ import pytest
 
 import derivatives_bt_engine.data.pysystemtrade_import as importer
 from derivatives_bt_engine.data.pysystemtrade_import import (
+    ImportResult,
     ImportValidationError,
     build_sidecar,
 )
@@ -173,3 +174,29 @@ def test_refuses_existing_output_without_replace(tmp_path: Path) -> None:
         build_sidecar(source, output)
 
     assert output.read_bytes() == b"keep me"
+
+
+def test_cli_main_returns_success_value_not_result_object(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    output = tmp_path / "sidecar.duckdb"
+    monkeypatch.setattr(
+        importer,
+        "build_sidecar",
+        lambda *args, **kwargs: ImportResult(
+            output_path=output,
+            source_git_commit=TEST_SOURCE_COMMIT,
+            manifest_files=8,
+            multiple_rows=2,
+            adjusted_rows=2,
+        ),
+    )
+
+    result = importer.main(
+        ["--source", str(tmp_path / "source"), "--output", str(output)]
+    )
+
+    assert result is None
+    assert "Built" in capsys.readouterr().out

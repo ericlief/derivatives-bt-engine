@@ -16,8 +16,19 @@ load_dotenv()
 
 # ── Infrastructure ─────────────────────────────────────────────────────────
 _DEFAULT_GLOBEX_DB_PATH = '/home/dev/fin/db/globex_mdp_3.0.duckdb'
+GLOBEX_CACHE_SCHEMA_VERSION = 1
 
 logger = setup_logger()
+
+
+def globex_daily_cache_path(data_dir: str, asset: str) -> str:
+    """Versioned path for the legacy Globex continuous-price cache."""
+    return os.path.join(
+        data_dir,
+        "globex",
+        f"v{GLOBEX_CACHE_SCHEMA_VERSION}",
+        f"{asset}_daily.parquet",
+    )
 
 # Front-month roll: for each trading date, take the not-yet-expired futures
 # contract for `asset` with the HIGHEST VOLUME that day (real liquidity, not
@@ -136,7 +147,7 @@ class FuturesDataLoader(BaseDataLoader):
 
     @property
     def _daily_processed_path(self) -> str:
-        return os.path.join(self.data_dir, f"{self.asset}_daily.parquet")
+        return globex_daily_cache_path(self.data_dir, self.asset)
 
     @cached_property
     def daily(self) -> pl.DataFrame:
@@ -157,6 +168,7 @@ class FuturesDataLoader(BaseDataLoader):
         assert_monotonic_expiration(df, self.asset)
 
         if self.save_preprocessed:
+            os.makedirs(os.path.dirname(self._daily_processed_path), exist_ok=True)
             df.write_parquet(self._daily_processed_path)
             logger.info(f"Saved data to {self._daily_processed_path}")
 

@@ -92,6 +92,65 @@ published atomically. The importer also refuses to use the configured Globex
 path as its output. Generated DuckDB files and temporary builds are ignored by
 Git.
 
+## Phase 2 and 3 implementation status
+
+Phase 2 now provides a source-neutral `FuturesHistory` object with independent
+signal, mark, and carry frames. `PysystemtradeHistoryProvider` constructs the
+signal stream as `delta(adjusted_price) / same-day current price` and compounds
+that return into a strictly positive index. The negative Panama-adjusted level
+is retained for audit but never enters percentage-return math. Marks retain the
+raw selected-contract price and contract ID, while carry retains only
+same-timestamp current/carry pairs. `GlobexHistoryProvider` builds its signal
+return from each selected contract's own prior close, including across a
+contract change, rather than treating a roll gap as market movement.
+
+Both providers open DuckDB read-only. Cache paths are isolated by source and
+history schema version; pysystemtrade caches additionally include the source
+Git commit, while Globex research caches include a database fingerprint. The
+legacy `FuturesDataLoader` default remains Globex-only, but its cache moved to
+the source/version-qualified `globex/v1` namespace.
+
+Phase 3 now has a reproducible `futures-overlap-report` CLI. The generated
+[14-market report](pysystemtrade-overlap/report.md),
+[machine-readable summary](pysystemtrade-overlap/summary.csv), and
+[roll matches](pysystemtrade-overlap/rolls.csv), plus the
+[source-specific missing dates](pysystemtrade-overlap/missing_dates.csv),
+compare 2010-06-07 through
+2024-03-29 without changing either database. All mappings remain candidates;
+the automated recommendation is triage, not approval.
+
+Important findings are:
+
+- JPY/6J is the only mapping currently clearing the automatic return/trend
+  thresholds for manual approval review: 0.908 daily-return correlation,
+  0.973 trend correlation, and 96.9% contract-month agreement.
+- US10/ZN is similarly strong (0.903 return and 0.983 trend correlation) but
+  remains blocked on explicit Treasury fractional-price scale validation.
+- Silver has a material session-date issue: its best correlation occurs with
+  Globex shifted one calendar day, so no shift is applied automatically.
+- `CRUDE_W` is an annual December winter contract, not a monthly WTI front
+  contract. `CORN`, `SOYBEAN`, and `WHEAT` likewise hold one annual delivery
+  month in this data. They may still be useful underlying trend histories, but
+  they are not direct validations of the Globex liquid-front roll sequence.
+- Trend correlations are much stronger than exact daily-return correlations
+  for most mappings. This supports the proposed independent-signal use case,
+  but not source substitution for execution marks or roll replay.
+- BRE/6L remains contaminated by the known local Globex sticky-anchor issue.
+
+Phase 3 therefore produced the evidence and exception list, but its mapping
+approval exit criterion is deliberately not marked complete. JPY and then
+US10 are the sensible first manual reviews; WTI, grains, silver, and BRE need
+the documented reconciliation work before approval.
+
+Regenerate the evidence with:
+
+```bash
+futures-overlap-report \
+  --carver-db /home/dev/fin/db/pysystemtrade_reference.duckdb \
+  --globex-db /home/dev/fin/db/globex_mdp_3.0.duckdb \
+  --output-dir research/pysystemtrade-overlap
+```
+
 ## Why a separate database
 
 | Choice | Advantages | Problems | Decision |
@@ -306,15 +365,15 @@ micro histories into the covariance universe would double-count a market.
 |---|---|---|---:|---|
 | ES / MES | SP500 | 1982-09-14 to 2024-03-28 | 63.8% | Use main series for both signal roots |
 | NQ / MNQ | NASDAQ | 1999-12-14 to 2024-03-28 | 96.5% | Direct price-scale match expected |
-| CL / MCL | CRUDE_W | 1990-10-16 to 2024-03-28 | 98.3% | All-month roll cycle |
+| CL / MCL | CRUDE_W | 1990-10-16 to 2024-03-28 | 98.3% | Underlying match only: Carver holds the annual December winter contract, not the monthly liquid front |
 | GC / MGC | GOLD | 1975-04-01 to 2024-03-28 | 99.4% | `GOLD_micro` exists but should not be a second risk factor |
 | SI / SIL | SILVER | 1970-06-15 to 2024-03-28 | 69.0% | Point size is 1,000; mapping/settlement date needs extra validation |
 | ZN / MTN | US10 | 1982-08-30 to 2024-03-28 | 94.5% | Treasury fractional pricing needs exact scale checks |
 | ZT | US2 | 2000-03-02 to 2024-03-28 | 99.4% | Direct candidate |
-| ZC / MZC | CORN | 1972-10-18 to 2024-03-28 | 90.5% | Use full-size history for both |
-| ZL / MZL | SOYOIL | 1970-02-03 to 2024-03-28 | 92.5% | Direct candidate |
-| ZS / MZS | SOYBEAN | 1985-09-20 to 2024-03-28 | 99.5% | Use full-size history for both |
-| ZW / MZW | WHEAT | 1973-12-19 to 2024-03-28 | 96.2% | Use full-size history for both |
+| ZC / MZC | CORN | 1972-10-18 to 2024-03-28 | 90.5% | Underlying match only: Carver holds annual December rather than the liquid front |
+| ZL / MZL | SOYOIL | 1970-02-03 to 2024-03-28 | 92.5% | Underlying match; roll cycles differ materially |
+| ZS / MZS | SOYBEAN | 1985-09-20 to 2024-03-28 | 99.5% | Underlying match only: Carver holds annual November rather than the liquid front |
+| ZW / MZW | WHEAT | 1973-12-19 to 2024-03-28 | 96.2% | Underlying match only: Carver holds annual December rather than the liquid front |
 | 6J / JPY / J7 | JPY | 1977-06-14 to 2024-03-28 | 98.5% | Same underlying, traded multipliers remain separate |
 | 6M | MXP | 1995-09-15 to 2024-03-28 | 91.3% | Naming crosswalk required |
 | 6L / BRE | BRE | 1995-12-01 to 2024-03-28 | 100.0% | Useful independent reference for the known Globex 6L issue |
@@ -582,6 +641,8 @@ row counts, coverage results, and logical table contents.
 
 ### Phase 2: loader and signal-return adapter
 
+Status: **implemented and validated on 2026-09-17**.
+
 - Add the source-neutral signal/mark/carry contract.
 - Implement the Carver daily return index without direct percentage changes
   on adjusted levels.
@@ -594,6 +655,8 @@ roll-adjusted returns are causal, and existing Globex tests/results remain
 unchanged.
 
 ### Phase 3: overlap validation
+
+Status: **reporting implemented; mapping approvals pending manual review**.
 
 - Generate 2010-2024 per-market reports comparing contract selection, daily
   changes, roll dates, volatility, missing dates, and trend forecasts.

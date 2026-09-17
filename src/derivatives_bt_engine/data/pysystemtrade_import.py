@@ -924,7 +924,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def main(argv: Optional[list[str]] = None) -> ImportResult:
+def main(argv: Optional[list[str]] = None) -> None:
     args = parse_args(argv)
     result = build_sidecar(
         args.source,
@@ -936,7 +936,6 @@ def main(argv: Optional[list[str]] = None) -> ImportResult:
         f"Built {result.output_path} from {result.manifest_files} files "
         f"({result.multiple_rows:,} multiple rows; {result.adjusted_rows:,} adjusted rows)"
     )
-    return result
 
 
 if __name__ == "__main__":

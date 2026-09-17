@@ -1,0 +1,15 @@
+canonical_market_id,carver_instrument,globex_asset,mapping_status,usage_status,notes,known_issue
+sp500,SP500,ES,candidate,signal_research,S&P 500 full-size signal history,
+nasdaq,NASDAQ,NQ,candidate,signal_research,Nasdaq-100 full-size signal history,
+crude_wti,CRUDE_W,CL,candidate,signal_research,WTI crude underlying,Carver CRUDE_W holds the annual December winter contract while Globex CL selects the liquid monthly front contract
+gold,GOLD,GC,candidate,signal_research,COMEX gold,
+silver,SILVER,SI,candidate,signal_research,COMEX silver,Settlement/date and point-scale reconciliation required
+us_10y,US10,ZN,candidate,signal_research,10-year Treasury note,Treasury fractional-price scaling requires explicit review
+us_2y,US2,ZT,candidate,signal_research,2-year Treasury note,
+corn,CORN,ZC,candidate,signal_research,CBOT corn underlying,Carver CORN holds only the annual December contract; Globex ZC selects the liquid front contract
+soybean_oil,SOYOIL,ZL,candidate,signal_research,CBOT soybean-oil underlying,Carver SOYOIL and Globex ZL use materially different roll cycles
+soybeans,SOYBEAN,ZS,candidate,signal_research,CBOT soybean underlying,Carver SOYBEAN holds only the annual November contract; Globex ZS selects the liquid front contract
+wheat,WHEAT,ZW,candidate,signal_research,CBOT wheat underlying,Carver WHEAT holds only the annual December contract; Globex ZW selects the liquid front contract
+jpy,JPY,6J,candidate,signal_research,CME Japanese yen,
+mxn,MXP,6M,candidate,signal_research,CME Mexican peso,
+brl,BRE,6L,candidate,signal_research,CME Brazilian real,Existing Globex 6L sticky-anchor issue remains unresolved

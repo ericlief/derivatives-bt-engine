@@ -37,7 +37,11 @@ from derivatives_bt_engine.domain.allocation import (
     compute_symbol_notional_budget,
 )
 from derivatives_bt_engine.domain.enums import VolRegime
-from derivatives_bt_engine.domain.futures_dataloader import FuturesDataLoader, assert_monotonic_expiration
+from derivatives_bt_engine.domain.futures_dataloader import (
+    FuturesDataLoader,
+    assert_monotonic_expiration,
+    globex_daily_cache_path,
+)
 from derivatives_bt_engine.domain.instruments import (
     CME_MONTH_NUM_TO_LETTER, get_spec, resolve_active_months, resolve_annualization_days, resolve_price_symbol,
 )
@@ -406,8 +410,10 @@ def _validate_symbols_exist(price_symbols, cache_dir: str) -> None:
     (no need to hit duckdb at all for those). Takes already-resolved price
     symbols (see load_portfolio_data), not raw traded symbols -- a micro
     like MES is expected to be absent from `daily` and shouldn't raise."""
-    uncached = [s for s in price_symbols
-                if not os.path.exists(os.path.join(cache_dir, f'{s}_daily.parquet'))]
+    uncached = [
+        s for s in price_symbols
+        if not os.path.exists(globex_daily_cache_path(cache_dir, s))
+    ]
     if not uncached:
         return
     # FuturesDataLoader.db_path is a dataclass field with a default_factory,
