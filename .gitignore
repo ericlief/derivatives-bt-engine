@@ -2,7 +2,7 @@
 .venv
 .env
 logs
-data
+/data/
 results
 nbs
 *.profile
@@ -12,6 +12,8 @@ nbs
 *.DS_Store
 *__pycache__
 *.parquet
+*.duckdb
+*.duckdb.tmp-*
 vix.pkl
 .cache
 

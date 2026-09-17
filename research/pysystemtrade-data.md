@@ -1,7 +1,7 @@
 # Proposal: using pysystemtrade futures data with the Globex database
 
-Research date: 2026-09-17. This is a design proposal, not an implemented
-import. The source data examined is the local checkout at
+Research date: 2026-09-17. This is the design proposal and Phase 1
+implementation record. The source data examined is the local checkout at
 `/home/dev/projects/pysystemtrade/data/futures`; the existing market-data
 source is `/home/dev/fin/db/globex_mdp_3.0.duckdb`.
 
@@ -39,6 +39,58 @@ carry prototype:
    instrument/date quality masks.
 5. Expand to non-CME markets only in a research-only portfolio after contract
    specifications, currency conversion, costs, and investability are verified.
+
+## Phase 1 build status
+
+The deterministic raw-data importer is implemented in
+`derivatives_bt_engine.data.pysystemtrade_import` and exposed as the
+`pysystemtrade-import` CLI. It writes the independently rebuildable sidecar at
+the recommended path; it does not attach to or write the Globex database.
+
+The first validated build used source commit
+`b4a25e6e1e33a54a3ecfb45c0f6db5e2b60b84f8` and produced:
+
+| Build result | Value |
+|---|---:|
+| Sidecar size | 222,572,544 bytes |
+| Manifest files | 803 |
+| Hashed source bytes | 717,390,223 |
+| Multiple-price rows | 7,249,183 |
+| Adjusted-price rows | 7,248,713 |
+| Instruments | 252 |
+| Source range | 1969-12-02 23:00 to 2024-03-29 05:00 |
+
+The materialized QA results reproduce the statistics in this document:
+89.4% mean, 98.7% median, and 89.7% weighted carry-day coverage; 203
+instruments at or above 90% and 26 below 50%; 40 adjusted series with
+non-positive history; 152,992 null adjusted rows; and five non-positive raw
+price rows. A second clean build was compared with `EXCEPT ALL` in both
+directions across the manifest, every raw table, and every QA table. It had no
+logical differences. Import time is intentionally the sole run-specific
+metadata value.
+
+Two source quirks are retained and made auditable instead of silently cleaned:
+
+- `CANOLA`, `COAL-GEORDIE`, and `GAS-PEN` roll calendars contain an unnamed
+  trailing boolean field. It is preserved as nullable `legacy_flag`; only
+  null/false values are accepted.
+- `EDOLLAR#1` and `INR-micro` each contain two different roll transitions at
+  the same timestamp. Both rows are preserved with their physical source-row
+  number and reported by `qa.roll_calendar_duplicate_timestamps`.
+
+Run a new build explicitly with:
+
+```bash
+pysystemtrade-import \
+  --source /home/dev/projects/pysystemtrade/data/futures \
+  --output /home/dev/fin/db/pysystemtrade_reference.duckdb
+```
+
+The command refuses an existing output unless `--replace` is supplied. A
+replacement is assembled and validated in a temporary database and only then
+published atomically. The importer also refuses to use the configured Globex
+path as its output. Generated DuckDB files and temporary builds are ignored by
+Git.
 
 ## Why a separate database
 
@@ -329,6 +381,12 @@ Additional raw tables should preserve roll calendars, FX prices,
 `instrumentconfig.csv`, `rollconfig.csv`, and `spreadcosts.csv` without
 overwriting repository live-trading specifications.
 
+`raw.roll_calendars` also retains `calendar_type`, one-based physical
+`source_row_number` (including the CSV header offset), and the optional
+`legacy_flag`. Roll timestamps are not declared unique because the source has
+two known same-time sequential transitions; their source-row keys are unique
+and their timestamp conflicts are materialized for QA.
+
 ### `ref` schema
 
 `ref.instrument_map`
@@ -509,10 +567,12 @@ commit, and no source database/file is modified.
 
 ### Phase 1: deterministic sidecar importer
 
+Status: **implemented and validated on 2026-09-17**.
+
 - Add a Polars-based importer CLI with explicit source and output paths.
 - Import raw price/config tables in one transaction into a temporary DB.
-- Enforce types, unique `(instrument_code, source_timestamp)` keys, row counts,
-  and checksums.
+- Enforce types, unique price/adjusted `(instrument_code, source_timestamp)`
+  keys, source-row keys for roll calendars, row counts, and checksums.
 - Materialize the audit/coverage tables and compare them to the statistics in
   this document.
 - Publish the sidecar only after validation succeeds.
