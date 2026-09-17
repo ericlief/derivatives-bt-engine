@@ -56,6 +56,7 @@ from derivatives_bt_engine.domain.instruments import (
     resolve_signal_symbol,
 )
 from derivatives_bt_engine.domain.allocation import (
+    ALLOCATION_MODES,
     NOTIONAL_WEIGHTING_SCHEMES,
     _bounded_ewm_correlation_matrix,
     _coverage_restricted_idm,
@@ -75,13 +76,16 @@ from derivatives_bt_engine.domain.futures_dataloader import FuturesDataLoader, a
 from derivatives_bt_engine.domain.signal import (
     DEFAULT_FAST_WINDOW,
     DEFAULT_SLOW_WINDOW,
+    GOULDING_SIGNAL_MODES,
     build_features,
     classify_signal_confidence,
     compute_signal_confidence,
     compute_vol_ratio,
     cluster_conviction_score,
     continuous_momentum,
+    estimate_goulding_forecast_scalar,
     estimate_mixing_params_diagnostics,
+    goulding_continuous_raw,
     goulding_monthly,
     resolve_trend_direction,
 )
@@ -153,6 +157,11 @@ class TsmomLiveConfig:
     long_only: bool = False
     regime_discount: float = 0.5
     max_contracts: int = 15
+    # 'risk-targeted' is the established CTA pipeline. 'ew' is a strict
+    # equal-gross-notional 1/N benchmark: signal direction only, configured
+    # universe denominator, zero-signal share left in cash, and no vol/IDM/
+    # forecast-magnitude/confidence/VIX/cluster sizing overlays.
+    allocation_mode: str = 'risk-targeted'
     account_equity: Optional[float] = None
     target_portfolio_vol: float = 0.15
     max_cluster_risk_pct: float = 0.25
@@ -190,6 +199,10 @@ class TsmomLiveConfig:
     # direction, vol-parity decides size"; regime_discount is ignored in
     # this mode (a_Co/a_Re IS the discount mechanism).
     signal_weighting: str = 'continuous'
+    # Goulding forecast shape: the established binary direction remains the
+    # default; continuous preserves raw monthly magnitude, causally scales
+    # pooled history to mean absolute 0.5, and caps at +/-1.
+    goulding_signal_mode: str = 'binary'
     # Only used when signal_weighting == 'goulding'. 'cluster' (default):
     # a_Co/a_Re estimated separately per instrument cluster (pooled across
     # only the instruments passed to this rebalance, not the full
@@ -322,8 +335,13 @@ class TsmomLiveConfig:
     splice_live_price: bool = False
 
     def __post_init__(self):
+        if self.allocation_mode not in ALLOCATION_MODES:
+            raise ValueError(f"allocation_mode must be one of {ALLOCATION_MODES}, got {self.allocation_mode!r}")
         if self.signal_weighting not in SIGNAL_WEIGHTINGS:
             raise ValueError(f"signal_weighting must be one of {SIGNAL_WEIGHTINGS}, got {self.signal_weighting!r}")
+        if self.goulding_signal_mode not in GOULDING_SIGNAL_MODES:
+            raise ValueError(f"goulding_signal_mode must be one of {GOULDING_SIGNAL_MODES}, "
+                             f"got {self.goulding_signal_mode!r}")
         if self.mixing_pool not in MIXING_POOLS:
             raise ValueError(f"mixing_pool must be one of {MIXING_POOLS}, got {self.mixing_pool!r}")
         if self.risk_budget_mode not in RISK_BUDGET_MODES:
@@ -1129,7 +1147,8 @@ def _fetch_signal_inputs(ib: Optional[IBPySync], instr: dict, config: TsmomLiveC
     feat = build_features(bars)
     cm_df = continuous_momentum(feat, fast_window=config.fast_window, slow_window=config.slow_window,
                                  vol_fast_window=config.vol_fast_window, vol_slow_window=config.vol_slow_window,
-                                 annualization_days=annualization_days)
+                                 annualization_days=annualization_days,
+                                 discount=config.regime_discount)
     g_df = goulding_monthly(feat) if config.signal_weighting == 'goulding' else None
 
     return {
@@ -1167,7 +1186,8 @@ def _goulding_history_frame(cluster: str, g_df: pl.DataFrame) -> pl.DataFrame:
 
 def _finalize_signal(instr: dict, raw: dict, config: TsmomLiveConfig, vix_scalar: float,
                       mixing_params_by_cluster: dict[str, tuple[float, float]],
-                      signal_confidence_cfg: dict) -> dict:
+                      signal_confidence_cfg: dict,
+                      goulding_forecast_scalar: Optional[float] = None) -> dict:
     """Stage 1c: resolves this instrument's final trend_strength/regime
     (continuous vs goulding, via domain.signal.resolve_trend_direction --
     shared with the backtest's own _compute_signal_row) and every
@@ -1215,9 +1235,15 @@ def _finalize_signal(instr: dict, raw: dict, config: TsmomLiveConfig, vix_scalar
         g_fast_val = g_last['fast'][0]
         g_slow_val = g_last['slow'][0]
 
-    resolved = resolve_trend_direction(config.signal_weighting, contin_signal,
-                                        ts_fast, ts_slow, config.regime_discount,
-                                        g_regime_val, g_fast_val, g_slow_val, a_co, a_re)
+    g_raw_forecast = (
+        goulding_continuous_raw(g_regime_val, a_co, a_re, g_fast_val, g_slow_val)
+        if config.signal_weighting == 'goulding' else None
+    )
+    resolved = resolve_trend_direction(
+        config.signal_weighting, contin_signal, ts_fast, ts_slow,
+        config.regime_discount, g_regime_val, g_fast_val, g_slow_val,
+        a_co, a_re, config.goulding_signal_mode, goulding_forecast_scalar,
+    )
     if resolved is not None:
         trend_strength, regime, regime_discount, g_blend = resolved
     else:
@@ -1287,6 +1313,9 @@ def _finalize_signal(instr: dict, raw: dict, config: TsmomLiveConfig, vix_scalar
         'g_regime': g_regime_val, 'g_fast': g_fast_val, 'g_slow': g_slow_val, 'g_blend': g_blend,
         'a_co': a_co if config.signal_weighting == 'goulding' else None,
         'a_re': a_re if config.signal_weighting == 'goulding' else None,
+        'g_signal_mode': config.goulding_signal_mode if config.signal_weighting == 'goulding' else None,
+        'g_raw_forecast': g_raw_forecast,
+        'g_forecast_scalar': goulding_forecast_scalar,
     }
 
 
@@ -1346,6 +1375,35 @@ def _mixing_params_for_instruments(config: TsmomLiveConfig, raw_by_symbol: dict[
         _log_mixing_params_diag('global', diag)
     global_params = (diag['a_co'], diag['a_re'])
     return {c: global_params for c in clusters_needed}
+
+
+def _goulding_forecast_scalar_for_instruments(
+    config: TsmomLiveConfig,
+    raw_by_symbol: dict[str, dict],
+    instruments: list[dict],
+    mixing_params_by_cluster: dict[str, tuple[float, float]],
+) -> Optional[float]:
+    """Causal pooled scalar for the optional continuous Goulding forecast.
+
+    Each instrument's final monthly row is the forecast being acted on now,
+    so it is excluded. Earlier raw forecasts are pooled across the supplied
+    universe, matching Carver's cross-instrument scalar convention.
+    """
+    if config.signal_weighting != 'goulding' or config.goulding_signal_mode != 'continuous':
+        return None
+    instr_by_symbol = {instr['symbol']: instr for instr in instruments}
+    raw_forecasts = []
+    for symbol, raw in raw_by_symbol.items():
+        g_df = raw.get('g_df')
+        if g_df is None or g_df.height <= 1:
+            continue
+        cluster = instr_by_symbol[symbol].get('cluster', 'other')
+        a_co, a_re = mixing_params_by_cluster.get(cluster, (0.5, 0.5))
+        for row in g_df[:-1].iter_rows(named=True):
+            raw_forecasts.append(goulding_continuous_raw(
+                row.get('regime'), a_co, a_re, row.get('fast'), row.get('slow'),
+            ))
+    return estimate_goulding_forecast_scalar(raw_forecasts)
 
 
 def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
@@ -1439,7 +1497,7 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
         'low_vol': config.signal_confidence_low_vol,
     }
 
-    if config.vix_gating:
+    if config.vix_gating and config.allocation_mode != 'ew':
         vx_current, vx_ma = _get_vx_spike_ratio(ib, config)
         vx_ratio = vx_current / vx_ma
         vol_regime = check_vol_regime(vx_ratio)
@@ -1451,7 +1509,9 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
         # vix_gating's own docstring).
         vx_current, vx_ma, vx_ratio = None, None, 1.0
         vol_regime = VolRegime.NORMAL
-        log.info('VX spike gate disabled (config.vix_gating=False) — proceeding as vol_regime=Normal')
+        reason = ("allocation_mode='ew' benchmark" if config.allocation_mode == 'ew'
+                  else 'config.vix_gating=False')
+        log.info('VX spike gate disabled (%s) — proceeding as vol_regime=Normal', reason)
 
     if vol_regime in (VolRegime.SPIKE, VolRegime.EXTREME):
         log.warning('VX %s detected (ratio=%.3f) — holding existing positions, skipping rebalance',
@@ -1523,6 +1583,12 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
     # Stage 1b (goulding only): a_Co/a_Re, pooled per mixing_params_for_instruments.
     mixing_params_by_cluster = _mixing_params_for_instruments(config, raw_by_symbol, instruments,
                                                                 diagnostics=mixing_diagnostics)
+    goulding_forecast_scalar = _goulding_forecast_scalar_for_instruments(
+        config, raw_by_symbol, instruments, mixing_params_by_cluster,
+    )
+    if config.signal_weighting == 'goulding':
+        log.info('Goulding signal mode=%s forecast_scalar=%s target_abs=0.5 cap=1.0',
+                 config.goulding_signal_mode, goulding_forecast_scalar)
 
     # Stage 1c: resolve each instrument's final trend_strength/regime/hv.
     instr_by_symbol = {i['symbol']: i for i in instruments}
@@ -1530,23 +1596,29 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
     for symbol, raw in raw_by_symbol.items():
         try:
             signals[symbol] = _finalize_signal(instr_by_symbol[symbol], raw, config, vix_scalar,
-                                               mixing_params_by_cluster, signal_confidence_cfg)
+                                               mixing_params_by_cluster, signal_confidence_cfg,
+                                               goulding_forecast_scalar)
         except Exception as exc:
             log.error('Failed to finalize signal for %s: %s', symbol, exc)
             errors[symbol] = str(exc)
 
     def _is_active(sig: dict) -> bool:
         v = sig['signal_for_scalar']
-        return v is not None and not (isinstance(v, float) and math.isnan(v)) and abs(v) > config.min_conviction
+        threshold = 0.0 if config.allocation_mode == 'ew' else config.min_conviction
+        return v is not None and not (isinstance(v, float) and math.isnan(v)) and abs(v) > threshold
 
     # Cluster-cap universe selection is intentionally before both budget
     # modes. The selected symbols are the actual candidate set for cluster
     # counting, H/IDM/ERC, and later integer sizing; excluded symbols remain
     # in the report with an explicit inactive diagnostic but receive no risk.
     initial_active_symbols = [symbol for symbol, signal in signals.items() if _is_active(signal)]
-    selected_active_symbols, cluster_universe_rank, cluster_universe_score = (
-        _select_cluster_cap_universe(signals, initial_active_symbols, config)
-    )
+    if config.allocation_mode == 'ew':
+        selected_active_symbols = set(initial_active_symbols)
+        cluster_universe_rank, cluster_universe_score = {}, {}
+    else:
+        selected_active_symbols, cluster_universe_rank, cluster_universe_score = (
+            _select_cluster_cap_universe(signals, initial_active_symbols, config)
+        )
 
     # Stage 2: derive the risk budget, per config.risk_budget_mode.
     n_effective = None
@@ -1580,7 +1652,20 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
     active_symbols: list[str] = []
     H: Optional[np.ndarray] = None
     covered: Optional[np.ndarray] = None
-    if config.risk_budget_mode == 'cluster':
+    if config.allocation_mode == 'ew':
+        active_symbols = sorted(initial_active_symbols)
+        n_effective = compute_n_effective({signals[s]['cluster'] for s in active_symbols})
+        equal_notional = (
+            config.account_equity / len(instruments)
+            if config.account_equity is not None and instruments else None
+        )
+        budget_constant_by_symbol = {s: equal_notional for s in signals}
+        notional_weight_by_symbol = {s: 1.0 / len(instruments) for s in signals} if instruments else {}
+        log.info('Allocation (ew benchmark) — universe_n=%d active_symbols=%s gross_notional_per_symbol=%s; '
+                 'IDM/vol scaling/forecast magnitude/overlays/active-set renormalization disabled',
+                 len(instruments), active_symbols,
+                 f'{equal_notional:.0f}' if equal_notional is not None else 'N/A (no account_equity)')
+    elif config.risk_budget_mode == 'cluster':
         active_clusters = {signals[symbol]['cluster'] for symbol in selected_active_symbols}
         n_effective = compute_n_effective(active_clusters)
         account_equity = config.account_equity
@@ -1595,7 +1680,7 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
                  sorted(active_clusters), n_effective,
                  f'{desired_risk_budget:.0f}' if desired_risk_budget is not None else 'N/A (no account_equity)',
                  f'{shared_budget_constant:.0f}' if shared_budget_constant is not None else 'N/A')
-    else:  # 'idm'
+    else:  # risk-targeted 'idm'
         active_symbols = [symbol for symbol in initial_active_symbols if symbol in selected_active_symbols]
         n_effective = compute_n_effective({signals[s]['cluster'] for s in active_symbols})
         account_equity = config.account_equity
@@ -1696,6 +1781,8 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
                     'vx_current': vx_current, 'vx_ma': vx_ma, 'vx_ratio': vx_ratio, 'vol_regime': vol_regime,
                     'g_regime': s['g_regime'], 'g_fast': s['g_fast'], 'g_slow': s['g_slow'],
                     'g_blend': s['g_blend'], 'a_co': s['a_co'], 'a_re': s['a_re'],
+                    'g_signal_mode': s['g_signal_mode'], 'g_raw_forecast': s['g_raw_forecast'],
+                    'g_forecast_scalar': s['g_forecast_scalar'],
                     'account_equity': config.account_equity,
                     'n_effective_clusters': n_effective,
                     'cluster_dollar_vol_budget': desired_risk_budget,
@@ -1712,13 +1799,21 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
                 })
                 continue
 
-            combined_scalar = compute_position_scalar(
-                s['signal_for_scalar'], s['daily_std'], config.vol_target, s['regime'],
-                regime_discount=s['regime_discount'], signal_confidence=s['signal_confidence'],
-                annualization_days=s['annualization_days'],
-            )
-            combined_scalar *= vix_scalar
-            if config.max_active_per_cluster is not None and not active:
+            if config.allocation_mode == 'ew':
+                signal_value = s['signal_for_scalar']
+                combined_scalar = (
+                    0.0 if signal_value is None or signal_value == 0
+                    else math.copysign(1.0, signal_value)
+                )
+            else:
+                combined_scalar = compute_position_scalar(
+                    s['signal_for_scalar'], s['daily_std'], config.vol_target, s['regime'],
+                    regime_discount=s['regime_discount'], signal_confidence=s['signal_confidence'],
+                    annualization_days=s['annualization_days'],
+                )
+                combined_scalar *= vix_scalar
+            if (config.allocation_mode != 'ew'
+                    and config.max_active_per_cluster is not None and not active):
                 # The selector is a universe decision, not a haircut. Keep
                 # the row and its raw diagnostics, but do not let an excluded
                 # instrument consume the shared cluster-mode budget.
@@ -1777,12 +1872,12 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
                 'ts_regime': s['ts_regime'],
                 'daily_std': s['daily_std'],
                 'hv': s['hv'],
-                'risk_scalar': s['risk_scalar'],
-                'reg_discount': s['regime_discount'],
+                'risk_scalar': s['risk_scalar'] if config.allocation_mode != 'ew' else 1.0,
+                'reg_discount': s['regime_discount'] if config.allocation_mode != 'ew' else 1.0,
                 'vol_ratio': s['vol_ratio'],
                 'sig_confid_reg': s['signal_confidence_regime'],
-                'sig_confid': s['signal_confidence'],
-                'vix_scalar': vix_scalar,
+                'sig_confid': s['signal_confidence'] if config.allocation_mode != 'ew' else 1.0,
+                'vix_scalar': vix_scalar if config.allocation_mode != 'ew' else 1.0,
                 'close': s['close'],
                 'mult': multiplier,
                 'uncapped_fractional_target_notional': uncapped_fractional_target_notional,
@@ -1796,6 +1891,8 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
                 # Goulding audit fields -- None in 'continuous' mode.
                 'g_regime': s['g_regime'], 'g_fast': s['g_fast'], 'g_slow': s['g_slow'],
                 'g_blend': s['g_blend'], 'a_co': s['a_co'], 'a_re': s['a_re'],
+                'g_signal_mode': s['g_signal_mode'], 'g_raw_forecast': s['g_raw_forecast'],
+                'g_forecast_scalar': s['g_forecast_scalar'],
                 # Portfolio-level context -- identical across every
                 # instrument under risk_budget_mode='cluster', per-symbol
                 # under 'idm' -- included per-row so each CSV row is
@@ -1814,6 +1911,7 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
                 'use_idm': config.use_idm if config.risk_budget_mode == 'idm' else None,
                 'max_cluster_risk_pct': config.max_cluster_risk_pct,
                 'max_lot_overrun_pct': config.max_lot_overrun_pct,
+                'allocation_mode': config.allocation_mode,
             })
         except Exception as exc:
             log.error('Failed to compute rebalance target for %s: %s', symbol, exc)
@@ -1831,6 +1929,7 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
         symbol = target.get('symbol')
         was_active_before_universe_filter = symbol in initial_active_symbols
         target.update({
+            'allocation_mode': config.allocation_mode,
             'max_active_per_cluster': config.max_active_per_cluster,
             'cluster_universe_rank': cluster_universe_rank.get(symbol),
             'cluster_universe_score': cluster_universe_score.get(symbol),
@@ -1843,7 +1942,7 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
 
     portfolio_risk_target = (
         config.account_equity * config.target_portfolio_vol
-        if config.account_equity else None
+        if config.account_equity and config.allocation_mode != 'ew' else None
     )
     idm_risk_target = None
     total_risk_target = portfolio_risk_target
@@ -1855,7 +1954,15 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
         # credit back.
         total_risk_target *= idm_multiplier
         idm_risk_target = total_risk_target
-    if config.discrete_allocation == 'lot-aware':
+    if config.allocation_mode == 'ew':
+        # Independent nearest-lot conversion is the only implementation
+        # layer retained by the plain 1/N benchmark. No correlation- or
+        # cluster-aware post-processing is allowed to change its weights.
+        apply_cluster_risk_cap(
+            targets, config.max_cluster_risk_pct, None, n_effective,
+            max_lot_overrun_pct=config.max_lot_overrun_pct, apply_cap=False,
+        )
+    elif config.discrete_allocation == 'lot-aware':
         allocate_lot_aware_targets(
             targets,
             portfolio_risk_target,
@@ -1923,7 +2030,7 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
         portfolio_risk_target=portfolio_risk_target,
         idm_risk_target=idm_risk_target,
         realized_portfolio_risk=realized_portfolio_risk,
-        discrete_allocation=config.discrete_allocation,
+        discrete_allocation=('ew' if config.allocation_mode == 'ew' else config.discrete_allocation),
         discrete_risk_overrun_pct=config.discrete_risk_overrun_pct,
         min_fractional_contracts=config.min_fractional_contracts,
     )
@@ -1979,18 +2086,19 @@ def print_rebalance_report(targets: list[dict]) -> str:
         instead carries continuous_momentum's own signal magnitude --
         named to match contin_sig below, not because it's exclusively a
         goulding-mode value.
-      risk_scalar / reg_discount / sig_confid / vix_scalar: the four
-        independent multiplicative components -- vol-equalization,
-        Correction/Rebound conviction discount, per-instrument signal
-        trust discount, and portfolio-wide VX de-risking, respectively.
-        None of these alone is "the" scalar; each is one ingredient.
-      combined_scalar: EXACTLY the product
+      risk_scalar / reg_discount / sig_confid / vix_scalar: sizing audit
+        components. The continuous Correction/Rebound discount is already
+        embedded once in contin_sig, so reg_discount is deliberately 1.0
+        downstream; Goulding likewise uses 1.0 because a_Co/a_Re is its own
+        disagreement mechanism. This prevents the old double application.
+      combined_scalar: under allocation_mode='risk-targeted', exactly the product
         g_sig * risk_scalar * reg_discount * sig_confid * vix_scalar --
         entirely reconstructable from the fields already printed to its
         left, kept here as a convenience total rather than making every
         reader do that multiplication by hand. `risk_scalar`'s explicit
         [0.25, 2.0] bound is the volatility-leverage guardrail; the finished
-        product is intentionally not re-clamped to [-1, 1].
+        product is intentionally not re-clamped to [-1, 1]. Under the
+        allocation_mode='ew' benchmark it is only sign(g_sig), by design.
       ts / contin_sig: continuous_momentum's own ts_fast/ts_slow
         combination -- ts is the tanh-squashed weighted blend BEFORE the
         correction/rebound discount, contin_sig is that same blend AFTER
@@ -2002,7 +2110,7 @@ def print_rebalance_report(targets: list[dict]) -> str:
       ts_regime: continuous_momentum's OWN regime classification --
         sign(ts_fast)/sign(ts_slow) only (Bull/Bear/Correction/Rebound),
         computed independently of signal_weighting. THIS is what gates
-        contin_sig's correction/rebound discount (contin_sig = ts * 0.5
+        contin_sig's correction/rebound discount (contin_sig = ts times the configured discount
         when ts_regime is Correction or Rebound, unchanged otherwise).
         There used to be a separate top-level regime= field here too, but
         it was always exactly redundant -- under 'goulding' it was a
@@ -2022,10 +2130,12 @@ def print_rebalance_report(targets: list[dict]) -> str:
         lines.append(
             f"{t['symbol']:6s}  final_target_contracts={t['final_target_contracts']!s:>4}  "
             f"current_contracts={t['current_contracts']!s:>4}  "
-            f"active={str(t.get('active')):>5}"
+            f"active={str(t.get('active')):>5}  allocation_mode={t.get('allocation_mode', 'risk-targeted')}"
             + (f"  |  g_regime={t['g_regime']}  g_fast={_fmt(t.get('g_fast'), '.4f')}  "
                f"g_slow={_fmt(t.get('g_slow'), '.4f')}  a_co={_fmt(t.get('a_co'), '.2f')}  "
                f"a_re={_fmt(t.get('a_re'), '.2f')}  g_blend={_fmt(t.get('g_blend'), '.4f')}  "
+               f"g_mode={t.get('g_signal_mode')}  g_raw={_fmt(t.get('g_raw_forecast'), '.4f')}  "
+               f"g_scale={_fmt(t.get('g_forecast_scalar'), '.3f')}  "
                f"g_sig={_fmt(t.get('signal')):>7}"
                if t.get('a_co') is not None else f"  g_sig={_fmt(t.get('signal')):>7}")
             + f"  |  ts_fast={_fmt(t.get('ts_fast')):>7}  ts_slow={_fmt(t.get('ts_slow')):>7}  "

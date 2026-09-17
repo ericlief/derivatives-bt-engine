@@ -28,6 +28,7 @@ import duckdb
 import polars as pl
 
 from derivatives_bt_engine.domain.allocation import (
+    ALLOCATION_MODES,
     NOTIONAL_WEIGHTING_SCHEMES,
     apply_cluster_risk_cap,
     build_returns_wide,
@@ -43,12 +44,15 @@ from derivatives_bt_engine.domain.instruments import (
 from derivatives_bt_engine.domain.signal import (
     DEFAULT_FAST_WINDOW,
     DEFAULT_SLOW_WINDOW,
+    GOULDING_SIGNAL_MODES,
     SignalSpec,
     build_features,
     build_monthly_state_return_history,
     cluster_conviction_score,
     continuous_momentum,
+    estimate_goulding_forecast_scalar,
     estimate_mixing_params,
+    goulding_continuous_raw,
     goulding_monthly,
     resolve_trend_direction,
 )
@@ -99,6 +103,14 @@ class TsmomBacktestConfig:
     vol_target: float = 0.15
     max_contracts: int = 5
     max_notional: float = 25_000.0
+    # 'risk-targeted' is the established CTA sizing pipeline. 'ew' is a
+    # strict DeMiguel-style benchmark adapted to directional futures: each
+    # configured symbol receives 1/N of gross account notional, only the
+    # signal sign is used, and a valid zero signal leaves its share in cash
+    # (missing/untradable remains a distinct unresolved state). It bypasses
+    # vol scaling, IDM, forecast magnitude, VIX/confidence
+    # sizing, active-set renormalization, and cluster allocation.
+    allocation_mode: str = 'risk-targeted'
     long_only: bool = False
     regime_discount: float = 0.5
     start_date: Optional[date] = None
@@ -260,6 +272,11 @@ class TsmomBacktestConfig:
     # via domain/signal.py instead of being that script's own local
     # implementation.
     signal_weighting: str = 'continuous'
+    # Goulding forecast shape. 'binary' preserves the original paper-like
+    # +/-1 direction. 'continuous' retains the fast/slow or equation-7
+    # magnitude, causally rescales pooled prior forecasts to mean absolute
+    # 0.5, and caps them at +/-1 before any risk/sizing overlays.
+    goulding_signal_mode: str = 'binary'
     # Only matters when signal_weighting == 'goulding'. 'cluster' (default):
     # a_Co/a_Re re-estimated separately per instruments.py cluster (each
     # symbol using only its own cluster's pooled Correction/Rebound
@@ -293,10 +310,15 @@ class TsmomBacktestConfig:
     max_lot_overrun_pct: float = 0.5
 
     def __post_init__(self):
+        if self.allocation_mode not in ALLOCATION_MODES:
+            raise ValueError(f"allocation_mode must be one of {ALLOCATION_MODES}, got {self.allocation_mode!r}")
         if self.signal_gate_mode not in ('off', 'monthly', 'daily'):
             raise ValueError(f"signal_gate_mode must be 'off', 'monthly', or 'daily', got {self.signal_gate_mode!r}")
         if self.signal_weighting not in ('continuous', 'goulding'):
             raise ValueError(f"signal_weighting must be 'continuous' or 'goulding', got {self.signal_weighting!r}")
+        if self.goulding_signal_mode not in GOULDING_SIGNAL_MODES:
+            raise ValueError(f"goulding_signal_mode must be one of {GOULDING_SIGNAL_MODES}, "
+                             f"got {self.goulding_signal_mode!r}")
         if self.fast_window <= 0 or self.slow_window <= 0:
             raise ValueError("fast_window/slow_window must be positive")
         if self.fast_window >= self.slow_window:
@@ -312,6 +334,8 @@ class TsmomBacktestConfig:
                 f"got {len(self.fixed_quantities)} quantities for {len(self.symbols)} symbols "
                 f"({self.symbols})"
             )
+        if self.allocation_mode == 'ew' and self.fixed_quantities is not None:
+            raise ValueError("allocation_mode='ew' is incompatible with fixed_quantities")
         if self.max_active_per_cluster is not None and self.max_active_per_cluster <= 0:
             raise ValueError("max_active_per_cluster must be positive when set")
         if not 0 < self.max_cluster_risk_pct <= 1:
@@ -463,7 +487,7 @@ def _apply_signal_gate(prior_contracts: int, proposed_target: int, result: dict,
     config field, since a TSMOM symbol's direction comes from its own
     signal sign, unlike a naked single-direction FuturesStrategyConfig.
     Returns (final_target, gate_reason)."""
-    if config.signal_gate_mode == 'off':
+    if config.signal_gate_mode == 'off' or config.allocation_mode == 'ew':
         return proposed_target, None
     sig_val, ts_fast_val, ts_slow_val = result.get('signal'), result.get('ts_fast'), result.get('ts_slow')
 
@@ -583,7 +607,8 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
                          notional_budget: Optional[float] = None,
                          g_regime_val: Optional[str] = None, g_fast_val: Optional[float] = None,
                          g_slow_val: Optional[float] = None, a_co: Optional[float] = None,
-                         a_re: Optional[float] = None) -> Optional[dict]:
+                         a_re: Optional[float] = None,
+                         goulding_forecast_scalar: Optional[float] = None) -> Optional[dict]:
     """Signal + vol-targeted (or fixed-quantity) sizing for one symbol as of
     date `d`, reading from `precomputed` -- each symbol's full
     continuous_momentum output, computed ONCE for the whole unbounded
@@ -650,9 +675,17 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
     # resolve_trend_direction (domain.signal) -- shared with
     # live.tsmom_rebalance's own per-instrument signal computation, so both
     # modules implement this continuous-vs-goulding branch exactly once.
-    resolved = resolve_trend_direction(config.signal_weighting, _col('signal'), ts_fast, ts_slow,
-                                        config.regime_discount, g_regime_val, g_fast_val, g_slow_val,
-                                        a_co, a_re)
+    g_raw_forecast = (
+        goulding_continuous_raw(g_regime_val, a_co, a_re, g_fast_val, g_slow_val)
+        if config.signal_weighting == 'goulding' and a_co is not None and a_re is not None
+        else None
+    )
+    resolved = resolve_trend_direction(
+        config.signal_weighting, _col('signal'), ts_fast, ts_slow,
+        config.regime_discount, g_regime_val, g_fast_val, g_slow_val,
+        a_co if a_co is not None else 0.5, a_re if a_re is not None else 0.5,
+        config.goulding_signal_mode, goulding_forecast_scalar,
+    )
     if resolved is None:
         return None
     trend_strength, regime, regime_discount, g_blend = resolved
@@ -663,10 +696,20 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
     ):
         signal_for_scalar = max(0.0, signal_for_scalar)
 
-    scalar = compute_position_scalar(
-        signal_for_scalar, daily_std_last, config.vol_target, regime,
-        regime_discount=regime_discount, annualization_days=annualization_days,
-    ) * vix_scalar
+    if config.allocation_mode == 'ew':
+        # Literal 1/N benchmark: signal chooses direction only. All dynamic
+        # magnitude and volatility/risk overlays are intentionally bypassed.
+        scalar = (
+            0.0 if signal_for_scalar is None or signal_for_scalar == 0
+            else math.copysign(1.0, signal_for_scalar)
+        )
+        applied_vix_scalar = 1.0
+    else:
+        scalar = compute_position_scalar(
+            signal_for_scalar, daily_std_last, config.vol_target, regime,
+            regime_discount=regime_discount, annualization_days=annualization_days,
+        ) * vix_scalar
+        applied_vix_scalar = vix_scalar
 
     mult = futures_types[symbol]['multiplier']
     one_contract_notional = last_close * mult if last_close is not None else None
@@ -715,13 +758,20 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
         'ts': _col('ts'),
         'ts_regime': _col('regime'),
         'daily_std': daily_std_last,
-        'vix_scalar': vix_scalar,
+        'vix_scalar': applied_vix_scalar,
+        'allocation_mode': config.allocation_mode,
+        'notional_allocation_weight': (
+            1.0 / len(config.symbols)
+            if config.allocation_mode == 'ew' and config.symbols else None
+        ),
         'pre_scalar_notional_budget': budget,
         'fractional_target_notional': (
             fractional_target_contracts * one_contract_notional
             if fractional_target_contracts is not None and one_contract_notional is not None else None
         ),
-        'hv': hv, 'risk_scalar': risk_scalar * vix_scalar, 'regime_discount': regime_discount,
+        'hv': hv,
+        'risk_scalar': risk_scalar * applied_vix_scalar if config.allocation_mode != 'ew' else 1.0,
+        'regime_discount': regime_discount if config.allocation_mode != 'ew' else 1.0,
         'close': last_close, 'dd_pct': dd_pct,
         # Raw signal-row fields, straight from continuous_momentum, purely
         # for debugging/sanity-checking the sizing math end to end.
@@ -742,6 +792,9 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
         # still resolves in that case.
         'g_regime': g_regime_val, 'g_fast': g_fast_val, 'g_slow': g_slow_val,
         'g_blend': g_blend, 'a_co': a_co, 'a_re': a_re,
+        'g_signal_mode': config.goulding_signal_mode if config.signal_weighting == 'goulding' else None,
+        'g_raw_forecast': g_raw_forecast,
+        'g_forecast_scalar': goulding_forecast_scalar,
     }
 
 
@@ -760,7 +813,8 @@ def _mixing_params_for_date(config: TsmomBacktestConfig, monthly_history: Option
 
 
 def _goulding_kwargs_for(config: TsmomBacktestConfig, rebal_monthly: dict[str, pl.DataFrame],
-                         symbol: str, d: date, mixing_params_by_cluster: dict[str, tuple[float, float]]) -> dict:
+                         symbol: str, d: date, mixing_params_by_cluster: dict[str, tuple[float, float]],
+                         goulding_forecast_scalar: Optional[float] = None) -> dict:
     """This symbol's own g_regime_val/g_fast_val/g_slow_val/a_co/a_re as of
     `d`, ready to **-unpack straight into _compute_signal_row. Empty dict
     outside 'goulding' mode -- _compute_signal_row's own defaults (all
@@ -773,7 +827,41 @@ def _goulding_kwargs_for(config: TsmomBacktestConfig, rebal_monthly: dict[str, p
     g_slow_val = g_row['g_slow'][0] if g_row.height else None
     a_co, a_re = mixing_params_by_cluster.get(get_spec(symbol)['cluster'], (0.5, 0.5))
     return {'g_regime_val': g_regime_val, 'g_fast_val': g_fast_val, 'g_slow_val': g_slow_val,
-            'a_co': a_co, 'a_re': a_re}
+            'a_co': a_co, 'a_re': a_re,
+            'goulding_forecast_scalar': goulding_forecast_scalar}
+
+
+def _goulding_forecast_scalar_for_date(
+    config: TsmomBacktestConfig,
+    monthly_by_symbol: dict[str, pl.DataFrame],
+    d: date,
+    mixing_params_by_cluster: dict[str, tuple[float, float]],
+) -> Optional[float]:
+    """Causal pooled Goulding scalar using forecast rows known before `d`.
+
+    At a month-end rebalance the next month's current forecast has a label
+    after `d`, so `ts_event <= d` contains prior forecasts only. Current
+    a_Co/a_Re parameters are applied to that prior forecast history, just as
+    a model calibration applies its currently estimated rule to training
+    observations. The current forecast itself never enters its own scale.
+    """
+    if config.signal_weighting != 'goulding' or config.goulding_signal_mode != 'continuous':
+        return None
+    raw_forecasts = []
+    for symbol, monthly in monthly_by_symbol.items():
+        a_co, a_re = mixing_params_by_cluster.get(get_spec(symbol)['cluster'], (0.5, 0.5))
+        history = monthly.filter(pl.col('ts_event') <= d)
+        for row in history.iter_rows(named=True):
+            raw_forecasts.append(goulding_continuous_raw(
+                row.get('regime'), a_co, a_re, row.get('fast'), row.get('slow'),
+            ))
+    return estimate_goulding_forecast_scalar(raw_forecasts)
+
+
+def _ew_notional_budget(config: TsmomBacktestConfig, capital: float) -> float:
+    """One configured symbol's 1/N gross-notional share, before lot rounding."""
+    equal_share = capital / len(config.symbols) if config.symbols else 0.0
+    return min(config.max_notional, equal_share)
 
 
 def _select_cluster_cap_universe(probe_results: dict[str, dict], active_symbols: list[str],
@@ -987,10 +1075,14 @@ class _PortfolioLedger:
             'g_slow': _round(s.get('g_slow'), 4),
             'a_co': _round(s.get('a_co'), 4), 'a_re': _round(s.get('a_re'), 4),
             'g_blend': _round(s.get('g_blend'), 4),
+            'g_signal_mode': s.get('g_signal_mode'),
+            'g_raw_forecast': _round(s.get('g_raw_forecast'), 6),
+            'g_forecast_scalar': _round(s.get('g_forecast_scalar'), 6),
             'fractional_target_contracts': _round(s.get('fractional_target_contracts'), 4),
             'fractional_target_notional': _round(s.get('fractional_target_notional'), 2),
             'pre_scalar_notional_budget': _round(s.get('pre_scalar_notional_budget'), 2),
             'notional_weighting': s.get('notional_weighting'),
+            'allocation_mode': s.get('allocation_mode'),
             'notional_allocation_weight': _round(s.get('notional_allocation_weight'), 6),
             'combined_scalar': _round(s.get('combined_scalar'), 6),
             'vix_scalar': _round(s.get('vix_scalar'), 4),
@@ -1095,7 +1187,8 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
         s: continuous_momentum(build_features(full_price_data[s].sort('ts_event')),
                                 fast_window=config.fast_window, slow_window=config.slow_window,
                                 vol_fast_window=config.vol_fast_window, vol_slow_window=config.vol_slow_window,
-                                annualization_days=annualization_by_symbol[s])
+                                annualization_days=annualization_by_symbol[s],
+                                discount=config.regime_discount)
         for s in config.symbols
     }
     futures_types = {s: get_spec(s) for s in config.symbols}
@@ -1104,7 +1197,11 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
     # target_portfolio_vol is actually set, since this is an extra
     # inner-join + pct_change pass over every symbol's full history that
     # the module's original (default) sizing has no use for.
-    returns_wide = build_returns_wide(full_price_data) if config.target_portfolio_vol is not None else None
+    returns_wide = (
+        build_returns_wide(full_price_data)
+        if config.allocation_mode == 'risk-targeted' and config.target_portfolio_vol is not None
+        else None
+    )
 
     windowed = {}
     for symbol, df in full_price_data.items():
@@ -1153,6 +1250,7 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
     # shared build_monthly_state_return_history/estimate_mixing_params
     # instead of a duplicate implementation.
     rebal_monthly: dict[str, pl.DataFrame] = {}
+    monthly_by_symbol: dict[str, pl.DataFrame] = {}
     monthly_history: Optional[pl.DataFrame] = None
     if config.signal_weighting == 'goulding':
         rebal_dates_sorted = sorted(rebalance_dates)
@@ -1160,6 +1258,7 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
         for s in config.symbols:
             feat = build_features(full_price_data[s].sort('ts_event'))
             monthly = goulding_monthly(feat, **SignalSpec.goulding().goulding_kwargs())
+            monthly_by_symbol[s] = monthly
             monthly = monthly.rename({'fast': 'g_fast', 'slow': 'g_slow', 'regime': 'g_regime'})
             monthly = monthly.select(['ts_event', 'ret', 'g_fast', 'g_slow', 'g_regime']).sort('ts_event')
             rebal_monthly[s] = rebal_dates_df.join_asof(monthly, on='ts_event', strategy='forward')
@@ -1194,13 +1293,17 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
         if prior_month_ends:
             seed_date = max(prior_month_ends)
             vol_regime, vix_close, vix_ratio = _vix_regime_at(vix, seed_date)
-            if not config.vix_gating:
+            if not config.vix_gating or config.allocation_mode == 'ew':
                 vol_regime = VolRegime.NORMAL  # vix_close/vix_ratio still logged, just not acted on
             if vol_regime not in (VolRegime.SPIKE, VolRegime.EXTREME):  # held_contracts are all 0 here -- hold/halve would be a no-op anyway
                 vix_scalar = VIX_ELEVATED_SCALE if vol_regime == VolRegime.ELEVATED else 1.0
                 for symbol in config.symbols:
                     result = _compute_signal_row(symbol, precomputed, seed_date, futures_types, config,
-                                                  vix_scalar, annualization_by_symbol[symbol])
+                                                  vix_scalar, annualization_by_symbol[symbol],
+                                                  notional_budget=(
+                                                      _ew_notional_budget(config, ledger.capital)
+                                                      if config.allocation_mode == 'ew' else None
+                                                  ))
                     if result is None:
                         continue
                     target, gate_reason = _apply_signal_gate(ledger.held_contracts[symbol], result['target'], result, config)
@@ -1265,18 +1368,29 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
         # re-evaluates the same gate that day (avoids a duplicate event).
         # VIX spike/extreme hold-or-halve intentionally stays a monthly-
         # only mechanism -- not extended to off-cycle days here.
-        if config.signal_gate_mode == 'daily' and d not in rebalance_dates:
+        if (config.allocation_mode != 'ew'
+                and config.signal_gate_mode == 'daily' and d not in rebalance_dates):
             vol_regime_d, vix_close_d, vix_ratio_d = _vix_regime_at(vix, d)
-            if not config.vix_gating:
+            if not config.vix_gating or config.allocation_mode == 'ew':
                 vol_regime_d = VolRegime.NORMAL
             vix_scalar_d = VIX_ELEVATED_SCALE if vol_regime_d == VolRegime.ELEVATED else 1.0
             mixing_params_by_cluster_d = _mixing_params_for_date(config, monthly_history, d)
+            goulding_forecast_scalar_d = _goulding_forecast_scalar_for_date(
+                config, monthly_by_symbol, d, mixing_params_by_cluster_d,
+            )
 
             for symbol in config.symbols:
                 prior = ledger.held_contracts[symbol]
                 result = _compute_signal_row(symbol, precomputed, d, futures_types, config,
                                               vix_scalar_d, annualization_by_symbol[symbol],
-                                              **_goulding_kwargs_for(config, rebal_monthly, symbol, d, mixing_params_by_cluster_d))
+                                              notional_budget=(
+                                                  _ew_notional_budget(config, ledger.capital)
+                                                  if config.allocation_mode == 'ew' else None
+                                              ),
+                                              **_goulding_kwargs_for(
+                                                  config, rebal_monthly, symbol, d,
+                                                  mixing_params_by_cluster_d, goulding_forecast_scalar_d,
+                                              ))
                 if result is None:
                     continue
 
@@ -1298,7 +1412,7 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
         # tsmom_rebalance.compute_rebalance_targets' early-return shape).
         if d in rebalance_dates:
             vol_regime, vix_close, vix_ratio = _vix_regime_at(vix, d)
-            if not config.vix_gating:
+            if not config.vix_gating or config.allocation_mode == 'ew':
                 vol_regime = VolRegime.NORMAL  # vix_close/vix_ratio still logged, just not acted on
 
             if vol_regime in (VolRegime.SPIKE, VolRegime.EXTREME):
@@ -1315,8 +1429,13 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
                 # below -- a_Co/a_Re only needs estimating once per date,
                 # not once per symbol or per branch.
                 mixing_params_by_cluster = _mixing_params_for_date(config, monthly_history, d)
+                goulding_forecast_scalar = _goulding_forecast_scalar_for_date(
+                    config, monthly_by_symbol, d, mixing_params_by_cluster,
+                )
 
-                if config.target_portfolio_vol is not None and config.fixed_quantities is None:
+                if (config.allocation_mode == 'risk-targeted'
+                        and config.target_portfolio_vol is not None
+                        and config.fixed_quantities is None):
                     # Correlation-aware sizing -- see TsmomBacktestConfig.
                     # target_portfolio_vol's own docstring for the full
                     # derivation. Two passes are needed because "which
@@ -1339,7 +1458,14 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
                     for symbol in config.symbols:
                         result = _compute_signal_row(symbol, precomputed, d, futures_types, config,
                                                       vix_scalar, annualization_by_symbol[symbol],
-                                                      **_goulding_kwargs_for(config, rebal_monthly, symbol, d, mixing_params_by_cluster))
+                                                      notional_budget=(
+                                                          _ew_notional_budget(config, ledger.capital)
+                                                          if config.allocation_mode == 'ew' else None
+                                                      ),
+                                                      **_goulding_kwargs_for(
+                                                          config, rebal_monthly, symbol, d,
+                                                          mixing_params_by_cluster, goulding_forecast_scalar,
+                                                      ))
                         if result is not None:
                             probe_results[symbol] = result
 
@@ -1380,7 +1506,10 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
                             result = _compute_signal_row(symbol, precomputed, d, futures_types, config,
                                                           vix_scalar, annualization_by_symbol[symbol],
                                                           notional_budget=per_symbol_budget[symbol],
-                                                          **_goulding_kwargs_for(config, rebal_monthly, symbol, d, mixing_params_by_cluster))
+                                                          **_goulding_kwargs_for(
+                                                              config, rebal_monthly, symbol, d,
+                                                              mixing_params_by_cluster, goulding_forecast_scalar,
+                                                          ))
                         result['cluster_universe_rank'] = cluster_universe_rank.get(symbol)
                         result['cluster_universe_score'] = cluster_universe_score.get(symbol)
                         result['cluster_universe_excluded'] = (
@@ -1461,7 +1590,14 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
                     for symbol in config.symbols:
                         result = _compute_signal_row(symbol, precomputed, d, futures_types, config,
                                                       vix_scalar, annualization_by_symbol[symbol],
-                                                      **_goulding_kwargs_for(config, rebal_monthly, symbol, d, mixing_params_by_cluster))
+                                                      notional_budget=(
+                                                          _ew_notional_budget(config, ledger.capital)
+                                                          if config.allocation_mode == 'ew' else None
+                                                      ),
+                                                      **_goulding_kwargs_for(
+                                                          config, rebal_monthly, symbol, d,
+                                                          mixing_params_by_cluster, goulding_forecast_scalar,
+                                                      ))
                         if result is None:
                             continue
                         target, gate_reason = _apply_signal_gate(ledger.held_contracts[symbol], result['target'], result, config)

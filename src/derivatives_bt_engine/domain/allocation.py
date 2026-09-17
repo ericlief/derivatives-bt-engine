@@ -1041,6 +1041,11 @@ def allocate_flat_cluster_diversified_targets(
 # estimate at all -- see _bounded_ewm_correlation_matrix's own docstring.
 MIN_IDM_WINDOW_ROWS = 63
 
+# Top-level portfolio-construction choice. 'ew' is the deliberately plain
+# equal-gross-notional benchmark; it is not routed through the risk-budget
+# split functions below.
+ALLOCATION_MODES = ('risk-targeted', 'ew')
+
 # compute_symbol_notional_budget's notional_weighting choices -- see that
 # function's own docstring for what each one does.
 NOTIONAL_WEIGHTING_SCHEMES = ('flat', 'erc', 'hrp')
@@ -1558,16 +1563,18 @@ def _coverage_restricted_idm(active_symbols: list[str], H: Optional[np.ndarray],
 def compute_notional_split(active_symbols: list[str], notional_weighting: str,
                             H: Optional[np.ndarray] = None,
                             covered: Optional[np.ndarray] = None) -> dict[str, float]:
-    """The 'flat'/'erc'/'hrp' fraction of the total dollar-vol budget each
+    """The 'flat'/'erc'/'hrp' fraction of total dollar-vol budget each
     active symbol gets -- the same split compute_symbol_notional_budget
     computes internally (and, when use_idm=True, feeds into compute_idm as
     its own weight vector), pulled out into its own function so a caller
     that already has active_symbols/H can inspect the split itself
     directly (e.g. reporting/diagnostics -- what fraction of the book did
     ERC/HRP actually give this symbol), not just the resulting dollar
-    figure. 'flat': 1/n each, ALWAYS -- correlation-blind by definition, so
-    `H`/`covered` don't apply (there's no fake-diversification credit to
-    protect against when nothing depends on correlation). 'erc'/'hrp':
+    figure. 'flat': 1/n each, ALWAYS -- this is equal active-symbol
+    *dollar-vol budget*, not DeMiguel-style equal final capital/notional
+    weights. Downstream forecast magnitudes, overlays, caps, and integer lots
+    can make final risk contributions unequal. `H`/`covered` don't apply to
+    this correlation-blind split. 'erc'/'hrp':
     compute_erc_weights/compute_hrp_weights on H -- see either's own
     docstring for the fallback-to-flat behavior when H is None or n < 2.
 

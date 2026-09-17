@@ -178,6 +178,24 @@ def test_goulding_signal_weighting_produces_long_position_with_audit_fields(monk
         assert e['a_re'] is not None
 
 
+def test_continuous_goulding_is_causally_scaled_and_bounded(monkeypatch):
+    price_data = {'X': _price_df(date(2016, 1, 1), 900, drift=0.0008, vol=0.01, seed=7)}
+    _patch_data(monkeypatch, price_data, _vix_df(date(2016, 1, 1), 900, level=15.0))
+    monkeypatch.setattr(tb, 'get_spec', lambda s: get_spec('ES'))
+
+    result = run_tsmom_backtest(TsmomBacktestConfig(
+        symbols=['X'], max_notional=50_000, max_contracts=20,
+        signal_weighting='goulding', goulding_signal_mode='continuous',
+        vix_gating=False,
+    ))
+
+    scaled = [event for event in result['trend_signals'] if event['g_forecast_scalar'] is not None]
+    assert scaled
+    assert all(event['g_signal_mode'] == 'continuous' for event in scaled)
+    assert all(event['g_raw_forecast'] is not None for event in scaled)
+    assert all(abs(event['signal']) <= 1.0 for event in scaled)
+
+
 def test_portfolio_capital_aggregates_across_symbols(monkeypatch):
     a = _price_df(date(2018, 1, 1), 400, drift=0.001, vol=0.005, seed=2)
     b = _price_df(date(2018, 1, 1), 400, drift=0.001, vol=0.005, seed=3)
@@ -249,6 +267,44 @@ def test_notional_weighting_rejects_unknown_scheme():
         TsmomBacktestConfig(symbols=['X'], target_portfolio_vol=0.15, notional_weighting='bogus')
 
 
+def test_allocation_and_goulding_modes_validate_and_default_conservatively():
+    config = TsmomBacktestConfig(symbols=['X'])
+    assert config.allocation_mode == 'risk-targeted'
+    assert config.goulding_signal_mode == 'binary'
+    with pytest.raises(ValueError, match='allocation_mode'):
+        TsmomBacktestConfig(symbols=['X'], allocation_mode='bogus')
+    with pytest.raises(ValueError, match='goulding_signal_mode'):
+        TsmomBacktestConfig(symbols=['X'], goulding_signal_mode='bogus')
+
+
+def test_ew_allocation_is_equal_gross_notional_direction_only(monkeypatch):
+    price_data = {
+        'A': _price_df(date(2018, 1, 1), 500, drift=0.0015, vol=0.005, seed=1),
+        'B': _price_df(date(2018, 1, 1), 500, drift=0.0010, vol=0.02, seed=2),
+    }
+    _patch_data(monkeypatch, price_data, _vix_df(date(2018, 1, 1), 500, level=15.0))
+    monkeypatch.setattr(tb, 'get_spec', lambda s: get_spec('ES'))
+
+    result = run_tsmom_backtest(TsmomBacktestConfig(
+        symbols=['A', 'B'], initial_capital=100_000, max_notional=100_000,
+        max_contracts=100, allocation_mode='ew', vix_gating=True,
+    ))
+    populated = [event for event in result['trend_signals'] if event['signal'] not in (None, 0)]
+    assert populated
+    first_date = populated[0]['date']
+    same_date = [event for event in populated if event['date'] == first_date]
+    for event in same_date:
+        assert abs(event['fractional_target_notional']) == pytest.approx(
+            event['capital'] / 2, rel=1e-6,
+        )
+        assert abs(event['combined_scalar']) == 1.0
+        assert event['risk_scalar'] == 1.0
+        assert event['regime_discount'] == 1.0
+        assert event['vix_scalar'] == 1.0
+        assert event['allocation_mode'] == 'ew'
+        assert event['notional_allocation_weight'] == pytest.approx(0.5)
+
+
 def test_cluster_universe_selects_goulding_raw_evidence_before_sizing():
     """Bull/Bear must not tie merely because each resolved direction is +/-1."""
     config = TsmomBacktestConfig(
@@ -314,6 +370,7 @@ def test_fast_slow_window_wired_through_to_continuous_momentum(monkeypatch):
     assert captured['slow_window'] == 100
     assert captured['vol_fast_window'] == 10
     assert captured['vol_slow_window'] == 50
+    assert captured['discount'] == config.regime_discount
 
 
 def test_use_idm_defaults_true_and_is_wired_through_to_compute_symbol_notional_budget(monkeypatch):

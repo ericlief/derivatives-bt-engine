@@ -147,7 +147,9 @@ def test_build_instruments_passes_through_max_notional_and_max_contracts():
 # ── TsmomLiveConfig validation ───────────────────────────────────────────────
 
 @pytest.mark.parametrize('field,value', [
+    ('allocation_mode', 'bogus'),
     ('signal_weighting', 'bogus'),
+    ('goulding_signal_mode', 'bogus'),
     ('mixing_pool', 'bogus'),
     ('risk_budget_mode', 'bogus'),
     ('notional_weighting', 'bogus'),
@@ -161,7 +163,9 @@ def test_tsmom_live_config_rejects_unknown_values(field, value):
 
 def test_tsmom_live_config_defaults_use_standard_lot_aware_policy():
     config = TsmomLiveConfig()
+    assert config.allocation_mode == 'risk-targeted'
     assert config.signal_weighting == 'continuous'
+    assert config.goulding_signal_mode == 'binary'
     assert config.risk_budget_mode == 'cluster'
     assert config.data_source == 'ib'
     assert config.notional_weighting == 'flat'
@@ -596,6 +600,23 @@ def test_signal_weighting_goulding_populates_audit_fields(monkeypatch):
     assert targets[0]['a_re'] is not None
 
 
+def test_continuous_goulding_is_causally_scaled_and_bounded(monkeypatch):
+    price_data = {'X': _price_df(date(2016, 1, 1), 900, drift=0.0008, vol=0.01, seed=7)}
+    _patch_db(monkeypatch, price_data)
+    config = TsmomLiveConfig(
+        account_equity=100_000, data_source='database', vix_gating=False,
+        signal_weighting='goulding', goulding_signal_mode='continuous',
+    )
+
+    target = compute_rebalance_targets([_instrument('X')], config, ib=None)[0]
+
+    assert target.get('error') is None
+    assert target['g_signal_mode'] == 'continuous'
+    assert target['g_raw_forecast'] is not None
+    assert target['g_forecast_scalar'] is not None
+    assert abs(target['signal']) <= 1.0
+
+
 def test_signal_weighting_continuous_leaves_audit_fields_none(monkeypatch):
     price_data = {'X': _price_df(date(2018, 1, 1), 500, drift=0.0015, vol=0.005, seed=1)}
     _patch_db(monkeypatch, price_data)
@@ -606,6 +627,30 @@ def test_signal_weighting_continuous_leaves_audit_fields_none(monkeypatch):
     assert targets[0]['g_regime'] is None
     assert targets[0]['a_co'] is None
     assert targets[0]['a_re'] is None
+
+
+def test_ew_allocation_is_equal_gross_notional_and_direction_only(monkeypatch):
+    price_data = {
+        'A': _price_df(date(2018, 1, 1), 500, drift=0.0015, vol=0.005, seed=1),
+        'B': _price_df(date(2018, 1, 1), 500, drift=0.0010, vol=0.02, seed=2),
+    }
+    _patch_db(monkeypatch, price_data, vx=(45.0, 15.0))
+    config = TsmomLiveConfig(
+        account_equity=100_000, data_source='database', allocation_mode='ew',
+    )
+
+    targets = compute_rebalance_targets([_instrument('A'), _instrument('B')], config, ib=None)
+
+    assert all(target.get('error') is None for target in targets)
+    for target in targets:
+        assert abs(target['fractional_target_notional']) == pytest.approx(50_000)
+        assert abs(target['combined_scalar']) == 1.0
+        assert target['risk_scalar'] == 1.0
+        assert target['reg_discount'] == 1.0
+        assert target['sig_confid'] == 1.0
+        assert target['vix_scalar'] == 1.0
+        assert target['allocation_mode'] == 'ew'
+        assert target['notional_allocation_weight'] == pytest.approx(0.5)
 
 
 # ── splice_live_price: live IB bar spliced onto the DB series' tail ──────────

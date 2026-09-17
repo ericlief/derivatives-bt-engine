@@ -108,6 +108,15 @@ DEFAULT_SLOW_WINDOW = 252
 # fast_window/slow_window.
 GOULDING_FAST_MONTHS = 2
 GOULDING_SLOW_MONTHS = 12
+# Goulding can be consumed either as the paper-like binary direction or as
+# a continuous forecast whose raw magnitude comes from the same monthly
+# fast/slow inputs.  The latter uses Carver's familiar average-absolute-10,
+# cap-at-20 convention divided by 20: average absolute forecast 0.5, hard
+# cap at +/-1.0.
+GOULDING_SIGNAL_MODES = ('binary', 'continuous')
+GOULDING_FORECAST_TARGET_ABS = 0.5
+GOULDING_FORECAST_CAP = 1.0
+GOULDING_FORECAST_MIN_OBS = 12
 # continuous_momentum's MACD signal-line smoothing -- deliberately its own
 # small, fixed halflife, NOT derived from fast_window/slow_window the way
 # the MACD line itself is (see continuous_momentum's own docstring): the
@@ -808,6 +817,91 @@ def _goulding_direction(regime_val: Optional[str], a_co: float, a_re: float,
     return direction, blend
 
 
+def goulding_continuous_raw(regime_val: Optional[str], a_co: float, a_re: float,
+                             r_fast: Optional[float] = None,
+                             r_slow: Optional[float] = None) -> Optional[float]:
+    """Raw continuous Goulding forecast before normalization or clipping.
+
+    Bull/Bear use the simple mean of the two agreeing monthly momentum
+    horizons. Correction/Rebound use the paper's equation-7 blend, retaining
+    magnitude instead of collapsing the result to its sign. This is a pure
+    forecast: volatility scaling, portfolio risk budgets, confidence, VIX,
+    and integer-contract effects belong downstream.
+    """
+    if not (0.0 <= a_co <= 1.0) or not (0.0 <= a_re <= 1.0):
+        raise ValueError(
+            f"a_co/a_re must be in [0, 1] (eq. 7's own mixing-weight range), "
+            f"got a_co={a_co}, a_re={a_re}"
+        )
+    if regime_val is None or r_fast is None or r_slow is None:
+        return None
+    try:
+        fast = float(r_fast)
+        slow = float(r_slow)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(fast) or not math.isfinite(slow):
+        return None
+
+    regime = regime_val.lower()
+    if regime == 'bull':
+        assert fast >= 0 and slow >= 0, (
+            f"regime={regime_val!r} inconsistent with r_fast={fast}/r_slow={slow}"
+        )
+        return (fast + slow) / 2.0
+    if regime == 'bear':
+        assert fast < 0 and slow < 0, (
+            f"regime={regime_val!r} inconsistent with r_fast={fast}/r_slow={slow}"
+        )
+        return (fast + slow) / 2.0
+    return _goulding_blend(regime, a_co, a_re, fast, slow)
+
+
+def estimate_goulding_forecast_scalar(raw_forecasts, target_abs: float = GOULDING_FORECAST_TARGET_ABS,
+                                       min_obs: int = GOULDING_FORECAST_MIN_OBS) -> Optional[float]:
+    """Return the scalar making supplied raw forecasts mean-absolute `target_abs`.
+
+    Causality is a caller responsibility: backtest/live callers supply only
+    observations strictly prior to the forecast being scaled. Pooling the
+    same rule across instruments follows Carver's forecast-scalar convention
+    and is more stable than estimating one scalar per instrument.
+    """
+    if target_abs <= 0:
+        raise ValueError("target_abs must be positive")
+    if min_obs <= 0:
+        raise ValueError("min_obs must be positive")
+    finite = []
+    for value in raw_forecasts:
+        if value is None:
+            continue
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value):
+            finite.append(value)
+    if len(finite) < min_obs:
+        return None
+    mean_abs = sum(abs(value) for value in finite) / len(finite)
+    if mean_abs <= _DEGENERATE_EPS:
+        return None
+    return target_abs / mean_abs
+
+
+def normalize_goulding_forecast(raw_forecast: Optional[float], scalar: Optional[float],
+                                 cap: float = GOULDING_FORECAST_CAP) -> Optional[float]:
+    """Scale a raw Goulding forecast and clip it to ``[-cap, cap]``."""
+    if cap <= 0:
+        raise ValueError("cap must be positive")
+    if raw_forecast is None or scalar is None:
+        return None
+    raw_forecast = float(raw_forecast)
+    scalar = float(scalar)
+    if not math.isfinite(raw_forecast) or not math.isfinite(scalar) or scalar <= 0:
+        return None
+    return max(-cap, min(cap, raw_forecast * scalar))
+
+
 def cluster_conviction_score(signal_weighting: str, signal: Mapping[str, object]) -> float:
     """Return the raw model evidence used to rank a capped cluster universe.
 
@@ -852,6 +946,8 @@ def resolve_trend_direction(signal_weighting: str, continuous_signal: Optional[f
                              g_regime_val: Optional[str] = None, g_fast_val: Optional[float] = None,
                              g_slow_val: Optional[float] = None,
                              a_co: float = 0.5, a_re: float = 0.5,
+                             goulding_signal_mode: str = 'binary',
+                             goulding_forecast_scalar: Optional[float] = None,
                              ) -> Optional[tuple[float, TrendRegime, float, Optional[float]]]:
     """(trend_strength, regime, regime_discount, blend) for either
     signal_weighting mode -- "Goulding decides direction, vol-parity
@@ -876,32 +972,46 @@ def resolve_trend_direction(signal_weighting: str, continuous_signal: Optional[f
     call -- (1-a_Co)*r_SLOW + a_Co*r_FAST in Correction, (1-a_Re)*r_SLOW +
     a_Re*r_FAST in Rebound -- for audit/display (e.g. a saved report
     showing *why* trend_strength came out +1/-1, not just that it did);
-    always None in Bull/Bear (eq. 7 doesn't apply there -- trend_strength
-    is unconditionally +-1, nothing to blend) even though trend_strength
-    itself is resolved in that case. Returns None (the whole tuple) when
-    g_regime_val is None or _goulding_direction itself can't resolve a
-    direction (missing/invalid g_fast_val/g_slow_val).
+    always None in Bull/Bear (eq. 7 doesn't apply there). In `binary` mode
+    trend_strength is +/-1/0. In `continuous` mode its raw value is the
+    fast/slow mean in Bull/Bear or the equation-7 blend in disagreement
+    states, then a caller-supplied causal forecast scalar targets average
+    absolute 0.5 and caps at +/-1. Returns None when the required inputs or
+    continuous-mode scalar are unavailable.
 
     'continuous': continuous_signal is continuous_momentum's own `signal`
     column value; regime is classify_regime(ts_fast, ts_slow);
-    regime_discount is regime_discount_cfg in Correction/Rebound, 1.0
-    otherwise; blend is always None (not a goulding-mode concept). Returns
-    None when continuous_signal is None (not yet enough history for a
-    signal at all)."""
+    `continuous_signal` is continuous_momentum's already-discounted `signal`
+    column, so the returned regime_discount is always 1.0. Returning
+    regime_discount_cfg here used to apply the same Correction/Rebound
+    discount a second time inside compute_position_scalar. `blend` is always
+    None (not a continuous-momentum concept). Returns None when
+    continuous_signal is None (not yet enough history for a signal at all)."""
     if signal_weighting == 'goulding':
+        if goulding_signal_mode not in GOULDING_SIGNAL_MODES:
+            raise ValueError(f"goulding_signal_mode must be one of {GOULDING_SIGNAL_MODES}, "
+                             f"got {goulding_signal_mode!r}")
         if g_regime_val is None:
             return None
         regime = TrendRegime(g_regime_val.lower())
-        resolved = _goulding_direction(g_regime_val, a_co, a_re, g_fast_val, g_slow_val)
-        if resolved is None:
-            return None
-        trend_strength, blend = resolved
+        if goulding_signal_mode == 'binary':
+            resolved = _goulding_direction(g_regime_val, a_co, a_re, g_fast_val, g_slow_val)
+            if resolved is None:
+                return None
+            trend_strength, blend = resolved
+        else:
+            raw_forecast = goulding_continuous_raw(
+                g_regime_val, a_co, a_re, g_fast_val, g_slow_val,
+            )
+            trend_strength = normalize_goulding_forecast(raw_forecast, goulding_forecast_scalar)
+            if trend_strength is None:
+                return None
+            blend = raw_forecast if regime in (TrendRegime.CORRECTION, TrendRegime.REBOUND) else None
         return trend_strength, regime, 1.0, blend
     if continuous_signal is None:
         return None
     regime = classify_regime(ts_fast, ts_slow)
-    regime_discount = regime_discount_cfg if regime in (TrendRegime.CORRECTION, TrendRegime.REBOUND) else 1.0
-    return continuous_signal, regime, regime_discount, None
+    return continuous_signal, regime, 1.0, None
 
 
 def build_monthly_state_return_history(rebal_monthly: dict[str, pl.DataFrame],

@@ -21,6 +21,8 @@ from datetime import date, datetime
 
 import polars as pl
 
+from derivatives_bt_engine.domain.allocation import ALLOCATION_MODES, NOTIONAL_WEIGHTING_SCHEMES
+from derivatives_bt_engine.domain.signal import GOULDING_SIGNAL_MODES
 from derivatives_bt_engine.domain.tsmom_backtester import TsmomBacktestConfig, run_tsmom_backtest
 from derivatives_bt_engine.domain.tsmom_reporting import clean_signal_rows, portfolio_rows_from_signals
 from derivatives_bt_engine.domain.tsmom_window_reporting import (
@@ -43,6 +45,13 @@ def parse_args():
                    help='Per-symbol hard cap on contract count (default: %(default)s)')
     p.add_argument('--max-notional', type=float, default=250000,
                    help='Per-symbol max notional USD (default: %(default)s -- sized for full-size ES/NQ, not micros)')
+    p.add_argument('--allocation-mode', choices=ALLOCATION_MODES, default='risk-targeted',
+                   help="Portfolio construction (default: %(default)s). 'risk-targeted' uses the "
+                        "normal CTA volatility/forecast/IDM allocation pipeline. 'ew' is a strict "
+                        "1/N gross-notional benchmark: configured-universe denominator, signal "
+                        "direction only, valid-zero share held as cash, and no vol scaling, IDM, "
+                        "forecast magnitude, VIX/confidence sizing, active-set renormalization, or "
+                        "cluster allocation. Contract rounding and hard caps still apply.")
     p.add_argument('--fixed-quantities', default=None,
                    help='Comma-separated fixed contract counts, positionally matched to --symbols '
                         '(e.g. --symbols ES,GC,CL --fixed-quantities 4,3,2). When set, disables '
@@ -97,7 +106,7 @@ def parse_args():
     p.add_argument('--corr-halflife-days', type=float, default=63.0,
                    help='Only used with --target-portfolio-vol: EWM halflife within the bounded window '
                         '(default: %(default)s)')
-    p.add_argument('--notional-weighting', choices=['flat', 'erc', 'hrp'], default='flat',
+    p.add_argument('--notional-weighting', choices=NOTIONAL_WEIGHTING_SCHEMES, default='flat',
                    help="Only used with --target-portfolio-vol: how the total IDM-derived dollar-vol "
                         "budget is split ACROSS active symbols (default: %(default)s). 'flat': every "
                         "active symbol gets the same budget, regardless of correlation structure -- "
@@ -139,6 +148,11 @@ def parse_args():
                         "every rebalance from all prior pooled history -- --regime-discount is "
                         "ignored in this mode. Position size/vol-targeting is unaffected either way; "
                         "see TsmomBacktestConfig.signal_weighting's own docstring")
+    p.add_argument('--goulding-signal-mode', choices=GOULDING_SIGNAL_MODES, default='binary',
+                   help="Only used with --signal-weighting goulding. 'binary' preserves the +/-1 "
+                        "direction baseline. 'continuous' uses mean(fast, slow) in Bull/Bear and "
+                        "the equation-7 blend in Correction/Rebound, causally normalizes pooled "
+                        "prior forecasts to mean absolute 0.5, and caps at +/-1.")
     p.add_argument('--mixing-pool', choices=['cluster', 'global'], default='cluster',
                    help="Only used with --signal-weighting goulding. 'cluster' (default): a_Co/a_Re "
                         "estimated separately per instruments.py cluster. 'global': one shared "
@@ -197,6 +211,7 @@ def main():
         vol_target=args.vol_target,
         max_contracts=args.max_contracts,
         max_notional=args.max_notional,
+        allocation_mode=args.allocation_mode,
         long_only=args.long_only,
         regime_discount=args.regime_discount,
         start_date=date(int(start_year), 1, 1),
@@ -218,6 +233,7 @@ def main():
         max_cluster_risk_pct=args.max_cluster_risk_pct,
         max_lot_overrun_pct=args.max_lot_overrun_pct,
         signal_weighting=args.signal_weighting,
+        goulding_signal_mode=args.goulding_signal_mode,
         mixing_pool=args.mixing_pool,
         fast_window=args.fast_window,
         slow_window=args.slow_window,

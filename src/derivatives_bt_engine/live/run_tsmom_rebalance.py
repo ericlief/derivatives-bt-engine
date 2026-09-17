@@ -41,6 +41,7 @@ from ib_tools.ibpysync import IBPySync
 from derivatives_bt_engine.live.tsmom_rebalance import (
     DATA_SOURCES,
     DISCRETE_ALLOCATIONS,
+    GOULDING_SIGNAL_MODES,
     MIXING_POOLS,
     RISK_BUDGET_MODES,
     SIGNAL_WEIGHTINGS,
@@ -51,7 +52,7 @@ from derivatives_bt_engine.live.tsmom_rebalance import (
     print_rebalance_report,
     _resolve_contract,
 )
-from derivatives_bt_engine.domain.allocation import NOTIONAL_WEIGHTING_SCHEMES
+from derivatives_bt_engine.domain.allocation import ALLOCATION_MODES, NOTIONAL_WEIGHTING_SCHEMES
 from derivatives_bt_engine.domain.tsmom_reporting import (
     PORTFOLIO_COLUMNS,
     SIGNAL_COLUMNS,
@@ -357,6 +358,10 @@ def parse_args():
                         "(--mixing-pool) -- --regime-discount is ignored in this mode. Position "
                         "size/vol-targeting is unaffected either way; see "
                         "TsmomLiveConfig.signal_weighting's own docstring")
+    p.add_argument('--goulding-signal-mode', choices=GOULDING_SIGNAL_MODES, default='binary',
+                   help="Only used with --signal-weighting goulding. 'binary' preserves the +/-1 "
+                        "direction baseline. 'continuous' retains fast/slow or equation-7 magnitude, "
+                        "causally scales pooled prior forecasts to mean absolute 0.5, and caps at +/-1.")
     p.add_argument('--mixing-pool', choices=MIXING_POOLS, default='cluster',
                    help="Only used with --signal-weighting goulding (default: %(default)s). 'cluster': "
                         "a_Co/a_Re estimated separately per instrument cluster. 'global': one shared "
@@ -382,6 +387,12 @@ def parse_args():
                         "compute_symbol_notional_budget -- one correlation-aware budget PER ACTIVE "
                         "SYMBOL, via a bounded trailing EWM correlation matrix (see "
                         "--notional-weighting/--use-idm/--corr-window-years/--corr-halflife-days)")
+    p.add_argument('--allocation-mode', choices=ALLOCATION_MODES, default='risk-targeted',
+                   help="Portfolio construction (default: %(default)s). 'ew' is the strict 1/N "
+                        "gross-notional benchmark: configured-universe denominator and signal "
+                        "direction only; vol scaling, IDM, forecast magnitude, VIX/confidence sizing, "
+                        "active-set renormalization, cluster allocation, and lot-aware risk repair "
+                        "are bypassed. Integer rounding and hard caps remain.")
     p.add_argument('--notional-weighting', choices=NOTIONAL_WEIGHTING_SCHEMES, default='flat',
                    help="Only used with --risk-budget-mode idm (default: %(default)s). How the "
                         "IDM-derived total is split across active symbols -- 'flat': equal split. "
@@ -489,6 +500,7 @@ def main():
     config = TsmomLiveConfig(
         vol_target=args.vol_target,
         max_contracts=args.max_contracts,
+        allocation_mode=args.allocation_mode,
         vx_expiry=args.vx_expiry,
         vix_gating=not args.disable_vix_gating,
         long_only=args.long_only,
@@ -504,6 +516,7 @@ def main():
         signal_confidence_high_vol=args.signal_confidence_high_vol,
         signal_confidence_low_vol=args.signal_confidence_low_vol,
         signal_weighting=args.signal_weighting,
+        goulding_signal_mode=args.goulding_signal_mode,
         mixing_pool=args.mixing_pool,
         fast_window=args.fast_window,
         slow_window=args.slow_window,

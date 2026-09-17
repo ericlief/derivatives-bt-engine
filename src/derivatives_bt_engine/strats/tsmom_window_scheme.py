@@ -18,6 +18,8 @@ from typing import Optional
 
 import polars as pl
 
+from derivatives_bt_engine.domain.allocation import ALLOCATION_MODES, NOTIONAL_WEIGHTING_SCHEMES
+from derivatives_bt_engine.domain.signal import GOULDING_SIGNAL_MODES
 from derivatives_bt_engine.domain.tsmom_backtester import (
     TsmomBacktestConfig,
     load_portfolio_data,
@@ -145,9 +147,11 @@ def parse_args():
                         help='Zero-based exclusive final window per selected scheme (default: all)')
     parser.add_argument('--vol-target', type=float, default=.15)
     parser.add_argument('--target-portfolio-vol', type=float, default=.15)
-    parser.add_argument('--notional-weighting', choices=['flat', 'erc', 'hrp'], default='erc')
+    parser.add_argument('--allocation-mode', choices=ALLOCATION_MODES, default='risk-targeted')
+    parser.add_argument('--notional-weighting', choices=NOTIONAL_WEIGHTING_SCHEMES, default='erc')
     parser.add_argument('--use-idm', action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument('--signal-weighting', choices=['continuous', 'goulding'], default='goulding')
+    parser.add_argument('--goulding-signal-mode', choices=GOULDING_SIGNAL_MODES, default='binary')
     parser.add_argument('--mixing-pool', choices=['cluster', 'global'], default='cluster')
     parser.add_argument('--fast-window', type=int, default=42)
     parser.add_argument('--slow-window', type=int, default=252)
@@ -178,8 +182,10 @@ def main():
     data_end = args.data_end or _data_end(symbols)
     config = TsmomBacktestConfig(
         symbols=symbols, initial_capital=args.initial_capital, vol_target=args.vol_target,
+        allocation_mode=args.allocation_mode,
         target_portfolio_vol=args.target_portfolio_vol, notional_weighting=args.notional_weighting,
-        use_idm=args.use_idm, signal_weighting=args.signal_weighting, mixing_pool=args.mixing_pool,
+        use_idm=args.use_idm, signal_weighting=args.signal_weighting,
+        goulding_signal_mode=args.goulding_signal_mode, mixing_pool=args.mixing_pool,
         fast_window=args.fast_window, slow_window=args.slow_window, vol_fast_window=args.vol_fast_window,
         corr_window_years=args.corr_window_years, corr_halflife_days=args.corr_halflife_days,
         vix_gating=args.vix_gating, max_contracts=args.max_contracts,

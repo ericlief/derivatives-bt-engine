@@ -15,12 +15,13 @@ from typing import Iterable, Mapping, Optional
 
 SIGNAL_COLUMNS = (
     'run_id', 'as_of', 'symbol', 'cluster', 'close', 'mult',
-    'g_regime', 'g_fast', 'g_slow', 'a_co', 'a_re', 'g_blend', 'g_sig',
+    'g_regime', 'g_fast', 'g_slow', 'a_co', 'a_re', 'g_blend',
+    'g_mode', 'g_raw', 'g_scale', 'g_sig',
     'ts_fast', 'ts_slow', 'ts', 'contin_sig', 'ts_reg',
     'day_std', 'hv', 'dd_pct', 'risk_sc', 'reg_disc', 'vx_sc', 'comb_sc',
     'cur_con', 'frac_con', 'tgt_con', 'max_con', 'rnd_gap', 'zero_why',
     'clust_rank', 'clust_score', 'clust_excl',
-    'not_weighting', 'pre_sc_not_bud', 'not_alloc_w',
+    'alloc_mode', 'not_weighting', 'pre_sc_not_bud', 'not_alloc_w',
     'one_con_not', 'frac_tgt_not', 'frac_tgt_dvol', 'pos_dvol', 'port_risk_con',
 )
 
@@ -106,6 +107,9 @@ def clean_signal_rows(rows: Iterable[Mapping], run_id: str, *, as_of=None) -> li
             'a_co': _report_float(_value(source, 'a_co')),
             'a_re': _report_float(_value(source, 'a_re')),
             'g_blend': _report_float(_value(source, 'g_blend')),
+            'g_mode': _value(source, 'g_signal_mode', 'g_mode'),
+            'g_raw': _report_float(_value(source, 'g_raw_forecast', 'g_raw')),
+            'g_scale': _report_float(_value(source, 'g_forecast_scalar', 'g_scale')),
             'g_sig': _report_float(_value(source, 'signal', 'g_sig')),
             'ts_fast': _report_float(_value(source, 'ts_fast')),
             'ts_slow': _report_float(_value(source, 'ts_slow')),
@@ -128,6 +132,7 @@ def clean_signal_rows(rows: Iterable[Mapping], run_id: str, *, as_of=None) -> li
             'clust_rank': _report_float(_value(source, 'cluster_universe_rank', 'clust_rank')),
             'clust_score': _report_float(_value(source, 'cluster_universe_score', 'clust_score')),
             'clust_excl': bool(_value(source, 'cluster_universe_excluded', 'clust_excl') or False),
+            'alloc_mode': _value(source, 'allocation_mode', 'alloc_mode'),
             'not_weighting': _value(source, 'notional_weighting', 'not_weighting'),
             'pre_sc_not_bud': _dollars(_value(source, 'pre_scalar_notional_budget')),
             'not_alloc_w': _report_float(_value(source, 'notional_allocation_weight', 'not_alloc_w')),

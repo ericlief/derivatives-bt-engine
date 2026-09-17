@@ -40,8 +40,11 @@ from derivatives_bt_engine.domain.signal import (
     compute_signal_confidence,
     compute_vol_ratio,
     continuous_momentum,
+    estimate_goulding_forecast_scalar,
     goulding_monthly,
+    goulding_continuous_raw,
     estimate_mixing_params_diagnostics,
+    normalize_goulding_forecast,
     resolve_trend_direction,
 )
 
@@ -734,12 +737,14 @@ def test_resolve_trend_direction_continuous_mode_uses_classify_regime():
     assert blend is None
 
 
-def test_resolve_trend_direction_continuous_mode_discounts_correction():
-    # slow>0, fast<0 -> Correction -> regime_discount_cfg applies.
+def test_resolve_trend_direction_continuous_mode_does_not_double_discount_correction():
+    # continuous_signal is continuous_momentum's already-discounted signal;
+    # the downstream position scalar must therefore receive a no-op 1.0.
     trend, regime, discount, blend = resolve_trend_direction('continuous', 0.3, ts_fast=-0.1, ts_slow=0.2,
                                                                regime_discount_cfg=0.5)
+    assert trend == 0.3
     assert regime == TrendRegime.CORRECTION
-    assert discount == 0.5
+    assert discount == 1.0
     assert blend is None
 
 
@@ -777,6 +782,46 @@ def test_resolve_trend_direction_goulding_mode_bull_bear_ignore_a_co_a_re():
 
 def test_resolve_trend_direction_goulding_mode_none_regime_returns_none():
     assert resolve_trend_direction('goulding', None, None, None, 0.5, g_regime_val=None) is None
+
+
+@pytest.mark.parametrize('regime,fast,slow,expected', [
+    ('bull', 0.06, 0.02, 0.04),
+    ('bear', -0.06, -0.02, -0.04),
+    ('correction', -0.02, 0.06, 0.04),
+    ('rebound', 0.06, -0.02, 0.02),
+])
+def test_goulding_continuous_raw_uses_mean_or_equation_7(regime, fast, slow, expected):
+    assert goulding_continuous_raw(regime, 0.25, 0.5, fast, slow) == pytest.approx(expected)
+
+
+def test_goulding_forecast_scalar_targets_mean_absolute_half_and_caps_at_one():
+    scalar = estimate_goulding_forecast_scalar([0.25, -0.25] * 6)
+    assert scalar == pytest.approx(2.0)
+    assert normalize_goulding_forecast(0.25, scalar) == pytest.approx(0.5)
+    assert normalize_goulding_forecast(0.75, scalar) == 1.0
+    assert normalize_goulding_forecast(-0.75, scalar) == -1.0
+    assert estimate_goulding_forecast_scalar([0.25] * 11) is None
+
+
+def test_resolve_trend_direction_continuous_goulding_preserves_normalized_magnitude():
+    trend, regime, discount, blend = resolve_trend_direction(
+        'goulding', None, None, None, 0.5,
+        g_regime_val='bull', g_fast_val=0.06, g_slow_val=0.02,
+        a_co=0.5, a_re=0.5, goulding_signal_mode='continuous',
+        goulding_forecast_scalar=10.0,
+    )
+    assert trend == pytest.approx(0.4)
+    assert regime == TrendRegime.BULL
+    assert discount == 1.0
+    assert blend is None
+
+
+def test_resolve_trend_direction_continuous_goulding_requires_causal_scalar():
+    assert resolve_trend_direction(
+        'goulding', None, None, None, 0.5,
+        g_regime_val='bull', g_fast_val=0.06, g_slow_val=0.02,
+        goulding_signal_mode='continuous', goulding_forecast_scalar=None,
+    ) is None
 
 # ── Proposition 9 dynamic mixing estimator ──────────────────────────────────
 
