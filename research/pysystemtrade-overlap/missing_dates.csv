@@ -323,12 +323,7 @@ gold,GOLD,GC,2023-12-25,globex,pysystemtrade
 gold,GOLD,GC,2024-01-01,globex,pysystemtrade
 gold,GOLD,GC,2024-01-15,globex,pysystemtrade
 gold,GOLD,GC,2024-02-19,globex,pysystemtrade
-silver,SILVER,SI,2014-06-13,pysystemtrade,globex
-silver,SILVER,SI,2014-09-23,pysystemtrade,globex
-silver,SILVER,SI,2014-09-24,pysystemtrade,globex
-silver,SILVER,SI,2014-09-25,pysystemtrade,globex
-silver,SILVER,SI,2014-12-31,pysystemtrade,globex
-silver,SILVER,SI,2020-02-28,pysystemtrade,globex
+silver,SILVER,SI,2021-06-30,globex,pysystemtrade
 silver,SILVER,SI,2021-07-05,globex,pysystemtrade
 silver,SILVER,SI,2021-09-06,globex,pysystemtrade
 silver,SILVER,SI,2021-10-07,globex,pysystemtrade

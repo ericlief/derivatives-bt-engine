@@ -8,6 +8,7 @@ levels directly with raw contract prices and never mutates either source DB.
 from __future__ import annotations
 
 import argparse
+import bisect
 import math
 from dataclasses import dataclass
 from datetime import date
@@ -36,6 +37,7 @@ logger = setup_logger()
 
 DEFAULT_OVERLAP_START = date(2010, 6, 7)
 DEFAULT_OVERLAP_END = date(2024, 3, 29)
+VOLATILITY_WINDOW_DAYS = 20
 
 
 @dataclass(frozen=True)
@@ -47,6 +49,8 @@ class MarketMapping:
     known_issue: str = ""
     mapping_status: str = "candidate"
     usage_status: str = "signal_research"
+    carver_date_alignment: str = ""
+    carver_date_alignment_through: Optional[date] = None
 
 
 def load_mappings(path: Optional[Path | str] = None) -> tuple[MarketMapping, ...]:
@@ -65,6 +69,8 @@ def load_mappings(path: Optional[Path | str] = None) -> tuple[MarketMapping, ...
         "globex_asset",
         "mapping_status",
         "usage_status",
+        "carver_date_alignment",
+        "carver_date_alignment_through",
         "notes",
         "known_issue",
     }
@@ -88,6 +94,12 @@ def load_mappings(path: Optional[Path | str] = None) -> tuple[MarketMapping, ...
             known_issue=row["known_issue"] or "",
             mapping_status=row["mapping_status"],
             usage_status=row["usage_status"],
+            carver_date_alignment=row["carver_date_alignment"] or "",
+            carver_date_alignment_through=(
+                date.fromisoformat(str(row["carver_date_alignment_through"]))
+                if row["carver_date_alignment_through"] is not None
+                else None
+            ),
         )
         for row in frame.iter_rows(named=True)
     )
@@ -118,6 +130,98 @@ def _trend_frame(history: FuturesHistory, prefix: str) -> pl.DataFrame:
         pl.col("ts_slow").alias(f"{prefix}_ts_slow"),
         pl.col("signal").alias(f"{prefix}_trend_signal"),
     )
+
+
+def _replace_trade_dates(
+    frame: pl.DataFrame,
+    date_map: dict[date, date],
+) -> tuple[pl.DataFrame, int]:
+    if frame.is_empty():
+        return frame, 0
+    before = frame.height
+    mapped = (
+        frame.with_columns(
+            pl.col("trade_date")
+            .replace_strict(date_map, default=pl.col("trade_date"))
+            .alias("trade_date")
+        )
+        .sort("trade_date", "source_timestamp")
+        .unique(subset="trade_date", keep="last", maintain_order=True)
+    )
+    return mapped, before - mapped.height
+
+
+def _align_carver_dates(
+    mapping: MarketMapping,
+    carver: FuturesHistory,
+    globex: FuturesHistory,
+) -> tuple[FuturesHistory, int]:
+    """Apply an explicitly configured cross-provider session alignment."""
+    if not mapping.carver_date_alignment:
+        return carver, 0
+    if mapping.carver_date_alignment != "previous_globex_session":
+        raise ValueError(
+            f"Unsupported Carver date alignment: {mapping.carver_date_alignment}"
+        )
+    if mapping.carver_date_alignment_through is None:
+        raise ValueError("Carver date alignment requires an inclusive end date")
+
+    globex_dates = sorted(set(globex.signal.get_column("trade_date").to_list()))
+    date_map: dict[date, date] = {}
+    for value in carver.signal.get_column("trade_date").to_list():
+        if value > mapping.carver_date_alignment_through:
+            continue
+        position = bisect.bisect_left(globex_dates, value) - 1
+        if position >= 0:
+            date_map[value] = globex_dates[position]
+
+    signal, collapsed = _replace_trade_dates(carver.signal, date_map)
+    marks, _ = _replace_trade_dates(carver.marks, date_map)
+    carry, _ = _replace_trade_dates(carver.carry, date_map)
+    marks = marks.with_columns(
+        (pl.col("contract_id") != pl.col("contract_id").shift(1))
+        .fill_null(False)
+        .alias("is_roll")
+    )
+    if {"adjusted_price", "current_price"}.issubset(signal.columns):
+        signal = signal.sort("trade_date").with_columns(
+            pl.col("adjusted_price").diff().alias("adjusted_point_change")
+        )
+        signal = signal.with_columns(
+            pl.when(
+                pl.col("adjusted_point_change").is_not_null()
+                & (pl.col("current_price") > 0)
+            )
+            .then(pl.col("adjusted_point_change") / pl.col("current_price"))
+            .otherwise(None)
+            .alias("normalized_return")
+        )
+    signal = signal.sort("trade_date").with_columns(
+        (
+            (1.0 + pl.col("normalized_return").fill_null(0.0)).cum_prod()
+            * 100.0
+        ).alias("signal_index"),
+        (pl.col("contract_id") != pl.col("contract_id").shift(1))
+        .fill_null(False)
+        .alias("is_roll"),
+    )
+    metadata = dict(carver.metadata)
+    metadata.update(
+        {
+            "date_alignment": mapping.carver_date_alignment,
+            "date_alignment_through": mapping.carver_date_alignment_through,
+            "date_alignment_collapsed_rows": collapsed,
+        }
+    )
+    return FuturesHistory(
+        source=carver.source,
+        instrument_code=carver.instrument_code,
+        schema_version=carver.schema_version,
+        signal=signal,
+        marks=marks,
+        carry=carry,
+        metadata=metadata,
+    ), collapsed
 
 
 def _comparison_frame(
@@ -185,6 +289,39 @@ def _shifted_return_correlation(
         ~pl.col("carver_is_roll") & ~pl.col("globex_is_roll")
     ).drop_nulls(["carver_return", "globex_return"])
     return _correlation(joined, "carver_return", "globex_return"), joined.height
+
+
+def _volatility_frame(history: FuturesHistory, prefix: str) -> pl.DataFrame:
+    return history.signal.sort("trade_date").select(
+        "trade_date",
+        (
+            pl.col("normalized_return")
+            .rolling_std(
+                window_size=VOLATILITY_WINDOW_DAYS,
+                min_samples=VOLATILITY_WINDOW_DAYS,
+            )
+            * math.sqrt(252)
+        ).alias(f"{prefix}_volatility"),
+    )
+
+
+def _shifted_volatility_correlation(
+    carver: FuturesHistory,
+    globex: FuturesHistory,
+    start: date,
+    end: date,
+    globex_shift_days: int,
+) -> tuple[Optional[float], int]:
+    left = _bounded(_volatility_frame(carver, "carver"), start, end)
+    right = _bounded(_volatility_frame(globex, "globex"), start, end).with_columns(
+        (pl.col("trade_date") + pl.duration(days=globex_shift_days)).alias(
+            "trade_date"
+        )
+    )
+    joined = left.join(right, on="trade_date", how="inner").drop_nulls(
+        ["carver_volatility", "globex_volatility"]
+    )
+    return _correlation(joined, "carver_volatility", "globex_volatility"), joined.height
 
 
 def _roll_events(
@@ -334,6 +471,15 @@ def compare_market(
     end: date = DEFAULT_OVERLAP_END,
 ) -> tuple[dict, pl.DataFrame, pl.DataFrame, pl.DataFrame]:
     """Compare one mapped market without making an approval decision."""
+    unaligned_shift_results = (
+        {
+            shift: _shifted_return_correlation(carver, globex, start, end, shift)
+            for shift in (-1, 0, 1)
+        }
+        if mapping.carver_date_alignment
+        else {}
+    )
+    carver, collapsed_alignment_rows = _align_carver_dates(mapping, carver, globex)
     detail = _comparison_frame(carver, globex, start, end)
     carver_dates = _bounded(carver.signal, start, end).select("trade_date")
     globex_dates = _bounded(globex.signal, start, end).select("trade_date")
@@ -343,6 +489,10 @@ def compare_market(
 
     shift_results = {
         shift: _shifted_return_correlation(carver, globex, start, end, shift)
+        for shift in (-1, 0, 1)
+    }
+    volatility_shift_results = {
+        shift: _shifted_volatility_correlation(carver, globex, start, end, shift)
         for shift in (-1, 0, 1)
     }
     for shift, (correlation, observations) in shift_results.items():
@@ -363,6 +513,17 @@ def compare_market(
         )
     else:
         best_shift, best_corr, best_shift_rows = None, None, 0
+    finite_volatility_shifts = {
+        shift: result
+        for shift, result in volatility_shift_results.items()
+        if result[0] is not None
+    }
+    if finite_volatility_shifts:
+        best_volatility_shift, (best_volatility_corr, best_volatility_rows) = max(
+            finite_volatility_shifts.items(), key=lambda item: item[1][0]
+        )
+    else:
+        best_volatility_shift, best_volatility_corr, best_volatility_rows = None, None, 0
 
     trend_clean = detail.drop_nulls(
         ["carver_trend_signal", "globex_trend_signal"]
@@ -382,6 +543,21 @@ def compare_market(
         "globex_dataset_fingerprint": globex.metadata.get("dataset_fingerprint"),
         "review_status": mapping.mapping_status,
         "usage_status": mapping.usage_status,
+        "carver_date_alignment": mapping.carver_date_alignment or "none",
+        "carver_date_alignment_through": mapping.carver_date_alignment_through,
+        "date_alignment_collapsed_rows": collapsed_alignment_rows,
+        "unaligned_shift_0_return_correlation": (
+            unaligned_shift_results[0][0] if unaligned_shift_results else None
+        ),
+        "unaligned_best_return_correlation": (
+            max(
+                result[0]
+                for result in unaligned_shift_results.values()
+                if result[0] is not None
+            )
+            if unaligned_shift_results
+            else None
+        ),
         "overlap_start": detail.get_column("trade_date").min(),
         "overlap_end": detail.get_column("trade_date").max(),
         "carver_dates": carver_dates.height,
@@ -402,6 +578,12 @@ def compare_market(
         "best_globex_shift_days": best_shift,
         "best_nonroll_return_correlation": best_corr,
         "best_shift_common_returns": best_shift_rows,
+        "shift_minus_1_volatility_correlation": volatility_shift_results[-1][0],
+        "shift_0_volatility_correlation": volatility_shift_results[0][0],
+        "shift_plus_1_volatility_correlation": volatility_shift_results[1][0],
+        "best_volatility_shift_days": best_volatility_shift,
+        "best_volatility_correlation": best_volatility_corr,
+        "best_shift_common_volatilities": best_volatility_rows,
         "carver_annualized_volatility": (
             nonroll.get_column("carver_return").drop_nulls().std() * math.sqrt(252)
         ),
@@ -548,29 +730,44 @@ def render_markdown(
         "",
         "Carver source timestamps are preserved, while Sunday observations are assigned "
         "to the following Monday trading session during sidecar import.",
+        "Daily volatility is the annualized trailing 20-session standard deviation of "
+        "normalized returns. The tables report every tested -1/0/+1 calendar-day "
+        "correlation for both returns and volatility.",
         "",
         "Every mapping remains `candidate`. Automated recommendations are triage only, "
         "not mapping approvals.",
         "",
         "## Summary",
         "",
-        "| Market | Carver | Globex | Common days | Return corr. | Best shift | "
-        "Trend corr. | Direction | Contract month | Recommendation |",
-        "|---|---|---:|---:|---:|---:|---:|---:|---:|---|",
+        "| Market | Carver | Globex | Common | Return corr. -1 / 0 / +1 | "
+        "Vol corr. -1 / 0 / +1 | Trend | Direction | Date alignment | Recommendation |",
+        "|---|---|---:|---:|---|---|---:|---:|---|---|",
     ]
     for row in report.summary.iter_rows(named=True):
         lines.append(
             "| {canonical_market_id} | {carver_instrument} | {globex_asset} | "
-            "{common_dates} | {return_corr} | {best_shift} | {trend_corr} | "
-            "{direction} | {contract} | {recommendation} |".format(
+            "{common_dates} | {return_corrs} | {vol_corrs} | {trend_corr} | "
+            "{direction} | {alignment} | {recommendation} |".format(
                 **row,
-                return_corr=_format_metric(
-                    row["best_nonroll_return_correlation"]
+                return_corrs=" / ".join(
+                    _format_metric(row[name])
+                    for name in (
+                        "shift_minus_1_return_correlation",
+                        "shift_0_return_correlation",
+                        "shift_plus_1_return_correlation",
+                    )
                 ),
-                best_shift=_format_metric(row["best_globex_shift_days"], 0),
+                vol_corrs=" / ".join(
+                    _format_metric(row[name])
+                    for name in (
+                        "shift_minus_1_volatility_correlation",
+                        "shift_0_volatility_correlation",
+                        "shift_plus_1_volatility_correlation",
+                    )
+                ),
                 trend_corr=_format_metric(row["trend_signal_correlation"]),
                 direction=_format_metric(row["trend_direction_agreement"]),
-                contract=_format_metric(row["contract_month_agreement"]),
+                alignment=row["carver_date_alignment"],
                 recommendation=row["automated_recommendation"],
             )
         )
@@ -586,11 +783,19 @@ def render_markdown(
                 f"{row['common_dates']:,} common dates, "
                 f"{row['carver_only_dates']:,} Carver-only and "
                 f"{row['globex_only_dates']:,} Globex-only dates.",
-                f"- Non-roll return correlation: same-day "
-                f"{_format_metric(row['same_day_nonroll_return_correlation'])}; "
-                f"best of -1/0/+1 calendar-day Globex shifts "
+                f"- Non-roll return correlation at -1/0/+1 calendar-day Globex shifts: "
+                f"{_format_metric(row['shift_minus_1_return_correlation'])} / "
+                f"{_format_metric(row['shift_0_return_correlation'])} / "
+                f"{_format_metric(row['shift_plus_1_return_correlation'])}; best "
                 f"{_format_metric(row['best_nonroll_return_correlation'])} at "
                 f"{_format_metric(row['best_globex_shift_days'], 0)} day(s).",
+                f"- Trailing {VOLATILITY_WINDOW_DAYS}-session annualized-volatility "
+                f"correlation at -1/0/+1 shifts: "
+                f"{_format_metric(row['shift_minus_1_volatility_correlation'])} / "
+                f"{_format_metric(row['shift_0_volatility_correlation'])} / "
+                f"{_format_metric(row['shift_plus_1_volatility_correlation'])}; best "
+                f"{_format_metric(row['best_volatility_correlation'])} at "
+                f"{_format_metric(row['best_volatility_shift_days'], 0)} day(s).",
                 f"- Annualized normalized-return volatility: Carver "
                 f"{_format_metric(row['carver_annualized_volatility'])}; Globex "
                 f"{_format_metric(row['globex_annualized_volatility'])}.",
@@ -605,12 +810,28 @@ def render_markdown(
                 f"- Configured contract cycles: Carver hold cycle "
                 f"`{row['carver_hold_roll_cycle'] or 'n/a'}`; repository Globex active "
                 f"months `{row['globex_active_months'] or 'unrestricted/unconfirmed'}`.",
+                f"- Date alignment: `{row['carver_date_alignment']}`"
+                + (
+                    f" through {row['carver_date_alignment_through']} inclusive; "
+                    f"{row['date_alignment_collapsed_rows']} duplicate mapped rows collapsed."
+                    if row["carver_date_alignment"] != "none"
+                    else "."
+                ),
                 f"- Status: {row['review_status']}; automated recommendation: "
                 f"`{row['automated_recommendation']}`.",
             ]
         )
         if row["known_issue"]:
             lines.append(f"- Known issue: {row['known_issue']}.")
+        if row["carver_date_alignment"] != "none":
+            lines.append(
+                "- Alignment audit: before the configured correction, same-date return "
+                f"correlation was {_format_metric(row['unaligned_shift_0_return_correlation'])} "
+                "and the best naive calendar shift produced "
+                f"{_format_metric(row['unaligned_best_return_correlation'])}; after "
+                f"actual-session alignment, the same-date result is "
+                f"{_format_metric(row['shift_0_return_correlation'])}."
+            )
         if row["notes"]:
             lines.append(f"- Mapping note: {row['notes']}.")
         lines.append("")
@@ -618,8 +839,9 @@ def render_markdown(
         [
             "## Interpretation safeguards",
             "",
-            "- A one-day lead/lag result is diagnostic evidence of settlement or session-date "
-            "alignment; it is not permission to shift data automatically.",
+            "- Silver alone has an explicit date adjustment: legacy observations through "
+            "2021-06-30 map to the preceding actual SI session. The other 13 mappings use "
+            "their normalized dates without a cross-provider shift.",
             "- Contract-month disagreement can reflect intentionally different roll rules, "
             "not a bad price series.",
             "- `proceed_to_manual_review` requires at least 1,000 common dates, return "

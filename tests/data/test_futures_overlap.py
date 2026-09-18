@@ -78,6 +78,32 @@ def _history(source: str, roll_index: int) -> FuturesHistory:
     )
 
 
+def _dated_history(source: str, dates: list[date]) -> FuturesHistory:
+    timestamps = [datetime.combine(value, datetime.min.time()) for value in dates]
+    signal = pl.DataFrame(
+        {
+            "trade_date": dates,
+            "source_timestamp": timestamps,
+            "normalized_return": [None, 0.01, 0.02],
+            "signal_index": [100.0, 101.0, 103.02],
+            "contract_id": ["20200300"] * 3,
+            "is_roll": [False] * 3,
+            "quality_flag": [""] * 3,
+        }
+    )
+    marks = pl.DataFrame(
+        {
+            "trade_date": dates,
+            "source_timestamp": timestamps,
+            "mark_price": [100.0, 101.0, 102.0],
+            "contract_id": ["20200300"] * 3,
+            "is_roll": [False] * 3,
+            "quality_flag": [""] * 3,
+        }
+    )
+    return FuturesHistory(source, "TEST", 1, signal, marks, _empty_carry())
+
+
 class _Provider:
     def __init__(self, history: FuturesHistory):
         self.history = history
@@ -92,8 +118,12 @@ def test_packaged_mapping_crosswalk_is_typed_and_unique() -> None:
     assert len(mappings) == 14
     assert len({mapping.canonical_market_id for mapping in mappings}) == 14
     crude = next(mapping for mapping in mappings if mapping.canonical_market_id == "crude_wti")
+    silver = next(mapping for mapping in mappings if mapping.canonical_market_id == "silver")
     assert crude.mapping_status == "candidate"
     assert "annual December" in crude.known_issue
+    assert silver.carver_date_alignment == "previous_globex_session"
+    assert silver.carver_date_alignment_through == date(2021, 6, 30)
+    assert sum(bool(mapping.carver_date_alignment) for mapping in mappings) == 1
 
 
 def test_compare_market_reports_returns_trends_and_nearest_roll() -> None:
@@ -111,6 +141,8 @@ def test_compare_market_reports_returns_trends_and_nearest_roll() -> None:
 
     assert metrics["common_dates"] == 400
     assert metrics["same_day_nonroll_return_correlation"] == pytest.approx(1.0)
+    assert metrics["shift_0_volatility_correlation"] == pytest.approx(1.0)
+    assert metrics["best_volatility_correlation"] == pytest.approx(1.0)
     assert metrics["trend_signal_correlation"] == pytest.approx(1.0)
     assert metrics["trend_direction_agreement"] == pytest.approx(1.0)
     assert metrics["contract_month_agreement"] == pytest.approx(398 / 400)
@@ -119,6 +151,28 @@ def test_compare_market_reports_returns_trends_and_nearest_roll() -> None:
     assert rolls.get_column("roll_date_distance_days").to_list() == [2]
     assert missing_dates.is_empty()
     assert detail.height == 400
+
+
+def test_previous_session_alignment_uses_actual_globex_dates_not_calendar_days() -> None:
+    globex_dates = [date(2020, 1, 3), date(2020, 1, 6), date(2020, 1, 7)]
+    carver_dates = [date(2020, 1, 6), date(2020, 1, 7), date(2020, 1, 8)]
+    mapping = MarketMapping(
+        "test",
+        "CARVER",
+        "GLOBEX",
+        carver_date_alignment="previous_globex_session",
+        carver_date_alignment_through=date(2020, 1, 8),
+    )
+
+    aligned, collapsed = overlap._align_carver_dates(
+        mapping,
+        _dated_history("pysystemtrade", carver_dates),
+        _dated_history("globex", globex_dates),
+    )
+
+    assert aligned.signal.get_column("trade_date").to_list() == globex_dates
+    assert all(value.weekday() < 5 for value in globex_dates)
+    assert collapsed == 0
 
 
 def test_build_and_write_overlap_report(tmp_path: Path) -> None:
@@ -146,6 +200,8 @@ def test_build_and_write_overlap_report(tmp_path: Path) -> None:
     markdown = (tmp_path / "report.md").read_text(encoding="utf-8")
     assert "Every mapping remains `candidate`" in markdown
     assert "Sunday observations are assigned" in markdown
+    assert "Return corr. -1 / 0 / +1" in markdown
+    assert "Vol corr. -1 / 0 / +1" in markdown
     assert "test: CARVER / GLOBEX" in markdown
 
 

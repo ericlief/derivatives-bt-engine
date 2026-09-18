@@ -27,6 +27,7 @@ def _build_carver_sidecar(path: Path) -> None:
     try:
         con.execute("CREATE SCHEMA meta")
         con.execute("CREATE SCHEMA raw")
+        con.execute("CREATE SCHEMA daily")
         con.execute(
             """
             CREATE TABLE meta.schema_version (
@@ -39,7 +40,7 @@ def _build_carver_sidecar(path: Path) -> None:
             """
         )
         con.execute(
-            "INSERT INTO meta.schema_version VALUES (2, now(), 'test', '/test', ?)",
+            "INSERT INTO meta.schema_version VALUES (3, now(), 'test', '/test', ?)",
             [SOURCE_COMMIT],
         )
         con.execute(
@@ -144,8 +145,51 @@ def _build_carver_sidecar(path: Path) -> None:
                         price + 1,
                     ],
                 )
+        _refresh_daily_tables(con)
     finally:
         con.close()
+
+
+def _refresh_daily_tables(con: duckdb.DuckDBPyConnection) -> None:
+    con.execute("DROP TABLE IF EXISTS daily.adjusted_prices")
+    con.execute("DROP TABLE IF EXISTS daily.marks")
+    con.execute("DROP TABLE IF EXISTS daily.carry")
+    con.execute(
+        """
+        CREATE TABLE daily.adjusted_prices AS
+        SELECT instrument_code, trade_date, source_timestamp, adjusted_price
+        FROM raw.adjusted_prices WHERE adjusted_price IS NOT NULL
+        QUALIFY row_number() OVER (
+            PARTITION BY instrument_code, trade_date ORDER BY source_timestamp DESC
+        ) = 1
+        """
+    )
+    con.execute(
+        """
+        CREATE TABLE daily.marks AS
+        SELECT instrument_code, trade_date, source_timestamp,
+               price AS mark_price, price_contract AS contract_id
+        FROM raw.multiple_prices
+        WHERE price IS NOT NULL AND price_contract IS NOT NULL
+        QUALIFY row_number() OVER (
+            PARTITION BY instrument_code, trade_date ORDER BY source_timestamp DESC
+        ) = 1
+        """
+    )
+    con.execute(
+        """
+        CREATE TABLE daily.carry AS
+        SELECT instrument_code, trade_date, source_timestamp,
+               price AS current_price, price_contract AS current_contract,
+               carry AS carry_price, carry_contract
+        FROM raw.multiple_prices
+        WHERE price IS NOT NULL AND carry IS NOT NULL
+          AND price_contract IS NOT NULL AND carry_contract IS NOT NULL
+        QUALIFY row_number() OVER (
+            PARTITION BY instrument_code, trade_date ORDER BY source_timestamp DESC
+        ) = 1
+        """
+    )
 
 
 def _build_globex_database(path: Path) -> None:
@@ -257,7 +301,7 @@ def test_carver_cache_path_is_source_and_version_namespaced(tmp_path: Path) -> N
         tmp_path
         / "cache"
         / "pysystemtrade"
-        / "v2"
+        / "v3"
         / SOURCE_COMMIT[:12]
         / "SP500_signal.parquet"
     )
@@ -302,6 +346,7 @@ def test_carver_loader_collapses_sunday_into_monday_and_recomputes_return(
                 monday_trade_date,
             ],
         )
+        _refresh_daily_tables(con)
     finally:
         con.close()
     provider = PysystemtradeHistoryProvider(

@@ -156,7 +156,7 @@ instrument-day on average, and every instrument has at least one date with
 multiple intraday observations. The snapshots are nevertheless irregular and
 do not form a full OHLCV contract surface. The deterministic research
 convention should remain the latest observation satisfying each stream's
-completeness constraint on a trade date. Importer schema v2 maps Sunday
+completeness constraint on a trade date. Importer schema v3 maps Sunday
 timestamps to Monday `trade_date` while retaining the source timestamp for
 audit. Carry's four fields must come from one complete source row; they must
 never be assembled column by column from different snapshots.

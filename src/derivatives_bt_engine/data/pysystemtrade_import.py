@@ -32,7 +32,7 @@ from derivatives_bt_engine.utils.logger import setup_logger
 
 logger = setup_logger()
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 DEFAULT_GLOBEX_DB_PATH = Path("/home/dev/fin/db/globex_mdp_3.0.duckdb")
 
 _MULTIPLE_SCHEMA = {
@@ -338,6 +338,7 @@ def _read_spread_costs(path: Path, relative_path: str) -> pl.DataFrame:
 def _create_schema(con: duckdb.DuckDBPyConnection) -> None:
     con.execute("CREATE SCHEMA meta")
     con.execute("CREATE SCHEMA raw")
+    con.execute("CREATE SCHEMA daily")
     con.execute("CREATE SCHEMA qa")
 
     con.execute(
@@ -732,6 +733,92 @@ def _validate_import(
             )
 
 
+def _create_daily_tables(con: duckdb.DuckDBPyConnection) -> None:
+    """Materialize one last-complete observation per normalized session.
+
+    The shipped files mix historical 23:00 daily observations with irregular
+    intraday snapshots.  After Sunday-to-Monday normalization, the latest
+    complete timestamp is the session close: normally 23:00, or the final
+    available complete snapshot when 23:00 is absent.  Selection is performed
+    independently for adjusted prices, marks, and carry because their validity
+    requirements differ.
+    """
+    con.execute(
+        """
+        CREATE TABLE daily.adjusted_prices AS
+        SELECT
+            instrument_code,
+            trade_date,
+            source_timestamp,
+            adjusted_price,
+            CASE
+                WHEN EXTRACT(HOUR FROM source_timestamp) = 23 THEN 'eod_2300'
+                ELSE 'last_complete'
+            END AS selection_policy,
+            source_file
+        FROM raw.adjusted_prices
+        WHERE adjusted_price IS NOT NULL
+        QUALIFY row_number() OVER (
+            PARTITION BY instrument_code, trade_date
+            ORDER BY source_timestamp DESC
+        ) = 1
+        ORDER BY instrument_code, trade_date
+        """
+    )
+    con.execute(
+        """
+        CREATE TABLE daily.marks AS
+        SELECT
+            instrument_code,
+            trade_date,
+            source_timestamp,
+            price AS mark_price,
+            price_contract AS contract_id,
+            CASE
+                WHEN EXTRACT(HOUR FROM source_timestamp) = 23 THEN 'eod_2300'
+                ELSE 'last_complete'
+            END AS selection_policy,
+            source_file
+        FROM raw.multiple_prices
+        WHERE price IS NOT NULL
+          AND price_contract IS NOT NULL
+        QUALIFY row_number() OVER (
+            PARTITION BY instrument_code, trade_date
+            ORDER BY source_timestamp DESC
+        ) = 1
+        ORDER BY instrument_code, trade_date
+        """
+    )
+    con.execute(
+        """
+        CREATE TABLE daily.carry AS
+        SELECT
+            instrument_code,
+            trade_date,
+            source_timestamp,
+            price AS current_price,
+            price_contract AS current_contract,
+            carry AS carry_price,
+            carry_contract,
+            CASE
+                WHEN EXTRACT(HOUR FROM source_timestamp) = 23 THEN 'eod_2300'
+                ELSE 'last_complete'
+            END AS selection_policy,
+            source_file
+        FROM raw.multiple_prices
+        WHERE price IS NOT NULL
+          AND carry IS NOT NULL
+          AND price_contract IS NOT NULL
+          AND carry_contract IS NOT NULL
+        QUALIFY row_number() OVER (
+            PARTITION BY instrument_code, trade_date
+            ORDER BY source_timestamp DESC
+        ) = 1
+        ORDER BY instrument_code, trade_date
+        """
+    )
+
+
 def _create_qa_tables(con: duckdb.DuckDBPyConnection) -> None:
     con.execute(
         """
@@ -767,30 +854,18 @@ def _create_qa_tables(con: duckdb.DuckDBPyConnection) -> None:
             FROM raw.multiple_prices
             GROUP BY instrument_code
         ),
-        day_flags AS (
-            SELECT
-                instrument_code,
-                trade_date,
-                bool_or(price IS NOT NULL AND price_contract IS NOT NULL) AS has_price,
-                bool_or(
-                    price IS NOT NULL AND carry IS NOT NULL
-                    AND price_contract IS NOT NULL AND carry_contract IS NOT NULL
-                ) AS has_carry_pair,
-                bool_or(
-                    price IS NOT NULL AND forward IS NOT NULL
-                    AND price_contract IS NOT NULL AND forward_contract IS NOT NULL
-                ) AS has_forward_pair
-            FROM raw.multiple_prices
-            GROUP BY instrument_code, trade_date
-        ),
         daily_stats AS (
             SELECT
-                instrument_code,
-                count(*) FILTER (WHERE has_price) AS price_days,
-                count(*) FILTER (WHERE has_carry_pair) AS carry_days,
-                count(*) FILTER (WHERE has_forward_pair) AS forward_days
-            FROM day_flags
-            GROUP BY instrument_code
+                m.instrument_code,
+                count(*) AS price_days,
+                count(c.trade_date) AS carry_days,
+                count(*) FILTER (WHERE r.forward IS NOT NULL) AS forward_days
+            FROM daily.marks m
+            LEFT JOIN daily.carry c USING (instrument_code, trade_date)
+            LEFT JOIN raw.multiple_prices r
+              ON r.instrument_code = m.instrument_code
+             AND r.source_timestamp = m.source_timestamp
+            GROUP BY m.instrument_code
         ),
         adjusted_stats AS (
             SELECT
@@ -823,6 +898,32 @@ def _create_qa_tables(con: duckdb.DuckDBPyConnection) -> None:
         LEFT JOIN daily_stats d USING (instrument_code)
         LEFT JOIN adjusted_stats a USING (instrument_code)
         ORDER BY m.instrument_code
+        """
+    )
+    con.execute(
+        """
+        CREATE TABLE qa.daily_selection AS
+        SELECT
+            'adjusted_prices' AS stream,
+            count(*) AS selected_days,
+            count(*) FILTER (WHERE selection_policy = 'eod_2300') AS eod_2300_days,
+            count(*) FILTER (WHERE selection_policy = 'last_complete') AS fallback_days
+        FROM daily.adjusted_prices
+        UNION ALL
+        SELECT
+            'marks' AS stream,
+            count(*) AS selected_days,
+            count(*) FILTER (WHERE selection_policy = 'eod_2300') AS eod_2300_days,
+            count(*) FILTER (WHERE selection_policy = 'last_complete') AS fallback_days
+        FROM daily.marks
+        UNION ALL
+        SELECT
+            'carry' AS stream,
+            count(*) AS selected_days,
+            count(*) FILTER (WHERE selection_policy = 'eod_2300') AS eod_2300_days,
+            count(*) FILTER (WHERE selection_policy = 'last_complete') AS fallback_days
+        FROM daily.carry
+        ORDER BY stream
         """
     )
     con.execute(
@@ -919,6 +1020,7 @@ def build_sidecar(
         manifest = _import_files(con, source)
         _insert_frame(con, "meta.dataset_manifest", _manifest_frame(manifest))
         _validate_import(con, manifest)
+        _create_daily_tables(con)
         _create_qa_tables(con)
         con.execute("COMMIT")
         con.execute("CHECKPOINT")

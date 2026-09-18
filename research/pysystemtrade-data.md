@@ -51,12 +51,12 @@ The deterministic raw-data importer is implemented in
 `pysystemtrade-import` CLI. It writes the independently rebuildable sidecar at
 the recommended path; it does not attach to or write the Globex database.
 
-The current schema-v2 validated build used source commit
+The current schema-v3 validated build used source commit
 `b4a25e6e1e33a54a3ecfb45c0f6db5e2b60b84f8` and produced:
 
 | Build result | Value |
 |---|---:|
-| Sidecar size | 229,912,576 bytes |
+| Sidecar size | 286,273,536 bytes |
 | Manifest files | 803 |
 | Hashed source bytes | 717,390,223 |
 | Multiple-price rows | 7,249,183 |
@@ -73,11 +73,21 @@ directions across the manifest, every raw table, and every QA table. It had no
 logical differences. Import time is intentionally the sole run-specific
 metadata value.
 
-Schema v2 preserves every original `source_timestamp` and adds a normalized
+Schema v3 preserves every original `source_timestamp` and adds a normalized
 `trade_date` to adjusted and multiple-price rows. Sunday timestamps are assigned
 to Monday's futures trading session. The current build shifted 34,299 adjusted
 rows and 34,301 multiple-price rows; `qa.session_date_normalization` records
-those counts.
+those counts. It also materializes stream-specific daily tables after session
+normalization. Each stream selects its last complete observation independently:
+normally the 23:00 row, otherwise the final complete timestamp for that session.
+This prevents an incomplete late carry row from displacing an earlier valid
+same-timestamp price/carry pair.
+
+| Canonical daily stream | Selected days | 23:00 selections | Last-complete fallbacks |
+|---|---:|---:|---:|
+| Adjusted price | 1,249,673 | 1,064,871 | 184,802 |
+| Mark | 1,249,673 | 1,064,884 | 184,789 |
+| Carry pair | 1,124,999 | 963,601 | 161,398 |
 
 Two source quirks are retained and made auditable instead of silently cleaned:
 
@@ -136,8 +146,9 @@ Important findings are:
   0.982 trend correlation, and 96.9% contract-month agreement.
 - US10/ZN is similarly strong (0.899 return and 0.988 trend correlation) but
   remains blocked on explicit Treasury fractional-price scale validation.
-- Silver has a material session-date issue: its best correlation occurs with
-  Globex shifted one calendar day, so no shift is applied automatically.
+- Silver was the only instrument with a material session-date issue. Its
+  legacy observations through 2021-06-30 are now mapped to the preceding
+  actual SI trading session; later observations retain their normalized date.
 - `CRUDE_W` is an annual December winter contract, not a monthly WTI front
   contract. `CORN`, `SOYBEAN`, and `WHEAT` likewise hold one annual delivery
   month in this data. They may still be useful underlying trend histories, but
@@ -170,21 +181,40 @@ coverage gaps, exchange-holiday differences, and other source-specific
 omissions. Silver's separate one-calendar-day lead/lag result also remains
 after Sunday normalization.
 
-This is now resolved in importer schema v2. `raw.adjusted_prices` and
+The Sunday artifact is resolved in importer schema v3. `raw.adjusted_prices` and
 `raw.multiple_prices` retain the original timestamp and store Sunday rows with
-the following Monday `trade_date`. The history provider groups adjusted prices,
-marks, and carry by that field and therefore recomputes returns and rolls only
-after normalization. `HISTORY_SCHEMA_VERSION=2` invalidates the old Carver and
+the following Monday `trade_date`. Materialized `daily.adjusted_prices`,
+`daily.marks`, and `daily.carry` then select the last complete observation per
+normalized session, and the history provider recomputes returns and rolls from
+those tables. `HISTORY_SCHEMA_VERSION=3` invalidates the old Carver and
 source-neutral Globex history caches; the Globex database itself was not
 changed.
 
-The regenerated report contains 1,331 Carver-only dates, exactly 1,863 fewer
-than the original 3,194, and zero Sunday discrepancies. Globex-only dates are
-unchanged at 746. Excluding BRE/6L, the Carver-only count is 103, matching the
-manual audit. These remaining differences are genuine coverage gaps,
-exchange-holiday differences, or other source-specific omissions. Silver still
-has its best return correlation with Globex shifted +1 calendar day (0.654
-versus 0.358 on the same date), so no automatic shift was introduced.
+The EOD-normalized, Silver-aligned report contains 1,325 Carver-only dates and
+747 Globex-only dates across the 14 mappings. The six-row reduction relative to
+the Sunday-only report is the expected collapse of legacy Silver dates that map
+to the same actual SI session (seven rows collapse over Silver's complete
+history). No generated Silver trade date is a weekend.
+
+### Silver session alignment audit
+
+Silver is the only mapping with a configured cross-provider date adjustment.
+The source regime changes after the last Sunday timestamp on 2021-06-27: Carver
+observations through 2021-06-30 are assigned to the preceding **actual Globex SI
+session**, not blindly shifted one calendar day. This keeps the resulting dates
+Monday through Friday and handles exchange holidays without creating Sundays.
+From 2021-07-01 onward, the Carver and Globex dates are already aligned and are
+left unchanged.
+
+Before this adjustment, Silver's same-date non-roll return correlation was
+0.358 and its best naive calendar shift was +1 day at 0.654. After mapping to
+actual SI sessions and recomputing returns, the -1/0/+1 return correlations are
+0.160 / 0.816 / 0.028. The corresponding trailing 20-session annualized-
+volatility correlations are 0.906 / 0.915 / 0.900. The best return and
+volatility shifts are therefore both zero. All other 13 mappings also have
+their best return correlation at zero without a configured adjustment; BRL is
+the sole case whose highly autocorrelated volatility measure peaks at +1 day,
+which is not evidence for a price-date shift.
 
 Regenerate the evidence with:
 
@@ -394,7 +424,7 @@ prices with stale carry prices and manufacture a false roll yield.
   `rollconfig.csv`. Neither mini/micro price duplication nor roll configuration
   should be accepted silently.
 - Timestamps are timezone-naive and mix old daily 23:00 observations with
-  recent intraday observations. Schema v2 retains `source_timestamp` exactly
+  recent intraday observations. Schema v3 retains `source_timestamp` exactly
   and derives a separate, documented `trade_date` rather than assuming the
   strings are UTC.
 
@@ -570,8 +600,8 @@ Cache paths must include source and schema version, for example:
 
 ```text
 .cache/futures/globex/v1/ES_daily.parquet
-.cache/futures/globex/v2/<database-fingerprint>/ES_signal.parquet
-.cache/futures/pysystemtrade/v2/<source-commit>/SP500_signal.parquet
+.cache/futures/globex/v3/<database-fingerprint>/ES_signal.parquet
+.cache/futures/pysystemtrade/v3/<source-commit>/SP500_signal.parquet
 ```
 
 The first path is the unchanged legacy `FuturesDataLoader` cache. The v2 paths

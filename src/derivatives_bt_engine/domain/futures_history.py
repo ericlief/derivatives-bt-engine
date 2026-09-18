@@ -34,7 +34,7 @@ from derivatives_bt_engine.utils.logger import setup_logger
 
 logger = setup_logger()
 
-HISTORY_SCHEMA_VERSION = 2
+HISTORY_SCHEMA_VERSION = 3
 DEFAULT_PYSYSTEMTRADE_DB_PATH = Path(
     "/home/dev/fin/db/pysystemtrade_reference.duckdb"
 )
@@ -220,7 +220,7 @@ class PysystemtradeHistoryProvider:
 
     def load(self, instrument_code: str) -> FuturesHistory:
         sidecar_version, source_commit = self._database_metadata()
-        if sidecar_version != 2:
+        if sidecar_version != 3:
             raise ValueError(
                 f"Unsupported pysystemtrade sidecar schema version: {sidecar_version}"
             )
@@ -308,16 +308,10 @@ class PysystemtradeHistoryProvider:
             """
             SELECT
                 trade_date,
-                max(source_timestamp) FILTER (
-                    WHERE adjusted_price IS NOT NULL
-                ) AS source_timestamp,
-                arg_max(adjusted_price, source_timestamp) FILTER (
-                    WHERE adjusted_price IS NOT NULL
-                ) AS adjusted_price
-            FROM raw.adjusted_prices
+                source_timestamp,
+                adjusted_price
+            FROM daily.adjusted_prices
             WHERE instrument_code = ?
-            GROUP BY trade_date
-            HAVING count(adjusted_price) > 0
             ORDER BY trade_date
             """,
             [instrument_code],
@@ -326,21 +320,11 @@ class PysystemtradeHistoryProvider:
             """
             SELECT
                 trade_date,
-                max(source_timestamp) FILTER (
-                    WHERE price IS NOT NULL AND price_contract IS NOT NULL
-                ) AS source_timestamp,
-                arg_max(price, source_timestamp) FILTER (
-                    WHERE price IS NOT NULL AND price_contract IS NOT NULL
-                ) AS mark_price,
-                arg_max(price_contract, source_timestamp) FILTER (
-                    WHERE price IS NOT NULL AND price_contract IS NOT NULL
-                ) AS contract_id
-            FROM raw.multiple_prices
+                source_timestamp,
+                mark_price,
+                contract_id
+            FROM daily.marks
             WHERE instrument_code = ?
-            GROUP BY trade_date
-            HAVING count(*) FILTER (
-                WHERE price IS NOT NULL AND price_contract IS NOT NULL
-            ) > 0
             ORDER BY trade_date
             """,
             [instrument_code],
@@ -412,19 +396,14 @@ class PysystemtradeHistoryProvider:
             """
             SELECT
                 trade_date,
-                max(source_timestamp) AS source_timestamp,
-                arg_max(price, source_timestamp) AS current_price,
-                arg_max(price_contract, source_timestamp) AS current_contract,
-                arg_max(carry, source_timestamp) AS carry_price,
-                arg_max(carry_contract, source_timestamp) AS carry_contract,
+                source_timestamp,
+                current_price,
+                current_contract,
+                carry_price,
+                carry_contract,
                 '' AS quality_flag
-            FROM raw.multiple_prices
+            FROM daily.carry
             WHERE instrument_code = ?
-              AND price IS NOT NULL
-              AND carry IS NOT NULL
-              AND price_contract IS NOT NULL
-              AND carry_contract IS NOT NULL
-            GROUP BY trade_date
             ORDER BY trade_date
             """,
             [instrument_code],
