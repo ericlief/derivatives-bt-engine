@@ -962,7 +962,7 @@ def cluster_conviction_score(signal_weighting: str, signal: Mapping[str, object]
         value = float(value)
         return value if math.isfinite(value) else None
 
-    if signal_weighting == 'continuous':
+    if signal_weighting in ('continuous', 'carver_ewmac'):
         return abs(finite(signal.get('contin_signal')) or 0.0)
 
     regime_value = signal.get('g_regime')

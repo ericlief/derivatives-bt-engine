@@ -24,6 +24,7 @@ import polars as pl
 from derivatives_bt_engine.domain.allocation import ALLOCATION_MODES, NOTIONAL_WEIGHTING_SCHEMES
 from derivatives_bt_engine.domain.signal import GOULDING_SIGNAL_MODES
 from derivatives_bt_engine.domain.tsmom_backtester import TsmomBacktestConfig, run_tsmom_backtest
+from derivatives_bt_engine.domain.tsmom_history import SOURCE_NEUTRAL_DATA_SOURCES
 from derivatives_bt_engine.domain.tsmom_reporting import clean_signal_rows, portfolio_rows_from_signals
 from derivatives_bt_engine.domain.tsmom_window_reporting import (
     score_causal_windows,
@@ -52,6 +53,22 @@ def parse_args():
                         "direction only, valid-zero share held as cash, and no vol scaling, IDM, "
                         "forecast magnitude, VIX/confidence sizing, active-set renormalization, or "
                         "cluster allocation. Contract rounding and hard caps still apply.")
+    p.add_argument(
+        '--data-source',
+        choices=['legacy_globex', *SOURCE_NEUTRAL_DATA_SOURCES],
+        default='legacy_globex',
+        help="Price-history path. legacy_globex preserves prior behavior; globex uses the "
+             "new separated streams; pysystemtrade uses Carver history; hybrid uses Carver "
+             "before an overlap handoff and Globex afterward.",
+    )
+    p.add_argument('--globex-db', default='/home/dev/fin/db/globex_mdp_3.0.duckdb')
+    p.add_argument('--pysystemtrade-db', default='/home/dev/fin/db/pysystemtrade_reference.duckdb')
+    p.add_argument('--pysystemtrade-mapping', default=None,
+                   help='Optional mapping CSV; default uses the packaged audited crosswalk')
+    p.add_argument('--hybrid-handoff-date', default=None,
+                   help='Optional YYYY-MM-DD handoff; default is the first valid primary return')
+    p.add_argument('--allow-candidate-mappings', action='store_true',
+                   help='Research opt-in required while crosswalk rows remain candidate status')
     p.add_argument('--fixed-quantities', default=None,
                    help='Comma-separated fixed contract counts, positionally matched to --symbols '
                         '(e.g. --symbols ES,GC,CL --fixed-quantities 4,3,2). When set, disables '
@@ -140,14 +157,21 @@ def parse_args():
                    help='Cluster cap as a fraction of portfolio dollar-vol target (default: %(default)s)')
     p.add_argument('--max-lot-overrun-pct', type=float, default=0.5,
                    help='Allow the cap priority leader one lot this far over its cap (default: %(default)s)')
-    p.add_argument('--signal-weighting', choices=['continuous', 'goulding'], default='continuous',
+    p.add_argument('--signal-weighting', choices=['continuous', 'goulding', 'carver_ewmac'], default='continuous',
                    help="Signal DIRECTION source (default: %(default)s). 'continuous': "
                         "continuous_momentum's daily trend_strength + --regime-discount. "
                         "'goulding': Goulding/Harvey/Mazzoleni (2023)'s own monthly Bull/Correction/"
                         "Bear/Rebound classification with a_Co/a_Re mixing weights re-estimated at "
                         "every rebalance from all prior pooled history -- --regime-discount is "
                         "ignored in this mode. Position size/vol-targeting is unaffected either way; "
-                        "see TsmomBacktestConfig.signal_weighting's own docstring")
+                        "'carver_ewmac' uses EMA differences and point volatility on the generated "
+                        "Panama series. See TsmomBacktestConfig.signal_weighting's docstring")
+    p.add_argument('--ewmac-fast-span', type=int, default=16)
+    p.add_argument('--ewmac-slow-span', type=int, default=64)
+    p.add_argument('--ewmac-vol-span', type=int, default=35)
+    p.add_argument('--ewmac-forecast-scalar', type=float, default=1.0,
+                   help='Explicit Carver forecast scalar for the selected speed pair')
+    p.add_argument('--ewmac-forecast-cap', type=float, default=20.0)
     p.add_argument('--goulding-signal-mode', choices=GOULDING_SIGNAL_MODES, default='binary',
                    help="Only used with --signal-weighting goulding. 'binary' preserves the +/-1 "
                         "direction baseline. 'continuous' uses mean(fast, slow) in Bull/Bear and "
@@ -239,6 +263,20 @@ def main():
         slow_window=args.slow_window,
         vol_fast_window=args.vol_fast_window,
         vol_slow_window=args.vol_slow_window,
+        data_source=args.data_source,
+        globex_db_path=args.globex_db,
+        pysystemtrade_db_path=args.pysystemtrade_db,
+        pysystemtrade_mapping_path=args.pysystemtrade_mapping,
+        hybrid_handoff_date=(
+            date.fromisoformat(args.hybrid_handoff_date)
+            if args.hybrid_handoff_date else None
+        ),
+        allow_candidate_mappings=args.allow_candidate_mappings,
+        ewmac_fast_span=args.ewmac_fast_span,
+        ewmac_slow_span=args.ewmac_slow_span,
+        ewmac_vol_span=args.ewmac_vol_span,
+        ewmac_forecast_scalar=args.ewmac_forecast_scalar,
+        ewmac_forecast_cap=args.ewmac_forecast_cap,
     )
 
     result = run_tsmom_backtest(config)
@@ -274,6 +312,9 @@ def main():
     # to a comparable summary CSV.
     summary_values = {
         'symbols': ','.join(symbols), 'years': args.years,
+        'data_source': args.data_source,
+        'signal_weighting': args.signal_weighting,
+        'requested_hybrid_handoff_date': args.hybrid_handoff_date,
         'n_days': result['n_days'], 'ann_ret_pct': result['ann_ret_pct'],
         'ann_vol_pct': result['ann_vol_pct'], 'sharpe': result['sharpe'],
         'max_dd_pct': result['max_dd_pct'], 'total_fees': result['total_fees'],
@@ -378,6 +419,7 @@ def main():
                 'data_start': str(stats['date'][0]),
                 'data_end': str(stats['date'][-1]),
                 'config': asdict(config),
+                'data_manifest': result['data_manifest'],
                 'window_report': {
                     'oos_start': args.oos_start,
                     'max_width_years': args.window_report_max_years,

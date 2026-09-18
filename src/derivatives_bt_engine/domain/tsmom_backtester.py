@@ -22,6 +22,7 @@ import math
 import os
 from dataclasses import dataclass
 from datetime import date
+from pathlib import Path
 from typing import Optional
 
 import duckdb
@@ -42,6 +43,10 @@ from derivatives_bt_engine.domain.futures_dataloader import (
     assert_monotonic_expiration,
     globex_daily_cache_path,
 )
+from derivatives_bt_engine.domain.futures_history import (
+    DEFAULT_GLOBEX_DB_PATH,
+    DEFAULT_PYSYSTEMTRADE_DB_PATH,
+)
 from derivatives_bt_engine.domain.instruments import (
     CME_MONTH_NUM_TO_LETTER, get_spec, resolve_active_months, resolve_annualization_days, resolve_price_symbol,
 )
@@ -52,6 +57,7 @@ from derivatives_bt_engine.domain.signal import (
     SignalSpec,
     build_features,
     build_monthly_state_return_history,
+    carver_ewmac,
     cluster_conviction_score,
     continuous_momentum,
     estimate_goulding_forecast_scalar,
@@ -59,6 +65,10 @@ from derivatives_bt_engine.domain.signal import (
     goulding_continuous_raw,
     goulding_monthly,
     resolve_trend_direction,
+)
+from derivatives_bt_engine.domain.tsmom_history import (
+    SOURCE_NEUTRAL_DATA_SOURCES,
+    load_source_neutral_histories,
 )
 from derivatives_bt_engine.utils.logger import setup_logger
 
@@ -312,14 +322,48 @@ class TsmomBacktestConfig:
     max_active_per_cluster: Optional[int] = None
     max_cluster_risk_pct: float = 0.25
     max_lot_overrun_pct: float = 0.5
+    # Data plumbing. ``legacy_globex`` is the unchanged historical default.
+    # The other modes use FuturesHistory's separated raw mark, return index,
+    # Panama, and provenance streams.
+    data_source: str = 'legacy_globex'
+    globex_db_path: Path | str = DEFAULT_GLOBEX_DB_PATH
+    pysystemtrade_db_path: Path | str = DEFAULT_PYSYSTEMTRADE_DB_PATH
+    pysystemtrade_mapping_path: Optional[Path | str] = None
+    hybrid_handoff_date: Optional[date] = None
+    allow_candidate_mappings: bool = False
+    # Native Carver EWMAC rule parameters. The forecast scalar is explicit:
+    # calibrated values are rule-speed-specific and must not be invented.
+    ewmac_fast_span: int = 16
+    ewmac_slow_span: int = 64
+    ewmac_vol_span: int = 35
+    ewmac_forecast_scalar: float = 1.0
+    ewmac_forecast_cap: float = 20.0
 
     def __post_init__(self):
         if self.allocation_mode not in ALLOCATION_MODES:
             raise ValueError(f"allocation_mode must be one of {ALLOCATION_MODES}, got {self.allocation_mode!r}")
         if self.signal_gate_mode not in ('off', 'monthly', 'daily'):
             raise ValueError(f"signal_gate_mode must be 'off', 'monthly', or 'daily', got {self.signal_gate_mode!r}")
-        if self.signal_weighting not in ('continuous', 'goulding'):
-            raise ValueError(f"signal_weighting must be 'continuous' or 'goulding', got {self.signal_weighting!r}")
+        if self.signal_weighting not in ('continuous', 'goulding', 'carver_ewmac'):
+            raise ValueError(
+                "signal_weighting must be 'continuous', 'goulding', or "
+                f"'carver_ewmac', got {self.signal_weighting!r}"
+            )
+        if self.data_source not in ('legacy_globex', *SOURCE_NEUTRAL_DATA_SOURCES):
+            raise ValueError(
+                "data_source must be legacy_globex, globex, pysystemtrade, or hybrid, "
+                f"got {self.data_source!r}"
+            )
+        if self.signal_weighting == 'carver_ewmac' and self.data_source == 'legacy_globex':
+            raise ValueError("carver_ewmac requires a source-neutral data_source")
+        if self.ewmac_fast_span <= 0 or self.ewmac_slow_span <= 0 or self.ewmac_vol_span <= 0:
+            raise ValueError("EWMAC spans must be positive")
+        if self.ewmac_fast_span >= self.ewmac_slow_span:
+            raise ValueError("ewmac_fast_span must be less than ewmac_slow_span")
+        if not math.isfinite(self.ewmac_forecast_scalar) or self.ewmac_forecast_scalar <= 0:
+            raise ValueError("ewmac_forecast_scalar must be finite and positive")
+        if not math.isfinite(self.ewmac_forecast_cap) or self.ewmac_forecast_cap <= 0:
+            raise ValueError("ewmac_forecast_cap must be positive")
         if self.goulding_signal_mode not in GOULDING_SIGNAL_MODES:
             raise ValueError(f"goulding_signal_mode must be one of {GOULDING_SIGNAL_MODES}, "
                              f"got {self.goulding_signal_mode!r}")
@@ -397,6 +441,117 @@ def load_portfolio_data(symbols: list[str]) -> tuple[dict[str, pl.DataFrame], pl
         assert_monotonic_expiration(df, s)
     vix = pl.read_parquet(VIX_FILE_PATH).select(['date', 'close']).rename({'close': 'vix_close'}).sort('date')
     return price_data, vix
+
+
+def _load_backtest_data(
+    config: TsmomBacktestConfig,
+) -> tuple[dict[str, pl.DataFrame], pl.DataFrame, dict[str, object]]:
+    """Load legacy or source-neutral histories behind one backtest contract."""
+    if config.data_source == 'legacy_globex':
+        price_data, vix = load_portfolio_data(config.symbols)
+        price_data = {
+            symbol: frame.with_columns(
+                pl.col('close').alias('pnl_close'),
+                pl.col('close').alias('signal_index'),
+                pl.col('close').alias('panama_price'),
+                pl.lit('globex_legacy').alias('source_segment'),
+                pl.lit('legacy_contract_marks').alias('pnl_quality'),
+            )
+            for symbol, frame in price_data.items()
+        }
+        return price_data, vix, {
+            'data_source': 'legacy_globex',
+            'instruments': {
+                symbol: {
+                    'source': 'globex_legacy',
+                    'resolved_globex_symbol': resolve_price_symbol(symbol),
+                    'start_date': frame.get_column('ts_event').min(),
+                    'end_date': frame.get_column('ts_event').max(),
+                    'invalid_return_rows': 0,
+                }
+                for symbol, frame in price_data.items()
+            },
+        }
+    price_data, manifest = load_source_neutral_histories(
+        config.symbols,
+        data_source=config.data_source,
+        globex_db_path=config.globex_db_path,
+        pysystemtrade_db_path=config.pysystemtrade_db_path,
+        mapping_path=config.pysystemtrade_mapping_path,
+        handoff_date=config.hybrid_handoff_date,
+        allow_candidate_mappings=config.allow_candidate_mappings,
+    )
+    vix = pl.read_parquet(VIX_FILE_PATH).select(['date', 'close']).rename(
+        {'close': 'vix_close'}
+    ).sort('date')
+    return price_data, vix, manifest
+
+
+def _return_signal_bars(frame: pl.DataFrame) -> pl.DataFrame:
+    eligible = frame
+    if 'return_valid' in frame.columns:
+        eligible = frame.filter(
+            pl.col('return_valid') | (pl.col('quality_flag') == 'initial_observation')
+        )
+    return eligible.select(
+        'ts_event', pl.col('signal_index').alias('close')
+    ).sort('ts_event')
+
+
+def _precompute_signal(
+    frame: pl.DataFrame,
+    config: TsmomBacktestConfig,
+    annualization_days: int,
+) -> pl.DataFrame:
+    """Build a common signal/sizing frame for all three signal classes."""
+    return_bars = _return_signal_bars(frame)
+    base = continuous_momentum(
+        build_features(return_bars),
+        fast_window=config.fast_window,
+        slow_window=config.slow_window,
+        vol_fast_window=config.vol_fast_window,
+        vol_slow_window=config.vol_slow_window,
+        annualization_days=annualization_days,
+        discount=config.regime_discount,
+    )
+    marks = frame.select(
+        'ts_event', 'close', 'pnl_close', 'source_segment', 'pnl_quality'
+    )
+    base = base.rename({'close': 'signal_close'})
+    if config.signal_weighting != 'carver_ewmac':
+        # Return-invalid observations do not advance a return-defined signal,
+        # but they remain real trading sessions. Hold the last valid signal
+        # state while retaining today's raw mark and roll-neutral P&L level.
+        state_columns = [column for column in base.columns if column != 'ts_event']
+        return marks.join(base, on='ts_event', how='left').with_columns(
+            [pl.col(column).forward_fill() for column in state_columns]
+        )
+    ewmac = carver_ewmac(
+        frame.select('ts_event', pl.col('panama_price').alias('close')),
+        fast_span=config.ewmac_fast_span,
+        slow_span=config.ewmac_slow_span,
+        vol_span=config.ewmac_vol_span,
+        forecast_scalar=config.ewmac_forecast_scalar,
+        forecast_cap=config.ewmac_forecast_cap,
+    ).select(
+        'ts_event', 'raw_ewmac', 'point_vol',
+        pl.col('signal').alias('ewmac_forecast'),
+    )
+    state_columns = [column for column in base.columns if column != 'ts_event']
+    return ewmac.join(base, on='ts_event', how='left').with_columns(
+        [pl.col(column).forward_fill() for column in state_columns]
+    ).join(marks, on='ts_event', how='left').with_columns(
+        (pl.col('ewmac_forecast') / config.ewmac_forecast_cap).alias('signal'),
+        (pl.col('ewmac_forecast') / config.ewmac_forecast_cap).alias('ts'),
+        (pl.col('ewmac_forecast') / config.ewmac_forecast_cap).alias('ts_fast'),
+        (pl.col('ewmac_forecast') / config.ewmac_forecast_cap).alias('ts_slow'),
+        pl.when(pl.col('ewmac_forecast') > 0)
+        .then(pl.lit('bull'))
+        .when(pl.col('ewmac_forecast') < 0)
+        .then(pl.lit('bear'))
+        .otherwise(pl.lit('unknown'))
+        .alias('regime'),
+    )
 
 
 def _validate_symbols_exist(price_symbols, cache_dir: str) -> None:
@@ -579,14 +734,16 @@ def _detect_roll_dates(df: pl.DataFrame, start: date, end: date,
     own defensive no-op for the same case (futures_dataloader.py), e.g. a
     hand-built or synthetic price series (some of this module's own test
     fixtures) that never carried contract-level metadata to begin with."""
-    if 'expiration' not in df.columns:
+    identity_column = 'contract_id' if 'contract_id' in df.columns else 'expiration'
+    if identity_column not in df.columns:
         return []
     d = df.sort('ts_event')
-    changed = d.filter(pl.col('expiration') != pl.col('expiration').shift(1))
+    changed = d.filter(pl.col(identity_column) != pl.col(identity_column).shift(1))
     changed = changed.filter((pl.col('ts_event') >= start) & (pl.col('ts_event') <= end))
     if active_months:
         for row in changed.iter_rows(named=True):
-            letter = CME_MONTH_NUM_TO_LETTER.get(row['expiration'].month)
+            expiration = row.get('expiration')
+            letter = CME_MONTH_NUM_TO_LETTER.get(expiration.month) if expiration else None
             if letter is not None and letter not in active_months:
                 logger.warning(
                     "%s: detected roll on %s into a contract expiring %s (month %s) -- outside "
@@ -686,8 +843,12 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
         if config.signal_weighting == 'goulding' and a_co is not None and a_re is not None
         else None
     )
+    direction_model = (
+        'continuous' if config.signal_weighting == 'carver_ewmac'
+        else config.signal_weighting
+    )
     resolved = resolve_trend_direction(
-        config.signal_weighting, _col('signal'), ts_fast, ts_slow,
+        direction_model, _col('signal'), ts_fast, ts_slow,
         config.regime_discount, g_regime_val, g_fast_val, g_slow_val,
         a_co if a_co is not None else 0.5, a_re if a_re is not None else 0.5,
         config.goulding_signal_mode, goulding_forecast_scalar,
@@ -778,7 +939,7 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
         'hv': hv,
         'risk_scalar': risk_scalar * applied_vix_scalar if config.allocation_mode != 'ew' else 1.0,
         'regime_discount': regime_discount if config.allocation_mode != 'ew' else 1.0,
-        'close': last_close, 'dd_pct': dd_pct,
+        'close': last_close, 'pnl_close': _col('pnl_close'), 'dd_pct': dd_pct,
         # Raw signal-row fields, straight from continuous_momentum, purely
         # for debugging/sanity-checking the sizing math end to end.
         # fast_return/slow_return named r_fast/r_slow in continuous_momentum's
@@ -801,6 +962,12 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
         'g_signal_mode': config.goulding_signal_mode if config.signal_weighting == 'goulding' else None,
         'g_raw_forecast': g_raw_forecast,
         'g_forecast_scalar': goulding_forecast_scalar,
+        'ewmac_raw': _col('raw_ewmac'),
+        'ewmac_point_vol': _col('point_vol'),
+        'ewmac_forecast': _col('ewmac_forecast'),
+        'signal_class': config.signal_weighting,
+        'source_segment': _col('source_segment'),
+        'pnl_quality': _col('pnl_quality'),
     }
 
 
@@ -977,6 +1144,8 @@ class _PortfolioLedger:
             'lots_closed_pre_exit': ot['lots_closed_pre_exit'],
             'fees': round(ot['fees'], 2),
             'pnl': net_pnl, 'close_reason': ot['close_reason'],
+            'entry_source_segment': ot.get('source_segment'),
+            'entry_pnl_quality': ot.get('pnl_quality'),
         })
         self.open_trade[symbol] = None
 
@@ -1013,6 +1182,9 @@ class _PortfolioLedger:
                 'quantity': abs(target - prior), 'price': _round(price, _PRICE_ROUND_NDIGITS),
                 'fee': round(fee, 2), 'prior_contracts': prior, 'target_contracts': target,
                 'gate_reason': s.get('gate_reason'), 'is_seed': is_seed,
+                'source_segment': s.get('source_segment'),
+                'pnl_quality': s.get('pnl_quality'),
+                'signal_class': s.get('signal_class'),
             })
 
             flipped = prior != 0 and target != 0 and (prior > 0) != (target > 0)
@@ -1037,6 +1209,8 @@ class _PortfolioLedger:
                     'max_contracts': abs(target), 'mtm_pnl': 0.0,
                     'fees': 0.0 if flipped else fee,
                     'close_reason': None, 'lots_closed_pre_exit': 0,
+                    'source_segment': s.get('source_segment'),
+                    'pnl_quality': s.get('pnl_quality'),
                 }
             elif target != 0 and ot is not None:
                 # Resize within the same direction -- extend the existing
@@ -1084,6 +1258,12 @@ class _PortfolioLedger:
             'g_signal_mode': s.get('g_signal_mode'),
             'g_raw_forecast': _round(s.get('g_raw_forecast'), 6),
             'g_forecast_scalar': _round(s.get('g_forecast_scalar'), 6),
+            'ewmac_raw': _round(s.get('ewmac_raw'), 6),
+            'ewmac_point_vol': _round(s.get('ewmac_point_vol'), 6),
+            'ewmac_forecast': _round(s.get('ewmac_forecast'), 6),
+            'signal_class': s.get('signal_class'),
+            'source_segment': s.get('source_segment'),
+            'pnl_quality': s.get('pnl_quality'),
             'fractional_target_contracts': _round(s.get('fractional_target_contracts'), 4),
             'fractional_target_notional': _round(s.get('fractional_target_notional'), 2),
             'pre_scalar_notional_budget': _round(s.get('pre_scalar_notional_budget'), 2),
@@ -1114,7 +1294,10 @@ class _PortfolioLedger:
             'cum_pnl': round(self.capital - self.initial_capital, 2),
         })
 
-    def process_roll(self, symbol: str, roll_date: date) -> None:
+    def process_roll(
+        self, symbol: str, roll_date: date, execution_price: Optional[float] = None,
+        source_segment: Optional[str] = None, pnl_quality: Optional[str] = None,
+    ) -> None:
         """Mandatory quarterly contract roll for a currently-held symbol:
         close the expiring contract (full round-trip commission on its own
         quantity, close_reason='roll') and immediately reopen the identical
@@ -1130,7 +1313,7 @@ class _PortfolioLedger:
         prior = self.held_contracts[symbol]
         if prior == 0:
             return
-        price = self.prior_close[symbol]
+        price = execution_price if execution_price is not None else self.prior_close[symbol]
         fee = self.futures_types[symbol]['commission'] * 2 * abs(prior)
         self.capital -= fee
         self.transactions.append({
@@ -1138,6 +1321,8 @@ class _PortfolioLedger:
             'quantity': abs(prior), 'price': _round(price, _PRICE_ROUND_NDIGITS),
             'fee': round(fee, 2), 'prior_contracts': prior, 'target_contracts': prior,
             'gate_reason': None, 'is_seed': False,
+            'source_segment': source_segment, 'pnl_quality': pnl_quality,
+            'signal_class': None,
         })
         ot = self.open_trade[symbol]
         if ot is not None:
@@ -1149,6 +1334,7 @@ class _PortfolioLedger:
             'direction': 'long' if prior > 0 else 'short',
             'max_contracts': abs(prior), 'mtm_pnl': 0.0, 'lots_closed_pre_exit': 0,
             'fees': 0.0, 'close_reason': None,
+            'source_segment': source_segment, 'pnl_quality': pnl_quality,
         }
 
 
@@ -1177,7 +1363,7 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
     # lookback needs real history before config.start_date, not just
     # whatever falls inside the requested window. Only the iterated date
     # range (and what counts as a rebalance/MTM date) is bounded.
-    full_price_data, vix = load_portfolio_data(config.symbols)
+    full_price_data, vix, data_manifest = _load_backtest_data(config)
     vix = _compute_vix_regime_series(vix, config.vix_ma_window_days)
     # Real trading-days/year per symbol (instruments.resolve_annualization_days)
     # -- this project's confirmed universe splits 252 (CBOT grains) vs. 259
@@ -1190,11 +1376,9 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
     # docstring for why this is exactly equivalent to (and much cheaper
     # than) recomputing continuous_momentum fresh at every rebalance.
     precomputed = {
-        s: continuous_momentum(build_features(full_price_data[s].sort('ts_event')),
-                                fast_window=config.fast_window, slow_window=config.slow_window,
-                                vol_fast_window=config.vol_fast_window, vol_slow_window=config.vol_slow_window,
-                                annualization_days=annualization_by_symbol[s],
-                                discount=config.regime_discount)
+        s: _precompute_signal(
+            full_price_data[s].sort('ts_event'), config, annualization_by_symbol[s]
+        )
         for s in config.symbols
     }
     futures_types = {s: get_spec(s) for s in config.symbols}
@@ -1204,7 +1388,7 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
     # inner-join + pct_change pass over every symbol's full history that
     # the module's original (default) sizing has no use for.
     returns_wide = (
-        build_returns_wide(full_price_data)
+        build_returns_wide({s: _return_signal_bars(df) for s, df in full_price_data.items()})
         if config.allocation_mode == 'risk-targeted' and config.target_portfolio_vol is not None
         else None
     )
@@ -1262,7 +1446,7 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
         rebal_dates_sorted = sorted(rebalance_dates)
         rebal_dates_df = pl.DataFrame({'ts_event': rebal_dates_sorted}).sort('ts_event')
         for s in config.symbols:
-            feat = build_features(full_price_data[s].sort('ts_event'))
+            feat = build_features(_return_signal_bars(full_price_data[s]))
             monthly = goulding_monthly(feat, **SignalSpec.goulding().goulding_kwargs())
             monthly_by_symbol[s] = monthly
             monthly = monthly.rename({'fast': 'g_fast', 'slow': 'g_slow', 'regime': 'g_regime'})
@@ -1336,7 +1520,7 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
                         # the SAME value rebalance_to just used as this
                         # trade's entry_price (signal={**result, ...} ->
                         # s.get('close')), so this guarantees they agree.
-                        ledger.prior_close[symbol] = result['close']
+                        ledger.prior_close[symbol] = result.get('pnl_close', result['close'])
 
     for d in all_dates:
         # 1. Mark existing holdings to market: today's close vs yesterday's,
@@ -1346,7 +1530,7 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
             row = windowed[symbol].filter(pl.col('ts_event') == d)
             if row.height == 0:
                 continue
-            ledger.mark_to_market(symbol, row['close'][0])
+            ledger.mark_to_market(symbol, row['pnl_close'][0])
 
         # 1.25. Mandatory per-symbol contract roll -- unconditional (not
         # gated by signal_gate_mode/fixed_quantities), since it's a
@@ -1360,7 +1544,17 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
         # series.
         for symbol in config.symbols:
             if d in roll_dates_by_symbol[symbol]:
-                ledger.process_roll(symbol, d)
+                mark_row = windowed[symbol].filter(pl.col('ts_event') == d)
+                execution_price = (
+                    float(mark_row['close'][0]) if mark_row.height else None
+                )
+                ledger.process_roll(
+                    symbol,
+                    d,
+                    execution_price,
+                    source_segment=(mark_row['source_segment'][0] if mark_row.height else None),
+                    pnl_quality=(mark_row['pnl_quality'][0] if mark_row.height else None),
+                )
 
         # 1.5. Daily signal-gate check (signal_gate_mode == 'daily' only),
         # off-cycle from the monthly resize below -- BOTH entry and exit,
@@ -1428,7 +1622,19 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
                     close_row = full_price_data[symbol].filter(pl.col('ts_event') <= d).tail(1)
                     close = float(close_row['close'][0]) if close_row.height > 0 else None
                     ledger.rebalance_to(symbol, target, d, vol_regime, vix_close=vix_close, vix_ratio=vix_ratio,
-                                        signal={'close': close})
+                                        signal={
+                                            'close': close,
+                                            'pnl_close': (
+                                                close_row['pnl_close'][0] if close_row.height else None
+                                            ),
+                                            'source_segment': (
+                                                close_row['source_segment'][0] if close_row.height else None
+                                            ),
+                                            'pnl_quality': (
+                                                close_row['pnl_quality'][0] if close_row.height else None
+                                            ),
+                                            'signal_class': config.signal_weighting,
+                                        })
             else:
                 vix_scalar = VIX_ELEVATED_SCALE if vol_regime == VolRegime.ELEVATED else 1.0
                 # Computed once per rebalance date, shared by both branches
@@ -1665,4 +1871,5 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
         'sharpe': round(sharpe, 2) if sharpe else None,
         'max_dd_pct': round(stats['drawdown_pct'].min(), 2) if stats.height else None,
         'total_fees': round(total_fees, 2),
+        'data_manifest': data_manifest,
     }

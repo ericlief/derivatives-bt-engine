@@ -23,6 +23,7 @@ Globex database or the pysystemtrade sidecar.
 
 from __future__ import annotations
 
+import bisect
 import os
 from dataclasses import dataclass, field
 from datetime import date
@@ -611,6 +612,8 @@ class HybridHistoryProvider:
     primary: FuturesHistoryProvider
     historical_instrument_map: Mapping[str, str] = field(default_factory=dict)
     handoff_date: Optional[date] = None
+    historical_date_alignment: str = ""
+    historical_date_alignment_through: Optional[date] = None
 
     def load(self, instrument_code: str) -> FuturesHistory:
         historical_code = self.historical_instrument_map.get(
@@ -618,6 +621,18 @@ class HybridHistoryProvider:
         )
         old = self.historical.load(historical_code)
         new = self.primary.load(instrument_code)
+        if self.historical_date_alignment:
+            if self.historical_date_alignment != "previous_primary_session":
+                raise ValueError(
+                    f"unsupported historical date alignment: {self.historical_date_alignment}"
+                )
+            if self.historical_date_alignment_through is None:
+                raise ValueError("historical date alignment requires an end date")
+            old = align_history_to_previous_sessions(
+                old,
+                new.signal.get_column("trade_date").to_list(),
+                through=self.historical_date_alignment_through,
+            )
         primary_start = new.signal.get_column("trade_date").min()
         historical_end = old.signal.get_column("trade_date").max()
         if primary_start is None or historical_end is None:
@@ -715,6 +730,12 @@ class HybridHistoryProvider:
             "primary_source": new.source,
             "primary_instrument": instrument_code,
             "handoff_date": handoff,
+            "historical_date_alignment": self.historical_date_alignment or None,
+            "historical_date_alignment_through": (
+                self.historical_date_alignment_through
+            ),
+            "historical_metadata": dict(old.metadata),
+            "primary_metadata": dict(new.metadata),
             "pre_handoff_pnl_quality": "research_approximation",
             "post_handoff_pnl_quality": "primary_contract_marks",
         }
@@ -728,3 +749,71 @@ class HybridHistoryProvider:
             metadata=metadata,
             panama=panama,
         )
+
+
+def align_history_to_previous_sessions(
+    history: FuturesHistory,
+    primary_dates: list[date],
+    *,
+    through: date,
+) -> FuturesHistory:
+    """Map legacy dates to the preceding actual primary trading session."""
+    sessions = sorted(set(primary_dates))
+    if not sessions:
+        raise ValueError("primary session calendar is empty")
+    date_map: dict[date, date] = {}
+    for value in history.signal.get_column("trade_date").to_list():
+        if value > through:
+            continue
+        position = bisect.bisect_left(sessions, value) - 1
+        if position >= 0:
+            date_map[value] = sessions[position]
+
+    def remap(frame: pl.DataFrame) -> pl.DataFrame:
+        if frame.is_empty():
+            return frame
+        return (
+            frame.with_columns(
+                pl.col("trade_date")
+                .replace_strict(date_map, default=pl.col("trade_date"))
+                .alias("trade_date")
+            )
+            .sort("trade_date", "source_timestamp")
+            .unique(subset="trade_date", keep="last", maintain_order=True)
+        )
+
+    signal = remap(history.signal).sort("trade_date").with_columns(
+        pl.col("signal_index").pct_change().alias("normalized_return"),
+        (pl.col("contract_id") != pl.col("contract_id").shift(1))
+        .fill_null(False)
+        .alias("is_roll"),
+    ).with_columns(
+        pl.when(pl.col("normalized_return").is_not_null())
+        .then(pl.col("current_price") / (1.0 + pl.col("normalized_return")))
+        .otherwise(None)
+        .alias("reference_price"),
+        pl.col("normalized_return").is_not_null().alias("return_valid"),
+    )
+    panama = remap(history.panama).sort("trade_date").with_columns(
+        pl.col("panama_price").diff().alias("contract_point_change")
+    )
+    marks = remap(history.marks).sort("trade_date").with_columns(
+        (pl.col("contract_id") != pl.col("contract_id").shift(1))
+        .fill_null(False)
+        .alias("is_roll")
+    )
+    metadata = dict(history.metadata)
+    metadata.update({
+        "date_alignment": "previous_primary_session",
+        "date_alignment_through": through,
+    })
+    return FuturesHistory(
+        source=history.source,
+        instrument_code=history.instrument_code,
+        schema_version=history.schema_version,
+        signal=signal,
+        marks=marks,
+        carry=remap(history.carry),
+        metadata=metadata,
+        panama=panama,
+    )

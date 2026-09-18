@@ -758,8 +758,8 @@ no unexplained large signal/P&L discrepancies.
 
 ### Phase 4: hybrid long-history TSMOM
 
-Status: **core transforms and research harness implemented on 2026-09-18;
-backtester/CLI integration and full-universe validation remain pending**.
+Status: **source-neutral backtester and CLI implemented on 2026-09-18;
+mapping approval and full-universe validation remain pending**.
 
 #### Source-of-truth and generated representations
 
@@ -812,7 +812,30 @@ inputs:
 the raw point-vol-normalized forecast; its scalar is explicit and defaults to
 one because calibrated forecast scalars differ by speed pair and must not be
 invented.  Raw contract marks—not either derived signal level—remain the
-authoritative P&L, execution, sizing, cost, and roll record.
+authoritative execution, sizing, cost, and roll record. P&L uses the
+roll-neutral point changes generated from those contract-aware raw inputs.
+
+The TSMOM backtester now consumes the same separation through
+`domain.tsmom_history`. Its source-neutral rows expose `close` as the current
+raw contract mark, `pnl_close` as the roll-neutral additive level,
+`signal_index` as the positive contract-return index, and `panama_price` as
+the point-price signal level. The portfolio ledger marks positions with
+changes in `pnl_close`, but executes, sizes, and records trades at `close`.
+This prevents a roll gap from becoming P&L without hiding the actually traded
+contract price.
+
+The three rule classes are available through the existing backtester:
+
+```text
+--signal-weighting continuous    # repository return TSMOM
+--signal-weighting goulding      # averaged monthly return horizons
+--signal-weighting carver_ewmac  # Panama-price EMA difference / point vol
+```
+
+`carver_ewmac` requires a source-neutral data path and has explicit fast,
+slow, volatility-span, forecast-scalar, and cap arguments. The legacy loader
+remains the CLI default and rejects this rule because it does not preserve the
+required distinction between raw marks and generated series.
 
 #### Hybrid-source harness
 
@@ -827,6 +850,25 @@ primary source owns the handoff session and every later session.  It rebuilds:
 - marks and carry with the same date boundary; and
 - per-row `source_segment` plus manifest metadata identifying both providers,
   instruments, and the handoff.
+
+The backtester exposes these providers as `--data-source globex`,
+`pysystemtrade`, or `hybrid`; `legacy_globex` remains the unchanged default.
+All current crosswalk rows are still candidates, so Carver-backed research
+requires the conspicuous `--allow-candidate-mappings` opt-in. Every run
+manifest records database paths, mapping policy, resolved symbols, source
+ranges, handoff, invalid-return counts, quality flags, and provider metadata.
+Silver's configured pre-2022 previous-Globex-session alignment is applied
+inside the historical provider before the hybrid boundary and is also stored
+in that metadata.
+
+A narrow, non-persisting comparison can now be run as follows (substitute
+`goulding` or `carver_ewmac` to isolate the other rules):
+
+```bash
+.venv/bin/tsmom --symbols ES --years 2009-2011 \
+  --data-source hybrid --allow-candidate-mappings \
+  --signal-weighting continuous --disable-vix-gating --no-save
+```
 
 For the planned Carver/Globex deployment, Carver supplies the long history and
 Globex is primary from an approved handoff within the overlap.  For live
@@ -881,19 +923,14 @@ Silver 0.813 after its configured session alignment), which confirms that EOD
 returns must be derived from the fully chained intraday index rather than from
 the final intraday row alone.
 
-- Rebuild the sidecar at schema v4 and compare generated versus supplied
-  Carver Panama prices by instrument; non-constant differences are failures.
-- Regenerate the overlap report using contract-consistent returns.  The v3
-  adjusted-difference correlations are historical/preliminary results.
 - Approve one handoff per market from the overlap rather than choosing it from
   backtest performance.
 - Run single-symbol/year tests including CL around April 2020, then matched
   regime windows, before a full-history portfolio run.
-- Keep pre-Globex P&L visibly labeled `research_approximation` and store source,
-  schema, crosswalk, handoff, return exclusions, and quality counts in every
-  result manifest.
-- Verify that the default legacy Globex-only backtest remains unchanged until
-  the new source-neutral path is explicitly selected.
+- Review the five isolated Panama discrepancies and four conservatively
+  masked return sessions listed above.
+- Compare the default legacy Globex-only control to the opt-in source-neutral
+  Globex path over matched windows before making the latter the default.
 
 Exit criterion: the hybrid backtest is causal and reproducible, and the
 Globex-only control is unchanged.
@@ -970,5 +1007,7 @@ Phases 0-3 produced:
 4. an overlap report for ES, NQ, CL, GC, SI, ZN, ZT, ZC, ZL, ZS, ZW, 6J,
    and 6M.
 
-Phase 4 now adds the core generated-series and hybrid harness described above;
-portfolio CLI integration remains behind the listed validation gates.
+Phase 4 now adds the generated-series and hybrid harness plus source-neutral
+portfolio/CLI integration for repository return TSMOM, Goulding monthly, and
+Carver EWMAC. Candidate-map approval and broader portfolio validation remain
+behind the listed gates; no live routing is enabled by this work.

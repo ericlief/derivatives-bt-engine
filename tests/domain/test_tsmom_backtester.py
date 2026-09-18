@@ -15,6 +15,7 @@ from derivatives_bt_engine.domain import tsmom_backtester as tb
 from derivatives_bt_engine.domain.instruments import get_spec
 from derivatives_bt_engine.domain.tsmom_backtester import (
     TsmomBacktestConfig,
+    _PortfolioLedger,
     _select_cluster_cap_universe,
     check_vol_regime,
     _compute_vix_regime_series,
@@ -97,6 +98,89 @@ def test_month_end_dates_lands_on_last_trading_day_per_month():
 
 def _patch_data(monkeypatch, price_data: dict, vix: pl.DataFrame):
     monkeypatch.setattr(tb, 'load_portfolio_data', lambda symbols: (price_data, vix))
+
+
+def _source_neutral_price_df(start: date, n: int) -> pl.DataFrame:
+    base = _price_df(start, n, drift=0.001, vol=0.005, seed=17)
+    return base.with_columns(
+        pl.col('close').alias('pnl_close'),
+        pl.col('close').alias('signal_index'),
+        pl.col('close').alias('panama_price'),
+        pl.lit('globex').alias('source_segment'),
+        pl.lit('primary_contract_marks').alias('pnl_quality'),
+        pl.lit(True).alias('return_valid'),
+        pl.lit('').alias('quality_flag'),
+        pl.col('close').pct_change().alias('normalized_return'),
+    )
+
+
+@pytest.mark.parametrize('signal_weighting', ['continuous', 'goulding', 'carver_ewmac'])
+def test_source_neutral_backtest_runs_all_three_signal_classes(monkeypatch, signal_weighting):
+    frame = _source_neutral_price_df(date(2017, 1, 1), 700)
+    vix = _vix_df(date(2017, 1, 1), 700, level=15.0)
+    manifest = {'data_source': 'globex', 'instruments': {'X': {'source': 'globex'}}}
+    monkeypatch.setattr(tb, '_load_backtest_data', lambda _config: ({'X': frame}, vix, manifest))
+    monkeypatch.setattr(tb, 'get_spec', lambda _symbol: get_spec('ES'))
+
+    result = run_tsmom_backtest(TsmomBacktestConfig(
+        symbols=['X'], data_source='globex', signal_weighting=signal_weighting,
+        max_notional=100_000, max_contracts=5, vix_gating=False,
+        ewmac_fast_span=8, ewmac_slow_span=32, ewmac_vol_span=20,
+    ))
+
+    assert result['n_days'] == frame.height
+    assert result['data_manifest'] == manifest
+    assert result['trend_signals']
+    assert all(event['signal_class'] == signal_weighting for event in result['trend_signals'])
+    if signal_weighting == 'carver_ewmac':
+        assert any(event['ewmac_forecast'] is not None for event in result['trend_signals'])
+
+
+def test_ledger_marks_roll_neutral_pnl_not_raw_contract_gap() -> None:
+    spec = get_spec('ES')
+    ledger = _PortfolioLedger(['ES'], 100_000.0, {'ES': spec})
+    ledger.held_contracts['ES'] = 1
+    ledger.prior_close['ES'] = 100.0
+
+    ledger.mark_to_market('ES', 101.0)
+
+    assert ledger.capital == pytest.approx(100_000.0 + spec['multiplier'])
+
+
+def test_carver_ewmac_rejects_legacy_conflated_price_path() -> None:
+    with pytest.raises(ValueError, match='source-neutral'):
+        TsmomBacktestConfig(symbols=['ES'], signal_weighting='carver_ewmac')
+
+
+def test_invalid_return_holds_signal_but_retains_current_raw_mark() -> None:
+    frame = _source_neutral_price_df(date(2020, 1, 1), 30)
+    invalid_date = frame['ts_event'][15]
+    previous_date = frame['ts_event'][14]
+    frame = frame.with_columns(
+        pl.when(pl.col('ts_event') == invalid_date)
+        .then(999.0)
+        .otherwise(pl.col('close'))
+        .alias('close'),
+        pl.when(pl.col('ts_event') == invalid_date)
+        .then(False)
+        .otherwise(pl.col('return_valid'))
+        .alias('return_valid'),
+        pl.when(pl.col('ts_event') == invalid_date)
+        .then(pl.lit('nonpositive_reference'))
+        .otherwise(pl.col('quality_flag'))
+        .alias('quality_flag'),
+    )
+    config = TsmomBacktestConfig(
+        symbols=['ES'], data_source='globex', fast_window=3, slow_window=8,
+        vol_fast_window=3, vol_slow_window=8,
+    )
+
+    computed = tb._precompute_signal(frame, config, annualization_days=252)
+    invalid = computed.filter(pl.col('ts_event') == invalid_date).row(0, named=True)
+    previous = computed.filter(pl.col('ts_event') == previous_date).row(0, named=True)
+
+    assert invalid['close'] == 999.0
+    assert invalid['signal'] == previous['signal']
 
 
 def test_seeds_position_from_last_month_end_before_start_date(monkeypatch):
