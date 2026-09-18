@@ -5,6 +5,10 @@ implementation record. The source data examined is the local checkout at
 `/home/dev/projects/pysystemtrade/data/futures`; the existing market-data
 source is `/home/dev/fin/db/globex_mdp_3.0.duckdb`.
 
+The companion [carry and long-history research plan](pysystemtrade-carry-and-long-history-plan.md)
+defines the proposed forecast rules, causal backtests, hyperparameter-correlation
+study, and forecast-weight comparison that build on this data work.
+
 ## Recommendation
 
 Import Carver's shipped data into a **separate, reproducible DuckDB sidecar**:
