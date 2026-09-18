@@ -51,12 +51,12 @@ The deterministic raw-data importer is implemented in
 `pysystemtrade-import` CLI. It writes the independently rebuildable sidecar at
 the recommended path; it does not attach to or write the Globex database.
 
-The first validated build used source commit
+The current schema-v2 validated build used source commit
 `b4a25e6e1e33a54a3ecfb45c0f6db5e2b60b84f8` and produced:
 
 | Build result | Value |
 |---|---:|
-| Sidecar size | 222,572,544 bytes |
+| Sidecar size | 229,912,576 bytes |
 | Manifest files | 803 |
 | Hashed source bytes | 717,390,223 |
 | Multiple-price rows | 7,249,183 |
@@ -64,14 +64,20 @@ The first validated build used source commit
 | Instruments | 252 |
 | Source range | 1969-12-02 23:00 to 2024-03-29 05:00 |
 
-The materialized QA results reproduce the statistics in this document:
-89.4% mean, 98.7% median, and 89.7% weighted carry-day coverage; 203
-instruments at or above 90% and 26 below 50%; 40 adjusted series with
+The materialized QA results reproduce the session-normalized statistics in
+this document: 89.5% mean, 98.9% median, and 90.0% weighted carry-day coverage;
+205 instruments at or above 90% and 26 below 50%; 40 adjusted series with
 non-positive history; 152,992 null adjusted rows; and five non-positive raw
 price rows. A second clean build was compared with `EXCEPT ALL` in both
 directions across the manifest, every raw table, and every QA table. It had no
 logical differences. Import time is intentionally the sole run-specific
 metadata value.
+
+Schema v2 preserves every original `source_timestamp` and adds a normalized
+`trade_date` to adjusted and multiple-price rows. Sunday timestamps are assigned
+to Monday's futures trading session. The current build shifted 34,299 adjusted
+rows and 34,301 multiple-price rows; `qa.session_date_normalization` records
+those counts.
 
 Two source quirks are retained and made auditable instead of silently cleaned:
 
@@ -126,9 +132,9 @@ the automated recommendation is triage, not approval.
 Important findings are:
 
 - JPY/6J is the only mapping currently clearing the automatic return/trend
-  thresholds for manual approval review: 0.908 daily-return correlation,
-  0.973 trend correlation, and 96.9% contract-month agreement.
-- US10/ZN is similarly strong (0.903 return and 0.983 trend correlation) but
+  thresholds for manual approval review: 0.906 daily-return correlation,
+  0.982 trend correlation, and 96.9% contract-month agreement.
+- US10/ZN is similarly strong (0.899 return and 0.988 trend correlation) but
   remains blocked on explicit Treasury fractional-price scale validation.
 - Silver has a material session-date issue: its best correlation occurs with
   Globex shifted one calendar day, so no shift is applied automatically.
@@ -146,13 +152,13 @@ approval exit criterion is deliberately not marked complete. JPY and then
 US10 are the sensible first manual reviews; WTI, grains, silver, and BRE need
 the documented reconciliation work before approval.
 
-### Post-report session-date audit (2026-09-18)
+### Post-report session-date audit and resolution (2026-09-18)
 
-The missing-date output overstates Globex gaps because the two providers do
-not currently apply the same session-date convention. The Globex `daily`
+The original missing-date output overstated Globex gaps because the two
+providers did not apply the same session-date convention. The Globex `daily`
 table already incorporates the repository's UTC correction and merges
 Sunday UTC session fragments forward into the next trading day. The Carver
-provider instead groups its mixed-frequency source rows with
+provider previously grouped its mixed-frequency source rows with
 `CAST(source_timestamp AS DATE)`, which turns Sunday-evening observations
 into separate daily rows.
 
@@ -164,13 +170,21 @@ coverage gaps, exchange-holiday differences, and other source-specific
 omissions. Silver's separate one-calendar-day lead/lag result also remains
 after Sunday normalization.
 
-Recommended action: normalize Carver adjusted prices, marks, and carry rows
-to the following trading session before computing daily returns, rolls, or
-missing dates; recompute returns after normalization; bump
-`HISTORY_SCHEMA_VERSION` to invalidate the current caches; and regenerate
-the overlap artifacts. The Globex database does not require another date
-correction. Until that work is complete, the current missing-date counts and
-derived correlations should be treated as preliminary.
+This is now resolved in importer schema v2. `raw.adjusted_prices` and
+`raw.multiple_prices` retain the original timestamp and store Sunday rows with
+the following Monday `trade_date`. The history provider groups adjusted prices,
+marks, and carry by that field and therefore recomputes returns and rolls only
+after normalization. `HISTORY_SCHEMA_VERSION=2` invalidates the old Carver and
+source-neutral Globex history caches; the Globex database itself was not
+changed.
+
+The regenerated report contains 1,331 Carver-only dates, exactly 1,863 fewer
+than the original 3,194, and zero Sunday discrepancies. Globex-only dates are
+unchanged at 746. Excluding BRE/6L, the Carver-only count is 103, matching the
+manual audit. These remaining differences are genuine coverage gaps,
+exchange-holiday differences, or other source-specific omissions. Silver still
+has its best return correlation with Globex shifted +1 calendar day (0.654
+versus 0.358 on the same date), so no automatic shift was introduced.
 
 Regenerate the evidence with:
 
@@ -328,10 +342,10 @@ leg independently.
 
 Across the full history:
 
-- median instrument carry coverage is 98.7%;
-- mean instrument coverage is 89.4%;
-- weighted coverage across all instrument-days is 89.7%;
-- 203 of 252 instruments have at least 90% coverage; and
+- median instrument carry coverage is 98.9%;
+- mean instrument coverage is 89.5%;
+- weighted coverage across all instrument-days is 90.0%;
+- 205 of 252 instruments have at least 90% coverage; and
 - 26 instruments have less than 50% coverage.
 
 The weakest complete-history series include:
@@ -339,28 +353,28 @@ The weakest complete-history series include:
 | Instrument | Carry coverage |
 |---|---:|
 | FANG | 13.1% |
-| US30 | 13.6% |
-| SP400 | 16.1% |
+| US30 | 15.4% |
+| SP400 | 17.8% |
 | EU-BANKS | 18.2% |
-| CAD_micro | 18.3% |
+| CAD_micro | 18.5% |
 | EURO600 | 18.9% |
 | US-INDUSTRY | 18.9% |
 | EU-TRAVEL | 19.2% |
-| DOW | 22.5% |
 | DAX | 22.6% |
+| DOW | 23.6% |
 
 Much of this is old backfill sparsity: carry appears only around quarterly
 roll windows, sometimes with 80-100 day gaps. Coverage improves materially in
 the final years:
 
-- weighted coverage is 96.5% in 2023 and 96.9% in 2024;
-- over 2023 through March 2024, 222 instruments exceed 90% and 193 exceed 99%;
-- in 2024 alone, 232 exceed 90% and 201 exceed 99%; and
-- the four 2024 series below 50% are `BB3M` (4.9%), `JGB-SGX-mini` (28.1%),
+- weighted coverage is 96.7% in 2023 and 97.4% in 2024;
+- over 2023 through March 2024, 222 instruments exceed 90% and 201 exceed 99%;
+- in 2024 alone, 235 exceed 90% and 210 exceed 99%; and
+- the four 2024 series below 50% are `BB3M` (4.9%), `JGB-SGX-mini` (31.2%),
   `OATIES` (34.4%), and `RICE` (47.5%).
 
-`FORWARD` coverage is slightly worse over the full history: median 98.6%,
-mean 86.6%, and weighted 83.0%.
+`FORWARD` coverage is slightly worse over the full history: median 98.8%,
+mean 86.7%, and weighted 83.3%.
 
 The import must preserve nulls. Carry should be calculated only after aligning
 valid current/carry observations at the same source timestamp. Forward-filling
@@ -380,9 +394,9 @@ prices with stale carry prices and manufacture a false roll yield.
   `rollconfig.csv`. Neither mini/micro price duplication nor roll configuration
   should be accepted silently.
 - Timestamps are timezone-naive and mix old daily 23:00 observations with
-  recent intraday observations. The importer should retain `source_timestamp`
-  exactly and derive a separate, documented `trade_date` rather than assuming
-  the strings are UTC.
+  recent intraday observations. Schema v2 retains `source_timestamp` exactly
+  and derives a separate, documented `trade_date` rather than assuming the
+  strings are UTC.
 
 ## Initial symbol crosswalk
 
@@ -393,19 +407,19 @@ micro histories into the covariance universe would double-count a market.
 
 | Repo/Globex signal root | Carver series | Carver range | Carry coverage | Notes |
 |---|---|---|---:|---|
-| ES / MES | SP500 | 1982-09-14 to 2024-03-28 | 63.8% | Use main series for both signal roots |
+| ES / MES | SP500 | 1982-09-14 to 2024-03-28 | 63.4% | Use main series for both signal roots |
 | NQ / MNQ | NASDAQ | 1999-12-14 to 2024-03-28 | 96.5% | Direct price-scale match expected |
-| CL / MCL | CRUDE_W | 1990-10-16 to 2024-03-28 | 98.3% | Underlying match only: Carver holds the annual December winter contract, not the monthly liquid front |
-| GC / MGC | GOLD | 1975-04-01 to 2024-03-28 | 99.4% | `GOLD_micro` exists but should not be a second risk factor |
-| SI / SIL | SILVER | 1970-06-15 to 2024-03-28 | 69.0% | Point size is 1,000; mapping/settlement date needs extra validation |
-| ZN / MTN | US10 | 1982-08-30 to 2024-03-28 | 94.5% | Treasury fractional pricing needs exact scale checks |
-| ZT | US2 | 2000-03-02 to 2024-03-28 | 99.4% | Direct candidate |
-| ZC / MZC | CORN | 1972-10-18 to 2024-03-28 | 90.5% | Underlying match only: Carver holds annual December rather than the liquid front |
-| ZL / MZL | SOYOIL | 1970-02-03 to 2024-03-28 | 92.5% | Underlying match; roll cycles differ materially |
+| CL / MCL | CRUDE_W | 1990-10-16 to 2024-03-28 | 99.1% | Underlying match only: Carver holds the annual December winter contract, not the monthly liquid front |
+| GC / MGC | GOLD | 1975-04-01 to 2024-03-28 | 99.5% | `GOLD_micro` exists but should not be a second risk factor |
+| SI / SIL | SILVER | 1970-06-15 to 2024-03-28 | 70.6% | Point size is 1,000; mapping/settlement date needs extra validation |
+| ZN / MTN | US10 | 1982-08-30 to 2024-03-28 | 95.0% | Treasury fractional pricing needs exact scale checks |
+| ZT | US2 | 2000-03-02 to 2024-03-28 | 99.3% | Direct candidate |
+| ZC / MZC | CORN | 1972-10-18 to 2024-03-28 | 91.1% | Underlying match only: Carver holds annual December rather than the liquid front |
+| ZL / MZL | SOYOIL | 1970-02-03 to 2024-03-28 | 92.6% | Underlying match; roll cycles differ materially |
 | ZS / MZS | SOYBEAN | 1985-09-20 to 2024-03-28 | 99.5% | Underlying match only: Carver holds annual November rather than the liquid front |
-| ZW / MZW | WHEAT | 1973-12-19 to 2024-03-28 | 96.2% | Underlying match only: Carver holds annual December rather than the liquid front |
-| 6J / JPY / J7 | JPY | 1977-06-14 to 2024-03-28 | 98.5% | Same underlying, traded multipliers remain separate |
-| 6M | MXP | 1995-09-15 to 2024-03-28 | 91.3% | Naming crosswalk required |
+| ZW / MZW | WHEAT | 1973-12-19 to 2024-03-28 | 96.5% | Underlying match only: Carver holds annual December rather than the liquid front |
+| 6J / JPY / J7 | JPY | 1977-06-14 to 2024-03-28 | 98.8% | Same underlying, traded multipliers remain separate |
+| 6M | MXP | 1995-09-15 to 2024-03-28 | 92.1% | Naming crosswalk required |
 | 6L / BRE | BRE | 1995-12-01 to 2024-03-28 | 100.0% | Useful independent reference for the known Globex 6L issue |
 
 `NIY` to Carver `NIKKEI` is only a candidate, not an approved mapping:
@@ -445,6 +459,7 @@ into the current Globex schema.
 ```text
 instrument_code VARCHAR
 source_timestamp TIMESTAMP
+trade_date DATE
 price DOUBLE
 price_contract VARCHAR
 carry DOUBLE
@@ -462,6 +477,7 @@ the synthetic `00` day cannot be altered by inference.
 ```text
 instrument_code VARCHAR
 source_timestamp TIMESTAMP
+trade_date DATE
 adjusted_price DOUBLE
 source_file VARCHAR
 ```
@@ -554,12 +570,13 @@ Cache paths must include source and schema version, for example:
 
 ```text
 .cache/futures/globex/v1/ES_daily.parquet
-.cache/futures/pysystemtrade/v1/SP500_daily.parquet
-.cache/futures/hybrid/v1/SP500_daily.parquet
+.cache/futures/globex/v2/<database-fingerprint>/ES_signal.parquet
+.cache/futures/pysystemtrade/v2/<source-commit>/SP500_signal.parquet
 ```
 
-The current asset-only cache names are unsafe once two sources can provide the
-same market.
+The first path is the unchanged legacy `FuturesDataLoader` cache. The v2 paths
+are the source-neutral history-provider caches. Asset-only cache names are
+unsafe once two sources can provide the same market.
 
 ## TSMOM use cases
 

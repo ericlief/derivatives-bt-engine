@@ -32,7 +32,7 @@ from derivatives_bt_engine.utils.logger import setup_logger
 
 logger = setup_logger()
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 DEFAULT_GLOBEX_DB_PATH = Path("/home/dev/fin/db/globex_mdp_3.0.duckdb")
 
 _MULTIPLE_SCHEMA = {
@@ -159,6 +159,23 @@ def _timestamp_expr(column: str) -> pl.Expr:
     return pl.col(column).str.to_datetime(strict=True, time_unit="us")
 
 
+def _following_session_date_expr(column: str = "source_timestamp") -> pl.Expr:
+    """Map Sunday observations to Monday while preserving source timestamps.
+
+    Carver's mixed-frequency CSV timestamps are naive, but Sunday evening rows
+    belong to the following futures trading session.  The paid Globex daily
+    table already applies that convention, so persist it explicitly here rather
+    than making every downstream consumer reinterpret the raw timestamp.
+    """
+    timestamp = pl.col(column)
+    return (
+        pl.when(timestamp.dt.weekday() == 7)
+        .then(timestamp.dt.offset_by("1d").dt.date())
+        .otherwise(timestamp.dt.date())
+        .alias("trade_date")
+    )
+
+
 def _read_multiple(path: Path, relative_path: str) -> pl.DataFrame:
     return (
         pl.read_csv(path, schema=_MULTIPLE_SCHEMA, null_values=[""])
@@ -167,9 +184,11 @@ def _read_multiple(path: Path, relative_path: str) -> pl.DataFrame:
             pl.lit(path.stem).alias("instrument_code"),
             pl.lit(relative_path).alias("source_file"),
         )
+        .with_columns(_following_session_date_expr())
         .select(
             "instrument_code",
             "source_timestamp",
+            "trade_date",
             pl.col("PRICE").alias("price"),
             pl.col("PRICE_CONTRACT").alias("price_contract"),
             pl.col("CARRY").alias("carry"),
@@ -189,9 +208,11 @@ def _read_adjusted(path: Path, relative_path: str) -> pl.DataFrame:
             pl.lit(path.stem).alias("instrument_code"),
             pl.lit(relative_path).alias("source_file"),
         )
+        .with_columns(_following_session_date_expr())
         .select(
             "instrument_code",
             "source_timestamp",
+            "trade_date",
             pl.col("price").alias("adjusted_price"),
             "source_file",
         )
@@ -350,6 +371,7 @@ def _create_schema(con: duckdb.DuckDBPyConnection) -> None:
         CREATE TABLE raw.multiple_prices (
             instrument_code VARCHAR NOT NULL,
             source_timestamp TIMESTAMP NOT NULL,
+            trade_date DATE NOT NULL,
             price DOUBLE,
             price_contract VARCHAR,
             carry DOUBLE,
@@ -365,6 +387,7 @@ def _create_schema(con: duckdb.DuckDBPyConnection) -> None:
         CREATE TABLE raw.adjusted_prices (
             instrument_code VARCHAR NOT NULL,
             source_timestamp TIMESTAMP NOT NULL,
+            trade_date DATE NOT NULL,
             adjusted_price DOUBLE,
             source_file VARCHAR NOT NULL
         )
@@ -638,6 +661,24 @@ def _validate_import(
         if null_count:
             raise ImportValidationError(f"{table} contains {null_count} null timestamps")
 
+    for table in ["raw.multiple_prices", "raw.adjusted_prices"]:
+        invalid_trade_dates = con.execute(
+            f"""
+            SELECT count(*)
+            FROM {table}
+            WHERE trade_date IS NULL
+               OR trade_date != CASE
+                    WHEN EXTRACT(ISODOW FROM source_timestamp) = 7
+                    THEN CAST(source_timestamp AS DATE) + 1
+                    ELSE CAST(source_timestamp AS DATE)
+                  END
+            """
+        ).fetchone()[0]
+        if invalid_trade_dates:
+            raise ImportValidationError(
+                f"{table} contains {invalid_trade_dates} invalid normalized trade dates"
+            )
+
     expected_rows = {
         "raw.multiple_prices": sum(
             e.row_count for e in manifest if e.dataset == "multiple_prices"
@@ -729,7 +770,7 @@ def _create_qa_tables(con: duckdb.DuckDBPyConnection) -> None:
         day_flags AS (
             SELECT
                 instrument_code,
-                CAST(source_timestamp AS DATE) AS trade_date,
+                trade_date,
                 bool_or(price IS NOT NULL AND price_contract IS NOT NULL) AS has_price,
                 bool_or(
                     price IS NOT NULL AND carry IS NOT NULL
@@ -740,7 +781,7 @@ def _create_qa_tables(con: duckdb.DuckDBPyConnection) -> None:
                     AND price_contract IS NOT NULL AND forward_contract IS NOT NULL
                 ) AS has_forward_pair
             FROM raw.multiple_prices
-            GROUP BY instrument_code, CAST(source_timestamp AS DATE)
+            GROUP BY instrument_code, trade_date
         ),
         daily_stats AS (
             SELECT
@@ -782,6 +823,27 @@ def _create_qa_tables(con: duckdb.DuckDBPyConnection) -> None:
         LEFT JOIN daily_stats d USING (instrument_code)
         LEFT JOIN adjusted_stats a USING (instrument_code)
         ORDER BY m.instrument_code
+        """
+    )
+    con.execute(
+        """
+        CREATE TABLE qa.session_date_normalization AS
+        SELECT
+            'multiple_prices' AS dataset,
+            count(*) AS total_rows,
+            count(*) FILTER (
+                WHERE trade_date != CAST(source_timestamp AS DATE)
+            ) AS shifted_rows
+        FROM raw.multiple_prices
+        UNION ALL
+        SELECT
+            'adjusted_prices' AS dataset,
+            count(*) AS total_rows,
+            count(*) FILTER (
+                WHERE trade_date != CAST(source_timestamp AS DATE)
+            ) AS shifted_rows
+        FROM raw.adjusted_prices
+        ORDER BY dataset
         """
     )
     con.execute(

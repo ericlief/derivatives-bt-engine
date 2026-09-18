@@ -145,6 +145,7 @@ def test_build_and_write_overlap_report(tmp_path: Path) -> None:
     assert (tmp_path / "details" / "test.csv").exists()
     markdown = (tmp_path / "report.md").read_text(encoding="utf-8")
     assert "Every mapping remains `candidate`" in markdown
+    assert "Sunday observations are assigned" in markdown
     assert "test: CARVER / GLOBEX" in markdown
 
 

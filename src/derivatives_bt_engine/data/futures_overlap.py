@@ -546,6 +546,9 @@ def render_markdown(
         "own prior close, including on roll days. Both are compounded into positive "
         "signal indices before trend forecasts are computed.",
         "",
+        "Carver source timestamps are preserved, while Sunday observations are assigned "
+        "to the following Monday trading session during sidecar import.",
+        "",
         "Every mapping remains `candidate`. Automated recommendations are triage only, "
         "not mapping approvals.",
         "",

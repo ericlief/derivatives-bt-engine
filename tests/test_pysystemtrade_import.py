@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import date, datetime
 from pathlib import Path
 
 import duckdb
@@ -97,6 +98,7 @@ def test_build_sidecar_imports_typed_data_manifest_and_qa(tmp_path: Path) -> Non
 
     con = duckdb.connect(str(output), read_only=True)
     try:
+        assert con.execute("SELECT version FROM meta.schema_version").fetchone()[0] == 2
         assert con.execute("SELECT count(*) FROM raw.multiple_prices").fetchone()[0] == 2
         assert con.execute(
             "SELECT typeof(price_contract) FROM raw.multiple_prices LIMIT 1"
@@ -122,6 +124,56 @@ def test_build_sidecar_imports_typed_data_manifest_and_qa(tmp_path: Path) -> Non
         assert coverage == (2, 1, 2, 2)
     finally:
         con.close()
+
+
+def test_import_preserves_timestamp_and_maps_sunday_to_monday_trade_date(
+    tmp_path: Path,
+) -> None:
+    source = _write_source_tree(tmp_path)
+    with (source / "multiple_prices_csv" / "TEST.csv").open(
+        "a", encoding="utf-8"
+    ) as handle:
+        handle.write(
+            "2020-01-05 23:00:00,100,20200200,101,20200100,102,20200200\n"
+        )
+    with (source / "adjusted_prices_csv" / "TEST.csv").open(
+        "a", encoding="utf-8"
+    ) as handle:
+        handle.write("2020-01-05 23:00:00,1\n")
+    output = tmp_path / "pysystemtrade_reference.duckdb"
+
+    build_sidecar(source, output)
+
+    con = duckdb.connect(str(output), read_only=True)
+    try:
+        multiple_row = con.execute(
+            """
+            SELECT source_timestamp, trade_date
+            FROM raw.multiple_prices
+            WHERE source_timestamp = TIMESTAMP '2020-01-05 23:00:00'
+            """
+        ).fetchone()
+        adjusted_row = con.execute(
+            """
+            SELECT source_timestamp, trade_date
+            FROM raw.adjusted_prices
+            WHERE source_timestamp = TIMESTAMP '2020-01-05 23:00:00'
+            """
+        ).fetchone()
+        normalization = dict(
+            con.execute(
+                """
+                SELECT dataset, shifted_rows
+                FROM qa.session_date_normalization
+                """
+            ).fetchall()
+        )
+    finally:
+        con.close()
+
+    assert multiple_row == (datetime(2020, 1, 5, 23), date(2020, 1, 6))
+    assert adjusted_row == (datetime(2020, 1, 5, 23), date(2020, 1, 6))
+    assert normalization == {"adjusted_prices": 1, "multiple_prices": 1}
 
 
 def test_duplicate_logical_key_prevents_publication(tmp_path: Path) -> None:

@@ -34,7 +34,7 @@ from derivatives_bt_engine.utils.logger import setup_logger
 
 logger = setup_logger()
 
-HISTORY_SCHEMA_VERSION = 1
+HISTORY_SCHEMA_VERSION = 2
 DEFAULT_PYSYSTEMTRADE_DB_PATH = Path(
     "/home/dev/fin/db/pysystemtrade_reference.duckdb"
 )
@@ -220,7 +220,7 @@ class PysystemtradeHistoryProvider:
 
     def load(self, instrument_code: str) -> FuturesHistory:
         sidecar_version, source_commit = self._database_metadata()
-        if sidecar_version != 1:
+        if sidecar_version != 2:
             raise ValueError(
                 f"Unsupported pysystemtrade sidecar schema version: {sidecar_version}"
             )
@@ -307,7 +307,7 @@ class PysystemtradeHistoryProvider:
         adjusted = con.execute(
             """
             SELECT
-                CAST(source_timestamp AS DATE) AS trade_date,
+                trade_date,
                 max(source_timestamp) FILTER (
                     WHERE adjusted_price IS NOT NULL
                 ) AS source_timestamp,
@@ -316,7 +316,7 @@ class PysystemtradeHistoryProvider:
                 ) AS adjusted_price
             FROM raw.adjusted_prices
             WHERE instrument_code = ?
-            GROUP BY CAST(source_timestamp AS DATE)
+            GROUP BY trade_date
             HAVING count(adjusted_price) > 0
             ORDER BY trade_date
             """,
@@ -325,7 +325,7 @@ class PysystemtradeHistoryProvider:
         marks = con.execute(
             """
             SELECT
-                CAST(source_timestamp AS DATE) AS trade_date,
+                trade_date,
                 max(source_timestamp) FILTER (
                     WHERE price IS NOT NULL AND price_contract IS NOT NULL
                 ) AS source_timestamp,
@@ -337,7 +337,7 @@ class PysystemtradeHistoryProvider:
                 ) AS contract_id
             FROM raw.multiple_prices
             WHERE instrument_code = ?
-            GROUP BY CAST(source_timestamp AS DATE)
+            GROUP BY trade_date
             HAVING count(*) FILTER (
                 WHERE price IS NOT NULL AND price_contract IS NOT NULL
             ) > 0
@@ -411,7 +411,7 @@ class PysystemtradeHistoryProvider:
         carry = con.execute(
             """
             SELECT
-                CAST(source_timestamp AS DATE) AS trade_date,
+                trade_date,
                 max(source_timestamp) AS source_timestamp,
                 arg_max(price, source_timestamp) AS current_price,
                 arg_max(price_contract, source_timestamp) AS current_contract,
@@ -424,7 +424,7 @@ class PysystemtradeHistoryProvider:
               AND carry IS NOT NULL
               AND price_contract IS NOT NULL
               AND carry_contract IS NOT NULL
-            GROUP BY CAST(source_timestamp AS DATE)
+            GROUP BY trade_date
             ORDER BY trade_date
             """,
             [instrument_code],

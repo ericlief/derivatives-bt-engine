@@ -150,38 +150,40 @@ forecast rather than only a sign ([discussion](https://qoppac.blogspot.com/2020/
 ## What the imported data can support
 
 The sidecar currently contains 252 instruments and 7,249,183
-`raw.multiple_prices` rows spanning 1,273,073 instrument-days. It is not
-literally one observation per day: there are about 5.69 rows per instrument-day
-on average, and every instrument has at least one date with multiple intraday
-observations. The snapshots are nevertheless irregular and do not form a full
-OHLCV contract surface. The deterministic research convention should remain
-the latest observation satisfying each stream's completeness constraint on a
-trade date. Carry's four fields must come from that one complete source row;
-they must never be assembled column by column from different snapshots.
+`raw.multiple_prices` rows spanning 1,251,845 normalized instrument-days. It is
+not literally one observation per day: there are about 5.79 rows per
+instrument-day on average, and every instrument has at least one date with
+multiple intraday observations. The snapshots are nevertheless irregular and
+do not form a full OHLCV contract surface. The deterministic research
+convention should remain the latest observation satisfying each stream's
+completeness constraint on a trade date. Importer schema v2 maps Sunday
+timestamps to Monday `trade_date` while retaining the source timestamp for
+audit. Carry's four fields must come from one complete source row; they must
+never be assembled column by column from different snapshots.
 
 ### Breadth and history
 
 | Asset class | Instruments | Earliest date | Median history | Mean carry-day coverage |
 |---|---:|---:|---:|---:|
-| Equity | 57 | 1982-09-14 | 11.1 years | 80.7% |
-| FX | 43 | 1972-09-14 | 21.8 years | 96.7% |
-| Agricultural | 36 | 1969-12-02 | 35.4 years | 93.3% |
-| Sector | 34 | 2005-06-10 | 8.8 years | 85.9% |
-| Bonds | 34 | 1978-05-31 | 16.2 years | 81.6% |
-| Metals | 21 | 1970-06-15 | 10.2 years | 98.4% |
-| Oil and gas | 20 | 1980-02-19 | 26.2 years | 97.2% |
+| Equity | 57 | 1982-09-14 | 11.1 years | 80.9% |
+| FX | 43 | 1972-09-14 | 21.8 years | 96.8% |
+| Agricultural | 36 | 1969-12-02 | 35.4 years | 93.4% |
+| Sector | 34 | 2005-06-10 | 8.8 years | 86.0% |
+| Bonds | 34 | 1978-05-31 | 16.2 years | 81.9% |
+| Metals | 21 | 1970-06-15 | 10.2 years | 98.5% |
+| Oil and gas | 20 | 1980-02-19 | 26.2 years | 97.7% |
 | Volatility | 4 | 2005-11-22 | 14.7 years | 99.4% |
 | Housing | 2 | 2021-11-12 | 2.3 years | 100.0% |
-| Other | 1 | 2021-10-14 | 2.5 years | 99.7% |
+| Other | 1 | 2021-10-14 | 2.5 years | 100.0% |
 
 Across all instruments, 30 begin before 1980, 55 before 1990, 80 before 2000,
 and 133 before 2010. Mean, median, and observation-weighted carry coverage are
-89.4%, 98.7%, and 89.7%; 203 instruments have at least 90% coverage, while 26
+89.5%, 98.9%, and 90.0%; 205 instruments have at least 90% coverage, while 26
 have less than 50%. Those masks must be visible in results rather than silently
 turning missing carry into a zero forecast.
 
 The longest series include orange juice, cotton, soybean oil, sugar, and cocoa
-at roughly 54 years. Corn has about 51.4 years of history and 90.5% carry-day
+at roughly 54 years. Corn has about 51.4 years of history and 91.1% carry-day
 coverage. This is the main advantage over the purchased Globex sample: slow
 rules, decade slices, regime variation, and causal estimator stability can be
 tested over materially more history and many more markets.

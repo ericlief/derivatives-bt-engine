@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 import duckdb
@@ -39,7 +39,7 @@ def _build_carver_sidecar(path: Path) -> None:
             """
         )
         con.execute(
-            "INSERT INTO meta.schema_version VALUES (1, now(), 'test', '/test', ?)",
+            "INSERT INTO meta.schema_version VALUES (2, now(), 'test', '/test', ?)",
             [SOURCE_COMMIT],
         )
         con.execute(
@@ -63,6 +63,7 @@ def _build_carver_sidecar(path: Path) -> None:
             CREATE TABLE raw.adjusted_prices (
                 instrument_code VARCHAR,
                 source_timestamp TIMESTAMP,
+                trade_date DATE,
                 adjusted_price DOUBLE,
                 source_file VARCHAR
             )
@@ -86,6 +87,7 @@ def _build_carver_sidecar(path: Path) -> None:
             CREATE TABLE raw.multiple_prices (
                 instrument_code VARCHAR,
                 source_timestamp TIMESTAMP,
+                trade_date DATE,
                 price DOUBLE,
                 price_contract VARCHAR,
                 carry DOUBLE,
@@ -124,15 +126,23 @@ def _build_carver_sidecar(path: Path) -> None:
                 ["20200100", "20200100", "20200100", "20200200"],
             ):
                 con.execute(
-                    "INSERT INTO raw.adjusted_prices VALUES (?, ?, ?, 'adjusted.csv')",
-                    [code, timestamp, adjusted],
+                    "INSERT INTO raw.adjusted_prices VALUES (?, ?, ?, ?, 'adjusted.csv')",
+                    [code, timestamp, timestamp.date(), adjusted],
                 )
                 con.execute(
                     """
                     INSERT INTO raw.multiple_prices VALUES
-                    (?, ?, ?, ?, ?, '20200300', ?, '20200300', 'multiple.csv')
+                    (?, ?, ?, ?, ?, ?, '20200300', ?, '20200300', 'multiple.csv')
                     """,
-                    [code, timestamp, price, contract, price - 1, price + 1],
+                    [
+                        code,
+                        timestamp,
+                        timestamp.date(),
+                        price,
+                        contract,
+                        price - 1,
+                        price + 1,
+                    ],
                 )
     finally:
         con.close()
@@ -247,11 +257,72 @@ def test_carver_cache_path_is_source_and_version_namespaced(tmp_path: Path) -> N
         tmp_path
         / "cache"
         / "pysystemtrade"
-        / "v1"
+        / "v2"
         / SOURCE_COMMIT[:12]
         / "SP500_signal.parquet"
     )
     assert expected.exists()
+
+
+def test_carver_loader_collapses_sunday_into_monday_and_recomputes_return(
+    tmp_path: Path,
+) -> None:
+    sidecar = tmp_path / "carver.duckdb"
+    _build_carver_sidecar(sidecar)
+    sunday_timestamp = datetime(2020, 1, 5, 23)
+    monday_timestamp = datetime(2020, 1, 6, 23)
+    monday_trade_date = date(2020, 1, 6)
+    con = duckdb.connect(str(sidecar))
+    try:
+        con.execute(
+            """
+            INSERT INTO raw.adjusted_prices VALUES
+            ('SP500', ?, ?, -6.0, 'adjusted.csv'),
+            ('SP500', ?, ?, -5.0, 'adjusted.csv')
+            """,
+            [
+                sunday_timestamp,
+                monday_trade_date,
+                monday_timestamp,
+                monday_trade_date,
+            ],
+        )
+        con.execute(
+            """
+            INSERT INTO raw.multiple_prices VALUES
+            ('SP500', ?, ?, 100.0, '20200200', 99.0, '20200300',
+             101.0, '20200300', 'multiple.csv'),
+            ('SP500', ?, ?, 200.0, '20200200', 199.0, '20200300',
+             201.0, '20200300', 'multiple.csv')
+            """,
+            [
+                sunday_timestamp,
+                monday_trade_date,
+                monday_timestamp,
+                monday_trade_date,
+            ],
+        )
+    finally:
+        con.close()
+    provider = PysystemtradeHistoryProvider(
+        db_path=sidecar,
+        cache_root=tmp_path / "cache",
+        use_cache=False,
+        save_cache=False,
+    )
+
+    history = provider.load("SP500")
+
+    assert history.signal.get_column("trade_date")[-1] == monday_trade_date
+    assert history.signal.get_column("source_timestamp")[-1] == monday_timestamp
+    assert history.signal.get_column("adjusted_point_change")[-1] == pytest.approx(2.0)
+    assert history.signal.get_column("normalized_return")[-1] == pytest.approx(0.01)
+    assert date(2020, 1, 5) not in history.signal.get_column("trade_date").to_list()
+    assert history.signal.height == 4
+    assert history.marks.get_column("trade_date")[-1] == monday_trade_date
+    assert history.marks.get_column("source_timestamp")[-1] == monday_timestamp
+    assert history.carry.get_column("trade_date")[-1] == monday_trade_date
+    assert history.carry.get_column("source_timestamp")[-1] == monday_timestamp
 
 
 def test_globex_signal_uses_same_contract_change_across_roll(tmp_path: Path) -> None:
