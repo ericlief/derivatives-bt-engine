@@ -178,6 +178,7 @@ def _align_carver_dates(
     signal, collapsed = _replace_trade_dates(carver.signal, date_map)
     marks, _ = _replace_trade_dates(carver.marks, date_map)
     carry, _ = _replace_trade_dates(carver.carry, date_map)
+    panama, _ = _replace_trade_dates(carver.panama, date_map)
     marks = marks.with_columns(
         (pl.col("contract_id") != pl.col("contract_id").shift(1))
         .fill_null(False)
@@ -221,6 +222,7 @@ def _align_carver_dates(
         marks=marks,
         carry=carry,
         metadata=metadata,
+        panama=panama,
     ), collapsed
 
 
@@ -723,10 +725,11 @@ def render_markdown(
         f"Globex fingerprint: "
         f"`{_format_metric(report.summary['globex_dataset_fingerprint'][0])}`.",
         "",
-        "Carver returns are adjusted-price point differences divided by the same-day "
-        "positive current-contract price. Globex returns use each selected contract's "
-        "own prior close, including on roll days. Both are compounded into positive "
-        "signal indices before trend forecasts are computed.",
+        "Both providers use contract-consistent arithmetic returns: the current "
+        "selected-contract price divided by its prior same-contract reference, "
+        "including the matched forward quote on a Carver roll. Invalid nonpositive "
+        "references are flagged rather than coerced. Valid returns are compounded "
+        "into positive signal indices before trend forecasts are computed.",
         "",
         "Carver source timestamps are preserved, while Sunday observations are assigned "
         "to the following Monday trading session during sidecar import.",

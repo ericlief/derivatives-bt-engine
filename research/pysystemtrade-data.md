@@ -51,7 +51,7 @@ The deterministic raw-data importer is implemented in
 `pysystemtrade-import` CLI. It writes the independently rebuildable sidecar at
 the recommended path; it does not attach to or write the Globex database.
 
-The current schema-v3 validated build used source commit
+The last fully regenerated overlap artifact used schema v3 and source commit
 `b4a25e6e1e33a54a3ecfb45c0f6db5e2b60b84f8` and produced:
 
 | Build result | Value |
@@ -73,7 +73,7 @@ directions across the manifest, every raw table, and every QA table. It had no
 logical differences. Import time is intentionally the sole run-specific
 metadata value.
 
-Schema v3 preserves every original `source_timestamp` and adds a normalized
+Schema v3 preserved every original `source_timestamp` and added a normalized
 `trade_date` to adjusted and multiple-price rows. Sunday timestamps are assigned
 to Monday's futures trading session. The current build shifted 34,299 adjusted
 rows and 34,301 multiple-price rows; `qa.session_date_normalization` records
@@ -114,15 +114,14 @@ Git.
 
 ## Phase 2 and 3 implementation status
 
-Phase 2 now provides a source-neutral `FuturesHistory` object with independent
-signal, mark, and carry frames. `PysystemtradeHistoryProvider` constructs the
-signal stream as `delta(adjusted_price) / same-day current price` and compounds
-that return into a strictly positive index. The negative Panama-adjusted level
-is retained for audit but never enters percentage-return math. Marks retain the
-raw selected-contract price and contract ID, while carry retains only
-same-timestamp current/carry pairs. `GlobexHistoryProvider` builds its signal
-return from each selected contract's own prior close, including across a
-contract change, rather than treating a roll gap as market movement.
+Phase 2 originally provided signal, mark, and carry frames using adjusted
+differences as a return proxy. Phase 4 corrects that provisional adapter.
+`FuturesHistory` now also carries a generated Panama frame;
+`PysystemtradeHistoryProvider` reconstructs both the additive series and the
+contract-consistent return index from raw multiple prices. The supplied
+adjusted level is retained only for validation. Marks retain the raw selected-
+contract price and identity, while carry retains same-timestamp pairs.
+`GlobexHistoryProvider` uses the same prior-contract reference convention.
 
 Both providers open DuckDB read-only. Cache paths are isolated by source and
 history schema version; pysystemtrade caches additionally include the source
@@ -315,7 +314,7 @@ Panama stitch adds that +5 differential to the older adjusted history, making
 the old series end at 105 before appending the new contract. Subsequent
 adjusted differences represent market movement rather than the price-level
 change caused solely by changing contracts. The adjusted level is therefore a
-signal/P&L accounting device, not a price at which a contract traded.
+point-signal device, not a traded price and not the authoritative P&L ledger.
 
 This is not a complete per-contract market database. It does not preserve
 every listed contract, OHLC, volume, or open interest. It is sufficient for
@@ -348,20 +347,20 @@ pipeline computes `close.pct_change()` and horizon ratios such as
 directly as `close`: negative or near-zero adjusted levels make percentage and
 log returns meaningless.
 
-For Carver data, construct a positive signal index from the two price objects:
+For return-defined models, construct a positive index from the raw selected
+contract and its contract-consistent reference:
 
 ```text
-normalized_return[t] = (adjusted_price[t] - adjusted_price[t-1])
-                       / current_contract_price[t]
+reference[t-1] = PRICE[t-1]                         # no roll
+reference[t-1] = FORWARD[t-1]                       # matched roll
+normalized_return[t] = PRICE[t] / reference[t-1] - 1
 
 signal_index[t] = signal_index[t-1] * (1 + normalized_return[t])
 ```
 
-This follows pysystemtrade's own separation between the adjusted-price
-difference numerator and its same-day, forward-filled current-contract
-denominator. Existing TSMOM signal code can consume the positive
-`signal_index`; position notional and pre-Globex approximate P&L continue to
-use the raw current contract and the adjusted point change respectively.
+Existing return TSMOM and Goulding code can consume this index. Carver EWMAC
+instead consumes the separately generated additive Panama series. Position
+notional and P&L continue to use raw contracts and roll-neutral point changes.
 
 ### Carry coverage
 
@@ -554,10 +553,11 @@ contract specifications.
 
 Prefer views where practical so derived logic stays auditable:
 
-- `curated.daily_price`: daily last valid adjusted/current price, contract ID,
-  source timestamps, and quality flags;
-- `curated.signal_returns`: adjusted point difference, current-price
-  denominator, normalized return, and positive signal index;
+- `daily.roll_inputs`: EOD current/forward prices and contract IDs for audit;
+- generated Panama stream: locally stitched point price, roll differential,
+  supplied-adjusted validation error, and quality flags;
+- generated return stream: contract-consistent reference, roll-neutral point
+  change, normalized return, positive index, and return-validity flags;
 - `curated.carry`: matched current/carry observations, contract-month year
   fraction, raw spread, annualized roll, and validity flags;
 - `curated.rolls`: inferred contract changes reconciled against shipped roll
@@ -582,14 +582,22 @@ The current `FuturesDataLoader.daily` returns one `close` that downstream code
 uses for both signal returns and mark-to-market P&L. That is already a fragile
 conflation around contract rolls; it cannot safely represent Carver data.
 
-Introduce a source-neutral history object with three explicit streams:
+Introduce a source-neutral history object with four explicit streams:
 
-1. **Signal stream**: `date`, positive `signal_index`, normalized return, source,
-   and data-quality flags.
+1. **Return-signal stream**: `date`, positive `signal_index`, contract-consistent
+   arithmetic return, reference price, source, and data-quality flags.
 2. **Execution/mark stream**: date, raw selected-contract price, contract ID or
    expiration, multiplier/currency, and volume when available.
 3. **Carry stream**: matched current/carry prices and contract IDs plus an
    annualized carry observation.
+4. **Additive signal stream**: a locally generated Panama price, roll-neutral
+   point change, roll differential, and reconstruction-quality flags.
+
+The imported Carver adjusted CSV remains in `raw.adjusted_prices` and
+`daily.adjusted_prices`, but only as a provenance-preserving regression oracle.
+Operational signal series are generated from `raw.multiple_prices`; importing
+the supplied adjusted level as the working series would prevent the same code
+from being used for Globex and IB and would risk double-adjusting future rolls.
 
 Keep `FuturesDataLoader` as the Globex implementation and add a separate
 Carver provider. A later hybrid provider composes them. The default
@@ -600,8 +608,8 @@ Cache paths must include source and schema version, for example:
 
 ```text
 .cache/futures/globex/v1/ES_daily.parquet
-.cache/futures/globex/v3/<database-fingerprint>/ES_signal.parquet
-.cache/futures/pysystemtrade/v3/<source-commit>/SP500_signal.parquet
+.cache/futures/globex/v5/<database-fingerprint>/ES_signal.parquet
+.cache/futures/pysystemtrade/v5/<source-commit>/SP500_signal.parquet
 ```
 
 The first path is the unchanged legacy `FuturesDataLoader` cache. The v2 paths
@@ -628,8 +636,8 @@ roll dates, drawdowns, and portfolio results—not only Sharpe.
 
 For dates before Globex coverage:
 
-- compute signal returns from the adjusted/current-price pair;
-- estimate P&L as `contracts * multiplier * delta(adjusted_price)`;
+- compute return signals from contract-consistent raw references;
+- estimate research P&L as `contracts * multiplier * roll_neutral_point_change`;
 - size notional from the unadjusted current-contract `PRICE`;
 - infer rolls from `PRICE_CONTRACT` changes; and
 - charge documented commission/slippage assumptions at those rolls.
@@ -645,8 +653,9 @@ From 2010 onward:
 - Carver acts as an independent signal/roll/carry comparison source.
 
 Do not concatenate Carver's adjusted level directly onto a raw Globex
-front-contract close. Splicing should operate on normalized returns or signal
-indices, with a documented handoff date and overlap report.
+front-contract close. Splicing should operate on contract-consistent returns
+or roll-neutral point changes, with a documented handoff date and overlap
+report.
 
 ### 3. Carry and trend-plus-carry
 
@@ -749,12 +758,142 @@ no unexplained large signal/P&L discrepancies.
 
 ### Phase 4: hybrid long-history TSMOM
 
-- Introduce an opt-in `hybrid` data source.
-- Use normalized returns/signal indices across the source boundary.
-- Keep pre-Globex approximate P&L visibly labeled in reports.
-- Run small single-symbol/year tests, then matched-universe regime windows,
-  before a full-history portfolio run.
-- Store source and quality metadata in every result manifest.
+Status: **core transforms and research harness implemented on 2026-09-18;
+backtester/CLI integration and full-universe validation remain pending**.
+
+#### Source-of-truth and generated representations
+
+The source of truth is always contract-aware raw data.  The v4 Carver sidecar
+adds `daily.roll_inputs` for inspection while retaining the complete
+mixed-frequency `raw.multiple_prices` stream.  Reconstruction deliberately
+runs on the full chronological stream *before* selecting the final normalized
+session observation; otherwise an intraday roll row and its forward quote can
+be lost.
+
+For an unchanged selected contract:
+
+```text
+reference[t-1] = PRICE[t-1]
+point_change[t] = PRICE[t] - reference[t-1]
+contract_return[t] = PRICE[t] / reference[t-1] - 1
+```
+
+At a Carver roll, require
+`FORWARD_CONTRACT[t-1] == PRICE_CONTRACT[t]`, then use:
+
+```text
+reference[t-1] = FORWARD[t-1]
+point_change[t] = PRICE[t] - FORWARD[t-1]
+contract_return[t] = PRICE[t] / FORWARD[t-1] - 1
+roll_differential[t] = FORWARD[t-1] - PRICE[t-1]
+```
+
+The local Panama implementation is algebraically identical to Carver's
+forward mutation: every new roll differential is added to all earlier
+observations, leaving the newest segment at its raw price.  It is implemented
+as a reverse cumulative adjustment to avoid quadratic repeated mutation.
+Carver's own documentation says adjusted prices are generated from multiple
+prices and that Panama is the default stitch; his worked EWMAC example uses
+the stitched price, point differences for volatility, and an EMA-price
+difference for the numerator ([pysystemtrade data documentation](https://github.com/pst-group/pysystemtrade/blob/develop/docs/data.md),
+[EWMAC example](https://github.com/robcarver17/systematictradingexamples/blob/master/ewmac.py),
+[rolling discussion](https://qoppac.blogspot.com/2015/05/systems-building-futures-rolling.html)).
+
+The three supported signal classes therefore have intentionally different
+inputs:
+
+| Signal class | Required input | Reason |
+|---|---|---|
+| repository return TSMOM | positive contract-return index | horizons and volatility are defined from arithmetic returns |
+| Goulding monthly | positive contract-return index | monthly price relatives must be multiplicative, not additive-Panama ratios |
+| Carver EWMAC | generated Panama point price | EMA differences and daily volatility must share point units |
+
+`domain.futures_signal_harness` enforces this routing.  `carver_ewmac` exposes
+the raw point-vol-normalized forecast; its scalar is explicit and defaults to
+one because calibrated forecast scalars differ by speed pair and must not be
+invented.  Raw contract marks—not either derived signal level—remain the
+authoritative P&L, execution, sizing, cost, and roll record.
+
+#### Hybrid-source harness
+
+`HybridHistoryProvider` is opt-in and accepts a historical provider, a primary
+provider, an explicit instrument crosswalk, and an optional handoff date.  The
+primary source owns the handoff session and every later session.  It rebuilds:
+
+- the hybrid return index from daily contract returns, never by joining level
+  values;
+- the hybrid additive price from roll-neutral point changes, so a different
+  vendor level base cannot create a false trend jump;
+- marks and carry with the same date boundary; and
+- per-row `source_segment` plus manifest metadata identifying both providers,
+  instruments, and the handoff.
+
+For the planned Carver/Globex deployment, Carver supplies the long history and
+Globex is primary from an approved handoff within the overlap.  For live
+extension, IB contributes new immutable raw contract observations to the same
+builder.  A roll is accepted only when both old and new contract prices are
+available at the decision point; the new differential is applied exactly once.
+If late corrections alter historical raw observations, rebuild the complete
+derived stream rather than mutating a previously adjusted series.
+
+#### Zero and negative prices
+
+Zero and negative futures prices are legitimate raw observations, not bad
+ticks by definition.  CME explicitly required systems to support zero and
+negative CL prices and stated that its trading, clearing, settlement, and
+message formats support them ([CME Clearing Advisory 20-160](https://www.cmegroup.com/notices/clearing/2020/04/Chadv20-160.html)).
+Consequently:
+
+- raw marks, contract identity, point changes, Panama prices, EWMAC, and
+  contract-dollar P&L retain nonpositive values;
+- a percentage return is emitted only when both the reference and current
+  price are strictly positive and the roll contract match is valid;
+- invalid ratio rows receive `return_valid=false` and specific flags such as
+  `nonpositive_reference`, `nonpositive_current`, or `unmatched_roll`;
+- the positive index holds its last valid value only as an auditable state
+  variable; the signal harness excludes the flagged observation from
+  return-defined models, so the held level must not be interpreted as a zero
+  economic return; and
+- reports must disclose excluded dates.  Sensitivity runs may exclude the
+  affected instrument/window or use EWMAC, but must not add an arbitrary
+  offset, take an absolute value, clip the raw price, or manufacture a percent
+  return.  Those operations change the economic meaning and can change the
+  signal.
+
+This is deliberately conservative.  A price relative crossing zero is not a
+well-defined capital return, whereas futures P&L remains a point change times
+the multiplier.  Carver's point-price EWMAC naturally survives this case; it
+does not justify forcing the Goulding or repository return models through it.
+
+#### Remaining validation gates
+
+The first schema-v4 real-data reconstruction covered all 252 instruments.
+Most generated EOD Panama values match the supplied adjusted CSV to floating-
+point precision. Five isolated maxima need source-row review rather than a
+blanket tolerance: RUSSELL `+0.70`, MILKWET `-0.23`, GICS `-0.20`, CHFJPY
+`-0.105`, and CRUDE_W `-0.01`. Four daily return sessions were conservatively
+masked because an invalid intraday transition occurred even though the final
+EOD mark was positive: HANGENT_mini on 2023-07-17, MILKWET on 2018-07-23, and
+MSCITAIWAN on 2023-06-21 and 2023-06-23. None is in the initial 14-market
+overlap universe. The regenerated schema-v5 history report now shows materially
+higher same-date return correlations for the intended mappings (for example,
+Silver 0.813 after its configured session alignment), which confirms that EOD
+returns must be derived from the fully chained intraday index rather than from
+the final intraday row alone.
+
+- Rebuild the sidecar at schema v4 and compare generated versus supplied
+  Carver Panama prices by instrument; non-constant differences are failures.
+- Regenerate the overlap report using contract-consistent returns.  The v3
+  adjusted-difference correlations are historical/preliminary results.
+- Approve one handoff per market from the overlap rather than choosing it from
+  backtest performance.
+- Run single-symbol/year tests including CL around April 2020, then matched
+  regime windows, before a full-history portfolio run.
+- Keep pre-Globex P&L visibly labeled `research_approximation` and store source,
+  schema, crosswalk, handoff, return exclusions, and quality counts in every
+  result manifest.
+- Verify that the default legacy Globex-only backtest remains unchanged until
+  the new source-neutral path is explicitly selected.
 
 Exit criterion: the hybrid backtest is causal and reproducible, and the
 Globex-only control is unchanged.
@@ -788,8 +927,14 @@ reported as execution-grade.
 - Source file hashes, row counts, schemas, and date ranges are tested.
 - Contract IDs round-trip as strings.
 - Duplicate timestamps and zero/raw-price exceptions are surfaced.
-- Adjusted-price returns use adjusted differences divided by current raw
-  price; direct `pct_change(adjusted_price)` is prohibited.
+- Return-defined signals use contract-consistent raw references; neither
+  `pct_change(adjusted_price)` nor adjusted differences divided by current raw
+  price is permitted.
+- Generated Panama prices reproduce supplied Carver adjusted prices up to a
+  constant/tolerance before the supplied series may serve as a validation
+  oracle.
+- Zero/negative raw prices survive import; percentage returns at invalid
+  references are flagged and excluded, never coerced.
 - Daily aggregation is deterministic and retains the original timestamp.
 - Carry requires matched legs and valid, nonzero contract-month separation.
 - Source/date quality masks are applied before signals, never after results
@@ -815,9 +960,9 @@ confirmed.
 The paid Globex data remains isolated under its own license and storage. No
 Carver import should weaken or blur that boundary.
 
-## Proposed first deliverable
+## Initial deliverable status
 
-Implement only Phases 0-3 initially:
+Phases 0-3 produced:
 
 1. a rebuildable `pysystemtrade_reference.duckdb`;
 2. manifest, raw tables, coverage tables, and the approved symbol map;
@@ -825,6 +970,5 @@ Implement only Phases 0-3 initially:
 4. an overlap report for ES, NQ, CL, GC, SI, ZN, ZT, ZC, ZL, ZS, ZW, 6J,
    and 6M.
 
-That creates immediate research value and settles the hard alignment questions
-before changing portfolio logic, adding carry forecasts, or expanding the live
-instrument registry.
+Phase 4 now adds the core generated-series and hybrid harness described above;
+portfolio CLI integration remains behind the listed validation gates.

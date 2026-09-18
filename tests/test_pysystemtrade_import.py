@@ -98,7 +98,7 @@ def test_build_sidecar_imports_typed_data_manifest_and_qa(tmp_path: Path) -> Non
 
     con = duckdb.connect(str(output), read_only=True)
     try:
-        assert con.execute("SELECT version FROM meta.schema_version").fetchone()[0] == 3
+        assert con.execute("SELECT version FROM meta.schema_version").fetchone()[0] == 4
         assert con.execute("SELECT count(*) FROM raw.multiple_prices").fetchone()[0] == 2
         assert con.execute(
             "SELECT typeof(price_contract) FROM raw.multiple_prices LIMIT 1"
@@ -127,6 +127,9 @@ def test_build_sidecar_imports_typed_data_manifest_and_qa(tmp_path: Path) -> Non
         ).fetchone()[0] == 2
         assert con.execute(
             "SELECT count(*) FROM daily.marks"
+        ).fetchone()[0] == 2
+        assert con.execute(
+            "SELECT count(*) FROM daily.roll_inputs"
         ).fetchone()[0] == 2
         assert con.execute(
             "SELECT count(*) FROM daily.carry"

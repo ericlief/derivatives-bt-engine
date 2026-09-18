@@ -19,12 +19,13 @@ that had grown awkwardly split across similarly-named files:
                          logic tsmom_binary_vol_parity_backtest.py already
                          had -- one canonical implementation, not two.
 
-Three signal-construction functions, each computed straight from raw OHLCV
-bars so no model depends on another model's intermediate columns:
+Signal construction functions remain independent; futures callers must route
+the appropriate continuous representation to each one:
 
     build_features(df)                 -- shared base features only
     continuous_momentum(df, ...)        -- daily, vol-normalized fast/slow model
     goulding_monthly(df, ...)           -- monthly, un-normalized arithmetic model
+    carver_ewmac(df, ...)                -- additive-price EMA crossover / point vol
 
 Design rationale (2026-07 rewrite of the signal_spec.py half, replacing an
 even earlier version that wrapped calculate_trend_strength and dispatched
@@ -476,6 +477,50 @@ def build_features(df: pl.DataFrame) -> pl.DataFrame:
         dd=((pl.col('close') - pl.col('peak')) / pl.col('peak')).round(2),
     )
     return df
+
+
+def carver_ewmac(
+    df: pl.DataFrame,
+    fast_span: int = 16,
+    slow_span: int = 64,
+    vol_span: int = 35,
+    forecast_scalar: float = 1.0,
+    forecast_cap: float = 20.0,
+) -> pl.DataFrame:
+    """Carver-style EWMAC on an additive continuous futures price.
+
+    ``close`` must be a Panama (or additively equivalent) point-price series,
+    never a positive return index.  The EMA difference and volatility are in
+    the same point units.  ``forecast_scalar`` is explicit because calibrated
+    scalars vary by speed pair and portfolio; the default exposes the raw
+    vol-normalized forecast rather than pretending to be calibrated.
+    """
+    if fast_span <= 0 or slow_span <= 0 or vol_span <= 0:
+        raise ValueError("EWMAC spans must be positive")
+    if fast_span >= slow_span:
+        raise ValueError("fast_span must be less than slow_span")
+    if forecast_cap <= 0:
+        raise ValueError("forecast_cap must be positive")
+    result = df.sort("ts_event").with_columns(
+        pl.col("close").ewm_mean(span=fast_span, adjust=False).alias("fast_ewma"),
+        pl.col("close").ewm_mean(span=slow_span, adjust=False).alias("slow_ewma"),
+        pl.col("close").diff().alias("point_change"),
+    )
+    result = result.with_columns(
+        (pl.col("fast_ewma") - pl.col("slow_ewma")).alias("raw_ewmac"),
+        pl.col("point_change")
+        .ewm_std(span=vol_span, adjust=False, min_samples=2)
+        .alias("point_vol"),
+    )
+    return result.with_columns(
+        pl.when(pl.col("point_vol") > 0)
+        .then(
+            (pl.col("raw_ewmac") / pl.col("point_vol") * forecast_scalar)
+            .clip(-forecast_cap, forecast_cap)
+        )
+        .otherwise(None)
+        .alias("signal")
+    )
 
 
 def continuous_momentum(df: pl.DataFrame, fast_window: int = DEFAULT_FAST_WINDOW,

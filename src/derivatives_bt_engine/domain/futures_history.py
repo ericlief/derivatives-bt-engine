@@ -6,8 +6,11 @@ not safe for additively adjusted data.  This module keeps three concerns
 explicit:
 
 ``signal``
-    A positive index and its normalized returns.  Signal code may safely use
-    percentage changes on this index.
+    A positive index and contract-consistent arithmetic returns for return
+    TSMOM and Goulding.
+``panama``
+    A generated additive continuous price for point-price rules such as
+    Carver EWMAC.  Supplied adjusted prices are validation data only.
 ``marks``
     Actual selected-contract prices and contract identity.
 ``carry``
@@ -22,19 +25,24 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import Mapping, Optional, Protocol
 
 import duckdb
 import polars as pl
 
+from derivatives_bt_engine.domain.continuous_futures import (
+    build_continuous_futures,
+    select_daily_continuous,
+)
 from derivatives_bt_engine.domain.instruments import get_spec
 from derivatives_bt_engine.utils.logger import setup_logger
 
 
 logger = setup_logger()
 
-HISTORY_SCHEMA_VERSION = 3
+HISTORY_SCHEMA_VERSION = 5
 DEFAULT_PYSYSTEMTRADE_DB_PATH = Path(
     "/home/dev/fin/db/pysystemtrade_reference.duckdb"
 )
@@ -65,6 +73,13 @@ _CARRY_COLUMNS = {
     "carry_contract",
     "quality_flag",
 }
+_PANAMA_COLUMNS = {
+    "trade_date",
+    "source_timestamp",
+    "panama_price",
+    "contract_point_change",
+    "quality_flag",
+}
 
 
 class FuturesHistoryProvider(Protocol):
@@ -76,7 +91,7 @@ class FuturesHistoryProvider(Protocol):
 
 @dataclass(frozen=True)
 class FuturesHistory:
-    """One instrument's source-neutral signal, mark, and carry streams."""
+    """One instrument's source-neutral derived and raw-price streams."""
 
     source: str
     instrument_code: str
@@ -85,11 +100,13 @@ class FuturesHistory:
     marks: pl.DataFrame
     carry: pl.DataFrame
     metadata: Mapping[str, object] = field(default_factory=dict)
+    panama: pl.DataFrame = field(default_factory=lambda: _empty_panama_frame())
 
     def __post_init__(self) -> None:
         _validate_stream("signal", self.signal, _SIGNAL_COLUMNS)
         _validate_stream("marks", self.marks, _MARK_COLUMNS)
         _validate_stream("carry", self.carry, _CARRY_COLUMNS, allow_empty=True)
+        _validate_stream("panama", self.panama, _PANAMA_COLUMNS, allow_empty=True)
 
         if self.signal.filter(
             pl.col("signal_index").is_null() | (pl.col("signal_index") <= 0)
@@ -102,8 +119,14 @@ class FuturesHistory:
         This is deliberately signal-only.  It must not be used as an
         executable price or a contract mark.
         """
+        signal = self.signal
+        if "return_valid" in signal.columns:
+            signal = signal.filter(
+                pl.col("return_valid")
+                | (pl.col("quality_flag") == "initial_observation")
+            )
         return (
-            self.signal.select(
+            signal.select(
                 pl.col("trade_date").alias("ts_event"),
                 pl.col("signal_index").alias("close"),
                 "normalized_return",
@@ -111,6 +134,17 @@ class FuturesHistory:
             )
             .sort("ts_event")
         )
+
+    def panama_bars(self) -> pl.DataFrame:
+        """Adapt generated additive prices to point-price signal columns."""
+        if self.panama.is_empty():
+            raise ValueError("history has no generated Panama stream")
+        return self.panama.select(
+            pl.col("trade_date").alias("ts_event"),
+            pl.col("panama_price").alias("close"),
+            "contract_point_change",
+            "quality_flag",
+        ).sort("ts_event")
 
 
 def _validate_stream(
@@ -148,37 +182,15 @@ def _empty_carry_frame() -> pl.DataFrame:
     )
 
 
-def _build_positive_signal_index(
-    frame: pl.DataFrame,
-    *,
-    return_numerator: str,
-    denominator: str,
-) -> pl.DataFrame:
-    frame = frame.sort("trade_date").with_columns(
-        pl.col(return_numerator).diff().alias("point_change")
-    )
-    frame = frame.with_columns(
-        pl.when(
-            pl.col("point_change").is_not_null()
-            & pl.col(denominator).is_not_null()
-            & (pl.col(denominator) > 0)
-        )
-        .then(pl.col("point_change") / pl.col(denominator))
-        .otherwise(None)
-        .alias("normalized_return")
-    )
-    invalid_growth = frame.filter(pl.col("normalized_return") <= -1)
-    if invalid_growth.height:
-        first_date = invalid_growth.get_column("trade_date")[0]
-        raise ValueError(
-            f"normalized return is <= -100% on {first_date}; cannot build a positive index"
-        )
-    return frame.with_columns(
-        (
-            (pl.lit(1.0) + pl.col("normalized_return").fill_null(0.0))
-            .cum_prod()
-            * 100.0
-        ).alias("signal_index")
+def _empty_panama_frame() -> pl.DataFrame:
+    return pl.DataFrame(
+        schema={
+            "trade_date": pl.Date,
+            "source_timestamp": pl.Datetime("us"),
+            "panama_price": pl.Float64,
+            "contract_point_change": pl.Float64,
+            "quality_flag": pl.String,
+        }
     )
 
 
@@ -215,12 +227,12 @@ class PysystemtradeHistoryProvider:
         directory = self._cache_directory(source_commit)
         return {
             stream: directory / f"{instrument_code}_{stream}.parquet"
-            for stream in ("signal", "marks", "carry")
+            for stream in ("signal", "marks", "carry", "panama")
         }
 
     def load(self, instrument_code: str) -> FuturesHistory:
         sidecar_version, source_commit = self._database_metadata()
-        if sidecar_version != 3:
+        if sidecar_version != 4:
             raise ValueError(
                 f"Unsupported pysystemtrade sidecar schema version: {sidecar_version}"
             )
@@ -261,18 +273,20 @@ class PysystemtradeHistoryProvider:
                 signal = pl.read_parquet(cache_paths["signal"])
                 marks = pl.read_parquet(cache_paths["marks"])
                 carry = pl.read_parquet(cache_paths["carry"])
+                panama = pl.read_parquet(cache_paths["panama"])
             else:
                 logger.info(
                     "pysystemtrade_history load instrument=%s source_commit=%s",
                     instrument_code,
                     source_commit,
                 )
-                signal, marks, carry = self._load_uncached(con, instrument_code)
+                signal, marks, carry, panama = self._load_uncached(con, instrument_code)
                 if self.save_cache:
                     cache_paths["signal"].parent.mkdir(parents=True, exist_ok=True)
                     signal.write_parquet(cache_paths["signal"])
                     marks.write_parquet(cache_paths["marks"])
                     carry.write_parquet(cache_paths["carry"])
+                    panama.write_parquet(cache_paths["panama"])
         finally:
             con.close()
 
@@ -298,12 +312,13 @@ class PysystemtradeHistoryProvider:
             marks=marks,
             carry=carry,
             metadata=metadata,
+            panama=panama,
         )
 
     @staticmethod
     def _load_uncached(
         con: duckdb.DuckDBPyConnection, instrument_code: str
-    ) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
+    ) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, pl.DataFrame]:
         adjusted = con.execute(
             """
             SELECT
@@ -313,6 +328,23 @@ class PysystemtradeHistoryProvider:
             FROM daily.adjusted_prices
             WHERE instrument_code = ?
             ORDER BY trade_date
+            """,
+            [instrument_code],
+        ).pl()
+        raw_roll_inputs = con.execute(
+            """
+            SELECT
+                trade_date,
+                source_timestamp,
+                price AS current_price,
+                price_contract AS current_contract,
+                forward AS forward_price,
+                forward_contract
+            FROM raw.multiple_prices
+            WHERE instrument_code = ?
+              AND price IS NOT NULL
+              AND price_contract IS NOT NULL
+            ORDER BY source_timestamp
             """,
             [instrument_code],
         ).pl()
@@ -329,7 +361,7 @@ class PysystemtradeHistoryProvider:
             """,
             [instrument_code],
         ).pl()
-        if adjusted.is_empty() or marks.is_empty():
+        if adjusted.is_empty() or marks.is_empty() or raw_roll_inputs.is_empty():
             raise ValueError(f"No price history for {instrument_code}")
 
         marks = (
@@ -348,48 +380,25 @@ class PysystemtradeHistoryProvider:
             )
         )
 
-        joined = (
-            adjusted.join(
-                marks.select(
-                    "trade_date",
-                    pl.col("source_timestamp").alias("mark_source_timestamp"),
-                    "mark_price",
-                    "contract_id",
-                    "is_roll",
-                ),
-                on="trade_date",
-                how="inner",
-            )
-            .filter(pl.col("mark_price") > 0)
-            .sort("trade_date")
+        generated = select_daily_continuous(build_continuous_futures(raw_roll_inputs))
+        signal = generated.signal.join(
+            adjusted.select(
+                "trade_date",
+                pl.col("adjusted_price").alias("source_adjusted_price"),
+            ),
+            on="trade_date",
+            how="left",
         )
-        signal = _build_positive_signal_index(
-            joined,
-            return_numerator="adjusted_price",
-            denominator="mark_price",
-        ).rename(
-            {
-                "point_change": "adjusted_point_change",
-                "mark_price": "current_price",
-            }
-        )
-        signal = signal.with_columns(
-            pl.when(pl.col("normalized_return").is_null())
-            .then(pl.lit("initial_observation"))
-            .otherwise(pl.lit(""))
-            .alias("quality_flag")
-        ).select(
-            "trade_date",
-            "source_timestamp",
-            "mark_source_timestamp",
-            "adjusted_price",
-            "adjusted_point_change",
-            "current_price",
-            "normalized_return",
-            "signal_index",
-            "contract_id",
-            "is_roll",
-            "quality_flag",
+        panama = generated.panama.join(
+            adjusted.select(
+                "trade_date",
+                pl.col("adjusted_price").alias("source_adjusted_price"),
+            ),
+            on="trade_date",
+            how="left",
+        ).with_columns(
+            (pl.col("panama_price") - pl.col("source_adjusted_price"))
+            .alias("adjusted_validation_error")
         )
 
         carry = con.execute(
@@ -410,7 +419,7 @@ class PysystemtradeHistoryProvider:
         ).pl()
         if carry.is_empty():
             carry = _empty_carry_frame()
-        return signal, marks, carry
+        return signal, marks, carry, panama
 
 
 _GLOBEX_HISTORY_SQL = """
@@ -499,7 +508,7 @@ class GlobexHistoryProvider:
         )
         return {
             stream: directory / f"{asset}_{stream}.parquet"
-            for stream in ("signal", "marks", "carry")
+            for stream in ("signal", "marks", "carry", "panama")
         }
 
     def load(self, instrument_code: str) -> FuturesHistory:
@@ -509,6 +518,7 @@ class GlobexHistoryProvider:
             signal = pl.read_parquet(cache_paths["signal"])
             marks = pl.read_parquet(cache_paths["marks"])
             carry = pl.read_parquet(cache_paths["carry"])
+            panama = pl.read_parquet(cache_paths["panama"])
         else:
             logger.info("globex_history load asset=%s", instrument_code)
             con = duckdb.connect(str(self.db_path), read_only=True)
@@ -518,12 +528,13 @@ class GlobexHistoryProvider:
                 con.close()
             if raw.is_empty():
                 raise KeyError(f"Unknown or empty Globex futures asset: {instrument_code}")
-            signal, marks, carry = self._from_raw(raw)
+            signal, marks, carry, panama = self._from_raw(raw)
             if self.save_cache:
                 cache_paths["signal"].parent.mkdir(parents=True, exist_ok=True)
                 signal.write_parquet(cache_paths["signal"])
                 marks.write_parquet(cache_paths["marks"])
                 carry.write_parquet(cache_paths["carry"])
+                panama.write_parquet(cache_paths["panama"])
 
         try:
             spec = get_spec(instrument_code)
@@ -536,6 +547,7 @@ class GlobexHistoryProvider:
             signal=signal,
             marks=marks,
             carry=carry,
+            panama=panama,
             metadata={
                 "multiplier": spec.get("multiplier"),
                 "exchange": spec.get("exchange"),
@@ -547,7 +559,7 @@ class GlobexHistoryProvider:
     @staticmethod
     def _from_raw(
         raw: pl.DataFrame,
-    ) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
+    ) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, pl.DataFrame]:
         raw = raw.sort("trade_date").with_columns(
             pl.col("expiration").dt.strftime("%Y%m00").alias("contract_id")
         )
@@ -571,49 +583,148 @@ class GlobexHistoryProvider:
             .alias("quality_flag"),
         )
 
-        eligible = raw.filter(pl.col("mark_price") > 0).with_columns(
-            (
-                pl.col("mark_price") - pl.col("previous_contract_close")
-            ).alias("contract_point_change"),
-        )
-        signal = eligible.with_columns(
-            pl.when(pl.col("previous_contract_close").is_not_null())
-            .then(pl.col("contract_point_change") / pl.col("mark_price"))
-            .otherwise(None)
-            .alias("normalized_return")
-        )
-        invalid_growth = signal.filter(pl.col("normalized_return") <= -1)
-        if invalid_growth.height:
-            first_date = invalid_growth.get_column("trade_date")[0]
-            raise ValueError(
-                f"Globex normalized return is <= -100% on {first_date}"
-            )
-        signal = signal.with_columns(
-            (
-                (pl.lit(1.0) + pl.col("normalized_return").fill_null(0.0))
-                .cum_prod()
-                * 100.0
-            ).alias("signal_index"),
-            (
-                pl.col("contract_id") != pl.col("contract_id").shift(1)
-            )
-            .fill_null(False)
-            .alias("is_roll"),
-            pl.when(pl.col("normalized_return").is_null())
-            .then(pl.lit("initial_contract_observation"))
-            .otherwise(pl.lit(""))
-            .alias("quality_flag"),
-        ).select(
+        inputs = raw.select(
             "trade_date",
             "source_timestamp",
-            "contract_point_change",
             pl.col("mark_price").alias("current_price"),
-            "normalized_return",
-            "signal_index",
-            "contract_id",
-            "instrument_id",
-            "expiration",
-            "is_roll",
-            "quality_flag",
+            pl.col("contract_id").alias("current_contract"),
+            "previous_contract_close",
         )
-        return signal, marks, _empty_carry_frame()
+        generated = build_continuous_futures(
+            inputs,
+            direct_reference_column="previous_contract_close",
+        )
+        return generated.signal, marks, _empty_carry_frame(), generated.panama
+
+
+@dataclass
+class HybridHistoryProvider:
+    """Causally splice a long-history provider into a primary provider.
+
+    The primary source owns ``handoff_date`` and all later sessions.  Earlier
+    observations come from ``historical``.  Return indices and additive
+    continuous levels are rebuilt from their respective daily increments, so
+    vendor level bases are never concatenated.
+    """
+
+    historical: FuturesHistoryProvider
+    primary: FuturesHistoryProvider
+    historical_instrument_map: Mapping[str, str] = field(default_factory=dict)
+    handoff_date: Optional[date] = None
+
+    def load(self, instrument_code: str) -> FuturesHistory:
+        historical_code = self.historical_instrument_map.get(
+            instrument_code, instrument_code
+        )
+        old = self.historical.load(historical_code)
+        new = self.primary.load(instrument_code)
+        primary_start = new.signal.get_column("trade_date").min()
+        historical_end = old.signal.get_column("trade_date").max()
+        if primary_start is None or historical_end is None:
+            raise ValueError(f"hybrid source is empty for {instrument_code}")
+        if historical_end < primary_start:
+            raise ValueError(
+                f"hybrid sources do not overlap for {instrument_code}: "
+                f"historical_end={historical_end} primary_start={primary_start}"
+            )
+        first_primary_return = (
+            new.signal.filter(pl.col("return_valid"))
+            .get_column("trade_date")
+            .min()
+        )
+        handoff = self.handoff_date or first_primary_return
+        if handoff is None:
+            raise ValueError(f"primary history has no valid return for {instrument_code}")
+        logger.info(
+            "hybrid_history instrument=%s historical_source=%s historical_instrument=%s "
+            "primary_source=%s handoff_date=%s",
+            instrument_code,
+            old.source,
+            historical_code,
+            new.source,
+            handoff,
+        )
+
+        old_signal = old.signal.filter(pl.col("trade_date") < handoff)
+        new_signal = new.signal.filter(pl.col("trade_date") >= handoff)
+        signal = pl.concat(
+            [
+                old_signal.select(
+                    "trade_date", "source_timestamp", "current_price",
+                    "contract_id", "reference_price", "contract_point_change",
+                    "normalized_return", "is_roll", "return_valid", "quality_flag",
+                ).with_columns(pl.lit(old.source).alias("source_segment")),
+                new_signal.select(
+                    "trade_date", "source_timestamp", "current_price",
+                    "contract_id", "reference_price", "contract_point_change",
+                    "normalized_return", "is_roll", "return_valid", "quality_flag",
+                ).with_columns(pl.lit(new.source).alias("source_segment")),
+            ],
+            how="vertical",
+        ).sort("trade_date")
+        signal = signal.with_columns(
+            (
+                (1.0 + pl.col("normalized_return").fill_null(0.0)).cum_prod()
+                * 100.0
+            ).alias("signal_index")
+        )
+
+        old_panama = old.panama.filter(pl.col("trade_date") < handoff)
+        new_panama = new.panama.filter(pl.col("trade_date") >= handoff)
+        increments = pl.concat(
+            [
+                old_panama.select(
+                    "trade_date", "source_timestamp", "contract_point_change",
+                    "contract_id", "is_roll", "quality_flag",
+                ).with_columns(pl.lit(old.source).alias("source_segment")),
+                new_panama.select(
+                    "trade_date", "source_timestamp", "contract_point_change",
+                    "contract_id", "is_roll", "quality_flag",
+                ).with_columns(pl.lit(new.source).alias("source_segment")),
+            ],
+            how="vertical",
+        ).sort("trade_date")
+        panama = increments.with_columns(
+            (
+                pl.lit(1000.0)
+                + pl.col("contract_point_change").fill_null(0.0).cum_sum()
+            ).alias("panama_price")
+        )
+
+        marks = pl.concat(
+            [
+                old.marks.filter(pl.col("trade_date") < handoff),
+                new.marks.filter(pl.col("trade_date") >= handoff),
+            ],
+            how="diagonal_relaxed",
+        ).sort("trade_date").with_columns(
+            (pl.col("contract_id") != pl.col("contract_id").shift(1))
+            .fill_null(False)
+            .alias("is_roll")
+        )
+        carry = pl.concat(
+            [
+                old.carry.filter(pl.col("trade_date") < handoff),
+                new.carry.filter(pl.col("trade_date") >= handoff),
+            ],
+            how="diagonal_relaxed",
+        ).sort("trade_date")
+        metadata = {
+            "historical_source": old.source,
+            "historical_instrument": historical_code,
+            "primary_source": new.source,
+            "primary_instrument": instrument_code,
+            "handoff_date": handoff,
+            "pre_handoff_pnl_quality": "research_approximation",
+            "post_handoff_pnl_quality": "primary_contract_marks",
+        }
+        return FuturesHistory(
+            source="hybrid",
+            instrument_code=instrument_code,
+            schema_version=HISTORY_SCHEMA_VERSION,
+            signal=signal,
+            marks=marks,
+            carry=carry,
+            metadata=metadata,
+            panama=panama,
+        )

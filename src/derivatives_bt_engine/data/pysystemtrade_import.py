@@ -32,7 +32,7 @@ from derivatives_bt_engine.utils.logger import setup_logger
 
 logger = setup_logger()
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 DEFAULT_GLOBEX_DB_PATH = Path("/home/dev/fin/db/globex_mdp_3.0.duckdb")
 
 _MULTIPLE_SCHEMA = {
@@ -740,8 +740,10 @@ def _create_daily_tables(con: duckdb.DuckDBPyConnection) -> None:
     intraday snapshots.  After Sunday-to-Monday normalization, the latest
     complete timestamp is the session close: normally 23:00, or the final
     available complete snapshot when 23:00 is absent.  Selection is performed
-    independently for adjusted prices, marks, and carry because their validity
-    requirements differ.
+    independently for adjusted prices, marks, roll inputs, and carry because
+    their validity requirements differ.  Full-frequency raw roll inputs remain
+    authoritative for reconstructing Panama prices; this daily table is an
+    inspectable EOD projection, not the stitch input.
     """
     con.execute(
         """
@@ -774,6 +776,32 @@ def _create_daily_tables(con: duckdb.DuckDBPyConnection) -> None:
             source_timestamp,
             price AS mark_price,
             price_contract AS contract_id,
+            CASE
+                WHEN EXTRACT(HOUR FROM source_timestamp) = 23 THEN 'eod_2300'
+                ELSE 'last_complete'
+            END AS selection_policy,
+            source_file
+        FROM raw.multiple_prices
+        WHERE price IS NOT NULL
+          AND price_contract IS NOT NULL
+        QUALIFY row_number() OVER (
+            PARTITION BY instrument_code, trade_date
+            ORDER BY source_timestamp DESC
+        ) = 1
+        ORDER BY instrument_code, trade_date
+        """
+    )
+    con.execute(
+        """
+        CREATE TABLE daily.roll_inputs AS
+        SELECT
+            instrument_code,
+            trade_date,
+            source_timestamp,
+            price AS current_price,
+            price_contract AS current_contract,
+            forward AS forward_price,
+            forward_contract,
             CASE
                 WHEN EXTRACT(HOUR FROM source_timestamp) = 23 THEN 'eod_2300'
                 ELSE 'last_complete'
