@@ -146,6 +146,32 @@ approval exit criterion is deliberately not marked complete. JPY and then
 US10 are the sensible first manual reviews; WTI, grains, silver, and BRE need
 the documented reconciliation work before approval.
 
+### Post-report session-date audit (2026-09-18)
+
+The missing-date output overstates Globex gaps because the two providers do
+not currently apply the same session-date convention. The Globex `daily`
+table already incorporates the repository's UTC correction and merges
+Sunday UTC session fragments forward into the next trading day. The Carver
+provider instead groups its mixed-frequency source rows with
+`CAST(source_timestamp AS DATE)`, which turns Sunday-evening observations
+into separate daily rows.
+
+Of the 3,194 dates reported as present only in Carver, 1,863 (58.3%) are
+Sundays. Excluding the already-known BRE/6L sticky-anchor problem, 1,732 of
+1,835 apparent Carver-only dates (94.4%) are Sunday artifacts. Removing them
+leaves 103 non-Sunday discrepancies outside BRE; these include genuine
+coverage gaps, exchange-holiday differences, and other source-specific
+omissions. Silver's separate one-calendar-day lead/lag result also remains
+after Sunday normalization.
+
+Recommended action: normalize Carver adjusted prices, marks, and carry rows
+to the following trading session before computing daily returns, rolls, or
+missing dates; recompute returns after normalization; bump
+`HISTORY_SCHEMA_VERSION` to invalidate the current caches; and regenerate
+the overlap artifacts. The Globex database does not require another date
+correction. Until that work is complete, the current missing-date counts and
+derived correlations should be treated as preliminary.
+
 Regenerate the evidence with:
 
 ```bash
