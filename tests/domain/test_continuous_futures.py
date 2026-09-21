@@ -48,8 +48,10 @@ def test_panama_reconstruction_and_roll_return_use_forward_reference() -> None:
     )
 
     assert result.panama.get_column("panama_price").to_list() == [120.0, 121.0, 122.0]
-    assert result.signal.get_column("contract_point_change").to_list() == [None, 1.0, 1.0]
-    assert result.signal.get_column("normalized_return")[2] == pytest.approx(122 / 121 - 1)
+    assert result.signal.get_column("pt_change_1d").to_list() == [None, 1.0, 1.0]
+    assert "normalized_return" not in result.signal.columns
+    assert "contract_point_change" not in result.signal.columns
+    assert result.signal.get_column("ret_1d")[2] == pytest.approx(122 / 121 - 1)
     assert result.panama.get_column("roll_differential")[2] == pytest.approx(20.0)
 
 
@@ -63,10 +65,10 @@ def test_nonpositive_prices_keep_point_path_but_mask_ratio_path() -> None:
         )
     )
 
-    assert result.panama.get_column("contract_point_change").to_list() == [
+    assert result.panama.get_column("pt_change_1d").to_list() == [
         None, -110.0, 15.0, 1.0
     ]
-    assert result.signal.get_column("normalized_return").to_list() == [
+    assert result.signal.get_column("ret_1d").to_list() == [
         None, None, None, pytest.approx(0.2)
     ]
     assert result.signal.get_column("signal_index").to_list() == [100.0, 100.0, 100.0, 120.0]
@@ -95,10 +97,10 @@ def test_daily_selection_chains_all_intraday_moves_and_propagates_invalidity() -
     daily = select_daily_continuous(build_continuous_futures(observations))
 
     assert daily.signal.height == 2
-    assert daily.signal.get_column("normalized_return").to_list() == [None, None]
+    assert daily.signal.get_column("ret_1d").to_list() == [None, None]
     assert daily.signal.get_column("return_valid").to_list() == [False, False]
     assert daily.signal.get_column("quality_flag")[1] == "invalid_intraday_return"
-    assert daily.panama.get_column("contract_point_change").to_list() == [None, 11.0]
+    assert daily.panama.get_column("pt_change_1d").to_list() == [None, 11.0]
 
 
 def _history(source: str, start: date, prices: list[float]) -> FuturesHistory:

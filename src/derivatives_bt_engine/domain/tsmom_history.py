@@ -39,7 +39,7 @@ def history_to_tsmom_bars(history: FuturesHistory) -> pl.DataFrame:
         "trade_date",
         "source_timestamp",
         "signal_index",
-        "normalized_return",
+        "ret_1d",
         "return_valid",
         "quality_flag",
     ]
@@ -55,7 +55,7 @@ def history_to_tsmom_bars(history: FuturesHistory) -> pl.DataFrame:
     panama = history.panama.select(
         "trade_date",
         "panama_price",
-        "contract_point_change",
+        "pt_change_1d",
     )
     bars = signal.join(marks, on="trade_date", how="inner").join(
         panama, on="trade_date", how="inner"
@@ -80,10 +80,10 @@ def history_to_tsmom_bars(history: FuturesHistory) -> pl.DataFrame:
         "pnl_close",
         "signal_index",
         "panama_price",
-        "normalized_return",
+        "ret_1d",
         "return_valid",
         "quality_flag",
-        "contract_point_change",
+        "pt_change_1d",
         "contract_id",
         "expiration",
         "is_roll",

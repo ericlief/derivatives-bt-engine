@@ -43,7 +43,7 @@ from derivatives_bt_engine.utils.logger import setup_logger
 
 logger = setup_logger()
 
-HISTORY_SCHEMA_VERSION = 5
+HISTORY_SCHEMA_VERSION = 6
 DEFAULT_PYSYSTEMTRADE_DB_PATH = Path(
     "/home/dev/fin/db/pysystemtrade_reference.duckdb"
 )
@@ -53,7 +53,7 @@ DEFAULT_FUTURES_CACHE_ROOT = Path(__file__).resolve().parents[3] / ".cache" / "f
 _SIGNAL_COLUMNS = {
     "trade_date",
     "source_timestamp",
-    "normalized_return",
+    "ret_1d",
     "signal_index",
     "quality_flag",
 }
@@ -78,7 +78,7 @@ _PANAMA_COLUMNS = {
     "trade_date",
     "source_timestamp",
     "panama_price",
-    "contract_point_change",
+    "pt_change_1d",
     "quality_flag",
 }
 
@@ -130,7 +130,7 @@ class FuturesHistory:
             signal.select(
                 pl.col("trade_date").alias("ts_event"),
                 pl.col("signal_index").alias("close"),
-                "normalized_return",
+                "ret_1d",
                 "quality_flag",
             )
             .sort("ts_event")
@@ -143,7 +143,7 @@ class FuturesHistory:
         return self.panama.select(
             pl.col("trade_date").alias("ts_event"),
             pl.col("panama_price").alias("close"),
-            "contract_point_change",
+            "pt_change_1d",
             "quality_flag",
         ).sort("ts_event")
 
@@ -189,7 +189,7 @@ def _empty_panama_frame() -> pl.DataFrame:
             "trade_date": pl.Date,
             "source_timestamp": pl.Datetime("us"),
             "panama_price": pl.Float64,
-            "contract_point_change": pl.Float64,
+            "pt_change_1d": pl.Float64,
             "quality_flag": pl.String,
         }
     )
@@ -666,20 +666,20 @@ class HybridHistoryProvider:
             [
                 old_signal.select(
                     "trade_date", "source_timestamp", "current_price",
-                    "contract_id", "reference_price", "contract_point_change",
-                    "normalized_return", "is_roll", "return_valid", "quality_flag",
+                    "contract_id", "reference_price", "pt_change_1d",
+                    "ret_1d", "is_roll", "return_valid", "quality_flag",
                 ).with_columns(pl.lit(old.source).alias("source_segment")),
                 new_signal.select(
                     "trade_date", "source_timestamp", "current_price",
-                    "contract_id", "reference_price", "contract_point_change",
-                    "normalized_return", "is_roll", "return_valid", "quality_flag",
+                    "contract_id", "reference_price", "pt_change_1d",
+                    "ret_1d", "is_roll", "return_valid", "quality_flag",
                 ).with_columns(pl.lit(new.source).alias("source_segment")),
             ],
             how="vertical",
         ).sort("trade_date")
         signal = signal.with_columns(
             (
-                (1.0 + pl.col("normalized_return").fill_null(0.0)).cum_prod()
+                (1.0 + pl.col("ret_1d").fill_null(0.0)).cum_prod()
                 * 100.0
             ).alias("signal_index")
         )
@@ -689,11 +689,11 @@ class HybridHistoryProvider:
         increments = pl.concat(
             [
                 old_panama.select(
-                    "trade_date", "source_timestamp", "contract_point_change",
+                    "trade_date", "source_timestamp", "pt_change_1d",
                     "contract_id", "is_roll", "quality_flag",
                 ).with_columns(pl.lit(old.source).alias("source_segment")),
                 new_panama.select(
-                    "trade_date", "source_timestamp", "contract_point_change",
+                    "trade_date", "source_timestamp", "pt_change_1d",
                     "contract_id", "is_roll", "quality_flag",
                 ).with_columns(pl.lit(new.source).alias("source_segment")),
             ],
@@ -702,7 +702,7 @@ class HybridHistoryProvider:
         panama = increments.with_columns(
             (
                 pl.lit(1000.0)
-                + pl.col("contract_point_change").fill_null(0.0).cum_sum()
+                + pl.col("pt_change_1d").fill_null(0.0).cum_sum()
             ).alias("panama_price")
         )
 
@@ -783,19 +783,19 @@ def align_history_to_previous_sessions(
         )
 
     signal = remap(history.signal).sort("trade_date").with_columns(
-        pl.col("signal_index").pct_change().alias("normalized_return"),
+        pl.col("signal_index").pct_change().alias("ret_1d"),
         (pl.col("contract_id") != pl.col("contract_id").shift(1))
         .fill_null(False)
         .alias("is_roll"),
     ).with_columns(
-        pl.when(pl.col("normalized_return").is_not_null())
-        .then(pl.col("current_price") / (1.0 + pl.col("normalized_return")))
+        pl.when(pl.col("ret_1d").is_not_null())
+        .then(pl.col("current_price") / (1.0 + pl.col("ret_1d")))
         .otherwise(None)
         .alias("reference_price"),
-        pl.col("normalized_return").is_not_null().alias("return_valid"),
+        pl.col("ret_1d").is_not_null().alias("return_valid"),
     )
     panama = remap(history.panama).sort("trade_date").with_columns(
-        pl.col("panama_price").diff().alias("contract_point_change")
+        pl.col("panama_price").diff().alias("pt_change_1d")
     )
     marks = remap(history.marks).sort("trade_date").with_columns(
         (pl.col("contract_id") != pl.col("contract_id").shift(1))

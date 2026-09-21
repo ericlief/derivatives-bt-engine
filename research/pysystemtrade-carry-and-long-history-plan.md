@@ -249,7 +249,7 @@ approved mapped subset.
 
 ```text
 PysystemtradeHistoryProvider
-  ├─ signal.normalized_return ──> trend and Goulding features
+  ├─ signal.ret_1d ──> trend and Goulding features
   ├─ same-row carry legs ───────> carry features
   └─ marks + contract IDs ──────> roll/audit flags
                                   │
@@ -274,7 +274,7 @@ date:
 
 ```text
 trade_date, instrument, asset_class,
-normalized_return, signal_index,
+ret_1d, signal_index,
 mark, price_contract, is_roll,
 carry_price, carry_contract,
 signal_source_timestamp, mark_source_timestamp, carry_source_timestamp,
@@ -322,7 +322,7 @@ For each instrument/rule/day, calculate approximately:
 
 ```text
 rule_return[t+1] = scaled_forecast[t] / forecast_target
-                 * normalized_return[t+1]
+                 * ret_1d[t+1]
 ```
 
 Then normalize rule returns to a common risk convention before comparing or

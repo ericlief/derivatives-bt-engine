@@ -266,7 +266,7 @@ def test_carver_loader_builds_generated_panama_and_contract_returns(
     assert history.signal.get_column("source_adjusted_price").to_list() == [
         105.0, 106.0, None, 108.0
     ]
-    assert history.signal.get_column("normalized_return").to_list() == [
+    assert history.signal.get_column("ret_1d").to_list() == [
         None,
         pytest.approx(0.01),
         pytest.approx(102.0 / 101.0 - 1.0),
@@ -315,7 +315,7 @@ def test_carver_cache_path_is_source_and_version_namespaced(tmp_path: Path) -> N
         tmp_path
         / "cache"
         / "pysystemtrade"
-        / "v5"
+        / "v6"
         / SOURCE_COMMIT[:12]
         / "SP500_signal.parquet"
     )
@@ -374,8 +374,8 @@ def test_carver_loader_collapses_sunday_into_monday_and_recomputes_return(
 
     assert history.signal.get_column("trade_date")[-1] == monday_trade_date
     assert history.signal.get_column("source_timestamp")[-1] == monday_timestamp
-    assert history.signal.get_column("contract_point_change")[-1] == pytest.approx(92.0)
-    assert history.signal.get_column("normalized_return")[-1] == pytest.approx(200.0 / 108.0 - 1.0)
+    assert history.signal.get_column("pt_change_1d")[-1] == pytest.approx(92.0)
+    assert history.signal.get_column("ret_1d")[-1] == pytest.approx(200.0 / 108.0 - 1.0)
     assert date(2020, 1, 5) not in history.signal.get_column("trade_date").to_list()
     assert history.signal.height == 5
     assert history.marks.get_column("trade_date")[-1] == monday_trade_date
@@ -409,10 +409,10 @@ def test_globex_signal_uses_same_contract_change_across_roll(tmp_path: Path) -> 
         "20200600",
     ]
     assert history.marks.get_column("is_roll").to_list() == [False, False, True]
-    assert history.signal.get_column("normalized_return")[2] == pytest.approx(
+    assert history.signal.get_column("ret_1d")[2] == pytest.approx(
         (107.0 - 106.0) / 106.0
     )
-    assert history.signal.get_column("normalized_return")[2] != pytest.approx(
+    assert history.signal.get_column("ret_1d")[2] != pytest.approx(
         (107.0 - 101.0) / 107.0
     )
     assert history.marks.get_column("mark_price").to_list() == legacy_daily.get_column(
@@ -425,7 +425,7 @@ def test_history_rejects_nonpositive_signal_index() -> None:
         {
             "trade_date": [datetime(2020, 1, 1).date()],
             "source_timestamp": [datetime(2020, 1, 1)],
-            "normalized_return": [None],
+            "ret_1d": [None],
             "signal_index": [0.0],
             "quality_flag": ["bad"],
         }

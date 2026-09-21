@@ -353,9 +353,9 @@ contract and its contract-consistent reference:
 ```text
 reference[t-1] = PRICE[t-1]                         # no roll
 reference[t-1] = FORWARD[t-1]                       # matched roll
-normalized_return[t] = PRICE[t] / reference[t-1] - 1
+ret_1d[t] = PRICE[t] / reference[t-1] - 1
 
-signal_index[t] = signal_index[t-1] * (1 + normalized_return[t])
+signal_index[t] = signal_index[t-1] * (1 + ret_1d[t])
 ```
 
 Existing return TSMOM and Goulding code can consume this index. Carver EWMAC
@@ -608,8 +608,8 @@ Cache paths must include source and schema version, for example:
 
 ```text
 .cache/futures/globex/v1/ES_daily.parquet
-.cache/futures/globex/v5/<database-fingerprint>/ES_signal.parquet
-.cache/futures/pysystemtrade/v5/<source-commit>/SP500_signal.parquet
+.cache/futures/globex/v6/<database-fingerprint>/ES_signal.parquet
+.cache/futures/pysystemtrade/v6/<source-commit>/SP500_signal.parquet
 ```
 
 The first path is the unchanged legacy `FuturesDataLoader` cache. The v2 paths
@@ -774,8 +774,8 @@ For an unchanged selected contract:
 
 ```text
 reference[t-1] = PRICE[t-1]
-point_change[t] = PRICE[t] - reference[t-1]
-contract_return[t] = PRICE[t] / reference[t-1] - 1
+pt_change_1d[t] = PRICE[t] - reference[t-1]
+ret_1d[t] = pt_change_1d[t] / reference[t-1]
 ```
 
 At a Carver roll, require
@@ -783,10 +783,15 @@ At a Carver roll, require
 
 ```text
 reference[t-1] = FORWARD[t-1]
-point_change[t] = PRICE[t] - FORWARD[t-1]
-contract_return[t] = PRICE[t] / FORWARD[t-1] - 1
+pt_change_1d[t] = PRICE[t] - FORWARD[t-1]
+ret_1d[t] = pt_change_1d[t] / reference[t-1]
 roll_differential[t] = FORWARD[t-1] - PRICE[t-1]
 ```
+
+The two named daily fields are paired measurements of the same matched-
+contract move: `pt_change_1d` is in price points and `ret_1d` is a fractional
+simple return. Neither field is volatility-normalized. The history cache
+schema is v6 to keep these names separate from older Parquet caches.
 
 The local Panama implementation is algebraically identical to Carver's
 forward mutation: every new roll differential is added to all earlier

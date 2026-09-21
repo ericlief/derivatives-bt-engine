@@ -48,7 +48,7 @@ def run_futures_signal(
     bars = eligible.select(
         pl.col("trade_date").alias("ts_event"),
         pl.col("signal_index").alias("close"),
-        "normalized_return",
+        "ret_1d",
         "quality_flag",
     ).sort("ts_event")
     features = build_features(bars)

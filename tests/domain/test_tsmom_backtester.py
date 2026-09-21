@@ -110,7 +110,7 @@ def _source_neutral_price_df(start: date, n: int) -> pl.DataFrame:
         pl.lit('primary_contract_marks').alias('pnl_quality'),
         pl.lit(True).alias('return_valid'),
         pl.lit('').alias('quality_flag'),
-        pl.col('close').pct_change().alias('normalized_return'),
+        pl.col('close').pct_change().alias('ret_1d'),
     )
 
 

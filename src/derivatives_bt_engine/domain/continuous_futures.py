@@ -43,8 +43,11 @@ def build_continuous_futures(
     already has the prior same-contract quote (the Globex query does) may pass
     its name as ``direct_reference_column``.
 
-    Percentage returns are deliberately unavailable when either side of the
-    ratio is nonpositive, or when a roll cannot be matched.  The positive
+    ``pt_change_1d`` is the matched-contract move in price points;
+    ``ret_1d`` divides that move by the reference price. Neither is
+    volatility-normalized. Percentage returns are deliberately unavailable
+    when either side of the ratio is nonpositive, or when a roll cannot be
+    matched. The positive
     index holds its last valid value on such a row, but ``return_valid`` is
     false and consumers must mask the row.  Point changes and the Panama path
     remain valid across negative prices when the contract match is valid.
@@ -124,12 +127,12 @@ def build_continuous_futures(
             and reference > 0.0
             and current > 0.0
         )
-        normalized_return = current / reference - 1.0 if ratio_valid else None
-        if normalized_return is not None and normalized_return <= -1.0:
-            normalized_return = None
+        ret_1d = current / reference - 1.0 if ratio_valid else None
+        if ret_1d is not None and ret_1d <= -1.0:
+            ret_1d = None
             ratio_valid = False
-        if normalized_return is not None:
-            index_value *= 1.0 + normalized_return
+        if ret_1d is not None:
+            index_value *= 1.0 + ret_1d
 
         flag = _quality(
             "unmatched_roll" if is_roll and not contract_match else "",
@@ -139,7 +142,7 @@ def build_continuous_futures(
         )
         point_changes.append(point_change)
         references.append(reference)
-        returns.append(normalized_return)
+        returns.append(ret_1d)
         indices.append(index_value)
         rolls.append(is_roll)
         roll_differentials.append(roll_differential)
@@ -165,8 +168,8 @@ def build_continuous_futures(
 
     enriched = frame.with_columns(
         pl.Series("reference_price", references, dtype=pl.Float64),
-        pl.Series("contract_point_change", point_changes, dtype=pl.Float64),
-        pl.Series("normalized_return", returns, dtype=pl.Float64),
+        pl.Series("pt_change_1d", point_changes, dtype=pl.Float64),
+        pl.Series("ret_1d", returns, dtype=pl.Float64),
         pl.Series("signal_index", indices, dtype=pl.Float64),
         pl.Series("is_roll", rolls, dtype=pl.Boolean),
         pl.Series("roll_differential", roll_differentials, dtype=pl.Float64),
@@ -179,8 +182,8 @@ def build_continuous_futures(
         "current_price",
         pl.col("current_contract").alias("contract_id"),
         "reference_price",
-        "contract_point_change",
-        "normalized_return",
+        "pt_change_1d",
+        "ret_1d",
         "signal_index",
         "is_roll",
         "return_valid",
@@ -192,7 +195,7 @@ def build_continuous_futures(
         "trade_date",
         "source_timestamp",
         "panama_price",
-        "contract_point_change",
+        "pt_change_1d",
         "roll_differential",
         pl.col("current_price"),
         pl.col("current_contract").alias("contract_id"),
@@ -216,7 +219,7 @@ def select_daily_continuous(
 ) -> ContinuousFuturesResult:
     """Collapse a full-frequency transformation without losing daily moves.
 
-    The last observation's ``normalized_return`` is only its final intraday
+    The last observation's ``ret_1d`` is only its final intraday
     move.  The full-frequency ``signal_index`` already chains every valid move,
     so daily returns must be recomputed from consecutive EOD index levels.
     Panama point changes are similarly recomputed from consecutive EOD levels.
@@ -232,34 +235,34 @@ def select_daily_continuous(
         .to_list()
     )
     panama = select_daily_last(result.panama).with_columns(
-        pl.col("panama_price").diff().alias("contract_point_change")
+        pl.col("panama_price").diff().alias("pt_change_1d")
     )
     signal = select_daily_last(result.signal).with_columns(
-        pl.col("signal_index").pct_change().alias("normalized_return")
+        pl.col("signal_index").pct_change().alias("ret_1d")
     ).with_columns(
-        pl.when(pl.col("normalized_return").is_not_null())
-        .then(pl.col("current_price") / (1.0 + pl.col("normalized_return")))
+        pl.when(pl.col("ret_1d").is_not_null())
+        .then(pl.col("current_price") / (1.0 + pl.col("ret_1d")))
         .otherwise(None)
         .alias("reference_price"),
         (~pl.col("trade_date").is_in(invalid_dates)
-         & pl.col("normalized_return").is_not_null()).alias("return_valid"),
+         & pl.col("ret_1d").is_not_null()).alias("return_valid"),
         pl.when(pl.col("trade_date").is_in(invalid_dates))
         .then(pl.lit("invalid_intraday_return"))
-        .when(pl.col("normalized_return").is_null())
+        .when(pl.col("ret_1d").is_null())
         .then(pl.lit("initial_observation"))
         .otherwise(pl.col("quality_flag"))
         .alias("quality_flag"),
     ).with_columns(
         pl.when(pl.col("return_valid"))
-        .then(pl.col("normalized_return"))
+        .then(pl.col("ret_1d"))
         .otherwise(None)
-        .alias("normalized_return")
+        .alias("ret_1d")
     ).join(
-        panama.select("trade_date", "contract_point_change"),
+        panama.select("trade_date", "pt_change_1d"),
         on="trade_date",
         how="left",
         suffix="_panama",
-    ).drop("contract_point_change").rename(
-        {"contract_point_change_panama": "contract_point_change"}
+    ).drop("pt_change_1d").rename(
+        {"pt_change_1d_panama": "pt_change_1d"}
     )
     return ContinuousFuturesResult(signal=signal, panama=panama)

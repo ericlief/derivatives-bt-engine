@@ -195,11 +195,11 @@ def _align_carver_dates(
             )
             .then(pl.col("adjusted_point_change") / pl.col("current_price"))
             .otherwise(None)
-            .alias("normalized_return")
+            .alias("ret_1d")
         )
     signal = signal.sort("trade_date").with_columns(
         (
-            (1.0 + pl.col("normalized_return").fill_null(0.0)).cum_prod()
+            (1.0 + pl.col("ret_1d").fill_null(0.0)).cum_prod()
             * 100.0
         ).alias("signal_index"),
         (pl.col("contract_id") != pl.col("contract_id").shift(1))
@@ -234,14 +234,14 @@ def _comparison_frame(
 ) -> pl.DataFrame:
     carver_signal = _bounded(carver.signal, start, end).select(
         "trade_date",
-        pl.col("normalized_return").alias("carver_return"),
+        pl.col("ret_1d").alias("carver_return"),
         pl.col("signal_index").alias("carver_signal_index"),
         pl.col("contract_id").alias("carver_contract"),
         pl.col("is_roll").alias("carver_is_roll"),
     )
     globex_signal = _bounded(globex.signal, start, end).select(
         "trade_date",
-        pl.col("normalized_return").alias("globex_return"),
+        pl.col("ret_1d").alias("globex_return"),
         pl.col("signal_index").alias("globex_signal_index"),
         pl.col("contract_id").alias("globex_contract"),
         pl.col("is_roll").alias("globex_is_roll"),
@@ -277,14 +277,14 @@ def _shifted_return_correlation(
 ) -> tuple[Optional[float], int]:
     left = _bounded(carver.signal, start, end).select(
         "trade_date",
-        pl.col("normalized_return").alias("carver_return"),
+        pl.col("ret_1d").alias("carver_return"),
         pl.col("is_roll").alias("carver_is_roll"),
     )
     right = _bounded(globex.signal, start, end).select(
         (pl.col("trade_date") + pl.duration(days=globex_shift_days)).alias(
             "trade_date"
         ),
-        pl.col("normalized_return").alias("globex_return"),
+        pl.col("ret_1d").alias("globex_return"),
         pl.col("is_roll").alias("globex_is_roll"),
     )
     joined = left.join(right, on="trade_date", how="inner").filter(
@@ -297,7 +297,7 @@ def _volatility_frame(history: FuturesHistory, prefix: str) -> pl.DataFrame:
     return history.signal.sort("trade_date").select(
         "trade_date",
         (
-            pl.col("normalized_return")
+            pl.col("ret_1d")
             .rolling_std(
                 window_size=VOLATILITY_WINDOW_DAYS,
                 min_samples=VOLATILITY_WINDOW_DAYS,
