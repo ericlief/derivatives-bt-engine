@@ -269,11 +269,11 @@ def test_full_pysystemtrade_universe_scales_only_traded_symbols(monkeypatch) -> 
     })
     monkeypatch.setattr(
         tb, '_load_pysystemtrade_ewmac_universe',
-        lambda _config: (panel, coverage, 'abc123', True),
+        lambda _config: (panel, coverage, 'abc123', 'range_test', True),
     )
     monkeypatch.setattr(
         tb, '_load_pysystemtrade_scalar_history',
-        lambda _panel, _config, _commit: (scalar, True),
+        lambda _panel, _config, _commit, _range: (scalar, True),
     )
     config = TsmomBacktestConfig(
         symbols=['ES'], data_source='globex', signal_weighting='carver_ewmac',
@@ -302,6 +302,12 @@ def test_full_pysystemtrade_universe_scales_only_traded_symbols(monkeypatch) -> 
     assert forecasts['ES'].filter(pl.col('ts_event') > dates[4])[
         'forecast_scalar'
     ].null_count() == 0
+    assert forecasts['ES'].filter(pl.col('ts_event') > dates[4])[
+        'scalar_carried_forward'
+    ].all()
+    assert forecasts['ES'].filter(pl.col('ts_event') > dates[4])[
+        'scalar_as_of_date'
+    ].unique().to_list() == [dates[4]]
 
 
 def test_full_pysystemtrade_forecast_and_scalar_caches(monkeypatch, tmp_path) -> None:
@@ -336,8 +342,18 @@ def test_full_pysystemtrade_forecast_and_scalar_caches(monkeypatch, tmp_path) ->
 
     monkeypatch.setattr(tb, 'DEFAULT_FUTURES_CACHE_ROOT', tmp_path)
     monkeypatch.setattr(tb, 'PysystemtradeHistoryProvider', FakeProvider)
+    source_coverage = pl.DataFrame({
+        'instrument_code': ['A', 'B'],
+        'source_multiple_rows': [12, 12],
+        'source_multiple_ts_start': [dates[0], dates[0]],
+        'source_multiple_ts_end': [dates[-1], dates[-1]],
+        'source_adjusted_rows': [12, 12],
+        'source_adjusted_ts_start': [dates[0], dates[0]],
+        'source_adjusted_ts_end': [dates[-1], dates[-1]],
+    })
     monkeypatch.setattr(
-        tb, '_eligible_pysystemtrade_instruments', lambda _path: ['A', 'B']
+        tb, '_pysystemtrade_source_coverage',
+        lambda _path: (source_coverage, 'range_20200101_20200116_test'),
     )
     config = TsmomBacktestConfig(
         symbols=['ES'], data_source='globex', signal_weighting='carver_ewmac',
@@ -345,17 +361,17 @@ def test_full_pysystemtrade_forecast_and_scalar_caches(monkeypatch, tmp_path) ->
         ewmac_scalar_universe='pysystemtrade', ewmac_scalar_min_periods=2,
     )
 
-    panel, coverage, commit, panel_hit = tb._load_pysystemtrade_ewmac_universe(
-        config
+    panel, coverage, commit, range_key, panel_hit = (
+        tb._load_pysystemtrade_ewmac_universe(config)
     )
     scalar, scalar_hit = tb._load_pysystemtrade_scalar_history(
-        panel, config, commit
+        panel, config, commit, range_key
     )
-    panel_again, coverage_again, commit_again, panel_hit_again = (
+    panel_again, coverage_again, commit_again, range_again, panel_hit_again = (
         tb._load_pysystemtrade_ewmac_universe(config)
     )
     scalar_again, scalar_hit_again = tb._load_pysystemtrade_scalar_history(
-        panel_again, config, commit_again
+        panel_again, config, commit_again, range_again
     )
 
     assert loaded == ['A', 'B']
@@ -367,6 +383,20 @@ def test_full_pysystemtrade_forecast_and_scalar_caches(monkeypatch, tmp_path) ->
     assert coverage.select('instrument_code', 'ts_start', 'ts_end').to_dicts() == [
         {'instrument_code': 'A', 'ts_start': dates[0], 'ts_end': dates[-1]},
         {'instrument_code': 'B', 'ts_start': dates[0], 'ts_end': dates[-1]},
+    ]
+
+    monkeypatch.setattr(
+        tb, '_pysystemtrade_source_coverage',
+        lambda _path: (source_coverage, 'range_20200101_20200117_changed'),
+    )
+    _, changed_coverage, _, changed_range, changed_hit = (
+        tb._load_pysystemtrade_ewmac_universe(config)
+    )
+    assert not changed_hit
+    assert changed_range == 'range_20200101_20200117_changed'
+    assert loaded == ['A', 'B', 'A', 'B']
+    assert changed_coverage['source_range_key'].unique().to_list() == [
+        changed_range
     ]
 
 

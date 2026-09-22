@@ -855,21 +855,26 @@ separate concerns.
 
 The full-universe path has two cache layers. Existing versioned history
 caches retain each instrument's signal, marks, carry, and generated Panama
-series. A derived EWMAC cache, keyed by history schema/source commit and the
-fast/slow/vol spans, stores the 252-instrument raw-forecast panel and coverage
-table. A second derived file, additionally keyed by target magnitude and
-minimum observations, stores the causal scalar history. Consequently the
-first run builds missing histories and forecasts; matching later runs read
-the panel and scalar directly. A backtest's requested years do not truncate
-the normalization input: all pre-start history remains available, and the
-daily scalar report can be sliced after its causal calculation.
+series. A derived EWMAC cache is keyed by history schema, source commit,
+fast/slow/vol spans, and a range fingerprint over every eligible instrument's
+raw/adjusted start timestamp, end timestamp, and row count. Cache hits validate
+both that fingerprint and exact instrument membership before reading the
+252-instrument raw-forecast panel and coverage table. A second derived file,
+additionally keyed by target magnitude and minimum observations, stores the
+causal scalar history. Consequently the first run builds missing histories and
+forecasts; matching later runs read the panel and scalar directly, while any
+source-range or membership change selects a new cache. A backtest's requested
+years do not truncate the normalization input: all pre-start history remains
+available, and the daily scalar report can be sliced after its causal
+calculation.
 
 The 2026-09-22 integration build found all 252 eligible instruments and
 materialized 1,249,673 raw-forecast rows over instrument histories spanning
 1969-12-02 through 2024-03-29. The pooled cache contains 14,192 daily scalar
 rows; for EWMAC 16/64 with 35-day point volatility, target 10, and a 500-day
 warm-up, its final scalar is approximately 4.7441. An immediate repeat load
-hit both the forecast-panel and scalar caches.
+hit both the forecast-panel and scalar caches. The current range key is
+`range19691202_20240329_n252_c580f0fc08c52f8d`.
 
 Each run returns `ewmac_scalar_history` and the CLI prints its last rows. Saved
 runs write a separate `*_tsmom_ewmac_scalars_*.csv` (and `ewmac_scalars`
@@ -887,6 +892,12 @@ counts. This makes staggered history availability auditable without repeating
 instrument ranges on every daily scalar row. The daily report also records
 the configured and normalization-universe instrument counts, source commit,
 and whether the forecast-panel and scalar caches were hits.
+Each traded EWMAC row also records `scalar_as_of_date` and
+`scalar_carried_forward`. In a hybrid validation after the Carver universe
+ended, the May 2024 rebalance explicitly showed a scalar as-of 2024-03-29 with
+the carry flag set; changing data source therefore recalculates the traded
+hybrid rule, while reuse or extrapolation of the separately calibrated scalar
+is visible and range-checked.
 When an EWMAC family is added,
 scale and cap each speed rule in 10/20 units first, combine those forecasts
 with weights summing to one, apply a causal forecast-diversification

@@ -18,6 +18,7 @@ front-month / VX-63d-MA ratio (see derivatives_bt_engine.live.tsmom_rebalance).
 """
 from __future__ import annotations
 
+import hashlib
 import math
 import os
 from dataclasses import dataclass
@@ -561,6 +562,7 @@ def _cache_float(value: float) -> str:
 def _pysystemtrade_ewmac_cache_paths(
     config: TsmomBacktestConfig,
     source_commit: str,
+    source_range_key: str,
 ) -> dict[str, Path]:
     directory = (
         Path(DEFAULT_FUTURES_CACHE_ROOT)
@@ -568,6 +570,7 @@ def _pysystemtrade_ewmac_cache_paths(
         / f'v{HISTORY_SCHEMA_VERSION}'
         / source_commit[:12]
         / f'ewmac_normalization_v{EWMAC_NORMALIZATION_CACHE_VERSION}'
+        / source_range_key
         / (
             f'fast{config.ewmac_fast_span}_slow{config.ewmac_slow_span}'
             f'_vol{config.ewmac_vol_span}'
@@ -584,12 +587,22 @@ def _pysystemtrade_ewmac_cache_paths(
     }
 
 
-def _eligible_pysystemtrade_instruments(db_path: Path | str) -> list[str]:
+def _pysystemtrade_source_coverage(
+    db_path: Path | str,
+) -> tuple[pl.DataFrame, str]:
+    """Return eligible source bounds and a range-sensitive cache key."""
     con = duckdb.connect(str(db_path), read_only=True)
     try:
-        rows = con.execute(
+        coverage = con.execute(
             """
-            SELECT s.instrument_code
+            SELECT
+                s.instrument_code,
+                s.multiple_rows AS source_multiple_rows,
+                s.multiple_start AS source_multiple_ts_start,
+                s.multiple_end AS source_multiple_ts_end,
+                s.adjusted_rows AS source_adjusted_rows,
+                s.adjusted_start AS source_adjusted_ts_start,
+                s.adjusted_end AS source_adjusted_ts_end
             FROM qa.series_coverage s
             WHERE s.multiple_rows > 0
               AND s.adjusted_rows > 0
@@ -603,15 +616,38 @@ def _eligible_pysystemtrade_instruments(db_path: Path | str) -> list[str]:
               )
             ORDER BY s.instrument_code
             """
-        ).fetchall()
+        ).pl()
     finally:
         con.close()
-    return [str(row[0]) for row in rows]
+    if coverage.is_empty():
+        raise ValueError('pysystemtrade normalization universe is empty')
+    fingerprint_rows = coverage.with_columns(
+        pl.col(pl.Datetime).dt.to_string('%Y-%m-%dT%H:%M:%S')
+    ).rows()
+    digest = hashlib.sha256(
+        '\n'.join('|'.join(str(value) for value in row) for row in fingerprint_rows)
+        .encode('utf-8')
+    ).hexdigest()[:16]
+    source_start = coverage.select(
+        pl.min_horizontal(
+            'source_multiple_ts_start', 'source_adjusted_ts_start'
+        ).min()
+    ).item()
+    source_end = coverage.select(
+        pl.max_horizontal(
+            'source_multiple_ts_end', 'source_adjusted_ts_end'
+        ).max()
+    ).item()
+    range_key = (
+        f"range{source_start:%Y%m%d}_{source_end:%Y%m%d}"
+        f"_n{coverage.height}_{digest}"
+    )
+    return coverage, range_key
 
 
 def _load_pysystemtrade_ewmac_universe(
     config: TsmomBacktestConfig,
-) -> tuple[pl.DataFrame, pl.DataFrame, str, bool]:
+) -> tuple[pl.DataFrame, pl.DataFrame, str, str, bool]:
     """Load or build the full Carver raw-forecast panel and coverage.
 
     The underlying four-stream histories remain owned by
@@ -621,25 +657,48 @@ def _load_pysystemtrade_ewmac_universe(
     """
     provider = PysystemtradeHistoryProvider(db_path=config.pysystemtrade_db_path)
     _, source_commit = provider._database_metadata()
-    paths = _pysystemtrade_ewmac_cache_paths(config, source_commit)
+    source_coverage, source_range_key = _pysystemtrade_source_coverage(
+        config.pysystemtrade_db_path
+    )
+    paths = _pysystemtrade_ewmac_cache_paths(
+        config, source_commit, source_range_key
+    )
     panel_cached = paths['raw_forecasts'].exists() and paths['coverage'].exists()
     if panel_cached:
-        logger.info(
-            'ewmac_universe cache_hit source=pysystemtrade fast=%d slow=%d vol=%d',
-            config.ewmac_fast_span, config.ewmac_slow_span, config.ewmac_vol_span,
-        )
-        panel = pl.read_parquet(paths['raw_forecasts'])
         coverage = pl.read_parquet(paths['coverage'])
-    else:
-        instrument_codes = _eligible_pysystemtrade_instruments(
-            config.pysystemtrade_db_path
+        cached_range_keys = (
+            coverage.get_column('source_range_key').unique().to_list()
+            if 'source_range_key' in coverage.columns else []
         )
-        if not instrument_codes:
-            raise ValueError('pysystemtrade normalization universe is empty')
+        cached_instruments = set(coverage.get_column('instrument_code'))
+        expected_instruments = set(source_coverage.get_column('instrument_code'))
+        panel_cached = (
+            cached_range_keys == [source_range_key]
+            and cached_instruments == expected_instruments
+        )
+        if panel_cached:
+            logger.info(
+                'ewmac_universe cache_hit source=pysystemtrade range=%s '
+                'fast=%d slow=%d vol=%d',
+                source_range_key, config.ewmac_fast_span,
+                config.ewmac_slow_span, config.ewmac_vol_span,
+            )
+            panel = pl.read_parquet(paths['raw_forecasts'])
+        else:
+            logger.info(
+                'ewmac_universe cache_rejected reason=range_or_membership_mismatch '
+                'range=%s',
+                source_range_key,
+            )
+    if not panel_cached:
+        instrument_codes = source_coverage.get_column('instrument_code').to_list()
+        source_by_instrument = {
+            row['instrument_code']: row for row in source_coverage.to_dicts()
+        }
         logger.info(
             'ewmac_universe build_start source=pysystemtrade instruments=%d '
-            'fast=%d slow=%d vol=%d',
-            len(instrument_codes), config.ewmac_fast_span,
+            'range=%s fast=%d slow=%d vol=%d',
+            len(instrument_codes), source_range_key, config.ewmac_fast_span,
             config.ewmac_slow_span, config.ewmac_vol_span,
         )
         panel_rows: list[pl.DataFrame] = []
@@ -677,6 +736,8 @@ def _load_pysystemtrade_ewmac_universe(
                 'history_observations': bars.height,
                 'usable_forecast_observations': usable.height,
                 'source_commit': source_commit,
+                'source_range_key': source_range_key,
+                **source_by_instrument[instrument_code],
             })
             if position % 25 == 0 or position == len(instrument_codes):
                 logger.info(
@@ -694,15 +755,18 @@ def _load_pysystemtrade_ewmac_universe(
             'cache=%s',
             coverage.height, panel.height, paths['raw_forecasts'],
         )
-    return panel, coverage, source_commit, panel_cached
+    return panel, coverage, source_commit, source_range_key, panel_cached
 
 
 def _load_pysystemtrade_scalar_history(
     panel: pl.DataFrame,
     config: TsmomBacktestConfig,
     source_commit: str,
+    source_range_key: str,
 ) -> tuple[pl.DataFrame, bool]:
-    paths = _pysystemtrade_ewmac_cache_paths(config, source_commit)
+    paths = _pysystemtrade_ewmac_cache_paths(
+        config, source_commit, source_range_key
+    )
     if paths['scalar'].exists():
         logger.info('ewmac_scalar cache_hit path=%s', paths['scalar'])
         return pl.read_parquet(paths['scalar']), True
@@ -786,13 +850,14 @@ def _precompute_ewmac_normalization(
     panel_cache_hit = False
     scalar_cache_hit = False
     source_commit: Optional[str] = None
+    source_range_key: Optional[str] = None
     if (config.ewmac_scalar_universe == 'pysystemtrade'
             and config.ewmac_scalar_pool == 'global'):
-        panel, coverage, source_commit, panel_cache_hit = (
+        panel, coverage, source_commit, source_range_key, panel_cache_hit = (
             _load_pysystemtrade_ewmac_universe(config)
         )
         scalar_history, scalar_cache_hit = _load_pysystemtrade_scalar_history(
-            panel, config, source_commit
+            panel, config, source_commit, source_range_key
         )
         normalization_universe = 'pysystemtrade_full'
         history_to_traded = {}
@@ -844,6 +909,11 @@ def _precompute_ewmac_normalization(
         pl.lit(config.ewmac_forecast_cap).alias('forecast_cap'),
         pl.lit(config.ewmac_scalar_min_periods).alias('configured_min_periods'),
         pl.lit(source_commit).cast(pl.String).alias('normalization_source_commit'),
+        pl.lit(source_range_key).cast(pl.String).alias('normalization_range_key'),
+        pl.lit(coverage.get_column('ts_start').min()).alias(
+            'normalization_ts_start'
+        ),
+        pl.lit(coverage.get_column('ts_end').max()).alias('normalization_ts_end'),
         pl.lit(panel_cache_hit).alias('forecast_panel_cache_hit'),
         pl.lit(scalar_cache_hit).alias('scalar_cache_hit'),
     )
@@ -856,7 +926,11 @@ def _precompute_ewmac_normalization(
         pool_key = raw.get_column('pool_key')[0]
         pool_scalar = scalar_join.filter(
             pl.col('pool_key') == pool_key
-        ).select('ts_event', 'forecast_scalar', 'scalar_valid').sort('ts_event')
+        ).select(
+            'ts_event', 'forecast_scalar', 'scalar_valid'
+        ).with_columns(
+            pl.col('ts_event').alias('scalar_as_of_date')
+        ).sort('ts_event')
         forecasts[symbol] = (
             raw.sort('ts_event').join_asof(
                 pool_scalar,
@@ -866,7 +940,11 @@ def _precompute_ewmac_normalization(
             .with_columns(
                 (pl.col('raw_forecast') * pl.col('forecast_scalar'))
                 .clip(-config.ewmac_forecast_cap, config.ewmac_forecast_cap)
-                .alias('ewmac_forecast')
+                .alias('ewmac_forecast'),
+                (
+                    pl.col('scalar_as_of_date').is_not_null()
+                    & (pl.col('scalar_as_of_date') < pl.col('ts_event'))
+                ).alias('scalar_carried_forward'),
             )
         )
     return forecasts, scalar_history, coverage
@@ -915,10 +993,13 @@ def _precompute_signal(
         ).with_columns(
             pl.lit(config.ewmac_forecast_scalar).alias('forecast_scalar'),
             pl.lit(config.ewmac_scalar_pool).alias('pool_key'),
+            pl.col('ts_event').alias('scalar_as_of_date'),
+            pl.lit(False).alias('scalar_carried_forward'),
         )
     ewmac = ewmac.select(
         'ts_event', 'raw_ewmac', 'point_vol', 'raw_forecast',
-        'forecast_scalar', 'pool_key', 'ewmac_forecast',
+        'forecast_scalar', 'pool_key', 'scalar_as_of_date',
+        'scalar_carried_forward', 'ewmac_forecast',
     )
     state_columns = [column for column in base.columns if column != 'ts_event']
     return ewmac.join(base, on='ts_event', how='left').with_columns(
@@ -1350,6 +1431,8 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
         'ewmac_point_vol': _col('point_vol'),
         'ewmac_forecast_scalar': _col('forecast_scalar'),
         'ewmac_scalar_pool': _col('pool_key'),
+        'ewmac_scalar_as_of_date': _col('scalar_as_of_date'),
+        'ewmac_scalar_carried_forward': _col('scalar_carried_forward'),
         'ewmac_forecast': _col('ewmac_forecast'),
         'signal_class': config.signal_weighting,
         'source_segment': _col('source_segment'),
@@ -1649,6 +1732,10 @@ class _PortfolioLedger:
             'ewmac_point_vol': _round(s.get('ewmac_point_vol'), 6),
             'ewmac_forecast_scalar': _round(s.get('ewmac_forecast_scalar'), 6),
             'ewmac_scalar_pool': s.get('ewmac_scalar_pool'),
+            'ewmac_scalar_as_of_date': s.get('ewmac_scalar_as_of_date'),
+            'ewmac_scalar_carried_forward': s.get(
+                'ewmac_scalar_carried_forward'
+            ),
             'ewmac_forecast': _round(s.get('ewmac_forecast'), 6),
             'signal_class': s.get('signal_class'),
             'source_segment': s.get('source_segment'),
