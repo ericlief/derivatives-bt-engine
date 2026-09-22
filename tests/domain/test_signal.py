@@ -40,6 +40,7 @@ from derivatives_bt_engine.domain.signal import (
     compute_signal_confidence,
     compute_vol_ratio,
     continuous_momentum,
+    estimate_ewmac_scalar_history,
     estimate_goulding_forecast_scalar,
     goulding_monthly,
     goulding_continuous_raw,
@@ -516,6 +517,31 @@ def test_continuous_momentum_has_no_unconsumed_index_ema_diagnostics():
     assert not {
         'ewm_fast', 'ewm_slow', 'macd', 'macd_signal', 'macd_diff'
     } & set(out.columns)
+
+
+def test_ewmac_scalar_history_is_cross_sectional_and_strictly_causal():
+    dates = _trading_dates(date(2020, 1, 1), 4)
+    panel = pl.DataFrame({
+        'ts_event': [dates[0], dates[1], dates[2], dates[3],
+                     dates[1], dates[2], dates[3]],
+        'instrument_code': ['A', 'A', 'A', 'A', 'B', 'B', 'B'],
+        'pool_key': ['global'] * 7,
+        'raw_forecast': [1.0, 2.0, 3.0, 4.0, 4.0, 5.0, 6.0],
+    })
+
+    history = estimate_ewmac_scalar_history(
+        panel, target_abs_forecast=10.0, min_periods=2
+    )
+
+    assert history['n_instruments'].to_list() == [1, 2, 2, 2]
+    assert history['cs_median_abs_forecast'].to_list() == pytest.approx(
+        [1.0, 3.0, 4.0, 5.0]
+    )
+    assert history['prior_daily_observations'].to_list() == [0, 1, 2, 3]
+    assert history['forecast_scalar'][0] is None
+    assert history['forecast_scalar'][1] is None
+    assert history['forecast_scalar'][2] == pytest.approx(10.0 / 2.0)
+    assert history['forecast_scalar'][3] == pytest.approx(10.0 / (8.0 / 3.0))
 
 
 # ── goulding_monthly: independent of continuous_momentum ─────────────────

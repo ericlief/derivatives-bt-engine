@@ -832,14 +832,39 @@ forecasts may be joined by date for comparison.
 Forecast units also remain explicit. The current backtester supports one
 EWMAC speed pair, computes
 `clip(((fast_ewma - slow_ewma) / point_vol) * forecast_scalar, -20, 20)`, and
-then divides by 20 for its internal `[-1, 1]` exposure. The default scalar of
-one is not calibrated: only a properly estimated scalar makes the uncapped
-rule average about 10 in absolute forecast units, or equivalently 0.5 after
-division by 20. When an EWMAC family is added, scale and cap each speed rule in
-10/20 units first, combine those forecasts with weights summing to one, apply
-a causal forecast-diversification multiplier if used, and cap the combined
-forecast again. A component's forecast weight does not change its own
-average-absolute-10 calibration target.
+then divides by 20 for its internal `[-1, 1]` exposure. This preserves
+comparability with the repository's bounded tanh signal without applying a
+second nonlinear squash to Carver's already capped forecast.
+
+The scalar is now estimated causally by default. For each date and speed pair,
+the configured pool takes the cross-sectional median absolute raw forecast;
+the scalar is `10 / expanding_mean(prior daily medians)`, shifted so date `t`
+uses dates strictly before `t`, with no future backfill. `global` pools all
+configured backtest instruments (not every instrument in the 252-instrument
+Carver database), `cluster` pools `instruments.py` clusters,
+`instrument` uses each individual history, and `fixed` retains the explicit
+`ewmac_forecast_scalar` parity hook. The default requires 500 prior daily
+pool observations. Zero raw forecasts are omitted from scale estimation and
+each instrument is forward-filled only after its first usable observation,
+matching the important mechanics of Carver's pooled estimator. Instruments
+may contribute to normalization even when a later cost filter would give the
+rule zero trading weight: scale eligibility and trading eligibility are
+separate concerns.
+
+Each run returns `ewmac_scalar_history` and the CLI prints its last rows. Saved
+runs write a separate `*_tsmom_ewmac_scalars_*.csv` (and `ewmac_scalars`
+spreadsheet tab) containing pool, date, available-instrument count, daily
+cross-sectional median, prior observation count, historical mean, scalar,
+validity, explicit normalization-universe label and configured count, target,
+cap, and speed parameters. The CLI prints the separate CSV's
+path after saving it. As with the mixing-parameter CSV, this calibration report
+is an independent artifact rather than being repeated across rebalance rows.
+When an EWMAC family is added,
+scale and cap each speed rule in 10/20 units first, combine those forecasts
+with weights summing to one, apply a causal forecast-diversification
+multiplier if used, and cap the combined forecast again. A component's
+forecast weight does not change its own average-absolute-10 calibration
+target.
 
 The TSMOM backtester now consumes the same separation through
 `domain.tsmom_history`. Its source-neutral rows expose `close` as the current

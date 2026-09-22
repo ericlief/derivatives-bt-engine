@@ -22,7 +22,12 @@ from datetime import date, datetime
 import polars as pl
 
 from derivatives_bt_engine.domain.allocation import ALLOCATION_MODES, NOTIONAL_WEIGHTING_SCHEMES
-from derivatives_bt_engine.domain.signal import GOULDING_SIGNAL_MODES
+from derivatives_bt_engine.domain.signal import (
+    EWMAC_FORECAST_TARGET_ABS,
+    EWMAC_SCALAR_MIN_PERIODS,
+    EWMAC_SCALAR_POOLS,
+    GOULDING_SIGNAL_MODES,
+)
 from derivatives_bt_engine.domain.tsmom_backtester import TsmomBacktestConfig, run_tsmom_backtest
 from derivatives_bt_engine.domain.tsmom_history import SOURCE_NEUTRAL_DATA_SOURCES
 from derivatives_bt_engine.domain.tsmom_reporting import clean_signal_rows, portfolio_rows_from_signals
@@ -169,8 +174,17 @@ def parse_args():
     p.add_argument('--ewmac-fast-span', type=int, default=16)
     p.add_argument('--ewmac-slow-span', type=int, default=64)
     p.add_argument('--ewmac-vol-span', type=int, default=35)
+    p.add_argument('--ewmac-scalar-pool', choices=EWMAC_SCALAR_POOLS, default='global',
+                   help="EWMAC forecast-scalar estimator (default: %(default)s). 'global' pools all "
+                        "--symbols, 'cluster' pools instruments.py clusters, 'instrument' estimates "
+                        "each history separately, and 'fixed' uses --ewmac-forecast-scalar")
+    p.add_argument('--ewmac-scalar-min-periods', type=int, default=EWMAC_SCALAR_MIN_PERIODS,
+                   help='Prior daily cross-sectional observations required before an estimated '
+                        'EWMAC scalar becomes valid (default: %(default)s)')
+    p.add_argument('--ewmac-target-abs', type=float, default=EWMAC_FORECAST_TARGET_ABS,
+                   help='Mean absolute native EWMAC forecast calibration target (default: %(default)s)')
     p.add_argument('--ewmac-forecast-scalar', type=float, default=1.0,
-                   help='Explicit Carver forecast scalar for the selected speed pair')
+                   help='Explicit scalar used only with --ewmac-scalar-pool fixed')
     p.add_argument('--ewmac-forecast-cap', type=float, default=20.0)
     p.add_argument('--goulding-signal-mode', choices=GOULDING_SIGNAL_MODES, default='binary',
                    help="Only used with --signal-weighting goulding. 'binary' preserves the +/-1 "
@@ -275,6 +289,9 @@ def main():
         ewmac_fast_span=args.ewmac_fast_span,
         ewmac_slow_span=args.ewmac_slow_span,
         ewmac_vol_span=args.ewmac_vol_span,
+        ewmac_scalar_pool=args.ewmac_scalar_pool,
+        ewmac_scalar_min_periods=args.ewmac_scalar_min_periods,
+        ewmac_forecast_target_abs=args.ewmac_target_abs,
         ewmac_forecast_scalar=args.ewmac_forecast_scalar,
         ewmac_forecast_cap=args.ewmac_forecast_cap,
     )
@@ -284,6 +301,7 @@ def main():
     events = result['trend_signals']
     transactions = result['transactions']
     trades = result['trades']
+    ewmac_scalar_history = result['ewmac_scalar_history']
 
     print(stats.tail(10))
     print()
@@ -292,6 +310,9 @@ def main():
           f"Max drawdown: ${stats['drawdown_usd'].min():,.2f} ({stats['drawdown_pct'].min():.2f}%)")
     print()
     print(f"{len(events)} rebalance events, {sum(1 for e in events if e['target_contracts'] != e['prior_contracts'])} caused a position change")
+    if ewmac_scalar_history.height:
+        print("\n=== EWMAC scalar history (last 10 rows) ===")
+        print(ewmac_scalar_history.tail(10))
     if args.signal_gate_mode != 'off':
         gated = [e for e in events if e.get('gate_reason')]
         print(f"{len(gated)} events triggered the signal gate "
@@ -314,6 +335,15 @@ def main():
         'symbols': ','.join(symbols), 'years': args.years,
         'data_source': args.data_source,
         'signal_weighting': args.signal_weighting,
+        'ewmac_scalar_pool': (
+            args.ewmac_scalar_pool if args.signal_weighting == 'carver_ewmac' else None
+        ),
+        'ewmac_scalar_min_periods': (
+            args.ewmac_scalar_min_periods if args.signal_weighting == 'carver_ewmac' else None
+        ),
+        'ewmac_target_abs': (
+            args.ewmac_target_abs if args.signal_weighting == 'carver_ewmac' else None
+        ),
         'requested_hybrid_handoff_date': args.hybrid_handoff_date,
         'n_days': result['n_days'], 'ann_ret_pct': result['ann_ret_pct'],
         'ann_vol_pct': result['ann_vol_pct'], 'sharpe': result['sharpe'],
@@ -344,6 +374,12 @@ def main():
     ts = datetime.now().strftime('%Y%m%d_%H%M%S')
     run_id = f'backtest_{ts}'
     symbol_str = '_'.join(symbols)
+    ewmac_scalar_report = (
+        ewmac_scalar_history.with_columns(run_id=pl.lit(run_id)).select(
+            'run_id', *ewmac_scalar_history.columns
+        )
+        if ewmac_scalar_history.height else ewmac_scalar_history
+    )
     clean_signals = clean_signal_rows(events, run_id)
     equity_by_as_of = {}
     portfolio_fields_by_as_of = {}
@@ -368,6 +404,8 @@ def main():
         'portfolio': pl.DataFrame(portfolio_rows),
         'summary': summary_df,
     }
+    if ewmac_scalar_history.height:
+        sheet_frames['ewmac_scalars'] = ewmac_scalar_report
     if window_metrics is not None:
         sheet_frames['window_metrics'] = window_metrics.with_columns(run_id=pl.lit(run_id)).select(
             'run_id', *window_metrics.columns
@@ -403,6 +441,13 @@ def main():
         trades.write_csv(os.path.join(results_dir, f"{ts}_tsmom_trades_{symbol_str}_{start_year}-{end_year}.csv"))
         summary_path = os.path.join(results_dir, f"{ts}_tsmom_summary_{symbol_str}_{start_year}-{end_year}.csv")
         summary_df.write_csv(summary_path)
+        if ewmac_scalar_history.height:
+            ewmac_scalar_path = os.path.join(
+                results_dir,
+                f"{ts}_tsmom_ewmac_scalars_{symbol_str}_{start_year}-{end_year}.csv",
+            )
+            ewmac_scalar_report.write_csv(ewmac_scalar_path)
+            print(f"Saved separate EWMAC scalar report: {ewmac_scalar_path}")
         if window_metrics is not None:
             sheet_frames['window_metrics'].write_csv(os.path.join(
                 results_dir, f"{ts}_tsmom_window_metrics_{symbol_str}_{start_year}-{end_year}.csv"

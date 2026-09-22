@@ -53,6 +53,10 @@ from derivatives_bt_engine.domain.instruments import (
 from derivatives_bt_engine.domain.signal import (
     DEFAULT_FAST_WINDOW,
     DEFAULT_SLOW_WINDOW,
+    EWMAC_FORECAST_CAP,
+    EWMAC_FORECAST_TARGET_ABS,
+    EWMAC_SCALAR_MIN_PERIODS,
+    EWMAC_SCALAR_POOLS,
     GOULDING_SIGNAL_MODES,
     SignalSpec,
     build_features,
@@ -60,6 +64,7 @@ from derivatives_bt_engine.domain.signal import (
     carver_ewmac,
     cluster_conviction_score,
     continuous_momentum,
+    estimate_ewmac_scalar_history,
     estimate_goulding_forecast_scalar,
     estimate_mixing_params,
     goulding_continuous_raw,
@@ -331,13 +336,17 @@ class TsmomBacktestConfig:
     pysystemtrade_mapping_path: Optional[Path | str] = None
     hybrid_handoff_date: Optional[date] = None
     allow_candidate_mappings: bool = False
-    # Native Carver EWMAC rule parameters. The forecast scalar is explicit:
-    # calibrated values are rule-speed-specific and must not be invented.
+    # Native Carver EWMAC rule parameters. Estimated modes pool the raw
+    # forecast causally through t-1; ``fixed`` retains the explicit scalar
+    # for parity tests against an externally calibrated Carver value.
     ewmac_fast_span: int = 16
     ewmac_slow_span: int = 64
     ewmac_vol_span: int = 35
+    ewmac_scalar_pool: str = 'global'
+    ewmac_scalar_min_periods: int = EWMAC_SCALAR_MIN_PERIODS
+    ewmac_forecast_target_abs: float = EWMAC_FORECAST_TARGET_ABS
     ewmac_forecast_scalar: float = 1.0
-    ewmac_forecast_cap: float = 20.0
+    ewmac_forecast_cap: float = EWMAC_FORECAST_CAP
 
     def __post_init__(self):
         if self.allocation_mode not in ALLOCATION_MODES:
@@ -360,6 +369,16 @@ class TsmomBacktestConfig:
             raise ValueError("EWMAC spans must be positive")
         if self.ewmac_fast_span >= self.ewmac_slow_span:
             raise ValueError("ewmac_fast_span must be less than ewmac_slow_span")
+        if self.ewmac_scalar_pool not in EWMAC_SCALAR_POOLS:
+            raise ValueError(
+                f"ewmac_scalar_pool must be one of {EWMAC_SCALAR_POOLS}, "
+                f"got {self.ewmac_scalar_pool!r}"
+            )
+        if self.ewmac_scalar_min_periods <= 0:
+            raise ValueError("ewmac_scalar_min_periods must be positive")
+        if (not math.isfinite(self.ewmac_forecast_target_abs)
+                or self.ewmac_forecast_target_abs <= 0):
+            raise ValueError("ewmac_forecast_target_abs must be finite and positive")
         if not math.isfinite(self.ewmac_forecast_scalar) or self.ewmac_forecast_scalar <= 0:
             raise ValueError("ewmac_forecast_scalar must be finite and positive")
         if not math.isfinite(self.ewmac_forecast_cap) or self.ewmac_forecast_cap <= 0:
@@ -499,10 +518,95 @@ def _return_signal_bars(frame: pl.DataFrame) -> pl.DataFrame:
     return eligible.select(columns).sort('ts_event')
 
 
+def _ewmac_pool_key(symbol: str, config: TsmomBacktestConfig) -> str:
+    if config.ewmac_scalar_pool in ('fixed', 'global'):
+        return 'global'
+    if config.ewmac_scalar_pool == 'cluster':
+        return str(get_spec(symbol)['cluster'])
+    return symbol
+
+
+def _precompute_ewmac_normalization(
+    full_price_data: dict[str, pl.DataFrame],
+    config: TsmomBacktestConfig,
+) -> tuple[dict[str, pl.DataFrame], pl.DataFrame]:
+    """Build raw rules, causal pooled scalars, and scaled EWMAC forecasts.
+
+    Forecasts are estimated from the full unbounded histories once, but every
+    estimated scalar row is shifted internally and therefore uses only prior
+    dates.  The returned report is deliberately separate from rebalance-event
+    output so calibration can be audited at its native daily frequency.
+    """
+    raw_by_symbol: dict[str, pl.DataFrame] = {}
+    panel_rows: list[pl.DataFrame] = []
+    for symbol, frame in full_price_data.items():
+        pool_key = _ewmac_pool_key(symbol, config)
+        raw = carver_ewmac(
+            frame.select('ts_event', pl.col('panama_price').alias('close')),
+            fast_span=config.ewmac_fast_span,
+            slow_span=config.ewmac_slow_span,
+            vol_span=config.ewmac_vol_span,
+            forecast_scalar=1.0,
+            forecast_cap=config.ewmac_forecast_cap,
+        ).select('ts_event', 'raw_ewmac', 'point_vol', 'raw_forecast')
+        raw_by_symbol[symbol] = raw.with_columns(
+            pl.lit(pool_key).alias('pool_key')
+        )
+        panel_rows.append(
+            raw.select('ts_event', 'raw_forecast').with_columns(
+                pl.lit(symbol).alias('instrument_code'),
+                pl.lit(pool_key).alias('pool_key'),
+            ).select('ts_event', 'instrument_code', 'pool_key', 'raw_forecast')
+        )
+
+    panel = pl.concat(panel_rows, how='vertical')
+    estimation_min_periods = (
+        1 if config.ewmac_scalar_pool == 'fixed'
+        else config.ewmac_scalar_min_periods
+    )
+    scalar_history = estimate_ewmac_scalar_history(
+        panel,
+        target_abs_forecast=config.ewmac_forecast_target_abs,
+        min_periods=estimation_min_periods,
+    )
+    if config.ewmac_scalar_pool == 'fixed':
+        scalar_history = scalar_history.with_columns(
+            pl.lit(config.ewmac_forecast_scalar).alias('forecast_scalar'),
+            pl.lit(True).alias('scalar_valid'),
+        )
+    scalar_history = scalar_history.with_columns(
+        pl.lit(config.ewmac_scalar_pool).alias('scalar_pool'),
+        pl.lit('configured_backtest_symbols').alias('normalization_universe'),
+        pl.lit(len(full_price_data)).alias('configured_instrument_count'),
+        pl.lit(config.ewmac_fast_span).alias('fast_span'),
+        pl.lit(config.ewmac_slow_span).alias('slow_span'),
+        pl.lit(config.ewmac_vol_span).alias('vol_span'),
+        pl.lit(config.ewmac_forecast_target_abs).alias('target_abs_forecast'),
+        pl.lit(config.ewmac_forecast_cap).alias('forecast_cap'),
+        pl.lit(config.ewmac_scalar_min_periods).alias('configured_min_periods'),
+    )
+
+    forecasts: dict[str, pl.DataFrame] = {}
+    scalar_join = scalar_history.select(
+        'ts_event', 'pool_key', 'forecast_scalar', 'scalar_valid'
+    )
+    for symbol, raw in raw_by_symbol.items():
+        forecasts[symbol] = (
+            raw.join(scalar_join, on=['ts_event', 'pool_key'], how='left')
+            .with_columns(
+                (pl.col('raw_forecast') * pl.col('forecast_scalar'))
+                .clip(-config.ewmac_forecast_cap, config.ewmac_forecast_cap)
+                .alias('ewmac_forecast')
+            )
+        )
+    return forecasts, scalar_history
+
+
 def _precompute_signal(
     frame: pl.DataFrame,
     config: TsmomBacktestConfig,
     annualization_days: int,
+    ewmac: Optional[pl.DataFrame] = None,
 ) -> pl.DataFrame:
     """Build a common signal/sizing frame for all three signal classes."""
     return_bars = _return_signal_bars(frame)
@@ -527,16 +631,24 @@ def _precompute_signal(
         return marks.join(base, on='ts_event', how='left').with_columns(
             [pl.col(column).forward_fill() for column in state_columns]
         )
-    ewmac = carver_ewmac(
-        frame.select('ts_event', pl.col('panama_price').alias('close')),
-        fast_span=config.ewmac_fast_span,
-        slow_span=config.ewmac_slow_span,
-        vol_span=config.ewmac_vol_span,
-        forecast_scalar=config.ewmac_forecast_scalar,
-        forecast_cap=config.ewmac_forecast_cap,
-    ).select(
-        'ts_event', 'raw_ewmac', 'point_vol',
-        pl.col('signal').alias('ewmac_forecast'),
+    if ewmac is None:
+        ewmac = carver_ewmac(
+            frame.select('ts_event', pl.col('panama_price').alias('close')),
+            fast_span=config.ewmac_fast_span,
+            slow_span=config.ewmac_slow_span,
+            vol_span=config.ewmac_vol_span,
+            forecast_scalar=config.ewmac_forecast_scalar,
+            forecast_cap=config.ewmac_forecast_cap,
+        ).select(
+            'ts_event', 'raw_ewmac', 'point_vol', 'raw_forecast',
+            pl.col('signal').alias('ewmac_forecast'),
+        ).with_columns(
+            pl.lit(config.ewmac_forecast_scalar).alias('forecast_scalar'),
+            pl.lit(config.ewmac_scalar_pool).alias('pool_key'),
+        )
+    ewmac = ewmac.select(
+        'ts_event', 'raw_ewmac', 'point_vol', 'raw_forecast',
+        'forecast_scalar', 'pool_key', 'ewmac_forecast',
     )
     state_columns = [column for column in base.columns if column != 'ts_event']
     return ewmac.join(base, on='ts_event', how='left').with_columns(
@@ -964,7 +1076,10 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
         'g_raw_forecast': g_raw_forecast,
         'g_forecast_scalar': goulding_forecast_scalar,
         'ewmac_raw': _col('raw_ewmac'),
+        'ewmac_raw_forecast': _col('raw_forecast'),
         'ewmac_point_vol': _col('point_vol'),
+        'ewmac_forecast_scalar': _col('forecast_scalar'),
+        'ewmac_scalar_pool': _col('pool_key'),
         'ewmac_forecast': _col('ewmac_forecast'),
         'signal_class': config.signal_weighting,
         'source_segment': _col('source_segment'),
@@ -1260,7 +1375,10 @@ class _PortfolioLedger:
             'g_raw_forecast': _round(s.get('g_raw_forecast'), 6),
             'g_forecast_scalar': _round(s.get('g_forecast_scalar'), 6),
             'ewmac_raw': _round(s.get('ewmac_raw'), 6),
+            'ewmac_raw_forecast': _round(s.get('ewmac_raw_forecast'), 6),
             'ewmac_point_vol': _round(s.get('ewmac_point_vol'), 6),
+            'ewmac_forecast_scalar': _round(s.get('ewmac_forecast_scalar'), 6),
+            'ewmac_scalar_pool': s.get('ewmac_scalar_pool'),
             'ewmac_forecast': _round(s.get('ewmac_forecast'), 6),
             'signal_class': s.get('signal_class'),
             'source_segment': s.get('source_segment'),
@@ -1372,13 +1490,20 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
     # unconfirmed falls back to 252 (DEFAULT_ANNUALIZATION_DAYS), unchanged
     # from this module's own prior universal-252 behavior.
     annualization_by_symbol = {s: resolve_annualization_days(s) for s in config.symbols}
+    if config.signal_weighting == 'carver_ewmac':
+        ewmac_by_symbol, ewmac_scalar_history = _precompute_ewmac_normalization(
+            full_price_data, config
+        )
+    else:
+        ewmac_by_symbol, ewmac_scalar_history = {}, pl.DataFrame()
     # Precomputed once per symbol, unconditionally (not just for
     # signal_gate_mode == 'daily') -- see _compute_signal_row's own
     # docstring for why this is exactly equivalent to (and much cheaper
     # than) recomputing continuous_momentum fresh at every rebalance.
     precomputed = {
         s: _precompute_signal(
-            full_price_data[s].sort('ts_event'), config, annualization_by_symbol[s]
+            full_price_data[s].sort('ts_event'), config, annualization_by_symbol[s],
+            ewmac=ewmac_by_symbol.get(s),
         )
         for s in config.symbols
     }
@@ -1873,4 +1998,5 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
         'max_dd_pct': round(stats['drawdown_pct'].min(), 2) if stats.height else None,
         'total_fees': round(total_fees, 2),
         'data_manifest': data_manifest,
+        'ewmac_scalar_history': ewmac_scalar_history,
     }

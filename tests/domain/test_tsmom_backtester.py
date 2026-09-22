@@ -134,6 +134,21 @@ def test_source_neutral_backtest_runs_all_three_signal_classes(monkeypatch, sign
     assert all(event['signal_class'] == signal_weighting for event in result['trend_signals'])
     if signal_weighting == 'carver_ewmac':
         assert any(event['ewmac_forecast'] is not None for event in result['trend_signals'])
+        scalar_history = result['ewmac_scalar_history']
+        assert scalar_history.height == frame.height
+        assert scalar_history['scalar_pool'].unique().to_list() == ['global']
+        assert scalar_history['normalization_universe'].unique().to_list() == [
+            'configured_backtest_symbols'
+        ]
+        assert scalar_history['configured_instrument_count'].unique().to_list() == [1]
+        assert scalar_history['scalar_valid'].any()
+        assert all(
+            event['ewmac_forecast'] is None
+            or -1.0 <= event['signal'] <= 1.0
+            for event in result['trend_signals']
+        )
+    else:
+        assert result['ewmac_scalar_history'].is_empty()
 
 
 def test_ledger_marks_roll_neutral_pnl_not_raw_contract_gap() -> None:
@@ -150,6 +165,53 @@ def test_ledger_marks_roll_neutral_pnl_not_raw_contract_gap() -> None:
 def test_carver_ewmac_rejects_legacy_conflated_price_path() -> None:
     with pytest.raises(ValueError, match='source-neutral'):
         TsmomBacktestConfig(symbols=['ES'], signal_weighting='carver_ewmac')
+
+
+@pytest.mark.parametrize(
+    'pool,expected_keys',
+    [
+        ('global', {'global'}),
+        ('cluster', {'rates', 'equity'}),
+        ('instrument', {'A', 'B'}),
+    ],
+)
+def test_ewmac_normalization_pool_keys(monkeypatch, pool, expected_keys) -> None:
+    histories = {
+        'A': _source_neutral_price_df(date(2020, 1, 1), 20),
+        'B': _source_neutral_price_df(date(2020, 1, 3), 18),
+    }
+    clusters = {'A': 'rates', 'B': 'equity'}
+    monkeypatch.setattr(
+        tb, 'get_spec', lambda symbol: {'cluster': clusters[symbol]}
+    )
+    config = TsmomBacktestConfig(
+        symbols=['A', 'B'], data_source='globex', signal_weighting='carver_ewmac',
+        ewmac_fast_span=2, ewmac_slow_span=4, ewmac_vol_span=2,
+        ewmac_scalar_pool=pool, ewmac_scalar_min_periods=2,
+    )
+
+    forecasts, report = tb._precompute_ewmac_normalization(histories, config)
+
+    assert set(forecasts) == {'A', 'B'}
+    assert set(report['pool_key'].unique()) == expected_keys
+    assert report['scalar_valid'].any()
+
+
+def test_fixed_ewmac_scalar_is_applied_before_cap() -> None:
+    history = {'A': _source_neutral_price_df(date(2020, 1, 1), 20)}
+    config = TsmomBacktestConfig(
+        symbols=['A'], data_source='globex', signal_weighting='carver_ewmac',
+        ewmac_fast_span=2, ewmac_slow_span=4, ewmac_vol_span=2,
+        ewmac_scalar_pool='fixed', ewmac_forecast_scalar=2.0,
+    )
+
+    forecasts, report = tb._precompute_ewmac_normalization(history, config)
+    usable = forecasts['A'].drop_nulls('raw_forecast')
+
+    assert report['forecast_scalar'].unique().to_list() == [2.0]
+    assert usable['ewmac_forecast'].to_list() == pytest.approx(
+        (usable['raw_forecast'] * 2.0).clip(-20.0, 20.0).to_list()
+    )
 
 
 def test_invalid_return_holds_signal_but_retains_current_raw_mark() -> None:
