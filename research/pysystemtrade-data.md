@@ -839,10 +839,12 @@ second nonlinear squash to Carver's already capped forecast.
 The scalar is now estimated causally by default. For each date and speed pair,
 the configured pool takes the cross-sectional median absolute raw forecast;
 the scalar is `10 / expanding_mean(prior daily medians)`, shifted so date `t`
-uses dates strictly before `t`, with no future backfill. `global` pools all
-configured backtest instruments (not every instrument in the 252-instrument
-Carver database), `cluster` pools `instruments.py` clusters,
-`instrument` uses each individual history, and `fixed` retains the explicit
+uses dates strictly before `t`, with no future backfill. The default
+`ewmac_scalar_universe=pysystemtrade` makes `global` pool all 252 eligible
+Carver instruments while trading only the requested symbols. The explicit
+`backtest` universe limits normalization to configured symbols and is required
+for `cluster` (`instruments.py` clusters) or `instrument` (each individual
+history) pooling. `fixed` retains the explicit
 `ewmac_forecast_scalar` parity hook. The default requires 500 prior daily
 pool observations. Zero raw forecasts are omitted from scale estimation and
 each instrument is forward-filled only after its first usable observation,
@@ -850,6 +852,24 @@ matching the important mechanics of Carver's pooled estimator. Instruments
 may contribute to normalization even when a later cost filter would give the
 rule zero trading weight: scale eligibility and trading eligibility are
 separate concerns.
+
+The full-universe path has two cache layers. Existing versioned history
+caches retain each instrument's signal, marks, carry, and generated Panama
+series. A derived EWMAC cache, keyed by history schema/source commit and the
+fast/slow/vol spans, stores the 252-instrument raw-forecast panel and coverage
+table. A second derived file, additionally keyed by target magnitude and
+minimum observations, stores the causal scalar history. Consequently the
+first run builds missing histories and forecasts; matching later runs read
+the panel and scalar directly. A backtest's requested years do not truncate
+the normalization input: all pre-start history remains available, and the
+daily scalar report can be sliced after its causal calculation.
+
+The 2026-09-22 integration build found all 252 eligible instruments and
+materialized 1,249,673 raw-forecast rows over instrument histories spanning
+1969-12-02 through 2024-03-29. The pooled cache contains 14,192 daily scalar
+rows; for EWMAC 16/64 with 35-day point volatility, target 10, and a 500-day
+warm-up, its final scalar is approximately 4.7441. An immediate repeat load
+hit both the forecast-panel and scalar caches.
 
 Each run returns `ewmac_scalar_history` and the CLI prints its last rows. Saved
 runs write a separate `*_tsmom_ewmac_scalars_*.csv` (and `ewmac_scalars`
@@ -864,7 +884,9 @@ tab) has one row per normalization instrument, including the traded symbol,
 source instrument code, pool, source segments, `ts_start`, `ts_end`, first and
 last usable-forecast timestamps, and both raw-history and usable-forecast row
 counts. This makes staggered history availability auditable without repeating
-instrument ranges on every daily scalar row.
+instrument ranges on every daily scalar row. The daily report also records
+the configured and normalization-universe instrument counts, source commit,
+and whether the forecast-panel and scalar caches were hits.
 When an EWMAC family is added,
 scale and cap each speed rule in 10/20 units first, combine those forecasts
 with weights summing to one, apply a causal forecast-diversification

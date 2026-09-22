@@ -44,8 +44,11 @@ from derivatives_bt_engine.domain.futures_dataloader import (
     globex_daily_cache_path,
 )
 from derivatives_bt_engine.domain.futures_history import (
+    DEFAULT_FUTURES_CACHE_ROOT,
     DEFAULT_GLOBEX_DB_PATH,
     DEFAULT_PYSYSTEMTRADE_DB_PATH,
+    HISTORY_SCHEMA_VERSION,
+    PysystemtradeHistoryProvider,
 )
 from derivatives_bt_engine.domain.instruments import (
     CME_MONTH_NUM_TO_LETTER, get_spec, resolve_active_months, resolve_annualization_days, resolve_price_symbol,
@@ -78,6 +81,9 @@ from derivatives_bt_engine.domain.tsmom_history import (
 from derivatives_bt_engine.utils.logger import setup_logger
 
 logger = setup_logger()
+
+EWMAC_SCALAR_UNIVERSES = ('backtest', 'pysystemtrade')
+EWMAC_NORMALIZATION_CACHE_VERSION = 1
 
 # Same VIX_PATH convention as naked_futures.py/the options strategies -- a
 # directory resolves to {dir}/processed/vix.parquet (see
@@ -343,6 +349,7 @@ class TsmomBacktestConfig:
     ewmac_slow_span: int = 64
     ewmac_vol_span: int = 35
     ewmac_scalar_pool: str = 'global'
+    ewmac_scalar_universe: str = 'pysystemtrade'
     ewmac_scalar_min_periods: int = EWMAC_SCALAR_MIN_PERIODS
     ewmac_forecast_target_abs: float = EWMAC_FORECAST_TARGET_ABS
     ewmac_forecast_scalar: float = 1.0
@@ -373,6 +380,19 @@ class TsmomBacktestConfig:
             raise ValueError(
                 f"ewmac_scalar_pool must be one of {EWMAC_SCALAR_POOLS}, "
                 f"got {self.ewmac_scalar_pool!r}"
+            )
+        if self.ewmac_scalar_universe not in EWMAC_SCALAR_UNIVERSES:
+            raise ValueError(
+                f"ewmac_scalar_universe must be one of {EWMAC_SCALAR_UNIVERSES}, "
+                f"got {self.ewmac_scalar_universe!r}"
+            )
+        if (self.signal_weighting == 'carver_ewmac'
+                and self.ewmac_scalar_universe == 'pysystemtrade'
+                and self.ewmac_scalar_pool not in ('global', 'fixed')):
+            raise ValueError(
+                "ewmac_scalar_universe='pysystemtrade' currently requires "
+                "ewmac_scalar_pool='global' or 'fixed'; use universe='backtest' "
+                "for cluster or instrument scalars"
             )
         if self.ewmac_scalar_min_periods <= 0:
             raise ValueError("ewmac_scalar_min_periods must be positive")
@@ -526,6 +546,179 @@ def _ewmac_pool_key(symbol: str, config: TsmomBacktestConfig) -> str:
     return symbol
 
 
+def _atomic_write_parquet(frame: pl.DataFrame, path: Path) -> None:
+    """Publish a derived cache only after its Parquet write completes."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + f'.{os.getpid()}.tmp')
+    frame.write_parquet(temporary)
+    os.replace(temporary, path)
+
+
+def _cache_float(value: float) -> str:
+    return format(value, '.12g').replace('-', 'm').replace('.', 'p')
+
+
+def _pysystemtrade_ewmac_cache_paths(
+    config: TsmomBacktestConfig,
+    source_commit: str,
+) -> dict[str, Path]:
+    directory = (
+        Path(DEFAULT_FUTURES_CACHE_ROOT)
+        / 'pysystemtrade'
+        / f'v{HISTORY_SCHEMA_VERSION}'
+        / source_commit[:12]
+        / f'ewmac_normalization_v{EWMAC_NORMALIZATION_CACHE_VERSION}'
+        / (
+            f'fast{config.ewmac_fast_span}_slow{config.ewmac_slow_span}'
+            f'_vol{config.ewmac_vol_span}'
+        )
+    )
+    scalar_key = (
+        f'global_target{_cache_float(config.ewmac_forecast_target_abs)}'
+        f'_min{config.ewmac_scalar_min_periods}'
+    )
+    return {
+        'raw_forecasts': directory / 'raw_forecasts.parquet',
+        'coverage': directory / 'instrument_coverage.parquet',
+        'scalar': directory / f'{scalar_key}_scalar.parquet',
+    }
+
+
+def _eligible_pysystemtrade_instruments(db_path: Path | str) -> list[str]:
+    con = duckdb.connect(str(db_path), read_only=True)
+    try:
+        rows = con.execute(
+            """
+            SELECT s.instrument_code
+            FROM qa.series_coverage s
+            WHERE s.multiple_rows > 0
+              AND s.adjusted_rows > 0
+              AND EXISTS (
+                  SELECT 1 FROM raw.instrument_config i
+                  WHERE i.instrument_code = s.instrument_code
+              )
+              AND EXISTS (
+                  SELECT 1 FROM raw.roll_config r
+                  WHERE r.instrument_code = s.instrument_code
+              )
+            ORDER BY s.instrument_code
+            """
+        ).fetchall()
+    finally:
+        con.close()
+    return [str(row[0]) for row in rows]
+
+
+def _load_pysystemtrade_ewmac_universe(
+    config: TsmomBacktestConfig,
+) -> tuple[pl.DataFrame, pl.DataFrame, str, bool]:
+    """Load or build the full Carver raw-forecast panel and coverage.
+
+    The underlying four-stream histories remain owned by
+    :class:`PysystemtradeHistoryProvider`.  This adds a derived cache for one
+    EWMAC speed so subsequent backtests do not reread 252 Panama files or
+    recompute their EMA and point-volatility histories.
+    """
+    provider = PysystemtradeHistoryProvider(db_path=config.pysystemtrade_db_path)
+    _, source_commit = provider._database_metadata()
+    paths = _pysystemtrade_ewmac_cache_paths(config, source_commit)
+    panel_cached = paths['raw_forecasts'].exists() and paths['coverage'].exists()
+    if panel_cached:
+        logger.info(
+            'ewmac_universe cache_hit source=pysystemtrade fast=%d slow=%d vol=%d',
+            config.ewmac_fast_span, config.ewmac_slow_span, config.ewmac_vol_span,
+        )
+        panel = pl.read_parquet(paths['raw_forecasts'])
+        coverage = pl.read_parquet(paths['coverage'])
+    else:
+        instrument_codes = _eligible_pysystemtrade_instruments(
+            config.pysystemtrade_db_path
+        )
+        if not instrument_codes:
+            raise ValueError('pysystemtrade normalization universe is empty')
+        logger.info(
+            'ewmac_universe build_start source=pysystemtrade instruments=%d '
+            'fast=%d slow=%d vol=%d',
+            len(instrument_codes), config.ewmac_fast_span,
+            config.ewmac_slow_span, config.ewmac_vol_span,
+        )
+        panel_rows: list[pl.DataFrame] = []
+        coverage_rows: list[dict[str, object]] = []
+        for position, instrument_code in enumerate(instrument_codes, start=1):
+            history = provider.load(instrument_code)
+            bars = history.panama_bars()
+            raw = carver_ewmac(
+                bars,
+                fast_span=config.ewmac_fast_span,
+                slow_span=config.ewmac_slow_span,
+                vol_span=config.ewmac_vol_span,
+                forecast_scalar=1.0,
+                forecast_cap=config.ewmac_forecast_cap,
+            ).select('ts_event', 'raw_forecast')
+            usable = raw.filter(pl.col('raw_forecast').is_not_null())
+            panel_rows.append(
+                raw.with_columns(
+                    pl.lit(instrument_code).alias('instrument_code'),
+                    pl.lit('global').alias('pool_key'),
+                ).select(
+                    'ts_event', 'instrument_code', 'pool_key', 'raw_forecast'
+                )
+            )
+            coverage_rows.append({
+                'instrument_code': instrument_code,
+                'pool_key': 'global',
+                'data_source': 'pysystemtrade',
+                'source_segments': 'pysystemtrade',
+                'asset_class': history.metadata.get('asset_class'),
+                'ts_start': bars.get_column('ts_event').min(),
+                'ts_end': bars.get_column('ts_event').max(),
+                'forecast_ts_start': usable.get_column('ts_event').min(),
+                'forecast_ts_end': usable.get_column('ts_event').max(),
+                'history_observations': bars.height,
+                'usable_forecast_observations': usable.height,
+                'source_commit': source_commit,
+            })
+            if position % 25 == 0 or position == len(instrument_codes):
+                logger.info(
+                    'ewmac_universe build_progress completed=%d total=%d',
+                    position, len(instrument_codes),
+                )
+        panel = pl.concat(panel_rows, how='vertical').sort(
+            'instrument_code', 'ts_event'
+        )
+        coverage = pl.DataFrame(coverage_rows).sort('instrument_code')
+        _atomic_write_parquet(panel, paths['raw_forecasts'])
+        _atomic_write_parquet(coverage, paths['coverage'])
+        logger.info(
+            'ewmac_universe build_complete instruments=%d forecast_rows=%d '
+            'cache=%s',
+            coverage.height, panel.height, paths['raw_forecasts'],
+        )
+    return panel, coverage, source_commit, panel_cached
+
+
+def _load_pysystemtrade_scalar_history(
+    panel: pl.DataFrame,
+    config: TsmomBacktestConfig,
+    source_commit: str,
+) -> tuple[pl.DataFrame, bool]:
+    paths = _pysystemtrade_ewmac_cache_paths(config, source_commit)
+    if paths['scalar'].exists():
+        logger.info('ewmac_scalar cache_hit path=%s', paths['scalar'])
+        return pl.read_parquet(paths['scalar']), True
+    scalar = estimate_ewmac_scalar_history(
+        panel,
+        target_abs_forecast=config.ewmac_forecast_target_abs,
+        min_periods=config.ewmac_scalar_min_periods,
+    )
+    _atomic_write_parquet(scalar, paths['scalar'])
+    logger.info(
+        'ewmac_scalar build_complete rows=%d cache=%s',
+        scalar.height, paths['scalar'],
+    )
+    return scalar, False
+
+
 def _precompute_ewmac_normalization(
     full_price_data: dict[str, pl.DataFrame],
     config: TsmomBacktestConfig,
@@ -559,6 +752,7 @@ def _precompute_ewmac_normalization(
         )
         usable_forecasts = raw.filter(pl.col('raw_forecast').is_not_null())
         instrument_manifest = manifest_instruments.get(symbol, {})
+        instrument_metadata = instrument_manifest.get('metadata', {})
         source_segments = (
             sorted(str(value) for value in frame['source_segment'].drop_nulls().unique())
             if 'source_segment' in frame.columns else [config.data_source]
@@ -569,12 +763,14 @@ def _precompute_ewmac_normalization(
             'pool_key': pool_key,
             'data_source': config.data_source,
             'source_segments': ','.join(source_segments),
+            'asset_class': instrument_metadata.get('asset_class'),
             'ts_start': frame.get_column('ts_event').min(),
             'ts_end': frame.get_column('ts_event').max(),
             'forecast_ts_start': usable_forecasts.get_column('ts_event').min(),
             'forecast_ts_end': usable_forecasts.get_column('ts_event').max(),
             'history_observations': frame.height,
             'usable_forecast_observations': usable_forecasts.height,
+            'source_commit': instrument_metadata.get('source_git_commit'),
         })
         panel_rows.append(
             raw.select('ts_event', 'raw_forecast').with_columns(
@@ -583,16 +779,54 @@ def _precompute_ewmac_normalization(
             ).select('ts_event', 'instrument_code', 'pool_key', 'raw_forecast')
         )
 
-    panel = pl.concat(panel_rows, how='vertical')
-    estimation_min_periods = (
-        1 if config.ewmac_scalar_pool == 'fixed'
-        else config.ewmac_scalar_min_periods
+    traded_panel = pl.concat(panel_rows, how='vertical')
+    traded_coverage = pl.DataFrame(coverage_rows).sort(
+        'pool_key', 'instrument_code'
     )
-    scalar_history = estimate_ewmac_scalar_history(
-        panel,
-        target_abs_forecast=config.ewmac_forecast_target_abs,
-        min_periods=estimation_min_periods,
-    )
+    panel_cache_hit = False
+    scalar_cache_hit = False
+    source_commit: Optional[str] = None
+    if (config.ewmac_scalar_universe == 'pysystemtrade'
+            and config.ewmac_scalar_pool == 'global'):
+        panel, coverage, source_commit, panel_cache_hit = (
+            _load_pysystemtrade_ewmac_universe(config)
+        )
+        scalar_history, scalar_cache_hit = _load_pysystemtrade_scalar_history(
+            panel, config, source_commit
+        )
+        normalization_universe = 'pysystemtrade_full'
+        history_to_traded = {}
+        for symbol, details in manifest_instruments.items():
+            crosswalk = details.get('crosswalk') or {}
+            history_code = (
+                crosswalk.get('carver_instrument')
+                or details.get('history_instrument')
+                or symbol
+            )
+            history_to_traded[str(history_code)] = symbol
+        coverage = pl.DataFrame(
+            [
+                {
+                    'traded_symbol': history_to_traded.get(row['instrument_code']),
+                    **row,
+                }
+                for row in coverage.to_dicts()
+            ],
+            infer_schema_length=None,
+        )
+    else:
+        panel = traded_panel
+        coverage = traded_coverage
+        normalization_universe = 'configured_backtest_symbols'
+        estimation_min_periods = (
+            1 if config.ewmac_scalar_pool == 'fixed'
+            else config.ewmac_scalar_min_periods
+        )
+        scalar_history = estimate_ewmac_scalar_history(
+            panel,
+            target_abs_forecast=config.ewmac_forecast_target_abs,
+            min_periods=estimation_min_periods,
+        )
     if config.ewmac_scalar_pool == 'fixed':
         scalar_history = scalar_history.with_columns(
             pl.lit(config.ewmac_forecast_scalar).alias('forecast_scalar'),
@@ -600,14 +834,18 @@ def _precompute_ewmac_normalization(
         )
     scalar_history = scalar_history.with_columns(
         pl.lit(config.ewmac_scalar_pool).alias('scalar_pool'),
-        pl.lit('configured_backtest_symbols').alias('normalization_universe'),
+        pl.lit(normalization_universe).alias('normalization_universe'),
         pl.lit(len(full_price_data)).alias('configured_instrument_count'),
+        pl.lit(coverage.height).alias('normalization_instrument_count'),
         pl.lit(config.ewmac_fast_span).alias('fast_span'),
         pl.lit(config.ewmac_slow_span).alias('slow_span'),
         pl.lit(config.ewmac_vol_span).alias('vol_span'),
         pl.lit(config.ewmac_forecast_target_abs).alias('target_abs_forecast'),
         pl.lit(config.ewmac_forecast_cap).alias('forecast_cap'),
         pl.lit(config.ewmac_scalar_min_periods).alias('configured_min_periods'),
+        pl.lit(source_commit).cast(pl.String).alias('normalization_source_commit'),
+        pl.lit(panel_cache_hit).alias('forecast_panel_cache_hit'),
+        pl.lit(scalar_cache_hit).alias('scalar_cache_hit'),
     )
 
     forecasts: dict[str, pl.DataFrame] = {}
@@ -615,15 +853,22 @@ def _precompute_ewmac_normalization(
         'ts_event', 'pool_key', 'forecast_scalar', 'scalar_valid'
     )
     for symbol, raw in raw_by_symbol.items():
+        pool_key = raw.get_column('pool_key')[0]
+        pool_scalar = scalar_join.filter(
+            pl.col('pool_key') == pool_key
+        ).select('ts_event', 'forecast_scalar', 'scalar_valid').sort('ts_event')
         forecasts[symbol] = (
-            raw.join(scalar_join, on=['ts_event', 'pool_key'], how='left')
+            raw.sort('ts_event').join_asof(
+                pool_scalar,
+                on='ts_event',
+                strategy='backward',
+            )
             .with_columns(
                 (pl.col('raw_forecast') * pl.col('forecast_scalar'))
                 .clip(-config.ewmac_forecast_cap, config.ewmac_forecast_cap)
                 .alias('ewmac_forecast')
             )
         )
-    coverage = pl.DataFrame(coverage_rows).sort('pool_key', 'instrument_code')
     return forecasts, scalar_history, coverage
 
 

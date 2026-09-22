@@ -28,7 +28,11 @@ from derivatives_bt_engine.domain.signal import (
     EWMAC_SCALAR_POOLS,
     GOULDING_SIGNAL_MODES,
 )
-from derivatives_bt_engine.domain.tsmom_backtester import TsmomBacktestConfig, run_tsmom_backtest
+from derivatives_bt_engine.domain.tsmom_backtester import (
+    EWMAC_SCALAR_UNIVERSES,
+    TsmomBacktestConfig,
+    run_tsmom_backtest,
+)
 from derivatives_bt_engine.domain.tsmom_history import SOURCE_NEUTRAL_DATA_SOURCES
 from derivatives_bt_engine.domain.tsmom_reporting import clean_signal_rows, portfolio_rows_from_signals
 from derivatives_bt_engine.domain.tsmom_window_reporting import (
@@ -175,9 +179,17 @@ def parse_args():
     p.add_argument('--ewmac-slow-span', type=int, default=64)
     p.add_argument('--ewmac-vol-span', type=int, default=35)
     p.add_argument('--ewmac-scalar-pool', choices=EWMAC_SCALAR_POOLS, default='global',
-                   help="EWMAC forecast-scalar estimator (default: %(default)s). 'global' pools all "
-                        "--symbols, 'cluster' pools instruments.py clusters, 'instrument' estimates "
-                        "each history separately, and 'fixed' uses --ewmac-forecast-scalar")
+                   help="EWMAC forecast-scalar estimator (default: %(default)s). 'global' makes one "
+                        "pool over --ewmac-scalar-universe; 'cluster' and 'instrument' use the "
+                        "backtest universe; 'fixed' uses --ewmac-forecast-scalar")
+    p.add_argument(
+        '--ewmac-scalar-universe',
+        choices=EWMAC_SCALAR_UNIVERSES,
+        default='pysystemtrade',
+        help="Normalization membership (default: %(default)s). 'pysystemtrade' "
+             "loads/caches all eligible Carver instruments and currently requires "
+             "a global pool; 'backtest' uses only --symbols",
+    )
     p.add_argument('--ewmac-scalar-min-periods', type=int, default=EWMAC_SCALAR_MIN_PERIODS,
                    help='Prior daily cross-sectional observations required before an estimated '
                         'EWMAC scalar becomes valid (default: %(default)s)')
@@ -290,6 +302,7 @@ def main():
         ewmac_slow_span=args.ewmac_slow_span,
         ewmac_vol_span=args.ewmac_vol_span,
         ewmac_scalar_pool=args.ewmac_scalar_pool,
+        ewmac_scalar_universe=args.ewmac_scalar_universe,
         ewmac_scalar_min_periods=args.ewmac_scalar_min_periods,
         ewmac_forecast_target_abs=args.ewmac_target_abs,
         ewmac_forecast_scalar=args.ewmac_forecast_scalar,
@@ -315,7 +328,21 @@ def main():
         print("\n=== EWMAC scalar history (last 10 rows) ===")
         print(ewmac_scalar_history.tail(10))
         print("\n=== EWMAC normalization instrument coverage ===")
-        print(ewmac_instrument_coverage)
+        print(ewmac_instrument_coverage.select(
+            pl.len().alias('instruments'),
+            pl.col('ts_start').min().alias('universe_ts_start'),
+            pl.col('ts_end').max().alias('universe_ts_end'),
+            pl.col('history_observations').sum().alias('history_observations'),
+            pl.col('usable_forecast_observations').sum().alias(
+                'usable_forecast_observations'
+            ),
+        ))
+        traded_coverage = ewmac_instrument_coverage.filter(
+            pl.col('traded_symbol').is_not_null()
+        )
+        if traded_coverage.height:
+            print("\nConfigured symbols within the normalization universe:")
+            print(traded_coverage)
     if args.signal_gate_mode != 'off':
         gated = [e for e in events if e.get('gate_reason')]
         print(f"{len(gated)} events triggered the signal gate "
@@ -340,6 +367,10 @@ def main():
         'signal_weighting': args.signal_weighting,
         'ewmac_scalar_pool': (
             args.ewmac_scalar_pool if args.signal_weighting == 'carver_ewmac' else None
+        ),
+        'ewmac_scalar_universe': (
+            args.ewmac_scalar_universe
+            if args.signal_weighting == 'carver_ewmac' else None
         ),
         'ewmac_scalar_min_periods': (
             args.ewmac_scalar_min_periods if args.signal_weighting == 'carver_ewmac' else None

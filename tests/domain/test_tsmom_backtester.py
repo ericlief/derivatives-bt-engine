@@ -126,6 +126,7 @@ def test_source_neutral_backtest_runs_all_three_signal_classes(monkeypatch, sign
         symbols=['X'], data_source='globex', signal_weighting=signal_weighting,
         max_notional=100_000, max_contracts=5, vix_gating=False,
         ewmac_fast_span=8, ewmac_slow_span=32, ewmac_vol_span=20,
+        ewmac_scalar_universe='backtest',
     ))
 
     assert result['n_days'] == frame.height
@@ -197,7 +198,8 @@ def test_ewmac_normalization_pool_keys(monkeypatch, pool, expected_keys) -> None
     config = TsmomBacktestConfig(
         symbols=['A', 'B'], data_source='globex', signal_weighting='carver_ewmac',
         ewmac_fast_span=2, ewmac_slow_span=4, ewmac_vol_span=2,
-        ewmac_scalar_pool=pool, ewmac_scalar_min_periods=2,
+        ewmac_scalar_pool=pool, ewmac_scalar_universe='backtest',
+        ewmac_scalar_min_periods=2,
     )
 
     forecasts, report, coverage = tb._precompute_ewmac_normalization(
@@ -224,7 +226,8 @@ def test_fixed_ewmac_scalar_is_applied_before_cap() -> None:
     config = TsmomBacktestConfig(
         symbols=['A'], data_source='globex', signal_weighting='carver_ewmac',
         ewmac_fast_span=2, ewmac_slow_span=4, ewmac_vol_span=2,
-        ewmac_scalar_pool='fixed', ewmac_forecast_scalar=2.0,
+        ewmac_scalar_pool='fixed', ewmac_scalar_universe='backtest',
+        ewmac_forecast_scalar=2.0,
     )
 
     forecasts, report, coverage = tb._precompute_ewmac_normalization(
@@ -237,6 +240,134 @@ def test_fixed_ewmac_scalar_is_applied_before_cap() -> None:
         (usable['raw_forecast'] * 2.0).clip(-20.0, 20.0).to_list()
     )
     assert coverage['forecast_ts_start'][0] is not None
+
+
+def test_full_pysystemtrade_universe_scales_only_traded_symbols(monkeypatch) -> None:
+    history = {'ES': _source_neutral_price_df(date(2020, 1, 1), 20)}
+    dates = history['ES']['ts_event'].to_list()
+    panel = pl.DataFrame({
+        'ts_event': [dates[0], dates[0]],
+        'instrument_code': ['SP500', 'NASDAQ'],
+        'pool_key': ['global', 'global'],
+        'raw_forecast': [1.0, 3.0],
+    })
+    coverage = pl.DataFrame({
+        'instrument_code': ['NASDAQ', 'SP500'],
+        'pool_key': ['global', 'global'],
+        'ts_start': [dates[0], dates[0]],
+        'ts_end': [dates[-1], dates[-1]],
+    })
+    scalar = pl.DataFrame({
+        'ts_event': [dates[4]],
+        'pool_key': ['global'],
+        'n_instruments': [2],
+        'cs_median_abs_forecast': [2.0],
+        'prior_daily_observations': [500],
+        'historical_mean_abs_forecast': [2.0],
+        'forecast_scalar': [5.0],
+        'scalar_valid': [True],
+    })
+    monkeypatch.setattr(
+        tb, '_load_pysystemtrade_ewmac_universe',
+        lambda _config: (panel, coverage, 'abc123', True),
+    )
+    monkeypatch.setattr(
+        tb, '_load_pysystemtrade_scalar_history',
+        lambda _panel, _config, _commit: (scalar, True),
+    )
+    config = TsmomBacktestConfig(
+        symbols=['ES'], data_source='globex', signal_weighting='carver_ewmac',
+        ewmac_fast_span=2, ewmac_slow_span=4, ewmac_vol_span=2,
+        ewmac_scalar_pool='global', ewmac_scalar_universe='pysystemtrade',
+        ewmac_scalar_min_periods=2,
+    )
+    manifest = {
+        'instruments': {'ES': {'history_instrument': 'SP500', 'metadata': {}}}
+    }
+
+    forecasts, report, universe = tb._precompute_ewmac_normalization(
+        history, config, manifest
+    )
+
+    assert set(forecasts) == {'ES'}
+    assert report['normalization_universe'].unique().to_list() == [
+        'pysystemtrade_full'
+    ]
+    assert report['normalization_instrument_count'].unique().to_list() == [2]
+    assert report['forecast_panel_cache_hit'].all()
+    assert report['scalar_cache_hit'].all()
+    assert universe.filter(pl.col('instrument_code') == 'SP500')[
+        'traded_symbol'
+    ][0] == 'ES'
+    assert forecasts['ES'].filter(pl.col('ts_event') > dates[4])[
+        'forecast_scalar'
+    ].null_count() == 0
+
+
+def test_full_pysystemtrade_forecast_and_scalar_caches(monkeypatch, tmp_path) -> None:
+    dates = _trading_dates(date(2020, 1, 1), 12)
+    loaded: list[str] = []
+
+    class FakeHistory:
+        def __init__(self, instrument_code: str):
+            self.metadata = {'asset_class': 'Equity'}
+            offset = 0.0 if instrument_code == 'A' else 10.0
+            self._bars = pl.DataFrame({
+                'ts_event': dates,
+                'close': [
+                    100.0 + offset + i + (0.5 if i % 2 else -0.25)
+                    for i in range(len(dates))
+                ],
+            })
+
+        def panama_bars(self):
+            return self._bars
+
+    class FakeProvider:
+        def __init__(self, **_kwargs):
+            pass
+
+        def _database_metadata(self):
+            return 4, 'abcdef1234567890'
+
+        def load(self, instrument_code):
+            loaded.append(instrument_code)
+            return FakeHistory(instrument_code)
+
+    monkeypatch.setattr(tb, 'DEFAULT_FUTURES_CACHE_ROOT', tmp_path)
+    monkeypatch.setattr(tb, 'PysystemtradeHistoryProvider', FakeProvider)
+    monkeypatch.setattr(
+        tb, '_eligible_pysystemtrade_instruments', lambda _path: ['A', 'B']
+    )
+    config = TsmomBacktestConfig(
+        symbols=['ES'], data_source='globex', signal_weighting='carver_ewmac',
+        ewmac_fast_span=2, ewmac_slow_span=4, ewmac_vol_span=2,
+        ewmac_scalar_universe='pysystemtrade', ewmac_scalar_min_periods=2,
+    )
+
+    panel, coverage, commit, panel_hit = tb._load_pysystemtrade_ewmac_universe(
+        config
+    )
+    scalar, scalar_hit = tb._load_pysystemtrade_scalar_history(
+        panel, config, commit
+    )
+    panel_again, coverage_again, commit_again, panel_hit_again = (
+        tb._load_pysystemtrade_ewmac_universe(config)
+    )
+    scalar_again, scalar_hit_again = tb._load_pysystemtrade_scalar_history(
+        panel_again, config, commit_again
+    )
+
+    assert loaded == ['A', 'B']
+    assert not panel_hit and not scalar_hit
+    assert panel_hit_again and scalar_hit_again
+    assert panel.equals(panel_again)
+    assert coverage.equals(coverage_again)
+    assert scalar.equals(scalar_again)
+    assert coverage.select('instrument_code', 'ts_start', 'ts_end').to_dicts() == [
+        {'instrument_code': 'A', 'ts_start': dates[0], 'ts_end': dates[-1]},
+        {'instrument_code': 'B', 'ts_start': dates[0], 'ts_end': dates[-1]},
+    ]
 
 
 def test_invalid_return_holds_signal_but_retains_current_raw_mark() -> None:
