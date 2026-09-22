@@ -302,6 +302,7 @@ def main():
     transactions = result['transactions']
     trades = result['trades']
     ewmac_scalar_history = result['ewmac_scalar_history']
+    ewmac_instrument_coverage = result['ewmac_instrument_coverage']
 
     print(stats.tail(10))
     print()
@@ -313,6 +314,8 @@ def main():
     if ewmac_scalar_history.height:
         print("\n=== EWMAC scalar history (last 10 rows) ===")
         print(ewmac_scalar_history.tail(10))
+        print("\n=== EWMAC normalization instrument coverage ===")
+        print(ewmac_instrument_coverage)
     if args.signal_gate_mode != 'off':
         gated = [e for e in events if e.get('gate_reason')]
         print(f"{len(gated)} events triggered the signal gate "
@@ -380,6 +383,12 @@ def main():
         )
         if ewmac_scalar_history.height else ewmac_scalar_history
     )
+    ewmac_coverage_report = (
+        ewmac_instrument_coverage.with_columns(run_id=pl.lit(run_id)).select(
+            'run_id', *ewmac_instrument_coverage.columns
+        )
+        if ewmac_instrument_coverage.height else ewmac_instrument_coverage
+    )
     clean_signals = clean_signal_rows(events, run_id)
     equity_by_as_of = {}
     portfolio_fields_by_as_of = {}
@@ -406,6 +415,7 @@ def main():
     }
     if ewmac_scalar_history.height:
         sheet_frames['ewmac_scalars'] = ewmac_scalar_report
+        sheet_frames['ewmac_universe'] = ewmac_coverage_report
     if window_metrics is not None:
         sheet_frames['window_metrics'] = window_metrics.with_columns(run_id=pl.lit(run_id)).select(
             'run_id', *window_metrics.columns
@@ -448,6 +458,12 @@ def main():
             )
             ewmac_scalar_report.write_csv(ewmac_scalar_path)
             print(f"Saved separate EWMAC scalar report: {ewmac_scalar_path}")
+            ewmac_universe_path = os.path.join(
+                results_dir,
+                f"{ts}_tsmom_ewmac_universe_{symbol_str}_{start_year}-{end_year}.csv",
+            )
+            ewmac_coverage_report.write_csv(ewmac_universe_path)
+            print(f"Saved EWMAC universe coverage: {ewmac_universe_path}")
         if window_metrics is not None:
             sheet_frames['window_metrics'].write_csv(os.path.join(
                 results_dir, f"{ts}_tsmom_window_metrics_{symbol_str}_{start_year}-{end_year}.csv"

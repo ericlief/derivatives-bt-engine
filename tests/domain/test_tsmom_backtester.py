@@ -142,6 +142,15 @@ def test_source_neutral_backtest_runs_all_three_signal_classes(monkeypatch, sign
         ]
         assert scalar_history['configured_instrument_count'].unique().to_list() == [1]
         assert scalar_history['scalar_valid'].any()
+        coverage = result['ewmac_instrument_coverage']
+        assert coverage.select(
+            'traded_symbol', 'instrument_code', 'ts_start', 'ts_end'
+        ).to_dicts() == [{
+            'traded_symbol': 'X',
+            'instrument_code': 'X',
+            'ts_start': frame['ts_event'].min(),
+            'ts_end': frame['ts_event'].max(),
+        }]
         assert all(
             event['ewmac_forecast'] is None
             or -1.0 <= event['signal'] <= 1.0
@@ -149,6 +158,7 @@ def test_source_neutral_backtest_runs_all_three_signal_classes(monkeypatch, sign
         )
     else:
         assert result['ewmac_scalar_history'].is_empty()
+        assert result['ewmac_instrument_coverage'].is_empty()
 
 
 def test_ledger_marks_roll_neutral_pnl_not_raw_contract_gap() -> None:
@@ -190,11 +200,23 @@ def test_ewmac_normalization_pool_keys(monkeypatch, pool, expected_keys) -> None
         ewmac_scalar_pool=pool, ewmac_scalar_min_periods=2,
     )
 
-    forecasts, report = tb._precompute_ewmac_normalization(histories, config)
+    forecasts, report, coverage = tb._precompute_ewmac_normalization(
+        histories, config
+    )
 
     assert set(forecasts) == {'A', 'B'}
     assert set(report['pool_key'].unique()) == expected_keys
     assert report['scalar_valid'].any()
+    assert coverage.sort('instrument_code').select(
+        'instrument_code', 'ts_start', 'ts_end'
+    ).to_dicts() == [
+        {
+            'instrument_code': symbol,
+            'ts_start': histories[symbol]['ts_event'].min(),
+            'ts_end': histories[symbol]['ts_event'].max(),
+        }
+        for symbol in sorted(histories)
+    ]
 
 
 def test_fixed_ewmac_scalar_is_applied_before_cap() -> None:
@@ -205,13 +227,16 @@ def test_fixed_ewmac_scalar_is_applied_before_cap() -> None:
         ewmac_scalar_pool='fixed', ewmac_forecast_scalar=2.0,
     )
 
-    forecasts, report = tb._precompute_ewmac_normalization(history, config)
+    forecasts, report, coverage = tb._precompute_ewmac_normalization(
+        history, config
+    )
     usable = forecasts['A'].drop_nulls('raw_forecast')
 
     assert report['forecast_scalar'].unique().to_list() == [2.0]
     assert usable['ewmac_forecast'].to_list() == pytest.approx(
         (usable['raw_forecast'] * 2.0).clip(-20.0, 20.0).to_list()
     )
+    assert coverage['forecast_ts_start'][0] is not None
 
 
 def test_invalid_return_holds_signal_but_retains_current_raw_mark() -> None:

@@ -859,6 +859,12 @@ validity, explicit normalization-universe label and configured count, target,
 cap, and speed parameters. The CLI prints the separate CSV's
 path after saving it. As with the mixing-parameter CSV, this calibration report
 is an independent artifact rather than being repeated across rebalance rows.
+The companion `*_tsmom_ewmac_universe_*.csv` (and `ewmac_universe` spreadsheet
+tab) has one row per normalization instrument, including the traded symbol,
+source instrument code, pool, source segments, `ts_start`, `ts_end`, first and
+last usable-forecast timestamps, and both raw-history and usable-forecast row
+counts. This makes staggered history availability auditable without repeating
+instrument ranges on every daily scalar row.
 When an EWMAC family is added,
 scale and cap each speed rule in 10/20 units first, combine those forecasts
 with weights summing to one, apply a causal forecast-diversification

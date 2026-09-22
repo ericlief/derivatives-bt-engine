@@ -529,7 +529,8 @@ def _ewmac_pool_key(symbol: str, config: TsmomBacktestConfig) -> str:
 def _precompute_ewmac_normalization(
     full_price_data: dict[str, pl.DataFrame],
     config: TsmomBacktestConfig,
-) -> tuple[dict[str, pl.DataFrame], pl.DataFrame]:
+    data_manifest: Optional[dict[str, object]] = None,
+) -> tuple[dict[str, pl.DataFrame], pl.DataFrame, pl.DataFrame]:
     """Build raw rules, causal pooled scalars, and scaled EWMAC forecasts.
 
     Forecasts are estimated from the full unbounded histories once, but every
@@ -539,6 +540,10 @@ def _precompute_ewmac_normalization(
     """
     raw_by_symbol: dict[str, pl.DataFrame] = {}
     panel_rows: list[pl.DataFrame] = []
+    coverage_rows: list[dict[str, object]] = []
+    manifest_instruments = (
+        data_manifest.get('instruments', {}) if data_manifest is not None else {}
+    )
     for symbol, frame in full_price_data.items():
         pool_key = _ewmac_pool_key(symbol, config)
         raw = carver_ewmac(
@@ -552,6 +557,25 @@ def _precompute_ewmac_normalization(
         raw_by_symbol[symbol] = raw.with_columns(
             pl.lit(pool_key).alias('pool_key')
         )
+        usable_forecasts = raw.filter(pl.col('raw_forecast').is_not_null())
+        instrument_manifest = manifest_instruments.get(symbol, {})
+        source_segments = (
+            sorted(str(value) for value in frame['source_segment'].drop_nulls().unique())
+            if 'source_segment' in frame.columns else [config.data_source]
+        )
+        coverage_rows.append({
+            'traded_symbol': symbol,
+            'instrument_code': instrument_manifest.get('history_instrument', symbol),
+            'pool_key': pool_key,
+            'data_source': config.data_source,
+            'source_segments': ','.join(source_segments),
+            'ts_start': frame.get_column('ts_event').min(),
+            'ts_end': frame.get_column('ts_event').max(),
+            'forecast_ts_start': usable_forecasts.get_column('ts_event').min(),
+            'forecast_ts_end': usable_forecasts.get_column('ts_event').max(),
+            'history_observations': frame.height,
+            'usable_forecast_observations': usable_forecasts.height,
+        })
         panel_rows.append(
             raw.select('ts_event', 'raw_forecast').with_columns(
                 pl.lit(symbol).alias('instrument_code'),
@@ -599,7 +623,8 @@ def _precompute_ewmac_normalization(
                 .alias('ewmac_forecast')
             )
         )
-    return forecasts, scalar_history
+    coverage = pl.DataFrame(coverage_rows).sort('pool_key', 'instrument_code')
+    return forecasts, scalar_history, coverage
 
 
 def _precompute_signal(
@@ -1491,11 +1516,17 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
     # from this module's own prior universal-252 behavior.
     annualization_by_symbol = {s: resolve_annualization_days(s) for s in config.symbols}
     if config.signal_weighting == 'carver_ewmac':
-        ewmac_by_symbol, ewmac_scalar_history = _precompute_ewmac_normalization(
-            full_price_data, config
+        (
+            ewmac_by_symbol,
+            ewmac_scalar_history,
+            ewmac_instrument_coverage,
+        ) = _precompute_ewmac_normalization(
+            full_price_data, config, data_manifest
         )
     else:
-        ewmac_by_symbol, ewmac_scalar_history = {}, pl.DataFrame()
+        ewmac_by_symbol, ewmac_scalar_history, ewmac_instrument_coverage = (
+            {}, pl.DataFrame(), pl.DataFrame()
+        )
     # Precomputed once per symbol, unconditionally (not just for
     # signal_gate_mode == 'daily') -- see _compute_signal_row's own
     # docstring for why this is exactly equivalent to (and much cheaper
@@ -1999,4 +2030,5 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
         'total_fees': round(total_fees, 2),
         'data_manifest': data_manifest,
         'ewmac_scalar_history': ewmac_scalar_history,
+        'ewmac_instrument_coverage': ewmac_instrument_coverage,
     }
