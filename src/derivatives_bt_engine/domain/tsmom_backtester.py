@@ -493,9 +493,10 @@ def _return_signal_bars(frame: pl.DataFrame) -> pl.DataFrame:
         eligible = frame.filter(
             pl.col('return_valid') | (pl.col('quality_flag') == 'initial_observation')
         )
-    return eligible.select(
-        'ts_event', pl.col('signal_index').alias('close')
-    ).sort('ts_event')
+    columns = ['ts_event', pl.col('signal_index').alias('close')]
+    if 'ret_1d' in eligible.columns:
+        columns.append('ret_1d')
+    return eligible.select(columns).sort('ts_event')
 
 
 def _precompute_signal(

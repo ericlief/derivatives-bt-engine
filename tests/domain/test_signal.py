@@ -343,17 +343,31 @@ def test_build_features_adds_only_base_columns():
     df = pl.DataFrame({'ts_event': _trading_dates(date(2020, 1, 1), 5),
                         'close': [100.0, 102.0, 101.0, 105.0, 103.0]})
     feat = build_features(df)
-    assert set(feat.columns) == {'ts_event', 'close', 'peak', 'dd', 'r1d'}
+    assert set(feat.columns) == {'ts_event', 'close', 'peak', 'dd', 'ret_1d'}
 
 
-def test_build_features_r1d_is_simple_return_not_log():
+def test_build_features_ret_1d_is_simple_return_not_log():
     df = pl.DataFrame({'ts_event': _trading_dates(date(2020, 1, 1), 3),
                         'close': [100.0, 110.0, 99.0]})
     feat = build_features(df)
-    r1d = feat['r1d'].to_list()
-    assert r1d[0] is None
-    assert r1d[1] == pytest.approx(0.10)   # 110/100 - 1, NOT log(110/100)
-    assert r1d[2] == pytest.approx(99 / 110 - 1)
+    ret_1d = feat['ret_1d'].to_list()
+    assert ret_1d[0] is None
+    assert ret_1d[1] == pytest.approx(0.10)   # 110/100 - 1, NOT log(110/100)
+    assert ret_1d[2] == pytest.approx(99 / 110 - 1)
+
+
+def test_build_features_preserves_supplied_validated_returns():
+    df = pl.DataFrame({
+        'ts_event': _trading_dates(date(2020, 1, 1), 3),
+        'close': [100.0, 110.0, 121.0],
+        # Deliberately differs from close.pct_change(): a source-neutral
+        # caller may have excluded a bad contract/session before this point.
+        'ret_1d': [None, 0.02, 0.03],
+    })
+
+    feat = build_features(df)
+
+    assert feat['ret_1d'].to_list() == [None, pytest.approx(0.02), pytest.approx(0.03)]
 
 
 def test_build_features_peak_and_drawdown():
@@ -368,14 +382,14 @@ def test_build_features_peak_and_drawdown():
 def test_build_features_sorts_unsorted_input():
     # pct_change()/cum_max() are order-dependent -- pass rows deliberately
     # out of ts_event order and confirm build_features sorts before
-    # computing, rather than silently corrupting peak/dd/r1d.
+    # computing, rather than silently corrupting peak/dd/ret_1d.
     df = pl.DataFrame({
         'ts_event': [date(2020, 1, 3), date(2020, 1, 1), date(2020, 1, 2)],
         'close': [103.0, 100.0, 101.0],
     })
     feat = build_features(df).sort('ts_event')
     assert feat['close'].to_list() == [100.0, 101.0, 103.0]
-    assert feat['r1d'].to_list() == [None, pytest.approx(0.01), pytest.approx(103 / 101 - 1)]
+    assert feat['ret_1d'].to_list() == [None, pytest.approx(0.01), pytest.approx(103 / 101 - 1)]
     assert feat['peak'].to_list() == [100.0, 101.0, 103.0]
 
 
@@ -400,7 +414,7 @@ def test_continuous_momentum_signal_is_bounded():
 
 
 def test_continuous_momentum_zero_std_produces_null_not_inf():
-    # A perfectly FLAT price (every close identical) makes r1d exactly 0.0
+    # A perfectly FLAT price (every close identical) makes ret_1d exactly 0.0
     # every day, and therefore std_fast/std_slow exactly 0.0 once the
     # rolling window is full -- r_fast/(std_fast*sqrt(n)) would be NaN
     # (0/0) without an explicit guard, and if r_fast were ever nonzero
@@ -479,14 +493,14 @@ def test_continuous_momentum_annualization_days_scales_avg_r():
 def test_continuous_momentum_avg_r_is_ewm_not_equal_weighted():
     # Regression test: avg_r_fast/avg_r_slow switched from an equal-
     # weighted rolling_mean to an EWM (half_life=fast_window/slow_window)
-    # -- same underlying r1d data, different weighting -- confirmed
+    # -- same underlying ret_1d data, different weighting -- confirmed
     # directly against a fresh independent computation rather than just
     # checking it differs from the old value (which could pass by
     # accident if the change were reverted to some OTHER wrong formula).
     df = _price_df_dated(date(2018, 1, 1), 400, drift=0.0015, vol=0.005, seed=5)
     feat = build_features(df)
     out = continuous_momentum(feat, annualization_days=252)
-    expected = (feat['r1d'].ewm_mean(half_life=DEFAULT_FAST_WINDOW) * 252).to_list()
+    expected = (feat['ret_1d'].ewm_mean(half_life=DEFAULT_FAST_WINDOW) * 252).to_list()
     actual = out['avg_r_fast'].to_list()
     for e, a in zip(expected, actual):
         if e is None:
@@ -495,54 +509,13 @@ def test_continuous_momentum_avg_r_is_ewm_not_equal_weighted():
             assert a == pytest.approx(e, rel=1e-9)
 
 
-def test_continuous_momentum_ewm_fast_slow_match_price_ewm():
-    df = _price_df_dated(date(2018, 1, 1), 400, drift=0.0015, vol=0.005, seed=6)
-    feat = build_features(df)
-    out = continuous_momentum(feat)
-    expected_fast = feat['close'].ewm_mean(half_life=DEFAULT_FAST_WINDOW).to_list()
-    expected_slow = feat['close'].ewm_mean(half_life=DEFAULT_SLOW_WINDOW).to_list()
-    for e, a in zip(expected_fast, out['ewm_fast'].to_list()):
-        assert a == pytest.approx(e, rel=1e-9)
-    for e, a in zip(expected_slow, out['ewm_slow'].to_list()):
-        assert a == pytest.approx(e, rel=1e-9)
-
-
-def test_continuous_momentum_macd_is_ewm_fast_minus_slow():
+def test_continuous_momentum_has_no_unconsumed_index_ema_diagnostics():
     df = _price_df_dated(date(2018, 1, 1), 400, drift=0.0015, vol=0.005, seed=6)
     out = continuous_momentum(build_features(df))
-    expected = (out['ewm_fast'] - out['ewm_slow']).to_list()
-    actual = out['macd'].to_list()
-    for e, a in zip(expected, actual):
-        assert a == pytest.approx(e, rel=1e-9)
 
-
-def test_continuous_momentum_macd_signal_is_ewm_of_macd():
-    df = _price_df_dated(date(2018, 1, 1), 400, drift=0.0015, vol=0.005, seed=7)
-    out = continuous_momentum(build_features(df), macd_signal_halflife=10.0)
-    expected = out['macd'].ewm_mean(half_life=10.0).to_list()
-    actual = out['macd_signal'].to_list()
-    for e, a in zip(expected, actual):
-        assert a == pytest.approx(e, rel=1e-9)
-
-
-def test_continuous_momentum_macd_diff_is_macd_minus_signal():
-    df = _price_df_dated(date(2018, 1, 1), 400, drift=0.0015, vol=0.005, seed=8)
-    out = continuous_momentum(build_features(df))
-    expected = (out['macd'] - out['macd_signal']).to_list()
-    actual = out['macd_diff'].to_list()
-    for e, a in zip(expected, actual):
-        assert a == pytest.approx(e, rel=1e-9)
-
-
-def test_continuous_momentum_macd_signal_halflife_is_configurable():
-    df = _price_df_dated(date(2018, 1, 1), 400, drift=0.0015, vol=0.005, seed=9)
-    feat = build_features(df)
-    out_10 = continuous_momentum(feat, macd_signal_halflife=10.0)
-    out_20 = continuous_momentum(feat, macd_signal_halflife=20.0)
-    # macd itself is unaffected by macd_signal_halflife...
-    assert out_10['macd'].to_list() == pytest.approx(out_20['macd'].to_list())
-    # ...but macd_signal (and therefore macd_diff) is.
-    assert out_10['macd_signal'].to_list() != pytest.approx(out_20['macd_signal'].to_list())
+    assert not {
+        'ewm_fast', 'ewm_slow', 'macd', 'macd_signal', 'macd_diff'
+    } & set(out.columns)
 
 
 # ── goulding_monthly: independent of continuous_momentum ─────────────────

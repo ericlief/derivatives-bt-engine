@@ -43,7 +43,7 @@ from derivatives_bt_engine.utils.logger import setup_logger
 
 logger = setup_logger()
 
-HISTORY_SCHEMA_VERSION = 6
+HISTORY_SCHEMA_VERSION = 7
 DEFAULT_PYSYSTEMTRADE_DB_PATH = Path(
     "/home/dev/fin/db/pysystemtrade_reference.duckdb"
 )

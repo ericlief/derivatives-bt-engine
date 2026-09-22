@@ -32,7 +32,7 @@ even earlier version that wrapped calculate_trend_strength and dispatched
 on a (SignalModel, WindowBasis) pair): that design tangled the monthly
 Goulding signal with the continuous model's own intermediate columns and
 only let a caller pick ONE model at a time. Here, both models take only
-build_features' output (peak/dd/r1d) and are run/saved/compared
+build_features' output (peak/dd/ret_1d) and are run/saved/compared
 independently -- see scripts/momentum_signal_comparison.py's --model
 continuous/goulding/both for the comparison workflow this enables.
 
@@ -118,12 +118,6 @@ GOULDING_SIGNAL_MODES = ('binary', 'continuous')
 GOULDING_FORECAST_TARGET_ABS = 0.5
 GOULDING_FORECAST_CAP = 1.0
 GOULDING_FORECAST_MIN_OBS = 12
-# continuous_momentum's MACD signal-line smoothing -- deliberately its own
-# small, fixed halflife, NOT derived from fast_window/slow_window the way
-# the MACD line itself is (see continuous_momentum's own docstring): the
-# signal line's job is to be a fast-reacting smoother of the MACD line's
-# own crossovers, not another multi-month trend estimate.
-DEFAULT_MACD_SIGNAL_HALFLIFE = 10.0
 # Paper's own warm-up requirement per Appendix C -- estimate_mixing_params
 # falls back to the uninformed (0.5, 0.5) below this many months of pooled
 # Correction/Rebound history.
@@ -450,28 +444,32 @@ class SignalSpec:
 
 
 def build_features(df: pl.DataFrame) -> pl.DataFrame:
-    """Shared base features only -- computed once from raw OHLCV bars
-    (needs 'ts_event', 'close'), so continuous_momentum/goulding_monthly
-    can each derive their own signal independently from this same starting
-    point without depending on each other's intermediate columns. No
-    model-specific features (no fast/slow windows, no vol normalization)
-    belong here.
+    """Build the shared drawdown and validated daily-return features.
 
-    r1d is a SIMPLE daily return (close.pct_change(), i.e. close/prev_close
-    - 1), not a log return -- this module uses simple returns throughout
-    (except calculate_trend_strength, the old retired function above,
-    which predates this convention), never log returns. No caller needs
-    prev_close itself (only r1d), so it's never materialized as its own
-    column.
+    Source-neutral futures bars already carry ``ret_1d`` constructed from
+    matched-contract price changes.  Preserve that column verbatim: deriving
+    it again from ``close`` after an invalid session has been filtered can
+    span the removed date and silently reintroduce a return that the history
+    layer rejected.  Legacy/raw OHLCV callers have no ``ret_1d``, so only
+    those callers fall back to the simple return ``close.pct_change()``.
+
+    ``ret_1d`` is always a SIMPLE daily return, not a log return.  The old,
+    retired ``calculate_trend_strength`` function above retains its separate
+    legacy ``r1d`` log-return convention.
 
     Sorts by ts_event first -- shift()/cum_max() are order-dependent, and
     every downstream function (continuous_momentum, goulding_monthly)
     inherits whatever order this leaves the frame in, so this is the one
     place that guarantee needs to be established."""
     df = df.sort('ts_event')
+    return_expression = (
+        pl.col('ret_1d')
+        if 'ret_1d' in df.columns
+        else pl.col('close').pct_change()
+    )
     df = df.with_columns(
         peak=pl.col('close').cum_max(),
-        r1d=pl.col('close').pct_change(),
+        ret_1d=return_expression,
     )
     df = df.with_columns(
         dd=((pl.col('close') - pl.col('peak')) / pl.col('peak')).round(2),
@@ -527,11 +525,11 @@ def continuous_momentum(df: pl.DataFrame, fast_window: int = DEFAULT_FAST_WINDOW
                          slow_window: int = DEFAULT_SLOW_WINDOW,
                          vol_fast_window: Optional[int] = None, vol_slow_window: Optional[int] = None,
                          annualization_days: int = DEFAULT_ANNUALIZATION_DAYS,
-                         w_fast: float = 0.4, w_slow: float = 0.6, discount: float = 0.5,
-                         macd_signal_halflife: float = DEFAULT_MACD_SIGNAL_HALFLIFE) -> pl.DataFrame:
+                         w_fast: float = 0.4, w_slow: float = 0.6,
+                         discount: float = 0.5) -> pl.DataFrame:
     """Continuous, daily, volatility-normalized fast/slow trend-strength
     model -- independent of goulding_monthly; takes only build_features'
-    output (peak/dd/r1d), no shared intermediate state between
+    output (peak/dd/ret_1d), no shared intermediate state between
     models.
 
     fast_window/slow_window control the return horizon (the numerator):
@@ -552,35 +550,15 @@ def continuous_momentum(df: pl.DataFrame, fast_window: int = DEFAULT_FAST_WINDOW
     denominator) stay a plain, equal-weighted rolling_std deliberately
     horizon-matched to fast_window/slow_window -- see this project's own
     design discussion on why an EWM estimate would break that clean
-    n-day-return-over-n-day-vol correspondence. avg_r_fast/avg_r_slow and
-    macd/macd_signal/macd_diff below are NOT part of this -- reporting/
-    charting diagnostics only, never touching ts_fast/ts_slow/ts/signal.
+    n-day-return-over-n-day-vol correspondence. avg_r_fast/avg_r_slow are
+    reporting diagnostics only and never touch ts_fast/ts_slow/ts/signal.
 
     avg_r_fast/avg_r_slow: EXPONENTIALLY-weighted mean daily return
-    (r1d.ewm_mean(half_life=fast_window/slow_window)), annualized --
+    (ret_1d.ewm_mean(half_life=fast_window/slow_window)), annualized --
     intentionally NOT the same equal-weighted rolling_mean convention
     std_fast/std_slow use; this is a pure reporting figure with no
     horizon-matching constraint to preserve, so EWM's smoother, more
     recency-weighted average is preferred here.
-
-    ewm_fast/ewm_slow = close.ewm_mean(half_life=fast_window/slow_window)
-    -- the underlying fast/slow EMA PRICE lines themselves, exposed as
-    their own columns (e.g. for a standard price+EMA chart), not just
-    embedded inside macd. macd = ewm_fast - ewm_slow. Reuses fast_window/
-    slow_window as EWM half-lives rather than introducing a second,
-    independent pair of MACD-specific windows, so "fast"/"slow" mean one
-    consistent pair of numbers across every feature in this function.
-    Flag this explicitly though: an EWM half-life of N behaves nothing
-    like ts_fast/ts_slow's own N-day lookback (a half-life-N EWM's
-    effective memory extends well past N days, unlike a hard N-day
-    window) -- macd is a genuinely different kind of "fast"/"slow" than
-    ts_fast/ts_slow, just sharing the same config numbers by deliberate
-    choice, not because the underlying math is equivalent. macd_signal
-    is macd's own EWM smoothing at a separate, much shorter half-life
-    (macd_signal_halflife, default 10 days -- deliberately NOT derived
-    from fast_window/slow_window,
-    see DEFAULT_MACD_SIGNAL_HALFLIFE's own comment). macd_diff = macd -
-    macd_signal, the standard MACD histogram.
 
     annualization_days is a separate, per-instrument units-conversion
     factor for the genuinely per-calendar-year REPORTING diagnostics only
@@ -602,21 +580,10 @@ def continuous_momentum(df: pl.DataFrame, fast_window: int = DEFAULT_FAST_WINDOW
         r_slow=pl.col('close') / pl.col('close').shift(slow_window) - 1,
     )
     df = df.with_columns(
-        avg_r_fast=pl.col('r1d').ewm_mean(half_life=fast_window) * annualization_days,
-        avg_r_slow=pl.col('r1d').ewm_mean(half_life=slow_window) * annualization_days,
-        std_fast=pl.col('r1d').rolling_std(vol_fast_window),
-        std_slow=pl.col('r1d').rolling_std(vol_slow_window),
-        ewm_fast=pl.col('close').ewm_mean(half_life=fast_window),
-        ewm_slow=pl.col('close').ewm_mean(half_life=slow_window),
-    )
-    df = df.with_columns(
-        macd=pl.col('ewm_fast') - pl.col('ewm_slow'),
-    )
-    df = df.with_columns(
-        macd_signal=pl.col('macd').ewm_mean(half_life=macd_signal_halflife),
-    )
-    df = df.with_columns(
-        macd_diff=pl.col('macd') - pl.col('macd_signal'),
+        avg_r_fast=pl.col('ret_1d').ewm_mean(half_life=fast_window) * annualization_days,
+        avg_r_slow=pl.col('ret_1d').ewm_mean(half_life=slow_window) * annualization_days,
+        std_fast=pl.col('ret_1d').rolling_std(vol_fast_window),
+        std_slow=pl.col('ret_1d').rolling_std(vol_slow_window),
     )
     df = df.with_columns(
         hv_fast=pl.col('std_fast') * annualization_days ** 0.5,

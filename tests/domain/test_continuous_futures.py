@@ -100,7 +100,40 @@ def test_daily_selection_chains_all_intraday_moves_and_propagates_invalidity() -
     assert daily.signal.get_column("ret_1d").to_list() == [None, None]
     assert daily.signal.get_column("return_valid").to_list() == [False, False]
     assert daily.signal.get_column("quality_flag")[1] == "invalid_intraday_return"
+    assert daily.signal.get_column("signal_index").to_list() == [100.0, 100.0]
     assert daily.panama.get_column("pt_change_1d").to_list() == [None, 11.0]
+
+
+def test_daily_selection_rebuilds_index_after_invalid_session_mask() -> None:
+    observations = pl.DataFrame(
+        {
+            "trade_date": [
+                date(2020, 1, 1),
+                date(2020, 1, 2), date(2020, 1, 2),
+                date(2020, 1, 3), date(2020, 1, 3),
+                date(2020, 1, 4),
+            ],
+            "source_timestamp": [
+                datetime(2020, 1, 1, 23),
+                datetime(2020, 1, 2, 12), datetime(2020, 1, 2, 23),
+                datetime(2020, 1, 3, 12), datetime(2020, 1, 3, 23),
+                datetime(2020, 1, 4, 23),
+            ],
+            "current_price": [100.0, 110.0, 0.0, 120.0, 126.0, 132.3],
+            "current_contract": ["A"] * 6,
+            "forward_price": [None] * 6,
+            "forward_contract": [None] * 6,
+        }
+    )
+
+    daily = select_daily_continuous(build_continuous_futures(observations))
+
+    assert daily.signal.get_column("ret_1d").to_list() == [
+        None, None, None, pytest.approx(0.05)
+    ]
+    assert daily.signal.get_column("signal_index").to_list() == [
+        100.0, 100.0, 100.0, pytest.approx(105.0)
+    ]
 
 
 def _history(source: str, start: date, prices: list[float]) -> FuturesHistory:

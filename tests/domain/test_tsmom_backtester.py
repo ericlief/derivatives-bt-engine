@@ -183,6 +183,20 @@ def test_invalid_return_holds_signal_but_retains_current_raw_mark() -> None:
     assert invalid['signal'] == previous['signal']
 
 
+def test_return_signal_bars_preserve_source_neutral_ret_1d() -> None:
+    frame = _source_neutral_price_df(date(2020, 1, 1), 5).with_columns(
+        pl.Series('ret_1d', [None, 0.01, 0.02, 0.03, 0.04])
+    )
+
+    bars = tb._return_signal_bars(frame)
+
+    assert bars.columns == ['ts_event', 'close', 'ret_1d']
+    assert bars['ret_1d'].to_list() == [
+        None, pytest.approx(0.01), pytest.approx(0.02),
+        pytest.approx(0.03), pytest.approx(0.04),
+    ]
+
+
 def test_seeds_position_from_last_month_end_before_start_date(monkeypatch):
     """With start_date set, the first event should be a seed dated at the
     last month-end *before* start_date (not start_date itself), and the

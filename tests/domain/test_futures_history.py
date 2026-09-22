@@ -315,7 +315,7 @@ def test_carver_cache_path_is_source_and_version_namespaced(tmp_path: Path) -> N
         tmp_path
         / "cache"
         / "pysystemtrade"
-        / "v6"
+        / "v7"
         / SOURCE_COMMIT[:12]
         / "SP500_signal.parquet"
     )

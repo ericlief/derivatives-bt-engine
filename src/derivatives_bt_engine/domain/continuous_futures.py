@@ -257,6 +257,15 @@ def select_daily_continuous(
         .then(pl.col("ret_1d"))
         .otherwise(None)
         .alias("ret_1d")
+    ).with_columns(
+        # Rebuild from the final validated daily returns.  The observation-
+        # frequency index may contain valid intraday moves from a session
+        # that was rejected as a whole; retaining that old index would let
+        # index-based rules recover those excluded moves on a later date.
+        (
+            (1.0 + pl.col("ret_1d").fill_null(0.0)).cum_prod()
+            * 100.0
+        ).alias("signal_index")
     ).join(
         panama.select("trade_date", "pt_change_1d"),
         on="trade_date",

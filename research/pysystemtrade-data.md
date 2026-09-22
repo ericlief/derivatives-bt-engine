@@ -608,11 +608,11 @@ Cache paths must include source and schema version, for example:
 
 ```text
 .cache/futures/globex/v1/ES_daily.parquet
-.cache/futures/globex/v6/<database-fingerprint>/ES_signal.parquet
-.cache/futures/pysystemtrade/v6/<source-commit>/SP500_signal.parquet
+.cache/futures/globex/v7/<database-fingerprint>/ES_signal.parquet
+.cache/futures/pysystemtrade/v7/<source-commit>/SP500_signal.parquet
 ```
 
-The first path is the unchanged legacy `FuturesDataLoader` cache. The v2 paths
+The first path is the unchanged legacy `FuturesDataLoader` cache. The v7 paths
 are the source-neutral history-provider caches. Asset-only cache names are
 unsafe once two sources can provide the same market.
 
@@ -791,7 +791,9 @@ roll_differential[t] = FORWARD[t-1] - PRICE[t-1]
 The two named daily fields are paired measurements of the same matched-
 contract move: `pt_change_1d` is in price points and `ret_1d` is a fractional
 simple return. Neither field is volatility-normalized. The history cache
-schema is v6 to keep these names separate from older Parquet caches.
+schema is v7 to keep these names separate from older Parquet caches and to
+invalidate indices built before invalid daily sessions were removed from the
+compounded return path.
 
 The local Panama implementation is algebraically identical to Carver's
 forward mutation: every new roll differential is added to all earlier
@@ -819,6 +821,25 @@ one because calibrated forecast scalars differ by speed pair and must not be
 invented.  Raw contract marks—not either derived signal level—remain the
 authoritative execution, sizing, cost, and roll record. P&L uses the
 roll-neutral point changes generated from those contract-aware raw inputs.
+
+The repository's return TSMOM no longer computes EMA-price or MACD columns on
+the positive index. Those columns were charting diagnostics with no path into
+its forecast and were easily confused with Carver EWMAC. Return TSMOM now
+contains only its actual horizon-return/return-volatility construction;
+Carver EWMAC is computed independently from Panama prices and the completed
+forecasts may be joined by date for comparison.
+
+Forecast units also remain explicit. The current backtester supports one
+EWMAC speed pair, computes
+`clip(((fast_ewma - slow_ewma) / point_vol) * forecast_scalar, -20, 20)`, and
+then divides by 20 for its internal `[-1, 1]` exposure. The default scalar of
+one is not calibrated: only a properly estimated scalar makes the uncapped
+rule average about 10 in absolute forecast units, or equivalently 0.5 after
+division by 20. When an EWMAC family is added, scale and cap each speed rule in
+10/20 units first, combine those forecasts with weights summing to one, apply
+a causal forecast-diversification multiplier if used, and cap the combined
+forecast again. A component's forecast weight does not change its own
+average-absolute-10 calibration target.
 
 The TSMOM backtester now consumes the same separation through
 `domain.tsmom_history`. Its source-neutral rows expose `close` as the current
