@@ -694,9 +694,10 @@ should initially be research-only because:
 That 252-history source panel is not itself a live small-account universe.
 [`circularity-in-sizing-a-small-account.md`](circularity-in-sizing-a-small-account.md)
 separates normalization, operational eligibility, capital feasibility,
-strategic weights, continuous shadow targets, and the final integer book. It
-also defines the pre-registered filters required before using the large panel
-for portfolio allocation.
+dynamic point-in-time allocation membership, continuous shadow targets, and
+the final integer book. It also defines how the fixed configuration snapshot
+can produce a lagged historical SR-cost proxy, and the pre-registered filters
+required before using the large panel for portfolio allocation.
 
 Start with weekly synchronized returns and an approved liquid universe. A
 broad-universe implementation will likely need coverage-aware pairwise or
