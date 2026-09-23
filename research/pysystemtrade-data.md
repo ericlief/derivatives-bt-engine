@@ -691,6 +691,13 @@ should initially be research-only because:
   current `build_returns_wide` implementation; and
 - carry quality varies sharply by instrument and period.
 
+That 252-history source panel is not itself a live small-account universe.
+[`circularity-in-sizing-a-small-account.md`](circularity-in-sizing-a-small-account.md)
+separates normalization, operational eligibility, capital feasibility,
+strategic weights, continuous shadow targets, and the final integer book. It
+also defines the pre-registered filters required before using the large panel
+for portfolio allocation.
+
 Start with weekly synchronized returns and an approved liquid universe. A
 broad-universe implementation will likely need coverage-aware pairwise or
 cluster-level covariance handling rather than the current complete-case inner
