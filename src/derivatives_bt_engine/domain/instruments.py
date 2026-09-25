@@ -219,24 +219,34 @@ INSTRUMENTS: dict[str, dict] = {
     'SIL': {'exchange': 'COMEX', 'multiplier': 1000,       'cluster': 'metal',
              'initial_margin': 13038.92, 'commission': 1.36, 'ib_symbol': 'SI'},
 
-    # ── Rates ───────────────────────────────────────────────────────────────
+    'HG':  {'exchange': 'COMEX', 'multiplier': 25000,        'cluster': 'metal',
+                'initial_margin': 25349.63, 'commission': 2.51, 'active_months': ['H', 'N', 'U', 'Z'],
+                'annualization_days': 259},
+
+    'MHG': {'exchange': 'COMEX', 'multiplier': 2500,         'cluster': 'metal',
+                'initial_margin': 3722.85, 'commission': 0.96, 'signal_symbol': 'HG'},
+        # ── Rates ───────────────────────────────────────────────────────────────
     # MTN borrows ZN's via signal_symbol (the standard 10-Year, not TN the
     # Ultra 10-Year -- a different duration/contract, not MTN's full-size
     # sibling), same reasoning as MES/MNQ above.
     # active_months on ZN/ZT confirmed empirically as the standard financial
     # quarterly cycle -- research doc §2.2. TN (Ultra 10-Year) not
     # separately queried -- left unset (unconfirmed, not "no restriction").
+    'ZT':  {'exchange': 'CBOT',  'multiplier': 2000,       'cluster': 'rates', # notional ~= 205K
+                'initial_margin': 1380.00, 'commission': 1.51, 'active_months': ['H', 'M', 'U', 'Z'],
+                'annualization_days': 259},
     'ZN':  {'exchange': 'CBOT',  'multiplier': 1000,       'cluster': 'rates', # notional ~= 109K
             'initial_margin': 2156.25, 'commission': 1.66, 'active_months': ['H', 'M', 'U', 'Z'],
             'annualization_days': 259},
-    'TN':  {'exchange': 'CBOT',  'multiplier': 1000,       'cluster': 'rates',
+    'TN':  {'exchange': 'CBOT',  'multiplier': 1000,       'cluster': 'rates', # notional ~- 110K
             'initial_margin': 2932.50, 'commission': 1.66},
     'MTN': {'exchange': 'CBOT',  'multiplier': 100,        'cluster': 'rates', # notional ~= 11K
-            'initial_margin': 769.16, 'commission': 0.56, 'signal_symbol': 'ZN'},
-    'ZT':  {'exchange': 'CBOT',  'multiplier': 2000,       'cluster': 'rates', # notional ~= 205K
-            'initial_margin': 1380.00, 'commission': 1.51, 'active_months': ['H', 'M', 'U', 'Z'],
+            'initial_margin': 828.76, 'commission': 0.56, 'signal_symbol': 'ZN'},
+    'UB':  {'exchange': 'CBOT',  'multiplier': 1000,       'cluster': 'rates', # notional ~= 105K
+            'initial_margin': 5922.50, 'commission': 1.81, 'active_months': ['H', 'M', 'U', 'Z'],
             'annualization_days': 259},
-
+    'MWN': {'exchange': 'CBOT',  'multiplier': 100,        'cluster': 'rates', # notional ~= 10.5K
+            'initial_margin': 1160.86, 'commission': 0.56, 'signal_symbol': 'ZN'},
     # ── Grains ──────────────────────────────────────────────────────────────
     # CBOT micro grains (MZL/MZC/MZS/MZW) launched ~Feb 2025 -- too short a
     # history for the 252-day TSMOM lookback. signal_symbol borrows the
@@ -274,8 +284,14 @@ INSTRUMENTS: dict[str, dict] = {
             'annualization_days': 252},
     'MZS': {'exchange': 'CBOT',  'multiplier': 5,          'cluster': 'grain',
             'initial_margin': 382.95, 'commission':  0.76, 'signal_symbol': 'ZS'},
-    'ZW':  {'exchange': 'CBOT',  'multiplier': 50,         'cluster': 'grain',
+    
+    'ZM':  {'exchange': 'CBOT',  'multiplier': 100,         'cluster': 'grain',
             'initial_margin': 3321.39, 'commission': 3.01, 'active_months': ['H', 'K', 'N', 'U', 'Z'],
+            'annualization_days': 252},
+    'MZM': {'exchange': 'CBOT',  'multiplier': 10,          'cluster': 'grain',
+            'initial_margin': 423.80, 'commission':  0.76, 'signal_symbol': 'ZM'},
+    'ZW':  {'exchange': 'CBOT',  'multiplier': 50,         'cluster': 'grain',
+            'initial_margin': 3321.39, 'commission': 3.01, 'active_months': ['H', 'K', 'N', 'U', 'Z'], # Check as re carver FHKNQUVZ
             'annualization_days': 252},
     'MZW': {'exchange': 'CBOT',  'multiplier': 5,          'cluster': 'grain',
              'initial_margin': 332.14, 'commission': 0.76, 'signal_symbol': 'ZW'},
@@ -319,7 +335,16 @@ INSTRUMENTS: dict[str, dict] = {
     '6M':  {'exchange': 'CME',   'multiplier': 500_000,    'cluster': 'fx', # notional ~= 28K
             'initial_margin': 1962.36, 'commission': 2.46, 'active_months': ['H', 'M', 'U', 'Z'],
             'annualization_days': 259},
+
+    # Volatiliy
+    'VXM':  {'exchange': 'CME',   'multiplier': 100,    'cluster': 'vol',  
+            'initial_margin': 855.60, 'commission': 0.46, 'active_months': ['F','G', 'H', 'J', 'K', 'M', 'N', 'Q' 'U', 'V', 'X', 'Z'],
+            'annualization_days': 259}, # check ann days
+
+
+
 }
+
 
 # ── Backtest-only contracts ─────────────────────────────────────────────────
 # Multiplier/margin/commission for contracts with NO live TSMOM
