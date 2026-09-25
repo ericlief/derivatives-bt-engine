@@ -337,7 +337,7 @@ INSTRUMENTS: dict[str, dict] = {
             'annualization_days': 259},
 
     # Volatiliy
-    'VXM':  {'exchange': 'CME',   'multiplier': 100,    'cluster': 'vol',  
+    'VXM':  {'exchange': 'CFE',   'multiplier': 100,    'cluster': 'vol',  
             'initial_margin': 855.60, 'commission': 0.46, 'active_months': ['F','G', 'H', 'J', 'K', 'M', 'N', 'Q' 'U', 'V', 'X', 'Z'],
             'annualization_days': 259}, # check ann days
 
