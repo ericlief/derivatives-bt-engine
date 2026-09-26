@@ -11,9 +11,11 @@ from derivatives_bt_engine.data.futures_cost_risk import (
     _emit_report,
     _history_volatility,
     _round_report_decimals,
+    _ticker_values,
     build_cost_risk_row,
     diagnose_instrument,
     volatility_from_bars,
+    parse_args,
 )
 from derivatives_bt_engine.domain.instruments import resolve_active_months
 from derivatives_bt_engine.live.tsmom_rebalance import (
@@ -34,6 +36,41 @@ def test_market_data_type_belongs_to_diagnostic_not_history_loader():
 
     assert "market_data_type" in diagnostic_parameters
     assert "market_data_type" not in history_parameters
+
+
+def test_broad_audit_defaults_to_automatic_quote_fallback():
+    assert parse_args([]).market_data_type == "auto"
+
+
+def test_automatic_quote_fallback_tries_live_then_delayed_then_frozen():
+    class FakeIB:
+        def __init__(self):
+            self.mode = None
+            self.modes = []
+
+        def set_market_data_type(self, mode):
+            self.mode = mode
+            self.modes.append(mode)
+
+        def req_mkt_data(self, contract, generic_ticks=""):
+            assert generic_ticks == ""
+            if self.mode < 4:
+                return SimpleNamespace(bid=None, ask=None, last=None, close=None)
+            return SimpleNamespace(bid=5999.75, ask=6000.0, last=5999.75, close=5990.0)
+
+        def sleep(self, seconds):
+            pass
+
+        def cancel_mkt_data(self, contract):
+            pass
+
+    ib = FakeIB()
+    quote = _ticker_values(ib, SimpleNamespace(symbol="ES"), 0.0, "auto")
+
+    assert ib.modes == [1, 3, 4]
+    assert quote["mid"] == pytest.approx(5999.875)
+    assert quote["market_data_type"] == "delayed-frozen"
+    assert quote["market_data_attempts"] == "live,delayed,delayed-frozen"
 
 
 def test_report_rounds_money_to_two_decimals_and_other_floats_to_four():
@@ -181,6 +218,30 @@ def test_cost_row_uses_half_spread_each_way_and_scales_by_dollar_vol():
     assert row["round_trip_total_cost"] == pytest.approx(2.47)
     assert row["round_trip_cost_per_annual_dollar_vol"] == pytest.approx(2.47 / 6000.0)
     assert row["spread_quality"] == "delayed_snapshot"
+
+
+def test_return_vol_uses_history_price_not_current_execution_price():
+    row = build_cost_risk_row(
+        symbol="SP500",
+        signal_symbol="ES",
+        contract_id="ESZ6",
+        expiration="20261218",
+        current_price=7700.0,
+        multiplier=50.0,
+        commission_per_side=2.25,
+        mixed_point_vol=30.0436603917,
+        vol_reference_price=5304.25,
+        annualization_days=256,
+        history_rows=10559,
+        history_start=date(1982, 9, 14),
+        history_end=date(2024, 3, 28),
+    )
+
+    expected_daily = 30.0436603917 / 5304.25
+    assert row["price"] == 7700.0
+    assert row["vol_reference_price"] == 5304.25
+    assert row["daily_return_vol"] == pytest.approx(expected_daily)
+    assert row["annual_return_vol"] == pytest.approx(expected_daily * 16.0)
 
 
 def test_missing_bid_ask_is_unknown_not_zero_cost():

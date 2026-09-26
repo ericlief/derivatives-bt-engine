@@ -1074,6 +1074,11 @@ the current 252-instrument panel every history produces a mixed estimate, but
 93 have fewer than ten years of fast-volatility observations and are labelled
 accordingly rather than treated as fully warmed up.
 
+Percentage volatility divides the mixed point volatility by the raw current-
+contract price at the same history endpoint (`vol_reference_price`). It does
+not divide stale historical point volatility by today's IB execution price;
+the latter remains a separate notional input.
+
 IB dated (`--vol-source dated`) and continuous (`--vol-source continuous`)
 history remain explicit comparison modes. Continuous is never the default
 because its adjustment and roll behavior disagrees with the repository's
@@ -1119,11 +1124,12 @@ that database (with `fx_asof` exposed). Omit `--offline` to qualify current IB
 contracts and request current quotes; this is the step that tests real account
 availability.
 
-For an IB-connected audit, the command defaults to delayed quotes
-(`--market-data-type delayed`) because a broad international universe will
-usually exceed the account's live exchange subscriptions. Use
-`--market-data-type live` only when checking subscribed real-time feeds. IB
-errors 354/10168 indicate quote entitlement, not a failed futures contract
+For an IB-connected audit, the command defaults to `--market-data-type auto`:
+it tries real-time (`1`), then delayed (`3`), then delayed-frozen (`4`), and
+stops at the first valid bid/ask. The CSV records both the successful mode and
+the attempted sequence. Explicit `live`, `delayed`, and `delayed-frozen`
+settings disable fallback. IB errors 354/10168 indicate quote entitlement,
+not a failed futures contract
 mapping; error 300 can be follow-on cancellation noise after a rejected quote
 request.
 

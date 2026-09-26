@@ -69,6 +69,7 @@ MARKET_DATA_TYPES = {
     "delayed": 3,
     "delayed-frozen": 4,
 }
+AUTO_MARKET_DATA_SEQUENCE = ("live", "delayed", "delayed-frozen")
 TWO_DECIMAL_MONEY_COLUMNS = {
     "notional_native_per_contract",
     "notional_per_contract",
@@ -215,6 +216,7 @@ def build_cost_risk_row(
     history_start,
     history_end,
     vol_source: str = "dated_contract",
+    vol_reference_price: Optional[float] = None,
     fast_point_vol: Optional[float] = None,
     slow_point_vol: Optional[float] = None,
     vol_observations: Optional[int] = None,
@@ -268,7 +270,8 @@ def build_cost_risk_row(
     notional = notional_native * fx
     daily_dollar_vol = point_vol * mult * fx
     annual_dollar_vol = daily_dollar_vol * math.sqrt(annualization_days)
-    daily_return_vol = point_vol / abs(price)
+    vol_reference = _positive_finite(vol_reference_price) or price
+    daily_return_vol = point_vol / abs(vol_reference)
     annual_return_vol = daily_return_vol * math.sqrt(annualization_days)
     one_way_commission_native = commission
     round_trip_commission_native = commission * 2.0
@@ -305,6 +308,7 @@ def build_cost_risk_row(
         "fast_point_vol": fast_point_vol,
         "slow_point_vol": slow_point_vol,
         "mixed_point_vol": point_vol,
+        "vol_reference_price": vol_reference,
         "daily_return_vol": daily_return_vol,
         "annual_return_vol": annual_return_vol,
         "daily_dollar_vol_per_contract": daily_dollar_vol,
@@ -343,8 +347,9 @@ def build_cost_risk_row(
     }
 
 
-def _ticker_values(ib, contract, wait_seconds: float) -> dict:
-    ticker = ib.req_mkt_data(contract)
+def _ticker_values_once(ib, contract, wait_seconds: float, mode: str) -> dict:
+    ib.set_market_data_type(MARKET_DATA_TYPES[mode])
+    ticker = ib.req_mkt_data(contract, generic_ticks="")
     try:
         ib.sleep(wait_seconds)
         bid = _positive_finite(getattr(ticker, "bid", None))
@@ -352,9 +357,66 @@ def _ticker_values(ib, contract, wait_seconds: float) -> dict:
         last = _positive_finite(getattr(ticker, "last", None))
         close = _positive_finite(getattr(ticker, "close", None))
         mid = (bid + ask) / 2.0 if bid is not None and ask is not None and ask >= bid else None
-        return {"bid": bid, "ask": ask, "last": last, "close": close, "mid": mid}
+        return {
+            "bid": bid,
+            "ask": ask,
+            "last": last,
+            "close": close,
+            "mid": mid,
+            "market_data_type": mode,
+        }
     finally:
-        ib.cancel_mkt_data(contract)
+        try:
+            ib.cancel_mkt_data(contract)
+        except Exception as exc:
+            log.debug(
+                "quote_cancel_failed contract=%s mode=%s reason=%s",
+                contract, mode, exc,
+            )
+
+
+def _ticker_values(
+    ib,
+    contract,
+    wait_seconds: float,
+    market_data_type: str,
+) -> dict:
+    modes = (
+        AUTO_MARKET_DATA_SEQUENCE
+        if market_data_type == "auto"
+        else (market_data_type,)
+    )
+    best_available = None
+    attempts = []
+    for mode in modes:
+        attempts.append(mode)
+        try:
+            quote = _ticker_values_once(ib, contract, wait_seconds, mode)
+        except Exception as exc:
+            log.debug(
+                "quote_mode_failed contract=%s mode=%s reason=%s",
+                contract, mode, exc,
+            )
+            continue
+        if quote["mid"] is not None:
+            quote["market_data_attempts"] = ",".join(attempts)
+            return quote
+        if best_available is None and (
+            quote["last"] is not None or quote["close"] is not None
+        ):
+            best_available = quote
+
+    if best_available is None:
+        best_available = {
+            "bid": None,
+            "ask": None,
+            "last": None,
+            "close": None,
+            "mid": None,
+            "market_data_type": modes[-1],
+        }
+    best_available["market_data_attempts"] = ",".join(attempts)
+    return best_available
 
 
 def _latest_dated_close(ib, contract) -> Optional[float]:
@@ -519,8 +581,9 @@ def diagnose_instrument(
         )
     assert annualization_days is not None and vol is not None
 
-    quote = _ticker_values(ib, contract, quote_wait_seconds)
-    quote_source = market_data_type.replace("-", "_")
+    quote = _ticker_values(ib, contract, quote_wait_seconds, market_data_type)
+    resolved_market_data_type = quote["market_data_type"]
+    quote_source = resolved_market_data_type.replace("-", "_")
     if quote["mid"] is not None:
         price = quote["mid"]
         price_source = f"{quote_source}_bid_ask_mid"
@@ -577,7 +640,8 @@ def diagnose_instrument(
         ask=quote["ask"],
         price_source=price_source,
         quote_timestamp_utc=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        quote_quality=f"{market_data_type}_snapshot",
+        quote_quality=f"{resolved_market_data_type}_snapshot",
+        vol_reference_price=vol["reference_price"],
     )
     row.update({
         "ib_symbol": instr.get("ib_symbol", symbol),
@@ -587,6 +651,8 @@ def diagnose_instrument(
         "price_magnifier": instr.get("price_magnifier"),
         "mapping_status": instr.get("mapping_status", "local_registry"),
         "ib_availability": "contract_qualified",
+        "quote_market_data_type": resolved_market_data_type,
+        "quote_market_data_attempts": quote["market_data_attempts"],
         "carver_spread_points": instr.get("carver_spread_points"),
     })
     return row
@@ -617,9 +683,9 @@ def parse_args(argv=None):
     parser.add_argument("--quote-wait-seconds", type=float, default=DEFAULT_QUOTE_WAIT_SECONDS)
     parser.add_argument(
         "--market-data-type",
-        choices=list(MARKET_DATA_TYPES),
-        default="delayed",
-        help="IB quote mode (default: delayed, suitable for broad subscription audits)",
+        choices=["auto", *MARKET_DATA_TYPES],
+        default="auto",
+        help="IB quote mode (default: auto tries live, delayed, then delayed-frozen)",
     )
     parser.add_argument("--use-rth", action="store_true",
                         help="Use regular-hours-only volatility bars; default uses the full futures session")
@@ -678,6 +744,7 @@ def _error_row(
             history_start=vol["history_start"],
             history_end=vol["history_end"],
             vol_source="pysystemtrade_roll_neutral",
+            vol_reference_price=vol["reference_price"],
             fast_point_vol=vol["fast_point_vol"],
             slow_point_vol=vol["slow_point_vol"],
             vol_observations=vol["vol_observations"],
@@ -831,7 +898,6 @@ def run(argv=None) -> pl.DataFrame:
     )
     ib = IBPySync()
     ib.connect(args.host, args.port, args.client_id)
-    ib.set_market_data_type(MARKET_DATA_TYPES[args.market_data_type])
     rows = []
     try:
         for instr in instruments:
