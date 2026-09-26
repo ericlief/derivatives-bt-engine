@@ -1059,18 +1059,40 @@ reported as execution-grade.
 
 `futures-cost-risk` is the executable-universe companion to the broad Carver
 research panel. It resolves the dated IBKR contract that would actually be
-traded and reports its current notional, 63-session annualized return
-volatility, daily and annual dollar volatility per contract, configured
+traded and reports its current notional, Carver mixed volatility, daily and
+annual dollar volatility per contract, configured
 commission, live bid/ask width when available, and one-way/round-trip cost as
 a fraction of annual dollar volatility.
 
-The default volatility source is the resolved **dated contract's own** daily
-history (`--vol-source dated`, one year requested). This intentionally avoids
-IB's continuous series, whose adjustment and roll behavior disagrees with the
-repository's Globex construction. `--vol-source continuous` exists only as an
-explicit comparison. The output records the source, history bounds, and the
-most recent volatility window's zero-return fraction so thin micro histories
-remain visible.
+The default volatility source is the full roll-neutral pysystemtrade history.
+The shared core helper calculates the *Advanced Futures Trading* specification:
+an `adjust=True` EWM standard deviation of daily point changes with span 32,
+an `adjust=True` EWM mean of that fast volatility with span `10 × 256`, and
+`mixed_vol = 0.7 × fast_vol + 0.3 × slow_vol`. The output exposes both
+components, their blend, observation count, and effective history years. In
+the current 252-instrument panel every history produces a mixed estimate, but
+93 have fewer than ten years of fast-volatility observations and are labelled
+accordingly rather than treated as fully warmed up.
+
+IB dated (`--vol-source dated`) and continuous (`--vol-source continuous`)
+history remain explicit comparison modes. Continuous is never the default
+because its adjustment and roll behavior disagrees with the repository's
+Globex construction.
+
+The bundled Carver-to-IB registry contains all 584 configured futures mappings
+and covers all 252 usable histories. It retains Carver instrument code,
+`IBSymbol`, exchange, broker currency, broker multiplier, price magnifier, and
+weekly-expiry flag. The packaged file is pinned to upstream pysystemtrade
+commit `b4a25e6e1e33a54a3ecfb45c0f6db5e2b60b84f8`. Candidate mapping does not imply that the connected US
+IBKR account has trading permission or market data: live qualification writes
+that result separately. The effective IB point value
+`IBMultiplier / priceMagnifier` matches imported `point_size` for all 584
+mappings.
+
+Eleven usable histories carry Carver's `IgnoreWeekly` flag. The generic live
+resolver does not guess among their weekly/daily expiries; it retains their
+offline cost/risk rows but marks live qualification unavailable until a
+product-specific expiry filter is supplied.
 
 The spread input is a point-in-time live quote on the actual micro/mini, not
 Carver's full-size static spread coefficient. Missing bid/ask data and zero
@@ -1082,10 +1104,20 @@ micro slippage.
 
 ```bash
 .venv/bin/futures-cost-risk \
-  --instruments MES,MNQ,MCL,MGC,SIL,VXM \
-  --duration '1 Y' \
-  --vol-window 63
+  --instruments all-pysystemtrade \
+  --offline \
+  --vol-source pysystemtrade \
+  --fast-vol-span 32 \
+  --slow-vol-years 10 \
+  --slow-vol-weight 0.30
 ```
+
+`--offline` writes the complete 252-row comparison without connecting to IB.
+Prices and volatility then end at the imported Carver history boundary, live
+spreads remain null, and non-USD conversions use the latest FX observation in
+that database (with `fx_asof` exposed). Omit `--offline` to qualify current IB
+contracts and request current quotes; this is the step that tests real account
+availability.
 
 ## Required tests and safeguards
 

@@ -514,7 +514,7 @@ def _get_vx_future(ib: IBPySync, expiry: str):
 
 
 def get_nearest_quarterly_expiry(ib: IBPySync, symbol: str, exchange: str, min_days: int = 7,
-                                  multiplier: str = '') -> str:
+                                  multiplier: str = '', currency: str = 'USD') -> str:
     """Nearest expiry with at least min_days remaining, as the full
     YYYYMMDD IB already gave us in req_contract_details -- truncating to
     YYYYMM and letting IB re-resolve from the partial month was observed to
@@ -523,7 +523,7 @@ def get_nearest_quarterly_expiry(ib: IBPySync, symbol: str, exchange: str, min_d
     back the untruncated date IB itself returned avoids that re-resolution
     step entirely."""
     from ib_tools.ibpysync import IBPySync
-    c = IBPySync.future(symbol, exchange=exchange, multiplier=multiplier)
+    c = IBPySync.future(symbol, exchange=exchange, multiplier=multiplier, currency=currency)
     details = ib.req_contract_details(c)
     log.debug(
         'req_contract_details(%s, %s) returned %d contract(s): %s',
@@ -2046,13 +2046,37 @@ def _resolve_contract(ib: IBPySync, instr: dict, min_days: int):
     # unconditionally risks breaking already-working contracts if our
     # multiplier's string formatting doesn't exactly match what IB has on
     # file (e.g. "0.5" vs "0.50").
-    multiplier = str(instr.get('multiplier', '') or '') if ib_symbol != instr['symbol'] else ''
+    explicit_broker_multiplier = instr.get('ib_multiplier')
+    broker_multiplier = (
+        explicit_broker_multiplier
+        if explicit_broker_multiplier not in ('', None)
+        else instr.get('multiplier', '')
+    )
+    # A full Carver IB mapping explicitly supplies IB's own contract
+    # multiplier and must always pass it, even when instrument_code happens
+    # to equal IBSymbol.  Legacy local specs retain the narrower old behavior:
+    # only pass our point-value multiplier to disambiguate a divergent symbol
+    # such as SIL -> SI.
+    pass_multiplier = (
+        explicit_broker_multiplier not in ('', None)
+        or ib_symbol != instr['symbol']
+    )
+    multiplier = (
+        f"{float(broker_multiplier):g}"
+        if pass_multiplier and broker_multiplier not in ('', None)
+        else ''
+    )
+    currency = instr.get('ib_currency')
+    if currency is None:
+        currency = 'USD'
     expiry = instr.get('expiry', 'auto')
     if expiry == 'auto':
-        expiry = get_nearest_quarterly_expiry(ib, ib_symbol, instr.get('exchange', 'CME'), min_days,
-                                               multiplier=multiplier)
+        expiry = get_nearest_quarterly_expiry(
+            ib, ib_symbol, instr.get('exchange', 'CME'), min_days,
+            multiplier=multiplier, currency=currency,
+        )
     contract = IBPySync.future(ib_symbol, exchange=instr.get('exchange', 'CME'), expiration=expiry,
-                               multiplier=multiplier)
+                               multiplier=multiplier, currency=currency)
     ib.qualify_contracts(contract)
     return contract
 

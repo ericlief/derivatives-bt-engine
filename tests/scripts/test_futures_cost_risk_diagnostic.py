@@ -1,4 +1,6 @@
 from datetime import date, timedelta
+from types import ModuleType, SimpleNamespace
+import sys
 
 import polars as pl
 import pytest
@@ -8,6 +10,7 @@ from derivatives_bt_engine.data.futures_cost_risk import (
     volatility_from_bars,
 )
 from derivatives_bt_engine.domain.instruments import resolve_active_months
+from derivatives_bt_engine.live.tsmom_rebalance import _resolve_contract
 
 
 def test_vxm_dated_contract_resolution_allows_every_month():
@@ -16,7 +19,50 @@ def test_vxm_dated_contract_resolution_allows_every_month():
     ]
 
 
-def test_volatility_matches_project_fast_window_convention():
+def test_full_carver_mapping_passes_ib_multiplier_and_currency(monkeypatch):
+    calls = []
+
+    class FakeIBPySync:
+        @staticmethod
+        def future(symbol, **kwargs):
+            calls.append((symbol, kwargs))
+            return SimpleNamespace(
+                symbol=symbol,
+                lastTradeDateOrContractMonth=kwargs.get("expiration", ""),
+            )
+
+    fake_module = ModuleType("ib_tools.ibpysync")
+    fake_module.IBPySync = FakeIBPySync
+    monkeypatch.setitem(sys.modules, "ib_tools.ibpysync", fake_module)
+
+    class FakeIB:
+        def req_contract_details(self, contract):
+            return [SimpleNamespace(contract=SimpleNamespace(
+                lastTradeDateOrContractMonth="20261215",
+                localSymbol="BREZ6",
+                tradingClass="BRE",
+                multiplier="100000",
+            ))]
+
+        def qualify_contracts(self, contract):
+            return [contract]
+
+    _resolve_contract(FakeIB(), {
+        "symbol": "BRE",
+        "ib_symbol": "BRE",
+        "exchange": "CME",
+        "ib_currency": "USD",
+        "ib_multiplier": 100000.0,
+        "multiplier": 100000.0,
+        "expiry": "auto",
+    }, min_days=7)
+
+    assert len(calls) == 2
+    assert all(call[1]["multiplier"] == "100000" for call in calls)
+    assert all(call[1]["currency"] == "USD" for call in calls)
+
+
+def test_volatility_uses_carver_fast_slow_point_vol_blend():
     closes = [100.0]
     for i in range(90):
         closes.append(closes[-1] * (1.01 if i % 2 == 0 else 0.995))
@@ -28,16 +74,18 @@ def test_volatility_matches_project_fast_window_convention():
     result = volatility_from_bars(
         bars,
         annualization_days=252,
-        vol_window=20,
+        fast_span=20,
+        slow_years=10,
+        slow_weight=0.3,
     )
 
-    expected_daily = (
-        bars.with_columns(ret=pl.col("close").pct_change())
-        .tail(20)["ret"]
-        .std()
-    )
-    assert result["daily_return_vol"] == pytest.approx(expected_daily)
-    assert result["annual_return_vol"] == pytest.approx(expected_daily * 252**0.5)
+    changes = bars["close"].diff()
+    expected_fast = changes.ewm_std(span=20, adjust=True, min_samples=10)
+    expected_slow = expected_fast.ewm_mean(span=2520, adjust=True, min_samples=1)
+    expected_mixed = expected_fast * 0.7 + expected_slow * 0.3
+    assert result["fast_point_vol"] == pytest.approx(expected_fast[-1])
+    assert result["slow_point_vol"] == pytest.approx(expected_slow[-1])
+    assert result["mixed_point_vol"] == pytest.approx(expected_mixed[-1])
     assert result["history_rows"] == len(closes)
 
 
@@ -50,7 +98,7 @@ def test_cost_row_uses_half_spread_each_way_and_scales_by_dollar_vol():
         current_price=6000.0,
         multiplier=5.0,
         commission_per_side=0.61,
-        annual_return_vol=0.20,
+        mixed_point_vol=6000.0 * 0.20 / 252**0.5,
         annualization_days=252,
         history_rows=260,
         history_start=date(2025, 1, 1),
@@ -79,7 +127,7 @@ def test_missing_bid_ask_is_unknown_not_zero_cost():
         current_price=80.0,
         multiplier=100.0,
         commission_per_side=0.76,
-        annual_return_vol=0.30,
+        mixed_point_vol=80.0 * 0.30 / 259**0.5,
         annualization_days=259,
         history_rows=250,
         history_start=date(2025, 1, 1),
