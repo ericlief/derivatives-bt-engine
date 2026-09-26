@@ -1119,6 +1119,19 @@ that database (with `fx_asof` exposed). Omit `--offline` to qualify current IB
 contracts and request current quotes; this is the step that tests real account
 availability.
 
+For an IB-connected audit, the command defaults to delayed quotes
+(`--market-data-type delayed`) because a broad international universe will
+usually exceed the account's live exchange subscriptions. Use
+`--market-data-type live` only when checking subscribed real-time feeds. IB
+errors 354/10168 indicate quote entitlement, not a failed futures contract
+mapping; error 300 can be follow-on cancellation noise after a rejected quote
+request.
+
+Saved CSV reports round monetary notional, commission, cash-cost, and dollar-
+volatility fields to two decimal places. Other floating-point diagnostics are
+rounded to four decimal places; identifiers and observation counts are left
+unchanged.
+
 ## Required tests and safeguards
 
 - Importer refuses the Globex path as output and never opens source databases

@@ -63,6 +63,24 @@ log = logging.getLogger("derivatives_bt_engine.data.futures_cost_risk")
 DEFAULT_DURATION = "1 Y"
 DEFAULT_MIN_DAYS = 7
 DEFAULT_QUOTE_WAIT_SECONDS = 3.0
+MARKET_DATA_TYPES = {
+    "live": 1,
+    "frozen": 2,
+    "delayed": 3,
+    "delayed-frozen": 4,
+}
+TWO_DECIMAL_MONEY_COLUMNS = {
+    "notional_native_per_contract",
+    "notional_per_contract",
+    "daily_dollar_vol_per_contract",
+    "annual_dollar_vol_per_contract",
+    "commission_per_side",
+    "commission_round_trip",
+    "one_way_spread_cash",
+    "round_trip_spread_cash",
+    "one_way_total_cost",
+    "round_trip_total_cost",
+}
 
 
 def _positive_finite(value) -> Optional[float]:
@@ -212,6 +230,7 @@ def build_cost_risk_row(
     ask: Optional[float] = None,
     price_source: str = "dated_contract",
     quote_timestamp_utc: Optional[str] = None,
+    quote_quality: str = "live_snapshot",
 ) -> dict:
     """Calculate notional, dollar vol, and risk-scaled execution costs.
 
@@ -308,7 +327,7 @@ def build_cost_risk_row(
         "one_way_cost_bps_notional": (
             one_way_total / notional * 10_000.0 if one_way_total is not None else None
         ),
-        "spread_quality": "live_snapshot" if spread_valid else "unknown_no_live_bid_ask",
+        "spread_quality": quote_quality if spread_valid else "unknown_no_bid_ask",
         "quote_timestamp_utc": quote_timestamp_utc,
         "annualization_days": annualization_days,
         "history_rows": history_rows,
@@ -384,6 +403,7 @@ def _history_volatility(
     fast_span: int,
     slow_years: int,
     slow_weight: float,
+    market_data_type: str,
     pysystemtrade_provider: Optional[PysystemtradeHistoryProvider],
     dated_contract=None,
 ) -> tuple[int, dict]:
@@ -500,15 +520,16 @@ def diagnose_instrument(
     assert annualization_days is not None and vol is not None
 
     quote = _ticker_values(ib, contract, quote_wait_seconds)
+    quote_source = market_data_type.replace("-", "_")
     if quote["mid"] is not None:
         price = quote["mid"]
-        price_source = "live_bid_ask_mid"
+        price_source = f"{quote_source}_bid_ask_mid"
     elif quote["last"] is not None:
         price = quote["last"]
-        price_source = "live_last"
+        price_source = f"{quote_source}_last"
     elif quote["close"] is not None:
         price = quote["close"]
-        price_source = "live_previous_close"
+        price_source = f"{quote_source}_previous_close"
     else:
         price = _latest_dated_close(ib, contract)
         price_source = "dated_contract_daily_close"
@@ -556,6 +577,7 @@ def diagnose_instrument(
         ask=quote["ask"],
         price_source=price_source,
         quote_timestamp_utc=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        quote_quality=f"{market_data_type}_snapshot",
     )
     row.update({
         "ib_symbol": instr.get("ib_symbol", symbol),
@@ -593,6 +615,12 @@ def parse_args(argv=None):
     parser.add_argument("--min-days", type=int, default=DEFAULT_MIN_DAYS,
                         help="Minimum days to expiry for resolved traded contract (default: %(default)s)")
     parser.add_argument("--quote-wait-seconds", type=float, default=DEFAULT_QUOTE_WAIT_SECONDS)
+    parser.add_argument(
+        "--market-data-type",
+        choices=list(MARKET_DATA_TYPES),
+        default="delayed",
+        help="IB quote mode (default: delayed, suitable for broad subscription audits)",
+    )
     parser.add_argument("--use-rth", action="store_true",
                         help="Use regular-hours-only volatility bars; default uses the full futures session")
     parser.add_argument("--host", default="127.0.0.1")
@@ -693,7 +721,23 @@ def _load_instruments(spec: str, pysystemtrade_db: Path | str) -> list[dict]:
     return selected
 
 
+def _round_report_decimals(report: pl.DataFrame) -> pl.DataFrame:
+    """Round report floats for human-facing CSV output.
+
+    Monetary contract/cost fields use cents; all other floating-point
+    diagnostics retain four decimal places. Counts and identifiers are not
+    cast or rounded.
+    """
+    expressions = []
+    for name, dtype in report.schema.items():
+        if dtype in (pl.Float32, pl.Float64):
+            decimals = 2 if name in TWO_DECIMAL_MONEY_COLUMNS else 4
+            expressions.append(pl.col(name).round(decimals))
+    return report.with_columns(expressions)
+
+
 def _emit_report(report: pl.DataFrame, args) -> pl.DataFrame:
+    output_report = _round_report_decimals(report)
     summary_columns = [
         "symbol",
         "ib_symbol",
@@ -707,16 +751,18 @@ def _emit_report(report: pl.DataFrame, args) -> pl.DataFrame:
         "ib_availability",
         "error",
     ]
-    print(report.select(column for column in summary_columns if column in report.columns))
-    print(f"Report rows={report.height} columns={report.width}")
+    print(output_report.select(
+        column for column in summary_columns if column in output_report.columns
+    ))
+    print(f"Report rows={output_report.height} columns={output_report.width}")
     if not args.no_save:
         output = args.output
         if output is None:
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             output = Path(__file__).resolve().parents[3] / "results" / f"futures_cost_risk_{stamp}.csv"
         output.parent.mkdir(parents=True, exist_ok=True)
-        report.write_csv(output)
-        log.info("futures_cost_risk complete output=%s rows=%d", output, report.height)
+        output_report.write_csv(output)
+        log.info("futures_cost_risk complete output=%s rows=%d", output, output_report.height)
         print(f"Saved {output}")
     return report
 
@@ -753,7 +799,7 @@ def run(argv=None) -> pl.DataFrame:
                     fx_by_currency=fx_by_currency,
                 )
                 row["ib_availability"] = "not_checked_offline"
-                row["spread_quality"] = "unknown_no_live_bid_ask"
+                row["spread_quality"] = "unknown_no_bid_ask"
                 row["error"] = None
                 rows.append(row)
             except Exception as exc:
@@ -773,12 +819,14 @@ def run(argv=None) -> pl.DataFrame:
 
     log.info(
         "futures_cost_risk start instruments=%d duration=%s fast_vol_span=%d "
-        "slow_vol_years=%d slow_vol_weight=%.3f vol_source=%s use_rth=%s",
+        "slow_vol_years=%d slow_vol_weight=%.3f vol_source=%s "
+        "market_data_type=%s use_rth=%s",
         len(instruments), args.duration, args.fast_vol_span, args.slow_vol_years,
-        args.slow_vol_weight, args.vol_source, args.use_rth,
+        args.slow_vol_weight, args.vol_source, args.market_data_type, args.use_rth,
     )
     ib = IBPySync()
     ib.connect(args.host, args.port, args.client_id)
+    ib.set_market_data_type(MARKET_DATA_TYPES[args.market_data_type])
     rows = []
     try:
         for instr in instruments:
@@ -795,6 +843,7 @@ def run(argv=None) -> pl.DataFrame:
                     fast_span=args.fast_vol_span,
                     slow_years=args.slow_vol_years,
                     slow_weight=args.slow_vol_weight,
+                    market_data_type=args.market_data_type,
                     pysystemtrade_provider=pysystemtrade_provider,
                     fx_by_currency=fx_by_currency,
                 )

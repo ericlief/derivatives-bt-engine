@@ -2038,6 +2038,23 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
     return targets
 
 
+def _format_ib_multiplier(value) -> str:
+    """Format an IB multiplier without scientific notation.
+
+    IB contract lookup treats ``multiplier`` as an identity string.  Python's
+    general format switches large FX-future multipliers such as 12,500,000 to
+    ``1.25e+07``, which IB does not match.  This follows pysystemtrade's
+    resolver: integral values are emitted as ordinary integer strings while
+    fractional values retain their decimal representation.
+    """
+    number = float(value)
+    if not math.isfinite(number) or number <= 0:
+        raise ValueError(f"IB multiplier must be positive and finite, got {value!r}")
+    if number.is_integer():
+        return str(int(number))
+    return format(number, "f").rstrip("0").rstrip(".")
+
+
 def _resolve_contract(ib: IBPySync, instr: dict, min_days: int):
     from ib_tools.ibpysync import IBPySync
     ib_symbol = instr.get('ib_symbol') or instr['symbol']
@@ -2062,7 +2079,7 @@ def _resolve_contract(ib: IBPySync, instr: dict, min_days: int):
         or ib_symbol != instr['symbol']
     )
     multiplier = (
-        f"{float(broker_multiplier):g}"
+        _format_ib_multiplier(broker_multiplier)
         if pass_multiplier and broker_multiplier not in ('', None)
         else ''
     )

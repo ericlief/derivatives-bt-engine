@@ -6,11 +6,15 @@ import polars as pl
 import pytest
 
 from derivatives_bt_engine.data.futures_cost_risk import (
+    _round_report_decimals,
     build_cost_risk_row,
     volatility_from_bars,
 )
 from derivatives_bt_engine.domain.instruments import resolve_active_months
-from derivatives_bt_engine.live.tsmom_rebalance import _resolve_contract
+from derivatives_bt_engine.live.tsmom_rebalance import (
+    _format_ib_multiplier,
+    _resolve_contract,
+)
 
 
 def test_vxm_dated_contract_resolution_allows_every_month():
@@ -19,7 +23,41 @@ def test_vxm_dated_contract_resolution_allows_every_month():
     ]
 
 
-def test_full_carver_mapping_passes_ib_multiplier_and_currency(monkeypatch):
+def test_report_rounds_money_to_two_decimals_and_other_floats_to_four():
+    report = pl.DataFrame({
+        "notional_per_contract": [12345.6789],
+        "commission_round_trip": [2.3456],
+        "price": [1.234567],
+        "fx_to_usd": [0.00660449],
+        "annual_return_vol": [0.123456],
+        "history_rows": [100],
+    })
+
+    rounded = _round_report_decimals(report)
+
+    assert rounded["notional_per_contract"][0] == pytest.approx(12345.68)
+    assert rounded["commission_round_trip"][0] == pytest.approx(2.35)
+    assert rounded["price"][0] == pytest.approx(1.2346)
+    assert rounded["fx_to_usd"][0] == pytest.approx(0.0066)
+    assert rounded["annual_return_vol"][0] == pytest.approx(0.1235)
+    assert rounded["history_rows"][0] == 100
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (12_500_000.0, "12500000"),
+        (6_250_000.0, "6250000"),
+        (50_000_000.0, "50000000"),
+        (12.5, "12.5"),
+        (0.01, "0.01"),
+    ],
+)
+def test_ib_multiplier_never_uses_scientific_notation(value, expected):
+    assert _format_ib_multiplier(value) == expected
+
+
+def test_full_carver_mapping_passes_large_ib_multiplier_and_currency(monkeypatch):
     calls = []
 
     class FakeIBPySync:
@@ -39,27 +77,27 @@ def test_full_carver_mapping_passes_ib_multiplier_and_currency(monkeypatch):
         def req_contract_details(self, contract):
             return [SimpleNamespace(contract=SimpleNamespace(
                 lastTradeDateOrContractMonth="20261215",
-                localSymbol="BREZ6",
-                tradingClass="BRE",
-                multiplier="100000",
+                localSymbol="6JZ6",
+                tradingClass="6J",
+                multiplier="12500000",
             ))]
 
         def qualify_contracts(self, contract):
             return [contract]
 
     _resolve_contract(FakeIB(), {
-        "symbol": "BRE",
-        "ib_symbol": "BRE",
+        "symbol": "JPY",
+        "ib_symbol": "JPY",
         "exchange": "CME",
-        "ib_currency": "USD",
-        "ib_multiplier": 100000.0,
-        "multiplier": 100000.0,
+        "ib_currency": "",
+        "ib_multiplier": 12_500_000.0,
+        "multiplier": 12_500_000.0,
         "expiry": "auto",
     }, min_days=7)
 
     assert len(calls) == 2
-    assert all(call[1]["multiplier"] == "100000" for call in calls)
-    assert all(call[1]["currency"] == "USD" for call in calls)
+    assert all(call[1]["multiplier"] == "12500000" for call in calls)
+    assert all(call[1]["currency"] == "" for call in calls)
 
 
 def test_volatility_uses_carver_fast_slow_point_vol_blend():
@@ -105,6 +143,7 @@ def test_cost_row_uses_half_spread_each_way_and_scales_by_dollar_vol():
         history_end=date(2025, 12, 31),
         bid=5999.75,
         ask=6000.00,
+        quote_quality="delayed_snapshot",
     )
 
     assert row["notional_per_contract"] == pytest.approx(30_000.0)
@@ -115,7 +154,7 @@ def test_cost_row_uses_half_spread_each_way_and_scales_by_dollar_vol():
     assert row["one_way_total_cost"] == pytest.approx(1.235)
     assert row["round_trip_total_cost"] == pytest.approx(2.47)
     assert row["round_trip_cost_per_annual_dollar_vol"] == pytest.approx(2.47 / 6000.0)
-    assert row["spread_quality"] == "live_snapshot"
+    assert row["spread_quality"] == "delayed_snapshot"
 
 
 def test_missing_bid_ask_is_unknown_not_zero_cost():
@@ -138,4 +177,4 @@ def test_missing_bid_ask_is_unknown_not_zero_cost():
     assert row["full_spread_points"] is None
     assert row["round_trip_total_cost"] is None
     assert row["round_trip_cost_per_annual_dollar_vol"] is None
-    assert row["spread_quality"] == "unknown_no_live_bid_ask"
+    assert row["spread_quality"] == "unknown_no_bid_ask"
