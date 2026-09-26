@@ -403,7 +403,6 @@ def _history_volatility(
     fast_span: int,
     slow_years: int,
     slow_weight: float,
-    market_data_type: str,
     pysystemtrade_provider: Optional[PysystemtradeHistoryProvider],
     dated_contract=None,
 ) -> tuple[int, dict]:
@@ -467,6 +466,7 @@ def diagnose_instrument(
     fast_span: int,
     slow_years: int,
     slow_weight: float,
+    market_data_type: str,
     pysystemtrade_provider: Optional[PysystemtradeHistoryProvider],
     fx_by_currency: dict[str, dict],
 ) -> dict:

@@ -1,4 +1,5 @@
 from datetime import date, timedelta
+import inspect
 from types import ModuleType, SimpleNamespace
 import sys
 
@@ -6,8 +7,10 @@ import polars as pl
 import pytest
 
 from derivatives_bt_engine.data.futures_cost_risk import (
+    _history_volatility,
     _round_report_decimals,
     build_cost_risk_row,
+    diagnose_instrument,
     volatility_from_bars,
 )
 from derivatives_bt_engine.domain.instruments import resolve_active_months
@@ -21,6 +24,14 @@ def test_vxm_dated_contract_resolution_allows_every_month():
     assert resolve_active_months("VXM") == [
         "F", "G", "H", "J", "K", "M", "N", "Q", "U", "V", "X", "Z",
     ]
+
+
+def test_market_data_type_belongs_to_diagnostic_not_history_loader():
+    diagnostic_parameters = inspect.signature(diagnose_instrument).parameters
+    history_parameters = inspect.signature(_history_volatility).parameters
+
+    assert "market_data_type" in diagnostic_parameters
+    assert "market_data_type" not in history_parameters
 
 
 def test_report_rounds_money_to_two_decimals_and_other_floats_to_four():
