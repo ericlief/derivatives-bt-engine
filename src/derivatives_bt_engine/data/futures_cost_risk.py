@@ -737,6 +737,11 @@ def _round_report_decimals(report: pl.DataFrame) -> pl.DataFrame:
 
 
 def _emit_report(report: pl.DataFrame, args) -> pl.DataFrame:
+    report = report.with_columns(
+        pl.lit(datetime.now(timezone.utc).isoformat(timespec="seconds")).alias(
+            "report_generated_at_utc"
+        )
+    )
     output_report = _round_report_decimals(report)
     summary_columns = [
         "symbol",

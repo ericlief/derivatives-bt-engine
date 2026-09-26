@@ -1,3 +1,4 @@
+from argparse import Namespace
 from datetime import date, timedelta
 import inspect
 from types import ModuleType, SimpleNamespace
@@ -7,6 +8,7 @@ import polars as pl
 import pytest
 
 from derivatives_bt_engine.data.futures_cost_risk import (
+    _emit_report,
     _history_volatility,
     _round_report_decimals,
     build_cost_risk_row,
@@ -52,6 +54,19 @@ def test_report_rounds_money_to_two_decimals_and_other_floats_to_four():
     assert rounded["fx_to_usd"][0] == pytest.approx(0.0066)
     assert rounded["annual_return_vol"][0] == pytest.approx(0.1235)
     assert rounded["history_rows"][0] == 100
+
+
+def test_emitted_report_includes_generation_timestamp(capsys):
+    emitted = _emit_report(
+        pl.DataFrame({"symbol": ["JPY"], "price": [0.0067]}),
+        Namespace(no_save=True),
+    )
+
+    assert "report_generated_at_utc" in emitted.columns
+    timestamp = emitted["report_generated_at_utc"][0]
+    assert timestamp.endswith("+00:00")
+    assert "T" in timestamp
+    capsys.readouterr()
 
 
 @pytest.mark.parametrize(
