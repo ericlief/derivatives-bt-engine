@@ -36,6 +36,7 @@ def test_market_data_type_belongs_to_diagnostic_not_history_loader():
 
     assert "market_data_type" in diagnostic_parameters
     assert "market_data_type" not in history_parameters
+    assert "contract_details_timeout" in diagnostic_parameters
 
 
 def test_broad_audit_defaults_to_automatic_quote_fallback():

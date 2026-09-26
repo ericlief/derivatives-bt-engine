@@ -1130,8 +1130,11 @@ stops at the first valid bid/ask. The CSV records both the successful mode and
 the attempted sequence. Explicit `live`, `delayed`, and `delayed-frozen`
 settings disable fallback. IB errors 354/10168 indicate quote entitlement,
 not a failed futures contract
-mapping; error 300 can be follow-on cancellation noise after a rejected quote
-request.
+mapping. Rejected requests are recorded in `quote_error_codes` and cleaned up
+locally without a redundant cancellation request. Contract-definition lookups
+are bounded to eight seconds by default (`--contract-details-timeout`) so a
+stale mapping cannot stall the broad-universe audit for the wrapper's normal
+30-second request timeout.
 
 Saved CSV reports round monetary notional, commission, cash-cost, and dollar-
 volatility fields to two decimal places. Other floating-point diagnostics are

@@ -63,6 +63,7 @@ log = logging.getLogger("derivatives_bt_engine.data.futures_cost_risk")
 DEFAULT_DURATION = "1 Y"
 DEFAULT_MIN_DAYS = 7
 DEFAULT_QUOTE_WAIT_SECONDS = 3.0
+DEFAULT_CONTRACT_DETAILS_TIMEOUT = 8.0
 MARKET_DATA_TYPES = {
     "live": 1,
     "frozen": 2,
@@ -349,30 +350,54 @@ def build_cost_risk_row(
 
 def _ticker_values_once(ib, contract, wait_seconds: float, mode: str) -> dict:
     ib.set_market_data_type(MARKET_DATA_TYPES[mode])
-    ticker = ib.req_mkt_data(contract, generic_ticks="")
+    rejected_codes = []
+    error_handler = None
+    if hasattr(ib, "ib") and hasattr(ib.ib, "errorEvent"):
+        target_con_id = getattr(contract, "conId", None)
+
+        def error_handler(req_id, error_code, error_string, error_contract):
+            error_con_id = getattr(error_contract, "conId", None)
+            if target_con_id in (None, 0) or error_con_id == target_con_id:
+                if error_code in (200, 354, 10168):
+                    rejected_codes.append(error_code)
+
+        ib.ib.errorEvent += error_handler
+
+    ticker = None
     try:
+        ticker = ib.req_mkt_data(contract, generic_ticks="")
         ib.sleep(wait_seconds)
         bid = _positive_finite(getattr(ticker, "bid", None))
         ask = _positive_finite(getattr(ticker, "ask", None))
         last = _positive_finite(getattr(ticker, "last", None))
         close = _positive_finite(getattr(ticker, "close", None))
         mid = (bid + ask) / 2.0 if bid is not None and ask is not None and ask >= bid else None
-        return {
-            "bid": bid,
-            "ask": ask,
-            "last": last,
-            "close": close,
-            "mid": mid,
-            "market_data_type": mode,
-        }
     finally:
-        try:
-            ib.cancel_mkt_data(contract)
-        except Exception as exc:
-            log.debug(
-                "quote_cancel_failed contract=%s mode=%s reason=%s",
-                contract, mode, exc,
-            )
+        if error_handler is not None:
+            ib.ib.errorEvent -= error_handler
+        if ticker is not None:
+            try:
+                if rejected_codes and hasattr(ib, "_call"):
+                    # IB already ended rejected requests. Remove ib_insync's
+                    # local ticker registration without sending a redundant
+                    # cancel that produces Error 300.
+                    ib._call(ib.ib.wrapper.endTicker, ticker, "mktData")
+                else:
+                    ib.cancel_mkt_data(contract)
+            except Exception as exc:
+                log.debug(
+                    "quote_cancel_failed contract=%s mode=%s reason=%s",
+                    contract, mode, exc,
+                )
+    return {
+        "bid": bid,
+        "ask": ask,
+        "last": last,
+        "close": close,
+        "mid": mid,
+        "market_data_type": mode,
+        "error_codes": rejected_codes,
+    }
 
 
 def _ticker_values(
@@ -388,6 +413,7 @@ def _ticker_values(
     )
     best_available = None
     attempts = []
+    error_codes = []
     for mode in modes:
         attempts.append(mode)
         try:
@@ -398,8 +424,10 @@ def _ticker_values(
                 contract, mode, exc,
             )
             continue
+        error_codes.extend(quote["error_codes"])
         if quote["mid"] is not None:
             quote["market_data_attempts"] = ",".join(attempts)
+            quote["error_codes"] = sorted(set(error_codes))
             return quote
         if best_available is None and (
             quote["last"] is not None or quote["close"] is not None
@@ -416,6 +444,7 @@ def _ticker_values(
             "market_data_type": modes[-1],
         }
     best_available["market_data_attempts"] = ",".join(attempts)
+    best_available["error_codes"] = sorted(set(error_codes))
     return best_available
 
 
@@ -522,6 +551,7 @@ def diagnose_instrument(
     *,
     duration: str,
     min_days: int,
+    contract_details_timeout: float,
     quote_wait_seconds: float,
     use_rth: bool,
     vol_source: str,
@@ -565,7 +595,12 @@ def diagnose_instrument(
             f"{symbol}: IB mapping requires specialised weekly/daily expiry filtering; "
             "candidate mapping retained but live contract selection skipped"
         )
-    contract = _resolve_contract(ib, instr, min_days)
+    contract = _resolve_contract(
+        ib,
+        instr,
+        min_days,
+        contract_details_timeout=contract_details_timeout,
+    )
     if vol_source == "dated":
         annualization_days, vol = _history_volatility(
             ib,
@@ -653,6 +688,7 @@ def diagnose_instrument(
         "ib_availability": "contract_qualified",
         "quote_market_data_type": resolved_market_data_type,
         "quote_market_data_attempts": quote["market_data_attempts"],
+        "quote_error_codes": ",".join(str(code) for code in quote["error_codes"]),
         "carver_spread_points": instr.get("carver_spread_points"),
     })
     return row
@@ -680,6 +716,12 @@ def parse_args(argv=None):
     parser.add_argument("--pysystemtrade-db", type=Path, default=DEFAULT_PYSYSTEMTRADE_DB_PATH)
     parser.add_argument("--min-days", type=int, default=DEFAULT_MIN_DAYS,
                         help="Minimum days to expiry for resolved traded contract (default: %(default)s)")
+    parser.add_argument(
+        "--contract-details-timeout",
+        type=float,
+        default=DEFAULT_CONTRACT_DETAILS_TIMEOUT,
+        help="Seconds allowed for each broad-universe IB contract lookup (default: %(default)s)",
+    )
     parser.add_argument("--quote-wait-seconds", type=float, default=DEFAULT_QUOTE_WAIT_SECONDS)
     parser.add_argument(
         "--market-data-type",
@@ -908,6 +950,7 @@ def run(argv=None) -> pl.DataFrame:
                     instr,
                     duration=args.duration,
                     min_days=args.min_days,
+                    contract_details_timeout=args.contract_details_timeout,
                     quote_wait_seconds=args.quote_wait_seconds,
                     use_rth=args.use_rth,
                     vol_source=args.vol_source,

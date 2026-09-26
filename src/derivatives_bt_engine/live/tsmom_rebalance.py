@@ -514,7 +514,8 @@ def _get_vx_future(ib: IBPySync, expiry: str):
 
 
 def get_nearest_quarterly_expiry(ib: IBPySync, symbol: str, exchange: str, min_days: int = 7,
-                                  multiplier: str = '', currency: str = 'USD') -> str:
+                                  multiplier: str = '', currency: str = 'USD',
+                                  request_timeout: Optional[float] = None) -> str:
     """Nearest expiry with at least min_days remaining, as the full
     YYYYMMDD IB already gave us in req_contract_details -- truncating to
     YYYYMM and letting IB re-resolve from the partial month was observed to
@@ -524,7 +525,14 @@ def get_nearest_quarterly_expiry(ib: IBPySync, symbol: str, exchange: str, min_d
     step entirely."""
     from ib_tools.ibpysync import IBPySync
     c = IBPySync.future(symbol, exchange=exchange, multiplier=multiplier, currency=currency)
-    details = ib.req_contract_details(c)
+    if request_timeout is not None and hasattr(ib, '_run') and hasattr(ib, 'ib'):
+        details = ib._run(
+            ib.ib.reqContractDetailsAsync,
+            c,
+            timeout=request_timeout,
+        )
+    else:
+        details = ib.req_contract_details(c)
     log.debug(
         'req_contract_details(%s, %s) returned %d contract(s): %s',
         symbol, exchange, len(details),
@@ -2055,7 +2063,12 @@ def _format_ib_multiplier(value) -> str:
     return format(number, "f").rstrip("0").rstrip(".")
 
 
-def _resolve_contract(ib: IBPySync, instr: dict, min_days: int):
+def _resolve_contract(
+    ib: IBPySync,
+    instr: dict,
+    min_days: int,
+    contract_details_timeout: Optional[float] = None,
+):
     from ib_tools.ibpysync import IBPySync
     ib_symbol = instr.get('ib_symbol') or instr['symbol']
     # Only pass multiplier when ib_symbol diverges from our local symbol
@@ -2091,6 +2104,7 @@ def _resolve_contract(ib: IBPySync, instr: dict, min_days: int):
         expiry = get_nearest_quarterly_expiry(
             ib, ib_symbol, instr.get('exchange', 'CME'), min_days,
             multiplier=multiplier, currency=currency,
+            request_timeout=contract_details_timeout,
         )
     contract = IBPySync.future(ib_symbol, exchange=instr.get('exchange', 'CME'), expiration=expiry,
                                multiplier=multiplier, currency=currency)
