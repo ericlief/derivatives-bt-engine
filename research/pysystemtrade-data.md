@@ -1055,6 +1055,38 @@ forecast observation identifies its two contracts and annualization interval.
 Exit criterion: no unverified Carver instrument can enter live routing or be
 reported as execution-grade.
 
+### Executable-contract cost and granularity diagnostic
+
+`futures-cost-risk` is the executable-universe companion to the broad Carver
+research panel. It resolves the dated IBKR contract that would actually be
+traded and reports its current notional, 63-session annualized return
+volatility, daily and annual dollar volatility per contract, configured
+commission, live bid/ask width when available, and one-way/round-trip cost as
+a fraction of annual dollar volatility.
+
+The default volatility source is the resolved **dated contract's own** daily
+history (`--vol-source dated`, one year requested). This intentionally avoids
+IB's continuous series, whose adjustment and roll behavior disagrees with the
+repository's Globex construction. `--vol-source continuous` exists only as an
+explicit comparison. The output records the source, history bounds, and the
+most recent volatility window's zero-return fraction so thin micro histories
+remain visible.
+
+The spread input is a point-in-time live quote on the actual micro/mini, not
+Carver's full-size static spread coefficient. Missing bid/ask data and zero
+Carver micro coefficients are treated as **unknown**, never as free execution;
+spread-dependent total costs remain null. A live snapshot is useful for
+current granularity screening but is not a historical slippage estimate.
+Repeated snapshots or realized fills are still required to calibrate robust
+micro slippage.
+
+```bash
+.venv/bin/futures-cost-risk \
+  --instruments MES,MNQ,MCL,MGC,SIL,VXM \
+  --duration '1 Y' \
+  --vol-window 63
+```
+
 ## Required tests and safeguards
 
 - Importer refuses the Globex path as output and never opens source databases
