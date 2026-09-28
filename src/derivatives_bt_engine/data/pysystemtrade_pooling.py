@@ -581,6 +581,7 @@ def write_pysystemtrade_pooling_audit(
 
     included = classifications.filter(pl.col("include_default"))
     excluded = classifications.filter(~pl.col("include_default"))
+    representatives = classifications.filter(pl.col("pooling_role") == "primary")
     roles = (
         classifications.group_by("pooling_role")
         .agg(pl.len().alias("instruments"))
@@ -611,6 +612,14 @@ source unless a reviewed source-quality reason says otherwise.
 
 {_markdown_table(roles, ['pooling_role', 'instruments'])}
 
+## Selected representatives for size variants
+
+This is the affirmative selection table. Carver's legacy instrument-code
+suffixes are not reliable product-size labels, so the broker symbol and
+effective point value are shown explicitly.
+
+{_markdown_table(representatives, ['duplicate_group_id', 'instrument_code', 'description', 'ib_symbol', 'ib_effective_point_value', 'price_days', 'decision_basis'])}
+
 ## Excluded from the default normalization pool
 
 {_markdown_table(excluded, ['instrument_code', 'economic_family_id', 'roll_policy_id', 'pooling_role', 'representative_instrument', 'decision_basis'])}
@@ -635,6 +644,11 @@ history starts, and the reviewed decision for every first-pass candidate.
   but Carver's stored EOD marks diverge materially. The full contract is the
   sole normalization representative; the micro remains available for execution
   and source-quality analysis.
+- `RUSSELL_mini` is the larger IB `RTY` E-mini (50 dollars per point), while
+  `RUSSELL` is the smaller IB `M2K` Micro E-mini (5 dollars per point). Likewise,
+  `DOW_mini` is IB `YM`, while `DOW` is the smaller IB `MYM`. The selected table
+  uses broker identity and effective point value to make these legacy-name
+  inversions explicit.
 - A long backfilled mini/micro history is research coverage, not evidence that
   the small contract itself traded throughout that period.
 """

@@ -7,6 +7,7 @@ from derivatives_bt_engine.data.pysystemtrade_pooling import (
     discover_pysystemtrade_duplicate_candidates,
     load_pysystemtrade_pooling_mapping,
     pooling_mapping_fingerprint,
+    write_pysystemtrade_pooling_audit,
 )
 
 
@@ -148,3 +149,47 @@ def test_candidate_discovery_uses_symbol_description_broker_and_review_map():
     )
     assert "normalized_symbol" in pair["candidate_reasons"]
     assert "reviewed_economic_family" in pair["candidate_reasons"]
+
+
+def test_report_shows_affirmative_representative_with_broker_identity(tmp_path):
+    classifications = pl.DataFrame(
+        [
+            {
+                "instrument_code": "FULL",
+                "description": "Full contract",
+                "ib_symbol": "NQ",
+                "ib_effective_point_value": 20.0,
+                "price_days": 101,
+                "duplicate_group_id": "TEST_SIZE_VARIANTS",
+                "economic_family_id": "TEST",
+                "roll_policy_id": "TEST_QUARTERLY",
+                "pooling_role": "primary",
+                "representative_instrument": "FULL",
+                "include_default": True,
+                "decision_basis": "longer_daily_history",
+                "pooling_mapping_hash": "testhash",
+            },
+            {
+                "instrument_code": "MICRO",
+                "description": "Micro contract",
+                "ib_symbol": "MNQ",
+                "ib_effective_point_value": 2.0,
+                "price_days": 100,
+                "duplicate_group_id": "TEST_SIZE_VARIANTS",
+                "economic_family_id": "TEST",
+                "roll_policy_id": "TEST_QUARTERLY",
+                "pooling_role": "execution_duplicate",
+                "representative_instrument": "FULL",
+                "include_default": False,
+                "decision_basis": "same_contract_policy_history",
+                "pooling_mapping_hash": "testhash",
+            },
+        ]
+    )
+
+    write_pysystemtrade_pooling_audit(tmp_path, classifications, pl.DataFrame())
+
+    report = (tmp_path / "report.md").read_text()
+    assert "## Selected representatives for size variants" in report
+    assert "| TEST_SIZE_VARIANTS | FULL | Full contract | NQ | 20.0 | 101 |" in report
+    assert "| MICRO | TEST | TEST_QUARTERLY | execution_duplicate | FULL |" in report

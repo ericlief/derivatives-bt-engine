@@ -30,6 +30,35 @@ source unless a reviewed source-quality reason says otherwise.
 | primary | 20 |
 | singleton | 157 |
 
+## Selected representatives for size variants
+
+This is the affirmative selection table. Carver's legacy instrument-code
+suffixes are not reliable product-size labels, so the broker symbol and
+effective point value are shown explicitly.
+
+| duplicate_group_id | instrument_code | description | ib_symbol | ib_effective_point_value | price_days | decision_basis |
+| --- | --- | --- | --- | --- | --- | --- |
+| AEX_SIZE_VARIANTS | AEX_mini | AEX mini | EOE | 20.0 | 3766 | longer_daily_history |
+| AUDUSD_SIZE_VARIANTS | AUD_micro | AUDUSD micro | M6A | 10000.0 | 9380 | longer_daily_history |
+| CADUSD_SIZE_VARIANTS | CAD | CADUSD currency | CAD | 100000.0 | 13096 | longer_daily_history |
+| CHFUSD_SIZE_VARIANTS | CHF | CHFUSD currency | CHF | 125000.0 | 13092 | equal_history_prefer_established_contract |
+| DOW30_SIZE_VARIANTS | DOW_mini | Mini Sized Dow Jones Industrial Average $5 | YM | 5.0 | 5575 | equal_history_prefer_established_contract |
+| ETHER_SIZE_VARIANTS | ETHEREUM | CME CF Ether-Dollar Reference Rate | ETHUSDRR | 50.0 | 809 | prefer_established_contract_source |
+| EURUSD_SIZE_VARIANTS | EUR_mini | EURUSD mini | E7 | 62500.0 | 6286 | longer_daily_history |
+| GAS_NYMEX_SIZE_VARIANTS | GAS_US_mini | Natural gas US mini | QG | 2500.0 | 8532 | longer_daily_history |
+| GBPUSD_SIZE_VARIANTS | GBP_micro | GBPUSD_micro | M6B | 6250.0 | 12284 | longer_daily_history |
+| GOLD_SIZE_VARIANTS | GOLD-mini | Gold mini | QO | 50.0 | 12379 | longer_daily_history |
+| HANG_SIZE_VARIANTS | HANG | Hong Kong equity index Hang Seng | HSI | 50.0 | 9322 | longer_daily_history |
+| IBEX_SIZE_VARIANTS | IBEX | Spanish equity index IBEX | IBEX35 | 10.0 | 7964 | equal_history_prefer_established_contract |
+| JGB_OSE_SIZE_VARIANTS | JGB-mini | Mini 10 Year JGB | MJ | 100000.0 | 5551 | longer_daily_history |
+| JPYUSD_SIZE_VARIANTS | JPY_mini | JPYUSD mini | J7 | 6250000.0 | 11926 | longer_daily_history |
+| NASDAQ_SIZE_VARIANTS | NASDAQ | US equity index Nasdaq | NQ | 20.0 | 6186 | longer_daily_history |
+| RUSSELL_SIZE_VARIANTS | RUSSELL_mini | E-Mini Russell 2000 Index | RTY | 50.0 | 2326 | equal_history_prefer_established_contract |
+| USDSGD_SIZE_VARIANTS | SGD_mini | SGX US Dollar in Singapore Dollar (Mini) Futures | US | 25000.0 | 938 | longer_daily_history |
+| SP500_SIZE_VARIANTS | SP500 | US equity index S&P500 | ES | 50.0 | 10559 | equal_history_prefer_established_contract |
+| TWDUSD_SIZE_VARIANTS | TWD | SGX Taiwan Dollar in US Dollar Futures (Full-Sized) | TWD | 3000.0 | 571 | longer_daily_history |
+| VIX_SIZE_VARIANTS | VIX_mini | Vol US equity VIX mini | VXM | 100.0 | 4654 | longer_daily_history |
+
 ## Excluded from the default normalization pool
 
 | instrument_code | economic_family_id | roll_policy_id | pooling_role | representative_instrument | decision_basis |
@@ -79,5 +108,10 @@ history starts, and the reviewed decision for every first-pass candidate.
   but Carver's stored EOD marks diverge materially. The full contract is the
   sole normalization representative; the micro remains available for execution
   and source-quality analysis.
+- `RUSSELL_mini` is the larger IB `RTY` E-mini (50 dollars per point), while
+  `RUSSELL` is the smaller IB `M2K` Micro E-mini (5 dollars per point). Likewise,
+  `DOW_mini` is IB `YM`, while `DOW` is the smaller IB `MYM`. The selected table
+  uses broker identity and effective point value to make these legacy-name
+  inversions explicit.
 - A long backfilled mini/micro history is research coverage, not evidence that
   the small contract itself traded throughout that period.
