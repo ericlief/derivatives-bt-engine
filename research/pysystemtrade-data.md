@@ -848,7 +848,7 @@ The scalar is now estimated causally by default. For each date and speed pair,
 the configured pool takes the cross-sectional median absolute raw forecast;
 the scalar is `10 / expanding_mean(prior daily medians)`, shifted so date `t`
 uses dates strictly before `t`, with no future backfill. The default
-`ewmac_scalar_universe=pysystemtrade` makes `global` pool the reviewed 229 of
+`ewmac_scalar_universe=pysystemtrade` makes `global` pool the reviewed 228 of
 252 source histories while trading only the requested symbols. The explicit
 `backtest` universe limits normalization to configured symbols and is required
 for `cluster` (`instruments.py` clusters) or `instrument` (each individual
@@ -881,12 +881,21 @@ calendar days, and both configured hold/priced cycles, roll offsets, carry
 offsets, and expiry offsets. The metrics support review; they do not silently
 delete a series.
 
-The first reviewed pass contains 157 singletons, 19 selected representatives,
-21 excluded execution duplicates, 19 retained distinct roll policies, 32
-retained distinct contracts, two retained review-required Ether histories,
-and two excluded mixed-regime WTI histories. Thus 23 rows are omitted from
-normalization and 229 remain. Execution variants are still present in the
-cost/risk universe.
+The corrected reviewed pass contains 157 singletons, 20 selected
+representatives, 22 excluded execution duplicates, 19 retained distinct roll
+policies, 32 retained distinct contracts, and two excluded mixed-regime WTI
+histories. Thus 24 rows are omitted from normalization and 228 remain.
+Execution variants are still present in the cost/risk universe.
+
+Representative coverage is measured only after session normalization and EOD
+selection, using canonical daily price/usable-return counts and valid start/end
+dates. Raw `multiple_rows` and `adjusted_rows` are mixed-frequency source-row
+counts and are prohibited as representative tie-breaks. Exact daily ties prefer
+the established full-sized contract source unless a reviewed source-quality
+reason is documented. This correction selects `CAD`, `IBEX`, and `NASDAQ`
+instead of variants that had only won on raw intraday row counts; `JGB-mini`
+wins on seven additional usable daily returns. `CHF`, `DOW_mini`,
+`RUSSELL_mini`, and `SP500` remain established-source tie-breaks.
 
 This distinction matters. SP500/SP500_micro have essentially identical
 returns and contract paths and should not count twice. CORN/CORN_mini,
@@ -896,6 +905,17 @@ default retains the consistent `CRUDE_W` December history and `CRUDE_ICE`
 monthly-front history. `CRUDE_W_mini` and `CRUDE_W_micro` are omitted because
 their single stored histories change from the old winter proxy to a monthly
 policy in 2015; they remain available for execution-cost comparison.
+
+`ETHER-micro` and `ETHEREUM` use the same configured hold/priced cycles,
+offsets, and carry relationship and therefore must not receive two weights in
+pooled normalization. Their returns nevertheless diverge because the two
+Carver CSVs contain different full- and micro-contract quote streams. Across
+808 common EOD dates, only 307 marks are exactly equal; 367 marks differ even
+when the selected contract month agrees. The first EOD price divergence is
+2021-09-30 and the largest gap is 302.5 index points. The discrepancy is in the
+source CSVs, not introduced by import normalization. `ETHEREUM` is retained as
+the established representative, while `ETHER-micro` remains available for
+execution and data-quality diagnostics.
 
 Generate or refresh the evidence without changing the source database:
 
@@ -937,12 +957,15 @@ from being reused by the reviewed pool. The reviewed source key before forecast
 materialization is
 `range19691202_20240329_n229_pool3535f542_6a3ba5931f37022b`.
 
-The 2026-09-28 reviewed build materialized 1,073,271 raw-forecast rows for the
-229 included histories and 14,189 scalar dates. With the same EWMAC 16/64,
+The 2026-09-28 pre-correction reviewed build materialized 1,073,271
+raw-forecast rows for the former 229-history pool and 14,189 scalar dates. With
+the same EWMAC 16/64,
 35-day point volatility, target 10, and 500-day warm-up, the final scalar is
 approximately 4.76055. An immediate repeat hit both the version-2 forecast
 panel and scalar caches. The small change from the unfiltered value is expected:
-the removed series no longer receive repeated cross-sectional influence.
+the removed series no longer receive repeated cross-sectional influence. The
+corrected 228-history map has a new content hash, so this old cache cannot be
+reused and the next pooled run will materialize a separate cache.
 
 Each run returns `ewmac_scalar_history` and the CLI prints its last rows. Saved
 runs write a separate `*_tsmom_ewmac_scalars_*.csv` (and `ewmac_scalars`

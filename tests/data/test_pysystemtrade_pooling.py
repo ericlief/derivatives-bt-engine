@@ -30,7 +30,8 @@ def test_bundled_mapping_is_reviewed_and_excludes_only_explicit_rows():
     mapping = load_pysystemtrade_pooling_mapping()
 
     assert mapping["instrument_code"].n_unique() == mapping.height
-    assert mapping.filter(~pl.col("include_default")).height == 23
+    assert mapping.filter(~pl.col("include_default")).height == 24
+    assert not mapping["decision_basis"].str.contains("source_rows").any()
     crude = mapping.filter(pl.col("instrument_code").str.starts_with("CRUDE"))
     assert set(crude.filter(pl.col("include_default"))["instrument_code"]) == {
         "CRUDE_ICE",
@@ -41,6 +42,16 @@ def test_bundled_mapping_is_reviewed_and_excludes_only_explicit_rows():
         "CRUDE_W_mini",
     }
     assert len(pooling_mapping_fingerprint()) == 16
+
+    representatives = {
+        row["duplicate_group_id"]: row["instrument_code"]
+        for row in mapping.filter(pl.col("pooling_role") == "primary").to_dicts()
+    }
+    assert representatives["CADUSD_SIZE_VARIANTS"] == "CAD"
+    assert representatives["IBEX_SIZE_VARIANTS"] == "IBEX"
+    assert representatives["JGB_OSE_SIZE_VARIANTS"] == "JGB-mini"
+    assert representatives["NASDAQ_SIZE_VARIANTS"] == "NASDAQ"
+    assert representatives["ETHER_SIZE_VARIANTS"] == "ETHEREUM"
 
 
 def test_apply_mapping_defaults_unmapped_history_to_included_singleton(tmp_path):

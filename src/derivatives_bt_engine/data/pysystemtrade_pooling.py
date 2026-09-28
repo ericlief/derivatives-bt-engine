@@ -15,6 +15,11 @@ Candidate review has two stages:
 
 The reviewed CSV is authoritative.  The heuristic assessment in the audit is
 evidence for review, never an automatic deletion rule.
+
+Representative coverage is measured from canonical daily prices and usable
+daily returns.  Raw ``multiple_rows`` and ``adjusted_rows`` counts include
+mixed-frequency observations and must never be used to choose between size
+variants.
 """
 
 from __future__ import annotations
@@ -592,6 +597,10 @@ with configured roll cycles, offsets, and carry relationships.
 The reviewed mapping is authoritative; pairwise `assessment` is supporting
 evidence and never deletes a history automatically.
 
+Representative selection uses canonical daily coverage, not raw mixed-frequency
+row counts. Exact daily-coverage ties prefer the established full-sized contract
+source unless a reviewed source-quality reason says otherwise.
+
 ## Summary
 
 - Source histories: {classifications.height}
@@ -622,6 +631,10 @@ history starts, and the reviewed decision for every first-pass candidate.
 - `excluded_mixed_history` is a reviewed data-quality/policy decision. The WTI
   mini/micro histories change regime inside one series, so the default pool
   instead retains the consistent NYMEX December and ICE monthly histories.
+- Full and micro Ether have the same economic exposure and roll configuration,
+  but Carver's stored EOD marks diverge materially. The full contract is the
+  sole normalization representative; the micro remains available for execution
+  and source-quality analysis.
 - A long backfilled mini/micro history is research coverage, not evidence that
   the small contract itself traded throughout that period.
 """
