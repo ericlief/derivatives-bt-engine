@@ -16,10 +16,13 @@ Candidate review has two stages:
 The reviewed CSV is authoritative.  The heuristic assessment in the audit is
 evidence for review, never an automatic deletion rule.
 
-Representative coverage is measured from canonical daily prices and usable
-daily returns.  Raw ``multiple_rows`` and ``adjusted_rows`` counts include
-mixed-frequency observations and must never be used to choose between size
-variants.
+Representative coverage is ranked by chronological source span. Canonical
+daily prices and usable returns diagnose gaps inside that span, but do not make
+a same-span mini/micro history "longer." Raw ``multiple_rows`` and
+``adjusted_rows`` counts include mixed-frequency observations and must never be
+used to choose between size variants. Same effective spans prefer the
+established larger contract unless a reviewed source-quality reason says
+otherwise.
 """
 
 from __future__ import annotations
@@ -598,9 +601,11 @@ with configured roll cycles, offsets, and carry relationships.
 The reviewed mapping is authoritative; pairwise `assessment` is supporting
 evidence and never deletes a history automatically.
 
-Representative selection uses canonical daily coverage, not raw mixed-frequency
-row counts. Exact daily-coverage ties prefer the established full-sized contract
-source unless a reviewed source-quality reason says otherwise.
+Representative selection ranks chronological source span, not raw
+mixed-frequency row counts. Daily-row counts expose gaps within a span; they do
+not make a same-span mini/micro series longer. Same effective spans prefer the
+established larger contract unless a reviewed source-quality reason says
+otherwise.
 
 ## Summary
 
@@ -618,7 +623,7 @@ This is the affirmative selection table. Carver's legacy instrument-code
 suffixes are not reliable product-size labels, so the broker symbol and
 effective point value are shown explicitly.
 
-{_markdown_table(representatives, ['duplicate_group_id', 'instrument_code', 'description', 'ib_symbol', 'ib_effective_point_value', 'price_days', 'decision_basis'])}
+{_markdown_table(representatives, ['duplicate_group_id', 'instrument_code', 'description', 'ib_symbol', 'ib_effective_point_value', 'adjusted_start', 'adjusted_end', 'price_days', 'decision_basis'])}
 
 ## Excluded from the default normalization pool
 

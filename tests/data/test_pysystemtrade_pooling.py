@@ -50,8 +50,9 @@ def test_bundled_mapping_is_reviewed_and_excludes_only_explicit_rows():
     }
     assert representatives["CADUSD_SIZE_VARIANTS"] == "CAD"
     assert representatives["IBEX_SIZE_VARIANTS"] == "IBEX"
-    assert representatives["JGB_OSE_SIZE_VARIANTS"] == "JGB-mini"
+    assert representatives["JGB_OSE_SIZE_VARIANTS"] == "JGB"
     assert representatives["NASDAQ_SIZE_VARIANTS"] == "NASDAQ"
+    assert representatives["USDSGD_SIZE_VARIANTS"] == "SGD"
     assert representatives["ETHER_SIZE_VARIANTS"] == "ETHEREUM"
 
 
@@ -159,6 +160,8 @@ def test_report_shows_affirmative_representative_with_broker_identity(tmp_path):
                 "description": "Full contract",
                 "ib_symbol": "NQ",
                 "ib_effective_point_value": 20.0,
+                "adjusted_start": datetime(2000, 1, 1),
+                "adjusted_end": datetime(2024, 1, 1),
                 "price_days": 101,
                 "duplicate_group_id": "TEST_SIZE_VARIANTS",
                 "economic_family_id": "TEST",
@@ -174,6 +177,8 @@ def test_report_shows_affirmative_representative_with_broker_identity(tmp_path):
                 "description": "Micro contract",
                 "ib_symbol": "MNQ",
                 "ib_effective_point_value": 2.0,
+                "adjusted_start": datetime(2000, 1, 1),
+                "adjusted_end": datetime(2024, 1, 1),
                 "price_days": 100,
                 "duplicate_group_id": "TEST_SIZE_VARIANTS",
                 "economic_family_id": "TEST",
@@ -191,5 +196,5 @@ def test_report_shows_affirmative_representative_with_broker_identity(tmp_path):
 
     report = (tmp_path / "report.md").read_text()
     assert "## Selected representatives for size variants" in report
-    assert "| TEST_SIZE_VARIANTS | FULL | Full contract | NQ | 20.0 | 101 |" in report
+    assert "| TEST_SIZE_VARIANTS | FULL | Full contract | NQ | 20.0 |" in report
     assert "| MICRO | TEST | TEST_QUARTERLY | execution_duplicate | FULL |" in report

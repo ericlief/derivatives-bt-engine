@@ -887,15 +887,25 @@ policies, 32 retained distinct contracts, and two excluded mixed-regime WTI
 histories. Thus 24 rows are omitted from normalization and 228 remain.
 Execution variants are still present in the cost/risk universe.
 
-Representative coverage is measured only after session normalization and EOD
-selection, using canonical daily price/usable-return counts and valid start/end
-dates. Raw `multiple_rows` and `adjusted_rows` are mixed-frequency source-row
-counts and are prohibited as representative tie-breaks. Exact daily ties prefer
-the established full-sized contract source unless a reviewed source-quality
-reason is documented. This correction selects `CAD`, `IBEX`, and `NASDAQ`
-instead of variants that had only won on raw intraday row counts; `JGB-mini`
-wins on seven additional usable daily returns. `CHF`, `DOW_mini`,
-`RUSSELL_mini`, and `SP500` remain established-source tie-breaks.
+Representative coverage is ranked by valid chronological source span. Daily
+price and usable-return counts diagnose gaps within that span, but do not make
+a same-span mini/micro series longer. Raw `multiple_rows` and `adjusted_rows`
+are mixed-frequency source-row counts and are prohibited as representative
+tie-breaks. Same effective spans prefer the established larger contract unless
+a reviewed source-quality reason is documented. This correction selects `CAD`,
+`IBEX`, `JGB`, `NASDAQ`, and `SGD` full contracts where variants cover the same
+effective period. `DOW_mini` and `RUSSELL_mini` remain because those legacy
+Carver codes map to the larger IB `YM` and `RTY` E-mini products; `DOW` and
+`RUSSELL` map to the smaller `MYM` and `M2K` micro contracts.
+
+For Nasdaq, NQ and MNQ both span 1999-12-14 through 2024-03-28. NQ has 6,186
+normalized daily rows versus 6,185 for MNQ because MNQ alone lacks 2021-09-17;
+that is a completeness difference, not a longer span. The SGD histories also
+start together and cover the same effective endpoint. The mini has 938 daily
+rows versus 903 for the full contract, but both retain many Saturday-labelled
+dates (95 and 89 respectively) and their source histories diverge materially.
+Those density differences are reported for QA but no longer override the
+established full-contract tie-break.
 
 This distinction matters. SP500/SP500_micro have essentially identical
 returns and contract paths and should not count twice. CORN/CORN_mini,
