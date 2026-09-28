@@ -38,6 +38,9 @@ import duckdb
 import polars as pl
 
 from derivatives_bt_engine.data.pysystemtrade_ib import load_pysystemtrade_ib_instruments
+from derivatives_bt_engine.data.pysystemtrade_pooling import (
+    DEFAULT_POOLING_MAPPING_PATH,
+)
 from derivatives_bt_engine.domain.futures_history import (
     DEFAULT_PYSYSTEMTRADE_DB_PATH,
     PysystemtradeHistoryProvider,
@@ -83,6 +86,18 @@ TWO_DECIMAL_MONEY_COLUMNS = {
     "one_way_total_cost",
     "round_trip_total_cost",
 }
+
+
+def _pooling_report_identity(instr: dict) -> dict:
+    return {
+        "economic_family_id": instr.get("economic_family_id"),
+        "roll_policy_id": instr.get("roll_policy_id"),
+        "duplicate_group_id": instr.get("duplicate_group_id"),
+        "pooling_role": instr.get("pooling_role"),
+        "representative_instrument": instr.get("representative_instrument"),
+        "include_default_pool": instr.get("include_default_pool"),
+        "pooling_decision_basis": instr.get("pooling_decision_basis"),
+    }
 
 
 def _positive_finite(value) -> Optional[float]:
@@ -690,6 +705,7 @@ def diagnose_instrument(
         "quote_market_data_attempts": quote["market_data_attempts"],
         "quote_error_codes": ",".join(str(code) for code in quote["error_codes"]),
         "carver_spread_points": instr.get("carver_spread_points"),
+        **_pooling_report_identity(instr),
     })
     return row
 
@@ -714,6 +730,12 @@ def parse_args(argv=None):
         help="Roll-neutral Carver history (default), or explicit IB comparison surface",
     )
     parser.add_argument("--pysystemtrade-db", type=Path, default=DEFAULT_PYSYSTEMTRADE_DB_PATH)
+    parser.add_argument(
+        "--pysystemtrade-pooling-mapping",
+        type=Path,
+        default=DEFAULT_POOLING_MAPPING_PATH,
+        help="Reviewed classification retained in the all-variant cost report",
+    )
     parser.add_argument("--min-days", type=int, default=DEFAULT_MIN_DAYS,
                         help="Minimum days to expiry for resolved traded contract (default: %(default)s)")
     parser.add_argument(
@@ -762,6 +784,7 @@ def _error_row(
         "mapping_status": instr.get("mapping_status", "local_registry"),
         "ib_availability": "unavailable_or_unverified",
         "carver_spread_points": instr.get("carver_spread_points"),
+        **_pooling_report_identity(instr),
         "spread_quality": "error",
         "error": str(exc),
     }
@@ -806,14 +829,21 @@ def _error_row(
     return row
 
 
-def _load_instruments(spec: str, pysystemtrade_db: Path | str) -> list[dict]:
+def _load_instruments(
+    spec: str,
+    pysystemtrade_db: Path | str,
+    pooling_mapping_path: Path | str = DEFAULT_POOLING_MAPPING_PATH,
+) -> list[dict]:
     path = Path(spec)
     if path.exists() and path.suffix.lower() == ".json":
         loaded = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(loaded, list):
             raise ValueError("instrument JSON must contain a list of instrument objects")
         return loaded
-    carver = load_pysystemtrade_ib_instruments(pysystemtrade_db)
+    carver = load_pysystemtrade_ib_instruments(
+        pysystemtrade_db,
+        pooling_mapping_path=pooling_mapping_path,
+    )
     if spec == "all-pysystemtrade":
         return carver
     carver_by_code = {row["instrument_code"]: row for row in carver}
@@ -862,6 +892,8 @@ def _emit_report(report: pl.DataFrame, args) -> pl.DataFrame:
         "mixed_point_vol",
         "annual_dollar_vol_per_contract",
         "slow_history_years",
+        "pooling_role",
+        "include_default_pool",
         "ib_availability",
         "error",
     ]
@@ -885,7 +917,11 @@ def run(argv=None) -> pl.DataFrame:
     """Build, emit, and return the report for Python/notebook callers."""
     args = parse_args(argv)
     setup_logger()
-    instruments = _load_instruments(args.instruments, args.pysystemtrade_db)
+    instruments = _load_instruments(
+        args.instruments,
+        args.pysystemtrade_db,
+        args.pysystemtrade_pooling_mapping,
+    )
     pysystemtrade_provider = (
         PysystemtradeHistoryProvider(db_path=args.pysystemtrade_db)
         if args.vol_source == "pysystemtrade" else None

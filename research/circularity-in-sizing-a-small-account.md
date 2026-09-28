@@ -52,7 +52,7 @@ snapshot. The current facts are:
 | Imported multiple-price histories | 252 instruments |
 | Imported adjusted-price histories | 252 instruments |
 | Rows in Carver's instrument configuration catalog | 586 instruments |
-| EWMAC global normalization universe | 252 instruments |
+| EWMAC global normalization universe | 229 reviewed histories from 252 source histories |
 | Packaged Carver/Globex crosswalk rows | 14, all `candidate` / `signal_research` |
 | Locally configured futures symbols in `instruments.py` | 35 symbols, including related full/mini/micro contracts |
 | Imported history range | 1969-12-02 through 2024-03-29 |
@@ -60,16 +60,18 @@ snapshot. The current facts are:
 | Sidecar schema | version 4, built 2026-09-18 |
 
 The 252 histories are the rows with both multiple-price and adjusted-price
-data and the required instrument and roll configuration. That is the set
-loaded by `_pysystemtrade_source_coverage` and pooled by the full-universe
-EWMAC scaler. The 586-row configuration table includes instruments without
-the complete histories required by this path and must not be described as a
-586-market backtest universe.
+data and the required instrument and roll configuration. The reviewed pooling
+map removes 21 execution duplicates and two mixed-regime WTI mini/micro
+histories, leaving 229 for the default full-universe EWMAC scaler. The 586-row
+configuration table includes instruments without the complete histories
+required by this path and must not be described as a 586-market backtest
+universe.
 
 Likewise, 252 histories do not mean 252 instruments are ready for live
 execution. The present integration deliberately separates these uses:
 
-- all 252 eligible histories can contribute to a pooled EWMAC forecast scalar;
+- 229 reviewed histories can contribute to the default pooled EWMAC forecast
+  scalar while all 252 remain available for audit and cost comparison;
 - the backtest still trades only its requested symbols;
 - the source-neutral trading path currently requires a Carver/Globex mapping;
 - the 14 packaged mappings remain research candidates, not approved live
@@ -611,15 +613,16 @@ returns.
 - Applying today's liquid-market list to the entire historical sample.
 - Counting full, mini, and micro siblings as independent diversification.
 - Treating missing/untradable as equivalent to a valid zero forecast.
-- Calling the 252-history normalization panel a 252-market live universe.
+- Calling the 252-history source panel or 229-history reviewed normalization
+  panel a live universe.
 
 ## Current code implications
 
 The latest branch already exposes the relevant fault lines:
 
 - `_pysystemtrade_source_coverage` and `_load_pysystemtrade_ewmac_universe`
-  correctly separate the 252-history normalization pool from requested traded
-  symbols.
+  correctly separate the 229-history reviewed normalization pool from the 252
+  source histories and from requested traded symbols.
 - Risk-targeted live allocation currently defines `active_symbols` from
   forecast validity and `min_conviction`, then estimates H, ERC/HRP, and IDM on
   that set. That is the active-set policy discussed above.

@@ -79,12 +79,17 @@ from derivatives_bt_engine.domain.tsmom_history import (
     SOURCE_NEUTRAL_DATA_SOURCES,
     load_source_neutral_histories,
 )
+from derivatives_bt_engine.data.pysystemtrade_pooling import (
+    DEFAULT_POOLING_MAPPING_PATH,
+    apply_pysystemtrade_pooling_mapping,
+    load_pysystemtrade_pooling_catalog,
+)
 from derivatives_bt_engine.utils.logger import setup_logger
 
 logger = setup_logger()
 
 EWMAC_SCALAR_UNIVERSES = ('backtest', 'pysystemtrade')
-EWMAC_NORMALIZATION_CACHE_VERSION = 1
+EWMAC_NORMALIZATION_CACHE_VERSION = 2
 
 # Same VIX_PATH convention as naked_futures.py/the options strategies -- a
 # directory resolves to {dir}/processed/vix.parquet (see
@@ -341,6 +346,10 @@ class TsmomBacktestConfig:
     globex_db_path: Path | str = DEFAULT_GLOBEX_DB_PATH
     pysystemtrade_db_path: Path | str = DEFAULT_PYSYSTEMTRADE_DB_PATH
     pysystemtrade_mapping_path: Optional[Path | str] = None
+    # Reviewed full/mini/micro/venue/roll-policy classification used only by
+    # the broad pysystemtrade EWMAC normalization pool. It does not alter the
+    # imported source database or the requested trading histories.
+    pysystemtrade_pooling_mapping_path: Optional[Path | str] = None
     hybrid_handoff_date: Optional[date] = None
     allow_candidate_mappings: bool = False
     # Native Carver EWMAC rule parameters. Estimated modes pool the raw
@@ -589,36 +598,35 @@ def _pysystemtrade_ewmac_cache_paths(
 
 def _pysystemtrade_source_coverage(
     db_path: Path | str,
+    pooling_mapping_path: Path | str = DEFAULT_POOLING_MAPPING_PATH,
 ) -> tuple[pl.DataFrame, str]:
-    """Return eligible source bounds and a range-sensitive cache key."""
-    con = duckdb.connect(str(db_path), read_only=True)
-    try:
-        coverage = con.execute(
-            """
-            SELECT
-                s.instrument_code,
-                s.multiple_rows AS source_multiple_rows,
-                s.multiple_start AS source_multiple_ts_start,
-                s.multiple_end AS source_multiple_ts_end,
-                s.adjusted_rows AS source_adjusted_rows,
-                s.adjusted_start AS source_adjusted_ts_start,
-                s.adjusted_end AS source_adjusted_ts_end
-            FROM qa.series_coverage s
-            WHERE s.multiple_rows > 0
-              AND s.adjusted_rows > 0
-              AND EXISTS (
-                  SELECT 1 FROM raw.instrument_config i
-                  WHERE i.instrument_code = s.instrument_code
-              )
-              AND EXISTS (
-                  SELECT 1 FROM raw.roll_config r
-                  WHERE r.instrument_code = s.instrument_code
-              )
-            ORDER BY s.instrument_code
-            """
-        ).pl()
-    finally:
-        con.close()
+    """Return reviewed source members and a mapping/range-sensitive key."""
+    coverage = (
+        apply_pysystemtrade_pooling_mapping(
+            load_pysystemtrade_pooling_catalog(db_path),
+            mapping_path=pooling_mapping_path,
+        )
+        .filter(pl.col('include_default'))
+        .select(
+            'instrument_code',
+            pl.col('multiple_rows').alias('source_multiple_rows'),
+            pl.col('multiple_start').alias('source_multiple_ts_start'),
+            pl.col('multiple_end').alias('source_multiple_ts_end'),
+            pl.col('adjusted_rows').alias('source_adjusted_rows'),
+            pl.col('adjusted_start').alias('source_adjusted_ts_start'),
+            pl.col('adjusted_end').alias('source_adjusted_ts_end'),
+            'economic_family_id',
+            'roll_policy_id',
+            'duplicate_group_id',
+            'pooling_role',
+            'representative_instrument',
+            'include_default',
+            'decision_basis',
+            'notes',
+            'pooling_mapping_hash',
+        )
+        .sort('instrument_code')
+    )
     if coverage.is_empty():
         raise ValueError('pysystemtrade normalization universe is empty')
     fingerprint_rows = coverage.with_columns(
@@ -640,7 +648,7 @@ def _pysystemtrade_source_coverage(
     ).item()
     range_key = (
         f"range{source_start:%Y%m%d}_{source_end:%Y%m%d}"
-        f"_n{coverage.height}_{digest}"
+        f"_n{coverage.height}_pool{coverage['pooling_mapping_hash'][0][:8]}_{digest}"
     )
     return coverage, range_key
 
@@ -657,9 +665,15 @@ def _load_pysystemtrade_ewmac_universe(
     """
     provider = PysystemtradeHistoryProvider(db_path=config.pysystemtrade_db_path)
     _, source_commit = provider._database_metadata()
-    source_coverage, source_range_key = _pysystemtrade_source_coverage(
-        config.pysystemtrade_db_path
-    )
+    if config.pysystemtrade_pooling_mapping_path is None:
+        source_coverage, source_range_key = _pysystemtrade_source_coverage(
+            config.pysystemtrade_db_path
+        )
+    else:
+        source_coverage, source_range_key = _pysystemtrade_source_coverage(
+            config.pysystemtrade_db_path,
+            config.pysystemtrade_pooling_mapping_path,
+        )
     paths = _pysystemtrade_ewmac_cache_paths(
         config, source_commit, source_range_key
     )

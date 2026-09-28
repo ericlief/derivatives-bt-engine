@@ -74,6 +74,15 @@ def parse_args():
     p.add_argument('--pysystemtrade-db', default='/home/dev/fin/db/pysystemtrade_reference.duckdb')
     p.add_argument('--pysystemtrade-mapping', default=None,
                    help='Optional mapping CSV; default uses the packaged audited crosswalk')
+    p.add_argument(
+        '--pysystemtrade-pooling-mapping',
+        default=None,
+        help=(
+            'Optional reviewed full/mini/micro/roll-policy classification CSV '
+            'for the broad pysystemtrade EWMAC scalar universe; default uses '
+            'the packaged pooling map'
+        ),
+    )
     p.add_argument('--hybrid-handoff-date', default=None,
                    help='Optional YYYY-MM-DD handoff; default is the first valid primary return')
     p.add_argument('--allow-candidate-mappings', action='store_true',
@@ -293,6 +302,7 @@ def main():
         globex_db_path=args.globex_db,
         pysystemtrade_db_path=args.pysystemtrade_db,
         pysystemtrade_mapping_path=args.pysystemtrade_mapping,
+        pysystemtrade_pooling_mapping_path=args.pysystemtrade_pooling_mapping,
         hybrid_handoff_date=(
             date.fromisoformat(args.hybrid_handoff_date)
             if args.hybrid_handoff_date else None
@@ -371,6 +381,12 @@ def main():
         'ewmac_scalar_universe': (
             args.ewmac_scalar_universe
             if args.signal_weighting == 'carver_ewmac' else None
+        ),
+        'pysystemtrade_pooling_mapping': (
+            args.pysystemtrade_pooling_mapping
+            if args.signal_weighting == 'carver_ewmac'
+            and args.ewmac_scalar_universe == 'pysystemtrade'
+            else None
         ),
         'ewmac_scalar_min_periods': (
             args.ewmac_scalar_min_periods if args.signal_weighting == 'carver_ewmac' else None

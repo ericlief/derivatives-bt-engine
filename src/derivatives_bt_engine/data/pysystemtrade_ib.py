@@ -51,6 +51,7 @@ def load_pysystemtrade_ib_instruments(
     db_path: Path | str = DEFAULT_PYSYSTEMTRADE_DB_PATH,
     *,
     mapping_path: Path | str = DEFAULT_IB_MAPPING_PATH,
+    pooling_mapping_path: Path | str | None = None,
     history_only: bool = True,
 ) -> list[dict]:
     """Return Carver instruments enriched with IB identity and cash specs."""
@@ -103,6 +104,16 @@ def load_pysystemtrade_ib_instruments(
             f"{mismatch['instrument_code'].to_list()}"
         )
 
+    from derivatives_bt_engine.data.pysystemtrade_pooling import (
+        DEFAULT_POOLING_MAPPING_PATH,
+        apply_pysystemtrade_pooling_mapping,
+    )
+
+    joined = apply_pysystemtrade_pooling_mapping(
+        joined,
+        mapping_path=pooling_mapping_path or DEFAULT_POOLING_MAPPING_PATH,
+    )
+
     return [
         {
             "symbol": row["instrument_code"],
@@ -124,6 +135,13 @@ def load_pysystemtrade_ib_instruments(
             "region": row["region"],
             "expiry": "auto",
             "mapping_status": "carver_ib_candidate",
+            "economic_family_id": row["economic_family_id"],
+            "roll_policy_id": row["roll_policy_id"],
+            "duplicate_group_id": row["duplicate_group_id"],
+            "pooling_role": row["pooling_role"],
+            "representative_instrument": row["representative_instrument"],
+            "include_default_pool": row["include_default"],
+            "pooling_decision_basis": row["decision_basis"],
             "history_start": row["multiple_start"],
             "history_end": row["multiple_end"],
         }

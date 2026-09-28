@@ -848,8 +848,8 @@ The scalar is now estimated causally by default. For each date and speed pair,
 the configured pool takes the cross-sectional median absolute raw forecast;
 the scalar is `10 / expanding_mean(prior daily medians)`, shifted so date `t`
 uses dates strictly before `t`, with no future backfill. The default
-`ewmac_scalar_universe=pysystemtrade` makes `global` pool all 252 eligible
-Carver instruments while trading only the requested symbols. The explicit
+`ewmac_scalar_universe=pysystemtrade` makes `global` pool the reviewed 229 of
+252 source histories while trading only the requested symbols. The explicit
 `backtest` universe limits normalization to configured symbols and is required
 for `cluster` (`instruments.py` clusters) or `instrument` (each individual
 history) pooling. `fixed` retains the explicit
@@ -861,13 +861,62 @@ may contribute to normalization even when a later cost filter would give the
 rule zero trading weight: scale eligibility and trading eligibility are
 separate concerns.
 
+#### Reviewed pooling universe
+
+The source DuckDB still contains all 252 histories. Duplicate removal is a
+separate versioned decision layer in
+`src/derivatives_bt_engine/data/pysystemtrade_pooling_universe.csv`; neither
+the importer nor the raw/daily database tables are mutated. Unmapped
+instruments default to included singletons. The reviewed map records
+`economic_family_id`, `roll_policy_id`, duplicate group, pooling role,
+representative instrument, default inclusion, decision basis, and notes.
+
+Candidate review is explicitly two stage. The first pass uses normalized
+instrument code, description, IB symbol/exchange, asset class, currency,
+point value, and the reviewed economic-family hints. The second pass loads the
+same canonical histories used by the backtester and records overlapping
+roll-neutral-return correlation, selected contract-month and exact-contract
+agreement, rolls in each history, two-sided nearest-roll agreement within five
+calendar days, and both configured hold/priced cycles, roll offsets, carry
+offsets, and expiry offsets. The metrics support review; they do not silently
+delete a series.
+
+The first reviewed pass contains 157 singletons, 19 selected representatives,
+21 excluded execution duplicates, 19 retained distinct roll policies, 32
+retained distinct contracts, two retained review-required Ether histories,
+and two excluded mixed-regime WTI histories. Thus 23 rows are omitted from
+normalization and 229 remain. Execution variants are still present in the
+cost/risk universe.
+
+This distinction matters. SP500/SP500_micro have essentially identical
+returns and contract paths and should not count twice. CORN/CORN_mini,
+SOYBEAN/SOYBEAN_mini, and WHEAT/WHEAT_mini select materially different
+contract paths and remain separate roll-policy strategies. For WTI, the
+default retains the consistent `CRUDE_W` December history and `CRUDE_ICE`
+monthly-front history. `CRUDE_W_mini` and `CRUDE_W_micro` are omitted because
+their single stored histories change from the old winter proxy to a monthly
+policy in 2015; they remain available for execution-cost comparison.
+
+Generate or refresh the evidence without changing the source database:
+
+```bash
+pysystemtrade-pooling-audit \
+  --db /home/dev/fin/db/pysystemtrade_reference.duckdb \
+  --output-dir research/pysystemtrade-pooling-audit
+```
+
+The output contains all 252 classifications, every first-pass candidate pair,
+and a compact report. A custom reviewed map can be supplied to `tsmom` with
+`--pysystemtrade-pooling-mapping`.
+
 The full-universe path has two cache layers. Existing versioned history
 caches retain each instrument's signal, marks, carry, and generated Panama
 series. A derived EWMAC cache is keyed by history schema, source commit,
-fast/slow/vol spans, and a range fingerprint over every eligible instrument's
-raw/adjusted start timestamp, end timestamp, and row count. Cache hits validate
-both that fingerprint and exact instrument membership before reading the
-252-instrument raw-forecast panel and coverage table. A second derived file,
+fast/slow/vol spans, the pooling-map content hash, and a range fingerprint over
+every included instrument's raw/adjusted start timestamp, end timestamp, and
+row count. Cache hits validate both that fingerprint and exact instrument
+membership before reading the reviewed raw-forecast panel and coverage table.
+A second derived file,
 additionally keyed by target magnitude and minimum observations, stores the
 causal scalar history. Consequently the first run builds missing histories and
 forecasts; matching later runs read the panel and scalar directly, while any
@@ -876,13 +925,24 @@ years do not truncate the normalization input: all pre-start history remains
 available, and the daily scalar report can be sliced after its causal
 calculation.
 
-The 2026-09-22 integration build found all 252 eligible instruments and
+The 2026-09-22 pre-filter integration build found all 252 source instruments and
 materialized 1,249,673 raw-forecast rows over instrument histories spanning
 1969-12-02 through 2024-03-29. The pooled cache contains 14,192 daily scalar
 rows; for EWMAC 16/64 with 35-day point volatility, target 10, and a 500-day
 warm-up, its final scalar is approximately 4.7441. An immediate repeat load
-hit both the forecast-panel and scalar caches. The current range key is
-`range19691202_20240329_n252_c580f0fc08c52f8d`.
+hit both the forecast-panel and scalar caches. Its range key was
+`range19691202_20240329_n252_c580f0fc08c52f8d`. It remains a useful baseline,
+but normalization cache version 2 and the mapping hash deliberately prevent it
+from being reused by the reviewed pool. The reviewed source key before forecast
+materialization is
+`range19691202_20240329_n229_pool3535f542_6a3ba5931f37022b`.
+
+The 2026-09-28 reviewed build materialized 1,073,271 raw-forecast rows for the
+229 included histories and 14,189 scalar dates. With the same EWMAC 16/64,
+35-day point volatility, target 10, and 500-day warm-up, the final scalar is
+approximately 4.76055. An immediate repeat hit both the version-2 forecast
+panel and scalar caches. The small change from the unfiltered value is expected:
+the removed series no longer receive repeated cross-sectional influence.
 
 Each run returns `ewmac_scalar_history` and the CLI prints its last rows. Saved
 runs write a separate `*_tsmom_ewmac_scalars_*.csv` (and `ewmac_scalars`
@@ -896,8 +956,10 @@ The companion `*_tsmom_ewmac_universe_*.csv` (and `ewmac_universe` spreadsheet
 tab) has one row per normalization instrument, including the traded symbol,
 source instrument code, pool, source segments, `ts_start`, `ts_end`, first and
 last usable-forecast timestamps, and both raw-history and usable-forecast row
-counts. This makes staggered history availability auditable without repeating
-instrument ranges on every daily scalar row. The daily report also records
+counts. It also carries economic family, roll policy, pooling role,
+representative, decision basis, and mapping hash. This makes staggered history
+availability and membership decisions auditable without repeating instrument
+ranges on every daily scalar row. The daily report also records
 the configured and normalization-universe instrument counts, source commit,
 and whether the forecast-panel and scalar caches were hits.
 Each traded EWMAC row also records `scalar_as_of_date` and
@@ -1093,6 +1155,13 @@ IBKR account has trading permission or market data: live qualification writes
 that result separately. The effective IB point value
 `IBMultiplier / priceMagnifier` matches imported `point_size` for all 584
 mappings.
+
+The cost report deliberately retains all 252 usable histories, including rows
+excluded from pooled signal calibration. It now adds economic family, roll
+policy, duplicate group, pooling role, representative, default-pool inclusion,
+and decision basis. This lets the same CSV compare ES/MES or CL/QM/MCL
+execution economics without allowing those variants to multiply their weight
+in the EWMAC normalization sample.
 
 Eleven usable histories carry Carver's `IgnoreWeekly` flag. The generic live
 resolver does not guess among their weekly/daily expiries; it retains their
