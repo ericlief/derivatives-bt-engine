@@ -1196,16 +1196,64 @@ and decision basis. This lets the same CSV compare ES/MES or CL/QM/MCL
 execution economics without allowing those variants to multiply their weight
 in the EWMAC normalization sample.
 
+The default cost audit also estimates a Carver-style EWMAC 16/64 research
+baseline from the 228 reviewed representatives. It reuses the mapping- and
+range-keyed EWMAC cache, applies the causal pooled forecast scalar, delays each
+forecast by one observation, and earns the canonical matched-contract point
+change against lagged 35-day point volatility. The affordability baseline is
+the equal-instrument mean of the individual full-history pre-cost Sharpes, so
+each reviewed strategy history gets one vote. The report also retains the
+history-weighted mean and the Sharpe obtained by stacking every daily
+observation; the latter lets long histories dominate and is therefore a
+diagnostic rather than the cost threshold's denominator.
+
+Forecast turnover is estimated separately for every representative as
+`256 × mean(abs(change in forecast)) / 10`, then pooled with Carver's
+history-length weighting. That same pooled forecast turnover is used for each
+execution row, while the row keeps its own configured spread, commission,
+point value, FX conversion, and current mixed point volatility. The selected
+representative supplies its observed roll rate; physical rolls add two
+one-way trades per roll. The resulting columns decompose cost as follows:
+
+```text
+configured SR cost per trade
+    = configured one-way cash cost / annual dollar volatility
+
+annual forecast SR cost
+    = configured SR cost per trade × pooled forecast turnover
+
+annual roll SR cost
+    = configured SR cost per trade × 2 × representative rolls per year
+
+total annual SR cost
+    = annual forecast SR cost + annual roll SR cost
+```
+
+`ewmac_cost_within_sharpe_limit` compares total annual SR cost with one third
+of pooled pre-cost Sharpe by default; `--max-cost-share-of-sharpe` makes the
+research threshold explicit. This is an affordability diagnostic, not a
+realized net backtest: the static configured cost coefficients are not
+subtracted from historical daily P&L.
+
+The 2026-09-28 full offline run produced pooled pre-cost Sharpe `0.1948`, a
+history-weighted mean instrument Sharpe of `0.3387`, an observation-stacked
+diagnostic Sharpe of `-0.0155`, and pooled annual forecast turnover `15.2148`.
+Of the 228 reviewed representatives, 116 passed and 112 failed the one-third
+cost gate. The near-even split underscores that the threshold is a meaningful
+screen rather than a cosmetic report field.
+
 Eleven usable histories carry Carver's `IgnoreWeekly` flag. The generic live
 resolver does not guess among their weekly/daily expiries; it retains their
 offline cost/risk rows but marks live qualification unavailable until a
 product-specific expiry filter is supplied.
 
-The spread input is a point-in-time live quote on the actual micro/mini, not
-Carver's full-size static spread coefficient. Missing bid/ask data and zero
-Carver micro coefficients are treated as **unknown**, never as free execution;
-spread-dependent total costs remain null. A live snapshot is useful for
-current granularity screening but is not a historical slippage estimate.
+Live spread fields use a point-in-time quote on the actual micro/mini, not
+Carver's full-size coefficient. Missing bid/ask data remain **unknown**, never
+zero, and live spread-dependent totals remain null. The separate configured
+cost proxy uses Carver's static coefficient exactly as stored; a zero value is
+labelled `static_config_zero_spread`, still includes commission, and must not
+be interpreted as evidence of free live execution. A live snapshot is useful
+for current granularity screening but is not a historical slippage estimate.
 Repeated snapshots or realized fills are still required to calibrate robust
 micro slippage.
 
@@ -1218,6 +1266,12 @@ micro slippage.
   --slow-vol-years 10 \
   --slow-vol-weight 0.30
 ```
+
+Use `--skip-ewmac-cost-baseline` only when a quick volatility/contract audit
+is wanted without the pooled strategy calculation. The EWMAC speed, point-vol
+span, scalar warm-up, and affordability threshold have separate `--cost-ewmac-*`
+and `--max-cost-share-of-sharpe` flags so they cannot be confused with the
+32-day mixed volatility used in the cost denominator.
 
 `--offline` writes the complete 252-row comparison without connecting to IB.
 Prices and volatility then end at the imported Carver history boundary, live

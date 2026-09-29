@@ -8,6 +8,10 @@ The diagnostic deliberately separates research history from execution data:
 * Carver's IB mapping resolves the dated contract that supplies current price,
   expiry, and an optional live bid/ask snapshot.  Point value, commission,
   native currency, and FX conversion remain explicit report inputs.
+* the reviewed normalization pool supplies a causal EWMAC 16/64 baseline,
+  equal-instrument pre-cost Sharpe, and history-weighted pooled turnover; and
+* each execution row combines its own configured costs and current point risk
+  with the selected representative's two-leg roll rate.
 
 All 252 instruments with usable Carver history have candidate IB identities;
 qualification against the connected account determines actual availability.
@@ -20,8 +24,9 @@ Run with TWS/IB Gateway available::
     .venv/bin/python -m derivatives_bt_engine.data.futures_cost_risk \
       --instruments all-pysystemtrade
 
-The bid/ask result is a point-in-time snapshot, not a historical slippage
-estimate.  Repeated snapshots or realized fills are required for that.
+Configured costs are a static snapshot, while the bid/ask result is a
+point-in-time quote.  Neither is a historical slippage series; repeated
+snapshots or realized fills are required for that.
 """
 
 from __future__ import annotations
@@ -49,6 +54,12 @@ from derivatives_bt_engine.domain.instruments import (
     get_spec,
     resolve_annualization_days,
     resolve_signal_symbol,
+)
+from derivatives_bt_engine.domain.signal import (
+    EWMAC_FORECAST_CAP,
+    EWMAC_FORECAST_TARGET_ABS,
+    EWMAC_SCALAR_MIN_PERIODS,
+    carver_ewmac,
 )
 from derivatives_bt_engine.domain.volatility import (
     CARVER_BUSINESS_DAYS_PER_YEAR,
@@ -85,7 +96,16 @@ TWO_DECIMAL_MONEY_COLUMNS = {
     "round_trip_spread_cash",
     "one_way_total_cost",
     "round_trip_total_cost",
+    "configured_commission_native",
+    "configured_spread_cash_native",
+    "configured_one_way_cost_native",
+    "configured_one_way_cost",
 }
+
+DEFAULT_COST_EWMAC_FAST_SPAN = 16
+DEFAULT_COST_EWMAC_SLOW_SPAN = 64
+DEFAULT_COST_EWMAC_VOL_SPAN = 35
+DEFAULT_MAX_COST_SHARE_OF_SHARPE = 1.0 / 3.0
 
 
 def _pooling_report_identity(instr: dict) -> dict:
@@ -106,6 +126,442 @@ def _positive_finite(value) -> Optional[float]:
     except (TypeError, ValueError):
         return None
     return number if math.isfinite(number) and number > 0 else None
+
+
+def _nonnegative_finite(value) -> Optional[float]:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) and number >= 0 else None
+
+
+def _annualized_sharpe(values: pl.Series, annualization_days: int) -> Optional[float]:
+    clean = values.drop_nulls()
+    if clean.len() < 2:
+        return None
+    standard_deviation = clean.std()
+    if standard_deviation is None or standard_deviation <= 0:
+        return None
+    return float(clean.mean() / standard_deviation * math.sqrt(annualization_days))
+
+
+def _ewmac_rule_performance(
+    frame: pl.DataFrame,
+    *,
+    annualization_days: int = CARVER_BUSINESS_DAYS_PER_YEAR,
+    target_abs_forecast: float = EWMAC_FORECAST_TARGET_ABS,
+) -> tuple[dict[str, object], pl.DataFrame]:
+    """Return one instrument's pre-cost EWMAC Sharpe and forecast turnover.
+
+    The forecast is delayed by one observation before earning the canonical
+    matched-contract point change.  Point volatility is delayed with the
+    forecast, matching the ex-ante position sizing used by pysystemtrade.
+    Turnover follows Carver's forecast convention: mean absolute daily change
+    divided by the average-absolute-forecast target, annualized by 256.
+    """
+    required = {
+        "ts_event", "ewmac_forecast", "point_vol", "pt_change_1d",
+    }
+    missing = required - set(frame.columns)
+    if missing:
+        raise ValueError(f"EWMAC performance input missing columns: {sorted(missing)}")
+    if target_abs_forecast <= 0:
+        raise ValueError("target_abs_forecast must be positive")
+
+    performance = (
+        frame.sort("ts_event")
+        .with_columns(
+            (pl.col("ewmac_forecast").shift(1) / target_abs_forecast).alias(
+                "normalized_position"
+            ),
+            pl.col("point_vol").shift(1).alias("sizing_point_vol"),
+        )
+        .with_columns(
+            pl.when(
+                pl.col("normalized_position").is_not_null()
+                & pl.col("pt_change_1d").is_not_null()
+                & (pl.col("sizing_point_vol") > 0)
+            )
+            .then(
+                pl.col("normalized_position")
+                * pl.col("pt_change_1d")
+                / pl.col("sizing_point_vol")
+            )
+            .otherwise(None)
+            .alias("risk_adjusted_pnl")
+        )
+    )
+    usable_forecasts = performance.get_column("ewmac_forecast").drop_nulls()
+    forecast_changes = usable_forecasts.diff().abs().drop_nulls()
+    annual_turnover = (
+        float(forecast_changes.mean() / target_abs_forecast * annualization_days)
+        if forecast_changes.len()
+        else None
+    )
+    pnl = performance.get_column("risk_adjusted_pnl").drop_nulls()
+    metrics = {
+        "strategy_history_start": performance.get_column("ts_event").min(),
+        "strategy_history_end": performance.get_column("ts_event").max(),
+        "strategy_history_observations": performance.height,
+        "strategy_forecast_observations": usable_forecasts.len(),
+        "strategy_pnl_observations": pnl.len(),
+        "ewmac_pre_cost_sharpe": _annualized_sharpe(pnl, annualization_days),
+        "ewmac_forecast_turnover": annual_turnover,
+    }
+    return metrics, performance.select("ts_event", "risk_adjusted_pnl").drop_nulls()
+
+
+def estimate_pooled_ewmac_cost_baseline(
+    provider: PysystemtradeHistoryProvider,
+    *,
+    db_path: Path | str,
+    pooling_mapping_path: Path | str = DEFAULT_POOLING_MAPPING_PATH,
+    fast_span: int = DEFAULT_COST_EWMAC_FAST_SPAN,
+    slow_span: int = DEFAULT_COST_EWMAC_SLOW_SPAN,
+    vol_span: int = DEFAULT_COST_EWMAC_VOL_SPAN,
+    scalar_min_periods: int = EWMAC_SCALAR_MIN_PERIODS,
+    target_abs_forecast: float = EWMAC_FORECAST_TARGET_ABS,
+    forecast_cap: float = EWMAC_FORECAST_CAP,
+) -> tuple[dict[str, object], pl.DataFrame]:
+    """Estimate a pooled pre-cost EWMAC baseline from reviewed histories."""
+    # Import lazily: the cost diagnostic can still be imported without loading
+    # the full backtester, while the actual run reuses its versioned cache.
+    from derivatives_bt_engine.domain.tsmom_backtester import (
+        TsmomBacktestConfig,
+        load_pysystemtrade_ewmac_normalization,
+    )
+
+    config = TsmomBacktestConfig(
+        symbols=[],
+        data_source="pysystemtrade",
+        signal_weighting="carver_ewmac",
+        pysystemtrade_db_path=db_path,
+        pysystemtrade_pooling_mapping_path=pooling_mapping_path,
+        ewmac_fast_span=fast_span,
+        ewmac_slow_span=slow_span,
+        ewmac_vol_span=vol_span,
+        ewmac_scalar_min_periods=scalar_min_periods,
+        ewmac_forecast_target_abs=target_abs_forecast,
+        ewmac_forecast_cap=forecast_cap,
+    )
+    scalar_history, coverage, cache_metadata = (
+        load_pysystemtrade_ewmac_normalization(config)
+    )
+    scalar = (
+        scalar_history.filter(pl.col("pool_key") == "global")
+        .select("ts_event", "forecast_scalar")
+        .sort("ts_event")
+    )
+    metric_rows = []
+    pooled_pnl = []
+    for position, coverage_row in enumerate(coverage.iter_rows(named=True), start=1):
+        instrument_code = coverage_row["instrument_code"]
+        history = provider.load(instrument_code)
+        rule = (
+            carver_ewmac(
+                history.panama_bars(),
+                fast_span=fast_span,
+                slow_span=slow_span,
+                vol_span=vol_span,
+                forecast_scalar=1.0,
+                forecast_cap=forecast_cap,
+            )
+            .join_asof(scalar, on="ts_event", strategy="backward")
+            .with_columns(
+                (pl.col("raw_forecast") * pl.col("forecast_scalar"))
+                .clip(-forecast_cap, forecast_cap)
+                .alias("ewmac_forecast")
+            )
+        )
+        metrics, pnl = _ewmac_rule_performance(
+            rule,
+            annualization_days=CARVER_BUSINESS_DAYS_PER_YEAR,
+            target_abs_forecast=target_abs_forecast,
+        )
+        roll_count = history.marks.filter(pl.col("is_roll")).height
+        history_start = history.marks.get_column("trade_date").min()
+        history_end = history.marks.get_column("trade_date").max()
+        elapsed_years = (
+            (history_end - history_start).days / 365.25
+            if history_start is not None and history_end is not None
+            else 0.0
+        )
+        metrics.update(
+            instrument_code=instrument_code,
+            strategy_rolls=roll_count,
+            strategy_rolls_per_year=(
+                roll_count / elapsed_years if elapsed_years > 0 else None
+            ),
+        )
+        metric_rows.append(metrics)
+        pooled_pnl.append(
+            pnl.with_columns(pl.lit(instrument_code).alias("instrument_code"))
+        )
+        if position % 25 == 0 or position == coverage.height:
+            log.info(
+                "cost_ewmac_baseline progress completed=%d total=%d",
+                position,
+                coverage.height,
+            )
+
+    metrics = pl.DataFrame(metric_rows, infer_schema_length=None).sort(
+        "instrument_code"
+    )
+    pooled_returns = pl.concat(pooled_pnl, how="vertical").get_column(
+        "risk_adjusted_pnl"
+    )
+    valid_metrics = metrics.filter(
+        pl.col("ewmac_forecast_turnover").is_not_null()
+        & pl.col("ewmac_pre_cost_sharpe").is_not_null()
+    )
+    turnover_weight = pl.col("strategy_history_observations").cast(pl.Float64)
+    weight_total = valid_metrics.select(turnover_weight.sum()).item()
+    pooled_turnover = (
+        valid_metrics.select(
+            (pl.col("ewmac_forecast_turnover") * turnover_weight).sum()
+            / turnover_weight.sum()
+        ).item()
+        if weight_total
+        else None
+    )
+    mean_instrument_sharpe = valid_metrics.get_column(
+        "ewmac_pre_cost_sharpe"
+    ).mean()
+    history_weighted_mean_sharpe = (
+        valid_metrics.select(
+            (pl.col("ewmac_pre_cost_sharpe") * turnover_weight).sum()
+            / turnover_weight.sum()
+        ).item()
+        if weight_total
+        else None
+    )
+    stacked_observation_sharpe = _annualized_sharpe(
+        pooled_returns, CARVER_BUSINESS_DAYS_PER_YEAR
+    )
+    mapping_hash = coverage.get_column("pooling_mapping_hash").unique().to_list()
+    summary = {
+        "ewmac_pool_instruments": coverage.height,
+        "ewmac_pool_mapping_hash": mapping_hash[0] if len(mapping_hash) == 1 else None,
+        # The affordability baseline gives every reviewed strategy history
+        # one vote. Concatenating all daily observations would instead let the
+        # oldest markets dominate merely because they have more rows.
+        "ewmac_pooled_pre_cost_sharpe": mean_instrument_sharpe,
+        "ewmac_mean_instrument_pre_cost_sharpe": mean_instrument_sharpe,
+        "ewmac_history_weighted_mean_pre_cost_sharpe": (
+            history_weighted_mean_sharpe
+        ),
+        "ewmac_stacked_observation_pre_cost_sharpe": stacked_observation_sharpe,
+        "ewmac_pooled_forecast_turnover": pooled_turnover,
+        "ewmac_fast_span": fast_span,
+        "ewmac_slow_span": slow_span,
+        "ewmac_vol_span": vol_span,
+        "ewmac_target_abs_forecast": target_abs_forecast,
+        "ewmac_forecast_cap": forecast_cap,
+        "ewmac_scalar_min_periods": scalar_min_periods,
+        "ewmac_normalization_source_commit": cache_metadata["source_commit"],
+        "ewmac_normalization_range_key": cache_metadata["source_range_key"],
+        "ewmac_forecast_panel_cache_hit": cache_metadata[
+            "forecast_panel_cache_hit"
+        ],
+        "ewmac_scalar_cache_hit": cache_metadata["scalar_cache_hit"],
+    }
+    log.info(
+        "cost_ewmac_baseline complete instruments=%d pooled_sharpe=%s "
+        "history_weighted_mean_sharpe=%s stacked_observation_sharpe=%s "
+        "pooled_turnover=%s",
+        coverage.height,
+        summary["ewmac_pooled_pre_cost_sharpe"],
+        history_weighted_mean_sharpe,
+        stacked_observation_sharpe,
+        summary["ewmac_pooled_forecast_turnover"],
+    )
+    return summary, metrics
+
+
+def _configured_cost_estimate(
+    instr: dict,
+    report_row: dict,
+    *,
+    pooled_summary: Optional[dict[str, object]],
+    strategy_metrics: Optional[dict[str, object]],
+    max_cost_share_of_sharpe: float,
+) -> dict[str, object]:
+    """Calculate Carver-style static costs in annual Sharpe-ratio units."""
+    common = dict(pooled_summary or {})
+    common.update({
+        "strategy_reference_instrument": (
+            instr.get("representative_instrument")
+            or instr.get("instrument_code")
+            or instr.get("symbol")
+        ),
+        "max_cost_share_of_pooled_sharpe": max_cost_share_of_sharpe,
+    })
+    if strategy_metrics is not None:
+        common.update({
+            "strategy_reference_history_start": strategy_metrics.get(
+                "strategy_history_start"
+            ),
+            "strategy_reference_history_end": strategy_metrics.get(
+                "strategy_history_end"
+            ),
+            "strategy_reference_history_observations": strategy_metrics.get(
+                "strategy_history_observations"
+            ),
+            "strategy_reference_forecast_observations": strategy_metrics.get(
+                "strategy_forecast_observations"
+            ),
+            "strategy_reference_pnl_observations": strategy_metrics.get(
+                "strategy_pnl_observations"
+            ),
+            "strategy_reference_pre_cost_sharpe": strategy_metrics.get(
+                "ewmac_pre_cost_sharpe"
+            ),
+            "strategy_reference_forecast_turnover": strategy_metrics.get(
+                "ewmac_forecast_turnover"
+            ),
+            "strategy_reference_rolls": strategy_metrics.get("strategy_rolls"),
+            "strategy_reference_rolls_per_year": strategy_metrics.get(
+                "strategy_rolls_per_year"
+            ),
+        })
+
+    spread_points = _nonnegative_finite(instr.get("carver_spread_points"))
+    multiplier = _positive_finite(report_row.get("multiplier"))
+    price = _positive_finite(report_row.get("vol_reference_price"))
+    point_vol = _positive_finite(report_row.get("mixed_point_vol"))
+    fx_to_usd = _positive_finite(report_row.get("fx_to_usd"))
+    annualization_days = report_row.get(
+        "annualization_days", CARVER_BUSINESS_DAYS_PER_YEAR
+    )
+    per_block = _nonnegative_finite(instr.get("commission"))
+    per_trade = _nonnegative_finite(instr.get("per_trade_cost"))
+    percentage = _nonnegative_finite(instr.get("percentage_cost"))
+    if (
+        spread_points is None
+        or multiplier is None
+        or price is None
+        or point_vol is None
+        or fx_to_usd is None
+        or annualization_days is None
+    ):
+        return {
+            **common,
+            "configured_cost_quality": "incomplete_static_inputs",
+        }
+
+    percentage_commission = (
+        percentage * price * multiplier if percentage is not None else 0.0
+    )
+    commission_native = max(
+        per_block if per_block is not None else 0.0,
+        per_trade if per_trade is not None else 0.0,
+        percentage_commission,
+    )
+    spread_cash_native = spread_points * multiplier
+    one_way_native = spread_cash_native + commission_native
+    one_way_usd = one_way_native * fx_to_usd
+    annual_dollar_vol = (
+        point_vol * multiplier * fx_to_usd * math.sqrt(float(annualization_days))
+    )
+    sr_cost_per_trade = one_way_usd / annual_dollar_vol
+    pooled_turnover = _positive_finite(
+        (pooled_summary or {}).get("ewmac_pooled_forecast_turnover")
+    )
+    rolls_per_year = _nonnegative_finite(
+        (strategy_metrics or {}).get("strategy_rolls_per_year")
+    )
+    forecast_sr_cost = (
+        sr_cost_per_trade * pooled_turnover
+        if pooled_turnover is not None
+        else None
+    )
+    roll_turnover = 2.0 * rolls_per_year if rolls_per_year is not None else None
+    roll_sr_cost = (
+        sr_cost_per_trade * roll_turnover
+        if roll_turnover is not None
+        else None
+    )
+    annual_sr_cost = (
+        forecast_sr_cost + roll_sr_cost
+        if forecast_sr_cost is not None and roll_sr_cost is not None
+        else None
+    )
+    pooled_sharpe = _positive_finite(
+        (pooled_summary or {}).get("ewmac_pooled_pre_cost_sharpe")
+    )
+    cost_share = (
+        annual_sr_cost / pooled_sharpe
+        if annual_sr_cost is not None and pooled_sharpe is not None
+        else None
+    )
+    return {
+        **common,
+        "configured_spread_points": spread_points,
+        "configured_commission_native": commission_native,
+        "configured_spread_cash_native": spread_cash_native,
+        "configured_one_way_cost_native": one_way_native,
+        "configured_one_way_cost": one_way_usd,
+        "configured_sr_cost_per_trade": sr_cost_per_trade,
+        "ewmac_pooled_forecast_annual_sr_cost": forecast_sr_cost,
+        "strategy_reference_roll_turnover": roll_turnover,
+        "strategy_reference_roll_annual_sr_cost": roll_sr_cost,
+        "ewmac_total_annual_sr_cost": annual_sr_cost,
+        "ewmac_cost_share_of_pooled_sharpe": cost_share,
+        "ewmac_net_sharpe_proxy": (
+            pooled_sharpe - annual_sr_cost
+            if pooled_sharpe is not None and annual_sr_cost is not None
+            else None
+        ),
+        "ewmac_cost_within_sharpe_limit": (
+            cost_share <= max_cost_share_of_sharpe
+            if cost_share is not None
+            else None
+        ),
+        "configured_cost_quality": (
+            "static_config_zero_spread"
+            if spread_points == 0
+            else "static_config_not_historical_quotes"
+        ),
+    }
+
+
+def _attach_pooled_cost_estimates(
+    rows: list[dict],
+    instruments: list[dict],
+    *,
+    pooled_summary: Optional[dict[str, object]],
+    strategy_metrics: Optional[pl.DataFrame],
+    max_cost_share_of_sharpe: float,
+) -> list[dict]:
+    instrument_by_symbol = {instr["symbol"]: instr for instr in instruments}
+    metrics_by_instrument = (
+        {
+            row["instrument_code"]: row
+            for row in strategy_metrics.iter_rows(named=True)
+        }
+        if strategy_metrics is not None
+        else {}
+    )
+    enriched = []
+    for row in rows:
+        instr = instrument_by_symbol.get(row.get("symbol"), {})
+        reference = (
+            instr.get("representative_instrument")
+            or instr.get("instrument_code")
+            or instr.get("symbol")
+        )
+        row.update(
+            _configured_cost_estimate(
+                instr,
+                row,
+                pooled_summary=pooled_summary,
+                strategy_metrics=metrics_by_instrument.get(reference),
+                max_cost_share_of_sharpe=max_cost_share_of_sharpe,
+            )
+        )
+        enriched.append(row)
+    return enriched
 
 
 def volatility_from_bars(
@@ -724,6 +1180,37 @@ def parse_args(argv=None):
     parser.add_argument("--slow-vol-years", type=int, default=CARVER_SLOW_VOL_YEARS)
     parser.add_argument("--slow-vol-weight", type=float, default=CARVER_SLOW_VOL_WEIGHT)
     parser.add_argument(
+        "--cost-ewmac-fast-span",
+        type=int,
+        default=DEFAULT_COST_EWMAC_FAST_SPAN,
+    )
+    parser.add_argument(
+        "--cost-ewmac-slow-span",
+        type=int,
+        default=DEFAULT_COST_EWMAC_SLOW_SPAN,
+    )
+    parser.add_argument(
+        "--cost-ewmac-vol-span",
+        type=int,
+        default=DEFAULT_COST_EWMAC_VOL_SPAN,
+    )
+    parser.add_argument(
+        "--cost-ewmac-scalar-min-periods",
+        type=int,
+        default=EWMAC_SCALAR_MIN_PERIODS,
+    )
+    parser.add_argument(
+        "--max-cost-share-of-sharpe",
+        type=float,
+        default=DEFAULT_MAX_COST_SHARE_OF_SHARPE,
+        help="Maximum annual SR cost as a share of pooled pre-cost Sharpe",
+    )
+    parser.add_argument(
+        "--skip-ewmac-cost-baseline",
+        action="store_true",
+        help="Skip the reviewed-pool EWMAC Sharpe and turnover calculation",
+    )
+    parser.add_argument(
         "--vol-source",
         choices=["pysystemtrade", "dated", "continuous"],
         default="pysystemtrade",
@@ -894,6 +1381,11 @@ def _emit_report(report: pl.DataFrame, args) -> pl.DataFrame:
         "slow_history_years",
         "pooling_role",
         "include_default_pool",
+        "ewmac_pooled_pre_cost_sharpe",
+        "configured_sr_cost_per_trade",
+        "ewmac_total_annual_sr_cost",
+        "ewmac_cost_share_of_pooled_sharpe",
+        "ewmac_cost_within_sharpe_limit",
         "ib_availability",
         "error",
     ]
@@ -927,6 +1419,24 @@ def run(argv=None) -> pl.DataFrame:
         if args.vol_source == "pysystemtrade" else None
     )
     fx_by_currency = load_latest_fx_to_usd(args.pysystemtrade_db)
+    if args.max_cost_share_of_sharpe <= 0:
+        raise ValueError("--max-cost-share-of-sharpe must be positive")
+
+    pooled_summary = None
+    strategy_metrics = None
+    if not args.skip_ewmac_cost_baseline:
+        strategy_provider = pysystemtrade_provider or PysystemtradeHistoryProvider(
+            db_path=args.pysystemtrade_db
+        )
+        pooled_summary, strategy_metrics = estimate_pooled_ewmac_cost_baseline(
+            strategy_provider,
+            db_path=args.pysystemtrade_db,
+            pooling_mapping_path=args.pysystemtrade_pooling_mapping,
+            fast_span=args.cost_ewmac_fast_span,
+            slow_span=args.cost_ewmac_slow_span,
+            vol_span=args.cost_ewmac_vol_span,
+            scalar_min_periods=args.cost_ewmac_scalar_min_periods,
+        )
 
     if args.offline:
         if pysystemtrade_provider is None:
@@ -954,6 +1464,13 @@ def run(argv=None) -> pl.DataFrame:
                 rows.append(row)
             except Exception as exc:
                 rows.append(_error_row(instr, exc, fx_by_currency=fx_by_currency))
+        rows = _attach_pooled_cost_estimates(
+            rows,
+            instruments,
+            pooled_summary=pooled_summary,
+            strategy_metrics=strategy_metrics,
+            max_cost_share_of_sharpe=args.max_cost_share_of_sharpe,
+        )
         return _emit_report(pl.DataFrame(rows, infer_schema_length=None), args)
 
     # eventkit still asks asyncio for a current main-thread loop at import
@@ -1035,6 +1552,13 @@ def run(argv=None) -> pl.DataFrame:
     finally:
         ib.disconnect()
 
+    rows = _attach_pooled_cost_estimates(
+        rows,
+        instruments,
+        pooled_summary=pooled_summary,
+        strategy_metrics=strategy_metrics,
+        max_cost_share_of_sharpe=args.max_cost_share_of_sharpe,
+    )
     return _emit_report(pl.DataFrame(rows, infer_schema_length=None), args)
 
 

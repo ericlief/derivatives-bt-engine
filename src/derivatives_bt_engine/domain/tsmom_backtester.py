@@ -797,6 +797,29 @@ def _load_pysystemtrade_scalar_history(
     return scalar, False
 
 
+def load_pysystemtrade_ewmac_normalization(
+    config: TsmomBacktestConfig,
+) -> tuple[pl.DataFrame, pl.DataFrame, dict[str, object]]:
+    """Load the reviewed EWMAC scalar and coverage for other research tools.
+
+    This is the public boundary around the range- and mapping-sensitive cache
+    used by the backtester.  Callers receive the same reviewed membership and
+    causal scalar without duplicating the full-universe normalization logic.
+    """
+    panel, coverage, source_commit, source_range_key, panel_cache_hit = (
+        _load_pysystemtrade_ewmac_universe(config)
+    )
+    scalar, scalar_cache_hit = _load_pysystemtrade_scalar_history(
+        panel, config, source_commit, source_range_key
+    )
+    return scalar, coverage, {
+        'source_commit': source_commit,
+        'source_range_key': source_range_key,
+        'forecast_panel_cache_hit': panel_cache_hit,
+        'scalar_cache_hit': scalar_cache_hit,
+    }
+
+
 def _precompute_ewmac_normalization(
     full_price_data: dict[str, pl.DataFrame],
     config: TsmomBacktestConfig,

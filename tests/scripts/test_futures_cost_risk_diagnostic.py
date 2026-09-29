@@ -1,6 +1,7 @@
 from argparse import Namespace
 from datetime import date, timedelta
 import inspect
+import statistics
 from types import ModuleType, SimpleNamespace
 import sys
 
@@ -8,7 +9,9 @@ import polars as pl
 import pytest
 
 from derivatives_bt_engine.data.futures_cost_risk import (
+    _configured_cost_estimate,
     _emit_report,
+    _ewmac_rule_performance,
     _history_volatility,
     _round_report_decimals,
     _ticker_values,
@@ -41,6 +44,83 @@ def test_market_data_type_belongs_to_diagnostic_not_history_loader():
 
 def test_broad_audit_defaults_to_automatic_quote_fallback():
     assert parse_args([]).market_data_type == "auto"
+
+
+def test_broad_audit_defaults_to_reviewed_pool_ewmac_cost_baseline():
+    args = parse_args([])
+
+    assert args.cost_ewmac_fast_span == 16
+    assert args.cost_ewmac_slow_span == 64
+    assert args.cost_ewmac_vol_span == 35
+    assert args.max_cost_share_of_sharpe == pytest.approx(1.0 / 3.0)
+    assert not args.skip_ewmac_cost_baseline
+
+
+def test_ewmac_performance_delays_forecast_and_annualizes_turnover():
+    frame = pl.DataFrame({
+        "ts_event": [date(2024, 1, day) for day in range(1, 6)],
+        "ewmac_forecast": [None, 10.0, 10.0, -10.0, -10.0],
+        "point_vol": [1.0] * 5,
+        "pt_change_1d": [None, 1.0, 2.0, -1.0, 2.0],
+    })
+
+    metrics, pnl = _ewmac_rule_performance(frame)
+
+    expected_pnl = [2.0, -1.0, -2.0]
+    expected_sharpe = (
+        statistics.mean(expected_pnl)
+        / statistics.stdev(expected_pnl)
+        * 256**0.5
+    )
+    assert pnl["risk_adjusted_pnl"].to_list() == expected_pnl
+    assert metrics["ewmac_pre_cost_sharpe"] == pytest.approx(expected_sharpe)
+    assert metrics["ewmac_forecast_turnover"] == pytest.approx(256 * (20 / 3) / 10)
+
+
+def test_configured_cost_uses_pooled_turnover_and_reference_rolls():
+    estimate = _configured_cost_estimate(
+        {
+            "symbol": "MICRO",
+            "instrument_code": "MICRO",
+            "representative_instrument": "FULL",
+            "carver_spread_points": 0.25,
+            "commission": 2.0,
+            "per_trade_cost": 1.0,
+            "percentage_cost": 0.0001,
+        },
+        {
+            "multiplier": 50.0,
+            "vol_reference_price": 100.0,
+            "mixed_point_vol": 1.0,
+            "fx_to_usd": 1.0,
+            "annualization_days": 256,
+        },
+        pooled_summary={
+            "ewmac_pooled_forecast_turnover": 2.0,
+            "ewmac_pooled_pre_cost_sharpe": 0.6,
+        },
+        strategy_metrics={
+            "instrument_code": "FULL",
+            "ewmac_pre_cost_sharpe": 0.5,
+            "ewmac_forecast_turnover": 1.8,
+            "strategy_rolls_per_year": 4.0,
+        },
+        max_cost_share_of_sharpe=1.0 / 3.0,
+    )
+
+    per_trade_sr = 14.5 / 800.0
+    assert estimate["strategy_reference_instrument"] == "FULL"
+    assert estimate["configured_one_way_cost_native"] == pytest.approx(14.5)
+    assert estimate["configured_sr_cost_per_trade"] == pytest.approx(per_trade_sr)
+    assert estimate["ewmac_pooled_forecast_annual_sr_cost"] == pytest.approx(
+        per_trade_sr * 2.0
+    )
+    assert estimate["strategy_reference_roll_turnover"] == pytest.approx(8.0)
+    assert estimate["ewmac_total_annual_sr_cost"] == pytest.approx(per_trade_sr * 10.0)
+    assert estimate["ewmac_cost_share_of_pooled_sharpe"] == pytest.approx(
+        per_trade_sr * 10.0 / 0.6
+    )
+    assert estimate["ewmac_cost_within_sharpe_limit"]
 
 
 def test_automatic_quote_fallback_tries_live_then_delayed_then_frozen():
