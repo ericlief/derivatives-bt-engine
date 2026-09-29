@@ -91,10 +91,13 @@ effective point value are shown explicitly.
 | VIX | VIX | VIX_MONTHLY | execution_duplicate | VIX_mini | same_config_execution_variant |
 
 All execution variants remain in `instrument_classification.csv` and in the
-futures cost/risk report. `candidate_pairs.csv` contains return correlation,
-contract-month agreement, exact contract agreement, two-sided five-day roll
-matching, both roll configurations, descriptions, broker symbols, exchanges,
-history starts, and the reviewed decision for every first-pass candidate.
+futures cost/risk report. `candidate_pairs.csv` contains common-interval return
+correlation, contract-month agreement, exact contract agreement, two-sided
+five-day roll matching, both roll configurations, descriptions, broker symbols,
+exchanges, history starts, and the reviewed decision for every first-pass
+candidate. Common-interval returns are recomputed from each signal index after
+joining common dates, so a missing session cannot pair a multi-session return
+from one history with a one-session return from the other.
 
 ## Interpretation
 

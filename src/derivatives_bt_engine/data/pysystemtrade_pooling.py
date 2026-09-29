@@ -409,18 +409,26 @@ def _finite_or_none(value) -> Optional[float]:
 
 
 def _history_pair_metrics(left, right) -> dict[str, object]:
+    # Join levels before calculating returns. Joining independently calculated
+    # daily returns can pair a one-session move with a multi-session move when
+    # either source omits an intermediate date.
     returns = (
         left.signal.select(
-            "trade_date", pl.col("ret_1d").alias("return_a")
+            "trade_date", pl.col("signal_index").alias("index_a")
         )
-        .drop_nulls()
         .join(
             right.signal.select(
-                "trade_date", pl.col("ret_1d").alias("return_b")
-            ).drop_nulls(),
+                "trade_date", pl.col("signal_index").alias("index_b")
+            ),
             on="trade_date",
             how="inner",
         )
+        .sort("trade_date")
+        .with_columns(
+            pl.col("index_a").pct_change().alias("return_a"),
+            pl.col("index_b").pct_change().alias("return_b"),
+        )
+        .drop_nulls(["return_a", "return_b"])
     )
     return_correlation = (
         _finite_or_none(returns.select(pl.corr("return_a", "return_b")).item())
@@ -630,10 +638,13 @@ effective point value are shown explicitly.
 {_markdown_table(excluded, ['instrument_code', 'economic_family_id', 'roll_policy_id', 'pooling_role', 'representative_instrument', 'decision_basis'])}
 
 All execution variants remain in `instrument_classification.csv` and in the
-futures cost/risk report. `candidate_pairs.csv` contains return correlation,
-contract-month agreement, exact contract agreement, two-sided five-day roll
-matching, both roll configurations, descriptions, broker symbols, exchanges,
-history starts, and the reviewed decision for every first-pass candidate.
+futures cost/risk report. `candidate_pairs.csv` contains common-interval return
+correlation, contract-month agreement, exact contract agreement, two-sided
+five-day roll matching, both roll configurations, descriptions, broker symbols,
+exchanges, history starts, and the reviewed decision for every first-pass
+candidate. Common-interval returns are recomputed from each signal index after
+joining common dates, so a missing session cannot pair a multi-session return
+from one history with a one-session return from the other.
 
 ## Interpretation
 

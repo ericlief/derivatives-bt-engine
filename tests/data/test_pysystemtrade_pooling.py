@@ -1,14 +1,48 @@
-from datetime import datetime
+from datetime import date, datetime
+from types import SimpleNamespace
 
 import polars as pl
 
 from derivatives_bt_engine.data.pysystemtrade_pooling import (
+    _history_pair_metrics,
     apply_pysystemtrade_pooling_mapping,
     discover_pysystemtrade_duplicate_candidates,
     load_pysystemtrade_pooling_mapping,
     pooling_mapping_fingerprint,
     write_pysystemtrade_pooling_audit,
 )
+
+
+def _pair_history(dates, levels):
+    signal = pl.DataFrame(
+        {
+            "trade_date": dates,
+            "signal_index": levels,
+        }
+    ).with_columns(pl.col("signal_index").pct_change().alias("ret_1d"))
+    marks = pl.DataFrame(
+        schema={
+            "trade_date": pl.Date,
+            "contract_id": pl.String,
+            "is_roll": pl.Boolean,
+        }
+    )
+    return SimpleNamespace(signal=signal, marks=marks)
+
+
+def test_pair_correlation_recomputes_returns_over_common_date_intervals():
+    all_dates = [date(2024, 1, day) for day in range(1, 6)]
+    levels = [100.0, 110.0, 132.0, 118.8, 124.74]
+    left = _pair_history(all_dates, levels)
+    right = _pair_history(
+        [all_dates[0], *all_dates[2:]],
+        [levels[0], *levels[2:]],
+    )
+
+    metrics = _history_pair_metrics(left, right)
+
+    assert metrics["overlap_return_days"] == 3
+    assert metrics["return_correlation"] == 1.0
 
 
 def _write_mapping(path) -> None:
@@ -198,3 +232,4 @@ def test_report_shows_affirmative_representative_with_broker_identity(tmp_path):
     assert "## Selected representatives for size variants" in report
     assert "| TEST_SIZE_VARIANTS | FULL | Full contract | NQ | 20.0 |" in report
     assert "| MICRO | TEST | TEST_QUARTERLY | execution_duplicate | FULL |" in report
+    assert "Common-interval returns are recomputed" in report
