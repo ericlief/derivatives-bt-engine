@@ -82,6 +82,14 @@ from typing import Mapping, Optional, cast
 import polars as pl
 
 from derivatives_bt_engine.domain.enums import SignalConfidenceRegime, TrendRegime
+from derivatives_bt_engine.domain.volatility import (
+    CARVER_BUSINESS_DAYS_PER_YEAR,
+    CARVER_FAST_VOL_SPAN,
+    CARVER_SLOW_VOL_WEIGHT,
+    CARVER_SLOW_VOL_YEARS,
+    CARVER_VOL_MIN_SAMPLES,
+    carver_mixed_point_volatility,
+)
 
 log = logging.getLogger(__name__)
 
@@ -118,8 +126,11 @@ GOULDING_SIGNAL_MODES = ('binary', 'continuous')
 GOULDING_FORECAST_TARGET_ABS = 0.5
 GOULDING_FORECAST_CAP = 1.0
 GOULDING_FORECAST_MIN_OBS = 12
-EWMAC_FORECAST_TARGET_ABS = 10.0
-EWMAC_FORECAST_CAP = 20.0
+# Native repository forecasts use the same bounded scale as the other TSMOM
+# signals. This is exactly Carver's average-absolute-10/cap-20 convention
+# divided by 20: average absolute 0.5, hard cap +/-1.
+EWMAC_FORECAST_TARGET_ABS = 0.5
+EWMAC_FORECAST_CAP = 1.0
 EWMAC_SCALAR_MIN_PERIODS = 500
 EWMAC_SCALAR_POOLS = ('fixed', 'global', 'cluster', 'instrument')
 # Paper's own warm-up requirement per Appendix C -- estimate_mixing_params
@@ -485,16 +496,22 @@ def carver_ewmac(
     df: pl.DataFrame,
     fast_span: int = 16,
     slow_span: int = 64,
-    vol_span: int = 35,
+    vol_span: int = CARVER_FAST_VOL_SPAN,
+    vol_slow_years: int = CARVER_SLOW_VOL_YEARS,
+    vol_slow_weight: float = CARVER_SLOW_VOL_WEIGHT,
+    vol_min_samples: int = CARVER_VOL_MIN_SAMPLES,
+    annualization_days: int = CARVER_BUSINESS_DAYS_PER_YEAR,
     forecast_scalar: float = 1.0,
-    forecast_cap: float = 20.0,
+    forecast_cap: float = EWMAC_FORECAST_CAP,
 ) -> pl.DataFrame:
     """Carver-style EWMAC on an additive continuous futures price.
 
     ``close`` must be a Panama (or additively equivalent) point-price series,
-    never a positive return index.  The EMA difference and volatility are in
-    the same point units.  ``forecast_scalar`` is explicit because calibrated
-    scalars vary by speed pair and portfolio; the default exposes the raw
+    never a positive return index. The EMA difference and the 70% fast/30%
+    slow mixed volatility are in the same point units. ``vol_span`` controls
+    the fast component; the slow component is an EWM mean of that fast
+    volatility. ``forecast_scalar`` is explicit because calibrated scalars
+    vary by speed pair and portfolio; the default exposes the raw
     vol-normalized forecast rather than pretending to be calibrated.
     """
     if fast_span <= 0 or slow_span <= 0 or vol_span <= 0:
@@ -510,10 +527,16 @@ def carver_ewmac(
     )
     result = result.with_columns(
         (pl.col("fast_ewma") - pl.col("slow_ewma")).alias("raw_ewmac"),
-        pl.col("point_change")
-        .ewm_std(span=vol_span, adjust=False, min_samples=2)
-        .alias("point_vol"),
     )
+    result = carver_mixed_point_volatility(
+        result,
+        point_change_col="point_change",
+        annualization_days=annualization_days,
+        fast_span=vol_span,
+        slow_years=vol_slow_years,
+        slow_weight=vol_slow_weight,
+        min_samples=vol_min_samples,
+    ).with_columns(pl.col("mixed_point_vol").alias("point_vol"))
     result = result.with_columns(
         pl.when(pl.col("point_vol") > 0)
         .then(pl.col("raw_ewmac") / pl.col("point_vol"))

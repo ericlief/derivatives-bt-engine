@@ -23,10 +23,17 @@ import polars as pl
 
 from derivatives_bt_engine.domain.allocation import ALLOCATION_MODES, NOTIONAL_WEIGHTING_SCHEMES
 from derivatives_bt_engine.domain.signal import (
+    EWMAC_FORECAST_CAP,
     EWMAC_FORECAST_TARGET_ABS,
     EWMAC_SCALAR_MIN_PERIODS,
     EWMAC_SCALAR_POOLS,
     GOULDING_SIGNAL_MODES,
+)
+from derivatives_bt_engine.domain.volatility import (
+    CARVER_FAST_VOL_SPAN,
+    CARVER_SLOW_VOL_WEIGHT,
+    CARVER_SLOW_VOL_YEARS,
+    CARVER_VOL_MIN_SAMPLES,
 )
 from derivatives_bt_engine.domain.tsmom_backtester import (
     EWMAC_SCALAR_UNIVERSES,
@@ -186,7 +193,14 @@ def parse_args():
                         "Panama series. See TsmomBacktestConfig.signal_weighting's docstring")
     p.add_argument('--ewmac-fast-span', type=int, default=16)
     p.add_argument('--ewmac-slow-span', type=int, default=64)
-    p.add_argument('--ewmac-vol-span', type=int, default=35)
+    p.add_argument(
+        '--ewmac-vol-span', type=int, default=CARVER_FAST_VOL_SPAN,
+        help='Fast span of the EWMAC 70/30 mixed point-volatility denominator '
+             '(default: %(default)s)',
+    )
+    p.add_argument('--ewmac-vol-slow-years', type=int, default=CARVER_SLOW_VOL_YEARS)
+    p.add_argument('--ewmac-vol-slow-weight', type=float, default=CARVER_SLOW_VOL_WEIGHT)
+    p.add_argument('--ewmac-vol-min-samples', type=int, default=CARVER_VOL_MIN_SAMPLES)
     p.add_argument('--ewmac-scalar-pool', choices=EWMAC_SCALAR_POOLS, default='global',
                    help="EWMAC forecast-scalar estimator (default: %(default)s). 'global' makes one "
                         "pool over --ewmac-scalar-universe; 'cluster' and 'instrument' use the "
@@ -206,7 +220,7 @@ def parse_args():
                    help='Mean absolute native EWMAC forecast calibration target (default: %(default)s)')
     p.add_argument('--ewmac-forecast-scalar', type=float, default=1.0,
                    help='Explicit scalar used only with --ewmac-scalar-pool fixed')
-    p.add_argument('--ewmac-forecast-cap', type=float, default=20.0)
+    p.add_argument('--ewmac-forecast-cap', type=float, default=EWMAC_FORECAST_CAP)
     p.add_argument('--goulding-signal-mode', choices=GOULDING_SIGNAL_MODES, default='binary',
                    help="Only used with --signal-weighting goulding. 'binary' preserves the +/-1 "
                         "direction baseline. 'continuous' uses mean(fast, slow) in Bull/Bear and "
@@ -311,6 +325,9 @@ def main():
         ewmac_fast_span=args.ewmac_fast_span,
         ewmac_slow_span=args.ewmac_slow_span,
         ewmac_vol_span=args.ewmac_vol_span,
+        ewmac_vol_slow_years=args.ewmac_vol_slow_years,
+        ewmac_vol_slow_weight=args.ewmac_vol_slow_weight,
+        ewmac_vol_min_samples=args.ewmac_vol_min_samples,
         ewmac_scalar_pool=args.ewmac_scalar_pool,
         ewmac_scalar_universe=args.ewmac_scalar_universe,
         ewmac_scalar_min_periods=args.ewmac_scalar_min_periods,

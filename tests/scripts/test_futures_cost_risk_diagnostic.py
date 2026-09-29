@@ -51,7 +51,10 @@ def test_broad_audit_defaults_to_reviewed_pool_ewmac_cost_baseline():
 
     assert args.cost_ewmac_fast_span == 16
     assert args.cost_ewmac_slow_span == 64
-    assert args.cost_ewmac_vol_span == 35
+    assert args.cost_ewmac_vol_span == 32
+    assert args.cost_ewmac_vol_slow_years == 10
+    assert args.cost_ewmac_vol_slow_weight == pytest.approx(0.3)
+    assert args.cost_ewmac_vol_min_samples == 10
     assert args.max_cost_share_of_sharpe == pytest.approx(1.0 / 3.0)
     assert not args.skip_ewmac_cost_baseline
 
@@ -59,7 +62,7 @@ def test_broad_audit_defaults_to_reviewed_pool_ewmac_cost_baseline():
 def test_ewmac_performance_delays_forecast_and_annualizes_turnover():
     frame = pl.DataFrame({
         "ts_event": [date(2024, 1, day) for day in range(1, 6)],
-        "ewmac_forecast": [None, 10.0, 10.0, -10.0, -10.0],
+        "ewmac_forecast": [None, 0.5, 0.5, -0.5, -0.5],
         "point_vol": [1.0] * 5,
         "pt_change_1d": [None, 1.0, 2.0, -1.0, 2.0],
     })
@@ -74,7 +77,9 @@ def test_ewmac_performance_delays_forecast_and_annualizes_turnover():
     )
     assert pnl["risk_adjusted_pnl"].to_list() == expected_pnl
     assert metrics["ewmac_pre_cost_sharpe"] == pytest.approx(expected_sharpe)
-    assert metrics["ewmac_forecast_turnover"] == pytest.approx(256 * (20 / 3) / 10)
+    assert metrics["ewmac_forecast_turnover"] == pytest.approx(
+        256 * (1.0 / 3) / 0.5
+    )
 
 
 def test_configured_cost_uses_pooled_turnover_and_reference_rolls():

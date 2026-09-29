@@ -75,6 +75,12 @@ from derivatives_bt_engine.domain.signal import (
     goulding_monthly,
     resolve_trend_direction,
 )
+from derivatives_bt_engine.domain.volatility import (
+    CARVER_FAST_VOL_SPAN,
+    CARVER_SLOW_VOL_WEIGHT,
+    CARVER_SLOW_VOL_YEARS,
+    CARVER_VOL_MIN_SAMPLES,
+)
 from derivatives_bt_engine.domain.tsmom_history import (
     SOURCE_NEUTRAL_DATA_SOURCES,
     load_source_neutral_histories,
@@ -89,7 +95,7 @@ from derivatives_bt_engine.utils.logger import setup_logger
 logger = setup_logger()
 
 EWMAC_SCALAR_UNIVERSES = ('backtest', 'pysystemtrade')
-EWMAC_NORMALIZATION_CACHE_VERSION = 2
+EWMAC_NORMALIZATION_CACHE_VERSION = 3
 
 # Same VIX_PATH convention as naked_futures.py/the options strategies -- a
 # directory resolves to {dir}/processed/vix.parquet (see
@@ -357,7 +363,11 @@ class TsmomBacktestConfig:
     # for parity tests against an externally calibrated Carver value.
     ewmac_fast_span: int = 16
     ewmac_slow_span: int = 64
-    ewmac_vol_span: int = 35
+    # Fast component of the shared 70/30 mixed point-volatility denominator.
+    ewmac_vol_span: int = CARVER_FAST_VOL_SPAN
+    ewmac_vol_slow_years: int = CARVER_SLOW_VOL_YEARS
+    ewmac_vol_slow_weight: float = CARVER_SLOW_VOL_WEIGHT
+    ewmac_vol_min_samples: int = CARVER_VOL_MIN_SAMPLES
     ewmac_scalar_pool: str = 'global'
     ewmac_scalar_universe: str = 'pysystemtrade'
     ewmac_scalar_min_periods: int = EWMAC_SCALAR_MIN_PERIODS
@@ -386,6 +396,12 @@ class TsmomBacktestConfig:
             raise ValueError("EWMAC spans must be positive")
         if self.ewmac_fast_span >= self.ewmac_slow_span:
             raise ValueError("ewmac_fast_span must be less than ewmac_slow_span")
+        if self.ewmac_vol_slow_years <= 0:
+            raise ValueError("ewmac_vol_slow_years must be positive")
+        if not 0.0 <= self.ewmac_vol_slow_weight <= 1.0:
+            raise ValueError("ewmac_vol_slow_weight must be between zero and one")
+        if self.ewmac_vol_min_samples < 2:
+            raise ValueError("ewmac_vol_min_samples must be at least 2")
         if self.ewmac_scalar_pool not in EWMAC_SCALAR_POOLS:
             raise ValueError(
                 f"ewmac_scalar_pool must be one of {EWMAC_SCALAR_POOLS}, "
@@ -582,7 +598,10 @@ def _pysystemtrade_ewmac_cache_paths(
         / source_range_key
         / (
             f'fast{config.ewmac_fast_span}_slow{config.ewmac_slow_span}'
-            f'_vol{config.ewmac_vol_span}'
+            f'_fastvol{config.ewmac_vol_span}'
+            f'_slowvol{config.ewmac_vol_slow_years}y'
+            f'_slowweight{_cache_float(config.ewmac_vol_slow_weight)}'
+            f'_volmin{config.ewmac_vol_min_samples}'
         )
     )
     scalar_key = (
@@ -725,6 +744,9 @@ def _load_pysystemtrade_ewmac_universe(
                 fast_span=config.ewmac_fast_span,
                 slow_span=config.ewmac_slow_span,
                 vol_span=config.ewmac_vol_span,
+                vol_slow_years=config.ewmac_vol_slow_years,
+                vol_slow_weight=config.ewmac_vol_slow_weight,
+                vol_min_samples=config.ewmac_vol_min_samples,
                 forecast_scalar=1.0,
                 forecast_cap=config.ewmac_forecast_cap,
             ).select('ts_event', 'raw_forecast')
@@ -845,9 +867,15 @@ def _precompute_ewmac_normalization(
             fast_span=config.ewmac_fast_span,
             slow_span=config.ewmac_slow_span,
             vol_span=config.ewmac_vol_span,
+            vol_slow_years=config.ewmac_vol_slow_years,
+            vol_slow_weight=config.ewmac_vol_slow_weight,
+            vol_min_samples=config.ewmac_vol_min_samples,
             forecast_scalar=1.0,
             forecast_cap=config.ewmac_forecast_cap,
-        ).select('ts_event', 'raw_ewmac', 'point_vol', 'raw_forecast')
+        ).select(
+            'ts_event', 'raw_ewmac', 'fast_point_vol', 'slow_point_vol',
+            'mixed_point_vol', 'point_vol', 'raw_forecast',
+        )
         raw_by_symbol[symbol] = raw.with_columns(
             pl.lit(pool_key).alias('pool_key')
         )
@@ -942,6 +970,9 @@ def _precompute_ewmac_normalization(
         pl.lit(config.ewmac_fast_span).alias('fast_span'),
         pl.lit(config.ewmac_slow_span).alias('slow_span'),
         pl.lit(config.ewmac_vol_span).alias('vol_span'),
+        pl.lit(config.ewmac_vol_slow_years).alias('vol_slow_years'),
+        pl.lit(config.ewmac_vol_slow_weight).alias('vol_slow_weight'),
+        pl.lit(config.ewmac_vol_min_samples).alias('vol_min_samples'),
         pl.lit(config.ewmac_forecast_target_abs).alias('target_abs_forecast'),
         pl.lit(config.ewmac_forecast_cap).alias('forecast_cap'),
         pl.lit(config.ewmac_scalar_min_periods).alias('configured_min_periods'),
@@ -1022,6 +1053,9 @@ def _precompute_signal(
             fast_span=config.ewmac_fast_span,
             slow_span=config.ewmac_slow_span,
             vol_span=config.ewmac_vol_span,
+            vol_slow_years=config.ewmac_vol_slow_years,
+            vol_slow_weight=config.ewmac_vol_slow_weight,
+            vol_min_samples=config.ewmac_vol_min_samples,
             forecast_scalar=config.ewmac_forecast_scalar,
             forecast_cap=config.ewmac_forecast_cap,
         ).select(

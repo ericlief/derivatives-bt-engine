@@ -977,6 +977,18 @@ the removed series no longer receive repeated cross-sectional influence. The
 corrected 228-history map has a new content hash, so this old cache cannot be
 reused and the next pooled run will materialize a separate cache.
 
+As of 2026-09-29, normalization cache version 3 replaces that research
+configuration. EWMAC now divides the EMA difference by the shared Carver mixed
+point volatility: a 32-session fast EWM standard deviation blended 70/30 with
+a ten-year-span EWM mean of fast volatility. The fast estimator requires ten
+point changes; the slow component begins equal to fast at that first valid
+observation and matures causally rather than imposing a ten-year minimum. The
+repository-native forecast directly targets average absolute 0.5 and caps at
+`[-1, 1]`. This is exactly the traditional Carver 10/20 scale divided by 20,
+so position and turnover normalization use 0.5. The mixed-volatility change,
+unlike the scale conversion, intentionally changes raw forecasts and requires
+the version-3 panel to be rebuilt.
+
 Each run returns `ewmac_scalar_history` and the CLI prints its last rows. Saved
 runs write a separate `*_tsmom_ewmac_scalars_*.csv` (and `ewmac_scalars`
 spreadsheet tab) containing pool, date, available-instrument count, daily
@@ -1001,12 +1013,11 @@ ended, the May 2024 rebalance explicitly showed a scalar as-of 2024-03-29 with
 the carry flag set; changing data source therefore recalculates the traded
 hybrid rule, while reuse or extrapolation of the separately calibrated scalar
 is visible and range-checked.
-When an EWMAC family is added,
-scale and cap each speed rule in 10/20 units first, combine those forecasts
-with weights summing to one, apply a causal forecast-diversification
-multiplier if used, and cap the combined forecast again. A component's
-forecast weight does not change its own average-absolute-10 calibration
-target.
+When an EWMAC family is added, scale and cap each speed rule to average
+absolute 0.5 and `[-1, 1]` first, combine those forecasts with weights summing
+to one, apply a causal forecast-diversification multiplier if used, and cap
+the combined forecast again. A component's forecast weight does not change
+its own average-absolute-0.5 calibration target.
 
 The TSMOM backtester now consumes the same separation through
 `domain.tsmom_history`. Its source-neutral rows expose `close` as the current
@@ -1200,15 +1211,15 @@ The default cost audit also estimates a Carver-style EWMAC 16/64 research
 baseline from the 228 reviewed representatives. It reuses the mapping- and
 range-keyed EWMAC cache, applies the causal pooled forecast scalar, delays each
 forecast by one observation, and earns the canonical matched-contract point
-change against lagged 35-day point volatility. The affordability baseline is
-the equal-instrument mean of the individual full-history pre-cost Sharpes, so
-each reviewed strategy history gets one vote. The report also retains the
+change against lagged 70/30 mixed point volatility. The affordability baseline
+is the equal-instrument mean of the individual full-history pre-cost Sharpes,
+so each reviewed strategy history gets one vote. The report also retains the
 history-weighted mean and the Sharpe obtained by stacking every daily
 observation; the latter lets long histories dominate and is therefore a
 diagnostic rather than the cost threshold's denominator.
 
 Forecast turnover is estimated separately for every representative as
-`256 × mean(abs(change in forecast)) / 10`, then pooled with Carver's
+`256 × mean(abs(change in forecast)) / 0.5`, then pooled with Carver's
 history-length weighting. That same pooled forecast turnover is used for each
 execution row, while the row keeps its own configured spread, commission,
 point value, FX conversion, and current mixed point volatility. The selected
@@ -1242,6 +1253,19 @@ Of the 228 reviewed representatives, 116 passed and 112 failed the one-third
 cost gate. The near-even split underscores that the threshold is a meaningful
 screen rather than a cosmetic report field.
 
+That run is retained as the pre-mixed-volatility comparison. The 2026-09-29
+version-3 regression used the native `[-1, 1]` forecast, target 0.5, 32-session
+fast volatility, ten-year-span slow volatility, 30% slow weight, and a
+ten-observation volatility warm-up. It produced pooled pre-cost Sharpe
+`0.1794`, history-weighted mean instrument Sharpe `0.3304`,
+observation-stacked diagnostic Sharpe `0.3612`, and
+pooled annual forecast turnover `14.5298`. Of the 228 reviewed representatives,
+112 passed and 116 failed the one-third threshold. The latest causal scalar was
+`0.242833` on 2024-03-29, based on a historical mean daily cross-sectional
+median absolute raw forecast of `2.059032`. The new 252-row report contains no
+missing pooled Sharpe, turnover, configured one-way cost, or total annual SR
+cost values.
+
 Eleven usable histories carry Carver's `IgnoreWeekly` flag. The generic live
 resolver does not guess among their weekly/daily expiries; it retains their
 offline cost/risk rows but marks live qualification unavailable until a
@@ -1268,10 +1292,11 @@ micro slippage.
 ```
 
 Use `--skip-ewmac-cost-baseline` only when a quick volatility/contract audit
-is wanted without the pooled strategy calculation. The EWMAC speed, point-vol
-span, scalar warm-up, and affordability threshold have separate `--cost-ewmac-*`
-and `--max-cost-share-of-sharpe` flags so they cannot be confused with the
-32-day mixed volatility used in the cost denominator.
+is wanted without the pooled strategy calculation. The EWMAC speed,
+mixed-volatility inputs, scalar warm-up, and affordability threshold have
+separate `--cost-ewmac-*` and `--max-cost-share-of-sharpe` flags. Their defaults
+match the 32-session/ten-year/30% mixed volatility used in the current-contract
+cost denominator, while remaining independently overridable for research.
 
 `--offline` writes the complete 252-row comparison without connecting to IB.
 Prices and volatility then end at the imported Carver history boundary, live

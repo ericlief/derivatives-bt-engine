@@ -135,6 +135,11 @@ def test_source_neutral_backtest_runs_all_three_signal_classes(monkeypatch, sign
     assert all(event['signal_class'] == signal_weighting for event in result['trend_signals'])
     if signal_weighting == 'carver_ewmac':
         assert any(event['ewmac_forecast'] is not None for event in result['trend_signals'])
+        assert all(
+            event['ewmac_forecast'] is None
+            or abs(event['ewmac_forecast']) <= 1.0
+            for event in result['trend_signals']
+        )
         scalar_history = result['ewmac_scalar_history']
         assert scalar_history.height == frame.height
         assert scalar_history['scalar_pool'].unique().to_list() == ['global']
@@ -142,6 +147,12 @@ def test_source_neutral_backtest_runs_all_three_signal_classes(monkeypatch, sign
             'configured_backtest_symbols'
         ]
         assert scalar_history['configured_instrument_count'].unique().to_list() == [1]
+        assert scalar_history['target_abs_forecast'].unique().to_list() == [0.5]
+        assert scalar_history['forecast_cap'].unique().to_list() == [1.0]
+        assert scalar_history['vol_span'].unique().to_list() == [20]
+        assert scalar_history['vol_slow_years'].unique().to_list() == [10]
+        assert scalar_history['vol_slow_weight'].unique().to_list() == [0.3]
+        assert scalar_history['vol_min_samples'].unique().to_list() == [10]
         assert scalar_history['scalar_valid'].any()
         coverage = result['ewmac_instrument_coverage']
         assert coverage.select(
@@ -237,7 +248,9 @@ def test_fixed_ewmac_scalar_is_applied_before_cap() -> None:
 
     assert report['forecast_scalar'].unique().to_list() == [2.0]
     assert usable['ewmac_forecast'].to_list() == pytest.approx(
-        (usable['raw_forecast'] * 2.0).clip(-20.0, 20.0).to_list()
+        (usable['raw_forecast'] * 2.0).clip(
+            -config.ewmac_forecast_cap, config.ewmac_forecast_cap
+        ).to_list()
     )
     assert coverage['forecast_ts_start'][0] is not None
 

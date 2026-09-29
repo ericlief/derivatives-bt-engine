@@ -35,6 +35,7 @@ from derivatives_bt_engine.domain.signal import (
     _goulding_direction,
     build_features,
     calculate_trend_strength,
+    carver_ewmac,
     classify_regime,
     classify_signal_confidence,
     compute_signal_confidence,
@@ -530,7 +531,7 @@ def test_ewmac_scalar_history_is_cross_sectional_and_strictly_causal():
     })
 
     history = estimate_ewmac_scalar_history(
-        panel, target_abs_forecast=10.0, min_periods=2
+        panel, target_abs_forecast=0.5, min_periods=2
     )
 
     assert history['n_instruments'].to_list() == [1, 2, 2, 2]
@@ -540,8 +541,68 @@ def test_ewmac_scalar_history_is_cross_sectional_and_strictly_causal():
     assert history['prior_daily_observations'].to_list() == [0, 1, 2, 3]
     assert history['forecast_scalar'][0] is None
     assert history['forecast_scalar'][1] is None
-    assert history['forecast_scalar'][2] == pytest.approx(10.0 / 2.0)
-    assert history['forecast_scalar'][3] == pytest.approx(10.0 / (8.0 / 3.0))
+    assert history['forecast_scalar'][2] == pytest.approx(0.5 / 2.0)
+    assert history['forecast_scalar'][3] == pytest.approx(0.5 / (8.0 / 3.0))
+
+
+def test_carver_ewmac_uses_shared_mixed_point_volatility():
+    dates = _trading_dates(date(2020, 1, 1), 90)
+    changes = [None] + [(-1.0) ** i * (i % 7 + 1) for i in range(1, 90)]
+    closes = [100.0]
+    for change in changes[1:]:
+        closes.append(closes[-1] + change)
+    result = carver_ewmac(
+        pl.DataFrame({'ts_event': dates, 'close': closes}),
+        fast_span=4,
+        slow_span=16,
+        vol_span=32,
+        vol_slow_years=10,
+        vol_slow_weight=0.3,
+        vol_min_samples=10,
+        annualization_days=252,
+    )
+
+    expected_fast = result['point_change'].ewm_std(
+        span=32, adjust=True, min_samples=10
+    )
+    expected_slow = expected_fast.ewm_mean(
+        span=2520, adjust=True, min_samples=1
+    )
+    expected_mixed = expected_fast * 0.7 + expected_slow * 0.3
+
+    assert result['fast_point_vol'].to_list() == pytest.approx(
+        expected_fast.to_list()
+    )
+    assert result['slow_point_vol'].to_list() == pytest.approx(
+        expected_slow.to_list()
+    )
+    assert result['point_vol'].to_list() == pytest.approx(
+        expected_mixed.to_list()
+    )
+
+
+def test_half_one_ewmac_scale_is_equivalent_to_carver_ten_twenty_scale():
+    dates = _trading_dates(date(2020, 1, 1), 4)
+    panel = pl.DataFrame({
+        'ts_event': dates,
+        'instrument_code': ['A'] * 4,
+        'pool_key': ['global'] * 4,
+        'raw_forecast': [1.0, 2.0, 3.0, 4.0],
+    })
+    normalized = estimate_ewmac_scalar_history(
+        panel, target_abs_forecast=0.5, min_periods=2
+    )
+    carver = estimate_ewmac_scalar_history(
+        panel, target_abs_forecast=10.0, min_periods=2
+    )
+
+    assert normalized['forecast_scalar'].to_list()[2:] == pytest.approx(
+        (carver['forecast_scalar'].drop_nulls() / 20.0).to_list()
+    )
+    raw = panel['raw_forecast'][3]
+    normalized_forecast = max(-1.0, min(1.0, raw * normalized['forecast_scalar'][3]))
+    carver_forecast = max(-20.0, min(20.0, raw * carver['forecast_scalar'][3]))
+    assert normalized_forecast == pytest.approx(carver_forecast / 20.0)
 
 
 # ── goulding_monthly: independent of continuous_momentum ─────────────────

@@ -66,6 +66,7 @@ from derivatives_bt_engine.domain.volatility import (
     CARVER_FAST_VOL_SPAN,
     CARVER_SLOW_VOL_WEIGHT,
     CARVER_SLOW_VOL_YEARS,
+    CARVER_VOL_MIN_SAMPLES,
     carver_mixed_point_volatility,
 )
 from derivatives_bt_engine.live.tsmom_rebalance import build_instruments, _resolve_contract
@@ -109,7 +110,7 @@ SIX_DECIMAL_RATE_COLUMNS = {
 
 DEFAULT_COST_EWMAC_FAST_SPAN = 16
 DEFAULT_COST_EWMAC_SLOW_SPAN = 64
-DEFAULT_COST_EWMAC_VOL_SPAN = 35
+DEFAULT_COST_EWMAC_VOL_SPAN = CARVER_FAST_VOL_SPAN
 DEFAULT_MAX_COST_SHARE_OF_SHARPE = 1.0 / 3.0
 
 
@@ -225,6 +226,9 @@ def estimate_pooled_ewmac_cost_baseline(
     fast_span: int = DEFAULT_COST_EWMAC_FAST_SPAN,
     slow_span: int = DEFAULT_COST_EWMAC_SLOW_SPAN,
     vol_span: int = DEFAULT_COST_EWMAC_VOL_SPAN,
+    vol_slow_years: int = CARVER_SLOW_VOL_YEARS,
+    vol_slow_weight: float = CARVER_SLOW_VOL_WEIGHT,
+    vol_min_samples: int = CARVER_VOL_MIN_SAMPLES,
     scalar_min_periods: int = EWMAC_SCALAR_MIN_PERIODS,
     target_abs_forecast: float = EWMAC_FORECAST_TARGET_ABS,
     forecast_cap: float = EWMAC_FORECAST_CAP,
@@ -246,6 +250,9 @@ def estimate_pooled_ewmac_cost_baseline(
         ewmac_fast_span=fast_span,
         ewmac_slow_span=slow_span,
         ewmac_vol_span=vol_span,
+        ewmac_vol_slow_years=vol_slow_years,
+        ewmac_vol_slow_weight=vol_slow_weight,
+        ewmac_vol_min_samples=vol_min_samples,
         ewmac_scalar_min_periods=scalar_min_periods,
         ewmac_forecast_target_abs=target_abs_forecast,
         ewmac_forecast_cap=forecast_cap,
@@ -269,6 +276,9 @@ def estimate_pooled_ewmac_cost_baseline(
                 fast_span=fast_span,
                 slow_span=slow_span,
                 vol_span=vol_span,
+                vol_slow_years=vol_slow_years,
+                vol_slow_weight=vol_slow_weight,
+                vol_min_samples=vol_min_samples,
                 forecast_scalar=1.0,
                 forecast_cap=forecast_cap,
             )
@@ -361,6 +371,9 @@ def estimate_pooled_ewmac_cost_baseline(
         "ewmac_fast_span": fast_span,
         "ewmac_slow_span": slow_span,
         "ewmac_vol_span": vol_span,
+        "ewmac_vol_slow_years": vol_slow_years,
+        "ewmac_vol_slow_weight": vol_slow_weight,
+        "ewmac_vol_min_samples": vol_min_samples,
         "ewmac_target_abs_forecast": target_abs_forecast,
         "ewmac_forecast_cap": forecast_cap,
         "ewmac_scalar_min_periods": scalar_min_periods,
@@ -1198,6 +1211,22 @@ def parse_args(argv=None):
         "--cost-ewmac-vol-span",
         type=int,
         default=DEFAULT_COST_EWMAC_VOL_SPAN,
+        help="Fast span of the EWMAC mixed point-vol denominator",
+    )
+    parser.add_argument(
+        "--cost-ewmac-vol-slow-years",
+        type=int,
+        default=CARVER_SLOW_VOL_YEARS,
+    )
+    parser.add_argument(
+        "--cost-ewmac-vol-slow-weight",
+        type=float,
+        default=CARVER_SLOW_VOL_WEIGHT,
+    )
+    parser.add_argument(
+        "--cost-ewmac-vol-min-samples",
+        type=int,
+        default=CARVER_VOL_MIN_SAMPLES,
     )
     parser.add_argument(
         "--cost-ewmac-scalar-min-periods",
@@ -1447,6 +1476,9 @@ def run(argv=None) -> pl.DataFrame:
             fast_span=args.cost_ewmac_fast_span,
             slow_span=args.cost_ewmac_slow_span,
             vol_span=args.cost_ewmac_vol_span,
+            vol_slow_years=args.cost_ewmac_vol_slow_years,
+            vol_slow_weight=args.cost_ewmac_vol_slow_weight,
+            vol_min_samples=args.cost_ewmac_vol_min_samples,
             scalar_min_periods=args.cost_ewmac_scalar_min_periods,
         )
 
