@@ -154,7 +154,7 @@ def test_automatic_quote_fallback_tries_live_then_delayed_then_frozen():
     assert quote["market_data_attempts"] == "live,delayed,delayed-frozen"
 
 
-def test_report_rounds_money_to_two_decimals_and_other_floats_to_four():
+def test_report_uses_auditable_precision_for_money_rates_and_other_floats():
     report = pl.DataFrame({
         "notional_per_contract": [12345.6789],
         "commission_round_trip": [2.3456],
@@ -169,8 +169,8 @@ def test_report_rounds_money_to_two_decimals_and_other_floats_to_four():
     assert rounded["notional_per_contract"][0] == pytest.approx(12345.68)
     assert rounded["commission_round_trip"][0] == pytest.approx(2.35)
     assert rounded["price"][0] == pytest.approx(1.2346)
-    assert rounded["fx_to_usd"][0] == pytest.approx(0.0066)
-    assert rounded["annual_return_vol"][0] == pytest.approx(0.1235)
+    assert rounded["fx_to_usd"][0] == pytest.approx(0.006604)
+    assert rounded["annual_return_vol"][0] == pytest.approx(0.123456)
     assert rounded["history_rows"][0] == 100
 
 

@@ -101,6 +101,11 @@ TWO_DECIMAL_MONEY_COLUMNS = {
     "configured_one_way_cost_native",
     "configured_one_way_cost",
 }
+SIX_DECIMAL_RATE_COLUMNS = {
+    "fx_to_usd",
+    "daily_return_vol",
+    "annual_return_vol",
+}
 
 DEFAULT_COST_EWMAC_FAST_SPAN = 16
 DEFAULT_COST_EWMAC_SLOW_SPAN = 64
@@ -1350,14 +1355,21 @@ def _load_instruments(
 def _round_report_decimals(report: pl.DataFrame) -> pl.DataFrame:
     """Round report floats for human-facing CSV output.
 
-    Monetary contract/cost fields use cents; all other floating-point
-    diagnostics retain four decimal places. Counts and identifiers are not
-    cast or rounded.
+    Monetary contract/cost fields use cents. FX and return-volatility rates
+    retain six decimal places so displayed notionals and rates reproduce the
+    reported dollar volatility without material rounding drift. Other
+    floating-point diagnostics retain four decimal places. Counts and
+    identifiers are not cast or rounded.
     """
     expressions = []
     for name, dtype in report.schema.items():
         if dtype in (pl.Float32, pl.Float64):
-            decimals = 2 if name in TWO_DECIMAL_MONEY_COLUMNS else 4
+            if name in TWO_DECIMAL_MONEY_COLUMNS:
+                decimals = 2
+            elif name in SIX_DECIMAL_RATE_COLUMNS:
+                decimals = 6
+            else:
+                decimals = 4
             expressions.append(pl.col(name).round(decimals))
     return report.with_columns(expressions)
 
