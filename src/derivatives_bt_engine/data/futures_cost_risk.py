@@ -8,10 +8,10 @@ The diagnostic deliberately separates research history from execution data:
 * Carver's IB mapping resolves the dated contract that supplies current price,
   expiry, and an optional live bid/ask snapshot.  Point value, commission,
   native currency, and FX conversion remain explicit report inputs.
-* the reviewed normalization pool supplies a causal EWMAC 16/64 baseline,
-  equal-instrument pre-cost Sharpe, and history-weighted pooled turnover; and
-* each execution row combines its own configured costs and current point risk
-  with the selected representative's two-leg roll rate.
+* the reviewed normalization pool supplies causal EWMAC baselines for the
+  4/16, 8/32, 16/64, 32/128, and 64/256 rules; and
+* each execution row combines its own one-way costs and current dollar risk
+  with pooled rule turnover and its representative roll policy.
 
 All 252 instruments with usable Carver history have candidate IB identities;
 qualification against the connected account determines actual availability.
@@ -69,13 +69,19 @@ from derivatives_bt_engine.domain.volatility import (
     CARVER_VOL_MIN_SAMPLES,
     carver_mixed_point_volatility,
 )
-from derivatives_bt_engine.live.tsmom_rebalance import build_instruments, _resolve_contract
+from derivatives_bt_engine.live.tsmom_rebalance import (
+    _format_ib_multiplier,
+    _resolve_contract,
+    build_instruments,
+)
 from derivatives_bt_engine.utils.logger import setup_logger
 
 
 log = logging.getLogger("derivatives_bt_engine.data.futures_cost_risk")
 
 DEFAULT_DURATION = "1 Y"
+DEFAULT_SPREAD_DURATION = "30 D"
+DEFAULT_SPREAD_BAR_SIZES = ("1 min", "2 mins")
 DEFAULT_MIN_DAYS = 7
 DEFAULT_QUOTE_WAIT_SECONDS = 3.0
 DEFAULT_CONTRACT_DETAILS_TIMEOUT = 8.0
@@ -91,12 +97,12 @@ TWO_DECIMAL_MONEY_COLUMNS = {
     "notional_per_contract",
     "daily_dollar_vol_per_contract",
     "annual_dollar_vol_per_contract",
+    "min_contract_notional",
+    "min_contract_annual_dollar_vol",
+    "min_capital_full_weight_idm1",
     "commission_per_side",
-    "commission_round_trip",
     "one_way_spread_cash",
-    "round_trip_spread_cash",
     "one_way_total_cost",
-    "round_trip_total_cost",
     "configured_commission_native",
     "configured_spread_cash_native",
     "configured_one_way_cost_native",
@@ -108,14 +114,20 @@ SIX_DECIMAL_RATE_COLUMNS = {
     "annual_return_vol",
 }
 
+DEFAULT_COST_EWMAC_FAST_SPANS = (4, 8, 16, 32, 64)
 DEFAULT_COST_EWMAC_FAST_SPAN = 16
 DEFAULT_COST_EWMAC_SLOW_SPAN = 64
 DEFAULT_COST_EWMAC_VOL_SPAN = CARVER_FAST_VOL_SPAN
-DEFAULT_MAX_COST_SHARE_OF_SHARPE = 1.0 / 3.0
+DEFAULT_RULE_COST_LIMIT_SR = 0.15
+DEFAULT_AFFORDABILITY_TARGET_VOL = 0.20
+DEFAULT_AFFORDABILITY_MIN_CONTRACTS = 4
 
 
 def _pooling_report_identity(instr: dict) -> dict:
     return {
+        "description": instr.get("description"),
+        "asset_class": instr.get("asset_class"),
+        "region": instr.get("region"),
         "economic_family_id": instr.get("economic_family_id"),
         "roll_policy_id": instr.get("roll_policy_id"),
         "duplicate_group_id": instr.get("duplicate_group_id"),
@@ -140,6 +152,16 @@ def _nonnegative_finite(value) -> Optional[float]:
     except (TypeError, ValueError):
         return None
     return number if math.isfinite(number) and number >= 0 else None
+
+
+def _parse_fast_spans(value: str) -> tuple[int, ...]:
+    try:
+        spans = tuple(int(item.strip()) for item in value.split(",") if item.strip())
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("EWMAC fast spans must be integers") from exc
+    if not spans or any(span <= 0 for span in spans):
+        raise argparse.ArgumentTypeError("EWMAC fast spans must be positive")
+    return spans
 
 
 def _annualized_sharpe(values: pl.Series, annualization_days: int) -> Optional[float]:
@@ -343,6 +365,9 @@ def estimate_pooled_ewmac_cost_baseline(
     mean_instrument_sharpe = valid_metrics.get_column(
         "ewmac_pre_cost_sharpe"
     ).mean()
+    median_instrument_sharpe = valid_metrics.get_column(
+        "ewmac_pre_cost_sharpe"
+    ).median()
     history_weighted_mean_sharpe = (
         valid_metrics.select(
             (pl.col("ewmac_pre_cost_sharpe") * turnover_weight).sum()
@@ -363,6 +388,7 @@ def estimate_pooled_ewmac_cost_baseline(
         # oldest markets dominate merely because they have more rows.
         "ewmac_pooled_pre_cost_sharpe": mean_instrument_sharpe,
         "ewmac_mean_instrument_pre_cost_sharpe": mean_instrument_sharpe,
+        "ewmac_median_instrument_pre_cost_sharpe": median_instrument_sharpe,
         "ewmac_history_weighted_mean_pre_cost_sharpe": (
             history_weighted_mean_sharpe
         ),
@@ -397,60 +423,87 @@ def estimate_pooled_ewmac_cost_baseline(
     return summary, metrics
 
 
+def estimate_pooled_ewmac_cost_baselines(
+    provider: PysystemtradeHistoryProvider,
+    *,
+    db_path: Path | str,
+    pooling_mapping_path: Path | str = DEFAULT_POOLING_MAPPING_PATH,
+    fast_spans: tuple[int, ...] = DEFAULT_COST_EWMAC_FAST_SPANS,
+    **kwargs,
+) -> tuple[dict[int, dict[str, object]], dict[int, pl.DataFrame]]:
+    """Estimate the five canonical EWMAC rule baselines independently.
+
+    Rule turnover is pooled across the reviewed research representatives.
+    Slow spans follow Carver's four-to-one convention.  The returned mapping
+    keeps each rule's diagnostic Sharpe separate; those Sharpes do not decide
+    whether a rule is affordable.
+    """
+    if not fast_spans or any(span <= 0 for span in fast_spans):
+        raise ValueError("fast_spans must contain positive integers")
+    summaries: dict[int, dict[str, object]] = {}
+    metrics: dict[int, pl.DataFrame] = {}
+    for fast_span in fast_spans:
+        summary, rule_metrics = estimate_pooled_ewmac_cost_baseline(
+            provider,
+            db_path=db_path,
+            pooling_mapping_path=pooling_mapping_path,
+            fast_span=fast_span,
+            slow_span=fast_span * 4,
+            **kwargs,
+        )
+        summaries[fast_span] = summary
+        metrics[fast_span] = rule_metrics
+    return summaries, metrics
+
+
 def _configured_cost_estimate(
     instr: dict,
     report_row: dict,
     *,
-    pooled_summary: Optional[dict[str, object]],
-    strategy_metrics: Optional[dict[str, object]],
-    max_cost_share_of_sharpe: float,
+    pooled_summaries: Optional[dict[int, dict[str, object]]],
+    strategy_metrics_by_rule: Optional[dict[int, dict[str, object]]],
+    rule_cost_limit_sr: float,
 ) -> dict[str, object]:
-    """Calculate Carver-style static costs in annual Sharpe-ratio units."""
-    common = dict(pooled_summary or {})
-    common.update({
+    """Calculate one-way rule and roll costs in annual SR units."""
+    common: dict[str, object] = {
         "strategy_reference_instrument": (
             instr.get("representative_instrument")
             or instr.get("instrument_code")
             or instr.get("symbol")
         ),
-        "max_cost_share_of_pooled_sharpe": max_cost_share_of_sharpe,
-    })
-    if strategy_metrics is not None:
-        common.update({
-            "strategy_reference_history_start": strategy_metrics.get(
+        "rule_cost_limit_sr": rule_cost_limit_sr,
+    }
+    first_metrics = next(iter((strategy_metrics_by_rule or {}).values()), None)
+    if first_metrics is not None:
+        common.update(
+            strategy_reference_history_start=first_metrics.get(
                 "strategy_history_start"
             ),
-            "strategy_reference_history_end": strategy_metrics.get(
+            strategy_reference_history_end=first_metrics.get(
                 "strategy_history_end"
             ),
-            "strategy_reference_history_observations": strategy_metrics.get(
+            strategy_reference_history_observations=first_metrics.get(
                 "strategy_history_observations"
             ),
-            "strategy_reference_forecast_observations": strategy_metrics.get(
-                "strategy_forecast_observations"
-            ),
-            "strategy_reference_pnl_observations": strategy_metrics.get(
-                "strategy_pnl_observations"
-            ),
-            "strategy_reference_pre_cost_sharpe": strategy_metrics.get(
-                "ewmac_pre_cost_sharpe"
-            ),
-            "strategy_reference_forecast_turnover": strategy_metrics.get(
-                "ewmac_forecast_turnover"
-            ),
-            "strategy_reference_rolls": strategy_metrics.get("strategy_rolls"),
-            "strategy_reference_rolls_per_year": strategy_metrics.get(
+            strategy_reference_rolls=first_metrics.get("strategy_rolls"),
+            strategy_reference_rolls_per_year=first_metrics.get(
                 "strategy_rolls_per_year"
             ),
-        })
+        )
 
-    spread_points = _nonnegative_finite(instr.get("carver_spread_points"))
+    carver_spread_points = _nonnegative_finite(instr.get("carver_spread_points"))
+    spread_points = _nonnegative_finite(
+        report_row.get("selected_one_way_spread_points")
+    )
+    spread_source = report_row.get("selected_spread_source")
+    if spread_points is None:
+        spread_points = carver_spread_points
+        spread_source = "carver_configured"
     multiplier = _positive_finite(report_row.get("multiplier"))
-    price = _positive_finite(report_row.get("vol_reference_price"))
-    point_vol = _positive_finite(report_row.get("mixed_point_vol"))
+    price = _positive_finite(report_row.get("price"))
     fx_to_usd = _positive_finite(report_row.get("fx_to_usd"))
-    annualization_days = report_row.get(
-        "annualization_days", CARVER_BUSINESS_DAYS_PER_YEAR
+    annual_dollar_vol = _positive_finite(
+        report_row.get("annual_dollar_vol_per_contract")
     )
     per_block = _nonnegative_finite(instr.get("commission"))
     per_trade = _nonnegative_finite(instr.get("per_trade_cost"))
@@ -459,9 +512,8 @@ def _configured_cost_estimate(
         spread_points is None
         or multiplier is None
         or price is None
-        or point_vol is None
         or fx_to_usd is None
-        or annualization_days is None
+        or annual_dollar_vol is None
     ):
         return {
             **common,
@@ -479,88 +531,111 @@ def _configured_cost_estimate(
     spread_cash_native = spread_points * multiplier
     one_way_native = spread_cash_native + commission_native
     one_way_usd = one_way_native * fx_to_usd
-    annual_dollar_vol = (
-        point_vol * multiplier * fx_to_usd * math.sqrt(float(annualization_days))
-    )
     sr_cost_per_trade = one_way_usd / annual_dollar_vol
-    pooled_turnover = _positive_finite(
-        (pooled_summary or {}).get("ewmac_pooled_forecast_turnover")
-    )
     rolls_per_year = _nonnegative_finite(
-        (strategy_metrics or {}).get("strategy_rolls_per_year")
+        (first_metrics or {}).get("strategy_rolls_per_year")
     )
-    forecast_sr_cost = (
-        sr_cost_per_trade * pooled_turnover
-        if pooled_turnover is not None
-        else None
-    )
-    roll_turnover = 2.0 * rolls_per_year if rolls_per_year is not None else None
-    roll_sr_cost = (
-        sr_cost_per_trade * roll_turnover
-        if roll_turnover is not None
-        else None
-    )
-    annual_sr_cost = (
-        forecast_sr_cost + roll_sr_cost
-        if forecast_sr_cost is not None and roll_sr_cost is not None
-        else None
-    )
-    pooled_sharpe = _positive_finite(
-        (pooled_summary or {}).get("ewmac_pooled_pre_cost_sharpe")
-    )
-    cost_share = (
-        annual_sr_cost / pooled_sharpe
-        if annual_sr_cost is not None and pooled_sharpe is not None
-        else None
-    )
-    return {
+    roll_transactions = 2.0 * rolls_per_year if rolls_per_year is not None else None
+    result: dict[str, object] = {
         **common,
-        "configured_spread_points": spread_points,
+        "carver_configured_one_way_spread_points": carver_spread_points,
+        "selected_one_way_spread_points": spread_points,
+        "selected_spread_source": spread_source,
         "configured_commission_native": commission_native,
         "configured_spread_cash_native": spread_cash_native,
         "configured_one_way_cost_native": one_way_native,
         "configured_one_way_cost": one_way_usd,
         "configured_sr_cost_per_trade": sr_cost_per_trade,
-        "ewmac_pooled_forecast_annual_sr_cost": forecast_sr_cost,
-        "strategy_reference_roll_turnover": roll_turnover,
-        "strategy_reference_roll_annual_sr_cost": roll_sr_cost,
-        "ewmac_total_annual_sr_cost": annual_sr_cost,
-        "ewmac_cost_share_of_pooled_sharpe": cost_share,
-        "ewmac_net_sharpe_proxy": (
-            pooled_sharpe - annual_sr_cost
-            if pooled_sharpe is not None and annual_sr_cost is not None
-            else None
-        ),
-        "ewmac_cost_within_sharpe_limit": (
-            cost_share <= max_cost_share_of_sharpe
-            if cost_share is not None
-            else None
-        ),
+        "strategy_reference_roll_transactions_per_year": roll_transactions,
         "configured_cost_quality": (
-            "static_config_zero_spread"
+            "ib_historical_bid_ask"
+            if spread_source and str(spread_source).startswith("ib_")
+            else "static_config_zero_spread"
             if spread_points == 0
             else "static_config_not_historical_quotes"
         ),
     }
+    eligible_rules: list[str] = []
+    for fast_span, summary in sorted((pooled_summaries or {}).items()):
+        slow_span = fast_span * 4
+        prefix = f"ewmac_{fast_span}_{slow_span}"
+        metrics = (strategy_metrics_by_rule or {}).get(fast_span, {})
+        pooled_turnover = _positive_finite(
+            summary.get("ewmac_pooled_forecast_turnover")
+        )
+        forecast_sr_cost = (
+            sr_cost_per_trade * pooled_turnover
+            if pooled_turnover is not None
+            else None
+        )
+        roll_sr_cost = (
+            sr_cost_per_trade * roll_transactions
+            if roll_transactions is not None
+            else None
+        )
+        total_transactions = (
+            pooled_turnover + roll_transactions
+            if pooled_turnover is not None and roll_transactions is not None
+            else None
+        )
+        total_sr_cost = (
+            sr_cost_per_trade * total_transactions
+            if total_transactions is not None
+            else None
+        )
+        eligible = (
+            total_sr_cost <= rule_cost_limit_sr
+            if total_sr_cost is not None
+            else None
+        )
+        if eligible:
+            eligible_rules.append(f"{fast_span}/{slow_span}")
+        result.update({
+            f"{prefix}_pooled_rule_turnover": pooled_turnover,
+            f"{prefix}_roll_transactions_per_year": roll_transactions,
+            f"{prefix}_total_transactions_per_year": total_transactions,
+            f"{prefix}_forecast_annual_sr_cost": forecast_sr_cost,
+            f"{prefix}_roll_annual_sr_cost": roll_sr_cost,
+            f"{prefix}_total_annual_sr_cost": total_sr_cost,
+            f"{prefix}_cost_eligible": eligible,
+            f"{prefix}_median_instrument_pre_cost_sharpe": summary.get(
+                "ewmac_median_instrument_pre_cost_sharpe"
+            ),
+            f"{prefix}_reference_pre_cost_sharpe": metrics.get(
+                "ewmac_pre_cost_sharpe"
+            ),
+        })
+    baselines_available = bool(pooled_summaries)
+    result.update({
+        "eligible_ewmac_rule_count": (
+            len(eligible_rules) if baselines_available else None
+        ),
+        "eligible_ewmac_rules": (
+            ",".join(eligible_rules) if baselines_available else None
+        ),
+        "instrument_has_eligible_ewmac_rule": (
+            bool(eligible_rules) if baselines_available else None
+        ),
+    })
+    return result
 
 
 def _attach_pooled_cost_estimates(
     rows: list[dict],
     instruments: list[dict],
     *,
-    pooled_summary: Optional[dict[str, object]],
-    strategy_metrics: Optional[pl.DataFrame],
-    max_cost_share_of_sharpe: float,
+    pooled_summaries: Optional[dict[int, dict[str, object]]],
+    strategy_metrics_by_rule: Optional[dict[int, pl.DataFrame]],
+    rule_cost_limit_sr: float,
 ) -> list[dict]:
     instrument_by_symbol = {instr["symbol"]: instr for instr in instruments}
-    metrics_by_instrument = (
-        {
+    metrics_by_rule = {
+        fast_span: {
             row["instrument_code"]: row
-            for row in strategy_metrics.iter_rows(named=True)
+            for row in metrics.iter_rows(named=True)
         }
-        if strategy_metrics is not None
-        else {}
-    )
+        for fast_span, metrics in (strategy_metrics_by_rule or {}).items()
+    }
     enriched = []
     for row in rows:
         instr = instrument_by_symbol.get(row.get("symbol"), {})
@@ -573,13 +648,68 @@ def _attach_pooled_cost_estimates(
             _configured_cost_estimate(
                 instr,
                 row,
-                pooled_summary=pooled_summary,
-                strategy_metrics=metrics_by_instrument.get(reference),
-                max_cost_share_of_sharpe=max_cost_share_of_sharpe,
+                pooled_summaries=pooled_summaries,
+                strategy_metrics_by_rule={
+                    fast_span: metrics.get(reference)
+                    for fast_span, metrics in metrics_by_rule.items()
+                    if metrics.get(reference) is not None
+                },
+                rule_cost_limit_sr=rule_cost_limit_sr,
             )
         )
         enriched.append(row)
     return enriched
+
+
+def _attach_affordability_ranks(
+    report: pl.DataFrame,
+    *,
+    target_vol: float,
+    min_contracts: int,
+) -> pl.DataFrame:
+    """Add transparent cost and contract-granularity ranks by asset class."""
+    if target_vol <= 0:
+        raise ValueError("target_vol must be positive")
+    if min_contracts <= 0:
+        raise ValueError("min_contracts must be positive")
+    required = {
+        "symbol",
+        "asset_class",
+        "notional_per_contract",
+        "annual_dollar_vol_per_contract",
+        "configured_sr_cost_per_trade",
+    }
+    if not required.issubset(report.columns):
+        return report
+    ranked = report.with_columns(
+        pl.lit(target_vol).alias("affordability_target_vol"),
+        pl.lit(min_contracts).alias("affordability_min_contracts"),
+        (pl.col("notional_per_contract") * min_contracts).alias(
+            "min_contract_notional"
+        ),
+        (pl.col("annual_dollar_vol_per_contract") * min_contracts).alias(
+            "min_contract_annual_dollar_vol"
+        ),
+        (
+            pl.col("annual_dollar_vol_per_contract")
+            * min_contracts
+            / target_vol
+        ).alias("min_capital_full_weight_idm1"),
+    )
+    return ranked.with_columns(
+        pl.col("configured_sr_cost_per_trade")
+        .rank("ordinal")
+        .over("asset_class")
+        .alias("cost_rank_in_asset_class"),
+        pl.col("annual_dollar_vol_per_contract")
+        .rank("ordinal")
+        .over("asset_class")
+        .alias("affordability_rank_in_asset_class"),
+        pl.col("notional_per_contract")
+        .rank("ordinal")
+        .over("asset_class")
+        .alias("notional_rank_in_asset_class"),
+    )
 
 
 def volatility_from_bars(
@@ -641,6 +771,82 @@ def volatility_from_bars(
         "slow_vol_weight": last["slow_vol_weight"][0],
         "zero_return_fraction": zero_return_fraction,
         "reference_price": clean["close"][-1],
+    }
+
+
+def _recent_dated_return_volatility(
+    ib,
+    contract,
+    *,
+    duration: str,
+    use_rth: bool,
+    fast_span: int,
+    min_samples: int = CARVER_VOL_MIN_SAMPLES,
+) -> dict[str, object]:
+    """Estimate recent fast return volatility from the executable contract."""
+    bars = ib.get_historical_bars(
+        contract,
+        duration=duration,
+        bar_size="1 day",
+        what_to_show="TRADES",
+        use_rth=use_rth,
+    )
+    if bars is None or bars.height == 0:
+        raise ValueError("dated contract price history is empty")
+    date_col = "ts_event" if "ts_event" in bars.columns else "date"
+    if date_col not in bars.columns or "close" not in bars.columns:
+        raise ValueError("dated contract history requires date and close")
+    clean = (
+        bars.select(
+            pl.col(date_col).alias("ts_event"),
+            pl.col("close").cast(pl.Float64),
+        )
+        .filter(pl.col("close").is_finite() & (pl.col("close") > 0))
+        .unique(subset=["ts_event"], keep="last")
+        .sort("ts_event")
+        .with_columns(pl.col("close").pct_change().alias("ret_1d"))
+        .with_columns(
+            pl.col("ret_1d")
+            .ewm_std(span=fast_span, adjust=True, min_samples=min_samples)
+            .alias("fast_return_vol")
+        )
+    )
+    fast_return_vol = _positive_finite(clean.tail(1)["fast_return_vol"][0])
+    if fast_return_vol is None:
+        raise ValueError("dated contract history does not produce fast return vol")
+    return {
+        "ib_recent_fast_return_vol": fast_return_vol,
+        "ib_recent_vol_observations": clean.get_column("ret_1d").drop_nulls().len(),
+        "ib_recent_vol_start": clean.get_column("ts_event").min(),
+        "ib_recent_vol_end": clean.get_column("ts_event").max(),
+        "ib_recent_vol_duration": duration,
+    }
+
+
+def _blend_recent_and_historical_return_volatility(
+    recent: dict[str, object],
+    historical: dict[str, object],
+    *,
+    slow_weight: float,
+) -> dict[str, object]:
+    """Blend current-contract fast return vol with Carver's slow anchor."""
+    if not 0 <= slow_weight <= 1:
+        raise ValueError("slow_weight must be between zero and one")
+    fast_return_vol = _positive_finite(recent.get("ib_recent_fast_return_vol"))
+    slow_point_vol = _positive_finite(historical.get("slow_point_vol"))
+    reference_price = _positive_finite(historical.get("reference_price"))
+    if fast_return_vol is None or slow_point_vol is None or reference_price is None:
+        raise ValueError("recent fast and historical slow volatility are required")
+    slow_return_vol = slow_point_vol / reference_price
+    mixed_return_vol = (
+        (1.0 - slow_weight) * fast_return_vol
+        + slow_weight * slow_return_vol
+    )
+    return {
+        **recent,
+        "carver_slow_return_vol": slow_return_vol,
+        "risk_daily_return_vol": mixed_return_vol,
+        "risk_return_vol_source": "ib_dated_fast_carver_slow",
     }
 
 
@@ -707,6 +913,7 @@ def build_cost_risk_row(
     history_end,
     vol_source: str = "dated_contract",
     vol_reference_price: Optional[float] = None,
+    daily_return_vol_override: Optional[float] = None,
     fast_point_vol: Optional[float] = None,
     slow_point_vol: Optional[float] = None,
     vol_observations: Optional[int] = None,
@@ -726,9 +933,12 @@ def build_cost_risk_row(
 ) -> dict:
     """Calculate notional, dollar vol, and risk-scaled execution costs.
 
-    A valid live bid/ask is interpreted as a full quoted width.  Expected
-    one-way crossing cost is half that width from mid; round-trip spread cost
-    is the full width.  Commission is per contract per side.
+    A valid live bid/ask is interpreted as a full quoted width. Expected
+    one-way crossing cost is half that width from mid. Commission is per
+    contract per side. Historical point volatility is converted to return
+    volatility and applied to the current IB price before calculating dollar
+    volatility, so a stale history cutoff does not freeze present contract
+    risk at the old price level.
     """
     price = _positive_finite(current_price)
     mult = _positive_finite(multiplier)
@@ -754,32 +964,27 @@ def build_cost_risk_row(
     spread_valid = bid_value is not None and ask_value is not None and ask_value >= bid_value
     full_spread_points = ask_value - bid_value if spread_valid else None
     one_way_spread_cash_native = full_spread_points * mult / 2.0 if spread_valid else None
-    round_trip_spread_cash_native = full_spread_points * mult if spread_valid else None
 
     notional_native = price * mult
     notional = notional_native * fx
-    daily_dollar_vol = point_vol * mult * fx
-    annual_dollar_vol = daily_dollar_vol * math.sqrt(annualization_days)
     vol_reference = _positive_finite(vol_reference_price) or price
-    daily_return_vol = point_vol / abs(vol_reference)
+    daily_return_vol = (
+        _positive_finite(daily_return_vol_override)
+        or point_vol / abs(vol_reference)
+    )
     annual_return_vol = daily_return_vol * math.sqrt(annualization_days)
+    price_scale_to_vol_reference = price / vol_reference
+    current_mixed_point_vol = daily_return_vol * price
+    daily_dollar_vol = current_mixed_point_vol * mult * fx
+    annual_dollar_vol = daily_dollar_vol * math.sqrt(annualization_days)
     one_way_commission_native = commission
-    round_trip_commission_native = commission * 2.0
     one_way_commission = one_way_commission_native * fx
-    round_trip_commission = round_trip_commission_native * fx
     one_way_spread_cash = (
         one_way_spread_cash_native * fx if one_way_spread_cash_native is not None else None
-    )
-    round_trip_spread_cash = (
-        round_trip_spread_cash_native * fx if round_trip_spread_cash_native is not None else None
     )
     one_way_total = (
         one_way_commission + one_way_spread_cash
         if one_way_spread_cash is not None else None
-    )
-    round_trip_total = (
-        round_trip_commission + round_trip_spread_cash
-        if round_trip_spread_cash is not None else None
     )
 
     return {
@@ -799,24 +1004,20 @@ def build_cost_risk_row(
         "slow_point_vol": slow_point_vol,
         "mixed_point_vol": point_vol,
         "vol_reference_price": vol_reference,
+        "price_scale_to_vol_reference": price_scale_to_vol_reference,
+        "current_mixed_point_vol": current_mixed_point_vol,
         "daily_return_vol": daily_return_vol,
         "annual_return_vol": annual_return_vol,
         "daily_dollar_vol_per_contract": daily_dollar_vol,
         "annual_dollar_vol_per_contract": annual_dollar_vol,
         "commission_per_side": one_way_commission,
-        "commission_round_trip": round_trip_commission,
         "bid": bid_value,
         "ask": ask_value,
         "full_spread_points": full_spread_points,
         "one_way_spread_cash": one_way_spread_cash,
-        "round_trip_spread_cash": round_trip_spread_cash,
         "one_way_total_cost": one_way_total,
-        "round_trip_total_cost": round_trip_total,
         "one_way_cost_per_annual_dollar_vol": (
             one_way_total / annual_dollar_vol if one_way_total is not None else None
-        ),
-        "round_trip_cost_per_annual_dollar_vol": (
-            round_trip_total / annual_dollar_vol if round_trip_total is not None else None
         ),
         "one_way_cost_bps_notional": (
             one_way_total / notional * 10_000.0 if one_way_total is not None else None
@@ -950,6 +1151,113 @@ def _latest_dated_close(ib, contract) -> Optional[float]:
     return _positive_finite(bars.sort("date").tail(1)["close"][0])
 
 
+def _spread_stats_from_bid_ask_bars(
+    bars: pl.DataFrame,
+    *,
+    duration: str,
+    bar_size: str,
+    source: str,
+) -> dict[str, object]:
+    """Summarize IB BID_ASK bars, whose open/close are average bid/ask."""
+    if bars is None or bars.height == 0:
+        raise ValueError("BID_ASK history is empty")
+    required = {"open", "close"}
+    missing = required - set(bars.columns)
+    if missing:
+        raise ValueError(f"BID_ASK history missing columns: {sorted(missing)}")
+    clean = (
+        bars.with_columns(
+            (pl.col("close").cast(pl.Float64) - pl.col("open").cast(pl.Float64))
+            .alias("spread_points")
+        )
+        .filter(
+            pl.col("spread_points").is_finite()
+            & (pl.col("spread_points") >= 0)
+        )
+    )
+    if clean.height == 0:
+        raise ValueError("BID_ASK history has no valid non-negative spreads")
+    date_col = "date" if "date" in clean.columns else None
+    return {
+        "ib_historical_spread_source": source,
+        "ib_historical_spread_duration": duration,
+        "ib_historical_spread_bar_size": bar_size,
+        "ib_historical_spread_observations": clean.height,
+        "ib_historical_spread_start": (
+            clean.get_column(date_col).min() if date_col else None
+        ),
+        "ib_historical_spread_end": (
+            clean.get_column(date_col).max() if date_col else None
+        ),
+        "ib_historical_spread_mean_points": clean.get_column(
+            "spread_points"
+        ).mean(),
+        "ib_historical_spread_median_points": clean.get_column(
+            "spread_points"
+        ).median(),
+        "ib_historical_spread_p90_points": clean.get_column(
+            "spread_points"
+        ).quantile(0.90),
+    }
+
+
+def _historical_bid_ask_spread(
+    ib,
+    contract,
+    *,
+    duration: str,
+    use_rth: bool,
+    source: str,
+    bar_sizes: tuple[str, ...] = DEFAULT_SPREAD_BAR_SIZES,
+) -> dict[str, object]:
+    """Try progressively coarser BID_ASK bars for one IB contract."""
+    attempts: list[str] = []
+    failures: list[str] = []
+    for bar_size in bar_sizes:
+        attempts.append(bar_size)
+        try:
+            bars = ib.get_historical_bars(
+                contract,
+                duration=duration,
+                bar_size=bar_size,
+                what_to_show="BID_ASK",
+                use_rth=use_rth,
+            )
+            result = _spread_stats_from_bid_ask_bars(
+                bars,
+                duration=duration,
+                bar_size=bar_size,
+                source=source,
+            )
+            result["ib_historical_spread_attempts"] = ",".join(attempts)
+            result["ib_historical_spread_failures"] = ";".join(failures)
+            return result
+        except Exception as exc:
+            failures.append(f"{bar_size}:{exc}")
+            log.debug(
+                "historical_spread_attempt_failed contract=%s source=%s "
+                "duration=%s bar_size=%s reason=%s",
+                contract,
+                source,
+                duration,
+                bar_size,
+                exc,
+            )
+    return {
+        "ib_historical_spread_source": None,
+        "ib_historical_spread_duration": duration,
+        "ib_historical_spread_bar_size": None,
+        "ib_historical_spread_observations": 0,
+        "ib_historical_spread_start": None,
+        "ib_historical_spread_end": None,
+        "ib_historical_spread_mean_points": None,
+        "ib_historical_spread_median_points": None,
+        "ib_historical_spread_p90_points": None,
+        "ib_historical_spread_attempts": ",".join(attempts),
+        "ib_historical_spread_failures": ";".join(failures),
+    }
+
+
 def load_latest_fx_to_usd(db_path: Path | str) -> dict[str, dict]:
     """Latest imported Carver FX conversion for each native currency."""
     con = duckdb.connect(str(db_path), read_only=True)
@@ -1039,6 +1347,8 @@ def diagnose_instrument(
     instr: dict,
     *,
     duration: str,
+    spread_duration: str,
+    spread_use_rth: bool,
     min_days: int,
     contract_details_timeout: float,
     quote_wait_seconds: float,
@@ -1090,6 +1400,82 @@ def diagnose_instrument(
         min_days,
         contract_details_timeout=contract_details_timeout,
     )
+    risk_vol: dict[str, object] = {}
+    if vol_source == "pysystemtrade":
+        try:
+            recent_vol = _recent_dated_return_volatility(
+                ib,
+                contract,
+                duration=duration,
+                use_rth=use_rth,
+                fast_span=fast_span,
+            )
+            risk_vol = _blend_recent_and_historical_return_volatility(
+                recent_vol,
+                vol,
+                slow_weight=slow_weight,
+            )
+        except Exception as exc:
+            risk_vol = {
+                "ib_recent_fast_return_vol": None,
+                "ib_recent_vol_observations": 0,
+                "ib_recent_vol_start": None,
+                "ib_recent_vol_end": None,
+                "ib_recent_vol_duration": duration,
+                "carver_slow_return_vol": (
+                    vol["slow_point_vol"] / vol["reference_price"]
+                    if _positive_finite(vol.get("slow_point_vol")) is not None
+                    and _positive_finite(vol.get("reference_price")) is not None
+                    else None
+                ),
+                "risk_daily_return_vol": (
+                    vol["mixed_point_vol"] / vol["reference_price"]
+                ),
+                "risk_return_vol_source": "carver_mixed_scaled_fallback",
+                "ib_recent_vol_error": str(exc),
+            }
+            log.debug(
+                "recent_dated_vol_fallback symbol=%s reason=%s",
+                symbol,
+                exc,
+            )
+    spread_stats = _historical_bid_ask_spread(
+        ib,
+        contract,
+        duration=spread_duration,
+        use_rth=spread_use_rth,
+        source="ib_dated_contract",
+    )
+    if spread_stats["ib_historical_spread_mean_points"] is None:
+        try:
+            from ib_tools.ibpysync import IBPySync
+
+            continuous = IBPySync.cont_future(
+                instr.get("ib_symbol") or getattr(contract, "symbol", symbol),
+                exchange=instr.get("exchange", "CME"),
+                currency=instr.get("ib_currency") or "USD",
+                multiplier=_format_ib_multiplier(
+                    instr.get("ib_multiplier") or multiplier
+                ),
+            )
+            qualified = ib.qualify_contracts(continuous)
+            if qualified:
+                continuous = qualified[0]
+            continuous_stats = _historical_bid_ask_spread(
+                ib,
+                continuous,
+                duration=spread_duration,
+                use_rth=spread_use_rth,
+                source="ib_continuous_fallback",
+            )
+            if continuous_stats["ib_historical_spread_mean_points"] is not None:
+                spread_stats = continuous_stats
+        except Exception as exc:
+            log.debug(
+                "continuous_spread_fallback_failed symbol=%s reason=%s",
+                symbol,
+                exc,
+            )
     if vol_source == "dated":
         annualization_days, vol = _history_volatility(
             ib,
@@ -1149,6 +1535,7 @@ def diagnose_instrument(
             "continuous": "ib_continuous_explicit",
             "dated": "ib_dated_contract",
         }[vol_source],
+        daily_return_vol_override=risk_vol.get("risk_daily_return_vol"),
         fast_point_vol=vol["fast_point_vol"],
         slow_point_vol=vol["slow_point_vol"],
         vol_observations=vol["vol_observations"],
@@ -1167,6 +1554,19 @@ def diagnose_instrument(
         quote_quality=f"{resolved_market_data_type}_snapshot",
         vol_reference_price=vol["reference_price"],
     )
+    historical_full_spread = _nonnegative_finite(
+        spread_stats.get("ib_historical_spread_mean_points")
+    )
+    snapshot_full_spread = _nonnegative_finite(row.get("full_spread_points"))
+    if historical_full_spread is not None:
+        selected_one_way_spread = historical_full_spread / 2.0
+        selected_spread_source = spread_stats["ib_historical_spread_source"]
+    elif snapshot_full_spread is not None:
+        selected_one_way_spread = snapshot_full_spread / 2.0
+        selected_spread_source = "ib_snapshot"
+    else:
+        selected_one_way_spread = None
+        selected_spread_source = None
     row.update({
         "ib_symbol": instr.get("ib_symbol", symbol),
         "ib_exchange": instr.get("exchange"),
@@ -1179,6 +1579,10 @@ def diagnose_instrument(
         "quote_market_data_attempts": quote["market_data_attempts"],
         "quote_error_codes": ",".join(str(code) for code in quote["error_codes"]),
         "carver_spread_points": instr.get("carver_spread_points"),
+        **risk_vol,
+        **spread_stats,
+        "selected_one_way_spread_points": selected_one_way_spread,
+        "selected_spread_source": selected_spread_source,
         **_pooling_report_identity(instr),
     })
     return row
@@ -1198,14 +1602,13 @@ def parse_args(argv=None):
     parser.add_argument("--slow-vol-years", type=int, default=CARVER_SLOW_VOL_YEARS)
     parser.add_argument("--slow-vol-weight", type=float, default=CARVER_SLOW_VOL_WEIGHT)
     parser.add_argument(
-        "--cost-ewmac-fast-span",
-        type=int,
-        default=DEFAULT_COST_EWMAC_FAST_SPAN,
-    )
-    parser.add_argument(
-        "--cost-ewmac-slow-span",
-        type=int,
-        default=DEFAULT_COST_EWMAC_SLOW_SPAN,
+        "--cost-ewmac-fast-spans",
+        type=_parse_fast_spans,
+        default=DEFAULT_COST_EWMAC_FAST_SPANS,
+        help=(
+            "Comma-separated EWMAC fast spans; slow spans are four times fast "
+            "(default: 4,8,16,32,64)"
+        ),
     )
     parser.add_argument(
         "--cost-ewmac-vol-span",
@@ -1234,10 +1637,10 @@ def parse_args(argv=None):
         default=EWMAC_SCALAR_MIN_PERIODS,
     )
     parser.add_argument(
-        "--max-cost-share-of-sharpe",
+        "--rule-cost-limit-sr",
         type=float,
-        default=DEFAULT_MAX_COST_SHARE_OF_SHARPE,
-        help="Maximum annual SR cost as a share of pooled pre-cost Sharpe",
+        default=DEFAULT_RULE_COST_LIMIT_SR,
+        help="Maximum total annual SR cost for each EWMAC rule",
     )
     parser.add_argument(
         "--skip-ewmac-cost-baseline",
@@ -1267,6 +1670,19 @@ def parse_args(argv=None):
     )
     parser.add_argument("--quote-wait-seconds", type=float, default=DEFAULT_QUOTE_WAIT_SECONDS)
     parser.add_argument(
+        "--spread-duration",
+        default=DEFAULT_SPREAD_DURATION,
+        help=(
+            "IB BID_ASK history duration for spread estimates; passed directly "
+            "to IBPySync.get_historical_bars (default: %(default)s)"
+        ),
+    )
+    parser.add_argument(
+        "--spread-all-hours",
+        action="store_true",
+        help="Use the full futures session for BID_ASK history; default uses RTH",
+    )
+    parser.add_argument(
         "--market-data-type",
         choices=["auto", *MARKET_DATA_TYPES],
         default="auto",
@@ -1279,6 +1695,18 @@ def parse_args(argv=None):
     parser.add_argument("--client-id", type=int, default=23)
     parser.add_argument("--offline", action="store_true",
                         help="Build the full mixed-vol/mapping comparison without connecting to IB")
+    parser.add_argument(
+        "--affordability-target-vol",
+        type=float,
+        default=DEFAULT_AFFORDABILITY_TARGET_VOL,
+        help="Risk target used for the capital-independent minimum-contract diagnostic",
+    )
+    parser.add_argument(
+        "--affordability-min-contracts",
+        type=int,
+        default=DEFAULT_AFFORDABILITY_MIN_CONTRACTS,
+        help="Minimum average contract count used by the affordability diagnostic",
+    )
     parser.add_argument("--output", type=Path, default=None,
                         help="CSV output path (default: timestamped file under results/)")
     parser.add_argument("--no-save", action="store_true")
@@ -1412,21 +1840,27 @@ def _emit_report(report: pl.DataFrame, args) -> pl.DataFrame:
     output_report = _round_report_decimals(report)
     summary_columns = [
         "symbol",
+        "asset_class",
         "ib_symbol",
         "ib_exchange",
         "price",
         "currency",
         "notional_per_contract",
+        "notional_rank_in_asset_class",
         "mixed_point_vol",
         "annual_dollar_vol_per_contract",
+        "affordability_rank_in_asset_class",
+        "min_capital_full_weight_idm1",
         "slow_history_years",
         "pooling_role",
         "include_default_pool",
-        "ewmac_pooled_pre_cost_sharpe",
+        "selected_one_way_spread_points",
+        "selected_spread_source",
         "configured_sr_cost_per_trade",
-        "ewmac_total_annual_sr_cost",
-        "ewmac_cost_share_of_pooled_sharpe",
-        "ewmac_cost_within_sharpe_limit",
+        "cost_rank_in_asset_class",
+        "eligible_ewmac_rule_count",
+        "eligible_ewmac_rules",
+        "instrument_has_eligible_ewmac_rule",
         "ib_availability",
         "error",
     ]
@@ -1460,26 +1894,31 @@ def run(argv=None) -> pl.DataFrame:
         if args.vol_source == "pysystemtrade" else None
     )
     fx_by_currency = load_latest_fx_to_usd(args.pysystemtrade_db)
-    if args.max_cost_share_of_sharpe <= 0:
-        raise ValueError("--max-cost-share-of-sharpe must be positive")
+    if args.rule_cost_limit_sr <= 0:
+        raise ValueError("--rule-cost-limit-sr must be positive")
+    if args.affordability_target_vol <= 0:
+        raise ValueError("--affordability-target-vol must be positive")
+    if args.affordability_min_contracts <= 0:
+        raise ValueError("--affordability-min-contracts must be positive")
 
-    pooled_summary = None
-    strategy_metrics = None
+    pooled_summaries = None
+    strategy_metrics_by_rule = None
     if not args.skip_ewmac_cost_baseline:
         strategy_provider = pysystemtrade_provider or PysystemtradeHistoryProvider(
             db_path=args.pysystemtrade_db
         )
-        pooled_summary, strategy_metrics = estimate_pooled_ewmac_cost_baseline(
+        pooled_summaries, strategy_metrics_by_rule = (
+            estimate_pooled_ewmac_cost_baselines(
             strategy_provider,
             db_path=args.pysystemtrade_db,
             pooling_mapping_path=args.pysystemtrade_pooling_mapping,
-            fast_span=args.cost_ewmac_fast_span,
-            slow_span=args.cost_ewmac_slow_span,
+            fast_spans=args.cost_ewmac_fast_spans,
             vol_span=args.cost_ewmac_vol_span,
             vol_slow_years=args.cost_ewmac_vol_slow_years,
             vol_slow_weight=args.cost_ewmac_vol_slow_weight,
             vol_min_samples=args.cost_ewmac_vol_min_samples,
             scalar_min_periods=args.cost_ewmac_scalar_min_periods,
+            )
         )
 
     if args.offline:
@@ -1511,11 +1950,16 @@ def run(argv=None) -> pl.DataFrame:
         rows = _attach_pooled_cost_estimates(
             rows,
             instruments,
-            pooled_summary=pooled_summary,
-            strategy_metrics=strategy_metrics,
-            max_cost_share_of_sharpe=args.max_cost_share_of_sharpe,
+            pooled_summaries=pooled_summaries,
+            strategy_metrics_by_rule=strategy_metrics_by_rule,
+            rule_cost_limit_sr=args.rule_cost_limit_sr,
         )
-        return _emit_report(pl.DataFrame(rows, infer_schema_length=None), args)
+        report = _attach_affordability_ranks(
+            pl.DataFrame(rows, infer_schema_length=None),
+            target_vol=args.affordability_target_vol,
+            min_contracts=args.affordability_min_contracts,
+        )
+        return _emit_report(report, args)
 
     # eventkit still asks asyncio for a current main-thread loop at import
     # time.  Python 3.14 no longer creates one implicitly, so establish it
@@ -1546,6 +1990,8 @@ def run(argv=None) -> pl.DataFrame:
                     ib,
                     instr,
                     duration=args.duration,
+                    spread_duration=args.spread_duration,
+                    spread_use_rth=not args.spread_all_hours,
                     min_days=args.min_days,
                     contract_details_timeout=args.contract_details_timeout,
                     quote_wait_seconds=args.quote_wait_seconds,
@@ -1561,10 +2007,10 @@ def run(argv=None) -> pl.DataFrame:
                 rows.append(row)
                 log.info(
                     "futures_cost_risk selected symbol=%s contract=%s notional_usd=%.2f "
-                    "annual_dvol_usd=%.2f round_trip_cost_usd=%s spread_quality=%s",
+                    "annual_dvol_usd=%.2f one_way_cost_usd=%s spread_source=%s",
                     symbol, row["contract_id"], row["notional_per_contract"],
-                    row["annual_dollar_vol_per_contract"], row["round_trip_total_cost"],
-                    row["spread_quality"],
+                    row["annual_dollar_vol_per_contract"], row["one_way_total_cost"],
+                    row["selected_spread_source"],
                 )
             except Exception as exc:
                 log.warning("futures_cost_risk rejected symbol=%s reason=%s", symbol, exc)
@@ -1599,11 +2045,16 @@ def run(argv=None) -> pl.DataFrame:
     rows = _attach_pooled_cost_estimates(
         rows,
         instruments,
-        pooled_summary=pooled_summary,
-        strategy_metrics=strategy_metrics,
-        max_cost_share_of_sharpe=args.max_cost_share_of_sharpe,
+        pooled_summaries=pooled_summaries,
+        strategy_metrics_by_rule=strategy_metrics_by_rule,
+        rule_cost_limit_sr=args.rule_cost_limit_sr,
     )
-    return _emit_report(pl.DataFrame(rows, infer_schema_length=None), args)
+    report = _attach_affordability_ranks(
+        pl.DataFrame(rows, infer_schema_length=None),
+        target_vol=args.affordability_target_vol,
+        min_contracts=args.affordability_min_contracts,
+    )
+    return _emit_report(report, args)
 
 
 def main(argv=None) -> None:

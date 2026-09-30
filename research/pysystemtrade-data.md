@@ -1167,8 +1167,8 @@ reported as execution-grade.
 research panel. It resolves the dated IBKR contract that would actually be
 traded and reports its current notional, Carver mixed volatility, daily and
 annual dollar volatility per contract, configured
-commission, live bid/ask width when available, and one-way/round-trip cost as
-a fraction of annual dollar volatility.
+commission, live and historical bid/ask width when available, and one-way cost
+as a fraction of annual dollar volatility.
 
 The default volatility source is the full roll-neutral pysystemtrade history.
 The shared core helper calculates the *Advanced Futures Trading* specification:
@@ -1180,10 +1180,17 @@ the current 252-instrument panel every history produces a mixed estimate, but
 93 have fewer than ten years of fast-volatility observations and are labelled
 accordingly rather than treated as fully warmed up.
 
-Percentage volatility divides the mixed point volatility by the raw current-
-contract price at the same history endpoint (`vol_reference_price`). It does
-not divide stale historical point volatility by today's IB execution price;
-the latter remains a separate notional input.
+Percentage volatility divides historical mixed point volatility by the raw
+current-contract price at the same history endpoint (`vol_reference_price`).
+For a live audit the fast return-volatility component comes from up to one year
+of daily bars on today's resolved dated IB contract, while the slow component
+is Carver's long-history point-volatility anchor divided by its contemporaneous
+price. The 70/30 blend is then applied to today's IB price. If the dated request
+does not produce the minimum observations, the complete Carver mixed return
+volatility is scaled to today's price and flagged as a fallback. Thus
+`current_mixed_point_vol`, dollar volatility, and notional share a current
+price level, while `mixed_point_vol` remains the auditable historical input.
+`price_scale_to_vol_reference` and `risk_return_vol_source` expose the handoff.
 
 IB dated (`--vol-source dated`) and continuous (`--vol-source continuous`)
 history remain explicit comparison modes. Continuous is never the default
@@ -1207,96 +1214,100 @@ and decision basis. This lets the same CSV compare ES/MES or CL/QM/MCL
 execution economics without allowing those variants to multiply their weight
 in the EWMAC normalization sample.
 
-The default cost audit also estimates a Carver-style EWMAC 16/64 research
-baseline from the 228 reviewed representatives. It reuses the mapping- and
-range-keyed EWMAC cache, applies the causal pooled forecast scalar, delays each
-forecast by one observation, and earns the canonical matched-contract point
-change against lagged 70/30 mixed point volatility. The affordability baseline
-is the equal-instrument mean of the individual full-history pre-cost Sharpes,
-so each reviewed strategy history gets one vote. The report also retains the
-history-weighted mean and the Sharpe obtained by stacking every daily
-observation; the latter lets long histories dominate and is therefore a
-diagnostic rather than the cost threshold's denominator.
+The default cost audit estimates separate Carver-style research baselines for
+EWMAC 4/16, 8/32, 16/64, 32/128, and 64/256 from the 228 reviewed
+representatives. Each rule reuses its mapping- and range-keyed EWMAC cache,
+applies the causal pooled forecast scalar, delays each forecast by one
+observation, and earns the canonical matched-contract point change against
+lagged 70/30 mixed point volatility. Mean, median, history-weighted, and
+observation-stacked pre-cost Sharpes remain diagnostics. They do not determine
+whether a rule or instrument is affordable.
 
-Forecast turnover is estimated separately for every representative as
+Forecast turnover is estimated separately for every representative and speed as
 `256 × mean(abs(change in forecast)) / 0.5`, then pooled with Carver's
-history-length weighting. That same pooled forecast turnover is used for each
-execution row, while the row keeps its own configured spread, commission,
-point value, FX conversion, and current mixed point volatility. The selected
-representative supplies its observed roll rate; physical rolls add two
-one-way trades per roll. The resulting columns decompose cost as follows:
+history-length weighting. Each execution row uses that speed's pooled rule
+turnover, its own one-way spread, commission, point value, FX conversion, and
+current-price-scaled dollar volatility. The selected research representative
+supplies the roll-policy rate; physical rolls add two one-way transactions per
+roll. Rule turnover excludes rolls. The resulting columns decompose cost as
+follows:
 
 ```text
 configured SR cost per trade
     = configured one-way cash cost / annual dollar volatility
 
-annual forecast SR cost
-    = configured SR cost per trade × pooled forecast turnover
+annual rule SR cost(speed)
+    = configured SR cost per trade × pooled rule turnover(speed)
 
 annual roll SR cost
     = configured SR cost per trade × 2 × representative rolls per year
 
-total annual SR cost
-    = annual forecast SR cost + annual roll SR cost
+total transactions(speed)
+    = pooled rule turnover(speed) + 2 × rolls per year
+
+total annual SR cost(speed)
+    = configured SR cost per trade × total transactions(speed)
 ```
 
-`ewmac_cost_within_sharpe_limit` compares total annual SR cost with one third
-of pooled pre-cost Sharpe by default; `--max-cost-share-of-sharpe` makes the
-research threshold explicit. This is an affordability diagnostic, not a
-realized net backtest: the static configured cost coefficients are not
-subtracted from historical daily P&L.
-
-The 2026-09-28 full offline run produced pooled pre-cost Sharpe `0.1948`, a
-history-weighted mean instrument Sharpe of `0.3387`, an observation-stacked
-diagnostic Sharpe of `-0.0155`, and pooled annual forecast turnover `15.2148`.
-Of the 228 reviewed representatives, 116 passed and 112 failed the one-third
-cost gate. The near-even split underscores that the threshold is a meaningful
-screen rather than a cosmetic report field.
-
-That run is retained as the pre-mixed-volatility comparison. The 2026-09-29
-version-3 regression used the native `[-1, 1]` forecast, target 0.5, 32-session
-fast volatility, ten-year-span slow volatility, 30% slow weight, and a
-ten-observation volatility warm-up. It produced pooled pre-cost Sharpe
-`0.1794`, history-weighted mean instrument Sharpe `0.3304`,
-observation-stacked diagnostic Sharpe `0.3612`, and
-pooled annual forecast turnover `14.5298`. Of the 228 reviewed representatives,
-112 passed and 116 failed the one-third threshold. The latest causal scalar was
-`0.242833` on 2024-03-29, based on a historical mean daily cross-sectional
-median absolute raw forecast of `2.059032`. The new 252-row report contains no
-missing pooled Sharpe, turnover, configured one-way cost, or total annual SR
-cost values.
+Each rule passes when total annual SR cost is no greater than `0.15`, the AFTS
+rule-selection ceiling. `--rule-cost-limit-sr` exposes that fixed SR-unit
+threshold. An instrument remains eligible when at least one speed passes; it
+is not compared with an empirically fitted individual or pooled Sharpe. The
+older one-third-of-pooled-Sharpe reports are retained as historical artifacts
+but are no longer the selection contract.
 
 Eleven usable histories carry Carver's `IgnoreWeekly` flag. The generic live
 resolver does not guess among their weekly/daily expiries; it retains their
 offline cost/risk rows but marks live qualification unavailable until a
 product-specific expiry filter is supplied.
 
-Live spread fields use a point-in-time quote on the actual micro/mini, not
-Carver's full-size coefficient. Missing bid/ask data remain **unknown**, never
-zero, and live spread-dependent totals remain null. The separate configured
-cost proxy uses Carver's static coefficient exactly as stored; a zero value is
-labelled `static_config_zero_spread`, still includes commission, and must not
-be interpreted as evidence of free live execution. A live snapshot is useful
-for current granularity screening but is not a historical slippage estimate.
-Repeated snapshots or realized fills are still required to calibrate robust
-micro slippage.
+An IB-connected phase-one audit requests `BID_ASK` history on the exact dated
+contract. `--spread-duration` is passed to
+`IBPySync.get_historical_bars(duration=...)` independently of the daily-price
+history duration and defaults to `30 D`. The audit first requests one-minute
+bars and retries with two-minute bars. Spread history uses RTH by default;
+`--spread-all-hours` opts into the entire futures session. For IB `BID_ASK` bars, `open` is average
+bid and `close` is average ask, so `close - open` is the full quoted point
+spread for that bar. The one-way cost uses half the mean historical width.
+Observation count, date range, mean, median, p90, successful bar size, attempts,
+and failures are all retained.
+
+If dated history is unavailable, the same IB root's continuous future is tried
+as a spread-only fallback. It never supplies the executable contract or signal
+history. A current snapshot is the next fallback; Carver's configured one-way
+spread is last. Missing bid/ask data remain **unknown**, never zero. A Carver
+zero is labelled `static_config_zero_spread`, still includes commission, and
+must not be interpreted as evidence of free live execution. Historical IB
+spread requests require entitlements and are pacing-sensitive, so a complete
+252-row collection should be run deliberately rather than as an incidental
+notebook refresh.
+
+Phase one also ranks candidates within each asset class separately by one-way
+SR cost, current notional, and current annual dollar volatility. The report
+includes the notional and annual dollar volatility of four contracts and
+`min_capital_full_weight_idm1 = 4 × annual dollar vol / target vol`. This is a
+capital-independent granularity diagnostic, not the final portfolio test: the
+next phase must divide by the candidate instrument weight and IDM and enforce
+asset-class coverage jointly.
 
 ```bash
 .venv/bin/futures-cost-risk \
   --instruments all-pysystemtrade \
-  --offline \
   --vol-source pysystemtrade \
+  --spread-duration '30 D' \
   --fast-vol-span 32 \
   --slow-vol-years 10 \
-  --slow-vol-weight 0.30
+  --slow-vol-weight 0.30 \
+  --cost-ewmac-fast-spans 4,8,16,32,64 \
+  --rule-cost-limit-sr 0.15
 ```
 
 Use `--skip-ewmac-cost-baseline` only when a quick volatility/contract audit
-is wanted without the pooled strategy calculation. The EWMAC speed,
-mixed-volatility inputs, scalar warm-up, and affordability threshold have
-separate `--cost-ewmac-*` and `--max-cost-share-of-sharpe` flags. Their defaults
-match the 32-session/ten-year/30% mixed volatility used in the current-contract
-cost denominator, while remaining independently overridable for research.
+is wanted without the pooled strategy calculation. EWMAC speeds,
+mixed-volatility inputs, scalar warm-up, and the SR cost ceiling have separate
+`--cost-ewmac-*` and `--rule-cost-limit-sr` flags. Their defaults match the five
+AFTS EWMAC speeds and the 32-session/ten-year/30% mixed volatility, while
+remaining independently overridable for research.
 
 `--offline` writes the complete 252-row comparison without connecting to IB.
 Prices and volatility then end at the imported Carver history boundary, live
