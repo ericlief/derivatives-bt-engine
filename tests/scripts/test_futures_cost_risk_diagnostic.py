@@ -508,7 +508,8 @@ def test_automatic_quote_fallback_tries_live_then_delayed_then_frozen():
     assert quote["selected_error_codes"] == []
 
 
-def test_quote_wait_stops_immediately_after_entitlement_rejection():
+@pytest.mark.parametrize("rejection_code", [322, 10089])
+def test_quote_wait_stops_immediately_after_quote_rejection(rejection_code):
     class FakeEvent:
         def __init__(self):
             self.handlers = []
@@ -545,8 +546,8 @@ def test_quote_wait_stops_immediately_after_entitlement_rejection():
             self.sleeps.append(seconds)
             self.ib.errorEvent.emit(
                 7,
-                10089,
-                "API subscription required",
+                rejection_code,
+                "quote request rejected",
                 self.contract,
             )
 
@@ -567,7 +568,7 @@ def test_quote_wait_stops_immediately_after_entitlement_rejection():
     )
 
     assert sum(ib.sleeps) == pytest.approx(0.1)
-    assert quote["error_codes"] == [10089]
+    assert quote["error_codes"] == [rejection_code]
     assert len(ib.ended_tickers) == 1
 
 
