@@ -174,7 +174,7 @@ def _parse_fast_spans(value: str) -> tuple[int, ...]:
 
 
 def _historical_requests_allowed(quote: dict[str, object]) -> bool:
-    """Judge the selected quote mode, not errors from earlier auto attempts."""
+    """Quote and historical availability are independent in delayed mode."""
     selected_error_codes = quote.get("selected_error_codes")
     if selected_error_codes is None:
         # Backwards-compatible conservative handling for callers that do not
@@ -185,6 +185,12 @@ def _historical_requests_allowed(quote: dict[str, object]) -> bool:
         for code in selected_error_codes
         if str(code).isdigit()
     }
+    if 200 in error_codes:
+        return False
+    if quote.get("market_data_type") in {"delayed", "delayed-frozen"}:
+        # IB can reject delayed reqMktData with 10168 while still serving
+        # delayed reqHistoricalData for the same qualified contract.
+        return True
     return not bool(error_codes & HISTORICAL_ENTITLEMENT_ERROR_CODES)
 
 
@@ -1236,17 +1242,50 @@ def _ticker_values(
     return best_available
 
 
-def _latest_dated_close(ib, contract) -> Optional[float]:
-    bars = ib.get_historical_bars(
-        contract,
-        duration="5 D",
-        bar_size="1 day",
-        what_to_show="TRADES",
-        use_rth=False,
+def _latest_dated_mark(
+    ib,
+    contract,
+    *,
+    market_data_type: str,
+) -> tuple[Optional[float], Optional[str]]:
+    """Get a recent mark even when delayed snapshots are unavailable."""
+    request_order = (
+        ("BID_ASK", "1 D", "5 mins", True),
+        ("TRADES", "5 D", "1 day", False),
     )
-    if bars is None or bars.height == 0 or "close" not in bars.columns:
-        return None
-    return _positive_finite(bars.sort("date").tail(1)["close"][0])
+    if market_data_type != "delayed":
+        request_order = tuple(reversed(request_order))
+    for what_to_show, duration, bar_size, use_rth in request_order:
+        try:
+            bars = ib.get_historical_bars(
+                contract,
+                duration=duration,
+                bar_size=bar_size,
+                what_to_show=what_to_show,
+                use_rth=use_rth,
+            )
+        except Exception as exc:
+            log.debug(
+                "latest_dated_mark_failed contract=%s source=%s reason=%s",
+                contract,
+                what_to_show,
+                exc,
+            )
+            continue
+        if bars is None or bars.height == 0:
+            continue
+        date_col = "date" if "date" in bars.columns else None
+        latest = bars.sort(date_col).tail(1) if date_col else bars.tail(1)
+        if what_to_show == "TRADES" and "close" in latest.columns:
+            value = _positive_finite(latest["close"][0])
+            if value is not None:
+                return value, "dated_contract_daily_close"
+        if {"open", "close"}.issubset(latest.columns):
+            bid = _positive_finite(latest["open"][0])
+            ask = _positive_finite(latest["close"][0])
+            if bid is not None and ask is not None and ask >= bid:
+                return (bid + ask) / 2.0, "dated_contract_historical_bid_ask_mid"
+    return None, None
 
 
 def _spread_stats_from_bid_ask_bars(
@@ -1552,8 +1591,11 @@ def diagnose_instrument(
         price = quote["close"]
         price_source = f"{quote_source}_previous_close"
     elif historical_requests_allowed:
-        price = _latest_dated_close(ib, contract)
-        price_source = "dated_contract_daily_close"
+        price, price_source = _latest_dated_mark(
+            ib,
+            contract,
+            market_data_type=historical_market_data_type or "live",
+        )
     else:
         price = None
         price_source = "unavailable_no_historical_entitlement"

@@ -1290,17 +1290,24 @@ report separates `quote_error_codes` (all attempts) from
 `quote_selected_error_codes` and records
 `ib_historical_market_data_type`.
 
-An entitlement or availability error such as `354`, `10167`, or `10168` on the
-selected attempt still prevents a doomed historical request. That row records
-`ib_historical_requests_allowed=false` and
-`skipped_no_historical_entitlement`, then uses the snapshot spread when one is
-present or the configured Carver spread otherwise. With the default
-`pysystemtrade` volatility source, the corresponding risk estimate falls back
-to the Carver mixed point volatility scaled as a return at the Carver reference
-price. The row still uses any current IB quote for present notional and dollar
-risk. `--vol-source dated` and `--vol-source continuous` remain hard failures
-without live or delayed historical availability because they have no
-defensible local fallback.
+Quote and historical availability are not identical for delayed data. The AEX
+mini, for example, can return `10168` from delayed `reqMktData` while a type-3
+`reqHistoricalData(..., whatToShow="BID_ASK")` request succeeds. Consequently
+`354`, `10167`, and `10168` still describe the selected quote attempt but no
+longer veto a type-3 historical probe for a qualified contract. Error `200`
+continues to block the probe because it means the contract itself is invalid.
+`ib_historical_requests_allowed` therefore means the audit may attempt the
+endpoint, not that IB has already proven the data available. Actual timeout or
+empty-history failures remain recorded and fall back to the snapshot or
+configured Carver spread. With the default `pysystemtrade` volatility source,
+failed recent IB history similarly falls back to the Carver mixed point
+volatility scaled as a return at the Carver reference price.
+
+If delayed `reqMktData` supplies no mark, the audit first requests one day of
+five-minute `BID_ASK` history and uses the midpoint of the latest time-average
+bid and ask; daily `TRADES` is the secondary mark fallback. This permits the
+AEX mini historical path demonstrated by IB even though its delayed snapshot
+returns `10168`.
 
 If dated history is unavailable, the same IB root's continuous future is tried
 as a spread-only fallback. It never supplies the executable contract or signal

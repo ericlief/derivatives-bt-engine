@@ -20,6 +20,7 @@ from derivatives_bt_engine.data.futures_cost_risk import (
     _history_volatility,
     _historical_request_timed_out,
     _ib_contract_currency,
+    _latest_dated_mark,
     _round_report_decimals,
     _select_historical_market_data_type,
     _ticker_values,
@@ -58,7 +59,27 @@ def test_broad_audit_defaults_to_automatic_quote_fallback():
 
 @pytest.mark.parametrize("error_code", [354, 10167, 10168, "354"])
 def test_historical_requests_skip_quotes_with_entitlement_errors(error_code):
-    assert not _historical_requests_allowed({"error_codes": [error_code]})
+    assert not _historical_requests_allowed({
+        "market_data_type": "live",
+        "error_codes": [error_code],
+    })
+
+
+@pytest.mark.parametrize("error_code", [354, 10167, 10168])
+def test_delayed_quote_errors_do_not_veto_historical_requests(error_code):
+    assert _historical_requests_allowed({
+        "market_data_type": "delayed-frozen",
+        "error_codes": [error_code],
+        "selected_error_codes": [error_code],
+    })
+
+
+def test_invalid_contract_still_blocks_delayed_historical_request():
+    assert not _historical_requests_allowed({
+        "market_data_type": "delayed",
+        "error_codes": [200],
+        "selected_error_codes": [200],
+    })
 
 
 def test_historical_requests_continue_without_entitlement_errors():
@@ -94,6 +115,36 @@ def test_delayed_frozen_quote_resets_type_three_for_history():
 
     assert selected == "delayed"
     assert ib.modes == [3]
+
+
+def test_delayed_mark_uses_small_bid_ask_history_when_snapshot_is_unavailable():
+    class FakeIB:
+        def __init__(self):
+            self.calls = []
+
+        def get_historical_bars(self, contract, **kwargs):
+            self.calls.append(kwargs)
+            return pl.DataFrame({
+                "date": ["2026-09-30 17:00:00"],
+                "open": [1_115.0],
+                "close": [1_121.0],
+            })
+
+    ib = FakeIB()
+    price, source = _latest_dated_mark(
+        ib,
+        SimpleNamespace(symbol="EOE"),
+        market_data_type="delayed",
+    )
+
+    assert price == pytest.approx(1_118.0)
+    assert source == "dated_contract_historical_bid_ask_mid"
+    assert ib.calls == [{
+        "duration": "1 D",
+        "bar_size": "5 mins",
+        "what_to_show": "BID_ASK",
+        "use_rth": True,
+    }]
 
 
 @pytest.mark.parametrize(
