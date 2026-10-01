@@ -1,6 +1,7 @@
 from argparse import Namespace
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 import inspect
+from pathlib import Path
 import statistics
 from types import ModuleType, SimpleNamespace
 import sys
@@ -554,6 +555,16 @@ def test_emitted_report_includes_generation_timestamp(capsys):
     assert timestamp.endswith("+00:00")
     assert "T" in timestamp
     capsys.readouterr()
+
+
+def test_timestamped_output_path_uses_utc_and_preserves_csv_extension():
+    generated_at = datetime(2026, 10, 1, 14, 54, 18, tzinfo=timezone.utc)
+
+    output = futures_cost_risk._timestamped_output_path(
+        Path("pysystemtrade_cost_phase1_ib.csv"), generated_at
+    )
+
+    assert output == Path("pysystemtrade_cost_phase1_ib_20261001_145418.csv")
 
 
 @pytest.mark.parametrize(

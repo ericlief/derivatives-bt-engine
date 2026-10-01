@@ -1969,8 +1969,15 @@ def parse_args(argv=None):
         default=DEFAULT_AFFORDABILITY_MIN_CONTRACTS,
         help="Minimum average contract count used by the affordability diagnostic",
     )
-    parser.add_argument("--output", type=Path, default=None,
-                        help="CSV output path (default: timestamped file under results/)")
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help=(
+            "CSV output base path; a UTC run timestamp is appended to the "
+            "filename (default base: results/futures_cost_risk.csv)"
+        ),
+    )
     parser.add_argument("--no-save", action="store_true")
     return parser.parse_args(argv)
 
@@ -2280,9 +2287,16 @@ def _public_report_schema(report: pl.DataFrame) -> pl.DataFrame:
     return report.select(*selected, *middle, *tail)
 
 
+def _timestamped_output_path(output: Path, generated_at: datetime) -> Path:
+    """Append the report's UTC generation time without discarding extensions."""
+    stamp = generated_at.astimezone(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    return output.with_name(f"{output.stem}_{stamp}{output.suffix}")
+
+
 def _emit_report(report: pl.DataFrame, args) -> pl.DataFrame:
+    generated_at = datetime.now(timezone.utc)
     report = report.with_columns(
-        pl.lit(datetime.now(timezone.utc).isoformat(timespec="seconds")).alias(
+        pl.lit(generated_at.isoformat(timespec="seconds")).alias(
             "report_generated_at_utc"
         )
     )
@@ -2319,10 +2333,14 @@ def _emit_report(report: pl.DataFrame, args) -> pl.DataFrame:
     ))
     print(f"Report rows={output_report.height} columns={output_report.width}")
     if not args.no_save:
-        output = args.output
-        if output is None:
-            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            output = Path(__file__).resolve().parents[3] / "results" / f"futures_cost_risk_{stamp}.csv"
+        output_base = args.output
+        if output_base is None:
+            output_base = (
+                Path(__file__).resolve().parents[3]
+                / "results"
+                / "futures_cost_risk.csv"
+            )
+        output = _timestamped_output_path(output_base, generated_at)
         output.parent.mkdir(parents=True, exist_ok=True)
         output_report.write_csv(output)
         log.info("futures_cost_risk complete output=%s rows=%d", output, output_report.height)
