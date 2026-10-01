@@ -1272,18 +1272,28 @@ spread for that bar. The one-way cost uses half the mean historical width.
 Observation count, date range, mean, median, p90, successful bar size, attempts,
 and failures are all retained.
 
-The current quote is now an entitlement preflight as well as a price source.
-IB errors `354`, `10167`, and `10168` mean that a delayed snapshot may be
-available while historical API data are not. For those rows the audit does not
-wait for doomed dated or continuous historical requests: it records
+The current quote is an availability preflight as well as a price source. In
+automatic mode the audit retains errors from every attempted mode for audit,
+but eligibility for history is determined only by the quote attempt ultimately
+selected. Thus an initial live error `354` does not veto history when the next
+type-3 delayed request returns usable data. Before any historical call, both a
+type-3 delayed quote and a type-4 delayed-frozen quote explicitly reset IB to
+type 3, because delayed—not delayed-frozen—is the historical-data mode. The
+report separates `quote_error_codes` (all attempts) from
+`quote_selected_error_codes` and records
+`ib_historical_market_data_type`.
+
+An entitlement or availability error such as `354`, `10167`, or `10168` on the
+selected attempt still prevents a doomed historical request. That row records
 `ib_historical_requests_allowed=false` and
 `skipped_no_historical_entitlement`, then uses the snapshot spread when one is
 present or the configured Carver spread otherwise. With the default
 `pysystemtrade` volatility source, the corresponding risk estimate falls back
 to the Carver mixed point volatility scaled as a return at the Carver reference
-price. The row still uses the current IB quote for present notional and dollar
-risk. `--vol-source dated` remains a hard failure without historical
-entitlement because it has no defensible local fallback.
+price. The row still uses any current IB quote for present notional and dollar
+risk. `--vol-source dated` and `--vol-source continuous` remain hard failures
+without live or delayed historical availability because they have no
+defensible local fallback.
 
 If dated history is unavailable, the same IB root's continuous future is tried
 as a spread-only fallback. It never supplies the executable contract or signal
@@ -1298,6 +1308,12 @@ must not be interpreted as evidence of free live execution. Historical IB
 spread requests require entitlements and are pacing-sensitive, so a complete
 252-row collection should be run deliberately rather than as an incidental
 notebook refresh.
+
+IB error `162` with “API historical data query cancelled” after the wrapper's
+60-second timeout is not an entitlement response. The asynchronous request has
+timed out and the cancellation is the server acknowledgement for that request
+ID. These rows need smaller, paced requests or a retry; they must not be
+labelled as missing subscriptions.
 
 Phase one also ranks candidates within each asset class separately by one-way
 SR cost, current notional, and current annual dollar volatility. The report

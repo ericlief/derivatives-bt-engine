@@ -166,13 +166,30 @@ def _parse_fast_spans(value: str) -> tuple[int, ...]:
 
 
 def _historical_requests_allowed(quote: dict[str, object]) -> bool:
-    """IB delayed quotes do not imply entitlement to historical API data."""
+    """Judge the selected quote mode, not errors from earlier auto attempts."""
+    selected_error_codes = quote.get("selected_error_codes")
+    if selected_error_codes is None:
+        # Backwards-compatible conservative handling for callers that do not
+        # yet distinguish the selected attempt from accumulated audit errors.
+        selected_error_codes = quote.get("error_codes") or []
     error_codes = {
         int(code)
-        for code in (quote.get("error_codes") or [])
+        for code in selected_error_codes
         if str(code).isdigit()
     }
     return not bool(error_codes & HISTORICAL_ENTITLEMENT_ERROR_CODES)
+
+
+def _select_historical_market_data_type(ib, quote: dict[str, object]) -> str:
+    """Use type 3 for history even when the usable quote was type 4."""
+    quote_mode = str(quote.get("market_data_type") or "live")
+    historical_mode = (
+        "delayed"
+        if quote_mode in {"delayed", "delayed-frozen"}
+        else quote_mode
+    )
+    ib.set_market_data_type(MARKET_DATA_TYPES[historical_mode])
+    return historical_mode
 
 
 def _annualized_sharpe(values: pl.Series, annualization_days: int) -> Optional[float]:
@@ -1130,11 +1147,13 @@ def _ticker_values(
         error_codes.extend(quote["error_codes"])
         if quote["mid"] is not None:
             quote["market_data_attempts"] = ",".join(attempts)
+            quote["selected_error_codes"] = sorted(set(quote["error_codes"]))
             quote["error_codes"] = sorted(set(error_codes))
             return quote
         if best_available is None and (
             quote["last"] is not None or quote["close"] is not None
         ):
+            quote["selected_error_codes"] = sorted(set(quote["error_codes"]))
             best_available = quote
 
     if best_available is None:
@@ -1145,7 +1164,12 @@ def _ticker_values(
             "close": None,
             "mid": None,
             "market_data_type": modes[-1],
+            "selected_error_codes": sorted(set(error_codes)),
         }
+    elif "selected_error_codes" not in best_available:
+        best_available["selected_error_codes"] = sorted(
+            set(best_available.get("error_codes") or [])
+        )
     best_available["market_data_attempts"] = ",".join(attempts)
     best_available["error_codes"] = sorted(set(error_codes))
     return best_available
@@ -1410,7 +1434,7 @@ def diagnose_instrument(
         )
     signal_symbol = resolve_signal_symbol(instr)
     annualization_days = vol = None
-    if vol_source != "dated":
+    if vol_source == "pysystemtrade":
         annualization_days, vol = _history_volatility(
             ib,
             instr,
@@ -1437,6 +1461,12 @@ def diagnose_instrument(
     resolved_market_data_type = quote["market_data_type"]
     quote_source = resolved_market_data_type.replace("-", "_")
     historical_requests_allowed = _historical_requests_allowed(quote)
+    historical_market_data_type = None
+    if historical_requests_allowed:
+        historical_market_data_type = _select_historical_market_data_type(
+            ib,
+            quote,
+        )
     if quote["mid"] is not None:
         price = quote["mid"]
         price_source = f"{quote_source}_bid_ask_mid"
@@ -1454,6 +1484,24 @@ def diagnose_instrument(
         price_source = "unavailable_no_historical_entitlement"
     if price is None:
         raise RuntimeError(f"{symbol}: no usable price for resolved dated contract")
+
+    if vol_source == "continuous" and not historical_requests_allowed:
+        raise RuntimeError(
+            f"{symbol}: --vol-source continuous requires live or delayed "
+            "IB historical data"
+        )
+    if vol_source == "continuous":
+        annualization_days, vol = _history_volatility(
+            ib,
+            instr,
+            vol_source=vol_source,
+            duration=duration,
+            use_rth=use_rth,
+            fast_span=fast_span,
+            slow_years=slow_years,
+            slow_weight=slow_weight,
+            pysystemtrade_provider=pysystemtrade_provider,
+        )
 
     risk_vol: dict[str, object] = {}
     if vol_source == "pysystemtrade":
@@ -1639,7 +1687,11 @@ def diagnose_instrument(
         "quote_market_data_type": resolved_market_data_type,
         "quote_market_data_attempts": quote["market_data_attempts"],
         "quote_error_codes": ",".join(str(code) for code in quote["error_codes"]),
+        "quote_selected_error_codes": ",".join(
+            str(code) for code in quote.get("selected_error_codes", [])
+        ),
         "ib_historical_requests_allowed": historical_requests_allowed,
+        "ib_historical_market_data_type": historical_market_data_type,
         "carver_spread_points": instr.get("carver_spread_points"),
         **risk_vol,
         **spread_stats,

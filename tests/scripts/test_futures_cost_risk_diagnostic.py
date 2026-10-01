@@ -19,6 +19,7 @@ from derivatives_bt_engine.data.futures_cost_risk import (
     _historical_requests_allowed,
     _history_volatility,
     _round_report_decimals,
+    _select_historical_market_data_type,
     _ticker_values,
     build_cost_risk_row,
     diagnose_instrument,
@@ -64,7 +65,36 @@ def test_historical_requests_continue_without_entitlement_errors():
     assert _historical_requests_allowed({"error_codes": [300]})
 
 
-def test_entitlement_preflight_skips_dated_vol_and_spread_history(monkeypatch):
+def test_selected_delayed_quote_overrides_prior_live_354():
+    quote = {
+        "market_data_type": "delayed",
+        "error_codes": [354],
+        "selected_error_codes": [],
+    }
+
+    assert _historical_requests_allowed(quote)
+
+
+def test_delayed_frozen_quote_resets_type_three_for_history():
+    class FakeIB:
+        def __init__(self):
+            self.modes = []
+
+        def set_market_data_type(self, mode):
+            self.modes.append(mode)
+
+    ib = FakeIB()
+
+    selected = _select_historical_market_data_type(
+        ib,
+        {"market_data_type": "delayed-frozen"},
+    )
+
+    assert selected == "delayed"
+    assert ib.modes == [3]
+
+
+def test_delayed_quote_runs_dated_vol_and_spread_after_live_354(monkeypatch):
     contract = SimpleNamespace(
         symbol="MES",
         conId=123,
@@ -108,30 +138,58 @@ def test_entitlement_preflight_skips_dated_vol_and_spread_history(monkeypatch):
             "market_data_type": "delayed",
             "market_data_attempts": "live,delayed",
             "error_codes": [354],
+            "selected_error_codes": [],
         },
     )
 
-    def forbidden_history(*args, **kwargs):
-        raise AssertionError("historical API must not be called")
+    history_calls = []
+
+    def recent_history(*args, **kwargs):
+        history_calls.append("recent_vol")
+        return {
+            "ib_recent_fast_return_vol": 0.02,
+            "ib_recent_vol_observations": 100,
+            "ib_recent_vol_start": date(2026, 1, 1),
+            "ib_recent_vol_end": date(2026, 9, 30),
+            "ib_recent_vol_duration": "1 Y",
+        }
+
+    def spread_history(*args, **kwargs):
+        history_calls.append("spread")
+        result = futures_cost_risk._skipped_historical_spread(
+            duration="30 D",
+            reason="",
+        )
+        result.update({
+            "ib_historical_spread_source": "ib_dated_contract",
+            "ib_historical_spread_bar_size": "1 min",
+            "ib_historical_spread_observations": 100,
+            "ib_historical_spread_mean_points": 0.25,
+        })
+        return result
 
     monkeypatch.setattr(
         futures_cost_risk,
         "_recent_dated_return_volatility",
-        forbidden_history,
+        recent_history,
     )
     monkeypatch.setattr(
         futures_cost_risk,
         "_historical_bid_ask_spread",
-        forbidden_history,
-    )
-    monkeypatch.setattr(
-        futures_cost_risk,
-        "_latest_dated_close",
-        forbidden_history,
+        spread_history,
     )
 
+    class FakeIB:
+        def __init__(self):
+            self.market_data_modes = []
+
+        def set_market_data_type(self, mode):
+            self.market_data_modes.append(mode)
+
+    ib = FakeIB()
+
     row = diagnose_instrument(
-        object(),
+        ib,
         {
             "symbol": "MES",
             "signal_symbol": "ES",
@@ -157,10 +215,14 @@ def test_entitlement_preflight_skips_dated_vol_and_spread_history(monkeypatch):
         fx_by_currency={"USD": {"rate": 1.0, "asof": date(2026, 9, 30)}},
     )
 
-    assert not row["ib_historical_requests_allowed"]
-    assert row["ib_historical_spread_failures"] == "skipped_no_historical_entitlement"
-    assert row["risk_return_vol_source"] == "carver_mixed_scaled_fallback"
-    assert row["selected_spread_source"] == "ib_snapshot"
+    assert row["ib_historical_requests_allowed"]
+    assert row["ib_historical_market_data_type"] == "delayed"
+    assert row["quote_error_codes"] == "354"
+    assert row["quote_selected_error_codes"] == ""
+    assert row["risk_return_vol_source"] == "ib_dated_fast_carver_slow"
+    assert row["selected_spread_source"] == "ib_dated_contract"
+    assert history_calls == ["recent_vol", "spread"]
+    assert ib.market_data_modes == [3]
 
 
 def test_broad_audit_defaults_to_reviewed_pool_ewmac_cost_baseline():
@@ -339,6 +401,44 @@ def test_automatic_quote_fallback_tries_live_then_delayed_then_frozen():
     assert quote["mid"] == pytest.approx(5999.875)
     assert quote["market_data_type"] == "delayed-frozen"
     assert quote["market_data_attempts"] == "live,delayed,delayed-frozen"
+    assert quote["selected_error_codes"] == []
+
+
+def test_quote_fallback_separates_live_errors_from_selected_delayed_attempt(
+    monkeypatch,
+):
+    responses = iter([
+        {
+            "bid": None,
+            "ask": None,
+            "last": None,
+            "close": None,
+            "mid": None,
+            "market_data_type": "live",
+            "error_codes": [354],
+        },
+        {
+            "bid": 99.0,
+            "ask": 101.0,
+            "last": 100.0,
+            "close": 98.0,
+            "mid": 100.0,
+            "market_data_type": "delayed",
+            "error_codes": [],
+        },
+    ])
+    monkeypatch.setattr(
+        futures_cost_risk,
+        "_ticker_values_once",
+        lambda *args, **kwargs: next(responses),
+    )
+
+    quote = _ticker_values(object(), object(), 0.0, "auto")
+
+    assert quote["market_data_type"] == "delayed"
+    assert quote["error_codes"] == [354]
+    assert quote["selected_error_codes"] == []
+    assert _historical_requests_allowed(quote)
 
 
 def test_report_uses_auditable_precision_for_money_rates_and_other_floats():
