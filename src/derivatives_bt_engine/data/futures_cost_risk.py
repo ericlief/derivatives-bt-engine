@@ -1321,17 +1321,19 @@ def _spread_stats_from_bid_ask_bars(
     if clean.height == 0:
         raise ValueError("BID_ASK history has no valid non-negative spreads")
     date_col = "date" if "date" in clean.columns else None
+    spread_start = clean.get_column(date_col).min() if date_col else None
+    spread_end = clean.get_column(date_col).max() if date_col else None
     return {
         "ib_historical_spread_source": source,
         "ib_historical_spread_duration": duration,
         "ib_historical_spread_bar_size": bar_size,
         "ib_historical_spread_observations": clean.height,
-        "ib_historical_spread_start": (
-            clean.get_column(date_col).min() if date_col else None
-        ),
-        "ib_historical_spread_end": (
-            clean.get_column(date_col).max() if date_col else None
-        ),
+        # IB timestamps carry each exchange's local timezone.  Report rows
+        # span exchanges, and Polars cannot construct one datetime column
+        # from values such as MET and US/Eastern.  UTC ISO text is portable
+        # across CSV output and preserves the absolute instant.
+        "ib_historical_spread_start": _timestamp_as_utc_iso(spread_start),
+        "ib_historical_spread_end": _timestamp_as_utc_iso(spread_end),
         "ib_historical_spread_mean_points": clean.get_column(
             "spread_points"
         ).mean(),
@@ -1342,6 +1344,20 @@ def _spread_stats_from_bid_ask_bars(
             "spread_points"
         ).quantile(0.90),
     }
+
+
+def _timestamp_as_utc_iso(value: object) -> Optional[str]:
+    """Return a report-safe UTC timestamp for mixed exchange timezones."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        else:
+            value = value.astimezone(timezone.utc)
+        return value.isoformat(timespec="seconds")
+    isoformat = getattr(value, "isoformat", None)
+    return isoformat() if callable(isoformat) else str(value)
 
 
 def _historical_bid_ask_spread(

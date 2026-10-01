@@ -1,9 +1,10 @@
 from argparse import Namespace
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 import inspect
 import statistics
 from types import ModuleType, SimpleNamespace
 import sys
+from zoneinfo import ZoneInfo
 
 import polars as pl
 import pytest
@@ -926,6 +927,31 @@ def test_live_spread_uses_one_full_window_fifteen_minute_request():
         for call in ib.calls
     ] == [("15 mins", "30 D")]
     assert result["ib_historical_spread_mean_points"] == pytest.approx(0.25)
+
+
+def test_spread_report_timestamps_normalize_mixed_exchange_zones_to_utc():
+    def stats(zone: str):
+        return futures_cost_risk._spread_stats_from_bid_ask_bars(
+            pl.DataFrame({
+                "date": [datetime(2026, 9, 30, 15, 45, tzinfo=ZoneInfo(zone))],
+                "open": [7800.0],
+                "close": [7800.25],
+            }),
+            duration="30 D",
+            bar_size="15 mins",
+            source="ib_dated_contract",
+        )
+
+    report = pl.DataFrame([
+        stats("Europe/Amsterdam"),
+        stats("America/New_York"),
+    ], infer_schema_length=None)
+
+    assert report.schema["ib_historical_spread_start"] == pl.String
+    assert report.get_column("ib_historical_spread_start").to_list() == [
+        "2026-09-30T13:45:00+00:00",
+        "2026-09-30T19:45:00+00:00",
+    ]
 
 
 def test_affordability_ranks_are_within_asset_class():
