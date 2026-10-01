@@ -1379,7 +1379,10 @@ used for notional, dollar volatility, and costs. The imported Carver rate is
 retained later as `ref_fx_to_usd`/`ref_fx_asof`. If IB cannot supply the pair,
 the reference rate becomes the selected `cur_fx_to_usd` and
 `cur_fx_source=pysystemtrade_reference_fallback` makes that substitution
-explicit.
+explicit. Contract construction, quote fallback, rejection handling, and the
+USD quotation convention live in `IBPySync`: AUD/EUR/GBP/NZD use `CCYUSD`;
+other currencies use `USDCCY` and are inverted, with legacy `MXP` mapped to
+IB's current `MXN` code. The cost report does not probe both orientations.
 
 The public CSV is ordered around a single selected calculation path. Selected
 current price, FX, volatility, dollar risk, spread, cash cost, and SR cost come

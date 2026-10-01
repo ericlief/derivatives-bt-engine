@@ -90,22 +90,12 @@ DEFAULT_DELAYED_SPREAD_REQUEST_PLAN = (
 )
 DEFAULT_MIN_DAYS = 7
 DEFAULT_QUOTE_WAIT_SECONDS = 3.0
-QUOTE_POLL_INTERVAL_SECONDS = 0.1
 DEFAULT_CONTRACT_DETAILS_TIMEOUT = 8.0
 # ib_insync's historical request coroutine times out internally after 60
 # seconds, cancels the request, and can return an empty BarDataList instead of
 # raising.  Treat an empty result this close to that boundary as a timeout so
 # the cost audit does not immediately issue another expensive history request.
 IB_INSYNC_HISTORICAL_TIMEOUT_FLOOR_SECONDS = 55.0
-MARKET_DATA_TYPES = {
-    "live": 1,
-    "frozen": 2,
-    "delayed": 3,
-    "delayed-frozen": 4,
-}
-AUTO_MARKET_DATA_SEQUENCE = ("live", "delayed", "delayed-frozen")
-HISTORICAL_ENTITLEMENT_ERROR_CODES = {354, 10167, 10168}
-QUOTE_REJECTION_ERROR_CODES = {200, 322, 354, 10089, 10167, 10168}
 RETIRED_IB_INSTRUMENTS = {
     "BB3M": "CME BSBY futures were permanently delisted in October 2024",
 }
@@ -197,39 +187,6 @@ def _parse_fast_spans(value: str) -> tuple[int, ...]:
     if not spans or any(span <= 0 for span in spans):
         raise argparse.ArgumentTypeError("EWMAC fast spans must be positive")
     return spans
-
-
-def _historical_requests_allowed(quote: dict[str, object]) -> bool:
-    """Quote and historical availability are independent in delayed mode."""
-    selected_error_codes = quote.get("selected_error_codes")
-    if selected_error_codes is None:
-        # Backwards-compatible conservative handling for callers that do not
-        # yet distinguish the selected attempt from accumulated audit errors.
-        selected_error_codes = quote.get("error_codes") or []
-    error_codes = {
-        int(code)
-        for code in selected_error_codes
-        if str(code).isdigit()
-    }
-    if 200 in error_codes:
-        return False
-    if quote.get("market_data_type") in {"delayed", "delayed-frozen"}:
-        # IB can reject delayed reqMktData with 10168 while still serving
-        # delayed reqHistoricalData for the same qualified contract.
-        return True
-    return not bool(error_codes & HISTORICAL_ENTITLEMENT_ERROR_CODES)
-
-
-def _select_historical_market_data_type(ib, quote: dict[str, object]) -> str:
-    """Use type 3 for history even when the usable quote was type 4."""
-    quote_mode = str(quote.get("market_data_type") or "live")
-    historical_mode = (
-        "delayed"
-        if quote_mode in {"delayed", "delayed-frozen"}
-        else quote_mode
-    )
-    ib.set_market_data_type(MARKET_DATA_TYPES[historical_mode])
-    return historical_mode
 
 
 def _ib_contract_currency(instr: dict, contract=None) -> str:
@@ -1162,139 +1119,6 @@ def build_cost_risk_row(
     }
 
 
-def _ticker_values_once(ib, contract, wait_seconds: float, mode: str) -> dict:
-    ib.set_market_data_type(MARKET_DATA_TYPES[mode])
-    rejected_codes = []
-    error_handler = None
-    if hasattr(ib, "ib") and hasattr(ib.ib, "errorEvent"):
-        target_con_id = getattr(contract, "conId", None)
-
-        def error_handler(req_id, error_code, error_string, error_contract):
-            error_con_id = getattr(error_contract, "conId", None)
-            if target_con_id in (None, 0) or error_con_id == target_con_id:
-                if error_code in QUOTE_REJECTION_ERROR_CODES:
-                    rejected_codes.append(error_code)
-
-        ib.ib.errorEvent += error_handler
-
-    ticker = None
-    try:
-        ticker = ib.req_mkt_data(contract, generic_ticks="")
-        remaining_wait = max(float(wait_seconds), 0.0)
-        waited_seconds = 0.0
-        while remaining_wait > 0.0 and not rejected_codes:
-            current_bid = _positive_finite(getattr(ticker, "bid", None))
-            current_ask = _positive_finite(getattr(ticker, "ask", None))
-            if (
-                current_bid is not None
-                and current_ask is not None
-                and current_ask >= current_bid
-            ):
-                break
-            sleep_seconds = min(
-                QUOTE_POLL_INTERVAL_SECONDS,
-                remaining_wait,
-            )
-            ib.sleep(sleep_seconds)
-            waited_seconds += sleep_seconds
-            remaining_wait -= sleep_seconds
-        if rejected_codes:
-            log.debug(
-                "quote_wait_rejected contract=%s mode=%s waited_seconds=%.1f "
-                "error_codes=%s",
-                contract,
-                mode,
-                waited_seconds,
-                sorted(set(rejected_codes)),
-            )
-        bid = _positive_finite(getattr(ticker, "bid", None))
-        ask = _positive_finite(getattr(ticker, "ask", None))
-        last = _positive_finite(getattr(ticker, "last", None))
-        close = _positive_finite(getattr(ticker, "close", None))
-        mid = (bid + ask) / 2.0 if bid is not None and ask is not None and ask >= bid else None
-    finally:
-        if error_handler is not None:
-            ib.ib.errorEvent -= error_handler
-        if ticker is not None:
-            try:
-                if rejected_codes and hasattr(ib, "_call"):
-                    # IB already ended rejected requests. Remove ib_insync's
-                    # local ticker registration without sending a redundant
-                    # cancel that produces Error 300.
-                    ib._call(ib.ib.wrapper.endTicker, ticker, "mktData")
-                else:
-                    ib.cancel_mkt_data(contract)
-            except Exception as exc:
-                log.debug(
-                    "quote_cancel_failed contract=%s mode=%s reason=%s",
-                    contract, mode, exc,
-                )
-    return {
-        "bid": bid,
-        "ask": ask,
-        "last": last,
-        "close": close,
-        "mid": mid,
-        "market_data_type": mode,
-        "error_codes": rejected_codes,
-    }
-
-
-def _ticker_values(
-    ib,
-    contract,
-    wait_seconds: float,
-    market_data_type: str,
-) -> dict:
-    modes = (
-        AUTO_MARKET_DATA_SEQUENCE
-        if market_data_type == "auto"
-        else (market_data_type,)
-    )
-    best_available = None
-    attempts = []
-    error_codes = []
-    for mode in modes:
-        attempts.append(mode)
-        try:
-            quote = _ticker_values_once(ib, contract, wait_seconds, mode)
-        except Exception as exc:
-            log.debug(
-                "quote_mode_failed contract=%s mode=%s reason=%s",
-                contract, mode, exc,
-            )
-            continue
-        error_codes.extend(quote["error_codes"])
-        if quote["mid"] is not None:
-            quote["market_data_attempts"] = ",".join(attempts)
-            quote["selected_error_codes"] = sorted(set(quote["error_codes"]))
-            quote["error_codes"] = sorted(set(error_codes))
-            return quote
-        if best_available is None and (
-            quote["last"] is not None or quote["close"] is not None
-        ):
-            quote["selected_error_codes"] = sorted(set(quote["error_codes"]))
-            best_available = quote
-
-    if best_available is None:
-        best_available = {
-            "bid": None,
-            "ask": None,
-            "last": None,
-            "close": None,
-            "mid": None,
-            "market_data_type": modes[-1],
-            "selected_error_codes": sorted(set(error_codes)),
-        }
-    elif "selected_error_codes" not in best_available:
-        best_available["selected_error_codes"] = sorted(
-            set(best_available.get("error_codes") or [])
-        )
-    best_available["market_data_attempts"] = ",".join(attempts)
-    best_available["error_codes"] = sorted(set(error_codes))
-    return best_available
-
-
 def _latest_dated_mark(
     ib,
     contract,
@@ -1550,21 +1374,6 @@ def load_latest_fx_to_usd(db_path: Path | str) -> dict[str, dict]:
     return result
 
 
-def _ib_forex_contract(pair: str):
-    """Construct an IB IDEALPRO cash-FX contract lazily."""
-    from ib_insync import Forex
-
-    return Forex(pair)
-
-
-def _quote_price(quote: dict[str, object]) -> tuple[Optional[float], Optional[str]]:
-    for field in ("mid", "last", "close"):
-        value = _positive_finite(quote.get(field))
-        if value is not None:
-            return value, field
-    return None, None
-
-
 def load_current_fx_to_usd(
     ib,
     currencies: set[str],
@@ -1591,80 +1400,58 @@ def load_current_fx_to_usd(
             })
             continue
 
-        failures: list[str] = []
-        current = None
-        for pair, invert in ((f"{currency}USD", False), (f"USD{currency}", True)):
-            try:
-                contract = _ib_forex_contract(pair)
-                qualified = ib.qualify_contracts(contract)
-                if not qualified:
-                    raise ValueError("contract did not qualify")
-                contract = qualified[0]
-                quote = _ticker_values(
-                    ib,
-                    contract,
-                    quote_wait_seconds,
-                    market_data_type,
-                )
-                quoted_rate, field = _quote_price(quote)
-                if quoted_rate is None:
-                    raise ValueError(
-                        "no usable FX bid/ask midpoint, last, or close"
-                    )
-                rate = 1.0 / quoted_rate if invert else quoted_rate
-                mode = str(quote.get("market_data_type") or "unknown")
-                current = {
-                    "rate": rate,
-                    "asof": datetime.now(timezone.utc).isoformat(
-                        timespec="seconds"
-                    ),
-                    "source": f"ib_{mode.replace('-', '_')}_{field}",
-                    "pair": pair,
-                    "market_data_type": mode,
-                    "error": ";".join(failures) or None,
-                    "reference_rate": (
-                        reference.get("reference_rate", reference.get("rate"))
-                        if reference is not None
-                        else None
-                    ),
-                    "reference_asof": (
-                        reference.get("reference_asof", reference.get("asof"))
-                        if reference is not None
-                        else None
-                    ),
-                    "reference_source": (
-                        reference.get("reference_source", reference.get("source"))
-                        if reference is not None
-                        else None
-                    ),
-                }
-                log.info(
-                    "current_fx selected currency=%s pair=%s rate_to_usd=%.8f "
-                    "market_data_type=%s source=%s",
-                    currency,
-                    pair,
-                    rate,
-                    mode,
-                    current["source"],
-                )
-                break
-            except Exception as exc:
-                failures.append(f"{pair}:{exc}")
-                log.debug(
-                    "current_fx_candidate_rejected currency=%s pair=%s reason=%s",
-                    currency,
-                    pair,
-                    exc,
-                )
-
-        if current is not None:
+        try:
+            ib_fx = ib.get_fx_to_usd(
+                currency,
+                wait_seconds=quote_wait_seconds,
+                market_data_type=market_data_type,
+            )
+            current = {
+                "rate": ib_fx["rate"],
+                "asof": ib_fx["queried_at_utc"],
+                "source": ib_fx["source"],
+                "pair": ib_fx["pair"],
+                "market_data_type": ib_fx["market_data_type"],
+                "error": None,
+                "reference_rate": (
+                    reference.get("reference_rate", reference.get("rate"))
+                    if reference is not None
+                    else None
+                ),
+                "reference_asof": (
+                    reference.get("reference_asof", reference.get("asof"))
+                    if reference is not None
+                    else None
+                ),
+                "reference_source": (
+                    reference.get("reference_source", reference.get("source"))
+                    if reference is not None
+                    else None
+                ),
+            }
             selected[currency] = current
-        elif reference is not None:
+            log.info(
+                "current_fx selected currency=%s pair=%s rate_to_usd=%.8f "
+                "market_data_type=%s source=%s",
+                currency,
+                current["pair"],
+                current["rate"],
+                current["market_data_type"],
+                current["source"],
+            )
+        except Exception as exc:
+            log.debug(
+                "current_fx_rejected currency=%s reason=%s",
+                currency,
+                exc,
+            )
+            if reference is None:
+                continue
             fallback = dict(reference)
             fallback.update({
                 "source": "pysystemtrade_reference_fallback",
                 "market_data_type": None,
-                "error": ";".join(failures) or "IB FX unavailable",
+                "error": str(exc),
             })
             selected[currency] = fallback
             log.info(
@@ -1813,16 +1600,18 @@ def diagnose_instrument(
         min_days,
         contract_details_timeout=contract_details_timeout,
     )
-    quote = _ticker_values(ib, contract, quote_wait_seconds, market_data_type)
+    quote = ib.get_quote(
+        contract,
+        wait_seconds=quote_wait_seconds,
+        market_data_type=market_data_type,
+        generic_ticks="",
+    )
     resolved_market_data_type = quote["market_data_type"]
     quote_source = resolved_market_data_type.replace("-", "_")
-    historical_requests_allowed = _historical_requests_allowed(quote)
+    historical_requests_allowed = ib.quote_allows_historical(quote)
     historical_market_data_type = None
     if historical_requests_allowed:
-        historical_market_data_type = _select_historical_market_data_type(
-            ib,
-            quote,
-        )
+        historical_market_data_type = ib.select_historical_market_data_type(quote)
     if quote["mid"] is not None:
         price = quote["mid"]
         price_source = f"{quote_source}_bid_ask_mid"
@@ -2160,7 +1949,7 @@ def parse_args(argv=None):
     )
     parser.add_argument(
         "--market-data-type",
-        choices=["auto", *MARKET_DATA_TYPES],
+        choices=["auto", "live", "frozen", "delayed", "delayed-frozen"],
         default="auto",
         help="IB quote mode (default: auto tries live, delayed, then delayed-frozen)",
     )

@@ -17,14 +17,11 @@ from derivatives_bt_engine.data.futures_cost_risk import (
     _emit_report,
     _ewmac_rule_performance,
     _historical_bid_ask_spread,
-    _historical_requests_allowed,
     _history_volatility,
     _historical_request_timed_out,
     _ib_contract_currency,
     _latest_dated_mark,
     _round_report_decimals,
-    _select_historical_market_data_type,
-    _ticker_values,
     build_cost_risk_row,
     diagnose_instrument,
     volatility_from_bars,
@@ -58,88 +55,17 @@ def test_broad_audit_defaults_to_automatic_quote_fallback():
     assert parse_args([]).market_data_type == "auto"
 
 
-@pytest.mark.parametrize("error_code", [354, 10167, 10168, "354"])
-def test_historical_requests_skip_quotes_with_entitlement_errors(error_code):
-    assert not _historical_requests_allowed({
-        "market_data_type": "live",
-        "error_codes": [error_code],
-    })
-
-
-@pytest.mark.parametrize("error_code", [354, 10167, 10168])
-def test_delayed_quote_errors_do_not_veto_historical_requests(error_code):
-    assert _historical_requests_allowed({
-        "market_data_type": "delayed-frozen",
-        "error_codes": [error_code],
-        "selected_error_codes": [error_code],
-    })
-
-
-def test_invalid_contract_still_blocks_delayed_historical_request():
-    assert not _historical_requests_allowed({
-        "market_data_type": "delayed",
-        "error_codes": [200],
-        "selected_error_codes": [200],
-    })
-
-
-def test_historical_requests_continue_without_entitlement_errors():
-    assert _historical_requests_allowed({"error_codes": []})
-    assert _historical_requests_allowed({"error_codes": None})
-    assert _historical_requests_allowed({"error_codes": [300]})
-
-
-def test_selected_delayed_quote_overrides_prior_live_354():
-    quote = {
-        "market_data_type": "delayed",
-        "error_codes": [354],
-        "selected_error_codes": [],
-    }
-
-    assert _historical_requests_allowed(quote)
-
-
-def test_delayed_frozen_quote_resets_type_three_for_history():
+def test_current_ib_fx_replaces_stale_reference_and_keeps_audit_fields():
     class FakeIB:
-        def __init__(self):
-            self.modes = []
-
-        def set_market_data_type(self, mode):
-            self.modes.append(mode)
-
-    ib = FakeIB()
-
-    selected = _select_historical_market_data_type(
-        ib,
-        {"market_data_type": "delayed-frozen"},
-    )
-
-    assert selected == "delayed"
-    assert ib.modes == [3]
-
-
-def test_current_ib_fx_replaces_stale_reference_and_keeps_audit_fields(
-    monkeypatch,
-):
-    monkeypatch.setattr(
-        futures_cost_risk,
-        "_ib_forex_contract",
-        lambda pair: SimpleNamespace(symbol=pair),
-    )
-    monkeypatch.setattr(
-        futures_cost_risk,
-        "_ticker_values",
-        lambda *args, **kwargs: {
-            "mid": 1.175,
-            "last": None,
-            "close": None,
-            "market_data_type": "delayed",
-        },
-    )
-
-    class FakeIB:
-        def qualify_contracts(self, contract):
-            return [contract]
+        def get_fx_to_usd(self, currency, **kwargs):
+            assert currency == "EUR"
+            return {
+                "rate": 1.175,
+                "queried_at_utc": "2026-10-01T15:00:00+00:00",
+                "source": "ib_delayed_mid",
+                "pair": "EURUSD",
+                "market_data_type": "delayed",
+            }
 
     selected = futures_cost_risk.load_current_fx_to_usd(
         FakeIB(),
@@ -160,30 +86,25 @@ def test_current_ib_fx_replaces_stale_reference_and_keeps_audit_fields(
 
     assert selected["EUR"]["rate"] == pytest.approx(1.175)
     assert selected["EUR"]["source"] == "ib_delayed_mid"
+    assert selected["EUR"]["pair"] == "EURUSD"
     assert selected["EUR"]["reference_rate"] == pytest.approx(1.077585)
     assert selected["EUR"]["reference_asof"] == "2024-03-29"
 
 
-def test_unavailable_ib_fx_makes_reference_rate_the_selected_rate(monkeypatch):
-    monkeypatch.setattr(
-        futures_cost_risk,
-        "_ib_forex_contract",
-        lambda pair: SimpleNamespace(symbol=pair),
-    )
-
+def test_unavailable_ib_fx_makes_reference_rate_the_selected_rate():
     class FakeIB:
-        def qualify_contracts(self, contract):
-            return []
+        def get_fx_to_usd(self, currency, **kwargs):
+            raise ValueError("USDCAD: IB cash-FX contract did not qualify")
 
     selected = futures_cost_risk.load_current_fx_to_usd(
         FakeIB(),
-        {"EUR"},
+        {"CAD"},
         {
-            "EUR": {
-                "rate": 1.077585,
+            "CAD": {
+                "rate": 0.72,
                 "asof": "2024-03-29",
                 "source": "pysystemtrade_reference",
-                "reference_rate": 1.077585,
+                "reference_rate": 0.72,
                 "reference_asof": "2024-03-29",
                 "reference_source": "pysystemtrade_reference",
             }
@@ -192,9 +113,9 @@ def test_unavailable_ib_fx_makes_reference_rate_the_selected_rate(monkeypatch):
         quote_wait_seconds=0.0,
     )
 
-    assert selected["EUR"]["rate"] == pytest.approx(1.077585)
-    assert selected["EUR"]["source"] == "pysystemtrade_reference_fallback"
-    assert "contract did not qualify" in selected["EUR"]["error"]
+    assert selected["CAD"]["rate"] == pytest.approx(0.72)
+    assert selected["CAD"]["source"] == "pysystemtrade_reference_fallback"
+    assert "USDCAD" in selected["CAD"]["error"]
 
 
 def test_delayed_mark_uses_small_bid_ask_history_when_snapshot_is_unavailable():
@@ -309,22 +230,6 @@ def test_delayed_quote_runs_dated_vol_and_spread_after_live_354(monkeypatch):
         "_resolve_contract",
         lambda *args, **kwargs: contract,
     )
-    monkeypatch.setattr(
-        futures_cost_risk,
-        "_ticker_values",
-        lambda *args, **kwargs: {
-            "bid": 5_999.75,
-            "ask": 6_000.0,
-            "last": 5_999.75,
-            "close": 5_990.0,
-            "mid": 5_999.875,
-            "market_data_type": "delayed",
-            "market_data_attempts": "live,delayed",
-            "error_codes": [354],
-            "selected_error_codes": [],
-        },
-    )
-
     history_calls = []
 
     def recent_history(*args, **kwargs):
@@ -366,8 +271,26 @@ def test_delayed_quote_runs_dated_vol_and_spread_after_live_354(monkeypatch):
         def __init__(self):
             self.market_data_modes = []
 
-        def set_market_data_type(self, mode):
-            self.market_data_modes.append(mode)
+        def get_quote(self, *args, **kwargs):
+            return {
+                "bid": 5_999.75,
+                "ask": 6_000.0,
+                "last": 5_999.75,
+                "close": 5_990.0,
+                "mid": 5_999.875,
+                "market_data_type": "delayed",
+                "market_data_attempts": "live,delayed",
+                "error_codes": [354],
+                "selected_error_codes": [],
+            }
+
+        @staticmethod
+        def quote_allows_historical(quote):
+            return True
+
+        def select_historical_market_data_type(self, quote):
+            self.market_data_modes.append(3)
+            return "delayed"
 
     ib = FakeIB()
 
@@ -553,173 +476,6 @@ def test_configured_cost_labels_snapshot_spread_separately_from_history():
     )
 
     assert estimate["configured_cost_quality"] == "ib_snapshot_bid_ask"
-
-
-def test_automatic_quote_fallback_tries_live_then_delayed_then_frozen():
-    class FakeIB:
-        def __init__(self):
-            self.mode = None
-            self.modes = []
-
-        def set_market_data_type(self, mode):
-            self.mode = mode
-            self.modes.append(mode)
-
-        def req_mkt_data(self, contract, generic_ticks=""):
-            assert generic_ticks == ""
-            if self.mode < 4:
-                return SimpleNamespace(bid=None, ask=None, last=None, close=None)
-            return SimpleNamespace(bid=5999.75, ask=6000.0, last=5999.75, close=5990.0)
-
-        def sleep(self, seconds):
-            pass
-
-        def cancel_mkt_data(self, contract):
-            pass
-
-    ib = FakeIB()
-    quote = _ticker_values(ib, SimpleNamespace(symbol="ES"), 0.0, "auto")
-
-    assert ib.modes == [1, 3, 4]
-    assert quote["mid"] == pytest.approx(5999.875)
-    assert quote["market_data_type"] == "delayed-frozen"
-    assert quote["market_data_attempts"] == "live,delayed,delayed-frozen"
-    assert quote["selected_error_codes"] == []
-
-
-@pytest.mark.parametrize("rejection_code", [322, 10089])
-def test_quote_wait_stops_immediately_after_quote_rejection(rejection_code):
-    class FakeEvent:
-        def __init__(self):
-            self.handlers = []
-
-        def __iadd__(self, handler):
-            self.handlers.append(handler)
-            return self
-
-        def __isub__(self, handler):
-            self.handlers.remove(handler)
-            return self
-
-        def emit(self, *args):
-            for handler in list(self.handlers):
-                handler(*args)
-
-    class FakeIB:
-        def __init__(self, contract):
-            self.contract = contract
-            self.sleeps = []
-            self.ended_tickers = []
-            self.ib = SimpleNamespace(
-                errorEvent=FakeEvent(),
-                wrapper=SimpleNamespace(endTicker=self._end_ticker),
-            )
-
-        def set_market_data_type(self, mode):
-            self.mode = mode
-
-        def req_mkt_data(self, contract, generic_ticks=""):
-            return SimpleNamespace(bid=None, ask=None, last=None, close=None)
-
-        def sleep(self, seconds):
-            self.sleeps.append(seconds)
-            self.ib.errorEvent.emit(
-                7,
-                rejection_code,
-                "quote request rejected",
-                self.contract,
-            )
-
-        def _end_ticker(self, ticker, tick_type):
-            self.ended_tickers.append((ticker, tick_type))
-
-        def _call(self, fn, *args):
-            return fn(*args)
-
-    contract = SimpleNamespace(symbol="UC", conId=123)
-    ib = FakeIB(contract)
-
-    quote = futures_cost_risk._ticker_values_once(
-        ib,
-        contract,
-        wait_seconds=3.0,
-        mode="live",
-    )
-
-    assert sum(ib.sleeps) == pytest.approx(0.1)
-    assert quote["error_codes"] == [rejection_code]
-    assert len(ib.ended_tickers) == 1
-
-
-def test_quote_wait_stops_when_bid_and_ask_are_already_available():
-    class FakeIB:
-        def __init__(self):
-            self.sleeps = []
-
-        def set_market_data_type(self, mode):
-            self.mode = mode
-
-        def req_mkt_data(self, contract, generic_ticks=""):
-            return SimpleNamespace(
-                bid=5999.75,
-                ask=6000.0,
-                last=5999.75,
-                close=5990.0,
-            )
-
-        def sleep(self, seconds):
-            self.sleeps.append(seconds)
-
-        def cancel_mkt_data(self, contract):
-            pass
-
-    ib = FakeIB()
-    quote = futures_cost_risk._ticker_values_once(
-        ib,
-        SimpleNamespace(symbol="ES"),
-        wait_seconds=3.0,
-        mode="live",
-    )
-
-    assert ib.sleeps == []
-    assert quote["mid"] == pytest.approx(5999.875)
-
-
-def test_quote_fallback_separates_live_errors_from_selected_delayed_attempt(
-    monkeypatch,
-):
-    responses = iter([
-        {
-            "bid": None,
-            "ask": None,
-            "last": None,
-            "close": None,
-            "mid": None,
-            "market_data_type": "live",
-            "error_codes": [354],
-        },
-        {
-            "bid": 99.0,
-            "ask": 101.0,
-            "last": 100.0,
-            "close": 98.0,
-            "mid": 100.0,
-            "market_data_type": "delayed",
-            "error_codes": [],
-        },
-    ])
-    monkeypatch.setattr(
-        futures_cost_risk,
-        "_ticker_values_once",
-        lambda *args, **kwargs: next(responses),
-    )
-
-    quote = _ticker_values(object(), object(), 0.0, "auto")
-
-    assert quote["market_data_type"] == "delayed"
-    assert quote["error_codes"] == [354]
-    assert quote["selected_error_codes"] == []
-    assert _historical_requests_allowed(quote)
 
 
 def test_report_uses_auditable_precision_for_money_rates_and_other_floats():
