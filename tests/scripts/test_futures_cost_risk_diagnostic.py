@@ -733,7 +733,7 @@ def test_historical_spread_retries_with_exposed_duration():
         def get_historical_bars(self, contract, **kwargs):
             self.calls.append(kwargs)
             if kwargs["bar_size"] == "1 min":
-                raise TimeoutError("one-minute request timed out")
+                raise ValueError("one-minute history was empty")
             return pl.DataFrame({
                 "date": [
                     "2026-09-01 10:00:00",
@@ -756,6 +756,60 @@ def test_historical_spread_retries_with_exposed_duration():
     assert all(call["duration"] == "30 D" for call in ib.calls)
     assert result["ib_historical_spread_mean_points"] == pytest.approx(0.375)
     assert result["ib_historical_spread_observations"] == 2
+
+
+def test_historical_spread_timeout_does_not_cascade_to_more_requests():
+    class FakeIB:
+        def __init__(self):
+            self.calls = []
+
+        def get_historical_bars(self, contract, **kwargs):
+            self.calls.append(kwargs)
+            raise TimeoutError("reqHistoricalDataAsync timed out after 60s")
+
+    ib = FakeIB()
+    result = _historical_bid_ask_spread(
+        ib,
+        SimpleNamespace(symbol="MES"),
+        duration="30 D",
+        use_rth=True,
+        source="ib_dated_contract",
+    )
+
+    assert [call["bar_size"] for call in ib.calls] == ["1 min"]
+    assert result["ib_historical_spread_mean_points"] is None
+    assert "timed out" in result["ib_historical_spread_failures"]
+
+
+def test_delayed_spread_uses_full_window_five_minute_first():
+    class FakeIB:
+        def __init__(self):
+            self.calls = []
+
+        def get_historical_bars(self, contract, **kwargs):
+            self.calls.append(kwargs)
+            return pl.DataFrame({
+                "date": ["2026-09-01 10:00:00"],
+                "open": [100.0],
+                "close": [100.25],
+            })
+
+    ib = FakeIB()
+    result = _historical_bid_ask_spread(
+        ib,
+        SimpleNamespace(symbol="EOE"),
+        duration="30 D",
+        use_rth=True,
+        source="ib_dated_contract",
+        market_data_type="delayed",
+    )
+
+    assert [
+        (call["bar_size"], call["duration"])
+        for call in ib.calls
+    ] == [("5 mins", "30 D")]
+    assert result["ib_historical_spread_bar_size"] == "5 mins"
+    assert result["ib_historical_spread_duration"] == "30 D"
 
 
 def test_affordability_ranks_are_within_asset_class():

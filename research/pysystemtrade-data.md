@@ -1264,8 +1264,15 @@ product-specific expiry filter is supplied.
 An IB-connected phase-one audit requests `BID_ASK` history on the exact dated
 contract. `--spread-duration` is passed to
 `IBPySync.get_historical_bars(duration=...)` independently of the daily-price
-history duration and defaults to `30 D`. The audit first requests one-minute
-bars and retries with two-minute bars. Spread history uses RTH by default;
+history duration and defaults to `30 D`. For live/subscribed data the audit
+retains the requested one-minute bars and retries two-minute bars only after an
+immediate non-timeout failure such as an empty response. A 60-second timeout
+stops all further historical probes for that contract. Delayed data uses a
+full-window five-minute request first; only immediate failures step down to a
+five-day two-minute sample and then a one-day one-minute sample. This avoids
+silently coarsening subscribed CME data while keeping delayed Euronext probes
+within a practical response size. The successful duration and bar size remain
+explicit report fields. Spread history uses RTH by default;
 `--spread-all-hours` opts into the entire futures session. For IB `BID_ASK` bars, `open` is average
 bid and `close` is average ask, so `close - open` is the full quoted point
 spread for that bar. The one-way cost uses half the mean historical width.

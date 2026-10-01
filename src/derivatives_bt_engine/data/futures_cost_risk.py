@@ -82,6 +82,11 @@ log = logging.getLogger("derivatives_bt_engine.data.futures_cost_risk")
 DEFAULT_DURATION = "1 Y"
 DEFAULT_SPREAD_DURATION = "30 D"
 DEFAULT_SPREAD_BAR_SIZES = ("1 min", "2 mins")
+DEFAULT_DELAYED_SPREAD_REQUEST_PLAN = (
+    ("5 mins", None),
+    ("2 mins", 5),
+    ("1 min", 1),
+)
 DEFAULT_MIN_DAYS = 7
 DEFAULT_QUOTE_WAIT_SECONDS = 3.0
 DEFAULT_CONTRACT_DETAILS_TIMEOUT = 8.0
@@ -210,6 +215,41 @@ def _historical_request_timed_out(failures: object) -> bool:
     return any(
         marker in text
         for marker in ("timeout", "timed out", "query cancelled")
+    )
+
+
+def _cap_ib_duration(duration: str, max_days: Optional[int]) -> str:
+    """Cap an IB duration while preserving shorter user requests."""
+    if max_days is None:
+        return duration
+    parts = duration.strip().upper().split()
+    if len(parts) != 2:
+        return f"{max_days} D"
+    try:
+        amount = int(parts[0])
+    except ValueError:
+        return f"{max_days} D"
+    days_per_unit = {
+        "S": 1.0 / 86_400.0,
+        "D": 1.0,
+        "W": 7.0,
+        "M": 30.0,
+        "Y": 365.0,
+    }
+    requested_days = amount * days_per_unit.get(parts[1], math.inf)
+    return duration if requested_days <= max_days else f"{max_days} D"
+
+
+def _spread_request_plan(
+    duration: str,
+    market_data_type: str,
+) -> tuple[tuple[str, str], ...]:
+    """Keep one-minute live data; bound delayed requests more defensibly."""
+    if market_data_type != "delayed":
+        return tuple((bar_size, duration) for bar_size in DEFAULT_SPREAD_BAR_SIZES)
+    return tuple(
+        (bar_size, _cap_ib_duration(duration, max_days))
+        for bar_size, max_days in DEFAULT_DELAYED_SPREAD_REQUEST_PLAN
     )
 
 
@@ -1266,24 +1306,31 @@ def _historical_bid_ask_spread(
     duration: str,
     use_rth: bool,
     source: str,
-    bar_sizes: tuple[str, ...] = DEFAULT_SPREAD_BAR_SIZES,
+    market_data_type: str = "live",
+    bar_sizes: Optional[tuple[str, ...]] = None,
 ) -> dict[str, object]:
-    """Try progressively coarser BID_ASK bars for one IB contract."""
+    """Try bounded BID_ASK requests without cascading after a timeout."""
     attempts: list[str] = []
     failures: list[str] = []
-    for bar_size in bar_sizes:
-        attempts.append(bar_size)
+    request_plan = (
+        tuple((bar_size, duration) for bar_size in bar_sizes)
+        if bar_sizes is not None
+        else _spread_request_plan(duration, market_data_type)
+    )
+    for bar_size, attempt_duration in request_plan:
+        attempt_label = f"{bar_size}@{attempt_duration}"
+        attempts.append(attempt_label)
         try:
             bars = ib.get_historical_bars(
                 contract,
-                duration=duration,
+                duration=attempt_duration,
                 bar_size=bar_size,
                 what_to_show="BID_ASK",
                 use_rth=use_rth,
             )
             result = _spread_stats_from_bid_ask_bars(
                 bars,
-                duration=duration,
+                duration=attempt_duration,
                 bar_size=bar_size,
                 source=source,
             )
@@ -1291,16 +1338,18 @@ def _historical_bid_ask_spread(
             result["ib_historical_spread_failures"] = ";".join(failures)
             return result
         except Exception as exc:
-            failures.append(f"{bar_size}:{exc}")
+            failures.append(f"{attempt_label}:{exc}")
             log.debug(
                 "historical_spread_attempt_failed contract=%s source=%s "
                 "duration=%s bar_size=%s reason=%s",
                 contract,
                 source,
-                duration,
+                attempt_duration,
                 bar_size,
                 exc,
             )
+            if _historical_request_timed_out(exc):
+                break
     return {
         "ib_historical_spread_source": None,
         "ib_historical_spread_duration": duration,
@@ -1582,6 +1631,7 @@ def diagnose_instrument(
             duration=spread_duration,
             use_rth=spread_use_rth,
             source="ib_dated_contract",
+            market_data_type=historical_market_data_type or "live",
         )
     else:
         spread_stats = _skipped_historical_spread(
@@ -1616,6 +1666,7 @@ def diagnose_instrument(
                 duration=spread_duration,
                 use_rth=spread_use_rth,
                 source="ib_continuous_fallback",
+                market_data_type=historical_market_data_type or "live",
             )
             if continuous_stats["ib_historical_spread_mean_points"] is not None:
                 spread_stats = continuous_stats
