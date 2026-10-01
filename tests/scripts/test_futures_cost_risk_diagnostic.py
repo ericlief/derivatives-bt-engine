@@ -508,6 +508,103 @@ def test_automatic_quote_fallback_tries_live_then_delayed_then_frozen():
     assert quote["selected_error_codes"] == []
 
 
+def test_quote_wait_stops_immediately_after_entitlement_rejection():
+    class FakeEvent:
+        def __init__(self):
+            self.handlers = []
+
+        def __iadd__(self, handler):
+            self.handlers.append(handler)
+            return self
+
+        def __isub__(self, handler):
+            self.handlers.remove(handler)
+            return self
+
+        def emit(self, *args):
+            for handler in list(self.handlers):
+                handler(*args)
+
+    class FakeIB:
+        def __init__(self, contract):
+            self.contract = contract
+            self.sleeps = []
+            self.ended_tickers = []
+            self.ib = SimpleNamespace(
+                errorEvent=FakeEvent(),
+                wrapper=SimpleNamespace(endTicker=self._end_ticker),
+            )
+
+        def set_market_data_type(self, mode):
+            self.mode = mode
+
+        def req_mkt_data(self, contract, generic_ticks=""):
+            return SimpleNamespace(bid=None, ask=None, last=None, close=None)
+
+        def sleep(self, seconds):
+            self.sleeps.append(seconds)
+            self.ib.errorEvent.emit(
+                7,
+                10089,
+                "API subscription required",
+                self.contract,
+            )
+
+        def _end_ticker(self, ticker, tick_type):
+            self.ended_tickers.append((ticker, tick_type))
+
+        def _call(self, fn, *args):
+            return fn(*args)
+
+    contract = SimpleNamespace(symbol="UC", conId=123)
+    ib = FakeIB(contract)
+
+    quote = futures_cost_risk._ticker_values_once(
+        ib,
+        contract,
+        wait_seconds=3.0,
+        mode="live",
+    )
+
+    assert sum(ib.sleeps) == pytest.approx(0.1)
+    assert quote["error_codes"] == [10089]
+    assert len(ib.ended_tickers) == 1
+
+
+def test_quote_wait_stops_when_bid_and_ask_are_already_available():
+    class FakeIB:
+        def __init__(self):
+            self.sleeps = []
+
+        def set_market_data_type(self, mode):
+            self.mode = mode
+
+        def req_mkt_data(self, contract, generic_ticks=""):
+            return SimpleNamespace(
+                bid=5999.75,
+                ask=6000.0,
+                last=5999.75,
+                close=5990.0,
+            )
+
+        def sleep(self, seconds):
+            self.sleeps.append(seconds)
+
+        def cancel_mkt_data(self, contract):
+            pass
+
+    ib = FakeIB()
+    quote = futures_cost_risk._ticker_values_once(
+        ib,
+        SimpleNamespace(symbol="ES"),
+        wait_seconds=3.0,
+        mode="live",
+    )
+
+    assert ib.sleeps == []
+    assert quote["mid"] == pytest.approx(5999.875)
+
+
 def test_quote_fallback_separates_live_errors_from_selected_delayed_attempt(
     monkeypatch,
 ):

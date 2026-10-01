@@ -90,6 +90,7 @@ DEFAULT_DELAYED_SPREAD_REQUEST_PLAN = (
 )
 DEFAULT_MIN_DAYS = 7
 DEFAULT_QUOTE_WAIT_SECONDS = 3.0
+QUOTE_POLL_INTERVAL_SECONDS = 0.1
 DEFAULT_CONTRACT_DETAILS_TIMEOUT = 8.0
 # ib_insync's historical request coroutine times out internally after 60
 # seconds, cancels the request, and can return an empty BarDataList instead of
@@ -104,6 +105,7 @@ MARKET_DATA_TYPES = {
 }
 AUTO_MARKET_DATA_SEQUENCE = ("live", "delayed", "delayed-frozen")
 HISTORICAL_ENTITLEMENT_ERROR_CODES = {354, 10167, 10168}
+QUOTE_REJECTION_ERROR_CODES = {200, 354, 10089, 10167, 10168}
 RETIRED_IB_INSTRUMENTS = {
     "BB3M": "CME BSBY futures were permanently delisted in October 2024",
 }
@@ -1151,7 +1153,7 @@ def _ticker_values_once(ib, contract, wait_seconds: float, mode: str) -> dict:
         def error_handler(req_id, error_code, error_string, error_contract):
             error_con_id = getattr(error_contract, "conId", None)
             if target_con_id in (None, 0) or error_con_id == target_con_id:
-                if error_code in (200, 354, 10167, 10168):
+                if error_code in QUOTE_REJECTION_ERROR_CODES:
                     rejected_codes.append(error_code)
 
         ib.ib.errorEvent += error_handler
@@ -1159,7 +1161,33 @@ def _ticker_values_once(ib, contract, wait_seconds: float, mode: str) -> dict:
     ticker = None
     try:
         ticker = ib.req_mkt_data(contract, generic_ticks="")
-        ib.sleep(wait_seconds)
+        remaining_wait = max(float(wait_seconds), 0.0)
+        waited_seconds = 0.0
+        while remaining_wait > 0.0 and not rejected_codes:
+            current_bid = _positive_finite(getattr(ticker, "bid", None))
+            current_ask = _positive_finite(getattr(ticker, "ask", None))
+            if (
+                current_bid is not None
+                and current_ask is not None
+                and current_ask >= current_bid
+            ):
+                break
+            sleep_seconds = min(
+                QUOTE_POLL_INTERVAL_SECONDS,
+                remaining_wait,
+            )
+            ib.sleep(sleep_seconds)
+            waited_seconds += sleep_seconds
+            remaining_wait -= sleep_seconds
+        if rejected_codes:
+            log.debug(
+                "quote_wait_rejected contract=%s mode=%s waited_seconds=%.1f "
+                "error_codes=%s",
+                contract,
+                mode,
+                waited_seconds,
+                sorted(set(rejected_codes)),
+            )
         bid = _positive_finite(getattr(ticker, "bid", None))
         ask = _positive_finite(getattr(ticker, "ask", None))
         last = _positive_finite(getattr(ticker, "last", None))
