@@ -8,6 +8,7 @@ import sys
 import polars as pl
 import pytest
 
+import derivatives_bt_engine.data.futures_cost_risk as futures_cost_risk
 from derivatives_bt_engine.data.futures_cost_risk import (
     _attach_affordability_ranks,
     _configured_cost_estimate,
@@ -15,6 +16,7 @@ from derivatives_bt_engine.data.futures_cost_risk import (
     _emit_report,
     _ewmac_rule_performance,
     _historical_bid_ask_spread,
+    _historical_requests_allowed,
     _history_volatility,
     _round_report_decimals,
     _ticker_values,
@@ -49,6 +51,116 @@ def test_market_data_type_belongs_to_diagnostic_not_history_loader():
 
 def test_broad_audit_defaults_to_automatic_quote_fallback():
     assert parse_args([]).market_data_type == "auto"
+
+
+@pytest.mark.parametrize("error_code", [354, 10167, 10168, "354"])
+def test_historical_requests_skip_quotes_with_entitlement_errors(error_code):
+    assert not _historical_requests_allowed({"error_codes": [error_code]})
+
+
+def test_historical_requests_continue_without_entitlement_errors():
+    assert _historical_requests_allowed({"error_codes": []})
+    assert _historical_requests_allowed({"error_codes": None})
+    assert _historical_requests_allowed({"error_codes": [300]})
+
+
+def test_entitlement_preflight_skips_dated_vol_and_spread_history(monkeypatch):
+    contract = SimpleNamespace(
+        symbol="MES",
+        conId=123,
+        localSymbol="MESZ6",
+        lastTradeDateOrContractMonth="20261218",
+    )
+    historical_vol = {
+        "mixed_point_vol": 50.0,
+        "fast_point_vol": 55.0,
+        "slow_point_vol": 40.0,
+        "reference_price": 5_000.0,
+        "history_rows": 1_000,
+        "history_start": date(2020, 1, 1),
+        "history_end": date(2024, 1, 1),
+        "vol_observations": 999,
+        "slow_history_years": 10,
+        "fast_vol_span": 32,
+        "slow_vol_span": 2_520,
+        "slow_vol_weight": 0.3,
+        "zero_return_fraction": 0.0,
+    }
+    monkeypatch.setattr(
+        futures_cost_risk,
+        "_history_volatility",
+        lambda *args, **kwargs: (252, historical_vol),
+    )
+    monkeypatch.setattr(
+        futures_cost_risk,
+        "_resolve_contract",
+        lambda *args, **kwargs: contract,
+    )
+    monkeypatch.setattr(
+        futures_cost_risk,
+        "_ticker_values",
+        lambda *args, **kwargs: {
+            "bid": 5_999.75,
+            "ask": 6_000.0,
+            "last": 5_999.75,
+            "close": 5_990.0,
+            "mid": 5_999.875,
+            "market_data_type": "delayed",
+            "market_data_attempts": "live,delayed",
+            "error_codes": [354],
+        },
+    )
+
+    def forbidden_history(*args, **kwargs):
+        raise AssertionError("historical API must not be called")
+
+    monkeypatch.setattr(
+        futures_cost_risk,
+        "_recent_dated_return_volatility",
+        forbidden_history,
+    )
+    monkeypatch.setattr(
+        futures_cost_risk,
+        "_historical_bid_ask_spread",
+        forbidden_history,
+    )
+    monkeypatch.setattr(
+        futures_cost_risk,
+        "_latest_dated_close",
+        forbidden_history,
+    )
+
+    row = diagnose_instrument(
+        object(),
+        {
+            "symbol": "MES",
+            "signal_symbol": "ES",
+            "exchange": "CME",
+            "currency": "USD",
+            "multiplier": 5.0,
+            "commission": 0.61,
+            "carver_spread_points": 0.25,
+        },
+        duration="1 Y",
+        spread_duration="30 D",
+        spread_use_rth=True,
+        min_days=7,
+        contract_details_timeout=8.0,
+        quote_wait_seconds=0.0,
+        use_rth=False,
+        vol_source="pysystemtrade",
+        fast_span=32,
+        slow_years=10,
+        slow_weight=0.3,
+        market_data_type="auto",
+        pysystemtrade_provider=None,
+        fx_by_currency={"USD": {"rate": 1.0, "asof": date(2026, 9, 30)}},
+    )
+
+    assert not row["ib_historical_requests_allowed"]
+    assert row["ib_historical_spread_failures"] == "skipped_no_historical_entitlement"
+    assert row["risk_return_vol_source"] == "carver_mixed_scaled_fallback"
+    assert row["selected_spread_source"] == "ib_snapshot"
 
 
 def test_broad_audit_defaults_to_reviewed_pool_ewmac_cost_baseline():
@@ -173,6 +285,29 @@ def test_configured_cost_prefers_ib_historical_half_spread():
     assert estimate["configured_one_way_cost"] == pytest.approx(1.235)
     assert estimate["configured_cost_quality"] == "ib_historical_bid_ask"
     assert estimate["instrument_has_eligible_ewmac_rule"] is None
+
+
+def test_configured_cost_labels_snapshot_spread_separately_from_history():
+    estimate = _configured_cost_estimate(
+        {
+            "symbol": "MES",
+            "carver_spread_points": 0.25,
+            "commission": 0.61,
+        },
+        {
+            "price": 6_000.0,
+            "multiplier": 5.0,
+            "fx_to_usd": 1.0,
+            "annual_dollar_vol_per_contract": 6_000.0,
+            "selected_one_way_spread_points": 0.125,
+            "selected_spread_source": "ib_snapshot",
+        },
+        pooled_summaries=None,
+        strategy_metrics_by_rule=None,
+        rule_cost_limit_sr=0.15,
+    )
+
+    assert estimate["configured_cost_quality"] == "ib_snapshot_bid_ask"
 
 
 def test_automatic_quote_fallback_tries_live_then_delayed_then_frozen():

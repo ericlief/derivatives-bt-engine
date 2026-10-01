@@ -1272,9 +1272,26 @@ spread for that bar. The one-way cost uses half the mean historical width.
 Observation count, date range, mean, median, p90, successful bar size, attempts,
 and failures are all retained.
 
+The current quote is now an entitlement preflight as well as a price source.
+IB errors `354`, `10167`, and `10168` mean that a delayed snapshot may be
+available while historical API data are not. For those rows the audit does not
+wait for doomed dated or continuous historical requests: it records
+`ib_historical_requests_allowed=false` and
+`skipped_no_historical_entitlement`, then uses the snapshot spread when one is
+present or the configured Carver spread otherwise. With the default
+`pysystemtrade` volatility source, the corresponding risk estimate falls back
+to the Carver mixed point volatility scaled as a return at the Carver reference
+price. The row still uses the current IB quote for present notional and dollar
+risk. `--vol-source dated` remains a hard failure without historical
+entitlement because it has no defensible local fallback.
+
 If dated history is unavailable, the same IB root's continuous future is tried
 as a spread-only fallback. It never supplies the executable contract or signal
-history. A current snapshot is the next fallback; Carver's configured one-way
+history. A dated-contract timeout suppresses this second historical attempt,
+because retrying the same service through a continuous contract normally adds
+two more 60-second waits rather than new information. Non-timeout failures can
+still use the continuous fallback. A current snapshot is the next fallback;
+Carver's configured one-way
 spread is last. Missing bid/ask data remain **unknown**, never zero. A Carver
 zero is labelled `static_config_zero_spread`, still includes commission, and
 must not be interpreted as evidence of free live execution. Historical IB

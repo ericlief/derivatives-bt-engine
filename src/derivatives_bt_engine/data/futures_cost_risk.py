@@ -92,6 +92,7 @@ MARKET_DATA_TYPES = {
     "delayed-frozen": 4,
 }
 AUTO_MARKET_DATA_SEQUENCE = ("live", "delayed", "delayed-frozen")
+HISTORICAL_ENTITLEMENT_ERROR_CODES = {354, 10167, 10168}
 TWO_DECIMAL_MONEY_COLUMNS = {
     "notional_native_per_contract",
     "notional_per_contract",
@@ -162,6 +163,16 @@ def _parse_fast_spans(value: str) -> tuple[int, ...]:
     if not spans or any(span <= 0 for span in spans):
         raise argparse.ArgumentTypeError("EWMAC fast spans must be positive")
     return spans
+
+
+def _historical_requests_allowed(quote: dict[str, object]) -> bool:
+    """IB delayed quotes do not imply entitlement to historical API data."""
+    error_codes = {
+        int(code)
+        for code in (quote.get("error_codes") or [])
+        if str(code).isdigit()
+    }
+    return not bool(error_codes & HISTORICAL_ENTITLEMENT_ERROR_CODES)
 
 
 def _annualized_sharpe(values: pl.Series, annualization_days: int) -> Optional[float]:
@@ -549,7 +560,9 @@ def _configured_cost_estimate(
         "strategy_reference_roll_transactions_per_year": roll_transactions,
         "configured_cost_quality": (
             "ib_historical_bid_ask"
-            if spread_source and str(spread_source).startswith("ib_")
+            if spread_source in {"ib_dated_contract", "ib_continuous_fallback"}
+            else "ib_snapshot_bid_ask"
+            if spread_source == "ib_snapshot"
             else "static_config_zero_spread"
             if spread_points == 0
             else "static_config_not_historical_quotes"
@@ -1048,7 +1061,7 @@ def _ticker_values_once(ib, contract, wait_seconds: float, mode: str) -> dict:
         def error_handler(req_id, error_code, error_string, error_contract):
             error_con_id = getattr(error_contract, "conId", None)
             if target_con_id in (None, 0) or error_con_id == target_con_id:
-                if error_code in (200, 354, 10168):
+                if error_code in (200, 354, 10167, 10168):
                     rejected_codes.append(error_code)
 
         ib.ib.errorEvent += error_handler
@@ -1258,6 +1271,26 @@ def _historical_bid_ask_spread(
     }
 
 
+def _skipped_historical_spread(
+    *,
+    duration: str,
+    reason: str,
+) -> dict[str, object]:
+    return {
+        "ib_historical_spread_source": None,
+        "ib_historical_spread_duration": duration,
+        "ib_historical_spread_bar_size": None,
+        "ib_historical_spread_observations": 0,
+        "ib_historical_spread_start": None,
+        "ib_historical_spread_end": None,
+        "ib_historical_spread_mean_points": None,
+        "ib_historical_spread_median_points": None,
+        "ib_historical_spread_p90_points": None,
+        "ib_historical_spread_attempts": "",
+        "ib_historical_spread_failures": reason,
+    }
+
+
 def load_latest_fx_to_usd(db_path: Path | str) -> dict[str, dict]:
     """Latest imported Carver FX conversion for each native currency."""
     con = duckdb.connect(str(db_path), read_only=True)
@@ -1400,23 +1433,57 @@ def diagnose_instrument(
         min_days,
         contract_details_timeout=contract_details_timeout,
     )
+    quote = _ticker_values(ib, contract, quote_wait_seconds, market_data_type)
+    resolved_market_data_type = quote["market_data_type"]
+    quote_source = resolved_market_data_type.replace("-", "_")
+    historical_requests_allowed = _historical_requests_allowed(quote)
+    if quote["mid"] is not None:
+        price = quote["mid"]
+        price_source = f"{quote_source}_bid_ask_mid"
+    elif quote["last"] is not None:
+        price = quote["last"]
+        price_source = f"{quote_source}_last"
+    elif quote["close"] is not None:
+        price = quote["close"]
+        price_source = f"{quote_source}_previous_close"
+    elif historical_requests_allowed:
+        price = _latest_dated_close(ib, contract)
+        price_source = "dated_contract_daily_close"
+    else:
+        price = None
+        price_source = "unavailable_no_historical_entitlement"
+    if price is None:
+        raise RuntimeError(f"{symbol}: no usable price for resolved dated contract")
+
     risk_vol: dict[str, object] = {}
     if vol_source == "pysystemtrade":
-        try:
-            recent_vol = _recent_dated_return_volatility(
-                ib,
-                contract,
-                duration=duration,
-                use_rth=use_rth,
-                fast_span=fast_span,
-            )
-            risk_vol = _blend_recent_and_historical_return_volatility(
-                recent_vol,
-                vol,
-                slow_weight=slow_weight,
-            )
-        except Exception as exc:
+        if historical_requests_allowed:
+            try:
+                recent_vol = _recent_dated_return_volatility(
+                    ib,
+                    contract,
+                    duration=duration,
+                    use_rth=use_rth,
+                    fast_span=fast_span,
+                )
+                risk_vol = _blend_recent_and_historical_return_volatility(
+                    recent_vol,
+                    vol,
+                    slow_weight=slow_weight,
+                )
+            except Exception as exc:
+                risk_vol = {"ib_recent_vol_error": str(exc)}
+                log.debug(
+                    "recent_dated_vol_fallback symbol=%s reason=%s",
+                    symbol,
+                    exc,
+                )
+        else:
             risk_vol = {
+                "ib_recent_vol_error": "skipped_no_historical_entitlement",
+            }
+        if "risk_daily_return_vol" not in risk_vol:
+            risk_vol.update({
                 "ib_recent_fast_return_vol": None,
                 "ib_recent_vol_observations": 0,
                 "ib_recent_vol_start": None,
@@ -1432,21 +1499,29 @@ def diagnose_instrument(
                     vol["mixed_point_vol"] / vol["reference_price"]
                 ),
                 "risk_return_vol_source": "carver_mixed_scaled_fallback",
-                "ib_recent_vol_error": str(exc),
-            }
-            log.debug(
-                "recent_dated_vol_fallback symbol=%s reason=%s",
-                symbol,
-                exc,
-            )
-    spread_stats = _historical_bid_ask_spread(
-        ib,
-        contract,
-        duration=spread_duration,
-        use_rth=spread_use_rth,
-        source="ib_dated_contract",
-    )
-    if spread_stats["ib_historical_spread_mean_points"] is None:
+            })
+
+    if historical_requests_allowed:
+        spread_stats = _historical_bid_ask_spread(
+            ib,
+            contract,
+            duration=spread_duration,
+            use_rth=spread_use_rth,
+            source="ib_dated_contract",
+        )
+    else:
+        spread_stats = _skipped_historical_spread(
+            duration=spread_duration,
+            reason="skipped_no_historical_entitlement",
+        )
+    dated_spread_timed_out = "timeout" in str(
+        spread_stats.get("ib_historical_spread_failures", "")
+    ).lower()
+    if (
+        historical_requests_allowed
+        and not dated_spread_timed_out
+        and spread_stats["ib_historical_spread_mean_points"] is None
+    ):
         try:
             from ib_tools.ibpysync import IBPySync
 
@@ -1476,6 +1551,10 @@ def diagnose_instrument(
                 symbol,
                 exc,
             )
+    if vol_source == "dated" and not historical_requests_allowed:
+        raise RuntimeError(
+            f"{symbol}: --vol-source dated requires IB historical entitlement"
+        )
     if vol_source == "dated":
         annualization_days, vol = _history_volatility(
             ib,
@@ -1490,24 +1569,6 @@ def diagnose_instrument(
             dated_contract=contract,
         )
     assert annualization_days is not None and vol is not None
-
-    quote = _ticker_values(ib, contract, quote_wait_seconds, market_data_type)
-    resolved_market_data_type = quote["market_data_type"]
-    quote_source = resolved_market_data_type.replace("-", "_")
-    if quote["mid"] is not None:
-        price = quote["mid"]
-        price_source = f"{quote_source}_bid_ask_mid"
-    elif quote["last"] is not None:
-        price = quote["last"]
-        price_source = f"{quote_source}_last"
-    elif quote["close"] is not None:
-        price = quote["close"]
-        price_source = f"{quote_source}_previous_close"
-    else:
-        price = _latest_dated_close(ib, contract)
-        price_source = "dated_contract_daily_close"
-    if price is None:
-        raise RuntimeError(f"{symbol}: no usable price for resolved dated contract")
 
     expiry = getattr(contract, "lastTradeDateOrContractMonth", "") or ""
     local_symbol = getattr(contract, "localSymbol", "") or ""
@@ -1578,6 +1639,7 @@ def diagnose_instrument(
         "quote_market_data_type": resolved_market_data_type,
         "quote_market_data_attempts": quote["market_data_attempts"],
         "quote_error_codes": ",".join(str(code) for code in quote["error_codes"]),
+        "ib_historical_requests_allowed": historical_requests_allowed,
         "carver_spread_points": instr.get("carver_spread_points"),
         **risk_vol,
         **spread_stats,
