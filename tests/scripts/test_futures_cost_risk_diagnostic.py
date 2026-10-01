@@ -18,6 +18,8 @@ from derivatives_bt_engine.data.futures_cost_risk import (
     _historical_bid_ask_spread,
     _historical_requests_allowed,
     _history_volatility,
+    _historical_request_timed_out,
+    _ib_contract_currency,
     _round_report_decimals,
     _select_historical_market_data_type,
     _ticker_values,
@@ -92,6 +94,56 @@ def test_delayed_frozen_quote_resets_type_three_for_history():
 
     assert selected == "delayed"
     assert ib.modes == [3]
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "1 min:request timeout",
+        "1 min:reqHistoricalDataAsync timed out after 60s",
+        "API historical data query cancelled: 55",
+    ],
+)
+def test_historical_timeout_detection_covers_ib_wording(message):
+    assert _historical_request_timed_out(message)
+
+
+def test_ib_contract_currency_falls_back_to_qualified_or_native_currency():
+    assert _ib_contract_currency(
+        {"ib_currency": "", "currency": "EUR"},
+        SimpleNamespace(currency="EUR"),
+    ) == "EUR"
+    assert _ib_contract_currency({"ib_currency": "", "currency": "EUR"}) == "EUR"
+
+
+def test_retired_bsby_contract_is_rejected_before_ib_requests():
+    with pytest.raises(RuntimeError, match="permanently delisted"):
+        diagnose_instrument(
+            object(),
+            {
+                "symbol": "BB3M",
+                "instrument_code": "BB3M",
+                "ib_symbol": "BSBY",
+                "exchange": "CME",
+                "currency": "USD",
+                "multiplier": 2_500.0,
+                "commission": 2.0,
+            },
+            duration="1 Y",
+            spread_duration="30 D",
+            spread_use_rth=True,
+            min_days=7,
+            contract_details_timeout=8.0,
+            quote_wait_seconds=0.0,
+            use_rth=False,
+            vol_source="pysystemtrade",
+            fast_span=32,
+            slow_years=10,
+            slow_weight=0.3,
+            market_data_type="auto",
+            pysystemtrade_provider=None,
+            fx_by_currency={},
+        )
 
 
 def test_delayed_quote_runs_dated_vol_and_spread_after_live_354(monkeypatch):

@@ -93,6 +93,9 @@ MARKET_DATA_TYPES = {
 }
 AUTO_MARKET_DATA_SEQUENCE = ("live", "delayed", "delayed-frozen")
 HISTORICAL_ENTITLEMENT_ERROR_CODES = {354, 10167, 10168}
+RETIRED_IB_INSTRUMENTS = {
+    "BB3M": "CME BSBY futures were permanently delisted in October 2024",
+}
 TWO_DECIMAL_MONEY_COLUMNS = {
     "notional_native_per_contract",
     "notional_per_contract",
@@ -190,6 +193,24 @@ def _select_historical_market_data_type(ib, quote: dict[str, object]) -> str:
     )
     ib.set_market_data_type(MARKET_DATA_TYPES[historical_mode])
     return historical_mode
+
+
+def _ib_contract_currency(instr: dict, contract=None) -> str:
+    """Prefer explicit broker currency, then the qualified/native currency."""
+    return (
+        instr.get("ib_currency")
+        or getattr(contract, "currency", None)
+        or instr.get("currency")
+        or "USD"
+    )
+
+
+def _historical_request_timed_out(failures: object) -> bool:
+    text = str(failures or "").lower()
+    return any(
+        marker in text
+        for marker in ("timeout", "timed out", "query cancelled")
+    )
 
 
 def _annualized_sharpe(values: pl.Series, annualization_days: int) -> Optional[float]:
@@ -1372,7 +1393,7 @@ def _history_volatility(
         vol_contract = IBPySync.cont_future(
             signal_symbol,
             exchange=instr.get("exchange", "CME"),
-            currency=instr.get("ib_currency") or "USD",
+            currency=_ib_contract_currency(instr),
         )
         ib.qualify_contracts(vol_contract)
     elif vol_source == "dated":
@@ -1433,6 +1454,11 @@ def diagnose_instrument(
             f"{symbol}: multiplier and commission are required in the registry or JSON config"
         )
     signal_symbol = resolve_signal_symbol(instr)
+    retired_reason = RETIRED_IB_INSTRUMENTS.get(
+        instr.get("instrument_code", symbol)
+    )
+    if retired_reason:
+        raise RuntimeError(f"{symbol}: {retired_reason}")
     annualization_days = vol = None
     if vol_source == "pysystemtrade":
         annualization_days, vol = _history_volatility(
@@ -1562,9 +1588,9 @@ def diagnose_instrument(
             duration=spread_duration,
             reason="skipped_no_historical_entitlement",
         )
-    dated_spread_timed_out = "timeout" in str(
-        spread_stats.get("ib_historical_spread_failures", "")
-    ).lower()
+    dated_spread_timed_out = _historical_request_timed_out(
+        spread_stats.get("ib_historical_spread_failures")
+    )
     if (
         historical_requests_allowed
         and not dated_spread_timed_out
@@ -1576,7 +1602,7 @@ def diagnose_instrument(
             continuous = IBPySync.cont_future(
                 instr.get("ib_symbol") or getattr(contract, "symbol", symbol),
                 exchange=instr.get("exchange", "CME"),
-                currency=instr.get("ib_currency") or "USD",
+                currency=_ib_contract_currency(instr, contract),
                 multiplier=_format_ib_multiplier(
                     instr.get("ib_multiplier") or multiplier
                 ),

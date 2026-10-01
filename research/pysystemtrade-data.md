@@ -1313,7 +1313,18 @@ IB error `162` with “API historical data query cancelled” after the wrapper'
 60-second timeout is not an entitlement response. The asynchronous request has
 timed out and the cancellation is the server acknowledgement for that request
 ID. These rows need smaller, paced requests or a retry; they must not be
-labelled as missing subscriptions.
+labelled as missing subscriptions. All observed timeout spellings (`timeout`,
+`timed out`, and `query cancelled`) suppress the continuous-contract retry so
+one failed dated request does not cascade into more 60-second waits. When a
+continuous spread fallback is appropriate after a non-timeout failure, its
+currency is inherited from the qualified dated contract or the instrument's
+native currency; an empty Carver broker-currency field must not default a EUR
+Eurex contract such as GBM to USD.
+
+Carver's `BB3M` history remains usable for research, but its mapped CME BSBY
+future is not a current execution candidate: CME converted and permanently
+delisted the contract in October 2024. The live audit therefore records BB3M as
+retired without sending an invalid `BSBY` security-definition request to IB.
 
 Phase one also ranks candidates within each asset class separately by one-way
 SR cost, current notional, and current annual dollar volatility. The report
