@@ -828,7 +828,7 @@ def test_historical_spread_timeout_does_not_cascade_to_more_requests():
         source="ib_dated_contract",
     )
 
-    assert [call["bar_size"] for call in ib.calls] == ["5 mins"]
+    assert [call["bar_size"] for call in ib.calls] == ["15 mins"]
     assert result["ib_historical_spread_mean_points"] is None
     assert "timed out" in result["ib_historical_spread_failures"]
 
@@ -859,7 +859,7 @@ def test_historical_spread_empty_after_ib_insync_timeout_does_not_cascade(
         source="ib_dated_contract",
     )
 
-    assert [call["bar_size"] for call in ib.calls] == ["5 mins"]
+    assert [call["bar_size"] for call in ib.calls] == ["15 mins"]
     assert result["ib_historical_spread_mean_points"] is None
     assert "returned empty after 60.0s" in result[
         "ib_historical_spread_failures"
@@ -867,7 +867,7 @@ def test_historical_spread_empty_after_ib_insync_timeout_does_not_cascade(
     assert "timeout" in result["ib_historical_spread_failures"]
 
 
-def test_delayed_spread_uses_full_window_five_minute_first():
+def test_delayed_spread_uses_full_window_fifteen_minute_first():
     class FakeIB:
         def __init__(self):
             self.calls = []
@@ -893,12 +893,12 @@ def test_delayed_spread_uses_full_window_five_minute_first():
     assert [
         (call["bar_size"], call["duration"])
         for call in ib.calls
-    ] == [("5 mins", "30 D")]
-    assert result["ib_historical_spread_bar_size"] == "5 mins"
+    ] == [("15 mins", "30 D")]
+    assert result["ib_historical_spread_bar_size"] == "15 mins"
     assert result["ib_historical_spread_duration"] == "30 D"
 
 
-def test_live_spread_uses_one_full_window_five_minute_request():
+def test_live_spread_uses_one_full_window_fifteen_minute_request():
     class FakeIB:
         def __init__(self):
             self.calls = []
@@ -924,7 +924,7 @@ def test_live_spread_uses_one_full_window_five_minute_request():
     assert [
         (call["bar_size"], call["duration"])
         for call in ib.calls
-    ] == [("5 mins", "30 D")]
+    ] == [("15 mins", "30 D")]
     assert result["ib_historical_spread_mean_points"] == pytest.approx(0.25)
 
 

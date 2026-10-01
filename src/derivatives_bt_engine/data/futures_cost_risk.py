@@ -82,10 +82,10 @@ log = logging.getLogger("derivatives_bt_engine.data.futures_cost_risk")
 
 DEFAULT_DURATION = "1 Y"
 DEFAULT_SPREAD_DURATION = "30 D"
-DEFAULT_SPREAD_BAR_SIZES = ("5 mins",)
+DEFAULT_SPREAD_BAR_SIZES = ("15 mins",)
 DEFAULT_DELAYED_SPREAD_REQUEST_PLAN = (
-    ("5 mins", None),
-    ("2 mins", 5),
+    ("15 mins", None),
+    ("5 mins", 5),
     ("1 min", 1),
 )
 DEFAULT_MIN_DAYS = 7
@@ -256,7 +256,7 @@ def _spread_request_plan(
     duration: str,
     market_data_type: str,
 ) -> tuple[tuple[str, str], ...]:
-    """Use bounded five-minute history, with shorter delayed fallbacks."""
+    """Use bounded 15-minute history, with shorter delayed fallbacks."""
     if market_data_type != "delayed":
         return tuple((bar_size, duration) for bar_size in DEFAULT_SPREAD_BAR_SIZES)
     return tuple(
