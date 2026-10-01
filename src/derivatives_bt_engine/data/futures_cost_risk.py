@@ -42,6 +42,7 @@ from typing import Optional
 
 import duckdb
 import polars as pl
+from ib_tools.ibpysync import IBPySync
 
 from derivatives_bt_engine.data.pysystemtrade_ib import load_pysystemtrade_ib_instruments
 from derivatives_bt_engine.data.pysystemtrade_pooling import (
@@ -1489,8 +1490,6 @@ def _history_volatility(
     pysystemtrade_provider: Optional[PysystemtradeHistoryProvider],
     dated_contract=None,
 ) -> tuple[int, dict]:
-    from ib_tools.ibpysync import IBPySync
-
     symbol = instr["symbol"]
     if vol_source == "pysystemtrade":
         if pysystemtrade_provider is None:
@@ -1720,8 +1719,6 @@ def diagnose_instrument(
         and spread_stats["ib_historical_spread_mean_points"] is None
     ):
         try:
-            from ib_tools.ibpysync import IBPySync
-
             continuous = IBPySync.cont_future(
                 instr.get("ib_symbol") or getattr(contract, "symbol", symbol),
                 exchange=instr.get("exchange", "CME"),
@@ -2414,17 +2411,6 @@ def run(argv=None) -> pl.DataFrame:
             min_contracts=args.affordability_min_contracts,
         )
         return _emit_report(report, args)
-
-    # eventkit still asks asyncio for a current main-thread loop at import
-    # time.  Python 3.14 no longer creates one implicitly, so establish it
-    # before importing ib_tools/ib_insync.  IBPySync subsequently owns its
-    # background loop as usual.
-    import asyncio
-    try:
-        asyncio.get_event_loop()
-    except RuntimeError:
-        asyncio.set_event_loop(asyncio.new_event_loop())
-    from ib_tools.ibpysync import IBPySync
 
     log.info(
         "futures_cost_risk start instruments=%d duration=%s fast_vol_span=%d "
