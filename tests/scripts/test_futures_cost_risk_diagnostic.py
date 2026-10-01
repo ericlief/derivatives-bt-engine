@@ -832,6 +832,40 @@ def test_historical_spread_timeout_does_not_cascade_to_more_requests():
     assert "timed out" in result["ib_historical_spread_failures"]
 
 
+def test_historical_spread_empty_after_ib_insync_timeout_does_not_cascade(
+    monkeypatch,
+):
+    class FakeIB:
+        def __init__(self):
+            self.calls = []
+
+        def get_historical_bars(self, contract, **kwargs):
+            self.calls.append(kwargs)
+            return pl.DataFrame()
+
+    clock = iter((100.0, 160.0))
+    monkeypatch.setattr(
+        futures_cost_risk.time,
+        "monotonic",
+        lambda: next(clock),
+    )
+    ib = FakeIB()
+    result = _historical_bid_ask_spread(
+        ib,
+        SimpleNamespace(symbol="GBM"),
+        duration="30 D",
+        use_rth=True,
+        source="ib_dated_contract",
+    )
+
+    assert [call["bar_size"] for call in ib.calls] == ["1 min"]
+    assert result["ib_historical_spread_mean_points"] is None
+    assert "returned empty after 60.0s" in result[
+        "ib_historical_spread_failures"
+    ]
+    assert "timeout" in result["ib_historical_spread_failures"]
+
+
 def test_delayed_spread_uses_full_window_five_minute_first():
     class FakeIB:
         def __init__(self):

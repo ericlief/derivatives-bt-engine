@@ -35,6 +35,7 @@ import argparse
 import json
 import logging
 import math
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -90,6 +91,11 @@ DEFAULT_DELAYED_SPREAD_REQUEST_PLAN = (
 DEFAULT_MIN_DAYS = 7
 DEFAULT_QUOTE_WAIT_SECONDS = 3.0
 DEFAULT_CONTRACT_DETAILS_TIMEOUT = 8.0
+# ib_insync's historical request coroutine times out internally after 60
+# seconds, cancels the request, and can return an empty BarDataList instead of
+# raising.  Treat an empty result this close to that boundary as a timeout so
+# the cost audit does not immediately issue another expensive history request.
+IB_INSYNC_HISTORICAL_TIMEOUT_FLOOR_SECONDS = 55.0
 MARKET_DATA_TYPES = {
     "live": 1,
     "frozen": 2,
@@ -1359,6 +1365,7 @@ def _historical_bid_ask_spread(
     for bar_size, attempt_duration in request_plan:
         attempt_label = f"{bar_size}@{attempt_duration}"
         attempts.append(attempt_label)
+        request_started = time.monotonic()
         try:
             bars = ib.get_historical_bars(
                 contract,
@@ -1367,6 +1374,16 @@ def _historical_bid_ask_spread(
                 what_to_show="BID_ASK",
                 use_rth=use_rth,
             )
+            request_elapsed = time.monotonic() - request_started
+            if (
+                (bars is None or bars.height == 0)
+                and request_elapsed
+                >= IB_INSYNC_HISTORICAL_TIMEOUT_FLOOR_SECONDS
+            ):
+                raise TimeoutError(
+                    "IB historical request returned empty after "
+                    f"{request_elapsed:.1f}s; treating as ib_insync timeout"
+                )
             result = _spread_stats_from_bid_ask_bars(
                 bars,
                 duration=attempt_duration,
