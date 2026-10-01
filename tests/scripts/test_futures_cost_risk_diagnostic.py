@@ -118,6 +118,85 @@ def test_delayed_frozen_quote_resets_type_three_for_history():
     assert ib.modes == [3]
 
 
+def test_current_ib_fx_replaces_stale_reference_and_keeps_audit_fields(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        futures_cost_risk,
+        "_ib_forex_contract",
+        lambda pair: SimpleNamespace(symbol=pair),
+    )
+    monkeypatch.setattr(
+        futures_cost_risk,
+        "_ticker_values",
+        lambda *args, **kwargs: {
+            "mid": 1.175,
+            "last": None,
+            "close": None,
+            "market_data_type": "delayed",
+        },
+    )
+
+    class FakeIB:
+        def qualify_contracts(self, contract):
+            return [contract]
+
+    selected = futures_cost_risk.load_current_fx_to_usd(
+        FakeIB(),
+        {"EUR"},
+        {
+            "EUR": {
+                "rate": 1.077585,
+                "asof": "2024-03-29",
+                "source": "pysystemtrade_reference",
+                "reference_rate": 1.077585,
+                "reference_asof": "2024-03-29",
+                "reference_source": "pysystemtrade_reference",
+            }
+        },
+        market_data_type="auto",
+        quote_wait_seconds=0.0,
+    )
+
+    assert selected["EUR"]["rate"] == pytest.approx(1.175)
+    assert selected["EUR"]["source"] == "ib_delayed_mid"
+    assert selected["EUR"]["reference_rate"] == pytest.approx(1.077585)
+    assert selected["EUR"]["reference_asof"] == "2024-03-29"
+
+
+def test_unavailable_ib_fx_makes_reference_rate_the_selected_rate(monkeypatch):
+    monkeypatch.setattr(
+        futures_cost_risk,
+        "_ib_forex_contract",
+        lambda pair: SimpleNamespace(symbol=pair),
+    )
+
+    class FakeIB:
+        def qualify_contracts(self, contract):
+            return []
+
+    selected = futures_cost_risk.load_current_fx_to_usd(
+        FakeIB(),
+        {"EUR"},
+        {
+            "EUR": {
+                "rate": 1.077585,
+                "asof": "2024-03-29",
+                "source": "pysystemtrade_reference",
+                "reference_rate": 1.077585,
+                "reference_asof": "2024-03-29",
+                "reference_source": "pysystemtrade_reference",
+            }
+        },
+        market_data_type="auto",
+        quote_wait_seconds=0.0,
+    )
+
+    assert selected["EUR"]["rate"] == pytest.approx(1.077585)
+    assert selected["EUR"]["source"] == "pysystemtrade_reference_fallback"
+    assert "contract did not qualify" in selected["EUR"]["error"]
+
+
 def test_delayed_mark_uses_small_bid_ask_history_when_snapshot_is_unavailable():
     class FakeIB:
         def __init__(self):
@@ -661,6 +740,51 @@ def test_report_uses_auditable_precision_for_money_rates_and_other_floats():
     assert rounded["fx_to_usd"][0] == pytest.approx(0.006604)
     assert rounded["annual_return_vol"][0] == pytest.approx(0.123456)
     assert rounded["history_rows"][0] == 100
+
+
+def test_public_report_leads_with_selected_values_and_normalizes_spreads():
+    report = futures_cost_risk._public_report_schema(pl.DataFrame({
+        "symbol": ["AEX_mini"],
+        "price": [1103.975],
+        "fx_to_usd": [1.175],
+        "cur_fx_source": ["ib_delayed_mid"],
+        "current_mixed_point_vol": [6.4668],
+        "daily_return_vol": [0.005858],
+        "annual_dollar_vol_per_contract": [2432.0],
+        "selected_one_way_spread_points": [3.177],
+        "configured_one_way_cost": [75.0],
+        "configured_sr_cost_per_trade": [0.03],
+        "full_spread_points": [3.25],
+        "ib_historical_spread_mean_points": [6.354],
+        "ib_historical_spread_median_points": [6.6],
+        "ib_historical_spread_p90_points": [9.75],
+        "mixed_point_vol": [5.847],
+        "vol_reference_price": [883.25],
+        "carver_configured_one_way_spread_points": [2.4],
+        "strategy_reference_roll_transactions_per_year": [24.0],
+        "ewmac_4_16_total_transactions_per_year": [80.0],
+        "ewmac_4_16_total_annual_sr_cost": [2.4],
+        "ewmac_4_16_reference_pre_cost_sharpe": [0.1],
+    }))
+
+    assert report["selected_spread_points"][0] == pytest.approx(3.177)
+    assert report["snap_spread_points"][0] == pytest.approx(1.625)
+    assert report["ib_hspread_mean_points"][0] == pytest.approx(3.177)
+    assert report["ib_hspread_median_points"][0] == pytest.approx(3.3)
+    assert report["ib_hspread_p90_points"][0] == pytest.approx(4.875)
+    assert report["ref_spread_points"][0] == pytest.approx(2.4)
+    assert "selected_cost_usd" in report.columns
+    assert "selected_ann_dvol_usd_per_contract" in report.columns
+    assert "ewmac_4_16_tot_tx_per_year" in report.columns
+    assert "ewmac_4_16_tot_ann_sr_cost" in report.columns
+    assert "ewmac_4_16_ref_pre_cost_sr" in report.columns
+    assert "ref_strategy_roll_tx_per_year" in report.columns
+    assert report.columns.index("selected_spread_points") < report.columns.index(
+        "snap_spread_points"
+    )
+    assert report.columns.index("selected_daily_point_vol") < report.columns.index(
+        "ref_mixed_point_vol"
+    )
 
 
 def test_emitted_report_includes_generation_timestamp(capsys):

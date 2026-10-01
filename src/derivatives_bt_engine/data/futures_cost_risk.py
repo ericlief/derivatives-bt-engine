@@ -24,9 +24,9 @@ Run with TWS/IB Gateway available::
     .venv/bin/python -m derivatives_bt_engine.data.futures_cost_risk \
       --instruments all-pysystemtrade
 
-Configured costs are a static snapshot, while the bid/ask result is a
-point-in-time quote.  Neither is a historical slippage series; repeated
-snapshots or realized fills are required for that.
+The public CSV leads with the selected current price, FX, volatility, spread,
+and cost path.  Snapshot alternatives use ``snap_*`` and imported Carver
+references use ``ref_*`` so neither can be mistaken for the selected inputs.
 """
 
 from __future__ import annotations
@@ -121,14 +121,32 @@ TWO_DECIMAL_MONEY_COLUMNS = {
     "one_way_spread_cash",
     "one_way_total_cost",
     "configured_commission_native",
+    "configured_commission",
     "configured_spread_cash_native",
     "configured_one_way_cost_native",
     "configured_one_way_cost",
+    "notional_usd_per_contract",
+    "selected_daily_dvol_usd_per_contract",
+    "selected_ann_dvol_usd_per_contract",
+    "selected_commission_native",
+    "selected_commission_usd",
+    "selected_spread_cash_native",
+    "selected_cost_native",
+    "selected_cost_usd",
+    "snap_spread_cash_usd",
+    "snap_cost_usd",
+    "min_contract_notional_usd",
+    "min_contract_ann_dvol_usd",
+    "min_capital_usd_full_weight_idm1",
 }
 SIX_DECIMAL_RATE_COLUMNS = {
     "fx_to_usd",
     "daily_return_vol",
     "annual_return_vol",
+    "cur_fx_to_usd",
+    "ref_fx_to_usd",
+    "selected_daily_return_vol",
+    "selected_ann_return_vol",
 }
 
 DEFAULT_COST_EWMAC_FAST_SPANS = (4, 8, 16, 32, 64)
@@ -645,6 +663,7 @@ def _configured_cost_estimate(
         "selected_one_way_spread_points": spread_points,
         "selected_spread_source": spread_source,
         "configured_commission_native": commission_native,
+        "configured_commission": commission_native * fx_to_usd,
         "configured_spread_cash_native": spread_cash_native,
         "configured_one_way_cost_native": one_way_native,
         "configured_one_way_cost": one_way_usd,
@@ -1486,7 +1505,7 @@ def _skipped_historical_spread(
 
 
 def load_latest_fx_to_usd(db_path: Path | str) -> dict[str, dict]:
-    """Latest imported Carver FX conversion for each native currency."""
+    """Reference FX conversions from the immutable Carver import."""
     con = duckdb.connect(str(db_path), read_only=True)
     try:
         fx = con.execute(
@@ -1500,12 +1519,174 @@ def load_latest_fx_to_usd(db_path: Path | str) -> dict[str, dict]:
         ).pl()
     finally:
         con.close()
-    result = {"USD": {"rate": 1.0, "asof": None}}
+    result = {
+        "USD": {
+            "rate": 1.0,
+            "asof": None,
+            "source": "identity",
+            "pair": "USDUSD",
+            "market_data_type": None,
+            "error": None,
+            "reference_rate": 1.0,
+            "reference_asof": None,
+            "reference_source": "identity",
+        }
+    }
     for row in fx.iter_rows(named=True):
         pair = row["currency_pair"]
         if pair.endswith("USD"):
-            result[pair[:-3]] = {"rate": row["price"], "asof": row["source_timestamp"]}
+            currency = pair[:-3]
+            result[currency] = {
+                "rate": row["price"],
+                "asof": row["source_timestamp"],
+                "source": "pysystemtrade_reference",
+                "pair": pair,
+                "market_data_type": None,
+                "error": None,
+                "reference_rate": row["price"],
+                "reference_asof": row["source_timestamp"],
+                "reference_source": "pysystemtrade_reference",
+            }
     return result
+
+
+def _ib_forex_contract(pair: str):
+    """Construct an IB IDEALPRO cash-FX contract lazily."""
+    from ib_insync import Forex
+
+    return Forex(pair)
+
+
+def _quote_price(quote: dict[str, object]) -> tuple[Optional[float], Optional[str]]:
+    for field in ("mid", "last", "close"):
+        value = _positive_finite(quote.get(field))
+        if value is not None:
+            return value, field
+    return None, None
+
+
+def load_current_fx_to_usd(
+    ib,
+    currencies: set[str],
+    reference_fx: dict[str, dict],
+    *,
+    market_data_type: str,
+    quote_wait_seconds: float,
+) -> dict[str, dict]:
+    """Select current IB FX, falling back explicitly to Carver reference FX."""
+    selected: dict[str, dict] = {}
+    for currency in sorted(currencies | {"USD"}):
+        reference = reference_fx.get(currency)
+        if currency == "USD":
+            selected[currency] = dict(reference or {
+                "rate": 1.0,
+                "asof": None,
+                "source": "identity",
+                "pair": "USDUSD",
+                "market_data_type": None,
+                "error": None,
+                "reference_rate": 1.0,
+                "reference_asof": None,
+                "reference_source": "identity",
+            })
+            continue
+
+        failures: list[str] = []
+        current = None
+        for pair, invert in ((f"{currency}USD", False), (f"USD{currency}", True)):
+            try:
+                contract = _ib_forex_contract(pair)
+                qualified = ib.qualify_contracts(contract)
+                if not qualified:
+                    raise ValueError("contract did not qualify")
+                contract = qualified[0]
+                quote = _ticker_values(
+                    ib,
+                    contract,
+                    quote_wait_seconds,
+                    market_data_type,
+                )
+                quoted_rate, field = _quote_price(quote)
+                if quoted_rate is None:
+                    raise ValueError(
+                        "no usable FX bid/ask midpoint, last, or close"
+                    )
+                rate = 1.0 / quoted_rate if invert else quoted_rate
+                mode = str(quote.get("market_data_type") or "unknown")
+                current = {
+                    "rate": rate,
+                    "asof": datetime.now(timezone.utc).isoformat(
+                        timespec="seconds"
+                    ),
+                    "source": f"ib_{mode.replace('-', '_')}_{field}",
+                    "pair": pair,
+                    "market_data_type": mode,
+                    "error": ";".join(failures) or None,
+                    "reference_rate": (
+                        reference.get("reference_rate", reference.get("rate"))
+                        if reference is not None
+                        else None
+                    ),
+                    "reference_asof": (
+                        reference.get("reference_asof", reference.get("asof"))
+                        if reference is not None
+                        else None
+                    ),
+                    "reference_source": (
+                        reference.get("reference_source", reference.get("source"))
+                        if reference is not None
+                        else None
+                    ),
+                }
+                log.info(
+                    "current_fx selected currency=%s pair=%s rate_to_usd=%.8f "
+                    "market_data_type=%s source=%s",
+                    currency,
+                    pair,
+                    rate,
+                    mode,
+                    current["source"],
+                )
+                break
+            except Exception as exc:
+                failures.append(f"{pair}:{exc}")
+                log.debug(
+                    "current_fx_candidate_rejected currency=%s pair=%s reason=%s",
+                    currency,
+                    pair,
+                    exc,
+                )
+
+        if current is not None:
+            selected[currency] = current
+        elif reference is not None:
+            fallback = dict(reference)
+            fallback.update({
+                "source": "pysystemtrade_reference_fallback",
+                "market_data_type": None,
+                "error": ";".join(failures) or "IB FX unavailable",
+            })
+            selected[currency] = fallback
+            log.info(
+                "current_fx fallback currency=%s rate_to_usd=%.8f asof=%s reason=%s",
+                currency,
+                fallback["rate"],
+                fallback.get("asof"),
+                fallback["error"],
+            )
+    return selected
+
+
+def _fx_report_fields(fx_info: dict[str, object]) -> dict[str, object]:
+    return {
+        "cur_fx_source": fx_info.get("source"),
+        "cur_fx_pair": fx_info.get("pair"),
+        "cur_fx_market_data_type": fx_info.get("market_data_type"),
+        "cur_fx_error": fx_info.get("error"),
+        "ref_fx_to_usd": fx_info.get("reference_rate", fx_info.get("rate")),
+        "ref_fx_asof": fx_info.get("reference_asof", fx_info.get("asof")),
+        "ref_fx_source": fx_info.get("reference_source", fx_info.get("source")),
+    }
 
 
 def _history_volatility(
@@ -1843,6 +2024,7 @@ def diagnose_instrument(
         quote_quality=f"{resolved_market_data_type}_snapshot",
         vol_reference_price=vol["reference_price"],
     )
+    row.update(_fx_report_fields(fx_info))
     historical_full_spread = _nonnegative_finite(
         spread_stats.get("ib_historical_spread_mean_points")
     )
@@ -2068,6 +2250,8 @@ def _error_row(
         )
     except Exception:
         return identity
+    row.update(_fx_report_fields(fx_info))
+    row["risk_return_vol_source"] = "pysystemtrade_reference_fallback"
     row.update(identity)
     return row
 
@@ -2125,32 +2309,218 @@ def _round_report_decimals(report: pl.DataFrame) -> pl.DataFrame:
     return report.with_columns(expressions)
 
 
+PUBLIC_REPORT_RENAMES = {
+    "price": "cur_price",
+    "price_source": "cur_price_source",
+    "fx_to_usd": "cur_fx_to_usd",
+    "fx_asof": "cur_fx_asof",
+    "notional_per_contract": "notional_usd_per_contract",
+    "current_mixed_point_vol": "selected_daily_point_vol",
+    "daily_return_vol": "selected_daily_return_vol",
+    "annual_return_vol": "selected_ann_return_vol",
+    "daily_dollar_vol_per_contract": "selected_daily_dvol_usd_per_contract",
+    "annual_dollar_vol_per_contract": "selected_ann_dvol_usd_per_contract",
+    "selected_one_way_spread_points": "selected_spread_points",
+    "configured_commission_native": "selected_commission_native",
+    "configured_commission": "selected_commission_usd",
+    "configured_spread_cash_native": "selected_spread_cash_native",
+    "configured_one_way_cost_native": "selected_cost_native",
+    "configured_one_way_cost": "selected_cost_usd",
+    "configured_sr_cost_per_trade": "selected_sr_cost_per_trade",
+    "configured_cost_quality": "selected_cost_quality",
+    "risk_return_vol_source": "selected_vol_source",
+    "bid": "snap_bid",
+    "ask": "snap_ask",
+    "full_spread_points": "snap_spread_points",
+    "commission_per_side": "snap_commission_usd",
+    "one_way_spread_cash": "snap_spread_cash_usd",
+    "one_way_total_cost": "snap_cost_usd",
+    "one_way_cost_per_annual_dollar_vol": "snap_sr_cost_per_trade",
+    "one_way_cost_bps_notional": "snap_cost_bps_notional",
+    "spread_quality": "snap_spread_quality",
+    "quote_timestamp_utc": "snap_quote_timestamp_utc",
+    "quote_market_data_type": "snap_market_data_type",
+    "quote_market_data_attempts": "snap_market_data_attempts",
+    "quote_error_codes": "snap_error_codes",
+    "quote_selected_error_codes": "snap_selected_error_codes",
+    "fast_point_vol": "ref_fast_point_vol",
+    "slow_point_vol": "ref_slow_point_vol",
+    "mixed_point_vol": "ref_mixed_point_vol",
+    "vol_reference_price": "ref_price",
+    "price_scale_to_vol_reference": "ref_cur_price_ratio",
+    "history_rows": "ref_history_n",
+    "history_start": "ref_history_start",
+    "history_end": "ref_history_end",
+    "vol_source": "ref_vol_source",
+    "vol_observations": "ref_vol_n",
+    "slow_history_years": "ref_slow_history_years",
+    "fast_vol_span": "ref_fast_vol_span",
+    "slow_vol_span": "ref_slow_vol_span",
+    "slow_vol_weight": "ref_slow_vol_weight",
+    "zero_return_fraction": "ref_zero_return_fraction",
+    "carver_slow_return_vol": "ref_slow_return_vol",
+    "carver_configured_one_way_spread_points": "ref_spread_points",
+    "strategy_reference_instrument": "ref_strategy_instrument",
+    "strategy_reference_history_start": "ref_strategy_history_start",
+    "strategy_reference_history_end": "ref_strategy_history_end",
+    "strategy_reference_history_observations": "ref_strategy_history_n",
+    "strategy_reference_rolls": "ref_strategy_rolls",
+    "strategy_reference_rolls_per_year": "ref_strategy_rolls_per_year",
+    "strategy_reference_roll_transactions_per_year": "ref_strategy_roll_tx_per_year",
+    "ib_recent_fast_return_vol": "ib_fast_return_vol",
+    "ib_recent_vol_observations": "ib_fast_n",
+    "ib_recent_vol_start": "ib_fast_start",
+    "ib_recent_vol_end": "ib_fast_end",
+    "ib_recent_vol_duration": "ib_fast_duration",
+    "ib_historical_requests_allowed": "ib_hist_requests_allowed",
+    "ib_historical_market_data_type": "ib_hist_market_data_type",
+    "ib_historical_spread_source": "ib_hspread_source",
+    "ib_historical_spread_duration": "ib_hspread_duration",
+    "ib_historical_spread_bar_size": "ib_hspread_bar_size",
+    "ib_historical_spread_observations": "ib_hspread_n",
+    "ib_historical_spread_start": "ib_hspread_start",
+    "ib_historical_spread_end": "ib_hspread_end",
+    "ib_historical_spread_mean_points": "ib_hspread_mean_points",
+    "ib_historical_spread_median_points": "ib_hspread_median_points",
+    "ib_historical_spread_p90_points": "ib_hspread_p90_points",
+    "ib_historical_spread_attempts": "ib_hspread_attempts",
+    "ib_historical_spread_failures": "ib_hspread_failures",
+    "annualization_days": "ann_days",
+    "min_contract_notional": "min_contract_notional_usd",
+    "min_contract_annual_dollar_vol": "min_contract_ann_dvol_usd",
+    "min_capital_full_weight_idm1": "min_capital_usd_full_weight_idm1",
+}
+
+
+def _compact_public_column_name(name: str) -> str:
+    if name in PUBLIC_REPORT_RENAMES:
+        return PUBLIC_REPORT_RENAMES[name]
+    compact = name.replace("transactions", "tx").replace("transaction", "tx")
+    compact = compact.replace("total", "tot").replace("annual", "ann")
+    compact = compact.replace("sharpe", "sr")
+    compact = compact.replace("strategy_reference", "ref_strategy")
+    compact = compact.replace("reference_pre_cost", "ref_pre_cost")
+    return compact
+
+
+def _public_report_schema(report: pl.DataFrame) -> pl.DataFrame:
+    """Expose one selected path first and move alternatives to audit sections."""
+    half_spread_columns = [
+        "full_spread_points",
+        "ib_historical_spread_mean_points",
+        "ib_historical_spread_median_points",
+        "ib_historical_spread_p90_points",
+    ]
+    report = report.with_columns(
+        (pl.col(name) / 2.0).alias(name)
+        for name in half_spread_columns
+        if name in report.columns
+    )
+    report = report.drop(
+        column
+        for column in ("carver_spread_points", "risk_daily_return_vol")
+        if column in report.columns
+    )
+    renames = {
+        name: _compact_public_column_name(name)
+        for name in report.columns
+        if _compact_public_column_name(name) != name
+    }
+    report = report.rename(renames)
+
+    selected_first = [
+        "symbol",
+        "signal_symbol",
+        "description",
+        "asset_class",
+        "region",
+        "contract_id",
+        "expiration",
+        "ib_symbol",
+        "ib_exchange",
+        "ib_currency",
+        "ib_multiplier",
+        "ib_availability",
+        "cur_price",
+        "cur_price_source",
+        "currency",
+        "cur_fx_to_usd",
+        "cur_fx_asof",
+        "cur_fx_source",
+        "cur_fx_pair",
+        "cur_fx_market_data_type",
+        "cur_fx_error",
+        "multiplier",
+        "notional_native_per_contract",
+        "notional_usd_per_contract",
+        "selected_daily_return_vol",
+        "selected_ann_return_vol",
+        "selected_daily_point_vol",
+        "selected_daily_dvol_usd_per_contract",
+        "selected_ann_dvol_usd_per_contract",
+        "selected_vol_source",
+        "selected_spread_points",
+        "selected_spread_source",
+        "selected_commission_native",
+        "selected_commission_usd",
+        "selected_spread_cash_native",
+        "selected_cost_native",
+        "selected_cost_usd",
+        "selected_sr_cost_per_trade",
+        "selected_cost_quality",
+        "rule_cost_limit_sr",
+        "ann_days",
+    ]
+    selected = [name for name in selected_first if name in report.columns]
+    selected_set = set(selected)
+    snap_suffix = [
+        name for name in report.columns
+        if name.startswith("snap_") and name not in selected_set
+    ]
+    ref_suffix = [
+        name for name in report.columns
+        if name.startswith("ref_") and name not in selected_set
+    ]
+    audit_suffix = [*snap_suffix, *ref_suffix]
+    middle = [
+        name for name in report.columns
+        if name not in selected_set
+        and name not in audit_suffix
+        and name != "report_generated_at_utc"
+    ]
+    tail = audit_suffix
+    if "report_generated_at_utc" in report.columns:
+        tail = [*tail, "report_generated_at_utc"]
+    return report.select(*selected, *middle, *tail)
+
+
 def _emit_report(report: pl.DataFrame, args) -> pl.DataFrame:
     report = report.with_columns(
         pl.lit(datetime.now(timezone.utc).isoformat(timespec="seconds")).alias(
             "report_generated_at_utc"
         )
     )
-    output_report = _round_report_decimals(report)
+    output_report = _round_report_decimals(_public_report_schema(report))
     summary_columns = [
         "symbol",
         "asset_class",
         "ib_symbol",
         "ib_exchange",
-        "price",
+        "cur_price",
         "currency",
-        "notional_per_contract",
+        "cur_fx_to_usd",
+        "cur_fx_source",
+        "notional_usd_per_contract",
         "notional_rank_in_asset_class",
-        "mixed_point_vol",
-        "annual_dollar_vol_per_contract",
+        "selected_daily_point_vol",
+        "selected_ann_dvol_usd_per_contract",
         "affordability_rank_in_asset_class",
-        "min_capital_full_weight_idm1",
-        "slow_history_years",
+        "min_capital_usd_full_weight_idm1",
         "pooling_role",
         "include_default_pool",
-        "selected_one_way_spread_points",
+        "selected_spread_points",
         "selected_spread_source",
-        "configured_sr_cost_per_trade",
+        "selected_sr_cost_per_trade",
         "cost_rank_in_asset_class",
         "eligible_ewmac_rule_count",
         "eligible_ewmac_rules",
@@ -2171,7 +2541,7 @@ def _emit_report(report: pl.DataFrame, args) -> pl.DataFrame:
         output_report.write_csv(output)
         log.info("futures_cost_risk complete output=%s rows=%d", output, output_report.height)
         print(f"Saved {output}")
-    return report
+    return output_report
 
 
 def run(argv=None) -> pl.DataFrame:
@@ -2187,7 +2557,8 @@ def run(argv=None) -> pl.DataFrame:
         PysystemtradeHistoryProvider(db_path=args.pysystemtrade_db)
         if args.vol_source == "pysystemtrade" else None
     )
-    fx_by_currency = load_latest_fx_to_usd(args.pysystemtrade_db)
+    reference_fx_by_currency = load_latest_fx_to_usd(args.pysystemtrade_db)
+    fx_by_currency = reference_fx_by_currency
     if args.rule_cost_limit_sr <= 0:
         raise ValueError("--rule-cost-limit-sr must be positive")
     if args.affordability_target_vol <= 0:
@@ -2275,6 +2646,13 @@ def run(argv=None) -> pl.DataFrame:
     )
     ib = IBPySync()
     ib.connect(args.host, args.port, args.client_id)
+    fx_by_currency = load_current_fx_to_usd(
+        ib,
+        {str(instr.get("currency") or "USD") for instr in instruments},
+        reference_fx_by_currency,
+        market_data_type=args.market_data_type,
+        quote_wait_seconds=args.quote_wait_seconds,
+    )
     rows = []
     try:
         for instr in instruments:

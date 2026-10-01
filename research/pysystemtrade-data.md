@@ -1181,16 +1181,16 @@ the current 252-instrument panel every history produces a mixed estimate, but
 accordingly rather than treated as fully warmed up.
 
 Percentage volatility divides historical mixed point volatility by the raw
-current-contract price at the same history endpoint (`vol_reference_price`).
+current-contract price at the same history endpoint (`ref_price`).
 For a live audit the fast return-volatility component comes from up to one year
 of daily bars on today's resolved dated IB contract, while the slow component
 is Carver's long-history point-volatility anchor divided by its contemporaneous
 price. The 70/30 blend is then applied to today's IB price. If the dated request
 does not produce the minimum observations, the complete Carver mixed return
 volatility is scaled to today's price and flagged as a fallback. Thus
-`current_mixed_point_vol`, dollar volatility, and notional share a current
-price level, while `mixed_point_vol` remains the auditable historical input.
-`price_scale_to_vol_reference` and `risk_return_vol_source` expose the handoff.
+`selected_daily_point_vol`, dollar volatility, and notional share a current
+price level, while `ref_mixed_point_vol` remains the auditable historical
+input. `ref_cur_price_ratio` and `selected_vol_source` expose the handoff.
 
 IB dated (`--vol-source dated`) and continuous (`--vol-source continuous`)
 history remain explicit comparison modes. Continuous is never the default
@@ -1233,20 +1233,20 @@ roll. Rule turnover excludes rolls. The resulting columns decompose cost as
 follows:
 
 ```text
-configured SR cost per trade
-    = configured one-way cash cost / annual dollar volatility
+selected SR cost per trade
+    = selected one-way cash cost / annual dollar volatility
 
 annual rule SR cost(speed)
-    = configured SR cost per trade × pooled rule turnover(speed)
+    = selected SR cost per trade × pooled rule turnover(speed)
 
 annual roll SR cost
-    = configured SR cost per trade × 2 × representative rolls per year
+    = selected SR cost per trade × 2 × representative rolls per year
 
 total transactions(speed)
     = pooled rule turnover(speed) + 2 × rolls per year
 
 total annual SR cost(speed)
-    = configured SR cost per trade × total transactions(speed)
+    = selected SR cost per trade × total transactions(speed)
 ```
 
 Each rule passes when total annual SR cost is no greater than `0.15`, the AFTS
@@ -1264,20 +1264,20 @@ product-specific expiry filter is supplied.
 An IB-connected phase-one audit requests `BID_ASK` history on the exact dated
 contract. `--spread-duration` is passed to
 `IBPySync.get_historical_bars(duration=...)` independently of the daily-price
-history duration and defaults to `30 D`. For live/subscribed data the audit
-retains the requested one-minute bars and retries two-minute bars only after an
-immediate non-timeout failure such as an empty response. A 60-second timeout
-stops all further historical probes for that contract. Delayed data uses a
-full-window five-minute request first; only immediate failures step down to a
-five-day two-minute sample and then a one-day one-minute sample. This avoids
-silently coarsening subscribed CME data while keeping delayed Euronext probes
-within a practical response size. The successful duration and bar size remain
-explicit report fields. Spread history uses RTH by default;
-`--spread-all-hours` opts into the entire futures session. For IB `BID_ASK` bars, `open` is average
-bid and `close` is average ask, so `close - open` is the full quoted point
-spread for that bar. The one-way cost uses half the mean historical width.
-Observation count, date range, mean, median, p90, successful bar size, attempts,
-and failures are all retained.
+history duration and defaults to `30 D × 15 mins`. A 60-second timeout stops
+all further historical probes for that contract. Delayed data can step down
+after an immediate non-timeout failure, but a timeout never cascades into more
+requests. The successful duration and bar size remain explicit report fields.
+Spread history uses RTH by default; `--spread-all-hours` opts into the entire
+futures session. For IB `BID_ASK` bars, `open` is average bid and `close` is
+average ask, so `close - open` is the full quoted point spread for that bar.
+Internally the one-way cost uses half the width. The CSV reports **all** spread
+statistics as one-way points: `ib_hspread_mean_points`,
+`ib_hspread_median_points`, `ib_hspread_p90_points`, `snap_spread_points`,
+`ref_spread_points`, and `selected_spread_points` are therefore directly
+comparable and must not be halved again. Observation count, date range,
+successful bar size, attempts, and failures are retained under the compact
+`ib_hspread_*` prefix.
 
 The current quote is an availability preflight as well as a price source. In
 automatic mode the audit retains errors from every attempted mode for audit,
@@ -1286,9 +1286,8 @@ selected. Thus an initial live error `354` does not veto history when the next
 type-3 delayed request returns usable data. Before any historical call, both a
 type-3 delayed quote and a type-4 delayed-frozen quote explicitly reset IB to
 type 3, because delayed—not delayed-frozen—is the historical-data mode. The
-report separates `quote_error_codes` (all attempts) from
-`quote_selected_error_codes` and records
-`ib_historical_market_data_type`.
+report separates `snap_error_codes` (all attempts) from
+`snap_selected_error_codes` and records `ib_hist_market_data_type`.
 
 Quote and historical availability are not identical for delayed data. The AEX
 mini, for example, can return `10168` from delayed `reqMktData` while a type-3
@@ -1296,7 +1295,7 @@ mini, for example, can return `10168` from delayed `reqMktData` while a type-3
 `354`, `10167`, and `10168` still describe the selected quote attempt but no
 longer veto a type-3 historical probe for a qualified contract. Error `200`
 continues to block the probe because it means the contract itself is invalid.
-`ib_historical_requests_allowed` therefore means the audit may attempt the
+`ib_hist_requests_allowed` therefore means the audit may attempt the
 endpoint, not that IB has already proven the data available. Actual timeout or
 empty-history failures remain recorded and fall back to the snapshot or
 configured Carver spread. With the default `pysystemtrade` volatility source,
@@ -1370,9 +1369,24 @@ remaining independently overridable for research.
 `--offline` writes the complete 252-row comparison without connecting to IB.
 Prices and volatility then end at the imported Carver history boundary, live
 spreads remain null, and non-USD conversions use the latest FX observation in
-that database (with `fx_asof` exposed). Omit `--offline` to qualify current IB
-contracts and request current quotes; this is the step that tests real account
-availability.
+that database. Omit `--offline` to qualify current IB contracts and request
+current quotes; this is the step that tests real account availability.
+
+An online audit requests each required cash-FX pair from IB once before the
+futures loop. `cur_fx_to_usd`, `cur_fx_source`, `cur_fx_pair`,
+`cur_fx_market_data_type`, and `cur_fx_asof` identify the conversion actually
+used for notional, dollar volatility, and costs. The imported Carver rate is
+retained later as `ref_fx_to_usd`/`ref_fx_asof`. If IB cannot supply the pair,
+the reference rate becomes the selected `cur_fx_to_usd` and
+`cur_fx_source=pysystemtrade_reference_fallback` makes that substitution
+explicit.
+
+The public CSV is ordered around a single selected calculation path. Selected
+current price, FX, volatility, dollar risk, spread, cash cost, and SR cost come
+first. Point-in-time quote alternatives use `snap_*`; unused Carver inputs and
+fallbacks use `ref_*` and are moved to the diagnostic tail. Converted monetary
+values carry `_usd`, native amounts carry `_native`, and long repeated suffixes
+use `tx`, `tot`, `ann`, and `sr`.
 
 For an IB-connected audit, the command defaults to `--market-data-type auto`:
 it tries real-time (`1`), then delayed (`3`), then delayed-frozen (`4`), and
@@ -1380,7 +1394,7 @@ stops at the first valid bid/ask. The CSV records both the successful mode and
 the attempted sequence. Explicit `live`, `delayed`, and `delayed-frozen`
 settings disable fallback. IB errors 354/10168 indicate quote entitlement,
 not a failed futures contract
-mapping. Rejected requests are recorded in `quote_error_codes` and cleaned up
+mapping. Rejected requests are recorded in `snap_error_codes` and cleaned up
 locally without a redundant cancellation request. Contract-definition lookups
 are bounded to eight seconds by default (`--contract-details-timeout`) so a
 stale mapping cannot stall the broad-universe audit for the wrapper's normal
