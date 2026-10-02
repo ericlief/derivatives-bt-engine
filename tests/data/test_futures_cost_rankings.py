@@ -15,7 +15,7 @@ def _report() -> pl.DataFrame:
         "symbol": ["ES", "MES", "NQ", "ZN", "ZT"],
         "description": ["S&P", "Micro S&P", "Nasdaq", "10Y", "2Y"],
         "asset_class": ["Equity", "Equity", "Equity", "Rates", "Rates"],
-        "cost_rank_in_asset_class": [2, 1, 3, 1, 2],
+        "cost_rank_in_asset_class": [2, 3, 1, 2, 1],
         "affordability_rank_in_asset_class": [3, 1, 2, 2, 1],
         "notional_rank_in_asset_class": [3, 1, 2, 2, 1],
         "selected_sr_cost_per_trade": [0.002, 0.004, 0.001, 0.003, 0.002],
@@ -52,11 +52,11 @@ def test_top_n_by_asset_class_supports_named_rankings():
     assert rankings["Rates"].get_column("symbol").to_list() == ["ZT", "ZN"]
 
 
-def test_top_n_by_asset_class_cost_ranking_is_most_expensive_first():
+def test_top_n_by_asset_class_cost_ranking_is_cheapest_first():
     rankings = top_n_by_asset_class(_report(), n=2, rank_by="cost")
 
-    assert rankings["Equity"].get_column("symbol").to_list() == ["MES", "ES"]
-    assert rankings["Rates"].get_column("symbol").to_list() == ["ZN", "ZT"]
+    assert rankings["Equity"].get_column("symbol").to_list() == ["NQ", "ES"]
+    assert rankings["Rates"].get_column("symbol").to_list() == ["ZT", "ZN"]
 
 
 def test_top_n_by_asset_class_can_keep_all_columns_and_filter_classes():
@@ -96,5 +96,5 @@ def test_top_n_by_asset_class_excludes_restricted_execution_by_default():
         eligible_only=False,
     )
 
-    assert eligible["Equity"]["symbol"].to_list() == ["MES"]
+    assert eligible["Equity"]["symbol"].to_list() == ["NQ"]
     assert all_rows["Equity"]["symbol"].to_list() == ["SGX"]

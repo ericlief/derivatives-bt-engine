@@ -1376,14 +1376,22 @@ trade.
 
 Phase one also ranks candidates within each asset class separately by one-way
 SR cost, current notional, and current annual dollar volatility. The report
-assigns cost rank 1 to the highest risk-adjusted trading cost so expensive
-contracts appear first for review. Affordability and notional rank 1 retain
-the opposite, natural meaning: the smallest contract-risk and notional first.
+assigns rank 1 to the lowest value: the cheapest risk-adjusted trading cost,
+smallest contract risk, and smallest notional appear first in their respective
+rankings.
 The report includes the notional and annual dollar volatility of four contracts and
 `min_capital_full_weight_idm1 = 4 × annual dollar vol / target vol`. This is a
 capital-independent granularity diagnostic, not the final portfolio test: the
 next phase must divide by the candidate instrument weight and IDM and enforce
 asset-class coverage jointly.
+
+Rule-cost screening has an independent volatility selector. The default
+`--cost-volatility-method selected-blend` uses the same current IB-fast/Carver-slow
+volatility selected for contract risk. Use `historical-1y` to match
+pysystemtrade's cost denominator more closely: mean mixed point volatility over
+the final calendar year of available history, annualized and converted using
+the executable contract's multiplier and current FX rate. Both the method and
+the resulting cost-specific annual dollar volatility are retained in the CSV.
 
 ```bash
 .venv/bin/futures-cost-risk \

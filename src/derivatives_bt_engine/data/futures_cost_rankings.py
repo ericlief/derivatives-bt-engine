@@ -114,9 +114,8 @@ def top_n_by_asset_class(
     explicit numeric column name. Pass ``columns=None`` to retain every source
     column rather than the compact notebook view. By default, rows explicitly
     restricted by our execution profile are excluded; older reports without
-    the eligibility column remain readable. Cost rank 1 is the highest
-    risk-adjusted trading cost; affordability and notional rank 1 are the
-    smallest contracts.
+    the eligibility column remain readable. Rank 1 is the lowest value for
+    cost, affordability, and notional.
     """
     if n <= 0:
         raise ValueError("n must be positive")
