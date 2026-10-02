@@ -1366,6 +1366,27 @@ mixed-volatility inputs, scalar warm-up, and the SR cost ceiling have separate
 AFTS EWMAC speeds and the 32-session/ten-year/30% mixed volatility, while
 remaining independently overridable for research.
 
+Load the newest timestamped Phase 1 report and show the top five instruments
+in every asset class from a notebook with:
+
+```python
+from derivatives_bt_engine.data.futures_cost_rankings import (
+    display_asset_class_rankings,
+    load_latest_phase1_cost_report,
+    top_n_by_asset_class,
+)
+
+report_path, phase1 = load_latest_phase1_cost_report(".")
+print(report_path)
+
+rankings = top_n_by_asset_class(phase1, n=5, rank_by="cost")
+display_asset_class_rankings(rankings)
+```
+
+Set `rank_by` to `"affordability"` or `"notional"` for the other Phase 1
+rankings. Pass `asset_classes=["Equity", "Rates"]` to show selected classes,
+or `columns=None` to retain all report columns in each returned frame.
+
 `--offline` writes the complete 252-row comparison without connecting to IB.
 Prices and volatility then end at the imported Carver history boundary, live
 spreads remain null, and non-USD conversions use the latest FX observation in
