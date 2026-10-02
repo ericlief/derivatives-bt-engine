@@ -1299,6 +1299,12 @@ comparable and must not be halved again. Observation count, date range,
 successful bar size, attempts, and failures are retained under the compact
 `ib_hspread_*` prefix.
 
+Timestamped Phase 1 filenames and the CSV fields `report_generated_at_ct`,
+`snap_quote_timestamp_ct`, `ib_hspread_start`, and `ib_hspread_end` use the
+daylight-saving-aware `America/Chicago` timezone. This aligns report review
+with CME hours; each ISO timestamp retains its explicit `-05:00` or `-06:00`
+offset. Raw IB bar timestamps are not mutated.
+
 The current quote is an availability preflight as well as a price source. In
 automatic mode the audit retains errors from every attempted mode for audit,
 but eligibility for history is determined only by the quote attempt ultimately

@@ -552,21 +552,21 @@ def test_emitted_report_includes_generation_timestamp(capsys):
         Namespace(no_save=True),
     )
 
-    assert "report_generated_at_utc" in emitted.columns
-    timestamp = emitted["report_generated_at_utc"][0]
-    assert timestamp.endswith("+00:00")
+    assert "report_generated_at_ct" in emitted.columns
+    timestamp = emitted["report_generated_at_ct"][0]
+    assert timestamp.endswith(("-05:00", "-06:00"))
     assert "T" in timestamp
     capsys.readouterr()
 
 
-def test_timestamped_output_path_uses_utc_and_preserves_csv_extension():
+def test_timestamped_output_path_uses_chicago_and_preserves_csv_extension():
     generated_at = datetime(2026, 10, 1, 14, 54, 18, tzinfo=timezone.utc)
 
     output = futures_cost_risk._timestamped_output_path(
         Path("pysystemtrade_cost_phase1_ib.csv"), generated_at
     )
 
-    assert output == Path("pysystemtrade_cost_phase1_ib_20261001_145418.csv")
+    assert output == Path("pysystemtrade_cost_phase1_ib_20261001_095418.csv")
 
 
 @pytest.mark.parametrize(
@@ -920,7 +920,7 @@ def test_live_spread_uses_one_full_window_fifteen_minute_request():
     assert result["ib_historical_spread_mean_points"] == pytest.approx(0.25)
 
 
-def test_spread_report_timestamps_normalize_mixed_exchange_zones_to_utc():
+def test_spread_report_timestamps_normalize_mixed_exchange_zones_to_chicago():
     def stats(zone: str):
         return futures_cost_risk._spread_stats_from_bid_ask_bars(
             pl.DataFrame({
@@ -940,8 +940,8 @@ def test_spread_report_timestamps_normalize_mixed_exchange_zones_to_utc():
 
     assert report.schema["ib_historical_spread_start"] == pl.String
     assert report.get_column("ib_historical_spread_start").to_list() == [
-        "2026-09-30T13:45:00+00:00",
-        "2026-09-30T19:45:00+00:00",
+        "2026-09-30T08:45:00-05:00",
+        "2026-09-30T14:45:00-05:00",
     ]
 
 

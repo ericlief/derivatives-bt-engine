@@ -38,9 +38,10 @@ import json
 import logging
 import math
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import duckdb
 import polars as pl
@@ -88,6 +89,7 @@ log = logging.getLogger("derivatives_bt_engine.data.futures_cost_risk")
 
 DEFAULT_DURATION = "1 Y"
 DEFAULT_SPREAD_DURATION = "5 D"
+REPORT_TIMEZONE = ZoneInfo("America/Chicago")
 DEFAULT_SPREAD_BAR_SIZES = ("15 mins",)
 DEFAULT_DELAYED_SPREAD_REQUEST_PLAN = (
     ("15 mins", None),
@@ -1024,7 +1026,7 @@ def build_cost_risk_row(
     bid: Optional[float] = None,
     ask: Optional[float] = None,
     price_source: str = "dated_contract",
-    quote_timestamp_utc: Optional[str] = None,
+    quote_timestamp_ct: Optional[str] = None,
     quote_quality: str = "live_snapshot",
 ) -> dict:
     """Calculate notional, dollar vol, and risk-scaled execution costs.
@@ -1119,7 +1121,7 @@ def build_cost_risk_row(
             one_way_total / notional * 10_000.0 if one_way_total is not None else None
         ),
         "spread_quality": quote_quality if spread_valid else "unknown_no_bid_ask",
-        "quote_timestamp_utc": quote_timestamp_utc,
+        "quote_timestamp_ct": quote_timestamp_ct,
         "annualization_days": annualization_days,
         "history_rows": history_rows,
         "history_start": history_start,
@@ -1214,12 +1216,13 @@ def _spread_stats_from_bid_ask_bars(
         "ib_historical_spread_duration": duration,
         "ib_historical_spread_bar_size": bar_size,
         "ib_historical_spread_observations": clean.height,
-        # IB timestamps carry each exchange's local timezone.  Report rows
+        # IB timestamps carry each exchange's local timezone. Report rows
         # span exchanges, and Polars cannot construct one datetime column
-        # from values such as MET and US/Eastern.  UTC ISO text is portable
-        # across CSV output and preserves the absolute instant.
-        "ib_historical_spread_start": _timestamp_as_utc_iso(spread_start),
-        "ib_historical_spread_end": _timestamp_as_utc_iso(spread_end),
+        # from values such as MET and US/Eastern. Central-time ISO text is
+        # portable across CSV output and aligns report inspection with CME
+        # hours while preserving the absolute instant and UTC offset.
+        "ib_historical_spread_start": _timestamp_as_central_iso(spread_start),
+        "ib_historical_spread_end": _timestamp_as_central_iso(spread_end),
         "ib_historical_spread_mean_points": clean.get_column(
             "spread_points"
         ).mean(),
@@ -1232,15 +1235,15 @@ def _spread_stats_from_bid_ask_bars(
     }
 
 
-def _timestamp_as_utc_iso(value: object) -> Optional[str]:
-    """Return a report-safe UTC timestamp for mixed exchange timezones."""
+def _timestamp_as_central_iso(value: object) -> Optional[str]:
+    """Return a report-safe Chicago timestamp for mixed exchange timezones."""
     if value is None:
         return None
     if isinstance(value, datetime):
         if value.tzinfo is None:
-            value = value.replace(tzinfo=timezone.utc)
+            value = value.replace(tzinfo=REPORT_TIMEZONE)
         else:
-            value = value.astimezone(timezone.utc)
+            value = value.astimezone(REPORT_TIMEZONE)
         return value.isoformat(timespec="seconds")
     isoformat = getattr(value, "isoformat", None)
     return isoformat() if callable(isoformat) else str(value)
@@ -1823,7 +1826,9 @@ def diagnose_instrument(
         bid=quote["bid"],
         ask=quote["ask"],
         price_source=price_source,
-        quote_timestamp_utc=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        quote_timestamp_ct=datetime.now(REPORT_TIMEZONE).isoformat(
+            timespec="seconds"
+        ),
         quote_quality=f"{resolved_market_data_type}_snapshot",
         vol_reference_price=vol["reference_price"],
     )
@@ -1994,7 +1999,7 @@ def parse_args(argv=None):
         type=Path,
         default=None,
         help=(
-            "CSV output base path; a UTC run timestamp is appended to the "
+            "CSV output base path; a Chicago-time run timestamp is appended to the "
             "filename (default base: results/futures_cost_risk.csv)"
         ),
     )
@@ -2159,7 +2164,7 @@ PUBLIC_REPORT_RENAMES = {
     "one_way_cost_per_annual_dollar_vol": "snap_sr_cost_per_trade",
     "one_way_cost_bps_notional": "snap_cost_bps_notional",
     "spread_quality": "snap_spread_quality",
-    "quote_timestamp_utc": "snap_quote_timestamp_utc",
+    "quote_timestamp_ct": "snap_quote_timestamp_ct",
     "quote_market_data_type": "snap_market_data_type",
     "quote_market_data_attempts": "snap_market_data_attempts",
     "quote_error_codes": "snap_error_codes",
@@ -2310,25 +2315,25 @@ def _public_report_schema(report: pl.DataFrame) -> pl.DataFrame:
         name for name in report.columns
         if name not in selected_set
         and name not in audit_suffix
-        and name != "report_generated_at_utc"
+        and name != "report_generated_at_ct"
     ]
     tail = audit_suffix
-    if "report_generated_at_utc" in report.columns:
-        tail = [*tail, "report_generated_at_utc"]
+    if "report_generated_at_ct" in report.columns:
+        tail = [*tail, "report_generated_at_ct"]
     return report.select(*selected, *middle, *tail)
 
 
 def _timestamped_output_path(output: Path, generated_at: datetime) -> Path:
-    """Append the report's UTC generation time without discarding extensions."""
-    stamp = generated_at.astimezone(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    """Append the report's Chicago generation time without losing extensions."""
+    stamp = generated_at.astimezone(REPORT_TIMEZONE).strftime("%Y%m%d_%H%M%S")
     return output.with_name(f"{output.stem}_{stamp}{output.suffix}")
 
 
 def _emit_report(report: pl.DataFrame, args) -> pl.DataFrame:
-    generated_at = datetime.now(timezone.utc)
+    generated_at = datetime.now(REPORT_TIMEZONE)
     report = report.with_columns(
         pl.lit(generated_at.isoformat(timespec="seconds")).alias(
-            "report_generated_at_utc"
+            "report_generated_at_ct"
         )
     )
     output_report = _round_report_decimals(_public_report_schema(report))
