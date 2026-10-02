@@ -1376,7 +1376,10 @@ trade.
 
 Phase one also ranks candidates within each asset class separately by one-way
 SR cost, current notional, and current annual dollar volatility. The report
-includes the notional and annual dollar volatility of four contracts and
+assigns cost rank 1 to the highest risk-adjusted trading cost so expensive
+contracts appear first for review. Affordability and notional rank 1 retain
+the opposite, natural meaning: the smallest contract-risk and notional first.
+The report includes the notional and annual dollar volatility of four contracts and
 `min_capital_full_weight_idm1 = 4 × annual dollar vol / target vol`. This is a
 capital-independent granularity diagnostic, not the final portfolio test: the
 next phase must divide by the candidate instrument weight and IDM and enforce

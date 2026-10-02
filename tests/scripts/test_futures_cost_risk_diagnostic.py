@@ -963,5 +963,6 @@ def test_affordability_ranks_are_within_asset_class():
     full = ranked.filter(pl.col("symbol") == "FULL").row(0, named=True)
 
     assert micro["affordability_rank_in_asset_class"] == 1
-    assert full["cost_rank_in_asset_class"] == 1
+    assert micro["cost_rank_in_asset_class"] == 1
+    assert full["cost_rank_in_asset_class"] == 2
     assert micro["min_capital_full_weight_idm1"] == pytest.approx(120_000.0)

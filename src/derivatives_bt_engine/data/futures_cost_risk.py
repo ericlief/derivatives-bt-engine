@@ -765,7 +765,12 @@ def _attach_affordability_ranks(
     target_vol: float,
     min_contracts: int,
 ) -> pl.DataFrame:
-    """Add transparent cost and contract-granularity ranks by asset class."""
+    """Add transparent cost and contract-granularity ranks by asset class.
+
+    Cost rank 1 is the highest risk-adjusted trading cost, so the report puts
+    the contracts needing the most scrutiny first. Affordability and notional
+    rank 1 retain their natural smallest-contract-first interpretation.
+    """
     if target_vol <= 0:
         raise ValueError("target_vol must be positive")
     if min_contracts <= 0:
@@ -796,7 +801,7 @@ def _attach_affordability_ranks(
     )
     return ranked.with_columns(
         pl.col("configured_sr_cost_per_trade")
-        .rank("ordinal")
+        .rank("ordinal", descending=True)
         .over("asset_class")
         .alias("cost_rank_in_asset_class"),
         pl.col("annual_dollar_vol_per_contract")

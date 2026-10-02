@@ -108,13 +108,15 @@ def top_n_by_asset_class(
     columns: Sequence[str] | None = DEFAULT_VIEW_COLUMNS,
     eligible_only: bool = True,
 ) -> dict[str, pl.DataFrame]:
-    """Return the top ``n`` rows in each asset class, sorted best rank first.
+    """Return the top ``n`` rows in each asset class, sorted rank 1 first.
 
     ``rank_by`` accepts ``cost``, ``affordability``, ``notional``, or an
     explicit numeric column name. Pass ``columns=None`` to retain every source
     column rather than the compact notebook view. By default, rows explicitly
     restricted by our execution profile are excluded; older reports without
-    the eligibility column remain readable.
+    the eligibility column remain readable. Cost rank 1 is the highest
+    risk-adjusted trading cost; affordability and notional rank 1 are the
+    smallest contracts.
     """
     if n <= 0:
         raise ValueError("n must be positive")
