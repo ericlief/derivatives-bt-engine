@@ -116,6 +116,12 @@ Each `INSTRUMENTS` entry carries:
                     all-listed-month Carver history rather than CORN's
                     December-only seasonal history.
 
+Account-specific execution restrictions are deliberately separate from the
+contract specifications below. ``resolve_execution_eligibility`` applies our
+local broker/account profile to both native instruments and externally mapped
+research instruments without modifying their source metadata or removing them
+from research pools.
+
 `BACKTEST_ONLY_SPECS` holds multiplier/margin/commission for contracts that
 exist only on the general single/multi-symbol backtest path (naked_futures.py,
 tsmom_backtester.py) and have never been part of the live TSMOM instrument
@@ -156,6 +162,54 @@ DEFAULT_DB_PATH = '/home/dev/fin/db/globex_mdp_3.0.duckdb'
 # session-merge fix, 2026-07) now the empirically-exact figure for the
 # CBOT grains specifically, not just a round-number default.
 DEFAULT_ANNUALIZATION_DAYS = 252
+
+DEFAULT_EXECUTION_PROFILE = 'ibkr_us'
+EXECUTION_ELIGIBILITY_OVERRIDES: dict[str, dict[str, dict[str, object]]] = {
+    'ibkr_us': {
+        # IB qualifies STI and may provide market data, but a US account is
+        # blocked from trading the SGX Straits Times Index future. Keep the
+        # Carver SGX history in research/scalar pools while excluding the
+        # execution contract from portfolio selection.
+        'STI': {
+            'execution_eligible': False,
+            'execution_restriction_reason': 'ibkr_us_product_restriction',
+        },
+    },
+}
+
+
+def resolve_execution_eligibility(
+    symbol: str,
+    *,
+    ib_symbol: Optional[str] = None,
+    profile: str = DEFAULT_EXECUTION_PROFILE,
+) -> dict[str, object]:
+    """Return our account-specific execution status for an instrument.
+
+    The IB symbol is checked first because externally sourced research codes
+    can differ from the executable contract root (Carver ``SGX`` -> IB
+    ``STI``). An absent override means no known restriction under the selected
+    profile; live contract qualification and cost checks remain independent.
+    """
+    overrides = EXECUTION_ELIGIBILITY_OVERRIDES.get(profile, {})
+    identifiers = [ib_symbol, symbol]
+    override = next(
+        (
+            overrides[identifier.upper()]
+            for identifier in identifiers
+            if identifier and identifier.upper() in overrides
+        ),
+        None,
+    )
+    return {
+        'execution_profile': profile,
+        'execution_eligible': (
+            bool(override['execution_eligible']) if override else True
+        ),
+        'execution_restriction_reason': (
+            override.get('execution_restriction_reason') if override else None
+        ),
+    }
 
 # ── Instrument universe ─────────────────────────────────────────────────────
 INSTRUMENTS: dict[str, dict] = {

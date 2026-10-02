@@ -1359,6 +1359,15 @@ future is not a current execution candidate: CME converted and permanently
 delisted the contract in October 2024. The live audit therefore records BB3M as
 retired without sending an invalid `BSBY` security-definition request to IB.
 
+Execution permission is local account metadata, not Carver source metadata.
+The engine's `ibkr_us` eligibility profile marks the Carver `SGX` instrument
+(IB root `STI`) `execution_eligible=false` with reason
+`ibkr_us_product_restriction`. Its history remains in the research and forecast
+scalar pools, and its cost row remains auditable; the asset-class ranking helper
+excludes explicitly restricted rows by default. `ib_availability` continues to
+describe contract/data qualification only and must not be read as permission to
+trade.
+
 Phase one also ranks candidates within each asset class separately by one-way
 SR cost, current notional, and current annual dollar volatility. The report
 includes the notional and annual dollar volatility of four contracts and

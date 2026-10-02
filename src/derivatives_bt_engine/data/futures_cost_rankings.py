@@ -24,6 +24,9 @@ DEFAULT_VIEW_COLUMNS = (
     "description",
     "asset_class",
     "region",
+    "execution_profile",
+    "execution_eligible",
+    "execution_restriction_reason",
     "cost_rank_in_asset_class",
     "affordability_rank_in_asset_class",
     "notional_rank_in_asset_class",
@@ -103,12 +106,15 @@ def top_n_by_asset_class(
     rank_by: str = "cost",
     asset_classes: Iterable[str] | None = None,
     columns: Sequence[str] | None = DEFAULT_VIEW_COLUMNS,
+    eligible_only: bool = True,
 ) -> dict[str, pl.DataFrame]:
     """Return the top ``n`` rows in each asset class, sorted best rank first.
 
     ``rank_by`` accepts ``cost``, ``affordability``, ``notional``, or an
     explicit numeric column name. Pass ``columns=None`` to retain every source
-    column rather than the compact notebook view.
+    column rather than the compact notebook view. By default, rows explicitly
+    restricted by our execution profile are excluded; older reports without
+    the eligibility column remain readable.
     """
     if n <= 0:
         raise ValueError("n must be positive")
@@ -116,6 +122,8 @@ def top_n_by_asset_class(
         raise ValueError("Report has no asset_class column")
 
     rank_column = _resolve_rank_column(report, rank_by)
+    if eligible_only and "execution_eligible" in report.columns:
+        report = report.filter(pl.col("execution_eligible").fill_null(False))
     if asset_classes is None:
         classes = sorted(
             value

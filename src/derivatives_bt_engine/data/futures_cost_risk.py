@@ -170,6 +170,11 @@ def _pooling_report_identity(instr: dict) -> dict:
         "representative_instrument": instr.get("representative_instrument"),
         "include_default_pool": instr.get("include_default_pool"),
         "pooling_decision_basis": instr.get("pooling_decision_basis"),
+        "execution_profile": instr.get("execution_profile"),
+        "execution_eligible": instr.get("execution_eligible", True),
+        "execution_restriction_reason": instr.get(
+            "execution_restriction_reason"
+        ),
     }
 
 
@@ -2250,6 +2255,9 @@ def _public_report_schema(report: pl.DataFrame) -> pl.DataFrame:
         "description",
         "asset_class",
         "region",
+        "execution_profile",
+        "execution_eligible",
+        "execution_restriction_reason",
         "contract_id",
         "expiration",
         "ib_symbol",
@@ -2349,6 +2357,8 @@ def _emit_report(report: pl.DataFrame, args) -> pl.DataFrame:
         "eligible_ewmac_rules",
         "instrument_has_eligible_ewmac_rule",
         "ib_availability",
+        "execution_eligible",
+        "execution_restriction_reason",
         "error",
     ]
     print(output_report.select(

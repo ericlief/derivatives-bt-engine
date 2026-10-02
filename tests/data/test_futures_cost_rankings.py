@@ -19,6 +19,7 @@ def _report() -> pl.DataFrame:
         "affordability_rank_in_asset_class": [3, 1, 2, 2, 1],
         "notional_rank_in_asset_class": [3, 1, 2, 2, 1],
         "selected_sr_cost_per_trade": [0.002, 0.004, 0.001, 0.003, 0.002],
+        "execution_eligible": [True, True, True, True, True],
     })
 
 
@@ -63,3 +64,30 @@ def test_top_n_by_asset_class_can_keep_all_columns_and_filter_classes():
     assert list(rankings) == ["Rates"]
     assert rankings["Rates"].columns == _report().columns
     assert rankings["Rates"].get_column("symbol").to_list() == ["ZT"]
+
+
+def test_top_n_by_asset_class_excludes_restricted_execution_by_default():
+    report = pl.concat([
+        _report(),
+        pl.DataFrame({
+            "symbol": ["SGX"],
+            "description": ["Straits Times Index"],
+            "asset_class": ["Equity"],
+            "cost_rank_in_asset_class": [0],
+            "affordability_rank_in_asset_class": [0],
+            "notional_rank_in_asset_class": [0],
+            "selected_sr_cost_per_trade": [0.0],
+            "execution_eligible": [False],
+        }),
+    ])
+
+    eligible = top_n_by_asset_class(report, n=1, columns=None)
+    all_rows = top_n_by_asset_class(
+        report,
+        n=1,
+        columns=None,
+        eligible_only=False,
+    )
+
+    assert eligible["Equity"]["symbol"].to_list() == ["NQ"]
+    assert all_rows["Equity"]["symbol"].to_list() == ["SGX"]

@@ -15,7 +15,10 @@ import duckdb
 import polars as pl
 
 from derivatives_bt_engine.domain.futures_history import DEFAULT_PYSYSTEMTRADE_DB_PATH
-from derivatives_bt_engine.domain.instruments import INSTRUMENTS
+from derivatives_bt_engine.domain.instruments import (
+    INSTRUMENTS,
+    resolve_execution_eligibility,
+)
 
 
 DEFAULT_IB_MAPPING_PATH = Path(__file__).with_name("pysystemtrade_ib_mappings.csv")
@@ -75,6 +78,10 @@ def add_local_execution_overlays(instruments: list[dict]) -> list[dict]:
                 f"execution_only_borrows_{parent_code}_history"
             ),
             "history_instrument_code": parent_code,
+            **resolve_execution_eligibility(
+                symbol,
+                ib_symbol=spec.get("ib_symbol", symbol),
+            ),
         })
         overlays.append(overlay)
     return [*instruments, *overlays]
@@ -202,6 +209,10 @@ def load_pysystemtrade_ib_instruments(
             "pooling_decision_basis": row["decision_basis"],
             "history_start": row["multiple_start"],
             "history_end": row["multiple_end"],
+            **resolve_execution_eligibility(
+                row["instrument_code"],
+                ib_symbol=row["ib_symbol"],
+            ),
         }
         for row in joined.sort("instrument_code").iter_rows(named=True)
     ]

@@ -4,7 +4,10 @@ from derivatives_bt_engine.data.pysystemtrade_ib import (
     add_local_execution_overlays,
     load_pysystemtrade_ib_mapping,
 )
-from derivatives_bt_engine.domain.instruments import resolve_active_months
+from derivatives_bt_engine.domain.instruments import (
+    resolve_active_months,
+    resolve_execution_eligibility,
+)
 
 
 def test_bundled_carver_ib_mapping_has_expected_coverage_and_point_values():
@@ -24,6 +27,22 @@ def test_na_ib_currency_becomes_unspecified_not_literal_na():
     mapping = load_pysystemtrade_ib_mapping()
     corn = mapping.filter(mapping["instrument_code"] == "CORN").row(0, named=True)
     assert corn["ib_currency"] == ""
+
+
+def test_ibkr_us_execution_restriction_uses_executable_ib_symbol():
+    restricted = resolve_execution_eligibility("SGX", ib_symbol="STI")
+    ordinary = resolve_execution_eligibility("SP500", ib_symbol="ES")
+
+    assert restricted == {
+        "execution_profile": "ibkr_us",
+        "execution_eligible": False,
+        "execution_restriction_reason": "ibkr_us_product_restriction",
+    }
+    assert ordinary == {
+        "execution_profile": "ibkr_us",
+        "execution_eligible": True,
+        "execution_restriction_reason": None,
+    }
 
 
 def test_local_micros_borrow_matching_carver_histories():
