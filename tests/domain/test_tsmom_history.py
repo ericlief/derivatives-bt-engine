@@ -60,9 +60,26 @@ def test_candidate_mapping_requires_explicit_research_opt_in(monkeypatch) -> Non
         )
 
 
-def test_mzc_uses_all_listed_carver_mini_history(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ('traded_symbol', 'globex_symbol', 'mapped_carver', 'expected_carver'),
+    [
+        ('MZC', 'ZC', 'CORN', 'CORN_mini'),
+        ('MTN', 'TN', 'US10U', 'US10U'),
+        ('MWN', 'UB', 'US30', 'US30'),
+    ],
+)
+def test_execution_overlay_uses_explicit_carver_parent(
+    monkeypatch,
+    traded_symbol: str,
+    globex_symbol: str,
+    mapped_carver: str,
+    expected_carver: str,
+) -> None:
     mapping = MarketMapping(
-        'corn', 'CORN', 'ZC', mapping_status='approved'
+        traded_symbol.lower(),
+        mapped_carver,
+        globex_symbol,
+        mapping_status='approved',
     )
     loaded: list[str] = []
 
@@ -78,13 +95,16 @@ def test_mzc_uses_all_listed_carver_mini_history(monkeypatch) -> None:
     monkeypatch.setattr(th, 'PysystemtradeHistoryProvider', StubCarverProvider)
 
     frames, manifest = th.load_source_neutral_histories(
-        ['MZC'], data_source='pysystemtrade'
+        [traded_symbol], data_source='pysystemtrade'
     )
 
-    assert loaded == ['CORN_mini']
-    assert frames['MZC'].height == 3
-    assert manifest['instruments']['MZC']['history_instrument'] == 'CORN_mini'
+    assert loaded == [expected_carver]
+    assert frames[traded_symbol].height == 3
     assert (
-        manifest['instruments']['MZC']['crosswalk']['carver_instrument']
-        == 'CORN_mini'
+        manifest['instruments'][traded_symbol]['history_instrument']
+        == expected_carver
+    )
+    assert (
+        manifest['instruments'][traded_symbol]['crosswalk']['carver_instrument']
+        == expected_carver
     )

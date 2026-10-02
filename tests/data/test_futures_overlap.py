@@ -115,8 +115,8 @@ class _Provider:
 def test_packaged_mapping_crosswalk_is_typed_and_unique() -> None:
     mappings = load_mappings()
 
-    assert len(mappings) == 14
-    assert len({mapping.canonical_market_id for mapping in mappings}) == 14
+    assert len(mappings) == 16
+    assert len({mapping.canonical_market_id for mapping in mappings}) == 16
     crude = next(mapping for mapping in mappings if mapping.canonical_market_id == "crude_wti")
     silver = next(mapping for mapping in mappings if mapping.canonical_market_id == "silver")
     assert crude.mapping_status == "candidate"

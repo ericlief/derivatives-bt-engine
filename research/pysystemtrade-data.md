@@ -441,7 +441,9 @@ micro histories into the covariance universe would double-count a market.
 | CL / MCL | CRUDE_W | 1990-10-16 to 2024-03-28 | 99.1% | Underlying match only: Carver holds the annual December winter contract, not the monthly liquid front |
 | GC / MGC | GOLD | 1975-04-01 to 2024-03-28 | 99.5% | `GOLD_micro` exists but should not be a second risk factor |
 | SI / SIL | SILVER | 1970-06-15 to 2024-03-28 | 70.6% | Point size is 1,000; mapping/settlement date needs extra validation |
-| ZN / MTN | US10 | 1982-08-30 to 2024-03-28 | 95.0% | Treasury fractional pricing needs exact scale checks |
+| ZN | US10 | 1982-08-30 to 2024-03-28 | 95.0% | Standard 10-Year Treasury note |
+| TN / MTN | US10U | 2016-03-02 to 2024-03-28 | 25.5% | Micro uses the same price convention and one-tenth point value as Ultra 10-Year |
+| UB / MWN | US30 | 2010-03-03 to 2024-03-28 | 15.4% | Micro uses the same price convention and one-tenth point value as Ultra Bond |
 | ZT | US2 | 2000-03-02 to 2024-03-28 | 99.3% | Direct candidate |
 | ZC / MZC | CORN | 1972-10-18 to 2024-03-28 | 91.1% | Underlying match only: Carver holds annual December rather than the liquid front |
 | ZL / MZL | SOYOIL | 1970-02-03 to 2024-03-28 | 92.6% | Underlying match; roll cycles differ materially |
@@ -1208,9 +1210,10 @@ that result separately. The effective IB point value
 mappings.
 
 The cost report deliberately retains all 252 usable histories, including rows
-excluded from pooled signal calibration, and adds five local CBOT grain-micro
-execution overlays absent from Carver: `MZC`, `MZS`, `MZW`, `MZL`, and `MZM`.
-The resulting 257 rows include economic family, roll policy, duplicate group,
+excluded from pooled signal calibration, and adds seven local execution
+overlays absent from Carver: the CBOT grain micros `MZC`, `MZS`, `MZW`, `MZL`,
+and `MZM`, plus the Treasury micros `MTN` and `MWN`. The resulting 259 rows
+include economic family, roll policy, duplicate group,
 pooling role, representative, default-pool inclusion, decision basis, and
 `history_instrument_code`. This lets the same CSV compare execution economics
 without allowing size variants to multiply their weight in the EWMAC
@@ -1219,12 +1222,14 @@ normalization sample.
 The overlays retain their own IB symbols, raw broker multipliers, effective
 point values, and commissions. Their research history and roll transactions
 come from a compatible Carver parent: `MZC→CORN_mini`,
-`MZS→SOYBEAN_mini`, `MZW→WHEAT_mini`, `MZL→SOYOIL`, and
-`MZM→SOYMEAL`. The first three use the all-listed-month mini history rather
-than the full contract's seasonal November/December policy. Because Carver has
-no observed spread for these micros, an overlay's spread stays unknown until
-IB supplies historical BID_ASK data or a snapshot; it never inherits the
-parent's spread silently.
+`MZS→SOYBEAN_mini`, `MZW→WHEAT_mini`, `MZL→SOYOIL`,
+`MZM→SOYMEAL`, `MTN→US10U`, and `MWN→US30`. The first three use the
+all-listed-month mini history rather than the full contract's seasonal
+November/December policy. `MTN` follows the price-quoted Ultra 10-Year (`TN`),
+not standard 10-Year (`ZN`), while `MWN` follows Ultra Bond (`UB`). Because
+Carver has no observed spread for these micros, an overlay's spread stays
+unknown until IB supplies historical BID_ASK data or a snapshot; it never
+inherits the parent's spread silently.
 
 The default cost audit estimates separate Carver-style research baselines for
 EWMAC 4/16, 8/32, 16/64, 32/128, and 64/256 from the 228 reviewed

@@ -26,9 +26,15 @@ def test_na_ib_currency_becomes_unspecified_not_literal_na():
     assert corn["ib_currency"] == ""
 
 
-def test_local_grain_micros_borrow_matching_carver_histories():
+def test_local_micros_borrow_matching_carver_histories():
     parent_codes = {
-        "CORN_mini", "SOYBEAN_mini", "SOYMEAL", "SOYOIL", "WHEAT_mini",
+        "CORN_mini",
+        "SOYBEAN_mini",
+        "SOYMEAL",
+        "SOYOIL",
+        "US10U",
+        "US30",
+        "WHEAT_mini",
     }
     parents = [
         {
@@ -48,7 +54,15 @@ def test_local_grain_micros_borrow_matching_carver_histories():
         if row.get("mapping_status") == "local_execution_overlay"
     }
 
-    assert set(overlays) == {"MZC", "MZL", "MZM", "MZS", "MZW"}
+    assert set(overlays) == {
+        "MTN",
+        "MWN",
+        "MZC",
+        "MZL",
+        "MZM",
+        "MZS",
+        "MZW",
+    }
     micro = overlays["MZC"]
     assert micro["instrument_code"] == "CORN_mini"
     assert micro["history_instrument_code"] == "CORN_mini"
@@ -62,3 +76,21 @@ def test_local_grain_micros_borrow_matching_carver_histories():
     assert micro["representative_instrument"] == "CORN_mini"
     assert micro["include_default_pool"] is False
     assert resolve_active_months("MZC") == ["H", "K", "N", "U", "Z"]
+
+    mtn = overlays["MTN"]
+    assert mtn["instrument_code"] == "US10U"
+    assert mtn["history_instrument_code"] == "US10U"
+    assert mtn["signal_symbol"] == "TN"
+    assert mtn["ib_symbol"] == "MTN"
+    assert mtn["multiplier"] == 100
+    assert mtn["active_months"] == ["H", "M", "U", "Z"]
+    assert resolve_active_months("MTN") == ["H", "M", "U", "Z"]
+
+    mwn = overlays["MWN"]
+    assert mwn["instrument_code"] == "US30"
+    assert mwn["history_instrument_code"] == "US30"
+    assert mwn["signal_symbol"] == "UB"
+    assert mwn["ib_symbol"] == "MWN"
+    assert mwn["multiplier"] == 100
+    assert mwn["active_months"] == ["H", "M", "U", "Z"]
+    assert resolve_active_months("MWN") == ["H", "M", "U", "Z"]

@@ -60,6 +60,8 @@ def add_local_execution_overlays(instruments: list[dict]) -> list[dict]:
             "price_magnifier": spec.get("price_magnifier"),
             "multiplier": spec["multiplier"],
             "commission": spec.get("commission"),
+            "initial_margin": spec.get("initial_margin"),
+            "active_months": spec.get("active_months"),
             "percentage_cost": 0.0,
             "per_trade_cost": 0.0,
             # No Carver execution-cost observation exists for the micro.

@@ -88,7 +88,7 @@ Each `INSTRUMENTS` entry carries:
                     covariance history; only set when the traded contract's
                     own history is too short/thin for a reliable estimate
                     (e.g. J7→JPY, MZC→ZC for CBOT micro grains launched
-                    ~2025, MES/MNQ/MTN/MCL→ES/NQ/ZN/CL -- CME Micro
+                    ~2025, MES/MNQ/MTN/MWN/MCL→ES/NQ/TN/UB/CL -- CME Micro
                     products launched 2019-2021, comparably new to J7).
                     Read by resolve_signal_symbol() (this module) for the
                     live IB continuous-bars fetch -- shared by
@@ -233,12 +233,16 @@ INSTRUMENTS: dict[str, dict] = {
     'MHG': {'exchange': 'COMEX', 'multiplier': 2500,         'cluster': 'metal',
                 'initial_margin': 3722.85, 'commission': 0.96, 'signal_symbol': 'HG'},
         # ── Rates ───────────────────────────────────────────────────────────────
-    # MTN borrows ZN's via signal_symbol (the standard 10-Year, not TN the
-    # Ultra 10-Year -- a different duration/contract, not MTN's full-size
-    # sibling), same reasoning as MES/MNQ above.
-    # active_months on ZN/ZT confirmed empirically as the standard financial
-    # quarterly cycle -- research doc §2.2. TN (Ultra 10-Year) not
-    # separately queried -- left unset (unconfirmed, not "no restriction").
+    # MTN and MWN are cash-settled, one-tenth-size versions of TN (Ultra
+    # 10-Year) and UB (Ultra Bond), respectively. They retain the parent's
+    # price convention, so both live signals and Carver history must come
+    # from those exact parents -- not ZN, and not the yield-quoted 10Y/30Y
+    # contracts. The local micros are absent from Carver's universe and are
+    # therefore exposed as execution overlays in the Phase 1 cost report.
+    # active_months on ZN/ZT were confirmed empirically (research doc §2.2);
+    # the same quarterly listing cycle for MTN/MWN comes from CME's contract
+    # specifications. TN itself remains unset because its local front-month
+    # selection has not been separately audited.
     'ZT':  {'exchange': 'CBOT',  'multiplier': 2000,       'cluster': 'rates', # notional ~= 205K
                 'initial_margin': 1380.00, 'commission': 1.51, 'active_months': ['H', 'M', 'U', 'Z'],
                 'annualization_days': 259},
@@ -248,12 +252,16 @@ INSTRUMENTS: dict[str, dict] = {
     'TN':  {'exchange': 'CBOT',  'multiplier': 1000,       'cluster': 'rates', # notional ~- 110K
             'initial_margin': 2932.50, 'commission': 1.66},
     'MTN': {'exchange': 'CBOT',  'multiplier': 100,        'cluster': 'rates', # notional ~= 11K
-            'initial_margin': 828.76, 'commission': 0.56, 'signal_symbol': 'ZN'},
+            'initial_margin': 828.76, 'commission': 0.56, 'signal_symbol': 'TN',
+            'pysystemtrade_instrument': 'US10U', 'ib_multiplier': 100,
+            'price_magnifier': 1, 'active_months': ['H', 'M', 'U', 'Z']},
     'UB':  {'exchange': 'CBOT',  'multiplier': 1000,       'cluster': 'rates', # notional ~= 105K
             'initial_margin': 5922.50, 'commission': 1.81, 'active_months': ['H', 'M', 'U', 'Z'],
             'annualization_days': 259},
     'MWN': {'exchange': 'CBOT',  'multiplier': 100,        'cluster': 'rates', # notional ~= 10.5K
-            'initial_margin': 1160.86, 'commission': 0.56, 'signal_symbol': 'ZN'},
+            'initial_margin': 1160.86, 'commission': 0.56, 'signal_symbol': 'UB',
+            'pysystemtrade_instrument': 'US30', 'ib_multiplier': 100,
+            'price_magnifier': 1, 'active_months': ['H', 'M', 'U', 'Z']},
     # ── Grains ──────────────────────────────────────────────────────────────
     # CBOT micro grains (MZL/MZC/MZS/MZW) launched ~Feb 2025 -- too short a
     # history for the 252-day TSMOM lookback. signal_symbol borrows the
