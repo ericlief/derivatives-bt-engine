@@ -1281,15 +1281,18 @@ product-specific expiry filter is supplied.
 An IB-connected phase-one audit requests `BID_ASK` history on the exact dated
 contract. `--spread-duration` is passed to
 `IBPySync.get_historical_bars(duration=...)` independently of the daily-price
-history duration and defaults to `30 D × 15 mins`. A 60-second timeout stops
+history duration and defaults to `5 D × 15 mins`. A 60-second timeout stops
 all further historical probes for that contract. Delayed data can step down
 after an immediate non-timeout failure, but a timeout never cascades into more
 requests. The successful duration and bar size remain explicit report fields.
 Spread history uses RTH by default; `--spread-all-hours` opts into the entire
 futures session. For IB `BID_ASK` bars, `open` is average bid and `close` is
 average ask, so `close - open` is the full quoted point spread for that bar.
-Internally the one-way cost uses half the width. The CSV reports **all** spread
-statistics as one-way points: `ib_hspread_mean_points`,
+The selected execution estimate is half the median width over the five-day
+window. This is robust to repeated stale quotes from the period before a dated
+contract becomes actively traded; mean and p90 remain visible as liquidity
+diagnostics. The CSV reports **all** spread statistics as one-way points:
+`ib_hspread_mean_points`,
 `ib_hspread_median_points`, `ib_hspread_p90_points`, `snap_spread_points`,
 `ref_spread_points`, and `selected_spread_points` are therefore directly
 comparable and must not be halved again. Observation count, date range,
@@ -1368,7 +1371,7 @@ asset-class coverage jointly.
 .venv/bin/futures-cost-risk \
   --instruments all-pysystemtrade \
   --vol-source pysystemtrade \
-  --spread-duration '30 D' \
+  --spread-duration '5 D' \
   --fast-vol-span 32 \
   --slow-vol-years 10 \
   --slow-vol-weight 0.30 \

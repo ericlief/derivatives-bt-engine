@@ -253,7 +253,8 @@ def test_delayed_quote_runs_dated_vol_and_spread_after_live_354(monkeypatch):
             "ib_historical_spread_source": "ib_dated_contract",
             "ib_historical_spread_bar_size": "1 min",
             "ib_historical_spread_observations": 100,
-            "ib_historical_spread_mean_points": 0.25,
+            "ib_historical_spread_mean_points": 12.0,
+            "ib_historical_spread_median_points": 0.25,
         })
         return result
 
@@ -328,6 +329,7 @@ def test_delayed_quote_runs_dated_vol_and_spread_after_live_354(monkeypatch):
     assert row["quote_selected_error_codes"] == ""
     assert row["risk_return_vol_source"] == "ib_dated_fast_carver_slow"
     assert row["selected_spread_source"] == "ib_dated_contract"
+    assert row["selected_one_way_spread_points"] == pytest.approx(0.125)
     assert history_calls == ["recent_vol", "spread"]
     assert ib.market_data_modes == [3]
 
@@ -341,7 +343,7 @@ def test_broad_audit_defaults_to_reviewed_pool_ewmac_cost_baseline():
     assert args.cost_ewmac_vol_slow_weight == pytest.approx(0.3)
     assert args.cost_ewmac_vol_min_samples == 10
     assert args.rule_cost_limit_sr == pytest.approx(0.15)
-    assert args.spread_duration == "30 D"
+    assert args.spread_duration == "5 D"
     assert not args.spread_all_hours
     assert not args.skip_ewmac_cost_baseline
 

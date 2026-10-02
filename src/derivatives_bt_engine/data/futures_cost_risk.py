@@ -87,7 +87,7 @@ from derivatives_bt_engine.utils.logger import setup_logger
 log = logging.getLogger("derivatives_bt_engine.data.futures_cost_risk")
 
 DEFAULT_DURATION = "1 Y"
-DEFAULT_SPREAD_DURATION = "30 D"
+DEFAULT_SPREAD_DURATION = "5 D"
 DEFAULT_SPREAD_BAR_SIZES = ("15 mins",)
 DEFAULT_DELAYED_SPREAD_REQUEST_PLAN = (
     ("15 mins", None),
@@ -1725,7 +1725,7 @@ def diagnose_instrument(
     if (
         historical_requests_allowed
         and not dated_spread_timed_out
-        and spread_stats["ib_historical_spread_mean_points"] is None
+        and spread_stats["ib_historical_spread_median_points"] is None
     ):
         try:
             continuous = IBPySync.cont_future(
@@ -1747,7 +1747,10 @@ def diagnose_instrument(
                 source="ib_continuous_fallback",
                 market_data_type=historical_market_data_type or "live",
             )
-            if continuous_stats["ib_historical_spread_mean_points"] is not None:
+            if (
+                continuous_stats["ib_historical_spread_median_points"]
+                is not None
+            ):
                 spread_stats = continuous_stats
         except Exception as exc:
             log.debug(
@@ -1821,7 +1824,7 @@ def diagnose_instrument(
     )
     row.update(_fx_report_fields(fx_info))
     historical_full_spread = _nonnegative_finite(
-        spread_stats.get("ib_historical_spread_mean_points")
+        spread_stats.get("ib_historical_spread_median_points")
     )
     snapshot_full_spread = _nonnegative_finite(row.get("full_spread_points"))
     if historical_full_spread is not None:
