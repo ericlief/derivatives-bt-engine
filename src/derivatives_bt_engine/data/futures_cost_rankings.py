@@ -20,6 +20,7 @@ RANK_COLUMNS = {
 
 DEFAULT_VIEW_COLUMNS = (
     "symbol",
+    "history_instrument_code",
     "description",
     "asset_class",
     "region",
@@ -31,6 +32,9 @@ DEFAULT_VIEW_COLUMNS = (
     "selected_spread_source",
     "cur_price",
     "currency",
+    "ib_multiplier",
+    "price_magnifier",
+    "multiplier",
     "notional_usd_per_contract",
     "selected_ann_dvol_usd_per_contract",
     "min_capital_usd_full_weight_idm1",

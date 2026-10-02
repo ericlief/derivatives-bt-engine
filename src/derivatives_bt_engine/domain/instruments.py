@@ -27,11 +27,12 @@ Each `INSTRUMENTS` entry carries:
                     calendar. Set directly only on a "full-size" entry (GC,
                     ZC, ES, ...) that was actually queried -- a micro/mini
                     that borrows its full-size sibling's price series
-                    (MGC->GC, J7->JPY, ...) does NOT get its own duplicate
-                    copy; call resolve_active_months(symbol) instead, which
-                    follows the same db_symbol/signal_symbol/ib_symbol
-                    fallback chain resolve_price_symbol already uses, so
-                    the two lists can never drift out of sync. Missing means
+                    (MGC->GC, J7->JPY, ...) normally does not get a duplicate
+                    copy; call resolve_active_months(symbol) instead. A local
+                    execution overlay may define its own calendar when its
+                    explicit pysystemtrade parent has a different roll policy
+                    from the full-size signal root (the CBOT grain micros).
+                    Missing means
                     either "not yet empirically confirmed" or "confirmed to
                     have no restriction" (e.g. CL trades all 12 months) --
                     see the comment on that specific entry for which; either
@@ -108,6 +109,12 @@ Each `INSTRUMENTS` entry carries:
                     ticker).
                     Used by the duckdb continuous-front-month queries in
                     the backtester, diagnostic, and data-quality scripts.
+  pysystemtrade_instrument -- Carver history used when this traded contract
+                    is an execution-only variant absent from Carver's own
+                    universe. This is independent of signal_symbol: MZC
+                    signals from the ZC market but borrows CORN_mini's
+                    all-listed-month Carver history rather than CORN's
+                    December-only seasonal history.
 
 `BACKTEST_ONLY_SPECS` holds multiplier/margin/commission for contracts that
 exist only on the general single/multi-symbol backtest path (naked_futures.py,
@@ -273,28 +280,43 @@ INSTRUMENTS: dict[str, dict] = {
             'initial_margin': 5102.79, 'commission': 3.01, 'active_months': ['F', 'H', 'K', 'N', 'Z'],
             'annualization_days': 252},
     'MZL': {'exchange': 'CBOT',  'multiplier': 60,         'cluster': 'grain',
-            'initial_margin': 525.16, 'commission': 0.76, 'signal_symbol': 'ZL'},
+            'initial_margin': 525.16, 'commission': 0.76, 'signal_symbol': 'ZL',
+            'pysystemtrade_instrument': 'SOYOIL', 'ib_multiplier': 6000,
+            'price_magnifier': 100,
+            'active_months': ['F', 'H', 'K', 'N', 'Q', 'U', 'V', 'Z']},
     'ZC':  {'exchange': 'CBOT',  'multiplier': 50,         'cluster': 'grain',
             'initial_margin': 1855.76, 'commission': 3.01, 'active_months': ['H', 'K', 'N', 'Z'],
             'annualization_days': 252},
     'MZC': {'exchange': 'CBOT',  'multiplier': 5,          'cluster': 'grain',
-            'initial_margin': 166.51, 'commission': 0.76, 'signal_symbol': 'ZC'},
+            'initial_margin': 166.51, 'commission': 0.76, 'signal_symbol': 'ZC',
+            'pysystemtrade_instrument': 'CORN_mini', 'ib_multiplier': 500,
+            'price_magnifier': 100,
+            'active_months': ['H', 'K', 'N', 'U', 'Z']},
     'ZS':  {'exchange': 'CBOT',  'multiplier': 50,         'cluster': 'grain',
             'initial_margin': 4038.46, 'commission': 3.01, 'active_months': ['F', 'H', 'K', 'N', 'X'],
             'annualization_days': 252},
     'MZS': {'exchange': 'CBOT',  'multiplier': 5,          'cluster': 'grain',
-            'initial_margin': 382.95, 'commission':  0.76, 'signal_symbol': 'ZS'},
+            'initial_margin': 382.95, 'commission':  0.76, 'signal_symbol': 'ZS',
+            'pysystemtrade_instrument': 'SOYBEAN_mini', 'ib_multiplier': 500,
+            'price_magnifier': 100,
+            'active_months': ['F', 'H', 'K', 'N', 'Q', 'U', 'X']},
     
     'ZM':  {'exchange': 'CBOT',  'multiplier': 100,         'cluster': 'grain',
             'initial_margin': 3321.39, 'commission': 3.01, 'active_months': ['H', 'K', 'N', 'U', 'Z'],
             'annualization_days': 252},
     'MZM': {'exchange': 'CBOT',  'multiplier': 10,          'cluster': 'grain',
-            'initial_margin': 423.80, 'commission':  0.76, 'signal_symbol': 'ZM'},
+            'initial_margin': 423.80, 'commission':  0.76, 'signal_symbol': 'ZM',
+            'pysystemtrade_instrument': 'SOYMEAL', 'ib_multiplier': 10,
+            'price_magnifier': 1,
+            'active_months': ['F', 'H', 'K', 'N', 'Q', 'U', 'V', 'Z']},
     'ZW':  {'exchange': 'CBOT',  'multiplier': 50,         'cluster': 'grain',
             'initial_margin': 3321.39, 'commission': 3.01, 'active_months': ['H', 'K', 'N', 'U', 'Z'], # Check as re carver FHKNQUVZ
             'annualization_days': 252},
     'MZW': {'exchange': 'CBOT',  'multiplier': 5,          'cluster': 'grain',
-             'initial_margin': 332.14, 'commission': 0.76, 'signal_symbol': 'ZW'},
+             'initial_margin': 332.14, 'commission': 0.76, 'signal_symbol': 'ZW',
+             'pysystemtrade_instrument': 'WHEAT_mini', 'ib_multiplier': 500,
+             'price_magnifier': 100,
+             'active_months': ['H', 'K', 'N', 'U', 'Z']},
 
     # ── International equity ─────────────────────────────────────────────────
     # Nikkei: its own factor (Japan equity, JPY-adjacent), not lumped with
@@ -427,6 +449,11 @@ def resolve_signal_symbol(instr: dict) -> str:
     return instr.get('signal_symbol') or instr.get('ib_symbol') or instr['symbol']
 
 
+def resolve_pysystemtrade_instrument(symbol: str) -> Optional[str]:
+    """Return the explicit Carver history parent for an execution variant."""
+    return INSTRUMENTS.get(symbol.upper(), {}).get('pysystemtrade_instrument')
+
+
 # get_spec()'s Globex/db ticker -> INSTRUMENTS dict key, for the 3 FX
 # symbols where they diverge (INSTRUMENTS keys by IBKR-facing ticker, not
 # the raw Globex root -- see this module's docstring, db_symbol field).
@@ -490,6 +517,9 @@ def resolve_active_months(symbol: str) -> Optional[list[str]]:
     test suite uses 'X') should degrade to "no info available," the same
     as a real but not-yet-confirmed one, rather than crash a caller that
     never asked for strict validation."""
+    direct = INSTRUMENTS.get(symbol.upper(), {})
+    if direct.get('active_months') is not None:
+        return direct['active_months']
     try:
         return get_spec(resolve_price_symbol(symbol)).get('active_months')
     except KeyError:

@@ -15,11 +15,67 @@ import duckdb
 import polars as pl
 
 from derivatives_bt_engine.domain.futures_history import DEFAULT_PYSYSTEMTRADE_DB_PATH
+from derivatives_bt_engine.domain.instruments import INSTRUMENTS
 
 
 DEFAULT_IB_MAPPING_PATH = Path(__file__).with_name("pysystemtrade_ib_mappings.csv")
 # Provenance for the packaged copy of sysbrokers/IB/config/ib_config_futures.csv.
 PYSYSTEMTRADE_IB_MAPPING_COMMIT = "b4a25e6e1e33a54a3ecfb45c0f6db5e2b60b84f8"
+
+
+def add_local_execution_overlays(instruments: list[dict]) -> list[dict]:
+    """Add local traded variants that intentionally borrow Carver history.
+
+    Carver's instrument list is a research-history universe, not a complete
+    executable contract catalogue. A local micro remains a distinct execution
+    row with its own multiplier and commission, while ``instrument_code`` and
+    ``representative_instrument`` identify the Carver series supplying its
+    volatility, rule performance, and roll-policy costs.
+    """
+    parent_by_code = {row["instrument_code"]: row for row in instruments}
+    existing_symbols = {row["symbol"] for row in instruments}
+    overlays: list[dict] = []
+    for symbol, spec in sorted(INSTRUMENTS.items()):
+        parent_code = spec.get("pysystemtrade_instrument")
+        if parent_code is None or symbol in existing_symbols:
+            continue
+        parent = parent_by_code.get(parent_code)
+        if parent is None:
+            raise ValueError(
+                f"{symbol} execution overlay references missing "
+                f"pysystemtrade instrument {parent_code}"
+            )
+        overlay = dict(parent)
+        overlay.update({
+            "symbol": symbol,
+            "description": f"{symbol} micro execution overlay",
+            "ib_symbol": spec.get("ib_symbol", symbol),
+            "signal_symbol": spec.get("signal_symbol", symbol),
+            "db_symbol": spec.get("db_symbol") or spec.get("signal_symbol", symbol),
+            "exchange": spec["exchange"],
+            "ib_currency": spec.get(
+                "ib_currency", parent.get("currency", "USD")
+            ),
+            "ib_multiplier": spec.get("ib_multiplier"),
+            "price_magnifier": spec.get("price_magnifier"),
+            "multiplier": spec["multiplier"],
+            "commission": spec.get("commission"),
+            "percentage_cost": 0.0,
+            "per_trade_cost": 0.0,
+            # No Carver execution-cost observation exists for the micro.
+            # Online IB history or a snapshot must supply its spread.
+            "carver_spread_points": None,
+            "mapping_status": "local_execution_overlay",
+            "pooling_role": "execution_overlay",
+            "representative_instrument": parent_code,
+            "include_default_pool": False,
+            "pooling_decision_basis": (
+                f"execution_only_borrows_{parent_code}_history"
+            ),
+            "history_instrument_code": parent_code,
+        })
+        overlays.append(overlay)
+    return [*instruments, *overlays]
 
 
 def load_pysystemtrade_ib_mapping(

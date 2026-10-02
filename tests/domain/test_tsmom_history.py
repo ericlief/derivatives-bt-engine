@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, datetime
 
 import polars as pl
@@ -57,3 +58,33 @@ def test_candidate_mapping_requires_explicit_research_opt_in(monkeypatch) -> Non
         th.load_source_neutral_histories(
             ['ES'], data_source='pysystemtrade', allow_candidate_mappings=False,
         )
+
+
+def test_mzc_uses_all_listed_carver_mini_history(monkeypatch) -> None:
+    mapping = MarketMapping(
+        'corn', 'CORN', 'ZC', mapping_status='approved'
+    )
+    loaded: list[str] = []
+
+    class StubCarverProvider:
+        def __init__(self, **_kwargs):
+            pass
+
+        def load(self, instrument_code: str) -> FuturesHistory:
+            loaded.append(instrument_code)
+            return replace(_history(), instrument_code=instrument_code)
+
+    monkeypatch.setattr(th, 'load_mappings', lambda _path=None: (mapping,))
+    monkeypatch.setattr(th, 'PysystemtradeHistoryProvider', StubCarverProvider)
+
+    frames, manifest = th.load_source_neutral_histories(
+        ['MZC'], data_source='pysystemtrade'
+    )
+
+    assert loaded == ['CORN_mini']
+    assert frames['MZC'].height == 3
+    assert manifest['instruments']['MZC']['history_instrument'] == 'CORN_mini'
+    assert (
+        manifest['instruments']['MZC']['crosswalk']['carver_instrument']
+        == 'CORN_mini'
+    )

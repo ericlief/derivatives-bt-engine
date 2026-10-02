@@ -1208,11 +1208,23 @@ that result separately. The effective IB point value
 mappings.
 
 The cost report deliberately retains all 252 usable histories, including rows
-excluded from pooled signal calibration. It now adds economic family, roll
-policy, duplicate group, pooling role, representative, default-pool inclusion,
-and decision basis. This lets the same CSV compare ES/MES or CL/QM/MCL
-execution economics without allowing those variants to multiply their weight
-in the EWMAC normalization sample.
+excluded from pooled signal calibration, and adds five local CBOT grain-micro
+execution overlays absent from Carver: `MZC`, `MZS`, `MZW`, `MZL`, and `MZM`.
+The resulting 257 rows include economic family, roll policy, duplicate group,
+pooling role, representative, default-pool inclusion, decision basis, and
+`history_instrument_code`. This lets the same CSV compare execution economics
+without allowing size variants to multiply their weight in the EWMAC
+normalization sample.
+
+The overlays retain their own IB symbols, raw broker multipliers, effective
+point values, and commissions. Their research history and roll transactions
+come from a compatible Carver parent: `MZC→CORN_mini`,
+`MZS→SOYBEAN_mini`, `MZW→WHEAT_mini`, `MZL→SOYOIL`, and
+`MZM→SOYMEAL`. The first three use the all-listed-month mini history rather
+than the full contract's seasonal November/December policy. Because Carver has
+no observed spread for these micros, an overlay's spread stays unknown until
+IB supplies historical BID_ASK data or a snapshot; it never inherits the
+parent's spread silently.
 
 The default cost audit estimates separate Carver-style research baselines for
 EWMAC 4/16, 8/32, 16/64, 32/128, and 64/256 from the 228 reviewed
@@ -1319,7 +1331,7 @@ spread is last. Missing bid/ask data remain **unknown**, never zero. A Carver
 zero is labelled `static_config_zero_spread`, still includes commission, and
 must not be interpreted as evidence of free live execution. Historical IB
 spread requests require entitlements and are pacing-sensitive, so a complete
-252-row collection should be run deliberately rather than as an incidental
+257-row collection should be run deliberately rather than as an incidental
 notebook refresh.
 
 IB error `162` with “API historical data query cancelled” after the wrapper's
@@ -1387,7 +1399,7 @@ Set `rank_by` to `"affordability"` or `"notional"` for the other Phase 1
 rankings. Pass `asset_classes=["Equity", "Rates"]` to show selected classes,
 or `columns=None` to retain all report columns in each returned frame.
 
-`--offline` writes the complete 252-row comparison without connecting to IB.
+`--offline` writes the complete 257-row comparison without connecting to IB.
 Prices and volatility then end at the imported Carver history boundary, live
 spreads remain null, and non-USD conversions use the latest FX observation in
 that database. Omit `--offline` to qualify current IB contracts and request

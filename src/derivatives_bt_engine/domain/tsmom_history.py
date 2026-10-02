@@ -17,7 +17,10 @@ from derivatives_bt_engine.domain.futures_history import (
     HybridHistoryProvider,
     PysystemtradeHistoryProvider,
 )
-from derivatives_bt_engine.domain.instruments import resolve_price_symbol
+from derivatives_bt_engine.domain.instruments import (
+    resolve_price_symbol,
+    resolve_pysystemtrade_instrument,
+)
 
 
 SOURCE_NEUTRAL_DATA_SOURCES = ("globex", "pysystemtrade", "hybrid")
@@ -139,10 +142,14 @@ def load_source_neutral_histories(
                 f"(resolved Globex symbol {globex_symbol}); use an approved mapping or "
                 "explicitly enable candidate mappings for research"
             )
+        carver_instrument = (
+            resolve_pysystemtrade_instrument(traded_symbol)
+            or (mapping.carver_instrument if mapping is not None else None)
+        )
         if data_source == "globex":
             history = globex.load(globex_symbol)
         elif data_source == "pysystemtrade":
-            history = carver.load(mapping.carver_instrument)
+            history = carver.load(carver_instrument)
         else:
             alignment = (
                 "previous_primary_session"
@@ -152,7 +159,7 @@ def load_source_neutral_histories(
             history = HybridHistoryProvider(
                 historical=carver,
                 primary=globex,
-                historical_instrument_map={globex_symbol: mapping.carver_instrument},
+                historical_instrument_map={globex_symbol: carver_instrument},
                 handoff_date=handoff_date,
                 historical_date_alignment=alignment,
                 historical_date_alignment_through=mapping.carver_date_alignment_through,
@@ -174,7 +181,7 @@ def load_source_neutral_histories(
             "crosswalk": (
                 {
                     "canonical_market_id": mapping.canonical_market_id,
-                    "carver_instrument": mapping.carver_instrument,
+                    "carver_instrument": carver_instrument,
                     "globex_asset": mapping.globex_asset,
                     "mapping_status": mapping.mapping_status,
                     "usage_status": mapping.usage_status,

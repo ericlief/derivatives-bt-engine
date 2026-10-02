@@ -13,8 +13,10 @@ The diagnostic deliberately separates research history from execution data:
 * each execution row combines its own one-way costs and current dollar risk
   with pooled rule turnover and its representative roll policy.
 
-All 252 instruments with usable Carver history have candidate IB identities;
-qualification against the connected account determines actual availability.
+All 252 instruments with usable Carver history have candidate IB identities.
+Five local CBOT grain micros absent from Carver are added as execution-only
+overlays, producing 257 candidate rows; qualification against the connected
+account determines actual availability.
 IB dated and continuous history remain explicit comparison modes.  A missing
 quote is never treated as a zero spread, and spread-dependent costs remain
 null.
@@ -44,7 +46,10 @@ import duckdb
 import polars as pl
 from ib_tools.ibpysync import IBPySync
 
-from derivatives_bt_engine.data.pysystemtrade_ib import load_pysystemtrade_ib_instruments
+from derivatives_bt_engine.data.pysystemtrade_ib import (
+    add_local_execution_overlays,
+    load_pysystemtrade_ib_instruments,
+)
 from derivatives_bt_engine.data.pysystemtrade_pooling import (
     DEFAULT_POOLING_MAPPING_PATH,
 )
@@ -151,6 +156,10 @@ DEFAULT_AFFORDABILITY_MIN_CONTRACTS = 4
 
 def _pooling_report_identity(instr: dict) -> dict:
     return {
+        "history_instrument_code": (
+            instr.get("history_instrument_code")
+            or instr.get("instrument_code")
+        ),
         "description": instr.get("description"),
         "asset_class": instr.get("asset_class"),
         "region": instr.get("region"),
@@ -1828,7 +1837,10 @@ def diagnose_instrument(
         "ib_symbol": instr.get("ib_symbol", symbol),
         "ib_exchange": instr.get("exchange"),
         "ib_currency": instr.get("ib_currency"),
-        "ib_multiplier": instr.get("ib_multiplier"),
+        "ib_multiplier": (
+            instr.get("ib_multiplier")
+            or getattr(contract, "multiplier", None)
+        ),
         "price_magnifier": instr.get("price_magnifier"),
         "mapping_status": instr.get("mapping_status", "local_registry"),
         "ib_availability": "contract_qualified",
@@ -2064,15 +2076,23 @@ def _load_instruments(
         pysystemtrade_db,
         pooling_mapping_path=pooling_mapping_path,
     )
+    execution_universe = add_local_execution_overlays(carver)
     if spec == "all-pysystemtrade":
-        return carver
+        return execution_universe
     carver_by_code = {row["instrument_code"]: row for row in carver}
+    overlay_by_symbol = {
+        row["symbol"]: row
+        for row in execution_universe
+        if row.get("mapping_status") == "local_execution_overlay"
+    }
     requested = [value.strip() for value in spec.split(",") if value.strip()]
     selected = []
     local = []
     for value in requested:
         if value in carver_by_code:
             selected.append(carver_by_code[value])
+        elif value.upper() in overlay_by_symbol:
+            selected.append(overlay_by_symbol[value.upper()])
         else:
             local.append(value)
     if local:
