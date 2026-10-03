@@ -777,16 +777,17 @@ def _attach_pooled_cost_estimates(
             or instr.get("instrument_code")
             or instr.get("symbol")
         )
+        reference_metrics_by_rule: dict[int, dict[str, object]] = {}
+        for fast_span, metrics in metrics_by_rule.items():
+            reference_metrics = metrics.get(reference)
+            if reference_metrics is not None:
+                reference_metrics_by_rule[fast_span] = reference_metrics
         row.update(
             _configured_cost_estimate(
                 instr,
                 row,
                 pooled_summaries=pooled_summaries,
-                strategy_metrics_by_rule={
-                    fast_span: metrics.get(reference)
-                    for fast_span, metrics in metrics_by_rule.items()
-                    if metrics.get(reference) is not None
-                },
+                strategy_metrics_by_rule=reference_metrics_by_rule,
                 rule_cost_limit_sr=rule_cost_limit_sr,
             )
         )
