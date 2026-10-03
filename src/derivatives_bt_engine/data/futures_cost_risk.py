@@ -115,6 +115,8 @@ TWO_DECIMAL_MONEY_COLUMNS = {
     "min_contract_notional",
     "min_contract_annual_dollar_vol",
     "min_capital_full_weight_idm1",
+    "equal_weight_dvol_budget",
+    "min_capital_equal_weight",
     "commission_per_side",
     "one_way_spread_cash",
     "one_way_total_cost",
@@ -137,6 +139,9 @@ TWO_DECIMAL_MONEY_COLUMNS = {
     "min_contract_notional_usd",
     "min_contract_ann_dvol_usd",
     "min_capital_usd_full_weight_idm1",
+    "affordability_scenario_capital_usd",
+    "equal_weight_dvol_budget_usd",
+    "min_capital_usd_equal_weight",
 }
 SIX_DECIMAL_RATE_COLUMNS = {
     "fx_to_usd",
@@ -157,6 +162,18 @@ DEFAULT_COST_VOLATILITY_METHOD = "selected-blend"
 COST_VOLATILITY_METHODS = ("selected-blend", "historical-1y")
 DEFAULT_AFFORDABILITY_TARGET_VOL = 0.20
 DEFAULT_AFFORDABILITY_MIN_CONTRACTS = 4
+DEFAULT_AFFORDABILITY_CAPITAL_USD = 100_000.0
+DEFAULT_AFFORDABILITY_IDM = 1.0
+DEFAULT_AFFORDABILITY_MIN_MAIN_INSTRUMENTS = 15
+DEFAULT_AFFORDABILITY_MAIN_ASSET_CLASSES = (
+    "Equity",
+    "Ags",
+    "Vol",
+    "OilGas",
+    "FX",
+    "Metals",
+    "Bond",
+)
 
 
 def _pooling_report_identity(instr: dict) -> dict:
@@ -238,6 +255,15 @@ def _parse_fast_spans(value: str) -> tuple[int, ...]:
     if not spans or any(span <= 0 for span in spans):
         raise argparse.ArgumentTypeError("EWMAC fast spans must be positive")
     return spans
+
+
+def _parse_asset_classes(value: str) -> tuple[str, ...]:
+    asset_classes = tuple(
+        item.strip() for item in value.split(",") if item.strip()
+    )
+    if not asset_classes:
+        raise argparse.ArgumentTypeError("asset classes cannot be empty")
+    return asset_classes
 
 
 def _ib_contract_currency(instr: dict, contract=None) -> str:
@@ -800,16 +826,32 @@ def _attach_affordability_ranks(
     *,
     target_vol: float,
     min_contracts: int,
+    capital_usd: float = DEFAULT_AFFORDABILITY_CAPITAL_USD,
+    idm: float = DEFAULT_AFFORDABILITY_IDM,
+    min_main_instruments: int = DEFAULT_AFFORDABILITY_MIN_MAIN_INSTRUMENTS,
+    main_asset_classes: tuple[str, ...] = (
+        DEFAULT_AFFORDABILITY_MAIN_ASSET_CLASSES
+    ),
 ) -> pl.DataFrame:
-    """Add transparent cost and contract-granularity ranks by asset class.
+    """Add cost ranks and an equal-weight main-instrument sizing scenario.
 
     Rank 1 means the lowest value for cost, affordability, and notional, so the
-    cheapest and smallest contracts appear first.
+    cheapest and smallest contracts appear first. The scenario assumes the
+    portfolio must fund at least ``min_main_instruments`` ordinary instruments;
+    special-cluster additions do not satisfy that breadth requirement.
     """
     if target_vol <= 0:
         raise ValueError("target_vol must be positive")
     if min_contracts <= 0:
         raise ValueError("min_contracts must be positive")
+    if capital_usd <= 0:
+        raise ValueError("capital_usd must be positive")
+    if idm <= 0:
+        raise ValueError("idm must be positive")
+    if min_main_instruments <= 0:
+        raise ValueError("min_main_instruments must be positive")
+    if not main_asset_classes:
+        raise ValueError("main_asset_classes cannot be empty")
     required = {
         "symbol",
         "asset_class",
@@ -819,9 +861,35 @@ def _attach_affordability_ranks(
     }
     if not required.issubset(report.columns):
         return report
+    equal_weight_dvol_budget = (
+        capital_usd * target_vol * idm / min_main_instruments
+    )
     ranked = report.with_columns(
         pl.lit(target_vol).alias("affordability_target_vol"),
         pl.lit(min_contracts).alias("affordability_min_contracts"),
+        pl.lit(capital_usd).alias("affordability_scenario_capital"),
+        pl.lit(idm).alias("affordability_scenario_idm"),
+        pl.lit(min_main_instruments).alias(
+            "affordability_min_main_instruments"
+        ),
+        pl.lit(len(set(main_asset_classes))).alias(
+            "affordability_main_cluster_count"
+        ),
+        pl.lit(",".join(main_asset_classes)).alias(
+            "affordability_main_asset_classes"
+        ),
+        pl.col("asset_class").is_in(main_asset_classes).alias(
+            "counts_toward_main_instrument_minimum"
+        ),
+        (
+            pl.when(pl.col("asset_class").is_in(main_asset_classes))
+            .then(pl.lit("main"))
+            .otherwise(pl.lit("special"))
+        ).alias("affordability_cluster_role"),
+        pl.lit(1.0 / min_main_instruments).alias(
+            "affordability_equal_weight"
+        ),
+        pl.lit(equal_weight_dvol_budget).alias("equal_weight_dvol_budget"),
         (pl.col("notional_per_contract") * min_contracts).alias(
             "min_contract_notional"
         ),
@@ -833,6 +901,29 @@ def _attach_affordability_ranks(
             * min_contracts
             / target_vol
         ).alias("min_capital_full_weight_idm1"),
+        (
+            pl.col("annual_dollar_vol_per_contract")
+            * min_contracts
+            * min_main_instruments
+            / (target_vol * idm)
+        ).alias("min_capital_equal_weight"),
+        (
+            equal_weight_dvol_budget
+            / pl.col("annual_dollar_vol_per_contract")
+        ).alias("equal_weight_average_contracts"),
+        (
+            equal_weight_dvol_budget
+            / pl.col("annual_dollar_vol_per_contract")
+            >= min_contracts
+        ).alias("equal_weight_meets_min_contracts"),
+        (
+            pl.col("asset_class").is_in(main_asset_classes)
+            & (
+                equal_weight_dvol_budget
+                / pl.col("annual_dollar_vol_per_contract")
+                >= min_contracts
+            )
+        ).alias("main_instrument_affordable_for_scenario"),
     )
     return ranked.with_columns(
         pl.col("configured_sr_cost_per_trade")
@@ -2111,6 +2202,36 @@ def parse_args(argv=None):
         help="Minimum average contract count used by the affordability diagnostic",
     )
     parser.add_argument(
+        "--affordability-capital-usd",
+        type=float,
+        default=DEFAULT_AFFORDABILITY_CAPITAL_USD,
+        help="Capital for the equal-weight affordability scenario",
+    )
+    parser.add_argument(
+        "--affordability-idm",
+        type=float,
+        default=DEFAULT_AFFORDABILITY_IDM,
+        help="IDM for the equal-weight affordability scenario",
+    )
+    parser.add_argument(
+        "--affordability-min-main-instruments",
+        type=int,
+        default=DEFAULT_AFFORDABILITY_MIN_MAIN_INSTRUMENTS,
+        help=(
+            "Minimum ordinary instruments sharing the scenario risk budget; "
+            "special-cluster additions do not satisfy this count"
+        ),
+    )
+    parser.add_argument(
+        "--affordability-main-asset-classes",
+        type=_parse_asset_classes,
+        default=DEFAULT_AFFORDABILITY_MAIN_ASSET_CLASSES,
+        help=(
+            "Comma-separated core asset classes counted toward the minimum "
+            "(default: Equity,Ags,Vol,OilGas,FX,Metals,Bond)"
+        ),
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=None,
@@ -2343,6 +2464,9 @@ PUBLIC_REPORT_RENAMES = {
     "min_contract_notional": "min_contract_notional_usd",
     "min_contract_annual_dollar_vol": "min_contract_ann_dvol_usd",
     "min_capital_full_weight_idm1": "min_capital_usd_full_weight_idm1",
+    "affordability_scenario_capital": "affordability_scenario_capital_usd",
+    "equal_weight_dvol_budget": "equal_weight_dvol_budget_usd",
+    "min_capital_equal_weight": "min_capital_usd_equal_weight",
 }
 
 
@@ -2483,7 +2607,18 @@ def _emit_report(report: pl.DataFrame, args) -> pl.DataFrame:
         "selected_ann_dvol_usd_per_contract",
         "selected_cost_ann_dvol_usd_per_contract",
         "affordability_rank_in_asset_class",
+        "affordability_cluster_role",
+        "counts_toward_main_instrument_minimum",
+        "affordability_scenario_capital_usd",
+        "affordability_scenario_idm",
+        "affordability_min_main_instruments",
+        "affordability_main_cluster_count",
+        "equal_weight_dvol_budget_usd",
+        "equal_weight_average_contracts",
+        "equal_weight_meets_min_contracts",
+        "main_instrument_affordable_for_scenario",
         "min_capital_usd_full_weight_idm1",
+        "min_capital_usd_equal_weight",
         "pooling_role",
         "include_default_pool",
         "selected_spread_points",
@@ -2539,6 +2674,14 @@ def run(argv=None) -> pl.DataFrame:
         raise ValueError("--affordability-target-vol must be positive")
     if args.affordability_min_contracts <= 0:
         raise ValueError("--affordability-min-contracts must be positive")
+    if args.affordability_capital_usd <= 0:
+        raise ValueError("--affordability-capital-usd must be positive")
+    if args.affordability_idm <= 0:
+        raise ValueError("--affordability-idm must be positive")
+    if args.affordability_min_main_instruments <= 0:
+        raise ValueError(
+            "--affordability-min-main-instruments must be positive"
+        )
 
     pooled_summaries = None
     strategy_metrics_by_rule = None
@@ -2598,6 +2741,10 @@ def run(argv=None) -> pl.DataFrame:
             pl.DataFrame(rows, infer_schema_length=None),
             target_vol=args.affordability_target_vol,
             min_contracts=args.affordability_min_contracts,
+            capital_usd=args.affordability_capital_usd,
+            idm=args.affordability_idm,
+            min_main_instruments=args.affordability_min_main_instruments,
+            main_asset_classes=args.affordability_main_asset_classes,
         )
         return _emit_report(report, args)
 
@@ -2692,6 +2839,10 @@ def run(argv=None) -> pl.DataFrame:
         pl.DataFrame(rows, infer_schema_length=None),
         target_vol=args.affordability_target_vol,
         min_contracts=args.affordability_min_contracts,
+        capital_usd=args.affordability_capital_usd,
+        idm=args.affordability_idm,
+        min_main_instruments=args.affordability_min_main_instruments,
+        main_asset_classes=args.affordability_main_asset_classes,
     )
     return _emit_report(report, args)
 

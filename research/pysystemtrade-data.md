@@ -1381,9 +1381,20 @@ smallest contract risk, and smallest notional appear first in their respective
 rankings.
 The report includes the notional and annual dollar volatility of four contracts and
 `min_capital_full_weight_idm1 = 4 × annual dollar vol / target vol`. This is a
-capital-independent granularity diagnostic, not the final portfolio test: the
-next phase must divide by the candidate instrument weight and IDM and enforce
-asset-class coverage jointly.
+capital-independent, one-instrument lower bound rather than the portfolio
+affordability result.
+
+The portfolio scenario defaults to `$100,000`, `IDM=1`, four average contracts,
+and at least 15 ordinary instruments. Fifteen is the lower end of Carver's
+[15-to-30 instrument guidance](https://qoppac.blogspot.com/2021/06/static-optimisation-of-best-set-of.html)
+for adequate futures diversification. Its equal-weight risk budget is
+`capital × target vol × IDM / minimum main instruments`; the CSV reports the
+resulting average contracts and the capital required to reach four. The seven
+main asset classes are `Equity, Ags, Vol, OilGas, FX, Metals, Bond`. `Housing`,
+`Sector`, and `Other` are special additions: they retain affordability metrics
+but do not satisfy the minimum-15 breadth count. Portfolio construction should
+first try to cover all seven main classes, then fill the remaining main slots;
+coverage is a preference when contract granularity makes a class infeasible.
 
 Rule-cost screening has an independent volatility selector. The default
 `--cost-volatility-method selected-blend` uses the same current IB-fast/Carver-slow
@@ -1402,7 +1413,12 @@ the resulting cost-specific annual dollar volatility are retained in the CSV.
   --slow-vol-years 10 \
   --slow-vol-weight 0.30 \
   --cost-ewmac-fast-spans 4,8,16,32,64 \
-  --rule-cost-limit-sr 0.15
+  --rule-cost-limit-sr 0.15 \
+  --affordability-capital-usd 100000 \
+  --affordability-idm 1 \
+  --affordability-min-contracts 4 \
+  --affordability-min-main-instruments 15 \
+  --affordability-main-asset-classes Equity,Ags,Vol,OilGas,FX,Metals,Bond
 ```
 
 Use `--skip-ewmac-cost-baseline` only when a quick volatility/contract audit

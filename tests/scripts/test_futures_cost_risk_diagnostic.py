@@ -347,6 +347,13 @@ def test_broad_audit_defaults_to_reviewed_pool_ewmac_cost_baseline():
     assert args.cost_ewmac_vol_min_samples == 10
     assert args.rule_cost_limit_sr == pytest.approx(0.15)
     assert args.cost_volatility_method == "selected-blend"
+    assert args.affordability_capital_usd == pytest.approx(100_000.0)
+    assert args.affordability_idm == pytest.approx(1.0)
+    assert args.affordability_min_contracts == 4
+    assert args.affordability_min_main_instruments == 15
+    assert args.affordability_main_asset_classes == (
+        "Equity", "Ags", "Vol", "OilGas", "FX", "Metals", "Bond",
+    )
     assert args.spread_duration == "5 D"
     assert not args.spread_all_hours
     assert not args.skip_ewmac_cost_baseline
@@ -1033,8 +1040,45 @@ def test_affordability_ranks_are_within_asset_class():
     )
     micro = ranked.filter(pl.col("symbol") == "MICRO").row(0, named=True)
     full = ranked.filter(pl.col("symbol") == "FULL").row(0, named=True)
+    bond = ranked.filter(pl.col("symbol") == "BOND").row(0, named=True)
 
     assert micro["affordability_rank_in_asset_class"] == 1
     assert full["cost_rank_in_asset_class"] == 1
     assert micro["cost_rank_in_asset_class"] == 2
     assert micro["min_capital_full_weight_idm1"] == pytest.approx(120_000.0)
+    assert micro["min_capital_equal_weight"] == pytest.approx(1_800_000.0)
+    assert micro["affordability_cluster_role"] == "main"
+    assert micro["counts_toward_main_instrument_minimum"]
+    assert micro["equal_weight_dvol_budget"] == pytest.approx(20_000.0 / 15)
+    assert micro["equal_weight_average_contracts"] == pytest.approx(2.0 / 9.0)
+    assert not micro["equal_weight_meets_min_contracts"]
+    assert not micro["main_instrument_affordable_for_scenario"]
+    assert bond["affordability_cluster_role"] == "special"
+    assert not bond["counts_toward_main_instrument_minimum"]
+    assert not bond["main_instrument_affordable_for_scenario"]
+
+
+def test_affordability_scenario_splits_risk_across_main_instruments():
+    report = pl.DataFrame({
+        "symbol": ["MICRO"],
+        "asset_class": ["Equity"],
+        "notional_per_contract": [10_000.0],
+        "annual_dollar_vol_per_contract": [2_500.0],
+        "configured_sr_cost_per_trade": [0.002],
+    })
+
+    ranked = _attach_affordability_ranks(
+        report,
+        target_vol=0.20,
+        min_contracts=4,
+        capital_usd=100_000.0,
+        idm=1.0,
+        min_main_instruments=2,
+    )
+    row = ranked.row(0, named=True)
+
+    assert row["equal_weight_dvol_budget"] == pytest.approx(10_000.0)
+    assert row["equal_weight_average_contracts"] == pytest.approx(4.0)
+    assert row["equal_weight_meets_min_contracts"]
+    assert row["main_instrument_affordable_for_scenario"]
+    assert row["min_capital_equal_weight"] == pytest.approx(100_000.0)
