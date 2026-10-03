@@ -1395,6 +1395,10 @@ main asset classes are `Equity, Ags, Vol, OilGas, FX, Metals, Bond`. `Housing`,
 but do not satisfy the minimum-15 breadth count. Portfolio construction should
 first try to cover all seven main classes, then fill the remaining main slots;
 coverage is a preference when contract granularity makes a class infeasible.
+These figures are deliberately a Phase 1 stress scenario. Four contracts and
+15 instruments must not become simultaneous hard admission gates in Phase 2:
+that would reject diversification before allowing its higher IDM to reduce the
+capital needed per instrument.
 
 Rule-cost screening has an independent volatility selector. The default
 `--cost-volatility-method selected-blend` uses the same current IB-fast/Carver-slow
@@ -1448,6 +1452,169 @@ display_asset_class_rankings(rankings)
 Set `rank_by` to `"affordability"` or `"notional"` for the other Phase 1
 rankings. Pass `asset_classes=["Equity", "Rates"]` to show selected classes,
 or `columns=None` to retain all report columns in each returned frame.
+
+### Phase 2 research: iterative AFTS instrument selection
+
+Carver's [static instrument-selection
+algorithm](https://qoppac.blogspot.com/2021/06/static-optimisation-of-best-set-of.html)
+is a greedy portfolio search, not a sort followed by a fixed contract-count
+filter. At each iteration it tries every unused instrument as the next member,
+rebuilds the hypothetical portfolio, and keeps the candidate with the highest
+expected portfolio Sharpe ratio. This is the appropriate baseline for Phase 2.
+
+The pre-selection filters remain hard: a candidate needs usable history,
+price, FX, contract multiplier, annual dollar volatility, and at least one
+cost-eligible rule. It must also be executable under the selected broker
+profile. Once dependable volume and open-interest fields are available, apply
+Carver's approximate liquidity floors of 100 contracts per day and $1.25
+million of daily risk units, as described in [Adding new
+instruments](https://qoppac.blogspot.com/2021/05/adding-new-instruments-or-how-i-learned.html).
+Full, mini, and micro contracts that express the same signal are one economic
+family: normally select at most one execution route, unless the report already
+establishes a materially distinct contract or roll path. An execution overlay
+may borrow the representative instrument's signal history, but retains its own
+multiplier, spread, commission, price, and resulting trading cost.
+
+For a trial book `B`, correlations must be estimated from volatility-normalized
+**subsystem returns after the forecasting decision**, using each candidate's
+eligible rule mix. Raw price-return correlations are not the portfolio input.
+Use the same robust missing-data treatment and bounded exponentially weighted
+correlation machinery as the allocation layer. The initial implementation
+should reproduce Carver's correlation-only handcrafted weights; existing ERC
+and HRP weights are useful sensitivity variants, but should not be labelled as
+the AFTS handcraft method.
+
+For normalized subsystem returns, let `H` be the correlation matrix and `w`
+the trial risk weights, summing to one. Recalculate the diversification
+multiplier for every trial book:
+
+```text
+IDM(B) = min(2.5, 1 / sqrt(w' H w))
+```
+
+For candidate `i`, the position at the maximum absolute forecast of 20 is:
+
+```text
+P_i = capital * target_vol * w_i * IDM(B) / annual_dollar_vol_i * (20 / 10)
+```
+
+The final factor is two because the AFTS average absolute forecast is 10.
+Following Carver, assign an effectively infinite size penalty when `P_i < 0.5`
+contracts; otherwise:
+
+```text
+size_penalty_i = 0.125 / P_i**2
+net_SR_i = 0.5 - annual_trading_cost_SR_i - size_penalty_i
+portfolio_score(B) = (w . net_SR) / sqrt(w' H w)
+```
+
+The constant gross Sharpe assumption of 0.5 is intentional. Instrument-specific
+pre-cost backtest performance must not decide which markets survive. The annual
+trading-cost term must come from the actual eligible-rule mixture, including
+forecast turnover and rolls; `selected_sr_cost_per_trade` by itself is not an
+annual portfolio cost. This preserves the observed corn result: a higher-cost
+full or mini contract can lose its fast EWMAC rules, while a cheaper micro can
+retain more rules, without either outcome being hard-coded by symbol.
+
+Seed the loop by ranking individual instruments with the same net-SR formula,
+but a configured nominal starting weight and `IDM=1`. Carver uses a 5% weight
+cap for a larger account and explicitly raises it for small accounts (20% in
+his `$100,000` example), so `starting_weight_cap` must be an exposed Phase 2
+parameter rather than a buried constant. The baseline loop is:
+
+```text
+eligible = hard_filter(phase1_candidates)
+selected = [best_single_candidate(eligible, starting_weight_cap)]
+best_seen = 0.0  # published AFTS loop updates this from the first n+1 trial
+
+while unused candidates remain:
+    trials = []
+    for candidate in unused:
+        book = selected + [candidate]
+        H = subsystem_return_correlations(book)
+        w = handcrafted_risk_weights(H)
+        idm = min(2.5, 1 / sqrt(w' H w))
+        positions = maximum_forecast_positions(book, w, idm)
+        penalties = annual_costs(book) + size_penalties(positions)
+        trials.append((portfolio_score(book, w, H, penalties), candidate))
+
+    trial_score, winner = deterministic_argmax(trials)
+    if trial_score < 0.90 * best_seen:
+        stop
+    selected.append(winner)
+    best_seen = max(best_seen, trial_score)
+```
+
+The 90% rule is Carver's tolerance for a temporarily lower score while gaining
+useful breadth; stopping at the first strict decline is too brittle. Record the
+last accepted book before the tolerance breach, rather than returning the
+breaching candidate.
+
+For this project, layer a transparent coverage policy onto that objective:
+
+1. **Core coverage.** The main classes are `Equity`, `Ags`, `Vol`, `OilGas`,
+   `FX`, `Metals`, and `Bond`. Seed this constrained pass from a core candidate.
+   While a feasible class is absent, trial only candidates from currently
+   missing classes, then choose the one with the best complete-book score. A
+   class is infeasible when all its candidates fail a hard
+   data/execution/liquidity test or the `P < 0.5` threshold. If its best trial
+   breaches the 90% score boundary, report `unmet_due_to_score_tolerance`
+   rather than forcing a bad contract merely to fill a label.
+2. **Core breadth.** After coverage, resume the unrestricted greedy loop over
+   core instruments. Treat 15 as a desired lower breadth, not a hard promise:
+   continue toward it only while the book stays inside the 90% score tolerance.
+3. **Special additions.** Consider `Housing`, `Sector`, and `Other` only after
+   the feasible core pass. They do not count toward the desired 15 and are
+   accepted only when their marginal diversification benefit keeps the book
+   inside the same tolerance.
+
+This constrained pass should be reported alongside the unconstrained AFTS
+baseline. A difference between them is useful evidence of the cost paid for
+cluster coverage, rather than something to conceal in the scoring function.
+The [small-account analysis](https://qoppac.blogspot.com/2016/03/diversification-and-small-account-size.html)
+also shows why four contracts cannot be a hard gate: for the first few markets,
+diversification can dominate granularity even when maximum positions are only
+one or two contracts. Conversely, the newer [static-selection
+report](https://github.com/robcarver17/reports/blob/master/Static_selection_of_instruments)
+selects materially more instruments at small capital after micro contracts are
+available. The feasible count therefore depends on the current contract
+universe, not a universal capital table.
+
+Ties and near-ties must be deterministic. Use, in order: coverage improvement,
+higher portfolio score, lower aggregate size penalty, lower aggregate annual
+cost, longer common return history, then symbol. Retained live instruments can
+later receive a small replacement buffer to avoid annual churn, but the raw
+research result should remain available without that incumbent preference.
+
+Each iteration needs an audit table with the current and candidate contract
+books, candidate class and economic family, core coverage before and after,
+common-history coverage, risk weights, IDM, annual dollar volatility, average
+and maximum-forecast contracts, trading-cost and size penalties, score before
+and after, best score so far, tolerance boundary, and the exact accept/reject
+reason. `DEBUG` logs should contain every trial; `INFO` should contain the
+selected winner, stopping decision, and final book. This gives Phase 2 enough
+evidence to explain why it advanced to the next candidate instead of merely
+publishing a final rank.
+
+Implementation should begin with the exact greedy baseline and the constrained
+coverage pass. A small beam search retaining the best few partial books is a
+useful validation check against greedy path dependence and temporary dips. A
+full mixed-integer subset optimizer is not the first choice: it adds substantial
+complexity and apparent precision around estimated correlations and costs,
+while moving away from the AFTS procedure. Integer position optimization belongs
+after static universe selection, where it can minimize tracking error for the
+chosen book rather than contaminating instrument selection with today's exact
+positions.
+
+Validate first on a narrow synthetic and real subset. Tests should cover an
+uncorrelated candidate beating a duplicate, a micro beating its full-size
+family member through size and cost, missing-core priority, exclusion of special
+classes from the breadth count, `P < 0.5` rejection, preservation of a useful
+one-to-two-contract diversifier, the 90% tolerance, and deterministic ties.
+Then compare unconstrained and coverage-constrained selections at `$100,000`
+under 20% and 25% targets, reporting the evolving IDM and contract counts at
+each step. ERC and HRP runs are sensitivity comparisons, not substitutes for
+the handcrafted baseline.
 
 `--offline` writes the complete 257-row comparison without connecting to IB.
 Prices and volatility then end at the imported Carver history boundary, live
