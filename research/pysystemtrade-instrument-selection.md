@@ -461,14 +461,13 @@ unchanged.
 The IB-connected audit also saves the exact executable contract's mean daily
 volume over its latest 20 valid daily `TRADES` bars as `avg_daily_volume`.
 This is deliberately contract volume, not volume borrowed from the signal
-history. The same bars supply the current daily point-risk estimate. This
-liquidity risk deliberately remains separate from the long-history mixed
-volatility used for portfolio sizing:
+history. Risk normalization reuses the selected mixed annual dollar volatility
+already used for production sizing; the screen does not introduce a separate
+short-window volatility definition:
 
 ```text
-risk_traded_usd_day = init_capital_usd * target_vol * liq_ann_trades / 250
-liq_ann_dvol_usd_per_contract = 16 * 20-day std(daily point changes) * multiplier * FX
-mkt_risk_vol_usd_day = avg_daily_volume * liq_ann_dvol_usd_per_contract
+risk_traded_usd_day = init_capital_usd * target_vol * liquidity_ann_trades / 250
+mkt_risk_vol_usd_day = avg_daily_volume * selected_ann_dvol_usd_per_contract
 pct_mkt_volume = 100 * risk_traded_usd_day / mkt_risk_vol_usd_day
 ```
 
@@ -492,9 +491,8 @@ size, contract-volume, and relative-risk-volume flags. `phase2_eligible` also
 requires at least one affordable EWMAC rule, an allowed execution profile, and
 a qualified IB contract. `phase2_exclusion` records all failed gates. The
 `phase2_search_universe()` notebook helper reads only eligible rows before the
-greedy search; it does not destructively condense the saved audit. The
-article-style size gate compares this current liquidity dollar volatility per
-contract with
+greedy search; it does not destructively condense the saved audit. The size
+gate compares the production mixed annual dollar volatility per contract with
 `init_capital_usd * target_vol`; futures notional is reported but is not a
 capital-eligibility test.
 

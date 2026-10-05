@@ -24,7 +24,6 @@ from derivatives_bt_engine.data.futures_cost_risk import (
     _historical_request_timed_out,
     _ib_contract_currency,
     _latest_dated_mark,
-    _liquidity_stats_from_trade_bars,
     _roll_rate_audit,
     _round_report_decimals,
     _volume_stats_from_trade_bars,
@@ -1265,27 +1264,6 @@ def test_volume_stats_average_latest_twenty_daily_contract_counts():
     assert stats["volume_end"] == date(2026, 1, 25)
 
 
-def test_liquidity_stats_use_same_twenty_daily_bars_for_point_risk():
-    bars = pl.DataFrame({
-        "date": [date(2026, 1, 1) + timedelta(days=day) for day in range(25)],
-        "close": [100.0 + day ** 2 for day in range(25)],
-        "volume": [float(day) for day in range(1, 26)],
-    })
-
-    stats = _liquidity_stats_from_trade_bars(
-        bars,
-        lookback_days=20,
-        source="ib_dated_contract",
-    )
-    expected_changes = [float(2 * day - 1) for day in range(6, 25)]
-
-    assert stats["avg_daily_volume_contracts"] == pytest.approx(15.5)
-    assert stats["liquidity_daily_point_vol"] == pytest.approx(
-        statistics.stdev(expected_changes)
-    )
-    assert stats["liquidity_vol_observations"] == 19
-
-
 def test_phase2_prefilter_uses_relative_market_risk_volume():
     report = pl.DataFrame({
         "symbol": ["GE"],
@@ -1293,7 +1271,6 @@ def test_phase2_prefilter_uses_relative_market_risk_volume():
         "fx_to_usd": [1.0],
         "multiplier": [2_500.0],
         "annual_dollar_vol_per_contract": [1_100.0],
-        "liquidity_annual_dollar_vol_per_contract": [1_100.0],
         "configured_trade_sr": [0.005],
         "avg_daily_volume_contracts": [100_000.0],
         "instrument_has_eligible_ewmac_rule": [True],
@@ -1321,8 +1298,11 @@ def test_phase2_prefilter_uses_relative_market_risk_volume():
     assert selected["phase2_exclusion"] == ""
     public = futures_cost_risk._public_report_schema(filtered)
     assert public["avg_daily_volume"][0] == pytest.approx(100_000.0)
-    assert public["liq_ann_dvol_usd_per_contract"][0] == pytest.approx(1_100.0)
+    assert public["selected_ann_dvol_usd_per_contract"][0] == pytest.approx(
+        1_100.0
+    )
     assert public["init_capital_usd"][0] == pytest.approx(500_000.0)
+    assert not any(name.startswith("liq_") for name in public.columns)
 
 
 def test_phase2_prefilter_requires_more_than_hundred_contracts():
@@ -1332,7 +1312,6 @@ def test_phase2_prefilter_requires_more_than_hundred_contracts():
         "fx_to_usd": [1.0],
         "multiplier": [1_000.0],
         "annual_dollar_vol_per_contract": [20_000.0],
-        "liquidity_annual_dollar_vol_per_contract": [20_000.0],
         "configured_trade_sr": [0.005],
         "avg_daily_volume_contracts": [100.0],
         "instrument_has_eligible_ewmac_rule": [True],
@@ -1367,7 +1346,7 @@ def test_phase2_prefilter_buckets_missing_subscription_data_first():
         "multiplier": [10.0],
         "configured_trade_sr": [None],
         "avg_daily_volume_contracts": [None],
-        "liquidity_annual_dollar_vol_per_contract": [None],
+        "annual_dollar_vol_per_contract": [None],
         "instrument_has_eligible_ewmac_rule": [True],
         "execution_eligible": [True],
         "ib_availability": ["unavailable_or_unverified"],

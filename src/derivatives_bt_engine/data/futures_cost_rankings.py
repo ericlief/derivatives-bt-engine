@@ -40,7 +40,6 @@ DEFAULT_VIEW_COLUMNS = (
     "multiplier",
     "notional_usd_per_contract",
     "selected_ann_dvol_usd_per_contract",
-    "liq_ann_dvol_usd_per_contract",
     "avg_daily_volume",
     "risk_traded_usd_day",
     "mkt_risk_vol_usd_day",

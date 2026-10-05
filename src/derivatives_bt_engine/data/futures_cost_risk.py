@@ -151,8 +151,6 @@ TWO_DECIMAL_MONEY_COLUMNS = {
     "risk_traded_usd_day",
     "min_mkt_risk_vol_usd_day",
     "mkt_risk_vol_usd_day",
-    "liquidity_annual_dollar_vol_per_contract",
-    "liq_ann_dvol_usd_per_contract",
 }
 SIX_DECIMAL_RATE_COLUMNS = {
     "fx_to_usd",
@@ -192,7 +190,6 @@ DEFAULT_LIQUIDITY_ANNUAL_TRADES = 25.0
 DEFAULT_LIQUIDITY_BUSINESS_DAYS = 250
 DEFAULT_MAX_MARKET_VOLUME_PCT = 1.0
 DEFAULT_MIN_DAILY_VOLUME_CONTRACTS = 100.0
-LIQUIDITY_ANNUALIZATION_FACTOR = 16.0
 
 
 def _pooling_report_identity(instr: dict) -> dict:
@@ -1172,7 +1169,7 @@ def _attach_phase2_prefilters(
             raise ValueError(f"{name} must be positive")
 
     required = {
-        "liquidity_annual_dollar_vol_per_contract",
+        "annual_dollar_vol_per_contract",
         "configured_trade_sr",
         "avg_daily_volume_contracts",
         "instrument_has_eligible_ewmac_rule",
@@ -1223,7 +1220,7 @@ def _attach_phase2_prefilters(
         ),
         (
             pl.col("avg_daily_volume_contracts")
-            * pl.col("liquidity_annual_dollar_vol_per_contract")
+            * pl.col("annual_dollar_vol_per_contract")
         ).alias("mkt_risk_vol_usd_day"),
     ).with_columns(
         pl.when(pl.col("mkt_risk_vol_usd_day") > 0)
@@ -1240,10 +1237,10 @@ def _attach_phase2_prefilters(
             & (pl.col("configured_trade_sr") <= instrument_cost_limit_sr)
         ).alias("instrument_cost_eligible"),
         (
-            pl.col("liquidity_annual_dollar_vol_per_contract").is_not_null()
-            & pl.col("liquidity_annual_dollar_vol_per_contract").is_finite()
+            pl.col("annual_dollar_vol_per_contract").is_not_null()
+            & pl.col("annual_dollar_vol_per_contract").is_finite()
             & (
-                pl.col("liquidity_annual_dollar_vol_per_contract")
+                pl.col("annual_dollar_vol_per_contract")
                 <= max_contract_ann_dvol_usd
             )
         ).alias("risk_size_eligible"),
@@ -1266,7 +1263,7 @@ def _attach_phase2_prefilters(
             & pl.col("multiplier").is_finite()
             & (pl.col("multiplier").abs() > 0)
             & pl.col("avg_daily_volume_contracts").is_not_null()
-            & pl.col("liquidity_annual_dollar_vol_per_contract").is_not_null()
+            & pl.col("annual_dollar_vol_per_contract").is_not_null()
             & (pl.col("ib_availability") == "contract_qualified")
         ).alias("data_eligible"),
     ).with_columns(
@@ -1440,7 +1437,7 @@ def _recent_dated_return_volatility(
         "ib_recent_vol_duration": duration,
     }
     try:
-        result.update(_liquidity_stats_from_trade_bars(
+        result.update(_volume_stats_from_trade_bars(
             bars,
             lookback_days=volume_lookback_days,
             source="ib_dated_contract",
@@ -1485,44 +1482,6 @@ def _volume_stats_from_trade_bars(
     }
 
 
-def _liquidity_stats_from_trade_bars(
-    bars: pl.DataFrame,
-    *,
-    lookback_days: int,
-    source: str,
-) -> dict[str, object]:
-    """Return aligned 20-day contract volume and current point risk."""
-    result = _volume_stats_from_trade_bars(
-        bars,
-        lookback_days=lookback_days,
-        source=source,
-    )
-    date_col = "ts_event" if "ts_event" in bars.columns else "date"
-    if date_col not in bars.columns or "close" not in bars.columns:
-        raise ValueError("dated contract history requires date and close")
-    clean = (
-        bars.select(
-            pl.col(date_col).alias("ts_event"),
-            pl.col("close").cast(pl.Float64, strict=False),
-        )
-        .filter(pl.col("close").is_finite() & (pl.col("close") > 0))
-        .unique(subset=["ts_event"], keep="last")
-        .sort("ts_event")
-        .tail(lookback_days)
-        .with_columns(pl.col("close").diff().alias("pt_change_1d"))
-    )
-    point_changes = clean.get_column("pt_change_1d").drop_nulls()
-    daily_point_vol = _positive_finite(point_changes.std())
-    if daily_point_vol is None:
-        raise ValueError("dated contract history has insufficient point changes")
-    result.update({
-        "liquidity_daily_point_vol": daily_point_vol,
-        "liquidity_vol_observations": point_changes.len(),
-        "liquidity_vol_source": source,
-    })
-    return result
-
-
 def _recent_dated_volume(
     ib,
     contract,
@@ -1539,7 +1498,7 @@ def _recent_dated_volume(
         what_to_show="TRADES",
         use_rth=use_rth,
     )
-    return _liquidity_stats_from_trade_bars(
+    return _volume_stats_from_trade_bars(
         bars,
         lookback_days=lookback_days,
         source="ib_dated_contract",
@@ -2499,16 +2458,6 @@ def diagnose_instrument(
     fx_info = fx_by_currency.get(currency)
     if fx_info is None:
         raise ValueError(f"{symbol}: no {currency}USD conversion available")
-    liquidity_daily_point_vol = _positive_finite(
-        risk_vol.get("liquidity_daily_point_vol")
-    )
-    if liquidity_daily_point_vol is not None:
-        risk_vol["liquidity_annual_dollar_vol_per_contract"] = (
-            LIQUIDITY_ANNUALIZATION_FACTOR
-            * liquidity_daily_point_vol
-            * abs(float(multiplier))
-            * float(fx_info["rate"])
-        )
     row = build_cost_risk_row(
         symbol=symbol,
         signal_symbol=signal_symbol,
@@ -3073,18 +3022,10 @@ PUBLIC_REPORT_RENAMES = {
     "selection_target_vol": "target_vol",
     "min_daily_volume_contracts": "min_daily_volume",
     "max_market_volume_pct": "max_pct_mkt_volume",
-    "liquidity_daily_point_vol": "liq_daily_point_vol",
-    "liquidity_vol_observations": "liq_vol_n",
-    "liquidity_vol_source": "liq_vol_source",
-    "liquidity_annual_dollar_vol_per_contract": (
-        "liq_ann_dvol_usd_per_contract"
-    ),
-    "liquidity_business_days": "liq_days",
     "instrument_cost_limit_sr": "cost_limit_sr",
     "instrument_cost_eligible": "cost_eligible",
     "risk_size_eligible": "size_eligible",
     "contract_volume_eligible": "volume_eligible",
-    "liquidity_eligible": "liq_eligible",
     "max_contract_ann_dvol_usd": "max_ann_dvol_usd",
 }
 
@@ -3166,10 +3107,6 @@ def _public_report_schema(report: pl.DataFrame) -> pl.DataFrame:
         "volume_start",
         "volume_end",
         "volume_source",
-        "liq_daily_point_vol",
-        "liq_ann_dvol_usd_per_contract",
-        "liq_vol_n",
-        "liq_vol_source",
         "risk_traded_usd_day",
         "mkt_risk_vol_usd_day",
         "pct_mkt_volume",
@@ -3177,7 +3114,7 @@ def _public_report_schema(report: pl.DataFrame) -> pl.DataFrame:
         "max_pct_mkt_volume",
         "volume_eligible",
         "risk_volume_eligible",
-        "liq_eligible",
+        "liquidity_eligible",
         "data_eligible",
         "selection_bucket",
         "cost_volatility_method",
