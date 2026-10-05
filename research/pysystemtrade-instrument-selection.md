@@ -456,6 +456,56 @@ volatility fields to two decimal places. Other floating-point diagnostics are
 rounded to four decimal places; identifiers and observation counts are left
 unchanged.
 
+### Phase 1 liquidity and Phase 2 pre-filter
+
+The IB-connected audit also saves the exact executable contract's mean daily
+volume over its latest 20 valid daily `TRADES` bars as `avg_daily_volume`.
+This is deliberately contract volume, not volume borrowed from the signal
+history. The same bars supply the current daily point-risk estimate. This
+liquidity risk deliberately remains separate from the long-history mixed
+volatility used for portfolio sizing:
+
+```text
+risk_traded_usd_day = init_capital_usd * target_vol * liq_ann_trades / 250
+liq_ann_dvol_usd_per_contract = 16 * 20-day std(daily point changes) * multiplier * FX
+mkt_risk_vol_usd_day = avg_daily_volume * liq_ann_dvol_usd_per_contract
+pct_mkt_volume = 100 * risk_traded_usd_day / mkt_risk_vol_usd_day
+```
+
+This makes the article's `$1.25 million` a scenario result, not a universal
+floor. With `$500,000`, a 25% target, and 25 annual trades, daily strategy risk
+traded is `$12,500`; a 1% participation limit therefore requires at least
+`$1.25 million` of market risk volume per day. The later `$25,000` Eurodollar
+numerator in the article is inconsistent with that construction; the report
+uses the stated `$12,500` calculation.
+
+The 100-contract condition remains an independent construction check. Passing
+the percentage test does not rescue a contract with 100 or fewer contracts of
+average daily volume, even if each contract has very large annual dollar
+volatility.
+The defaults are `--min-daily-volume 100`, `--max-market-volume-pct 1`,
+`--liquidity-ann-trades 25`, `--volume-lookback-days 20`,
+`--initial-capital-usd 100000`, and `--target-vol 0.20`.
+
+Phase 1 retains every row for audit and adds separate cost, one-contract risk-
+size, contract-volume, and relative-risk-volume flags. `phase2_eligible` also
+requires at least one affordable EWMAC rule, an allowed execution profile, and
+a qualified IB contract. `phase2_exclusion` records all failed gates. The
+`phase2_search_universe()` notebook helper reads only eligible rows before the
+greedy search; it does not destructively condense the saved audit. The
+article-style size gate compares this current liquidity dollar volatility per
+contract with
+`init_capital_usd * target_vol`; futures notional is reported but is not a
+capital-eligibility test.
+
+`selection_bucket` mirrors Carver's three-way triage. Missing executable
+price, FX, multiplier, or 20-day close/volume data is `dont_add_no_data`;
+there is no numeric substitute for a missing data subscription. Rows with
+data that fail cost, dollar-vol size, or either liquidity gate are
+`add_later`. Rows passing those four numeric gates are `add_first`.
+`phase2_eligible` is intentionally narrower than `add_first`, because the
+actual search must also respect the EWMAC-rule and execution-family checks.
+
 ## Phase 2: Iterative AFTS instrument selection
 
 Carver's [static instrument-selection
@@ -465,13 +515,12 @@ filter. At each iteration it tries every unused instrument as the next member,
 rebuilds the hypothetical portfolio, and keeps the candidate with the highest
 expected portfolio Sharpe ratio. This is the appropriate baseline for Phase 2.
 
-The pre-selection filters remain hard: a candidate needs usable history,
-price, FX, contract multiplier, annual dollar volatility, and at least one
-cost-eligible rule. It must also be executable under the selected broker
-profile. Once dependable volume and open-interest fields are available, apply
-Carver's approximate liquidity floors of 100 contracts per day and $1.25
-million of daily risk units, as described in [Adding new
-instruments](https://qoppac.blogspot.com/2021/05/adding-new-instruments-or-how-i-learned.html).
+The pre-selection filters are hard: a candidate needs usable history, price,
+FX, contract multiplier, annual dollar volatility, at least one cost-eligible
+rule, one-way `trade_sr <= 0.01`, and a qualified contract allowed by the
+selected broker profile. It must pass both the 100-contract daily volume floor
+and the relative market-risk participation calculation above, as described in
+[Adding new instruments](https://qoppac.blogspot.com/2021/05/adding-new-instruments-or-how-i-learned.html).
 Full, mini, and micro contracts that express the same signal are one economic
 family: normally select at most one execution route, unless the report already
 establishes a materially distinct contract or roll path. An execution overlay

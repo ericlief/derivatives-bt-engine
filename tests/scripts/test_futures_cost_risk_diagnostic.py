@@ -13,6 +13,7 @@ import pytest
 import derivatives_bt_engine.data.futures_cost_risk as futures_cost_risk
 from derivatives_bt_engine.data.futures_cost_risk import (
     _attach_affordability_ranks,
+    _attach_phase2_prefilters,
     _configured_cost_estimate,
     _blend_recent_and_historical_return_volatility,
     _cost_volatility_fields,
@@ -23,8 +24,10 @@ from derivatives_bt_engine.data.futures_cost_risk import (
     _historical_request_timed_out,
     _ib_contract_currency,
     _latest_dated_mark,
+    _liquidity_stats_from_trade_bars,
     _roll_rate_audit,
     _round_report_decimals,
+    _volume_stats_from_trade_bars,
     build_cost_risk_row,
     diagnose_instrument,
     volatility_from_bars,
@@ -355,6 +358,13 @@ def test_broad_audit_defaults_to_reviewed_pool_ewmac_cost_baseline():
     assert args.affordability_main_asset_classes == (
         "Equity", "Ags", "Vol", "OilGas", "FX", "Metals", "Bond",
     )
+    assert args.volume_lookback_days == 20
+    assert args.volume_duration == "2 M"
+    assert args.instrument_cost_limit_sr == pytest.approx(0.01)
+    assert args.liquidity_ann_trades == pytest.approx(25.0)
+    assert args.liquidity_business_days == 250
+    assert args.max_market_volume_pct == pytest.approx(1.0)
+    assert args.min_daily_volume == pytest.approx(100.0)
     assert args.spread_duration == "5 D"
     assert not args.spread_all_hours
     assert not args.skip_ewmac_cost_baseline
@@ -364,6 +374,13 @@ def test_cost_volatility_method_is_adjustable():
     args = parse_args(["--cost-volatility-method", "historical-1y"])
 
     assert args.cost_volatility_method == "historical-1y"
+
+
+def test_short_selection_aliases_are_adjustable():
+    args = parse_args(["--initial-capital-usd", "500000", "--target-vol", "0.25"])
+
+    assert args.affordability_capital_usd == pytest.approx(500_000.0)
+    assert args.affordability_target_vol == pytest.approx(0.25)
 
 
 def test_ewmac_performance_delays_forecast_and_annualizes_turnover():
@@ -1228,3 +1245,145 @@ def test_affordability_scenario_splits_risk_across_main_instruments():
     assert row["equal_weight_meets_min_contracts"]
     assert row["main_instrument_affordable_for_scenario"]
     assert row["min_capital_equal_weight"] == pytest.approx(100_000.0)
+
+
+def test_volume_stats_average_latest_twenty_daily_contract_counts():
+    bars = pl.DataFrame({
+        "date": [date(2026, 1, 1) + timedelta(days=day) for day in range(25)],
+        "volume": [float(day) for day in range(1, 26)],
+    })
+
+    stats = _volume_stats_from_trade_bars(
+        bars,
+        lookback_days=20,
+        source="ib_dated_contract",
+    )
+
+    assert stats["avg_daily_volume_contracts"] == pytest.approx(15.5)
+    assert stats["volume_observations"] == 20
+    assert stats["volume_start"] == date(2026, 1, 6)
+    assert stats["volume_end"] == date(2026, 1, 25)
+
+
+def test_liquidity_stats_use_same_twenty_daily_bars_for_point_risk():
+    bars = pl.DataFrame({
+        "date": [date(2026, 1, 1) + timedelta(days=day) for day in range(25)],
+        "close": [100.0 + day ** 2 for day in range(25)],
+        "volume": [float(day) for day in range(1, 26)],
+    })
+
+    stats = _liquidity_stats_from_trade_bars(
+        bars,
+        lookback_days=20,
+        source="ib_dated_contract",
+    )
+    expected_changes = [float(2 * day - 1) for day in range(6, 25)]
+
+    assert stats["avg_daily_volume_contracts"] == pytest.approx(15.5)
+    assert stats["liquidity_daily_point_vol"] == pytest.approx(
+        statistics.stdev(expected_changes)
+    )
+    assert stats["liquidity_vol_observations"] == 19
+
+
+def test_phase2_prefilter_uses_relative_market_risk_volume():
+    report = pl.DataFrame({
+        "symbol": ["GE"],
+        "price": [96.0],
+        "fx_to_usd": [1.0],
+        "multiplier": [2_500.0],
+        "annual_dollar_vol_per_contract": [1_100.0],
+        "liquidity_annual_dollar_vol_per_contract": [1_100.0],
+        "configured_trade_sr": [0.005],
+        "avg_daily_volume_contracts": [100_000.0],
+        "instrument_has_eligible_ewmac_rule": [True],
+        "execution_eligible": [True],
+        "ib_availability": ["contract_qualified"],
+    })
+
+    filtered = _attach_phase2_prefilters(
+        report,
+        initial_capital_usd=500_000.0,
+        target_vol=0.25,
+        instrument_cost_limit_sr=0.01,
+        liquidity_ann_trades=25.0,
+        liquidity_business_days=250,
+        max_market_volume_pct=1.0,
+        min_daily_volume_contracts=100.0,
+    )
+    selected = filtered.row(0, named=True)
+
+    assert selected["risk_traded_usd_day"] == pytest.approx(12_500.0)
+    assert selected["mkt_risk_vol_usd_day"] == pytest.approx(110_000_000.0)
+    assert selected["pct_mkt_volume"] == pytest.approx(0.011363636)
+    assert selected["phase2_eligible"]
+    assert selected["selection_bucket"] == "add_first"
+    assert selected["phase2_exclusion"] == ""
+    public = futures_cost_risk._public_report_schema(filtered)
+    assert public["avg_daily_volume"][0] == pytest.approx(100_000.0)
+    assert public["liq_ann_dvol_usd_per_contract"][0] == pytest.approx(1_100.0)
+    assert public["init_capital_usd"][0] == pytest.approx(500_000.0)
+
+
+def test_phase2_prefilter_requires_more_than_hundred_contracts():
+    report = pl.DataFrame({
+        "symbol": ["THIN"],
+        "price": [100.0],
+        "fx_to_usd": [1.0],
+        "multiplier": [1_000.0],
+        "annual_dollar_vol_per_contract": [20_000.0],
+        "liquidity_annual_dollar_vol_per_contract": [20_000.0],
+        "configured_trade_sr": [0.005],
+        "avg_daily_volume_contracts": [100.0],
+        "instrument_has_eligible_ewmac_rule": [True],
+        "execution_eligible": [True],
+        "ib_availability": ["contract_qualified"],
+    })
+
+    selected = _attach_phase2_prefilters(
+        report,
+        initial_capital_usd=100_000.0,
+        target_vol=0.20,
+        instrument_cost_limit_sr=0.01,
+        liquidity_ann_trades=25.0,
+        liquidity_business_days=250,
+        max_market_volume_pct=1.0,
+        min_daily_volume_contracts=100.0,
+    ).row(0, named=True)
+
+    assert selected["pct_mkt_volume"] < 1.0
+    assert not selected["contract_volume_eligible"]
+    assert selected["risk_volume_eligible"]
+    assert not selected["phase2_eligible"]
+    assert selected["selection_bucket"] == "add_later"
+    assert selected["phase2_exclusion"] == "contract_volume"
+
+
+def test_phase2_prefilter_buckets_missing_subscription_data_first():
+    report = pl.DataFrame({
+        "symbol": ["NO_DATA"],
+        "price": [None],
+        "fx_to_usd": [1.0],
+        "multiplier": [10.0],
+        "configured_trade_sr": [None],
+        "avg_daily_volume_contracts": [None],
+        "liquidity_annual_dollar_vol_per_contract": [None],
+        "instrument_has_eligible_ewmac_rule": [True],
+        "execution_eligible": [True],
+        "ib_availability": ["unavailable_or_unverified"],
+    })
+
+    selected = _attach_phase2_prefilters(
+        report,
+        initial_capital_usd=100_000.0,
+        target_vol=0.20,
+        instrument_cost_limit_sr=0.01,
+        liquidity_ann_trades=25.0,
+        liquidity_business_days=250,
+        max_market_volume_pct=1.0,
+        min_daily_volume_contracts=100.0,
+    ).row(0, named=True)
+
+    assert not selected["data_eligible"]
+    assert selected["selection_bucket"] == "dont_add_no_data"
+    assert "data_unavailable" in selected["phase2_exclusion"]

@@ -145,6 +145,14 @@ TWO_DECIMAL_MONEY_COLUMNS = {
     "affordability_scenario_capital_usd",
     "equal_weight_dvol_budget_usd",
     "min_capital_usd_equal_weight",
+    "initial_capital_usd",
+    "init_capital_usd",
+    "max_contract_ann_dvol_usd",
+    "risk_traded_usd_day",
+    "min_mkt_risk_vol_usd_day",
+    "mkt_risk_vol_usd_day",
+    "liquidity_annual_dollar_vol_per_contract",
+    "liq_ann_dvol_usd_per_contract",
 }
 SIX_DECIMAL_RATE_COLUMNS = {
     "fx_to_usd",
@@ -177,6 +185,14 @@ DEFAULT_AFFORDABILITY_MAIN_ASSET_CLASSES = (
     "Metals",
     "Bond",
 )
+DEFAULT_INSTRUMENT_COST_LIMIT_SR = 0.01
+DEFAULT_VOLUME_LOOKBACK_DAYS = 20
+DEFAULT_VOLUME_DURATION = "2 M"
+DEFAULT_LIQUIDITY_ANNUAL_TRADES = 25.0
+DEFAULT_LIQUIDITY_BUSINESS_DAYS = 250
+DEFAULT_MAX_MARKET_VOLUME_PCT = 1.0
+DEFAULT_MIN_DAILY_VOLUME_CONTRACTS = 100.0
+LIQUIDITY_ANNUALIZATION_FACTOR = 16.0
 
 
 def _pooling_report_identity(instr: dict) -> dict:
@@ -1126,6 +1142,192 @@ def _attach_affordability_ranks(
     )
 
 
+def _attach_phase2_prefilters(
+    report: pl.DataFrame,
+    *,
+    initial_capital_usd: float,
+    target_vol: float,
+    instrument_cost_limit_sr: float,
+    liquidity_ann_trades: float,
+    liquidity_business_days: int,
+    max_market_volume_pct: float,
+    min_daily_volume_contracts: float,
+) -> pl.DataFrame:
+    """Attach hard cost, granularity, and relative-liquidity gates.
+
+    The report remains a complete Phase 1 audit. ``phase2_eligible`` is the
+    compact search-universe flag consumed before the greedy Phase 2 search.
+    """
+    numeric_args = {
+        "initial_capital_usd": initial_capital_usd,
+        "target_vol": target_vol,
+        "instrument_cost_limit_sr": instrument_cost_limit_sr,
+        "liquidity_ann_trades": liquidity_ann_trades,
+        "liquidity_business_days": liquidity_business_days,
+        "max_market_volume_pct": max_market_volume_pct,
+        "min_daily_volume_contracts": min_daily_volume_contracts,
+    }
+    for name, value in numeric_args.items():
+        if value <= 0:
+            raise ValueError(f"{name} must be positive")
+
+    required = {
+        "liquidity_annual_dollar_vol_per_contract",
+        "configured_trade_sr",
+        "avg_daily_volume_contracts",
+        "instrument_has_eligible_ewmac_rule",
+        "execution_eligible",
+        "ib_availability",
+        "price",
+        "fx_to_usd",
+        "multiplier",
+    }
+    for name in required.difference(report.columns):
+        if name in {
+            "instrument_has_eligible_ewmac_rule",
+            "execution_eligible",
+        }:
+            dtype = pl.Boolean
+        elif name == "ib_availability":
+            dtype = pl.String
+        else:
+            dtype = pl.Float64
+        report = report.with_columns(pl.lit(None, dtype=dtype).alias(name))
+
+    max_contract_ann_dvol_usd = initial_capital_usd * target_vol
+    risk_traded_usd_day = (
+        initial_capital_usd
+        * target_vol
+        * liquidity_ann_trades
+        / liquidity_business_days
+    )
+    min_mkt_risk_vol_usd_day = risk_traded_usd_day / (
+        max_market_volume_pct / 100.0
+    )
+    report = report.with_columns(
+        pl.lit(initial_capital_usd).alias("initial_capital_usd"),
+        pl.lit(target_vol).alias("selection_target_vol"),
+        pl.lit(instrument_cost_limit_sr).alias("instrument_cost_limit_sr"),
+        pl.lit(liquidity_ann_trades).alias("liquidity_ann_trades"),
+        pl.lit(liquidity_business_days).alias("liquidity_business_days"),
+        pl.lit(max_market_volume_pct).alias("max_market_volume_pct"),
+        pl.lit(min_daily_volume_contracts).alias(
+            "min_daily_volume_contracts"
+        ),
+        pl.lit(max_contract_ann_dvol_usd).alias(
+            "max_contract_ann_dvol_usd"
+        ),
+        pl.lit(risk_traded_usd_day).alias("risk_traded_usd_day"),
+        pl.lit(min_mkt_risk_vol_usd_day).alias(
+            "min_mkt_risk_vol_usd_day"
+        ),
+        (
+            pl.col("avg_daily_volume_contracts")
+            * pl.col("liquidity_annual_dollar_vol_per_contract")
+        ).alias("mkt_risk_vol_usd_day"),
+    ).with_columns(
+        pl.when(pl.col("mkt_risk_vol_usd_day") > 0)
+        .then(
+            100.0
+            * pl.col("risk_traded_usd_day")
+            / pl.col("mkt_risk_vol_usd_day")
+        )
+        .otherwise(None)
+        .alias("pct_mkt_volume"),
+        (
+            pl.col("configured_trade_sr").is_not_null()
+            & pl.col("configured_trade_sr").is_finite()
+            & (pl.col("configured_trade_sr") <= instrument_cost_limit_sr)
+        ).alias("instrument_cost_eligible"),
+        (
+            pl.col("liquidity_annual_dollar_vol_per_contract").is_not_null()
+            & pl.col("liquidity_annual_dollar_vol_per_contract").is_finite()
+            & (
+                pl.col("liquidity_annual_dollar_vol_per_contract")
+                <= max_contract_ann_dvol_usd
+            )
+        ).alias("risk_size_eligible"),
+        (
+            pl.col("avg_daily_volume_contracts").is_not_null()
+            & pl.col("avg_daily_volume_contracts").is_finite()
+            & (
+                pl.col("avg_daily_volume_contracts")
+                > min_daily_volume_contracts
+            )
+        ).alias("contract_volume_eligible"),
+        (
+            pl.col("price").is_not_null()
+            & pl.col("price").is_finite()
+            & (pl.col("price") > 0)
+            & pl.col("fx_to_usd").is_not_null()
+            & pl.col("fx_to_usd").is_finite()
+            & (pl.col("fx_to_usd") > 0)
+            & pl.col("multiplier").is_not_null()
+            & pl.col("multiplier").is_finite()
+            & (pl.col("multiplier").abs() > 0)
+            & pl.col("avg_daily_volume_contracts").is_not_null()
+            & pl.col("liquidity_annual_dollar_vol_per_contract").is_not_null()
+            & (pl.col("ib_availability") == "contract_qualified")
+        ).alias("data_eligible"),
+    ).with_columns(
+        (
+            pl.col("pct_mkt_volume").is_not_null()
+            & pl.col("pct_mkt_volume").is_finite()
+            & (pl.col("pct_mkt_volume") < max_market_volume_pct)
+        ).alias("risk_volume_eligible"),
+    ).with_columns(
+        (
+            pl.col("contract_volume_eligible")
+            & pl.col("risk_volume_eligible")
+        ).alias("liquidity_eligible"),
+        (
+            pl.when(~pl.col("data_eligible"))
+            .then(pl.lit("dont_add_no_data"))
+            .when(
+                pl.col("instrument_cost_eligible")
+                & pl.col("risk_size_eligible")
+                & pl.col("contract_volume_eligible")
+                & pl.col("risk_volume_eligible")
+            )
+            .then(pl.lit("add_first"))
+            .otherwise(pl.lit("add_later"))
+        ).alias("selection_bucket"),
+    ).with_columns(
+        (
+            (pl.col("selection_bucket") == "add_first")
+            & pl.col("instrument_has_eligible_ewmac_rule").fill_null(False)
+            & pl.col("execution_eligible").fill_null(False)
+        ).alias("phase2_eligible"),
+    )
+
+    exclusions: list[str] = []
+    for row in report.iter_rows(named=True):
+        reasons = []
+        if not row.get("data_eligible"):
+            reasons.append("data_unavailable")
+        if not row.get("instrument_cost_eligible"):
+            reasons.append("cost")
+        if not row.get("risk_size_eligible"):
+            reasons.append("risk_size")
+        if row.get("avg_daily_volume_contracts") is None:
+            reasons.append("volume_unavailable")
+        else:
+            if not row.get("contract_volume_eligible"):
+                reasons.append("contract_volume")
+            if not row.get("risk_volume_eligible"):
+                reasons.append("risk_volume")
+        if not row.get("instrument_has_eligible_ewmac_rule"):
+            reasons.append("no_eligible_rule")
+        if not row.get("execution_eligible"):
+            reasons.append("execution")
+        if row.get("ib_availability") != "contract_qualified":
+            reasons.append("ib_unavailable")
+        exclusions.append(",".join(reasons))
+    return report.with_columns(
+        pl.Series("phase2_exclusion", exclusions, dtype=pl.String)
+    )
+
+
 def volatility_from_bars(
     bars: pl.DataFrame,
     *,
@@ -1196,6 +1398,7 @@ def _recent_dated_return_volatility(
     duration: str,
     use_rth: bool,
     fast_span: int,
+    volume_lookback_days: int = DEFAULT_VOLUME_LOOKBACK_DAYS,
     min_samples: int = CARVER_VOL_MIN_SAMPLES,
 ) -> dict[str, object]:
     """Estimate recent fast return volatility from the executable contract."""
@@ -1229,13 +1432,118 @@ def _recent_dated_return_volatility(
     fast_return_vol = _positive_finite(clean.tail(1)["fast_return_vol"][0])
     if fast_return_vol is None:
         raise ValueError("dated contract history does not produce fast return vol")
-    return {
+    result = {
         "ib_recent_fast_return_vol": fast_return_vol,
         "ib_recent_vol_observations": clean.get_column("ret_1d").drop_nulls().len(),
         "ib_recent_vol_start": clean.get_column("ts_event").min(),
         "ib_recent_vol_end": clean.get_column("ts_event").max(),
         "ib_recent_vol_duration": duration,
     }
+    try:
+        result.update(_liquidity_stats_from_trade_bars(
+            bars,
+            lookback_days=volume_lookback_days,
+            source="ib_dated_contract",
+        ))
+    except ValueError as exc:
+        result["volume_error"] = str(exc)
+    return result
+
+
+def _volume_stats_from_trade_bars(
+    bars: pl.DataFrame,
+    *,
+    lookback_days: int,
+    source: str,
+) -> dict[str, object]:
+    """Return Carver's mean volume over the latest daily contract bars."""
+    if lookback_days <= 0:
+        raise ValueError("volume lookback must be positive")
+    if bars is None or bars.height == 0:
+        raise ValueError("dated contract volume history is empty")
+    date_col = "ts_event" if "ts_event" in bars.columns else "date"
+    if date_col not in bars.columns or "volume" not in bars.columns:
+        raise ValueError("dated contract history requires date and volume")
+    clean = (
+        bars.select(
+            pl.col(date_col).alias("ts_event"),
+            pl.col("volume").cast(pl.Float64, strict=False),
+        )
+        .filter(pl.col("volume").is_finite() & (pl.col("volume") >= 0))
+        .unique(subset=["ts_event"], keep="last")
+        .sort("ts_event")
+        .tail(lookback_days)
+    )
+    if clean.is_empty():
+        raise ValueError("dated contract history has no valid volume")
+    return {
+        "avg_daily_volume_contracts": clean.get_column("volume").mean(),
+        "volume_observations": clean.height,
+        "volume_start": clean.get_column("ts_event").min(),
+        "volume_end": clean.get_column("ts_event").max(),
+        "volume_source": source,
+    }
+
+
+def _liquidity_stats_from_trade_bars(
+    bars: pl.DataFrame,
+    *,
+    lookback_days: int,
+    source: str,
+) -> dict[str, object]:
+    """Return aligned 20-day contract volume and current point risk."""
+    result = _volume_stats_from_trade_bars(
+        bars,
+        lookback_days=lookback_days,
+        source=source,
+    )
+    date_col = "ts_event" if "ts_event" in bars.columns else "date"
+    if date_col not in bars.columns or "close" not in bars.columns:
+        raise ValueError("dated contract history requires date and close")
+    clean = (
+        bars.select(
+            pl.col(date_col).alias("ts_event"),
+            pl.col("close").cast(pl.Float64, strict=False),
+        )
+        .filter(pl.col("close").is_finite() & (pl.col("close") > 0))
+        .unique(subset=["ts_event"], keep="last")
+        .sort("ts_event")
+        .tail(lookback_days)
+        .with_columns(pl.col("close").diff().alias("pt_change_1d"))
+    )
+    point_changes = clean.get_column("pt_change_1d").drop_nulls()
+    daily_point_vol = _positive_finite(point_changes.std())
+    if daily_point_vol is None:
+        raise ValueError("dated contract history has insufficient point changes")
+    result.update({
+        "liquidity_daily_point_vol": daily_point_vol,
+        "liquidity_vol_observations": point_changes.len(),
+        "liquidity_vol_source": source,
+    })
+    return result
+
+
+def _recent_dated_volume(
+    ib,
+    contract,
+    *,
+    duration: str,
+    use_rth: bool,
+    lookback_days: int,
+) -> dict[str, object]:
+    """Request daily TRADES bars solely for the executable contract's volume."""
+    bars = ib.get_historical_bars(
+        contract,
+        duration=duration,
+        bar_size="1 day",
+        what_to_show="TRADES",
+        use_rth=use_rth,
+    )
+    return _liquidity_stats_from_trade_bars(
+        bars,
+        lookback_days=lookback_days,
+        source="ib_dated_contract",
+    )
 
 
 def _blend_recent_and_historical_return_volatility(
@@ -1933,6 +2241,8 @@ def diagnose_instrument(
     duration: str,
     spread_duration: str,
     spread_use_rth: bool,
+    volume_duration: str = DEFAULT_VOLUME_DURATION,
+    volume_lookback_days: int = DEFAULT_VOLUME_LOOKBACK_DAYS,
     min_days: int,
     contract_details_timeout: float,
     quote_wait_seconds: float,
@@ -2051,6 +2361,7 @@ def diagnose_instrument(
                     duration=duration,
                     use_rth=use_rth,
                     fast_span=fast_span,
+                    volume_lookback_days=volume_lookback_days,
                 )
                 risk_vol = _blend_recent_and_historical_return_volatility(
                     recent_vol,
@@ -2086,6 +2397,27 @@ def diagnose_instrument(
                 ),
                 "risk_return_vol_source": "carver_mixed_scaled_fallback",
             })
+
+    if (
+        historical_requests_allowed
+        and "avg_daily_volume_contracts" not in risk_vol
+        and "volume_error" not in risk_vol
+    ):
+        try:
+            risk_vol.update(_recent_dated_volume(
+                ib,
+                contract,
+                duration=volume_duration,
+                use_rth=use_rth,
+                lookback_days=volume_lookback_days,
+            ))
+        except Exception as exc:
+            risk_vol["volume_error"] = str(exc)
+            log.debug(
+                "dated_volume_unavailable symbol=%s reason=%s",
+                symbol,
+                exc,
+            )
 
     if historical_requests_allowed:
         spread_stats = _historical_bid_ask_spread(
@@ -2167,6 +2499,16 @@ def diagnose_instrument(
     fx_info = fx_by_currency.get(currency)
     if fx_info is None:
         raise ValueError(f"{symbol}: no {currency}USD conversion available")
+    liquidity_daily_point_vol = _positive_finite(
+        risk_vol.get("liquidity_daily_point_vol")
+    )
+    if liquidity_daily_point_vol is not None:
+        risk_vol["liquidity_annual_dollar_vol_per_contract"] = (
+            LIQUIDITY_ANNUALIZATION_FACTOR
+            * liquidity_daily_point_vol
+            * abs(float(multiplier))
+            * float(fx_info["rate"])
+        )
     row = build_cost_risk_row(
         symbol=symbol,
         signal_symbol=signal_symbol,
@@ -2362,6 +2704,17 @@ def parse_args(argv=None):
         help="Use the full futures session for BID_ASK history; default uses RTH",
     )
     parser.add_argument(
+        "--volume-duration",
+        default=DEFAULT_VOLUME_DURATION,
+        help="IB daily TRADES history duration used for contract volume",
+    )
+    parser.add_argument(
+        "--volume-lookback-days",
+        type=int,
+        default=DEFAULT_VOLUME_LOOKBACK_DAYS,
+        help="Latest daily contract-volume observations to average",
+    )
+    parser.add_argument(
         "--market-data-type",
         choices=["auto", "live", "frozen", "delayed", "delayed-frozen"],
         default="auto",
@@ -2375,7 +2728,9 @@ def parse_args(argv=None):
     parser.add_argument("--offline", action="store_true",
                         help="Build the full mixed-vol/mapping comparison without connecting to IB")
     parser.add_argument(
+        "--target-vol",
         "--affordability-target-vol",
+        dest="affordability_target_vol",
         type=float,
         default=DEFAULT_AFFORDABILITY_TARGET_VOL,
         help="Risk target used for the capital-independent minimum-contract diagnostic",
@@ -2387,10 +2742,42 @@ def parse_args(argv=None):
         help="Minimum average contract count used by the affordability diagnostic",
     )
     parser.add_argument(
+        "--initial-capital-usd",
         "--affordability-capital-usd",
+        dest="affordability_capital_usd",
         type=float,
         default=DEFAULT_AFFORDABILITY_CAPITAL_USD,
         help="Capital for the equal-weight affordability scenario",
+    )
+    parser.add_argument(
+        "--instrument-cost-limit-sr",
+        type=float,
+        default=DEFAULT_INSTRUMENT_COST_LIMIT_SR,
+        help="Maximum one-way SR cost per trade for Phase 2 eligibility",
+    )
+    parser.add_argument(
+        "--liquidity-ann-trades",
+        type=float,
+        default=DEFAULT_LIQUIDITY_ANNUAL_TRADES,
+        help="Annual strategy turnover used to estimate daily risk traded",
+    )
+    parser.add_argument(
+        "--liquidity-business-days",
+        type=int,
+        default=DEFAULT_LIQUIDITY_BUSINESS_DAYS,
+        help="Trading days used to convert annual turnover to daily risk traded",
+    )
+    parser.add_argument(
+        "--max-market-volume-pct",
+        type=float,
+        default=DEFAULT_MAX_MARKET_VOLUME_PCT,
+        help="Maximum strategy risk traded as a percent of market risk volume",
+    )
+    parser.add_argument(
+        "--min-daily-volume",
+        type=float,
+        default=DEFAULT_MIN_DAILY_VOLUME_CONTRACTS,
+        help="Minimum 20-day average contracts traded per day",
     )
     parser.add_argument(
         "--affordability-idm",
@@ -2680,6 +3067,25 @@ PUBLIC_REPORT_RENAMES = {
     "affordability_scenario_capital": "affordability_scenario_capital_usd",
     "equal_weight_dvol_budget": "equal_weight_dvol_budget_usd",
     "min_capital_equal_weight": "min_capital_usd_equal_weight",
+    "avg_daily_volume_contracts": "avg_daily_volume",
+    "volume_observations": "volume_n",
+    "initial_capital_usd": "init_capital_usd",
+    "selection_target_vol": "target_vol",
+    "min_daily_volume_contracts": "min_daily_volume",
+    "max_market_volume_pct": "max_pct_mkt_volume",
+    "liquidity_daily_point_vol": "liq_daily_point_vol",
+    "liquidity_vol_observations": "liq_vol_n",
+    "liquidity_vol_source": "liq_vol_source",
+    "liquidity_annual_dollar_vol_per_contract": (
+        "liq_ann_dvol_usd_per_contract"
+    ),
+    "liquidity_business_days": "liq_days",
+    "instrument_cost_limit_sr": "cost_limit_sr",
+    "instrument_cost_eligible": "cost_eligible",
+    "risk_size_eligible": "size_eligible",
+    "contract_volume_eligible": "volume_eligible",
+    "liquidity_eligible": "liq_eligible",
+    "max_contract_ann_dvol_usd": "max_ann_dvol_usd",
 }
 
 
@@ -2755,6 +3161,25 @@ def _public_report_schema(report: pl.DataFrame) -> pl.DataFrame:
         "selected_daily_dvol_usd_per_contract",
         "selected_ann_dvol_usd_per_contract",
         "selected_vol_source",
+        "avg_daily_volume",
+        "volume_n",
+        "volume_start",
+        "volume_end",
+        "volume_source",
+        "liq_daily_point_vol",
+        "liq_ann_dvol_usd_per_contract",
+        "liq_vol_n",
+        "liq_vol_source",
+        "risk_traded_usd_day",
+        "mkt_risk_vol_usd_day",
+        "pct_mkt_volume",
+        "min_daily_volume",
+        "max_pct_mkt_volume",
+        "volume_eligible",
+        "risk_volume_eligible",
+        "liq_eligible",
+        "data_eligible",
+        "selection_bucket",
         "cost_volatility_method",
         "selected_cost_ann_dvol_usd_per_contract",
         "selected_cost_vol_source",
@@ -2769,6 +3194,12 @@ def _public_report_schema(report: pl.DataFrame) -> pl.DataFrame:
         "roll_sr",
         "selected_cost_quality",
         "rule_cost_limit_sr",
+        "cost_limit_sr",
+        "cost_eligible",
+        "max_ann_dvol_usd",
+        "size_eligible",
+        "phase2_eligible",
+        "phase2_exclusion",
         "ann_days",
     ]
     selected = [name for name in selected_first if name in report.columns]
@@ -2822,6 +3253,18 @@ def _emit_report(report: pl.DataFrame, args) -> pl.DataFrame:
         "selected_daily_point_vol",
         "selected_ann_dvol_usd_per_contract",
         "selected_cost_ann_dvol_usd_per_contract",
+        "avg_daily_volume",
+        "risk_traded_usd_day",
+        "mkt_risk_vol_usd_day",
+        "pct_mkt_volume",
+        "volume_eligible",
+        "risk_volume_eligible",
+        "cost_eligible",
+        "size_eligible",
+        "data_eligible",
+        "selection_bucket",
+        "phase2_eligible",
+        "phase2_exclusion",
         "affordability_rank_in_asset_class",
         "affordability_cluster_role",
         "counts_toward_main_instrument_minimum",
@@ -2898,6 +3341,17 @@ def run(argv=None) -> pl.DataFrame:
         raise ValueError(
             "--affordability-min-main-instruments must be positive"
         )
+    phase2_positive_args = {
+        "--instrument-cost-limit-sr": args.instrument_cost_limit_sr,
+        "--volume-lookback-days": args.volume_lookback_days,
+        "--liquidity-ann-trades": args.liquidity_ann_trades,
+        "--liquidity-business-days": args.liquidity_business_days,
+        "--max-market-volume-pct": args.max_market_volume_pct,
+        "--min-daily-volume": args.min_daily_volume,
+    }
+    for option, value in phase2_positive_args.items():
+        if value <= 0:
+            raise ValueError(f"{option} must be positive")
 
     pooled_summaries = None
     strategy_metrics_by_rule = None
@@ -2962,6 +3416,16 @@ def run(argv=None) -> pl.DataFrame:
             min_main_instruments=args.affordability_min_main_instruments,
             main_asset_classes=args.affordability_main_asset_classes,
         )
+        report = _attach_phase2_prefilters(
+            report,
+            initial_capital_usd=args.affordability_capital_usd,
+            target_vol=args.affordability_target_vol,
+            instrument_cost_limit_sr=args.instrument_cost_limit_sr,
+            liquidity_ann_trades=args.liquidity_ann_trades,
+            liquidity_business_days=args.liquidity_business_days,
+            max_market_volume_pct=args.max_market_volume_pct,
+            min_daily_volume_contracts=args.min_daily_volume,
+        )
         return _emit_report(report, args)
 
     log.info(
@@ -2992,6 +3456,8 @@ def run(argv=None) -> pl.DataFrame:
                     duration=args.duration,
                     spread_duration=args.spread_duration,
                     spread_use_rth=not args.spread_all_hours,
+                    volume_duration=args.volume_duration,
+                    volume_lookback_days=args.volume_lookback_days,
                     min_days=args.min_days,
                     contract_details_timeout=args.contract_details_timeout,
                     quote_wait_seconds=args.quote_wait_seconds,
@@ -3059,6 +3525,16 @@ def run(argv=None) -> pl.DataFrame:
         idm=args.affordability_idm,
         min_main_instruments=args.affordability_min_main_instruments,
         main_asset_classes=args.affordability_main_asset_classes,
+    )
+    report = _attach_phase2_prefilters(
+        report,
+        initial_capital_usd=args.affordability_capital_usd,
+        target_vol=args.affordability_target_vol,
+        instrument_cost_limit_sr=args.instrument_cost_limit_sr,
+        liquidity_ann_trades=args.liquidity_ann_trades,
+        liquidity_business_days=args.liquidity_business_days,
+        max_market_volume_pct=args.max_market_volume_pct,
+        min_daily_volume_contracts=args.min_daily_volume,
     )
     return _emit_report(report, args)
 

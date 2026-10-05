@@ -6,6 +6,7 @@ import pytest
 from derivatives_bt_engine.data.futures_cost_rankings import (
     find_latest_phase1_cost_report,
     load_latest_phase1_cost_report,
+    phase2_search_universe,
     top_n_by_asset_class,
 )
 
@@ -98,3 +99,19 @@ def test_top_n_by_asset_class_excludes_restricted_execution_by_default():
 
     assert eligible["Equity"]["symbol"].to_list() == ["NQ"]
     assert all_rows["Equity"]["symbol"].to_list() == ["SGX"]
+
+
+def test_phase2_search_universe_filters_without_mutating_audit_report():
+    report = _report().with_columns(
+        pl.Series("phase2_eligible", [True, False, None, True, False])
+    )
+
+    selected = phase2_search_universe(report)
+
+    assert selected.get_column("symbol").to_list() == ["ES", "ZN"]
+    assert report.height == 5
+
+
+def test_phase2_search_universe_requires_new_phase1_schema():
+    with pytest.raises(ValueError, match="rerun the Phase 1 audit"):
+        phase2_search_universe(_report())

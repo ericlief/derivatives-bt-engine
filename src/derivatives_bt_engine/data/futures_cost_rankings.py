@@ -40,6 +40,19 @@ DEFAULT_VIEW_COLUMNS = (
     "multiplier",
     "notional_usd_per_contract",
     "selected_ann_dvol_usd_per_contract",
+    "liq_ann_dvol_usd_per_contract",
+    "avg_daily_volume",
+    "risk_traded_usd_day",
+    "mkt_risk_vol_usd_day",
+    "pct_mkt_volume",
+    "volume_eligible",
+    "risk_volume_eligible",
+    "cost_eligible",
+    "size_eligible",
+    "data_eligible",
+    "selection_bucket",
+    "phase2_eligible",
+    "phase2_exclusion",
     "affordability_cluster_role",
     "counts_toward_main_instrument_minimum",
     "affordability_scenario_capital_usd",
@@ -58,6 +71,23 @@ DEFAULT_VIEW_COLUMNS = (
     "include_default_pool",
     "ib_availability",
 )
+
+
+def phase2_search_universe(
+    report: pl.DataFrame,
+    *,
+    eligible_column: str = "phase2_eligible",
+) -> pl.DataFrame:
+    """Return only rows that passed the Phase 1 hard pre-selection gates."""
+    if eligible_column not in report.columns:
+        raise ValueError(
+            f"Report has no {eligible_column} column; rerun the Phase 1 audit"
+        )
+    filtered = report.filter(pl.col(eligible_column).fill_null(False))
+    sort_columns = [
+        name for name in ("asset_class", "symbol") if name in filtered.columns
+    ]
+    return filtered.sort(sort_columns) if sort_columns else filtered
 
 
 def find_latest_phase1_cost_report(
