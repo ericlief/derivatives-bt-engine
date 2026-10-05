@@ -53,6 +53,7 @@ pysystemtrade-import = "derivatives_bt_engine.data.pysystemtrade_import:main"
 pysystemtrade-pooling-audit = "derivatives_bt_engine.data.pysystemtrade_pooling:main"
 futures-overlap-report = "derivatives_bt_engine.data.futures_overlap:main"
 futures-cost-risk = "derivatives_bt_engine.data.futures_cost_risk:main"
+futures-select-phase2 = "derivatives_bt_engine.data.futures_selection_phase2:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

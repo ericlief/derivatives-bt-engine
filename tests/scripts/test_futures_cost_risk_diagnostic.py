@@ -657,7 +657,7 @@ def test_report_uses_auditable_precision_for_money_rates_and_other_floats():
     assert rounded["history_rows"][0] == 100
 
 
-def test_public_report_leads_with_selected_values_and_normalizes_spreads():
+def test_public_report_leads_with_primary_values_and_normalizes_spreads():
     report = futures_cost_risk._public_report_schema(pl.DataFrame({
         "symbol": ["AEX_mini"],
         "price": [1103.975],
@@ -691,14 +691,14 @@ def test_public_report_leads_with_selected_values_and_normalizes_spreads():
         "ewmac_4_16_reference_pre_cost_sharpe": [0.1],
     }))
 
-    assert report["selected_spread_points"][0] == pytest.approx(3.177)
-    assert report["snap_spread_points"][0] == pytest.approx(1.625)
-    assert report["ib_hspread_mean_points"][0] == pytest.approx(3.177)
-    assert report["ib_hspread_median_points"][0] == pytest.approx(3.3)
-    assert report["ib_hspread_p90_points"][0] == pytest.approx(4.875)
-    assert report["ref_spread_points"][0] == pytest.approx(2.4)
-    assert "selected_cost_usd" in report.columns
-    assert "selected_ann_dvol_usd_per_contract" in report.columns
+    assert report["spread_pts"][0] == pytest.approx(3.177)
+    assert report["snap_spread_pts"][0] == pytest.approx(1.625)
+    assert report["ib_hspread_mean_pts"][0] == pytest.approx(3.177)
+    assert report["ib_hspread_median_pts"][0] == pytest.approx(3.3)
+    assert report["ib_hspread_p90_pts"][0] == pytest.approx(4.875)
+    assert report["ref_spread_pts"][0] == pytest.approx(2.4)
+    assert "cost_usd" in report.columns
+    assert "ann_dvol" in report.columns
     assert "ewmac_4_16_ann_trades" in report.columns
     assert "ewmac_4_16_ann_rolls" in report.columns
     assert "ewmac_4_16_tot_ann_cost_sr" in report.columns
@@ -707,18 +707,18 @@ def test_public_report_leads_with_selected_values_and_normalizes_spreads():
     assert "roll_sr" in report.columns
     assert not any("tx" in column for column in report.columns)
     assert not any("total_transactions" in column for column in report.columns)
-    assert report["ref_strategy_configured_rolls_per_year"][0] == pytest.approx(
+    assert report["ref_strat_cfg_rolls_per_year"][0] == pytest.approx(
         12.0
     )
     assert report["ref_ann_rolls"][0] == pytest.approx(
         12.0
     )
-    assert report["ref_strategy_roll_rate_source"][0] == "configured_hold_cycle"
-    assert report.columns.index("selected_spread_points") < report.columns.index(
-        "snap_spread_points"
+    assert report["ref_strat_roll_rate_src"][0] == "configured_hold_cycle"
+    assert report.columns.index("spread_pts") < report.columns.index(
+        "snap_spread_pts"
     )
-    assert report.columns.index("selected_daily_point_vol") < report.columns.index(
-        "ref_mixed_point_vol"
+    assert report.columns.index("daily_pt_vol") < report.columns.index(
+        "ref_mixed_pt_vol"
     )
 
 
@@ -728,8 +728,8 @@ def test_emitted_report_includes_generation_timestamp(capsys):
         Namespace(no_save=True),
     )
 
-    assert "report_generated_at_ct" in emitted.columns
-    timestamp = emitted["report_generated_at_ct"][0]
+    assert "report_ts_ct" in emitted.columns
+    timestamp = emitted["report_ts_ct"][0]
     assert timestamp.endswith(("-05:00", "-06:00"))
     assert "T" in timestamp
     capsys.readouterr()
@@ -1298,11 +1298,10 @@ def test_phase2_prefilter_uses_relative_market_risk_volume():
     assert selected["phase2_exclusion"] == ""
     public = futures_cost_risk._public_report_schema(filtered)
     assert public["avg_daily_volume"][0] == pytest.approx(100_000.0)
-    assert public["selected_ann_dvol_usd_per_contract"][0] == pytest.approx(
-        1_100.0
-    )
-    assert public["init_capital_usd"][0] == pytest.approx(500_000.0)
-    assert not any(name.startswith("liq_") for name in public.columns)
+    assert public["ann_dvol"][0] == pytest.approx(1_100.0)
+    assert public["init_cap_usd"][0] == pytest.approx(500_000.0)
+    assert "liq_ann_dvol" not in public.columns
+    assert not any(name.startswith("selected_") for name in public.columns)
 
 
 def test_phase2_prefilter_requires_more_than_hundred_contracts():

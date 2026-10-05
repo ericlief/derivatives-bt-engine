@@ -13,6 +13,12 @@ DEFAULT_REPORT_PATTERNS = (
 )
 
 RANK_COLUMNS = {
+    "cost": "cost_rank_in_asset_cls",
+    "affordability": "afford_rank_in_asset_cls",
+    "notional": "notional_rank_in_asset_cls",
+}
+
+LEGACY_RANK_COLUMNS = {
     "cost": "cost_rank_in_asset_class",
     "affordability": "affordability_rank_in_asset_class",
     "notional": "notional_rank_in_asset_class",
@@ -20,71 +26,165 @@ RANK_COLUMNS = {
 
 DEFAULT_VIEW_COLUMNS = (
     "symbol",
-    "history_instrument_code",
-    "description",
-    "asset_class",
+    "hist_instr_code",
+    "desc",
+    "asset_cls",
     "region",
-    "execution_profile",
-    "execution_eligible",
-    "execution_restriction_reason",
-    "cost_rank_in_asset_class",
-    "affordability_rank_in_asset_class",
-    "notional_rank_in_asset_class",
+    "exec_prof",
+    "exec_elig",
+    "exec_restrict_reason",
+    "cost_rank_in_asset_cls",
+    "afford_rank_in_asset_cls",
+    "notional_rank_in_asset_cls",
     "trade_sr",
-    "selected_spread_points",
-    "selected_spread_source",
-    "cur_price",
-    "currency",
-    "ib_multiplier",
-    "price_magnifier",
-    "multiplier",
-    "notional_usd_per_contract",
-    "selected_ann_dvol_usd_per_contract",
+    "spread_pts",
+    "spread_src",
+    "cur_px",
+    "ccy",
+    "ib_mult",
+    "px_magnifier",
+    "mult",
+    "notional",
+    "ann_dvol",
     "avg_daily_volume",
     "risk_traded_usd_day",
     "mkt_risk_vol_usd_day",
     "pct_mkt_volume",
-    "volume_eligible",
-    "risk_volume_eligible",
-    "cost_eligible",
-    "size_eligible",
-    "data_eligible",
-    "selection_bucket",
-    "phase2_eligible",
-    "phase2_exclusion",
-    "affordability_cluster_role",
-    "counts_toward_main_instrument_minimum",
-    "affordability_scenario_capital_usd",
-    "affordability_scenario_idm",
-    "affordability_min_main_instruments",
-    "affordability_main_cluster_count",
-    "equal_weight_dvol_budget_usd",
-    "equal_weight_average_contracts",
-    "equal_weight_meets_min_contracts",
-    "main_instrument_affordable_for_scenario",
-    "min_capital_usd_full_weight_idm1",
-    "min_capital_usd_equal_weight",
-    "eligible_ewmac_rule_count",
-    "eligible_ewmac_rules",
-    "pooling_role",
-    "include_default_pool",
-    "ib_availability",
+    "volume_elig",
+    "risk_volume_elig",
+    "cost_elig",
+    "size_elig",
+    "data_elig",
+    "sel_bucket",
+    "phase2_elig",
+    "phase2_excl",
+    "afford_cluster_role",
+    "counts_toward_main_instr_min",
+    "afford_scen_cap",
+    "afford_scen_idm",
+    "afford_min_main_instrs",
+    "afford_main_cluster_count",
+    "equal_wt_dvol_budget",
+    "equal_wt_avg_cons",
+    "equal_wt_meets_min_cons",
+    "main_instr_afford_for_scen",
+    "min_cap_usd_full_wt_idm1",
+    "min_cap_usd_equal_wt",
+    "elig_ewmac_rule_count",
+    "elig_ewmac_rules",
+    "pool_role",
+    "incl_default_pool",
+    "ib_avail",
 )
+
+PHASE2_STEP1_GATE_COLUMNS = (
+    "cost_elig",
+    "size_elig",
+    "liq_elig",
+    "data_elig",
+    "instr_has_elig_ewmac_rule",
+    "exec_elig",
+    "phase2_elig",
+)
+
+PHASE2_STEP1_COLUMNS = (
+    "symbol",
+    "signal_symbol",
+    "hist_instr_code",
+    "desc",
+    "asset_cls",
+    "region",
+    "econ_fam_id",
+    "roll_policy_id",
+    "dup_grp_id",
+    "pool_role",
+    "rep_instr",
+    "exec_prof",
+    "con_id",
+    "expiry",
+    "ib_symbol",
+    "ib_exch",
+    "ib_avail",
+    "cur_px",
+    "ccy",
+    "mult",
+    "notional",
+    "ann_dvol",
+    "vol_src",
+    "avg_daily_volume",
+    "volume_n",
+    "volume_start",
+    "volume_end",
+    "volume_src",
+    "risk_traded_usd_day",
+    "mkt_risk_vol_usd_day",
+    "pct_mkt_volume",
+    "min_daily_volume",
+    "max_pct_mkt_volume",
+    "volume_elig",
+    "risk_volume_elig",
+    "liq_elig",
+    "trade_sr",
+    "cost_lim_sr",
+    "cost_elig",
+    "max_ann_dvol",
+    "size_elig",
+    "data_elig",
+    "elig_ewmac_rule_count",
+    "elig_ewmac_rules",
+    "instr_has_elig_ewmac_rule",
+    "exec_elig",
+    "phase2_elig",
+    "report_ts_ct",
+)
+
+
+def phase2_step1_candidates(report: pl.DataFrame) -> pl.DataFrame:
+    """Select Phase 2 candidates using only gates saved by Phase 1.
+
+    This function deliberately performs no market-data request and no metric
+    calculation. It filters the complete Phase 1 audit using its persisted
+    cost, dollar-vol size, liquidity, data, rule, execution, and IB contract
+    decisions, then returns the compact columns needed by the next stage.
+    """
+    required = {*PHASE2_STEP1_GATE_COLUMNS, "ib_avail", "symbol"}
+    missing = sorted(required.difference(report.columns))
+    if missing:
+        raise ValueError(
+            "Phase 1 report is missing Step 1 selection fields "
+            f"{missing}; rerun the current futures-cost-risk audit"
+        )
+
+    gate = pl.lit(True)
+    for column in PHASE2_STEP1_GATE_COLUMNS:
+        gate &= pl.col(column).fill_null(False)
+    gate &= pl.col("ib_avail").fill_null("") == "contract_qualified"
+
+    selected = report.filter(gate)
+    columns = [name for name in PHASE2_STEP1_COLUMNS if name in selected.columns]
+    selected = selected.select(columns)
+    sort_columns = [
+        name for name in ("asset_cls", "symbol") if name in selected.columns
+    ]
+    return selected.sort(sort_columns) if sort_columns else selected
 
 
 def phase2_search_universe(
     report: pl.DataFrame,
     *,
-    eligible_column: str = "phase2_eligible",
+    eligible_column: str = "phase2_elig",
 ) -> pl.DataFrame:
     """Return only rows that passed the Phase 1 hard pre-selection gates."""
+    if eligible_column not in report.columns and eligible_column == "phase2_elig":
+        eligible_column = "phase2_eligible"
     if eligible_column not in report.columns:
         raise ValueError(
             f"Report has no {eligible_column} column; rerun the Phase 1 audit"
         )
     filtered = report.filter(pl.col(eligible_column).fill_null(False))
     sort_columns = [
-        name for name in ("asset_class", "symbol") if name in filtered.columns
+        name for name in ("asset_cls", "asset_class", "symbol")
+        if name in filtered.columns
     ]
     return filtered.sort(sort_columns) if sort_columns else filtered
 
@@ -130,6 +230,8 @@ def load_latest_phase1_cost_report(
 
 def _resolve_rank_column(report: pl.DataFrame, rank_by: str) -> str:
     rank_column = RANK_COLUMNS.get(rank_by, rank_by)
+    if rank_column not in report.columns and rank_by in LEGACY_RANK_COLUMNS:
+        rank_column = LEGACY_RANK_COLUMNS[rank_by]
     if rank_column not in report.columns:
         choices = ", ".join(RANK_COLUMNS)
         raise ValueError(
@@ -159,16 +261,24 @@ def top_n_by_asset_class(
     """
     if n <= 0:
         raise ValueError("n must be positive")
-    if "asset_class" not in report.columns:
-        raise ValueError("Report has no asset_class column")
+    asset_class_column = (
+        "asset_cls" if "asset_cls" in report.columns else "asset_class"
+    )
+    if asset_class_column not in report.columns:
+        raise ValueError("Report has no asset class column")
 
     rank_column = _resolve_rank_column(report, rank_by)
-    if eligible_only and "execution_eligible" in report.columns:
-        report = report.filter(pl.col("execution_eligible").fill_null(False))
+    execution_eligible_column = (
+        "exec_elig" if "exec_elig" in report.columns else "execution_eligible"
+    )
+    if eligible_only and execution_eligible_column in report.columns:
+        report = report.filter(
+            pl.col(execution_eligible_column).fill_null(False)
+        )
     if asset_classes is None:
         classes = sorted(
             value
-            for value in report.get_column("asset_class").unique().to_list()
+            for value in report.get_column(asset_class_column).unique().to_list()
             if value is not None
         )
     else:
@@ -184,7 +294,7 @@ def top_n_by_asset_class(
     for asset_class in classes:
         ranked = (
             report
-            .filter(pl.col("asset_class") == asset_class)
+            .filter(pl.col(asset_class_column) == asset_class)
             .sort([rank_column, "symbol"], nulls_last=True)
             .head(n)
         )

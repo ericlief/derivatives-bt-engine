@@ -42,9 +42,9 @@ is Carver's long-history point-volatility anchor divided by its contemporaneous
 price. The 70/30 blend is then applied to today's IB price. If the dated request
 does not produce the minimum observations, the complete Carver mixed return
 volatility is scaled to today's price and flagged as a fallback. Thus
-`selected_daily_point_vol`, dollar volatility, and notional share a current
+`daily_pt_vol`, dollar volatility, and notional share a current
 price level, while `ref_mixed_point_vol` remains the auditable historical
-input. `ref_cur_price_ratio` and `selected_vol_source` expose the handoff.
+input. `ref_cur_price_ratio` and `vol_source` expose the handoff.
 
 IB dated (`--vol-source dated`) and continuous (`--vol-source continuous`)
 history remain explicit comparison modes. Continuous is never the default
@@ -251,14 +251,14 @@ The selected execution estimate is half the median width over the five-day
 window. This is robust to repeated stale quotes from the period before a dated
 contract becomes actively traded; mean and p90 remain visible as liquidity
 diagnostics. The CSV reports **all** spread statistics as one-way points:
-`ib_hspread_mean_points`,
-`ib_hspread_median_points`, `ib_hspread_p90_points`, `snap_spread_points`,
-`ref_spread_points`, and `selected_spread_points` are therefore directly
+`ib_hspread_mean_pts`,
+`ib_hspread_median_pts`, `ib_hspread_p90_pts`, `snap_spread_pts`,
+`ref_spread_pts`, and `spread_pts` are therefore directly
 comparable and must not be halved again. Observation count, date range,
 successful bar size, attempts, and failures are retained under the compact
 `ib_hspread_*` prefix.
 
-Timestamped Phase 1 filenames and the CSV fields `report_generated_at_ct`,
+Timestamped Phase 1 filenames and the CSV fields `report_ts_ct`,
 `snap_quote_timestamp_ct`, `ib_hspread_start`, and `ib_hspread_end` use the
 daylight-saving-aware `America/Chicago` timezone. This aligns report review
 with CME hours; each ISO timestamp retains its explicit `-05:00` or `-06:00`
@@ -272,7 +272,7 @@ type-3 delayed request returns usable data. Before any historical call, both a
 type-3 delayed quote and a type-4 delayed-frozen quote explicitly reset IB to
 type 3, because delayed—not delayed-frozen—is the historical-data mode. The
 report separates `snap_error_codes` (all attempts) from
-`snap_selected_error_codes` and records `ib_hist_market_data_type`.
+`snap_selected_error_codes` and records `ib_hist_mkt_data_type`.
 
 Quote and historical availability are not identical for delayed data. The AEX
 mini, for example, can return `10168` from delayed `reqMktData` while a type-3
@@ -326,10 +326,10 @@ retired without sending an invalid `BSBY` security-definition request to IB.
 
 Execution permission is local account metadata, not Carver source metadata.
 The engine's `ibkr_us` eligibility profile marks the Carver `SGX` instrument
-(IB root `STI`) `execution_eligible=false` with reason
+(IB root `STI`) `exec_elig=false` with reason
 `ibkr_us_product_restriction`. Its history remains in the research and forecast
 scalar pools, and its cost row remains auditable; the asset-class ranking helper
-excludes explicitly restricted rows by default. `ib_availability` continues to
+excludes explicitly restricted rows by default. `ib_avail` continues to
 describe contract/data qualification only and must not be read as permission to
 trade.
 
@@ -421,23 +421,24 @@ that database. Omit `--offline` to qualify current IB contracts and request
 current quotes; this is the step that tests real account availability.
 
 An online audit requests each required cash-FX pair from IB once before the
-futures loop. `cur_fx_to_usd`, `cur_fx_source`, `cur_fx_pair`,
-`cur_fx_market_data_type`, and `cur_fx_asof` identify the conversion actually
+futures loop. `cur_fx_to_usd`, `cur_fx_src`, `cur_fx_pair`,
+`cur_fx_mkt_data_type`, and `cur_fx_asof` identify the conversion actually
 used for notional, dollar volatility, and costs. The imported Carver rate is
 retained later as `ref_fx_to_usd`/`ref_fx_asof`. If IB cannot supply the pair,
 the reference rate becomes the selected `cur_fx_to_usd` and
-`cur_fx_source=pysystemtrade_reference_fallback` makes that substitution
+`cur_fx_src=pysystemtrade_reference_fallback` makes that substitution
 explicit. Contract construction, quote fallback, rejection handling, and the
 USD quotation convention live in `IBPySync`: AUD/EUR/GBP/NZD use `CCYUSD`;
 other currencies use `USDCCY` and are inverted, with legacy `MXP` mapped to
 IB's current `MXN` code. The cost report does not probe both orientations.
 
-The public CSV is ordered around a single selected calculation path. Selected
-current price, FX, volatility, dollar risk, spread, cash cost, and SR cost come
-first. Point-in-time quote alternatives use `snap_*`; unused Carver inputs and
-fallbacks use `ref_*` and are moved to the diagnostic tail. Converted monetary
-values carry `_usd`, native amounts carry `_native`, and long repeated suffixes
-use `tx`, `tot`, `ann`, and `sr`.
+The public CSV is ordered around one primary calculation path, so it does not
+repeat a `selected_*` prefix. Current price, FX, volatility, dollar risk,
+spread, cash cost, and SR cost come first. Point-in-time quote alternatives use
+`snap_*`; unused Carver inputs and fallbacks use `ref_*` at the diagnostic
+tail. Primary `notional` and `dvol` values are USD per row contract; native
+amounts retain `_native`. Common abbreviations include `con`, `instr`, `exec`,
+`elig`, `ann`, `dvol`, `sr`, `pct`, `avg`, `min`, `max`, and `n`.
 
 For an IB-connected audit, the command defaults to `--market-data-type auto`:
 it tries real-time (`1`), then delayed (`3`), then delayed-frozen (`4`), and
@@ -467,7 +468,7 @@ short-window volatility definition:
 
 ```text
 risk_traded_usd_day = init_capital_usd * target_vol * liquidity_ann_trades / 250
-mkt_risk_vol_usd_day = avg_daily_volume * selected_ann_dvol_usd_per_contract
+mkt_risk_vol_usd_day = avg_daily_volume * ann_dvol
 pct_mkt_volume = 100 * risk_traded_usd_day / mkt_risk_vol_usd_day
 ```
 
@@ -487,22 +488,87 @@ The defaults are `--min-daily-volume 100`, `--max-market-volume-pct 1`,
 `--initial-capital-usd 100000`, and `--target-vol 0.20`.
 
 Phase 1 retains every row for audit and adds separate cost, one-contract risk-
-size, contract-volume, and relative-risk-volume flags. `phase2_eligible` also
+size, contract-volume, and relative-risk-volume flags. `phase2_elig` also
 requires at least one affordable EWMAC rule, an allowed execution profile, and
-a qualified IB contract. `phase2_exclusion` records all failed gates. The
+a qualified IB contract. `phase2_excl` records all failed gates. The
 `phase2_search_universe()` notebook helper reads only eligible rows before the
 greedy search; it does not destructively condense the saved audit. The size
 gate compares the production mixed annual dollar volatility per contract with
 `init_capital_usd * target_vol`; futures notional is reported but is not a
 capital-eligibility test.
 
-`selection_bucket` mirrors Carver's three-way triage. Missing executable
+`sel_bucket` mirrors Carver's three-way triage. Missing executable
 price, FX, multiplier, or 20-day close/volume data is `dont_add_no_data`;
 there is no numeric substitute for a missing data subscription. Rows with
 data that fail cost, dollar-vol size, or either liquidity gate are
 `add_later`. Rows passing those four numeric gates are `add_first`.
-`phase2_eligible` is intentionally narrower than `add_first`, because the
+`phase2_elig` is intentionally narrower than `add_first`, because the
 actual search must also respect the EWMAC-rule and execution-family checks.
+
+### Phase 1 to Phase 2 pipeline
+
+The saved Phase 1 CSV is the durable handoff, not a throwaway display table.
+Keep every audited row in that file so exclusions remain reproducible, then
+derive the smaller search universe from it:
+
+```text
+pysystemtrade histories + instrument metadata + local execution overlays
+    -> per-rule EWMAC performance, turnover, rolls, and cost eligibility
+    -> resolve the exact dated IB contract
+    -> current price and FX, executable spread and commission
+    -> 20-day mean contract volume
+    -> mixed production volatility and one-contract dollar risk
+    -> Phase 1 gates, sel_bucket, phase2_elig, and phase2_excl
+    -> full auditable Phase 1 CSV
+    -> phase2_search_universe(CSV)
+    -> combined forecast and subsystem return for each surviving instrument
+    -> trial-book correlations, handcrafted weights, and IDM
+    -> portfolio-specific positions, turnover, cost, and market participation
+    -> greedy AFTS selection with core-class coverage and score tolerance
+```
+
+Phase 2 Step 1 is deliberately only a persisted-gate selection. It does not
+connect to IB and does not recalculate volume, volatility, cost, or any other
+Phase 1 metric. Run:
+
+```bash
+futures-select-phase2 --report-dir results
+```
+
+The command loads the newest Phase 1 IB CSV and saves
+`pysystemtrade_phase2_step1_<timestamp>.csv` beside it. The output contains
+selected instruments only. A row must have saved `cost_elig`, `size_elig`,
+`liq_elig`, `data_elig`, rule eligibility, execution eligibility, and
+`phase2_elig` flags equal to true, plus `ib_avail=contract_qualified`. The CSV
+retains the instrument and executable-contract identifiers, `ann_dvol`, raw
+volume and market-risk-volume values, liquidity percentages and limits, and
+the saved gate flags needed to audit why each row entered the Phase 2 search.
+Use `--input <phase1.csv>` to select a particular audit and `--output <path>`
+to choose the exact intermediate filename.
+
+The Phase 1 `liquidity_ann_trades=25` calculation is Carver's conservative
+single-instrument scenario. It is useful for coarse triage, but it is not the
+final capacity estimate for a Phase 2 trial book. Phase 2 must first combine
+the surviving rules into the instrument forecast and measure the resulting
+subsystem turnover. It must then use the trial weight and trial IDM to compute
+that instrument's risk allocation and daily risk traded. Do not average or sum
+the individual rule turnovers as a substitute for the combined subsystem.
+
+Likewise, the Phase 1 one-way `trade_sr <= 0.01` test is an initial cost screen.
+The Phase 2 score uses the combined subsystem turnover:
+
+```text
+instr_risk = capital * target_vol * weight * IDM
+risk_traded_day = instr_risk * subsystem_turnover / 250
+pct_mkt_volume = 100 * risk_traded_day / mkt_risk_vol_usd_day
+annual_trade_cost_sr = trade_sr * subsystem_turnover
+```
+
+Add `roll_sr * ann_rolls` only in the separately reported production-cost
+sensitivity. The baseline AFTS score excludes that holding-roll allowance, as
+described below. Thus Phase 1 answers “is this executable contract worth
+carrying into the search?”, while Phase 2 answers “does this contract fit this
+particular diversified trial book?”
 
 ## Phase 2: Iterative AFTS instrument selection
 
@@ -513,12 +579,16 @@ filter. At each iteration it tries every unused instrument as the next member,
 rebuilds the hypothetical portfolio, and keeps the candidate with the highest
 expected portfolio Sharpe ratio. This is the appropriate baseline for Phase 2.
 
-The pre-selection filters are hard: a candidate needs usable history, price,
-FX, contract multiplier, annual dollar volatility, at least one cost-eligible
-rule, one-way `trade_sr <= 0.01`, and a qualified contract allowed by the
-selected broker profile. It must pass both the 100-contract daily volume floor
-and the relative market-risk participation calculation above, as described in
+The Phase 1 pre-selection filters are hard for entry to the search: a candidate
+needs usable history, price, FX, contract multiplier, annual dollar volatility,
+at least one cost-eligible rule, one-way `trade_sr <= 0.01`, and a qualified
+contract allowed by the selected broker profile. It must pass both the
+100-contract daily volume floor and the coarse relative market-risk
+participation calculation above, as described in
 [Adding new instruments](https://qoppac.blogspot.com/2021/05/adding-new-instruments-or-how-i-learned.html).
+Every Phase 2 trial then recalculates turnover, position size, and market
+participation using the combined subsystem and the trial book's weight and IDM;
+the fixed 25-trade Phase 1 scenario must not replace that calculation.
 Full, mini, and micro contracts that express the same signal are one economic
 family: normally select at most one execution route, unless the report already
 establishes a materially distinct contract or roll path. An execution overlay

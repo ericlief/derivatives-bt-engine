@@ -20,6 +20,25 @@
 - Database resources may exist under `/home/dev/fin/db`.
 - Do not modify source market data unless explicitly requested.
 
+## Public report schemas
+
+- Keep internal dataframe and calculation names descriptive. Compact names only
+  at the public CSV/report boundary.
+- A futures cost-report row represents one executable contract. Primary
+  monetary values are USD, so use `notional`, `daily_dvol`, `ann_dvol`, and
+  `cost_ann_dvol`; retain suffixes such as `_native` only when they distinguish
+  parallel values or units.
+- Do not prefix the primary calculation path with `selected_`. Use `snap_` for
+  point-in-time quote alternatives and `ref_` for reference inputs or
+  fallbacks.
+- Use short, unambiguous report tokens consistently: `con`, `instr`, `exec`,
+  `elig`, `ann`, `dvol`, `sr`, `pct`, `avg`, `min`, `max`, `n`, `px`, `pt`,
+  `pts`, `ccy`, `mult`, `src`, `hist`, `ref`, `snap`, `cap`, `wt`, and `cls`.
+  In public column names, abbreviate `contract` as `con`.
+- Add new abbreviations to the centralized public-schema rename/token map, not
+  as one-off aliases. Update report ordering, ranking/notebook helpers,
+  documentation, and schema tests together.
+
 ## Interactive Brokers
 
 - Local IB Gateway/TWS ports may include 7496, 7497, 4001, and 4002.

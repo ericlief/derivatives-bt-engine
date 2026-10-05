@@ -7,6 +7,7 @@ from derivatives_bt_engine.data.futures_cost_rankings import (
     find_latest_phase1_cost_report,
     load_latest_phase1_cost_report,
     phase2_search_universe,
+    phase2_step1_candidates,
     top_n_by_asset_class,
 )
 
@@ -115,3 +116,56 @@ def test_phase2_search_universe_filters_without_mutating_audit_report():
 def test_phase2_search_universe_requires_new_phase1_schema():
     with pytest.raises(ValueError, match="rerun the Phase 1 audit"):
         phase2_search_universe(_report())
+
+
+def _phase2_step1_report() -> pl.DataFrame:
+    return pl.DataFrame({
+        "symbol": ["PASS", "ILLIQ", "BIG", "NOIB", "NODATA"],
+        "asset_cls": ["Ags", "Ags", "Equity", "Vol", "FX"],
+        "ann_dvol": [500.0, 500.0, 25_000.0, 500.0, 500.0],
+        "avg_daily_volume": [1_000.0, 50.0, 1_000.0, 1_000.0, None],
+        "pct_mkt_volume": [0.1, 2.0, 0.1, 0.1, None],
+        "cost_elig": [True] * 5,
+        "size_elig": [True, True, False, True, True],
+        "liq_elig": [True, False, True, True, False],
+        "data_elig": [True, True, True, True, False],
+        "instr_has_elig_ewmac_rule": [True] * 5,
+        "exec_elig": [True] * 5,
+        "phase2_elig": [True, False, False, True, False],
+        "ib_avail": [
+            "contract_qualified",
+            "contract_qualified",
+            "contract_qualified",
+            "unavailable_or_unverified",
+            "contract_qualified",
+        ],
+    })
+
+
+def test_phase2_step1_uses_saved_gates_and_keeps_only_selected_rows():
+    report = _phase2_step1_report()
+
+    selected = phase2_step1_candidates(report)
+
+    assert selected.get_column("symbol").to_list() == ["PASS"]
+    assert selected.get_column("ann_dvol").to_list() == [500.0]
+    assert report.height == 5
+
+
+def test_phase2_step1_does_not_recalculate_phase1_metrics():
+    report = _phase2_step1_report().with_columns(
+        pl.when(pl.col("symbol") == "PASS")
+        .then(99.0)
+        .otherwise(pl.col("pct_mkt_volume"))
+        .alias("pct_mkt_volume")
+    )
+
+    selected = phase2_step1_candidates(report)
+
+    assert selected.get_column("symbol").to_list() == ["PASS"]
+    assert selected.get_column("pct_mkt_volume").to_list() == [99.0]
+
+
+def test_phase2_step1_requires_current_phase1_gate_schema():
+    with pytest.raises(ValueError, match="missing Step 1 selection fields"):
+        phase2_step1_candidates(_report())
