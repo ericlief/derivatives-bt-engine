@@ -124,17 +124,20 @@ tot_ann_cost_sr(speed)
 
 The Phase 1 CSV uses `ann_trades` for Carver's one-way strategy trades and
 `ann_rolls` for complete roll events. It deliberately has no `total_tx`
-column. Under the current conservative `two_outright_legs` roll-cost model:
+column. Under the Carver-style `calendar_spread` roll-cost model:
 
 ```text
-roll_sr = 2 × trade_sr
+trade_sr = (one spread crossing + one commission) / annual dollar volatility
+roll_sr = (one spread crossing + two commissions) / annual dollar volatility
 ```
 
 A physical futures roll has two one-way legs: close the old contract and open
-the new contract. That two-leg cost is contained in `roll_sr`; `ann_rolls`
-remains an event count and is never doubled or added to `ann_trades`. This
-schema also permits a later calendar-spread estimate to replace `roll_sr`
-without changing the turnover fields.
+the new contract. A calendar-spread order executes both legs with one spread
+crossing but pays commission on both legs. That complete event cost is
+contained in `roll_sr`; `ann_rolls` remains an event count and is never doubled
+or added to `ann_trades`. The selected outright half-spread is the fallback
+proxy for the calendar-spread execution cost until a direct spread quote is
+available.
 
 The selected event rate is now the number of months in the current configured
 hold cycle, matching pysystemtrade's `rolls_per_year_in_hold_cycle()`. The CSV

@@ -457,24 +457,25 @@ def test_configured_cost_uses_pooled_turnover_and_reference_rolls():
                 "strategy_rolls_per_year": 4.0,
             },
         },
-        rule_cost_limit_sr=0.15,
+        rule_cost_limit_sr=0.10,
     )
 
     per_trade_sr = 14.5 / 800.0
+    per_roll_sr = 16.5 / 800.0
     assert estimate["strategy_reference_instrument"] == "FULL"
     assert estimate["configured_one_way_cost_native"] == pytest.approx(14.5)
     assert estimate["configured_trade_sr"] == pytest.approx(per_trade_sr)
-    assert estimate["configured_roll_sr"] == pytest.approx(per_trade_sr * 2.0)
+    assert estimate["configured_roll_sr"] == pytest.approx(per_roll_sr)
     assert estimate["ewmac_16_64_trade_ann_cost_sr"] == pytest.approx(
         per_trade_sr * 2.0
     )
     assert estimate["ewmac_16_64_ann_trades"] == pytest.approx(2.0)
     assert estimate["ewmac_16_64_ann_rolls"] == pytest.approx(4.0)
     assert estimate["ewmac_16_64_roll_ann_cost_sr"] == pytest.approx(
-        per_trade_sr * 2.0 * 4.0
+        per_roll_sr * 4.0
     )
     assert estimate["ewmac_16_64_tot_ann_cost_sr"] == pytest.approx(
-        per_trade_sr * 10.0
+        per_trade_sr * 2.0 + per_roll_sr * 4.0
     )
     assert not any("transactions" in key or "_tx" in key for key in estimate)
     assert not estimate["ewmac_16_64_cost_eligible"]
@@ -965,7 +966,7 @@ def test_configured_cost_prefers_cost_specific_dollar_volatility():
         9.22 / 5_000.0
     )
     assert estimate["configured_roll_sr"] == pytest.approx(
-        18.44 / 5_000.0
+        12.19 / 5_000.0
     )
 
 

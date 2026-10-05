@@ -833,7 +833,7 @@ def _configured_cost_estimate(
     common.update(
         strategy_reference_ann_rolls=rolls_per_year,
         strategy_reference_roll_rate_source=roll_rate_source,
-        roll_cost_model="two_outright_legs",
+        roll_cost_model="calendar_spread",
     )
 
     carver_spread_points = _nonnegative_finite(instr.get("carver_spread_points"))
@@ -878,7 +878,7 @@ def _configured_cost_estimate(
     one_way_native = spread_cash_native + commission_native
     one_way_usd = one_way_native * fx_to_usd
     trade_sr = one_way_usd / annual_dollar_vol
-    roll_native = 2.0 * one_way_native
+    roll_native = spread_cash_native + 2.0 * commission_native
     roll_usd = roll_native * fx_to_usd
     roll_sr = roll_usd / annual_dollar_vol
     result: dict[str, object] = {
