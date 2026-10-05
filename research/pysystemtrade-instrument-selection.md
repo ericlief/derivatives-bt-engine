@@ -97,46 +97,44 @@ Forecast turnover is estimated separately for every representative and speed as
 history-length weighting. Each execution row uses that speed's pooled rule
 turnover, its own one-way spread, commission, point value, FX conversion, and
 current-price-scaled dollar volatility. The selected research representative's
-current configured hold cycle supplies the forward roll-policy rate; physical
-rolls add two one-way transactions per roll. Full-history and recent observed
-rates remain audit fields and never silently override that configuration. Rule
-turnover excludes rolls. The resulting columns decompose cost as follows:
+current configured hold cycle supplies `ann_rolls`; full-history and recent
+observed rates remain audit fields and never silently override that
+configuration. `ann_trades` is Carver's one-way rule turnover and excludes
+rolls. The report keeps the two cost streams separate instead of inventing a
+combined transaction count:
 
 ```text
-selected SR cost per trade
+trade_sr
     = selected one-way cash cost / annual dollar volatility
 
-annual rule SR cost(speed)
-    = selected SR cost per trade × pooled rule turnover(speed)
+roll_sr
+    = estimated complete roll cost / annual dollar volatility
 
-annual roll SR cost
-    = selected SR cost per trade × 2 × selected rolls per year
+trade_ann_cost_sr(speed)
+    = trade_sr × ann_trades(speed)
 
-total transactions(speed)
-    = pooled rule turnover(speed) + 2 × selected rolls per year
+roll_ann_cost_sr(speed)
+    = roll_sr × ann_rolls
 
-total annual SR cost(speed)
-    = selected SR cost per trade × total transactions(speed)
+tot_ann_cost_sr(speed)
+    = trade_ann_cost_sr(speed) + roll_ann_cost_sr(speed)
 ```
 
 #### Turnover units and AFTS reconciliation
 
-The report contains both a roll-event rate and a roll-transaction rate. They
-are not interchangeable:
+The Phase 1 CSV uses `ann_trades` for Carver's one-way strategy trades and
+`ann_rolls` for complete roll events. It deliberately has no `total_tx`
+column. Under the current conservative `two_outright_legs` roll-cost model:
 
 ```text
-ref_strategy_roll_tx_per_year
-    = 2 × ref_strategy_selected_rolls_per_year
-
-ewmac_<speed>_tot_tx_per_year
-    = ewmac_<speed>_pooled_rule_turnover
-      + ewmac_<speed>_roll_tx_per_year
+roll_sr = 2 × trade_sr
 ```
 
 A physical futures roll has two one-way legs: close the old contract and open
-the new contract. Consequently the total column visibly adds rule turnover to
-`roll_tx_per_year`, because that latter field has already doubled the selected
-roll-event rate. It must not be doubled again.
+the new contract. That two-leg cost is contained in `roll_sr`; `ann_rolls`
+remains an event count and is never doubled or added to `ann_trades`. This
+schema also permits a later calendar-spread estimate to replace `roll_sr`
+without changing the turnover fields.
 
 The selected event rate is now the number of months in the current configured
 hold cycle, matching pysystemtrade's `rolls_per_year_in_hold_cycle()`. The CSV
@@ -149,9 +147,9 @@ This distinction corrected a real undercount in the earlier report.
 `CORN_mini` and its `MZC` overlay used 132 transitions over the entire
 1970–2024 history, or `2.4622` events/year, even though the current `HKNUZ`
 cycle and every complete 2016–2023 year imply five. For MZC 64/256, the
-forward total is therefore `5.5685 + 2 × 5 = 15.5685` transactions/year, not
-the earlier `10.4929`. Full-size `CORN` retains its configured annual `Z`
-cycle and therefore two roll legs/year.
+forward inputs are therefore `ann_trades=5.5685` and `ann_rolls=5`; its annual
+cost is `trade_sr × 5.5685 + roll_sr × 5`. Full-size `CORN` retains its
+configured annual `Z` cycle and therefore one roll event/year.
 
 #### CORN roll-policy performance ablation
 
@@ -220,7 +218,7 @@ does not call `get_SR_cost_given_turnover` and therefore does not add a
 separate holding-roll term. Phase 2 must reproduce that definition for its
 exact AFTS baseline. It should also report a clearly labelled
 `afts_plus_rolls` sensitivity using
-`subsystem_turnover + 2 × selected_rolls_per_year`. The Phase 1 per-rule total is
+`trade_sr × subsystem_turnover + roll_sr × ann_rolls`. The Phase 1 per-rule total is
 neither of those Phase 2 inputs: it screens individual rules before their
 forecasts are combined.
 
@@ -517,23 +515,22 @@ produced by the eligible-rule mixture:
 
 ```text
 afts_annual_trading_cost_SR
-    = selected_sr_cost_per_trade × subsystem_turnover
+    = trade_sr × subsystem_turnover
 ```
 
 Do not sum the eligible rules' individual turnovers: forecast combination and
 buffering change the resulting position turnover. Do not feed the Phase 1
-`total_annual_sr_cost` into this baseline either, because it includes a
+`tot_ann_cost_sr` into this baseline either, because it includes a
 separate two-leg holding-roll allowance that the published AFTS selector omits.
 Report the more conservative production sensitivity separately:
 
 ```text
 afts_plus_rolls_annual_cost_SR
-    = selected_sr_cost_per_trade
-      × (subsystem_turnover + 2 × selected_rolls_per_year)
+    = trade_sr × subsystem_turnover + roll_sr × ann_rolls
 ```
 
-Both variants use the current one-way definition of
-`selected_sr_cost_per_trade`. This preserves the observed corn result at the
+Both variants use the current one-way definition of `trade_sr`. This preserves
+the observed corn result at the
 screening stage: a higher-cost full or mini contract can lose its fast EWMAC
 rules, while a cheaper micro can retain more rules, without either outcome
 being hard-coded by symbol. Phase 2 then scores each surviving execution route

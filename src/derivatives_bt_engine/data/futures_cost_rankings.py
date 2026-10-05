@@ -30,7 +30,7 @@ DEFAULT_VIEW_COLUMNS = (
     "cost_rank_in_asset_class",
     "affordability_rank_in_asset_class",
     "notional_rank_in_asset_class",
-    "selected_sr_cost_per_trade",
+    "trade_sr",
     "selected_spread_points",
     "selected_spread_source",
     "cur_price",

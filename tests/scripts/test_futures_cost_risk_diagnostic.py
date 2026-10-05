@@ -463,14 +463,20 @@ def test_configured_cost_uses_pooled_turnover_and_reference_rolls():
     per_trade_sr = 14.5 / 800.0
     assert estimate["strategy_reference_instrument"] == "FULL"
     assert estimate["configured_one_way_cost_native"] == pytest.approx(14.5)
-    assert estimate["configured_sr_cost_per_trade"] == pytest.approx(per_trade_sr)
-    assert estimate["ewmac_16_64_forecast_annual_sr_cost"] == pytest.approx(
+    assert estimate["configured_trade_sr"] == pytest.approx(per_trade_sr)
+    assert estimate["configured_roll_sr"] == pytest.approx(per_trade_sr * 2.0)
+    assert estimate["ewmac_16_64_trade_ann_cost_sr"] == pytest.approx(
         per_trade_sr * 2.0
     )
-    assert estimate["strategy_reference_roll_transactions_per_year"] == pytest.approx(8.0)
-    assert estimate["ewmac_16_64_total_annual_sr_cost"] == pytest.approx(
+    assert estimate["ewmac_16_64_ann_trades"] == pytest.approx(2.0)
+    assert estimate["ewmac_16_64_ann_rolls"] == pytest.approx(4.0)
+    assert estimate["ewmac_16_64_roll_ann_cost_sr"] == pytest.approx(
+        per_trade_sr * 2.0 * 4.0
+    )
+    assert estimate["ewmac_16_64_tot_ann_cost_sr"] == pytest.approx(
         per_trade_sr * 10.0
     )
+    assert not any("transactions" in key or "_tx" in key for key in estimate)
     assert not estimate["ewmac_16_64_cost_eligible"]
     assert estimate["ewmac_64_256_cost_eligible"]
     assert estimate["eligible_ewmac_rules"] == "64/256"
@@ -520,18 +526,14 @@ def test_configured_cost_uses_current_cycle_not_full_history_roll_rate():
     assert estimate[
         "strategy_reference_configured_rolls_per_year"
     ] == pytest.approx(5.0)
-    assert estimate["strategy_reference_selected_rolls_per_year"] == pytest.approx(
+    assert estimate["strategy_reference_ann_rolls"] == pytest.approx(
         5.0
     )
     assert estimate["strategy_reference_roll_rate_source"] == (
         "configured_hold_cycle"
     )
-    assert estimate["strategy_reference_roll_transactions_per_year"] == pytest.approx(
-        10.0
-    )
-    assert estimate["ewmac_64_256_total_transactions_per_year"] == pytest.approx(
-        15.5685
-    )
+    assert estimate["ewmac_64_256_ann_trades"] == pytest.approx(5.5685)
+    assert estimate["ewmac_64_256_ann_rolls"] == pytest.approx(5.0)
 
 
 def test_roll_audit_survives_missing_execution_cost_inputs():
@@ -561,11 +563,8 @@ def test_roll_audit_survives_missing_execution_cost_inputs():
     )
 
     assert estimate["configured_cost_quality"] == "incomplete_static_inputs"
-    assert estimate["strategy_reference_selected_rolls_per_year"] == pytest.approx(
+    assert estimate["strategy_reference_ann_rolls"] == pytest.approx(
         5.0
-    )
-    assert estimate["strategy_reference_roll_transactions_per_year"] == pytest.approx(
-        10.0
     )
     assert estimate["strategy_reference_roll_rate_audit"] == (
         "historical_policy_change"
@@ -652,7 +651,8 @@ def test_public_report_leads_with_selected_values_and_normalizes_spreads():
         "annual_dollar_vol_per_contract": [2432.0],
         "selected_one_way_spread_points": [3.177],
         "configured_one_way_cost": [75.0],
-        "configured_sr_cost_per_trade": [0.03],
+        "configured_trade_sr": [0.03],
+        "configured_roll_sr": [0.06],
         "full_spread_points": [3.25],
         "ib_historical_spread_mean_points": [6.354],
         "ib_historical_spread_median_points": [6.6],
@@ -661,14 +661,16 @@ def test_public_report_leads_with_selected_values_and_normalizes_spreads():
         "vol_reference_price": [883.25],
         "carver_configured_one_way_spread_points": [2.4],
         "strategy_reference_configured_rolls_per_year": [12.0],
-        "strategy_reference_selected_rolls_per_year": [12.0],
+        "strategy_reference_ann_rolls": [12.0],
         "strategy_reference_roll_rate_source": ["configured_hold_cycle"],
         "strategy_reference_roll_rate_audit": [
             "consistent_with_configured_cycle"
         ],
-        "strategy_reference_roll_transactions_per_year": [24.0],
-        "ewmac_4_16_total_transactions_per_year": [80.0],
-        "ewmac_4_16_total_annual_sr_cost": [2.4],
+        "ewmac_4_16_ann_trades": [56.0],
+        "ewmac_4_16_ann_rolls": [12.0],
+        "ewmac_4_16_trade_ann_cost_sr": [1.68],
+        "ewmac_4_16_roll_ann_cost_sr": [0.72],
+        "ewmac_4_16_tot_ann_cost_sr": [2.4],
         "ewmac_4_16_reference_pre_cost_sharpe": [0.1],
     }))
 
@@ -680,14 +682,18 @@ def test_public_report_leads_with_selected_values_and_normalizes_spreads():
     assert report["ref_spread_points"][0] == pytest.approx(2.4)
     assert "selected_cost_usd" in report.columns
     assert "selected_ann_dvol_usd_per_contract" in report.columns
-    assert "ewmac_4_16_tot_tx_per_year" in report.columns
-    assert "ewmac_4_16_tot_ann_sr_cost" in report.columns
+    assert "ewmac_4_16_ann_trades" in report.columns
+    assert "ewmac_4_16_ann_rolls" in report.columns
+    assert "ewmac_4_16_tot_ann_cost_sr" in report.columns
     assert "ewmac_4_16_ref_pre_cost_sr" in report.columns
-    assert "ref_strategy_roll_tx_per_year" in report.columns
+    assert "trade_sr" in report.columns
+    assert "roll_sr" in report.columns
+    assert not any("tx" in column for column in report.columns)
+    assert not any("total_transactions" in column for column in report.columns)
     assert report["ref_strategy_configured_rolls_per_year"][0] == pytest.approx(
         12.0
     )
-    assert report["ref_strategy_selected_rolls_per_year"][0] == pytest.approx(
+    assert report["ref_ann_rolls"][0] == pytest.approx(
         12.0
     )
     assert report["ref_strategy_roll_rate_source"][0] == "configured_hold_cycle"
@@ -955,8 +961,11 @@ def test_configured_cost_prefers_cost_specific_dollar_volatility():
     )
 
     assert estimate["configured_one_way_cost"] == pytest.approx(9.22)
-    assert estimate["configured_sr_cost_per_trade"] == pytest.approx(
+    assert estimate["configured_trade_sr"] == pytest.approx(
         9.22 / 5_000.0
+    )
+    assert estimate["configured_roll_sr"] == pytest.approx(
+        18.44 / 5_000.0
     )
 
 
@@ -1166,7 +1175,7 @@ def test_affordability_ranks_are_within_asset_class():
         "asset_class": ["Equity", "Equity", "Rates"],
         "notional_per_contract": [30_000.0, 300_000.0, 120_000.0],
         "annual_dollar_vol_per_contract": [6_000.0, 60_000.0, 8_000.0],
-        "configured_sr_cost_per_trade": [0.002, 0.001, 0.003],
+        "configured_trade_sr": [0.002, 0.001, 0.003],
     })
 
     ranked = _attach_affordability_ranks(
@@ -1200,7 +1209,7 @@ def test_affordability_scenario_splits_risk_across_main_instruments():
         "asset_class": ["Equity"],
         "notional_per_contract": [10_000.0],
         "annual_dollar_vol_per_contract": [2_500.0],
-        "configured_sr_cost_per_trade": [0.002],
+        "configured_trade_sr": [0.002],
     })
 
     ranked = _attach_affordability_ranks(

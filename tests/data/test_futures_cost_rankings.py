@@ -18,7 +18,7 @@ def _report() -> pl.DataFrame:
         "cost_rank_in_asset_class": [2, 3, 1, 2, 1],
         "affordability_rank_in_asset_class": [3, 1, 2, 2, 1],
         "notional_rank_in_asset_class": [3, 1, 2, 2, 1],
-        "selected_sr_cost_per_trade": [0.002, 0.004, 0.001, 0.003, 0.002],
+        "trade_sr": [0.002, 0.004, 0.001, 0.003, 0.002],
         "execution_eligible": [True, True, True, True, True],
     })
 
@@ -63,7 +63,7 @@ def test_top_n_by_asset_class_can_keep_all_columns_and_filter_classes():
     rankings = top_n_by_asset_class(
         _report(),
         n=1,
-        rank_by="selected_sr_cost_per_trade",
+        rank_by="trade_sr",
         asset_classes=["Rates"],
         columns=None,
     )
@@ -83,7 +83,7 @@ def test_top_n_by_asset_class_excludes_restricted_execution_by_default():
             "cost_rank_in_asset_class": [0],
             "affordability_rank_in_asset_class": [0],
             "notional_rank_in_asset_class": [0],
-            "selected_sr_cost_per_trade": [0.0],
+            "trade_sr": [0.0],
             "execution_eligible": [False],
         }),
     ])

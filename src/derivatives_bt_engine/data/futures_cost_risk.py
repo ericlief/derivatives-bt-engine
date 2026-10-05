@@ -744,7 +744,7 @@ def _configured_cost_estimate(
     strategy_metrics_by_rule: Optional[dict[int, dict[str, object]]],
     rule_cost_limit_sr: float,
 ) -> dict[str, object]:
-    """Calculate one-way rule and roll costs in annual SR units."""
+    """Calculate one-way trade and complete-roll costs in annual SR units."""
     common: dict[str, object] = {
         "strategy_reference_instrument": (
             instr.get("representative_instrument")
@@ -830,13 +830,10 @@ def _configured_cost_estimate(
             if rolls_per_year is not None
             else "unavailable"
         )
-    roll_transactions = (
-        2.0 * rolls_per_year if rolls_per_year is not None else None
-    )
     common.update(
-        strategy_reference_selected_rolls_per_year=rolls_per_year,
+        strategy_reference_ann_rolls=rolls_per_year,
         strategy_reference_roll_rate_source=roll_rate_source,
-        strategy_reference_roll_transactions_per_year=roll_transactions,
+        roll_cost_model="two_outright_legs",
     )
 
     carver_spread_points = _nonnegative_finite(instr.get("carver_spread_points"))
@@ -880,7 +877,10 @@ def _configured_cost_estimate(
     spread_cash_native = spread_points * multiplier
     one_way_native = spread_cash_native + commission_native
     one_way_usd = one_way_native * fx_to_usd
-    sr_cost_per_trade = one_way_usd / annual_dollar_vol
+    trade_sr = one_way_usd / annual_dollar_vol
+    roll_native = 2.0 * one_way_native
+    roll_usd = roll_native * fx_to_usd
+    roll_sr = roll_usd / annual_dollar_vol
     result: dict[str, object] = {
         **common,
         "carver_configured_one_way_spread_points": carver_spread_points,
@@ -891,7 +891,10 @@ def _configured_cost_estimate(
         "configured_spread_cash_native": spread_cash_native,
         "configured_one_way_cost_native": one_way_native,
         "configured_one_way_cost": one_way_usd,
-        "configured_sr_cost_per_trade": sr_cost_per_trade,
+        "configured_trade_sr": trade_sr,
+        "configured_roll_cost_native": roll_native,
+        "configured_roll_cost": roll_usd,
+        "configured_roll_sr": roll_sr,
         "configured_cost_quality": (
             "ib_historical_bid_ask"
             if spread_source in {"ib_dated_contract", "ib_continuous_fallback"}
@@ -910,40 +913,34 @@ def _configured_cost_estimate(
         pooled_turnover = _positive_finite(
             summary.get("ewmac_pooled_forecast_turnover")
         )
-        forecast_sr_cost = (
-            sr_cost_per_trade * pooled_turnover
+        trade_ann_cost_sr = (
+            trade_sr * pooled_turnover
             if pooled_turnover is not None
             else None
         )
-        roll_sr_cost = (
-            sr_cost_per_trade * roll_transactions
-            if roll_transactions is not None
+        roll_ann_cost_sr = (
+            roll_sr * rolls_per_year
+            if rolls_per_year is not None
             else None
         )
-        total_transactions = (
-            pooled_turnover + roll_transactions
-            if pooled_turnover is not None and roll_transactions is not None
-            else None
-        )
-        total_sr_cost = (
-            sr_cost_per_trade * total_transactions
-            if total_transactions is not None
+        tot_ann_cost_sr = (
+            trade_ann_cost_sr + roll_ann_cost_sr
+            if trade_ann_cost_sr is not None and roll_ann_cost_sr is not None
             else None
         )
         eligible = (
-            total_sr_cost <= rule_cost_limit_sr
-            if total_sr_cost is not None
+            tot_ann_cost_sr <= rule_cost_limit_sr
+            if tot_ann_cost_sr is not None
             else None
         )
         if eligible:
             eligible_rules.append(f"{fast_span}/{slow_span}")
         result.update({
-            f"{prefix}_pooled_rule_turnover": pooled_turnover,
-            f"{prefix}_roll_transactions_per_year": roll_transactions,
-            f"{prefix}_total_transactions_per_year": total_transactions,
-            f"{prefix}_forecast_annual_sr_cost": forecast_sr_cost,
-            f"{prefix}_roll_annual_sr_cost": roll_sr_cost,
-            f"{prefix}_total_annual_sr_cost": total_sr_cost,
+            f"{prefix}_ann_trades": pooled_turnover,
+            f"{prefix}_ann_rolls": rolls_per_year,
+            f"{prefix}_trade_ann_cost_sr": trade_ann_cost_sr,
+            f"{prefix}_roll_ann_cost_sr": roll_ann_cost_sr,
+            f"{prefix}_tot_ann_cost_sr": tot_ann_cost_sr,
             f"{prefix}_cost_eligible": eligible,
             f"{prefix}_median_instrument_pre_cost_sharpe": summary.get(
                 "ewmac_median_instrument_pre_cost_sharpe"
@@ -1045,7 +1042,7 @@ def _attach_affordability_ranks(
         "asset_class",
         "notional_per_contract",
         "annual_dollar_vol_per_contract",
-        "configured_sr_cost_per_trade",
+        "configured_trade_sr",
     }
     if not required.issubset(report.columns):
         return report
@@ -1114,7 +1111,7 @@ def _attach_affordability_ranks(
         ).alias("main_instrument_affordable_for_scenario"),
     )
     return ranked.with_columns(
-        pl.col("configured_sr_cost_per_trade")
+        pl.col("configured_trade_sr")
         .rank("ordinal")
         .over("asset_class")
         .alias("cost_rank_in_asset_class"),
@@ -2588,7 +2585,10 @@ PUBLIC_REPORT_RENAMES = {
     "configured_spread_cash_native": "selected_spread_cash_native",
     "configured_one_way_cost_native": "selected_cost_native",
     "configured_one_way_cost": "selected_cost_usd",
-    "configured_sr_cost_per_trade": "selected_sr_cost_per_trade",
+    "configured_trade_sr": "trade_sr",
+    "configured_roll_cost_native": "roll_cost_native",
+    "configured_roll_cost": "roll_cost_usd",
+    "configured_roll_sr": "roll_sr",
     "configured_cost_quality": "selected_cost_quality",
     "risk_return_vol_source": "selected_vol_source",
     "cost_volatility_source": "selected_cost_vol_source",
@@ -2653,11 +2653,8 @@ PUBLIC_REPORT_RENAMES = {
         "ref_strategy_recent_minus_configured_rolls_per_year"
     ),
     "strategy_reference_roll_rate_audit": "ref_strategy_roll_rate_audit",
-    "strategy_reference_selected_rolls_per_year": (
-        "ref_strategy_selected_rolls_per_year"
-    ),
+    "strategy_reference_ann_rolls": "ref_ann_rolls",
     "strategy_reference_roll_rate_source": "ref_strategy_roll_rate_source",
-    "strategy_reference_roll_transactions_per_year": "ref_strategy_roll_tx_per_year",
     "ib_recent_fast_return_vol": "ib_fast_return_vol",
     "ib_recent_vol_observations": "ib_fast_n",
     "ib_recent_vol_start": "ib_fast_start",
@@ -2689,7 +2686,9 @@ PUBLIC_REPORT_RENAMES = {
 def _compact_public_column_name(name: str) -> str:
     if name in PUBLIC_REPORT_RENAMES:
         return PUBLIC_REPORT_RENAMES[name]
-    compact = name.replace("transactions", "tx").replace("transaction", "tx")
+    compact = name.replace("transactions", "trades").replace(
+        "transaction", "trade"
+    )
     compact = compact.replace("total", "tot").replace("annual", "ann")
     compact = compact.replace("sharpe", "sr")
     compact = compact.replace("strategy_reference", "ref_strategy")
@@ -2766,7 +2765,8 @@ def _public_report_schema(report: pl.DataFrame) -> pl.DataFrame:
         "selected_spread_cash_native",
         "selected_cost_native",
         "selected_cost_usd",
-        "selected_sr_cost_per_trade",
+        "trade_sr",
+        "roll_sr",
         "selected_cost_quality",
         "rule_cost_limit_sr",
         "ann_days",
@@ -2839,7 +2839,7 @@ def _emit_report(report: pl.DataFrame, args) -> pl.DataFrame:
         "include_default_pool",
         "selected_spread_points",
         "selected_spread_source",
-        "selected_sr_cost_per_trade",
+        "trade_sr",
         "cost_rank_in_asset_class",
         "eligible_ewmac_rule_count",
         "eligible_ewmac_rules",
