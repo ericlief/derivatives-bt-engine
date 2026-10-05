@@ -153,6 +153,54 @@ forward total is therefore `5.5685 + 2 × 5 = 15.5685` transactions/year, not
 the earlier `10.4929`. Full-size `CORN` retains its configured annual `Z`
 cycle and therefore two roll legs/year.
 
+#### CORN roll-policy performance ablation
+
+The EWMAC performance columns must be interpreted separately from the forward
+roll-cost correction. A full-history `CORN_mini` score mixes two materially
+different histories: the early sample rolled mostly between September and
+December, while every complete 2016–2023 year used the current five-month
+`HKNUZ` path. `MZC` borrows that mini history. A high full-history mini score
+therefore cannot by itself justify either two or five future rolls.
+
+[`pysystemtrade_corn_roll_ablation.py`](../scripts/pysystemtrade_corn_roll_ablation.py)
+calculates all five EWMAC forecasts using the complete history for warm-up,
+then evaluates full-size annual-December `CORN` and `CORN_mini` before and
+after 2016. These are matched-era comparisons of the two available held
+contract paths, not a causal same-market roll experiment:
+
+| Rule | Pre-2016 annual Z SR | Pre-2016 early-mini SR | Mini minus annual | 2016–2024 annual Z SR | 2016–2024 five-roll mini SR | Mini minus annual |
+|---|---:|---:|---:|---:|---:|---:|
+| 4/16 | 0.255 | 0.443 | +0.188 | 0.028 | 0.034 | +0.006 |
+| 8/32 | 0.396 | 0.538 | +0.142 | 0.226 | 0.168 | -0.058 |
+| 16/64 | 0.439 | 0.537 | +0.098 | 0.332 | 0.229 | -0.102 |
+| 32/128 | 0.333 | 0.379 | +0.046 | 0.349 | 0.258 | -0.091 |
+| 64/256 | 0.175 | 0.169 | -0.006 | 0.265 | 0.234 | -0.031 |
+
+The result explains the apparent full-history advantage of `CORN_mini`: it is
+concentrated in the long early regime, especially in the fast and medium
+rules. In the approximately eight-year post-2016 sample, annual December is
+ahead for 8/32 through 64/256, but the paired mini-minus-annual differential
+Sharpes are only `-0.065`, `-0.118`, `-0.117`, and `-0.004`. Their approximate
+standard errors are about `0.35`; the evidence is far too weak to infer that
+annual December is the superior current strategy. The post-2016 daily P&L
+correlations remain 0.78–0.85, so this is mostly a close variant comparison.
+
+Changing the roll allowance also does not change MZC's rule set in the
+referenced live audit. At its `0.0054` one-way SR cost per trade and the pooled
+turnovers used by that report, 16/64 costs approximately `0.089`, `0.100`, and
+`0.132` SR units with one, two, and five annual rolls respectively; all pass
+the `0.15` ceiling. Rule 8/32 costs approximately `0.162` even with only one
+roll, so an annual contract would not make it eligible. The current five-roll
+MZC still retains 16/64, 32/128, and 64/256.
+
+The operational default should therefore remain the configured five-month
+MZC/`CORN_mini` path. Annual December is useful as a sensitivity benchmark,
+not as a selected replacement. A causal roll-policy choice requires building
+same-date Z-only, U/Z, and HKNUZ histories from contract-level prices and
+comparing them net of month-specific spreads and liquidity. The two imported
+held paths cannot isolate roll policy from contract size, construction, and
+era effects.
+
 This Phase 1 calculation matches pysystemtrade's current **rule affordability**
 contract: [`get_SR_cost_for_instrument_forecast`](https://github.com/pst-group/pysystemtrade/blob/b4a25e6e1e33a54a3ecfb45c0f6db5e2b60b84f8/systems/accounts/account_costs.py#L14-L33)
 adds forecast transaction cost to holding cost, and

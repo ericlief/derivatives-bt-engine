@@ -459,6 +459,15 @@ mostly rolled twice per year. It rolled five times in every complete year from
 execution overlay borrows this history, so forward cost must use five physical
 rolls (ten one-way legs), not twice the diluted full-history rate.
 
+The same regime change also means a full-history `CORN_mini` EWMAC Sharpe is a
+mixed-strategy statistic. The matched-era
+[CORN roll-policy ablation](pysystemtrade-instrument-selection.md#corn-roll-policy-performance-ablation)
+finds that the mini's full-history advantage is concentrated before 2016; the
+short post-2016 comparison is not precise enough to select annual December
+over the configured five-month path. The imported histories contain only one
+held path each, so a causal Z-only versus U/Z versus HKNUZ comparison requires
+new contract-level reconstructions rather than another slice of these series.
+
 The recent/configured mismatch list is deliberately not auto-resolved. Recent
 rates are below configuration for `COPPER-micro`, `FTSETAIWAN`, `HANGTECH`,
 `KOSPI_mini`, `MILKWET`, and `SONIA3`, and above it for `BRENT_W`,
