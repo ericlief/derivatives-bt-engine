@@ -199,7 +199,10 @@ not as a selected replacement. A causal roll-policy choice requires building
 same-date Z-only, U/Z, and HKNUZ histories from contract-level prices and
 comparing them net of month-specific spreads and liquidity. The two imported
 held paths cannot isolate roll policy from contract size, construction, and
-era effects.
+era effects. The source-neutral Globex provider now supports these
+contract-level counterfactuals through explicit, run-local roll-policy
+overrides; the next performance comparison should use those generated paths,
+not add another raw market-data table.
 
 This Phase 1 calculation matches pysystemtrade's current **rule affordability**
 contract: [`get_SR_cost_for_instrument_forecast`](https://github.com/pst-group/pysystemtrade/blob/b4a25e6e1e33a54a3ecfb45c0f6db5e2b60b84f8/systems/accounts/account_costs.py#L14-L33)

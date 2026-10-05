@@ -29,6 +29,7 @@ from derivatives_bt_engine.domain.signal import (
     EWMAC_SCALAR_POOLS,
     GOULDING_SIGNAL_MODES,
 )
+from derivatives_bt_engine.domain.roll_policy import parse_roll_policy_overrides
 from derivatives_bt_engine.domain.volatility import (
     CARVER_FAST_VOL_SPAN,
     CARVER_SLOW_VOL_WEIGHT,
@@ -94,6 +95,17 @@ def parse_args():
                    help='Optional YYYY-MM-DD handoff; default is the first valid primary return')
     p.add_argument('--allow-candidate-mappings', action='store_true',
                    help='Research opt-in required while crosswalk rows remain candidate status')
+    p.add_argument(
+        '--roll-policy-override',
+        action='append',
+        default=[],
+        metavar='SYMBOL:CYCLE:OFFSET',
+        help=(
+            'Override the pinned Carver-aligned Globex held-contract policy '
+            'for one requested symbol; repeat for multiple instruments. Example: '
+            'MZC:Z:-60. Applies to --data-source globex and the Globex leg of hybrid.'
+        ),
+    )
     p.add_argument('--fixed-quantities', default=None,
                    help='Comma-separated fixed contract counts, positionally matched to --symbols '
                         '(e.g. --symbols ES,GC,CL --fixed-quantities 4,3,2). When set, disables '
@@ -265,6 +277,9 @@ def main():
     args = parse_args()
 
     symbols = [s.strip().upper() for s in args.symbols.split(',') if s.strip()]
+    roll_policy_overrides = parse_roll_policy_overrides(
+        args.roll_policy_override
+    )
 
     parts = args.years.split('-')
     if len(parts) == 1:
@@ -322,6 +337,7 @@ def main():
             if args.hybrid_handoff_date else None
         ),
         allow_candidate_mappings=args.allow_candidate_mappings,
+        globex_roll_policy_overrides=roll_policy_overrides,
         ewmac_fast_span=args.ewmac_fast_span,
         ewmac_slow_span=args.ewmac_slow_span,
         ewmac_vol_span=args.ewmac_vol_span,
@@ -412,6 +428,7 @@ def main():
             args.ewmac_target_abs if args.signal_weighting == 'carver_ewmac' else None
         ),
         'requested_hybrid_handoff_date': args.hybrid_handoff_date,
+        'roll_policy_overrides': ','.join(args.roll_policy_override) or None,
         'n_days': result['n_days'], 'ann_ret_pct': result['ann_ret_pct'],
         'ann_vol_pct': result['ann_vol_pct'], 'sharpe': result['sharpe'],
         'max_dd_pct': result['max_dd_pct'], 'total_fees': result['total_fees'],

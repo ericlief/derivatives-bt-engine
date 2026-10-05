@@ -26,7 +26,7 @@ from __future__ import annotations
 import bisect
 import os
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Mapping, Optional, Protocol
 
@@ -38,12 +38,16 @@ from derivatives_bt_engine.domain.continuous_futures import (
     select_daily_continuous,
 )
 from derivatives_bt_engine.domain.instruments import get_spec
+from derivatives_bt_engine.domain.roll_policy import (
+    ContractRollPolicy,
+    carver_aligned_globex_roll_policy_set,
+)
 from derivatives_bt_engine.utils.logger import setup_logger
 
 
 logger = setup_logger()
 
-HISTORY_SCHEMA_VERSION = 7
+HISTORY_SCHEMA_VERSION = 8
 DEFAULT_PYSYSTEMTRADE_DB_PATH = Path(
     "/home/dev/fin/db/pysystemtrade_reference.duckdb"
 )
@@ -423,7 +427,45 @@ class PysystemtradeHistoryProvider:
         return signal, marks, carry, panama
 
 
-_GLOBEX_HISTORY_SQL = """
+_GLOBEX_ALL_CONTRACTS_SQL = """
+WITH bars AS (
+    SELECT
+        instrument_id,
+        ts_event,
+        open,
+        high,
+        low,
+        close,
+        volume,
+        expiration,
+        lag(close) OVER (
+            PARTITION BY instrument_id, expiration
+            ORDER BY ts_event
+        ) AS previous_contract_close
+    FROM daily
+    WHERE asset = ?
+      AND instrument_class = 'F'
+      AND security_type = 'FUT'
+      AND expiration IS NOT NULL
+      AND ts_event < expiration
+)
+SELECT
+    ts_event AS source_timestamp,
+    CAST(ts_event AS DATE) AS trade_date,
+    open,
+    high,
+    low,
+    close AS mark_price,
+    volume,
+    instrument_id,
+    expiration,
+    previous_contract_close
+FROM bars
+ORDER BY ts_event, expiration
+"""
+
+
+_GLOBEX_VOLUME_FRONT_SQL = """
 WITH bars AS (
     SELECT
         instrument_id,
@@ -485,27 +527,39 @@ ORDER BY b.ts_event
 
 @dataclass
 class GlobexHistoryProvider:
-    """Build a roll-adjusted signal stream from paid/raw Globex marks."""
+    """Build a policy-selected signal stream from paid/raw Globex contracts."""
 
     db_path: Path | str = field(
         default_factory=lambda: Path(
             os.getenv("GLOBEX_DB_PATH", str(DEFAULT_GLOBEX_DB_PATH))
-        )
+        ).expanduser()
     )
     cache_root: Path | str = DEFAULT_FUTURES_CACHE_ROOT
     use_cache: bool = True
     save_cache: bool = True
+    roll_policy: ContractRollPolicy | None = None
 
     def _dataset_fingerprint(self) -> str:
         stat = Path(self.db_path).stat()
         return f"{stat.st_size}-{stat.st_mtime_ns}"
 
-    def _cache_paths(self, asset: str) -> dict[str, Path]:
+    def _resolved_roll_policy(self, asset: str) -> ContractRollPolicy:
+        if self.roll_policy is not None:
+            return self.roll_policy
+        policy, _ = carver_aligned_globex_roll_policy_set().resolve(asset, asset)
+        return policy
+
+    def _cache_paths(
+        self,
+        asset: str,
+        policy: ContractRollPolicy,
+    ) -> dict[str, Path]:
         directory = (
             Path(self.cache_root)
             / "globex"
             / f"v{HISTORY_SCHEMA_VERSION}"
             / self._dataset_fingerprint()
+            / policy.cache_key
         )
         return {
             stream: directory / f"{asset}_{stream}.parquet"
@@ -513,22 +567,46 @@ class GlobexHistoryProvider:
         }
 
     def load(self, instrument_code: str) -> FuturesHistory:
-        cache_paths = self._cache_paths(instrument_code)
+        policy = self._resolved_roll_policy(instrument_code)
+        cache_paths = self._cache_paths(instrument_code, policy)
         if self.use_cache and all(path.exists() for path in cache_paths.values()):
-            logger.info("globex_history cache_hit asset=%s", instrument_code)
+            logger.info(
+                "globex_history cache_hit asset=%s roll_policy=%s",
+                instrument_code,
+                policy.policy_id,
+            )
             signal = pl.read_parquet(cache_paths["signal"])
             marks = pl.read_parquet(cache_paths["marks"])
             carry = pl.read_parquet(cache_paths["carry"])
             panama = pl.read_parquet(cache_paths["panama"])
         else:
-            logger.info("globex_history load asset=%s", instrument_code)
+            logger.info(
+                "globex_history load asset=%s roll_policy=%s hold_cycle=%s "
+                "roll_offset_days=%s",
+                instrument_code,
+                policy.policy_id,
+                policy.hold_roll_cycle or None,
+                policy.roll_offset_days if policy.mode == "calendar" else None,
+            )
             con = duckdb.connect(str(self.db_path), read_only=True)
             try:
-                raw = con.execute(_GLOBEX_HISTORY_SQL, [instrument_code]).pl()
+                query = (
+                    _GLOBEX_VOLUME_FRONT_SQL
+                    if policy.mode == "volume_front"
+                    else _GLOBEX_ALL_CONTRACTS_SQL
+                )
+                raw = con.execute(query, [instrument_code]).pl()
             finally:
                 con.close()
             if raw.is_empty():
                 raise KeyError(f"Unknown or empty Globex futures asset: {instrument_code}")
+            if policy.mode == "calendar":
+                raw = self._select_calendar_contracts(raw, policy)
+                if raw.is_empty():
+                    raise ValueError(
+                        f"Globex roll policy {policy.policy_id} selected no "
+                        f"contract observations for {instrument_code}"
+                    )
             signal, marks, carry, panama = self._from_raw(raw)
             if self.save_cache:
                 cache_paths["signal"].parent.mkdir(parents=True, exist_ok=True)
@@ -554,8 +632,69 @@ class GlobexHistoryProvider:
                 "exchange": spec.get("exchange"),
                 "active_months": spec.get("active_months"),
                 "dataset_fingerprint": self._dataset_fingerprint(),
+                "roll_policy": policy.as_dict(),
+                "selected_rolls": int(marks.get_column("is_roll").sum()),
             },
         )
+
+    @staticmethod
+    def _select_calendar_contracts(
+        raw: pl.DataFrame,
+        policy: ContractRollPolicy,
+    ) -> pl.DataFrame:
+        """Select one deterministic held contract for every market date.
+
+        A contract is held from the prior held contract's desired roll date
+        until its own ``expiration + roll_offset_days``. The schedule is
+        determined from the contract calendar before joining daily marks, so
+        a missing held-contract bar becomes an honest gap rather than silently
+        substituting a different expiry.
+        """
+        all_dates = raw.get_column("trade_date").unique().sort().to_list()
+        allowed = (
+            raw.filter(pl.col("expiration").dt.month().is_in(
+                policy.hold_month_numbers
+            ))
+            .sort("trade_date", "expiration", "volume")
+            .unique(
+                subset=["trade_date", "expiration"],
+                keep="last",
+                maintain_order=True,
+            )
+        )
+        if allowed.is_empty():
+            return allowed
+        contracts = (
+            allowed.group_by("expiration")
+            .agg(pl.col("trade_date").min().alias("first_trade_date"))
+            .sort("expiration")
+            .to_dicts()
+        )
+        schedule_dates: list[date] = []
+        schedule_expirations: list[date] = []
+        for trade_date in all_dates:
+            held_expiration = next(
+                (
+                    row["expiration"]
+                    for row in contracts
+                    if row["first_trade_date"] <= trade_date
+                    and trade_date
+                    < row["expiration"] + timedelta(days=policy.roll_offset_days)
+                ),
+                None,
+            )
+            if held_expiration is not None:
+                schedule_dates.append(trade_date)
+                schedule_expirations.append(held_expiration)
+        schedule = pl.DataFrame({
+            "trade_date": pl.Series(schedule_dates, dtype=pl.Date),
+            "expiration": pl.Series(schedule_expirations, dtype=pl.Date),
+        })
+        return schedule.join(
+            allowed,
+            on=["trade_date", "expiration"],
+            how="inner",
+        ).sort("trade_date")
 
     @staticmethod
     def _from_raw(

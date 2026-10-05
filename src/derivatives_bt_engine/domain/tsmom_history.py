@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import date
 from pathlib import Path
-from typing import Optional
+from typing import Mapping, Optional
 
 import polars as pl
 
@@ -20,6 +20,10 @@ from derivatives_bt_engine.domain.futures_history import (
 from derivatives_bt_engine.domain.instruments import (
     resolve_price_symbol,
     resolve_pysystemtrade_instrument,
+)
+from derivatives_bt_engine.domain.roll_policy import (
+    ContractRollPolicy,
+    carver_aligned_globex_roll_policy_set,
 )
 
 
@@ -119,12 +123,17 @@ def load_source_neutral_histories(
     mapping_path: Optional[Path | str] = None,
     handoff_date: Optional[date] = None,
     allow_candidate_mappings: bool = False,
+    globex_roll_policy_overrides: Optional[
+        Mapping[str, ContractRollPolicy]
+    ] = None,
 ) -> tuple[dict[str, pl.DataFrame], dict[str, object]]:
     """Load source-neutral bars plus reproducibility/quality metadata."""
     if data_source not in SOURCE_NEUTRAL_DATA_SOURCES:
         raise ValueError(f"unsupported source-neutral data source: {data_source}")
-    globex = GlobexHistoryProvider(db_path=globex_db_path)
     carver = PysystemtradeHistoryProvider(db_path=pysystemtrade_db_path)
+    policy_set = carver_aligned_globex_roll_policy_set(
+        globex_roll_policy_overrides
+    )
     mappings = _mapping_by_globex(
         mapping_path,
         allow_candidate_mappings=allow_candidate_mappings,
@@ -134,6 +143,14 @@ def load_source_neutral_histories(
 
     for traded_symbol in symbols:
         globex_symbol = resolve_price_symbol(traded_symbol)
+        roll_policy, roll_policy_resolution = policy_set.resolve(
+            traded_symbol,
+            globex_symbol,
+        )
+        globex = GlobexHistoryProvider(
+            db_path=globex_db_path,
+            roll_policy=roll_policy,
+        )
         mapping = mappings.get(globex_symbol)
         if data_source in {"pysystemtrade", "hybrid"} and mapping is None:
             qualifier = "approved " if not allow_candidate_mappings else ""
@@ -178,6 +195,8 @@ def load_source_neutral_histories(
             "end_date": history.signal.get_column("trade_date").max(),
             "invalid_return_rows": invalid.height,
             "quality_flags": invalid.group_by("quality_flag").len().to_dicts(),
+            "globex_roll_policy_resolution": roll_policy_resolution,
+            "globex_roll_policy": roll_policy.as_dict(),
             "crosswalk": (
                 {
                     "canonical_market_id": mapping.canonical_market_id,
@@ -202,5 +221,9 @@ def load_source_neutral_histories(
         "mapping_path": str(mapping_path) if mapping_path is not None else "packaged_default",
         "allow_candidate_mappings": allow_candidate_mappings,
         "requested_handoff_date": handoff_date,
+        "globex_roll_policy_overrides": {
+            symbol: policy.as_dict()
+            for symbol, policy in (globex_roll_policy_overrides or {}).items()
+        },
         "instruments": instruments,
     }

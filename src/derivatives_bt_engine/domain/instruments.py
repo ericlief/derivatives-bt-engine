@@ -122,6 +122,12 @@ local broker/account profile to both native instruments and externally mapped
 research instruments without modifying their source metadata or removing them
 from research pools.
 
+Globex held-contract construction is also separate from ``active_months``.
+The latter describes empirically liquid delivery months; it is not necessarily
+the contract cycle a strategy chooses to hold. ``GLOBEX_ROLL_POLICY_DEFAULTS``
+and ``GLOBEX_ROLL_POLICY_OVERRIDES`` below pin Carver-aligned hold cycles and
+calendar roll offsets without writing derived policy data into the market DB.
+
 `BACKTEST_ONLY_SPECS` holds multiplier/margin/commission for contracts that
 exist only on the general single/multi-symbol backtest path (naked_futures.py,
 tsmom_backtester.py) and have never been part of the live TSMOM instrument
@@ -175,6 +181,62 @@ EXECUTION_ELIGIBILITY_OVERRIDES: dict[str, dict[str, dict[str, object]]] = {
             'execution_restriction_reason': 'ibkr_us_product_restriction',
         },
     },
+}
+
+
+# Carver-aligned defaults for raw Globex roots. These values are pinned to the
+# same upstream pysystemtrade source commit as the packaged mappings and were
+# audited against data/futures/csvconfig/rollconfig.csv on 2026-10-05.
+# ``active_months`` must not be substituted for this map: for example, liquid
+# ZC months are H/K/N/Z while Carver's full-size CORN strategy deliberately
+# holds only Z; MZC instead follows CORN_mini's H/K/N/U/Z policy.
+CARVER_ROLL_POLICY_SOURCE_COMMIT = (
+    'b4a25e6e1e33a54a3ecfb45c0f6db5e2b60b84f8'
+)
+GLOBEX_ROLL_POLICY_DEFAULTS: dict[str, dict[str, object]] = {
+    'ES': {'carver_instrument': 'SP500', 'hold_roll_cycle': 'HMUZ', 'roll_offset_days': -5},
+    'NQ': {'carver_instrument': 'NASDAQ', 'hold_roll_cycle': 'HMUZ', 'roll_offset_days': -5},
+    'CL': {'carver_instrument': 'CRUDE_W', 'hold_roll_cycle': 'Z', 'roll_offset_days': -40},
+    'GC': {'carver_instrument': 'GOLD', 'hold_roll_cycle': 'GJMQVZ', 'roll_offset_days': -30},
+    'SI': {'carver_instrument': 'SILVER', 'hold_roll_cycle': 'HKNUZ', 'roll_offset_days': -45},
+    'HG': {'carver_instrument': 'COPPER', 'hold_roll_cycle': 'HNUZ', 'roll_offset_days': -30},
+    'ZT': {'carver_instrument': 'US2', 'hold_roll_cycle': 'HMUZ', 'roll_offset_days': -25},
+    'ZN': {'carver_instrument': 'US10', 'hold_roll_cycle': 'HMUZ', 'roll_offset_days': -25},
+    'TN': {'carver_instrument': 'US10U', 'hold_roll_cycle': 'HMUZ', 'roll_offset_days': -25},
+    'UB': {'carver_instrument': 'US30', 'hold_roll_cycle': 'HMUZ', 'roll_offset_days': -25},
+    'ZL': {'carver_instrument': 'SOYOIL', 'hold_roll_cycle': 'FHKNQUVZ', 'roll_offset_days': -90},
+    'ZC': {'carver_instrument': 'CORN', 'hold_roll_cycle': 'Z', 'roll_offset_days': -60},
+    'ZS': {'carver_instrument': 'SOYBEAN', 'hold_roll_cycle': 'X', 'roll_offset_days': -60},
+    'ZM': {'carver_instrument': 'SOYMEAL', 'hold_roll_cycle': 'FHKNQUVZ', 'roll_offset_days': -90},
+    'ZW': {'carver_instrument': 'WHEAT', 'hold_roll_cycle': 'Z', 'roll_offset_days': -60},
+    'NKD': {'carver_instrument': 'NIKKEI-CME', 'hold_roll_cycle': 'HMUZ', 'roll_offset_days': -5},
+    '6J': {'carver_instrument': 'JPY', 'hold_roll_cycle': 'HMUZ', 'roll_offset_days': -5},
+    '6M': {'carver_instrument': 'MXP', 'hold_roll_cycle': 'HMUZ', 'roll_offset_days': -5},
+    '6L': {'carver_instrument': 'BRE', 'hold_roll_cycle': 'FGHJKMNQUVXZ', 'roll_offset_days': -5},
+    'VXM': {
+        'carver_instrument': 'VIX_mini',
+        'hold_roll_cycle': 'FGHJKMNQUVXZ',
+        'roll_offset_days': -60,
+    },
+}
+
+# Requested-symbol overrides take precedence over the resolved raw Globex
+# root. This is what permits two traded instruments to derive different held
+# paths from one raw contract family (MZC and ZC both read ZC bars, but MZC
+# follows CORN_mini while ZC follows CORN). Explicit same-as-root entries are
+# retained for execution overlays so their research parent is auditable.
+GLOBEX_ROLL_POLICY_OVERRIDES: dict[str, dict[str, object]] = {
+    'MTN': {'carver_instrument': 'US10U', 'hold_roll_cycle': 'HMUZ', 'roll_offset_days': -25},
+    'MWN': {'carver_instrument': 'US30', 'hold_roll_cycle': 'HMUZ', 'roll_offset_days': -25},
+    'MZL': {'carver_instrument': 'SOYOIL', 'hold_roll_cycle': 'FHKNQUVZ', 'roll_offset_days': -90},
+    'MZC': {'carver_instrument': 'CORN_mini', 'hold_roll_cycle': 'HKNUZ', 'roll_offset_days': -30},
+    'MZS': {
+        'carver_instrument': 'SOYBEAN_mini',
+        'hold_roll_cycle': 'FHKNQUX',
+        'roll_offset_days': -45,
+    },
+    'MZM': {'carver_instrument': 'SOYMEAL', 'hold_roll_cycle': 'FHKNQUVZ', 'roll_offset_days': -90},
+    'MZW': {'carver_instrument': 'WHEAT_mini', 'hold_roll_cycle': 'HKNUZ', 'roll_offset_days': -30},
 }
 
 

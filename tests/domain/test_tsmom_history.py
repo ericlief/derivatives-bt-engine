@@ -108,3 +108,37 @@ def test_execution_overlay_uses_explicit_carver_parent(
         manifest['instruments'][traded_symbol]['crosswalk']['carver_instrument']
         == expected_carver
     )
+
+
+def test_globex_history_uses_requested_symbol_roll_override(monkeypatch) -> None:
+    captured = []
+
+    class StubGlobexProvider:
+        def __init__(self, *, roll_policy, **_kwargs):
+            captured.append(roll_policy)
+
+        def load(self, instrument_code: str) -> FuturesHistory:
+            return replace(
+                _history(),
+                source='globex',
+                instrument_code=instrument_code,
+                metadata={'roll_policy': captured[-1].as_dict()},
+            )
+
+    monkeypatch.setattr(th, 'GlobexHistoryProvider', StubGlobexProvider)
+    monkeypatch.setattr(th, 'load_mappings', lambda _path=None: ())
+
+    frames, manifest = th.load_source_neutral_histories(
+        ['MZC'],
+        data_source='globex',
+    )
+
+    assert frames['MZC'].height == 3
+    assert captured[0].hold_roll_cycle == 'HKNUZ'
+    assert captured[0].roll_offset_days == -30
+    assert captured[0].carver_instrument == 'CORN_mini'
+    assert manifest['instruments']['MZC']['resolved_globex_symbol'] == 'ZC'
+    assert (
+        manifest['instruments']['MZC']['globex_roll_policy_resolution']
+        == 'requested_symbol_override'
+    )

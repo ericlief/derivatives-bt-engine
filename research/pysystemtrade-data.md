@@ -478,6 +478,50 @@ current configured hold cycle for forward holding cost while retaining both
 observed rates and an audit status; it does not silently infer a new live roll
 policy from historical transitions.
 
+### Globex held-contract policy implementation (2026-10-05)
+
+The source-neutral `GlobexHistoryProvider` now builds its held path from a
+first-class `ContractRollPolicy`. Its default policy set is pinned to the same
+pysystemtrade commit as the packaged mappings and reproduces Carver's
+`HoldRollCycle` and `RollOffsetDays`. A requested-symbol override is resolved
+before the raw Globex root, allowing `MZC` and `ZC` to read the same ZC
+contract table while selecting different paths. Unknown roots retain the
+previous sticky volume-front fallback.
+
+This required a separate policy registry in `instruments.py`; the existing
+`active_months` map is not a roll-policy map. The latter records empirically
+liquid delivery months and intentionally disagrees with Carver for several
+strategies: liquid monthly CL versus annual-December `CRUDE_W`, H/K/N/Z ZC
+versus annual-December `CORN`, and the analogous GC, ZL, ZS, ZM, and ZW cases.
+[`audit_globex_roll_policies.py`](../scripts/audit_globex_roll_policies.py)
+compares both concepts rather than silently treating one as the other.
+
+The audit covers 20 raw-root defaults and seven requested-symbol overrides.
+All 27 code-pinned cycle/offset pairs exactly match `raw.roll_config`. Fourteen
+raw roots are present in the current Globex database and contain every month
+required by their policy. Six configured roots (`HG`, `TN`, `UB`, `ZM`, `NKD`,
+and `VXM`) have no local raw Globex rows; this is a market-data availability
+gap, not a reason to encode policy in the DB. Their backtests continue to fail
+honestly for absent data.
+
+Policy paths are derived from immutable contract bars and cached by data
+fingerprint, history schema, and policy identity. No table was added to the
+raw market database. The run manifest records the requested symbol, resolved
+raw root, policy-resolution level, hold cycle, roll offset, and Carver parent.
+Run-local overrides use the repeated CLI form
+`--roll-policy-override SYMBOL:CYCLE:OFFSET`, for example
+`--roll-policy-override MZC:Z:-60`.
+
+The real CORN validation selected 4,040 sessions from 2010-06-07 through
+2026-06-18 under both paths. `ZC` used only December contracts and made 16
+transitions; `MZC` used H/K/N/U/Z and made 81 transitions. A 2020–2024
+single-instrument MZC EWMAC run then completed over 1,257 backtest days using
+the policy-generated mark, return-index, and Panama streams.
+
+This applies to `data_source=globex` and to the Globex leg of `hybrid`.
+`legacy_globex` and the separate `naked` command still use the older sticky
+volume-front loader; they have not acquired a second roll implementation.
+
 ## Initial symbol crosswalk
 
 The following are high-confidence candidates for the first overlap study. A
@@ -652,20 +696,21 @@ Operational signal series are generated from `raw.multiple_prices`; importing
 the supplied adjusted level as the working series would prevent the same code
 from being used for Globex and IB and would risk double-adjusting future rolls.
 
-Keep `FuturesDataLoader` as the Globex implementation and add a separate
-Carver provider. A later hybrid provider composes them. The default
-`data_source=globex` path must remain behaviorally unchanged until the hybrid
-path passes comparison tests.
+The legacy `FuturesDataLoader` remains available as `legacy_globex`; the
+source-neutral Globex and Carver providers expose the separated streams, and
+the hybrid provider composes them. The source-neutral Globex path now applies
+the explicit held-contract policies documented below rather than inheriting
+the legacy volume-front path implicitly.
 
 Cache paths must include source and schema version, for example:
 
 ```text
 .cache/futures/globex/v1/ES_daily.parquet
-.cache/futures/globex/v7/<database-fingerprint>/ES_signal.parquet
-.cache/futures/pysystemtrade/v7/<source-commit>/SP500_signal.parquet
+.cache/futures/globex/v8/<database-fingerprint>/<policy-key>/ES_signal.parquet
+.cache/futures/pysystemtrade/v8/<source-commit>/SP500_signal.parquet
 ```
 
-The first path is the unchanged legacy `FuturesDataLoader` cache. The v7 paths
+The first path is the unchanged legacy `FuturesDataLoader` cache. The v8 paths
 are the source-neutral history-provider caches. Asset-only cache names are
 unsafe once two sources can provide the same market.
 
@@ -851,10 +896,9 @@ roll_differential[t] = FORWARD[t-1] - PRICE[t-1]
 
 The two named daily fields are paired measurements of the same matched-
 contract move: `pt_change_1d` is in price points and `ret_1d` is a fractional
-simple return. Neither field is volatility-normalized. The history cache
-schema is v7 to keep these names separate from older Parquet caches and to
-invalidate indices built before invalid daily sessions were removed from the
-compounded return path.
+simple return. Neither field is volatility-normalized. History cache schema
+v8 retains the v7 invalid-session correction and additionally isolates every
+Globex cache by roll-policy identity.
 
 The local Panama implementation is algebraically identical to Carver's
 forward mutation: every new roll differential is added to all earlier

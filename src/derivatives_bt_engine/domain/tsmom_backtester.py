@@ -21,10 +21,10 @@ from __future__ import annotations
 import hashlib
 import math
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
-from typing import Optional
+from typing import Mapping, Optional
 
 import duckdb
 import polars as pl
@@ -54,6 +54,7 @@ from derivatives_bt_engine.domain.futures_history import (
 from derivatives_bt_engine.domain.instruments import (
     CME_MONTH_NUM_TO_LETTER, get_spec, resolve_active_months, resolve_annualization_days, resolve_price_symbol,
 )
+from derivatives_bt_engine.domain.roll_policy import ContractRollPolicy
 from derivatives_bt_engine.domain.signal import (
     DEFAULT_FAST_WINDOW,
     DEFAULT_SLOW_WINDOW,
@@ -358,6 +359,14 @@ class TsmomBacktestConfig:
     pysystemtrade_pooling_mapping_path: Optional[Path | str] = None
     hybrid_handoff_date: Optional[date] = None
     allow_candidate_mappings: bool = False
+    # Run-local requested-symbol overrides layered over the pinned Carver
+    # defaults used by GlobexHistoryProvider. An MZC override, for example,
+    # still reads raw ZC contracts but can select a different held path from
+    # ZC itself. These policies affect globex and the primary leg of hybrid;
+    # imported pysystemtrade histories already contain their own held path.
+    globex_roll_policy_overrides: Mapping[
+        str, ContractRollPolicy
+    ] = field(default_factory=dict)
     # Native Carver EWMAC rule parameters. Estimated modes pool the raw
     # forecast causally through t-1; ``fixed`` retains the explicit scalar
     # for parity tests against an externally calibrated Carver value.
@@ -392,6 +401,13 @@ class TsmomBacktestConfig:
             )
         if self.signal_weighting == 'carver_ewmac' and self.data_source == 'legacy_globex':
             raise ValueError("carver_ewmac requires a source-neutral data_source")
+        if not all(
+            isinstance(policy, ContractRollPolicy)
+            for policy in self.globex_roll_policy_overrides.values()
+        ):
+            raise ValueError(
+                "globex_roll_policy_overrides values must be ContractRollPolicy"
+            )
         if self.ewmac_fast_span <= 0 or self.ewmac_slow_span <= 0 or self.ewmac_vol_span <= 0:
             raise ValueError("EWMAC spans must be positive")
         if self.ewmac_fast_span >= self.ewmac_slow_span:
@@ -545,6 +561,7 @@ def _load_backtest_data(
         mapping_path=config.pysystemtrade_mapping_path,
         handoff_date=config.hybrid_handoff_date,
         allow_candidate_mappings=config.allow_candidate_mappings,
+        globex_roll_policy_overrides=config.globex_roll_policy_overrides,
     )
     vix = pl.read_parquet(VIX_FILE_PATH).select(['date', 'close']).rename(
         {'close': 'vix_close'}

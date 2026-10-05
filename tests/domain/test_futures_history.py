@@ -16,6 +16,10 @@ from derivatives_bt_engine.domain.futures_history import (
     GlobexHistoryProvider,
     PysystemtradeHistoryProvider,
 )
+from derivatives_bt_engine.domain.roll_policy import (
+    ContractRollPolicy,
+    VOLUME_FRONT_POLICY,
+)
 
 
 CARVER_CODES = ["SP500", "GOLD", "CRUDE_W", "US10", "JPY"]
@@ -315,7 +319,7 @@ def test_carver_cache_path_is_source_and_version_namespaced(tmp_path: Path) -> N
         tmp_path
         / "cache"
         / "pysystemtrade"
-        / "v7"
+        / "v8"
         / SOURCE_COMMIT[:12]
         / "SP500_signal.parquet"
     )
@@ -392,6 +396,7 @@ def test_globex_signal_uses_same_contract_change_across_roll(tmp_path: Path) -> 
         cache_root=tmp_path / "cache",
         use_cache=False,
         save_cache=False,
+        roll_policy=VOLUME_FRONT_POLICY,
     )
 
     history = provider.load("ES")
@@ -418,6 +423,109 @@ def test_globex_signal_uses_same_contract_change_across_roll(tmp_path: Path) -> 
     assert history.marks.get_column("mark_price").to_list() == legacy_daily.get_column(
         "close"
     ).to_list()
+
+
+def test_globex_calendar_policy_rolls_on_expiry_offset(tmp_path: Path) -> None:
+    database = tmp_path / "globex-calendar.duckdb"
+    con = duckdb.connect(str(database))
+    try:
+        con.execute(
+            """
+            CREATE TABLE daily (
+                ts_event TIMESTAMP,
+                instrument_id UINTEGER,
+                open DOUBLE,
+                high DOUBLE,
+                low DOUBLE,
+                close DOUBLE,
+                volume UBIGINT,
+                asset VARCHAR,
+                instrument_class VARCHAR,
+                security_type VARCHAR,
+                expiration DATE
+            )
+            """
+        )
+        con.execute(
+            """
+            INSERT INTO daily VALUES
+            ('2020-10-14', 1, 400, 400, 400, 400, 100, 'ZC', 'F', 'FUT', '2020-12-14'),
+            ('2020-10-14', 2, 420, 420, 420, 420, 80, 'ZC', 'F', 'FUT', '2021-12-14'),
+            ('2020-10-15', 1, 401, 401, 401, 401, 90, 'ZC', 'F', 'FUT', '2020-12-14'),
+            ('2020-10-15', 2, 422, 422, 422, 422, 85, 'ZC', 'F', 'FUT', '2021-12-14')
+            """
+        )
+    finally:
+        con.close()
+    provider = GlobexHistoryProvider(
+        db_path=database,
+        cache_root=tmp_path / "cache",
+        use_cache=False,
+        save_cache=False,
+        roll_policy=ContractRollPolicy(
+            policy_id="corn_annual",
+            hold_roll_cycle="Z",
+            roll_offset_days=-60,
+        ),
+    )
+
+    history = provider.load("ZC")
+
+    assert history.marks.get_column("contract_id").to_list() == [
+        "20201200",
+        "20211200",
+    ]
+    assert history.marks.get_column("is_roll").to_list() == [False, True]
+    assert history.signal.get_column("ret_1d")[1] == pytest.approx(
+        422.0 / 420.0 - 1.0
+    )
+    assert history.metadata["roll_policy"]["hold_roll_cycle"] == "Z"
+    assert history.metadata["selected_rolls"] == 1
+
+
+def test_globex_calendar_policy_reports_empty_schedule(tmp_path: Path) -> None:
+    database = tmp_path / "globex-empty-calendar.duckdb"
+    con = duckdb.connect(str(database))
+    try:
+        con.execute(
+            """
+            CREATE TABLE daily (
+                ts_event TIMESTAMP,
+                instrument_id UINTEGER,
+                open DOUBLE,
+                high DOUBLE,
+                low DOUBLE,
+                close DOUBLE,
+                volume UBIGINT,
+                asset VARCHAR,
+                instrument_class VARCHAR,
+                security_type VARCHAR,
+                expiration DATE
+            )
+            """
+        )
+        con.execute(
+            """
+            INSERT INTO daily VALUES
+            ('2020-12-01', 1, 400, 400, 400, 400, 100, 'ZC', 'F', 'FUT', '2020-12-14')
+            """
+        )
+    finally:
+        con.close()
+    provider = GlobexHistoryProvider(
+        db_path=database,
+        cache_root=tmp_path / "cache",
+        use_cache=False,
+        save_cache=False,
+        roll_policy=ContractRollPolicy(
+            policy_id="corn_annual",
+            hold_roll_cycle="Z",
+            roll_offset_days=-60,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="selected no contract observations"):
+        provider.load("ZC")
 
 
 def test_history_rejects_nonpositive_signal_index() -> None:
