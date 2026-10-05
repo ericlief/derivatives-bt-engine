@@ -14,9 +14,9 @@ The diagnostic deliberately separates research history from execution data:
   with pooled rule turnover and its representative roll policy.
 
 All 252 instruments with usable Carver history have candidate IB identities.
-Five local CBOT grain micros absent from Carver are added as execution-only
-overlays, producing 257 candidate rows; qualification against the connected
-account determines actual availability.
+Five local CBOT grain micros and two Treasury micros absent from Carver are
+added as execution-only overlays, producing 259 candidate rows; qualification
+against the connected account determines actual availability.
 IB dated and continuous history remain explicit comparison modes.  A missing
 quote is never treated as a zero spread, and spread-dependent costs remain
 null.
@@ -99,6 +99,9 @@ DEFAULT_DELAYED_SPREAD_REQUEST_PLAN = (
 DEFAULT_MIN_DAYS = 7
 DEFAULT_QUOTE_WAIT_SECONDS = 3.0
 DEFAULT_CONTRACT_DETAILS_TIMEOUT = 8.0
+DEFAULT_ROLL_AUDIT_RECENT_YEARS = 5
+MIN_ROLL_AUDIT_RECENT_YEARS = 3
+ROLL_RATE_MATCH_TOLERANCE = 0.25
 # ib_insync's historical request coroutine times out internally after 60
 # seconds, cancels the request, and can return an empty BarDataList instead of
 # raising.  Treat an empty result this close to that boundary as a timeout so
@@ -329,6 +332,113 @@ def _annualized_sharpe(values: pl.Series, annualization_days: int) -> Optional[f
     return float(clean.mean() / standard_deviation * math.sqrt(annualization_days))
 
 
+def _roll_rate_audit(
+    marks: pl.DataFrame,
+    *,
+    hold_roll_cycle: object,
+    recent_years: int = DEFAULT_ROLL_AUDIT_RECENT_YEARS,
+) -> dict[str, object]:
+    """Compare historical roll transitions with the current configured cycle.
+
+    Forward holding costs follow pysystemtrade's current roll configuration,
+    whose rolls-per-year value is the number of months in the hold cycle.
+    Full-history and recent observed rates remain diagnostics because older
+    histories can embody a different roll policy.
+    """
+    if recent_years <= 0:
+        raise ValueError("recent_years must be positive")
+    required = {"trade_date", "is_roll"}
+    missing = required - set(marks.columns)
+    if missing:
+        raise ValueError(f"roll audit marks missing columns: {sorted(missing)}")
+
+    history_start = marks.get_column("trade_date").min()
+    history_end = marks.get_column("trade_date").max()
+    roll_dates = marks.filter(pl.col("is_roll")).get_column("trade_date")
+    observed_rolls = roll_dates.len()
+    elapsed_years = (
+        (history_end - history_start).days / 365.25
+        if history_start is not None and history_end is not None
+        else 0.0
+    )
+    observed_full_rate = (
+        observed_rolls / elapsed_years if elapsed_years > 0 else None
+    )
+
+    cycle = str(hold_roll_cycle or "").strip().upper()
+    configured_rate = float(len(cycle)) if cycle else None
+
+    recent_start_year = None
+    recent_end_year = None
+    recent_year_count = 0
+    recent_roll_count = 0
+    observed_recent_rate = None
+    if history_start is not None and history_end is not None:
+        # Exclude both boundary calendar years: either can be partial.
+        first_complete_year = history_start.year + 1
+        last_complete_year = history_end.year - 1
+        recent_start_year = max(
+            first_complete_year,
+            last_complete_year - recent_years + 1,
+        )
+        if recent_start_year <= last_complete_year:
+            recent_end_year = last_complete_year
+            recent_year_count = recent_end_year - recent_start_year + 1
+            recent_roll_count = roll_dates.filter(
+                roll_dates.dt.year().is_between(
+                    recent_start_year,
+                    recent_end_year,
+                )
+            ).len()
+            observed_recent_rate = recent_roll_count / recent_year_count
+
+    full_difference = (
+        observed_full_rate - configured_rate
+        if observed_full_rate is not None and configured_rate is not None
+        else None
+    )
+    recent_difference = (
+        observed_recent_rate - configured_rate
+        if observed_recent_rate is not None and configured_rate is not None
+        else None
+    )
+    if configured_rate is None:
+        audit_status = "missing_configured_hold_cycle"
+    elif recent_year_count < MIN_ROLL_AUDIT_RECENT_YEARS:
+        audit_status = "insufficient_recent_complete_years"
+    elif abs(recent_difference) > ROLL_RATE_MATCH_TOLERANCE:
+        audit_status = (
+            "recent_above_configured"
+            if recent_difference > 0
+            else "recent_below_configured"
+        )
+    elif (
+        full_difference is not None
+        and abs(full_difference) > ROLL_RATE_MATCH_TOLERANCE
+    ):
+        audit_status = "historical_policy_change"
+    else:
+        audit_status = "consistent_with_configured_cycle"
+
+    return {
+        "strategy_rolls": observed_rolls,
+        # Retain the legacy name for downstream compatibility. It is an
+        # observed full-history rate, never the selected forward cost input.
+        "strategy_rolls_per_year": observed_full_rate,
+        "strategy_observed_rolls_per_year_full": observed_full_rate,
+        "strategy_recent_rolls": recent_roll_count,
+        "strategy_observed_rolls_per_year_recent": observed_recent_rate,
+        "strategy_recent_roll_start_year": recent_start_year,
+        "strategy_recent_roll_end_year": recent_end_year,
+        "strategy_recent_roll_years": recent_year_count,
+        "strategy_hold_roll_cycle": cycle or None,
+        "strategy_configured_rolls_per_year": configured_rate,
+        "strategy_full_minus_configured_rolls_per_year": full_difference,
+        "strategy_recent_minus_configured_rolls_per_year": recent_difference,
+        "strategy_roll_rate_audit": audit_status,
+    }
+
+
 def _ewmac_rule_performance(
     frame: pl.DataFrame,
     *,
@@ -471,19 +581,11 @@ def estimate_pooled_ewmac_cost_baseline(
             annualization_days=CARVER_BUSINESS_DAYS_PER_YEAR,
             target_abs_forecast=target_abs_forecast,
         )
-        roll_count = history.marks.filter(pl.col("is_roll")).height
-        history_start = history.marks.get_column("trade_date").min()
-        history_end = history.marks.get_column("trade_date").max()
-        elapsed_years = (
-            (history_end - history_start).days / 365.25
-            if history_start is not None and history_end is not None
-            else 0.0
-        )
         metrics.update(
             instrument_code=instrument_code,
-            strategy_rolls=roll_count,
-            strategy_rolls_per_year=(
-                roll_count / elapsed_years if elapsed_years > 0 else None
+            **_roll_rate_audit(
+                history.marks,
+                hold_roll_cycle=history.metadata.get("hold_roll_cycle"),
             ),
         )
         metric_rows.append(metrics)
@@ -499,6 +601,25 @@ def estimate_pooled_ewmac_cost_baseline(
 
     metrics = pl.DataFrame(metric_rows, infer_schema_length=None).sort(
         "instrument_code"
+    )
+    roll_audit_counts = dict(
+        sorted(
+            {
+                row["strategy_roll_rate_audit"]: row["len"]
+                for row in metrics.group_by("strategy_roll_rate_audit")
+                .len()
+                .iter_rows(named=True)
+            }.items()
+        )
+    )
+    log.info(
+        "roll_rate_audit ewmac_fast_span=%d instruments=%d "
+        "configured_unit=roll_events_per_year recent_window_years=%d "
+        "status_counts=%s",
+        fast_span,
+        metrics.height,
+        DEFAULT_ROLL_AUDIT_RECENT_YEARS,
+        roll_audit_counts,
     )
     pooled_returns = pl.concat(pooled_pnl, how="vertical").get_column(
         "risk_adjusted_pnl"
@@ -549,6 +670,10 @@ def estimate_pooled_ewmac_cost_baseline(
         ),
         "ewmac_stacked_observation_pre_cost_sharpe": stacked_observation_sharpe,
         "ewmac_pooled_forecast_turnover": pooled_turnover,
+        "roll_rate_audit_status_counts": json.dumps(
+            roll_audit_counts,
+            sort_keys=True,
+        ),
         "ewmac_fast_span": fast_span,
         "ewmac_slow_span": slow_span,
         "ewmac_vol_span": vol_span,
@@ -641,10 +766,78 @@ def _configured_cost_estimate(
                 "strategy_history_observations"
             ),
             strategy_reference_rolls=first_metrics.get("strategy_rolls"),
-            strategy_reference_rolls_per_year=first_metrics.get(
-                "strategy_rolls_per_year"
+            strategy_reference_observed_rolls_per_year_full=first_metrics.get(
+                "strategy_observed_rolls_per_year_full"
+            ),
+            strategy_reference_recent_rolls=first_metrics.get(
+                "strategy_recent_rolls"
+            ),
+            strategy_reference_observed_rolls_per_year_recent=first_metrics.get(
+                "strategy_observed_rolls_per_year_recent"
+            ),
+            strategy_reference_recent_roll_start_year=first_metrics.get(
+                "strategy_recent_roll_start_year"
+            ),
+            strategy_reference_recent_roll_end_year=first_metrics.get(
+                "strategy_recent_roll_end_year"
+            ),
+            strategy_reference_recent_roll_years=first_metrics.get(
+                "strategy_recent_roll_years"
+            ),
+            strategy_reference_hold_roll_cycle=first_metrics.get(
+                "strategy_hold_roll_cycle"
+            ),
+            strategy_reference_configured_rolls_per_year=first_metrics.get(
+                "strategy_configured_rolls_per_year"
+            ),
+            strategy_reference_full_minus_configured_rolls_per_year=(
+                first_metrics.get(
+                    "strategy_full_minus_configured_rolls_per_year"
+                )
+            ),
+            strategy_reference_recent_minus_configured_rolls_per_year=(
+                first_metrics.get(
+                    "strategy_recent_minus_configured_rolls_per_year"
+                )
+            ),
+            strategy_reference_roll_rate_audit=first_metrics.get(
+                "strategy_roll_rate_audit"
             ),
         )
+    configured_rolls_per_year = _nonnegative_finite(
+        (first_metrics or {}).get("strategy_configured_rolls_per_year")
+    )
+    recent_rolls_per_year = _nonnegative_finite(
+        (first_metrics or {}).get("strategy_observed_rolls_per_year_recent")
+    )
+    observed_rolls_per_year = _nonnegative_finite(
+        (first_metrics or {}).get("strategy_observed_rolls_per_year_full")
+    )
+    if observed_rolls_per_year is None:
+        observed_rolls_per_year = _nonnegative_finite(
+            (first_metrics or {}).get("strategy_rolls_per_year")
+        )
+    if configured_rolls_per_year is not None:
+        rolls_per_year = configured_rolls_per_year
+        roll_rate_source = "configured_hold_cycle"
+    elif recent_rolls_per_year is not None:
+        rolls_per_year = recent_rolls_per_year
+        roll_rate_source = "recent_observed_fallback"
+    else:
+        rolls_per_year = observed_rolls_per_year
+        roll_rate_source = (
+            "full_history_observed_fallback"
+            if rolls_per_year is not None
+            else "unavailable"
+        )
+    roll_transactions = (
+        2.0 * rolls_per_year if rolls_per_year is not None else None
+    )
+    common.update(
+        strategy_reference_selected_rolls_per_year=rolls_per_year,
+        strategy_reference_roll_rate_source=roll_rate_source,
+        strategy_reference_roll_transactions_per_year=roll_transactions,
+    )
 
     carver_spread_points = _nonnegative_finite(instr.get("carver_spread_points"))
     spread_points = _nonnegative_finite(
@@ -688,10 +881,6 @@ def _configured_cost_estimate(
     one_way_native = spread_cash_native + commission_native
     one_way_usd = one_way_native * fx_to_usd
     sr_cost_per_trade = one_way_usd / annual_dollar_vol
-    rolls_per_year = _nonnegative_finite(
-        (first_metrics or {}).get("strategy_rolls_per_year")
-    )
-    roll_transactions = 2.0 * rolls_per_year if rolls_per_year is not None else None
     result: dict[str, object] = {
         **common,
         "carver_configured_one_way_spread_points": carver_spread_points,
@@ -703,7 +892,6 @@ def _configured_cost_estimate(
         "configured_one_way_cost_native": one_way_native,
         "configured_one_way_cost": one_way_usd,
         "configured_sr_cost_per_trade": sr_cost_per_trade,
-        "strategy_reference_roll_transactions_per_year": roll_transactions,
         "configured_cost_quality": (
             "ib_historical_bid_ask"
             if spread_source in {"ib_dated_contract", "ib_continuous_fallback"}
@@ -2439,8 +2627,36 @@ PUBLIC_REPORT_RENAMES = {
     "strategy_reference_history_start": "ref_strategy_history_start",
     "strategy_reference_history_end": "ref_strategy_history_end",
     "strategy_reference_history_observations": "ref_strategy_history_n",
-    "strategy_reference_rolls": "ref_strategy_rolls",
-    "strategy_reference_rolls_per_year": "ref_strategy_rolls_per_year",
+    "strategy_reference_rolls": "ref_strategy_observed_rolls_full",
+    "strategy_reference_observed_rolls_per_year_full": (
+        "ref_strategy_observed_rolls_per_year_full"
+    ),
+    "strategy_reference_recent_rolls": "ref_strategy_recent_rolls",
+    "strategy_reference_observed_rolls_per_year_recent": (
+        "ref_strategy_observed_rolls_per_year_recent"
+    ),
+    "strategy_reference_recent_roll_start_year": (
+        "ref_strategy_recent_roll_start_year"
+    ),
+    "strategy_reference_recent_roll_end_year": (
+        "ref_strategy_recent_roll_end_year"
+    ),
+    "strategy_reference_recent_roll_years": "ref_strategy_recent_roll_years",
+    "strategy_reference_hold_roll_cycle": "ref_strategy_hold_roll_cycle",
+    "strategy_reference_configured_rolls_per_year": (
+        "ref_strategy_configured_rolls_per_year"
+    ),
+    "strategy_reference_full_minus_configured_rolls_per_year": (
+        "ref_strategy_full_minus_configured_rolls_per_year"
+    ),
+    "strategy_reference_recent_minus_configured_rolls_per_year": (
+        "ref_strategy_recent_minus_configured_rolls_per_year"
+    ),
+    "strategy_reference_roll_rate_audit": "ref_strategy_roll_rate_audit",
+    "strategy_reference_selected_rolls_per_year": (
+        "ref_strategy_selected_rolls_per_year"
+    ),
+    "strategy_reference_roll_rate_source": "ref_strategy_roll_rate_source",
     "strategy_reference_roll_transactions_per_year": "ref_strategy_roll_tx_per_year",
     "ib_recent_fast_return_vol": "ib_fast_return_vol",
     "ib_recent_vol_observations": "ib_fast_n",

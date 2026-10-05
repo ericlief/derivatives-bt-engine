@@ -96,10 +96,11 @@ Forecast turnover is estimated separately for every representative and speed as
 `256 × mean(abs(change in forecast)) / 0.5`, then pooled with Carver's
 history-length weighting. Each execution row uses that speed's pooled rule
 turnover, its own one-way spread, commission, point value, FX conversion, and
-current-price-scaled dollar volatility. The selected research representative
-supplies the roll-policy rate; physical rolls add two one-way transactions per
-roll. Rule turnover excludes rolls. The resulting columns decompose cost as
-follows:
+current-price-scaled dollar volatility. The selected research representative's
+current configured hold cycle supplies the forward roll-policy rate; physical
+rolls add two one-way transactions per roll. Full-history and recent observed
+rates remain audit fields and never silently override that configuration. Rule
+turnover excludes rolls. The resulting columns decompose cost as follows:
 
 ```text
 selected SR cost per trade
@@ -109,10 +110,10 @@ annual rule SR cost(speed)
     = selected SR cost per trade × pooled rule turnover(speed)
 
 annual roll SR cost
-    = selected SR cost per trade × 2 × representative rolls per year
+    = selected SR cost per trade × 2 × selected rolls per year
 
 total transactions(speed)
-    = pooled rule turnover(speed) + 2 × rolls per year
+    = pooled rule turnover(speed) + 2 × selected rolls per year
 
 total annual SR cost(speed)
     = selected SR cost per trade × total transactions(speed)
@@ -125,7 +126,7 @@ are not interchangeable:
 
 ```text
 ref_strategy_roll_tx_per_year
-    = 2 × ref_strategy_rolls_per_year
+    = 2 × ref_strategy_selected_rolls_per_year
 
 ewmac_<speed>_tot_tx_per_year
     = ewmac_<speed>_pooled_rule_turnover
@@ -134,10 +135,23 @@ ewmac_<speed>_tot_tx_per_year
 
 A physical futures roll has two one-way legs: close the old contract and open
 the new contract. Consequently the total column visibly adds rule turnover to
-`roll_tx_per_year`, because that latter field has already doubled the raw
-roll-event rate. It must not be doubled again. For example, the offline CORN
-16/64 row reports raw rolls/year `0.9914`, roll transactions/year `1.9828`,
-and total transactions/year `14.5298 + 1.9828 = 16.5126`.
+`roll_tx_per_year`, because that latter field has already doubled the selected
+roll-event rate. It must not be doubled again.
+
+The selected event rate is now the number of months in the current configured
+hold cycle, matching pysystemtrade's `rolls_per_year_in_hold_cycle()`. The CSV
+also reports full-history and recent observed rates, their differences from
+configuration, the recent window, and `ref_strategy_roll_rate_audit`. Fallback
+to recent and then full-history observation occurs only when the configured
+cycle is unavailable and is explicit in `ref_strategy_roll_rate_source`.
+
+This distinction corrected a real undercount in the earlier report.
+`CORN_mini` and its `MZC` overlay used 132 transitions over the entire
+1970–2024 history, or `2.4622` events/year, even though the current `HKNUZ`
+cycle and every complete 2016–2023 year imply five. For MZC 64/256, the
+forward total is therefore `5.5685 + 2 × 5 = 15.5685` transactions/year, not
+the earlier `10.4929`. Full-size `CORN` retains its configured annual `Z`
+cycle and therefore two roll legs/year.
 
 This Phase 1 calculation matches pysystemtrade's current **rule affordability**
 contract: [`get_SR_cost_for_instrument_forecast`](https://github.com/pst-group/pysystemtrade/blob/b4a25e6e1e33a54a3ecfb45c0f6db5e2b60b84f8/systems/accounts/account_costs.py#L14-L33)
@@ -155,7 +169,7 @@ does not call `get_SR_cost_given_turnover` and therefore does not add a
 separate holding-roll term. Phase 2 must reproduce that definition for its
 exact AFTS baseline. It should also report a clearly labelled
 `afts_plus_rolls` sensitivity using
-`subsystem_turnover + 2 × rolls_per_year`. The Phase 1 per-rule total is
+`subsystem_turnover + 2 × selected_rolls_per_year`. The Phase 1 per-rule total is
 neither of those Phase 2 inputs: it screens individual rules before their
 forecasts are combined.
 
@@ -464,7 +478,7 @@ Report the more conservative production sensitivity separately:
 ```text
 afts_plus_rolls_annual_cost_SR
     = selected_sr_cost_per_trade
-      × (subsystem_turnover + 2 × rolls_per_year)
+      × (subsystem_turnover + 2 × selected_rolls_per_year)
 ```
 
 Both variants use the current one-way definition of

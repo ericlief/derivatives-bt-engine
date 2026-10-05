@@ -422,10 +422,52 @@ prices with stale carry prices and manufacture a false roll yield.
   and that historical carry offsets can differ from the current
   `rollconfig.csv`. Neither mini/micro price duplication nor roll configuration
   should be accepted silently.
+- A 2026-10-04 audit confirmed that historical contract transitions cannot be
+  used blindly as the forward roll rate. It compares each of the 228 reviewed
+  representatives with its current hold cycle, the full-history observed rate,
+  and the observed rate over as many as five recent complete calendar years.
+  With a tolerance of 0.25 rolls/year, 166 are consistent across the recent
+  and full samples, 12 show a historical policy change, 13 have a
+  recent/configured mismatch requiring inspection, and 37 lack three complete
+  recent years.
 - Timestamps are timezone-naive and mix old daily 23:00 observations with
   recent intraday observations. Schema v3 retains `source_timestamp` exactly
   and derives a separate, documented `trade_date` rather than assuming the
   strings are UTC.
+
+The 12 histories classified as a historical policy change are:
+
+| Instrument | Current hold cycle | Configured rolls/year | Full-history observed | Recent observed |
+|---|---|---:|---:|---:|
+| `CANOLA` | `FHKNX` | 5 | 4.178 | 5.2 |
+| `COPPER-mini` | `HKNUZ` | 5 | 4.299 | 5.0 |
+| `CORN_mini` | `HKNUZ` | 5 | 2.462 | 5.0 |
+| `GAS_US_mini` | `FGHJKMNQUVXZ` | 12 | 9.129 | 11.8 |
+| `GICS` | `FGHJKMNQUVXZ` | 12 | 11.512 | 12.0 |
+| `LEANHOG` | `GJMNQVZ` | 7 | 2.858 | 6.8 |
+| `LIVECOW` | `GJMQVZ` | 6 | 2.632 | 6.0 |
+| `MILK` | `FGHJKMNQUVXZ` | 12 | 11.701 | 12.0 |
+| `MILLWHEAT` | `HKUZ` | 4 | 3.039 | 3.8 |
+| `SOYBEAN_mini` | `FHKNQUX` | 7 | 3.001 | 7.0 |
+| `WHEAT_mini` | `HKNUZ` | 5 | 2.630 | 5.0 |
+| `WHEY` | `FGHJKMNQUVXZ` | 12 | 11.748 | 11.8 |
+
+`CORN_mini` makes the failure mode explicit. Its 132 observed transitions from
+1970 through March 2024 average only 2.462 rolls/year because the early series
+mostly rolled twice per year. It rolled five times in every complete year from
+2016 through 2023, matching the current `HKNUZ` configuration. The local `MZC`
+execution overlay borrows this history, so forward cost must use five physical
+rolls (ten one-way legs), not twice the diluted full-history rate.
+
+The recent/configured mismatch list is deliberately not auto-resolved. Recent
+rates are below configuration for `COPPER-micro`, `FTSETAIWAN`, `HANGTECH`,
+`KOSPI_mini`, `MILKWET`, and `SONIA3`, and above it for `BRENT_W`,
+`GASOILINE`, `HEATOIL`, `HIGHYIELD`, `NIKKEI`, `SGD`, and `VNKI`. These can
+reflect duplicate transitions, incomplete contract paths, or a genuinely
+different historical strategy. The executable cost report therefore uses the
+current configured hold cycle for forward holding cost while retaining both
+observed rates and an audit status; it does not silently infer a new live roll
+policy from historical transitions.
 
 ## Initial symbol crosswalk
 

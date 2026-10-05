@@ -23,6 +23,7 @@ from derivatives_bt_engine.data.futures_cost_risk import (
     _historical_request_timed_out,
     _ib_contract_currency,
     _latest_dated_mark,
+    _roll_rate_audit,
     _round_report_decimals,
     build_cost_risk_row,
     diagnose_instrument,
@@ -388,6 +389,32 @@ def test_ewmac_performance_delays_forecast_and_annualizes_turnover():
     )
 
 
+def test_roll_rate_audit_detects_historical_policy_change():
+    rows = [
+        {"trade_date": date(2010, 1, 4), "is_roll": False},
+        {"trade_date": date(2024, 3, 28), "is_roll": False},
+    ]
+    for year in range(2011, 2016):
+        for month in (9, 12):
+            rows.append({"trade_date": date(year, month, 1), "is_roll": True})
+    for year in range(2016, 2024):
+        for month in (3, 5, 7, 9, 12):
+            rows.append({"trade_date": date(year, month, 1), "is_roll": True})
+
+    audit = _roll_rate_audit(
+        pl.DataFrame(rows).sort("trade_date"),
+        hold_roll_cycle="HKNUZ",
+    )
+
+    assert audit["strategy_rolls"] == 50
+    assert audit["strategy_configured_rolls_per_year"] == pytest.approx(5.0)
+    assert audit["strategy_observed_rolls_per_year_recent"] == pytest.approx(5.0)
+    assert audit["strategy_recent_roll_start_year"] == 2019
+    assert audit["strategy_recent_roll_end_year"] == 2023
+    assert audit["strategy_recent_roll_years"] == 5
+    assert audit["strategy_roll_rate_audit"] == "historical_policy_change"
+
+
 def test_configured_cost_uses_pooled_turnover_and_reference_rolls():
     estimate = _configured_cost_estimate(
         {
@@ -447,6 +474,102 @@ def test_configured_cost_uses_pooled_turnover_and_reference_rolls():
     assert not estimate["ewmac_16_64_cost_eligible"]
     assert estimate["ewmac_64_256_cost_eligible"]
     assert estimate["eligible_ewmac_rules"] == "64/256"
+
+
+def test_configured_cost_uses_current_cycle_not_full_history_roll_rate():
+    estimate = _configured_cost_estimate(
+        {
+            "symbol": "MZC",
+            "instrument_code": "MZC",
+            "representative_instrument": "CORN_mini",
+            "carver_spread_points": 0.5,
+            "commission": 0.76,
+            "per_trade_cost": 0.0,
+            "percentage_cost": 0.0,
+        },
+        {
+            "multiplier": 5.0,
+            "price": 497.0,
+            "fx_to_usd": 1.0,
+            "annual_dollar_vol_per_contract": 602.67,
+        },
+        pooled_summaries={
+            64: {
+                "ewmac_pooled_forecast_turnover": 5.5685,
+                "ewmac_median_instrument_pre_cost_sharpe": 0.3,
+            },
+        },
+        strategy_metrics_by_rule={
+            64: {
+                "instrument_code": "CORN_mini",
+                "strategy_rolls": 132,
+                "strategy_rolls_per_year": 2.4622,
+                "strategy_observed_rolls_per_year_full": 2.4622,
+                "strategy_observed_rolls_per_year_recent": 5.0,
+                "strategy_hold_roll_cycle": "HKNUZ",
+                "strategy_configured_rolls_per_year": 5.0,
+                "strategy_roll_rate_audit": "historical_policy_change",
+            },
+        },
+        rule_cost_limit_sr=0.15,
+    )
+
+    assert estimate[
+        "strategy_reference_observed_rolls_per_year_full"
+    ] == pytest.approx(2.4622)
+    assert estimate[
+        "strategy_reference_configured_rolls_per_year"
+    ] == pytest.approx(5.0)
+    assert estimate["strategy_reference_selected_rolls_per_year"] == pytest.approx(
+        5.0
+    )
+    assert estimate["strategy_reference_roll_rate_source"] == (
+        "configured_hold_cycle"
+    )
+    assert estimate["strategy_reference_roll_transactions_per_year"] == pytest.approx(
+        10.0
+    )
+    assert estimate["ewmac_64_256_total_transactions_per_year"] == pytest.approx(
+        15.5685
+    )
+
+
+def test_roll_audit_survives_missing_execution_cost_inputs():
+    estimate = _configured_cost_estimate(
+        {
+            "symbol": "MZC",
+            "instrument_code": "MZC",
+            "representative_instrument": "CORN_mini",
+            "carver_spread_points": None,
+        },
+        {
+            "multiplier": 5.0,
+            "price": 497.0,
+            "fx_to_usd": 1.0,
+            "annual_dollar_vol_per_contract": 602.67,
+        },
+        pooled_summaries={64: {"ewmac_pooled_forecast_turnover": 5.5685}},
+        strategy_metrics_by_rule={
+            64: {
+                "strategy_observed_rolls_per_year_full": 2.4622,
+                "strategy_observed_rolls_per_year_recent": 5.0,
+                "strategy_configured_rolls_per_year": 5.0,
+                "strategy_roll_rate_audit": "historical_policy_change",
+            },
+        },
+        rule_cost_limit_sr=0.15,
+    )
+
+    assert estimate["configured_cost_quality"] == "incomplete_static_inputs"
+    assert estimate["strategy_reference_selected_rolls_per_year"] == pytest.approx(
+        5.0
+    )
+    assert estimate["strategy_reference_roll_transactions_per_year"] == pytest.approx(
+        10.0
+    )
+    assert estimate["strategy_reference_roll_rate_audit"] == (
+        "historical_policy_change"
+    )
 
 
 def test_configured_cost_prefers_ib_historical_half_spread():
@@ -537,6 +660,12 @@ def test_public_report_leads_with_selected_values_and_normalizes_spreads():
         "mixed_point_vol": [5.847],
         "vol_reference_price": [883.25],
         "carver_configured_one_way_spread_points": [2.4],
+        "strategy_reference_configured_rolls_per_year": [12.0],
+        "strategy_reference_selected_rolls_per_year": [12.0],
+        "strategy_reference_roll_rate_source": ["configured_hold_cycle"],
+        "strategy_reference_roll_rate_audit": [
+            "consistent_with_configured_cycle"
+        ],
         "strategy_reference_roll_transactions_per_year": [24.0],
         "ewmac_4_16_total_transactions_per_year": [80.0],
         "ewmac_4_16_total_annual_sr_cost": [2.4],
@@ -555,6 +684,13 @@ def test_public_report_leads_with_selected_values_and_normalizes_spreads():
     assert "ewmac_4_16_tot_ann_sr_cost" in report.columns
     assert "ewmac_4_16_ref_pre_cost_sr" in report.columns
     assert "ref_strategy_roll_tx_per_year" in report.columns
+    assert report["ref_strategy_configured_rolls_per_year"][0] == pytest.approx(
+        12.0
+    )
+    assert report["ref_strategy_selected_rolls_per_year"][0] == pytest.approx(
+        12.0
+    )
+    assert report["ref_strategy_roll_rate_source"][0] == "configured_hold_cycle"
     assert report.columns.index("selected_spread_points") < report.columns.index(
         "snap_spread_points"
     )
