@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
-from datetime import datetime
+from collections.abc import Iterable
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import polars as pl
 
 from derivatives_bt_engine.data.futures_cost_rankings import (
@@ -15,11 +18,63 @@ from derivatives_bt_engine.data.futures_cost_rankings import (
     phase2_step1_candidates,
     phase2_step1_config,
 )
+from derivatives_bt_engine.data.pysystemtrade_pooling import (
+    DEFAULT_POOLING_MAPPING_PATH,
+)
+from derivatives_bt_engine.domain.allocation import (
+    _bounded_ewm_correlation_matrix,
+)
+from derivatives_bt_engine.domain.forecast_combination import (
+    CANONICAL_EWMAC_RULES,
+    CombinedForecastEngine,
+    ForecastCombinationConfig,
+    SlowTiltEwmacWeights,
+    median_forecast_correlation,
+)
+from derivatives_bt_engine.domain.futures_history import (
+    DEFAULT_PYSYSTEMTRADE_DB_PATH,
+    PysystemtradeHistoryProvider,
+)
+from derivatives_bt_engine.domain.instrument_selection import (
+    GreedyInstrumentSelector,
+    GreedySelectionConfig,
+    SelectionCandidate,
+)
+from derivatives_bt_engine.domain.signal import carver_ewmac
+from derivatives_bt_engine.domain.tsmom_backtester import (
+    TsmomBacktestConfig,
+    load_pysystemtrade_ewmac_normalization,
+)
 from derivatives_bt_engine.utils.logger import setup_logger
 
 
 logger = logging.getLogger(__name__)
 REPORT_TIMEZONE = ZoneInfo("America/Chicago")
+
+# Production-inspired ordinary-EWMAC template. The two slowest rules receive
+# 60% in total and the three faster rules receive 40%. Rules removed by the
+# Phase 1 cost ceiling are set to zero and the survivors are renormalised.
+EWMAC_SLOW_TILT_60_40 = {
+    "4/16": 0.05,
+    "8/32": 0.15,
+    "16/64": 0.20,
+    "32/128": 0.30,
+    "64/256": 0.30,
+}
+
+
+def slow_tilt_ewmac_weights(
+    eligible_rules: str | Iterable[str],
+) -> dict[str, float]:
+    """Return the 60/40 EWMAC template renormalised over eligible rules."""
+    rules = _parse_rules(eligible_rules)
+    return SlowTiltEwmacWeights(EWMAC_SLOW_TILT_60_40).weights(rules)
+
+
+def _parse_rules(eligible_rules: str | Iterable[str]) -> list[str]:
+    if isinstance(eligible_rules, str):
+        return [rule.strip() for rule in eligible_rules.split(",") if rule.strip()]
+    return [str(rule).strip() for rule in eligible_rules if str(rule).strip()]
 
 
 def parse_args(argv=None):
@@ -46,12 +101,324 @@ def parse_args(argv=None):
         type=Path,
         help="Exact Step 1 output path; defaults beside the input report.",
     )
+    parser.add_argument(
+        "--complete",
+        action="store_true",
+        help="Build combined forecasts and run the iterative greedy selector.",
+    )
+    parser.add_argument(
+        "--pysystemtrade-db",
+        type=Path,
+        default=DEFAULT_PYSYSTEMTRADE_DB_PATH,
+        help="Reviewed pysystemtrade history database.",
+    )
+    parser.add_argument(
+        "--min-forecast-obs",
+        type=int,
+        default=256,
+        help="Minimum valid combined-forecast observations.",
+    )
+    parser.add_argument("--score-threshold", type=float, default=0.90)
+    parser.add_argument("--gross-sr", type=float, default=0.50)
+    parser.add_argument("--starting-weight", type=float, default=0.20)
+    parser.add_argument("--corr-window-years", type=float, default=20.0)
+    parser.add_argument("--corr-halflife-days", type=float, default=250.0)
+    parser.add_argument("--corr-min-rows", type=int, default=256)
     return parser.parse_args(argv)
 
 
 def _default_output_path(source: Path, generated_at: datetime) -> Path:
     stamp = generated_at.astimezone(REPORT_TIMEZONE).strftime("%Y%m%d_%H%M%S")
     return source.parent / f"pysystemtrade_phase2_step1_{stamp}.csv"
+
+
+def _ewmac_scalar_histories(db_path: Path) -> dict[str, pl.DataFrame]:
+    """Load the same causal global scalars used by Phase 1 for all speeds."""
+    histories: dict[str, pl.DataFrame] = {}
+    for rule in CANONICAL_EWMAC_RULES:
+        config = TsmomBacktestConfig(
+            symbols=[],
+            data_source="pysystemtrade",
+            signal_weighting="carver_ewmac",
+            pysystemtrade_db_path=db_path,
+            pysystemtrade_pooling_mapping_path=DEFAULT_POOLING_MAPPING_PATH,
+            ewmac_fast_span=rule.fast,
+            ewmac_slow_span=rule.slow,
+        )
+        scalar, _, _ = load_pysystemtrade_ewmac_normalization(config)
+        histories[rule.key] = (
+            scalar.filter(pl.col("pool_key") == "global")
+            .select("ts_event", "forecast_scalar")
+            .sort("ts_event")
+        )
+    return histories
+
+
+def _build_forecast_frames(
+    candidates: pl.DataFrame,
+    *,
+    db_path: Path,
+) -> dict[str, pl.DataFrame]:
+    """Build the five scaled component forecasts once per history code."""
+    provider = PysystemtradeHistoryProvider(db_path=db_path)
+    scalars = _ewmac_scalar_histories(db_path)
+    history_codes = sorted(
+        set(candidates.get_column("hist_instr_code").drop_nulls().to_list())
+    )
+    frames: dict[str, pl.DataFrame] = {}
+    for position, history_code in enumerate(history_codes, start=1):
+        history = provider.load(history_code)
+        combined: pl.DataFrame | None = None
+        for rule in CANONICAL_EWMAC_RULES:
+            calculated = (
+                carver_ewmac(
+                    history.panama_bars(),
+                    fast_span=rule.fast,
+                    slow_span=rule.slow,
+                    forecast_scalar=1.0,
+                )
+                .join_asof(scalars[rule.key], on="ts_event", strategy="backward")
+                .with_columns(
+                    (pl.col("raw_forecast") * pl.col("forecast_scalar"))
+                    .clip(-1.0, 1.0)
+                    .alias(rule.column)
+                )
+            )
+            columns = ["ts_event", rule.column]
+            if combined is None:
+                columns.extend(["point_vol", "pt_change_1d"])
+                combined = calculated.select(columns)
+            else:
+                combined = combined.join(
+                    calculated.select(columns), on="ts_event", how="left"
+                )
+        assert combined is not None
+        frames[history_code] = combined.sort("ts_event")
+        logger.debug(
+            "phase2_forecast built hist_instr_code=%s rows=%d completed=%d total=%d",
+            history_code,
+            combined.height,
+            position,
+            len(history_codes),
+        )
+    return frames
+
+
+def _subsystem_correlation(
+    subsystem_frames: dict[str, pl.DataFrame],
+    symbols: list[str],
+    *,
+    window_years: float,
+    halflife_days: float,
+    min_rows: int,
+) -> tuple[np.ndarray, np.ndarray, pl.DataFrame]:
+    wide: pl.DataFrame | None = None
+    for symbol in symbols:
+        returns = (
+            subsystem_frames[symbol]
+            .select("ts_event", pl.col("subsystem_return").alias(symbol))
+            .drop_nulls()
+        )
+        wide = returns if wide is None else wide.join(
+            returns, on="ts_event", how="inner"
+        )
+    if wide is None or wide.is_empty():
+        return np.eye(len(symbols)), np.zeros(len(symbols), dtype=bool), pl.DataFrame()
+    wide = wide.sort("ts_event").drop_nulls()
+    last = wide.get_column("ts_event").max()
+    as_of = (last.date() if isinstance(last, datetime) else last) + timedelta(days=1)
+    correlation, covered = _bounded_ewm_correlation_matrix(
+        wide,
+        symbols,
+        as_of,
+        window_years,
+        halflife_days,
+        min_rows=min_rows,
+    )
+    return correlation, covered, wide
+
+
+def _run_complete_selection(
+    selected: pl.DataFrame,
+    *,
+    source: Path,
+    generated_at: datetime,
+    run_config: dict[str, object],
+    args: argparse.Namespace,
+) -> tuple[Path, pl.DataFrame]:
+    """Audit combined forecasts, exclude invalid rows, and run greedy Phase 2."""
+    frames_by_history = _build_forecast_frames(
+        selected, db_path=args.pysystemtrade_db.expanduser().resolve()
+    )
+    forecast_correlation, correlation_rules = median_forecast_correlation(
+        frames_by_history.values(), min_observations=args.min_forecast_obs
+    )
+    engine = CombinedForecastEngine(config=ForecastCombinationConfig(
+        min_valid_observations=args.min_forecast_obs,
+    ))
+
+    audit_rows: list[dict[str, object]] = []
+    forecast_frames: list[pl.DataFrame] = []
+    subsystem_frames: dict[str, pl.DataFrame] = {}
+    source_rows: dict[str, dict[str, object]] = {}
+    for row in selected.iter_rows(named=True):
+        symbol = str(row["symbol"])
+        source_rows[symbol] = row
+        rules = _parse_rules(str(row["elig_ewmac_rules"] or ""))
+        result = engine.combine(
+            frames_by_history[str(row["hist_instr_code"])],
+            rules,
+            forecast_correlation,
+            correlation_rules,
+        )
+        subsystem_frames[symbol] = result.frame
+        audit = {
+            "symbol": symbol,
+            "hist_instr_code": row["hist_instr_code"],
+            "elig_ewmac_rules": ",".join(result.weights),
+            "forecast_weights": json.dumps(result.weights, sort_keys=True),
+            "fdm": result.fdm,
+            "comb_turnover": result.turnover,
+            "ann_trade_cost_sr": (
+                float(row["trade_sr"]) * result.turnover
+                if row.get("trade_sr") is not None and result.turnover is not None
+                else None
+            ),
+            **result.audit,
+        }
+        audit_rows.append(audit)
+        forecast_frames.append(
+            result.frame.with_columns(
+                pl.lit(symbol).alias("symbol"),
+                pl.lit(str(row["hist_instr_code"])).alias("hist_instr_code"),
+            )
+        )
+        logger.log(
+            logging.INFO if result.audit["forecast_elig"] else logging.DEBUG,
+            "phase2_forecast_audit symbol=%s eligible=%s valid_obs=%s "
+            "post_warmup_invalid_obs=%s comb_turnover=%s reason=%s",
+            symbol,
+            result.audit["forecast_elig"],
+            result.audit["forecast_valid_obs"],
+            result.audit["forecast_post_warmup_invalid_obs"],
+            result.turnover,
+            result.audit["forecast_excl"],
+        )
+
+    audit_frame = pl.DataFrame(audit_rows, infer_schema_length=None).sort("symbol")
+    eligible_audit = audit_frame.filter(pl.col("forecast_elig"))
+    eligible_symbols = eligible_audit.get_column("symbol").to_list()
+    if not eligible_symbols:
+        raise ValueError("no instrument passed the combined-forecast audit")
+
+    correlation, covered, returns_wide = _subsystem_correlation(
+        subsystem_frames,
+        eligible_symbols,
+        window_years=args.corr_window_years,
+        halflife_days=args.corr_halflife_days,
+        min_rows=args.corr_min_rows,
+    )
+    if not covered.all():
+        uncovered = [
+            symbol for symbol, is_covered in zip(eligible_symbols, covered)
+            if not is_covered
+        ]
+        audit_frame = audit_frame.with_columns(
+            pl.when(pl.col("symbol").is_in(uncovered))
+            .then(pl.lit(False))
+            .otherwise(pl.col("forecast_elig"))
+            .alias("forecast_elig"),
+            pl.when(pl.col("symbol").is_in(uncovered))
+            .then(pl.lit("insufficient_synchronised_return_obs"))
+            .otherwise(pl.col("forecast_excl"))
+            .alias("forecast_excl"),
+        )
+        keep = [idx for idx, value in enumerate(covered) if value]
+        eligible_symbols = [eligible_symbols[idx] for idx in keep]
+        correlation = correlation[np.ix_(keep, keep)]
+    if not eligible_symbols:
+        raise ValueError("no instrument has sufficient synchronized subsystem returns")
+
+    audit_by_symbol = {
+        row["symbol"]: row for row in audit_frame.iter_rows(named=True)
+    }
+    candidate_list = []
+    for symbol in eligible_symbols:
+        row = source_rows[symbol]
+        audit = audit_by_symbol[symbol]
+        candidate_list.append(SelectionCandidate(
+            symbol=symbol,
+            ann_dvol=float(row["ann_dvol"]),
+            trade_sr=float(row["trade_sr"]),
+            combined_turnover=float(audit["comb_turnover"]),
+            econ_family=str(row.get("econ_fam_id") or ""),
+            mkt_risk_vol_day=(
+                float(row["mkt_risk_vol_usd_day"])
+                if row.get("mkt_risk_vol_usd_day") is not None
+                else None
+            ),
+        ))
+    selector = GreedyInstrumentSelector(config=GreedySelectionConfig(
+        capital=float(run_config["init_cap_usd"]),
+        target_vol=float(run_config["target_vol"]),
+        gross_sr=args.gross_sr,
+        score_threshold=args.score_threshold,
+        starting_weight=args.starting_weight,
+        max_pct_market_volume=float(run_config["max_pct_mkt_volume"]),
+        liquidity_days=int(run_config["liq_days"]),
+    ))
+    selection = selector.select(candidate_list, correlation)
+    for trial in selection.trials:
+        logger.debug(
+            "phase2_trial iteration=%s candidate=%s book=%s score=%s idm=%s "
+            "feasible=%s accepted=%s reason=%s",
+            trial["iteration"], trial["candidate"], trial["book"], trial["score"],
+            trial["idm"], trial["feasible"], trial["accepted"], trial["reason"],
+        )
+    logger.info(
+        "phase2_selection complete selected=%d candidates=%d score=%s idm=%s book=%s",
+        len(selection.selected), len(candidate_list), selection.final_score.score,
+        selection.final_score.idm, ",".join(selection.selected),
+    )
+
+    final_details = {
+        detail["symbol"]: detail for detail in selection.final_score.details
+    }
+    final_rows = []
+    for rank, symbol in enumerate(selection.selected, start=1):
+        candidate = next(item for item in candidate_list if item.symbol == symbol)
+        final_rows.append({
+            "rank": rank,
+            "symbol": symbol,
+            "weight": selection.final_score.weights[symbol],
+            "idm": selection.final_score.idm,
+            "ann_dvol": candidate.ann_dvol,
+            "trade_sr": candidate.trade_sr,
+            "comb_turnover": candidate.combined_turnover,
+            **final_details[symbol],
+        })
+    final_frame = pl.DataFrame(final_rows, infer_schema_length=None)
+    stamp = generated_at.astimezone(REPORT_TIMEZONE).strftime("%Y%m%d_%H%M%S")
+    output_dir = source.parent
+    audit_path = output_dir / f"pysystemtrade_phase2_forecast_audit_{stamp}.csv"
+    forecasts_path = output_dir / f"pysystemtrade_phase2_forecasts_{stamp}.parquet"
+    trials_path = output_dir / f"pysystemtrade_phase2_trials_{stamp}.csv"
+    selection_path = output_dir / f"pysystemtrade_phase2_selection_{stamp}.csv"
+    returns_path = output_dir / f"pysystemtrade_phase2_subsystem_returns_{stamp}.parquet"
+    audit_frame.write_csv(audit_path)
+    pl.concat(forecast_frames, how="diagonal_relaxed").write_parquet(forecasts_path)
+    pl.DataFrame(selection.trials, infer_schema_length=None).write_csv(trials_path)
+    final_frame.write_csv(selection_path)
+    returns_wide.write_parquet(returns_path)
+    print(
+        f"Phase 2 selected {len(selection.selected)}/{len(candidate_list)} "
+        f"forecast-eligible instruments"
+    )
+    print(f"Saved forecast audit {audit_path}")
+    print(f"Saved daily forecasts {forecasts_path}")
+    print(f"Saved trials {trials_path}")
+    print(f"Saved selection {selection_path}")
+    return selection_path, final_frame
 
 
 def run(argv=None) -> tuple[Path, pl.DataFrame]:
@@ -148,6 +515,14 @@ def run(argv=None) -> tuple[Path, pl.DataFrame]:
         f"max_pct_mkt_volume={config['max_pct_mkt_volume']}"
     )
     print(f"Saved {output}")
+    if args.complete:
+        return _run_complete_selection(
+            selected,
+            source=source,
+            generated_at=generated_at,
+            run_config=config,
+            args=args,
+        )
     return output, selected
 
 

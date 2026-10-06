@@ -1,6 +1,49 @@
 import polars as pl
+import pytest
 
-from derivatives_bt_engine.data.futures_selection_phase2 import run
+from derivatives_bt_engine.data.futures_selection_phase2 import (
+    run,
+    slow_tilt_ewmac_weights,
+)
+
+
+def test_slow_tilt_ewmac_weights_use_sixty_forty_full_template():
+    weights = slow_tilt_ewmac_weights(
+        "4/16,8/32,16/64,32/128,64/256"
+    )
+
+    assert weights == pytest.approx({
+        "4/16": 0.05,
+        "8/32": 0.15,
+        "16/64": 0.20,
+        "32/128": 0.30,
+        "64/256": 0.30,
+    })
+    assert weights["32/128"] + weights["64/256"] == pytest.approx(0.60)
+
+
+def test_slow_tilt_ewmac_weights_renormalise_cost_eligible_subset():
+    weights = slow_tilt_ewmac_weights(["64/256", "16/64", "32/128"])
+
+    assert weights == pytest.approx({
+        "16/64": 0.25,
+        "32/128": 0.375,
+        "64/256": 0.375,
+    })
+    assert sum(weights.values()) == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize(
+    "rules, message",
+    [
+        ("", "at least one"),
+        ("4/16,4/16", "duplicates"),
+        ("2/8,4/16", "unsupported"),
+    ],
+)
+def test_slow_tilt_ewmac_weights_reject_invalid_rule_sets(rules, message):
+    with pytest.raises(ValueError, match=message):
+        slow_tilt_ewmac_weights(rules)
 
 
 def test_run_loads_explicit_phase1_csv_and_saves_selected_rows(tmp_path):

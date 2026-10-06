@@ -547,6 +547,28 @@ if any of these are absent, null, or inconsistent across the Phase 1 report.
 Use `--input <phase1.csv>` to select a particular audit and `--output <path>`
 to choose the exact intermediate filename.
 
+Add `--complete` to continue from that saved Step 1 universe through forecast
+combination and the unconstrained greedy AFTS baseline. The command writes:
+
+- `pysystemtrade_phase2_forecast_audit_<timestamp>.csv`, with component and
+  combined null/non-finite counts, valid dates and observations, FDM, combined
+  turnover, cost, and the precise exclusion reason;
+- `pysystemtrade_phase2_forecasts_<timestamp>.parquet`, containing the daily
+  component forecasts, combined forecast, validity flag, normalized position,
+  and subsystem return for direct inspection;
+- `pysystemtrade_phase2_subsystem_returns_<timestamp>.parquet`, the synchronized
+  return panel used by the bounded correlation estimator;
+- `pysystemtrade_phase2_trials_<timestamp>.csv`, one row per greedy trial; and
+- `pysystemtrade_phase2_selection_<timestamp>.csv`, the last accepted book.
+
+Warm-up nulls are expected and recorded. A candidate is excluded before the
+search when it has fewer than `--min-forecast-obs` fully valid observations,
+has a null or non-finite component after its first fully valid row, produces a
+non-finite combined forecast or turnover, or lacks enough synchronized
+subsystem returns for correlation estimation. The daily Parquet makes the
+summary gate reproducible rather than hiding a missing forecast behind an
+aggregate score.
+
 The Phase 1 `liquidity_ann_trades=25` calculation is Carver's conservative
 single-instrument scenario. It is useful for coarse triage, but it is not the
 final capacity estimate for a Phase 2 trial book. Phase 2 must first combine
@@ -570,6 +592,20 @@ sensitivity. The baseline AFTS score excludes that holding-roll allowance, as
 described below. Thus Phase 1 answers “is this executable contract worth
 carrying into the search?”, while Phase 2 answers “does this contract fit this
 particular diversified trial book?”
+
+The initial combination policy uses the five ordinary EWMAC speeds only:
+
+```text
+4/16=5%, 8/32=15%, 16/64=20%, 32/128=30%, 64/256=30%
+```
+
+This gives 60% to `32/128` and `64/256` and 40% to the faster three rules. A
+rule removed by the Phase 1 cost gate receives zero weight and the remaining
+weights are renormalized; for example, `16/64,32/128,64/256` becomes
+`25%,37.5%,37.5%`. Each component is causally scaled and capped first. The
+weighted forecast then receives a correlation-estimated FDM,
+`min(2.5, 1/sqrt(w' C w))`, and is capped again. FDM is separate from the rule
+weights and is not baked into their reported percentages.
 
 ## Phase 2: Iterative AFTS instrument selection
 
