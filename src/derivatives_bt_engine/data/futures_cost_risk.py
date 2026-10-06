@@ -132,12 +132,10 @@ TWO_DECIMAL_MONEY_COLUMNS = {
     "notional_native",
     "daily_dvol",
     "ann_dvol",
-    "cost_ann_dvol",
     "comm_native",
     "comm_usd",
     "daily_dvol",
     "ann_dvol",
-    "cost_ann_dvol",
     "commission_native",
     "commission_usd",
     "spread_cash_native",
@@ -179,8 +177,6 @@ DEFAULT_COST_EWMAC_FAST_SPAN = 16
 DEFAULT_COST_EWMAC_SLOW_SPAN = 64
 DEFAULT_COST_EWMAC_VOL_SPAN = CARVER_FAST_VOL_SPAN
 DEFAULT_RULE_COST_LIMIT_SR = 0.15
-DEFAULT_COST_VOLATILITY_METHOD = "selected-blend"
-COST_VOLATILITY_METHODS = ("selected-blend", "historical-1y")
 DEFAULT_AFFORDABILITY_TARGET_VOL = 0.20
 DEFAULT_AFFORDABILITY_MIN_CONTRACTS = 4
 DEFAULT_AFFORDABILITY_CAPITAL_USD = 100_000.0
@@ -234,37 +230,6 @@ def _positive_finite(value) -> Optional[float]:
     except (TypeError, ValueError):
         return None
     return number if math.isfinite(number) and number > 0 else None
-
-
-def _one_year_before(value):
-    """Return the same calendar date one year earlier, including leap days."""
-    try:
-        return value.replace(year=value.year - 1)
-    except ValueError:
-        return value.replace(year=value.year - 1, day=28)
-
-
-def _one_year_average_point_volatility(
-    frame: pl.DataFrame,
-) -> dict[str, object]:
-    """Summarize mixed point volatility over the final calendar year."""
-    valid = frame.filter(pl.col("mixed_point_vol").is_not_null())
-    if valid.is_empty():
-        raise ValueError("history does not contain valid mixed point volatility")
-    end = valid.get_column("ts_event")[-1]
-    start = _one_year_before(end)
-    window = valid.filter(pl.col("ts_event") >= start)
-    average = _positive_finite(window.get_column("mixed_point_vol").mean())
-    if average is None:
-        raise ValueError(
-            "final historical year does not contain valid point volatility"
-        )
-    return {
-        "one_year_average_point_vol": average,
-        "one_year_vol_start": window.get_column("ts_event").min(),
-        "one_year_vol_end": window.get_column("ts_event").max(),
-        "one_year_vol_observations": window.height,
-    }
 
 
 def _nonnegative_finite(value) -> Optional[float]:
@@ -873,8 +838,7 @@ def _configured_cost_estimate(
     price = _positive_finite(report_row.get("price"))
     fx_to_usd = _positive_finite(report_row.get("fx_to_usd"))
     annual_dollar_vol = _positive_finite(
-        report_row.get("cost_annual_dollar_vol_per_contract")
-        or report_row.get("annual_dollar_vol_per_contract")
+        report_row.get("annual_dollar_vol_per_contract")
     )
     per_block = _nonnegative_finite(instr.get("commission"))
     per_trade = _nonnegative_finite(instr.get("per_trade_cost"))
@@ -1396,7 +1360,6 @@ def volatility_from_bars(
         "slow_vol_weight": last["slow_vol_weight"][0],
         "zero_return_fraction": zero_return_fraction,
         "reference_price": clean["close"][-1],
-        **_one_year_average_point_volatility(mixed),
     }
 
 
@@ -1544,61 +1507,6 @@ def _blend_recent_and_historical_return_volatility(
     }
 
 
-def _cost_volatility_fields(
-    report_row: dict[str, object],
-    historical: dict[str, object],
-    *,
-    method: str,
-) -> dict[str, object]:
-    """Select the dollar-vol denominator used only for cost screening."""
-    if method not in COST_VOLATILITY_METHODS:
-        raise ValueError(f"Unknown cost volatility method {method!r}")
-    audit = {
-        "cost_vol_one_year_average_point_vol": historical.get(
-            "one_year_average_point_vol"
-        ),
-        "cost_vol_one_year_start": historical.get("one_year_vol_start"),
-        "cost_vol_one_year_end": historical.get("one_year_vol_end"),
-        "cost_vol_one_year_observations": historical.get(
-            "one_year_vol_observations"
-        ),
-    }
-    if method == "selected-blend":
-        annual_dollar_vol = _positive_finite(
-            report_row.get("annual_dollar_vol_per_contract")
-        )
-        if annual_dollar_vol is None:
-            raise ValueError("selected dollar volatility is unavailable")
-        return {
-            **audit,
-            "cost_volatility_method": method,
-            "cost_volatility_source": report_row.get("risk_return_vol_source")
-            or report_row.get("vol_source"),
-            "cost_annual_dollar_vol_per_contract": annual_dollar_vol,
-        }
-
-    average_point_vol = _positive_finite(
-        historical.get("one_year_average_point_vol")
-    )
-    multiplier = _positive_finite(report_row.get("multiplier"))
-    fx_to_usd = _positive_finite(report_row.get("fx_to_usd"))
-    annualization_days = _positive_finite(report_row.get("annualization_days"))
-    if None in (average_point_vol, multiplier, fx_to_usd, annualization_days):
-        raise ValueError("one-year historical cost volatility is unavailable")
-    annual_dollar_vol = (
-        average_point_vol
-        * multiplier
-        * fx_to_usd
-        * math.sqrt(annualization_days)
-    )
-    return {
-        **audit,
-        "cost_volatility_method": method,
-        "cost_volatility_source": "historical_one_year_average_point_vol",
-        "cost_annual_dollar_vol_per_contract": annual_dollar_vol,
-    }
-
-
 def volatility_from_pysystemtrade_history(
     provider: PysystemtradeHistoryProvider,
     instrument_code: str,
@@ -1643,7 +1551,6 @@ def volatility_from_pysystemtrade_history(
             int((changes == 0).sum()) / changes.len() if changes.len() else None
         ),
         "reference_price": reference_price,
-        **_one_year_average_point_volatility(mixed),
     }
 
 
@@ -2222,7 +2129,6 @@ def diagnose_instrument(
     fast_span: int,
     slow_years: int,
     slow_weight: float,
-    cost_volatility_method: str,
     market_data_type: str,
     pysystemtrade_provider: Optional[PysystemtradeHistoryProvider],
     fx_by_currency: dict[str, dict],
@@ -2549,13 +2455,6 @@ def diagnose_instrument(
         "selected_spread_source": selected_spread_source,
         **_pooling_report_identity(instr),
     })
-    row.update(
-        _cost_volatility_fields(
-            row,
-            vol,
-            method=cost_volatility_method,
-        )
-    )
     return row
 
 
@@ -2612,17 +2511,6 @@ def parse_args(argv=None):
         type=float,
         default=DEFAULT_RULE_COST_LIMIT_SR,
         help="Maximum total annual SR cost for each EWMAC rule",
-    )
-    parser.add_argument(
-        "--cost-volatility-method",
-        choices=COST_VOLATILITY_METHODS,
-        default=DEFAULT_COST_VOLATILITY_METHOD,
-        help=(
-            "Dollar-vol denominator for cost screening: selected-blend uses "
-            "the selected current risk volatility; historical-1y uses the "
-            "mean mixed point volatility over the final calendar year of the "
-            "selected history (default: %(default)s)"
-        ),
     )
     parser.add_argument(
         "--skip-ewmac-cost-baseline",
@@ -2784,7 +2672,6 @@ def _error_row(
     vol: Optional[dict] = None,
     annualization_days: int = CARVER_BUSINESS_DAYS_PER_YEAR,
     fx_by_currency: Optional[dict[str, dict]] = None,
-    cost_volatility_method: str = DEFAULT_COST_VOLATILITY_METHOD,
 ) -> dict:
     identity = {
         "symbol": instr.get("symbol"),
@@ -2841,13 +2728,6 @@ def _error_row(
         return identity
     row.update(_fx_report_fields(fx_info))
     row["risk_return_vol_source"] = "pysystemtrade_reference_fallback"
-    row.update(
-        _cost_volatility_fields(
-            row,
-            vol,
-            method=cost_volatility_method,
-        )
-    )
     row.update(identity)
     return row
 
@@ -2924,9 +2804,6 @@ PUBLIC_REPORT_RENAMES = {
     "current_mixed_point_vol": "daily_point_vol",
     "daily_dollar_vol_per_contract": "daily_dvol",
     "annual_dollar_vol_per_contract": "ann_dvol",
-    "cost_annual_dollar_vol_per_contract": (
-        "cost_ann_dvol"
-    ),
     "selected_one_way_spread_points": "spread_points",
     "selected_spread_source": "spread_source",
     "configured_commission_native": "commission_native",
@@ -2940,7 +2817,6 @@ PUBLIC_REPORT_RENAMES = {
     "configured_roll_sr": "roll_sr",
     "configured_cost_quality": "cost_quality",
     "risk_return_vol_source": "vol_source",
-    "cost_volatility_source": "cost_vol_source",
     "bid": "snap_bid",
     "ask": "snap_ask",
     "full_spread_points": "snap_spread_points",
@@ -3191,9 +3067,6 @@ def _public_report_schema(report: pl.DataFrame) -> pl.DataFrame:
         "liq_elig",
         "data_elig",
         "sel_bucket",
-        "cost_vol_method",
-        "cost_ann_dvol",
-        "cost_vol_src",
         "spread_pts",
         "spread_src",
         "comm_native",
@@ -3263,7 +3136,6 @@ def _emit_report(report: pl.DataFrame, args) -> pl.DataFrame:
         "notional_rank_in_asset_cls",
         "daily_pt_vol",
         "ann_dvol",
-        "cost_ann_dvol",
         "avg_daily_volume",
         "risk_traded_usd_day",
         "mkt_risk_vol_usd_day",
@@ -3403,7 +3275,6 @@ def run(argv=None) -> pl.DataFrame:
                     RuntimeError("IB contract qualification not run (--offline)"),
                     vol=vol,
                     fx_by_currency=fx_by_currency,
-                    cost_volatility_method=args.cost_volatility_method,
                 )
                 row["ib_availability"] = "not_checked_offline"
                 row["spread_quality"] = "unknown_no_bid_ask"
@@ -3442,10 +3313,10 @@ def run(argv=None) -> pl.DataFrame:
     log.info(
         "futures_cost_risk start instruments=%d duration=%s fast_vol_span=%d "
         "slow_vol_years=%d slow_vol_weight=%.3f vol_source=%s "
-        "cost_volatility_method=%s market_data_type=%s use_rth=%s",
+        "market_data_type=%s use_rth=%s",
         len(instruments), args.duration, args.fast_vol_span, args.slow_vol_years,
-        args.slow_vol_weight, args.vol_source, args.cost_volatility_method,
-        args.market_data_type, args.use_rth,
+        args.slow_vol_weight, args.vol_source, args.market_data_type,
+        args.use_rth,
     )
     ib = IBPySync()
     ib.connect(args.host, args.port, args.client_id)
@@ -3477,7 +3348,6 @@ def run(argv=None) -> pl.DataFrame:
                     fast_span=args.fast_vol_span,
                     slow_years=args.slow_vol_years,
                     slow_weight=args.slow_vol_weight,
-                    cost_volatility_method=args.cost_volatility_method,
                     market_data_type=args.market_data_type,
                     pysystemtrade_provider=pysystemtrade_provider,
                     fx_by_currency=fx_by_currency,
@@ -3516,7 +3386,6 @@ def run(argv=None) -> pl.DataFrame:
                     exc,
                     vol=fallback_vol,
                     fx_by_currency=fx_by_currency,
-                    cost_volatility_method=args.cost_volatility_method,
                 ))
     finally:
         ib.disconnect()

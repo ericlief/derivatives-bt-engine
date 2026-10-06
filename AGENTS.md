@@ -25,9 +25,10 @@
 - Keep internal dataframe and calculation names descriptive. Compact names only
   at the public CSV/report boundary.
 - A futures cost-report row represents one executable contract. Primary
-  monetary values are USD, so use `notional`, `daily_dvol`, `ann_dvol`, and
-  `cost_ann_dvol`; retain suffixes such as `_native` only when they distinguish
-  parallel values or units.
+  monetary values are USD, so use `notional`, `daily_dvol`, and `ann_dvol`.
+  Retain suffixes such as `_native` only when they distinguish parallel values
+  or units. Cost SR calculations use `ann_dvol`; do not add a duplicate
+  cost-specific dollar-volatility field.
 - Do not prefix the primary calculation path with `selected_`. Use `snap_` for
   point-in-time quote alternatives and `ref_` for reference inputs or
   fallbacks.

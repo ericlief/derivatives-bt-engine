@@ -359,13 +359,10 @@ These figures are deliberately a Phase 1 stress scenario. Four contracts and
 that would reject diversification before allowing its higher IDM to reduce the
 capital needed per instrument.
 
-Rule-cost screening has an independent volatility selector. The default
-`--cost-volatility-method selected-blend` uses the same current IB-fast/Carver-slow
-volatility selected for contract risk. Use `historical-1y` to match
-pysystemtrade's cost denominator more closely: mean mixed point volatility over
-the final calendar year of available history, annualized and converted using
-the executable contract's multiplier and current FX rate. Both the method and
-the resulting cost-specific annual dollar volatility are retained in the CSV.
+Rule-cost screening uses the same `ann_dvol` as contract-risk sizing and the
+liquidity screen. There is no separate cost-volatility selector or duplicate
+cost dollar-volatility field. Consequently `trade_sr` and `roll_sr` can always
+be reproduced directly from the reported cash costs and `ann_dvol`.
 
 ```bash
 .venv/bin/futures-cost-risk \

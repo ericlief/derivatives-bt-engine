@@ -16,7 +16,6 @@ from derivatives_bt_engine.data.futures_cost_risk import (
     _attach_phase2_prefilters,
     _configured_cost_estimate,
     _blend_recent_and_historical_return_volatility,
-    _cost_volatility_fields,
     _emit_report,
     _ewmac_rule_performance,
     _historical_bid_ask_spread,
@@ -197,7 +196,6 @@ def test_retired_bsby_contract_is_rejected_before_ib_requests():
             fast_span=32,
             slow_years=10,
             slow_weight=0.3,
-            cost_volatility_method="selected-blend",
             market_data_type="auto",
             pysystemtrade_provider=None,
             fx_by_currency={},
@@ -323,7 +321,6 @@ def test_delayed_quote_runs_dated_vol_and_spread_after_live_354(monkeypatch):
         fast_span=32,
         slow_years=10,
         slow_weight=0.3,
-        cost_volatility_method="selected-blend",
         market_data_type="auto",
         pysystemtrade_provider=None,
         fx_by_currency={"USD": {"rate": 1.0, "asof": date(2026, 9, 30)}},
@@ -349,7 +346,6 @@ def test_broad_audit_defaults_to_reviewed_pool_ewmac_cost_baseline():
     assert args.cost_ewmac_vol_slow_weight == pytest.approx(0.3)
     assert args.cost_ewmac_vol_min_samples == 10
     assert args.rule_cost_limit_sr == pytest.approx(0.15)
-    assert args.cost_volatility_method == "selected-blend"
     assert args.affordability_capital_usd == pytest.approx(100_000.0)
     assert args.affordability_idm == pytest.approx(1.0)
     assert args.affordability_min_contracts == 4
@@ -367,12 +363,6 @@ def test_broad_audit_defaults_to_reviewed_pool_ewmac_cost_baseline():
     assert args.spread_duration == "5 D"
     assert not args.spread_all_hours
     assert not args.skip_ewmac_cost_baseline
-
-
-def test_cost_volatility_method_is_adjustable():
-    args = parse_args(["--cost-volatility-method", "historical-1y"])
-
-    assert args.cost_volatility_method == "historical-1y"
 
 
 def test_short_selection_aliases_are_adjustable():
@@ -826,9 +816,6 @@ def test_volatility_uses_carver_fast_slow_point_vol_blend():
     assert result["fast_point_vol"] == pytest.approx(expected_fast[-1])
     assert result["slow_point_vol"] == pytest.approx(expected_slow[-1])
     assert result["mixed_point_vol"] == pytest.approx(expected_mixed[-1])
-    assert result["one_year_average_point_vol"] == pytest.approx(
-        expected_mixed.drop_nulls().mean()
-    )
     assert result["history_rows"] == len(closes)
 
 
@@ -924,41 +911,7 @@ def test_recent_fast_return_vol_blends_with_carver_slow_anchor():
     assert blended["risk_return_vol_source"] == "ib_dated_fast_carver_slow"
 
 
-def test_cost_volatility_can_use_selected_blend_or_historical_year():
-    row = {
-        "annual_dollar_vol_per_contract": 6_000.0,
-        "risk_return_vol_source": "ib_dated_fast_carver_slow",
-        "multiplier": 50.0,
-        "fx_to_usd": 1.0,
-        "annualization_days": 256,
-    }
-    historical = {
-        "one_year_average_point_vol": 6.5,
-        "one_year_vol_start": date(2023, 3, 28),
-        "one_year_vol_end": date(2024, 3, 28),
-        "one_year_vol_observations": 253,
-    }
-
-    selected = _cost_volatility_fields(
-        row, historical, method="selected-blend"
-    )
-    one_year = _cost_volatility_fields(
-        row, historical, method="historical-1y"
-    )
-
-    assert selected["cost_annual_dollar_vol_per_contract"] == pytest.approx(
-        6_000.0
-    )
-    assert selected["cost_volatility_source"] == "ib_dated_fast_carver_slow"
-    assert one_year["cost_annual_dollar_vol_per_contract"] == pytest.approx(
-        6.5 * 50.0 * 16.0
-    )
-    assert one_year["cost_volatility_source"] == (
-        "historical_one_year_average_point_vol"
-    )
-
-
-def test_configured_cost_prefers_cost_specific_dollar_volatility():
+def test_configured_cost_uses_annual_dollar_volatility():
     estimate = _configured_cost_estimate(
         {
             "symbol": "CORN",
@@ -970,7 +923,6 @@ def test_configured_cost_prefers_cost_specific_dollar_volatility():
             "multiplier": 50.0,
             "fx_to_usd": 1.0,
             "annual_dollar_vol_per_contract": 6_000.0,
-            "cost_annual_dollar_vol_per_contract": 5_000.0,
         },
         pooled_summaries=None,
         strategy_metrics_by_rule=None,
@@ -979,10 +931,10 @@ def test_configured_cost_prefers_cost_specific_dollar_volatility():
 
     assert estimate["configured_one_way_cost"] == pytest.approx(9.22)
     assert estimate["configured_trade_sr"] == pytest.approx(
-        9.22 / 5_000.0
+        9.22 / 6_000.0
     )
     assert estimate["configured_roll_sr"] == pytest.approx(
-        12.19 / 5_000.0
+        12.19 / 6_000.0
     )
 
 
