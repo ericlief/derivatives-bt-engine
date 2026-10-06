@@ -8,6 +8,7 @@ from derivatives_bt_engine.data.futures_cost_rankings import (
     load_latest_phase1_cost_report,
     phase2_search_universe,
     phase2_step1_candidates,
+    phase2_step1_config,
     top_n_by_asset_class,
 )
 
@@ -125,6 +126,14 @@ def _phase2_step1_report() -> pl.DataFrame:
         "ann_dvol": [500.0, 500.0, 25_000.0, 500.0, 500.0],
         "avg_daily_volume": [1_000.0, 50.0, 1_000.0, 1_000.0, None],
         "pct_mkt_volume": [0.1, 2.0, 0.1, 0.1, None],
+        "init_cap_usd": [100_000.0] * 5,
+        "target_vol": [0.2] * 5,
+        "cost_lim_sr": [0.01] * 5,
+        "rule_cost_lim_sr": [0.15] * 5,
+        "liq_ann_trades": [25.0] * 5,
+        "liq_days": [250] * 5,
+        "min_daily_volume": [100.0] * 5,
+        "max_pct_mkt_volume": [1.0] * 5,
         "cost_elig": [True] * 5,
         "size_elig": [True, True, False, True, True],
         "liq_elig": [True, False, True, True, False],
@@ -149,6 +158,8 @@ def test_phase2_step1_uses_saved_gates_and_keeps_only_selected_rows():
 
     assert selected.get_column("symbol").to_list() == ["PASS"]
     assert selected.get_column("ann_dvol").to_list() == [500.0]
+    assert selected.get_column("init_cap_usd").to_list() == [100_000.0]
+    assert selected.get_column("target_vol").to_list() == [0.2]
     assert report.height == 5
 
 
@@ -169,3 +180,15 @@ def test_phase2_step1_does_not_recalculate_phase1_metrics():
 def test_phase2_step1_requires_current_phase1_gate_schema():
     with pytest.raises(ValueError, match="missing Step 1 selection fields"):
         phase2_step1_candidates(_report())
+
+
+def test_phase2_step1_rejects_inconsistent_run_parameters():
+    report = _phase2_step1_report().with_columns(
+        pl.when(pl.col("symbol") == "ILLIQ")
+        .then(200_000.0)
+        .otherwise(pl.col("init_cap_usd"))
+        .alias("init_cap_usd")
+    )
+
+    with pytest.raises(ValueError, match="inconsistent init_cap_usd"):
+        phase2_step1_config(report)

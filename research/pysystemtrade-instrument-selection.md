@@ -540,6 +540,10 @@ selected instruments only. A row must have saved `cost_elig`, `size_elig`,
 retains the instrument and executable-contract identifiers, `ann_dvol`, raw
 volume and market-risk-volume values, liquidity percentages and limits, and
 the saved gate flags needed to audit why each row entered the Phase 2 search.
+It also repeats the validated run-level inputs `init_cap_usd`, `target_vol`,
+`cost_lim_sr`, `rule_cost_lim_sr`, `liq_ann_trades`, `liq_days`,
+`min_daily_volume`, and `max_pct_mkt_volume` on each selected row. Step 1 fails
+if any of these are absent, null, or inconsistent across the Phase 1 report.
 Use `--input <phase1.csv>` to select a particular audit and `--output <path>`
 to choose the exact intermediate filename.
 

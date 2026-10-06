@@ -13,6 +13,7 @@ import polars as pl
 from derivatives_bt_engine.data.futures_cost_rankings import (
     load_latest_phase1_cost_report,
     phase2_step1_candidates,
+    phase2_step1_config,
 )
 from derivatives_bt_engine.utils.logger import setup_logger
 
@@ -69,6 +70,20 @@ def run(argv=None) -> tuple[Path, pl.DataFrame]:
         source,
         report.height,
     )
+    config = phase2_step1_config(report)
+    logger.info(
+        "phase2_step1 config init_cap_usd=%s target_vol=%s cost_lim_sr=%s "
+        "rule_cost_lim_sr=%s liq_ann_trades=%s liq_days=%s "
+        "min_daily_volume_cons=%s max_pct_mkt_volume=%s",
+        config["init_cap_usd"],
+        config["target_vol"],
+        config["cost_lim_sr"],
+        config["rule_cost_lim_sr"],
+        config["liq_ann_trades"],
+        config["liq_days"],
+        config["min_daily_volume"],
+        config["max_pct_mkt_volume"],
+    )
     selected = phase2_step1_candidates(report)
     selected_symbols = set(selected.get_column("symbol").to_list())
     for row in report.select(
@@ -120,6 +135,17 @@ def run(argv=None) -> tuple[Path, pl.DataFrame]:
     )
     print(
         f"Phase 2 Step 1 selected {selected.height}/{report.height} instruments"
+    )
+    print(
+        "Parameters: "
+        f"init_cap_usd={config['init_cap_usd']} "
+        f"target_vol={config['target_vol']} "
+        f"cost_lim_sr={config['cost_lim_sr']} "
+        f"rule_cost_lim_sr={config['rule_cost_lim_sr']} "
+        f"liq_ann_trades={config['liq_ann_trades']} "
+        f"liq_days={config['liq_days']} "
+        f"min_daily_volume={config['min_daily_volume']} "
+        f"max_pct_mkt_volume={config['max_pct_mkt_volume']}"
     )
     print(f"Saved {output}")
     return output, selected

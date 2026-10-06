@@ -87,6 +87,17 @@ PHASE2_STEP1_GATE_COLUMNS = (
     "phase2_elig",
 )
 
+PHASE2_STEP1_PARAM_COLUMNS = (
+    "init_cap_usd",
+    "target_vol",
+    "cost_lim_sr",
+    "rule_cost_lim_sr",
+    "liq_ann_trades",
+    "liq_days",
+    "min_daily_volume",
+    "max_pct_mkt_volume",
+)
+
 PHASE2_STEP1_COLUMNS = (
     "symbol",
     "signal_symbol",
@@ -111,6 +122,15 @@ PHASE2_STEP1_COLUMNS = (
     "notional",
     "ann_dvol",
     "vol_src",
+    "init_cap_usd",
+    "target_vol",
+    "cost_lim_sr",
+    "rule_cost_lim_sr",
+    "liq_ann_trades",
+    "liq_days",
+    "min_daily_volume",
+    "max_pct_mkt_volume",
+    "max_ann_dvol",
     "avg_daily_volume",
     "volume_n",
     "volume_start",
@@ -119,15 +139,11 @@ PHASE2_STEP1_COLUMNS = (
     "risk_traded_usd_day",
     "mkt_risk_vol_usd_day",
     "pct_mkt_volume",
-    "min_daily_volume",
-    "max_pct_mkt_volume",
     "volume_elig",
     "risk_volume_elig",
     "liq_elig",
     "trade_sr",
-    "cost_lim_sr",
     "cost_elig",
-    "max_ann_dvol",
     "size_elig",
     "data_elig",
     "elig_ewmac_rule_count",
@@ -137,6 +153,27 @@ PHASE2_STEP1_COLUMNS = (
     "phase2_elig",
     "report_ts_ct",
 )
+
+
+def phase2_step1_config(report: pl.DataFrame) -> dict[str, object]:
+    """Return the single persisted Phase 1 configuration for Step 1."""
+    missing = sorted(set(PHASE2_STEP1_PARAM_COLUMNS).difference(report.columns))
+    if missing:
+        raise ValueError(
+            "Phase 1 report is missing Step 1 parameter fields "
+            f"{missing}; rerun the current futures-cost-risk audit"
+        )
+
+    config: dict[str, object] = {}
+    for column in PHASE2_STEP1_PARAM_COLUMNS:
+        values = report.get_column(column).drop_nulls().unique().to_list()
+        if len(values) != 1 or report.get_column(column).null_count():
+            raise ValueError(
+                f"Phase 1 report has inconsistent {column}; expected one "
+                "non-null run-level value"
+            )
+        config[column] = values[0]
+    return config
 
 
 def phase2_step1_candidates(report: pl.DataFrame) -> pl.DataFrame:
@@ -154,6 +191,7 @@ def phase2_step1_candidates(report: pl.DataFrame) -> pl.DataFrame:
             "Phase 1 report is missing Step 1 selection fields "
             f"{missing}; rerun the current futures-cost-risk audit"
         )
+    phase2_step1_config(report)
 
     gate = pl.lit(True)
     for column in PHASE2_STEP1_GATE_COLUMNS:

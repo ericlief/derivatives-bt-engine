@@ -12,6 +12,14 @@ def test_run_loads_explicit_phase1_csv_and_saves_selected_rows(tmp_path):
         "ann_dvol": [600.0, 6_200.0],
         "avg_daily_volume": [2_000.0, None],
         "pct_mkt_volume": [0.2, None],
+        "init_cap_usd": [100_000.0, 100_000.0],
+        "target_vol": [0.2, 0.2],
+        "cost_lim_sr": [0.01, 0.01],
+        "rule_cost_lim_sr": [0.15, 0.15],
+        "liq_ann_trades": [25.0, 25.0],
+        "liq_days": [250, 250],
+        "min_daily_volume": [100.0, 100.0],
+        "max_pct_mkt_volume": [1.0, 1.0],
         "cost_elig": [True, True],
         "size_elig": [True, True],
         "liq_elig": [True, False],
@@ -33,4 +41,6 @@ def test_run_loads_explicit_phase1_csv_and_saves_selected_rows(tmp_path):
     assert selected.get_column("symbol").to_list() == ["MZC"]
     saved = pl.read_csv(output)
     assert saved.get_column("symbol").to_list() == ["MZC"]
+    assert saved.get_column("init_cap_usd").to_list() == [100_000.0]
+    assert saved.get_column("target_vol").to_list() == [0.2]
     assert saved.columns == selected.columns
