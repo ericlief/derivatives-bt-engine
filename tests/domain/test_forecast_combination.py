@@ -81,3 +81,27 @@ def test_forecast_diversification_is_capped():
     )
 
     assert multiplier == pytest.approx(np.sqrt(5))
+
+
+def test_turnover_ewm_applies_to_average_position_not_forecast():
+    frame = pl.DataFrame({
+        "ts_event": pl.date_range(
+            pl.date(2024, 1, 1), pl.date(2024, 1, 5), eager=True
+        ),
+        "point_vol": [1.0, 1.25, 2.0, 2.5, 4.0],
+        "pt_change_1d": [0.1] * 5,
+        "fcst_4_16": [0.2] * 5,
+    })
+    engine = CombinedForecastEngine(config=ForecastCombinationConfig(
+        average_position_ewm_com=2,
+        min_valid_observations=3,
+    ))
+
+    result = engine.combine(frame, ["4/16"], np.eye(1), ["4/16"])
+
+    assert result.frame.get_column("combined_forecast").to_list() == pytest.approx(
+        [0.2] * 5
+    )
+    last = result.frame.tail(1).row(0, named=True)
+    assert last["avg_position"] == pytest.approx(0.25)
+    assert last["smooth_avg_position"] != pytest.approx(last["avg_position"])

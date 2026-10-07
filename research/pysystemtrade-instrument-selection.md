@@ -675,9 +675,25 @@ afts_annual_trading_cost_SR
     = trade_sr × subsystem_turnover
 ```
 
+Here `subsystem_turnover` follows pysystemtrade's `turnover(x, y)` definition.
+`x` is the unbuffered combined subsystem position. Its EWMAC forecast is not
+smoothed again. The function applies an EWM with `com=250` only to `y`, the
+time-varying average-position/volatility denominator, before measuring changes
+in `x / y`. The implementation calls this parameter
+`average_position_ewm_com` to avoid implying forecast smoothing.
+
+The separate default `buffer_size=0.10` is a no-trade band, not a smoothing
+parameter. With forecast buffering, the band is 10% of average position and a
+breach trades to the nearest edge. The published static-small-system AFTS code
+uses `system.accounts.subsystem_turnover()`, which measures the unbuffered
+subsystem position, so the Phase 2 baseline does the same. A buffered
+portfolio-turnover sensitivity may be reported separately; it must not silently
+replace the AFTS cost input.
+
 Do not sum the eligible rules' individual turnovers: forecast combination and
-buffering change the resulting position turnover. Do not feed the Phase 1
-`tot_ann_cost_sr` into this baseline either, because it includes a
+the changing volatility scalar determine the resulting subsystem turnover.
+Do not feed the Phase 1 `tot_ann_cost_sr` into this baseline either, because it
+includes a
 separate two-leg holding-roll allowance that the published AFTS selector omits.
 Report the more conservative production sensitivity separately:
 

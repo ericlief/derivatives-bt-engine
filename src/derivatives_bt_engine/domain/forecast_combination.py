@@ -125,13 +125,16 @@ class ForecastCombinationConfig:
     target_abs_forecast: float = EWMAC_FORECAST_TARGET_ABS
     forecast_cap: float = EWMAC_FORECAST_CAP
     annualization_days: int = CARVER_BUSINESS_DAYS_PER_YEAR
-    turnover_smoothing_days: int = 250
+    # This is pysystemtrade turnover()'s ``smooth_y_days``: the EWM ``com``
+    # applied only to the changing average-position/volatility denominator.
+    # It does not smooth the EWMAC forecast or the optimal position.
+    average_position_ewm_com: int = 250
     min_valid_observations: int = 256
 
     def __post_init__(self) -> None:
         if self.target_abs_forecast <= 0 or self.forecast_cap <= 0:
             raise ValueError("forecast target and cap must be positive")
-        if self.annualization_days <= 0 or self.turnover_smoothing_days <= 0:
+        if self.annualization_days <= 0 or self.average_position_ewm_com <= 0:
             raise ValueError("turnover day parameters must be positive")
         if self.min_valid_observations < 2:
             raise ValueError("min_valid_observations must be at least 2")
@@ -227,7 +230,7 @@ class CombinedForecastEngine:
                 ).alias("subsystem_position"),
                 pl.col("avg_position")
                 .ewm_mean(
-                    com=self.config.turnover_smoothing_days,
+                    com=self.config.average_position_ewm_com,
                     adjust=True,
                     min_samples=2,
                 )
