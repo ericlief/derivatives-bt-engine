@@ -38,15 +38,14 @@ from derivatives_bt_engine.data.futures_cost_rankings import (
     phase2_step1_candidates,
     phase2_step1_config,
 )
-from derivatives_bt_engine.data.pysystemtrade_pooling import (
-    DEFAULT_POOLING_MAPPING_PATH,
+from derivatives_bt_engine.data.pysystemtrade_ewmac import (
+    load_ewmac_component_frames,
 )
 from derivatives_bt_engine.data.report_formatting import round_public_report
 from derivatives_bt_engine.domain.allocation import (
     _bounded_ewm_correlation_matrix,
 )
 from derivatives_bt_engine.domain.forecast_combination import (
-    CANONICAL_EWMAC_RULES,
     CombinedForecastEngine,
     ForecastCombinationConfig,
     SlowTiltEwmacWeights,
@@ -54,17 +53,11 @@ from derivatives_bt_engine.domain.forecast_combination import (
 )
 from derivatives_bt_engine.domain.futures_history import (
     DEFAULT_PYSYSTEMTRADE_DB_PATH,
-    PysystemtradeHistoryProvider,
 )
 from derivatives_bt_engine.domain.instrument_selection import (
     GreedyInstrumentSelector,
     GreedySelectionConfig,
     SelectionCandidate,
-)
-from derivatives_bt_engine.domain.signal import carver_ewmac
-from derivatives_bt_engine.domain.tsmom_backtester import (
-    TsmomBacktestConfig,
-    load_pysystemtrade_ewmac_normalization,
 )
 from derivatives_bt_engine.utils.logger import setup_logger
 
@@ -161,111 +154,6 @@ def _default_output_path(source: Path, generated_at: datetime) -> Path:
     return source.parent / f"pysystemtrade_phase2_step1_{stamp}.csv"
 
 
-def _ewmac_scalar_histories(db_path: Path) -> dict[str, pl.DataFrame]:
-    """Load the causal pooled forecast scalar for every canonical EWMAC rule.
-
-    Parameters
-    ----------
-    db_path
-        Read-only pysystemtrade history database used by the normalization
-        cache.
-
-    Returns
-    -------
-    dict[str, pl.DataFrame]
-        Rule key to a two-column ``[ts_event, forecast_scalar]`` daily frame.
-        These are pooled scalar histories, not instrument price histories.
-    """
-    histories: dict[str, pl.DataFrame] = {}
-    for rule in CANONICAL_EWMAC_RULES:
-        config = TsmomBacktestConfig(
-            symbols=[],
-            data_source="pysystemtrade",
-            signal_weighting="carver_ewmac",
-            pysystemtrade_db_path=db_path,
-            pysystemtrade_pooling_mapping_path=DEFAULT_POOLING_MAPPING_PATH,
-            ewmac_fast_span=rule.fast,
-            ewmac_slow_span=rule.slow,
-        )
-        scalar, _, _ = load_pysystemtrade_ewmac_normalization(config)
-        histories[rule.key] = (
-            scalar.filter(pl.col("pool_key") == "global")
-            .select("ts_event", "forecast_scalar")
-            .sort("ts_event")
-        )
-    return histories
-
-
-def _build_forecast_frames(
-    candidates: pl.DataFrame,
-    *,
-    db_path: Path,
-) -> dict[str, pl.DataFrame]:
-    """Build five component forecasts once per distinct signal history.
-
-    Parameters
-    ----------
-    candidates
-        Phase 2 Step 1 rows. ``hist_instr_code`` identifies the research
-        history used for signals; it need not equal the executable ``symbol``.
-    db_path
-        Read-only pysystemtrade history database.
-
-    Returns
-    -------
-    dict[str, pl.DataFrame]
-        ``hist_instr_code`` to a daily frame containing ``point_vol``,
-        ``pt_change_1d``, and all five ``fcst_<fast>_<slow>`` columns. For
-        example, MZC can reuse the single ``CORN_mini`` frame here.
-    """
-    provider = PysystemtradeHistoryProvider(db_path=db_path)
-    scalars = _ewmac_scalar_histories(db_path)
-    history_codes = sorted(
-        set(candidates.get_column("hist_instr_code").drop_nulls().to_list())
-    )
-    frames_by_history: dict[str, pl.DataFrame] = {}
-    for position, history_code in enumerate(history_codes, start=1):
-        history = provider.load(history_code)
-        # This frame belongs to the signal history, not yet to an executable
-        # contract. Component columns are added one speed at a time.
-        history_frame: pl.DataFrame | None = None
-        for rule in CANONICAL_EWMAC_RULES:
-            rule_frame = (
-                carver_ewmac(
-                    history.panama_bars(),
-                    fast_span=rule.fast,
-                    slow_span=rule.slow,
-                    forecast_scalar=1.0,
-                )
-                .join_asof(scalars[rule.key], on="ts_event", strategy="backward")
-                .with_columns(
-                    (pl.col("raw_forecast") * pl.col("forecast_scalar"))
-                    .clip(-1.0, 1.0)
-                    .alias(rule.column)
-                )
-            )
-            columns = ["ts_event", rule.column]
-            if history_frame is None:
-                # Point volatility and price changes are independent of EWMAC
-                # speed, so retain one copy from the first rule calculation.
-                columns.extend(["point_vol", "pt_change_1d"])
-                history_frame = rule_frame.select(columns)
-            else:
-                history_frame = history_frame.join(
-                    rule_frame.select(columns), on="ts_event", how="left"
-                )
-        assert history_frame is not None
-        frames_by_history[history_code] = history_frame.sort("ts_event")
-        logger.debug(
-            "phase2_forecast built hist_instr_code=%s rows=%d completed=%d total=%d",
-            history_code,
-            history_frame.height,
-            position,
-            len(history_codes),
-        )
-    return frames_by_history
-
-
 def _subsystem_correlation(
     subsystem_frames: dict[str, pl.DataFrame],
     symbols: list[str],
@@ -330,8 +218,9 @@ def _run_complete_selection(
 
     Returns the final selection CSV path and its in-memory dataframe.
     """
-    frames_by_history = _build_forecast_frames(
-        selected, db_path=args.pysystemtrade_db.expanduser().resolve()
+    frames_by_history = load_ewmac_component_frames(
+        selected.get_column("hist_instr_code").drop_nulls().to_list(),
+        db_path=args.pysystemtrade_db.expanduser().resolve(),
     )
     forecast_correlation, correlation_rules = median_forecast_correlation(
         frames_by_history.values(), min_observations=args.min_forecast_obs

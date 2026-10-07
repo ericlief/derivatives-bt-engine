@@ -582,6 +582,10 @@ subsystem returns for correlation estimation. The daily Parquet makes the
 summary gate reproducible rather than hiding a missing forecast behind an
 aggregate score.
 
+For interactive inspection of one instrument's history, pooled normalization,
+raw momentum, and component forecasts without running either report, use the
+[pysystemtrade EWMAC notebook workflow](pysystemtrade-ewmac-notebook.md).
+
 The Phase 1 `liquidity_ann_trades=25` calculation is Carver's conservative
 single-instrument scenario. It is useful for coarse triage, but it is not the
 final capacity estimate for a Phase 2 trial book. Phase 2 must first combine

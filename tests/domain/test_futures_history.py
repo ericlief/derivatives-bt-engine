@@ -265,6 +265,7 @@ def test_carver_loader_builds_generated_panama_and_contract_returns(
     history = provider.load(instrument_code)
 
     assert history.source == "pysystemtrade"
+    assert history.metadata["cache_hit"] is False
     assert history.metadata["source_git_commit"] == SOURCE_COMMIT
     assert history.metadata["hold_roll_cycle"] == "HMUZ"
     assert history.signal.get_column("source_adjusted_price").to_list() == [
@@ -303,6 +304,24 @@ def test_carver_loader_builds_generated_panama_and_contract_returns(
         True,
     ]
     assert history.carry.height == 4
+
+
+def test_carver_loader_reports_history_cache_hits(tmp_path: Path) -> None:
+    """Notebook callers can distinguish a cache load from a database build."""
+    sidecar = tmp_path / "carver.duckdb"
+    _build_carver_sidecar(sidecar)
+    provider = PysystemtradeHistoryProvider(
+        db_path=sidecar,
+        cache_root=tmp_path / "cache",
+        use_cache=True,
+        save_cache=True,
+    )
+
+    first = provider.load("SP500")
+    second = provider.load("SP500")
+
+    assert first.metadata["cache_hit"] is False
+    assert second.metadata["cache_hit"] is True
 
 
 def test_carver_cache_path_is_source_and_version_namespaced(tmp_path: Path) -> None:

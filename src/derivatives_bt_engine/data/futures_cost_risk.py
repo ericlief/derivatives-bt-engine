@@ -54,7 +54,12 @@ from derivatives_bt_engine.data.pysystemtrade_ib import (
 from derivatives_bt_engine.data.pysystemtrade_pooling import (
     DEFAULT_POOLING_MAPPING_PATH,
 )
+from derivatives_bt_engine.data.pysystemtrade_ewmac import (
+    build_ewmac_rule_forecast,
+    load_pooled_ewmac_rule,
+)
 from derivatives_bt_engine.data.report_formatting import round_public_report
+from derivatives_bt_engine.domain.forecast_combination import EwmacRule
 from derivatives_bt_engine.domain.futures_history import (
     DEFAULT_PYSYSTEMTRADE_DB_PATH,
     PysystemtradeHistoryProvider,
@@ -68,7 +73,6 @@ from derivatives_bt_engine.domain.signal import (
     EWMAC_FORECAST_CAP,
     EWMAC_FORECAST_TARGET_ABS,
     EWMAC_SCALAR_MIN_PERIODS,
-    carver_ewmac,
 )
 from derivatives_bt_engine.domain.volatility import (
     CARVER_BUSINESS_DAYS_PER_YEAR,
@@ -450,60 +454,29 @@ def estimate_pooled_ewmac_cost_baseline(
     forecast_cap: float = EWMAC_FORECAST_CAP,
 ) -> tuple[dict[str, object], pl.DataFrame]:
     """Estimate a pooled pre-cost EWMAC baseline from reviewed histories."""
-    # Import lazily: the cost diagnostic can still be imported without loading
-    # the full backtester, while the actual run reuses its versioned cache.
-    from derivatives_bt_engine.domain.tsmom_backtester import (
-        TsmomBacktestConfig,
-        load_pysystemtrade_ewmac_normalization,
+    pooled = load_pooled_ewmac_rule(
+        EwmacRule(fast_span, slow_span),
+        db_path=db_path,
+        pooling_mapping_path=pooling_mapping_path,
+        vol_span=vol_span,
+        vol_slow_years=vol_slow_years,
+        vol_slow_weight=vol_slow_weight,
+        vol_min_samples=vol_min_samples,
+        scalar_min_periods=scalar_min_periods,
+        target_abs_forecast=target_abs_forecast,
+        forecast_cap=forecast_cap,
     )
-
-    config = TsmomBacktestConfig(
-        symbols=[],
-        data_source="pysystemtrade",
-        signal_weighting="carver_ewmac",
-        pysystemtrade_db_path=db_path,
-        pysystemtrade_pooling_mapping_path=pooling_mapping_path,
-        ewmac_fast_span=fast_span,
-        ewmac_slow_span=slow_span,
-        ewmac_vol_span=vol_span,
-        ewmac_vol_slow_years=vol_slow_years,
-        ewmac_vol_slow_weight=vol_slow_weight,
-        ewmac_vol_min_samples=vol_min_samples,
-        ewmac_scalar_min_periods=scalar_min_periods,
-        ewmac_forecast_target_abs=target_abs_forecast,
-        ewmac_forecast_cap=forecast_cap,
-    )
-    scalar_history, coverage, cache_metadata = (
-        load_pysystemtrade_ewmac_normalization(config)
-    )
-    scalar = (
-        scalar_history.filter(pl.col("pool_key") == "global")
-        .select("ts_event", "forecast_scalar")
-        .sort("ts_event")
-    )
+    coverage = pooled.coverage
+    cache_metadata = pooled.cache_metadata
     metric_rows = []
     pooled_pnl = []
     for position, coverage_row in enumerate(coverage.iter_rows(named=True), start=1):
         instrument_code = coverage_row["instrument_code"]
         history = provider.load(instrument_code)
-        rule = (
-            carver_ewmac(
-                history.panama_bars(),
-                fast_span=fast_span,
-                slow_span=slow_span,
-                vol_span=vol_span,
-                vol_slow_years=vol_slow_years,
-                vol_slow_weight=vol_slow_weight,
-                vol_min_samples=vol_min_samples,
-                forecast_scalar=1.0,
-                forecast_cap=forecast_cap,
-            )
-            .join_asof(scalar, on="ts_event", strategy="backward")
-            .with_columns(
-                (pl.col("raw_forecast") * pl.col("forecast_scalar"))
-                .clip(-forecast_cap, forecast_cap)
-                .alias("ewmac_forecast")
-            )
+        rule = build_ewmac_rule_forecast(
+            history,
+            pooled,
+            forecast_column="ewmac_forecast",
         )
         metrics, pnl = _ewmac_rule_performance(
             rule,

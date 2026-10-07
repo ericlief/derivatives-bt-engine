@@ -255,6 +255,9 @@ class PysystemtradeHistoryProvider:
                 f"Unsupported pysystemtrade sidecar schema version: {sidecar_version}"
             )
         cache_paths = self._cache_paths(instrument_code, source_commit)
+        cache_hit = self.use_cache and all(
+            path.exists() for path in cache_paths.values()
+        )
 
         con = duckdb.connect(str(self.db_path), read_only=True)
         try:
@@ -282,7 +285,7 @@ class PysystemtradeHistoryProvider:
                     f"Unknown pysystemtrade instrument code: {instrument_code}"
                 )
 
-            if self.use_cache and all(path.exists() for path in cache_paths.values()):
+            if cache_hit:
                 logger.info(
                     "pysystemtrade_history cache_hit instrument=%s source_commit=%s",
                     instrument_code,
@@ -321,6 +324,7 @@ class PysystemtradeHistoryProvider:
             "expiry_offset": config[9],
             "source_git_commit": source_commit,
             "sidecar_schema_version": sidecar_version,
+            "cache_hit": cache_hit,
         }
         return FuturesHistory(
             source="pysystemtrade",
