@@ -31,6 +31,7 @@ SOURCE_NEUTRAL_DATA_SOURCES = ("globex", "pysystemtrade", "hybrid")
 
 
 def _contract_month_date(contract_id: object) -> Optional[date]:
+    """Parse a ``YYYYMM...`` contract identifier into its contract month."""
     value = str(contract_id or "")
     if len(value) < 6 or not value[:6].isdigit():
         return None
@@ -41,7 +42,13 @@ def _contract_month_date(contract_id: object) -> Optional[date]:
 
 
 def history_to_tsmom_bars(history: FuturesHistory) -> pl.DataFrame:
-    """Expose separate signal, mark, and roll-neutral P&L columns."""
+    """Expose separate signal, mark, and roll-neutral P&L columns.
+
+    The result has one row per date common to the signal, mark, and Panama
+    streams. ``signal_index`` drives return-based forecasts, ``panama_price``
+    drives point-price rules and research P&L where necessary, while ``close``
+    and ``contract_id`` retain the selected executable mark and roll identity.
+    """
     signal_columns = [
         "trade_date",
         "source_timestamp",
@@ -64,6 +71,9 @@ def history_to_tsmom_bars(history: FuturesHistory) -> pl.DataFrame:
         "panama_price",
         "pt_change_1d",
     )
+    # An inner join makes every downstream row fully owned by all three input
+    # streams; silently forward-filling a missing mark or Panama increment here
+    # would manufacture either P&L or a signal observation.
     bars = signal.join(marks, on="trade_date", how="inner").join(
         panama, on="trade_date", how="inner"
     ).sort("trade_date")
@@ -104,6 +114,7 @@ def _mapping_by_globex(
     *,
     allow_candidate_mappings: bool,
 ) -> dict[str, object]:
+    """Index approved, or explicitly allowed candidate, mappings by asset."""
     mappings = {mapping.globex_asset: mapping for mapping in load_mappings(mapping_path)}
     if allow_candidate_mappings:
         return mappings
@@ -127,7 +138,13 @@ def load_source_neutral_histories(
         Mapping[str, ContractRollPolicy]
     ] = None,
 ) -> tuple[dict[str, pl.DataFrame], dict[str, object]]:
-    """Load source-neutral bars plus reproducibility/quality metadata."""
+    """Load TSMOM bars and a reproducibility manifest for traded symbols.
+
+    The returned frame mapping is keyed by the requested executable symbol,
+    even when its price history comes from another Globex root or Carver
+    instrument. Each frame has signal, Panama/P&L, mark identity, roll, and
+    source-quality columns; the second return value records those resolutions.
+    """
     if data_source not in SOURCE_NEUTRAL_DATA_SOURCES:
         raise ValueError(f"unsupported source-neutral data source: {data_source}")
     carver = PysystemtradeHistoryProvider(db_path=pysystemtrade_db_path)
@@ -181,6 +198,9 @@ def load_source_neutral_histories(
                 historical_date_alignment=alignment,
                 historical_date_alignment_through=mapping.carver_date_alignment_through,
             ).load(globex_symbol)
+        # Preserve executable-symbol ownership at this boundary. The history
+        # object may be keyed by a different research identifier, but all
+        # downstream sizing and accounting dictionaries use ``traded_symbol``.
         frames[traded_symbol] = history_to_tsmom_bars(history)
         invalid = history.signal.filter(
             ~pl.col("return_valid")

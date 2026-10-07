@@ -1,3 +1,11 @@
+"""Legacy Globex continuous-front loader used by the TSMOM backtester.
+
+The loader selects a sticky, volume-led held contract from raw daily futures
+bars and exposes it through the older generic Backtester data contract. New
+source-neutral TSMOM paths use :mod:`futures_history`; this module remains the
+``legacy_globex`` implementation and owns its own versioned Parquet cache.
+"""
+
 from __future__ import annotations
 from dataclasses import dataclass, field
 import os
@@ -147,6 +155,7 @@ class FuturesDataLoader(BaseDataLoader):
 
     @property
     def _daily_processed_path(self) -> str:
+        """Return this asset's versioned legacy continuous-series cache path."""
         return globex_daily_cache_path(self.data_dir, self.asset)
 
     @cached_property

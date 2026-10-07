@@ -146,6 +146,12 @@ def _run_one(combo_id: int, combo: dict, symbols: list[str], start_date: date,
 def run_grid(symbols: list[str], start_date: date, end_date: date, param_grid: dict,
              *, oos_start: date, max_width_years: int = 5,
              max_workers: Optional[int] = None) -> GridResults:
+    """Evaluate independent parameter combinations in spawned workers.
+
+    Returns three Polars tables: one row per combination, one row per causal
+    reporting window, and one row per combination/symbol diagnostic. Price
+    caches are warmed before workers start so they are read-only in children.
+    """
     combos = product_dict(param_grid)
     logger.info(f"Running {len(combos)} combos across {symbols} ({start_date} to {end_date})")
 
@@ -185,6 +191,7 @@ def run_grid(symbols: list[str], start_date: date, end_date: date, param_grid: d
 
 
 def parse_args():
+    """Parse grid universe, date range, worker, and output options."""
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--symbols', default='ES',
@@ -206,6 +213,7 @@ def parse_args():
 
 
 def main():
+    """Run the default grid and save or upload its three result tables."""
     args = parse_args()
     symbols = [s.strip().upper() for s in args.symbols.split(',') if s.strip()]
 

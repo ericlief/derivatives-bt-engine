@@ -1049,6 +1049,7 @@ def run(symbols: list[str], start: date, end: date, regime_discount: float,
 
 
 def parse_args():
+    """Parse the binary vol-parity comparison and calibration options."""
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--symbols', default=','.join(DEFAULT_SYMBOLS),
                     help='Comma-separated futures symbols, must be known instruments.py symbols (default: %(default)s)')
@@ -1138,6 +1139,7 @@ def parse_args():
 
 
 def main():
+    """Run requested comparison variants and optionally persist their reports."""
     args = parse_args()
     symbols = [s.strip().upper() for s in args.symbols.split(',') if s.strip()]
     start_year, end_year = args.years.split('-')

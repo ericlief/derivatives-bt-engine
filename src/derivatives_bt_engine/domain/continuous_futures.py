@@ -26,6 +26,7 @@ class ContinuousFuturesResult:
 
 
 def _quality(*flags: str) -> str:
+    """Join non-empty quality flags into the stream's semicolon convention."""
     return ";".join(flag for flag in flags if flag)
 
 

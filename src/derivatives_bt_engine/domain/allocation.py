@@ -252,6 +252,7 @@ def apply_cluster_risk_cap(targets: list[dict], max_cluster_risk_pct: float,
         # front, so later iterations of this loop can't see a value
         # another instrument's walk step already changed.
         def priority(target: dict) -> float:
+            """Rank cluster members by raw conviction before cap mutation."""
             raw_score = target.get('cluster_universe_score')
             if raw_score is not None and math.isfinite(float(raw_score)):
                 return abs(float(raw_score))
@@ -414,6 +415,7 @@ def allocate_lot_aware_targets(
         portfolio_limit = float(portfolio_risk_target) * (1.0 + risk_overrun_pct)
 
     def portfolio_risk(contract_counts: dict[str, int]) -> float:
+        """Return correlated annual dollar volatility for an integer book."""
         exposure = np.zeros(len(risk_symbols), dtype=float)
         for symbol, count in contract_counts.items():
             index = risk_index.get(symbol)
@@ -433,6 +435,7 @@ def allocate_lot_aware_targets(
         )
 
     def format_contracts(contract_counts: dict[str, int]) -> str:
+        """Format the nonzero signed contract book for allocation logs."""
         return ', '.join(
             f'{symbol}={count:+d}' for symbol, count in sorted(contract_counts.items()) if count
         ) or 'flat'
@@ -687,6 +690,7 @@ def allocate_flat_cluster_diversified_targets(
     allocated_contract_counts = {symbol: 0 for symbol in symbols}
 
     def portfolio_risk(contract_counts: dict[str, int]) -> float:
+        """Return correlated annual dollar volatility for an integer book."""
         exposure = np.zeros(len(risk_symbols), dtype=float)
         for symbol, count in contract_counts.items():
             index = risk_index.get(symbol)
@@ -696,6 +700,7 @@ def allocate_flat_cluster_diversified_targets(
         return math.sqrt(max(variance, 0.0))
 
     def cluster_risks(contract_counts: dict[str, int]) -> dict[str, float]:
+        """Aggregate absolute standalone dollar volatility by cluster."""
         result: dict[str, float] = {}
         for symbol, count in contract_counts.items():
             cluster = clusters[symbol]
@@ -705,6 +710,7 @@ def allocate_flat_cluster_diversified_targets(
         return result
 
     def infeasibility_reason(contract_counts: dict[str, int]) -> Optional[str]:
+        """Explain the first portfolio or cluster risk limit violation."""
         candidate_portfolio_risk = portfolio_risk(contract_counts)
         if (portfolio_limit is not None
                 and candidate_portfolio_risk > portfolio_limit + 1e-9):
@@ -720,6 +726,7 @@ def allocate_flat_cluster_diversified_targets(
         return None
 
     def distance_from_continuous(contract_counts: dict[str, int]) -> float:
+        """Measure absolute dollar-vol distance from continuous targets."""
         return sum(
             abs(
                 abs(contract_counts[symbol]) * one_contract_dollar_vol[symbol]
@@ -735,6 +742,7 @@ def allocate_flat_cluster_diversified_targets(
         return candidate_contract_counts
 
     def format_contracts(contract_counts: dict[str, int]) -> str:
+        """Format the nonzero signed contract book for allocation logs."""
         return ', '.join(
             f'{symbol}={count:+d}'
             for symbol, count in sorted(contract_counts.items())
@@ -742,6 +750,7 @@ def allocate_flat_cluster_diversified_targets(
         ) or 'flat'
 
     def audit(level: int, message: str, *args) -> None:
+        """Route allocation diagnostics through the shared module logger."""
         log.log(level, message, *args)
 
     audit(

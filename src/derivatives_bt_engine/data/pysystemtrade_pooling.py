@@ -255,21 +255,25 @@ def default_pysystemtrade_pooling_universe(
 
 
 def _words(value: str) -> list[str]:
+    """Tokenize a code or description into normalized alphanumeric words."""
     return [token for token in re.split(r"[^a-z0-9]+", value.lower()) if token]
 
 
 def _code_base(value: str) -> str:
+    """Remove known size-variant tokens from an instrument code."""
     return "".join(
         token for token in _words(value) if token not in _VARIANT_CODE_TOKENS
     )
 
 
 def _code_root(value: str) -> str:
+    """Return the first normalized token used for conservative matching."""
     words = _words(value)
     return words[0] if words else ""
 
 
 def _description_key(value: str) -> str:
+    """Normalize a description after removing non-identifying stop words."""
     return " ".join(
         token
         for token in _words(value)
@@ -278,6 +282,7 @@ def _description_key(value: str) -> str:
 
 
 def _candidate_reasons(left: dict, right: dict) -> list[str]:
+    """Return metadata reasons that justify an expensive history comparison."""
     if left["asset_class"] != right["asset_class"]:
         return []
     reasons: list[str] = []
@@ -367,6 +372,7 @@ def discover_pysystemtrade_duplicate_candidates(
 
 
 def _roll_config_label(row: dict) -> str:
+    """Serialize roll-cycle fields into a compact pair-comparison label."""
     return "/".join(
         str(row[column])
         for column in (
@@ -382,6 +388,7 @@ def _roll_config_label(row: dict) -> str:
 def _near_roll_fraction(
     source: list, target: list, days: int = 5
 ) -> Optional[float]:
+    """Fraction of source roll dates within ``days`` of a target roll."""
     if not source:
         return None
     if not target:
@@ -402,6 +409,7 @@ def _near_roll_fraction(
 
 
 def _finite_or_none(value) -> Optional[float]:
+    """Convert an optional numeric diagnostic to a finite float."""
     if value is None:
         return None
     value = float(value)
@@ -409,6 +417,12 @@ def _finite_or_none(value) -> Optional[float]:
 
 
 def _history_pair_metrics(left, right) -> dict[str, object]:
+    """Compare common-date returns, contract identity, and roll timing.
+
+    Both inputs are :class:`FuturesHistory` objects. Returns are reconstructed
+    only after the two signal-index levels have been inner-joined on date, so
+    missing sessions cannot compare unequal holding periods.
+    """
     # Join levels before calculating returns. Joining independently calculated
     # daily returns can pair a one-session move with a multi-session move when
     # either source omits an intermediate date.
@@ -476,6 +490,7 @@ def _history_pair_metrics(left, right) -> dict[str, object]:
 
 
 def _heuristic_assessment(row: dict) -> str:
+    """Label pair evidence without overriding reviewed pooling decisions."""
     roles = {row["pooling_role_a"], row["pooling_role_b"]}
     if "excluded_mixed_history" in roles:
         return "reviewed_excluded_mixed_history"
@@ -568,6 +583,7 @@ def build_pysystemtrade_pooling_audit(
 
 
 def _markdown_table(frame: pl.DataFrame, columns: list[str]) -> str:
+    """Render selected Polars columns as a compact Markdown table."""
     if frame.is_empty():
         return "_None._"
     rows = frame.select(columns).to_dicts()
@@ -585,6 +601,7 @@ def write_pysystemtrade_pooling_audit(
     classifications: pl.DataFrame,
     candidates: pl.DataFrame,
 ) -> None:
+    """Persist pooling classifications, pair evidence, and narrative audit."""
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
     classifications.write_csv(output / "instrument_classification.csv")
@@ -672,6 +689,7 @@ from one history with a one-session return from the other.
 
 
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
+    """Parse source database, mapping, and audit-output paths."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", default=str(DEFAULT_PYSYSTEMTRADE_DB_PATH))
     parser.add_argument(
@@ -682,6 +700,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
 
 
 def main(argv: Optional[list[str]] = None) -> None:
+    """Build and write the reviewed normalization-pool audit artifacts."""
     args = parse_args(argv)
     classifications, candidates = build_pysystemtrade_pooling_audit(
         args.db, mapping_path=args.mapping

@@ -108,6 +108,7 @@ class FuturesHistory:
     panama: pl.DataFrame = field(default_factory=lambda: _empty_panama_frame())
 
     def __post_init__(self) -> None:
+        """Validate stream schemas, date uniqueness, and signal-index levels."""
         _validate_stream("signal", self.signal, _SIGNAL_COLUMNS)
         _validate_stream("marks", self.marks, _MARK_COLUMNS)
         _validate_stream("carry", self.carry, _CARRY_COLUMNS, allow_empty=True)
@@ -159,6 +160,7 @@ def _validate_stream(
     *,
     allow_empty: bool = False,
 ) -> None:
+    """Validate one dated stream's required columns, rows, and date key."""
     missing = required_columns - set(frame.columns)
     if missing:
         raise ValueError(f"{name} stream is missing columns: {sorted(missing)}")
@@ -174,6 +176,7 @@ def _validate_stream(
 
 
 def _empty_carry_frame() -> pl.DataFrame:
+    """Return a typed zero-row carry stream for sources without carry data."""
     return pl.DataFrame(
         schema={
             "trade_date": pl.Date,
@@ -188,6 +191,7 @@ def _empty_carry_frame() -> pl.DataFrame:
 
 
 def _empty_panama_frame() -> pl.DataFrame:
+    """Return a typed zero-row additive-price stream placeholder."""
     return pl.DataFrame(
         schema={
             "trade_date": pl.Date,
@@ -209,6 +213,7 @@ class PysystemtradeHistoryProvider:
     save_cache: bool = True
 
     def _database_metadata(self) -> tuple[int, str]:
+        """Read the sidecar schema version and pinned source commit."""
         con = duckdb.connect(str(self.db_path), read_only=True)
         try:
             row = con.execute(
@@ -221,6 +226,7 @@ class PysystemtradeHistoryProvider:
         return int(row[0]), str(row[1])
 
     def _cache_directory(self, source_commit: str) -> Path:
+        """Return the schema- and source-versioned cache directory."""
         return (
             Path(self.cache_root)
             / "pysystemtrade"
@@ -229,6 +235,7 @@ class PysystemtradeHistoryProvider:
         )
 
     def _cache_paths(self, instrument_code: str, source_commit: str) -> dict[str, Path]:
+        """Map each stream name to its instrument-specific Parquet cache."""
         directory = self._cache_directory(source_commit)
         return {
             stream: directory / f"{instrument_code}_{stream}.parquet"
@@ -236,6 +243,12 @@ class PysystemtradeHistoryProvider:
         }
 
     def load(self, instrument_code: str) -> FuturesHistory:
+        """Load or build four daily streams for one Carver instrument.
+
+        Cache identity includes the local history schema and upstream source
+        commit. The returned :class:`FuturesHistory` owns distinct signal,
+        executable-mark, carry, and additive-price dataframes.
+        """
         sidecar_version, source_commit = self._database_metadata()
         if sidecar_version != 4:
             raise ValueError(
@@ -324,6 +337,7 @@ class PysystemtradeHistoryProvider:
     def _load_uncached(
         con: duckdb.DuckDBPyConnection, instrument_code: str
     ) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, pl.DataFrame]:
+        """Build signal, mark, carry, and Panama frames from sidecar tables."""
         adjusted = con.execute(
             """
             SELECT
@@ -385,6 +399,9 @@ class PysystemtradeHistoryProvider:
             )
         )
 
+        # ``generated`` is authoritative for roll-neutral returns and Panama
+        # increments. The imported adjusted-price level is joined only as a
+        # validation reference; it never replaces the locally rebuilt paths.
         generated = select_daily_continuous(build_continuous_futures(raw_roll_inputs))
         signal = generated.signal.join(
             adjusted.select(
@@ -540,10 +557,12 @@ class GlobexHistoryProvider:
     roll_policy: ContractRollPolicy | None = None
 
     def _dataset_fingerprint(self) -> str:
+        """Fingerprint the read-only Globex database for cache invalidation."""
         stat = Path(self.db_path).stat()
         return f"{stat.st_size}-{stat.st_mtime_ns}"
 
     def _resolved_roll_policy(self, asset: str) -> ContractRollPolicy:
+        """Return an explicit override or the reviewed default for ``asset``."""
         if self.roll_policy is not None:
             return self.roll_policy
         policy, _ = carver_aligned_globex_roll_policy_set().resolve(asset, asset)
@@ -554,6 +573,7 @@ class GlobexHistoryProvider:
         asset: str,
         policy: ContractRollPolicy,
     ) -> dict[str, Path]:
+        """Map stream names to caches keyed by data and roll-policy identity."""
         directory = (
             Path(self.cache_root)
             / "globex"
@@ -567,6 +587,13 @@ class GlobexHistoryProvider:
         }
 
     def load(self, instrument_code: str) -> FuturesHistory:
+        """Load one Globex asset under its resolved held-contract policy.
+
+        The raw selected-contract observations are transformed into separate
+        signal, mark, carry, and Panama frames. Cache keys include both the
+        database fingerprint and roll policy so policy experiments cannot
+        silently reuse a different held path.
+        """
         policy = self._resolved_roll_policy(instrument_code)
         cache_paths = self._cache_paths(instrument_code, policy)
         if self.use_cache and all(path.exists() for path in cache_paths.values()):
@@ -700,6 +727,7 @@ class GlobexHistoryProvider:
     def _from_raw(
         raw: pl.DataFrame,
     ) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, pl.DataFrame]:
+        """Transform selected Globex rows into the four history streams."""
         raw = raw.sort("trade_date").with_columns(
             pl.col("expiration").dt.strftime("%Y%m00").alias("contract_id")
         )
@@ -755,6 +783,12 @@ class HybridHistoryProvider:
     historical_date_alignment_through: Optional[date] = None
 
     def load(self, instrument_code: str) -> FuturesHistory:
+        """Splice historical and primary streams at a causal handoff date.
+
+        ``instrument_code`` identifies the primary source; the optional map
+        resolves its historical identifier. Levels are reconstructed from
+        daily increments rather than concatenated across vendor bases.
+        """
         historical_code = self.historical_instrument_map.get(
             instrument_code, instrument_code
         )
@@ -799,6 +833,9 @@ class HybridHistoryProvider:
             handoff,
         )
 
+        # Stream ownership changes exactly once: historical owns dates before
+        # handoff and primary owns handoff onward. Concatenate daily economic
+        # increments first, then rebuild the arbitrary index level below.
         old_signal = old.signal.filter(pl.col("trade_date") < handoff)
         new_signal = new.signal.filter(pl.col("trade_date") >= handoff)
         signal = pl.concat(
@@ -816,6 +853,8 @@ class HybridHistoryProvider:
             ],
             how="vertical",
         ).sort("trade_date")
+        # Vendor signal indices have unrelated bases. Rebase the spliced return
+        # path to 100 so the handoff cannot create a false level jump.
         signal = signal.with_columns(
             (
                 (1.0 + pl.col("ret_1d").fill_null(0.0)).cum_prod()
@@ -823,6 +862,8 @@ class HybridHistoryProvider:
             ).alias("signal_index")
         )
 
+        # Additive price levels are likewise vendor-specific. Preserve point
+        # changes and reconstruct one continuous path from a neutral 1000 base.
         old_panama = old.panama.filter(pl.col("trade_date") < handoff)
         new_panama = new.panama.filter(pl.col("trade_date") >= handoff)
         increments = pl.concat(
@@ -845,6 +886,9 @@ class HybridHistoryProvider:
             ).alias("panama_price")
         )
 
+        # Marks retain actual source levels and contract identity because they
+        # drive P&L and roll accounting; unlike signal indices, they are not
+        # normalized across the handoff.
         marks = pl.concat(
             [
                 old.marks.filter(pl.col("trade_date") < handoff),
@@ -909,6 +953,7 @@ def align_history_to_previous_sessions(
             date_map[value] = sessions[position]
 
     def remap(frame: pl.DataFrame) -> pl.DataFrame:
+        """Apply the legacy-to-primary session map and retain one row/date."""
         if frame.is_empty():
             return frame
         return (

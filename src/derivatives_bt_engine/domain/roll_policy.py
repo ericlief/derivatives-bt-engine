@@ -29,6 +29,7 @@ class ContractRollPolicy:
     carver_instrument: str = ""
 
     def __post_init__(self) -> None:
+        """Validate mode-specific cycle and pre-expiry offset invariants."""
         if self.mode not in {"calendar", "volume_front"}:
             raise ValueError(
                 "roll policy mode must be 'calendar' or 'volume_front'"
@@ -54,10 +55,12 @@ class ContractRollPolicy:
 
     @property
     def hold_month_numbers(self) -> tuple[int, ...]:
+        """Translate the ordered CME month-letter cycle to month numbers."""
         return tuple(CME_MONTH_LETTERS[letter] for letter in self.hold_roll_cycle)
 
     @property
     def cache_key(self) -> str:
+        """Return a stable identity for caches derived under this policy."""
         if self.mode == "volume_front":
             return VOLUME_FRONT_POLICY_ID
         identity = (
@@ -68,6 +71,7 @@ class ContractRollPolicy:
         return f"calendar_{digest}"
 
     def as_dict(self) -> dict[str, object]:
+        """Serialize the policy for run manifests and history metadata."""
         return {
             "policy_id": self.policy_id,
             "mode": self.mode,
@@ -88,6 +92,7 @@ VOLUME_FRONT_POLICY = ContractRollPolicy(
 
 
 def _policy_from_spec(spec: Mapping[str, object]) -> ContractRollPolicy:
+    """Convert one pinned instrument metadata record into a roll policy."""
     carver_instrument = str(spec["carver_instrument"])
     return ContractRollPolicy(
         policy_id=f"carver_{carver_instrument}",
@@ -111,6 +116,7 @@ class RollPolicySet:
         requested_symbol: str,
         raw_symbol: str,
     ) -> tuple[ContractRollPolicy, str]:
+        """Resolve requested-symbol override, raw-root default, then fallback."""
         requested = requested_symbol.upper()
         raw = raw_symbol.upper()
         if requested in self.overrides:
@@ -123,6 +129,7 @@ class RollPolicySet:
         self,
         overrides: Mapping[str, ContractRollPolicy] | None,
     ) -> "RollPolicySet":
+        """Return an immutable copy with normalized run-local overrides."""
         if not overrides:
             return self
         merged = dict(self.overrides)

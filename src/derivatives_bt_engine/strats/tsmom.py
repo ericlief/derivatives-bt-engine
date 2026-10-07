@@ -50,6 +50,7 @@ from derivatives_bt_engine.domain.tsmom_window_reporting import (
 
 
 def parse_args():
+    """Parse the main TSMOM backtest, reporting, and data-source options."""
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--symbols', default='ES,NQ',
@@ -274,6 +275,7 @@ def parse_args():
 
 
 def main():
+    """Build a config, run one backtest, and emit its audit/report files."""
     args = parse_args()
 
     symbols = [s.strip().upper() for s in args.symbols.split(',') if s.strip()]

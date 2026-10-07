@@ -167,6 +167,7 @@ def _param_str(symbols: list[str], capital_levels: list[float],
     symbol_str = '-'.join(symbols) if len(symbols) <= 6 else f"{len(symbols)}syms"
 
     def _fmt_cap(c: float) -> str:
+        """Format a capital level compactly for a result filename."""
         return f"{c / 1_000_000:g}M" if c >= 1_000_000 else f"{int(c / 1000)}k"
     cap_str = '-'.join(_fmt_cap(c) for c in capital_levels)
 
@@ -176,6 +177,7 @@ def _param_str(symbols: list[str], capital_levels: list[float],
 
 
 def parse_args():
+    """Parse the binary vol-parity window and capital sweep options."""
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--symbols', default=','.join(DEFAULT_SYMBOLS),
                     help='Comma-separated futures symbols (default: %(default)s)')
@@ -201,6 +203,7 @@ def parse_args():
 
 
 def main():
+    """Run the window sweep and optionally save its detail and summary CSVs."""
     args = parse_args()
     symbols = [s.strip().upper() for s in args.symbols.split(',') if s.strip()]
     capital_levels = [float(c.strip()) for c in args.capital_levels.split(',') if c.strip()]

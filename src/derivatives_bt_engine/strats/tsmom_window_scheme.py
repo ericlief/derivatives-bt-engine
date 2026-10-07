@@ -130,6 +130,7 @@ def summarize(results: pl.DataFrame) -> pl.DataFrame:
 
 
 def parse_args():
+    """Parse causal window-scheme inputs and the underlying TSMOM config."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--symbols', default=DEFAULT_SYMBOLS)
     parser.add_argument('--initial-capital', type=float, default=90_000)
@@ -171,6 +172,7 @@ def parse_args():
 
 
 def main():
+    """Run selected window schemes and optionally persist detail and summary."""
     args = parse_args()
     symbols = [symbol.strip().upper() for symbol in args.symbols.split(',') if symbol.strip()]
     schemes = tuple(scheme.strip().upper() for scheme in args.schemes.split(',') if scheme.strip())

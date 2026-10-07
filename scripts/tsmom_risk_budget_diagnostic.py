@@ -200,6 +200,7 @@ def compute_erc_weights(cov: pd.DataFrame) -> pd.Series:
     cov_vals = cov.values
 
     def risk_contributions(w):
+        """Return each asset's signed marginal contribution to portfolio vol."""
         port_var = w @ cov_vals @ w
         if port_var <= 0:
             return np.zeros(n)
@@ -207,6 +208,7 @@ def compute_erc_weights(cov: pd.DataFrame) -> pd.Series:
         return w * marginal / np.sqrt(port_var)
 
     def objective(w):
+        """Penalize dispersion in risk contributions for the ERC solver."""
         rc = risk_contributions(w)
         return np.sum((rc - rc.mean()) ** 2)
 
@@ -343,6 +345,7 @@ def fetch_continuous_bars(ib, instr: dict, duration: str = '3 y') -> pd.DataFram
 
 
 def fetch_all_continuous_bars(ib, instruments: list[dict], duration: str = '3 y') -> dict[str, pd.DataFrame]:
+    """Fetch one IB continuous daily-price frame per executable symbol."""
     price_frames = {}
     for instr in instruments:
         symbol = instr['symbol']

@@ -33,6 +33,7 @@ PORTFOLIO_COLUMNS = (
 
 
 def _value(row: Mapping, *keys: str):
+    """Return the first present alias from a raw live/backtest mapping."""
     for key in keys:
         if key in row:
             return row[key]
@@ -40,6 +41,7 @@ def _value(row: Mapping, *keys: str):
 
 
 def _number(value) -> Optional[float]:
+    """Convert a report value to a finite float, otherwise return ``None``."""
     if value is None:
         return None
     try:
@@ -50,6 +52,7 @@ def _number(value) -> Optional[float]:
 
 
 def _as_of(value) -> Optional[str]:
+    """Normalize optional dates and timestamps to an ISO report string."""
     if value is None:
         return None
     if isinstance(value, (date, datetime)):
@@ -73,12 +76,17 @@ def clean_signal_rows(rows: Iterable[Mapping], run_id: str, *, as_of=None) -> li
     """Project raw live targets or backtest events into the common signal sheet."""
     output = []
     for source in rows:
+        # Live and backtest rows use a few historical aliases. Resolve them at
+        # this reporting boundary so calculation code can keep descriptive
+        # internal names and the spreadsheet schema remains stable.
         close = _number(_value(source, 'close'))
         mult = _number(_value(source, 'mult'))
         hv = _number(_value(source, 'hv'))
         fractional_contracts = _number(_value(source, 'fractional_target_contracts', 'frac_con'))
         target_contracts = _number(_value(source, 'final_target_contracts', 'target_contracts', 'tgt_con'))
         fractional_notional = _number(_value(source, 'fractional_target_notional'))
+        # Derive absent audit values only from fields in the same source row;
+        # these fallbacks do not alter the strategy's saved target or sizing.
         if fractional_notional is None and fractional_contracts is not None and close is not None and mult is not None:
             fractional_notional = fractional_contracts * close * mult
         one_contract_notional = _number(_value(source, 'one_contract_notional', 'one_con_not'))

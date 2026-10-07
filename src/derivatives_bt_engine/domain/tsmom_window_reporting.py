@@ -23,6 +23,7 @@ WINDOW_COLUMNS = (
 
 
 def _iso(value: date) -> str:
+    """Serialize a window boundary using the report's ISO-date convention."""
     return value.isoformat()
 
 
@@ -38,6 +39,7 @@ def _year_windows(oos_start: date, data_end: date) -> list[tuple[date, date]]:
 
 
 def _expanding_windows(oos_start: date, data_end: date) -> list[tuple[date, date]]:
+    """Return windows sharing one OOS start and successively later year ends."""
     return [(oos_start, end) for _, end in _year_windows(oos_start, data_end)]
 
 
@@ -80,6 +82,7 @@ def _daily_returns(daily_mtm: pl.DataFrame) -> pl.DataFrame:
 
 
 def _fees_in_window(transactions: Optional[pl.DataFrame], start: date, end: date) -> float:
+    """Sum transaction fees inside an inclusive reporting window."""
     if transactions is None or transactions.is_empty() or not {'date', 'fee'} <= set(transactions.columns):
         return 0.0
     return float(transactions.filter(
@@ -88,12 +91,14 @@ def _fees_in_window(transactions: Optional[pl.DataFrame], start: date, end: date
 
 
 def _events_in_window(events: Iterable[Mapping], start: date, end: date) -> int:
+    """Count sparse rebalance events inside an inclusive window."""
     return sum(1 for event in events if start <= event['date'] <= end)
 
 
 def _score_window(returns: pl.DataFrame, events: Iterable[Mapping],
                   transactions: Optional[pl.DataFrame], *, scheme: str,
                   start: date, end: date, capital: float) -> dict:
+    """Score one slice of the already-realised causal daily return path."""
     window = returns.filter(
         pl.col('date').is_between(start, end, closed='both') & pl.col('daily_return').is_not_null()
     )
