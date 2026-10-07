@@ -1139,6 +1139,15 @@ def _precompute_signal(
     use them in every signal mode. ``ewmac`` optionally supplies the already
     pooled/scaled EWMAC frame. The output aligns signal state with executable
     P&L marks and is later stored in ``precomputed[symbol]``.
+
+    In continuous/Goulding mode, ``signal`` is produced by
+    :func:`continuous_momentum`: the bounded, possibly disagreement-discounted
+    fast/slow trend forecast. Goulding later replaces its direction inside
+    :func:`_compute_signal_row`, but continues to use this frame's volatility
+    and audit columns. In EWMAC mode, ``ewmac_forecast`` is divided by the
+    configured cap so the common ``signal`` interface remains in ``[-1, 1]``.
+    None of these columns is a position; sizing happens in
+    :func:`_compute_signal_row`.
     """
     return_bars = _return_signal_bars(frame)
     base = continuous_momentum(
@@ -1157,7 +1166,6 @@ def _precompute_signal(
     if config.signal_weighting != 'carver_ewmac':
         # Return-invalid observations do not advance a return-defined signal,
         # but they remain real trading sessions. Hold the last valid signal
-        # state while retaining today's raw mark and roll-neutral P&L level.
         state_columns = [column for column in base.columns if column != 'ts_event']
         return marks.join(base, on='ts_event', how='left').with_columns(
             [pl.col(column).forward_fill() for column in state_columns]
@@ -1191,6 +1199,11 @@ def _precompute_signal(
     return ewmac.join(base, on='ts_event', how='left').with_columns(
         [pl.col(column).forward_fill() for column in state_columns]
     ).join(marks, on='ts_event', how='left').with_columns(
+        # The normalized EWMAC forecast is capped at +/- forecast_cap. Divide
+        # by that same cap to expose the common bounded [-1, +1] ``signal``
+        # interface used by the other signal models. ``raw_forecast`` retains
+        # the unscaled rule value; ``ewmac_forecast`` retains the scaled and
+        # capped value before this final interface normalization.
         (pl.col('ewmac_forecast') / config.ewmac_forecast_cap).alias('signal'),
         (pl.col('ewmac_forecast') / config.ewmac_forecast_cap).alias('ts'),
         (pl.col('ewmac_forecast') / config.ewmac_forecast_cap).alias('ts_fast'),
@@ -1444,6 +1457,16 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
     the non-fixed_quantities branch below (fixed_quantities' own sizing
     never reads max_notional/notional_budget at all).
 
+    Signal-to-position flow is intentionally staged and auditable:
+
+    1. Resolve one model forecast, ``trend_strength``, in approximately
+       ``[-1, +1]``. Its sign is direction and its magnitude is conviction.
+    2. In the risk-targeted path, :func:`compute_position_scalar` combines
+       that forecast with daily volatility and the volatility target; the VIX
+       overlay is then applied. Equal-weight mode uses only the forecast sign.
+    3. Multiply the applicable notional budget by that scalar, divide by one
+       contract's notional, round to whole contracts, and apply ``max_contracts``.
+
     g_regime_val/g_fast_val/g_slow_val/a_co/a_re: only read when
     config.signal_weighting == 'goulding' -- the caller resolves these from
     its own precomputed, forward-matched goulding_monthly output and that
@@ -1508,6 +1531,9 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
         return None
     trend_strength, regime, regime_discount, g_blend = resolved
 
+    # ``trend_strength`` is still a forecast here, not a position.  Long-only
+    # clips negative forecasts before any volatility or capital scaling so a
+    # bearish reading becomes cash instead of a short position.
     signal_for_scalar = trend_strength
     if config.long_only and signal_for_scalar is not None and not (
         isinstance(signal_for_scalar, float) and math.isnan(signal_for_scalar)
@@ -1523,6 +1549,9 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
         )
         applied_vix_scalar = 1.0
     else:
+        # Convert model conviction into a volatility-aware exposure multiplier;
+        # then apply the portfolio-wide VIX overlay.  Contract notional and the
+        # available capital budget are deliberately handled in the next stage.
         scalar = compute_position_scalar(
             signal_for_scalar, daily_std_last, config.vol_target, regime,
             regime_discount=regime_discount, annualization_days=annualization_days,
@@ -1550,11 +1579,17 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
             target = direction * round(fixed_qty * vix_scalar)
     else:
         budget = notional_budget if notional_budget is not None else config.max_notional
+        # A continuous target is useful for auditing and cluster allocation;
+        # only the final target is rounded to an executable whole-contract lot.
         fractional_target_contracts = (budget * scalar) / one_contract_notional if one_contract_notional else 0.0
         target = round(fractional_target_contracts)
     target = max(-config.max_contracts, min(config.max_contracts, target))
 
     return {
+        # ``signal`` is the resolved model forecast before sizing; ``scalar``
+        # below is the post-volatility/post-VIX exposure multiplier; ``target``
+        # is the final integer contract position.  Keeping all three prevents
+        # reports from conflating conviction with risk or executable quantity.
         'symbol': symbol, 'target': target, 'signal': trend_strength, 'regime': regime,
         # scalar itself (pre-notional-conversion, post-vix_scalar) --
         # not printed/logged anywhere before this, needed by

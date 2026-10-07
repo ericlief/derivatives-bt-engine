@@ -27,6 +27,19 @@ the appropriate continuous representation to each one:
     goulding_monthly(df, ...)           -- monthly, un-normalized arithmetic model
     carver_ewmac(df, ...)                -- additive-price EMA crossover / point vol
 
+The public ``signal`` column is deliberately a bounded, unitless forecast, not
+a position or a return:
+
+    continuous_momentum: tanh(weighted fast/slow trend), optionally discounted
+                         when the two horizons disagree; range [-1, +1]
+    carver_ewmac:        raw EMA crossover / mixed point volatility, multiplied
+                         by its forecast scalar and clipped to the configured cap
+
+The backtester subsequently converts that forecast into a position scalar and
+then into integer contracts.  Keeping those stages separate is important:
+``signal`` expresses direction and conviction; volatility, portfolio budget,
+contract notional, VIX overlays, and lot rounding determine exposure.
+
 Design rationale (2026-07 rewrite of the signal_spec.py half, replacing an
 even earlier version that wrapped calculate_trend_strength and dispatched
 on a (SignalModel, WindowBasis) pair): that design tangled the monthly
@@ -409,6 +422,7 @@ class SignalSpec:
     a_re: float = 0.5
 
     def __post_init__(self):
+        """Reject contradictory horizons, weights, and mixing parameters."""
         if self.fast_window <= 0 or self.slow_window <= 0:
             raise ValueError("fast_window/slow_window must be positive")
         if self.fast_window >= self.slow_window:
@@ -539,11 +553,17 @@ def carver_ewmac(
     ).with_columns(pl.col("mixed_point_vol").alias("point_vol"))
     result = result.with_columns(
         pl.when(pl.col("point_vol") > 0)
+        # The EMA difference and point volatility share price-point units,
+        # so their ratio is the unitless raw rule forecast.  It is not yet a
+        # position and has not yet been normalized to the target magnitude.
         .then(pl.col("raw_ewmac") / pl.col("point_vol"))
         .otherwise(None)
         .alias("raw_forecast")
     )
     return result.with_columns(
+        # ``signal`` is the final bounded EWMAC forecast consumed by the
+        # backtester: scale the raw rule, then cap extreme conviction.  Risk
+        # targeting and conversion to contracts happen downstream.
         (pl.col("raw_forecast") * forecast_scalar)
         .clip(-forecast_cap, forecast_cap)
         .alias("signal")
@@ -754,10 +774,17 @@ def continuous_momentum(df: pl.DataFrame, fast_window: int = DEFAULT_FAST_WINDOW
                   .otherwise(None),
     )
     df = df.with_columns(
+        # A horizon contributes only when its score is available.  The
+        # composite below intentionally remains null until the slow score has
+        # completed its warm-up; after that point these availability weights
+        # prevent a temporarily missing leg from diluting the other one.
         _w_fast=pl.col('ts_fast').is_not_null().cast(pl.Float64) * w_fast,
         _w_slow=pl.col('ts_slow').is_not_null().cast(pl.Float64) * w_slow,
     )
     df = df.with_columns(
+        # ``ts`` is a bounded, unitless composite forecast.  tanh preserves
+        # the sign of the weighted horizon score while preventing an extreme
+        # volatility-normalized return from creating unbounded conviction.
         ts=(
             pl.when(pl.col('ts_slow').is_not_null())
             .then(
@@ -775,6 +802,10 @@ def continuous_momentum(df: pl.DataFrame, fast_window: int = DEFAULT_FAST_WINDOW
         ),
     )
     df = df.with_columns(
+        # The public ``signal`` is the composite forecast actually passed to
+        # sizing.  Agreement regimes retain ``ts``; disagreement regimes are
+        # deliberately reduced by ``discount``.  No volatility targeting,
+        # capital allocation, or contract rounding occurs in this function.
         signal=(
             pl.when(pl.col('regime').is_in(['correction', 'rebound']))
             .then(pl.col('ts') * discount)
@@ -1072,6 +1103,7 @@ def cluster_conviction_score(signal_weighting: str, signal: Mapping[str, object]
     states use the absolute raw equation-7 blend.
     """
     def finite(value: object) -> Optional[float]:
+        """Convert an optional audit value to a finite float or ``None``."""
         if value is None:
             return None
         value = float(value)
@@ -1364,6 +1396,7 @@ def estimate_mixing_params_diagnostics(history: pl.DataFrame, as_of: date, clust
         return diag
 
     def _stats(states: str | tuple[str, ...]) -> tuple[int, Optional[float], Optional[float]]:
+        """Return count, mean return, and mean squared return for states."""
         state_values = [states] if isinstance(states, str) else list(states)
         sub = prior.filter(pl.col('state').is_in(state_values))
         if sub.height == 0:
@@ -1375,6 +1408,7 @@ def estimate_mixing_params_diagnostics(history: pl.DataFrame, as_of: date, clust
                 float(avg_r2) if avg_r2 is not None else None)
 
     def _kelly(avg_r: Optional[float], avg_r2: Optional[float]) -> Optional[float]:
+        """Return the paper's mean-over-mean-square state statistic."""
         return avg_r / avg_r2 if avg_r is not None and avg_r2 else None
 
     n_bu, avg_r_bu, avg_r2_bu = _stats('bull')
