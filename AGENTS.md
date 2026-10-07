@@ -14,6 +14,17 @@
 - Backtests may be computationally expensive; use narrow symbol/year ranges for validation before running large tests.
 - Preserve existing backtest results unless explicitly asked to regenerate or overwrite them.
 
+## Code documentation
+
+- Give every module a docstring explaining its responsibility and its place in
+  the surrounding pipeline.
+- Give functions and classes docstrings that explain their behavior, important
+  parameters, return values, and any non-obvious units or data shapes.
+- Add concise inline comments where dataframe identity, ownership, joins,
+  normalization, or financial conventions would otherwise be difficult to
+  infer from the code. Comments should explain why the step exists, not merely
+  restate the syntax.
+
 ## Data
 
 - Financial data may exist outside the repository under `/home/dev/data/fin`.

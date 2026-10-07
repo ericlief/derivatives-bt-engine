@@ -1,4 +1,24 @@
-"""Start Phase 2 selection from the persisted Phase 1 cost audit."""
+"""Build and score the Phase 2 instrument-selection universe.
+
+The persisted Phase 1 CSV supplies executable symbols, their borrowed signal
+history identifiers, costs, dollar volatility, and eligibility flags. Phase 2
+then uses three deliberately different dataframe collections:
+
+``frames_by_history``
+    One daily component-forecast frame per unique ``hist_instr_code``. Several
+    executable symbols can reuse the same history, so these expensive EWMAC
+    calculations are performed once.
+``subsystem_frames``
+    One daily combined-forecast, position, and return frame per executable
+    ``symbol``. Symbols sharing history may differ here because their Phase 1
+    cost gates can leave them with different eligible rules.
+``returns_wide``
+    One synchronized frame with dates in rows and executable symbols in
+    columns. This is the input to the instrument-correlation estimator.
+
+The command persists each intermediate form so forecast gaps, turnover, and
+greedy selection decisions remain inspectable after a run.
+"""
 
 from __future__ import annotations
 
@@ -66,18 +86,25 @@ EWMAC_SLOW_TILT_60_40 = {
 def slow_tilt_ewmac_weights(
     eligible_rules: str | Iterable[str],
 ) -> dict[str, float]:
-    """Return the 60/40 EWMAC template renormalised over eligible rules."""
+    """Return slow-tilted weights for the rules that survived Phase 1.
+
+    ``eligible_rules`` may be a comma-separated report value or an iterable of
+    ``fast/slow`` rule keys. Missing rules receive no allocation and the
+    remaining template weights are renormalized to sum to one.
+    """
     rules = _parse_rules(eligible_rules)
     return SlowTiltEwmacWeights(EWMAC_SLOW_TILT_60_40).weights(rules)
 
 
 def _parse_rules(eligible_rules: str | Iterable[str]) -> list[str]:
+    """Normalize a CSV rule field or iterable into non-empty rule keys."""
     if isinstance(eligible_rules, str):
         return [rule.strip() for rule in eligible_rules.split(",") if rule.strip()]
     return [str(rule).strip() for rule in eligible_rules if str(rule).strip()]
 
 
 def parse_args(argv=None):
+    """Parse the Step 1 and optional complete Phase 2 command arguments."""
     parser = argparse.ArgumentParser(
         description=(
             "Load a Phase 1 futures cost CSV and save the instruments that "
@@ -128,12 +155,26 @@ def parse_args(argv=None):
 
 
 def _default_output_path(source: Path, generated_at: datetime) -> Path:
+    """Return the timestamped Step 1 CSV path beside its Phase 1 source."""
     stamp = generated_at.astimezone(REPORT_TIMEZONE).strftime("%Y%m%d_%H%M%S")
     return source.parent / f"pysystemtrade_phase2_step1_{stamp}.csv"
 
 
 def _ewmac_scalar_histories(db_path: Path) -> dict[str, pl.DataFrame]:
-    """Load the same causal global scalars used by Phase 1 for all speeds."""
+    """Load the causal pooled forecast scalar for every canonical EWMAC rule.
+
+    Parameters
+    ----------
+    db_path
+        Read-only pysystemtrade history database used by the normalization
+        cache.
+
+    Returns
+    -------
+    dict[str, pl.DataFrame]
+        Rule key to a two-column ``[ts_event, forecast_scalar]`` daily frame.
+        These are pooled scalar histories, not instrument price histories.
+    """
     histories: dict[str, pl.DataFrame] = {}
     for rule in CANONICAL_EWMAC_RULES:
         config = TsmomBacktestConfig(
@@ -159,18 +200,36 @@ def _build_forecast_frames(
     *,
     db_path: Path,
 ) -> dict[str, pl.DataFrame]:
-    """Build the five scaled component forecasts once per history code."""
+    """Build five component forecasts once per distinct signal history.
+
+    Parameters
+    ----------
+    candidates
+        Phase 2 Step 1 rows. ``hist_instr_code`` identifies the research
+        history used for signals; it need not equal the executable ``symbol``.
+    db_path
+        Read-only pysystemtrade history database.
+
+    Returns
+    -------
+    dict[str, pl.DataFrame]
+        ``hist_instr_code`` to a daily frame containing ``point_vol``,
+        ``pt_change_1d``, and all five ``fcst_<fast>_<slow>`` columns. For
+        example, MZC can reuse the single ``CORN_mini`` frame here.
+    """
     provider = PysystemtradeHistoryProvider(db_path=db_path)
     scalars = _ewmac_scalar_histories(db_path)
     history_codes = sorted(
         set(candidates.get_column("hist_instr_code").drop_nulls().to_list())
     )
-    frames: dict[str, pl.DataFrame] = {}
+    frames_by_history: dict[str, pl.DataFrame] = {}
     for position, history_code in enumerate(history_codes, start=1):
         history = provider.load(history_code)
-        combined: pl.DataFrame | None = None
+        # This frame belongs to the signal history, not yet to an executable
+        # contract. Component columns are added one speed at a time.
+        history_frame: pl.DataFrame | None = None
         for rule in CANONICAL_EWMAC_RULES:
-            calculated = (
+            rule_frame = (
                 carver_ewmac(
                     history.panama_bars(),
                     fast_span=rule.fast,
@@ -185,23 +244,25 @@ def _build_forecast_frames(
                 )
             )
             columns = ["ts_event", rule.column]
-            if combined is None:
+            if history_frame is None:
+                # Point volatility and price changes are independent of EWMAC
+                # speed, so retain one copy from the first rule calculation.
                 columns.extend(["point_vol", "pt_change_1d"])
-                combined = calculated.select(columns)
+                history_frame = rule_frame.select(columns)
             else:
-                combined = combined.join(
-                    calculated.select(columns), on="ts_event", how="left"
+                history_frame = history_frame.join(
+                    rule_frame.select(columns), on="ts_event", how="left"
                 )
-        assert combined is not None
-        frames[history_code] = combined.sort("ts_event")
+        assert history_frame is not None
+        frames_by_history[history_code] = history_frame.sort("ts_event")
         logger.debug(
             "phase2_forecast built hist_instr_code=%s rows=%d completed=%d total=%d",
             history_code,
-            combined.height,
+            history_frame.height,
             position,
             len(history_codes),
         )
-    return frames
+    return frames_by_history
 
 
 def _subsystem_correlation(
@@ -212,6 +273,16 @@ def _subsystem_correlation(
     halflife_days: float,
     min_rows: int,
 ) -> tuple[np.ndarray, np.ndarray, pl.DataFrame]:
+    """Estimate instrument correlations from combined subsystem returns.
+
+    ``subsystem_frames`` is keyed by executable symbol, unlike
+    ``frames_by_history`` above. The function inner-joins each symbol's
+    ``subsystem_return`` on date to form ``returns_wide`` and passes that
+    synchronized panel to the allocation layer's bounded EWM estimator.
+
+    Returns the dense correlation matrix, its per-symbol coverage mask, and
+    the wide return frame that was actually used.
+    """
     wide: pl.DataFrame | None = None
     for symbol in symbols:
         returns = (
@@ -219,6 +290,8 @@ def _subsystem_correlation(
             .select("ts_event", pl.col("subsystem_return").alias(symbol))
             .drop_nulls()
         )
+        # Inner joining makes every matrix row a genuinely contemporaneous
+        # observation across the candidate universe.
         wide = returns if wide is None else wide.join(
             returns, on="ts_event", how="inner"
         )
@@ -246,7 +319,16 @@ def _run_complete_selection(
     run_config: dict[str, object],
     args: argparse.Namespace,
 ) -> tuple[Path, pl.DataFrame]:
-    """Audit combined forecasts, exclude invalid rows, and run greedy Phase 2."""
+    """Audit forecasts, exclude invalid instruments, and run greedy Phase 2.
+
+    ``selected`` contains one row per executable symbol from Step 1. The
+    function first builds reusable history-level forecasts, then creates a
+    symbol-level combined subsystem using that symbol's eligible-rule subset.
+    It persists the daily forecast panel, audit, correlation input, greedy
+    trials, and final accepted book.
+
+    Returns the final selection CSV path and its in-memory dataframe.
+    """
     frames_by_history = _build_forecast_frames(
         selected, db_path=args.pysystemtrade_db.expanduser().resolve()
     )
@@ -258,13 +340,21 @@ def _run_complete_selection(
     ))
 
     audit_rows: list[dict[str, object]] = []
-    forecast_frames: list[pl.DataFrame] = []
+    # Long-form output copies: one symbol-labelled frame is appended here and
+    # all are concatenated only when the daily forecast Parquet is written.
+    forecast_output_frames: list[pl.DataFrame] = []
+    # Executable symbol -> its combined forecast, position, and return history.
+    # MZC and CORN_mini can point to the same raw history but remain separate
+    # because their eligible rules and transaction costs can differ.
     subsystem_frames: dict[str, pl.DataFrame] = {}
+    # Preserve each compact Step 1 row for later sizing and liquidity inputs.
     source_rows: dict[str, dict[str, object]] = {}
     for row in selected.iter_rows(named=True):
         symbol = str(row["symbol"])
         source_rows[symbol] = row
         rules = _parse_rules(str(row["elig_ewmac_rules"] or ""))
+        # Convert the shared history frame into this executable symbol's
+        # subsystem by combining only the rules that passed its cost ceiling.
         result = engine.combine(
             frames_by_history[str(row["hist_instr_code"])],
             rules,
@@ -287,7 +377,7 @@ def _run_complete_selection(
             **result.audit,
         }
         audit_rows.append(audit)
-        forecast_frames.append(
+        forecast_output_frames.append(
             result.frame.with_columns(
                 pl.lit(symbol).alias("symbol"),
                 pl.lit(str(row["hist_instr_code"])).alias("hist_instr_code"),
@@ -311,6 +401,8 @@ def _run_complete_selection(
     if not eligible_symbols:
         raise ValueError("no instrument passed the combined-forecast audit")
 
+    # Correlations belong to executable subsystem returns, not raw market
+    # returns or the individual EWMAC component forecasts.
     correlation, covered, returns_wide = _subsystem_correlation(
         subsystem_frames,
         eligible_symbols,
@@ -406,7 +498,9 @@ def _run_complete_selection(
     selection_path = output_dir / f"pysystemtrade_phase2_selection_{stamp}.csv"
     returns_path = output_dir / f"pysystemtrade_phase2_subsystem_returns_{stamp}.parquet"
     audit_frame.write_csv(audit_path)
-    pl.concat(forecast_frames, how="diagonal_relaxed").write_parquet(forecasts_path)
+    pl.concat(forecast_output_frames, how="diagonal_relaxed").write_parquet(
+        forecasts_path
+    )
     pl.DataFrame(selection.trials, infer_schema_length=None).write_csv(trials_path)
     final_frame.write_csv(selection_path)
     returns_wide.write_parquet(returns_path)
@@ -422,7 +516,12 @@ def _run_complete_selection(
 
 
 def run(argv=None) -> tuple[Path, pl.DataFrame]:
-    """Load Phase 1, save its selected candidate rows, and return both."""
+    """Run persisted-gate Step 1 and optionally the complete Phase 2 search.
+
+    Returns the last output path and dataframe produced: the compact Step 1
+    universe normally, or the final greedy selection when ``--complete`` is
+    supplied.
+    """
     args = parse_args(argv)
     setup_logger()
 
@@ -527,6 +626,7 @@ def run(argv=None) -> tuple[Path, pl.DataFrame]:
 
 
 def main(argv=None) -> None:
+    """CLI entry point for ``futures-select-phase2``."""
     run(argv)
 
 

@@ -1,4 +1,15 @@
-"""Combine cost-eligible EWMAC forecasts and audit the resulting subsystem."""
+"""Turn one instrument history into an auditable combined EWMAC subsystem.
+
+The input is a single daily signal-history dataframe containing the five
+already-scaled EWMAC component forecasts. The engine selects the rules that
+passed the executable contract's Phase 1 cost gate, combines them, converts the
+forecast to a volatility-scaled position, measures turnover, and returns both
+the daily calculations and a compact validity audit.
+
+Forecast diversification and instrument diversification are intentionally
+separate. This module calculates FDM across component rules for one history;
+the Phase 2 selector later calculates IDM across executable instruments.
+"""
 
 from __future__ import annotations
 
@@ -19,17 +30,23 @@ from derivatives_bt_engine.domain.volatility import CARVER_BUSINESS_DAYS_PER_YEA
 
 @dataclass(frozen=True)
 class EwmacRule:
-    """One canonical EWMAC speed and its stable report key."""
+    """Describe one EWMAC rule and its dataframe/report identifiers.
+
+    ``fast`` and ``slow`` are the two exponentially weighted moving-average
+    spans in business-day observations.
+    """
 
     fast: int
     slow: int
 
     @property
     def key(self) -> str:
+        """Return the public ``fast/slow`` key stored in Phase 1 reports."""
         return f"{self.fast}/{self.slow}"
 
     @property
     def column(self) -> str:
+        """Return this component's internal daily dataframe column name."""
         return f"fcst_{self.fast}_{self.slow}"
 
 
@@ -40,7 +57,7 @@ EWMAC_RULE_BY_KEY = {rule.key: rule for rule in CANONICAL_EWMAC_RULES}
 
 
 class ForecastWeightPolicy(ABC):
-    """Configurable rule-weight policy used before forecast diversification."""
+    """Choose pre-FDM weights for an executable symbol's eligible rules."""
 
     @abstractmethod
     def weights(self, eligible_rules: Iterable[str]) -> dict[str, float]:
@@ -49,11 +66,17 @@ class ForecastWeightPolicy(ABC):
 
 @dataclass(frozen=True)
 class SlowTiltEwmacWeights(ForecastWeightPolicy):
-    """Allocate 60% to the two slowest and 40% to the faster three rules."""
+    """Allocate 60% to the two slowest and 40% to the faster three rules.
+
+    ``template`` optionally replaces the default five-rule allocation. Rules
+    absent from ``eligible_rules`` receive zero and surviving weights are
+    renormalized to one.
+    """
 
     template: Mapping[str, float] | None = None
 
     def weights(self, eligible_rules: Iterable[str]) -> dict[str, float]:
+        """Validate rule keys and return their renormalized template weights."""
         base = dict(self.template or {
             "4/16": 0.05,
             "8/32": 0.15,
@@ -80,7 +103,7 @@ class SlowTiltEwmacWeights(ForecastWeightPolicy):
 
 
 class ForecastDiversificationPolicy(ABC):
-    """Policy boundary for the forecast diversification multiplier (FDM)."""
+    """Calculate FDM for a weighted subset of component forecasts."""
 
     @abstractmethod
     def multiplier(
@@ -90,12 +113,20 @@ class ForecastDiversificationPolicy(ABC):
         correlation: np.ndarray,
         correlation_rules: list[str],
     ) -> float:
-        """Return the multiplier for one active rule set."""
+        """Return FDM using the active rules' block of a larger matrix.
+
+        ``correlation`` is ordered by ``correlation_rules``; ``rules`` selects
+        and orders the block needed for this executable symbol.
+        """
 
 
 @dataclass(frozen=True)
 class CorrelationForecastDiversification(ForecastDiversificationPolicy):
-    """Use ``1/sqrt(w' C w)`` after flooring negative correlations at zero."""
+    """Use ``1/sqrt(w' C w)`` after flooring negative correlations at zero.
+
+    ``cap`` limits leverage from forecast diversification; the default 2.5 is
+    applied after extracting the active rule-correlation block.
+    """
 
     cap: float = 2.5
 
@@ -106,6 +137,7 @@ class CorrelationForecastDiversification(ForecastDiversificationPolicy):
         correlation: np.ndarray,
         correlation_rules: list[str],
     ) -> float:
+        """Calculate capped FDM for ``rules`` in their supplied weight order."""
         if self.cap <= 0:
             raise ValueError("FDM cap must be positive")
         indices = [correlation_rules.index(rule) for rule in rules]
@@ -120,7 +152,14 @@ class CorrelationForecastDiversification(ForecastDiversificationPolicy):
 
 @dataclass(frozen=True)
 class ForecastCombinationConfig:
-    """Parameters governing combined-forecast validity and turnover."""
+    """Configure combined-forecast scaling, turnover, and validity gates.
+
+    Forecasts use the project's normalized Carver convention: target average
+    absolute forecast 0.5 and cap 1.0 correspond to conventional 10 and 20.
+    ``average_position_ewm_com`` is the pandas-compatible EWM ``com`` applied
+    only to the average-position denominator in turnover. It never smooths
+    the forecast. ``min_valid_observations`` excludes short histories.
+    """
 
     target_abs_forecast: float = EWMAC_FORECAST_TARGET_ABS
     forecast_cap: float = EWMAC_FORECAST_CAP
@@ -132,6 +171,7 @@ class ForecastCombinationConfig:
     min_valid_observations: int = 256
 
     def __post_init__(self) -> None:
+        """Reject nonsensical forecast, turnover, and history parameters."""
         if self.target_abs_forecast <= 0 or self.forecast_cap <= 0:
             raise ValueError("forecast target and cap must be positive")
         if self.annualization_days <= 0 or self.average_position_ewm_com <= 0:
@@ -142,6 +182,14 @@ class ForecastCombinationConfig:
 
 @dataclass(frozen=True)
 class CombinedForecastResult:
+    """Hold one executable symbol's daily subsystem and summary diagnostics.
+
+    ``frame`` contains component forecasts, combined forecast, average and
+    optimal positions, normalized position, and subsystem return. ``weights``
+    and ``fdm`` explain the combination; ``turnover`` is annualized;
+    ``audit`` contains null/non-finite counts and the eligibility decision.
+    """
+
     frame: pl.DataFrame
     weights: dict[str, float]
     fdm: float
@@ -150,7 +198,11 @@ class CombinedForecastResult:
 
 
 class CombinedForecastEngine:
-    """Combine rule forecasts, calculate subsystem turnover, and audit gaps."""
+    """Combine rule forecasts, calculate subsystem turnover, and audit gaps.
+
+    The three constructor policies make forecast weighting, FDM, and numeric
+    conventions replaceable without changing the Phase 2 orchestration code.
+    """
 
     def __init__(
         self,
@@ -159,6 +211,7 @@ class CombinedForecastEngine:
         diversification_policy: ForecastDiversificationPolicy | None = None,
         config: ForecastCombinationConfig | None = None,
     ) -> None:
+        """Initialize the engine with supplied policies or project defaults."""
         self.weight_policy = weight_policy or SlowTiltEwmacWeights()
         self.diversification_policy = (
             diversification_policy or CorrelationForecastDiversification()
@@ -167,12 +220,31 @@ class CombinedForecastEngine:
 
     def combine(
         self,
-        frame: pl.DataFrame,
+        history_frame: pl.DataFrame,
         eligible_rules: Iterable[str],
         forecast_correlation: np.ndarray,
         correlation_rules: list[str],
     ) -> CombinedForecastResult:
-        """Return a combined forecast and the turnover of its actual position.
+        """Return a combined forecast and its unbuffered subsystem turnover.
+
+        Parameters
+        ----------
+        history_frame
+            One signal history with ``ts_event``, ``point_vol``,
+            ``pt_change_1d``, and a ``fcst_<fast>_<slow>`` column for every
+            eligible rule. It contains one history, not the whole universe.
+        eligible_rules
+            Rule keys retained for this executable symbol by Phase 1 costs.
+        forecast_correlation
+            Pooled component-forecast correlation matrix.
+        correlation_rules
+            Rule-key order of ``forecast_correlation``.
+
+        Returns
+        -------
+        CombinedForecastResult
+            The daily subsystem frame, applied weights and FDM, annualized
+            turnover, and forecast-data audit.
 
         Warm-up nulls are retained in the audit.  A row is usable only when
         every active component, point volatility, and the point change are
@@ -183,7 +255,7 @@ class CombinedForecastEngine:
         weights = self.weight_policy.weights(rules)
         required = {"ts_event", "point_vol", "pt_change_1d"}
         required.update(EWMAC_RULE_BY_KEY[rule].column for rule in weights)
-        missing = sorted(required.difference(frame.columns))
+        missing = sorted(required.difference(history_frame.columns))
         if missing:
             raise ValueError(f"combined forecast input missing columns: {missing}")
 
@@ -201,14 +273,18 @@ class CombinedForecastEngine:
         for column in component_columns:
             valid_expr &= pl.col(column).is_not_null() & pl.col(column).is_finite()
 
+        # Every component forecast is already causally scaled and capped.
+        # Weighting happens before FDM; the diversified result is capped again.
         weighted = pl.sum_horizontal([
             pl.col(EWMAC_RULE_BY_KEY[rule].column) * weight
             for rule, weight in weights.items()
         ])
-        result = (
-            frame.sort("ts_event")
+        subsystem_frame = (
+            history_frame.sort("ts_event")
             .with_columns(valid_expr.alias("forecast_valid"))
             .with_columns(
+                # Combine the active components in forecast units, apply FDM,
+                # and enforce the same cap used by each component.
                 pl.when(pl.col("forecast_valid"))
                 .then((weighted * fdm).clip(
                     -self.config.forecast_cap, self.config.forecast_cap
@@ -217,12 +293,19 @@ class CombinedForecastEngine:
                 .alias("combined_forecast")
             )
             .with_columns(
+                # y(t): a position-scale proxy proportional to contracts at the
+                # target average forecast. It is not an account-sized contract
+                # count: cash-risk target, multiplier, and constant FX scale
+                # are omitted because they cancel from the turnover ratio.
                 pl.when(pl.col("forecast_valid"))
                 .then(1.0 / pl.col("point_vol"))
                 .otherwise(None)
                 .alias("avg_position"),
             )
             .with_columns(
+                # x(t) = y(t) * forecast(t) / average_abs_forecast. This is the
+                # unbuffered optimal subsystem-position proxy, in the same
+                # arbitrary scale as y(t), used by Carver's AFTS cost formula.
                 (
                     pl.col("avg_position")
                     * pl.col("combined_forecast")
@@ -237,6 +320,8 @@ class CombinedForecastEngine:
                 .alias("smooth_avg_position"),
             )
             .with_columns(
+                # Turnover is measured in slowly varying average-position
+                # units. The EWM applies to y(t), never to the forecast or x(t).
                 pl.when(pl.col("smooth_avg_position") > 0)
                 .then(pl.col("subsystem_position") / pl.col("smooth_avg_position"))
                 .otherwise(None)
@@ -247,7 +332,13 @@ class CombinedForecastEngine:
                 ).alias("subsystem_return"),
             )
         )
-        changes = result.get_column("normalized_position").drop_nulls().diff().abs()
+        # Annual subsystem turnover is the mean absolute daily change in x/y.
+        changes = (
+            subsystem_frame.get_column("normalized_position")
+            .drop_nulls()
+            .diff()
+            .abs()
+        )
         changes = changes.filter(changes.is_not_null() & changes.is_finite())
         turnover = (
             float(changes.mean() * self.config.annualization_days)
@@ -255,32 +346,36 @@ class CombinedForecastEngine:
             else None
         )
 
-        valid = result.filter(pl.col("forecast_valid"))
+        valid = subsystem_frame.filter(pl.col("forecast_valid"))
         first_valid = valid.get_column("ts_event").min() if valid.height else None
         after_warmup = (
-            result.filter(pl.col("ts_event") >= first_valid)
+            subsystem_frame.filter(pl.col("ts_event") >= first_valid)
             if first_valid is not None
-            else result
+            else subsystem_frame
         )
         audit: dict[str, object] = {
-            "history_obs": result.height,
+            "history_obs": subsystem_frame.height,
             "forecast_valid_obs": valid.height,
-            "forecast_invalid_obs": result.height - valid.height,
+            "forecast_invalid_obs": subsystem_frame.height - valid.height,
             "forecast_post_warmup_invalid_obs": (
                 after_warmup.filter(~pl.col("forecast_valid")).height
             ),
             "forecast_start": first_valid,
             "forecast_end": valid.get_column("ts_event").max() if valid.height else None,
-            "combined_nulls": result.get_column("combined_forecast").null_count(),
-            "combined_nonfinite": result.filter(
+            "combined_nulls": (
+                subsystem_frame.get_column("combined_forecast").null_count()
+            ),
+            "combined_nonfinite": subsystem_frame.filter(
                 pl.col("combined_forecast").is_not_null()
                 & ~pl.col("combined_forecast").is_finite()
             ).height,
         }
         for rule in weights:
             column = EWMAC_RULE_BY_KEY[rule].column
-            audit[f"{column}_nulls"] = result.get_column(column).null_count()
-            audit[f"{column}_nonfinite"] = result.filter(
+            audit[f"{column}_nulls"] = (
+                subsystem_frame.get_column(column).null_count()
+            )
+            audit[f"{column}_nonfinite"] = subsystem_frame.filter(
                 pl.col(column).is_not_null() & ~pl.col(column).is_finite()
             ).height
         audit["forecast_elig"] = bool(
@@ -300,22 +395,34 @@ class CombinedForecastEngine:
             audit["forecast_excl"] = "invalid_combined_turnover"
         else:
             audit["forecast_excl"] = ""
-        return CombinedForecastResult(result, weights, fdm, turnover, audit)
+        return CombinedForecastResult(
+            subsystem_frame, weights, fdm, turnover, audit
+        )
 
 
 def median_forecast_correlation(
-    frames: Iterable[pl.DataFrame],
+    history_frames: Iterable[pl.DataFrame],
     *,
     rules: tuple[EwmacRule, ...] = CANONICAL_EWMAC_RULES,
     min_observations: int = 256,
 ) -> tuple[np.ndarray, list[str]]:
-    """Estimate a robust pooled component-forecast correlation matrix."""
+    """Estimate a robust pooled correlation matrix across EWMAC components.
+
+    Each member of ``history_frames`` is one distinct instrument history with
+    all requested component columns. Correlations are calculated within each
+    history so long-lived markets do not dominate short-lived ones, then the
+    matrices are combined elementwise by their median.
+
+    Returns the matrix and the rule-key order describing its rows and columns.
+    If no history meets ``min_observations``, the conservative fallback is an
+    identity matrix rather than invented cross-rule diversification.
+    """
     matrices: list[np.ndarray] = []
     columns = [rule.column for rule in rules]
-    for frame in frames:
-        if not set(columns).issubset(frame.columns):
+    for history_frame in history_frames:
+        if not set(columns).issubset(history_frame.columns):
             continue
-        usable = frame.select(columns).drop_nulls()
+        usable = history_frame.select(columns).drop_nulls()
         usable = usable.filter(pl.all_horizontal(pl.all().is_finite()))
         if usable.height < min_observations:
             continue

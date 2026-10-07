@@ -1,4 +1,14 @@
-"""Correlation-aware greedy selection using combined subsystem forecasts."""
+"""Score and greedily select executable futures instruments for Phase 2.
+
+Inputs are deliberately compact: one :class:`SelectionCandidate` per
+executable symbol plus a same-order correlation matrix estimated from those
+symbols' combined subsystem returns. Each trial rebuilds portfolio weights and
+IDM, converts capital allocation to a maximum contract position, applies size
+and liquidity constraints, and calculates the AFTS portfolio score.
+
+This module does not build forecasts or query market data. Those operations
+belong to ``futures_selection_phase2`` and ``forecast_combination``.
+"""
 
 from __future__ import annotations
 
@@ -15,6 +25,16 @@ from derivatives_bt_engine.domain.allocation import compute_idm
 
 @dataclass(frozen=True)
 class SelectionCandidate:
+    """Store fixed inputs for one executable contract in every greedy trial.
+
+    ``ann_dvol`` is annual USD volatility per contract. ``trade_sr`` is the
+    one-way cost in SR units, while ``combined_turnover`` is the measured
+    annual turnover of this symbol's combined subsystem. ``econ_family``
+    prevents selecting duplicate execution routes for the same exposure.
+    ``mkt_risk_vol_day`` is daily market volume expressed in annualized USD
+    risk units, matching the Phase 2 participation calculation.
+    """
+
     symbol: str
     ann_dvol: float
     trade_sr: float
@@ -24,11 +44,22 @@ class SelectionCandidate:
 
     @property
     def annual_trade_cost_sr(self) -> float:
+        """Return one-way trade SR multiplied by combined annual turnover."""
         return self.trade_sr * self.combined_turnover
 
 
 @dataclass(frozen=True)
 class GreedySelectionConfig:
+    """Configure AFTS scoring, position granularity, and liquidity limits.
+
+    ``starting_weight`` is used only when comparing singleton seeds. Later
+    trials use correlation-derived portfolio weights. ``forecast_cap_ratio``
+    is maximum forecast divided by average absolute forecast (20/10 = 2 in
+    conventional Carver units). ``min_max_position`` enforces the half-contract
+    granularity rule. ``score_threshold`` controls the tolerated decline from
+    the best score observed so far.
+    """
+
     capital: float = 100_000.0
     target_vol: float = 0.20
     gross_sr: float = 0.50
@@ -42,6 +73,7 @@ class GreedySelectionConfig:
     max_pct_market_volume: float = 1.0
 
     def __post_init__(self) -> None:
+        """Validate configuration ranges before any trial is evaluated."""
         if self.capital <= 0 or self.target_vol <= 0:
             raise ValueError("capital and target_vol must be positive")
         if not 0 <= self.score_threshold <= 1:
@@ -57,21 +89,33 @@ class GreedySelectionConfig:
 
 
 class PortfolioWeightPolicy(ABC):
+    """Map a trial book and its correlation block to risk weights."""
+
     @abstractmethod
     def weights(self, symbols: list[str], correlation: np.ndarray) -> dict[str, float]:
         """Return normalized nonnegative instrument weights."""
 
 
 class EqualPortfolioWeights(PortfolioWeightPolicy):
+    """Assign the same risk weight to every instrument in a trial book."""
+
     def weights(self, symbols: list[str], correlation: np.ndarray) -> dict[str, float]:
+        """Return ``1/n`` weights; ``correlation`` is intentionally unused."""
         del correlation
         return {symbol: 1.0 / len(symbols) for symbol in symbols} if symbols else {}
 
 
 class HandcraftedPortfolioWeights(PortfolioWeightPolicy):
-    """Small Carver-style recursive two-cluster risk-weighting policy."""
+    """Implement Carver-style recursive two-cluster risk weighting.
+
+    Instruments are split into two correlation clusters. Each cluster receives
+    half the parent allocation after adjustment for its internal IDM, and
+    clusters larger than two instruments are split recursively. Final raw
+    weights are normalized to one.
+    """
 
     def weights(self, symbols: list[str], correlation: np.ndarray) -> dict[str, float]:
+        """Return normalized handcrafted weights for ``symbols`` in matrix order."""
         if not symbols:
             return {}
         raw = self._recursive(symbols, correlation)
@@ -79,6 +123,7 @@ class HandcraftedPortfolioWeights(PortfolioWeightPolicy):
         return {symbol: raw[symbol] / total for symbol in symbols}
 
     def _recursive(self, symbols: list[str], correlation: np.ndarray) -> dict[str, float]:
+        """Recursively split a correlation block into two sub-portfolios."""
         if len(symbols) <= 2:
             return {symbol: 1.0 / len(symbols) for symbol in symbols}
         try:
@@ -106,6 +151,13 @@ class HandcraftedPortfolioWeights(PortfolioWeightPolicy):
 
 @dataclass(frozen=True)
 class PortfolioScore:
+    """Describe one complete trial book and all instrument-level diagnostics.
+
+    ``score`` is negative infinity when any member violates a hard size or
+    liquidity constraint. ``details`` retains the calculated position, cost,
+    penalty, risk traded, and participation for every member.
+    """
+
     symbols: tuple[str, ...]
     weights: dict[str, float]
     idm: float
@@ -117,13 +169,22 @@ class PortfolioScore:
 
 @dataclass(frozen=True)
 class GreedySelectionResult:
+    """Return the accepted symbol order, final score, and every trial row."""
+
     selected: tuple[str, ...]
     final_score: PortfolioScore
     trials: tuple[dict[str, object], ...]
 
 
 class GreedyInstrumentSelector:
-    """Add the best feasible candidate until score falls below a threshold."""
+    """Add the best feasible candidate until score falls below tolerance.
+
+    The selector first scores every singleton using ``starting_weight`` and
+    IDM=1. It then tries every unused economic family as the next addition,
+    fully rescoring the hypothetical book. The first two-instrument book sets
+    the score benchmark; later winners must remain above
+    ``score_threshold * best_seen``.
+    """
 
     def __init__(
         self,
@@ -131,6 +192,7 @@ class GreedyInstrumentSelector:
         config: GreedySelectionConfig | None = None,
         weight_policy: PortfolioWeightPolicy | None = None,
     ) -> None:
+        """Initialize the selector with configurable scoring and weight policies."""
         self.config = config or GreedySelectionConfig()
         self.weight_policy = weight_policy or HandcraftedPortfolioWeights()
 
@@ -143,6 +205,27 @@ class GreedyInstrumentSelector:
         *,
         starting: bool = False,
     ) -> PortfolioScore:
+        """Score one hypothetical book using its correlation submatrix.
+
+        Parameters
+        ----------
+        symbols
+            Executable symbols in the hypothetical book.
+        candidates
+            Lookup containing fixed cost, risk, and liquidity inputs.
+        full_symbols
+            Row/column order of ``full_correlation``.
+        full_correlation
+            Correlation matrix for the complete eligible universe.
+        starting
+            Use the configured singleton weight and IDM=1 for seed comparison.
+
+        Returns
+        -------
+        PortfolioScore
+            Complete score plus per-instrument constraint diagnostics.
+        """
+        # Slice the precomputed universe matrix into this trial book's order.
         indices = [full_symbols.index(symbol) for symbol in symbols]
         correlation = full_correlation[np.ix_(indices, indices)]
         weights = self.weight_policy.weights(symbols, correlation)
@@ -163,6 +246,8 @@ class GreedyInstrumentSelector:
         for symbol in symbols:
             candidate = candidates[symbol]
             allocation = weights_for_limits[symbol]
+            # Maximum contracts at the forecast cap. A value below 0.5 cannot
+            # reliably express even one signed contract after rounding.
             max_position = (
                 self.config.capital
                 * self.config.target_vol
@@ -176,8 +261,12 @@ class GreedyInstrumentSelector:
                 if max_position < self.config.min_max_position
                 else self.config.size_penalty_scale / max_position**2
             )
+            # AFTS assumes a common gross SR and subtracts each instrument's
+            # own combined-forecast trading cost and granularity penalty.
             annual_cost = candidate.annual_trade_cost_sr
             net_sr = self.config.gross_sr - annual_cost - size_penalty
+            # Translate trial risk allocation and measured turnover into the
+            # same annualized-dollar-risk units as market volume.
             risk_traded_day = (
                 self.config.capital
                 * self.config.target_vol
@@ -216,6 +305,9 @@ class GreedyInstrumentSelector:
                 "reason": reason,
             })
 
+        # Portfolio score rewards diversification through the same w'Hw risk
+        # denominator used by IDM, but applies each member's net SR in the
+        # numerator before deciding whether the candidate improves the book.
         vector = np.array([weights[symbol] for symbol in symbols])
         denominator = math.sqrt(max(float(vector @ correlation @ vector), 0.0))
         numerator = sum(weights[symbol] * net_sharpes[symbol] for symbol in symbols)
@@ -229,6 +321,13 @@ class GreedyInstrumentSelector:
         candidate_list: list[SelectionCandidate],
         correlation: np.ndarray,
     ) -> GreedySelectionResult:
+        """Run the deterministic singleton seed and iterative addition loop.
+
+        ``candidate_list`` order defines the correlation-matrix order.
+        Economic-family duplicates are removed from consideration once one
+        family member is selected. Every attempted addition is retained in the
+        returned trial audit, including infeasible and rejected candidates.
+        """
         if not candidate_list:
             raise ValueError("at least one selection candidate is required")
         full_symbols = [candidate.symbol for candidate in candidate_list]
@@ -237,6 +336,8 @@ class GreedyInstrumentSelector:
         candidates = {candidate.symbol: candidate for candidate in candidate_list}
         trials: list[dict[str, object]] = []
 
+        # Seed selection uses a conservative nominal portfolio weight rather
+        # than pretending a one-market account permanently holds 100% weight.
         singleton_scores = []
         for symbol in full_symbols:
             scored = self.score(
@@ -256,6 +357,8 @@ class GreedyInstrumentSelector:
 
         iteration = 1
         while True:
+            # Once one execution route is selected, alternatives borrowing the
+            # same economic exposure cannot enter the book as fake breadth.
             selected_families = {
                 candidates[symbol].econ_family for symbol in selected
                 if candidates[symbol].econ_family
@@ -270,6 +373,8 @@ class GreedyInstrumentSelector:
             ]
             if not remaining:
                 break
+            # Recalculate weights, IDM, positions, liquidity, costs, and score
+            # for the entire hypothetical book for every possible addition.
             scored_trials = []
             for symbol in remaining:
                 scored = self.score(
@@ -301,6 +406,7 @@ class GreedyInstrumentSelector:
         *,
         accepted: bool,
     ) -> dict[str, object]:
+        """Flatten a portfolio score into one persisted candidate-trial row."""
         return {
             "iteration": iteration,
             "candidate": candidate,
@@ -316,6 +422,7 @@ class GreedyInstrumentSelector:
     def _mark_accepted(
         trials: list[dict[str, object]], iteration: int, candidate: str
     ) -> None:
+        """Mark the previously recorded winning row for one iteration."""
         for row in reversed(trials):
             if row["iteration"] == iteration and row["candidate"] == candidate:
                 row["accepted"] = True
