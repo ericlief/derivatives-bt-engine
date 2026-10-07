@@ -15,6 +15,27 @@ No VX futures (CFE) history is available locally (the Globex MDP3.0 duckdb
 is CME-only) -- the regime gate below uses spot VIX vs its own trailing
 63-day MA as the closest available analog to the live system's VX
 front-month / VX-63d-MA ratio (see derivatives_bt_engine.live.tsmom_rebalance).
+
+The main dataframe collections have distinct ownership:
+
+``full_price_data``
+    One unbounded source-neutral price/history frame per traded symbol. Signal
+    lookbacks and pre-window seed positions require observations before the
+    requested backtest start date.
+``precomputed``
+    One daily signal-and-sizing frame per traded symbol. Signals are calculated
+    once over full history and looked up by date inside the portfolio loop.
+``windowed``
+    The same price histories restricted to the requested reporting/trading
+    dates. These rows drive marks, rolls, and the daily event loop.
+``returns_wide``
+    A synchronized date-by-symbol return panel used only for correlation-aware
+    allocation and IDM.
+
+For estimated EWMAC scaling, ``panel`` means a long cross-instrument table of
+raw forecasts, while ``scalar_history`` is the causal pooled scale calculated
+from that panel. Neither should be confused with the per-symbol scaled forecast
+frames returned to the backtest.
 """
 from __future__ import annotations
 
@@ -136,6 +157,19 @@ _PRICE_ROUND_NDIGITS = 6
 
 @dataclass
 class TsmomBacktestConfig:
+    """Configure data, signals, sizing, gates, and accounting for one run.
+
+    ``symbols`` are traded/executable identifiers. Depending on ``data_source``
+    they may borrow another instrument's research history while retaining their
+    own multiplier and cost metadata. ``signal_weighting`` selects continuous,
+    Goulding, or Carver EWMAC direction. ``allocation_mode`` selects either the
+    production-like risk-targeted path or a strict equal-notional benchmark.
+
+    The field comments below document specialized options close to their use.
+    :meth:`__post_init__` validates combinations that would otherwise create an
+    ambiguous sizing or signal pipeline.
+    """
+
     symbols: list[str]
     initial_capital: float = 100_000.0
     vol_target: float = 0.15
@@ -385,6 +419,7 @@ class TsmomBacktestConfig:
     ewmac_forecast_cap: float = EWMAC_FORECAST_CAP
 
     def __post_init__(self):
+        """Validate parameter ranges and mutually incompatible run modes."""
         if self.allocation_mode not in ALLOCATION_MODES:
             raise ValueError(f"allocation_mode must be one of {ALLOCATION_MODES}, got {self.allocation_mode!r}")
         if self.signal_gate_mode not in ('off', 'monthly', 'daily'):
@@ -527,7 +562,13 @@ def load_portfolio_data(symbols: list[str]) -> tuple[dict[str, pl.DataFrame], pl
 def _load_backtest_data(
     config: TsmomBacktestConfig,
 ) -> tuple[dict[str, pl.DataFrame], pl.DataFrame, dict[str, object]]:
-    """Load legacy or source-neutral histories behind one backtest contract."""
+    """Load symbol histories, shared VIX data, and a source audit manifest.
+
+    The returned history mapping remains keyed by traded symbol even when a
+    micro contract borrows a full-size price history. Each frame contains the
+    signal index, Panama price, executable P&L mark, and source-quality fields
+    expected by the downstream signal and accounting stages.
+    """
     if config.data_source == 'legacy_globex':
         price_data, vix = load_portfolio_data(config.symbols)
         price_data = {
@@ -570,6 +611,12 @@ def _load_backtest_data(
 
 
 def _return_signal_bars(frame: pl.DataFrame) -> pl.DataFrame:
+    """Return the clean positive-index history used by return-based signals.
+
+    ``frame`` is one source-neutral symbol history. Invalid stitched returns
+    are removed without discarding its initial observation. The output always
+    contains ``[ts_event, close]`` and retains ``ret_1d`` when supplied.
+    """
     eligible = frame
     if 'return_valid' in frame.columns:
         eligible = frame.filter(
@@ -582,6 +629,7 @@ def _return_signal_bars(frame: pl.DataFrame) -> pl.DataFrame:
 
 
 def _ewmac_pool_key(symbol: str, config: TsmomBacktestConfig) -> str:
+    """Resolve which causal scalar pool supplies ``symbol``'s EWMAC scale."""
     if config.ewmac_scalar_pool in ('fixed', 'global'):
         return 'global'
     if config.ewmac_scalar_pool == 'cluster':
@@ -598,6 +646,7 @@ def _atomic_write_parquet(frame: pl.DataFrame, path: Path) -> None:
 
 
 def _cache_float(value: float) -> str:
+    """Encode a float as a stable filesystem-safe cache-key token."""
     return format(value, '.12g').replace('-', 'm').replace('.', 'p')
 
 
@@ -606,6 +655,12 @@ def _pysystemtrade_ewmac_cache_paths(
     source_commit: str,
     source_range_key: str,
 ) -> dict[str, Path]:
+    """Return content-addressed raw-panel, coverage, and scalar cache paths.
+
+    Paths include source commit/range, history schema, EWMAC/volatility
+    parameters, target forecast, and minimum calibration observations. This
+    prevents an older normalization universe from masquerading as a cache hit.
+    """
     directory = (
         Path(DEFAULT_FUTURES_CACHE_ROOT)
         / 'pysystemtrade'
@@ -698,6 +753,11 @@ def _load_pysystemtrade_ewmac_universe(
     :class:`PysystemtradeHistoryProvider`.  This adds a derived cache for one
     EWMAC speed so subsequent backtests do not reread 252 Panama files or
     recompute their EMA and point-volatility histories.
+
+    Returns a long ``panel`` with one raw-forecast row per instrument/date, an
+    instrument-level ``coverage`` audit, the source commit, a source-range and
+    membership fingerprint, and whether both panel files were accepted from
+    cache.
     """
     provider = PysystemtradeHistoryProvider(db_path=config.pysystemtrade_db_path)
     _, source_commit = provider._database_metadata()
@@ -751,6 +811,8 @@ def _load_pysystemtrade_ewmac_universe(
             len(instrument_codes), source_range_key, config.ewmac_fast_span,
             config.ewmac_slow_span, config.ewmac_vol_span,
         )
+        # Each element is one instrument's long raw-forecast history. They are
+        # concatenated only after every reviewed pooling member is processed.
         panel_rows: list[pl.DataFrame] = []
         coverage_rows: list[dict[str, object]] = []
         for position, instrument_code in enumerate(instrument_codes, start=1):
@@ -817,6 +879,12 @@ def _load_pysystemtrade_scalar_history(
     source_commit: str,
     source_range_key: str,
 ) -> tuple[pl.DataFrame, bool]:
+    """Load or causally estimate the pooled scalar for one raw forecast panel.
+
+    ``panel`` is the long full-universe table returned by
+    :func:`_load_pysystemtrade_ewmac_universe`. The boolean return value reports
+    whether the scalar came from the exact parameter-sensitive cache.
+    """
     paths = _pysystemtrade_ewmac_cache_paths(
         config, source_commit, source_range_key
     )
@@ -844,6 +912,10 @@ def load_pysystemtrade_ewmac_normalization(
     This is the public boundary around the range- and mapping-sensitive cache
     used by the backtester.  Callers receive the same reviewed membership and
     causal scalar without duplicating the full-universe normalization logic.
+
+    Returns ``(scalar_history, coverage, metadata)``. ``scalar_history`` is a
+    pooled time series, not an instrument forecast frame; callers still join it
+    backward onto their own raw forecast histories.
     """
     panel, coverage, source_commit, source_range_key, panel_cache_hit = (
         _load_pysystemtrade_ewmac_universe(config)
@@ -870,8 +942,16 @@ def _precompute_ewmac_normalization(
     estimated scalar row is shifted internally and therefore uses only prior
     dates.  The returned report is deliberately separate from rebalance-event
     output so calibration can be audited at its native daily frequency.
+
+    ``full_price_data`` is keyed by traded symbol. The result is
+    ``(forecasts_by_symbol, scalar_history, coverage)``: one scaled daily EWMAC
+    frame per traded symbol, the causal pool-level scalar series used to scale
+    them, and the membership/history audit for that normalization universe.
     """
+    # Per-symbol raw rule frames retain point volatility and diagnostic fields
+    # needed after the pooled scalar has been estimated.
     raw_by_symbol: dict[str, pl.DataFrame] = {}
+    # Long rows used only to estimate pooled scalar histories across symbols.
     panel_rows: list[pl.DataFrame] = []
     coverage_rows: list[dict[str, object]] = []
     manifest_instruments = (
@@ -925,6 +1005,9 @@ def _precompute_ewmac_normalization(
             ).select('ts_event', 'instrument_code', 'pool_key', 'raw_forecast')
         )
 
+    # This panel covers only configured backtest symbols. It is used for
+    # instrument/cluster/backtest-global pools; the reviewed full
+    # pysystemtrade panel replaces it for the production global pool.
     traded_panel = pl.concat(panel_rows, how='vertical')
     traded_coverage = pl.DataFrame(coverage_rows).sort(
         'pool_key', 'instrument_code'
@@ -935,6 +1018,9 @@ def _precompute_ewmac_normalization(
     source_range_key: Optional[str] = None
     if (config.ewmac_scalar_universe == 'pysystemtrade'
             and config.ewmac_scalar_pool == 'global'):
+        # Production-like scaling uses a stable reviewed universe rather than
+        # changing the forecast scale whenever the requested backtest symbols
+        # change.
         panel, coverage, source_commit, source_range_key, panel_cache_hit = (
             _load_pysystemtrade_ewmac_universe(config)
         )
@@ -962,6 +1048,8 @@ def _precompute_ewmac_normalization(
             infer_schema_length=None,
         )
     else:
+        # Research-specific pools intentionally estimate only from symbols in
+        # this run, grouped by the pool_key stamped above.
         panel = traded_panel
         coverage = traded_coverage
         normalization_universe = 'configured_backtest_symbols'
@@ -1003,6 +1091,9 @@ def _precompute_ewmac_normalization(
         pl.lit(scalar_cache_hit).alias('scalar_cache_hit'),
     )
 
+    # Join the appropriate causal pool scalar back onto each traded history.
+    # The output mapping is symbol-level; ``panel`` above remains long and is
+    # used only for calibration/cache auditing.
     forecasts: dict[str, pl.DataFrame] = {}
     scalar_join = scalar_history.select(
         'ts_event', 'pool_key', 'forecast_scalar', 'scalar_valid'
@@ -1041,7 +1132,14 @@ def _precompute_signal(
     annualization_days: int,
     ewmac: Optional[pl.DataFrame] = None,
 ) -> pl.DataFrame:
-    """Build a common signal/sizing frame for all three signal classes."""
+    """Build one symbol's common daily signal-and-sizing frame.
+
+    ``frame`` is the symbol's full unbounded source-neutral history. Return
+    momentum features are always calculated because volatility and diagnostics
+    use them in every signal mode. ``ewmac`` optionally supplies the already
+    pooled/scaled EWMAC frame. The output aligns signal state with executable
+    P&L marks and is later stored in ``precomputed[symbol]``.
+    """
     return_bars = _return_signal_bars(frame)
     base = continuous_momentum(
         build_features(return_bars),
@@ -1362,6 +1460,7 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
         return None
 
     def _col(name):
+        """Read one optional value from this symbol-date's single-row slice."""
         return row[name][0] if name in row.columns else None
 
     # Sizing inputs -- daily_std_last/hv/risk_scalar/close/dd -- ALWAYS
@@ -1641,9 +1740,21 @@ class _PortfolioLedger:
     isolation but, taken together with the goulding-mixing helpers, over
     200 lines a reader had to scroll past before reaching the loop itself.
     Pulling them out here lets the day loop read as a sequence of named
-    steps against `ledger` instead."""
+    steps against `ledger` instead.
+
+    ``events`` records every rebalance decision, ``transactions`` only actual
+    contract-count changes and rolls, and ``trades`` completed continuous spans
+    of exposure. Daily capital is maintained internally and copied into the
+    run's separate daily statistics table by :func:`run_tsmom_backtest`.
+    """
 
     def __init__(self, symbols: list[str], initial_capital: float, futures_types: dict[str, dict]):
+        """Initialize flat positions and empty audit logs for ``symbols``.
+
+        ``futures_types`` is the instrument-spec lookup containing contract
+        multipliers and commissions used by mark-to-market and transaction
+        accounting.
+        """
         self.futures_types = futures_types
         self.initial_capital = initial_capital
         self.capital = initial_capital
@@ -1675,6 +1786,12 @@ class _PortfolioLedger:
         self.prior_close[symbol] = close
 
     def close_trade(self, symbol: str, exit_date: date, exit_price: Optional[float]) -> None:
+        """Finalize one open exposure span and append its trade summary.
+
+        Mark-to-market P&L has already accumulated daily in ``open_trade``;
+        this method subtracts accumulated fees, records the exit metadata, and
+        clears the symbol's open span. It does not alter held contracts.
+        """
         ot = self.open_trade[symbol]
         if ot is None:
             return
@@ -1862,7 +1979,7 @@ class _PortfolioLedger:
         self, symbol: str, roll_date: date, execution_price: Optional[float] = None,
         source_segment: Optional[str] = None, pnl_quality: Optional[str] = None,
     ) -> None:
-        """Mandatory quarterly contract roll for a currently-held symbol:
+        """Process a detected contract roll for a currently-held symbol:
         close the expiring contract (full round-trip commission on its own
         quantity, close_reason='roll') and immediately reopen the identical
         size under the new contract at the same price -- net zero PnL/size
@@ -1917,7 +2034,7 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
     span of nonzero exposure in a single direction: 0->nonzero opens it,
     nonzero->0 or a direct sign flip closes it; resizing within the same
     direction extends the same trade rather than starting a new one. The
-    quarterly contract roll is the one exception forced regardless of
+    detected contract roll is the one exception forced regardless of
     exposure direction: a held span is always closed and immediately
     reopened at each scheduled roll date (close_reason='roll'), same as
     FuturesPosition's own roll_date handling, so 'trades' never reports a
