@@ -18,7 +18,7 @@ def _frame(values_4, values_64):
             eager=True,
         ),
         "point_vol": [1.0] * n,
-        "pt_change_1d": [0.1] * n,
+        "point_change": [0.1] * n,
         "fcst_4_16": values_4,
         "fcst_64_256": values_64,
     })
@@ -89,7 +89,7 @@ def test_turnover_ewm_applies_to_average_position_not_forecast():
             pl.date(2024, 1, 1), pl.date(2024, 1, 5), eager=True
         ),
         "point_vol": [1.0, 1.25, 2.0, 2.5, 4.0],
-        "pt_change_1d": [0.1] * 5,
+        "point_change": [0.1] * 5,
         "fcst_4_16": [0.2] * 5,
     })
     engine = CombinedForecastEngine(config=ForecastCombinationConfig(

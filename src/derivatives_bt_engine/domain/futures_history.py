@@ -47,7 +47,7 @@ from derivatives_bt_engine.utils.logger import setup_logger
 
 logger = setup_logger()
 
-HISTORY_SCHEMA_VERSION = 8
+HISTORY_SCHEMA_VERSION = 9
 DEFAULT_PYSYSTEMTRADE_DB_PATH = Path(
     "/home/dev/fin/db/pysystemtrade_reference.duckdb"
 )
@@ -82,7 +82,7 @@ _PANAMA_COLUMNS = {
     "trade_date",
     "source_timestamp",
     "panama_price",
-    "pt_change_1d",
+    "point_change",
     "quality_flag",
 }
 
@@ -142,13 +142,17 @@ class FuturesHistory:
         )
 
     def panama_bars(self) -> pl.DataFrame:
-        """Adapt generated additive prices to point-price signal columns."""
+        """Adapt generated additive prices to canonical EWMAC input columns.
+
+        The stored Panama stream and this adapter both use ``point_change`` so
+        the EWMAC pipeline has one name from history construction onward.
+        """
         if self.panama.is_empty():
             raise ValueError("history has no generated Panama stream")
         return self.panama.select(
             pl.col("trade_date").alias("ts_event"),
             pl.col("panama_price").alias("close"),
-            "pt_change_1d",
+            "point_change",
             "quality_flag",
         ).sort("ts_event")
 
@@ -197,7 +201,7 @@ def _empty_panama_frame() -> pl.DataFrame:
             "trade_date": pl.Date,
             "source_timestamp": pl.Datetime("us"),
             "panama_price": pl.Float64,
-            "pt_change_1d": pl.Float64,
+            "point_change": pl.Float64,
             "quality_flag": pl.String,
         }
     )
@@ -846,12 +850,12 @@ class HybridHistoryProvider:
             [
                 old_signal.select(
                     "trade_date", "source_timestamp", "current_price",
-                    "contract_id", "reference_price", "pt_change_1d",
+                    "contract_id", "reference_price", "point_change",
                     "ret_1d", "is_roll", "return_valid", "quality_flag",
                 ).with_columns(pl.lit(old.source).alias("source_segment")),
                 new_signal.select(
                     "trade_date", "source_timestamp", "current_price",
-                    "contract_id", "reference_price", "pt_change_1d",
+                    "contract_id", "reference_price", "point_change",
                     "ret_1d", "is_roll", "return_valid", "quality_flag",
                 ).with_columns(pl.lit(new.source).alias("source_segment")),
             ],
@@ -873,11 +877,11 @@ class HybridHistoryProvider:
         increments = pl.concat(
             [
                 old_panama.select(
-                    "trade_date", "source_timestamp", "pt_change_1d",
+                    "trade_date", "source_timestamp", "point_change",
                     "contract_id", "is_roll", "quality_flag",
                 ).with_columns(pl.lit(old.source).alias("source_segment")),
                 new_panama.select(
-                    "trade_date", "source_timestamp", "pt_change_1d",
+                    "trade_date", "source_timestamp", "point_change",
                     "contract_id", "is_roll", "quality_flag",
                 ).with_columns(pl.lit(new.source).alias("source_segment")),
             ],
@@ -886,7 +890,7 @@ class HybridHistoryProvider:
         panama = increments.with_columns(
             (
                 pl.lit(1000.0)
-                + pl.col("pt_change_1d").fill_null(0.0).cum_sum()
+                + pl.col("point_change").fill_null(0.0).cum_sum()
             ).alias("panama_price")
         )
 
@@ -983,7 +987,7 @@ def align_history_to_previous_sessions(
         pl.col("ret_1d").is_not_null().alias("return_valid"),
     )
     panama = remap(history.panama).sort("trade_date").with_columns(
-        pl.col("panama_price").diff().alias("pt_change_1d")
+        pl.col("panama_price").diff().alias("point_change")
     )
     marks = remap(history.marks).sort("trade_date").with_columns(
         (pl.col("contract_id") != pl.col("contract_id").shift(1))

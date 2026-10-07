@@ -22,11 +22,13 @@ from datetime import date, datetime
 import polars as pl
 
 from derivatives_bt_engine.domain.allocation import ALLOCATION_MODES, NOTIONAL_WEIGHTING_SCHEMES
-from derivatives_bt_engine.domain.signal import (
+from derivatives_bt_engine.domain.ewmac import (
     EWMAC_FORECAST_CAP,
     EWMAC_FORECAST_TARGET_ABS,
     EWMAC_SCALAR_MIN_PERIODS,
     EWMAC_SCALAR_POOLS,
+)
+from derivatives_bt_engine.domain.signal import (
     GOULDING_SIGNAL_MODES,
 )
 from derivatives_bt_engine.domain.roll_policy import parse_roll_policy_overrides

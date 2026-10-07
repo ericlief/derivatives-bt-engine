@@ -60,6 +60,14 @@ from derivatives_bt_engine.domain.allocation import (
     compute_symbol_notional_budget,
 )
 from derivatives_bt_engine.domain.enums import VolRegime
+from derivatives_bt_engine.domain.ewmac import (
+    EWMAC_FORECAST_CAP,
+    EWMAC_FORECAST_TARGET_ABS,
+    EWMAC_SCALAR_MIN_PERIODS,
+    EWMAC_SCALAR_POOLS,
+    estimate_ewmac_scalar_history,
+    ewmac,
+)
 from derivatives_bt_engine.domain.futures_dataloader import (
     FuturesDataLoader,
     assert_monotonic_expiration,
@@ -79,18 +87,12 @@ from derivatives_bt_engine.domain.roll_policy import ContractRollPolicy
 from derivatives_bt_engine.domain.signal import (
     DEFAULT_FAST_WINDOW,
     DEFAULT_SLOW_WINDOW,
-    EWMAC_FORECAST_CAP,
-    EWMAC_FORECAST_TARGET_ABS,
-    EWMAC_SCALAR_MIN_PERIODS,
-    EWMAC_SCALAR_POOLS,
     GOULDING_SIGNAL_MODES,
     SignalSpec,
     build_features,
     build_monthly_state_return_history,
-    carver_ewmac,
     cluster_conviction_score,
     continuous_momentum,
-    estimate_ewmac_scalar_history,
     estimate_goulding_forecast_scalar,
     estimate_mixing_params,
     goulding_continuous_raw,
@@ -818,7 +820,7 @@ def _load_pysystemtrade_ewmac_universe(
         for position, instrument_code in enumerate(instrument_codes, start=1):
             history = provider.load(instrument_code)
             bars = history.panama_bars()
-            raw = carver_ewmac(
+            raw = ewmac(
                 bars,
                 fast_span=config.ewmac_fast_span,
                 slow_span=config.ewmac_slow_span,
@@ -959,8 +961,13 @@ def _precompute_ewmac_normalization(
     )
     for symbol, frame in full_price_data.items():
         pool_key = _ewmac_pool_key(symbol, config)
-        raw = carver_ewmac(
-            frame.select('ts_event', pl.col('panama_price').alias('close')),
+        ewmac_columns = ['ts_event', pl.col('panama_price').alias('close')]
+        if 'point_change' in frame.columns:
+            # Preserve the history provider's matched-contract point changes;
+            # EWMAC derives close.diff() only for generic close-only frames.
+            ewmac_columns.append('point_change')
+        raw = ewmac(
+            frame.select(ewmac_columns),
             fast_span=config.ewmac_fast_span,
             slow_span=config.ewmac_slow_span,
             vol_span=config.ewmac_vol_span,
@@ -1130,15 +1137,15 @@ def _precompute_signal(
     frame: pl.DataFrame,
     config: TsmomBacktestConfig,
     annualization_days: int,
-    ewmac: Optional[pl.DataFrame] = None,
+    ewmac_frame: Optional[pl.DataFrame] = None,
 ) -> pl.DataFrame:
     """Build one symbol's common daily signal-and-sizing frame.
 
     ``frame`` is the symbol's full unbounded source-neutral history. Return
     momentum features are always calculated because volatility and diagnostics
-    use them in every signal mode. ``ewmac`` optionally supplies the already
-    pooled/scaled EWMAC frame. The output aligns signal state with executable
-    P&L marks and is later stored in ``precomputed[symbol]``.
+    use them in every signal mode. ``ewmac_frame`` optionally supplies the
+    already pooled/scaled EWMAC frame. The output aligns signal state with
+    executable P&L marks and is later stored in ``precomputed[symbol]``.
 
     In continuous/Goulding mode, ``signal`` is produced by
     :func:`continuous_momentum`: the bounded, possibly disagreement-discounted
@@ -1170,9 +1177,13 @@ def _precompute_signal(
         return marks.join(base, on='ts_event', how='left').with_columns(
             [pl.col(column).forward_fill() for column in state_columns]
         )
-    if ewmac is None:
-        ewmac = carver_ewmac(
-            frame.select('ts_event', pl.col('panama_price').alias('close')),
+    if ewmac_frame is None:
+        ewmac_columns = ['ts_event', pl.col('panama_price').alias('close')]
+        if 'point_change' in frame.columns:
+            # Do not discard provider-owned changes immediately before EWMAC.
+            ewmac_columns.append('point_change')
+        ewmac_frame = ewmac(
+            frame.select(ewmac_columns),
             fast_span=config.ewmac_fast_span,
             slow_span=config.ewmac_slow_span,
             vol_span=config.ewmac_vol_span,
@@ -1190,13 +1201,13 @@ def _precompute_signal(
             pl.col('ts_event').alias('scalar_as_of_date'),
             pl.lit(False).alias('scalar_carried_forward'),
         )
-    ewmac = ewmac.select(
+    ewmac_frame = ewmac_frame.select(
         'ts_event', 'raw_ewmac', 'point_vol', 'raw_forecast',
         'forecast_scalar', 'pool_key', 'scalar_as_of_date',
         'scalar_carried_forward', 'ewmac_forecast',
     )
     state_columns = [column for column in base.columns if column != 'ts_event']
-    return ewmac.join(base, on='ts_event', how='left').with_columns(
+    return ewmac_frame.join(base, on='ts_event', how='left').with_columns(
         [pl.col(column).forward_fill() for column in state_columns]
     ).join(marks, on='ts_event', how='left').with_columns(
         # The normalized EWMAC forecast is capped at +/- forecast_cap. Divide
@@ -2106,7 +2117,7 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
     precomputed = {
         s: _precompute_signal(
             full_price_data[s].sort('ts_event'), config, annualization_by_symbol[s],
-            ewmac=ewmac_by_symbol.get(s),
+            ewmac_frame=ewmac_by_symbol.get(s),
         )
         for s in config.symbols
     }

@@ -377,7 +377,7 @@ def test_ewmac_performance_delays_forecast_and_annualizes_turnover():
         "ts_event": [date(2024, 1, day) for day in range(1, 6)],
         "ewmac_forecast": [None, 0.5, 0.5, -0.5, -0.5],
         "point_vol": [1.0] * 5,
-        "pt_change_1d": [None, 1.0, 2.0, -1.0, 2.0],
+        "point_change": [None, 1.0, 2.0, -1.0, 2.0],
     })
 
     metrics, pnl = _ewmac_rule_performance(frame)

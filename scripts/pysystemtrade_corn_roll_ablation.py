@@ -30,7 +30,7 @@ from derivatives_bt_engine.domain.futures_history import (
     DEFAULT_PYSYSTEMTRADE_DB_PATH,
     PysystemtradeHistoryProvider,
 )
-from derivatives_bt_engine.domain.signal import carver_ewmac
+from derivatives_bt_engine.domain.ewmac import ewmac
 from derivatives_bt_engine.domain.tsmom_backtester import (
     TsmomBacktestConfig,
     load_pysystemtrade_ewmac_normalization,
@@ -71,7 +71,7 @@ def _rule_frame(
 ) -> pl.DataFrame:
     slow_span = fast_span * 4
     return (
-        carver_ewmac(
+        ewmac(
             history.panama_bars(),
             fast_span=fast_span,
             slow_span=slow_span,

@@ -69,7 +69,7 @@ def history_to_tsmom_bars(history: FuturesHistory) -> pl.DataFrame:
     panama = history.panama.select(
         "trade_date",
         "panama_price",
-        "pt_change_1d",
+        "point_change",
     )
     # An inner join makes every downstream row fully owned by all three input
     # streams; silently forward-filling a missing mark or Panama increment here
@@ -100,7 +100,7 @@ def history_to_tsmom_bars(history: FuturesHistory) -> pl.DataFrame:
         "ret_1d",
         "return_valid",
         "quality_flag",
-        "pt_change_1d",
+        "point_change",
         "contract_id",
         "expiration",
         "is_roll",

@@ -21,7 +21,7 @@ from dataclasses import dataclass
 import numpy as np
 import polars as pl
 
-from derivatives_bt_engine.domain.signal import (
+from derivatives_bt_engine.domain.ewmac import (
     EWMAC_FORECAST_CAP,
     EWMAC_FORECAST_TARGET_ABS,
 )
@@ -231,7 +231,7 @@ class CombinedForecastEngine:
         ----------
         history_frame
             One signal history with ``ts_event``, ``point_vol``,
-            ``pt_change_1d``, and a ``fcst_<fast>_<slow>`` column for every
+            ``point_change``, and a ``fcst_<fast>_<slow>`` column for every
             eligible rule. It contains one history, not the whole universe.
         eligible_rules
             Rule keys retained for this executable symbol by Phase 1 costs.
@@ -253,7 +253,7 @@ class CombinedForecastEngine:
         """
         rules = [str(rule).strip() for rule in eligible_rules if str(rule).strip()]
         weights = self.weight_policy.weights(rules)
-        required = {"ts_event", "point_vol", "pt_change_1d"}
+        required = {"ts_event", "point_vol", "point_change"}
         required.update(EWMAC_RULE_BY_KEY[rule].column for rule in weights)
         missing = sorted(required.difference(history_frame.columns))
         if missing:
@@ -267,8 +267,8 @@ class CombinedForecastEngine:
             pl.col("point_vol").is_not_null()
             & pl.col("point_vol").is_finite()
             & (pl.col("point_vol") > 0)
-            & pl.col("pt_change_1d").is_not_null()
-            & pl.col("pt_change_1d").is_finite()
+            & pl.col("point_change").is_not_null()
+            & pl.col("point_change").is_finite()
         )
         for column in component_columns:
             valid_expr &= pl.col(column).is_not_null() & pl.col(column).is_finite()
@@ -328,7 +328,7 @@ class CombinedForecastEngine:
                 .alias("normalized_position"),
                 (
                     pl.col("subsystem_position").shift(1)
-                    * pl.col("pt_change_1d")
+                    * pl.col("point_change")
                 ).alias("subsystem_return"),
             )
         )

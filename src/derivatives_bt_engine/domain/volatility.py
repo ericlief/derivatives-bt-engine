@@ -21,10 +21,10 @@ CARVER_VOL_MIN_SAMPLES = 10
 CARVER_BUSINESS_DAYS_PER_YEAR = 256
 
 
-def carver_mixed_point_volatility(
+def mixed_point_volatility(
     frame: pl.DataFrame,
     *,
-    point_change_col: str = "pt_change_1d",
+    point_change_col: str = "point_change",
     annualization_days: int = CARVER_BUSINESS_DAYS_PER_YEAR,
     fast_span: int = CARVER_FAST_VOL_SPAN,
     slow_years: int = CARVER_SLOW_VOL_YEARS,

@@ -7,10 +7,10 @@ from typing import Any, Mapping
 
 import polars as pl
 
+from derivatives_bt_engine.domain.ewmac import ewmac
 from derivatives_bt_engine.domain.futures_history import FuturesHistory
 from derivatives_bt_engine.domain.signal import (
     build_features,
-    carver_ewmac,
     continuous_momentum,
     goulding_monthly,
 )
@@ -21,6 +21,9 @@ class FuturesSignalClass(str, Enum):
 
     RETURN_TSMOM = "return_tsmom"
     GOULDING_MONTHLY = "goulding_monthly"
+    EWMAC = "carver_ewmac"
+    # Preserve the existing serialized/configured value without carrying the
+    # old author-specific name through new internal code.
     CARVER_EWMAC = "carver_ewmac"
 
 
@@ -39,8 +42,8 @@ def run_futures_signal(
     """
     kind = FuturesSignalClass(signal_class)
     kwargs = dict(parameters or {})
-    if kind == FuturesSignalClass.CARVER_EWMAC:
-        return carver_ewmac(history.panama_bars(), **kwargs)
+    if kind == FuturesSignalClass.EWMAC:
+        return ewmac(history.panama_bars(), **kwargs)
 
     eligible = history.signal.filter(
         pl.col("return_valid") | (pl.col("quality_flag") == "initial_observation")

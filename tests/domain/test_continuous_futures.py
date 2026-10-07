@@ -48,7 +48,7 @@ def test_panama_reconstruction_and_roll_return_use_forward_reference() -> None:
     )
 
     assert result.panama.get_column("panama_price").to_list() == [120.0, 121.0, 122.0]
-    assert result.signal.get_column("pt_change_1d").to_list() == [None, 1.0, 1.0]
+    assert result.signal.get_column("point_change").to_list() == [None, 1.0, 1.0]
     assert "normalized_return" not in result.signal.columns
     assert "contract_point_change" not in result.signal.columns
     assert result.signal.get_column("ret_1d")[2] == pytest.approx(122 / 121 - 1)
@@ -65,7 +65,7 @@ def test_nonpositive_prices_keep_point_path_but_mask_ratio_path() -> None:
         )
     )
 
-    assert result.panama.get_column("pt_change_1d").to_list() == [
+    assert result.panama.get_column("point_change").to_list() == [
         None, -110.0, 15.0, 1.0
     ]
     assert result.signal.get_column("ret_1d").to_list() == [
@@ -101,7 +101,7 @@ def test_daily_selection_chains_all_intraday_moves_and_propagates_invalidity() -
     assert daily.signal.get_column("return_valid").to_list() == [False, False]
     assert daily.signal.get_column("quality_flag")[1] == "invalid_intraday_return"
     assert daily.signal.get_column("signal_index").to_list() == [100.0, 100.0]
-    assert daily.panama.get_column("pt_change_1d").to_list() == [None, 11.0]
+    assert daily.panama.get_column("point_change").to_list() == [None, 11.0]
 
 
 def test_daily_selection_rebuilds_index_after_invalid_session_mask() -> None:

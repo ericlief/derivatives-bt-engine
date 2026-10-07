@@ -44,7 +44,7 @@ def build_continuous_futures(
     already has the prior same-contract quote (the Globex query does) may pass
     its name as ``direct_reference_column``.
 
-    ``pt_change_1d`` is the matched-contract move in price points;
+    ``point_change`` is the matched-contract move in price points;
     ``ret_1d`` divides that move by the reference price. Neither is
     volatility-normalized. Percentage returns are deliberately unavailable
     when either side of the ratio is nonpositive, or when a roll cannot be
@@ -169,7 +169,7 @@ def build_continuous_futures(
 
     enriched = frame.with_columns(
         pl.Series("reference_price", references, dtype=pl.Float64),
-        pl.Series("pt_change_1d", point_changes, dtype=pl.Float64),
+        pl.Series("point_change", point_changes, dtype=pl.Float64),
         pl.Series("ret_1d", returns, dtype=pl.Float64),
         pl.Series("signal_index", indices, dtype=pl.Float64),
         pl.Series("is_roll", rolls, dtype=pl.Boolean),
@@ -183,7 +183,7 @@ def build_continuous_futures(
         "current_price",
         pl.col("current_contract").alias("contract_id"),
         "reference_price",
-        "pt_change_1d",
+        "point_change",
         "ret_1d",
         "signal_index",
         "is_roll",
@@ -196,7 +196,7 @@ def build_continuous_futures(
         "trade_date",
         "source_timestamp",
         "panama_price",
-        "pt_change_1d",
+        "point_change",
         "roll_differential",
         pl.col("current_price"),
         pl.col("current_contract").alias("contract_id"),
@@ -236,7 +236,7 @@ def select_daily_continuous(
         .to_list()
     )
     panama = select_daily_last(result.panama).with_columns(
-        pl.col("panama_price").diff().alias("pt_change_1d")
+        pl.col("panama_price").diff().alias("point_change")
     )
     signal = select_daily_last(result.signal).with_columns(
         pl.col("signal_index").pct_change().alias("ret_1d")
@@ -268,11 +268,11 @@ def select_daily_continuous(
             * 100.0
         ).alias("signal_index")
     ).join(
-        panama.select("trade_date", "pt_change_1d"),
+        panama.select("trade_date", "point_change"),
         on="trade_date",
         how="left",
         suffix="_panama",
-    ).drop("pt_change_1d").rename(
-        {"pt_change_1d_panama": "pt_change_1d"}
+    ).drop("point_change").rename(
+        {"point_change_panama": "point_change"}
     )
     return ContinuousFuturesResult(signal=signal, panama=panama)

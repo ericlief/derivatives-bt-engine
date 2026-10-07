@@ -25,6 +25,7 @@ import polars as pl
 import pytest
 
 from derivatives_bt_engine.domain.enums import SignalConfidenceRegime, TrendRegime
+from derivatives_bt_engine.domain.ewmac import ewmac, estimate_ewmac_scalar_history
 from derivatives_bt_engine.domain.signal import (
     DEFAULT_FAST_WINDOW,
     DEFAULT_SLOW_WINDOW,
@@ -35,13 +36,11 @@ from derivatives_bt_engine.domain.signal import (
     _goulding_direction,
     build_features,
     calculate_trend_strength,
-    carver_ewmac,
     classify_regime,
     classify_signal_confidence,
     compute_signal_confidence,
     compute_vol_ratio,
     continuous_momentum,
-    estimate_ewmac_scalar_history,
     estimate_goulding_forecast_scalar,
     goulding_monthly,
     goulding_continuous_raw,
@@ -545,13 +544,13 @@ def test_ewmac_scalar_history_is_cross_sectional_and_strictly_causal():
     assert history['forecast_scalar'][3] == pytest.approx(0.5 / (8.0 / 3.0))
 
 
-def test_carver_ewmac_uses_shared_mixed_point_volatility():
+def test_ewmac_uses_shared_mixed_point_volatility():
     dates = _trading_dates(date(2020, 1, 1), 90)
     changes = [None] + [(-1.0) ** i * (i % 7 + 1) for i in range(1, 90)]
     closes = [100.0]
     for change in changes[1:]:
         closes.append(closes[-1] + change)
-    result = carver_ewmac(
+    result = ewmac(
         pl.DataFrame({'ts_event': dates, 'close': closes}),
         fast_span=4,
         slow_span=16,

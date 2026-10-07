@@ -60,6 +60,11 @@ from derivatives_bt_engine.data.pysystemtrade_ewmac import (
 )
 from derivatives_bt_engine.data.report_formatting import round_public_report
 from derivatives_bt_engine.domain.forecast_combination import EwmacRule
+from derivatives_bt_engine.domain.ewmac import (
+    EWMAC_FORECAST_CAP,
+    EWMAC_FORECAST_TARGET_ABS,
+    EWMAC_SCALAR_MIN_PERIODS,
+)
 from derivatives_bt_engine.domain.futures_history import (
     DEFAULT_PYSYSTEMTRADE_DB_PATH,
     PysystemtradeHistoryProvider,
@@ -69,18 +74,13 @@ from derivatives_bt_engine.domain.instruments import (
     resolve_annualization_days,
     resolve_signal_symbol,
 )
-from derivatives_bt_engine.domain.signal import (
-    EWMAC_FORECAST_CAP,
-    EWMAC_FORECAST_TARGET_ABS,
-    EWMAC_SCALAR_MIN_PERIODS,
-)
 from derivatives_bt_engine.domain.volatility import (
     CARVER_BUSINESS_DAYS_PER_YEAR,
     CARVER_FAST_VOL_SPAN,
     CARVER_SLOW_VOL_WEIGHT,
     CARVER_SLOW_VOL_YEARS,
     CARVER_VOL_MIN_SAMPLES,
-    carver_mixed_point_volatility,
+    mixed_point_volatility,
 )
 from derivatives_bt_engine.live.tsmom_rebalance import (
     _format_ib_multiplier,
@@ -387,7 +387,7 @@ def _ewmac_rule_performance(
     divided by the average-absolute-forecast target, annualized by 256.
     """
     required = {
-        "ts_event", "ewmac_forecast", "point_vol", "pt_change_1d",
+        "ts_event", "ewmac_forecast", "point_vol", "point_change",
     }
     missing = required - set(frame.columns)
     if missing:
@@ -406,12 +406,12 @@ def _ewmac_rule_performance(
         .with_columns(
             pl.when(
                 pl.col("normalized_position").is_not_null()
-                & pl.col("pt_change_1d").is_not_null()
+                & pl.col("point_change").is_not_null()
                 & (pl.col("sizing_point_vol") > 0)
             )
             .then(
                 pl.col("normalized_position")
-                * pl.col("pt_change_1d")
+                * pl.col("point_change")
                 / pl.col("sizing_point_vol")
             )
             .otherwise(None)
@@ -1237,9 +1237,9 @@ def volatility_from_bars(
         .unique(subset=["ts_event"], keep="last")
         .sort("ts_event")
     )
-    mixed = carver_mixed_point_volatility(
-        clean.with_columns(pl.col("close").diff().alias("pt_change_1d")),
-        point_change_col="pt_change_1d",
+    mixed = mixed_point_volatility(
+        clean.with_columns(pl.col("close").diff().alias("point_change")),
+        point_change_col="point_change",
         annualization_days=annualization_days,
         fast_span=fast_span,
         slow_years=slow_years,
@@ -1431,7 +1431,7 @@ def volatility_from_pysystemtrade_history(
     """Calculate mixed point vol from the full roll-neutral Carver history."""
     history = provider.load(instrument_code)
     bars = history.panama_bars()
-    mixed = carver_mixed_point_volatility(
+    mixed = mixed_point_volatility(
         bars,
         annualization_days=annualization_days,
         fast_span=fast_span,
@@ -1442,7 +1442,7 @@ def volatility_from_pysystemtrade_history(
     value = _positive_finite(last["mixed_point_vol"][0])
     if value is None:
         raise ValueError(f"{instrument_code}: no valid mixed point volatility")
-    changes = bars["pt_change_1d"].drop_nulls().tail(fast_span)
+    changes = bars["point_change"].drop_nulls().tail(fast_span)
     if history.carry.height:
         reference_price = history.carry.sort("trade_date")["current_price"][-1]
     else:

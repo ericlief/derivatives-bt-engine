@@ -34,11 +34,11 @@ from derivatives_bt_engine.domain.futures_history import (
     FuturesHistory,
     PysystemtradeHistoryProvider,
 )
-from derivatives_bt_engine.domain.signal import (
+from derivatives_bt_engine.domain.ewmac import (
     EWMAC_FORECAST_CAP,
     EWMAC_FORECAST_TARGET_ABS,
     EWMAC_SCALAR_MIN_PERIODS,
-    carver_ewmac,
+    ewmac,
 )
 from derivatives_bt_engine.domain.volatility import (
     CARVER_FAST_VOL_SPAN,
@@ -181,7 +181,7 @@ def build_ewmac_rule_forecast(
     column = forecast_column or pooled.rule.column
     scalar = pooled.global_scalar().select("ts_event", "forecast_scalar")
     return (
-        carver_ewmac(
+        ewmac(
             history.panama_bars(),
             fast_span=pooled.rule.fast,
             slow_span=pooled.rule.slow,
@@ -209,7 +209,7 @@ def build_ewmac_component_frame(
 ) -> pl.DataFrame:
     """Build a wide component-forecast frame for one instrument history.
 
-    The compact shape contains ``ts_event``, ``point_vol``, ``pt_change_1d``,
+    The compact shape contains ``ts_event``, ``point_vol``, ``point_change``,
     and one ``fcst_<fast>_<slow>`` column per rule and is consumed by Phase 2.
     With ``detailed=True`` the frame additionally exposes the Panama price,
     raw EWMAC difference, raw normalized forecast, and daily pooled scalar for
@@ -229,18 +229,17 @@ def build_ewmac_component_frame(
             base_columns = [
                 "ts_event",
                 "point_vol",
-                "pt_change_1d",
+                "point_change",
                 pooled.rule.column,
             ]
             if detailed:
                 base_columns = [
                     "ts_event",
                     "close",
-                    "point_change",
                     "fast_point_vol",
                     "slow_point_vol",
                     "point_vol",
-                    "pt_change_1d",
+                    "point_change",
                     "quality_flag",
                     pl.col("raw_ewmac").alias(f"raw_ewmac_{suffix}"),
                     pl.col("raw_forecast").alias(f"raw_fcst_{suffix}"),

@@ -2,13 +2,13 @@ import pandas as pd
 import polars as pl
 import pytest
 
-from derivatives_bt_engine.domain.volatility import carver_mixed_point_volatility
+from derivatives_bt_engine.domain.volatility import mixed_point_volatility
 
 
-def test_carver_mixed_point_volatility_matches_direct_polars_formula():
-    frame = pl.DataFrame({"pt_change_1d": [None] + [(-1.0) ** i * (i % 7 + 1) for i in range(1, 90)]})
+def test_mixed_point_volatility_matches_direct_polars_formula():
+    frame = pl.DataFrame({"point_change": [None] + [(-1.0) ** i * (i % 7 + 1) for i in range(1, 90)]})
 
-    result = carver_mixed_point_volatility(
+    result = mixed_point_volatility(
         frame,
         annualization_days=252,
         fast_span=32,
@@ -16,7 +16,7 @@ def test_carver_mixed_point_volatility_matches_direct_polars_formula():
         slow_weight=0.3,
         min_samples=10,
     )
-    expected_fast = frame["pt_change_1d"].ewm_std(span=32, adjust=True, min_samples=10)
+    expected_fast = frame["point_change"].ewm_std(span=32, adjust=True, min_samples=10)
     expected_slow = expected_fast.ewm_mean(span=2520, adjust=True, min_samples=1)
     expected_mixed = expected_fast * 0.7 + expected_slow * 0.3
 
@@ -28,10 +28,10 @@ def test_carver_mixed_point_volatility_matches_direct_polars_formula():
     assert result["slow_vol_weight"][-1] == pytest.approx(0.3)
 
 
-def test_carver_mixed_point_volatility_matches_pysystemtrade_pandas_mechanics():
+def test_mixed_point_volatility_matches_pysystemtrade_pandas_mechanics():
     changes = [None] + [(-1.0) ** i * (i % 7 + 1) for i in range(1, 90)]
-    result = carver_mixed_point_volatility(
-        pl.DataFrame({"pt_change_1d": changes}),
+    result = mixed_point_volatility(
+        pl.DataFrame({"point_change": changes}),
         annualization_days=252,
         fast_span=32,
         slow_years=10,
@@ -54,8 +54,8 @@ def test_carver_mixed_point_volatility_matches_pysystemtrade_pandas_mechanics():
     )
 
 
-def test_carver_mixed_point_volatility_exposes_short_slow_history():
-    result = carver_mixed_point_volatility(
+def test_mixed_point_volatility_exposes_short_slow_history():
+    result = mixed_point_volatility(
         pl.DataFrame({"change": list(range(30))}),
         point_change_col="change",
         annualization_days=250,
@@ -76,6 +76,6 @@ def test_carver_mixed_point_volatility_exposes_short_slow_history():
         ({"min_samples": 1}, "min_samples"),
     ],
 )
-def test_carver_mixed_point_volatility_validates_configuration(kwargs, message):
+def test_mixed_point_volatility_validates_configuration(kwargs, message):
     with pytest.raises(ValueError, match=message):
-        carver_mixed_point_volatility(pl.DataFrame({"pt_change_1d": [1.0, 2.0]}), **kwargs)
+        mixed_point_volatility(pl.DataFrame({"point_change": [1.0, 2.0]}), **kwargs)

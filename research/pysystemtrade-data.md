@@ -880,8 +880,8 @@ For an unchanged selected contract:
 
 ```text
 reference[t-1] = PRICE[t-1]
-pt_change_1d[t] = PRICE[t] - reference[t-1]
-ret_1d[t] = pt_change_1d[t] / reference[t-1]
+point_change[t] = PRICE[t] - reference[t-1]
+ret_1d[t] = point_change[t] / reference[t-1]
 ```
 
 At a Carver roll, require
@@ -889,16 +889,16 @@ At a Carver roll, require
 
 ```text
 reference[t-1] = FORWARD[t-1]
-pt_change_1d[t] = PRICE[t] - FORWARD[t-1]
-ret_1d[t] = pt_change_1d[t] / reference[t-1]
+point_change[t] = PRICE[t] - FORWARD[t-1]
+ret_1d[t] = point_change[t] / reference[t-1]
 roll_differential[t] = FORWARD[t-1] - PRICE[t-1]
 ```
 
 The two named daily fields are paired measurements of the same matched-
-contract move: `pt_change_1d` is in price points and `ret_1d` is a fractional
+contract move: `point_change` is in price points and `ret_1d` is a fractional
 simple return. Neither field is volatility-normalized. History cache schema
-v8 retains the v7 invalid-session correction and additionally isolates every
-Globex cache by roll-policy identity.
+v9 uses that name from stream construction onward; it retains the v7
+invalid-session correction and v8 roll-policy-specific Globex cache identity.
 
 The local Panama implementation is algebraically identical to Carver's
 forward mutation: every new roll differential is added to all earlier
@@ -918,9 +918,9 @@ inputs:
 |---|---|---|
 | repository return TSMOM | positive contract-return index | horizons and volatility are defined from arithmetic returns |
 | Goulding monthly | positive contract-return index | monthly price relatives must be multiplicative, not additive-Panama ratios |
-| Carver EWMAC | generated Panama point price | EMA differences and daily volatility must share point units |
+| EWMAC | generated Panama point price | EMA differences and daily volatility must share point units |
 
-`domain.futures_signal_harness` enforces this routing.  `carver_ewmac` exposes
+`domain.futures_signal_harness` enforces this routing.  `domain.ewmac.ewmac` exposes
 the raw point-vol-normalized forecast; its scalar is explicit and defaults to
 one because calibrated forecast scalars differ by speed pair and must not be
 invented.  Raw contract marks—not either derived signal level—remain the
@@ -1133,7 +1133,7 @@ The three rule classes are available through the existing backtester:
 --signal-weighting carver_ewmac  # Panama-price EMA difference / point vol
 ```
 
-`carver_ewmac` requires a source-neutral data path and has explicit fast,
+The `carver_ewmac` CLI mode requires a source-neutral data path and has explicit fast,
 slow, volatility-span, forecast-scalar, and cap arguments. The legacy loader
 remains the CLI default and rejects this rule because it does not preserve the
 required distinction between raw marks and generated series.

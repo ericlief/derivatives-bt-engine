@@ -20,7 +20,7 @@ def _history() -> SimpleNamespace:
             pl.date(2024, 1, 1), pl.date(2024, 1, 8), eager=True
         ),
         "close": [100.0, 101.0, 102.0, 101.0, 103.0, 104.0, 103.0, 105.0],
-        "pt_change_1d": [None, 1.0, 1.0, -1.0, 2.0, 1.0, -1.0, 2.0],
+        "point_change": [None, 1.0, 1.0, -1.0, 2.0, 1.0, -1.0, 2.0],
         "quality_flag": [""] * 8,
     })
     return SimpleNamespace(panama_bars=lambda: bars)
@@ -58,7 +58,7 @@ def test_component_builder_exposes_compact_and_detailed_shapes():
     detailed = build_ewmac_component_frame(_history(), pooled, detailed=True)
 
     assert compact.columns == [
-        "ts_event", "point_vol", "pt_change_1d", "fcst_2_4", "fcst_4_8"
+        "ts_event", "point_vol", "point_change", "fcst_2_4", "fcst_4_8"
     ]
     assert {
         "close",

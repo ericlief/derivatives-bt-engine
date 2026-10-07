@@ -25,16 +25,15 @@ the appropriate continuous representation to each one:
     build_features(df)                 -- shared base features only
     continuous_momentum(df, ...)        -- daily, vol-normalized fast/slow model
     goulding_monthly(df, ...)           -- monthly, un-normalized arithmetic model
-    carver_ewmac(df, ...)                -- additive-price EMA crossover / point vol
+
+Additive-price EWMAC construction lives in ``domain.ewmac`` rather than in
+this return-signal module.
 
 The public ``signal`` column is deliberately a bounded, unitless forecast, not
 a position or a return:
 
     continuous_momentum: tanh(weighted fast/slow trend), optionally discounted
                          when the two horizons disagree; range [-1, +1]
-    carver_ewmac:        raw EMA crossover / mixed point volatility, multiplied
-                         by its forecast scalar and clipped to the configured cap
-
 The backtester subsequently converts that forecast into a position scalar and
 then into integer contracts.  Keeping those stages separate is important:
 ``signal`` expresses direction and conviction; volatility, portfolio budget,
@@ -95,15 +94,6 @@ from typing import Mapping, Optional, cast
 import polars as pl
 
 from derivatives_bt_engine.domain.enums import SignalConfidenceRegime, TrendRegime
-from derivatives_bt_engine.domain.volatility import (
-    CARVER_BUSINESS_DAYS_PER_YEAR,
-    CARVER_FAST_VOL_SPAN,
-    CARVER_SLOW_VOL_WEIGHT,
-    CARVER_SLOW_VOL_YEARS,
-    CARVER_VOL_MIN_SAMPLES,
-    carver_mixed_point_volatility,
-)
-
 log = logging.getLogger(__name__)
 
 # ── Tunable defaults ─────────────────────────────────────────────────────
@@ -139,13 +129,6 @@ GOULDING_SIGNAL_MODES = ('binary', 'continuous')
 GOULDING_FORECAST_TARGET_ABS = 0.5
 GOULDING_FORECAST_CAP = 1.0
 GOULDING_FORECAST_MIN_OBS = 12
-# Native repository forecasts use the same bounded scale as the other TSMOM
-# signals. This is exactly Carver's average-absolute-10/cap-20 convention
-# divided by 20: average absolute 0.5, hard cap +/-1.
-EWMAC_FORECAST_TARGET_ABS = 0.5
-EWMAC_FORECAST_CAP = 1.0
-EWMAC_SCALAR_MIN_PERIODS = 500
-EWMAC_SCALAR_POOLS = ('fixed', 'global', 'cluster', 'instrument')
 # Paper's own warm-up requirement per Appendix C -- estimate_mixing_params
 # falls back to the uninformed (0.5, 0.5) below this many months of pooled
 # Correction/Rebound history.
@@ -504,189 +487,6 @@ def build_features(df: pl.DataFrame) -> pl.DataFrame:
         dd=((pl.col('close') - pl.col('peak')) / pl.col('peak')).round(2),
     )
     return df
-
-
-def carver_ewmac(
-    df: pl.DataFrame,
-    fast_span: int = 16,
-    slow_span: int = 64,
-    vol_span: int = CARVER_FAST_VOL_SPAN,
-    vol_slow_years: int = CARVER_SLOW_VOL_YEARS,
-    vol_slow_weight: float = CARVER_SLOW_VOL_WEIGHT,
-    vol_min_samples: int = CARVER_VOL_MIN_SAMPLES,
-    annualization_days: int = CARVER_BUSINESS_DAYS_PER_YEAR,
-    forecast_scalar: float = 1.0,
-    forecast_cap: float = EWMAC_FORECAST_CAP,
-) -> pl.DataFrame:
-    """Carver-style EWMAC on an additive continuous futures price.
-
-    ``close`` must be a Panama (or additively equivalent) point-price series,
-    never a positive return index. The EMA difference and the 70% fast/30%
-    slow mixed volatility are in the same point units. ``vol_span`` controls
-    the fast component; the slow component is an EWM mean of that fast
-    volatility. ``forecast_scalar`` is explicit because calibrated scalars
-    vary by speed pair and portfolio; the default exposes the raw
-    vol-normalized forecast rather than pretending to be calibrated.
-    """
-    if fast_span <= 0 or slow_span <= 0 or vol_span <= 0:
-        raise ValueError("EWMAC spans must be positive")
-    if fast_span >= slow_span:
-        raise ValueError("fast_span must be less than slow_span")
-    if forecast_cap <= 0:
-        raise ValueError("forecast_cap must be positive")
-    result = df.sort("ts_event").with_columns(
-        pl.col("close").ewm_mean(span=fast_span, adjust=False).alias("fast_ewma"),
-        pl.col("close").ewm_mean(span=slow_span, adjust=False).alias("slow_ewma"),
-        pl.col("close").diff().alias("point_change"),
-    )
-    result = result.with_columns(
-        (pl.col("fast_ewma") - pl.col("slow_ewma")).alias("raw_ewmac"),
-    )
-    result = carver_mixed_point_volatility(
-        result,
-        point_change_col="point_change",
-        annualization_days=annualization_days,
-        fast_span=vol_span,
-        slow_years=vol_slow_years,
-        slow_weight=vol_slow_weight,
-        min_samples=vol_min_samples,
-    ).with_columns(pl.col("mixed_point_vol").alias("point_vol"))
-    result = result.with_columns(
-        pl.when(pl.col("point_vol") > 0)
-        # The EMA difference and point volatility share price-point units,
-        # so their ratio is the unitless raw rule forecast.  It is not yet a
-        # position and has not yet been normalized to the target magnitude.
-        .then(pl.col("raw_ewmac") / pl.col("point_vol"))
-        .otherwise(None)
-        .alias("raw_forecast")
-    )
-    return result.with_columns(
-        # ``signal`` is the final bounded EWMAC forecast consumed by the
-        # backtester: scale the raw rule, then cap extreme conviction.  Risk
-        # targeting and conversion to contracts happen downstream.
-        (pl.col("raw_forecast") * forecast_scalar)
-        .clip(-forecast_cap, forecast_cap)
-        .alias("signal")
-    )
-
-
-def estimate_ewmac_scalar_history(
-    raw_forecasts: pl.DataFrame,
-    *,
-    target_abs_forecast: float = EWMAC_FORECAST_TARGET_ABS,
-    min_periods: int = EWMAC_SCALAR_MIN_PERIODS,
-) -> pl.DataFrame:
-    """Causally estimate one pooled scalar history per ``pool_key``.
-
-    Input is a long panel with ``ts_event``, ``instrument_code``,
-    ``pool_key``, and unscaled ``raw_forecast``.  It mirrors Carver's pooled
-    estimator: zero forecasts are omitted from the magnitude sample, each
-    instrument is forward-filled only after its first usable observation,
-    and the daily cross-sectional median absolute forecast is averaged over
-    time.  The daily statistic is shifted before accumulation, so the scalar
-    stamped on date ``t`` uses dates strictly before ``t`` even though the
-    whole history is calculated in one vectorized pass.
-
-    A daily cross-sectional statistic prevents instruments with longer
-    histories from receiving more weight merely because they have more rows.
-    No backfill is performed: rows before ``min_periods`` prior daily samples
-    retain a null scalar.
-    """
-    required = {"ts_event", "instrument_code", "pool_key", "raw_forecast"}
-    missing = required - set(raw_forecasts.columns)
-    if missing:
-        raise ValueError(f"EWMAC scalar input missing columns: {sorted(missing)}")
-    if target_abs_forecast <= 0 or not math.isfinite(target_abs_forecast):
-        raise ValueError("target_abs_forecast must be finite and positive")
-    if min_periods <= 0:
-        raise ValueError("min_periods must be positive")
-    if raw_forecasts.is_empty():
-        return pl.DataFrame(
-            schema={
-                "ts_event": pl.Date,
-                "pool_key": pl.String,
-                "n_instruments": pl.UInt32,
-                "cs_median_abs_forecast": pl.Float64,
-                "prior_daily_observations": pl.UInt32,
-                "historical_mean_abs_forecast": pl.Float64,
-                "forecast_scalar": pl.Float64,
-                "scalar_valid": pl.Boolean,
-            }
-        )
-
-    identities = raw_forecasts.select("instrument_code", "pool_key").unique()
-    dates = raw_forecasts.select("ts_event").unique().sort("ts_event")
-    aligned = (
-        identities.join(dates, how="cross")
-        .join(
-            raw_forecasts.select(
-                "ts_event", "instrument_code", "pool_key", "raw_forecast"
-            ),
-            on=["ts_event", "instrument_code", "pool_key"],
-            how="left",
-        )
-        .sort("pool_key", "instrument_code", "ts_event")
-        .with_columns(
-            pl.when(pl.col("raw_forecast") != 0.0)
-            .then(pl.col("raw_forecast"))
-            .otherwise(None)
-            .forward_fill()
-            .over("pool_key", "instrument_code")
-            .alias("_scalar_observation")
-        )
-    )
-    daily = (
-        aligned.group_by("pool_key", "ts_event")
-        .agg(
-            pl.col("_scalar_observation").is_not_null().sum().cast(pl.UInt32)
-            .alias("n_instruments"),
-            pl.col("_scalar_observation").abs().median()
-            .alias("cs_median_abs_forecast"),
-        )
-        .sort("pool_key", "ts_event")
-        .with_columns(
-            pl.col("cs_median_abs_forecast")
-            .shift(1)
-            .over("pool_key")
-            .alias("_prior_daily_median")
-        )
-        .with_columns(
-            pl.col("_prior_daily_median")
-            .fill_null(0.0)
-            .cum_sum()
-            .over("pool_key")
-            .alias("_prior_sum"),
-            pl.col("_prior_daily_median")
-            .is_not_null()
-            .cast(pl.UInt32)
-            .cum_sum()
-            .over("pool_key")
-            .alias("prior_daily_observations"),
-        )
-        .with_columns(
-            pl.when(pl.col("prior_daily_observations") >= min_periods)
-            .then(pl.col("_prior_sum") / pl.col("prior_daily_observations"))
-            .otherwise(None)
-            .alias("historical_mean_abs_forecast")
-        )
-        .with_columns(
-            pl.when(pl.col("historical_mean_abs_forecast") > 0)
-            .then(target_abs_forecast / pl.col("historical_mean_abs_forecast"))
-            .otherwise(None)
-            .alias("forecast_scalar")
-        )
-        .with_columns(pl.col("forecast_scalar").is_not_null().alias("scalar_valid"))
-    )
-    return daily.select(
-        "ts_event",
-        "pool_key",
-        "n_instruments",
-        "cs_median_abs_forecast",
-        "prior_daily_observations",
-        "historical_mean_abs_forecast",
-        "forecast_scalar",
-        "scalar_valid",
-    )
 
 
 def continuous_momentum(df: pl.DataFrame, fast_window: int = DEFAULT_FAST_WINDOW,
