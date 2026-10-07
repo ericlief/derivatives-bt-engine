@@ -12,12 +12,11 @@ alongside build_features/continuous_momentum/goulding_monthly. This was the
 second half of the same split that originally created this module:
 compute_n_effective/compute_desired_risk_budget/apply_cluster_risk_cap moved
 here unchanged from the old tsmom_signal.py (see git history for that
-mechanical move); _bounded_ewm_correlation_matrix/compute_idm moved here from
-derivatives_bt_engine.strats.tsmom_binary_vol_parity_backtest, which
-originally built them for its own idm_scaling feature -- this is now the one
-canonical implementation, not a duplicate, so any other caller (the live
-system's own compute_desired_risk_budget, tsmom_backtester.py) can reuse the
-same correlation math rather than re-deriving it.
+mechanical move); compute_idm moved here from
+derivatives_bt_engine.strats.tsmom_binary_vol_parity_backtest. This is now the
+one canonical allocation implementation. Correlation/covariance estimation
+lives in domain.correlation, so live and backtest callers reuse the same
+estimator without making allocation own its statistical input construction.
 
 compute_n_effective/compute_desired_risk_budget assume active clusters are
 UNCORRELATED (their 1/sqrt(n_effective) scaling is exactly compute_idm's own
@@ -32,7 +31,7 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import date, timedelta
+from datetime import date
 from typing import Optional
 
 import numpy as np
@@ -41,7 +40,8 @@ import scipy.cluster.hierarchy as sch
 from scipy.spatial.distance import squareform
 
 from derivatives_bt_engine.domain.enums import TrendRegime
-from derivatives_bt_engine.domain.signal import DEFAULT_ANNUALIZATION_DAYS
+from derivatives_bt_engine.domain.continuous_momentum import DEFAULT_ANNUALIZATION_DAYS
+from derivatives_bt_engine.domain.correlation import bounded_ewm_correlation_matrix
 
 log = logging.getLogger(__name__)
 
@@ -87,7 +87,7 @@ def compute_position_scalar(trend_strength, daily_std_last, vol_target: float,
     instrument discount on trust in THIS instrument's signal when its own
     vol_ratio (short-window/long-window realized vol, asset-specific, NOT
     VIX/VX-driven) is unusual relative to its own history -- see
-    compute_signal_confidence() in signal.py. Orthogonal to regime_discount
+    compute_signal_confidence() in signal_confidence.py. Orthogonal to regime_discount
     (which is about fast/slow sign disagreement, not vol) and to
     vix_scalar (which is portfolio-wide, not per-instrument).
     """
@@ -1046,10 +1046,6 @@ def allocate_flat_cluster_diversified_targets(
     return targets
 
 
-# Minimum rows in a bounded EWM correlation window before trusting the
-# estimate at all -- see _bounded_ewm_correlation_matrix's own docstring.
-MIN_IDM_WINDOW_ROWS = 63
-
 # Top-level portfolio-construction choice. 'ew' is the deliberately plain
 # equal-gross-notional benchmark; it is not routed through the risk-budget
 # split functions below.
@@ -1089,175 +1085,13 @@ ERC_NEWTON_MIN_STEP = 1e-12  # backtracking line-search floor before giving up o
 
 # Ceiling on the total notional-budget share collectively given to symbols
 # with NO correlation coverage (a live signal, but missing/insufficient
-# return history -- see `covered` in _bounded_ewm_correlation_matrix's own
+# return history -- see `covered` in bounded_ewm_correlation_matrix's own
 # docstring) under 'erc'/'hrp' notional_weighting: min(this, |uncovered| /
 # |active_symbols|), so a single new instrument gets roughly its proportional
 # headcount share (not artificially punished), but a wave of simultaneously-
 # uncovered instruments can't collectively claim more than this fraction of
 # the book regardless of how many there are.
 UNCOVERED_BUDGET_CAP_FRACTION = 0.10
-
-
-def build_returns_wide(price_data: dict[str, pl.DataFrame]) -> pl.DataFrame:
-    """One row per date (inner-joined across every symbol's own daily
-    close -- only dates common to ALL symbols survive), one column per
-    symbol, values = that symbol's own simple daily return
-    (close.pct_change()). Pure polars -- no pandas, per this project's own
-    CLAUDE.md convention (pandas stays scoped to a single library call
-    site, e.g. HRPOpt, never leaks into general data-handling code).
-    Shared by every caller of _bounded_ewm_correlation_matrix (both TSMOM
-    backtesters) -- build ONCE per backtest run and reuse at every
-    rebalance date's own bounded-window slice; recomputing the raw return
-    series per rebalance would be pure waste, only the EWM calc itself
-    genuinely needs to run once per (rebalance date, bounded window)
-    pair."""
-    wide = None
-    for sym, df in price_data.items():
-        s = df.sort('ts_event').select('ts_event', pl.col('close').pct_change().alias(sym))
-        wide = s if wide is None else wide.join(s, on='ts_event', how='inner')
-    return wide.sort('ts_event').drop_nulls()
-
-
-def _bounded_ewm_correlation_matrix(returns_wide: pl.DataFrame, symbols: list[str], as_of: date,
-                                     window_years: float, halflife: float,
-                                     min_rows: int = MIN_IDM_WINDOW_ROWS
-                                     ) -> tuple[np.ndarray, np.ndarray]:
-    """EWM-weighted correlation among `symbols`, computed ONLY from the
-    trailing `window_years` slice of returns_wide ending STRICTLY before
-    `as_of` (no lookahead) -- a genuinely BOUNDED window, not an unbounded
-    full-history EWM. This distinction matters: a plain `.ewm_mean(half_life=hl)`
-    applied to the ENTIRE historical series never fully zeroes out old data
-    -- it decays toward negligible weight but asymptotically, so a few
-    percent of a 2026 correlation estimate could technically still trace
-    back to 2010 even at a short halflife. Slicing to a bounded window
-    FIRST, then computing the EWM only within that slice, guarantees
-    exactly zero weight on anything older than `window_years` -- the EWM
-    only supplies the within-window recency emphasis (Carver's "regime"
-    weighting), not the outer bound on history.
-
-    Built as a single joint Gram-matrix decomposition, not n*(n+1)/2
-    separately-estimated pairwise correlations. Polars' own
-    `.ewm_mean(half_life=..., adjust=True)` (the default `adjust`) is, at
-    any given row, exactly a normalized static weight vector over the
-    rows up to and including it: weight of row t is (1-alpha)^(age of t),
-    alpha = 1 - 2**(-1/halflife), normalized to sum to 1 -- so evaluating
-    "at the last row of the bounded slice" is equivalent to a single
-    static weight vector `w` anchored at that last row. That lets the
-    whole n x n covariance matrix be built in one shot: `X` = the bounded
-    slice as a plain (T x n) array, `mu = w @ X` the weighted mean,
-    `Z = sqrt(w)[:, None] * (X - mu)`, `cov = Z.T @ Z`. This is
-    numerically identical (confirmed to ~1e-16, well within float noise)
-    to computing each pair's ewm_cov(x, y) = ewm_mean(x*y) - ewm_mean(x) *
-    ewm_mean(y) separately, but ~9x faster at n=12 (one BLAS matmul over
-    the whole universe instead of O(n^2) individual polars EWM
-    evaluations) and PSD *by construction* -- `cov` is a Gram matrix
-    (`Z.T @ Z`), so no post-hoc eigenvalue check is needed the way a set
-    of independently-estimated pairwise correlations would require, and
-    each diagonal entry (a sum of squares) can't land below zero the way
-    an independently-estimated ewm_var(x) occasionally does on
-    floating-point noise.
-
-    `returns_wide`: one row per date, one column per symbol, simple daily
-    returns (a caller-built, synchronized wide frame -- e.g.
-    tsmom_binary_vol_parity_backtest.py's own _build_returns_wide).
-
-    Returns (H, covered). H is ALWAYS a dense n x n matrix (n = len(symbols),
-    never None -- np.eye(n) is a real, usable "nothing measured" placeholder,
-    not an error signal); the canonical output now that this function builds
-    one joint matrix rather than independently-estimated pairs (see above).
-    compute_idm/compute_erc_weights/compute_hrp_weights/compute_notional_
-    split all take H directly too (H is their sole correlation-data input --
-    no hand-built corr_pairs dict accepted on those functions' own
-    signatures either; a caller with only pairwise correlations writes H
-    directly, e.g. test_allocation.py's own fixtures), so there's no
-    pairwise dict anywhere in this path at all -- one representation, not
-    two that could drift apart.
-
-    covered is a length-n boolean array (True where `symbols[i]` actually
-    had return data in this window, `symbols`' own order) -- an EXPLICIT,
-    PER-SYMBOL usability signal, not something a caller should infer from H
-    itself. This matters because H's identity-default entries (1.0 diag,
-    0.0 off-diag) for an uncovered symbol are a computational placeholder,
-    not a measurement: H[i, j] = 0 for an uncovered symbol i means "no
-    correlation was measured," NOT "this symbol was measured and found to
-    be uncorrelated with j." Treating those two as the same thing silently
-    manufactures fake diversification credit -- confirmed directly: adding
-    one zero-history symbol to an otherwise-real 2-asset correlation matrix
-    inflated IDM by 34% and handed that symbol the largest individual ERC
-    weight of the three, purely because "unknown" was encoded as "measured
-    independent." Every caller that cares about this distinction (currently
-    compute_notional_split/compute_symbol_notional_budget, both of which
-    accept `covered` and route uncovered symbols to a capped, correlation-
-    blind fallback allocation instead of letting them participate in H at
-    all -- see UNCOVERED_BUDGET_CAP_FRACTION) must consult `covered`
-    directly rather than trusting H's own entries for an uncovered symbol.
-
-    A caller that doesn't care about the covered/uncovered distinction (or
-    is calling compute_idm/compute_erc_weights/compute_hrp_weights
-    directly, without going through compute_notional_split/compute_symbol_
-    notional_budget) should still guard against the DEGENERATE case where
-    NOTHING is covered (covered.all() is False and covered.any() is False,
-    i.e. `covered.sum() == 0`): H is np.eye(n) there too, and passing it
-    straight through would manufacture the same fake-independence credit
-    for the WHOLE active set, not just one symbol -- squash H to None in
-    that case (`H = None if not covered.any() else H`) so compute_idm's
-    etc. own `H is None` fallback fires instead.
-
-    (np.eye(len(symbols)), all-False) if the bounded slice itself has fewer
-    than `min_rows` (too little history this early in the backtest to trust
-    ANY correlation estimate, regardless of which symbols technically have
-    a column) or if fewer than 2 symbols have data in that slice; (H,
-    per-symbol coverage) otherwise, where H's covered rows/columns are real
-    measurements and its uncovered ones are the identity placeholder."""
-    window_start = as_of - timedelta(days=int(window_years * 365.25))
-    sl = returns_wide.filter((pl.col('ts_event') >= window_start) & (pl.col('ts_event') < as_of))
-    n = len(symbols)
-    if sl.height < min_rows:
-        return np.eye(n), np.zeros(n, dtype=bool)
-
-    present = [s for s in symbols if s in sl.columns]
-    covered = np.array([s in present for s in symbols])
-    if len(present) < 2:
-        return np.eye(n), covered
-
-    # Static weight vector equivalent to ewm_mean(half_life=..., adjust=True)
-    # evaluated at the last row of the slice: row t (0-indexed from the
-    # start) gets weight (1-alpha)^((T-1)-t), normalized to sum to 1.
-    T = sl.height
-    alpha = 1.0 - 2.0 ** (-1.0 / halflife)
-    age = (T - 1) - np.arange(T)
-    weights = (1.0 - alpha) ** age
-    weights /= weights.sum()
-
-    X = sl.select(present).to_numpy()
-    mu = weights @ X
-    Z = np.sqrt(weights)[:, None] * (X - mu)
-    C = Z.T @ Z
-    d = np.sqrt(np.diag(C))
-    with np.errstate(invalid='ignore', divide='ignore'):
-        corr_present = C / np.outer(d, d)
-    # nan (0/0, a zero-variance/constant column in-window) defaults to the
-    # same 0.0 off-diagonal np.eye already carries for an absent symbol;
-    # +-inf can't arise mathematically here (Cauchy-Schwarz bounds |cov_ij|
-    # by d_i*d_j, so a zero denominator forces a zero numerator too) but is
-    # guarded the same way as a defensive floor against float noise, same
-    # as the explicit clip below.
-    corr_present = np.nan_to_num(corr_present, nan=0.0, posinf=0.0, neginf=0.0)
-    np.clip(corr_present, -1.0, 1.0, out=corr_present)
-    np.fill_diagonal(corr_present, 1.0)
-
-    # Embed the correlation matrix for symbols with data into the FULL
-    # requested symbol universe, preserving `symbols` order. Symbols with
-    # no data retain the identity fallback (diag=1, off-diag=0) -- a
-    # placeholder for "unmeasured," not evidence of independence; `covered`
-    # (built above, before this block) is what tells a caller which is
-    # which.
-    idx = {s: i for i, s in enumerate(symbols)}
-    present_idx = np.array([idx[s] for s in present])
-    H = np.eye(n)
-    H[np.ix_(present_idx, present_idx)] = corr_present
-
-    return H, covered
 
 
 def _spinu_erc_newton(H: np.ndarray, b: np.ndarray) -> Optional[np.ndarray]:
@@ -1487,7 +1321,7 @@ def compute_hrp_weights(active_symbols: list[str],
 
 
 def _partial_coverage(active_symbols: list[str], covered: Optional[np.ndarray]) -> bool:
-    """True iff `covered` (see _bounded_ewm_correlation_matrix's own
+    """True iff `covered` (see bounded_ewm_correlation_matrix's own
     docstring) marks SOME but not all of active_symbols -- the only
     situation needing special covered/uncovered handling. Fully-covered
     (nothing to protect against) and fully-uncovered (nothing to protect
@@ -1501,7 +1335,7 @@ def _partial_coverage(active_symbols: list[str], covered: Optional[np.ndarray]) 
 
 def _squash_fully_uncovered_H(H: Optional[np.ndarray],
                                covered: Optional[np.ndarray]) -> Optional[np.ndarray]:
-    """H is _bounded_ewm_correlation_matrix's np.eye(n) placeholder when
+    """H is bounded_ewm_correlation_matrix's np.eye(n) placeholder when
     `covered` is present but entirely False (no symbol had usable data at
     all, whether from too few window rows or too few present columns) --
     squash to None so compute_idm/compute_erc_weights/compute_hrp_weights
@@ -1517,7 +1351,7 @@ def _blend_covered_uncovered_split(active_symbols: list[str], covered: np.ndarra
     """The 'erc'/'hrp' split when coverage is PARTIAL (see
     _partial_coverage): uncovered symbols never participate in the
     correlation-aware optimization at all (their row/column in H is a
-    placeholder, not a measurement -- see _bounded_ewm_correlation_matrix's
+    placeholder, not a measurement -- see bounded_ewm_correlation_matrix's
     own docstring), so they can't inherit an inflated share the way
     passing the full H straight through would let them. Instead:
 
@@ -1587,7 +1421,7 @@ def compute_notional_split(active_symbols: list[str], notional_weighting: str,
     compute_erc_weights/compute_hrp_weights on H -- see either's own
     docstring for the fallback-to-flat behavior when H is None or n < 2.
 
-    `covered`: _bounded_ewm_correlation_matrix's own per-symbol coverage
+    `covered`: bounded_ewm_correlation_matrix's own per-symbol coverage
     mask (see its docstring). When coverage is PARTIAL under 'erc'/'hrp',
     delegates to _blend_covered_uncovered_split instead of letting an
     uncovered symbol inherit a share of the split from H's identity
@@ -1681,7 +1515,7 @@ def compute_symbol_notional_budget(active_symbols: list[str], returns_wide: Opti
     supplied) -- the caller's own probe pass already means every such
     symbol's target is 0 regardless of budget, so there's nobody to size
     for. A too-short bounded correlation window
-    (_bounded_ewm_correlation_matrix's own min_rows floor) instead makes
+    (bounded_ewm_correlation_matrix's own min_rows floor) instead makes
     compute_idm (and, under 'erc'/'hrp', the weighting itself) fall back
     to its own flat/no-adjustment default, not an early return here --
     and neither does passing H directly without returns_wide (the whole
@@ -1689,13 +1523,13 @@ def compute_symbol_notional_budget(active_symbols: list[str], returns_wide: Opti
     returns_wide at all once they already have H).
 
     `H`/`covered`: pass both if a caller already ran
-    _bounded_ewm_correlation_matrix for this exact (active_symbols, as_of,
+    bounded_ewm_correlation_matrix for this exact (active_symbols, as_of,
     corr_window_years, corr_halflife_days) -- e.g. the live rebalance report,
     which needs them itself for notional_weight_by_symbol before ever
     calling this function. Skips rerunning the EWM estimation over
     returns_wide a second time. `covered` is what actually protects an
     uncovered symbol (a live signal but no correlation data -- see
-    _bounded_ewm_correlation_matrix's own docstring) from inheriting a
+    bounded_ewm_correlation_matrix's own docstring) from inheriting a
     fake diversification-credited share via H's identity placeholder: the
     split routes through compute_notional_split's own covered-aware
     blending, and use_idm's multiplier is computed via
@@ -1725,7 +1559,7 @@ def compute_symbol_notional_budget(active_symbols: list[str], returns_wide: Opti
         # together, not something a type checker narrows across separate
         # if-statements on its own.
         assert returns_wide is not None
-        H, covered = _bounded_ewm_correlation_matrix(returns_wide, active_symbols, as_of,
+        H, covered = bounded_ewm_correlation_matrix(returns_wide, active_symbols, as_of,
                                                        corr_window_years, corr_halflife_days)
     split = compute_notional_split(active_symbols, notional_weighting, H, covered)
     idm_multiplier = _coverage_restricted_idm(active_symbols, H, covered, weights=split) if use_idm else 1.0
@@ -1753,7 +1587,7 @@ def compute_idm(active_symbols: list[str], H: Optional[np.ndarray] = None,
     the average-correlation algebraic shortcut (1/sqrt(1/N + (1-1/N)*
     avg_corr)), which is only exactly equivalent to this when every
     pairwise correlation happens to be identical AND weights are equal.
-    Since _bounded_ewm_correlation_matrix already builds the full matrix,
+    Since bounded_ewm_correlation_matrix already builds the full matrix,
     using it directly costs nothing extra over averaging its entries down
     to one scalar first.
 

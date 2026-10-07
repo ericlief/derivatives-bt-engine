@@ -26,13 +26,11 @@ import pytest
 
 from derivatives_bt_engine.domain.allocation import (
     UNCOVERED_BUDGET_CAP_FRACTION,
-    _bounded_ewm_correlation_matrix,
     _coverage_restricted_idm,
     allocate_flat_cluster_diversified_targets,
     allocate_lot_aware_targets,
     _spinu_erc_newton,
     apply_cluster_risk_cap,
-    build_returns_wide,
     compute_desired_risk_budget,
     compute_erc_weights,
     compute_hrp_weights,
@@ -44,9 +42,13 @@ from derivatives_bt_engine.domain.allocation import (
     compute_symbol_notional_budget,
     group_by_cluster,
 )
+from derivatives_bt_engine.domain.correlation import (
+    bounded_ewm_correlation_matrix,
+    build_returns_wide,
+)
 from derivatives_bt_engine.domain.enums import TrendRegime
-from derivatives_bt_engine.domain.signal import (
-    calculate_trend_strength,
+from derivatives_bt_engine.domain.legacy_signal import calculate_trend_strength
+from derivatives_bt_engine.domain.signal_confidence import (
     compute_signal_confidence,
     compute_vol_ratio,
 )
@@ -425,7 +427,7 @@ def test_notional_budget_idm_uses_the_same_split_as_weights(notional_weighting):
     returns_wide = build_returns_wide(price_data)
     as_of = price_data['A']['ts_event'][-1]
     symbols = ['A', 'B', 'C']
-    H, covered = _bounded_ewm_correlation_matrix(returns_wide, symbols, as_of, 3.0, 63.0)
+    H, covered = bounded_ewm_correlation_matrix(returns_wide, symbols, as_of, 3.0, 63.0)
     assert covered.all()
     weight_fn = compute_erc_weights if notional_weighting == 'erc' else compute_hrp_weights
     split = weight_fn(symbols, H)
@@ -492,7 +494,7 @@ def test_notional_budget_rejects_unknown_weighting_scheme():
 
 
 def test_bounded_ewm_correlation_matches_independent_pandas_ewm():
-    # Independent oracle for _bounded_ewm_correlation_matrix's own Gram-
+    # Independent oracle for bounded_ewm_correlation_matrix's own Gram-
     # matrix construction: pandas' .ewm(halflife=..., adjust=True).cov(),
     # a completely separate implementation of the same "EWM correlation
     # evaluated at the last row" definition. Pandas is scoped to just this
@@ -505,7 +507,7 @@ def test_bounded_ewm_correlation_matches_independent_pandas_ewm():
     symbols = ['A', 'B', 'C']
     as_of = price_data['A']['ts_event'][-1]
 
-    H, covered = _bounded_ewm_correlation_matrix(returns_wide, symbols, as_of, 3.0, 63.0)
+    H, covered = bounded_ewm_correlation_matrix(returns_wide, symbols, as_of, 3.0, 63.0)
     assert covered.all()
 
     window_start = as_of - timedelta(days=int(3.0 * 365.25))
@@ -531,7 +533,7 @@ def test_bounded_ewm_correlation_covered_mask_flags_missing_symbol():
     as_of = price_data['A']['ts_event'][-1]
     symbols = ['A', 'B', 'C', 'NEWSYM']
 
-    H, covered = _bounded_ewm_correlation_matrix(returns_wide, symbols, as_of, 3.0, 63.0)
+    H, covered = bounded_ewm_correlation_matrix(returns_wide, symbols, as_of, 3.0, 63.0)
 
     assert covered.tolist() == [True, True, True, False]
     assert H[3, 3] == 1.0

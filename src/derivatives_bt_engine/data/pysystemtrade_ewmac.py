@@ -41,10 +41,10 @@ from derivatives_bt_engine.domain.ewmac import (
     ewmac,
 )
 from derivatives_bt_engine.domain.volatility import (
-    CARVER_FAST_VOL_SPAN,
-    CARVER_SLOW_VOL_WEIGHT,
-    CARVER_SLOW_VOL_YEARS,
-    CARVER_VOL_MIN_SAMPLES,
+    MIXED_VOL_FAST_SPAN,
+    MIXED_VOL_MIN_SAMPLES,
+    MIXED_VOL_SLOW_WEIGHT,
+    MIXED_VOL_SLOW_YEARS,
 )
 
 
@@ -85,10 +85,10 @@ def load_pooled_ewmac_rule(
     *,
     db_path: Path | str = DEFAULT_PYSYSTEMTRADE_DB_PATH,
     pooling_mapping_path: Path | str = DEFAULT_POOLING_MAPPING_PATH,
-    vol_span: int = CARVER_FAST_VOL_SPAN,
-    vol_slow_years: int = CARVER_SLOW_VOL_YEARS,
-    vol_slow_weight: float = CARVER_SLOW_VOL_WEIGHT,
-    vol_min_samples: int = CARVER_VOL_MIN_SAMPLES,
+    vol_span: int = MIXED_VOL_FAST_SPAN,
+    vol_slow_years: int = MIXED_VOL_SLOW_YEARS,
+    vol_slow_weight: float = MIXED_VOL_SLOW_WEIGHT,
+    vol_min_samples: int = MIXED_VOL_MIN_SAMPLES,
     scalar_min_periods: int = EWMAC_SCALAR_MIN_PERIODS,
     target_abs_forecast: float = EWMAC_FORECAST_TARGET_ABS,
     forecast_cap: float = EWMAC_FORECAST_CAP,

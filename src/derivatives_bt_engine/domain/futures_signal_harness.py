@@ -9,11 +9,11 @@ import polars as pl
 
 from derivatives_bt_engine.domain.ewmac import ewmac
 from derivatives_bt_engine.domain.futures_history import FuturesHistory
-from derivatives_bt_engine.domain.signal import (
+from derivatives_bt_engine.domain.continuous_momentum import (
     build_features,
     continuous_momentum,
-    goulding_monthly,
 )
+from derivatives_bt_engine.domain.goulding import goulding_monthly
 
 
 class FuturesSignalClass(str, Enum):

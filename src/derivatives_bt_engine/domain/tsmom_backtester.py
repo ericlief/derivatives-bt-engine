@@ -8,7 +8,7 @@ close" trades, shared with the still-pandas option backtest path. TSMOM's
 lifecycle (continuously-sized monthly rebalance toward a target contract
 count, no roll/expiry-driven open-close cycle) doesn't fit that model, and
 retrofitting it would risk regressing the shared option path. This module
-reuses the existing pure signal math (signal.py) and FuturesDataLoader
+reuses the dedicated signal-domain modules and FuturesDataLoader
 but implements its own portfolio loop.
 
 No VX futures (CFE) history is available locally (the Globex MDP3.0 duckdb
@@ -54,12 +54,18 @@ from derivatives_bt_engine.domain.allocation import (
     ALLOCATION_MODES,
     NOTIONAL_WEIGHTING_SCHEMES,
     apply_cluster_risk_cap,
-    build_returns_wide,
     compute_realized_portfolio_risk,
     compute_position_scalar,
     compute_symbol_notional_budget,
 )
+from derivatives_bt_engine.domain.correlation import build_returns_wide
 from derivatives_bt_engine.domain.enums import VolRegime
+from derivatives_bt_engine.domain.continuous_momentum import (
+    DEFAULT_FAST_WINDOW,
+    DEFAULT_SLOW_WINDOW,
+    build_features,
+    continuous_momentum,
+)
 from derivatives_bt_engine.domain.ewmac import (
     EWMAC_FORECAST_CAP,
     EWMAC_FORECAST_TARGET_ABS,
@@ -84,26 +90,24 @@ from derivatives_bt_engine.domain.instruments import (
     CME_MONTH_NUM_TO_LETTER, get_spec, resolve_active_months, resolve_annualization_days, resolve_price_symbol,
 )
 from derivatives_bt_engine.domain.roll_policy import ContractRollPolicy
-from derivatives_bt_engine.domain.signal import (
-    DEFAULT_FAST_WINDOW,
-    DEFAULT_SLOW_WINDOW,
+from derivatives_bt_engine.domain.goulding import (
     GOULDING_SIGNAL_MODES,
-    SignalSpec,
-    build_features,
     build_monthly_state_return_history,
-    cluster_conviction_score,
-    continuous_momentum,
     estimate_goulding_forecast_scalar,
     estimate_mixing_params,
     goulding_continuous_raw,
     goulding_monthly,
+)
+from derivatives_bt_engine.domain.signal_config import SignalSpec
+from derivatives_bt_engine.domain.signal_selection import (
+    cluster_conviction_score,
     resolve_trend_direction,
 )
 from derivatives_bt_engine.domain.volatility import (
-    CARVER_FAST_VOL_SPAN,
-    CARVER_SLOW_VOL_WEIGHT,
-    CARVER_SLOW_VOL_YEARS,
-    CARVER_VOL_MIN_SAMPLES,
+    MIXED_VOL_FAST_SPAN,
+    MIXED_VOL_MIN_SAMPLES,
+    MIXED_VOL_SLOW_WEIGHT,
+    MIXED_VOL_SLOW_YEARS,
 )
 from derivatives_bt_engine.domain.tsmom_history import (
     SOURCE_NEUTRAL_DATA_SOURCES,
@@ -257,8 +261,8 @@ class TsmomBacktestConfig:
     #
     # When set (e.g. 0.15), run_tsmom_backtest instead derives EACH
     # rebalance's own per-symbol notional_budget from
-    # domain.allocation.compute_idm/build_returns_wide/
-    # _bounded_ewm_correlation_matrix: total_budget = current capital *
+    # domain.allocation.compute_idm plus domain.correlation's return/correlation
+    # builders: total_budget = current capital *
     # target_portfolio_vol * IDM (IDM computed from that rebalance's own
     # signal-active symbols' REAL correlation, over a bounded trailing EWM
     # window -- corr_window_years/corr_halflife_days below), split across
@@ -334,7 +338,7 @@ class TsmomBacktestConfig:
     # Correction/Rebound. 'goulding': Goulding/Harvey/Mazzoleni (2023)'s own
     # monthly Bull/Correction/Bear/Rebound classification (goulding_monthly)
     # with a_Co/a_Re mixing weights re-estimated at EVERY rebalance from all
-    # prior pooled history (domain.signal's build_monthly_state_return_
+    # prior pooled history (domain.goulding's build_monthly_state_return_
     # history/estimate_mixing_params, no lookahead) blending the slow/fast
     # direction in Correction/Rebound instead of a flat discount --
     # regime_discount is ignored in this mode (the a_Co/a_Re blend IS the
@@ -343,7 +347,7 @@ class TsmomBacktestConfig:
     # this only changes which model decides the +-1/0 direction, mirroring
     # tsmom_binary_vol_parity_backtest.py's own weighting_mode='dynamic'
     # ("Goulding decides direction, vol-parity decides size"), now shared
-    # via domain/signal.py instead of being that script's own local
+    # via domain.signal_selection instead of being that script's own local
     # implementation.
     signal_weighting: str = 'continuous'
     # Goulding forecast shape. 'binary' preserves the original paper-like
@@ -409,10 +413,10 @@ class TsmomBacktestConfig:
     ewmac_fast_span: int = 16
     ewmac_slow_span: int = 64
     # Fast component of the shared 70/30 mixed point-volatility denominator.
-    ewmac_vol_span: int = CARVER_FAST_VOL_SPAN
-    ewmac_vol_slow_years: int = CARVER_SLOW_VOL_YEARS
-    ewmac_vol_slow_weight: float = CARVER_SLOW_VOL_WEIGHT
-    ewmac_vol_min_samples: int = CARVER_VOL_MIN_SAMPLES
+    ewmac_vol_span: int = MIXED_VOL_FAST_SPAN
+    ewmac_vol_slow_years: int = MIXED_VOL_SLOW_YEARS
+    ewmac_vol_slow_weight: float = MIXED_VOL_SLOW_WEIGHT
+    ewmac_vol_min_samples: int = MIXED_VOL_MIN_SAMPLES
     ewmac_scalar_pool: str = 'global'
     ewmac_scalar_universe: str = 'pysystemtrade'
     ewmac_scalar_min_periods: int = EWMAC_SCALAR_MIN_PERIODS
@@ -519,7 +523,7 @@ def check_vol_regime(vix_ratio: Optional[float]) -> VolRegime:
     management gate (feeds vix_scalar / the spike-extreme hold-
     or-halve bypass), not a regime-confidence detector. Per-instrument,
     asset-specific vol state (including a low-vol bucket) is a separate
-    mechanism -- see SignalConfidenceRegime in signal.py."""
+    mechanism -- see SignalConfidenceRegime and domain.signal_confidence."""
     if vix_ratio is None:
         return VolRegime.NORMAL
     if vix_ratio > VIX_EXTREME_RATIO:
@@ -2176,7 +2180,7 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
     # expanding-window a_Co/a_Re estimation history built from every
     # symbol's forward-matched buckets. Mirrors
     # tsmom_binary_vol_parity_backtest.py's own construction (see that
-    # script's run() for the fuller rationale), reusing domain/signal.py's
+    # script's run() for the fuller rationale), reusing domain.goulding's
     # shared build_monthly_state_return_history/estimate_mixing_params
     # instead of a duplicate implementation.
     rebal_monthly: dict[str, pl.DataFrame] = {}

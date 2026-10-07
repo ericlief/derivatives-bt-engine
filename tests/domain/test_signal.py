@@ -1,20 +1,8 @@
-"""
-Tests for domain.signal -- pure TSMOM signal construction, estimation, and
-signal-confidence math, no IB dependency. Consolidated (2026-07) from
-test_tsmom_signal.py and test_signal_spec.py once their two source modules
-merged into signal.py.
+"""Tests for the independent trend-model and confidence domain modules.
 
-Covers: calculate_trend_strength/classify_regime/compute_vol_ratio/
-classify_signal_confidence/compute_signal_confidence (the old
-tsmom_signal.py half) and build_features/continuous_momentum/
-goulding_monthly/SignalSpec/_goulding_blend/_goulding_direction (the newer
-signal_spec.py half) -- each model's own tests deliberately avoid touching
-the other model's columns, mirroring the "no model depends on another
-model's intermediate columns" requirement the module itself is built
-around. compute_position_scalar/apply_cluster_risk_cap/
-compute_desired_risk_budget/compute_n_effective all now live in
-domain.allocation (risk-SIZING math, a different concern from this module's
-own signal CONSTRUCTION) -- see test_allocation.py for their tests.
+Each model's tests avoid depending on another model's intermediate columns.
+Risk-sizing functions live in ``domain.allocation`` and are covered by
+``test_allocation.py``.
 """
 
 import math
@@ -26,28 +14,32 @@ import pytest
 
 from derivatives_bt_engine.domain.enums import SignalConfidenceRegime, TrendRegime
 from derivatives_bt_engine.domain.ewmac import ewmac, estimate_ewmac_scalar_history
-from derivatives_bt_engine.domain.signal import (
+from derivatives_bt_engine.domain.continuous_momentum import (
     DEFAULT_FAST_WINDOW,
     DEFAULT_SLOW_WINDOW,
+    build_features,
+    classify_regime,
+    continuous_momentum,
+)
+from derivatives_bt_engine.domain.goulding import (
     GOULDING_FAST_MONTHS,
     GOULDING_SLOW_MONTHS,
-    SignalSpec,
     _goulding_blend,
     _goulding_direction,
-    build_features,
-    calculate_trend_strength,
-    classify_regime,
+    estimate_goulding_forecast_scalar,
+    estimate_mixing_params_diagnostics,
+    goulding_continuous_raw,
+    goulding_monthly,
+    normalize_goulding_forecast,
+)
+from derivatives_bt_engine.domain.legacy_signal import calculate_trend_strength
+from derivatives_bt_engine.domain.signal_confidence import (
     classify_signal_confidence,
     compute_signal_confidence,
     compute_vol_ratio,
-    continuous_momentum,
-    estimate_goulding_forecast_scalar,
-    goulding_monthly,
-    goulding_continuous_raw,
-    estimate_mixing_params_diagnostics,
-    normalize_goulding_forecast,
-    resolve_trend_direction,
 )
+from derivatives_bt_engine.domain.signal_config import SignalSpec
+from derivatives_bt_engine.domain.signal_selection import resolve_trend_direction
 
 def _price_df(n: int, drift: float, vol: float = 0.01, seed: int = 0) -> pl.DataFrame:
     rng = np.random.default_rng(seed)

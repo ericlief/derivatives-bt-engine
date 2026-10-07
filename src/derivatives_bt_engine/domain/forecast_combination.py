@@ -25,7 +25,7 @@ from derivatives_bt_engine.domain.ewmac import (
     EWMAC_FORECAST_CAP,
     EWMAC_FORECAST_TARGET_ABS,
 )
-from derivatives_bt_engine.domain.volatility import CARVER_BUSINESS_DAYS_PER_YEAR
+from derivatives_bt_engine.domain.volatility import MIXED_VOL_ANNUALIZATION_DAYS
 
 
 @dataclass(frozen=True)
@@ -163,7 +163,7 @@ class ForecastCombinationConfig:
 
     target_abs_forecast: float = EWMAC_FORECAST_TARGET_ABS
     forecast_cap: float = EWMAC_FORECAST_CAP
-    annualization_days: int = CARVER_BUSINESS_DAYS_PER_YEAR
+    annualization_days: int = MIXED_VOL_ANNUALIZATION_DAYS
     # This is pysystemtrade turnover()'s ``smooth_y_days``: the EWM ``com``
     # applied only to the changing average-position/volatility denominator.
     # It does not smooth the EWMAC forecast or the optimal position.

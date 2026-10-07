@@ -28,15 +28,13 @@ from derivatives_bt_engine.domain.ewmac import (
     EWMAC_SCALAR_MIN_PERIODS,
     EWMAC_SCALAR_POOLS,
 )
-from derivatives_bt_engine.domain.signal import (
-    GOULDING_SIGNAL_MODES,
-)
+from derivatives_bt_engine.domain.goulding import GOULDING_SIGNAL_MODES
 from derivatives_bt_engine.domain.roll_policy import parse_roll_policy_overrides
 from derivatives_bt_engine.domain.volatility import (
-    CARVER_FAST_VOL_SPAN,
-    CARVER_SLOW_VOL_WEIGHT,
-    CARVER_SLOW_VOL_YEARS,
-    CARVER_VOL_MIN_SAMPLES,
+    MIXED_VOL_FAST_SPAN,
+    MIXED_VOL_MIN_SAMPLES,
+    MIXED_VOL_SLOW_WEIGHT,
+    MIXED_VOL_SLOW_YEARS,
 )
 from derivatives_bt_engine.domain.tsmom_backtester import (
     EWMAC_SCALAR_UNIVERSES,
@@ -209,13 +207,13 @@ def parse_args():
     p.add_argument('--ewmac-fast-span', type=int, default=16)
     p.add_argument('--ewmac-slow-span', type=int, default=64)
     p.add_argument(
-        '--ewmac-vol-span', type=int, default=CARVER_FAST_VOL_SPAN,
+        '--ewmac-vol-span', type=int, default=MIXED_VOL_FAST_SPAN,
         help='Fast span of the EWMAC 70/30 mixed point-volatility denominator '
              '(default: %(default)s)',
     )
-    p.add_argument('--ewmac-vol-slow-years', type=int, default=CARVER_SLOW_VOL_YEARS)
-    p.add_argument('--ewmac-vol-slow-weight', type=float, default=CARVER_SLOW_VOL_WEIGHT)
-    p.add_argument('--ewmac-vol-min-samples', type=int, default=CARVER_VOL_MIN_SAMPLES)
+    p.add_argument('--ewmac-vol-slow-years', type=int, default=MIXED_VOL_SLOW_YEARS)
+    p.add_argument('--ewmac-vol-slow-weight', type=float, default=MIXED_VOL_SLOW_WEIGHT)
+    p.add_argument('--ewmac-vol-min-samples', type=int, default=MIXED_VOL_MIN_SAMPLES)
     p.add_argument('--ewmac-scalar-pool', choices=EWMAC_SCALAR_POOLS, default='global',
                    help="EWMAC forecast-scalar estimator (default: %(default)s). 'global' makes one "
                         "pool over --ewmac-scalar-universe; 'cluster' and 'instrument' use the "

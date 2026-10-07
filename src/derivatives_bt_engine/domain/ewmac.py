@@ -18,11 +18,11 @@ import math
 import polars as pl
 
 from derivatives_bt_engine.domain.volatility import (
-    CARVER_BUSINESS_DAYS_PER_YEAR,
-    CARVER_FAST_VOL_SPAN,
-    CARVER_SLOW_VOL_WEIGHT,
-    CARVER_SLOW_VOL_YEARS,
-    CARVER_VOL_MIN_SAMPLES,
+    MIXED_VOL_ANNUALIZATION_DAYS,
+    MIXED_VOL_FAST_SPAN,
+    MIXED_VOL_MIN_SAMPLES,
+    MIXED_VOL_SLOW_WEIGHT,
+    MIXED_VOL_SLOW_YEARS,
     mixed_point_volatility,
 )
 
@@ -37,11 +37,11 @@ def ewmac(
     frame: pl.DataFrame,
     fast_span: int = 16,
     slow_span: int = 64,
-    vol_span: int = CARVER_FAST_VOL_SPAN,
-    vol_slow_years: int = CARVER_SLOW_VOL_YEARS,
-    vol_slow_weight: float = CARVER_SLOW_VOL_WEIGHT,
-    vol_min_samples: int = CARVER_VOL_MIN_SAMPLES,
-    annualization_days: int = CARVER_BUSINESS_DAYS_PER_YEAR,
+    vol_span: int = MIXED_VOL_FAST_SPAN,
+    vol_slow_years: int = MIXED_VOL_SLOW_YEARS,
+    vol_slow_weight: float = MIXED_VOL_SLOW_WEIGHT,
+    vol_min_samples: int = MIXED_VOL_MIN_SAMPLES,
+    annualization_days: int = MIXED_VOL_ANNUALIZATION_DAYS,
     forecast_scalar: float = 1.0,
     forecast_cap: float = EWMAC_FORECAST_CAP,
 ) -> pl.DataFrame:

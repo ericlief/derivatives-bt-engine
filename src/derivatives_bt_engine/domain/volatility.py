@@ -14,22 +14,22 @@ import math
 import polars as pl
 
 
-CARVER_FAST_VOL_SPAN = 32
-CARVER_SLOW_VOL_YEARS = 10
-CARVER_SLOW_VOL_WEIGHT = 0.30
-CARVER_VOL_MIN_SAMPLES = 10
-CARVER_BUSINESS_DAYS_PER_YEAR = 256
+MIXED_VOL_FAST_SPAN = 32
+MIXED_VOL_SLOW_YEARS = 10
+MIXED_VOL_SLOW_WEIGHT = 0.30
+MIXED_VOL_MIN_SAMPLES = 10
+MIXED_VOL_ANNUALIZATION_DAYS = 256
 
 
 def mixed_point_volatility(
     frame: pl.DataFrame,
     *,
     point_change_col: str = "point_change",
-    annualization_days: int = CARVER_BUSINESS_DAYS_PER_YEAR,
-    fast_span: int = CARVER_FAST_VOL_SPAN,
-    slow_years: int = CARVER_SLOW_VOL_YEARS,
-    slow_weight: float = CARVER_SLOW_VOL_WEIGHT,
-    min_samples: int = CARVER_VOL_MIN_SAMPLES,
+    annualization_days: int = MIXED_VOL_ANNUALIZATION_DAYS,
+    fast_span: int = MIXED_VOL_FAST_SPAN,
+    slow_years: int = MIXED_VOL_SLOW_YEARS,
+    slow_weight: float = MIXED_VOL_SLOW_WEIGHT,
+    min_samples: int = MIXED_VOL_MIN_SAMPLES,
 ) -> pl.DataFrame:
     """Append causal fast, slow, and blended point-volatility columns.
 

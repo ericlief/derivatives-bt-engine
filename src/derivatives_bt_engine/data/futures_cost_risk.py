@@ -75,11 +75,11 @@ from derivatives_bt_engine.domain.instruments import (
     resolve_signal_symbol,
 )
 from derivatives_bt_engine.domain.volatility import (
-    CARVER_BUSINESS_DAYS_PER_YEAR,
-    CARVER_FAST_VOL_SPAN,
-    CARVER_SLOW_VOL_WEIGHT,
-    CARVER_SLOW_VOL_YEARS,
-    CARVER_VOL_MIN_SAMPLES,
+    MIXED_VOL_ANNUALIZATION_DAYS,
+    MIXED_VOL_FAST_SPAN,
+    MIXED_VOL_SLOW_WEIGHT,
+    MIXED_VOL_SLOW_YEARS,
+    MIXED_VOL_MIN_SAMPLES,
     mixed_point_volatility,
 )
 from derivatives_bt_engine.live.tsmom_rebalance import (
@@ -118,7 +118,7 @@ RETIRED_IB_INSTRUMENTS = {
 DEFAULT_COST_EWMAC_FAST_SPANS = (4, 8, 16, 32, 64)
 DEFAULT_COST_EWMAC_FAST_SPAN = 16
 DEFAULT_COST_EWMAC_SLOW_SPAN = 64
-DEFAULT_COST_EWMAC_VOL_SPAN = CARVER_FAST_VOL_SPAN
+DEFAULT_COST_EWMAC_VOL_SPAN = MIXED_VOL_FAST_SPAN
 DEFAULT_RULE_COST_LIMIT_SR = 0.15
 DEFAULT_AFFORDABILITY_TARGET_VOL = 0.20
 DEFAULT_AFFORDABILITY_MIN_CONTRACTS = 4
@@ -375,7 +375,7 @@ def _roll_rate_audit(
 def _ewmac_rule_performance(
     frame: pl.DataFrame,
     *,
-    annualization_days: int = CARVER_BUSINESS_DAYS_PER_YEAR,
+    annualization_days: int = MIXED_VOL_ANNUALIZATION_DAYS,
     target_abs_forecast: float = EWMAC_FORECAST_TARGET_ABS,
 ) -> tuple[dict[str, object], pl.DataFrame]:
     """Return one instrument's pre-cost EWMAC Sharpe and forecast turnover.
@@ -446,9 +446,9 @@ def estimate_pooled_ewmac_cost_baseline(
     fast_span: int = DEFAULT_COST_EWMAC_FAST_SPAN,
     slow_span: int = DEFAULT_COST_EWMAC_SLOW_SPAN,
     vol_span: int = DEFAULT_COST_EWMAC_VOL_SPAN,
-    vol_slow_years: int = CARVER_SLOW_VOL_YEARS,
-    vol_slow_weight: float = CARVER_SLOW_VOL_WEIGHT,
-    vol_min_samples: int = CARVER_VOL_MIN_SAMPLES,
+    vol_slow_years: int = MIXED_VOL_SLOW_YEARS,
+    vol_slow_weight: float = MIXED_VOL_SLOW_WEIGHT,
+    vol_min_samples: int = MIXED_VOL_MIN_SAMPLES,
     scalar_min_periods: int = EWMAC_SCALAR_MIN_PERIODS,
     target_abs_forecast: float = EWMAC_FORECAST_TARGET_ABS,
     forecast_cap: float = EWMAC_FORECAST_CAP,
@@ -480,7 +480,7 @@ def estimate_pooled_ewmac_cost_baseline(
         )
         metrics, pnl = _ewmac_rule_performance(
             rule,
-            annualization_days=CARVER_BUSINESS_DAYS_PER_YEAR,
+            annualization_days=MIXED_VOL_ANNUALIZATION_DAYS,
             target_abs_forecast=target_abs_forecast,
         )
         metrics.update(
@@ -555,7 +555,7 @@ def estimate_pooled_ewmac_cost_baseline(
         else None
     )
     stacked_observation_sharpe = _annualized_sharpe(
-        pooled_returns, CARVER_BUSINESS_DAYS_PER_YEAR
+        pooled_returns, MIXED_VOL_ANNUALIZATION_DAYS
     )
     mapping_hash = coverage.get_column("pooling_mapping_hash").unique().to_list()
     summary = {
@@ -1217,9 +1217,9 @@ def volatility_from_bars(
     bars: pl.DataFrame,
     *,
     annualization_days: int,
-    fast_span: int = CARVER_FAST_VOL_SPAN,
-    slow_years: int = CARVER_SLOW_VOL_YEARS,
-    slow_weight: float = CARVER_SLOW_VOL_WEIGHT,
+    fast_span: int = MIXED_VOL_FAST_SPAN,
+    slow_years: int = MIXED_VOL_SLOW_YEARS,
+    slow_weight: float = MIXED_VOL_SLOW_WEIGHT,
 ) -> dict:
     """Calculate Carver mixed point volatility from ordinary price bars."""
     if annualization_days <= 0:
@@ -1283,7 +1283,7 @@ def _recent_dated_return_volatility(
     use_rth: bool,
     fast_span: int,
     volume_lookback_days: int = DEFAULT_VOLUME_LOOKBACK_DAYS,
-    min_samples: int = CARVER_VOL_MIN_SAMPLES,
+    min_samples: int = MIXED_VOL_MIN_SAMPLES,
 ) -> dict[str, object]:
     """Estimate recent fast return volatility from the executable contract."""
     bars = ib.get_historical_bars(
@@ -1424,9 +1424,9 @@ def volatility_from_pysystemtrade_history(
     instrument_code: str,
     *,
     annualization_days: int,
-    fast_span: int = CARVER_FAST_VOL_SPAN,
-    slow_years: int = CARVER_SLOW_VOL_YEARS,
-    slow_weight: float = CARVER_SLOW_VOL_WEIGHT,
+    fast_span: int = MIXED_VOL_FAST_SPAN,
+    slow_years: int = MIXED_VOL_SLOW_YEARS,
+    slow_weight: float = MIXED_VOL_SLOW_WEIGHT,
 ) -> dict:
     """Calculate mixed point vol from the full roll-neutral Carver history."""
     history = provider.load(instrument_code)
@@ -1487,9 +1487,9 @@ def build_cost_risk_row(
     slow_point_vol: Optional[float] = None,
     vol_observations: Optional[int] = None,
     slow_history_years: Optional[float] = None,
-    fast_vol_span: int = CARVER_FAST_VOL_SPAN,
+    fast_vol_span: int = MIXED_VOL_FAST_SPAN,
     slow_vol_span: Optional[int] = None,
-    slow_vol_weight: float = CARVER_SLOW_VOL_WEIGHT,
+    slow_vol_weight: float = MIXED_VOL_SLOW_WEIGHT,
     zero_return_fraction: Optional[float] = None,
     currency: str = "USD",
     fx_to_usd: float = 1.0,
@@ -1982,7 +1982,7 @@ def _history_volatility(
     if vol_source == "pysystemtrade":
         if pysystemtrade_provider is None:
             raise ValueError("pysystemtrade vol source requires a provider")
-        annualization_days = CARVER_BUSINESS_DAYS_PER_YEAR
+        annualization_days = MIXED_VOL_ANNUALIZATION_DAYS
         return annualization_days, volatility_from_pysystemtrade_history(
             pysystemtrade_provider,
             instr.get("instrument_code", symbol),
@@ -2379,10 +2379,10 @@ def parse_args(argv=None):
     )
     parser.add_argument("--duration", default=DEFAULT_DURATION,
                         help="IB history request duration for the selected vol source (default: %(default)s)")
-    parser.add_argument("--fast-vol-span", type=int, default=CARVER_FAST_VOL_SPAN,
+    parser.add_argument("--fast-vol-span", type=int, default=MIXED_VOL_FAST_SPAN,
                         help="Fast EWM point-vol span (default: %(default)s, Advanced Futures Trading)")
-    parser.add_argument("--slow-vol-years", type=int, default=CARVER_SLOW_VOL_YEARS)
-    parser.add_argument("--slow-vol-weight", type=float, default=CARVER_SLOW_VOL_WEIGHT)
+    parser.add_argument("--slow-vol-years", type=int, default=MIXED_VOL_SLOW_YEARS)
+    parser.add_argument("--slow-vol-weight", type=float, default=MIXED_VOL_SLOW_WEIGHT)
     parser.add_argument(
         "--cost-ewmac-fast-spans",
         type=_parse_fast_spans,
@@ -2401,17 +2401,17 @@ def parse_args(argv=None):
     parser.add_argument(
         "--cost-ewmac-vol-slow-years",
         type=int,
-        default=CARVER_SLOW_VOL_YEARS,
+        default=MIXED_VOL_SLOW_YEARS,
     )
     parser.add_argument(
         "--cost-ewmac-vol-slow-weight",
         type=float,
-        default=CARVER_SLOW_VOL_WEIGHT,
+        default=MIXED_VOL_SLOW_WEIGHT,
     )
     parser.add_argument(
         "--cost-ewmac-vol-min-samples",
         type=int,
-        default=CARVER_VOL_MIN_SAMPLES,
+        default=MIXED_VOL_MIN_SAMPLES,
     )
     parser.add_argument(
         "--cost-ewmac-scalar-min-periods",
@@ -2582,7 +2582,7 @@ def _error_row(
     exc: Exception,
     *,
     vol: Optional[dict] = None,
-    annualization_days: int = CARVER_BUSINESS_DAYS_PER_YEAR,
+    annualization_days: int = MIXED_VOL_ANNUALIZATION_DAYS,
     fx_by_currency: Optional[dict[str, dict]] = None,
 ) -> dict:
     identity = {
@@ -3155,7 +3155,7 @@ def run(argv=None) -> pl.DataFrame:
                 vol = volatility_from_pysystemtrade_history(
                     pysystemtrade_provider,
                     instr.get("instrument_code", instr["symbol"]),
-                    annualization_days=CARVER_BUSINESS_DAYS_PER_YEAR,
+                    annualization_days=MIXED_VOL_ANNUALIZATION_DAYS,
                     fast_span=args.fast_vol_span,
                     slow_years=args.slow_vol_years,
                     slow_weight=args.slow_vol_weight,

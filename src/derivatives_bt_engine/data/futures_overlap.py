@@ -26,7 +26,7 @@ from derivatives_bt_engine.domain.futures_history import (
     GlobexHistoryProvider,
     PysystemtradeHistoryProvider,
 )
-from derivatives_bt_engine.domain.signal import (
+from derivatives_bt_engine.domain.continuous_momentum import (
     build_features,
     continuous_momentum,
 )

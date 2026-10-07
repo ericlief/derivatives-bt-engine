@@ -18,7 +18,11 @@ from derivatives_bt_engine.domain.position import FuturesPosition, SingleLegOpti
 from derivatives_bt_engine.domain.trade_result import OptionTradeResult
 from derivatives_bt_engine.domain.position import MultiLegOptionPosition
 from derivatives_bt_engine.domain.instruments import resolve_annualization_days
-from derivatives_bt_engine.domain.signal import build_features, classify_regime, continuous_momentum
+from derivatives_bt_engine.domain.continuous_momentum import (
+    build_features,
+    classify_regime,
+    continuous_momentum,
+)
 from derivatives_bt_engine.domain.futures_dataloader import assert_monotonic_expiration
 from derivatives_bt_engine.utils.logger import setup_logger
 from derivatives_bt_engine.utils.price_utils import PriceUtils
@@ -1049,5 +1053,4 @@ class Backtester:
         }
 
         return results
-
 

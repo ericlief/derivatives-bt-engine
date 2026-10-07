@@ -58,12 +58,10 @@ from derivatives_bt_engine.domain.instruments import (
 from derivatives_bt_engine.domain.allocation import (
     ALLOCATION_MODES,
     NOTIONAL_WEIGHTING_SCHEMES,
-    _bounded_ewm_correlation_matrix,
     _coverage_restricted_idm,
     allocate_flat_cluster_diversified_targets,
     allocate_lot_aware_targets,
     apply_cluster_risk_cap,
-    build_returns_wide,
     compute_desired_risk_budget,
     compute_n_effective,
     compute_notional_split,
@@ -72,21 +70,31 @@ from derivatives_bt_engine.domain.allocation import (
     compute_symbol_notional_budget,
     group_by_cluster,
 )
+from derivatives_bt_engine.domain.correlation import (
+    bounded_ewm_correlation_matrix,
+    build_returns_wide,
+)
 from derivatives_bt_engine.domain.futures_dataloader import FuturesDataLoader, assert_monotonic_expiration
-from derivatives_bt_engine.domain.signal import (
+from derivatives_bt_engine.domain.continuous_momentum import (
     DEFAULT_FAST_WINDOW,
     DEFAULT_SLOW_WINDOW,
-    GOULDING_SIGNAL_MODES,
     build_features,
-    classify_signal_confidence,
-    compute_signal_confidence,
-    compute_vol_ratio,
-    cluster_conviction_score,
     continuous_momentum,
+)
+from derivatives_bt_engine.domain.goulding import (
+    GOULDING_SIGNAL_MODES,
     estimate_goulding_forecast_scalar,
     estimate_mixing_params_diagnostics,
     goulding_continuous_raw,
     goulding_monthly,
+)
+from derivatives_bt_engine.domain.signal_confidence import (
+    classify_signal_confidence,
+    compute_signal_confidence,
+    compute_vol_ratio,
+)
+from derivatives_bt_engine.domain.signal_selection import (
+    cluster_conviction_score,
     resolve_trend_direction,
 )
 # VIX_FILE_PATH: the same local spot-VIX parquet the backtest reads (see
@@ -655,7 +663,7 @@ def check_vol_regime(vx_ratio: float) -> VolRegime:
     looks dangerous" is, so nothing here classifies it. (Per-instrument,
     asset-specific vol state -- including a low-vol-ratio bucket -- is a
     different, independent mechanism: see SignalConfidenceRegime /
-    classify_signal_confidence in signal.py.)"""
+    classify_signal_confidence in signal_confidence.py.)"""
     if vx_ratio > VX_EXTREME_RATIO:
         return VolRegime.EXTREME
     if vx_ratio > VX_SPIKE_RATIO:
@@ -898,8 +906,8 @@ def _splice_live_front_month_bar(ib: Optional[IBPySync], instr: dict, db_symbol:
     be computed off a stale close without anything flagging it.
 
     Backfills the WHOLE gap, not just the single latest bar: continuous_
-    momentum's rolling windows (ts_fast/ts_slow/daily_std/hv,
-    signal.py's rolling_mean/rolling_std) are plain ROW-COUNT windows,
+    momentum's rolling windows (ts_fast/ts_slow/daily_std/hv in
+    domain.continuous_momentum) are plain ROW-COUNT windows,
     calendar-agnostic -- splicing on only today's bar while the DB is
     stale by N days doesn't "skip" those N missing days, it silently
     compresses them out of the window entirely (the newest computed
@@ -1695,7 +1703,7 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
         if account_equity and active_symbols:
             returns_wide = build_returns_wide({s: raw['closes'] for s, raw in raw_by_symbol.items()})
             as_of = config.as_of or date.today()
-            H, covered = _bounded_ewm_correlation_matrix(returns_wide, active_symbols, as_of,
+            H, covered = bounded_ewm_correlation_matrix(returns_wide, active_symbols, as_of,
                                                           config.corr_window_years, config.corr_halflife_days)
             notional_weight_by_symbol = compute_notional_split(active_symbols, config.notional_weighting,
                                                                 H, covered)

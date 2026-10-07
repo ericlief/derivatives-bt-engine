@@ -42,9 +42,7 @@ from derivatives_bt_engine.data.pysystemtrade_ewmac import (
     load_ewmac_component_frames,
 )
 from derivatives_bt_engine.data.report_formatting import round_public_report
-from derivatives_bt_engine.domain.allocation import (
-    _bounded_ewm_correlation_matrix,
-)
+from derivatives_bt_engine.domain.correlation import bounded_ewm_correlation_matrix
 from derivatives_bt_engine.domain.forecast_combination import (
     CombinedForecastEngine,
     ForecastCombinationConfig,
@@ -189,7 +187,7 @@ def _subsystem_correlation(
     wide = wide.sort("ts_event").drop_nulls()
     last = wide.get_column("ts_event").max()
     as_of = (last.date() if isinstance(last, datetime) else last) + timedelta(days=1)
-    correlation, covered = _bounded_ewm_correlation_matrix(
+    correlation, covered = bounded_ewm_correlation_matrix(
         wide,
         symbols,
         as_of,

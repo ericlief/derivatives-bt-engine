@@ -116,20 +116,24 @@ from typing import Optional
 import polars as pl
 
 from derivatives_bt_engine.domain.allocation import (
-    _bounded_ewm_correlation_matrix,
     _coverage_restricted_idm,
+)
+from derivatives_bt_engine.domain.correlation import (
+    bounded_ewm_correlation_matrix,
     build_returns_wide,
 )
 from derivatives_bt_engine.domain.instruments import get_spec, resolve_active_months, resolve_annualization_days
-from derivatives_bt_engine.domain.signal import (
-    SignalSpec,
-    _goulding_direction,
+from derivatives_bt_engine.domain.continuous_momentum import (
     build_features,
-    build_monthly_state_return_history,
     continuous_momentum,
+)
+from derivatives_bt_engine.domain.goulding import (
+    _goulding_direction,
+    build_monthly_state_return_history,
     estimate_mixing_params,
     goulding_monthly,
 )
+from derivatives_bt_engine.domain.signal_config import SignalSpec
 from derivatives_bt_engine.domain.tsmom_backtester import _detect_roll_dates, _month_end_dates, load_portfolio_data
 from derivatives_bt_engine.utils.logger import setup_logger
 
@@ -186,8 +190,7 @@ RESULTS_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', '..
 # mixing-parameter estimator, kept separate from calculate_trend_strength's
 # existing 3m/12m ts_fast/ts_slow (which stay canonical/untouched per that
 # function's own docstring). The paper's own 2m/12m fast/slow horizons and
-# eq. 4/7 state/direction logic come from domain/signal.py's
-# build_features()/goulding_monthly()/_goulding_direction (genuine calendar-
+# eq. 4/7 state/direction logic come from domain.goulding (genuine calendar-
 # month aggregation) and build_monthly_state_return_history/
 # estimate_mixing_params (the pooled, expanding-window a_Co/a_Re
 # ESTIMATION, moved there from this script once tsmom_backtester.py needed
@@ -232,7 +235,7 @@ _CLUSTER_FLOOR_RATIO = 0.51
 # comparison, not a silent behavior change.
 DEFAULT_IDM_SCALING = False
 DEFAULT_CORR_WINDOW_YEARS = 3.0       # bounded trailing window -- see
-                                      # _bounded_ewm_correlation_matrix's own
+                                      # bounded_ewm_correlation_matrix's own
                                       # docstring for why bounded, not an
                                       # unbounded full-history EWM
 DEFAULT_CORR_HALFLIFE_DAYS = 63.0     # matches this project's existing
@@ -375,7 +378,7 @@ def run(symbols: list[str], start: date, end: date, regime_discount: float,
         IDM = 1/sqrt(W H W_t) -- see compute_idm's own docstring. Recomputed
         at EVERY rebalance date from that date's own signal-active symbols
         and a bounded trailing-window EWM correlation matrix (see
-        _bounded_ewm_correlation_matrix, no lookahead), then multiplies
+        bounded_ewm_correlation_matrix, no lookahead), then multiplies
         that rebalance's own effective budget (every symbol's flat target,
         cluster-floor reservations, and active-set redistribution all
         scale off this SAME per-rebalance budget when idm_scaling is on --
@@ -590,7 +593,7 @@ def run(symbols: list[str], start: date, end: date, regime_discount: float,
             # behavior into one number), or once globally and shared by
             # every symbol under mixing_pool='global' (this project's
             # original behaviour, kept for direct comparison). See
-            # domain/signal.py's build_monthly_state_return_history/estimate_mixing_params.
+            # domain.goulding's build_monthly_state_return_history/estimate_mixing_params.
             if weighting_mode == 'dynamic':
                 clusters_needed = {get_spec(s)['cluster'] for s in symbols}
                 if mixing_pool == 'cluster':
@@ -726,7 +729,7 @@ def run(symbols: list[str], start: date, end: date, regime_discount: float,
             # rebalance's own signal-active symbols, H their REAL pairwise
             # correlation matrix from a BOUNDED trailing EWM window ending
             # strictly before `d` (no lookahead -- see
-            # _bounded_ewm_correlation_matrix's own docstring for why
+            # bounded_ewm_correlation_matrix's own docstring for why
             # bounded, not an unbounded full-history EWM). Scales this
             # rebalance's own effective budget UP when active instruments
             # are genuinely diversified (lower correlation), reflecting
@@ -741,13 +744,13 @@ def run(symbols: list[str], start: date, end: date, regime_discount: float,
             idm_multiplier = 1.0
             if idm_scaling:
                 active_symbols_for_idm = [c['s'] for c in candidates if c['weight'] != 0]
-                H, covered = _bounded_ewm_correlation_matrix(
+                H, covered = bounded_ewm_correlation_matrix(
                     returns_wide, active_symbols_for_idm, d, corr_window_years, corr_halflife_days)
                 # _coverage_restricted_idm, not a bare compute_idm call: a
                 # signal-active symbol with no correlation coverage (e.g.
                 # just added to the universe, too little history yet) must
                 # not contribute to this measurement at all -- see
-                # _bounded_ewm_correlation_matrix's own docstring on
+                # bounded_ewm_correlation_matrix's own docstring on
                 # `covered` for why H's identity-default entries for it
                 # aren't real zero-correlation evidence.
                 idm_multiplier = _coverage_restricted_idm(active_symbols_for_idm, H, covered)
