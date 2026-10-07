@@ -52,7 +52,7 @@ def test_run_loads_explicit_phase1_csv_and_saves_selected_rows(tmp_path):
     pl.DataFrame({
         "symbol": ["MZC", "VIX"],
         "asset_cls": ["Ags", "Vol"],
-        "ann_dvol": [600.0, 6_200.0],
+        "ann_dvol": [600.126, 6_200.0],
         "avg_daily_volume": [2_000.0, None],
         "pct_mkt_volume": [0.2, None],
         "init_cap_usd": [100_000.0, 100_000.0],
@@ -84,6 +84,8 @@ def test_run_loads_explicit_phase1_csv_and_saves_selected_rows(tmp_path):
     assert selected.get_column("symbol").to_list() == ["MZC"]
     saved = pl.read_csv(output)
     assert saved.get_column("symbol").to_list() == ["MZC"]
+    assert saved.get_column("ann_dvol").to_list() == [600.13]
+    assert selected.get_column("ann_dvol").to_list() == [600.13]
     assert saved.get_column("init_cap_usd").to_list() == [100_000.0]
     assert saved.get_column("target_vol").to_list() == [0.2]
     assert saved.columns == selected.columns

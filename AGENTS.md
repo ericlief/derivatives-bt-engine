@@ -50,6 +50,11 @@
 - Add new abbreviations to the centralized public-schema rename/token map, not
   as one-off aliases. Update report ordering, ranking/notebook helpers,
   documentation, and schema tests together.
+- Pass every public Polars CSV/report dataframe through
+  `data.report_formatting.round_public_report` at the output boundary. Keep
+  calculation dataframes at full precision, and register new monetary or
+  reproduction-sensitive rate columns in that shared formatter rather than
+  adding report-local rounding logic.
 
 ## Interactive Brokers
 

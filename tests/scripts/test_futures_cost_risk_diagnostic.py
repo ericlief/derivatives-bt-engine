@@ -24,13 +24,13 @@ from derivatives_bt_engine.data.futures_cost_risk import (
     _ib_contract_currency,
     _latest_dated_mark,
     _roll_rate_audit,
-    _round_report_decimals,
     _volume_stats_from_trade_bars,
     build_cost_risk_row,
     diagnose_instrument,
     volatility_from_bars,
     parse_args,
 )
+from derivatives_bt_engine.data.report_formatting import round_public_report
 from derivatives_bt_engine.domain.instruments import resolve_active_months
 from derivatives_bt_engine.live.tsmom_rebalance import (
     _format_ib_multiplier,
@@ -637,7 +637,7 @@ def test_report_uses_auditable_precision_for_money_rates_and_other_floats():
         "history_rows": [100],
     })
 
-    rounded = _round_report_decimals(report)
+    rounded = round_public_report(report)
 
     assert rounded["notional_per_contract"][0] == pytest.approx(12345.68)
     assert rounded["one_way_total_cost"][0] == pytest.approx(2.35)

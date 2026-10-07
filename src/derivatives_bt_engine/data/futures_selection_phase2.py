@@ -41,6 +41,7 @@ from derivatives_bt_engine.data.futures_cost_rankings import (
 from derivatives_bt_engine.data.pysystemtrade_pooling import (
     DEFAULT_POOLING_MAPPING_PATH,
 )
+from derivatives_bt_engine.data.report_formatting import round_public_report
 from derivatives_bt_engine.domain.allocation import (
     _bounded_ewm_correlation_matrix,
 )
@@ -497,12 +498,19 @@ def _run_complete_selection(
     trials_path = output_dir / f"pysystemtrade_phase2_trials_{stamp}.csv"
     selection_path = output_dir / f"pysystemtrade_phase2_selection_{stamp}.csv"
     returns_path = output_dir / f"pysystemtrade_phase2_subsystem_returns_{stamp}.parquet"
-    audit_frame.write_csv(audit_path)
+    # Round only persisted public CSV copies. Full-precision daily analytical
+    # frames remain available in Parquet and calculations above are untouched.
+    public_audit = round_public_report(audit_frame)
+    public_trials = round_public_report(
+        pl.DataFrame(selection.trials, infer_schema_length=None)
+    )
+    public_selection = round_public_report(final_frame)
+    public_audit.write_csv(audit_path)
     pl.concat(forecast_output_frames, how="diagonal_relaxed").write_parquet(
         forecasts_path
     )
-    pl.DataFrame(selection.trials, infer_schema_length=None).write_csv(trials_path)
-    final_frame.write_csv(selection_path)
+    public_trials.write_csv(trials_path)
+    public_selection.write_csv(selection_path)
     returns_wide.write_parquet(returns_path)
     print(
         f"Phase 2 selected {len(selection.selected)}/{len(candidate_list)} "
@@ -512,7 +520,7 @@ def _run_complete_selection(
     print(f"Saved daily forecasts {forecasts_path}")
     print(f"Saved trials {trials_path}")
     print(f"Saved selection {selection_path}")
-    return selection_path, final_frame
+    return selection_path, public_selection
 
 
 def run(argv=None) -> tuple[Path, pl.DataFrame]:
@@ -591,7 +599,10 @@ def run(argv=None) -> tuple[Path, pl.DataFrame]:
         else _default_output_path(source, generated_at)
     )
     output.parent.mkdir(parents=True, exist_ok=True)
-    selected.write_csv(output)
+    # Step 1 is a public report boundary. Keep ``selected`` at calculation
+    # precision for the optional complete search and round only its CSV copy.
+    public_selected = round_public_report(selected)
+    public_selected.write_csv(output)
     logger.info(
         "phase2_step1 complete source=%s output=%s selected=%d total=%d",
         source,
@@ -622,7 +633,7 @@ def run(argv=None) -> tuple[Path, pl.DataFrame]:
             run_config=config,
             args=args,
         )
-    return output, selected
+    return output, public_selected
 
 
 def main(argv=None) -> None:

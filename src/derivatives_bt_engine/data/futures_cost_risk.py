@@ -54,6 +54,7 @@ from derivatives_bt_engine.data.pysystemtrade_ib import (
 from derivatives_bt_engine.data.pysystemtrade_pooling import (
     DEFAULT_POOLING_MAPPING_PATH,
 )
+from derivatives_bt_engine.data.report_formatting import round_public_report
 from derivatives_bt_engine.domain.futures_history import (
     DEFAULT_PYSYSTEMTRADE_DB_PATH,
     PysystemtradeHistoryProvider,
@@ -110,68 +111,6 @@ IB_INSYNC_HISTORICAL_TIMEOUT_FLOOR_SECONDS = 55.0
 RETIRED_IB_INSTRUMENTS = {
     "BB3M": "CME BSBY futures were permanently delisted in October 2024",
 }
-TWO_DECIMAL_MONEY_COLUMNS = {
-    "notional_native_per_contract",
-    "notional_per_contract",
-    "daily_dollar_vol_per_contract",
-    "annual_dollar_vol_per_contract",
-    "min_contract_notional",
-    "min_contract_annual_dollar_vol",
-    "min_capital_full_weight_idm1",
-    "equal_weight_dvol_budget",
-    "min_capital_equal_weight",
-    "commission_per_side",
-    "one_way_spread_cash",
-    "one_way_total_cost",
-    "configured_commission_native",
-    "configured_commission",
-    "configured_spread_cash_native",
-    "configured_one_way_cost_native",
-    "configured_one_way_cost",
-    "notional",
-    "notional_native",
-    "daily_dvol",
-    "ann_dvol",
-    "comm_native",
-    "comm_usd",
-    "daily_dvol",
-    "ann_dvol",
-    "commission_native",
-    "commission_usd",
-    "spread_cash_native",
-    "cost_native",
-    "cost_usd",
-    "snap_spread_cash_usd",
-    "snap_cost_usd",
-    "min_con_notional",
-    "min_con_ann_dvol",
-    "min_cap_usd_full_wt_idm1",
-    "afford_scen_cap",
-    "equal_wt_dvol_budget",
-    "min_cap_usd_equal_wt",
-    "init_cap_usd",
-    "max_ann_dvol",
-    "min_capital_usd_full_weight_idm1",
-    "afford_scen_cap",
-    "min_capital_usd_equal_weight",
-    "initial_capital_usd",
-    "init_capital_usd",
-    "max_ann_dvol",
-    "risk_traded_usd_day",
-    "min_mkt_risk_vol_usd_day",
-    "mkt_risk_vol_usd_day",
-}
-SIX_DECIMAL_RATE_COLUMNS = {
-    "fx_to_usd",
-    "daily_return_vol",
-    "annual_return_vol",
-    "cur_fx_to_usd",
-    "ref_fx_to_usd",
-    "ann_return_vol",
-    "daily_ret_vol",
-    "ann_ret_vol",
-}
-
 DEFAULT_COST_EWMAC_FAST_SPANS = (4, 8, 16, 32, 64)
 DEFAULT_COST_EWMAC_FAST_SPAN = 16
 DEFAULT_COST_EWMAC_SLOW_SPAN = 64
@@ -2771,28 +2710,6 @@ def _load_instruments(
     return selected
 
 
-def _round_report_decimals(report: pl.DataFrame) -> pl.DataFrame:
-    """Round report floats for human-facing CSV output.
-
-    Monetary contract/cost fields use cents. FX and return-volatility rates
-    retain six decimal places so displayed notionals and rates reproduce the
-    reported dollar volatility without material rounding drift. Other
-    floating-point diagnostics retain four decimal places. Counts and
-    identifiers are not cast or rounded.
-    """
-    expressions = []
-    for name, dtype in report.schema.items():
-        if dtype in (pl.Float32, pl.Float64):
-            if name in TWO_DECIMAL_MONEY_COLUMNS:
-                decimals = 2
-            elif name in SIX_DECIMAL_RATE_COLUMNS:
-                decimals = 6
-            else:
-                decimals = 4
-            expressions.append(pl.col(name).round(decimals))
-    return report.with_columns(expressions)
-
-
 PUBLIC_REPORT_RENAMES = {
     "price": "cur_price",
     "price_source": "cur_price_source",
@@ -3122,7 +3039,7 @@ def _emit_report(report: pl.DataFrame, args) -> pl.DataFrame:
             "report_generated_at_ct"
         )
     )
-    output_report = _round_report_decimals(_public_report_schema(report))
+    output_report = round_public_report(_public_report_schema(report))
     summary_columns = [
         "symbol",
         "asset_cls",

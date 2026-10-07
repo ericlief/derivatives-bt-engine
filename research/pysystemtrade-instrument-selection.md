@@ -561,6 +561,19 @@ combination and the unconstrained greedy AFTS baseline. The command writes:
 - `pysystemtrade_phase2_trials_<timestamp>.csv`, one row per greedy trial; and
 - `pysystemtrade_phase2_selection_<timestamp>.csv`, the last accepted book.
 
+In the final selection CSV, `net_sr` is an instrument-level input to the
+portfolio score: the common gross SR assumption less that instrument's annual
+combined-forecast trading cost and its final-book granularity penalty. It is
+not the book score when the ranked instrument was added. The accepted rows in
+the trials CSV record that sequence: `book` is the hypothetical portfolio and
+`score` is its portfolio-level score at that iteration.
+
+All Phase 1 and Phase 2 public CSVs use the shared report formatter at the
+write boundary. USD amounts are rounded to cents, reproduction-sensitive FX
+and return-volatility rates to six decimal places, and other floating-point
+diagnostics to four. Forecast and synchronized-return Parquet files retain
+full calculation precision.
+
 Warm-up nulls are expected and recorded. A candidate is excluded before the
 search when it has fewer than `--min-forecast-obs` fully valid observations,
 has a null or non-finite component after its first fully valid row, produces a
