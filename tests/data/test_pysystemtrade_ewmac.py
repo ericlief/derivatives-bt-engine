@@ -10,7 +10,7 @@ from derivatives_bt_engine.data.pysystemtrade_ewmac import (
     PooledEwmacRuleData,
     build_ewmac_component_frame,
 )
-from derivatives_bt_engine.domain.forecast_combination import EwmacRule
+from derivatives_bt_engine.domain.ewmac import EwmacRule
 
 
 def _history() -> SimpleNamespace:

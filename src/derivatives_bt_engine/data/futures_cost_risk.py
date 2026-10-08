@@ -59,11 +59,11 @@ from derivatives_bt_engine.data.pysystemtrade_ewmac import (
     load_pooled_ewmac_rule,
 )
 from derivatives_bt_engine.data.report_formatting import round_public_report
-from derivatives_bt_engine.domain.forecast_combination import EwmacRule
 from derivatives_bt_engine.domain.ewmac import (
     EWMAC_FORECAST_CAP,
     EWMAC_FORECAST_TARGET_ABS,
     EWMAC_SCALAR_MIN_PERIODS,
+    EwmacRule,
 )
 from derivatives_bt_engine.domain.futures_history import (
     DEFAULT_PYSYSTEMTRADE_DB_PATH,

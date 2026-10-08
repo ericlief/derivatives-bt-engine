@@ -6,7 +6,9 @@ from derivatives_bt_engine.domain.forecast_combination import (
     CombinedForecastEngine,
     CorrelationForecastDiversification,
     ForecastCombinationConfig,
+    combine_ewmac_forecasts,
 )
+from derivatives_bt_engine.domain.ewmac import EwmacRule
 
 
 def _frame(values_4, values_64):
@@ -105,3 +107,41 @@ def test_turnover_ewm_applies_to_average_position_not_forecast():
     last = result.frame.tail(1).row(0, named=True)
     assert last["avg_position"] == pytest.approx(0.25)
     assert last["smooth_avg_position"] != pytest.approx(last["avg_position"])
+
+
+def test_dataframe_helper_builds_components_and_disables_fdm():
+    """One price frame can use the complete engine with a fixed unit FDM."""
+    rows = 80
+    history = pl.DataFrame({
+        "date": pl.date_range(
+            pl.date(2024, 1, 1),
+            pl.date(2024, 1, 1) + pl.duration(days=rows - 1),
+            eager=True,
+        ),
+        "close": [100.0 + index * 0.1 + np.sin(index / 3) for index in range(rows)],
+    })
+    result = combine_ewmac_forecasts(
+        history,
+        rules=(EwmacRule(4, 16), EwmacRule(8, 32)),
+        forecast_scalars={"4/16": 0.5, "8/32": 0.75},
+        fdm=1.0,
+        config=ForecastCombinationConfig(min_valid_observations=10),
+        vol_span=4,
+        vol_slow_years=1,
+        vol_min_samples=2,
+    )
+
+    valid = result.frame.filter(pl.col("forecast_valid"))
+    expected = (
+        valid.get_column("fcst_4_16") * 0.25
+        + valid.get_column("fcst_8_32") * 0.75
+    ).clip(-1.0, 1.0)
+    assert result.fdm == 1.0
+    assert "date" in result.frame.columns
+    assert "ts_event" not in result.frame.columns
+    assert result.weights["4/16"] == pytest.approx(0.25)
+    assert result.weights["8/32"] == pytest.approx(0.75)
+    assert valid.get_column("combined_forecast").to_list() == pytest.approx(
+        expected.to_list()
+    )
+    assert result.audit["forecast_elig"] is True

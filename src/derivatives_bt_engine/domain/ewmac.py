@@ -14,6 +14,7 @@ contract explicit and avoids silently replacing history-provider changes.
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 
 import polars as pl
 
@@ -31,6 +32,34 @@ EWMAC_FORECAST_TARGET_ABS = 0.5
 EWMAC_FORECAST_CAP = 1.0
 EWMAC_SCALAR_MIN_PERIODS = 500
 EWMAC_SCALAR_POOLS = ("fixed", "global", "cluster", "instrument")
+
+
+@dataclass(frozen=True)
+class EwmacRule:
+    """Describe one EWMAC rule and its dataframe/report identifiers.
+
+    ``fast`` and ``slow`` are the two exponentially weighted moving-average
+    spans in business-day observations.
+    """
+
+    fast: int
+    slow: int
+
+    @property
+    def key(self) -> str:
+        """Return the public ``fast/slow`` rule identifier."""
+        return f"{self.fast}/{self.slow}"
+
+    @property
+    def column(self) -> str:
+        """Return this component's internal daily dataframe column name."""
+        return f"fcst_{self.fast}_{self.slow}"
+
+
+CANONICAL_EWMAC_RULES = tuple(
+    EwmacRule(fast, fast * 4) for fast in (4, 8, 16, 32, 64)
+)
+EWMAC_RULE_BY_KEY = {rule.key: rule for rule in CANONICAL_EWMAC_RULES}
 
 
 def ewmac(

@@ -16,44 +16,30 @@ from __future__ import annotations
 import math
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 import polars as pl
 
 from derivatives_bt_engine.domain.ewmac import (
+    CANONICAL_EWMAC_RULES,
     EWMAC_FORECAST_CAP,
+    EWMAC_SCALAR_MIN_PERIODS,
     EWMAC_FORECAST_TARGET_ABS,
+    EWMAC_RULE_BY_KEY,
+    EwmacRule,
 )
-from derivatives_bt_engine.domain.volatility import MIXED_VOL_ANNUALIZATION_DAYS
-
-
-@dataclass(frozen=True)
-class EwmacRule:
-    """Describe one EWMAC rule and its dataframe/report identifiers.
-
-    ``fast`` and ``slow`` are the two exponentially weighted moving-average
-    spans in business-day observations.
-    """
-
-    fast: int
-    slow: int
-
-    @property
-    def key(self) -> str:
-        """Return the public ``fast/slow`` key stored in Phase 1 reports."""
-        return f"{self.fast}/{self.slow}"
-
-    @property
-    def column(self) -> str:
-        """Return this component's internal daily dataframe column name."""
-        return f"fcst_{self.fast}_{self.slow}"
-
-
-CANONICAL_EWMAC_RULES = tuple(
-    EwmacRule(fast, fast * 4) for fast in (4, 8, 16, 32, 64)
+from derivatives_bt_engine.domain.ewmac_components import (
+    build_ewmac_components,
+    resolve_daily_date_column,
 )
-EWMAC_RULE_BY_KEY = {rule.key: rule for rule in CANONICAL_EWMAC_RULES}
+from derivatives_bt_engine.domain.volatility import (
+    MIXED_VOL_ANNUALIZATION_DAYS,
+    MIXED_VOL_FAST_SPAN,
+    MIXED_VOL_MIN_SAMPLES,
+    MIXED_VOL_SLOW_WEIGHT,
+    MIXED_VOL_SLOW_YEARS,
+)
 
 
 class ForecastWeightPolicy(ABC):
@@ -148,6 +134,34 @@ class CorrelationForecastDiversification(ForecastDiversificationPolicy):
         vector = np.array([weights[rule] for rule in rules], dtype=float)
         variance = float(vector @ active @ vector)
         return min(self.cap, 1.0 / math.sqrt(variance)) if variance > 0 else 1.0
+
+
+@dataclass(frozen=True)
+class FixedForecastDiversification(ForecastDiversificationPolicy):
+    """Return one fixed FDM independently of rule correlations.
+
+    ``value=1.0`` disables forecast diversification while retaining the same
+    combination and audit path used by the portfolio research pipeline.  A
+    fixed policy is preferable to manufacturing a correlation matrix merely
+    to force a desired multiplier.
+    """
+
+    value: float = 1.0
+
+    def __post_init__(self) -> None:
+        """Require a finite, positive forecast diversification multiplier."""
+        if not math.isfinite(self.value) or self.value <= 0:
+            raise ValueError("fixed FDM must be finite and positive")
+
+    def multiplier(
+        self,
+        rules: list[str],
+        weights: Mapping[str, float],
+        correlation: np.ndarray,
+        correlation_rules: list[str],
+    ) -> float:
+        """Return the configured multiplier; other arguments are unused."""
+        return self.value
 
 
 @dataclass(frozen=True)
@@ -398,6 +412,117 @@ class CombinedForecastEngine:
         return CombinedForecastResult(
             subsystem_frame, weights, fdm, turnover, audit
         )
+
+
+def combine_ewmac_forecasts(
+    history_frame: pl.DataFrame,
+    *,
+    rules: Iterable[EwmacRule] = CANONICAL_EWMAC_RULES,
+    date_col: str | None = None,
+    instrument_code: str = "instrument",
+    forecast_scalars: Mapping[str, float] | None = None,
+    scalar_min_periods: int = EWMAC_SCALAR_MIN_PERIODS,
+    weight_policy: ForecastWeightPolicy | None = None,
+    fdm: float = 1.0,
+    config: ForecastCombinationConfig | None = None,
+    vol_span: int = MIXED_VOL_FAST_SPAN,
+    vol_slow_years: int = MIXED_VOL_SLOW_YEARS,
+    vol_slow_weight: float = MIXED_VOL_SLOW_WEIGHT,
+    vol_min_samples: int = MIXED_VOL_MIN_SAMPLES,
+) -> CombinedForecastResult:
+    """Build and combine every requested EWMAC speed from one price frame.
+
+    Parameters
+    ----------
+    history_frame
+        One instrument's daily Polars dataframe with ``date`` and ``close``;
+        legacy ``ts_event`` is also accepted.  A supplied ``point_change`` is
+        authoritative; otherwise sorted ``close.diff()`` is used.  For
+        equities, ``close`` should be adjusted for splits so corporate actions
+        do not become false signals.
+    rules
+        EWMAC speed pairs to calculate and combine.  The five canonical
+        ``4/16`` through ``64/256`` rules are used by default.
+    date_col
+        Optional daily date-column name.  The helper prefers ``date`` and
+        accepts legacy ``ts_event`` when this is omitted.
+    instrument_code
+        Stable identity used only when causally estimating per-instrument
+        forecast scalars.
+    forecast_scalars
+        Optional fixed scalar by rule key.  When omitted, each rule receives
+        a causal scalar estimated solely from this instrument's prior raw
+        forecasts.  This is a single-instrument normalization, not pooling.
+    scalar_min_periods
+        Prior daily observations required before a causal scalar is valid.
+    weight_policy
+        Pre-FDM forecast weights.  The standard slow-tilted EWMAC weights are
+        used when omitted and are renormalized over ``rules``.
+    fdm
+        Fixed forecast diversification multiplier.  The default ``1.0``
+        disables FDM, which is useful for a standalone stock dataframe.
+    config
+        Forecast cap, turnover, and validity settings for the combined engine.
+    vol_span, vol_slow_years, vol_slow_weight, vol_min_samples
+        Mixed point-volatility settings shared by every component rule.
+
+    Returns
+    -------
+    CombinedForecastResult
+        The usual combined-forecast result.  Its frame also retains the input
+        columns, common volatility diagnostics, and rule-specific EMA, raw
+        forecast, scalar, and final component columns for notebook inspection.
+
+    Notes
+    -----
+    This helper deliberately fixes FDM rather than estimating one from a
+    single market.  Cross-rule correlation FDM for portfolio research remains
+    the responsibility of :class:`CombinedForecastEngine` with a pooled
+    correlation matrix.
+    """
+    rule_tuple = tuple(rules)
+    combination_config = config or ForecastCombinationConfig()
+    public_date_column = resolve_daily_date_column(history_frame, date_col)
+    component_frame = build_ewmac_components(
+        history_frame,
+        rules=rule_tuple,
+        date_col=public_date_column,
+        instrument_code=instrument_code,
+        forecast_scalars=forecast_scalars,
+        scalar_min_periods=scalar_min_periods,
+        target_abs_forecast=combination_config.target_abs_forecast,
+        forecast_cap=combination_config.forecast_cap,
+        annualization_days=combination_config.annualization_days,
+        vol_span=vol_span,
+        vol_slow_years=vol_slow_years,
+        vol_slow_weight=vol_slow_weight,
+        vol_min_samples=vol_min_samples,
+    )
+    rule_keys = [rule.key for rule in rule_tuple]
+    engine = CombinedForecastEngine(
+        weight_policy=weight_policy,
+        diversification_policy=FixedForecastDiversification(fdm),
+        config=combination_config,
+    )
+    # Fixed FDM ignores correlation inputs; these identity placeholders keep
+    # the lower-level engine API uniform without implying estimated diversity.
+    engine_frame = (
+        component_frame
+        if public_date_column == "ts_event"
+        else component_frame.rename({public_date_column: "ts_event"})
+    )
+    result = engine.combine(
+        engine_frame,
+        rule_keys,
+        np.eye(len(rule_keys)),
+        rule_keys,
+    )
+    if public_date_column == "ts_event":
+        return result
+    return replace(
+        result,
+        frame=result.frame.rename({"ts_event": public_date_column}),
+    )
 
 
 def median_forecast_correlation(

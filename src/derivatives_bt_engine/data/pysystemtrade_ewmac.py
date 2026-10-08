@@ -25,19 +25,17 @@ import polars as pl
 from derivatives_bt_engine.data.pysystemtrade_pooling import (
     DEFAULT_POOLING_MAPPING_PATH,
 )
-from derivatives_bt_engine.domain.forecast_combination import (
-    CANONICAL_EWMAC_RULES,
-    EwmacRule,
-)
 from derivatives_bt_engine.domain.futures_history import (
     DEFAULT_PYSYSTEMTRADE_DB_PATH,
     FuturesHistory,
     PysystemtradeHistoryProvider,
 )
 from derivatives_bt_engine.domain.ewmac import (
+    CANONICAL_EWMAC_RULES,
     EWMAC_FORECAST_CAP,
     EWMAC_FORECAST_TARGET_ABS,
     EWMAC_SCALAR_MIN_PERIODS,
+    EwmacRule,
     ewmac,
 )
 from derivatives_bt_engine.domain.volatility import (
