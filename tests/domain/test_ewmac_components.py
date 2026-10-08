@@ -3,11 +3,13 @@
 import math
 
 import polars as pl
+import pytest
 
 from derivatives_bt_engine.domain.ewmac import EwmacRule
 from derivatives_bt_engine.domain.ewmac_components import (
     build_ewmac_components,
     build_ewmac_rule_component,
+    prepare_daily_price_frame,
 )
 
 
@@ -67,3 +69,36 @@ def test_component_builder_retains_history_and_joins_requested_speeds():
         "raw_fcst_8_32",
         "fcst_8_32",
     } <= set(result.columns)
+
+
+def test_daily_preparation_collapses_only_identical_duplicate_rows():
+    """Repeated provider rows cannot multiply during component joins."""
+    original = _price_frame(20)
+    duplicated = pl.concat([original, original.head(1)], how="vertical")
+
+    prepared = prepare_daily_price_frame(duplicated)
+    components = build_ewmac_components(
+        duplicated,
+        rules=(EwmacRule(4, 16), EwmacRule(8, 32)),
+        forecast_scalars={"4/16": 0.5, "8/32": 0.75},
+        vol_span=4,
+        vol_slow_years=1,
+        vol_min_samples=2,
+    )
+
+    assert prepared.height == original.height
+    assert prepared.get_column("date").n_unique() == original.height
+    assert components.height == original.height
+    assert components.get_column("date").n_unique() == original.height
+    assert components.get_column("point_change").null_count() == 1
+
+
+def test_daily_preparation_rejects_conflicting_same_date_rows():
+    """Intraday or competing closes require an explicit upstream policy."""
+    original = _price_frame(20)
+    conflict = original.head(1).with_columns(pl.lit(999.0).alias("close"))
+
+    with pytest.raises(ValueError, match="conflicting rows for the same date"):
+        prepare_daily_price_frame(
+            pl.concat([original, conflict], how="vertical")
+        )

@@ -35,6 +35,48 @@ from derivatives_bt_engine.domain.volatility import (
 _INTERNAL_DATE_COLUMN = "ts_event"
 
 
+def prepare_daily_price_frame(history_frame: pl.DataFrame) -> pl.DataFrame:
+    """Validate and normalize one daily price history before rule calculation.
+
+    The frame must contain ``date`` and ``close`` with at most one distinct
+    observation per date.  Completely identical duplicate rows are harmless
+    provider duplication and are collapsed.  Same-date rows that differ in
+    any field are rejected because choosing a close or aggregating volume is a
+    data-policy decision that must happen before daily EWMAC calculation.
+
+    Returns a date-sorted Polars dataframe retaining all caller-owned columns.
+    """
+    required = {"date", "close"}
+    missing = sorted(required.difference(history_frame.columns))
+    if missing:
+        raise ValueError(f"daily price frame missing columns: {missing}")
+    if history_frame.schema["date"] != pl.Date:
+        raise ValueError("daily price frame 'date' column must have Polars Date type")
+    if history_frame.get_column("date").null_count():
+        raise ValueError("daily price frame contains null dates")
+
+    # Remove only rows identical across every field.  If a date remains
+    # duplicated afterward, the source contains competing daily observations
+    # and silently keeping one would make the signal depend on row order.
+    deduplicated = history_frame.unique(maintain_order=True)
+    conflicting_dates = (
+        deduplicated.group_by("date")
+        .len()
+        .filter(pl.col("len") > 1)
+        .get_column("date")
+    )
+    if conflicting_dates.len():
+        examples = ", ".join(
+            str(value) for value in conflicting_dates.sort().head(5).to_list()
+        )
+        raise ValueError(
+            "daily price frame has conflicting rows for the same date; "
+            "aggregate intraday/provider rows before EWMAC calculation "
+            f"(examples: {examples})"
+        )
+    return deduplicated.sort("date")
+
+
 def _to_internal_date_column(
     history_frame: pl.DataFrame,
 ) -> pl.DataFrame:
@@ -92,7 +134,8 @@ def build_ewmac_rule_component(
     ):
         raise ValueError("forecast_scalar must be finite and positive")
 
-    internal_history = _to_internal_date_column(history_frame)
+    daily_history = prepare_daily_price_frame(history_frame)
+    internal_history = _to_internal_date_column(daily_history)
     raw_rule = ewmac(
         internal_history,
         fast_span=rule.fast,
@@ -170,6 +213,7 @@ def build_ewmac_components(
     when ``forecast_scalars`` is omitted, each rule is normalized causally
     from the instrument's own prior history.
     """
+    daily_history = prepare_daily_price_frame(history_frame)
     rule_tuple = tuple(rules)
     if not rule_tuple:
         raise ValueError("at least one EWMAC rule is required")
@@ -187,7 +231,7 @@ def build_ewmac_components(
     combined: pl.DataFrame | None = None
     for rule in rule_tuple:
         component = build_ewmac_rule_component(
-            history_frame,
+            daily_history,
             rule,
             instrument_code=instrument_code,
             forecast_scalar=(
