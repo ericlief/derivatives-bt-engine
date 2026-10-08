@@ -207,7 +207,7 @@ def build_ewmac_component_frame(
 ) -> pl.DataFrame:
     """Build a wide component-forecast frame for one instrument history.
 
-    The compact shape contains ``ts_event``, ``point_vol``, ``point_change``,
+    The compact shape contains ``date``, ``point_vol``, ``point_change``,
     and one ``fcst_<fast>_<slow>`` column per rule and is consumed by Phase 2.
     With ``detailed=True`` the frame additionally exposes the Panama price,
     raw EWMAC difference, raw normalized forecast, and daily pooled scalar for
@@ -225,14 +225,14 @@ def build_ewmac_component_frame(
         suffix = f"{pooled.rule.fast}_{pooled.rule.slow}"
         if combined is None:
             base_columns = [
-                "ts_event",
+                pl.col("ts_event").alias("date"),
                 "point_vol",
                 "point_change",
                 pooled.rule.column,
             ]
             if detailed:
                 base_columns = [
-                    "ts_event",
+                    pl.col("ts_event").alias("date"),
                     "close",
                     "fast_point_vol",
                     "slow_point_vol",
@@ -247,7 +247,10 @@ def build_ewmac_component_frame(
             combined = frame.select(base_columns)
             continue
 
-        columns: list[str | pl.Expr] = ["ts_event", pooled.rule.column]
+        columns: list[str | pl.Expr] = [
+            pl.col("ts_event").alias("date"),
+            pooled.rule.column,
+        ]
         if detailed:
             columns.extend([
                 pl.col("raw_ewmac").alias(f"raw_ewmac_{suffix}"),
@@ -256,9 +259,9 @@ def build_ewmac_component_frame(
             ])
         # All rules are calculated from the same Panama history; joining on
         # date makes that ownership explicit while retaining one common vol.
-        combined = combined.join(frame.select(columns), on="ts_event", how="left")
+        combined = combined.join(frame.select(columns), on="date", how="left")
     assert combined is not None
-    return combined.sort("ts_event")
+    return combined.sort("date")
 
 
 def load_ewmac_component_frames(
@@ -313,14 +316,14 @@ def _date_slice(
     start: date | datetime | str | None,
     end: date | datetime | str | None,
 ) -> pl.DataFrame:
-    """Filter a ``ts_event`` dataframe to optional inclusive boundaries."""
+    """Filter a daily ``date`` dataframe to optional inclusive boundaries."""
     start_date = _coerce_date(start)
     end_date = _coerce_date(end)
     result = frame
     if start_date is not None:
-        result = result.filter(pl.col("ts_event") >= start_date)
+        result = result.filter(pl.col("date") >= start_date)
     if end_date is not None:
-        result = result.filter(pl.col("ts_event") <= end_date)
+        result = result.filter(pl.col("date") <= end_date)
     return result
 
 
@@ -357,15 +360,15 @@ class EwmacResearchView:
         """
         frame = _date_slice(self.forecasts, start=start, end=end)
         if columns is None:
-            selected = ["ts_event", "close", "point_vol"]
+            selected = ["date", "close", "point_vol"]
             selected.extend(
                 rule.column for rule in self.rules
                 if rule.column in frame.columns
             )
         else:
             selected = list(columns)
-            if "ts_event" not in selected:
-                selected.insert(0, "ts_event")
+            if "date" not in selected:
+                selected.insert(0, "date")
         missing = sorted(set(selected).difference(frame.columns))
         if missing:
             raise ValueError(f"forecast table has no columns: {missing}")
@@ -433,7 +436,7 @@ class EwmacResearchView:
         if frame.is_empty():
             raise ValueError("plot date range contains no forecast observations")
 
-        x = frame.get_column("ts_event").to_list()
+        x = frame.get_column("date").to_list()
         figure, axes = plt.subplots(2, 1, sharex=True, figsize=figsize)
         axes[0].plot(x, frame.get_column("close").to_list(), color="black")
         axes[0].set_ylabel("Panama price")
@@ -481,10 +484,12 @@ def load_ewmac_research(
     scalar_frames = []
     for key, item in pooled.items():
         scalar_frames.append(
-            item.global_scalar().with_columns(pl.lit(key).alias("rule"))
+            item.global_scalar().rename({"ts_event": "date"}).with_columns(
+                pl.lit(key).alias("rule")
+            )
         )
     pooled_scalars = pl.concat(scalar_frames, how="diagonal_relaxed").sort(
-        "rule", "ts_event"
+        "rule", "date"
     )
     return EwmacResearchView(
         instrument_code=instrument_code,

@@ -174,18 +174,18 @@ def _subsystem_correlation(
     for symbol in symbols:
         returns = (
             subsystem_frames[symbol]
-            .select("ts_event", pl.col("subsystem_return").alias(symbol))
+            .select("date", pl.col("subsystem_return").alias(symbol))
             .drop_nulls()
         )
         # Inner joining makes every matrix row a genuinely contemporaneous
         # observation across the candidate universe.
         wide = returns if wide is None else wide.join(
-            returns, on="ts_event", how="inner"
+            returns, on="date", how="inner"
         )
     if wide is None or wide.is_empty():
         return np.eye(len(symbols)), np.zeros(len(symbols), dtype=bool), pl.DataFrame()
-    wide = wide.sort("ts_event").drop_nulls()
-    last = wide.get_column("ts_event").max()
+    wide = wide.sort("date").drop_nulls()
+    last = wide.get_column("date").max()
     as_of = (last.date() if isinstance(last, datetime) else last) + timedelta(days=1)
     correlation, covered = bounded_ewm_correlation_matrix(
         wide,

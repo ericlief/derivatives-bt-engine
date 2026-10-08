@@ -2,6 +2,7 @@ import polars as pl
 import pytest
 
 from derivatives_bt_engine.data.futures_selection_phase2 import (
+    _subsystem_correlation,
     run,
     slow_tilt_ewmac_weights,
 )
@@ -89,3 +90,32 @@ def test_run_loads_explicit_phase1_csv_and_saves_selected_rows(tmp_path):
     assert saved.get_column("init_cap_usd").to_list() == [100_000.0]
     assert saved.get_column("target_vol").to_list() == [0.2]
     assert saved.columns == selected.columns
+
+
+def test_subsystem_correlation_uses_daily_date_key():
+    """Phase 2 correlation retains ``date`` in its persisted input panel."""
+    dates = pl.date_range(
+        pl.date(2024, 1, 1), pl.date(2024, 3, 20), eager=True
+    )
+    frames = {
+        "A": pl.DataFrame({
+            "date": dates,
+            "subsystem_return": [index * 0.001 for index in range(len(dates))],
+        }),
+        "B": pl.DataFrame({
+            "date": dates,
+            "subsystem_return": [index * -0.002 for index in range(len(dates))],
+        }),
+    }
+
+    correlation, covered, wide = _subsystem_correlation(
+        frames,
+        ["A", "B"],
+        window_years=1.0,
+        halflife_days=20.0,
+        min_rows=20,
+    )
+
+    assert wide.columns == ["date", "A", "B"]
+    assert covered.tolist() == [True, True]
+    assert correlation.shape == (2, 2)

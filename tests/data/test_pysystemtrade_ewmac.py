@@ -58,7 +58,7 @@ def test_component_builder_exposes_compact_and_detailed_shapes():
     detailed = build_ewmac_component_frame(_history(), pooled, detailed=True)
 
     assert compact.columns == [
-        "ts_event", "point_vol", "point_change", "fcst_2_4", "fcst_4_8"
+        "date", "point_vol", "point_change", "fcst_2_4", "fcst_4_8"
     ]
     assert {
         "close",
@@ -78,7 +78,7 @@ def test_research_view_filters_display_tables_without_mutating_full_history():
     """Notebook date slicing and default forecast columns remain predictable."""
     canonical_rule = EwmacRule(4, 16)
     forecasts = pl.DataFrame({
-        "ts_event": pl.date_range(
+        "date": pl.date_range(
             pl.date(2024, 1, 1), pl.date(2024, 1, 3), eager=True
         ),
         "close": [100.0, 101.0, 102.0],
@@ -86,7 +86,7 @@ def test_research_view_filters_display_tables_without_mutating_full_history():
         canonical_rule.column: [None, 0.1, 0.2],
     })
     scalars = pl.DataFrame({
-        "ts_event": forecasts.get_column("ts_event"),
+        "date": forecasts.get_column("date"),
         "rule": [canonical_rule.key] * 3,
         "forecast_scalar": [None, 0.4, 0.5],
     })
@@ -109,7 +109,7 @@ def test_research_view_filters_display_tables_without_mutating_full_history():
     scalar_table = view.scalar_table(canonical_rule.key, end="2024-01-02")
 
     assert table.shape == (2, 4)
-    assert table.columns == ["ts_event", "close", "point_vol", "fcst_4_16"]
+    assert table.columns == ["date", "close", "point_vol", "fcst_4_16"]
     assert scalar_table.height == 2
     assert view.forecasts.height == 3
     assert view.cache_status().select(

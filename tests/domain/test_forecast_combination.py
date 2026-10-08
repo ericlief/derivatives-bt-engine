@@ -14,7 +14,7 @@ from derivatives_bt_engine.domain.ewmac import EwmacRule
 def _frame(values_4, values_64):
     n = len(values_4)
     return pl.DataFrame({
-        "ts_event": pl.date_range(
+        "date": pl.date_range(
             pl.date(2024, 1, 1),
             pl.date(2024, 1, 1) + pl.duration(days=n - 1),
             eager=True,
@@ -87,7 +87,7 @@ def test_forecast_diversification_is_capped():
 
 def test_turnover_ewm_applies_to_average_position_not_forecast():
     frame = pl.DataFrame({
-        "ts_event": pl.date_range(
+        "date": pl.date_range(
             pl.date(2024, 1, 1), pl.date(2024, 1, 5), eager=True
         ),
         "point_vol": [1.0, 1.25, 2.0, 2.5, 4.0],

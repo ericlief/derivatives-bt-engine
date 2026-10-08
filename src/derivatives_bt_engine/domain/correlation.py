@@ -130,8 +130,18 @@ def bounded_ewm_correlation_matrix(returns_wide: pl.DataFrame, symbols: list[str
     a column) or if fewer than 2 symbols have data in that slice; (H,
     per-symbol coverage) otherwise, where H's covered rows/columns are real
     measurements and its uncovered ones are the identity placeholder."""
+    if 'date' in returns_wide.columns:
+        date_column = 'date'
+    elif 'ts_event' in returns_wide.columns:
+        # Existing return-TSMOM callers still expose the older generic event
+        # key; daily forecast/selection frames use the clearer ``date`` name.
+        date_column = 'ts_event'
+    else:
+        raise ValueError("returns_wide must contain 'date' or 'ts_event'")
     window_start = as_of - timedelta(days=int(window_years * 365.25))
-    sl = returns_wide.filter((pl.col('ts_event') >= window_start) & (pl.col('ts_event') < as_of))
+    sl = returns_wide.filter(
+        (pl.col(date_column) >= window_start) & (pl.col(date_column) < as_of)
+    )
     n = len(symbols)
     if sl.height < min_rows:
         return np.eye(n), np.zeros(n, dtype=bool)

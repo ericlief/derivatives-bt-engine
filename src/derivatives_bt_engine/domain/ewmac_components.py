@@ -35,42 +35,24 @@ from derivatives_bt_engine.domain.volatility import (
 _INTERNAL_DATE_COLUMN = "ts_event"
 
 
-def resolve_daily_date_column(
-    history_frame: pl.DataFrame,
-    date_col: str | None,
-) -> str:
-    """Return the caller-owned daily date column used by a history frame."""
-    if date_col is not None:
-        if date_col not in history_frame.columns:
-            raise ValueError(f"history frame is missing date column {date_col!r}")
-        return date_col
-    if "date" in history_frame.columns:
-        return "date"
-    if _INTERNAL_DATE_COLUMN in history_frame.columns:
-        return _INTERNAL_DATE_COLUMN
-    raise ValueError("history frame must contain 'date' or 'ts_event'")
-
-
 def _to_internal_date_column(
     history_frame: pl.DataFrame,
-    date_col: str,
 ) -> pl.DataFrame:
-    """Adapt a public daily date key to the legacy EWMAC engine key."""
-    if date_col == _INTERNAL_DATE_COLUMN:
-        return history_frame
+    """Adapt the public daily ``date`` key to the legacy EWMAC engine key."""
+    if "date" not in history_frame.columns:
+        raise ValueError("history frame is missing date column 'date'")
     if _INTERNAL_DATE_COLUMN in history_frame.columns:
         raise ValueError(
-            f"history frame contains both {date_col!r} and "
-            f"{_INTERNAL_DATE_COLUMN!r}; choose one date identity"
+            "history frame contains both 'date' and 'ts_event'; "
+            "the public component API requires one 'date' identity"
         )
-    return history_frame.rename({date_col: _INTERNAL_DATE_COLUMN})
+    return history_frame.rename({"date": _INTERNAL_DATE_COLUMN})
 
 
 def build_ewmac_rule_component(
     history_frame: pl.DataFrame,
     rule: EwmacRule,
     *,
-    date_col: str | None = None,
     instrument_code: str = "instrument",
     forecast_scalar: float | None = None,
     scalar_min_periods: int = EWMAC_SCALAR_MIN_PERIODS,
@@ -84,12 +66,11 @@ def build_ewmac_rule_component(
 ) -> pl.DataFrame:
     """Calculate one scaled EWMAC rule and retain its diagnostics.
 
-    ``history_frame`` contains one instrument with ``date`` and ``close``;
-    legacy ``ts_event`` input is also accepted.  ``date_col`` can identify a
-    differently named daily key.  An existing ``point_change`` is retained as
-    authoritative.  A fixed ``forecast_scalar`` is used when supplied;
-    otherwise it is estimated causally from this instrument's prior raw
-    forecasts after ``scalar_min_periods`` observations.
+    ``history_frame`` contains one instrument with ``date`` and ``close``.
+    An existing ``point_change`` is retained as authoritative.  A fixed
+    ``forecast_scalar`` is used when supplied; otherwise it is estimated
+    causally from this instrument's prior raw forecasts after
+    ``scalar_min_periods`` observations.
 
     The returned frame retains the original columns, common mixed-volatility
     fields, and rule-specific EMA, raw forecast, scalar, and final forecast
@@ -111,10 +92,7 @@ def build_ewmac_rule_component(
     ):
         raise ValueError("forecast_scalar must be finite and positive")
 
-    public_date_column = resolve_daily_date_column(history_frame, date_col)
-    internal_history = _to_internal_date_column(
-        history_frame, public_date_column
-    )
+    internal_history = _to_internal_date_column(history_frame)
     raw_rule = ewmac(
         internal_history,
         fast_span=rule.fast,
@@ -164,16 +142,15 @@ def build_ewmac_rule_component(
         # named component column above is the authoritative scaled forecast.
         .drop("signal")
     )
-    if public_date_column != _INTERNAL_DATE_COLUMN:
-        result = result.rename({_INTERNAL_DATE_COLUMN: public_date_column})
-    return result
+    # Daily component frames expose one stable public key even when a provider
+    # supplied a legacy timestamp/event column name.
+    return result.rename({_INTERNAL_DATE_COLUMN: "date"})
 
 
 def build_ewmac_components(
     history_frame: pl.DataFrame,
     *,
     rules: Iterable[EwmacRule] = CANONICAL_EWMAC_RULES,
-    date_col: str | None = None,
     instrument_code: str = "instrument",
     forecast_scalars: Mapping[str, float] | None = None,
     scalar_min_periods: int = EWMAC_SCALAR_MIN_PERIODS,
@@ -189,11 +166,10 @@ def build_ewmac_components(
 
     This is the reusable multi-speed construction layer.  It calls
     :func:`build_ewmac_rule_component` for every requested speed and joins the
-    rule-owned columns by ``ts_event``.  Fixed scalars must cover every rule;
+    rule-owned columns by ``date``.  Fixed scalars must cover every rule;
     when ``forecast_scalars`` is omitted, each rule is normalized causally
     from the instrument's own prior history.
     """
-    public_date_column = resolve_daily_date_column(history_frame, date_col)
     rule_tuple = tuple(rules)
     if not rule_tuple:
         raise ValueError("at least one EWMAC rule is required")
@@ -213,7 +189,6 @@ def build_ewmac_components(
         component = build_ewmac_rule_component(
             history_frame,
             rule,
-            date_col=public_date_column,
             instrument_code=instrument_code,
             forecast_scalar=(
                 None if forecast_scalars is None else forecast_scalars[rule.key]
@@ -229,7 +204,7 @@ def build_ewmac_components(
         )
         suffix = f"{rule.fast}_{rule.slow}"
         owned_columns = [
-            public_date_column,
+            "date",
             f"fast_ewma_{suffix}",
             f"slow_ewma_{suffix}",
             f"raw_ewmac_{suffix}",
@@ -244,8 +219,8 @@ def build_ewmac_components(
             # subsequent rule contributes only its speed-specific columns.
             combined = combined.join(
                 component.select(owned_columns),
-                on=public_date_column,
+                on="date",
                 how="left",
             )
     assert combined is not None
-    return combined.sort(public_date_column)
+    return combined.sort("date")

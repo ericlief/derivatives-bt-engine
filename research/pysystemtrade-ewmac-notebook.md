@@ -43,7 +43,7 @@ volatility-normalized forecast, and the causal pooled scalar for every rule:
 
 ```python
 corn.forecasts.select(
-    "ts_event",
+    "date",
     "close",
     "point_vol",
     "raw_ewmac_16_64",

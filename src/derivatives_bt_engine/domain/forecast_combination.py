@@ -16,7 +16,7 @@ from __future__ import annotations
 import math
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 import numpy as np
 import polars as pl
@@ -31,7 +31,6 @@ from derivatives_bt_engine.domain.ewmac import (
 )
 from derivatives_bt_engine.domain.ewmac_components import (
     build_ewmac_components,
-    resolve_daily_date_column,
 )
 from derivatives_bt_engine.domain.volatility import (
     MIXED_VOL_ANNUALIZATION_DAYS,
@@ -244,7 +243,7 @@ class CombinedForecastEngine:
         Parameters
         ----------
         history_frame
-            One signal history with ``ts_event``, ``point_vol``,
+            One signal history with ``date``, ``point_vol``,
             ``point_change``, and a ``fcst_<fast>_<slow>`` column for every
             eligible rule. It contains one history, not the whole universe.
         eligible_rules
@@ -267,7 +266,7 @@ class CombinedForecastEngine:
         """
         rules = [str(rule).strip() for rule in eligible_rules if str(rule).strip()]
         weights = self.weight_policy.weights(rules)
-        required = {"ts_event", "point_vol", "point_change"}
+        required = {"date", "point_vol", "point_change"}
         required.update(EWMAC_RULE_BY_KEY[rule].column for rule in weights)
         missing = sorted(required.difference(history_frame.columns))
         if missing:
@@ -294,7 +293,7 @@ class CombinedForecastEngine:
             for rule, weight in weights.items()
         ])
         subsystem_frame = (
-            history_frame.sort("ts_event")
+            history_frame.sort("date")
             .with_columns(valid_expr.alias("forecast_valid"))
             .with_columns(
                 # Combine the active components in forecast units, apply FDM,
@@ -361,9 +360,9 @@ class CombinedForecastEngine:
         )
 
         valid = subsystem_frame.filter(pl.col("forecast_valid"))
-        first_valid = valid.get_column("ts_event").min() if valid.height else None
+        first_valid = valid.get_column("date").min() if valid.height else None
         after_warmup = (
-            subsystem_frame.filter(pl.col("ts_event") >= first_valid)
+            subsystem_frame.filter(pl.col("date") >= first_valid)
             if first_valid is not None
             else subsystem_frame
         )
@@ -375,7 +374,7 @@ class CombinedForecastEngine:
                 after_warmup.filter(~pl.col("forecast_valid")).height
             ),
             "forecast_start": first_valid,
-            "forecast_end": valid.get_column("ts_event").max() if valid.height else None,
+            "forecast_end": valid.get_column("date").max() if valid.height else None,
             "combined_nulls": (
                 subsystem_frame.get_column("combined_forecast").null_count()
             ),
@@ -418,7 +417,6 @@ def combine_ewmac_forecasts(
     history_frame: pl.DataFrame,
     *,
     rules: Iterable[EwmacRule] = CANONICAL_EWMAC_RULES,
-    date_col: str | None = None,
     instrument_code: str = "instrument",
     forecast_scalars: Mapping[str, float] | None = None,
     scalar_min_periods: int = EWMAC_SCALAR_MIN_PERIODS,
@@ -435,17 +433,13 @@ def combine_ewmac_forecasts(
     Parameters
     ----------
     history_frame
-        One instrument's daily Polars dataframe with ``date`` and ``close``;
-        legacy ``ts_event`` is also accepted.  A supplied ``point_change`` is
-        authoritative; otherwise sorted ``close.diff()`` is used.  For
-        equities, ``close`` should be adjusted for splits so corporate actions
-        do not become false signals.
+        One instrument's daily Polars dataframe with ``date`` and ``close``.
+        A supplied ``point_change`` is authoritative; otherwise sorted
+        ``close.diff()`` is used.  For equities, ``close`` should be adjusted
+        for splits so corporate actions do not become false signals.
     rules
         EWMAC speed pairs to calculate and combine.  The five canonical
         ``4/16`` through ``64/256`` rules are used by default.
-    date_col
-        Optional daily date-column name.  The helper prefers ``date`` and
-        accepts legacy ``ts_event`` when this is omitted.
     instrument_code
         Stable identity used only when causally estimating per-instrument
         forecast scalars.
@@ -482,11 +476,9 @@ def combine_ewmac_forecasts(
     """
     rule_tuple = tuple(rules)
     combination_config = config or ForecastCombinationConfig()
-    public_date_column = resolve_daily_date_column(history_frame, date_col)
     component_frame = build_ewmac_components(
         history_frame,
         rules=rule_tuple,
-        date_col=public_date_column,
         instrument_code=instrument_code,
         forecast_scalars=forecast_scalars,
         scalar_min_periods=scalar_min_periods,
@@ -506,22 +498,11 @@ def combine_ewmac_forecasts(
     )
     # Fixed FDM ignores correlation inputs; these identity placeholders keep
     # the lower-level engine API uniform without implying estimated diversity.
-    engine_frame = (
-        component_frame
-        if public_date_column == "ts_event"
-        else component_frame.rename({public_date_column: "ts_event"})
-    )
-    result = engine.combine(
-        engine_frame,
+    return engine.combine(
+        component_frame,
         rule_keys,
         np.eye(len(rule_keys)),
         rule_keys,
-    )
-    if public_date_column == "ts_event":
-        return result
-    return replace(
-        result,
-        frame=result.frame.rename({"ts_event": public_date_column}),
     )
 
 
