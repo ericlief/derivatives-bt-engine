@@ -104,8 +104,14 @@ def test_turnover_ewm_applies_to_average_position_not_forecast():
     assert result.frame.get_column("combined_forecast").to_list() == pytest.approx(
         [0.2] * 5
     )
+    assert result.frame.get_column("forecast_multiplier").to_list() == pytest.approx(
+        [0.4] * 5
+    )
     last = result.frame.tail(1).row(0, named=True)
     assert last["avg_position"] == pytest.approx(0.25)
+    assert last["subsystem_position"] == pytest.approx(
+        last["avg_position"] * last["forecast_multiplier"]
+    )
     assert last["smooth_avg_position"] != pytest.approx(last["avg_position"])
 
 
@@ -148,5 +154,8 @@ def test_dataframe_helper_builds_components_and_disables_fdm():
     assert result.weights["8/32"] == pytest.approx(0.75)
     assert valid.get_column("combined_forecast").to_list() == pytest.approx(
         expected.to_list()
+    )
+    assert valid.get_column("forecast_multiplier").to_list() == pytest.approx(
+        (expected / 0.5).to_list()
     )
     assert result.audit["forecast_elig"] is True

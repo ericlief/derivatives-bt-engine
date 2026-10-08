@@ -197,10 +197,11 @@ class ForecastCombinationConfig:
 class CombinedForecastResult:
     """Hold one executable symbol's daily subsystem and summary diagnostics.
 
-    ``frame`` contains component forecasts, combined forecast, average and
-    optimal positions, normalized position, and subsystem return. ``weights``
-    and ``fdm`` explain the combination; ``turnover`` is annualized;
-    ``audit`` contains null/non-finite counts and the eligibility decision.
+    ``frame`` contains component forecasts, the combined forecast, its signed
+    multiple of the target-average forecast, average and optimal position
+    proxies, normalized position, and subsystem return. ``weights`` and
+    ``fdm`` explain the combination; ``turnover`` is annualized; ``audit``
+    contains null/non-finite counts and the eligibility decision.
     """
 
     frame: pl.DataFrame
@@ -320,24 +321,36 @@ class CombinedForecastEngine:
                 .alias("combined_forecast")
             )
             .with_columns(
-                # y(t): a position-scale proxy proportional to contracts at the
-                # target average forecast. It is not an account-sized contract
-                # count: cash-risk target, multiplier, and constant FX scale
-                # are omitted because they cancel from the turnover ratio.
+                # Express the combined signal as a signed multiple of the
+                # target-average position. With our 0.5 target, forecasts of
+                # +0.5 and +1.0 mean +1x and +2x average position; negative
+                # values represent short positions of the same magnitude.
+                (
+                    pl.col("combined_forecast")
+                    / self.config.target_abs_forecast
+                ).alias("forecast_multiplier"),
+                # Inverse daily point volatility has the same relative path as
+                # the properly risk-sized number of contracts or shares. This
+                # is deliberately a position proxy, not an executable count:
+                # capital, risk target, annualization, contract multiplier,
+                # and constant FX terms are omitted because they cancel when
+                # turnover is expressed in average-position units.
                 pl.when(pl.col("forecast_valid"))
                 .then(1.0 / pl.col(point_vol_column))
                 .otherwise(None)
                 .alias("avg_position"),
             )
             .with_columns(
-                # x(t) = y(t) * forecast(t) / average_abs_forecast. This is the
-                # unbuffered optimal subsystem-position proxy, in the same
-                # arbitrary scale as y(t), used by Carver's AFTS cost formula.
+                # The unbuffered optimal position is the average risk-sized
+                # position multiplied by current forecast conviction. It has
+                # the same arbitrary contract/share scale as avg_position.
                 (
                     pl.col("avg_position")
-                    * pl.col("combined_forecast")
-                    / self.config.target_abs_forecast
+                    * pl.col("forecast_multiplier")
                 ).alias("subsystem_position"),
+                # Volatility changes make avg_position move even with a flat
+                # forecast. Carver smooths this denominator so daily volatility
+                # estimation noise does not redefine one unit of turnover.
                 pl.col("avg_position")
                 .ewm_mean(
                     com=self.config.average_position_ewm_com,
@@ -347,19 +360,24 @@ class CombinedForecastEngine:
                 .alias("smooth_avg_position"),
             )
             .with_columns(
-                # Turnover is measured in slowly varying average-position
-                # units. The EWM applies to y(t), never to the forecast or x(t).
+                # This dimensionless series says how many smoothed average-
+                # position units the strategy currently wants. Turnover is the
+                # annualized mean absolute daily change in this series.
                 pl.when(pl.col("smooth_avg_position") > 0)
                 .then(pl.col("subsystem_position") / pl.col("smooth_avg_position"))
                 .otherwise(None)
                 .alias("normalized_position"),
+                # Lag the position so today's price change earns P&L on the
+                # position known at yesterday's close. Values remain in proxy
+                # P&L units because account-sizing constants were omitted.
                 (
                     pl.col("subsystem_position").shift(1)
                     * pl.col("point_change")
                 ).alias("subsystem_return"),
             )
         )
-        # Annual subsystem turnover is the mean absolute daily change in x/y.
+        # Each absolute change is a fraction of an average risk-sized position;
+        # multiplying its daily mean by the trading-day count annualizes it.
         changes = (
             subsystem_frame.get_column("normalized_position")
             .drop_nulls()
