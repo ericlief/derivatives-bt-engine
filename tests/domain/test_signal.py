@@ -536,6 +536,27 @@ def test_ewmac_scalar_history_is_cross_sectional_and_strictly_causal():
     assert history['forecast_scalar'][3] == pytest.approx(0.5 / (8.0 / 3.0))
 
 
+def test_ewmac_scalar_history_preserves_zero_and_fills_only_missing_dates():
+    dates = _trading_dates(date(2020, 1, 1), 3)
+    panel = pl.DataFrame({
+        'ts_event': [dates[0], dates[1], dates[0], dates[1], dates[2]],
+        'instrument_code': ['A', 'A', 'B', 'B', 'B'],
+        'pool_key': ['global'] * 5,
+        'raw_forecast': [2.0, 0.0, 4.0, 6.0, 8.0],
+    })
+
+    history = estimate_ewmac_scalar_history(
+        panel, target_abs_forecast=0.5, min_periods=1
+    )
+
+    assert history['n_instruments'].to_list() == [2, 2, 2]
+    # On date two, zero contributes to median(|0|, |6|). On date three, A's
+    # genuinely missing row carries that last observed neutral forecast.
+    assert history['cs_median_abs_forecast'].to_list() == pytest.approx(
+        [3.0, 3.0, 4.0]
+    )
+
+
 def test_ewmac_uses_shared_mixed_point_volatility():
     dates = _trading_dates(date(2020, 1, 1), 90)
     changes = [None] + [(-1.0) ** i * (i % 7 + 1) for i in range(1, 90)]

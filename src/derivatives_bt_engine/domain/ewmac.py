@@ -136,9 +136,9 @@ def estimate_ewmac_scalar_history(
     """Causally estimate one pooled EWMAC scalar history per ``pool_key``.
 
     ``raw_forecasts`` is a long panel with ``ts_event``, ``instrument_code``,
-    ``pool_key``, and unscaled ``raw_forecast``.  Zero forecasts are omitted
-    from the magnitude sample, each instrument is forward-filled only after
-    its first usable observation, and the daily cross-sectional median
+    ``pool_key``, and unscaled ``raw_forecast``.  Each instrument is
+    forward-filled only after its first usable observation, while a genuine
+    zero remains a valid neutral forecast.  The daily cross-sectional median
     absolute forecast is averaged over time.  The daily statistic is shifted
     before accumulation, so the scalar stamped on date ``t`` uses dates
     strictly before ``t``.
@@ -182,9 +182,9 @@ def estimate_ewmac_scalar_history(
         )
         .sort("pool_key", "instrument_code", "ts_event")
         .with_columns(
-            pl.when(pl.col("raw_forecast") != 0.0)
-            .then(pl.col("raw_forecast"))
-            .otherwise(None)
+            # Fill only absent dates introduced by the rectangular alignment.
+            # Zero is an observed neutral forecast, not a missing-data marker.
+            pl.col("raw_forecast")
             .forward_fill()
             .over("pool_key", "instrument_code")
             .alias("_scalar_observation")
