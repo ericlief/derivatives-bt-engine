@@ -34,6 +34,18 @@ from derivatives_bt_engine.domain.volatility import (
 
 _INTERNAL_DATE_COLUMN = "ts_event"
 
+_VOLATILITY_COLUMNS = (
+    "fast_point_vol",
+    "slow_point_vol",
+    "vol_observations",
+    "mixed_point_vol",
+    "slow_history_years",
+    "fast_vol_span",
+    "slow_vol_span",
+    "slow_vol_weight",
+    "annualization_sqrt",
+)
+
 
 def prepare_daily_price_frame(history_frame: pl.DataFrame) -> pl.DataFrame:
     """Validate and normalize one daily price history before rule calculation.
@@ -116,7 +128,9 @@ def build_ewmac_rule_component(
 
     The returned frame retains the original columns, common mixed-volatility
     fields, and rule-specific EMA, raw forecast, scalar, and final forecast
-    columns.  Forecasts use normalized units with target absolute magnitude
+    columns. ``mixed_point_vol`` is the one authoritative volatility series;
+    the lower-level EWMAC engine's identical ``point_vol`` compatibility alias
+    is omitted. Forecasts use normalized units with target absolute magnitude
     ``target_abs_forecast`` and bounds ``[-forecast_cap, forecast_cap]``.
     """
     if rule.key not in EWMAC_RULE_BY_KEY:
@@ -183,11 +197,26 @@ def build_ewmac_rule_component(
         })
         # ``signal`` was the unscaled intermediate produced by ewmac(); the
         # named component column above is the authoritative scaled forecast.
-        .drop("signal")
+        .drop("signal", "point_vol")
+        .rename({_INTERNAL_DATE_COLUMN: "date"})
     )
-    # Daily component frames expose one stable public key even when a provider
-    # supplied a legacy timestamp/event column name.
-    return result.rename({_INTERNAL_DATE_COLUMN: "date"})
+    rule_columns = [
+        f"fast_ewma_{suffix}",
+        f"slow_ewma_{suffix}",
+        f"raw_ewmac_{suffix}",
+        f"raw_fcst_{suffix}",
+        f"scalar_{suffix}",
+        rule.column,
+    ]
+    history_columns = list(daily_history.columns)
+    if "point_change" not in history_columns:
+        history_columns.append("point_change")
+    # Keep instrument-wide price and volatility inputs together before the
+    # complete diagnostic block owned by this particular EWMAC speed.
+    volatility_columns = [
+        column for column in _VOLATILITY_COLUMNS if column in result.columns
+    ]
+    return result.select(history_columns + volatility_columns + rule_columns)
 
 
 def build_ewmac_components(

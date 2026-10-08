@@ -139,6 +139,11 @@ def test_dataframe_helper_builds_components_and_disables_fdm():
     assert result.fdm == 1.0
     assert "date" in result.frame.columns
     assert "ts_event" not in result.frame.columns
+    assert "mixed_point_vol" in result.frame.columns
+    assert "point_vol" not in result.frame.columns
+    assert result.frame.columns.index("annualization_sqrt") < result.frame.columns.index(
+        "fast_ewma_4_16"
+    )
     assert result.weights["4/16"] == pytest.approx(0.25)
     assert result.weights["8/32"] == pytest.approx(0.75)
     assert valid.get_column("combined_forecast").to_list() == pytest.approx(

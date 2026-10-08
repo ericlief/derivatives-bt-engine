@@ -243,9 +243,11 @@ class CombinedForecastEngine:
         Parameters
         ----------
         history_frame
-            One signal history with ``date``, ``point_vol``,
-            ``point_change``, and a ``fcst_<fast>_<slow>`` column for every
-            eligible rule. It contains one history, not the whole universe.
+            One signal history with ``date``, ``point_change``, one point-
+            volatility column, and a ``fcst_<fast>_<slow>`` column for every
+            eligible rule. ``mixed_point_vol`` is preferred; legacy compact
+            Phase 2 frames containing ``point_vol`` remain supported. It
+            contains one history, not the whole universe.
         eligible_rules
             Rule keys retained for this executable symbol by Phase 1 costs.
         forecast_correlation
@@ -266,7 +268,19 @@ class CombinedForecastEngine:
         """
         rules = [str(rule).strip() for rule in eligible_rules if str(rule).strip()]
         weights = self.weight_policy.weights(rules)
-        required = {"date", "point_vol", "point_change"}
+        if "mixed_point_vol" in history_frame.columns:
+            point_vol_column = "mixed_point_vol"
+        elif "point_vol" in history_frame.columns:
+            # Phase 2's compact pooled-history frame predates the descriptive
+            # mixed-volatility name. It carries the same blended estimator.
+            point_vol_column = "point_vol"
+        else:
+            raise ValueError(
+                "combined forecast input missing point volatility; expected "
+                "'mixed_point_vol' or legacy 'point_vol'"
+            )
+
+        required = {"date", "point_change", point_vol_column}
         required.update(EWMAC_RULE_BY_KEY[rule].column for rule in weights)
         missing = sorted(required.difference(history_frame.columns))
         if missing:
@@ -277,9 +291,9 @@ class CombinedForecastEngine:
         )
         component_columns = [EWMAC_RULE_BY_KEY[rule].column for rule in weights]
         valid_expr = (
-            pl.col("point_vol").is_not_null()
-            & pl.col("point_vol").is_finite()
-            & (pl.col("point_vol") > 0)
+            pl.col(point_vol_column).is_not_null()
+            & pl.col(point_vol_column).is_finite()
+            & (pl.col(point_vol_column) > 0)
             & pl.col("point_change").is_not_null()
             & pl.col("point_change").is_finite()
         )
@@ -311,7 +325,7 @@ class CombinedForecastEngine:
                 # count: cash-risk target, multiplier, and constant FX scale
                 # are omitted because they cancel from the turnover ratio.
                 pl.when(pl.col("forecast_valid"))
-                .then(1.0 / pl.col("point_vol"))
+                .then(1.0 / pl.col(point_vol_column))
                 .otherwise(None)
                 .alias("avg_position"),
             )

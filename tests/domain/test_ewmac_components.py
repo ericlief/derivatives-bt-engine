@@ -46,7 +46,7 @@ def test_rule_component_derives_changes_and_causal_scalar():
 
 
 def test_component_builder_retains_history_and_joins_requested_speeds():
-    """The generic builder keeps provider fields and adds each rule once."""
+    """Volatility precedes complete per-speed blocks without duplicate aliases."""
     rules = (EwmacRule(4, 16), EwmacRule(8, 32))
     result = build_ewmac_components(
         _price_frame(),
@@ -63,12 +63,41 @@ def test_component_builder_retains_history_and_joins_requested_speeds():
     assert "volume" in result.columns
     assert result.get_column("scalar_4_16").unique().to_list() == [0.5]
     assert result.get_column("scalar_8_32").unique().to_list() == [0.75]
+    assert "mixed_point_vol" in result.columns
+    assert "point_vol" not in result.columns
     assert {
         "raw_fcst_4_16",
         "fcst_4_16",
         "raw_fcst_8_32",
         "fcst_8_32",
     } <= set(result.columns)
+    assert result.columns == [
+        "date",
+        "close",
+        "volume",
+        "point_change",
+        "fast_point_vol",
+        "slow_point_vol",
+        "vol_observations",
+        "mixed_point_vol",
+        "slow_history_years",
+        "fast_vol_span",
+        "slow_vol_span",
+        "slow_vol_weight",
+        "annualization_sqrt",
+        "fast_ewma_4_16",
+        "slow_ewma_4_16",
+        "raw_ewmac_4_16",
+        "raw_fcst_4_16",
+        "scalar_4_16",
+        "fcst_4_16",
+        "fast_ewma_8_32",
+        "slow_ewma_8_32",
+        "raw_ewmac_8_32",
+        "raw_fcst_8_32",
+        "scalar_8_32",
+        "fcst_8_32",
+    ]
 
 
 def test_daily_preparation_collapses_only_identical_duplicate_rows():
