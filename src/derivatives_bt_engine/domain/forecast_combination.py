@@ -171,7 +171,9 @@ class ForecastCombinationConfig:
     absolute forecast 0.5 and cap 1.0 correspond to conventional 10 and 20.
     ``average_position_ewm_com`` is the pandas-compatible EWM ``com`` applied
     only to the average-position denominator in turnover. It never smooths
-    the forecast. ``min_valid_observations`` excludes short histories.
+    the forecast. ``turnover_rolling_days`` controls the trailing diagnostic
+    window; a complete valid window is required. ``min_valid_observations``
+    excludes short histories.
     """
 
     target_abs_forecast: float = EWMAC_FORECAST_TARGET_ABS
@@ -181,6 +183,7 @@ class ForecastCombinationConfig:
     # applied only to the changing average-position/volatility denominator.
     # It does not smooth the EWMAC forecast or the optimal position.
     average_position_ewm_com: int = 250
+    turnover_rolling_days: int = MIXED_VOL_ANNUALIZATION_DAYS
     min_valid_observations: int = 256
 
     def __post_init__(self) -> None:
@@ -189,6 +192,8 @@ class ForecastCombinationConfig:
             raise ValueError("forecast target and cap must be positive")
         if self.annualization_days <= 0 or self.average_position_ewm_com <= 0:
             raise ValueError("turnover day parameters must be positive")
+        if self.turnover_rolling_days <= 0:
+            raise ValueError("turnover_rolling_days must be positive")
         if self.min_valid_observations < 2:
             raise ValueError("min_valid_observations must be at least 2")
 
@@ -199,9 +204,10 @@ class CombinedForecastResult:
 
     ``frame`` contains component forecasts, the combined forecast, its signed
     multiple of the target-average forecast, average and optimal position
-    proxies, normalized position, and subsystem return. ``weights`` and
-    ``fdm`` explain the combination; ``turnover`` is annualized; ``audit``
-    contains null/non-finite counts and the eligibility decision.
+    proxies, normalized position, its absolute daily change, trailing turnover
+    diagnostics, and subsystem return. ``weights`` and ``fdm`` explain the
+    combination; ``turnover`` is annualized; ``audit`` contains null/non-finite
+    counts and the eligibility decision.
     """
 
     frame: pl.DataFrame
@@ -375,15 +381,41 @@ class CombinedForecastEngine:
                     * pl.col("point_change")
                 ).alias("subsystem_return"),
             )
+            .with_columns(
+                # Preserve the row-level turnover input for inspection. A null
+                # normalized position produces a null change on that row and
+                # the following row, rather than silently measuring across a
+                # warm-up or missing-data gap.
+                pl.col("normalized_position")
+                .diff()
+                .abs()
+                .alias("abs_position_change")
+            )
+            .with_columns(
+                # A full trailing window is mandatory. Consequently the
+                # rolling estimate stays null during warm-up and whenever its
+                # window contains a missing turnover observation.
+                pl.col("abs_position_change")
+                .rolling_mean(
+                    window_size=self.config.turnover_rolling_days,
+                    min_samples=self.config.turnover_rolling_days,
+                )
+                .alias("rolling_mean_abs_position_change")
+            )
+            .with_columns(
+                # Convert the mean daily change into the same annual-turnover
+                # units returned by CombinedForecastResult.turnover.
+                (
+                    pl.col("rolling_mean_abs_position_change")
+                    * self.config.annualization_days
+                ).alias("rolling_ann_turnover")
+            )
         )
         # Each absolute change is a fraction of an average risk-sized position;
-        # multiplying its daily mean by the trading-day count annualizes it.
-        changes = (
-            subsystem_frame.get_column("normalized_position")
-            .drop_nulls()
-            .diff()
-            .abs()
-        )
+        # only finite observations enter the mean, while the dataframe retains
+        # nulls for warm-up and gap auditing. Multiplying the mean daily change
+        # by the trading-day count annualizes it.
+        changes = subsystem_frame.get_column("abs_position_change")
         changes = changes.filter(changes.is_not_null() & changes.is_finite())
         turnover = (
             float(changes.mean() * self.config.annualization_days)

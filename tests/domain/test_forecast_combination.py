@@ -70,6 +70,10 @@ def test_forecast_gap_after_warmup_is_audited_and_excluded():
     assert result.audit["forecast_post_warmup_invalid_obs"] == 1
     assert result.audit["forecast_elig"] is False
     assert result.audit["forecast_excl"] == "forecast_gaps_after_warmup"
+    # The daily turnover input preserves both the invalid row and the first
+    # row after it as null, so the calculation never jumps across the gap.
+    assert result.frame.get_column("abs_position_change")[3] is None
+    assert result.frame.get_column("abs_position_change")[4] is None
 
 
 def test_forecast_diversification_is_capped():
@@ -96,6 +100,7 @@ def test_turnover_ewm_applies_to_average_position_not_forecast():
     })
     engine = CombinedForecastEngine(config=ForecastCombinationConfig(
         average_position_ewm_com=2,
+        turnover_rolling_days=3,
         min_valid_observations=3,
     ))
 
@@ -113,6 +118,16 @@ def test_turnover_ewm_applies_to_average_position_not_forecast():
         last["avg_position"] * last["forecast_multiplier"]
     )
     assert last["smooth_avg_position"] != pytest.approx(last["avg_position"])
+    daily_changes = result.frame.get_column("abs_position_change")
+    assert daily_changes.head(2).null_count() == 2
+    assert daily_changes.tail(3).null_count() == 0
+    assert result.turnover == pytest.approx(daily_changes.drop_nulls().mean() * 256)
+    rolling_mean = result.frame.get_column("rolling_mean_abs_position_change")
+    assert rolling_mean.head(4).null_count() == 4
+    assert rolling_mean[-1] == pytest.approx(daily_changes.tail(3).mean())
+    assert result.frame.get_column("rolling_ann_turnover")[-1] == pytest.approx(
+        rolling_mean[-1] * 256
+    )
 
 
 def test_dataframe_helper_builds_components_and_disables_fdm():
