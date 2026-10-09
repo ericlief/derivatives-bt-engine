@@ -524,6 +524,105 @@ pysystemtrade histories + instrument metadata + local execution overlays
     -> greedy AFTS selection with core-class coverage and score tolerance
 ```
 
+#### Target Phase 2 pipeline runner
+
+The complete path should have one explicit runner that coordinates narrow
+data and domain stages. Each stage appends the columns it owns to the same
+daily frame; it must not hide intermediate values in a private calculation.
+In particular, forecast combination does not own FX retrieval, position
+sizing does not own P&L conversion, and the audit does not reconstruct values
+that should already be present in the daily frame.
+
+```mermaid
+flowchart TD
+    Runner["Phase2PipelineRunner"]
+
+    Phase1["Phase 1 row<br/>symbol · history code · currency · multiplier<br/>eligible rules · trading cost"]
+    Prices["Daily signal history<br/>date · close · point change · mixed point vol"]
+    Components["EWMAC component builder<br/>scaled forecast for each speed"]
+
+    HistFX["Historical FX database<br/>raw.fx_prices"]
+    IBHist["IB daily FX extension<br/>MIDPOINT · 1-day bars"]
+    IBLive["IB current FX quote<br/>today only"]
+    USD["USD identity series<br/>FX = 1"]
+
+    FXProvider["FXHistoryProvider<br/>load once per currency · cache"]
+    FXMerge["Attach FX by date<br/>historical → IB extension → live quote<br/>backward as-of only · preserve source"]
+
+    subgraph PerSymbol["Per-symbol pipeline"]
+        Combine["1. Combine forecasts<br/>weights · FDM · cap"]
+        ForecastFrame["combined_forecast<br/>forecast_multiplier"]
+
+        Valuation["2. Attach valuation inputs<br/>fx_to_usd · multiplier"]
+
+        Sizing["3. Size subsystem position<br/>daily_dvol_per_con<br/>avg_position<br/>subsystem_position"]
+
+        Turnover["4. Calculate turnover<br/>smooth_avg_position<br/>normalized_position<br/>abs_position_change<br/>rolling_ann_turnover"]
+
+        PnL["5. Calculate P&L<br/>held_position = prior position<br/>point_pnl<br/>pnl_native<br/>pnl_usd"]
+
+        Audit["6. Audit subsystem<br/>forecast gaps · FX gaps · P&L gaps<br/>valid observations · eligibility reason"]
+    end
+
+    DailyOutput["Wide daily audit frame / Parquet<br/>all intermediate columns retained"]
+    SummaryOutput["One-row instrument audit / CSV"]
+    ReturnPanel["Synchronized pnl_usd panel"]
+    Correlation["Subsystem correlation matrix"]
+    Selection["Greedy Phase 2 selection<br/>weights · IDM · costs · size penalty"]
+
+    Runner --> Phase1
+    Runner --> Prices
+    Runner --> FXProvider
+
+    Prices --> Components
+    Components --> Combine
+    Phase1 -->|"eligible rules"| Combine
+    Combine --> ForecastFrame
+
+    HistFX --> FXProvider
+    IBHist --> FXProvider
+    IBLive --> FXProvider
+    USD --> FXProvider
+    FXProvider --> FXMerge
+
+    ForecastFrame --> Valuation
+    FXMerge --> Valuation
+    Phase1 -->|"currency and multiplier"| Valuation
+
+    Valuation --> Sizing
+    Sizing --> Turnover
+    Sizing --> PnL
+    Turnover --> Audit
+    PnL --> Audit
+
+    Audit --> DailyOutput
+    Audit --> SummaryOutput
+    PnL --> ReturnPanel
+    ReturnPanel --> Correlation
+    SummaryOutput --> Selection
+    Correlation --> Selection
+```
+
+The same ownership in terminal-readable form is:
+
+```text
+1. Load Phase 1 row and daily signal history.
+2. Build and combine eligible EWMAC forecasts.
+3. Load historical FX once per currency; extend it with IB only after the
+   stored series ends; attach multiplier and date-aligned FX to the frame.
+4. Convert mixed point volatility into average and desired subsystem positions.
+5. Calculate turnover from normalized desired-position changes.
+6. Lag the desired position and calculate point, native-currency, and USD P&L.
+7. Audit the wide daily frame and write the compact instrument summary.
+8. Align valid USD subsystem P&L, estimate correlations, and run the greedy
+   portfolio search.
+```
+
+The Phase 1 `cur_fx_to_usd` value is a point-in-time cost and sizing snapshot;
+it must never be filled backward through the historical subsystem frame. The
+FX history provider owns the database-to-IB splice and records the source and
+observation date of every rate. USD receives an explicit identity series.
+
 Phase 2 Step 1 is deliberately only a persisted-gate selection. It does not
 connect to IB and does not recalculate volume, volatility, cost, or any other
 Phase 1 metric. Run:
