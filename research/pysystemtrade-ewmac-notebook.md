@@ -83,6 +83,40 @@ selected component forecasts in the project's normalized `-1` to `+1` units.
 The method returns the Matplotlib figure and axes so the notebook can customize
 labels, limits, or output files.
 
+## Build forecasts from a notebook dataframe
+
+For a provider-neutral Polars dataframe such as an IB stock history, import
+the reusable calculations directly. The input must contain one row per
+``date`` and a ``close`` column; ``point_change`` is optional and is calculated
+from the sorted close when absent. Equity closes should already be adjusted
+for splits.
+
+```python
+from derivatives_bt_engine.calculations.ewmac_components import (
+    build_ewmac_rule_component,
+    build_ewmac_components,
+)
+from derivatives_bt_engine.calculations.forecast_combination import (
+    combine_ewmac_forecasts,
+)
+
+result = combine_ewmac_forecasts(
+    xar,                       # date, adjusted close, optional point_change
+    instrument_code="XAR",
+    fdm=1.0,                   # no single-instrument diversification uplift
+)
+
+forecasts = result.frame
+forecasts
+```
+
+``result.frame`` retains the input columns, mixed-volatility diagnostics, all
+five rule-component calculations, the combined forecast, and turnover audit
+columns. ``result.weights``, ``result.fdm``, ``result.turnover``, and
+``result.audit`` expose the corresponding summary values. Use
+``build_ewmac_components`` when only the wide component frame is needed, or
+``build_ewmac_rule_component`` to inspect a single speed.
+
 ## Combined Phase 2 forecasts
 
 The notebook loader intentionally does not manufacture an FDM from one market.
