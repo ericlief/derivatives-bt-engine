@@ -1,6 +1,7 @@
-# Options Backtesting Package
+# Derivatives Backtesting Engine
 
-A Python package for backtesting options trading strategies, specifically designed for SPX options trading.
+A Polars-based research and backtesting package for futures trend systems and
+options strategies.
 
 ## Features
 
@@ -15,17 +16,24 @@ A Python package for backtesting options trading strategies, specifically design
   - Sharpe ratio calculation
   - Return on margin metrics
 
-## Project Structure
+## Runtime package structure
 
 ```
-options-bt/
-├── derivatives_bt_engine/           # Source code directory
-│   ├── __init__.py      # Package initialization
-│   └── bt.py            # Main backtesting logic
-├── logs/                 # Log files directory
-├── results/             # Backtest results directory
-└── README.md            # This file
+src/derivatives_bt_engine/
+├── data/          # load, validate, cache, and persist market data
+├── calculations/  # storage-independent financial calculations
+├── backtest/      # historical simulation and trade lifecycle code
+├── strats/        # strategy definitions and command entry points
+├── pipelines/     # Phase 1, Phase 2, and other multi-stage workflows
+├── reports/       # public schemas, formatting, and report builders
+├── live/          # live portfolio and rebalance workflows
+└── utils/         # small cross-cutting utilities
 ```
+
+The package intentionally has no generic `domain`, `core`, `engine`, or
+`system` container. Code is placed by its concrete responsibility; strategy
+entry points may orchestrate the reusable data, calculation, and backtest
+layers but should not duplicate their financial logic.
 
 ## Installation
 

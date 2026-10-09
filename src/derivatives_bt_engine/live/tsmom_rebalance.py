@@ -9,9 +9,9 @@ fully usable with data_source='database' in an environment that has no
 ib_tools/ib_insync installed at all, which is what makes it runnable in a
 plain notebook kernel with zero IB dependency.
 
-Pure signal math lives in derivatives_bt_engine.domain.signal (used by both this
+Pure signal math lives in derivatives_bt_engine.calculations.signal (used by both this
 live orchestrator and the duckdb-backed backtest); cross-instrument risk
-allocation lives in derivatives_bt_engine.domain.allocation. This module wires
+allocation lives in derivatives_bt_engine.calculations.allocation. This module wires
 that signal up to IBPySync (data_source='ib' only), applies the VX/VIX
 vol-spike gate, and turns the result into a per-instrument rebalance plan
 (contract counts), without placing any orders itself.
@@ -44,8 +44,8 @@ if TYPE_CHECKING:
     # IBPySync`, scoped to the data_source='ib' functions that need it.
     from ib_tools.ibpysync import IBPySync
 
-from derivatives_bt_engine.domain.enums import TrendRegime, VolRegime
-from derivatives_bt_engine.domain.instruments import (
+from derivatives_bt_engine.calculations.enums import TrendRegime, VolRegime
+from derivatives_bt_engine.calculations.instruments import (
     CME_MONTH_LETTERS,
     CME_MONTH_NUM_TO_LETTER,
     INSTRUMENTS,
@@ -55,7 +55,7 @@ from derivatives_bt_engine.domain.instruments import (
     resolve_annualization_days,
     resolve_signal_symbol,
 )
-from derivatives_bt_engine.domain.allocation import (
+from derivatives_bt_engine.calculations.allocation import (
     ALLOCATION_MODES,
     NOTIONAL_WEIGHTING_SCHEMES,
     _coverage_restricted_idm,
@@ -70,30 +70,30 @@ from derivatives_bt_engine.domain.allocation import (
     compute_symbol_notional_budget,
     group_by_cluster,
 )
-from derivatives_bt_engine.domain.correlation import (
+from derivatives_bt_engine.calculations.correlation import (
     bounded_ewm_correlation_matrix,
     build_returns_wide,
 )
-from derivatives_bt_engine.domain.futures_dataloader import FuturesDataLoader, assert_monotonic_expiration
-from derivatives_bt_engine.domain.continuous_momentum import (
+from derivatives_bt_engine.data.futures_dataloader import FuturesDataLoader, assert_monotonic_expiration
+from derivatives_bt_engine.calculations.continuous_momentum import (
     DEFAULT_FAST_WINDOW,
     DEFAULT_SLOW_WINDOW,
     build_features,
     continuous_momentum,
 )
-from derivatives_bt_engine.domain.goulding import (
+from derivatives_bt_engine.calculations.goulding import (
     GOULDING_SIGNAL_MODES,
     estimate_goulding_forecast_scalar,
     estimate_mixing_params_diagnostics,
     goulding_continuous_raw,
     goulding_monthly,
 )
-from derivatives_bt_engine.domain.signal_confidence import (
+from derivatives_bt_engine.calculations.signal_confidence import (
     classify_signal_confidence,
     compute_signal_confidence,
     compute_vol_ratio,
 )
-from derivatives_bt_engine.domain.signal_selection import (
+from derivatives_bt_engine.calculations.signal_selection import (
     cluster_conviction_score,
     resolve_trend_direction,
 )
@@ -103,7 +103,7 @@ from derivatives_bt_engine.domain.signal_selection import (
 # analog to this module's live VX-front-month/VX-63d-MA ratio). Reused here
 # (not duplicated) so data_source='database' stays byte-for-byte consistent
 # with what the backtest itself would compute for the same date.
-from derivatives_bt_engine.domain.tsmom_backtester import VIX_FILE_PATH
+from derivatives_bt_engine.backtest.tsmom import VIX_FILE_PATH
 
 log = logging.getLogger(__name__)
 
@@ -119,7 +119,7 @@ VX_ELEVATED_SCALE = 0.6   # reduce all positions to this fraction of target when
 DEFAULT_BAR_YEARS = 3.0
 # Trailing window for the VX/VIX moving average the spike gate compares
 # vx_current against (vx_ratio = vx_current / vx_ma) -- same window used by
-# domain.tsmom_backtester's own vix_ma_window_days (see that module's
+# backtest.tsmom's own vix_ma_window_days (see that module's
 # TsmomBacktestConfig field), which this project's VX_ELEVATED_RATIO/
 # VX_SPIKE_RATIO/VX_EXTREME_RATIO bands above were calibrated against.
 DEFAULT_VX_MA_WINDOW_DAYS = 63
@@ -134,7 +134,7 @@ DISCRETE_ALLOCATIONS = ('independent', 'lot-aware', 'flat-cluster-diversified')
 DATA_SOURCES = ('ib', 'database')
 
 # ── Infrastructure ───────────────────────────────────────────────────────
-# Same futures-bar parquet cache the backtest uses (domain.tsmom_backtester's
+# Same futures-bar parquet cache the backtest uses (backtest.tsmom's
 # own load_portfolio_data) -- sharing it means a symbol already cached by a
 # backtest run doesn't need re-fetching here, and vice versa.
 _DB_CACHE_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', '..', '..', '.cache', 'futures'))
@@ -144,7 +144,7 @@ _DB_CACHE_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', '
 class TsmomLiveConfig:
     """Portfolio-level config for compute_rebalance_targets.
 
-    Deliberately named/shaped after domain.tsmom_backtester.TsmomBacktestConfig
+    Deliberately named/shaped after backtest.tsmom.TsmomBacktestConfig
     -- signal_weighting/mixing_pool/notional_weighting/use_idm/
     corr_window_years/corr_halflife_days/vol_target/target_portfolio_vol share
     both name AND meaning with that dataclass, so the same mental model
@@ -197,7 +197,7 @@ class TsmomLiveConfig:
     # goes stale the moment it's reused for a later as_of/rebalance date,
     # silently gating on old data instead of not gating at all.
     vix_gating: bool = True
-    # Signal DIRECTION source -- see domain.signal.resolve_trend_direction
+    # Signal DIRECTION source -- see calculations.signal.resolve_trend_direction
     # (shared with TsmomBacktestConfig.signal_weighting, same semantics):
     # 'continuous' (default): continuous_momentum's daily trend_strength +
     # classify_regime + regime_discount. 'goulding': Goulding/Harvey/
@@ -234,7 +234,7 @@ class TsmomLiveConfig:
     # 'cluster' (default, unchanged prior behavior): compute_n_effective/
     # compute_desired_risk_budget -- one shared risk budget per ACTIVE
     # CLUSTER (zero-correlation assumption), replicated across every
-    # instrument in that cluster. 'idm': domain.allocation.
+    # instrument in that cluster. 'idm': calculations.allocation.
     # compute_symbol_notional_budget -- one risk budget PER ACTIVE SYMBOL,
     # correlation-aware (bounded trailing EWM correlation matrix over the
     # active set, IDM-scaled total split via notional_weighting/use_idm
@@ -242,7 +242,7 @@ class TsmomLiveConfig:
     # drives in the backtest, now also available live.
     risk_budget_mode: str = 'cluster'
     # Only used when risk_budget_mode == 'idm' -- see
-    # domain.allocation.compute_symbol_notional_budget's own docstring for
+    # calculations.allocation.compute_symbol_notional_budget's own docstring for
     # the full derivation of both (including why the split is fed into IDM
     # as its own weight vector, not a flat one, to avoid double-counting
     # diversification across the two steps).
@@ -382,14 +382,14 @@ class TsmomLiveConfig:
 def build_instruments(symbols: list[str], max_notional: Optional[float] = None,
                        max_contracts: int = DEFAULT_MAX_CONTRACTS) -> list[dict]:
     """The `instruments` list compute_rebalance_targets expects, built from
-    a plain symbol list against domain.instruments.INSTRUMENTS -- the
-    equivalent of domain.tsmom_backtester.load_portfolio_data(symbols) for
+    a plain symbol list against calculations.instruments.INSTRUMENTS -- the
+    equivalent of backtest.tsmom.load_portfolio_data(symbols) for
     this module's own instrument-dict shape, not a price/VIX frame.
     INSTRUMENTS.get(s) alone isn't enough: this also resolves each known
     spec's ib_symbol/signal_symbol/db_symbol fallback chain and fills in
     expiry/max_contracts/max_notional, which compute_rebalance_targets'
     per-instrument fields (_resolve_contract, _fetch_signal_inputs, ...)
-    all read directly. No IB dependency -- domain.instruments has none.
+    all read directly. No IB dependency -- calculations.instruments has none.
 
     Raises ValueError on any symbol not in INSTRUMENTS -- for anything
     outside that known universe, build the dict(s) yourself instead (same
@@ -399,7 +399,7 @@ def build_instruments(symbols: list[str], max_notional: Optional[float] = None,
     instruments = []
     for symbol in (s.strip().upper() for s in symbols if s.strip()):
         if symbol not in INSTRUMENTS:
-            raise ValueError(f'Unknown symbol {symbol!r} -- not in domain.instruments.INSTRUMENTS '
+            raise ValueError(f'Unknown symbol {symbol!r} -- not in calculations.instruments.INSTRUMENTS '
                               f'({sorted(INSTRUMENTS)}); build its dict manually instead')
         known = INSTRUMENTS[symbol]
         ib_symbol = known.get('ib_symbol') or symbol
@@ -626,7 +626,7 @@ def _vx_spike_ratio_from_db(as_of: Optional[date] = None,
                              ma_window_days: int = DEFAULT_VX_MA_WINDOW_DAYS) -> tuple[float, float]:
     """Local spot-VIX analog to fetch_vx_spike_ratio, for
     TsmomLiveConfig(data_source='database') -- no VX futures (CFE) history
-    is available locally (same reason domain.tsmom_backtester's own module
+    is available locally (same reason backtest.tsmom's own module
     docstring gives), so this reads the same VIX spot parquet the backtest
     uses instead: current close vs its own trailing ma_window_days MA.
     Filtered to <= as_of when given (no lookahead); None uses the full
@@ -907,7 +907,7 @@ def _splice_live_front_month_bar(ib: Optional[IBPySync], instr: dict, db_symbol:
 
     Backfills the WHOLE gap, not just the single latest bar: continuous_
     momentum's rolling windows (ts_fast/ts_slow/daily_std/hv in
-    domain.continuous_momentum) are plain ROW-COUNT windows,
+    calculations.continuous_momentum) are plain ROW-COUNT windows,
     calendar-agnostic -- splicing on only today's bar while the DB is
     stale by N days doesn't "skip" those N missing days, it silently
     compresses them out of the window entirely (the newest computed
@@ -1181,7 +1181,7 @@ def _fetch_signal_inputs(ib: Optional[IBPySync], instr: dict, config: TsmomLiveC
 def _goulding_history_frame(cluster: str, g_df: pl.DataFrame) -> pl.DataFrame:
     """All-but-the-most-recent row of goulding_monthly's own output, in the
     {date, cluster, state, monthly_return} schema estimate_mixing_params
-    expects -- the live equivalent of domain.tsmom_backtester's
+    expects -- the live equivalent of backtest.tsmom's
     build_monthly_state_return_history, simplified for a single as-of
     snapshot: there's no separate backtest-style rebalance-date calendar
     to forward-match against here, so goulding_monthly's own 'ts_event'
@@ -1205,7 +1205,7 @@ def _finalize_signal(instr: dict, raw: dict, config: TsmomLiveConfig, vix_scalar
                       signal_confidence_cfg: dict,
                       goulding_forecast_scalar: Optional[float] = None) -> dict:
     """Stage 1c: resolves this instrument's final trend_strength/regime
-    (continuous vs goulding, via domain.signal.resolve_trend_direction --
+    (continuous vs goulding, via calculations.signal.resolve_trend_direction --
     shared with the backtest's own _compute_signal_row) and every
     reporting/sizing field downstream stages need. Takes `raw` from
     _fetch_signal_inputs and, when signal_weighting == 'goulding',
@@ -1442,7 +1442,7 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
          (bars, sourced per config.data_source) then, in 'goulding' mode,
          _mixing_params_for_instruments (needs every instrument's bars
          first) then _finalize_signal (trend_strength/regime/hv per
-         instrument, via domain.signal.resolve_trend_direction -- shared
+         instrument, via calculations.signal.resolve_trend_direction -- shared
          with the backtest's own _compute_signal_row).
       2. Derive the risk budget, per config.risk_budget_mode:
          'cluster' (default, unchanged prior behavior): which CLUSTERS have
@@ -1451,7 +1451,7 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
          target_portfolio_vol / sqrt(n_effective)) -> ONE shared
          budget_constant for every instrument (zero-correlation
          assumption). 'idm': which SYMBOLS have a live signal ->
-         domain.allocation.compute_symbol_notional_budget over that active
+         calculations.allocation.compute_symbol_notional_budget over that active
          set (correlation-aware, via a bounded trailing EWM correlation
          matrix built from the same config.data_source's own price
          history) -> a budget_constant PER ACTIVE SYMBOL instead of one

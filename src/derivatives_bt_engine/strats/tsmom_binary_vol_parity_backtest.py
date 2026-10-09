@@ -16,7 +16,7 @@ research/research_trend_strength_crossover_signal.md, Part 2 §6): does
 regime_discount (the flat Correction/Rebound de-risking multiplier in
 tsmom_signal.py's compute_position_scalar) actually help on this project's
 own recent data? The existing tsmom CLI (strats/tsmom.py, wrapping
-domain/tsmom_backtester.py) turned out to be unsuitable for this -- it
+backtest/tsmom.py) turned out to be unsuitable for this -- it
 sizes each symbol independently against its own
 vol_target/max_notional/max_contracts with NO cross-instrument risk
 cap (unlike live/tsmom_rebalance.py's compute_desired_risk_budget/
@@ -115,26 +115,26 @@ from typing import Optional
 
 import polars as pl
 
-from derivatives_bt_engine.domain.allocation import (
+from derivatives_bt_engine.calculations.allocation import (
     _coverage_restricted_idm,
 )
-from derivatives_bt_engine.domain.correlation import (
+from derivatives_bt_engine.calculations.correlation import (
     bounded_ewm_correlation_matrix,
     build_returns_wide,
 )
-from derivatives_bt_engine.domain.instruments import get_spec, resolve_active_months, resolve_annualization_days
-from derivatives_bt_engine.domain.continuous_momentum import (
+from derivatives_bt_engine.calculations.instruments import get_spec, resolve_active_months, resolve_annualization_days
+from derivatives_bt_engine.calculations.continuous_momentum import (
     build_features,
     continuous_momentum,
 )
-from derivatives_bt_engine.domain.goulding import (
+from derivatives_bt_engine.calculations.goulding import (
     _goulding_direction,
     build_monthly_state_return_history,
     estimate_mixing_params,
     goulding_monthly,
 )
-from derivatives_bt_engine.domain.signal_config import SignalSpec
-from derivatives_bt_engine.domain.tsmom_backtester import _detect_roll_dates, _month_end_dates, load_portfolio_data
+from derivatives_bt_engine.calculations.signal_config import SignalSpec
+from derivatives_bt_engine.backtest.tsmom import _detect_roll_dates, _month_end_dates, load_portfolio_data
 from derivatives_bt_engine.utils.logger import setup_logger
 
 logger = setup_logger()
@@ -190,7 +190,7 @@ RESULTS_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', '..
 # mixing-parameter estimator, kept separate from calculate_trend_strength's
 # existing 3m/12m ts_fast/ts_slow (which stay canonical/untouched per that
 # function's own docstring). The paper's own 2m/12m fast/slow horizons and
-# eq. 4/7 state/direction logic come from domain.goulding (genuine calendar-
+# eq. 4/7 state/direction logic come from calculations.goulding (genuine calendar-
 # month aggregation) and build_monthly_state_return_history/
 # estimate_mixing_params (the pooled, expanding-window a_Co/a_Re
 # ESTIMATION, moved there from this script once tsmom_backtester.py needed
@@ -593,7 +593,7 @@ def run(symbols: list[str], start: date, end: date, regime_discount: float,
             # behavior into one number), or once globally and shared by
             # every symbol under mixing_pool='global' (this project's
             # original behaviour, kept for direct comparison). See
-            # domain.goulding's build_monthly_state_return_history/estimate_mixing_params.
+            # calculations.goulding's build_monthly_state_return_history/estimate_mixing_params.
             if weighting_mode == 'dynamic':
                 clusters_needed = {get_spec(s)['cluster'] for s in symbols}
                 if mixing_pool == 'cluster':

@@ -19,7 +19,7 @@ modified for this document.
 
 ### 1.1 What was fixed (recap, for context — already documented in-line)
 
-`_CONTINUOUS_FRONT_MONTH_SQL` (`src/derivatives_bt_engine/domain/futures_dataloader.py:77-99`)
+`_CONTINUOUS_FRONT_MONTH_SQL` (`src/derivatives_bt_engine/data/futures_dataloader.py:77-99`)
 is the single query every backtest path (naked, TSMOM, and this session's diagnostic
 scripts) draws its "front-month" price series from. It used to rank each date's
 not-yet-expired candidate contracts by `expiration ASC` — soonest calendar expiration
@@ -371,7 +371,7 @@ calendar attribute (`roll_date`), against the *same* continuous-front-month seri
 described in §1.**
 
 `FuturesSignalGenerator.generate_futures_signals`
-(`src/derivatives_bt_engine/domain/futures_signal_generator.py:35-89`) is what actually
+(`src/derivatives_bt_engine/backtest/futures_signal_generator.py:35-89`) is what actually
 schedules rolls for this path: it computes `_get_quarterly_roll_dates` (Monday before the
 third Friday of Mar/Jun/Sep/Dec, `futures_signal_generator.py:97-127`) over the
 backtest's date range, then `join_asof`s every underlying bar to the **next** roll date
@@ -434,7 +434,7 @@ fixed independently — one in `futures_dataloader.py`'s query, the other in
 resized contract count, monthly. The quarterly roll is a mechanical side-event forced
 independent of the signal, not a position-level attribute.**
 
-`run_tsmom_backtest` (`src/derivatives_bt_engine/domain/tsmom_backtester.py:409-780`)
+`run_tsmom_backtest` (`src/derivatives_bt_engine/backtest/tsmom.py:409-780`)
 computes `sorted_roll_dates` once, up front, via the exact same
 `FuturesSignalGenerator._get_quarterly_roll_dates` static method Path 1 uses
 (`tsmom_backtester.py:466-467`) — this is the one piece of roll-scheduling logic actually

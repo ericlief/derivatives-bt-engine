@@ -1,11 +1,13 @@
+"""Search the bull-put strategy's historical parameter grid."""
+
 from datetime import datetime
 import os
 from derivatives_bt_engine.utils.logger import setup_logger
-from derivatives_bt_engine.domain.enums import *
-from derivatives_bt_engine.domain.backtester import Backtester
-from derivatives_bt_engine.domain.dataloader import OptionsDataLoader
-from derivatives_bt_engine.domain.strategy_config import MultiLegOptionStrategyConfig
-from derivatives_bt_engine.domain.option_leg_config import OptionLegConfig
+from derivatives_bt_engine.calculations.enums import *
+from derivatives_bt_engine.backtest.backtester import Backtester
+from derivatives_bt_engine.data.dataloader import OptionsDataLoader
+from derivatives_bt_engine.backtest.strategy_config import MultiLegOptionStrategyConfig
+from derivatives_bt_engine.backtest.option_leg_config import OptionLegConfig
 from derivatives_bt_engine.strats.grid_search_backtester import GridSearchBacktester
 from dotenv import load_dotenv
 
@@ -100,11 +102,11 @@ def main():
     data = dl.load_data()
 
     bt = Backtester(data=data, save_trades=False, log_to_sheets=False) # Disable saving for grid search performance
-    
+
     start_date="2010-01-01"
     # end_date="2011-01-01"
     # start_date = "2013-03-16"
-    end_date = "2023-12-31" 
+    end_date = "2023-12-31"
     periods = [10]
     # periods = [1, 3, 5, 10]
 
@@ -117,7 +119,7 @@ def main():
 
     param_grid = {
         # Original (commented to control explosion):
-     
+
         'max_spread_width': [5, 10],
         # 'max_trade_loss': [2500, 5000, 7500],
         # 'trade_selection_method': [TradeSelectionMethod.DELTA_FIRST, TradeSelectionMethod.PREMIUM_FIRST],
@@ -135,14 +137,14 @@ def main():
         # 'short_delta_target': [0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.55],
         'short_delta_target': [0.45, 0.50, 0.55],
 
-        # 'dte_target': [7, 15, 23, 30, 37, 44] ,   
-        'dte_target': [44],            
+        # 'dte_target': [7, 15, 23, 30, 37, 44] ,
+        'dte_target': [44],
     }
 
-    
+
     results_df = runner.run(
-        param_grid=param_grid, 
-        make_config=make_bull_put_config, 
+        param_grid=param_grid,
+        make_config=make_bull_put_config,
         save_top_runs=10,  # Save detailed results for top 5 runs
         # top_k=10
       )  # pass list of dicts too
@@ -162,5 +164,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
- 

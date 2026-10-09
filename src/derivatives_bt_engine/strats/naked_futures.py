@@ -23,12 +23,12 @@ from typing import Optional
 import polars as pl
 from ib_tools.ibpysync import IBPySync
 
-from derivatives_bt_engine.domain.backtester import Backtester
-from derivatives_bt_engine.domain.enums import FuturesStrategy
-from derivatives_bt_engine.domain.futures_dataloader import FuturesDataLoader
-from derivatives_bt_engine.domain.ib_futures_dataloader import IBFuturesDataLoader, connect_ib
-from derivatives_bt_engine.domain.instruments import resolve_price_symbol
-from derivatives_bt_engine.domain.strategy_config import FuturesStrategyConfig
+from derivatives_bt_engine.backtest.backtester import Backtester
+from derivatives_bt_engine.calculations.enums import FuturesStrategy
+from derivatives_bt_engine.data.futures_dataloader import FuturesDataLoader
+from derivatives_bt_engine.data.ib_futures_dataloader import IBFuturesDataLoader, connect_ib
+from derivatives_bt_engine.calculations.instruments import resolve_price_symbol
+from derivatives_bt_engine.backtest.strategy_config import FuturesStrategyConfig
 from derivatives_bt_engine.utils.logger import setup_logger
 
 logger = setup_logger()

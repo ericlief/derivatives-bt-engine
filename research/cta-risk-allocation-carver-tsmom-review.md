@@ -130,7 +130,7 @@ underlying-return `H` even when every market uses the same trading rule.
 
 #### Continuous path
 
-[`continuous_momentum`](../src/derivatives_bt_engine/domain/signal.py#L472):
+[`continuous_momentum`](../src/derivatives_bt_engine/calculations/signal.py#L472):
 
 - computes simple fast/slow trailing returns;
 - divides each by its horizon-matched daily standard deviation times
@@ -147,12 +147,12 @@ sizing. It is not calibrated so that historical mean absolute forecast equals 10
 
 #### Goulding path
 
-[`goulding_monthly`](../src/derivatives_bt_engine/domain/signal.py#L618) forms
+[`goulding_monthly`](../src/derivatives_bt_engine/calculations/signal.py#L618) forms
 lagged means of completed monthly simple returns, by default two and twelve
 months. There is no volatility standardization in this function.
-[`_goulding_blend`](../src/derivatives_bt_engine/domain/signal.py#L666) computes
+[`_goulding_blend`](../src/derivatives_bt_engine/calculations/signal.py#L666) computes
 the fast/slow blend in correction/rebound, and
-[`_goulding_direction`](../src/derivatives_bt_engine/domain/signal.py#L725) takes
+[`_goulding_direction`](../src/derivatives_bt_engine/calculations/signal.py#L725) takes
 its sign. Bull is `+1`, bear is `-1`, and an exactly zero blend is flat.
 
 Goulding, Harvey, and Mazzoleni study dynamic blending of fast and slow momentum
@@ -164,11 +164,11 @@ natural pre-registered continuous challenger.
 
 #### Resolved double discount
 
-[`resolve_trend_direction`](../src/derivatives_bt_engine/domain/signal.py#L943)
+[`resolve_trend_direction`](../src/derivatives_bt_engine/calculations/signal.py#L943)
 receives `continuous_momentum.signal`, which is already discounted in
 correction/rebound, and now returns `regime_discount=1.0` in continuous mode.
 Both live and backtest call
-[`compute_position_scalar`](../src/derivatives_bt_engine/domain/allocation.py#L49),
+[`compute_position_scalar`](../src/derivatives_bt_engine/calculations/allocation.py#L49),
 so subject to no other cap the corrected exposure is
 
 \[
@@ -182,7 +182,7 @@ mixing rule already determines the disagreement-state forecast.
 
 ### 1.2 Allocation and `H`
 
-[`build_returns_wide`](../src/derivatives_bt_engine/domain/allocation.py#L1092)
+[`build_returns_wide`](../src/derivatives_bt_engine/calculations/allocation.py#L1092)
 computes daily close-to-close simple returns and inner-joins every supplied
 symbol. This has two implications:
 
@@ -190,19 +190,19 @@ symbol. This has two implications:
 2. dates missing for any symbol in the supplied dictionary are discarded before
    the active subset is passed to `H`.
 
-[`_bounded_ewm_correlation_matrix`](../src/derivatives_bt_engine/domain/allocation.py#L1112)
+[`_bounded_ewm_correlation_matrix`](../src/derivatives_bt_engine/calculations/allocation.py#L1112)
 uses only rows strictly before the rebalance date, first bounds the history, and
 then applies recency weights. The joint weighted Gram construction produces a PSD
 correlation matrix. Current defaults are a three-year outer window and 63-trading-
 day half-life. An explicit coverage vector distinguishes “unmeasured” from a true
 zero correlation.
 
-[`compute_erc_weights`](../src/derivatives_bt_engine/domain/allocation.py#L1318)
+[`compute_erc_weights`](../src/derivatives_bt_engine/calculations/allocation.py#L1318)
 solves equal risk contribution on this correlation matrix. Using correlation
 rather than raw covariance is deliberate because per-instrument inverse-volatility
 sizing already equalizes standalone risk.
 
-[`compute_symbol_notional_budget`](../src/derivatives_bt_engine/domain/allocation.py#L1610):
+[`compute_symbol_notional_budget`](../src/derivatives_bt_engine/calculations/allocation.py#L1610):
 
 1. obtains flat, ERC, or HRP risk-budget shares `w`;
 2. computes `IDM = 1/sqrt(w' H w)` when enabled;
@@ -217,9 +217,9 @@ For a fractional pre-signal book, this algebra is coherent: component risks
 Forecast attenuation, overlays, caps, changing signs, and integer lots mean the
 implemented book need not hit that target.
 
-[`compute_idm`](../src/derivatives_bt_engine/domain/allocation.py#L1737) floors
+[`compute_idm`](../src/derivatives_bt_engine/calculations/allocation.py#L1737) floors
 negative correlations at zero only for the multiplier. ERC and HRP use the signed
-matrix. [`compute_realized_portfolio_risk`](../src/derivatives_bt_engine/domain/allocation.py#L1789)
+matrix. [`compute_realized_portfolio_risk`](../src/derivatives_bt_engine/calculations/allocation.py#L1789)
 correctly passes signed post-sizing dollar-vol exposure through `H` and produces
 Euler risk contributions.
 
@@ -242,7 +242,7 @@ normalized to mean absolute 10.
 
 ### 1.4 Backtest path and divergences
 
-[`tsmom_backtester.py`](../src/derivatives_bt_engine/domain/tsmom_backtester.py)
+[`tsmom_backtester.py`](../src/derivatives_bt_engine/backtest/tsmom.py)
 shares the signal-resolution and allocation functions, but parity is incomplete:
 
 | Concern | Live | Backtest | Consequence |
@@ -1119,14 +1119,14 @@ No changes are made by this report. If implementation is authorized, the smalles
 defensible order is:
 
 1. **Signal correctness and parity**
-   - In [`domain/signal.py`](../src/derivatives_bt_engine/domain/signal.py), make
+   - In [`calculations/signal.py`](../src/derivatives_bt_engine/calculations/signal.py), make
      the continuous regime discount occur exactly once and add tests for all four
      regimes.
    - In live and backtest, expose separate fields for pure forecast, forecast
      fraction, instrument vol scalar, portfolio overlays, and final position
      scalar.
 2. **Live/backtest implementation parity**
-   - In [`domain/tsmom_backtester.py`](../src/derivatives_bt_engine/domain/tsmom_backtester.py),
+   - In [`backtest/tsmom.py`](../src/derivatives_bt_engine/backtest/tsmom.py),
      share the live active definition and lot-aware allocation; cover seed and
      off-cycle paths.
    - Add golden date-level parity tests with identical data/config/current book.
@@ -1139,7 +1139,7 @@ defensible order is:
      history and frozen fallbacks.
    - Keep Goulding binary and continuous `tanh` as separately named candidates.
 5. **Strategic allocator interface**
-   - In [`domain/allocation.py`](../src/derivatives_bt_engine/domain/allocation.py),
+   - In [`calculations/allocation.py`](../src/derivatives_bt_engine/calculations/allocation.py),
      add whole-universe fixed/grouped, shrinkage ERC, and annual bootstrap providers.
    - Retain `_bounded_ewm_correlation_matrix` as `H_market` behavior for the fast
      overlay; do not overload it with subsystem fitting.

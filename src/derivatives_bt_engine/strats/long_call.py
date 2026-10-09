@@ -1,9 +1,11 @@
+"""Run the legacy long-call strategy from the command line."""
+
 from derivatives_bt_engine.utils.logger import setup_logger
-from derivatives_bt_engine.domain.enums import *
-from derivatives_bt_engine.domain.backtester import Backtester
-from derivatives_bt_engine.domain.dataloader import OptionsDataLoader
-from derivatives_bt_engine.domain.strategy_config import SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig
-from derivatives_bt_engine.domain.option_leg_config import OptionLegConfig
+from derivatives_bt_engine.calculations.enums import *
+from derivatives_bt_engine.backtest.backtester import Backtester
+from derivatives_bt_engine.data.dataloader import OptionsDataLoader
+from derivatives_bt_engine.backtest.strategy_config import SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig
+from derivatives_bt_engine.backtest.option_leg_config import OptionLegConfig
 
 # Create logger instance
 logger = setup_logger()
@@ -25,15 +27,15 @@ def main():
     # print(dl.__dict__)
     # Check data quality once
     # check_data_quality(options_chain, spx_data, vix_data)
-    
+
     # preloaded_data = {
     #     'spx_data': spx_data,
     #     'options_data': options_chain,
     #     'options_data_multi': options_chain_multi_index,
     #     'vix_data': vix_data
     # }
-    
-    configs = [ 
+
+    configs = [
         SingleLegOptionStrategyConfig(
         quantity=1,
         option_strategy=OptionsStrategy.LONG_CALL,
@@ -49,7 +51,7 @@ def main():
         # trade_selection_method=TradeSelectionMethod.DELTA_FIRST,
         trade_selection_method=TradeSelectionMethod.PREMIUM_FIRST,
         # vix_range=None,
-        # vix_max=25, 
+        # vix_max=25,
         # premium_ratio=0.33,
 
         # Define the leg of the strategy
@@ -64,7 +66,7 @@ def main():
         ),
     ]
 
-    
+
     for i, config in enumerate(configs):
 
 
@@ -76,7 +78,7 @@ def main():
         results = bt.run(config)
         print(results)
 
-      
+
         # trade_results = results['trade_results']
         # transactions = results['transactions']
 
@@ -159,11 +161,11 @@ def main():
     #     params = test_data['params']
     #     result_df = test_data['results']
     #     execution_time = test_data['execution_time']
-        
+
     #     logger.info(f"\n{test_id}:")
     #     logger.info(f"Parameters: {params}")
     #     logger.info(f"Execution time: {execution_time:.2f} seconds")
-        
+
     #     if not result_df.empty:c
     #         logger.info(f"Total trades: {len(result_df)}")
     #         logger.info(f"Win rate: {(result_df['pnl'] > 0).mean():.2%}")
@@ -176,5 +178,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
- 

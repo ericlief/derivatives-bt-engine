@@ -18,7 +18,7 @@ from typing import Iterable, Optional
 
 import polars as pl
 
-from derivatives_bt_engine.domain.futures_history import (
+from derivatives_bt_engine.data.futures_history import (
     DEFAULT_FUTURES_CACHE_ROOT,
     DEFAULT_GLOBEX_DB_PATH,
     DEFAULT_PYSYSTEMTRADE_DB_PATH,
@@ -26,7 +26,7 @@ from derivatives_bt_engine.domain.futures_history import (
     GlobexHistoryProvider,
     PysystemtradeHistoryProvider,
 )
-from derivatives_bt_engine.domain.continuous_momentum import (
+from derivatives_bt_engine.calculations.continuous_momentum import (
     build_features,
     continuous_momentum,
 )

@@ -1,11 +1,13 @@
+"""Run the legacy iron-condor strategy from the command line."""
+
 import os
 
 from derivatives_bt_engine.utils.logger import setup_logger
-from derivatives_bt_engine.domain.enums import *
-from derivatives_bt_engine.domain.backtester import Backtester
-from derivatives_bt_engine.domain.dataloader import OptionsDataLoader
-from derivatives_bt_engine.domain.strategy_config import MultiLegOptionStrategyConfig
-from derivatives_bt_engine.domain.option_leg_config import OptionLegConfig
+from derivatives_bt_engine.calculations.enums import *
+from derivatives_bt_engine.backtest.backtester import Backtester
+from derivatives_bt_engine.data.dataloader import OptionsDataLoader
+from derivatives_bt_engine.backtest.strategy_config import MultiLegOptionStrategyConfig
+from derivatives_bt_engine.backtest.option_leg_config import OptionLegConfig
 from dotenv import load_dotenv
 
 # Create logger instance

@@ -920,7 +920,7 @@ inputs:
 | Goulding monthly | positive contract-return index | monthly price relatives must be multiplicative, not additive-Panama ratios |
 | EWMAC | generated Panama point price | EMA differences and daily volatility must share point units |
 
-`domain.futures_signal_harness` enforces this routing.  `domain.ewmac.ewmac` exposes
+`pipelines.futures_signals` enforces this routing.  `calculations.ewmac.ewmac` exposes
 the raw point-vol-normalized forecast; its scalar is explicit and defaults to
 one because calibrated forecast scalars differ by speed pair and must not be
 invented.  Raw contract marks—not either derived signal level—remain the
@@ -1117,7 +1117,7 @@ the combined forecast again. A component's forecast weight does not change
 its own average-absolute-0.5 calibration target.
 
 The TSMOM backtester now consumes the same separation through
-`domain.tsmom_history`. Its source-neutral rows expose `close` as the current
+`data.tsmom_history`. Its source-neutral rows expose `close` as the current
 raw contract mark, `pnl_close` as the roll-neutral additive level,
 `signal_index` as the positive contract-return index, and `panama_price` as
 the point-price signal level. The portfolio ledger marks positions with

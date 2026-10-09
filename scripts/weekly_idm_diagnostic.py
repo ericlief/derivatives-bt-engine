@@ -32,16 +32,16 @@ from typing import Optional
 import numpy as np
 import polars as pl
 
-from derivatives_bt_engine.domain.allocation import (
+from derivatives_bt_engine.calculations.allocation import (
     compute_erc_weights,
     compute_idm,
 )
-from derivatives_bt_engine.domain.correlation import (
+from derivatives_bt_engine.calculations.correlation import (
     bounded_ewm_correlation_matrix,
     build_returns_wide,
 )
-from derivatives_bt_engine.domain.futures_dataloader import FuturesDataLoader
-from derivatives_bt_engine.domain.instruments import resolve_price_symbol
+from derivatives_bt_engine.data.futures_dataloader import FuturesDataLoader
+from derivatives_bt_engine.calculations.instruments import resolve_price_symbol
 from derivatives_bt_engine.strats.tsmom_binary_vol_parity_backtest import DEFAULT_SYMBOLS
 from derivatives_bt_engine.utils.logger import setup_logger
 

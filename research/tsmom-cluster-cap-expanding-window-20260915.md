@@ -3,7 +3,7 @@
 > **Interpretation:** this is retained as a cold-start/history-sensitivity
 > experiment. It reruns and resets the strategy at every row boundary, so it
 > is not the Carver-style causal expanding/rolling return-window report. Use
-> `domain.tsmom_window_reporting.score_causal_windows` on one full strategy
+> `reports.tsmom_windows.score_causal_windows` on one full strategy
 > path for that comparison.
 
 This is a robustness check of the live-policy-parity path in the main `tsmom`

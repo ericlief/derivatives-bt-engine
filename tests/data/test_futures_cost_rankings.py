@@ -134,6 +134,9 @@ def _phase2_step1_report() -> pl.DataFrame:
         "liq_days": [250] * 5,
         "min_daily_volume": [100.0] * 5,
         "max_pct_mkt_volume": [1.0] * 5,
+        "trade_sr": [0.002] * 5,
+        "roll_sr": [0.003] * 5,
+        "ref_ann_rolls": [4.0] * 5,
         "cost_elig": [True] * 5,
         "size_elig": [True, True, False, True, True],
         "liq_elig": [True, False, True, True, False],
@@ -160,6 +163,11 @@ def test_phase2_step1_uses_saved_gates_and_keeps_only_selected_rows():
     assert selected.get_column("ann_dvol").to_list() == [500.0]
     assert selected.get_column("init_cap_usd").to_list() == [100_000.0]
     assert selected.get_column("target_vol").to_list() == [0.2]
+    assert selected.select("trade_sr", "roll_sr", "ref_ann_rolls").row(0) == (
+        0.002,
+        0.003,
+        4.0,
+    )
     assert report.height == 5
 
 

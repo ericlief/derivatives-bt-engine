@@ -4,7 +4,7 @@ from derivatives_bt_engine.data.pysystemtrade_ib import (
     add_local_execution_overlays,
     load_pysystemtrade_ib_mapping,
 )
-from derivatives_bt_engine.domain.instruments import (
+from derivatives_bt_engine.calculations.instruments import (
     resolve_active_months,
     resolve_execution_eligibility,
 )

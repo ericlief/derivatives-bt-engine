@@ -24,11 +24,11 @@ import polars as pl
 from dateutil.relativedelta import relativedelta
 from dotenv import load_dotenv
 
-from derivatives_bt_engine.domain.backtester import Backtester
-from derivatives_bt_engine.domain.enums import FuturesStrategy
-from derivatives_bt_engine.domain.futures_dataloader import FuturesDataLoader
-from derivatives_bt_engine.domain.instruments import resolve_price_symbol
-from derivatives_bt_engine.domain.strategy_config import FuturesStrategyConfig
+from derivatives_bt_engine.backtest.backtester import Backtester
+from derivatives_bt_engine.calculations.enums import FuturesStrategy
+from derivatives_bt_engine.data.futures_dataloader import FuturesDataLoader
+from derivatives_bt_engine.calculations.instruments import resolve_price_symbol
+from derivatives_bt_engine.backtest.strategy_config import FuturesStrategyConfig
 from derivatives_bt_engine.strats.grid_search_backtester import _generate_windows
 from derivatives_bt_engine.utils.gspread_log_util import (
     DEFAULT_FUTURES_SPREADSHEET, _format_futures_backtest_result_row, upload_df_to_google_sheets,

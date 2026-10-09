@@ -10,14 +10,14 @@ integer-contract constraints.
 
 ## Code to inspect first
 
-- `src/derivatives_bt_engine/domain/signal.py`
+- `src/derivatives_bt_engine/calculations/signal.py`
   - `continuous_momentum`: continuous volatility-standardized fast/slow trend,
     currently squashed with `tanh`.
   - `goulding_monthly`, `_goulding_blend`, `_goulding_direction`: Goulding
     binary bull/bear direction logic.
   - Locate `ts` and `contin_signal`; determine whether correction/rebound
     discounting already applies.
-- `src/derivatives_bt_engine/domain/allocation.py`
+- `src/derivatives_bt_engine/calculations/allocation.py`
   - `_bounded_ewm_correlation_matrix`: current EWM H based on underlying daily
     close-to-close returns.
   - `compute_erc_weights`, `compute_idm`, `compute_symbol_notional_budget`, and
@@ -28,7 +28,7 @@ integer-contract constraints.
   - `combined_scalar` is not a pure forecast: it contains signal, risk scalar,
     regime/confidence effects, and VIX/portfolio overlays. Do not normalize it
     as a Carver forecast.
-- `src/derivatives_bt_engine/domain/tsmom_backtester.py`
+- `src/derivatives_bt_engine/backtest/tsmom.py`
   - Confirm live/backtest parity in activity gates, signal construction, and
     allocation timing.
 - `research/tsmom-sizing-terms-cheat-sheet.md`

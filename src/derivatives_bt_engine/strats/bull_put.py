@@ -1,11 +1,13 @@
+"""Run the legacy bull-put strategy from the command line."""
+
 import os
 
 from derivatives_bt_engine.utils.logger import setup_logger
-from derivatives_bt_engine.domain.enums import *
-from derivatives_bt_engine.domain.backtester import Backtester
-from derivatives_bt_engine.domain.dataloader import OptionsDataLoader
-from derivatives_bt_engine.domain.strategy_config import SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig
-from derivatives_bt_engine.domain.option_leg_config import OptionLegConfig
+from derivatives_bt_engine.calculations.enums import *
+from derivatives_bt_engine.backtest.backtester import Backtester
+from derivatives_bt_engine.data.dataloader import OptionsDataLoader
+from derivatives_bt_engine.backtest.strategy_config import SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig
+from derivatives_bt_engine.backtest.option_leg_config import OptionLegConfig
 from dotenv import load_dotenv
 
 # Create logger instance
@@ -36,20 +38,20 @@ def main():
     # print(dl.__dict__)
     # Check data quality once
     # check_data_quality(options_chain, spx_data, vix_data)
-    
+
     # preloaded_data = {
     #     'spx_data': spx_data,
     #     'options_data': options_chain,
     #     'options_data_multi': options_chain_multi_index,
     #     'vix_data': vix_data
     # }
-    
-    configs = [ 
+
+    configs = [
         MultiLegOptionStrategyConfig(
         quantity=1,
         option_strategy=OptionsStrategy.BULL_PUT_CREDIT_SPREAD,
         spread_type=OptionSpreadType.VERTICAL,
-        # leg_ratios={0: 1.0, 1: 2.0, 2: 2.0, 3: 1.0},   
+        # leg_ratios={0: 1.0, 1: 2.0, 2: 2.0, 3: 1.0},
         initial_capital=100000,
         leverage=1.0,
         start_date="2017-02-23",
@@ -66,7 +68,7 @@ def main():
         # trade_selection_method=TradeSelectionMethod.DELTA_FIRST,
         trade_selection_method=TradeSelectionMethod.PREMIUM_FIRST,
         # vix_range=None,
-        # vix_max=25, 
+        # vix_max=25,
         # premium_ratio=0.33,
 
         # Define the leg of the strategy
@@ -94,7 +96,7 @@ def main():
     #     quantity=1,
     #     option_strategy=OptionsStrategy.BULL_PUT_CREDIT_SPREAD,
     #     spread_type=OptionSpreadType.VERTICAL,
-    #     # leg_ratio={0: 1.0, 1: 2.0, 2: 2.0, 3: 1.0},   
+    #     # leg_ratio={0: 1.0, 1: 2.0, 2: 2.0, 3: 1.0},
     #     initial_capital=100000,
     #     leverage=1.0,
     #     start_date="2020-01-01",
@@ -106,7 +108,7 @@ def main():
     #     max_spread_width=100,
     #     max_trade_loss=10000.00,
     #     trade_selection_method=TradeSelectionMethod.PREMIUM_FIRST,
-        
+
     #     # Define the leg of the strategy
     #     legs=[
     #         OptionLegConfig(
@@ -124,7 +126,7 @@ def main():
     #         dte_range=(40, 45),
     #         )
     #     ],
-    
+
     #     ),
     # ]
     for i, config in enumerate(configs):
@@ -138,7 +140,7 @@ def main():
         results = bt.run(config)
         print(results)
 
-      
+
         # trade_results = results['trade_results']
         # transactions = results['transactions']
 
@@ -221,11 +223,11 @@ def main():
     #     params = test_data['params']
     #     result_df = test_data['results']
     #     execution_time = test_data['execution_time']
-        
+
     #     logger.info(f"\n{test_id}:")
     #     logger.info(f"Parameters: {params}")
     #     logger.info(f"Execution time: {execution_time:.2f} seconds")
-        
+
     #     if not result_df.empty:c
     #         logger.info(f"Total trades: {len(result_df)}")
     #         logger.info(f"Win rate: {(result_df['pnl'] > 0).mean():.2%}")
@@ -238,5 +240,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
- 

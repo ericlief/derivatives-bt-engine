@@ -6,7 +6,7 @@ backtest over that row's date bounds. That deliberately resets Goulding's
 available mixing history, capital path, and portfolio state at each row's
 start. It is therefore a cold-start/history-sensitivity experiment, *not* the
 normal causal performance-window report; use
-``domain.tsmom_window_reporting.score_causal_windows`` for the latter.
+``reports.tsmom_windows.score_causal_windows`` for the latter.
 """
 from __future__ import annotations
 
@@ -18,9 +18,9 @@ from typing import Optional
 
 import polars as pl
 
-from derivatives_bt_engine.domain.allocation import ALLOCATION_MODES, NOTIONAL_WEIGHTING_SCHEMES
-from derivatives_bt_engine.domain.goulding import GOULDING_SIGNAL_MODES
-from derivatives_bt_engine.domain.tsmom_backtester import (
+from derivatives_bt_engine.calculations.allocation import ALLOCATION_MODES, NOTIONAL_WEIGHTING_SCHEMES
+from derivatives_bt_engine.calculations.goulding import GOULDING_SIGNAL_MODES
+from derivatives_bt_engine.backtest.tsmom import (
     TsmomBacktestConfig,
     load_portfolio_data,
     run_tsmom_backtest,

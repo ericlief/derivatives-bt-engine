@@ -70,7 +70,7 @@ although the report would be clearer if it exposed the per-symbol dollar-vol
 budget explicitly.
 
 The implementation performs this per-symbol budget construction in
-[`compute_symbol_notional_budget`](../src/derivatives_bt_engine/domain/allocation.py#L868),
+[`compute_symbol_notional_budget`](../src/derivatives_bt_engine/calculations/allocation.py#L868),
 and the live path selects it under `risk_budget_mode='idm'` in
 [`compute_rebalance_targets`](../src/derivatives_bt_engine/live/tsmom_rebalance.py#L1374).
 
@@ -107,7 +107,7 @@ signal. `apply_cluster_cap` was omitted and defaults to false; disabling that
 cap disables cluster redistribution, but it does not permit fractional futures
 contracts. The unconditional rounding and `standalone_position_dollar_vol`
 calculation are in
-[`apply_cluster_risk_cap`](../src/derivatives_bt_engine/domain/allocation.py#L192).
+[`apply_cluster_risk_cap`](../src/derivatives_bt_engine/calculations/allocation.py#L192).
 
 ## What Goulding mode means here
 

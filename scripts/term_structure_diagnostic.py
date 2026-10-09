@@ -22,8 +22,8 @@ import argparse
 import duckdb
 import polars as pl
 
-from derivatives_bt_engine.domain.instruments import INSTRUMENTS as KNOWN_INSTRUMENTS
-from derivatives_bt_engine.domain.instruments import DEFAULT_DB_PATH
+from derivatives_bt_engine.calculations.instruments import INSTRUMENTS as KNOWN_INSTRUMENTS
+from derivatives_bt_engine.calculations.instruments import DEFAULT_DB_PATH
 
 # ── Tunable defaults ────────────────────────────────────────────────────────
 # BRE (6L) deliberately excluded -- its continuous series has a known,
@@ -60,7 +60,7 @@ pivoted AS (
 SELECT asset, date_part('year', ts_event)::int AS yr,
     count(*) AS n_days,
     ROUND(avg(front - back), 2) AS avg_spread,
-    ROUND(avg((front - back) / back) * 100) AS avg_pct_spread, 
+    ROUND(avg((front - back) / back) * 100) AS avg_pct_spread,
     ROUND(sum(CASE WHEN front > back THEN 1 ELSE 0 END)::double / count(*) * 100) AS pct_days_backwardated
 FROM pivoted
 WHERE front IS NOT NULL AND back IS NOT NULL

@@ -37,4 +37,4 @@ def test_delta_range_checks():
             print(f"✗ '{case}' evaluated to False")
 
 if __name__ == "__main__":
-    test_delta_range_checks() 
+    test_delta_range_checks()

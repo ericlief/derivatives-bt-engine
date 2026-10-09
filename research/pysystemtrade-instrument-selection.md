@@ -526,8 +526,8 @@ pysystemtrade histories + instrument metadata + local execution overlays
 
 #### Target Phase 2 pipeline runner
 
-The complete path should have one explicit runner that coordinates narrow
-data and domain stages. Each stage appends the columns it owns to the same
+The complete path has one explicit runner that coordinates narrow data and
+calculation stages. Each stage appends the columns it owns to the same
 daily frame; it must not hide intermediate values in a private calculation.
 In particular, forecast combination does not own FX retrieval, position
 sizing does not own P&L conversion, and the audit does not reconstruct values
@@ -543,12 +543,10 @@ flowchart TD
     Components["EWMAC component builder<br/>scaled forecast for each speed"]
 
     HistFX["Historical FX database<br/>raw.fx_prices"]
-    IBHist["IB daily FX extension<br/>MIDPOINT · 1-day bars"]
-    IBLive["IB current FX quote<br/>today only"]
     USD["USD identity series<br/>FX = 1"]
 
-    FXProvider["FXHistoryProvider<br/>load once per currency · cache"]
-    FXMerge["Attach FX by date<br/>historical → IB extension → live quote<br/>backward as-of only · preserve source"]
+    FXProvider["Historical FX loader<br/>load once per currency · cache"]
+    FXMerge["Attach FX by date<br/>backward as-of only · preserve source"]
 
     subgraph PerSymbol["Per-symbol pipeline"]
         Combine["1. Combine forecasts<br/>weights · FDM · cap"]
@@ -588,8 +586,6 @@ flowchart TD
     Combine --> ForecastFrame
 
     HistFX --> FXProvider
-    IBHist --> FXProvider
-    IBLive --> FXProvider
     USD --> FXProvider
     FXProvider --> FXMerge
 
@@ -623,8 +619,9 @@ The same ownership in terminal-readable form is:
 ```text
 1. Load Phase 1 row and daily signal history.
 2. Build and combine eligible EWMAC forecasts.
-3. Load historical FX once per currency; extend it with IB only after the
-   stored series ends; attach multiplier and date-aligned FX to the frame.
+3. Load historical FX once per currency and attach multiplier and
+   backward-as-of FX to the frame. A later live runner may append IB history,
+   but it must not backfill a current quote through old P&L dates.
 4. Convert mixed point volatility into average and desired subsystem positions.
 5. Calculate the actual combined-subsystem turnover from normalized desired-
    position changes. This replaces, rather than averages, the individual-rule
@@ -643,8 +640,8 @@ The same ownership in terminal-readable form is:
 
 The Phase 1 `cur_fx_to_usd` value is a point-in-time cost and sizing snapshot;
 it must never be filled backward through the historical subsystem frame. The
-FX history provider owns the database-to-IB splice and records the source and
-observation date of every rate. USD receives an explicit identity series.
+FX loader records the pair and observation date of every rate. USD receives
+an explicit identity series.
 
 #### Cost ownership, backtests, and live selection
 
@@ -726,7 +723,7 @@ combination and the unconstrained greedy AFTS baseline. The command writes:
 - `pysystemtrade_phase2_forecasts_<timestamp>.parquet`, containing the daily
   component forecasts, combined forecast, validity flag, normalized position,
   and subsystem return for direct inspection;
-- `pysystemtrade_phase2_subsystem_returns_<timestamp>.parquet`, the synchronized
+- `pysystemtrade_phase2_subsystem_net_pnl_<timestamp>.parquet`, the synchronized
   return panel used by the bounded correlation estimator;
 - `pysystemtrade_phase2_trials_<timestamp>.csv`, one row per greedy trial; and
 - `pysystemtrade_phase2_selection_<timestamp>.csv`, the last accepted book.

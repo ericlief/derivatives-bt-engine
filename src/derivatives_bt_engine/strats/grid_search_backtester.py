@@ -1,3 +1,5 @@
+"""Run repeated legacy strategy backtests over a parameter grid."""
+
 import itertools
 import multiprocessing
 import os
@@ -8,7 +10,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import polars as pl
 
-from derivatives_bt_engine.domain.backtester import Backtester
+from derivatives_bt_engine.backtest.backtester import Backtester
 from derivatives_bt_engine.utils.gspread_log_util import upload_df_to_google_sheets, _format_single_backtest_result_row
 from derivatives_bt_engine.utils.logger import setup_logger
 

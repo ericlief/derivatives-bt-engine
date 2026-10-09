@@ -1,3 +1,5 @@
+"""Log optional backtest summaries to Google Sheets."""
+
 import json
 import os
 from pathlib import Path
@@ -9,7 +11,7 @@ import polars as pl
 import numpy as np
 
 from derivatives_bt_engine.utils.logger import setup_logger
-from derivatives_bt_engine.domain.strategy_config import SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig, FuturesStrategyConfig
+from derivatives_bt_engine.backtest.strategy_config import SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig, FuturesStrategyConfig
 
 # Load environment variables from .env file
 from dotenv import load_dotenv
@@ -32,14 +34,14 @@ def google_auth():
         key_file_path = Path(key_file_path).expanduser()
         # Define the scope
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-        
+
         # Create credentials
         credentials = Credentials.from_service_account_file(str(key_file_path), scopes=scope)
-        
+
         # Authorize and return the client
         gc = gspread.authorize(credentials)
         return gc
-        
+
     except FileNotFoundError:
         logger.error(f"Service account key file not found at: {key_file_path}")
         raise
@@ -111,20 +113,20 @@ def log_to_google_sheets(results: dict,
     Log backtest results to Google Sheets as a single row.
     """
     logger.info(f"Starting Google Sheets logging for: {param_str}")
-    
+
     results_df = results['trade_results']
     stats = results.get('stats')
     drawdown_analysis = results.get('drawdown_analysis', {})
-    
+
     try:
         logger.info("Authenticating with Google Sheets...")
         gc = google_auth()
         logger.info("Authentication successful")
-        
+
         logger.info(f"Opening spreadsheet {spreadsheet_name}...")
         spreadsheet = _get_or_create_spreadsheet(gc, spreadsheet_name=spreadsheet_name)
         logger.info("Spreadsheet opened successfully")
-        
+
         # Try to get existing worksheet, create if doesn't exist
         try:
             strat_name = '_'.join(config.option_strategy.value.upper().split())
@@ -143,10 +145,10 @@ def log_to_google_sheets(results: dict,
             # headers = [a
             #     'Timestamp', 'Strategy', 'Start', 'End', 'Period', 'Quantity', 'DTE_Target', 'DTE_Range', 'Delta_Target', 'Delta_Range',
             #     'Total_PnL', 'Initial_Capital', 'Final_Capital', 'Return_Pct', 'Avg_Days_Held',
-            #     'Avg_ROI', 'Max_Profit', 'Max_Loss', 'Win_Rate', 'Winning_Trades', 'Total_Trades', 
-            #     'Max_Drawdown_USD', 'Max_Drawdown_Pct', 'Peak_Capital', 'Trough_Capital', 
-            #     'Drawdown_Duration', 'Execution_Time', 'Max_Positions', 'Early_Close', 
-            #     'Leverage', 'Max_Margin', 'Max_Spread_Width', 'Max_Trade_Loss', 
+            #     'Avg_ROI', 'Max_Profit', 'Max_Loss', 'Win_Rate', 'Winning_Trades', 'Total_Trades',
+            #     'Max_Drawdown_USD', 'Max_Drawdown_Pct', 'Peak_Capital', 'Trough_Capital',
+            #     'Drawdown_Duration', 'Execution_Time', 'Max_Positions', 'Early_Close',
+            #     'Leverage', 'Max_Margin', 'Max_Spread_Width', 'Max_Trade_Loss',
             #     'Param_String', 'Use_VIX', 'Use_IV', 'SL', 'TP', 'Average_Premium', "Trade_Selection"
             # ]
             headers = [
@@ -162,7 +164,7 @@ def log_to_google_sheets(results: dict,
             logger.info("Adding headers...")
             header_response = worksheet.append_row(headers)
             logger.info(f"Headers added, response: {header_response}")
-        
+
         # Calculate drawdown stats
         # OLD (for negative drawdown): Use .min() instead of .max()
         max_dd_amount = "N/A"
@@ -227,11 +229,11 @@ def log_to_google_sheets(results: dict,
             _get_leg_field_json(config, 'short_delta_target'),
             _get_leg_field_json(config, 'long_delta_target'),
         ]
-        
+
         row_data = [flatten_for_sheet(convert_numpy_types(obj)) for obj in row_data]
         logger.info(f"Prepared row data with {len(row_data)} columns")
         logger.info(f"Row data: {row_data}")
-        
+
         # Sanity check: headers vs row length
         try:
             expected_cols = len(headers)  # if we just created the sheet in this run
@@ -250,7 +252,7 @@ def log_to_google_sheets(results: dict,
         logger.info(f"Response: {response}")
         logger.info(f"Response status code: {getattr(response, 'status_code', 'No status_code attribute')}")
         logger.info(f"Results logged to Google Sheets: {param_str}")
-        
+
     except Exception as e:
         logger.error(f"An unexpected error occurred during Google Sheets upload: {e}")
         import traceback
@@ -265,7 +267,7 @@ def _get_or_create_spreadsheet(gc, spreadsheet_name: str):
         raise
     return spreadsheet
 
-def _format_single_backtest_result_row(results: dict, 
+def _format_single_backtest_result_row(results: dict,
                                       config: Union['SingleLegOptionStrategyConfig', 'MultiLegOptionStrategyConfig','FuturesStrategyConfig'],
                                       param_str: str,
                                       period: int) -> dict:
@@ -344,7 +346,7 @@ def _format_single_backtest_result_row(results: dict,
     # Apply flatten_for_sheet to all values
     for key, value in row_data.items():
         row_data[key] = flatten_for_sheet(value)
-    
+
     return row_data
 
 def _format_futures_backtest_result_row(results: dict,

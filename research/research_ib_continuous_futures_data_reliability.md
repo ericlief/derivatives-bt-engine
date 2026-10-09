@@ -15,7 +15,7 @@ prices, and volumes are quoted directly from what was actually returned.
 ## 1. What was being compared
 
 - **This project's DB** (`FuturesDataLoader` / `_CONTINUOUS_FRONT_MONTH_SQL`,
-  `src/derivatives_bt_engine/domain/futures_dataloader.py`): raw, unadjusted, real
+  `src/derivatives_bt_engine/data/futures_dataloader.py`): raw, unadjusted, real
   front-month splice — for each date, whichever not-yet-expired contract had the highest
   volume that day, sticky/monotonic guarded. Real dated-contract OHLC, no adjustment,
   genuine roll-day price jumps preserved by design.

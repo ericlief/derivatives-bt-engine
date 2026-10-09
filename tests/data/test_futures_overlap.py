@@ -14,7 +14,7 @@ from derivatives_bt_engine.data.futures_overlap import (
     load_mappings,
     write_overlap_report,
 )
-from derivatives_bt_engine.domain.futures_history import FuturesHistory
+from derivatives_bt_engine.data.futures_history import FuturesHistory
 
 
 def _empty_carry() -> pl.DataFrame:

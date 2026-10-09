@@ -38,7 +38,7 @@ from typing import Optional
 import duckdb
 import polars as pl
 
-from derivatives_bt_engine.domain.futures_history import (
+from derivatives_bt_engine.data.futures_history import (
     DEFAULT_PYSYSTEMTRADE_DB_PATH,
     PysystemtradeHistoryProvider,
 )

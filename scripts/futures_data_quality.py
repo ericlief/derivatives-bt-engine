@@ -698,7 +698,7 @@ def fetch_ib_prices(
     """
     from ib_tools.ibpysync import IBPySync
 
-    from derivatives_bt_engine.domain.instruments import resolve_signal_symbol
+    from derivatives_bt_engine.calculations.instruments import resolve_signal_symbol
 
     price_frames: dict[str, pl.DataFrame] = {}
     vol_frames: dict[str, pl.DataFrame] = {}
@@ -875,7 +875,7 @@ def main(argv=None) -> dict:
                         format='%(asctime)s %(name)s [%(levelname)s] %(message)s')
 
     from ib_tools.ibpysync import IBPySync
-    from derivatives_bt_engine.domain.instruments import INSTRUMENTS as KNOWN_INSTRUMENTS
+    from derivatives_bt_engine.calculations.instruments import INSTRUMENTS as KNOWN_INSTRUMENTS
     from derivatives_bt_engine.live.run_tsmom_rebalance import _build_instruments
 
     args = parse_args(argv)

@@ -9,7 +9,7 @@ implementation.
 ## Load one instrument
 
 ```python
-from derivatives_bt_engine.data.pysystemtrade_ewmac import load_ewmac_research
+from derivatives_bt_engine.pipelines.pysystemtrade_ewmac import load_ewmac_research
 
 corn = load_ewmac_research("CORN_mini")
 corn.cache_status()

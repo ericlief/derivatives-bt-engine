@@ -23,15 +23,15 @@ from pathlib import Path
 
 import polars as pl
 
-from derivatives_bt_engine.data.futures_cost_risk import (
+from derivatives_bt_engine.pipelines.phase1_cost import (
     _ewmac_rule_performance,
 )
-from derivatives_bt_engine.domain.futures_history import (
+from derivatives_bt_engine.data.futures_history import (
     DEFAULT_PYSYSTEMTRADE_DB_PATH,
     PysystemtradeHistoryProvider,
 )
-from derivatives_bt_engine.domain.ewmac import ewmac
-from derivatives_bt_engine.domain.tsmom_backtester import (
+from derivatives_bt_engine.calculations.ewmac import ewmac
+from derivatives_bt_engine.backtest.tsmom import (
     TsmomBacktestConfig,
     load_pysystemtrade_ewmac_normalization,
 )

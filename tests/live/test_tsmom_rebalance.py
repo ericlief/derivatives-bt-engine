@@ -398,7 +398,7 @@ def test_risk_budget_mode_cluster_gives_every_active_instrument_the_same_budget(
 def test_risk_budget_mode_idm_favors_independent_symbol_over_correlated_pair(monkeypatch):
     # A and B are the SAME series (correlation exactly 1.0), C is
     # independent -- same "correlated cluster vs. lone diversifier" setup
-    # as domain.allocation's own compute_erc_weights tests, now exercised
+    # as calculations.allocation's own compute_erc_weights tests, now exercised
     # end to end through the live rebalance's 'idm' risk_budget_mode.
     same_series = _price_df(date(2018, 1, 1), 500, drift=0.0015, vol=0.005, seed=1)
     price_data = {

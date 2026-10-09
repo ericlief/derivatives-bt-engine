@@ -52,8 +52,8 @@ from derivatives_bt_engine.live.tsmom_rebalance import (
     print_rebalance_report,
     _resolve_contract,
 )
-from derivatives_bt_engine.domain.allocation import ALLOCATION_MODES, NOTIONAL_WEIGHTING_SCHEMES
-from derivatives_bt_engine.domain.tsmom_reporting import (
+from derivatives_bt_engine.calculations.allocation import ALLOCATION_MODES, NOTIONAL_WEIGHTING_SCHEMES
+from derivatives_bt_engine.reports.tsmom import (
     PORTFOLIO_COLUMNS,
     SIGNAL_COLUMNS,
     clean_signal_rows,
@@ -397,7 +397,7 @@ def parse_args():
                    help="Only used with --risk-budget-mode idm (default: %(default)s). How the "
                         "IDM-derived total is split across active symbols -- 'flat': equal split. "
                         "'erc'/'hrp': data-driven, correlation-aware splits -- see "
-                        "domain.allocation.compute_symbol_notional_budget's own docstring")
+                        "calculations.allocation.compute_symbol_notional_budget's own docstring")
     p.add_argument('--use-idm', action=argparse.BooleanOptionalAction, default=True,
                    help="Only used with --risk-budget-mode idm (default: %(default)s). Whether the "
                         "total budget is scaled by IDM before being split, or left as account_equity "

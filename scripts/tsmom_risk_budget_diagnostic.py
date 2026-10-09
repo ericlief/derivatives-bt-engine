@@ -11,8 +11,8 @@ in named portfolio-construction literature (unlike its instrument-level
 vol targeting, which matches canonical TSMOM exactly). This script makes
 that gap measurable instead of theoretical.
 
-Does NOT modify derivatives_bt_engine/domain/tsmom_signal.py, derivatives_bt_engine/live/
-tsmom_rebalance.py, derivatives_bt_engine/domain/tsmom_backtester.py, or any other
+Does NOT modify derivatives_bt_engine/calculations/signal.py, derivatives_bt_engine/live/
+tsmom_rebalance.py, derivatives_bt_engine/backtest/tsmom.py, or any other
 production code path -- it imports and calls compute_rebalance_targets
 read-only, to capture what the live system actually produces, and
 otherwise only reads market data via the IB connection.
@@ -57,7 +57,7 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
 
-from derivatives_bt_engine.domain.instruments import resolve_signal_symbol
+from derivatives_bt_engine.calculations.instruments import resolve_signal_symbol
 
 log = logging.getLogger(__name__)
 
@@ -443,7 +443,7 @@ def main(argv=None):
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(name)s [%(levelname)s] %(message)s')
 
     from ib_tools.ibpysync import IBPySync
-    from derivatives_bt_engine.domain.instruments import INSTRUMENTS as KNOWN_INSTRUMENTS
+    from derivatives_bt_engine.calculations.instruments import INSTRUMENTS as KNOWN_INSTRUMENTS
     from derivatives_bt_engine.live.run_tsmom_rebalance import _build_instruments
     from derivatives_bt_engine.live.tsmom_rebalance import compute_rebalance_targets
 

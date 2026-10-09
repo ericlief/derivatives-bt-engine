@@ -190,7 +190,7 @@ tested over materially more history and many more markets.
 
 ### The three source streams
 
-The existing [futures history abstraction](../src/derivatives_bt_engine/domain/futures_history.py)
+The existing [futures history abstraction](../src/derivatives_bt_engine/data/futures_history.py)
 already represents the correct conceptual split:
 
 | Stream | Source fields | Valid use |
@@ -229,7 +229,7 @@ series may be spliced into the other as though their returns were identical.
 ## Why this should not enter the current TSMOM engine directly
 
 The production-style path in
-[tsmom_backtester.py](../src/derivatives_bt_engine/domain/tsmom_backtester.py)
+[tsmom_backtester.py](../src/derivatives_bt_engine/backtest/tsmom.py)
 loads a Globex continuous OHLCV frame and currently lets the same `close` data
 serve three jobs: feature generation, daily marking, and contract/accounting
 logic. The Carver data deliberately separates those jobs.
@@ -301,7 +301,7 @@ execution lag should be configurable but never zero by accident.
 
 ### 3. Carry calculation module
 
-Add a focused module such as `domain/carry.py` with pure Polars functions for:
+Add a focused module such as `calculations/carry.py` with pure Polars functions for:
 
 - parsing `YYYYMM` contract IDs into year fractions;
 - validating that price and carry contracts are distinct and recording their
@@ -357,7 +357,7 @@ different horizons, not to search hundreds of nearly identical parameters.
 
 1. **Repository TSMOM:** current continuous 63/252 trading-day horizons, with
    the existing 0.4/0.6 blend and causal volatility normalization from
-   [signal.py](../src/derivatives_bt_engine/domain/signal.py).
+   [signal.py](../src/derivatives_bt_engine/calculations/signal.py).
 2. **Goulding:** existing genuine-calendar 2/12-month model, tested in both the
    binary and continuous forms already implemented. Preserve the existing
    expanding pooled `a_Co`/`a_Re` estimation and compare cluster versus global
@@ -442,7 +442,7 @@ speeds form one tight cluster, they should not automatically receive six times
 the family weight of one carry rule.
 
 The existing
-[window reporting](../src/derivatives_bt_engine/domain/tsmom_window_reporting.py)
+[window reporting](../src/derivatives_bt_engine/reports/tsmom_windows.py)
 and [grid search](../src/derivatives_bt_engine/strats/tsmom_grid_search.py) should
 provide the causal scoring and report conventions. Extend their outputs rather
 than inventing a second definition of expanding and rolling windows. The long

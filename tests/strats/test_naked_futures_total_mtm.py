@@ -1,7 +1,7 @@
 """
 Regression test for naked_futures.py's combined total-mtm output
 (_build_total_mtm): the existing domain-level mtm tests
-(tests/domain/test_futures_backtest_integration.py) only ever run one
+(tests/backtest/test_futures_backtest_integration.py) only ever run one
 symbol at a time -- they never check that the AGGREGATE across multiple
 symbols actually equals the sum of each symbol's own independent series.
 Against the real CME Globex duckdb. Skipped if that db isn't available.

@@ -1,0 +1,814 @@
+"""
+Tests for derivatives_bt_engine.backtest.tsmom — the multi-symbol monthly-
+rebalance TSMOM backtest engine. Uses synthetic price/VIX data throughout
+(monkeypatched in place of load_portfolio_data) so these run fast and
+without a duckdb/CSV dependency.
+"""
+
+from datetime import date, timedelta
+
+import numpy as np
+import polars as pl
+import pytest
+
+from derivatives_bt_engine.backtest import tsmom as tb
+from derivatives_bt_engine.calculations.instruments import get_spec
+from derivatives_bt_engine.backtest.tsmom import (
+    TsmomBacktestConfig,
+    _PortfolioLedger,
+    _select_cluster_cap_universe,
+    check_vol_regime,
+    _compute_vix_regime_series,
+    _month_end_dates,
+    run_tsmom_backtest,
+)
+
+
+def _trading_dates(start: date, n: int) -> list[date]:
+    """n business days starting at `start` (skips weekends only, no holiday calendar needed for tests)."""
+    dates = []
+    d = start
+    while len(dates) < n:
+        if d.weekday() < 5:
+            dates.append(d)
+        d += timedelta(days=1)
+    return dates
+
+
+def _price_df(start: date, n: int, drift: float, vol: float = 0.01, seed: int = 0) -> pl.DataFrame:
+    rng = np.random.default_rng(seed)
+    rets = rng.normal(drift, vol, n)
+    close = 100 * np.exp(np.cumsum(rets))
+    dates = _trading_dates(start, n)
+    return pl.DataFrame({
+        'ts_event': dates, 'open': close, 'high': close, 'low': close,
+        'close': close, 'volume': [1000] * n,
+    })
+
+
+def _vix_df(start: date, n: int, level: float) -> pl.DataFrame:
+    dates = _trading_dates(start, n)
+    return pl.DataFrame({'date': dates, 'vix_close': [level] * n})
+
+
+# ── check_vol_regime ─────────────────────────────────────────────────────────
+
+def test_check_vol_regime_bands():
+    assert check_vol_regime(1.0) == 'normal'
+    assert check_vol_regime(1.4) == 'elevated'
+    assert check_vol_regime(1.6) == 'spike'
+    assert check_vol_regime(2.5) == 'extreme'
+    assert check_vol_regime(None) == 'normal'
+
+
+# ── _compute_vix_regime_series ───────────────────────────────────────────────
+
+def test_compute_vix_regime_series_flat_is_normal():
+    vix = _vix_df(date(2020, 1, 1), 100, level=15.0)
+    out = _compute_vix_regime_series(vix)
+    assert 'vix_ma' in out.columns and 'vix_ratio' in out.columns and 'vol_regime' in out.columns
+    last = out.tail(1)
+    assert last['vix_ratio'][0] == pytest.approx(1.0)
+    assert last['vol_regime'][0] == 'normal'
+
+
+def test_compute_vix_regime_series_spike_detected():
+    base = _vix_df(date(2020, 1, 1), 90, level=15.0)
+    spike = _vix_df(base['date'][-1] + timedelta(days=3), 5, level=40.0)
+    vix = pl.concat([base, spike])
+    out = _compute_vix_regime_series(vix)
+    assert out.tail(1)['vol_regime'][0] in ('spike', 'extreme')
+
+
+# ── _month_end_dates ──────────────────────────────────────────────────────────
+
+def test_month_end_dates_lands_on_last_trading_day_per_month():
+    df = _price_df(date(2021, 1, 1), 70, drift=0.0)  # spans Jan-Apr 2021
+    ends = _month_end_dates({'X': df})
+    months_seen = sorted({(d.year, d.month) for d in ends})
+    assert len(months_seen) >= 3
+    for d in ends:
+        next_day_same_month = df.filter(
+            (pl.col('ts_event') > d) & (pl.col('ts_event').dt.month() == d.month)
+        )
+        assert next_day_same_month.height == 0
+
+
+# ── run_tsmom_backtest (monkeypatched data) ─────────────────────────────────
+
+def _patch_data(monkeypatch, price_data: dict, vix: pl.DataFrame):
+    monkeypatch.setattr(tb, 'load_portfolio_data', lambda symbols: (price_data, vix))
+
+
+def _source_neutral_price_df(start: date, n: int) -> pl.DataFrame:
+    base = _price_df(start, n, drift=0.001, vol=0.005, seed=17)
+    return base.with_columns(
+        pl.col('close').alias('pnl_close'),
+        pl.col('close').alias('signal_index'),
+        pl.col('close').alias('panama_price'),
+        pl.lit('globex').alias('source_segment'),
+        pl.lit('primary_contract_marks').alias('pnl_quality'),
+        pl.lit(True).alias('return_valid'),
+        pl.lit('').alias('quality_flag'),
+        pl.col('close').pct_change().alias('ret_1d'),
+    )
+
+
+@pytest.mark.parametrize('signal_weighting', ['continuous', 'goulding', 'carver_ewmac'])
+def test_source_neutral_backtest_runs_all_three_signal_classes(monkeypatch, signal_weighting):
+    frame = _source_neutral_price_df(date(2017, 1, 1), 700)
+    vix = _vix_df(date(2017, 1, 1), 700, level=15.0)
+    manifest = {'data_source': 'globex', 'instruments': {'X': {'source': 'globex'}}}
+    monkeypatch.setattr(tb, '_load_backtest_data', lambda _config: ({'X': frame}, vix, manifest))
+    monkeypatch.setattr(tb, 'get_spec', lambda _symbol: get_spec('ES'))
+
+    result = run_tsmom_backtest(TsmomBacktestConfig(
+        symbols=['X'], data_source='globex', signal_weighting=signal_weighting,
+        max_notional=100_000, max_contracts=5, vix_gating=False,
+        ewmac_fast_span=8, ewmac_slow_span=32, ewmac_vol_span=20,
+        ewmac_scalar_universe='backtest',
+    ))
+
+    assert result['n_days'] == frame.height
+    assert result['data_manifest'] == manifest
+    assert result['trend_signals']
+    assert all(event['signal_class'] == signal_weighting for event in result['trend_signals'])
+    if signal_weighting == 'carver_ewmac':
+        assert any(event['ewmac_forecast'] is not None for event in result['trend_signals'])
+        assert all(
+            event['ewmac_forecast'] is None
+            or abs(event['ewmac_forecast']) <= 1.0
+            for event in result['trend_signals']
+        )
+        scalar_history = result['ewmac_scalar_history']
+        assert scalar_history.height == frame.height
+        assert scalar_history['scalar_pool'].unique().to_list() == ['global']
+        assert scalar_history['normalization_universe'].unique().to_list() == [
+            'configured_backtest_symbols'
+        ]
+        assert scalar_history['configured_instrument_count'].unique().to_list() == [1]
+        assert scalar_history['target_abs_forecast'].unique().to_list() == [0.5]
+        assert scalar_history['forecast_cap'].unique().to_list() == [1.0]
+        assert scalar_history['vol_span'].unique().to_list() == [20]
+        assert scalar_history['vol_slow_years'].unique().to_list() == [10]
+        assert scalar_history['vol_slow_weight'].unique().to_list() == [0.3]
+        assert scalar_history['vol_min_samples'].unique().to_list() == [10]
+        assert scalar_history['scalar_valid'].any()
+        coverage = result['ewmac_instrument_coverage']
+        assert coverage.select(
+            'traded_symbol', 'instrument_code', 'ts_start', 'ts_end'
+        ).to_dicts() == [{
+            'traded_symbol': 'X',
+            'instrument_code': 'X',
+            'ts_start': frame['ts_event'].min(),
+            'ts_end': frame['ts_event'].max(),
+        }]
+        assert all(
+            event['ewmac_forecast'] is None
+            or -1.0 <= event['signal'] <= 1.0
+            for event in result['trend_signals']
+        )
+    else:
+        assert result['ewmac_scalar_history'].is_empty()
+        assert result['ewmac_instrument_coverage'].is_empty()
+
+
+def test_ledger_marks_roll_neutral_pnl_not_raw_contract_gap() -> None:
+    spec = get_spec('ES')
+    ledger = _PortfolioLedger(['ES'], 100_000.0, {'ES': spec})
+    ledger.held_contracts['ES'] = 1
+    ledger.prior_close['ES'] = 100.0
+
+    ledger.mark_to_market('ES', 101.0)
+
+    assert ledger.capital == pytest.approx(100_000.0 + spec['multiplier'])
+
+
+def test_carver_ewmac_rejects_legacy_conflated_price_path() -> None:
+    with pytest.raises(ValueError, match='source-neutral'):
+        TsmomBacktestConfig(symbols=['ES'], signal_weighting='carver_ewmac')
+
+
+@pytest.mark.parametrize(
+    'pool,expected_keys',
+    [
+        ('global', {'global'}),
+        ('cluster', {'rates', 'equity'}),
+        ('instrument', {'A', 'B'}),
+    ],
+)
+def test_ewmac_normalization_pool_keys(monkeypatch, pool, expected_keys) -> None:
+    histories = {
+        'A': _source_neutral_price_df(date(2020, 1, 1), 20),
+        'B': _source_neutral_price_df(date(2020, 1, 3), 18),
+    }
+    clusters = {'A': 'rates', 'B': 'equity'}
+    monkeypatch.setattr(
+        tb, 'get_spec', lambda symbol: {'cluster': clusters[symbol]}
+    )
+    config = TsmomBacktestConfig(
+        symbols=['A', 'B'], data_source='globex', signal_weighting='carver_ewmac',
+        ewmac_fast_span=2, ewmac_slow_span=4, ewmac_vol_span=2,
+        ewmac_scalar_pool=pool, ewmac_scalar_universe='backtest',
+        ewmac_scalar_min_periods=2,
+    )
+
+    forecasts, report, coverage = tb._precompute_ewmac_normalization(
+        histories, config
+    )
+
+    assert set(forecasts) == {'A', 'B'}
+    assert set(report['pool_key'].unique()) == expected_keys
+    assert report['scalar_valid'].any()
+    assert coverage.sort('instrument_code').select(
+        'instrument_code', 'ts_start', 'ts_end'
+    ).to_dicts() == [
+        {
+            'instrument_code': symbol,
+            'ts_start': histories[symbol]['ts_event'].min(),
+            'ts_end': histories[symbol]['ts_event'].max(),
+        }
+        for symbol in sorted(histories)
+    ]
+
+
+def test_fixed_ewmac_scalar_is_applied_before_cap() -> None:
+    history = {'A': _source_neutral_price_df(date(2020, 1, 1), 20)}
+    config = TsmomBacktestConfig(
+        symbols=['A'], data_source='globex', signal_weighting='carver_ewmac',
+        ewmac_fast_span=2, ewmac_slow_span=4, ewmac_vol_span=2,
+        ewmac_scalar_pool='fixed', ewmac_scalar_universe='backtest',
+        ewmac_forecast_scalar=2.0,
+    )
+
+    forecasts, report, coverage = tb._precompute_ewmac_normalization(
+        history, config
+    )
+    usable = forecasts['A'].drop_nulls('raw_forecast')
+
+    assert report['forecast_scalar'].unique().to_list() == [2.0]
+    assert usable['ewmac_forecast'].to_list() == pytest.approx(
+        (usable['raw_forecast'] * 2.0).clip(
+            -config.ewmac_forecast_cap, config.ewmac_forecast_cap
+        ).to_list()
+    )
+    assert coverage['forecast_ts_start'][0] is not None
+
+
+def test_full_pysystemtrade_universe_scales_only_traded_symbols(monkeypatch) -> None:
+    history = {'ES': _source_neutral_price_df(date(2020, 1, 1), 20)}
+    dates = history['ES']['ts_event'].to_list()
+    panel = pl.DataFrame({
+        'ts_event': [dates[0], dates[0]],
+        'instrument_code': ['SP500', 'NASDAQ'],
+        'pool_key': ['global', 'global'],
+        'raw_forecast': [1.0, 3.0],
+    })
+    coverage = pl.DataFrame({
+        'instrument_code': ['NASDAQ', 'SP500'],
+        'pool_key': ['global', 'global'],
+        'ts_start': [dates[0], dates[0]],
+        'ts_end': [dates[-1], dates[-1]],
+    })
+    scalar = pl.DataFrame({
+        'ts_event': [dates[4]],
+        'pool_key': ['global'],
+        'n_instruments': [2],
+        'cs_median_abs_forecast': [2.0],
+        'prior_daily_observations': [500],
+        'historical_mean_abs_forecast': [2.0],
+        'forecast_scalar': [5.0],
+        'scalar_valid': [True],
+    })
+    monkeypatch.setattr(
+        tb, '_load_pysystemtrade_ewmac_universe',
+        lambda _config: (panel, coverage, 'abc123', 'range_test', True),
+    )
+    monkeypatch.setattr(
+        tb, '_load_pysystemtrade_scalar_history',
+        lambda _panel, _config, _commit, _range: (scalar, True),
+    )
+    config = TsmomBacktestConfig(
+        symbols=['ES'], data_source='globex', signal_weighting='carver_ewmac',
+        ewmac_fast_span=2, ewmac_slow_span=4, ewmac_vol_span=2,
+        ewmac_scalar_pool='global', ewmac_scalar_universe='pysystemtrade',
+        ewmac_scalar_min_periods=2,
+    )
+    manifest = {
+        'instruments': {'ES': {'history_instrument': 'SP500', 'metadata': {}}}
+    }
+
+    forecasts, report, universe = tb._precompute_ewmac_normalization(
+        history, config, manifest
+    )
+
+    assert set(forecasts) == {'ES'}
+    assert report['normalization_universe'].unique().to_list() == [
+        'pysystemtrade_full'
+    ]
+    assert report['normalization_instrument_count'].unique().to_list() == [2]
+    assert report['forecast_panel_cache_hit'].all()
+    assert report['scalar_cache_hit'].all()
+    assert universe.filter(pl.col('instrument_code') == 'SP500')[
+        'traded_symbol'
+    ][0] == 'ES'
+    assert forecasts['ES'].filter(pl.col('ts_event') > dates[4])[
+        'forecast_scalar'
+    ].null_count() == 0
+    assert forecasts['ES'].filter(pl.col('ts_event') > dates[4])[
+        'scalar_carried_forward'
+    ].all()
+    assert forecasts['ES'].filter(pl.col('ts_event') > dates[4])[
+        'scalar_as_of_date'
+    ].unique().to_list() == [dates[4]]
+
+
+def test_full_pysystemtrade_forecast_and_scalar_caches(monkeypatch, tmp_path) -> None:
+    dates = _trading_dates(date(2020, 1, 1), 12)
+    loaded: list[str] = []
+
+    class FakeHistory:
+        def __init__(self, instrument_code: str):
+            self.metadata = {'asset_class': 'Equity'}
+            offset = 0.0 if instrument_code == 'A' else 10.0
+            self._bars = pl.DataFrame({
+                'ts_event': dates,
+                'close': [
+                    100.0 + offset + i + (0.5 if i % 2 else -0.25)
+                    for i in range(len(dates))
+                ],
+            })
+
+        def panama_bars(self):
+            return self._bars
+
+    class FakeProvider:
+        def __init__(self, **_kwargs):
+            pass
+
+        def _database_metadata(self):
+            return 4, 'abcdef1234567890'
+
+        def load(self, instrument_code):
+            loaded.append(instrument_code)
+            return FakeHistory(instrument_code)
+
+    monkeypatch.setattr(tb, 'DEFAULT_FUTURES_CACHE_ROOT', tmp_path)
+    monkeypatch.setattr(tb, 'PysystemtradeHistoryProvider', FakeProvider)
+    source_coverage = pl.DataFrame({
+        'instrument_code': ['A', 'B'],
+        'source_multiple_rows': [12, 12],
+        'source_multiple_ts_start': [dates[0], dates[0]],
+        'source_multiple_ts_end': [dates[-1], dates[-1]],
+        'source_adjusted_rows': [12, 12],
+        'source_adjusted_ts_start': [dates[0], dates[0]],
+        'source_adjusted_ts_end': [dates[-1], dates[-1]],
+    })
+    monkeypatch.setattr(
+        tb, '_pysystemtrade_source_coverage',
+        lambda _path: (source_coverage, 'range_20200101_20200116_test'),
+    )
+    config = TsmomBacktestConfig(
+        symbols=['ES'], data_source='globex', signal_weighting='carver_ewmac',
+        ewmac_fast_span=2, ewmac_slow_span=4, ewmac_vol_span=2,
+        ewmac_scalar_universe='pysystemtrade', ewmac_scalar_min_periods=2,
+    )
+
+    panel, coverage, commit, range_key, panel_hit = (
+        tb._load_pysystemtrade_ewmac_universe(config)
+    )
+    scalar, scalar_hit = tb._load_pysystemtrade_scalar_history(
+        panel, config, commit, range_key
+    )
+    panel_again, coverage_again, commit_again, range_again, panel_hit_again = (
+        tb._load_pysystemtrade_ewmac_universe(config)
+    )
+    scalar_again, scalar_hit_again = tb._load_pysystemtrade_scalar_history(
+        panel_again, config, commit_again, range_again
+    )
+
+    assert loaded == ['A', 'B']
+    assert not panel_hit and not scalar_hit
+    assert panel_hit_again and scalar_hit_again
+    assert panel.equals(panel_again)
+    assert coverage.equals(coverage_again)
+    assert scalar.equals(scalar_again)
+    assert coverage.select('instrument_code', 'ts_start', 'ts_end').to_dicts() == [
+        {'instrument_code': 'A', 'ts_start': dates[0], 'ts_end': dates[-1]},
+        {'instrument_code': 'B', 'ts_start': dates[0], 'ts_end': dates[-1]},
+    ]
+
+    monkeypatch.setattr(
+        tb, '_pysystemtrade_source_coverage',
+        lambda _path: (source_coverage, 'range_20200101_20200117_changed'),
+    )
+    _, changed_coverage, _, changed_range, changed_hit = (
+        tb._load_pysystemtrade_ewmac_universe(config)
+    )
+    assert not changed_hit
+    assert changed_range == 'range_20200101_20200117_changed'
+    assert loaded == ['A', 'B', 'A', 'B']
+    assert changed_coverage['source_range_key'].unique().to_list() == [
+        changed_range
+    ]
+
+
+def test_invalid_return_holds_signal_but_retains_current_raw_mark() -> None:
+    frame = _source_neutral_price_df(date(2020, 1, 1), 30)
+    invalid_date = frame['ts_event'][15]
+    previous_date = frame['ts_event'][14]
+    frame = frame.with_columns(
+        pl.when(pl.col('ts_event') == invalid_date)
+        .then(999.0)
+        .otherwise(pl.col('close'))
+        .alias('close'),
+        pl.when(pl.col('ts_event') == invalid_date)
+        .then(False)
+        .otherwise(pl.col('return_valid'))
+        .alias('return_valid'),
+        pl.when(pl.col('ts_event') == invalid_date)
+        .then(pl.lit('nonpositive_reference'))
+        .otherwise(pl.col('quality_flag'))
+        .alias('quality_flag'),
+    )
+    config = TsmomBacktestConfig(
+        symbols=['ES'], data_source='globex', fast_window=3, slow_window=8,
+        vol_fast_window=3, vol_slow_window=8,
+    )
+
+    computed = tb._precompute_signal(frame, config, annualization_days=252)
+    invalid = computed.filter(pl.col('ts_event') == invalid_date).row(0, named=True)
+    previous = computed.filter(pl.col('ts_event') == previous_date).row(0, named=True)
+
+    assert invalid['close'] == 999.0
+    assert invalid['signal'] == previous['signal']
+
+
+def test_return_signal_bars_preserve_source_neutral_ret_1d() -> None:
+    frame = _source_neutral_price_df(date(2020, 1, 1), 5).with_columns(
+        pl.Series('ret_1d', [None, 0.01, 0.02, 0.03, 0.04])
+    )
+
+    bars = tb._return_signal_bars(frame)
+
+    assert bars.columns == ['ts_event', 'close', 'ret_1d']
+    assert bars['ret_1d'].to_list() == [
+        None, pytest.approx(0.01), pytest.approx(0.02),
+        pytest.approx(0.03), pytest.approx(0.04),
+    ]
+
+
+def test_seeds_position_from_last_month_end_before_start_date(monkeypatch):
+    """With start_date set, the first event should be a seed dated at the
+    last month-end *before* start_date (not start_date itself), and the
+    position should already be on as of day one of the window -- not
+    flat-until-the-first-in-window-rebalance."""
+    price_data = {'X': _price_df(date(2018, 1, 1), 460, drift=0.0015, vol=0.005, seed=1)}
+    vix = _vix_df(date(2018, 1, 1), 460, level=15.0)
+    _patch_data(monkeypatch, price_data, vix)
+    monkeypatch.setattr(tb, 'get_spec', lambda s: get_spec('ES'))
+
+    all_dates = sorted(price_data['X']['ts_event'].to_list())
+    start_date = all_dates[-30]  # well past the 64-bar minimum, comfortably inside the series
+
+    config = TsmomBacktestConfig(symbols=['X'], max_notional=50_000, max_contracts=5, start_date=start_date)
+    result = run_tsmom_backtest(config)
+
+    seed_events = [e for e in result['trend_signals'] if e['is_seed']]
+    assert seed_events, "expected a seed event before start_date"
+    for e in seed_events:
+        assert e['date'] < start_date
+
+    first_day_capital = result['daily_mtm'].filter(pl.col('date') == start_date)
+    assert first_day_capital.height == 1
+    # held_contracts must already reflect the seed target on day one --
+    # confirmed indirectly: at least one symbol holds a nonzero position
+    # immediately (no "wait for the next month-end" gap).
+    held_after_seed = {e['symbol']: e['target_contracts'] for e in seed_events}
+    assert any(v != 0 for v in held_after_seed.values())
+
+
+def test_long_uptrend_produces_long_position(monkeypatch):
+    price_data = {'X': _price_df(date(2018, 1, 1), 500, drift=0.0015, vol=0.005, seed=1)}
+    vix = _vix_df(date(2018, 1, 1), 500, level=15.0)
+    _patch_data(monkeypatch, price_data, vix)
+
+    config = TsmomBacktestConfig(symbols=['X'], max_notional=50_000, max_contracts=5)
+    monkeypatch.setattr(tb, 'get_spec', lambda s: get_spec('ES'))
+
+    result = run_tsmom_backtest(config)
+    later_events = [e for e in result['trend_signals'] if e['target_contracts'] is not None][-5:]
+    assert any(e['target_contracts'] > 0 for e in later_events)
+
+
+def test_goulding_signal_weighting_produces_long_position_with_audit_fields(monkeypatch):
+    """signal_weighting='goulding' must actually drive direction (same strong
+    synthetic uptrend as test_long_uptrend_produces_long_position above,
+    just under the goulding model instead of continuous) and must populate
+    the goulding audit fields (g_regime/g_fast/g_slow/a_co/a_re) on
+    trend_signals events. These are computed by _compute_signal_row
+    specifically so a saved trend_signals CSV shows what drove a given
+    rebalance's direction, but were previously silently dropped before
+    reaching ledger.events -- confirmed and fixed alongside this test."""
+    price_data = {'X': _price_df(date(2018, 1, 1), 500, drift=0.0015, vol=0.005, seed=1)}
+    vix = _vix_df(date(2018, 1, 1), 500, level=15.0)
+    _patch_data(monkeypatch, price_data, vix)
+    monkeypatch.setattr(tb, 'get_spec', lambda s: get_spec('ES'))
+
+    config = TsmomBacktestConfig(symbols=['X'], max_notional=50_000, max_contracts=5,
+                                  signal_weighting='goulding')
+    result = run_tsmom_backtest(config)
+
+    later_events = [e for e in result['trend_signals'] if e['target_contracts'] is not None][-5:]
+    assert any(e['target_contracts'] > 0 for e in later_events)
+
+    # Outside 'goulding' mode these fields are always None (see
+    # _goulding_kwargs_for's own empty-dict short-circuit) -- filtering for
+    # "populated" here specifically isolates goulding-mode events, and
+    # confirms they're no longer silently dropped before reaching
+    # trend_signals.
+    populated = [e for e in result['trend_signals'] if e['g_regime'] is not None]
+    assert populated, "expected at least one event with goulding audit fields populated"
+    for e in populated[-5:]:
+        assert e['g_regime'] in ('bull', 'bear', 'correction', 'rebound')
+        assert e['g_fast'] is not None
+        assert e['g_slow'] is not None
+        assert e['a_co'] is not None
+        assert e['a_re'] is not None
+
+
+def test_continuous_goulding_is_causally_scaled_and_bounded(monkeypatch):
+    price_data = {'X': _price_df(date(2016, 1, 1), 900, drift=0.0008, vol=0.01, seed=7)}
+    _patch_data(monkeypatch, price_data, _vix_df(date(2016, 1, 1), 900, level=15.0))
+    monkeypatch.setattr(tb, 'get_spec', lambda s: get_spec('ES'))
+
+    result = run_tsmom_backtest(TsmomBacktestConfig(
+        symbols=['X'], max_notional=50_000, max_contracts=20,
+        signal_weighting='goulding', goulding_signal_mode='continuous',
+        vix_gating=False,
+    ))
+
+    scaled = [event for event in result['trend_signals'] if event['g_forecast_scalar'] is not None]
+    assert scaled
+    assert all(event['g_signal_mode'] == 'continuous' for event in scaled)
+    assert all(event['g_raw_forecast'] is not None for event in scaled)
+    assert all(abs(event['signal']) <= 1.0 for event in scaled)
+
+
+def test_portfolio_capital_aggregates_across_symbols(monkeypatch):
+    a = _price_df(date(2018, 1, 1), 400, drift=0.001, vol=0.005, seed=2)
+    b = _price_df(date(2018, 1, 1), 400, drift=0.001, vol=0.005, seed=3)
+    price_data = {'A': a, 'B': b}
+    vix = _vix_df(date(2018, 1, 1), 400, level=15.0)
+    _patch_data(monkeypatch, price_data, vix)
+    monkeypatch.setattr(tb, 'get_spec', lambda s: get_spec('ES'))
+
+    config_ab = TsmomBacktestConfig(symbols=['A', 'B'], max_notional=50_000, max_contracts=5)
+    result_ab = run_tsmom_backtest(config_ab)
+
+    # Single-symbol runs (same data/config) should sum to the same total
+    # PnL as the combined two-symbol portfolio, confirming each symbol's
+    # daily MTM contribution is aggregated additively, not overwritten.
+    _patch_data(monkeypatch, {'A': a}, vix)
+    result_a = run_tsmom_backtest(TsmomBacktestConfig(symbols=['A'], max_notional=50_000, max_contracts=5))
+    _patch_data(monkeypatch, {'B': b}, vix)
+    result_b = run_tsmom_backtest(TsmomBacktestConfig(symbols=['B'], max_notional=50_000, max_contracts=5))
+
+    combined_pnl = result_a['daily_mtm']['cum_pnl'][-1] + result_b['daily_mtm']['cum_pnl'][-1]
+    assert result_ab['daily_mtm']['cum_pnl'][-1] == pytest.approx(combined_pnl, abs=1.0)
+
+
+def test_notional_weighting_erc_favors_independent_symbol_over_correlated_pair(monkeypatch):
+    """target_portfolio_vol's notional_weighting='erc' path, end-to-end:
+    A and B are the SAME price series (correlation exactly 1.0, the
+    starkest possible "correlated cluster"), C is an independent uptrend.
+    Spies on calculations.allocation.compute_symbol_notional_budget (still the
+    real implementation underneath -- monkeypatch just records its return
+    value) to confirm the per-symbol budget dict it computes each
+    rebalance gives C, the uncorrelated diversifier, a bigger individual
+    share than A or B once all three are active simultaneously -- exactly
+    the property compute_erc_weights' own unit tests check in isolation,
+    now confirmed wired all the way through run_tsmom_backtest."""
+    same_series = _price_df(date(2018, 1, 1), 500, drift=0.0015, vol=0.005, seed=1)
+    price_data = {
+        'A': same_series,
+        'B': same_series,
+        'C': _price_df(date(2018, 1, 1), 500, drift=0.0015, vol=0.005, seed=2),
+    }
+    vix = _vix_df(date(2018, 1, 1), 500, level=15.0)
+    _patch_data(monkeypatch, price_data, vix)
+    monkeypatch.setattr(tb, 'get_spec', lambda s: get_spec('ES'))
+
+    captured_budgets = []
+    real_compute_budget = tb.compute_symbol_notional_budget
+
+    def spy(*args, **kwargs):
+        result = real_compute_budget(*args, **kwargs)
+        if result:
+            captured_budgets.append(result)
+        return result
+
+    monkeypatch.setattr(tb, 'compute_symbol_notional_budget', spy)
+
+    config = TsmomBacktestConfig(symbols=['A', 'B', 'C'], max_contracts=50, max_notional=500_000,
+                                  target_portfolio_vol=0.15, notional_weighting='erc')
+    run_tsmom_backtest(config)
+
+    all_three_active = [b for b in captured_budgets if set(b) == {'A', 'B', 'C'}]
+    assert all_three_active, "expected at least one rebalance with all three symbols simultaneously active"
+    for budget in all_three_active:
+        assert budget['C'] > budget['A']
+        assert budget['C'] > budget['B']
+
+
+def test_notional_weighting_rejects_unknown_scheme():
+    with pytest.raises(ValueError):
+        TsmomBacktestConfig(symbols=['X'], target_portfolio_vol=0.15, notional_weighting='bogus')
+
+
+def test_allocation_and_goulding_modes_validate_and_default_conservatively():
+    config = TsmomBacktestConfig(symbols=['X'])
+    assert config.allocation_mode == 'risk-targeted'
+    assert config.goulding_signal_mode == 'binary'
+    with pytest.raises(ValueError, match='allocation_mode'):
+        TsmomBacktestConfig(symbols=['X'], allocation_mode='bogus')
+    with pytest.raises(ValueError, match='goulding_signal_mode'):
+        TsmomBacktestConfig(symbols=['X'], goulding_signal_mode='bogus')
+
+
+def test_ew_allocation_is_equal_gross_notional_direction_only(monkeypatch):
+    price_data = {
+        'A': _price_df(date(2018, 1, 1), 500, drift=0.0015, vol=0.005, seed=1),
+        'B': _price_df(date(2018, 1, 1), 500, drift=0.0010, vol=0.02, seed=2),
+    }
+    _patch_data(monkeypatch, price_data, _vix_df(date(2018, 1, 1), 500, level=15.0))
+    monkeypatch.setattr(tb, 'get_spec', lambda s: get_spec('ES'))
+
+    result = run_tsmom_backtest(TsmomBacktestConfig(
+        symbols=['A', 'B'], initial_capital=100_000, max_notional=100_000,
+        max_contracts=100, allocation_mode='ew', vix_gating=True,
+    ))
+    populated = [event for event in result['trend_signals'] if event['signal'] not in (None, 0)]
+    assert populated
+    first_date = populated[0]['date']
+    same_date = [event for event in populated if event['date'] == first_date]
+    for event in same_date:
+        assert abs(event['fractional_target_notional']) == pytest.approx(
+            event['capital'] / 2, rel=1e-6,
+        )
+        assert abs(event['combined_scalar']) == 1.0
+        assert event['risk_scalar'] == 1.0
+        assert event['regime_discount'] == 1.0
+        assert event['vix_scalar'] == 1.0
+        assert event['allocation_mode'] == 'ew'
+        assert event['notional_allocation_weight'] == pytest.approx(0.5)
+
+
+def test_cluster_universe_selects_goulding_raw_evidence_before_sizing():
+    """Bull/Bear must not tie merely because each resolved direction is +/-1."""
+    config = TsmomBacktestConfig(
+        symbols=['MZC', 'MZS', 'MES'], signal_weighting='goulding', max_active_per_cluster=1,
+    )
+    probes = {
+        'MZC': {'cluster': 'grain', 'g_regime': 'bull', 'g_fast': .02, 'g_slow': .04,
+                'scalar': 2.0, 'contin_signal': .1},
+        'MZS': {'cluster': 'grain', 'g_regime': 'bull', 'g_fast': .08, 'g_slow': .12,
+                'scalar': .25, 'contin_signal': .1},
+        'MES': {'cluster': 'equity', 'g_regime': 'bear', 'g_fast': -.03, 'g_slow': -.05,
+                'scalar': -1.0, 'contin_signal': -.1},
+    }
+
+    selected, ranks, scores = _select_cluster_cap_universe(probes, list(probes), config)
+
+    assert selected == {'MZS', 'MES'}
+    assert ranks == {'MZS': 1, 'MZC': 2, 'MES': 1}
+    assert scores['MZS'] == pytest.approx(.10)
+    assert scores['MZC'] == pytest.approx(.03)
+
+
+def test_cluster_cap_config_rejects_invalid_limits():
+    with pytest.raises(ValueError, match='max_active_per_cluster'):
+        TsmomBacktestConfig(symbols=['X'], max_active_per_cluster=0)
+    with pytest.raises(ValueError, match='max_cluster_risk_pct'):
+        TsmomBacktestConfig(symbols=['X'], max_cluster_risk_pct=0)
+
+
+def test_fast_slow_window_defaults_and_validation():
+    config = TsmomBacktestConfig(symbols=['X'])
+    assert config.fast_window == 63
+    assert config.slow_window == 252
+    assert config.vol_fast_window is None
+    assert config.vol_slow_window is None
+
+    with pytest.raises(ValueError):
+        TsmomBacktestConfig(symbols=['X'], fast_window=0)
+    with pytest.raises(ValueError):
+        TsmomBacktestConfig(symbols=['X'], fast_window=252, slow_window=63)
+
+
+def test_fast_slow_window_wired_through_to_continuous_momentum(monkeypatch):
+    price_data = {'X': _price_df(date(2018, 1, 1), 400, drift=0.0015, vol=0.005, seed=1)}
+    vix = _vix_df(date(2018, 1, 1), 400, level=15.0)
+    _patch_data(monkeypatch, price_data, vix)
+    monkeypatch.setattr(tb, 'get_spec', lambda s: get_spec('ES'))
+
+    captured = {}
+    real_continuous_momentum = tb.continuous_momentum
+
+    def spy(df, **kwargs):
+        captured.update(kwargs)
+        return real_continuous_momentum(df, **kwargs)
+
+    monkeypatch.setattr(tb, 'continuous_momentum', spy)
+
+    config = TsmomBacktestConfig(symbols=['X'], max_notional=50_000, max_contracts=5,
+                                  fast_window=21, slow_window=100, vol_fast_window=10, vol_slow_window=50)
+    run_tsmom_backtest(config)
+
+    assert captured['fast_window'] == 21
+    assert captured['slow_window'] == 100
+    assert captured['vol_fast_window'] == 10
+    assert captured['vol_slow_window'] == 50
+    assert captured['discount'] == config.regime_discount
+
+
+def test_use_idm_defaults_true_and_is_wired_through_to_compute_symbol_notional_budget(monkeypatch):
+    """use_idm defaults to True (unchanged prior behavior), and
+    run_tsmom_backtest passes config.use_idm straight through to
+    compute_symbol_notional_budget's own use_idm param -- spy on the real
+    call and check the captured positional arg matches config.use_idm for
+    both True (default) and an explicit False."""
+    assert TsmomBacktestConfig(symbols=['X']).use_idm is True
+
+    price_data = {
+        'A': _price_df(date(2018, 1, 1), 400, drift=0.0015, vol=0.005, seed=1),
+        'B': _price_df(date(2018, 1, 1), 400, drift=0.0015, vol=0.005, seed=2),
+    }
+    vix = _vix_df(date(2018, 1, 1), 400, level=15.0)
+    _patch_data(monkeypatch, price_data, vix)
+    monkeypatch.setattr(tb, 'get_spec', lambda s: get_spec('ES'))
+
+    captured_use_idm = []
+    real_compute_budget = tb.compute_symbol_notional_budget
+
+    def spy(*args, **kwargs):
+        result = real_compute_budget(*args, **kwargs)
+        if args:
+            captured_use_idm.append(args[-1] if len(args) >= 9 else kwargs.get('use_idm'))
+        return result
+
+    monkeypatch.setattr(tb, 'compute_symbol_notional_budget', spy)
+
+    config = TsmomBacktestConfig(symbols=['A', 'B'], max_contracts=50, max_notional=500_000,
+                                  target_portfolio_vol=0.15, use_idm=False)
+    run_tsmom_backtest(config)
+
+    assert captured_use_idm, "expected compute_symbol_notional_budget to be called at least once"
+    assert all(v is False for v in captured_use_idm)
+
+
+def test_vix_spike_holds_positions_unchanged(monkeypatch):
+    """ratio ~25/15=1.67 lands in the 'spike' band (not 'extreme') -- the
+    gate should hold prior positions exactly, with signal computation
+    skipped entirely (signal/regime both None on those events).
+    Price data runs ~60 trading days past the (short) VIX spike, so the
+    spike's rebalance date isn't the literal last date in the window
+    (which the last-date-in-window cutoff excludes) and the rolling
+    63-day VIX MA doesn't have time to absorb the spike before then."""
+    price_data = {'X': _price_df(date(2018, 1, 1), 460, drift=0.0015, vol=0.005, seed=4)}
+    base_vix = _vix_df(date(2018, 1, 1), 395, level=15.0)
+    spike_vix = _vix_df(base_vix['date'][-1] + timedelta(days=1), 5, level=25.0)
+    vix = pl.concat([base_vix, spike_vix])
+    _patch_data(monkeypatch, price_data, vix)
+    monkeypatch.setattr(tb, 'get_spec', lambda s: get_spec('ES'))
+
+    config = TsmomBacktestConfig(symbols=['X'], max_notional=50_000, max_contracts=5)
+    result = run_tsmom_backtest(config)
+
+    spike_events = [e for e in result['trend_signals'] if e['vol_regime'] == 'spike']
+    assert spike_events, "expected the synthetic VIX spike to trigger at least one gated rebalance"
+    for e in spike_events:
+        assert e['signal'] is None
+        assert e['regime'] is None
+        assert e['target_contracts'] == e['prior_contracts']
+
+
+def test_vix_extreme_halves_positions(monkeypatch):
+    """ratio ~35/15=2.33 lands in 'extreme' -- the gate should halve
+    (round-to-nearest) the prior position rather than hold or resize via
+    the signal. Same spike-then-runway construction as the 'spike' test
+    above, just a higher level."""
+    price_data = {'X': _price_df(date(2018, 1, 1), 460, drift=0.0015, vol=0.005, seed=4)}
+    base_vix = _vix_df(date(2018, 1, 1), 395, level=15.0)
+    spike_vix = _vix_df(base_vix['date'][-1] + timedelta(days=1), 5, level=35.0)
+    vix = pl.concat([base_vix, spike_vix])
+    _patch_data(monkeypatch, price_data, vix)
+    monkeypatch.setattr(tb, 'get_spec', lambda s: get_spec('ES'))
+
+    config = TsmomBacktestConfig(symbols=['X'], max_notional=50_000, max_contracts=5)
+    result = run_tsmom_backtest(config)
+
+    extreme_events = [e for e in result['trend_signals'] if e['vol_regime'] == 'extreme']
+    assert extreme_events, "expected the synthetic VIX blowout to trigger at least one 'extreme' rebalance"
+    for e in extreme_events:
+        assert e['target_contracts'] == round(e['prior_contracts'] / 2)

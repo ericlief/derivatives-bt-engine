@@ -52,8 +52,8 @@ tsmom-windows = "derivatives_bt_engine.strats.tsmom_window_scheme:main"
 pysystemtrade-import = "derivatives_bt_engine.data.pysystemtrade_import:main"
 pysystemtrade-pooling-audit = "derivatives_bt_engine.data.pysystemtrade_pooling:main"
 futures-overlap-report = "derivatives_bt_engine.data.futures_overlap:main"
-futures-cost-risk = "derivatives_bt_engine.data.futures_cost_risk:main"
-futures-select-phase2 = "derivatives_bt_engine.data.futures_selection_phase2:main"
+futures-cost-risk = "derivatives_bt_engine.pipelines.phase1_cost:main"
+futures-select-phase2 = "derivatives_bt_engine.pipelines.phase2_selection:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -72,7 +72,7 @@ include = ["derivatives_bt_engine*"]
 # parent directory holding your sibling project checkouts, e.g.
 # /home/dev/projects). Only needed for the live/IB-connected paths
 # (live/run_tsmom_rebalance.py, live/tsmom_rebalance.py,
-# domain/ib_futures_dataloader.py, strats/naked_futures.py import it at
+# data/ib_futures_dataloader.py and strats/naked_futures.py import it at
 # module level) -- everything else (the duckdb-backed backtests) doesn't
 # need it at all.
 

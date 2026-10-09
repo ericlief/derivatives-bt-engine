@@ -2,7 +2,7 @@ from datetime import date
 
 import polars as pl
 
-from derivatives_bt_engine.domain.tsmom_backtester import TsmomBacktestConfig
+from derivatives_bt_engine.backtest.tsmom import TsmomBacktestConfig
 from derivatives_bt_engine.strats import tsmom_window_scheme as windows
 
 

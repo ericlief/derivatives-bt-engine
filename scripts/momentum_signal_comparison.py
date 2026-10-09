@@ -47,11 +47,11 @@ from typing import Optional
 
 import polars as pl
 
-from derivatives_bt_engine.domain.instruments import resolve_annualization_days
-from derivatives_bt_engine.domain.continuous_momentum import build_features, continuous_momentum
-from derivatives_bt_engine.domain.goulding import goulding_monthly
-from derivatives_bt_engine.domain.signal_config import SignalSpec
-from derivatives_bt_engine.domain.tsmom_backtester import load_portfolio_data
+from derivatives_bt_engine.calculations.instruments import resolve_annualization_days
+from derivatives_bt_engine.calculations.continuous_momentum import build_features, continuous_momentum
+from derivatives_bt_engine.calculations.goulding import goulding_monthly
+from derivatives_bt_engine.calculations.signal_config import SignalSpec
+from derivatives_bt_engine.backtest.tsmom import load_portfolio_data
 from derivatives_bt_engine.utils.logger import setup_logger
 
 logger = setup_logger()
