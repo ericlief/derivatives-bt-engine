@@ -25,15 +25,15 @@ from dateutil.relativedelta import relativedelta
 from dotenv import load_dotenv
 
 from derivatives_bt_engine.backtest.backtester import Backtester
-from derivatives_bt_engine.calculations.enums import FuturesStrategy
+from derivatives_bt_engine.backtest.futures.types import FuturesStrategy
 from derivatives_bt_engine.data.futures_dataloader import FuturesDataLoader
 from derivatives_bt_engine.calculations.instruments import resolve_price_symbol
 from derivatives_bt_engine.backtest.strategy_config import FuturesStrategyConfig
 from derivatives_bt_engine.strats.grid_search_backtester import _generate_windows
-from derivatives_bt_engine.utils.gspread_log_util import (
+from derivatives_bt_engine.integrations.google_sheets import (
     DEFAULT_FUTURES_SPREADSHEET, _format_futures_backtest_result_row, upload_df_to_google_sheets,
 )
-from derivatives_bt_engine.utils.logger import setup_logger
+from derivatives_bt_engine.logging_config import setup_logger
 
 logger = setup_logger()
 load_dotenv()

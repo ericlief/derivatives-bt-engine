@@ -31,6 +31,23 @@ def test_generic_domain_package_does_not_return():
         ), path
 
 
+def test_generic_utils_and_enum_buckets_do_not_return():
+    """Infrastructure and vocabulary must live with concrete owners."""
+    assert not (PACKAGE_ROOT / "utils").exists()
+    assert not (PACKAGE_ROOT / "calculations" / "enums.py").exists()
+    assert not (PACKAGE_ROOT / "backtest" / "types.py").exists()
+    forbidden = (
+        "derivatives_bt_engine.utils",
+        "derivatives_bt_engine.calculations.enums",
+        "derivatives_bt_engine.backtest.types",
+    )
+    for path in PACKAGE_ROOT.rglob("*.py"):
+        assert all(
+            not module.startswith(forbidden)
+            for module in _imported_modules(path)
+        ), path
+
+
 def test_calculations_do_not_depend_on_io_or_orchestration_packages():
     """Pure calculations may not reach upward into runtime workflow layers."""
     forbidden = (

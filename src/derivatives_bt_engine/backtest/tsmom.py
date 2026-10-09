@@ -59,7 +59,7 @@ from derivatives_bt_engine.calculations.allocation import (
     compute_symbol_notional_budget,
 )
 from derivatives_bt_engine.calculations.correlation import build_returns_wide
-from derivatives_bt_engine.calculations.enums import VolRegime
+from derivatives_bt_engine.calculations.volatility import VolRegime
 from derivatives_bt_engine.calculations.continuous_momentum import (
     DEFAULT_FAST_WINDOW,
     DEFAULT_SLOW_WINDOW,
@@ -118,7 +118,7 @@ from derivatives_bt_engine.data.pysystemtrade_pooling import (
     apply_pysystemtrade_pooling_mapping,
     load_pysystemtrade_pooling_catalog,
 )
-from derivatives_bt_engine.utils.logger import setup_logger
+from derivatives_bt_engine.logging_config import setup_logger
 
 logger = setup_logger()
 

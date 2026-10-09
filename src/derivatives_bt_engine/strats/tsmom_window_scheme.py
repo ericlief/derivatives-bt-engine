@@ -29,7 +29,7 @@ from derivatives_bt_engine.strats.window_scheme_naked_futures import (
     generate_capped_rolling_windows,
     generate_expanding_windows,
 )
-from derivatives_bt_engine.utils.logger import setup_logger
+from derivatives_bt_engine.logging_config import setup_logger
 
 
 logger = setup_logger()

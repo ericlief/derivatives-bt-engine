@@ -24,7 +24,7 @@ from derivatives_bt_engine.calculations.instruments import (
     resolve_active_months,
     resolve_price_symbol,
 )
-from derivatives_bt_engine.utils.logger import setup_logger
+from derivatives_bt_engine.logging_config import setup_logger
 
 
 def audit_roll_policies(

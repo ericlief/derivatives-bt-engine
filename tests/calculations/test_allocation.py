@@ -46,7 +46,7 @@ from derivatives_bt_engine.calculations.correlation import (
     bounded_ewm_correlation_matrix,
     build_returns_wide,
 )
-from derivatives_bt_engine.calculations.enums import TrendRegime
+from derivatives_bt_engine.calculations.continuous_momentum import TrendRegime
 from derivatives_bt_engine.calculations.legacy_signal import calculate_trend_strength
 from derivatives_bt_engine.calculations.signal_confidence import (
     compute_signal_confidence,

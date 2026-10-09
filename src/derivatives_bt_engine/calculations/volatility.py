@@ -10,6 +10,7 @@ apply the executable contract's point value and FX conversion afterwards.
 from __future__ import annotations
 
 import math
+from enum import Enum
 
 import polars as pl
 
@@ -19,6 +20,15 @@ MIXED_VOL_SLOW_YEARS = 10
 MIXED_VOL_SLOW_WEIGHT = 0.30
 MIXED_VOL_MIN_SAMPLES = 10
 MIXED_VOL_ANNUALIZATION_DAYS = 256
+
+
+class VolRegime(str, Enum):
+    """Portfolio-wide VIX/VX risk-overlay state used by TSMOM."""
+
+    NORMAL = "normal"
+    ELEVATED = "elevated"
+    SPIKE = "spike"
+    EXTREME = "extreme"
 
 
 def mixed_point_volatility(

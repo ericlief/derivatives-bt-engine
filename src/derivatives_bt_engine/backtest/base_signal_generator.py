@@ -13,9 +13,10 @@ import numpy as np
 
 import logging
 
-from derivatives_bt_engine.calculations.enums import OptionsType, PositionSide
+from derivatives_bt_engine.backtest.options.types import OptionsType
+from derivatives_bt_engine.backtest.position_side import PositionSide
 from derivatives_bt_engine.backtest.strategy_config import SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig
-from derivatives_bt_engine.utils.logger import setup_logger
+from derivatives_bt_engine.logging_config import setup_logger
 
 # Create logger instance
 logger = setup_logger()

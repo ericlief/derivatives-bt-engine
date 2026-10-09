@@ -35,7 +35,7 @@ from derivatives_bt_engine.backtest.tsmom import (
     TsmomBacktestConfig,
     load_pysystemtrade_ewmac_normalization,
 )
-from derivatives_bt_engine.utils.logger import setup_logger
+from derivatives_bt_engine.logging_config import setup_logger
 
 
 log = logging.getLogger(

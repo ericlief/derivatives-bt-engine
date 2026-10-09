@@ -28,7 +28,7 @@ from ib_tools.ibpysync import IBPySync
 
 from derivatives_bt_engine.data.base_dataloader import BaseDataLoader
 from derivatives_bt_engine.calculations.instruments import INSTRUMENTS, resolve_signal_symbol
-from derivatives_bt_engine.utils.logger import setup_logger
+from derivatives_bt_engine.logging_config import setup_logger
 
 logger = setup_logger()
 

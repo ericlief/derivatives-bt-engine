@@ -5,7 +5,7 @@ from collections.abc import Mapping
 
 import polars as pl
 
-from derivatives_bt_engine.utils.logger import setup_logger
+from derivatives_bt_engine.logging_config import setup_logger
 
 logger = setup_logger()
 
@@ -18,7 +18,9 @@ def upload_tsmom_frames(*, spreadsheet_name: str, run_label: str,
     normal CLI runs independent of service-account configuration and avoids
     making merely importing a strategy authenticate with Google.
     """
-    from derivatives_bt_engine.utils.gspread_log_util import upload_df_to_google_sheets
+    from derivatives_bt_engine.integrations.google_sheets import (
+        upload_df_to_google_sheets,
+    )
 
     for artifact, frame in frames.items():
         if frame.is_empty():

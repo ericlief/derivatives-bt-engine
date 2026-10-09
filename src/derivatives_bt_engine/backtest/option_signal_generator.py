@@ -8,11 +8,15 @@ from typing import Optional, Union, List, Tuple
 
 import polars as pl
 
-from derivatives_bt_engine.calculations.enums import *
+from derivatives_bt_engine.backtest.position_side import PositionSide
+from derivatives_bt_engine.backtest.options.types import (
+    OptionSpreadType, OptionsStrategy, OptionsType, TradeSelectionMethod,
+)
+from derivatives_bt_engine.backtest.futures.types import FuturesStrategy
 from derivatives_bt_engine.backtest.base_signal_generator import BaseSignalGenerator
 from derivatives_bt_engine.backtest.option_leg_config import OptionLegConfig
 from derivatives_bt_engine.backtest.strategy_config import FuturesStrategyConfig, SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig
-from derivatives_bt_engine.utils.logger import setup_logger
+from derivatives_bt_engine.logging_config import setup_logger
 
 # Create logger instance
 logger = setup_logger()
@@ -133,7 +137,7 @@ class OptionSignalGenerator(BaseSignalGenerator):
         ).filter(pl.col('spread_percent') <= _MAX_SPREAD_PERCENT)
         logger.debug(f'After spread filtering: {chain.height} options remaining')
 
-        # Midpoint price. Equivalent to PriceUtils.calculate_midpoint_price(bid, ask)
+        # Midpoint price. Equivalent to OptionPricing.calculate_midpoint_price(bid, ask)
         # for every surviving row here (bid/ask are already > 0 and spread-filtered
         # above, so its validity checks can never fire) -- this is the vectorized form.
         chain = chain.with_columns(((pl.col(bid_col) + pl.col(ask_col)) / 2).alias('midpoint_price'))

@@ -26,14 +26,16 @@ src/derivatives_bt_engine/
 ├── strats/        # strategy definitions and command entry points
 ├── pipelines/     # Phase 1, Phase 2, and other multi-stage workflows
 ├── reports/       # public schemas, formatting, and report builders
+├── integrations/  # optional external-service adapters such as Google Sheets
 ├── live/          # live portfolio and rebalance workflows
-└── utils/         # small cross-cutting utilities
+└── logging_config.py  # shared package file-logger configuration
 ```
 
 The package intentionally has no generic `domain`, `core`, `engine`, or
-`system` container. Code is placed by its concrete responsibility; strategy
-entry points may orchestrate the reusable data, calculation, and backtest
-layers but should not duplicate their financial logic.
+`system` container, and no catch-all `utils` or `enums` module. Code is placed
+by its concrete responsibility; strategy entry points may orchestrate the
+reusable data, calculation, and backtest layers but should not duplicate their
+financial logic.
 
 ## Installation
 

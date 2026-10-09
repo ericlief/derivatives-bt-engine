@@ -572,7 +572,7 @@ def main():
         print(f"\nSaved summary to {summary_path}; clean signal, portfolio, and run-manifest files share {run_id}")
 
     if args.sheets_spreadsheet:
-        from derivatives_bt_engine.utils.tsmom_sheets import upload_tsmom_frames
+        from derivatives_bt_engine.integrations.tsmom_sheets import upload_tsmom_frames
         upload_tsmom_frames(
             spreadsheet_name=args.sheets_spreadsheet,
             run_label=f'tsmom_backtest_{symbol_str}', frames=sheet_frames,

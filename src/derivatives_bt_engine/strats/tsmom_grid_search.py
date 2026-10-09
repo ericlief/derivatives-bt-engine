@@ -27,7 +27,7 @@ from derivatives_bt_engine.reports.tsmom_windows import (
     score_causal_windows,
     summarize_causal_windows,
 )
-from derivatives_bt_engine.utils.logger import setup_logger
+from derivatives_bt_engine.logging_config import setup_logger
 
 logger = setup_logger()
 
@@ -258,7 +258,7 @@ def main():
         print(f"Saved {results.window_metrics.height} causal OOS window rows to {metrics_path}")
 
     if args.sheets_spreadsheet:
-        from derivatives_bt_engine.utils.tsmom_sheets import upload_tsmom_frames
+        from derivatives_bt_engine.integrations.tsmom_sheets import upload_tsmom_frames
         upload_tsmom_frames(
             spreadsheet_name=args.sheets_spreadsheet,
             run_label=f'tsmom_grid_{symbol_str}',

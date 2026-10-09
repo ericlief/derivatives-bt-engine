@@ -1,7 +1,7 @@
 """Compatibility imports for the former combined signal module.
 
 New code should import trend models, legacy logic, and confidence overlays from
-their dedicated domain modules. This file contains no calculations.
+their dedicated modules. This file contains no calculations.
 """
 
 from derivatives_bt_engine.calculations.continuous_momentum import (

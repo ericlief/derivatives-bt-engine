@@ -43,7 +43,7 @@ from derivatives_bt_engine.calculations.correlation import (
 from derivatives_bt_engine.data.futures_dataloader import FuturesDataLoader
 from derivatives_bt_engine.calculations.instruments import resolve_price_symbol
 from derivatives_bt_engine.strats.tsmom_binary_vol_parity_backtest import DEFAULT_SYMBOLS
-from derivatives_bt_engine.utils.logger import setup_logger
+from derivatives_bt_engine.logging_config import setup_logger
 
 
 logger = setup_logger()

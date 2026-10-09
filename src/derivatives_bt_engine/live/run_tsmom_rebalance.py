@@ -59,7 +59,7 @@ from derivatives_bt_engine.reports.tsmom import (
     clean_signal_rows,
     portfolio_rows_from_signals,
 )
-from derivatives_bt_engine.utils.logger import setup_logger
+from derivatives_bt_engine.logging_config import setup_logger
 
 load_dotenv()
 
@@ -256,7 +256,7 @@ def _save_report(cluster_report: str, targets: list[dict], config: TsmomLiveConf
                  txt_path, csv_path, run_id)
 
     if sheets_spreadsheet:
-        from derivatives_bt_engine.utils.tsmom_sheets import upload_tsmom_frames
+        from derivatives_bt_engine.integrations.tsmom_sheets import upload_tsmom_frames
         upload_tsmom_frames(
             spreadsheet_name=sheets_spreadsheet,
             run_label=f'tsmom_live_{"_".join(instrument["symbol"] for instrument in instruments)}',

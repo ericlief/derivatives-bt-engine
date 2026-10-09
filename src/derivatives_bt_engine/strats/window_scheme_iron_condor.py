@@ -41,8 +41,8 @@ from derivatives_bt_engine.backtest.backtester import Backtester
 from derivatives_bt_engine.data.dataloader import OptionsDataLoader
 from derivatives_bt_engine.strats.grid_search_backtester import _generate_windows
 from derivatives_bt_engine.strats.iron_condor_param_search import make_iron_condor_config
-from derivatives_bt_engine.utils.gspread_log_util import _format_single_backtest_result_row
-from derivatives_bt_engine.utils.logger import setup_logger
+from derivatives_bt_engine.integrations.google_sheets import _format_single_backtest_result_row
+from derivatives_bt_engine.logging_config import setup_logger
 
 logger = setup_logger()
 load_dotenv()

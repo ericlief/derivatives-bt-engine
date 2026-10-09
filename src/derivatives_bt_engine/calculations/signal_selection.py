@@ -11,8 +11,10 @@ from __future__ import annotations
 import math
 from typing import Mapping, Optional
 
-from derivatives_bt_engine.calculations.continuous_momentum import classify_regime
-from derivatives_bt_engine.calculations.enums import TrendRegime
+from derivatives_bt_engine.calculations.continuous_momentum import (
+    TrendRegime,
+    classify_regime,
+)
 from derivatives_bt_engine.calculations.goulding import (
     GOULDING_SIGNAL_MODES,
     _goulding_direction,

@@ -87,7 +87,7 @@ from derivatives_bt_engine.live.tsmom_rebalance import (
     _resolve_contract,
     build_instruments,
 )
-from derivatives_bt_engine.utils.logger import setup_logger
+from derivatives_bt_engine.logging_config import setup_logger
 
 
 log = logging.getLogger("derivatives_bt_engine.pipelines.phase1_cost")

@@ -18,7 +18,7 @@ import polars as pl
 from dotenv import load_dotenv
 
 from derivatives_bt_engine.data.base_dataloader import BaseDataLoader
-from derivatives_bt_engine.utils.logger import setup_logger
+from derivatives_bt_engine.logging_config import setup_logger
 
 load_dotenv()
 

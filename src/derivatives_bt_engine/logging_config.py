@@ -1,6 +1,6 @@
 """One shared file logger for all derivatives-bt-engine modules.
 
-Every strategy and domain module may call :func:`setup_logger` during import.
+Every package module may call :func:`setup_logger` during import.
 The returned package logger owns the sole handler, while child loggers such as
 ``derivatives_bt_engine.live.tsmom_rebalance`` propagate to it. A live run and
 a backtest therefore write one coherent, run-scoped log instead of each module
@@ -19,7 +19,9 @@ _FILE_HANDLER_NAME = 'derivatives_bt_engine_file'
 
 def _default_log_path() -> Path:
     """Return a project-root log path, independent of the caller's CWD."""
-    project_root = Path(__file__).resolve().parents[3]
+    # This module lives directly under ``src/derivatives_bt_engine``; two
+    # parent hops reach the repository root regardless of the caller's CWD.
+    project_root = Path(__file__).resolve().parents[2]
     logs_dir = project_root / 'logs'
     logs_dir.mkdir(exist_ok=True)
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')

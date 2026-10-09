@@ -4,11 +4,15 @@ import math
 from datetime import date
 from typing import Optional, Dict, Union, List, NamedTuple, Tuple
 import polars as pl
-from derivatives_bt_engine.calculations.enums import *
+from derivatives_bt_engine.backtest.position_side import PositionSide
+from derivatives_bt_engine.backtest.options.types import (
+    OptionSpreadType, OptionsStrategy, OptionsType, TradeSelectionMethod,
+)
+from derivatives_bt_engine.backtest.futures.types import FuturesStrategy
 from derivatives_bt_engine.backtest.position import SingleLegOptionPosition, MultiLegOptionPosition, FuturesPosition
 from derivatives_bt_engine.backtest.trade_result import OptionTradeResult
 from derivatives_bt_engine.calculations.continuous_momentum import build_features, continuous_momentum
-from derivatives_bt_engine.utils.logger import setup_logger
+from derivatives_bt_engine.logging_config import setup_logger
 from derivatives_bt_engine.backtest.strategy_config import SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig, FuturesStrategyConfig
 
 logger = setup_logger()

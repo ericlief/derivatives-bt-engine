@@ -11,7 +11,11 @@ from enum import Enum
 
 import polars as pl
 
-from derivatives_bt_engine.calculations.enums import *
+from derivatives_bt_engine.backtest.position_side import PositionSide
+from derivatives_bt_engine.backtest.options.types import (
+    OptionSpreadType, OptionsStrategy, OptionsType, TradeSelectionMethod,
+)
+from derivatives_bt_engine.backtest.futures.types import FuturesStrategy
 from derivatives_bt_engine.backtest.strategy_config import FuturesStrategyConfig, SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig
 from derivatives_bt_engine.backtest.option_signal_generator import OptionSignalGenerator
 from derivatives_bt_engine.backtest.futures_signal_generator import FuturesSignalGenerator
@@ -26,8 +30,8 @@ from derivatives_bt_engine.calculations.continuous_momentum import (
     continuous_momentum,
 )
 from derivatives_bt_engine.data.futures_dataloader import assert_monotonic_expiration
-from derivatives_bt_engine.utils.logger import setup_logger
-from derivatives_bt_engine.utils.price_utils import PriceUtils
+from derivatives_bt_engine.logging_config import setup_logger
+from derivatives_bt_engine.backtest.options.pricing import OptionPricing
 
 # Create logger instance
 logger = setup_logger()
@@ -574,10 +578,10 @@ class Backtester:
                 # exist on a futures config/trade table -- log_futures_to_
                 # google_sheets is the futures-shaped counterpart (own
                 # spreadsheet, 'futures_bt', includes the signal gate params).
-                from derivatives_bt_engine.utils.gspread_log_util import log_futures_to_google_sheets
+                from derivatives_bt_engine.integrations.google_sheets import log_futures_to_google_sheets
                 log_futures_to_google_sheets(results, config=config, param_str=param_str)
             else:
-                from derivatives_bt_engine.utils.gspread_log_util import log_to_google_sheets
+                from derivatives_bt_engine.integrations.google_sheets import log_to_google_sheets
                 log_to_google_sheets(results, config=config, param_str=param_str)
 
         # Save MTM results with same timestamp

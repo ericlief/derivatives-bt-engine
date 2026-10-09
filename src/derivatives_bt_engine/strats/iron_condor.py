@@ -2,8 +2,12 @@
 
 import os
 
-from derivatives_bt_engine.utils.logger import setup_logger
-from derivatives_bt_engine.calculations.enums import *
+from derivatives_bt_engine.logging_config import setup_logger
+from derivatives_bt_engine.backtest.position_side import PositionSide
+from derivatives_bt_engine.backtest.options.types import (
+    OptionSpreadType, OptionsStrategy, OptionsType, TradeSelectionMethod,
+)
+from derivatives_bt_engine.backtest.futures.types import FuturesStrategy
 from derivatives_bt_engine.backtest.backtester import Backtester
 from derivatives_bt_engine.data.dataloader import OptionsDataLoader
 from derivatives_bt_engine.backtest.strategy_config import MultiLegOptionStrategyConfig

@@ -10,7 +10,7 @@ from datetime import date, datetime
 import polars as pl
 import numpy as np
 
-from derivatives_bt_engine.utils.logger import setup_logger
+from derivatives_bt_engine.logging_config import setup_logger
 from derivatives_bt_engine.backtest.strategy_config import SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig, FuturesStrategyConfig
 
 # Load environment variables from .env file

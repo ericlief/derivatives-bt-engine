@@ -8,6 +8,7 @@ used by comparison scripts and backtests that intentionally run both models.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from typing import Optional
 
 from derivatives_bt_engine.calculations.continuous_momentum import (
@@ -19,6 +20,13 @@ from derivatives_bt_engine.calculations.goulding import (
     GOULDING_FAST_MONTHS,
     GOULDING_SLOW_MONTHS,
 )
+
+
+class SignalModel(str, Enum):
+    """Economic construction used to turn prices into trend strength."""
+
+    CONTINUOUS = "continuous"
+    GOULDING_MONTHLY = "goulding_monthly"
 
 
 @dataclass

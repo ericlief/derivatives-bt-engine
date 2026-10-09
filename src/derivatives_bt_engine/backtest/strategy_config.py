@@ -1,6 +1,10 @@
 """Define strategy configuration records consumed by backtest runners."""
 
-from derivatives_bt_engine.calculations.enums import *
+from derivatives_bt_engine.backtest.position_side import PositionSide
+from derivatives_bt_engine.backtest.options.types import (
+    OptionSpreadType, OptionsStrategy, OptionsType, TradeSelectionMethod,
+)
+from derivatives_bt_engine.backtest.futures.types import FuturesStrategy
 from dataclasses import dataclass
 from typing import Optional, List, Dict
 from abc import ABC, abstractmethod

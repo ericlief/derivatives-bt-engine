@@ -39,8 +39,10 @@ import polars as pl
 import scipy.cluster.hierarchy as sch
 from scipy.spatial.distance import squareform
 
-from derivatives_bt_engine.calculations.enums import TrendRegime
-from derivatives_bt_engine.calculations.continuous_momentum import DEFAULT_ANNUALIZATION_DAYS
+from derivatives_bt_engine.calculations.continuous_momentum import (
+    DEFAULT_ANNUALIZATION_DAYS,
+    TrendRegime,
+)
 from derivatives_bt_engine.calculations.correlation import bounded_ewm_correlation_matrix
 
 log = logging.getLogger(__name__)

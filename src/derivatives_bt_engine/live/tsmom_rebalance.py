@@ -44,7 +44,8 @@ if TYPE_CHECKING:
     # IBPySync`, scoped to the data_source='ib' functions that need it.
     from ib_tools.ibpysync import IBPySync
 
-from derivatives_bt_engine.calculations.enums import TrendRegime, VolRegime
+from derivatives_bt_engine.calculations.continuous_momentum import TrendRegime
+from derivatives_bt_engine.calculations.volatility import VolRegime
 from derivatives_bt_engine.calculations.instruments import (
     CME_MONTH_LETTERS,
     CME_MONTH_NUM_TO_LETTER,

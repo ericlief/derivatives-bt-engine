@@ -1,14 +1,20 @@
-"""Select fill prices for simulated option transactions."""
+"""Calculate validated fills and expiration values for simulated options."""
+
+from __future__ import annotations
 
 import math
-
-from derivatives_bt_engine.calculations.enums import OptionsType, PositionSide
 from typing import Optional
-from derivatives_bt_engine.utils.logger import setup_logger
+
+from derivatives_bt_engine.backtest.options.types import OptionsType
+from derivatives_bt_engine.backtest.position_side import PositionSide
+from derivatives_bt_engine.logging_config import setup_logger
 
 logger = setup_logger()
 
-class PriceUtils:
+
+class OptionPricing:
+    """Stateless option-pricing conventions used by the simulation engine."""
+
     @staticmethod
     def calculate_midpoint_price(bid: float, ask: float, threshold: float = 50.0) -> Optional[float]:
         """

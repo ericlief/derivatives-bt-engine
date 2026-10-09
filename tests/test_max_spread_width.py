@@ -5,7 +5,10 @@ This shows how to limit spread widths to prevent excessive margin requirements.
 """
 
 from derivatives_bt_engine.backtest.strategy_config import MultiLegOptionStrategyConfig
-from derivatives_bt_engine.calculations.enums import OptionsStrategy, OptionSpreadType, OptionsType, PositionSide
+from derivatives_bt_engine.backtest.options.types import (
+    OptionSpreadType, OptionsStrategy, OptionsType,
+)
+from derivatives_bt_engine.backtest.position_side import PositionSide
 from derivatives_bt_engine.backtest.option_leg_config import OptionLegConfig
 
 def test_max_spread_width_config():

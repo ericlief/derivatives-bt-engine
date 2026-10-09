@@ -1,6 +1,6 @@
 import logging
 
-from derivatives_bt_engine.utils.logger import setup_logger
+from derivatives_bt_engine.logging_config import setup_logger
 
 
 def test_package_file_handler_collects_live_and_futures_child_logs(tmp_path):

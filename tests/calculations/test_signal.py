@@ -1,4 +1,4 @@
-"""Tests for the independent trend-model and confidence domain modules.
+"""Tests for the independent trend-model and confidence modules.
 
 Each model's tests avoid depending on another model's intermediate columns.
 Risk-sizing functions live in ``calculations.allocation`` and are covered by
@@ -12,7 +12,10 @@ import numpy as np
 import polars as pl
 import pytest
 
-from derivatives_bt_engine.calculations.enums import SignalConfidenceRegime, TrendRegime
+from derivatives_bt_engine.calculations.continuous_momentum import TrendRegime
+from derivatives_bt_engine.calculations.signal_confidence import (
+    SignalConfidenceRegime,
+)
 from derivatives_bt_engine.calculations.ewmac import ewmac, estimate_ewmac_scalar_history
 from derivatives_bt_engine.calculations.continuous_momentum import (
     DEFAULT_FAST_WINDOW,

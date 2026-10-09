@@ -63,7 +63,7 @@ from derivatives_bt_engine.calculations.instrument_selection import (
     SelectionCandidate,
 )
 from derivatives_bt_engine.calculations.pnl import build_subsystem_pnl_curve
-from derivatives_bt_engine.utils.logger import setup_logger
+from derivatives_bt_engine.logging_config import setup_logger
 
 
 logger = logging.getLogger(__name__)

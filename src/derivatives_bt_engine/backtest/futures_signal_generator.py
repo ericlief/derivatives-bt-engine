@@ -8,10 +8,11 @@ from typing import List
 import polars as pl
 
 from derivatives_bt_engine.backtest.base_signal_generator import BaseSignalGenerator
-from derivatives_bt_engine.calculations.enums import FuturesStrategy, PositionSide
+from derivatives_bt_engine.backtest.futures.types import FuturesStrategy
+from derivatives_bt_engine.backtest.position_side import PositionSide
 from derivatives_bt_engine.calculations.instruments import get_spec, known_futures_symbols
 from derivatives_bt_engine.backtest.strategy_config import FuturesStrategyConfig
-from derivatives_bt_engine.utils.logger import setup_logger
+from derivatives_bt_engine.logging_config import setup_logger
 
 logger = setup_logger()
 

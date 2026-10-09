@@ -2,7 +2,8 @@
 
 from dataclasses import dataclass
 from typing import Optional
-from derivatives_bt_engine.calculations.enums import OptionsType, PositionSide
+from derivatives_bt_engine.backtest.options.types import OptionsType
+from derivatives_bt_engine.backtest.position_side import PositionSide
 from typing import Tuple
 
 @dataclass

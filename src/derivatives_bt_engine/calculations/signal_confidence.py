@@ -3,20 +3,29 @@
 The helpers compare short- and long-horizon realized volatility, classify the
 resulting regime, and return the optional confidence discount consumed by live
 position sizing. Trend construction and portfolio risk allocation remain in
-their own domain modules.
+their own modules.
 """
 
 from __future__ import annotations
 
 import math
+from enum import Enum
 
 import polars as pl
 
-from derivatives_bt_engine.calculations.enums import SignalConfidenceRegime
-from derivatives_bt_engine.utils.logger import setup_logger
+from derivatives_bt_engine.logging_config import setup_logger
 
 
 log = setup_logger()
+
+
+class SignalConfidenceRegime(str, Enum):
+    """Instrument-specific short-versus-long realized-volatility state."""
+
+    LOW = "low"
+    NORMAL = "normal"
+    HIGH = "high"
+
 
 def compute_vol_ratio(df: pl.DataFrame, short_window: int = 21, long_window: int = 252) -> pl.DataFrame:
     """

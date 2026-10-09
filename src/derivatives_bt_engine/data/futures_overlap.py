@@ -30,7 +30,7 @@ from derivatives_bt_engine.calculations.continuous_momentum import (
     build_features,
     continuous_momentum,
 )
-from derivatives_bt_engine.utils.logger import setup_logger
+from derivatives_bt_engine.logging_config import setup_logger
 
 
 logger = setup_logger()

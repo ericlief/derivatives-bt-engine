@@ -8,16 +8,24 @@ forecast-selection, portfolio-allocation, or execution logic.
 from __future__ import annotations
 
 import math
+from enum import Enum
 from typing import Optional
 
 import polars as pl
 
-from derivatives_bt_engine.calculations.enums import TrendRegime
-
-
 DEFAULT_ANNUALIZATION_DAYS = 252
 DEFAULT_FAST_WINDOW = 63
 DEFAULT_SLOW_WINDOW = 252
+
+
+class TrendRegime(str, Enum):
+    """Sign agreement between the fast and slow momentum forecasts."""
+
+    BULL = "bull"
+    CORRECTION = "correction"
+    BEAR = "bear"
+    REBOUND = "rebound"
+    UNKNOWN = "unknown"
 
 
 def classify_regime(fast, slow) -> TrendRegime:

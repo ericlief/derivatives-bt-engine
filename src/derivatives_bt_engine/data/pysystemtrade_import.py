@@ -27,7 +27,7 @@ from typing import Callable, Iterable, Optional
 import duckdb
 import polars as pl
 
-from derivatives_bt_engine.utils.logger import setup_logger
+from derivatives_bt_engine.logging_config import setup_logger
 
 
 logger = setup_logger()

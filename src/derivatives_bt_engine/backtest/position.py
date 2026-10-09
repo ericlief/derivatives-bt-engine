@@ -9,12 +9,16 @@ from functools import cached_property
 from abc import ABC, abstractmethod
 import polars as pl
 
-from derivatives_bt_engine.calculations.enums import *
+from derivatives_bt_engine.backtest.position_side import PositionSide
+from derivatives_bt_engine.backtest.options.types import (
+    OptionSpreadType, OptionsStrategy, OptionsType, TradeSelectionMethod,
+)
+from derivatives_bt_engine.backtest.futures.types import FuturesStrategy
 from derivatives_bt_engine.calculations.instruments import get_spec
 from derivatives_bt_engine.backtest.strategy_config import MultiLegOptionStrategyConfig
 from derivatives_bt_engine.backtest.trade_result import BaseTradeResult, OptionTradeResult, FuturesTradeResult
-from derivatives_bt_engine.utils.logger import setup_logger
-from derivatives_bt_engine.utils.price_utils import PriceUtils
+from derivatives_bt_engine.logging_config import setup_logger
+from derivatives_bt_engine.backtest.options.pricing import OptionPricing
 logger = setup_logger()
 
 
@@ -289,7 +293,7 @@ class BaseOptionPosition(BasePosition, ABC):
         #     logger.debug(f'Calculating pnl for early closure for {self.option_type}, {self.expire_date, {self.exit_price}}')
             # For long positions, exit price should be positive (credit/STC)
             # For short positions, exit price should be negative (debit/BTC)
-            # signed_exit_price = self.signed_exit_price if self.exit_price is not None else PriceUtils.get_signed_exit_price(exit_price, self.position_side)
+            # signed_exit_price = self.signed_exit_price if self.exit_price is not None else OptionPricing.get_signed_exit_price(exit_price, self.position_side)
 
             # else:
                 # logger.debug(f'Need to provide exit_price for early closure (pnl) {self.option_type}, {self.expire_date, {exit_price}}')
@@ -792,7 +796,7 @@ class SingleLegOptionPosition(BaseOptionPosition):
                     return False
             exit_delta = round(row[delta_col], 2) if row[delta_col] is not None else None
             logger.debug(f'Calculating midpoint for {bid}-{ask}')
-            mid_price = PriceUtils.calculate_midpoint_price(bid, ask)
+            mid_price = OptionPricing.calculate_midpoint_price(bid, ask)
             if mid_price is not None and not (isinstance(mid_price, float) and math.isnan(mid_price)):
                 # Update instance variables only if mid_price is valid
                 self.underlying_exit = underlying_close
