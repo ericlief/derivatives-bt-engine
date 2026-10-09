@@ -537,7 +537,8 @@ that should already be present in the daily frame.
 flowchart TD
     Runner["Phase2PipelineRunner"]
 
-    Phase1["Phase 1 row<br/>symbol · history code · currency · multiplier<br/>eligible rules · trading cost"]
+    Phase1["Phase 1 row<br/>symbol · history code · currency · multiplier<br/>eligible rules · trade_sr · roll_sr · ref_ann_rolls"]
+    RuleScreen["Phase 1 rule screen<br/>rule turnover × trade_sr<br/>+ ref_ann_rolls × roll_sr<br/>determines eligible rules only"]
     Prices["Daily signal history<br/>date · close · point change · mixed point vol"]
     Components["EWMAC component builder<br/>scaled forecast for each speed"]
 
@@ -557,11 +558,17 @@ flowchart TD
 
         Sizing["3. Size subsystem position<br/>daily_dvol_per_con<br/>avg_position<br/>subsystem_position"]
 
-        Turnover["4. Calculate turnover<br/>smooth_avg_position<br/>normalized_position<br/>abs_position_change<br/>rolling_ann_turnover"]
+        Turnover["4. Calculate actual subsystem turnover<br/>smooth_avg_position<br/>normalized_position<br/>abs_position_change<br/>full-sample and rolling audit estimates"]
 
-        PnL["5. Calculate P&L<br/>held_position = prior position<br/>point_pnl<br/>pnl_native<br/>pnl_usd"]
+        Cost["5. Calibrate combined-subsystem cost<br/>ann_trade_cost_sr = trade_sr × subsystem turnover<br/>ann_roll_cost_sr = roll_sr × ref_ann_rolls"]
 
-        Audit["6. Audit subsystem<br/>forecast gaps · FX gaps · P&L gaps<br/>valid observations · eligibility reason"]
+        GrossPnL["6. Calculate gross P&L<br/>held_position = prior position<br/>point_pnl<br/>gross_pnl_native · gross_pnl_usd"]
+
+        CostPnL["7. Accrue annual SR cost pro rata<br/>time-varying average risk × elapsed year fraction<br/>cost_pnl_native · cost_pnl_usd"]
+
+        NetPnL["8. Calculate net P&L<br/>net_pnl_usd = gross_pnl_usd + cost_pnl_usd"]
+
+        Audit["9. Audit subsystem<br/>forecast gaps · FX gaps · P&L gaps<br/>cost calibration · valid observations · eligibility reason"]
     end
 
     DailyOutput["Wide daily audit frame / Parquet<br/>all intermediate columns retained"]
@@ -576,7 +583,8 @@ flowchart TD
 
     Prices --> Components
     Components --> Combine
-    Phase1 -->|"eligible rules"| Combine
+    Phase1 --> RuleScreen
+    RuleScreen -->|"eligible rules"| Combine
     Combine --> ForecastFrame
 
     HistFX --> FXProvider
@@ -591,14 +599,21 @@ flowchart TD
 
     Valuation --> Sizing
     Sizing --> Turnover
-    Sizing --> PnL
+    Phase1 -->|"reuse executable cost and roll inputs"| Cost
+    Turnover -->|"replace per-rule turnover"| Cost
+    Sizing --> GrossPnL
+    Cost --> CostPnL
+    Valuation --> CostPnL
+    GrossPnL --> NetPnL
+    CostPnL --> NetPnL
     Turnover --> Audit
-    PnL --> Audit
+    NetPnL --> Audit
 
     Audit --> DailyOutput
     Audit --> SummaryOutput
-    PnL --> ReturnPanel
+    NetPnL --> ReturnPanel
     ReturnPanel --> Correlation
+    Cost --> Selection
     SummaryOutput --> Selection
     Correlation --> Selection
 ```
@@ -611,17 +626,73 @@ The same ownership in terminal-readable form is:
 3. Load historical FX once per currency; extend it with IB only after the
    stored series ends; attach multiplier and date-aligned FX to the frame.
 4. Convert mixed point volatility into average and desired subsystem positions.
-5. Calculate turnover from normalized desired-position changes.
-6. Lag the desired position and calculate point, native-currency, and USD P&L.
-7. Audit the wide daily frame and write the compact instrument summary.
-8. Align valid USD subsystem P&L, estimate correlations, and run the greedy
-   portfolio search.
+5. Calculate the actual combined-subsystem turnover from normalized desired-
+   position changes. This replaces, rather than averages, the individual-rule
+   turnover estimates used by the Phase 1 screen.
+6. Reuse Phase 1 `trade_sr`, `roll_sr`, and `ref_ann_rolls` to calculate the
+   combined subsystem's annual trading cost and holding-roll cost.
+7. Lag the desired position and calculate gross point, native-currency, and
+   USD P&L.
+8. Convert the annual SR-cost estimate into a pro-rata cost P&L series using
+   the time-varying average risk, multiplier, and historical FX; add it to
+   gross P&L to obtain net subsystem P&L.
+9. Audit the wide daily frame and write the compact instrument summary.
+10. Align valid net USD subsystem P&L, estimate correlations, and run the
+    greedy portfolio search. Retain the gross panel as an explicit sensitivity.
 ```
 
 The Phase 1 `cur_fx_to_usd` value is a point-in-time cost and sizing snapshot;
 it must never be filled backward through the historical subsystem frame. The
 FX history provider owns the database-to-IB splice and records the source and
 observation date of every rate. USD receives an explicit identity series.
+
+#### Cost ownership, backtests, and live selection
+
+Phase 1 calculates two different kinds of cost information. The executable
+contract supplies the reusable per-event inputs `trade_sr` and `roll_sr`, plus
+the saved reference roll frequency `ref_ann_rolls`. The individual EWMAC rule turnovers are screening
+inputs only. They answer whether each rule is cheap enough to enter the
+combined forecast; their annual costs must not be summed, averaged, or carried
+forward as the combined subsystem cost.
+
+After Phase 2 combines the eligible rules, it measures the resulting position
+turnover and replaces the Phase 1 rule-turnover estimate:
+
+```text
+ann_trade_cost_sr = trade_sr * subsystem_turnover
+ann_roll_cost_sr  = roll_sr * ref_ann_rolls
+ann_cost_sr       = ann_trade_cost_sr + ann_roll_cost_sr
+```
+
+There are then two deliberate consumers. The published AFTS selection score
+uses `ann_trade_cost_sr` only. The Carver-style subsystem account curve uses
+the full `ann_cost_sr`, including holding rolls, and spreads it across the P&L
+index as a small loss proportional to elapsed year fraction and the
+time-varying average risk position. Multiplier and historical FX convert both
+gross and cost P&L through the same native-to-USD path. Persist
+`gross_pnl_usd`, `cost_pnl_usd`, and `net_pnl_usd` separately so the choice of
+gross or net correlation inputs is auditable; the Carver-compatible default
+correlation panel uses `net_pnl_usd`.
+
+This pro-rata series does not make the cost estimate rolling or causal by
+itself. Carver's standard SR-cost account curve uses a full-sample turnover
+scalar and a terminal recent-cost calibration. Using one Phase 1 snapshot over
+an entire historical run has the same fixed-calibration interpretation: it is
+valid as an explicitly stated cost stress, but it is not a walk-forward cost
+backtest. A causal historical selection run must cut all histories off at each
+selection date and rerun Phase 1 and Phase 2 as of that date. For a live
+selection, the current Phase 1 snapshot and all history ending at the run date
+are causal at that date; keep that annual cost calibration until the next
+scheduled selection refresh rather than backfilling a later snapshot into
+earlier live results.
+
+The current implementation has not completed this target cost path: Step 1
+retains `trade_sr` but drops `roll_sr` and `ref_ann_rolls`; the greedy score
+recalculates `trade_sr * subsystem_turnover`, while the synchronized subsystem
+return panel remains pre-cost. Completing the runner therefore requires
+carrying the roll inputs into Step 1 and adding the explicit cost and net-P&L
+stages shown above. It must not query a live contract again to reconstruct
+values that already belong to the saved Phase 1 run.
 
 Phase 2 Step 1 is deliberately only a persisted-gate selection. It does not
 connect to IB and does not recalculate volume, volatility, cost, or any other
