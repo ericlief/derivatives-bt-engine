@@ -371,11 +371,11 @@ calendar attribute (`roll_date`), against the *same* continuous-front-month seri
 described in §1.**
 
 `FuturesSignalGenerator.generate_futures_signals`
-(`src/derivatives_bt_engine/backtest/futures_signal_generator.py:35-89`) is what actually
+(`src/derivatives_bt_engine/backtest/futures/signal_generator.py:35-89`) is what actually
 schedules rolls for this path: it computes `_get_quarterly_roll_dates` (Monday before the
-third Friday of Mar/Jun/Sep/Dec, `futures_signal_generator.py:97-127`) over the
+third Friday of Mar/Jun/Sep/Dec, `backtest/futures/signal_generator.py:97-127`) over the
 backtest's date range, then `join_asof`s every underlying bar to the **next** roll date
-strictly after that bar (`futures_signal_generator.py:71-84` — the `+1 day` shift before
+strictly after that bar (`backtest/futures/signal_generator.py:71-84` — the `+1 day` shift before
 the join exists specifically so a bar dated exactly on a roll date rolls into the *next*
 cycle rather than opening-and-immediately-closing same-day). Every row of `signals`
 therefore carries a `roll_date` column — that's the entire signal for this strategy type:
@@ -434,7 +434,7 @@ fixed independently — one in `futures_dataloader.py`'s query, the other in
 resized contract count, monthly. The quarterly roll is a mechanical side-event forced
 independent of the signal, not a position-level attribute.**
 
-`run_tsmom_backtest` (`src/derivatives_bt_engine/backtest/tsmom.py:409-780`)
+`run_tsmom_backtest` (`src/derivatives_bt_engine/backtest/futures/tsmom.py:409-780`)
 computes `sorted_roll_dates` once, up front, via the exact same
 `FuturesSignalGenerator._get_quarterly_roll_dates` static method Path 1 uses
 (`tsmom_backtester.py:466-467`) — this is the one piece of roll-scheduling logic actually

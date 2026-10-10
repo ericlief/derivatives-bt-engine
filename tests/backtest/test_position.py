@@ -10,7 +10,7 @@ from derivatives_bt_engine.backtest.options.types import (
 from derivatives_bt_engine.backtest.position_side import PositionSide
 from derivatives_bt_engine.data.dataloader import OptionsDataLoader
 from derivatives_bt_engine.backtest.trade_result import OptionTradeResult
-from derivatives_bt_engine.backtest.trade_manager import TradeManager
+from derivatives_bt_engine.backtest.options.trade_manager import TradeManager
 from scipy.stats import norm
 from derivatives_bt_engine.logging_config import setup_logger
 from derivatives_bt_engine.backtest.options.pricing import OptionPricing

@@ -51,7 +51,7 @@ from derivatives_bt_engine.calculations.instruments import resolve_annualization
 from derivatives_bt_engine.calculations.continuous_momentum import build_features, continuous_momentum
 from derivatives_bt_engine.calculations.goulding import goulding_monthly
 from derivatives_bt_engine.calculations.signal_config import SignalSpec
-from derivatives_bt_engine.backtest.tsmom import load_portfolio_data
+from derivatives_bt_engine.backtest.futures.tsmom import load_portfolio_data
 from derivatives_bt_engine.logging_config import setup_logger
 
 logger = setup_logger()

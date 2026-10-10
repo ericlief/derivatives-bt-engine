@@ -12,7 +12,7 @@ vol targeting, which matches canonical TSMOM exactly). This script makes
 that gap measurable instead of theoretical.
 
 Does NOT modify derivatives_bt_engine/calculations/signal.py, derivatives_bt_engine/live/
-tsmom_rebalance.py, derivatives_bt_engine/backtest/tsmom.py, or any other
+tsmom_rebalance.py, derivatives_bt_engine/backtest/futures/tsmom.py, or any other
 production code path -- it imports and calls compute_rebalance_targets
 read-only, to capture what the live system actually produces, and
 otherwise only reads market data via the IB connection.

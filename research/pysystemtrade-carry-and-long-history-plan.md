@@ -229,7 +229,7 @@ series may be spliced into the other as though their returns were identical.
 ## Why this should not enter the current TSMOM engine directly
 
 The production-style path in
-[tsmom_backtester.py](../src/derivatives_bt_engine/backtest/tsmom.py)
+[tsmom_backtester.py](../src/derivatives_bt_engine/backtest/futures/tsmom.py)
 loads a Globex continuous OHLCV frame and currently lets the same `close` data
 serve three jobs: feature generation, daily marking, and contract/accounting
 logic. The Carver data deliberately separates those jobs.

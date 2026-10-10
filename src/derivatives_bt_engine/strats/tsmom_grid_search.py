@@ -22,7 +22,7 @@ from typing import Any, Iterable, Optional
 
 import polars as pl
 
-from derivatives_bt_engine.backtest.tsmom import TsmomBacktestConfig, load_portfolio_data, run_tsmom_backtest
+from derivatives_bt_engine.backtest.futures.tsmom import TsmomBacktestConfig, load_portfolio_data, run_tsmom_backtest
 from derivatives_bt_engine.reports.tsmom_windows import (
     score_causal_windows,
     summarize_causal_windows,

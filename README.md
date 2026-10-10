@@ -22,7 +22,9 @@ options strategies.
 src/derivatives_bt_engine/
 ├── data/          # load, validate, cache, and persist market data
 ├── calculations/  # storage-independent financial calculations
-├── backtest/      # historical simulation and trade lifecycle code
+├── backtest/      # shared historical position and result records
+│   ├── options/   # legacy option event loop, contract selection, and pricing
+│   └── futures/   # futures adapters and portfolio TSMOM simulation
 ├── strats/        # strategy definitions and command entry points
 ├── pipelines/     # Phase 1, Phase 2, and other multi-stage workflows
 ├── reports/       # public schemas, formatting, and report builders

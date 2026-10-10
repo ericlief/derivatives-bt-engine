@@ -1,4 +1,9 @@
-"""Manage simulated position entry, exit, capital, and trade records."""
+"""Manage the legacy option trade lifecycle and naked-futures compatibility.
+
+The manager owns buying power, open positions, entry/exit events, and trade
+records for the option event loop.  A narrow futures branch remains for the
+legacy naked-futures runner; portfolio futures engines do not use this class.
+"""
 
 import math
 from datetime import date
@@ -195,7 +200,7 @@ class TradeManager:
         start = trade_signals[date_col].min()
         if is_futures:
             # Bound on underlying_price_history's max, not signals' max: the
-            # signal generator drops the tail end of a backtest window when
+            # contract selector drops the tail end of a backtest window when
             # no roll date falls strictly after those days (e.g. the last
             # ~2 weeks of a single-year run, since the *next* cycle's roll
             # date is out of range) — but an already-open position still

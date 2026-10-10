@@ -2,18 +2,18 @@
 import pytest
 import numpy as np
 import polars as pl
-from derivatives_bt_engine.backtest.option_leg_config import OptionLegConfig
+from derivatives_bt_engine.backtest.options.leg_config import OptionLegConfig
 from derivatives_bt_engine.backtest.position import SingleLegOptionPosition, MultiLegOptionPosition
 from derivatives_bt_engine.backtest.position_side import PositionSide
 from derivatives_bt_engine.backtest.options.types import (
     OptionSpreadType, OptionsStrategy, OptionsType, TradeSelectionMethod,
 )
 from derivatives_bt_engine.backtest.futures.types import FuturesStrategy
-from derivatives_bt_engine.backtest.trade_manager import TradeManager
+from derivatives_bt_engine.backtest.options.trade_manager import TradeManager
 from derivatives_bt_engine.data.dataloader import OptionsDataLoader
 from derivatives_bt_engine.backtest.strategy_config import SingleLegOptionStrategyConfig
 from derivatives_bt_engine.backtest.trade_result import OptionTradeResult
-from derivatives_bt_engine.backtest.option_signal_generator import OptionSignalGenerator
+from derivatives_bt_engine.backtest.options.contract_selector import OptionContractSelector
 from scipy.stats import norm
 from derivatives_bt_engine.logging_config import setup_logger
 from derivatives_bt_engine.backtest.options.pricing import OptionPricing

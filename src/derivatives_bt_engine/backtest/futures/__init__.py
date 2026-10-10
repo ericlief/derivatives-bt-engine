@@ -1,1 +1,1 @@
-"""Futures-specific vocabulary and simulation components."""
+"""Futures adapters, vocabulary, and portfolio simulation components."""

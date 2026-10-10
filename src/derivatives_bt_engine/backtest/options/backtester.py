@@ -1,4 +1,11 @@
-"""Run the legacy event-loop simulation for dated options and futures."""
+"""Run the legacy option event-loop and its naked-futures compatibility path.
+
+Options are this engine's primary owner: contract selection, leg lifecycle,
+margin accounting, expiry, and result reporting dominate the implementation.
+The historical naked-futures runners still enter through a deliberately kept
+compatibility branch; portfolio futures simulation belongs in
+``backtest.futures.tsmom``.
+"""
 
 import sys
 from typing import Dict, List, NamedTuple, Optional, Tuple, Union
@@ -17,9 +24,9 @@ from derivatives_bt_engine.backtest.options.types import (
 )
 from derivatives_bt_engine.backtest.futures.types import FuturesStrategy
 from derivatives_bt_engine.backtest.strategy_config import FuturesStrategyConfig, SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig
-from derivatives_bt_engine.backtest.option_signal_generator import OptionSignalGenerator
-from derivatives_bt_engine.backtest.futures_signal_generator import FuturesSignalGenerator
-from derivatives_bt_engine.backtest.trade_manager import TradeManager
+from derivatives_bt_engine.backtest.options.contract_selector import OptionContractSelector
+from derivatives_bt_engine.backtest.futures.signal_generator import FuturesSignalGenerator
+from derivatives_bt_engine.backtest.options.trade_manager import TradeManager
 from derivatives_bt_engine.backtest.position import FuturesPosition, SingleLegOptionPosition
 from derivatives_bt_engine.backtest.trade_result import OptionTradeResult
 from derivatives_bt_engine.backtest.position import MultiLegOptionPosition
@@ -106,13 +113,13 @@ class Backtester:
         # Initialize trade manager
         trade_manager = TradeManager(config=config, vix=self.vix)
         if is_futures:
-            signal_generator = FuturesSignalGenerator(config=config, underlying=self.underlying)
+            contract_source = FuturesSignalGenerator(config=config, underlying=self.underlying)
         else:
-            signal_generator = OptionSignalGenerator(option_chain=self.option_chain, underlying=self.underlying, config=config)
+            contract_source = OptionContractSelector(option_chain=self.option_chain, underlying=self.underlying, config=config)
         # Generate or validate signals
         signal_start = time.time()
         if isinstance(config, SingleLegOptionStrategyConfig):
-            signals = signal_generator.generate_single_leg_signals(
+            signals = contract_source.select_single_leg_contracts(
                 option_type=config.leg.option_type,
                 position_side=config.leg.position_side,
                 delta_target=config.leg.delta_target,
@@ -123,9 +130,9 @@ class Backtester:
                 end_date=config.end_date
             )
         elif isinstance(config, MultiLegOptionStrategyConfig):
-            signals = signal_generator.generate_multi_leg_signals()
+            signals = contract_source.select_multi_leg_contracts()
         elif is_futures:
-            signals = signal_generator.generate_futures_signals(
+            signals = contract_source.generate_futures_signals(
                 futures_type=config.futures_type,
                 futures_strategy=config.futures_strategy,
                 position_side=config.position_side,

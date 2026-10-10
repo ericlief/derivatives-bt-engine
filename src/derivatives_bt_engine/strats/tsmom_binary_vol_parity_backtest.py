@@ -16,7 +16,7 @@ research/research_trend_strength_crossover_signal.md, Part 2 §6): does
 regime_discount (the flat Correction/Rebound de-risking multiplier in
 tsmom_signal.py's compute_position_scalar) actually help on this project's
 own recent data? The existing tsmom CLI (strats/tsmom.py, wrapping
-backtest/tsmom.py) turned out to be unsuitable for this -- it
+backtest/futures/tsmom.py) turned out to be unsuitable for this -- it
 sizes each symbol independently against its own
 vol_target/max_notional/max_contracts with NO cross-instrument risk
 cap (unlike live/tsmom_rebalance.py's compute_desired_risk_budget/
@@ -134,7 +134,7 @@ from derivatives_bt_engine.calculations.goulding import (
     goulding_monthly,
 )
 from derivatives_bt_engine.calculations.signal_config import SignalSpec
-from derivatives_bt_engine.backtest.tsmom import _detect_roll_dates, _month_end_dates, load_portfolio_data
+from derivatives_bt_engine.backtest.futures.tsmom import _detect_roll_dates, _month_end_dates, load_portfolio_data
 from derivatives_bt_engine.logging_config import setup_logger
 
 logger = setup_logger()

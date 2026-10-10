@@ -1,4 +1,9 @@
-"""Generate dated option-entry signals for historical simulation."""
+"""Select dated option contracts for the legacy option simulation engine.
+
+The output rows are executable option candidates, not strategy forecasts.
+Entry/exit lifecycle and accounting remain owned by the option backtester and
+trade manager.
+"""
 
 from __future__ import annotations
 from dataclasses import dataclass
@@ -12,10 +17,9 @@ from derivatives_bt_engine.backtest.position_side import PositionSide
 from derivatives_bt_engine.backtest.options.types import (
     OptionSpreadType, OptionsStrategy, OptionsType, TradeSelectionMethod,
 )
-from derivatives_bt_engine.backtest.futures.types import FuturesStrategy
-from derivatives_bt_engine.backtest.base_signal_generator import BaseSignalGenerator
-from derivatives_bt_engine.backtest.option_leg_config import OptionLegConfig
-from derivatives_bt_engine.backtest.strategy_config import FuturesStrategyConfig, SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig
+from derivatives_bt_engine.backtest.options.base_selector import BaseContractSelector
+from derivatives_bt_engine.backtest.options.leg_config import OptionLegConfig
+from derivatives_bt_engine.backtest.strategy_config import SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig
 from derivatives_bt_engine.logging_config import setup_logger
 
 # Create logger instance
@@ -29,12 +33,12 @@ _BUTTERFLY_STRIKE_SPACING_TOLERANCE = 0.01   # float tolerance for equal wing wi
 
 
 @dataclass
-class OptionSignalGenerator(BaseSignalGenerator):
-    """Class to generate signals for trading.
+class OptionContractSelector(BaseContractSelector):
+    """Select option-chain rows satisfying a configured leg structure.
 
-    option_chain/underlying are polars DataFrames (matching what Backtester
-    hands in), used internally throughout -- no pandas conversion anywhere
-    in this class.
+    ``option_chain`` and ``underlying`` are Polars dataframes supplied by the
+    legacy option backtester.  Selection is Polars-native and returns dated
+    candidate rows consumed by the trade lifecycle engine.
     """
 
     config: Union[SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig]
@@ -44,7 +48,7 @@ class OptionSignalGenerator(BaseSignalGenerator):
     def __post_init__(self):
         super().__init__(config=self.config)
 
-        if not isinstance(self.config, (SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig, FuturesStrategyConfig)):
+        if not isinstance(self.config, (SingleLegOptionStrategyConfig, MultiLegOptionStrategyConfig)):
             raise ValueError("Invalid config type")
 
         logger.info(f"Config: {self.config}")
@@ -54,7 +58,7 @@ class OptionSignalGenerator(BaseSignalGenerator):
     def fetch_data(self) -> pl.DataFrame:
         return self.option_chain
 
-    def generate_single_leg_signals(
+    def select_single_leg_contracts(
         self,
         option_type: OptionsType,
         position_side: PositionSide,
@@ -67,8 +71,7 @@ class OptionSignalGenerator(BaseSignalGenerator):
         end_date: Optional[str] = None
     ) -> pl.DataFrame:
         """
-        Generate trade signals based on the provided parameters. These are not the actual trades,
-        but rather potential trades filtered for the desired criteria.
+        Select potential single-leg contracts matching the supplied criteria.
 
         Args:
             option_type: Type of option (call or put)
@@ -82,9 +85,9 @@ class OptionSignalGenerator(BaseSignalGenerator):
             end_date: End date for filtering
 
         Returns:
-            DataFrame containing the generated trade signals, with a `date` column
+            Candidate contracts with one row per eligible date and a ``date`` column.
         """
-        return self._generate_single_leg_signals_pl(
+        return self._select_single_leg_contracts(
             option_type=option_type,
             position_side=position_side,
             delta_target=delta_target,
@@ -96,7 +99,7 @@ class OptionSignalGenerator(BaseSignalGenerator):
             end_date=end_date,
         )
 
-    def _generate_single_leg_signals_pl(
+    def _select_single_leg_contracts(
         self,
         option_type: OptionsType,
         position_side: PositionSide,
@@ -108,7 +111,7 @@ class OptionSignalGenerator(BaseSignalGenerator):
         start_date: Optional[str] = None,
         end_date: Optional[str] = None
     ) -> pl.DataFrame:
-        logger.debug(f'Generating trade signals for {option_type}|{delta_target if delta_target else delta_range}|{dte_target if dte_target else dte_range}|{start_date if start_date else "all"}|{end_date if end_date else "all"}')
+        logger.debug(f'Selecting option contracts for {option_type}|{delta_target if delta_target else delta_range}|{dte_target if dte_target else dte_range}|{start_date if start_date else "all"}|{end_date if end_date else "all"}')
 
         chain = self._option_chain_pl
 
@@ -281,17 +284,17 @@ class OptionSignalGenerator(BaseSignalGenerator):
         logger.info(f"Derived {joined.height} width-based ({width}pt) trade signals for {leg_config.option_type.value}")
         return joined
 
-    def generate_multi_leg_signals(self) -> pl.DataFrame:
+    def select_multi_leg_contracts(self) -> pl.DataFrame:
         """
-        Generate trade signals for option spreads by pairing legs according to the specified spread type.
+        Select option spreads by pairing contracts for each configured leg.
 
         Returns:
-            DataFrame containing the generated spread signals with legs paired by date, with a `date` column
+            Candidate spreads with legs paired by date and a ``date`` column.
         """
         logger.info(f"Generating {self.config.spread_type.value} spread signals...")
 
         if self.config.spread_type == OptionSpreadType.NONE:
-            raise ValueError("Use generate_trade_signals for single-leg positions")
+            raise ValueError("Use select_single_leg_contracts for single-leg positions")
 
         use_spread_width = getattr(self.config, 'use_spread_width', False)
 
@@ -313,7 +316,7 @@ class OptionSignalGenerator(BaseSignalGenerator):
                 logger.error(f"Leg {i+1} must have either dte_target or dte_range specified")
                 return pl.DataFrame()
 
-            leg_df = self._generate_single_leg_signals_pl(
+            leg_df = self._select_single_leg_contracts(
                 option_type=leg_config.option_type,
                 position_side=leg_config.position_side,
                 delta_target=leg_config.delta_target,

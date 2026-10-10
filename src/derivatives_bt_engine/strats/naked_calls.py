@@ -6,10 +6,10 @@ from derivatives_bt_engine.backtest.options.types import (
     OptionSpreadType, OptionsStrategy, OptionsType, TradeSelectionMethod,
 )
 from derivatives_bt_engine.backtest.futures.types import FuturesStrategy
-from derivatives_bt_engine.backtest.backtester import Backtester
+from derivatives_bt_engine.backtest.options.backtester import Backtester
 from derivatives_bt_engine.data.dataloader import OptionsDataLoader
 from derivatives_bt_engine.backtest.strategy_config import SingleLegOptionStrategyConfig
-from derivatives_bt_engine.backtest.option_leg_config import OptionLegConfig
+from derivatives_bt_engine.backtest.options.leg_config import OptionLegConfig
 
 # Create logger instance
 logger = setup_logger()

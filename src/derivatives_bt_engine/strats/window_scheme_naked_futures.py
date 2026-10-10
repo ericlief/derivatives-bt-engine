@@ -24,7 +24,7 @@ import polars as pl
 from dateutil.relativedelta import relativedelta
 from dotenv import load_dotenv
 
-from derivatives_bt_engine.backtest.backtester import Backtester
+from derivatives_bt_engine.backtest.options.backtester import Backtester
 from derivatives_bt_engine.backtest.futures.types import FuturesStrategy
 from derivatives_bt_engine.data.futures_dataloader import FuturesDataLoader
 from derivatives_bt_engine.calculations.instruments import resolve_price_symbol

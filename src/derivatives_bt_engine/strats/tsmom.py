@@ -36,7 +36,7 @@ from derivatives_bt_engine.calculations.volatility import (
     MIXED_VOL_SLOW_WEIGHT,
     MIXED_VOL_SLOW_YEARS,
 )
-from derivatives_bt_engine.backtest.tsmom import (
+from derivatives_bt_engine.backtest.futures.tsmom import (
     EWMAC_SCALAR_UNIVERSES,
     TsmomBacktestConfig,
     run_tsmom_backtest,

@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Optional, List, Dict
 from abc import ABC, abstractmethod
 from derivatives_bt_engine.calculations.instruments import known_futures_symbols
-from derivatives_bt_engine.backtest.option_leg_config import OptionLegConfig
+from derivatives_bt_engine.backtest.options.leg_config import OptionLegConfig
 from typing import List
 from typing import Optional, Tuple
 

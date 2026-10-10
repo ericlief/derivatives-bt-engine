@@ -195,7 +195,7 @@ class TsmomBacktestConfig:
     end_date: Optional[date] = None
     # Signal-based entry/exit gate -- same mechanism as FuturesStrategyConfig/
     # TradeManager's ts_exit_threshold/ts_entry_threshold/exit_on_ts_crossover
-    # (backtest/trade_manager.py), adapted here for TSMOM's variable-direction
+    # (backtest/options/trade_manager.py), adapted here for TSMOM's variable-direction
     # sizing: direction is derived from whichever side actually matters (the
     # currently-held position for exit, the newly-proposed target for entry)
     # rather than a fixed config field, since a TSMOM symbol can go long or
@@ -1294,7 +1294,7 @@ def _round(x: Optional[float], ndigits: int) -> Optional[float]:
 def _signal_gate_reason(sig_val, ts_fast_val, ts_slow_val, is_long: bool, threshold: Optional[float],
                          exit_on_ts_crossover: bool) -> Optional[str]:
     """Same shape as TradeManager's per-position gate check
-    (backtest/trade_manager.py's _signal_gate_reason), standalone here since
+    (backtest/options/trade_manager.py's _signal_gate_reason), standalone here since
     TSMOM has no per-position `self.config` to close over and this module
     is deliberately kept separate from TradeManager. Bails out (never
     gates) if either ts_fast or ts_slow is still null -- continuous_momentum

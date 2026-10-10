@@ -100,7 +100,7 @@ def load_pooled_ewmac_rule(
     """
     # Keep the full backtester import off the lightweight history/plot import
     # path; normalization calls still reuse its versioned production caches.
-    from derivatives_bt_engine.backtest.tsmom import (
+    from derivatives_bt_engine.backtest.futures.tsmom import (
         TsmomBacktestConfig,
         load_pysystemtrade_ewmac_normalization,
     )

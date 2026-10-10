@@ -242,7 +242,7 @@ normalized to mean absolute 10.
 
 ### 1.4 Backtest path and divergences
 
-[`tsmom_backtester.py`](../src/derivatives_bt_engine/backtest/tsmom.py)
+[`tsmom_backtester.py`](../src/derivatives_bt_engine/backtest/futures/tsmom.py)
 shares the signal-resolution and allocation functions, but parity is incomplete:
 
 | Concern | Live | Backtest | Consequence |
@@ -1126,7 +1126,7 @@ defensible order is:
      fraction, instrument vol scalar, portfolio overlays, and final position
      scalar.
 2. **Live/backtest implementation parity**
-   - In [`backtest/tsmom.py`](../src/derivatives_bt_engine/backtest/tsmom.py),
+   - In [`backtest/futures/tsmom.py`](../src/derivatives_bt_engine/backtest/futures/tsmom.py),
      share the live active definition and lot-aware allocation; cover seed and
      off-cycle paths.
    - Add golden date-level parity tests with identical data/config/current book.

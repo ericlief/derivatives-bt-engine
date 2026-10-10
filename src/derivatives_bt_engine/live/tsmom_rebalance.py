@@ -104,7 +104,7 @@ from derivatives_bt_engine.calculations.signal_selection import (
 # analog to this module's live VX-front-month/VX-63d-MA ratio). Reused here
 # (not duplicated) so data_source='database' stays byte-for-byte consistent
 # with what the backtest itself would compute for the same date.
-from derivatives_bt_engine.backtest.tsmom import VIX_FILE_PATH
+from derivatives_bt_engine.backtest.futures.tsmom import VIX_FILE_PATH
 
 log = logging.getLogger(__name__)
 
@@ -120,7 +120,7 @@ VX_ELEVATED_SCALE = 0.6   # reduce all positions to this fraction of target when
 DEFAULT_BAR_YEARS = 3.0
 # Trailing window for the VX/VIX moving average the spike gate compares
 # vx_current against (vx_ratio = vx_current / vx_ma) -- same window used by
-# backtest.tsmom's own vix_ma_window_days (see that module's
+# backtest.futures.tsmom's own vix_ma_window_days (see that module's
 # TsmomBacktestConfig field), which this project's VX_ELEVATED_RATIO/
 # VX_SPIKE_RATIO/VX_EXTREME_RATIO bands above were calibrated against.
 DEFAULT_VX_MA_WINDOW_DAYS = 63
@@ -135,7 +135,7 @@ DISCRETE_ALLOCATIONS = ('independent', 'lot-aware', 'flat-cluster-diversified')
 DATA_SOURCES = ('ib', 'database')
 
 # ── Infrastructure ───────────────────────────────────────────────────────
-# Same futures-bar parquet cache the backtest uses (backtest.tsmom's
+# Same futures-bar parquet cache the backtest uses (backtest.futures.tsmom's
 # own load_portfolio_data) -- sharing it means a symbol already cached by a
 # backtest run doesn't need re-fetching here, and vice versa.
 _DB_CACHE_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', '..', '..', '.cache', 'futures'))
@@ -145,7 +145,7 @@ _DB_CACHE_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', '
 class TsmomLiveConfig:
     """Portfolio-level config for compute_rebalance_targets.
 
-    Deliberately named/shaped after backtest.tsmom.TsmomBacktestConfig
+    Deliberately named/shaped after backtest.futures.tsmom.TsmomBacktestConfig
     -- signal_weighting/mixing_pool/notional_weighting/use_idm/
     corr_window_years/corr_halflife_days/vol_target/target_portfolio_vol share
     both name AND meaning with that dataclass, so the same mental model
@@ -384,7 +384,7 @@ def build_instruments(symbols: list[str], max_notional: Optional[float] = None,
                        max_contracts: int = DEFAULT_MAX_CONTRACTS) -> list[dict]:
     """The `instruments` list compute_rebalance_targets expects, built from
     a plain symbol list against calculations.instruments.INSTRUMENTS -- the
-    equivalent of backtest.tsmom.load_portfolio_data(symbols) for
+    equivalent of backtest.futures.tsmom.load_portfolio_data(symbols) for
     this module's own instrument-dict shape, not a price/VIX frame.
     INSTRUMENTS.get(s) alone isn't enough: this also resolves each known
     spec's ib_symbol/signal_symbol/db_symbol fallback chain and fills in
@@ -627,7 +627,7 @@ def _vx_spike_ratio_from_db(as_of: Optional[date] = None,
                              ma_window_days: int = DEFAULT_VX_MA_WINDOW_DAYS) -> tuple[float, float]:
     """Local spot-VIX analog to fetch_vx_spike_ratio, for
     TsmomLiveConfig(data_source='database') -- no VX futures (CFE) history
-    is available locally (same reason backtest.tsmom's own module
+    is available locally (same reason backtest.futures.tsmom's own module
     docstring gives), so this reads the same VIX spot parquet the backtest
     uses instead: current close vs its own trailing ma_window_days MA.
     Filtered to <= as_of when given (no lookahead); None uses the full
@@ -1182,7 +1182,7 @@ def _fetch_signal_inputs(ib: Optional[IBPySync], instr: dict, config: TsmomLiveC
 def _goulding_history_frame(cluster: str, g_df: pl.DataFrame) -> pl.DataFrame:
     """All-but-the-most-recent row of goulding_monthly's own output, in the
     {date, cluster, state, monthly_return} schema estimate_mixing_params
-    expects -- the live equivalent of backtest.tsmom's
+    expects -- the live equivalent of backtest.futures.tsmom's
     build_monthly_state_return_history, simplified for a single as-of
     snapshot: there's no separate backtest-style rebalance-date calendar
     to forward-match against here, so goulding_monthly's own 'ts_event'

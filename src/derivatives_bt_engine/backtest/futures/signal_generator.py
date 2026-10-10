@@ -1,4 +1,9 @@
-"""Adapt futures histories into dated signals for the legacy simulator."""
+"""Adapt futures histories into dated entries for the legacy naked-futures path.
+
+This small compatibility adapter serves the event-loop engine used by the
+``naked_futures`` and ``long_futures`` strategy runners.  Portfolio TSMOM uses
+the separate :mod:`derivatives_bt_engine.backtest.futures.tsmom` engine.
+"""
 
 from __future__ import annotations
 from dataclasses import dataclass
@@ -7,7 +12,6 @@ from typing import List
 
 import polars as pl
 
-from derivatives_bt_engine.backtest.base_signal_generator import BaseSignalGenerator
 from derivatives_bt_engine.backtest.futures.types import FuturesStrategy
 from derivatives_bt_engine.backtest.position_side import PositionSide
 from derivatives_bt_engine.calculations.instruments import get_spec, known_futures_symbols
@@ -18,7 +22,7 @@ logger = setup_logger()
 
 
 @dataclass
-class FuturesSignalGenerator(BaseSignalGenerator):
+class FuturesSignalGenerator:
     """
     Polars-native signal generator for futures strategies. Futures have no
     spreads/legs, so this is a single, simple signal: each underlying bar
@@ -30,9 +34,12 @@ class FuturesSignalGenerator(BaseSignalGenerator):
     underlying: pl.DataFrame
 
     def __post_init__(self):
-        super().__init__(config=self.config)
+        """Cache the configured date window without option-selector coupling."""
+        self.start_date = date.fromisoformat(self.config.start_date)
+        self.end_date = date.fromisoformat(self.config.end_date)
 
     def fetch_data(self) -> pl.DataFrame:
+        """Return the source futures history owned by this adapter."""
         return self.underlying
 
     def generate_futures_signals(

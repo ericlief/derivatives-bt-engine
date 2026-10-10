@@ -31,7 +31,7 @@ from derivatives_bt_engine.data.futures_history import (
     PysystemtradeHistoryProvider,
 )
 from derivatives_bt_engine.calculations.ewmac import ewmac
-from derivatives_bt_engine.backtest.tsmom import (
+from derivatives_bt_engine.backtest.futures.tsmom import (
     TsmomBacktestConfig,
     load_pysystemtrade_ewmac_normalization,
 )

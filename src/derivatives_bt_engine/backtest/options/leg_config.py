@@ -6,8 +6,16 @@ from derivatives_bt_engine.backtest.options.types import OptionsType
 from derivatives_bt_engine.backtest.position_side import PositionSide
 from typing import Tuple
 
+
 @dataclass
 class OptionLegConfig:
+    """Describe one option leg's type, side, delta, and expiry criteria.
+
+    Exactly one delta criterion may be supplied, except for a derived long
+    spread leg validated by ``MultiLegOptionStrategyConfig``.  Exactly one DTE
+    criterion is always required.
+    """
+
     option_type: OptionsType
     position_side: PositionSide
     delta_target: Optional[float] = None
@@ -18,6 +26,7 @@ class OptionLegConfig:
     early_close_on_dte: Optional[int] = None  # For complex assymetric strategies
 
     def __post_init__(self):
+        """Validate mutually exclusive delta and DTE selection criteria."""
         # delta_target/delta_range may both be left None for a LONG leg whose
         # strike is instead derived from its paired SHORT leg's strike +/-
         # MultiLegOptionStrategyConfig.max_spread_width (use_spread_width=True)

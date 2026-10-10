@@ -8,12 +8,12 @@ Backtester API. Update the data paths below before running.
 import logging
 import time
 
-from derivatives_bt_engine.backtest.backtester import Backtester
+from derivatives_bt_engine.backtest.options.backtester import Backtester
 from derivatives_bt_engine.data.dataloader import OptionsDataLoader
 from derivatives_bt_engine.backtest.futures.types import FuturesStrategy
 from derivatives_bt_engine.backtest.options.types import OptionsStrategy, OptionsType
 from derivatives_bt_engine.backtest.position_side import PositionSide
-from derivatives_bt_engine.backtest.option_leg_config import OptionLegConfig
+from derivatives_bt_engine.backtest.options.leg_config import OptionLegConfig
 from derivatives_bt_engine.backtest.strategy_config import FuturesStrategyConfig, SingleLegOptionStrategyConfig
 
 logging.basicConfig(

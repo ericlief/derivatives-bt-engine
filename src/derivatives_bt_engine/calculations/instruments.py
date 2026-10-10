@@ -147,9 +147,9 @@ Imported by:
                                             commission (via get_spec)
   derivatives_bt_engine.backtest.strategy_config     -- FuturesStrategyConfig validation
                                             (via known_futures_symbols)
-  derivatives_bt_engine.backtest.futures_signal_generator -- signal margin (via get_spec)
+  derivatives_bt_engine.backtest.futures.signal_generator -- signal margin (via get_spec)
   derivatives_bt_engine.live.run_tsmom_rebalance   -- live rebalancing + order execution
-  derivatives_bt_engine.backtest.tsmom    -- historical backtest (via
+  derivatives_bt_engine.backtest.futures.tsmom    -- historical backtest (via
                                             get_spec, resolve_price_symbol)
   derivatives_bt_engine.strats.naked_futures       -- single-symbol backtest CLI (via
                                             resolve_price_symbol)

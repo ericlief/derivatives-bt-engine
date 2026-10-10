@@ -20,7 +20,7 @@ import polars as pl
 
 from derivatives_bt_engine.calculations.allocation import ALLOCATION_MODES, NOTIONAL_WEIGHTING_SCHEMES
 from derivatives_bt_engine.calculations.goulding import GOULDING_SIGNAL_MODES
-from derivatives_bt_engine.backtest.tsmom import (
+from derivatives_bt_engine.backtest.futures.tsmom import (
     TsmomBacktestConfig,
     load_portfolio_data,
     run_tsmom_backtest,

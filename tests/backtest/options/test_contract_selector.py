@@ -2,20 +2,20 @@
 import pytest
 import pandas as pd
 import numpy as np
-from derivatives_bt_engine.backtest.option_leg_config import OptionLegConfig
+from derivatives_bt_engine.backtest.options.leg_config import OptionLegConfig
 from derivatives_bt_engine.backtest.position import SingleLegOptionPosition, MultiLegOptionPosition
 from derivatives_bt_engine.backtest.position_side import PositionSide
 from derivatives_bt_engine.backtest.options.types import (
     OptionSpreadType, OptionsStrategy, OptionsType, TradeSelectionMethod,
 )
 from derivatives_bt_engine.backtest.futures.types import FuturesStrategy
-from derivatives_bt_engine.backtest.trade_manager import TradeManager
+from derivatives_bt_engine.backtest.options.trade_manager import TradeManager
 
 from derivatives_bt_engine.data.dataloader import OptionsDataLoader
 from derivatives_bt_engine.backtest.strategy_config import SingleLegOptionStrategyConfig
 from derivatives_bt_engine.backtest.trade_result import OptionTradeResult
-from derivatives_bt_engine.backtest.trade_manager import TradeManager
-from derivatives_bt_engine.backtest.option_signal_generator import OptionSignalGenerator
+from derivatives_bt_engine.backtest.options.trade_manager import TradeManager
+from derivatives_bt_engine.backtest.options.contract_selector import OptionContractSelector
 from scipy.stats import norm
 from derivatives_bt_engine.logging_config import setup_logger
 from derivatives_bt_engine.backtest.options.pricing import OptionPricing
@@ -31,7 +31,7 @@ def setup(mock_data):
     # Set up data and signal mocking
     option_chain = mock_data['option_chain']
     underlying = mock_data['underlying_price_history']
-    logger.info(f'Starting SignalGenerator unittest')
+    logger.info('Starting OptionContractSelector unittest')
     logger.info('Option chain:')
     logger.info(option_chain.head())
     logger.info('Underlying:')
@@ -117,8 +117,8 @@ def test_signals_single_leg_targets(setup):
                 dte_target=30,
                 )
     )
-    sg = OptionSignalGenerator(option_chain=option_chain, underlying=underlying, config=config)
-    signals = sg.generate_single_leg_signals()
+    sg = OptionContractSelector(option_chain=option_chain, underlying=underlying, config=config)
+    signals = sg.select_single_leg_contracts()
     validate_dte(signals, config)
     validate_delta(signals, config)
 
@@ -140,8 +140,8 @@ def test_signals_single_leg_targets(setup):
                 dte_target=30,
                 )
     )
-    sg = OptionSignalGenerator(option_chain=option_chain, underlying=underlying, config=config)
-    signals = sg.generate_single_leg_signals()
+    sg = OptionContractSelector(option_chain=option_chain, underlying=underlying, config=config)
+    signals = sg.select_single_leg_contracts()
     validate_dte(signals, config)
     validate_delta(signals, config)
 
@@ -169,8 +169,8 @@ def test_signals_single_leg_ranges(setup):
                 dte_range=(30, 35)
                 )
     )
-    sg = OptionSignalGenerator(option_chain=option_chain, underlying=underlying, config=config)
-    signals = sg.generate_single_leg_signals()
+    sg = OptionContractSelector(option_chain=option_chain, underlying=underlying, config=config)
+    signals = sg.select_single_leg_contracts()
     validate_dte(signals, config)
     validate_delta(signals, config)
 
@@ -193,7 +193,7 @@ def test_signals_single_leg_ranges(setup):
                 dte_range=(30, 35)
                 )
     )
-    sg = OptionSignalGenerator(option_chain=option_chain, underlying=underlying, config=config)
-    signals = sg.generate_single_leg_signals()
+    sg = OptionContractSelector(option_chain=option_chain, underlying=underlying, config=config)
+    signals = sg.select_single_leg_contracts()
     validate_dte(signals, config)
     validate_delta(signals, config)

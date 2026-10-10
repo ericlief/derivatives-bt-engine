@@ -48,6 +48,34 @@ def test_generic_utils_and_enum_buckets_do_not_return():
         ), path
 
 
+def test_asset_specific_backtests_stay_in_owner_packages():
+    """Option and futures implementations may not drift back to the root."""
+    forbidden_root_modules = (
+        "backtester.py",
+        "base_signal_generator.py",
+        "option_leg_config.py",
+        "option_signal_generator.py",
+        "futures_signal_generator.py",
+        "trade_manager.py",
+        "tsmom.py",
+    )
+    backtest_root = PACKAGE_ROOT / "backtest"
+    assert not [
+        name for name in forbidden_root_modules if (backtest_root / name).exists()
+    ]
+
+    required_modules = (
+        backtest_root / "options" / "backtester.py",
+        backtest_root / "options" / "base_selector.py",
+        backtest_root / "options" / "contract_selector.py",
+        backtest_root / "options" / "leg_config.py",
+        backtest_root / "options" / "trade_manager.py",
+        backtest_root / "futures" / "signal_generator.py",
+        backtest_root / "futures" / "tsmom.py",
+    )
+    assert all(path.exists() for path in required_modules)
+
+
 def test_calculations_do_not_depend_on_io_or_orchestration_packages():
     """Pure calculations may not reach upward into runtime workflow layers."""
     forbidden = (
@@ -83,7 +111,7 @@ def test_data_and_backtest_packages_do_not_import_workflow_layers():
         ),
     }
     for package, forbidden in forbidden_by_package.items():
-        for path in (PACKAGE_ROOT / package).glob("*.py"):
+        for path in (PACKAGE_ROOT / package).rglob("*.py"):
             imports = _imported_modules(path)
             assert not [
                 module for module in imports if module.startswith(forbidden)

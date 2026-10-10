@@ -28,7 +28,7 @@ integer-contract constraints.
   - `combined_scalar` is not a pure forecast: it contains signal, risk scalar,
     regime/confidence effects, and VIX/portfolio overlays. Do not normalize it
     as a Carver forecast.
-- `src/derivatives_bt_engine/backtest/tsmom.py`
+- `src/derivatives_bt_engine/backtest/futures/tsmom.py`
   - Confirm live/backtest parity in activity gates, signal construction, and
     allocation timing.
 - `research/tsmom-sizing-terms-cheat-sheet.md`

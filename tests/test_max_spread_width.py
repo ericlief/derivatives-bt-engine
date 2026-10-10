@@ -9,7 +9,7 @@ from derivatives_bt_engine.backtest.options.types import (
     OptionSpreadType, OptionsStrategy, OptionsType,
 )
 from derivatives_bt_engine.backtest.position_side import PositionSide
-from derivatives_bt_engine.backtest.option_leg_config import OptionLegConfig
+from derivatives_bt_engine.backtest.options.leg_config import OptionLegConfig
 
 def test_max_spread_width_config():
     """Test creating a configuration with max_spread_width parameter."""

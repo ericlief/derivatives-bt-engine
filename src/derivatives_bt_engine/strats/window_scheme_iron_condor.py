@@ -37,7 +37,7 @@ import polars as pl
 from dateutil.relativedelta import relativedelta
 from dotenv import load_dotenv
 
-from derivatives_bt_engine.backtest.backtester import Backtester
+from derivatives_bt_engine.backtest.options.backtester import Backtester
 from derivatives_bt_engine.data.dataloader import OptionsDataLoader
 from derivatives_bt_engine.strats.grid_search_backtester import _generate_windows
 from derivatives_bt_engine.strats.iron_condor_param_search import make_iron_condor_config

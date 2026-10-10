@@ -10,7 +10,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import polars as pl
 
-from derivatives_bt_engine.backtest.backtester import Backtester
+from derivatives_bt_engine.backtest.options.backtester import Backtester
 from derivatives_bt_engine.integrations.google_sheets import upload_df_to_google_sheets, _format_single_backtest_result_row
 from derivatives_bt_engine.logging_config import setup_logger
 
