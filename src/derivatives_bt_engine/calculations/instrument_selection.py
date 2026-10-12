@@ -568,14 +568,27 @@ class GreedyInstrumentSelector:
         """Expand one hypothetical book into auditable member allocation rows."""
         rows: list[dict[str, object]] = []
         book = ",".join(score.symbols)
+        # Make each terminal cluster readable without requiring the consumer
+        # to group dotted paths across multiple CSV rows.
+        members_by_cluster: dict[str, list[str]] = {}
+        weight_by_cluster: dict[str, float] = {}
+        for symbol in score.symbols:
+            cluster_path = score.cluster_paths[symbol]
+            members_by_cluster.setdefault(cluster_path, []).append(symbol)
+            weight_by_cluster[cluster_path] = (
+                weight_by_cluster.get(cluster_path, 0.0) + score.weights[symbol]
+            )
         for detail in score.details:
+            cluster_path = str(detail["cluster_path"])
             rows.append({
                 "iteration": iteration,
                 "candidate": candidate,
                 "accepted": accepted,
                 "book": book,
                 "book_symbol": detail["symbol"],
-                "cluster_path": detail["cluster_path"],
+                "cluster_path": cluster_path,
+                "cluster_members": ",".join(members_by_cluster[cluster_path]),
+                "cluster_weight": weight_by_cluster[cluster_path],
                 "weight": detail["weight"],
                 "limit_weight": detail["limit_weight"],
                 "idm": score.idm,

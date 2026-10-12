@@ -730,6 +730,11 @@ combination and the unconstrained greedy AFTS baseline. The command writes:
   of every hypothetical trial book, including its recursive `cluster_path`,
   portfolio `weight`, sizing `limit_weight`, IDM, score, feasibility, and
   accepted flag; and
+- `pysystemtrade_phase2_selection_passes_<timestamp>.csv`, the readable
+  accepted path only: `selection_step` identifies the pass, `added_symbol` is
+  its winner, and each `symbol` row records that accepted book member's
+  terminal cluster, cluster membership, cluster weight, and instrument weight;
+  and
 - `pysystemtrade_phase2_selection_<timestamp>.csv`, the last accepted book.
 
 In the final selection CSV, `net_sr` is an instrument-level input to the

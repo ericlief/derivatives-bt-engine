@@ -508,6 +508,9 @@ def _run_complete_selection(
     trial_allocations_path = (
         output_dir / f"pysystemtrade_phase2_trial_allocations_{stamp}.csv"
     )
+    selection_passes_path = (
+        output_dir / f"pysystemtrade_phase2_selection_passes_{stamp}.csv"
+    )
     selection_path = output_dir / f"pysystemtrade_phase2_selection_{stamp}.csv"
     net_pnl_path = (
         output_dir / f"pysystemtrade_phase2_subsystem_net_pnl_{stamp}.parquet"
@@ -521,6 +524,28 @@ def _run_complete_selection(
     public_trial_allocations = round_public_report(
         pl.DataFrame(selection.trial_allocations, infer_schema_length=None)
     )
+    # The exhaustive trial-allocation audit is useful for reproducing rejected
+    # decisions, but the accepted path is the readable answer to "what changed
+    # on each selection pass?" Rename the two roles so the newly added symbol
+    # cannot be confused with the existing members of its accepted book.
+    public_selection_passes = round_public_report(
+        pl.DataFrame(selection.trial_allocations, infer_schema_length=None)
+        .filter(pl.col("accepted"))
+        .select(
+            pl.col("iteration").alias("selection_step"),
+            pl.col("candidate").alias("added_symbol"),
+            "book",
+            pl.col("book_symbol").alias("symbol"),
+            "cluster_path",
+            "cluster_members",
+            "cluster_weight",
+            "weight",
+            "limit_weight",
+            "idm",
+            "score",
+        )
+        .sort("selection_step", "cluster_path", "symbol")
+    )
     public_selection = round_public_report(final_frame)
     public_audit.write_csv(audit_path)
     pl.concat(forecast_output_frames, how="diagonal_relaxed").write_parquet(
@@ -528,6 +553,7 @@ def _run_complete_selection(
     )
     public_trials.write_csv(trials_path)
     public_trial_allocations.write_csv(trial_allocations_path)
+    public_selection_passes.write_csv(selection_passes_path)
     public_selection.write_csv(selection_path)
     net_pnl_wide.write_parquet(net_pnl_path)
     print(
@@ -539,6 +565,7 @@ def _run_complete_selection(
     print(f"Saved synchronized net P&L {net_pnl_path}")
     print(f"Saved trials {trials_path}")
     print(f"Saved trial allocations {trial_allocations_path}")
+    print(f"Saved accepted selection passes {selection_passes_path}")
     print(f"Saved selection {selection_path}")
     return selection_path, public_selection
 

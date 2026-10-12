@@ -177,4 +177,11 @@ def test_greedy_selector_saves_member_weights_for_every_trial():
         )
         assert sum(float(row["weight"]) for row in member_rows) == pytest.approx(1.0)
         assert {row["cluster_path"] for row in member_rows} == {"1"}
+        assert {
+            row["cluster_members"] for row in member_rows
+        } == {str(trial["book"])}
+        assert all(
+            float(row["cluster_weight"]) == pytest.approx(1.0)
+            for row in member_rows
+        )
         assert {row["accepted"] for row in member_rows} == {trial["accepted"]}
