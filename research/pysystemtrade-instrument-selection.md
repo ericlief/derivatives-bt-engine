@@ -350,9 +350,10 @@ for adequate futures diversification. Its equal-weight risk budget is
 `capital × target vol × IDM / minimum main instruments`; the CSV reports the
 resulting average contracts and the capital required to reach four. The seven
 main asset classes are `equity, ags, vol, energy, fx, metals, bond`. Crypto and
-broad commodity indexes are special additions: they retain affordability
-metrics but do not satisfy the minimum-15 breadth count. Source Housing and
-Sector instruments are classified as equity. Portfolio construction should
+`other` are special additions: they retain affordability metrics but do not
+satisfy the minimum-15 breadth count. The US home-price future uses
+`other/housing`; EPRA-Europe and Sector instruments are classified as equity.
+Portfolio construction should
 first try to cover all seven main classes, then fill the remaining main slots;
 coverage is a preference when contract granularity makes a class infeasible.
 These figures are deliberately a Phase 1 stress scenario. Four contracts and
@@ -825,13 +826,18 @@ fx       -> fx
 metals   -> precious, industrial
 energy   -> energy
 vol      -> vol
+crypto   -> crypto
+other    -> housing, commodity_index
 ```
 
-`crypto/crypto` and `other/commodity_index` remain explicit special branches
-rather than being mislabeled as industrial metals or agricultural softs.
-Source Housing and Sector instruments are classified geographically as
-`equity/us` or `equity/ex_us`. Uppercase identifiers are reserved for
-instrument and contract symbols.
+`crypto/crypto`, `other/housing`, and `other/commodity_index` are explicit
+special branches. The US home-price future stays separate from equities;
+EPRA-Europe remains equity because it tracks listed real-estate companies and
+REITs. Sector instruments are classified geographically as `equity/us` or
+`equity/ex_us`. Uppercase identifiers are reserved for instrument and contract
+symbols. Carver's source config currently groups crypto under Metals; this
+table separates it because crypto is a distinct exposure for portfolio
+allocation.
 
 Execution overlays inherit the classification of their explicit
 `pysystemtrade_instrument` parent. Thus MZC is `ags/grains` and shares the
@@ -997,9 +1003,9 @@ For this project, layer a transparent coverage policy onto that objective:
 2. **Core breadth.** After coverage, resume the unrestricted greedy loop over
    core instruments. Treat 15 as a desired lower breadth, not a hard promise:
    continue toward it only while the book stays inside the 90% score tolerance.
-3. **Special additions.** Consider `crypto` and `other/commodity_index` only
-   after the feasible core pass. Housing and Sector instruments already belong
-   to `equity/us` or `equity/ex_us`. Specials do not count
+3. **Special additions.** Consider `crypto` and `other` only after the feasible
+   core pass. EPRA-Europe and Sector instruments belong to `equity/us` or
+   `equity/ex_us`. Specials do not count
    toward the desired 15 and are
    accepted only when their marginal diversification benefit keeps the book
    inside the same tolerance.

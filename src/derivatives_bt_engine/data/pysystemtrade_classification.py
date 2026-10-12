@@ -27,9 +27,9 @@ CLASSIFICATION_COLUMNS = {
 }
 
 # The small number of non-core branches are explicit rather than forcing
-# commodity indexes or crypto into unrelated classes. Source ``Housing`` and
-# ``Sector`` instruments are intentionally folded into the equity geography
-# branches used by the Phase 2 top-down allocation.
+# commodity indexes or crypto into unrelated classes. A residential home-price
+# future is kept under the broad ``other`` allocation class, while listed
+# real-estate and sector indexes use the equity geography branches.
 ALLOWED_CLASSIFICATION_TREE: dict[str, frozenset[str]] = {
     "ags": frozenset({"grains", "softs", "livestock"}),
     "bond": frozenset({"bonds", "rates"}),
@@ -39,7 +39,7 @@ ALLOWED_CLASSIFICATION_TREE: dict[str, frozenset[str]] = {
     "energy": frozenset({"energy"}),
     "vol": frozenset({"vol"}),
     "crypto": frozenset({"crypto"}),
-    "other": frozenset({"commodity_index"}),
+    "other": frozenset({"commodity_index", "housing"}),
 }
 
 _LOWER_SNAKE_CASE = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")

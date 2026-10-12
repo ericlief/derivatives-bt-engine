@@ -135,7 +135,7 @@ HANG_mini,equity,ex_us
 HEATOIL,energy,energy
 HEATOIL-ICE,energy,energy
 HIGHYIELD,bond,bonds
-HOUSE-US,equity,us
+HOUSE-US,other,housing
 IBEX,equity,ex_us
 IBEX_mini,equity,ex_us
 IG,bond,bonds

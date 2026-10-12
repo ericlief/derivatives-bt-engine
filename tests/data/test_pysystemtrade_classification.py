@@ -27,8 +27,8 @@ def test_packaged_classification_is_complete_and_uses_lowercase_values():
     ).height == 1
     assert classification.filter(
         (pl.col("instrument_code") == "HOUSE-US")
-        & (pl.col("asset_class") == "equity")
-        & (pl.col("economic_subclass") == "us")
+        & (pl.col("asset_class") == "other")
+        & (pl.col("economic_subclass") == "housing")
     ).height == 1
     assert classification.filter(
         (pl.col("instrument_code") == "EPRA-EUROPE")
