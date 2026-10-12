@@ -5,6 +5,7 @@ from derivatives_bt_engine.calculations.instrument_selection import (
     EqualPortfolioWeights,
     GreedyInstrumentSelector,
     GreedySelectionConfig,
+    HandcraftedPortfolioWeights,
     SelectionCandidate,
 )
 
@@ -76,3 +77,50 @@ def test_greedy_selector_allows_only_one_instrument_per_economic_family():
     result = selector.select(candidates, np.eye(3))
 
     assert len({"CORN", "MZC"}.intersection(result.selected)) == 1
+
+
+def test_handcrafted_weights_expose_recursive_cluster_paths():
+    """Similar correlation profiles should share an auditable terminal path."""
+    symbols = ["ES", "NQ", "GC", "SI"]
+    correlation = np.array([
+        [1.00, 0.90, 0.10, 0.05],
+        [0.90, 1.00, 0.12, 0.08],
+        [0.10, 0.12, 1.00, 0.80],
+        [0.05, 0.08, 0.80, 1.00],
+    ])
+
+    allocation = HandcraftedPortfolioWeights().allocate(symbols, correlation)
+
+    assert sum(allocation.weights.values()) == pytest.approx(1.0)
+    assert allocation.cluster_paths["ES"] == allocation.cluster_paths["NQ"]
+    assert allocation.cluster_paths["GC"] == allocation.cluster_paths["SI"]
+    assert allocation.cluster_paths["ES"] != allocation.cluster_paths["GC"]
+
+
+def test_greedy_selector_saves_member_weights_for_every_trial():
+    """Every summary trial should have a complete long-form book allocation."""
+    candidates = [
+        _candidate("A", 0.0),
+        _candidate("B", 0.0),
+        _candidate("C", 0.0),
+    ]
+    selector = GreedyInstrumentSelector(
+        config=GreedySelectionConfig(capital=1_000_000.0),
+        weight_policy=EqualPortfolioWeights(),
+    )
+
+    result = selector.select(candidates, np.eye(3))
+
+    for trial in result.trials:
+        member_rows = [
+            row
+            for row in result.trial_allocations
+            if row["iteration"] == trial["iteration"]
+            and row["candidate"] == trial["candidate"]
+        ]
+        assert {row["book_symbol"] for row in member_rows} == set(
+            str(trial["book"]).split(",")
+        )
+        assert sum(float(row["weight"]) for row in member_rows) == pytest.approx(1.0)
+        assert {row["cluster_path"] for row in member_rows} == {"1"}
+        assert {row["accepted"] for row in member_rows} == {trial["accepted"]}

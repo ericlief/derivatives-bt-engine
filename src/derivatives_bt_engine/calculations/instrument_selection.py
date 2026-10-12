@@ -88,21 +88,53 @@ class GreedySelectionConfig:
             raise ValueError("liquidity parameters must be positive")
 
 
+@dataclass(frozen=True)
+class PortfolioWeightAllocation:
+    """Return portfolio weights together with their hierarchical grouping.
+
+    ``weights`` maps each symbol to its normalized risk weight. ``cluster_paths``
+    uses dotted branch identifiers such as ``1``, ``2.1``, and ``2.2``. Symbols
+    sharing a complete path occupy the same terminal cluster, while common path
+    prefixes expose the recursive grouping that produced the weights.
+    """
+
+    weights: dict[str, float]
+    cluster_paths: dict[str, str]
+
+
 class PortfolioWeightPolicy(ABC):
-    """Map a trial book and its correlation block to risk weights."""
+    """Map a trial book and its correlation block to auditable risk weights."""
 
     @abstractmethod
+    def allocate(
+        self, symbols: list[str], correlation: np.ndarray
+    ) -> PortfolioWeightAllocation:
+        """Return normalized weights and a cluster path for every symbol."""
+
     def weights(self, symbols: list[str], correlation: np.ndarray) -> dict[str, float]:
-        """Return normalized nonnegative instrument weights."""
+        """Return normalized weights while preserving the former compact API."""
+        return self.allocate(symbols, correlation).weights
 
 
 class EqualPortfolioWeights(PortfolioWeightPolicy):
     """Assign the same risk weight to every instrument in a trial book."""
 
-    def weights(self, symbols: list[str], correlation: np.ndarray) -> dict[str, float]:
-        """Return ``1/n`` weights; ``correlation`` is intentionally unused."""
+    def allocate(
+        self, symbols: list[str], correlation: np.ndarray
+    ) -> PortfolioWeightAllocation:
+        """Return ``1/n`` weights in one common group.
+
+        ``correlation`` is intentionally unused because this policy is the
+        transparent equal-weight sensitivity rather than a clustering policy.
+        """
         del correlation
-        return {symbol: 1.0 / len(symbols) for symbol in symbols} if symbols else {}
+        weights = (
+            {symbol: 1.0 / len(symbols) for symbol in symbols} if symbols else {}
+        )
+        return PortfolioWeightAllocation(
+            weights=weights,
+            cluster_paths={symbol: "1" for symbol in symbols},
+        )
 
 
 class HandcraftedPortfolioWeights(PortfolioWeightPolicy):
@@ -114,18 +146,31 @@ class HandcraftedPortfolioWeights(PortfolioWeightPolicy):
     weights are normalized to one.
     """
 
-    def weights(self, symbols: list[str], correlation: np.ndarray) -> dict[str, float]:
-        """Return normalized handcrafted weights for ``symbols`` in matrix order."""
+    def allocate(
+        self, symbols: list[str], correlation: np.ndarray
+    ) -> PortfolioWeightAllocation:
+        """Return normalized handcrafted weights and recursive cluster paths."""
         if not symbols:
-            return {}
-        raw = self._recursive(symbols, correlation)
+            return PortfolioWeightAllocation({}, {})
+        raw, cluster_paths = self._recursive(symbols, correlation)
         total = sum(raw.values())
-        return {symbol: raw[symbol] / total for symbol in symbols}
+        weights = {symbol: raw[symbol] / total for symbol in symbols}
+        # A one- or two-instrument book reaches the base case before a split;
+        # label it as one terminal cluster so every persisted row has a path.
+        normalized_paths = {
+            symbol: cluster_paths[symbol] or "1" for symbol in symbols
+        }
+        return PortfolioWeightAllocation(weights, normalized_paths)
 
-    def _recursive(self, symbols: list[str], correlation: np.ndarray) -> dict[str, float]:
-        """Recursively split a correlation block into two sub-portfolios."""
+    def _recursive(
+        self, symbols: list[str], correlation: np.ndarray
+    ) -> tuple[dict[str, float], dict[str, str]]:
+        """Return raw weights and relative cluster paths for one tree node."""
         if len(symbols) <= 2:
-            return {symbol: 1.0 / len(symbols) for symbol in symbols}
+            return (
+                {symbol: 1.0 / len(symbols) for symbol in symbols},
+                {symbol: "" for symbol in symbols},
+            )
         try:
             link = sch.linkage(distance.pdist(correlation), method="complete")
             cutoff = link[len(symbols) - 2][2] - 1e-6
@@ -136,17 +181,24 @@ class HandcraftedPortfolioWeights(PortfolioWeightPolicy):
             labels = np.array([(idx % 2) + 1 for idx in range(len(symbols))])
 
         result: dict[str, float] = {}
-        for label in sorted(set(labels)):
+        cluster_paths: dict[str, str] = {}
+        for branch, label in enumerate(sorted(set(labels)), start=1):
             indices = [idx for idx, value in enumerate(labels) if value == label]
             group_symbols = [symbols[idx] for idx in indices]
             group_correlation = correlation[np.ix_(indices, indices)]
-            group_weights = self._recursive(group_symbols, group_correlation)
+            group_weights, child_paths = self._recursive(
+                group_symbols, group_correlation
+            )
             group_idm = compute_idm(
                 group_symbols, H=group_correlation, weights=group_weights
             )
             for symbol, weight in group_weights.items():
                 result[symbol] = 0.5 * group_idm * weight
-        return result
+                child_path = child_paths[symbol]
+                cluster_paths[symbol] = (
+                    f"{branch}.{child_path}" if child_path else str(branch)
+                )
+        return result, cluster_paths
 
 
 @dataclass(frozen=True)
@@ -160,6 +212,7 @@ class PortfolioScore:
 
     symbols: tuple[str, ...]
     weights: dict[str, float]
+    cluster_paths: dict[str, str]
     idm: float
     score: float
     feasible: bool
@@ -169,11 +222,12 @@ class PortfolioScore:
 
 @dataclass(frozen=True)
 class GreedySelectionResult:
-    """Return the accepted symbol order, final score, and every trial row."""
+    """Return the accepted book plus summary and member-level trial audits."""
 
     selected: tuple[str, ...]
     final_score: PortfolioScore
     trials: tuple[dict[str, object], ...]
+    trial_allocations: tuple[dict[str, object], ...]
 
 
 class GreedyInstrumentSelector:
@@ -228,7 +282,8 @@ class GreedyInstrumentSelector:
         # Slice the precomputed universe matrix into this trial book's order.
         indices = [full_symbols.index(symbol) for symbol in symbols]
         correlation = full_correlation[np.ix_(indices, indices)]
-        weights = self.weight_policy.weights(symbols, correlation)
+        allocation_result = self.weight_policy.allocate(symbols, correlation)
+        weights = allocation_result.weights
         if starting and len(symbols) == 1:
             weights_for_limits = {symbols[0]: self.config.starting_weight}
             idm = 1.0
@@ -294,6 +349,7 @@ class GreedyInstrumentSelector:
             net_sharpes[symbol] = net_sr
             details.append({
                 "symbol": symbol,
+                "cluster_path": allocation_result.cluster_paths[symbol],
                 "weight": weights[symbol],
                 "limit_weight": allocation,
                 "ann_trade_cost_sr": annual_cost,
@@ -313,7 +369,14 @@ class GreedyInstrumentSelector:
         numerator = sum(weights[symbol] * net_sharpes[symbol] for symbol in symbols)
         score = numerator / denominator if denominator > 0 and feasible else -math.inf
         return PortfolioScore(
-            tuple(symbols), weights, idm, score, feasible, ";".join(reasons), tuple(details)
+            symbols=tuple(symbols),
+            weights=weights,
+            cluster_paths=allocation_result.cluster_paths,
+            idm=idm,
+            score=score,
+            feasible=feasible,
+            reason=";".join(reasons),
+            details=tuple(details),
         )
 
     def select(
@@ -335,6 +398,7 @@ class GreedyInstrumentSelector:
             raise ValueError("candidate correlation matrix has the wrong shape")
         candidates = {candidate.symbol: candidate for candidate in candidate_list}
         trials: list[dict[str, object]] = []
+        trial_allocations: list[dict[str, object]] = []
 
         # Seed selection uses a conservative nominal portfolio weight rather
         # than pretending a one-market account permanently holds 100% weight.
@@ -344,7 +408,9 @@ class GreedyInstrumentSelector:
                 [symbol], candidates, full_symbols, correlation, starting=True
             )
             singleton_scores.append(scored)
-            trials.append(self._trial_row(0, symbol, scored, accepted=False))
+            self._record_trial(
+                trials, trial_allocations, 0, symbol, scored, accepted=False
+            )
         feasible_singletons = [score for score in singleton_scores if score.feasible]
         if not feasible_singletons:
             raise ValueError("no candidate passed singleton granularity and liquidity")
@@ -354,6 +420,7 @@ class GreedyInstrumentSelector:
         # while the first n+1 book establishes the tolerance benchmark.
         best_seen = 0.0
         self._mark_accepted(trials, 0, selected[-1])
+        self._mark_accepted(trial_allocations, 0, selected[-1])
 
         iteration = 1
         while True:
@@ -381,7 +448,14 @@ class GreedyInstrumentSelector:
                     selected + [symbol], candidates, full_symbols, correlation
                 )
                 scored_trials.append((symbol, scored))
-                trials.append(self._trial_row(iteration, symbol, scored, accepted=False))
+                self._record_trial(
+                    trials,
+                    trial_allocations,
+                    iteration,
+                    symbol,
+                    scored,
+                    accepted=False,
+                )
             feasible = [item for item in scored_trials if item[1].feasible]
             if not feasible:
                 break
@@ -394,9 +468,31 @@ class GreedyInstrumentSelector:
             current = winning_score
             best_seen = max(best_seen, winning_score.score)
             self._mark_accepted(trials, iteration, winner)
+            self._mark_accepted(trial_allocations, iteration, winner)
             iteration += 1
 
-        return GreedySelectionResult(tuple(selected), current, tuple(trials))
+        return GreedySelectionResult(
+            tuple(selected), current, tuple(trials), tuple(trial_allocations)
+        )
+
+    @classmethod
+    def _record_trial(
+        cls,
+        trials: list[dict[str, object]],
+        trial_allocations: list[dict[str, object]],
+        iteration: int,
+        candidate: str,
+        score: PortfolioScore,
+        *,
+        accepted: bool,
+    ) -> None:
+        """Persist summary and per-book-member state for one candidate trial."""
+        trials.append(cls._trial_row(iteration, candidate, score, accepted=accepted))
+        trial_allocations.extend(
+            cls._trial_allocation_rows(
+                iteration, candidate, score, accepted=accepted
+            )
+        )
 
     @staticmethod
     def _trial_row(
@@ -419,11 +515,39 @@ class GreedyInstrumentSelector:
         }
 
     @staticmethod
+    def _trial_allocation_rows(
+        iteration: int,
+        candidate: str,
+        score: PortfolioScore,
+        *,
+        accepted: bool,
+    ) -> list[dict[str, object]]:
+        """Expand one hypothetical book into auditable member allocation rows."""
+        rows: list[dict[str, object]] = []
+        book = ",".join(score.symbols)
+        for detail in score.details:
+            rows.append({
+                "iteration": iteration,
+                "candidate": candidate,
+                "accepted": accepted,
+                "book": book,
+                "book_symbol": detail["symbol"],
+                "cluster_path": detail["cluster_path"],
+                "weight": detail["weight"],
+                "limit_weight": detail["limit_weight"],
+                "idm": score.idm,
+                "score": score.score if math.isfinite(score.score) else None,
+                "feasible": score.feasible,
+                "reason": score.reason,
+                "instr_reason": detail["reason"],
+            })
+        return rows
+
+    @staticmethod
     def _mark_accepted(
         trials: list[dict[str, object]], iteration: int, candidate: str
     ) -> None:
-        """Mark the previously recorded winning row for one iteration."""
+        """Mark every summary or member row belonging to an accepted trial."""
         for row in reversed(trials):
             if row["iteration"] == iteration and row["candidate"] == candidate:
                 row["accepted"] = True
-                return

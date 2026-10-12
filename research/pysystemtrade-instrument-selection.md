@@ -722,10 +722,14 @@ combination and the unconstrained greedy AFTS baseline. The command writes:
   turnover, cost, and the precise exclusion reason;
 - `pysystemtrade_phase2_forecasts_<timestamp>.parquet`, containing the daily
   component forecasts, combined forecast, validity flag, normalized position,
-  and subsystem return for direct inspection;
+  and gross, cost, and net subsystem P&L for direct inspection;
 - `pysystemtrade_phase2_subsystem_net_pnl_<timestamp>.parquet`, the synchronized
   return panel used by the bounded correlation estimator;
 - `pysystemtrade_phase2_trials_<timestamp>.csv`, one row per greedy trial; and
+- `pysystemtrade_phase2_trial_allocations_<timestamp>.csv`, one row per member
+  of every hypothetical trial book, including its recursive `cluster_path`,
+  portfolio `weight`, sizing `limit_weight`, IDM, score, feasibility, and
+  accepted flag; and
 - `pysystemtrade_phase2_selection_<timestamp>.csv`, the last accepted book.
 
 In the final selection CSV, `net_sr` is an instrument-level input to the

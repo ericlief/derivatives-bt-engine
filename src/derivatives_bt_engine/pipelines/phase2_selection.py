@@ -505,6 +505,9 @@ def _run_complete_selection(
     audit_path = output_dir / f"pysystemtrade_phase2_forecast_audit_{stamp}.csv"
     forecasts_path = output_dir / f"pysystemtrade_phase2_forecasts_{stamp}.parquet"
     trials_path = output_dir / f"pysystemtrade_phase2_trials_{stamp}.csv"
+    trial_allocations_path = (
+        output_dir / f"pysystemtrade_phase2_trial_allocations_{stamp}.csv"
+    )
     selection_path = output_dir / f"pysystemtrade_phase2_selection_{stamp}.csv"
     net_pnl_path = (
         output_dir / f"pysystemtrade_phase2_subsystem_net_pnl_{stamp}.parquet"
@@ -515,12 +518,16 @@ def _run_complete_selection(
     public_trials = round_public_report(
         pl.DataFrame(selection.trials, infer_schema_length=None)
     )
+    public_trial_allocations = round_public_report(
+        pl.DataFrame(selection.trial_allocations, infer_schema_length=None)
+    )
     public_selection = round_public_report(final_frame)
     public_audit.write_csv(audit_path)
     pl.concat(forecast_output_frames, how="diagonal_relaxed").write_parquet(
         forecasts_path
     )
     public_trials.write_csv(trials_path)
+    public_trial_allocations.write_csv(trial_allocations_path)
     public_selection.write_csv(selection_path)
     net_pnl_wide.write_parquet(net_pnl_path)
     print(
@@ -531,6 +538,7 @@ def _run_complete_selection(
     print(f"Saved daily forecasts {forecasts_path}")
     print(f"Saved synchronized net P&L {net_pnl_path}")
     print(f"Saved trials {trials_path}")
+    print(f"Saved trial allocations {trial_allocations_path}")
     print(f"Saved selection {selection_path}")
     return selection_path, public_selection
 
