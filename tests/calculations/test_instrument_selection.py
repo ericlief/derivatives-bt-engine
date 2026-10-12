@@ -97,6 +97,60 @@ def test_handcrafted_weights_expose_recursive_cluster_paths():
     assert allocation.cluster_paths["ES"] != allocation.cluster_paths["GC"]
 
 
+def test_handcrafted_weights_match_pysystemtrade_nested_group_result():
+    """Nested child weights must retain their raw scale at the parent node.
+
+    These golden values reproduce pysystemtrade's ``handcraftPortfolio`` for
+    the same four-instrument correlation matrix. One top-level branch contains
+    three instruments, so normalizing its recursive weights inside the parent
+    IDM would produce materially different answers and fail this test.
+    """
+    symbols = ["S0", "S1", "S2", "S3"]
+    correlation = np.array([
+        [1.0, 0.44019574, 0.62537716, 0.55906521],
+        [0.44019574, 1.0, 0.54820557, 0.45648545],
+        [0.62537716, 0.54820557, 1.0, 0.62784243],
+        [0.55906521, 0.45648545, 0.62784243, 1.0],
+    ])
+
+    allocation = HandcraftedPortfolioWeights().allocate(symbols, correlation)
+
+    assert allocation.weights == pytest.approx({
+        "S0": 0.25454610712397285,
+        "S1": 0.4633069978592112,
+        "S2": 0.14107344750840803,
+        "S3": 0.14107344750840803,
+    })
+    assert allocation.cluster_paths == {
+        "S0": "1.2",
+        "S1": "2",
+        "S2": "1.1",
+        "S3": "1.1",
+    }
+
+
+def test_selection_idm_retains_signed_correlations():
+    """AFTS final-book IDM uses signed H rather than the production zero floor."""
+    candidates = [_candidate("A", 0.0), _candidate("B", 0.0)]
+    correlation = np.array([
+        [1.0, -0.5],
+        [-0.5, 1.0],
+    ])
+    selector = GreedyInstrumentSelector(
+        config=GreedySelectionConfig(capital=1_000_000.0),
+    )
+
+    score = selector.score(
+        ["A", "B"],
+        {candidate.symbol: candidate for candidate in candidates},
+        ["A", "B"],
+        correlation,
+    )
+
+    assert score.weights == pytest.approx({"A": 0.5, "B": 0.5})
+    assert score.idm == pytest.approx(2.0)
+
+
 def test_greedy_selector_saves_member_weights_for_every_trial():
     """Every summary trial should have a complete long-form book allocation."""
     candidates = [

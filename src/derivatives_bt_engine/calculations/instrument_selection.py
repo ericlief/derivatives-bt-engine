@@ -20,7 +20,46 @@ import numpy as np
 from scipy.cluster import hierarchy as sch
 from scipy.spatial import distance
 
-from derivatives_bt_engine.calculations.allocation import compute_idm
+HANDCRAFT_MAX_DIVERSIFICATION_MULTIPLIER = 2.5
+
+
+def _handcrafted_diversification_multiplier(
+    symbols: list[str],
+    correlation: np.ndarray,
+    weights: dict[str, float],
+    *,
+    maximum: float = HANDCRAFT_MAX_DIVERSIFICATION_MULTIPLIER,
+) -> float:
+    """Return pysystemtrade's single-period handcrafting multiplier.
+
+    Unlike the production allocation layer's conservative IDM, this exact
+    AFTS/pysystemtrade calculation retains signed correlations and does not
+    normalize ``weights`` internally. Recursive child portfolios deliberately
+    pass raw weights whose scale carries the diversification adjustment from
+    lower tree levels. Normalizing them here changes all ancestor weights.
+
+    Parameters
+    ----------
+    symbols
+        Matrix-order symbols represented by ``correlation`` and ``weights``.
+    correlation
+        Same-order instrument correlation matrix.
+    weights
+        Raw or normalized risk weights for the current tree node.
+    maximum
+        Upper bound for the diversification multiplier; pysystemtrade uses
+        2.5 in both recursive handcrafting and final portfolio sizing.
+
+    Returns
+    -------
+    float
+        ``min(maximum, 1 / sqrt(w' H w))`` or one when risk is unusable.
+    """
+    vector = np.array([weights[symbol] for symbol in symbols], dtype=float)
+    variance = float(vector @ correlation @ vector)
+    if not math.isfinite(variance) or variance < 1e-14:
+        return 1.0
+    return min(maximum, 1.0 / math.sqrt(variance))
 
 
 @dataclass(frozen=True)
@@ -189,8 +228,10 @@ class HandcraftedPortfolioWeights(PortfolioWeightPolicy):
             group_weights, child_paths = self._recursive(
                 group_symbols, group_correlation
             )
-            group_idm = compute_idm(
-                group_symbols, H=group_correlation, weights=group_weights
+            group_idm = _handcrafted_diversification_multiplier(
+                group_symbols,
+                group_correlation,
+                group_weights,
             )
             for symbol, weight in group_weights.items():
                 result[symbol] = 0.5 * group_idm * weight
@@ -289,9 +330,11 @@ class GreedyInstrumentSelector:
             idm = 1.0
         else:
             weights_for_limits = weights
-            idm = min(
-                self.config.max_idm,
-                compute_idm(symbols, H=correlation, weights=weights),
+            idm = _handcrafted_diversification_multiplier(
+                symbols,
+                correlation,
+                weights,
+                maximum=self.config.max_idm,
             )
 
         details: list[dict[str, object]] = []
