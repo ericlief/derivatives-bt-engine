@@ -349,9 +349,10 @@ and at least 15 ordinary instruments. Fifteen is the lower end of Carver's
 for adequate futures diversification. Its equal-weight risk budget is
 `capital × target vol × IDM / minimum main instruments`; the CSV reports the
 resulting average contracts and the capital required to reach four. The seven
-main asset classes are `Equity, Ags, Vol, OilGas, FX, Metals, Bond`. `Housing`,
-`Sector`, and `Other` are special additions: they retain affordability metrics
-but do not satisfy the minimum-15 breadth count. Portfolio construction should
+main asset classes are `equity, ags, vol, energy, fx, metals, bond`. Crypto and
+broad commodity indexes are special additions: they retain affordability
+metrics but do not satisfy the minimum-15 breadth count. Source Housing and
+Sector instruments are classified as equity. Portfolio construction should
 first try to cover all seven main classes, then fill the remaining main slots;
 coverage is a preference when contract granularity makes a class infeasible.
 These figures are deliberately a Phase 1 stress scenario. Four contracts and
@@ -378,7 +379,7 @@ be reproduced directly from the reported cash costs and `ann_dvol`.
   --affordability-idm 1 \
   --affordability-min-contracts 4 \
   --affordability-min-main-instruments 15 \
-  --affordability-main-asset-classes Equity,Ags,Vol,OilGas,FX,Metals,Bond
+  --affordability-main-asset-classes equity,ags,vol,energy,fx,metals,bond
 ```
 
 Use `--skip-ewmac-cost-baseline` only when a quick volatility/contract audit
@@ -509,7 +510,7 @@ Keep every audited row in that file so exclusions remain reproducible, then
 derive the smaller search universe from it:
 
 ```text
-pysystemtrade histories + instrument metadata + local execution overlays
+pysystemtrade histories + reviewed economic classification + local execution overlays
     -> per-rule EWMAC performance, turnover, rolls, and cost eligibility
     -> resolve the exact dated IB contract
     -> current price and FX, executable spread and commission
@@ -519,7 +520,7 @@ pysystemtrade histories + instrument metadata + local execution overlays
     -> full auditable Phase 1 CSV
     -> phase2_search_universe(CSV)
     -> combined forecast and subsystem return for each surviving instrument
-    -> trial-book correlations, handcrafted weights, and IDM
+    -> trial-book correlations, top-down classification weights, and IDM
     -> portfolio-specific positions, turnover, cost, and market participation
     -> greedy AFTS selection with core-class coverage and score tolerance
 ```
@@ -696,7 +697,7 @@ connect to IB and does not recalculate volume, volatility, cost, or any other
 Phase 1 metric. Run:
 
 ```bash
-futures-select-phase2 --report-dir results
+futures-select-phase2 --report-dir results --weight-policy topdown_classif
 ```
 
 The command loads the newest Phase 1 IB CSV and saves
@@ -712,7 +713,11 @@ It also repeats the validated run-level inputs `init_cap_usd`, `target_vol`,
 `min_daily_volume`, and `max_pct_mkt_volume` on each selected row. Step 1 fails
 if any of these are absent, null, or inconsistent across the Phase 1 report.
 Use `--input <phase1.csv>` to select a particular audit and `--output <path>`
-to choose the exact intermediate filename.
+to choose the exact intermediate filename. `topdown_classif` is the default
+weight policy; `legacy_handcraft` and `equal` are retained as explicit research
+comparators. Complete-selection reports persist the choice as `wt_policy` and
+record `asset_cls`, `econ_subcls`, and the resulting class path for each book
+member on every accepted pass.
 
 Add `--complete` to continue from that saved Step 1 universe through forecast
 combination and the unconstrained greedy AFTS baseline. The command writes:
@@ -727,13 +732,13 @@ combination and the unconstrained greedy AFTS baseline. The command writes:
   return panel used by the bounded correlation estimator;
 - `pysystemtrade_phase2_trials_<timestamp>.csv`, one row per greedy trial; and
 - `pysystemtrade_phase2_trial_allocations_<timestamp>.csv`, one row per member
-  of every hypothetical trial book, including its recursive `cluster_path`,
+  of every hypothetical trial book, including its economic `cluster_path`,
   portfolio `weight`, sizing `limit_weight`, IDM, score, feasibility, and
   accepted flag; and
 - `pysystemtrade_phase2_selection_passes_<timestamp>.csv`, the readable
   accepted path only: `selection_step` identifies the pass, `added_symbol` is
   its winner, and each `symbol` row records that accepted book member's
-  terminal cluster, cluster membership, cluster weight, and instrument weight;
+  terminal subclass, subclass membership, subclass weight, and instrument weight;
   and
 - `pysystemtrade_phase2_selection_<timestamp>.csv`, the last accepted book.
 
@@ -802,6 +807,37 @@ weights and is not baked into their reported percentages.
 
 ## Phase 2: Iterative AFTS instrument selection
 
+### Reviewed economic hierarchy
+
+The upstream pysystemtrade `AssetClass` field is retained in `raw` for source
+fidelity, but it is not the allocation hierarchy. The repository-owned
+`pysystemtrade_instrument_classification.csv` assigns every one of the 252
+history-bearing instruments a canonical lowercase `asset_class` and
+`economic_subclass`. The importer validates the allowed pairs and complete
+history-universe coverage before materializing the mapping as
+`ref.instrument_classification`.
+
+```text
+ags      -> grains, softs, livestock
+bond     -> bonds, rates
+equity   -> us, ex_us
+fx       -> fx
+metals   -> precious, industrial
+energy   -> energy
+vol      -> vol
+```
+
+`crypto/crypto` and `other/commodity_index` remain explicit special branches
+rather than being mislabeled as industrial metals or agricultural softs.
+Source Housing and Sector instruments are classified geographically as
+`equity/us` or `equity/ex_us`. Uppercase identifiers are reserved for
+instrument and contract symbols.
+
+Execution overlays inherit the classification of their explicit
+`pysystemtrade_instrument` parent. Thus MZC is `ags/grains` and shares the
+`CORN` economic family, while retaining its own executable contract costs and
+granularity.
+
 Carver's [static instrument-selection
 algorithm](https://qoppac.blogspot.com/2021/06/static-optimisation-of-best-set-of.html)
 is a greedy portfolio search, not a sort followed by a fixed contract-count
@@ -829,10 +865,19 @@ For a trial book `B`, correlations must be estimated from volatility-normalized
 **subsystem returns after the forecasting decision**, using each candidate's
 eligible rule mix. Raw price-return correlations are not the portfolio input.
 Use the same robust missing-data treatment and bounded exponentially weighted
-correlation machinery as the allocation layer. The initial implementation
-should reproduce Carver's correlation-only handcrafted weights; existing ERC
-and HRP weights are useful sensitivity variants, but should not be labelled as
-the AFTS handcraft method.
+correlation machinery as the allocation layer. Correlation determines the
+trial IDM and portfolio score, but the default risk weights now follow the
+reviewed hierarchy instead of asking correlation clustering to invent economic
+groups. Every represented asset class receives equal risk; represented
+subclasses split their class allocation equally; instruments then split their
+subclass allocation equally. The former correlation-only recursive
+`HandcraftedPortfolioWeights` remains an explicitly selected legacy
+sensitivity, not the Phase 2 default.
+
+For example, a book containing two grains, one soft, one US equity, and one
+ex-US equity assigns 50% to `ags` and 50% to `equity`. Within `ags`, grains and
+softs receive 25% each, so the grains receive 12.5% apiece. Within equity, US
+and ex-US receive 25% apiece.
 
 For normalized subsystem returns, let `H` be the correlation matrix and `w`
 the trial risk weights, summing to one. Recalculate the diversification
@@ -918,7 +963,10 @@ while unused candidates remain:
     for candidate in unused:
         book = selected + [candidate]
         H = subsystem_return_correlations(book)
-        w = handcrafted_risk_weights(H)
+        w = top_down_classification_weights(
+            book,
+            levels=("asset_class", "economic_subclass", "instrument"),
+        )
         idm = min(2.5, 1 / sqrt(w' H w))
         positions = maximum_forecast_positions(book, w, idm)
         penalties = annual_costs(book) + size_penalties(positions)
@@ -938,8 +986,8 @@ breaching candidate.
 
 For this project, layer a transparent coverage policy onto that objective:
 
-1. **Core coverage.** The main classes are `Equity`, `Ags`, `Vol`, `OilGas`,
-   `FX`, `Metals`, and `Bond`. Seed this constrained pass from a core candidate.
+1. **Core coverage.** The main classes are `equity`, `ags`, `vol`, `energy`,
+   `fx`, `metals`, and `bond`. Seed this constrained pass from a core candidate.
    While a feasible class is absent, trial only candidates from currently
    missing classes, then choose the one with the best complete-book score. A
    class is infeasible when all its candidates fail a hard
@@ -949,8 +997,10 @@ For this project, layer a transparent coverage policy onto that objective:
 2. **Core breadth.** After coverage, resume the unrestricted greedy loop over
    core instruments. Treat 15 as a desired lower breadth, not a hard promise:
    continue toward it only while the book stays inside the 90% score tolerance.
-3. **Special additions.** Consider `Housing`, `Sector`, and `Other` only after
-   the feasible core pass. They do not count toward the desired 15 and are
+3. **Special additions.** Consider `crypto` and `other/commodity_index` only
+   after the feasible core pass. Housing and Sector instruments already belong
+   to `equity/us` or `equity/ex_us`. Specials do not count
+   toward the desired 15 and are
    accepted only when their marginal diversification benefit keeps the book
    inside the same tolerance.
 

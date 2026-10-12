@@ -7,15 +7,25 @@ from derivatives_bt_engine.calculations.instrument_selection import (
     GreedySelectionConfig,
     HandcraftedPortfolioWeights,
     SelectionCandidate,
+    TopDownClassificationWeights,
 )
 
 
-def _candidate(symbol, turnover, *, family=""):
+def _candidate(
+    symbol,
+    turnover,
+    *,
+    family="",
+    asset_class="equity",
+    economic_subclass="us",
+):
     return SelectionCandidate(
         symbol=symbol,
         ann_dvol=100.0,
         trade_sr=0.01,
         combined_turnover=turnover,
+        asset_class=asset_class,
+        economic_subclass=economic_subclass,
         econ_family=family,
         mkt_risk_vol_day=1_000_000_000.0,
     )
@@ -127,6 +137,61 @@ def test_handcrafted_weights_match_pysystemtrade_nested_group_result():
         "S2": "1.1",
         "S3": "1.1",
     }
+
+
+def test_top_down_classification_weights_equalize_each_tree_level():
+    """Crowded subclasses must not consume extra top-level portfolio risk."""
+    symbols = ["CORN", "WHEAT", "COCOA", "ES", "NIKKEI"]
+    policy = TopDownClassificationWeights({
+        "CORN": ("ags", "grains"),
+        "WHEAT": ("ags", "grains"),
+        "COCOA": ("ags", "softs"),
+        "ES": ("equity", "us"),
+        "NIKKEI": ("equity", "ex_us"),
+    })
+
+    allocation = policy.allocate(symbols, np.eye(len(symbols)))
+
+    assert allocation.weights == pytest.approx({
+        "CORN": 0.125,
+        "WHEAT": 0.125,
+        "COCOA": 0.25,
+        "ES": 0.25,
+        "NIKKEI": 0.25,
+    })
+    assert allocation.cluster_paths == {
+        "CORN": "ags/grains",
+        "WHEAT": "ags/grains",
+        "COCOA": "ags/softs",
+        "ES": "equity/us",
+        "NIKKEI": "equity/ex_us",
+    }
+
+
+def test_selector_defaults_to_top_down_classification_weights():
+    candidates = [
+        _candidate("CORN", 0.0, asset_class="ags", economic_subclass="grains"),
+        _candidate("WHEAT", 0.0, asset_class="ags", economic_subclass="grains"),
+        _candidate("ES", 0.0, asset_class="equity", economic_subclass="us"),
+    ]
+    selector = GreedyInstrumentSelector(
+        config=GreedySelectionConfig(capital=1_000_000.0)
+    )
+
+    score = selector.score(
+        [candidate.symbol for candidate in candidates],
+        {candidate.symbol: candidate for candidate in candidates},
+        [candidate.symbol for candidate in candidates],
+        np.eye(3),
+    )
+
+    assert score.weights == pytest.approx({
+        "CORN": 0.25,
+        "WHEAT": 0.25,
+        "ES": 0.50,
+    })
+    assert score.cluster_paths["CORN"] == "ags/grains"
+    assert score.cluster_paths["ES"] == "equity/us"
 
 
 def test_selection_idm_retains_signed_correlations():

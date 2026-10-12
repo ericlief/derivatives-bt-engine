@@ -129,7 +129,9 @@ def load_pysystemtrade_ib_instruments(
                 i.description,
                 i.point_size,
                 i.currency,
-                i.asset_class,
+                i.asset_class AS source_asset_class,
+                classification.asset_class,
+                classification.economic_subclass,
                 i.per_block_cost,
                 i.percentage_cost,
                 i.per_trade_cost,
@@ -142,6 +144,8 @@ def load_pysystemtrade_ib_instruments(
                 c.adjusted_start,
                 c.adjusted_end
             FROM raw.instrument_config i
+            JOIN ref.instrument_classification classification
+              USING (instrument_code)
             LEFT JOIN raw.spread_costs s USING (instrument_code)
             LEFT JOIN qa.series_coverage c USING (instrument_code)
             """
@@ -197,6 +201,8 @@ def load_pysystemtrade_ib_instruments(
             "per_trade_cost": row["per_trade_cost"],
             "carver_spread_points": row["spread_cost"],
             "asset_class": row["asset_class"],
+            "source_asset_class": row["source_asset_class"],
+            "economic_subclass": row["economic_subclass"],
             "region": row["region"],
             "expiry": "auto",
             "mapping_status": "carver_ib_candidate",

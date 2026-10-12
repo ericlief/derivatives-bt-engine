@@ -58,8 +58,10 @@ from derivatives_bt_engine.data.futures_history import (
     DEFAULT_PYSYSTEMTRADE_DB_PATH,
 )
 from derivatives_bt_engine.calculations.instrument_selection import (
+    EqualPortfolioWeights,
     GreedyInstrumentSelector,
     GreedySelectionConfig,
+    HandcraftedPortfolioWeights,
     SelectionCandidate,
 )
 from derivatives_bt_engine.calculations.pnl import build_subsystem_pnl_curve
@@ -146,6 +148,15 @@ def parse_args(argv=None):
     parser.add_argument("--score-threshold", type=float, default=0.90)
     parser.add_argument("--gross-sr", type=float, default=0.50)
     parser.add_argument("--starting-weight", type=float, default=0.20)
+    parser.add_argument(
+        "--weight-policy",
+        choices=("topdown_classif", "legacy_handcraft", "equal"),
+        default="topdown_classif",
+        help=(
+            "Trial risk-weight policy; the reviewed asset/subclass hierarchy "
+            "is the default"
+        ),
+    )
     parser.add_argument("--corr-window-years", type=float, default=20.0)
     parser.add_argument("--corr-halflife-days", type=float, default=250.0)
     parser.add_argument("--corr-min-rows", type=int, default=256)
@@ -450,6 +461,8 @@ def _run_complete_selection(
             ann_dvol=float(row["ann_dvol"]),
             trade_sr=float(row["trade_sr"]),
             combined_turnover=float(audit["comb_turnover"]),
+            asset_class=str(row["asset_cls"]),
+            economic_subclass=str(row["econ_subcls"]),
             econ_family=str(row.get("econ_fam_id") or ""),
             mkt_risk_vol_day=(
                 float(row["mkt_risk_vol_usd_day"])
@@ -457,15 +470,24 @@ def _run_complete_selection(
                 else None
             ),
         ))
-    selector = GreedyInstrumentSelector(config=GreedySelectionConfig(
-        capital=float(run_config["init_cap_usd"]),
-        target_vol=float(run_config["target_vol"]),
-        gross_sr=args.gross_sr,
-        score_threshold=args.score_threshold,
-        starting_weight=args.starting_weight,
-        max_pct_market_volume=float(run_config["max_pct_mkt_volume"]),
-        liquidity_days=int(run_config["liq_days"]),
-    ))
+    if args.weight_policy == "legacy_handcraft":
+        weight_policy = HandcraftedPortfolioWeights()
+    elif args.weight_policy == "equal":
+        weight_policy = EqualPortfolioWeights()
+    else:
+        weight_policy = None
+    selector = GreedyInstrumentSelector(
+        config=GreedySelectionConfig(
+            capital=float(run_config["init_cap_usd"]),
+            target_vol=float(run_config["target_vol"]),
+            gross_sr=args.gross_sr,
+            score_threshold=args.score_threshold,
+            starting_weight=args.starting_weight,
+            max_pct_market_volume=float(run_config["max_pct_mkt_volume"]),
+            liquidity_days=int(run_config["liq_days"]),
+        ),
+        weight_policy=weight_policy,
+    )
     selection = selector.select(candidate_list, correlation)
     for trial in selection.trials:
         logger.debug(
@@ -489,6 +511,7 @@ def _run_complete_selection(
         final_rows.append({
             "rank": rank,
             "symbol": symbol,
+            "wt_policy": args.weight_policy,
             "weight": selection.final_score.weights[symbol],
             "idm": selection.final_score.idm,
             "ann_dvol": candidate.ann_dvol,
@@ -519,10 +542,13 @@ def _run_complete_selection(
     # frames remain available in Parquet and calculations above are untouched.
     public_audit = round_public_report(audit_frame)
     public_trials = round_public_report(
-        pl.DataFrame(selection.trials, infer_schema_length=None)
+        pl.DataFrame(selection.trials, infer_schema_length=None).with_columns(
+            pl.lit(args.weight_policy).alias("wt_policy")
+        )
     )
     public_trial_allocations = round_public_report(
         pl.DataFrame(selection.trial_allocations, infer_schema_length=None)
+        .with_columns(pl.lit(args.weight_policy).alias("wt_policy"))
     )
     # The exhaustive trial-allocation audit is useful for reproducing rejected
     # decisions, but the accepted path is the readable answer to "what changed
@@ -531,11 +557,16 @@ def _run_complete_selection(
     public_selection_passes = round_public_report(
         pl.DataFrame(selection.trial_allocations, infer_schema_length=None)
         .filter(pl.col("accepted"))
+        .with_columns(pl.lit(args.weight_policy).alias("wt_policy"))
         .select(
             pl.col("iteration").alias("selection_step"),
             pl.col("candidate").alias("added_symbol"),
+            "wt_policy",
             "book",
             pl.col("book_symbol").alias("symbol"),
+            "asset_cls",
+            "econ_subcls",
+            "econ_fam_id",
             "cluster_path",
             "cluster_members",
             "cluster_weight",

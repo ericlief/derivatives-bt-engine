@@ -68,8 +68,9 @@ class SelectionCandidate:
 
     ``ann_dvol`` is annual USD volatility per contract. ``trade_sr`` is the
     one-way cost in SR units, while ``combined_turnover`` is the measured
-    annual turnover of this symbol's combined subsystem. ``econ_family``
-    prevents selecting duplicate execution routes for the same exposure.
+    annual turnover of this symbol's combined subsystem. ``asset_class`` and
+    ``economic_subclass`` locate it in the reviewed allocation tree, while
+    ``econ_family`` prevents selecting duplicate routes for the same exposure.
     ``mkt_risk_vol_day`` is daily market volume expressed in annualized USD
     risk units, matching the Phase 2 participation calculation.
     """
@@ -78,6 +79,8 @@ class SelectionCandidate:
     ann_dvol: float
     trade_sr: float
     combined_turnover: float
+    asset_class: str
+    economic_subclass: str
     econ_family: str = ""
     mkt_risk_vol_day: float | None = None
 
@@ -131,10 +134,10 @@ class GreedySelectionConfig:
 class PortfolioWeightAllocation:
     """Return portfolio weights together with their hierarchical grouping.
 
-    ``weights`` maps each symbol to its normalized risk weight. ``cluster_paths``
-    uses dotted branch identifiers such as ``1``, ``2.1``, and ``2.2``. Symbols
-    sharing a complete path occupy the same terminal cluster, while common path
-    prefixes expose the recursive grouping that produced the weights.
+    ``weights`` maps each symbol to its normalized risk weight. The default
+    ``cluster_paths`` values are readable classification paths such as
+    ``ags/grains``. The retained legacy correlation policy uses dotted branch
+    identifiers such as ``1``, ``2.1``, and ``2.2`` instead.
     """
 
     weights: dict[str, float]
@@ -176,8 +179,76 @@ class EqualPortfolioWeights(PortfolioWeightPolicy):
         )
 
 
+class TopDownClassificationWeights(PortfolioWeightPolicy):
+    """Allocate equally down the reviewed economic classification tree.
+
+    Every represented asset class receives equal risk. Within an asset class,
+    every represented economic subclass receives equal risk, and instruments
+    then share their subclass allocation equally. Correlations remain relevant
+    to the trial's final IDM and score, but they no longer invent opaque groups
+    such as an FX cross and gasoil occupying the same allocation branch.
+
+    Parameters
+    ----------
+    classification_by_symbol
+        Mapping from executable symbol to canonical lowercase
+        ``(asset_class, economic_subclass)`` identifiers.
+    """
+
+    def __init__(
+        self,
+        classification_by_symbol: dict[str, tuple[str, str]],
+    ) -> None:
+        """Store the symbol hierarchy used for every hypothetical book."""
+        self.classification_by_symbol = classification_by_symbol
+
+    def allocate(
+        self, symbols: list[str], correlation: np.ndarray
+    ) -> PortfolioWeightAllocation:
+        """Return class/subclass/instrument equal-risk weights.
+
+        ``correlation`` is intentionally unused here. It is applied after this
+        structural allocation when the selector calculates IDM and portfolio
+        score.
+        """
+        del correlation
+        if not symbols:
+            return PortfolioWeightAllocation({}, {})
+
+        missing = [
+            symbol
+            for symbol in symbols
+            if symbol not in self.classification_by_symbol
+            or not all(self.classification_by_symbol[symbol])
+        ]
+        if missing:
+            raise ValueError(
+                "top-down weighting requires asset class and economic "
+                f"subclass for: {missing}"
+            )
+
+        members: dict[str, dict[str, list[str]]] = {}
+        for symbol in symbols:
+            asset_class, subclass = self.classification_by_symbol[symbol]
+            members.setdefault(asset_class, {}).setdefault(subclass, []).append(
+                symbol
+            )
+
+        class_weight = 1.0 / len(members)
+        weights: dict[str, float] = {}
+        paths: dict[str, str] = {}
+        for asset_class, subclasses in members.items():
+            subclass_weight = class_weight / len(subclasses)
+            for subclass, subclass_symbols in subclasses.items():
+                instrument_weight = subclass_weight / len(subclass_symbols)
+                for symbol in subclass_symbols:
+                    weights[symbol] = instrument_weight
+                    paths[symbol] = f"{asset_class}/{subclass}"
+        return PortfolioWeightAllocation(weights, paths)
+
+
 class HandcraftedPortfolioWeights(PortfolioWeightPolicy):
-    """Implement Carver-style recursive two-cluster risk weighting.
+    """Implement the legacy correlation-derived recursive risk weighting.
 
     Instruments are split into two correlation clusters. Each cluster receives
     half the parent allocation after adjustment for its internal IDM, and
@@ -289,7 +360,21 @@ class GreedyInstrumentSelector:
     ) -> None:
         """Initialize the selector with configurable scoring and weight policies."""
         self.config = config or GreedySelectionConfig()
-        self.weight_policy = weight_policy or HandcraftedPortfolioWeights()
+        # ``None`` selects the reviewed economic hierarchy dynamically from
+        # each candidate set. Explicit policies remain available for research
+        # comparisons against equal or legacy correlation-derived weighting.
+        self.weight_policy = weight_policy
+
+    def _weight_policy_for(
+        self, candidates: dict[str, SelectionCandidate]
+    ) -> PortfolioWeightPolicy:
+        """Return the configured policy or build the default hierarchy policy."""
+        if self.weight_policy is not None:
+            return self.weight_policy
+        return TopDownClassificationWeights({
+            symbol: (candidate.asset_class, candidate.economic_subclass)
+            for symbol, candidate in candidates.items()
+        })
 
     def score(
         self,
@@ -323,7 +408,9 @@ class GreedyInstrumentSelector:
         # Slice the precomputed universe matrix into this trial book's order.
         indices = [full_symbols.index(symbol) for symbol in symbols]
         correlation = full_correlation[np.ix_(indices, indices)]
-        allocation_result = self.weight_policy.allocate(symbols, correlation)
+        allocation_result = self._weight_policy_for(candidates).allocate(
+            symbols, correlation
+        )
         weights = allocation_result.weights
         if starting and len(symbols) == 1:
             weights_for_limits = {symbols[0]: self.config.starting_weight}
@@ -392,6 +479,9 @@ class GreedyInstrumentSelector:
             net_sharpes[symbol] = net_sr
             details.append({
                 "symbol": symbol,
+                "asset_cls": candidate.asset_class,
+                "econ_subcls": candidate.economic_subclass,
+                "econ_fam_id": candidate.econ_family,
                 "cluster_path": allocation_result.cluster_paths[symbol],
                 "weight": weights[symbol],
                 "limit_weight": allocation,
@@ -586,6 +676,9 @@ class GreedyInstrumentSelector:
                 "accepted": accepted,
                 "book": book,
                 "book_symbol": detail["symbol"],
+                "asset_cls": detail["asset_cls"],
+                "econ_subcls": detail["econ_subcls"],
+                "econ_fam_id": detail["econ_fam_id"],
                 "cluster_path": cluster_path,
                 "cluster_members": ",".join(members_by_cluster[cluster_path]),
                 "cluster_weight": weight_by_cluster[cluster_path],

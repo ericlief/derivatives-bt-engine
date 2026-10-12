@@ -30,6 +30,8 @@
 - Financial data may exist outside the repository under `/home/dev/data/fin`.
 - Database resources may exist under `/home/dev/fin/db`.
 - Do not modify source market data unless explicitly requested.
+- Persist asset classes and economic subclasses as lowercase snake case.
+  Reserve uppercase identifiers for instrument and contract symbols.
 
 ## Public report schemas
 

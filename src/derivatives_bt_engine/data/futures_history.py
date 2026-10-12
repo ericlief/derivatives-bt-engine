@@ -254,7 +254,7 @@ class PysystemtradeHistoryProvider:
         executable-mark, carry, and additive-price dataframes.
         """
         sidecar_version, source_commit = self._database_metadata()
-        if sidecar_version != 4:
+        if sidecar_version != 5:
             raise ValueError(
                 f"Unsupported pysystemtrade sidecar schema version: {sidecar_version}"
             )
@@ -271,7 +271,8 @@ class PysystemtradeHistoryProvider:
                     i.description,
                     i.point_size,
                     i.currency,
-                    i.asset_class,
+                    classification.asset_class,
+                    classification.economic_subclass,
                     i.region,
                     r.hold_roll_cycle,
                     r.roll_offset_days,
@@ -279,6 +280,8 @@ class PysystemtradeHistoryProvider:
                     r.priced_roll_cycle,
                     r.expiry_offset
                 FROM raw.instrument_config i
+                JOIN ref.instrument_classification classification
+                  USING (instrument_code)
                 JOIN raw.roll_config r USING (instrument_code)
                 WHERE i.instrument_code = ?
                 """,
@@ -320,12 +323,13 @@ class PysystemtradeHistoryProvider:
             "point_size": config[1],
             "currency": config[2],
             "asset_class": config[3],
-            "region": config[4],
-            "hold_roll_cycle": config[5],
-            "roll_offset_days": config[6],
-            "carry_offset": config[7],
-            "priced_roll_cycle": config[8],
-            "expiry_offset": config[9],
+            "economic_subclass": config[4],
+            "region": config[5],
+            "hold_roll_cycle": config[6],
+            "roll_offset_days": config[7],
+            "carry_offset": config[8],
+            "priced_roll_cycle": config[9],
+            "expiry_offset": config[10],
             "source_git_commit": source_commit,
             "sidecar_schema_version": sidecar_version,
             "cache_hit": cache_hit,

@@ -51,7 +51,7 @@ The deterministic raw-data importer is implemented in
 `pysystemtrade-import` CLI. It writes the independently rebuildable sidecar at
 the recommended path; it does not attach to or write the Globex database.
 
-The last fully regenerated overlap artifact used schema v3 and source commit
+The current reference sidecar uses schema v5 and source commit
 `b4a25e6e1e33a54a3ecfb45c0f6db5e2b60b84f8` and produced:
 
 | Build result | Value |
@@ -82,6 +82,13 @@ normalization. Each stream selects its last complete observation independently:
 normally the 23:00 row, otherwise the final complete timestamp for that session.
 This prevents an incomplete late carry row from displacing an earlier valid
 same-timestamp price/carry pair.
+
+Schema v5 adds the repository-owned `ref.instrument_classification` table.
+The importer requires one canonical lowercase `asset_class` and
+`economic_subclass` for each of the 252 instruments with both multiple and
+adjusted price history. The source CSV hash and row count are persisted in
+`meta.reference_manifest`; dormant upstream config rows without history are
+not part of the portfolio-classification universe.
 
 | Canonical daily stream | Selected days | 23:00 selections | Last-complete fallbacks |
 |---|---:|---:|---:|

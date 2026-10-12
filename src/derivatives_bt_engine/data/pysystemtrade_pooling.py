@@ -157,7 +157,9 @@ def load_pysystemtrade_pooling_catalog(
             SELECT
                 i.instrument_code,
                 i.description,
-                i.asset_class,
+                i.asset_class AS source_asset_class,
+                classification.asset_class,
+                classification.economic_subclass,
                 i.currency,
                 i.point_size,
                 i.region,
@@ -175,6 +177,8 @@ def load_pysystemtrade_pooling_catalog(
                 c.adjusted_start,
                 c.adjusted_end
             FROM raw.instrument_config i
+            JOIN ref.instrument_classification classification
+              USING (instrument_code)
             JOIN raw.roll_config r USING (instrument_code)
             JOIN qa.series_coverage c USING (instrument_code)
             WHERE c.multiple_rows > 0

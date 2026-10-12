@@ -122,7 +122,8 @@ def test_phase2_search_universe_requires_new_phase1_schema():
 def _phase2_step1_report() -> pl.DataFrame:
     return pl.DataFrame({
         "symbol": ["PASS", "ILLIQ", "BIG", "NOIB", "NODATA"],
-        "asset_cls": ["Ags", "Ags", "Equity", "Vol", "FX"],
+        "asset_cls": ["ags", "ags", "equity", "vol", "fx"],
+        "econ_subcls": ["grains", "grains", "us", "vol", "fx"],
         "ann_dvol": [500.0, 500.0, 25_000.0, 500.0, 500.0],
         "avg_daily_volume": [1_000.0, 50.0, 1_000.0, 1_000.0, None],
         "pct_mkt_volume": [0.1, 2.0, 0.1, 0.1, None],

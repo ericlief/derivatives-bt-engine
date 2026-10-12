@@ -29,6 +29,7 @@ DEFAULT_VIEW_COLUMNS = (
     "hist_instr_code",
     "desc",
     "asset_cls",
+    "econ_subcls",
     "region",
     "exec_prof",
     "exec_elig",
@@ -106,6 +107,7 @@ PHASE2_STEP1_COLUMNS = (
     "hist_instr_code",
     "desc",
     "asset_cls",
+    "econ_subcls",
     "region",
     "econ_fam_id",
     "roll_policy_id",
@@ -188,7 +190,13 @@ def phase2_step1_candidates(report: pl.DataFrame) -> pl.DataFrame:
     cost, dollar-vol size, liquidity, data, rule, execution, and IB contract
     decisions, then returns the compact columns needed by the next stage.
     """
-    required = {*PHASE2_STEP1_GATE_COLUMNS, "ib_avail", "symbol"}
+    required = {
+        *PHASE2_STEP1_GATE_COLUMNS,
+        "ib_avail",
+        "symbol",
+        "asset_cls",
+        "econ_subcls",
+    }
     missing = sorted(required.difference(report.columns))
     if missing:
         raise ValueError(

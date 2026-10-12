@@ -32,6 +32,7 @@ def _build_carver_sidecar(path: Path) -> None:
         con.execute("CREATE SCHEMA meta")
         con.execute("CREATE SCHEMA raw")
         con.execute("CREATE SCHEMA daily")
+        con.execute("CREATE SCHEMA ref")
         con.execute(
             """
             CREATE TABLE meta.schema_version (
@@ -44,7 +45,7 @@ def _build_carver_sidecar(path: Path) -> None:
             """
         )
         con.execute(
-            "INSERT INTO meta.schema_version VALUES (4, now(), 'test', '/test', ?)",
+            "INSERT INTO meta.schema_version VALUES (5, now(), 'test', '/test', ?)",
             [SOURCE_COMMIT],
         )
         con.execute(
@@ -60,6 +61,15 @@ def _build_carver_sidecar(path: Path) -> None:
                 per_trade_cost DOUBLE,
                 region VARCHAR,
                 source_file VARCHAR
+            )
+            """
+        )
+        con.execute(
+            """
+            CREATE TABLE ref.instrument_classification (
+                instrument_code VARCHAR,
+                asset_class VARCHAR,
+                economic_subclass VARCHAR
             )
             """
         )
@@ -116,6 +126,10 @@ def _build_carver_sidecar(path: Path) -> None:
                 (?, ?, 10, 'USD', 'Test', 0, 0, 0, 'US', 'config.csv')
                 """,
                 [code, f"{code} test future"],
+            )
+            con.execute(
+                "INSERT INTO ref.instrument_classification VALUES (?, 'equity', 'us')",
+                [code],
             )
             con.execute(
                 """

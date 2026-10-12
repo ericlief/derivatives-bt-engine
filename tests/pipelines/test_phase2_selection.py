@@ -3,6 +3,7 @@ import pytest
 
 from derivatives_bt_engine.pipelines.phase2_selection import (
     _subsystem_correlation,
+    parse_args,
     run,
     slow_tilt_ewmac_weights,
 )
@@ -47,12 +48,19 @@ def test_slow_tilt_ewmac_weights_reject_invalid_rule_sets(rules, message):
         slow_tilt_ewmac_weights(rules)
 
 
+def test_phase2_defaults_to_reviewed_classification_weights():
+    args = parse_args([])
+
+    assert args.weight_policy == "topdown_classif"
+
+
 def test_run_loads_explicit_phase1_csv_and_saves_selected_rows(tmp_path):
     source = tmp_path / "pysystemtrade_cost_phase1_ib_20261005_120000.csv"
     output = tmp_path / "phase2_step1.csv"
     pl.DataFrame({
         "symbol": ["MZC", "VIX"],
-        "asset_cls": ["Ags", "Vol"],
+        "asset_cls": ["ags", "vol"],
+        "econ_subcls": ["grains", "vol"],
         "ann_dvol": [600.126, 6_200.0],
         "avg_daily_volume": [2_000.0, None],
         "pct_mkt_volume": [0.2, None],

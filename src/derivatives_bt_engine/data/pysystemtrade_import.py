@@ -28,11 +28,16 @@ import duckdb
 import polars as pl
 
 from derivatives_bt_engine.logging_config import setup_logger
+from derivatives_bt_engine.data.pysystemtrade_classification import (
+    DEFAULT_PYSYSTEMTRADE_CLASSIFICATION_PATH,
+    load_pysystemtrade_instrument_classification,
+    validate_classification_coverage,
+)
 
 
 logger = setup_logger()
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 DEFAULT_GLOBEX_DB_PATH = Path("/home/dev/fin/db/globex_mdp_3.0.duckdb")
 
 _MULTIPLE_SCHEMA = {
@@ -340,6 +345,7 @@ def _create_schema(con: duckdb.DuckDBPyConnection) -> None:
     con.execute("CREATE SCHEMA raw")
     con.execute("CREATE SCHEMA daily")
     con.execute("CREATE SCHEMA qa")
+    con.execute("CREATE SCHEMA ref")
 
     con.execute(
         """
@@ -364,6 +370,16 @@ def _create_schema(con: duckdb.DuckDBPyConnection) -> None:
             row_count UBIGINT NOT NULL,
             min_source_timestamp TIMESTAMP,
             max_source_timestamp TIMESTAMP
+        )
+        """
+    )
+    con.execute(
+        """
+        CREATE TABLE meta.reference_manifest (
+            reference_name VARCHAR PRIMARY KEY,
+            source_path VARCHAR NOT NULL,
+            sha256 VARCHAR NOT NULL,
+            row_count UBIGINT NOT NULL
         )
         """
     )
@@ -457,6 +473,15 @@ def _create_schema(con: duckdb.DuckDBPyConnection) -> None:
         )
         """
     )
+    con.execute(
+        """
+        CREATE TABLE ref.instrument_classification (
+            instrument_code VARCHAR PRIMARY KEY,
+            asset_class VARCHAR NOT NULL,
+            economic_subclass VARCHAR NOT NULL
+        )
+        """
+    )
 
 
 def _insert_frame(
@@ -468,6 +493,56 @@ def _insert_frame(
         con.execute(f"INSERT INTO {table} SELECT * FROM {registration}")
     finally:
         con.unregister(registration)
+
+
+def _import_instrument_classification(
+    con: duckdb.DuckDBPyConnection,
+    classification_path: Path,
+) -> None:
+    """Validate and materialize the repository-owned economic hierarchy.
+
+    The imported market-data files remain untouched in ``raw``.  This mapping
+    belongs in ``ref`` because it is a reviewed portfolio-construction input,
+    not upstream pysystemtrade source data.
+    """
+    try:
+        classification = load_pysystemtrade_instrument_classification(
+            classification_path
+        )
+        # The upstream config contains dormant definitions with no imported
+        # price history. Phase 1's research universe requires classifications
+        # only for instruments represented in both price streams.
+        source_codes = con.execute(
+            """
+            SELECT config.instrument_code
+            FROM raw.instrument_config config
+            WHERE EXISTS (
+                SELECT 1 FROM raw.multiple_prices multiple
+                WHERE multiple.instrument_code = config.instrument_code
+            )
+              AND EXISTS (
+                SELECT 1 FROM raw.adjusted_prices adjusted
+                WHERE adjusted.instrument_code = config.instrument_code
+            )
+            ORDER BY config.instrument_code
+            """
+        ).pl().get_column("instrument_code")
+        classification = validate_classification_coverage(
+            classification, source_codes
+        )
+    except (OSError, ValueError) as error:
+        raise ImportValidationError(str(error)) from error
+
+    _insert_frame(con, "ref.instrument_classification", classification)
+    con.execute(
+        "INSERT INTO meta.reference_manifest VALUES (?, ?, ?, ?)",
+        [
+            "instrument_classification",
+            str(classification_path),
+            _sha256(classification_path),
+            classification.height,
+        ],
+    )
 
 
 def _manifest_entry(
@@ -1009,12 +1084,19 @@ def build_sidecar(
     output: Path | str,
     *,
     globex_db: Path | str = DEFAULT_GLOBEX_DB_PATH,
+    classification_path: Path | str = DEFAULT_PYSYSTEMTRADE_CLASSIFICATION_PATH,
     replace: bool = False,
 ) -> ImportResult:
-    """Build and atomically publish a validated pysystemtrade DuckDB sidecar."""
+    """Build and atomically publish a validated pysystemtrade DuckDB sidecar.
+
+    ``classification_path`` is the reviewed economic hierarchy materialized
+    into ``ref.instrument_classification``. Every imported instrument must be
+    classified before the temporary database can replace an existing sidecar.
+    """
     source = _resolved(Path(source))
     output = _resolved(Path(output))
     globex_db = _resolved(Path(globex_db))
+    classification_path = _resolved(Path(classification_path))
     _validate_paths(source, output, globex_db, replace)
 
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -1046,6 +1128,7 @@ def build_sidecar(
             ],
         )
         manifest = _import_files(con, source)
+        _import_instrument_classification(con, classification_path)
         _insert_frame(con, "meta.dataset_manifest", _manifest_frame(manifest))
         _validate_import(con, manifest)
         _create_daily_tables(con)
@@ -1109,6 +1192,14 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         help="Protected Globex DB path; the importer refuses to use it as output",
     )
     parser.add_argument(
+        "--classification",
+        default=str(DEFAULT_PYSYSTEMTRADE_CLASSIFICATION_PATH),
+        help=(
+            "Version-controlled economic classification CSV materialized in "
+            "the reference schema"
+        ),
+    )
+    parser.add_argument(
         "--replace",
         action="store_true",
         help="Atomically replace an existing sidecar after the new build validates",
@@ -1122,6 +1213,7 @@ def main(argv: Optional[list[str]] = None) -> None:
         args.source,
         args.output,
         globex_db=args.globex_db,
+        classification_path=args.classification,
         replace=args.replace,
     )
     print(

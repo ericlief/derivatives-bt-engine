@@ -351,7 +351,7 @@ def test_broad_audit_defaults_to_reviewed_pool_ewmac_cost_baseline():
     assert args.affordability_min_contracts == 4
     assert args.affordability_min_main_instruments == 15
     assert args.affordability_main_asset_classes == (
-        "Equity", "Ags", "Vol", "OilGas", "FX", "Metals", "Bond",
+        "equity", "ags", "vol", "energy", "fx", "metals", "bond",
     )
     assert args.volume_lookback_days == 20
     assert args.volume_duration == "2 M"

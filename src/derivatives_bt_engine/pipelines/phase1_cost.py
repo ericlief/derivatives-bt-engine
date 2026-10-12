@@ -126,13 +126,13 @@ DEFAULT_AFFORDABILITY_CAPITAL_USD = 100_000.0
 DEFAULT_AFFORDABILITY_IDM = 1.0
 DEFAULT_AFFORDABILITY_MIN_MAIN_INSTRUMENTS = 15
 DEFAULT_AFFORDABILITY_MAIN_ASSET_CLASSES = (
-    "Equity",
-    "Ags",
-    "Vol",
-    "OilGas",
-    "FX",
-    "Metals",
-    "Bond",
+    "equity",
+    "ags",
+    "vol",
+    "energy",
+    "fx",
+    "metals",
+    "bond",
 )
 DEFAULT_INSTRUMENT_COST_LIMIT_SR = 0.01
 DEFAULT_VOLUME_LOOKBACK_DAYS = 20
@@ -151,6 +151,7 @@ def _pooling_report_identity(instr: dict) -> dict:
         ),
         "description": instr.get("description"),
         "asset_class": instr.get("asset_class"),
+        "economic_subclass": instr.get("economic_subclass"),
         "region": instr.get("region"),
         "economic_family_id": instr.get("economic_family_id"),
         "roll_policy_id": instr.get("roll_policy_id"),
@@ -938,6 +939,10 @@ def _attach_affordability_ranks(
         raise ValueError("min_main_instruments must be positive")
     if not main_asset_classes:
         raise ValueError("main_asset_classes cannot be empty")
+    main_asset_classes = tuple(
+        value.strip().casefold() for value in main_asset_classes
+    )
+    normalized_asset_class = pl.col("asset_class").str.to_lowercase()
     required = {
         "symbol",
         "asset_class",
@@ -964,11 +969,11 @@ def _attach_affordability_ranks(
         pl.lit(",".join(main_asset_classes)).alias(
             "affordability_main_asset_classes"
         ),
-        pl.col("asset_class").is_in(main_asset_classes).alias(
+        normalized_asset_class.is_in(main_asset_classes).alias(
             "counts_toward_main_instrument_minimum"
         ),
         (
-            pl.when(pl.col("asset_class").is_in(main_asset_classes))
+            pl.when(normalized_asset_class.is_in(main_asset_classes))
             .then(pl.lit("main"))
             .otherwise(pl.lit("special"))
         ).alias("affordability_cluster_role"),
@@ -1003,7 +1008,7 @@ def _attach_affordability_ranks(
             >= min_contracts
         ).alias("equal_weight_meets_min_contracts"),
         (
-            pl.col("asset_class").is_in(main_asset_classes)
+            normalized_asset_class.is_in(main_asset_classes)
             & (
                 equal_weight_dvol_budget
                 / pl.col("annual_dollar_vol_per_contract")
@@ -2561,7 +2566,7 @@ def parse_args(argv=None):
         default=DEFAULT_AFFORDABILITY_MAIN_ASSET_CLASSES,
         help=(
             "Comma-separated core asset classes counted toward the minimum "
-            "(default: Equity,Ags,Vol,OilGas,FX,Metals,Bond)"
+            "(default: equity,ags,vol,energy,fx,metals,bond)"
         ),
     )
     parser.add_argument(
@@ -2684,6 +2689,7 @@ def _load_instruments(
 
 
 PUBLIC_REPORT_RENAMES = {
+    "economic_subclass": "econ_subcls",
     "price": "cur_price",
     "price_source": "cur_price_source",
     "expiration": "expiry",
@@ -2913,6 +2919,7 @@ def _public_report_schema(report: pl.DataFrame) -> pl.DataFrame:
         "signal_symbol",
         "desc",
         "asset_cls",
+        "econ_subcls",
         "region",
         "exec_prof",
         "exec_elig",

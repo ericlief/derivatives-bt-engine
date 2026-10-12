@@ -80,13 +80,26 @@ def _write_source_tree(root: Path) -> Path:
     return source
 
 
+def _write_classification(root: Path) -> Path:
+    """Create the minimal reviewed hierarchy required by the import fixture."""
+    path = root / "instrument_classification.csv"
+    path.write_text(
+        "instrument_code,asset_class,economic_subclass\n"
+        "TEST,equity,us\n",
+        encoding="utf-8",
+    )
+    return path
+
+
 def test_build_sidecar_imports_typed_data_manifest_and_qa(tmp_path: Path) -> None:
     source = _write_source_tree(tmp_path)
     output = tmp_path / "pysystemtrade_reference.duckdb"
     source_file = source / "multiple_prices_csv" / "TEST.csv"
     source_digest = hashlib.sha256(source_file.read_bytes()).hexdigest()
 
-    result = build_sidecar(source, output)
+    result = build_sidecar(
+        source, output, classification_path=_write_classification(tmp_path)
+    )
 
     assert result.output_path == output
     assert result.manifest_files == 8
@@ -98,7 +111,11 @@ def test_build_sidecar_imports_typed_data_manifest_and_qa(tmp_path: Path) -> Non
 
     con = duckdb.connect(str(output), read_only=True)
     try:
-        assert con.execute("SELECT version FROM meta.schema_version").fetchone()[0] == 4
+        assert con.execute("SELECT version FROM meta.schema_version").fetchone()[0] == 5
+        assert con.execute(
+            "SELECT asset_class, economic_subclass "
+            "FROM ref.instrument_classification WHERE instrument_code = 'TEST'"
+        ).fetchone() == ("equity", "us")
         assert con.execute("SELECT count(*) FROM raw.multiple_prices").fetchone()[0] == 2
         assert con.execute(
             "SELECT typeof(price_contract) FROM raw.multiple_prices LIMIT 1"
@@ -165,7 +182,9 @@ def test_import_preserves_timestamp_and_maps_sunday_to_monday_trade_date(
         handle.write("2020-01-05 23:00:00,1\n")
     output = tmp_path / "pysystemtrade_reference.duckdb"
 
-    build_sidecar(source, output)
+    build_sidecar(
+        source, output, classification_path=_write_classification(tmp_path)
+    )
 
     con = duckdb.connect(str(output), read_only=True)
     try:
@@ -218,7 +237,9 @@ def test_daily_tables_choose_2300_or_last_complete_snapshot(tmp_path: Path) -> N
             "2020-01-04 20:00:00,3\n"
         )
     output = tmp_path / "pysystemtrade_reference.duckdb"
-    build_sidecar(source, output)
+    build_sidecar(
+        source, output, classification_path=_write_classification(tmp_path)
+    )
 
     con = duckdb.connect(str(output), read_only=True)
     try:
@@ -252,7 +273,33 @@ def test_duplicate_logical_key_prevents_publication(tmp_path: Path) -> None:
     output = tmp_path / "pysystemtrade_reference.duckdb"
 
     with pytest.raises(ImportValidationError, match="duplicate key group"):
-        build_sidecar(source, output)
+        build_sidecar(
+            source, output, classification_path=_write_classification(tmp_path)
+        )
+
+    assert not output.exists()
+    assert not list(tmp_path.glob(".*.duckdb.tmp-*"))
+
+
+def test_missing_instrument_classification_prevents_publication(
+    tmp_path: Path,
+) -> None:
+    """An unclassified history must fail before the sidecar is published."""
+    source = _write_source_tree(tmp_path)
+    output = tmp_path / "pysystemtrade_reference.duckdb"
+    classification = tmp_path / "instrument_classification.csv"
+    classification.write_text(
+        "instrument_code,asset_class,economic_subclass\n"
+        "OTHER,equity,us\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ImportValidationError, match="TEST"):
+        build_sidecar(
+            source,
+            output,
+            classification_path=classification,
+        )
 
     assert not output.exists()
     assert not list(tmp_path.glob(".*.duckdb.tmp-*"))
@@ -269,7 +316,12 @@ def test_failed_replacement_preserves_existing_output(tmp_path: Path) -> None:
     output.write_bytes(b"existing sidecar")
 
     with pytest.raises(ImportValidationError, match="duplicate key group"):
-        build_sidecar(source, output, replace=True)
+        build_sidecar(
+            source,
+            output,
+            classification_path=_write_classification(tmp_path),
+            replace=True,
+        )
 
     assert output.read_bytes() == b"existing sidecar"
     assert not list(tmp_path.glob(".*.duckdb.tmp-*"))
@@ -280,7 +332,12 @@ def test_refuses_to_overwrite_protected_globex_database(tmp_path: Path) -> None:
     globex = tmp_path / "globex.duckdb"
 
     with pytest.raises(ImportValidationError, match="Globex source-of-record"):
-        build_sidecar(source, globex, globex_db=globex)
+        build_sidecar(
+            source,
+            globex,
+            globex_db=globex,
+            classification_path=_write_classification(tmp_path),
+        )
 
 
 def test_refuses_existing_output_without_replace(tmp_path: Path) -> None:
@@ -289,7 +346,9 @@ def test_refuses_existing_output_without_replace(tmp_path: Path) -> None:
     output.write_bytes(b"keep me")
 
     with pytest.raises(FileExistsError, match="--replace"):
-        build_sidecar(source, output)
+        build_sidecar(
+            source, output, classification_path=_write_classification(tmp_path)
+        )
 
     assert output.read_bytes() == b"keep me"
 
