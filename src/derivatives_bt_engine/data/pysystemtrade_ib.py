@@ -81,6 +81,7 @@ def add_local_execution_overlays(instruments: list[dict]) -> list[dict]:
             **resolve_execution_eligibility(
                 symbol,
                 ib_symbol=spec.get("ib_symbol", symbol),
+                exchange=spec["exchange"],
             ),
         })
         overlays.append(overlay)
@@ -218,6 +219,7 @@ def load_pysystemtrade_ib_instruments(
             **resolve_execution_eligibility(
                 row["instrument_code"],
                 ib_symbol=row["ib_symbol"],
+                exchange=row["ib_exchange"],
             ),
         }
         for row in joined.sort("instrument_code").iter_rows(named=True)

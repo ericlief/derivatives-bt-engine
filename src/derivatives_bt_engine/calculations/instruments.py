@@ -183,6 +183,17 @@ EXECUTION_ELIGIBILITY_OVERRIDES: dict[str, dict[str, dict[str, object]]] = {
     },
 }
 
+# Venue restrictions apply only to the executable universe for this account
+# profile. Their research histories remain available for pooling, signals, and
+# comparative analysis; the live market snapshot must not query them.
+EXECUTION_EXCHANGE_RESTRICTIONS: dict[str, dict[str, str]] = {
+    'ibkr_us': {
+        'EUREX': 'ibkr_us_exchange_no_trading_permission',
+        'FTA': 'ibkr_us_exchange_no_trading_permission',
+        'IPE': 'ibkr_us_exchange_no_trading_permission',
+    },
+}
+
 
 # Carver-aligned defaults for raw Globex roots. These values are pinned to the
 # same upstream pysystemtrade source commit as the packaged mappings and were
@@ -244,14 +255,17 @@ def resolve_execution_eligibility(
     symbol: str,
     *,
     ib_symbol: Optional[str] = None,
+    exchange: Optional[str] = None,
     profile: str = DEFAULT_EXECUTION_PROFILE,
 ) -> dict[str, object]:
     """Return our account-specific execution status for an instrument.
 
     The IB symbol is checked first because externally sourced research codes
     can differ from the executable contract root (Carver ``SGX`` -> IB
-    ``STI``). An absent override means no known restriction under the selected
-    profile; live contract qualification and cost checks remain independent.
+    ``STI``). Product overrides take precedence over venue restrictions so a
+    future account-specific exception can reopen one contract without enabling
+    an entire exchange. An absent restriction means the live snapshot must
+    still verify contract qualification and account permissions.
     """
     overrides = EXECUTION_ELIGIBILITY_OVERRIDES.get(profile, {})
     identifiers = [ib_symbol, symbol]
@@ -263,6 +277,15 @@ def resolve_execution_eligibility(
         ),
         None,
     )
+    if override is None and exchange:
+        exchange_reason = EXECUTION_EXCHANGE_RESTRICTIONS.get(
+            profile, {}
+        ).get(exchange.upper())
+        if exchange_reason:
+            override = {
+                'execution_eligible': False,
+                'execution_restriction_reason': exchange_reason,
+            }
     return {
         'execution_profile': profile,
         'execution_eligible': (

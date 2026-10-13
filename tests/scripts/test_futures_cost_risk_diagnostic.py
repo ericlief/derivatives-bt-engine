@@ -27,6 +27,7 @@ from derivatives_bt_engine.pipelines.phase1_cost import (
     _latest_dated_mark,
     _resolve_ib_account_name,
     _resolve_what_if_account,
+    _snapshot_execution_universe,
     _what_if_margin_currency,
     _what_if_order_preview,
     _roll_rate_audit,
@@ -59,6 +60,24 @@ def test_market_data_type_belongs_to_diagnostic_not_history_loader():
     assert "spread_use_rth" in diagnostic_parameters
     assert "market_data_type" not in history_parameters
     assert "contract_details_timeout" in diagnostic_parameters
+
+
+def test_snapshot_universe_omits_static_execution_restrictions():
+    """Research-only instruments never reach the live IB request loop."""
+    instruments = [
+        {
+            "symbol": "BUND",
+            "execution_eligible": False,
+            "execution_restriction_reason": (
+                "ibkr_us_exchange_no_trading_permission"
+            ),
+        },
+        {"symbol": "MZC", "execution_eligible": True},
+    ]
+
+    selected = _snapshot_execution_universe(instruments)
+
+    assert [instr["symbol"] for instr in selected] == ["MZC"]
 
 
 def test_broad_audit_defaults_to_automatic_quote_fallback():

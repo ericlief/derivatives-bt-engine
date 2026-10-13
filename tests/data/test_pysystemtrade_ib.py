@@ -45,6 +45,29 @@ def test_ibkr_us_execution_restriction_uses_executable_ib_symbol():
     }
 
 
+def test_ibkr_us_execution_restriction_excludes_unavailable_exchanges():
+    """Known unavailable venues remain research-only for the US profile."""
+    for exchange in ("EUREX", "FTA", "IPE"):
+        restricted = resolve_execution_eligibility(
+            "TEST",
+            ib_symbol="TEST",
+            exchange=exchange,
+        )
+        assert not restricted["execution_eligible"]
+        assert (
+            restricted["execution_restriction_reason"]
+            == "ibkr_us_exchange_no_trading_permission"
+        )
+
+    ordinary = resolve_execution_eligibility(
+        "EURIBOR-ICE",
+        ib_symbol="ER3",
+        exchange="ICEEU",
+    )
+    assert ordinary["execution_eligible"]
+    assert ordinary["execution_restriction_reason"] is None
+
+
 def test_local_micros_borrow_matching_carver_histories():
     parent_codes = {
         "CORN_mini",

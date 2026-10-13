@@ -16,8 +16,10 @@ The diagnostic deliberately separates research history from execution data:
 
 All 252 instruments with usable Carver history have candidate IB identities.
 Five local CBOT grain micros and two Treasury micros absent from Carver are
-added as execution-only overlays, producing 259 candidate rows; qualification
-against the connected account determines actual availability.
+added as execution-only overlays, producing 259 mapped rows. The ``ibkr_us``
+execution profile removes 56 known research-only rows before any live request
+(46 EUREX, seven IPE, two FTA, and SGX STI), leaving 203 snapshot candidates;
+qualification against the connected account determines remaining availability.
 IB dated and continuous history remain explicit comparison modes.  A missing
 quote is never treated as a zero spread, and spread-dependent costs remain
 null.
@@ -3793,6 +3795,7 @@ def _acquire_live_market_rows(
     capital, cost-limit, affordability, or Phase 2 eligibility policy is
     applied here, which makes the result safe to cache and reuse.
     """
+    instruments = _snapshot_execution_universe(instruments)
     log.info(
         "futures_market_snapshot start instruments=%d duration=%s "
         "fast_vol_span=%d slow_vol_years=%d slow_vol_weight=%.3f "
@@ -3916,6 +3919,40 @@ def _acquire_live_market_rows(
     finally:
         ib.disconnect()
     return rows
+
+
+def _snapshot_execution_universe(instruments: list[dict]) -> list[dict]:
+    """Return only contracts permitted in the configured execution profile.
+
+    Static product and exchange restrictions are evaluated while loading the
+    instrument map. Removing those rows before the IB connection loop avoids
+    all qualification, quote, history, spread, volume, and what-if requests.
+    Their source histories remain untouched and available to research code.
+    """
+    eligible = [
+        instr for instr in instruments
+        if bool(instr.get("execution_eligible", True))
+    ]
+    excluded = [
+        instr for instr in instruments
+        if not bool(instr.get("execution_eligible", True))
+    ]
+    if excluded:
+        reason_counts: dict[str, int] = {}
+        for instr in excluded:
+            reason = str(
+                instr.get("execution_restriction_reason") or "restricted"
+            )
+            reason_counts[reason] = reason_counts.get(reason, 0) + 1
+        log.info(
+            "futures_market_snapshot prefilter input=%d eligible=%d "
+            "excluded=%d reasons=%s",
+            len(instruments),
+            len(eligible),
+            len(excluded),
+            json.dumps(reason_counts, sort_keys=True),
+        )
+    return eligible
 
 
 def _market_snapshot_frame(

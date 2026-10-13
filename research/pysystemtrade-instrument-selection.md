@@ -750,6 +750,12 @@ contract qualification, current quotes and FX, dated-contract spread and
 volume statistics, account-specific what-if commission and margin, and current
 volatility inputs once:
 
+The `ibkr_us` execution profile removes known untradable venues before the
+snapshot request loop. `EUREX`, `FTA`, and `IPE` instruments remain in the
+research-history universe but are absent from the executable snapshot, so IB
+receives no contract, quote, history, spread, volume, or what-if request for
+them. Product-specific restrictions such as SGX STI follow the same boundary.
+
 ```bash
 futures-market-snapshot \
   --instruments all-pysystemtrade \
