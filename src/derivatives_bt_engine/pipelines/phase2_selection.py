@@ -171,8 +171,9 @@ def parse_args(argv=None):
         "--max-margin-pct",
         type=float,
         help=(
-            "Optional maximum summed IB what-if initial margin at forecast "
-            "cap, as a percent of initial capital"
+            "Optional maximum summed IB what-if initial margin for rounded "
+            "whole-contract positions at the forecast cap, as a percent of "
+            "initial capital"
         ),
     )
     parser.add_argument(
@@ -528,10 +529,12 @@ def _run_complete_selection(
     for trial in selection.trials:
         logger.debug(
             "phase2_trial iteration=%s candidate=%s book=%s score=%s idm=%s "
+            "portfolio_cont_margin_at_max_usd=%s "
             "portfolio_margin_at_max_usd=%s margin_limit_usd=%s "
             "feasible=%s accepted=%s reason=%s",
             trial["iteration"], trial["candidate"], trial["book"], trial["score"],
-            trial["idm"], trial.get("portfolio_margin_at_max_usd"),
+            trial["idm"], trial.get("portfolio_cont_margin_at_max_usd"),
+            trial.get("portfolio_margin_at_max_usd"),
             trial.get("margin_limit_usd"), trial["feasible"], trial["accepted"],
             trial["reason"],
         )
@@ -629,6 +632,13 @@ def _run_complete_selection(
             "limit_weight",
             "idm",
             "score",
+            "max_position",
+            "max_cons",
+            "cont_margin_at_max_usd",
+            "margin_at_max_usd",
+            "portfolio_cont_margin_at_max_usd",
+            "portfolio_margin_at_max_usd",
+            "margin_limit_usd",
         )
         .sort("selection_step", "cluster_path", "symbol")
     )

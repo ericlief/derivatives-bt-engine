@@ -189,6 +189,33 @@ def test_optional_margin_limit_rejects_overfunded_trial_book():
     )
 
 
+def test_margin_limit_uses_half_up_whole_contract_position():
+    """The practical gate uses executable lots while retaining the baseline."""
+    candidate = _candidate("MARGIN", 0.0, initial_margin_usd=100.0)
+    selector = GreedyInstrumentSelector(
+        config=GreedySelectionConfig(
+            capital=1_875.0,
+            target_vol=0.20,
+            starting_weight=0.20,
+            max_margin_pct=9.0,
+        ),
+        weight_policy=EqualPortfolioWeights(),
+    )
+
+    score = selector.score(
+        ["MARGIN"], {"MARGIN": candidate}, ["MARGIN"], np.eye(1),
+        starting=True,
+    )
+
+    detail = score.details[0]
+    assert detail["max_position"] == pytest.approx(1.5)
+    assert detail["max_cons"] == 2
+    assert detail["cont_margin_at_max_usd"] == pytest.approx(150.0)
+    assert detail["margin_at_max_usd"] == pytest.approx(200.0)
+    assert not score.feasible
+    assert "portfolio_margin_limit" in score.reason
+
+
 def test_handcrafted_weights_expose_recursive_cluster_paths():
     """Similar correlation profiles should share an auditable terminal path."""
     symbols = ["ES", "NQ", "GC", "SI"]

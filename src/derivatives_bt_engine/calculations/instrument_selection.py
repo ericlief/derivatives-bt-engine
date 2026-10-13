@@ -106,10 +106,12 @@ class GreedySelectionConfig:
     number of selected instruments sharing one economic subclass, such as
     ``grains``. ``score_threshold`` controls the tolerated decline from the
     best score observed so far. ``max_margin_pct`` optionally limits the sum
-    of one-contract IB initial margin multiplied by each instrument's maximum
-    forecast position. This is an additive screen: it deliberately does not
-    assume cross-product SPAN offsets, but remains an estimate because IB's
-    one-lot margin change depends on the account's positions at snapshot time.
+    of one-contract IB initial margin multiplied by each instrument's rounded
+    whole-contract position at the maximum forecast. Both continuous and
+    rounded estimates are retained for comparison. This is an additive screen:
+    it deliberately does not assume cross-product SPAN offsets, but remains an
+    estimate because IB's one-lot margin change depends on the account's
+    positions at snapshot time.
     """
 
     capital: float = 100_000.0
@@ -397,6 +399,29 @@ class GreedyInstrumentSelector:
             for symbol, candidate in candidates.items()
         })
 
+    @staticmethod
+    def _rounded_max_contracts(max_position: float) -> int:
+        """Convert a positive continuous cap position to an executable lot count.
+
+        Futures allocation elsewhere in the engine uses deterministic half-up
+        rounding because Python's ``round`` sends exact half lots to the nearest
+        even integer. Keeping selection on the same rule makes ``0.5`` one
+        contract, ``1.5`` two contracts, and so on.
+
+        Parameters
+        ----------
+        max_position
+            Positive continuous contract position at the forecast cap.
+
+        Returns
+        -------
+        int
+            Non-negative whole-contract estimate.
+        """
+        if not math.isfinite(max_position) or max_position < 0:
+            raise ValueError("max_position must be finite and non-negative")
+        return 0 if max_position < 0.5 else math.floor(max_position + 0.5)
+
     def score(
         self,
         symbols: list[str],
@@ -503,8 +528,16 @@ class GreedyInstrumentSelector:
                 and candidate.mkt_risk_vol_day > 0
                 else None
             )
-            margin_at_max_usd = (
+            max_contracts = self._rounded_max_contracts(max_position)
+            continuous_margin_at_max_usd = (
                 max_position * candidate.initial_margin_usd
+                if candidate.initial_margin_usd is not None
+                else None
+            )
+            # Margin is occupied in whole lots. Retain the continuous value so
+            # the extra heuristic can be compared with Carver's approximation.
+            margin_at_max_usd = (
+                max_contracts * candidate.initial_margin_usd
                 if candidate.initial_margin_usd is not None
                 else None
             )
@@ -531,16 +564,23 @@ class GreedyInstrumentSelector:
                 "limit_weight": allocation,
                 "ann_trade_cost_sr": annual_cost,
                 "max_position": max_position,
+                "max_cons": max_contracts,
                 "size_penalty_sr": size_penalty,
                 "net_sr": net_sr,
                 "risk_traded_day": risk_traded_day,
                 "pct_mkt_volume": pct_market,
                 "init_margin_usd": candidate.initial_margin_usd,
+                "cont_margin_at_max_usd": continuous_margin_at_max_usd,
                 "margin_at_max_usd": margin_at_max_usd,
                 "margin_limit_usd": margin_limit_usd,
                 "reason": reason,
             })
 
+        total_continuous_margin_at_max_usd = sum(
+            float(detail["cont_margin_at_max_usd"])
+            for detail in details
+            if detail["cont_margin_at_max_usd"] is not None
+        )
         total_margin_at_max_usd = sum(
             float(detail["margin_at_max_usd"])
             for detail in details
@@ -558,6 +598,9 @@ class GreedyInstrumentSelector:
                 f"max_usd={margin_limit_usd:.2f}"
             )
         for detail in details:
+            detail["portfolio_cont_margin_at_max_usd"] = (
+                total_continuous_margin_at_max_usd
+            )
             detail["portfolio_margin_at_max_usd"] = total_margin_at_max_usd
 
         # Portfolio score rewards diversification through the same w'Hw risk
@@ -736,6 +779,9 @@ class GreedyInstrumentSelector:
             "feasible": score.feasible,
             "accepted": accepted,
             "reason": score.reason,
+            "portfolio_cont_margin_at_max_usd": first_detail.get(
+                "portfolio_cont_margin_at_max_usd"
+            ),
             "portfolio_margin_at_max_usd": first_detail.get(
                 "portfolio_margin_at_max_usd"
             ),
@@ -787,8 +833,16 @@ class GreedyInstrumentSelector:
                 "feasible": score.feasible,
                 "reason": score.reason,
                 "instr_reason": detail["reason"],
+                "max_position": detail["max_position"],
+                "max_cons": detail["max_cons"],
                 "init_margin_usd": detail["init_margin_usd"],
+                "cont_margin_at_max_usd": detail[
+                    "cont_margin_at_max_usd"
+                ],
                 "margin_at_max_usd": detail["margin_at_max_usd"],
+                "portfolio_cont_margin_at_max_usd": detail[
+                    "portfolio_cont_margin_at_max_usd"
+                ],
                 "portfolio_margin_at_max_usd": detail[
                     "portfolio_margin_at_max_usd"
                 ],

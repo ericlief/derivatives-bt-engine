@@ -782,9 +782,14 @@ record `asset_cls`, `econ_subcls`, and the resulting class path for each book
 member on every accepted pass.
 
 Use `--max-margin-pct P` with `--complete` to apply an optional capital-usage
-gate. Each trial multiplies IB's one-contract `init_margin_usd` by that
-instrument's maximum-forecast position and rejects the trial if the sum is
-greater than `P%` of initial capital. This additive estimate is deliberately
+gate. Each trial first calculates Carver's continuous maximum-forecast
+position, then rounds it to whole contracts with the allocator's deterministic
+half-up rule (`0.5` becomes one contract). It multiplies that `max_cons` value
+by IB's one-contract `init_margin_usd` and rejects the trial if the summed
+whole-contract margin is greater than `P%` of initial capital. The allocation
+audit retains `max_position` and `cont_margin_at_max_usd` beside `max_cons` and
+`margin_at_max_usd`, so the extra practical constraint can be compared directly
+with the fractional Carver baseline. This additive estimate is deliberately
 simple and auditable; it does not model IB portfolio/SPAN offsets or nonlinear
 margin changes at larger quantities. The saved one-contract margin is itself
 the marginal change against the account's positions at snapshot time, so this
