@@ -443,11 +443,24 @@ account-level values, so `init_margin` and `maint_margin` use the account base
 `margin_ccy`, independently of the commission currency. Their USD values are
 `init_margin_usd` and `maint_margin_usd`.
 
-What-if orders require an account. When `--ib-account` is omitted, the runner
-uses the first entry returned by TWS `managedAccounts`; an explicit value is
-validated against that list. TWS ordering, rather than account type, defines
-the default, so pass the account explicitly when margin and retirement
-accounts share one login and the distinction matters. Account-margin currency
+What-if orders require an account. Prefer `--ib-account-name taxable` (or
+`roth`): the friendly name is resolved to its private IB identifier through
+the JSON path in `ACCOUNTS_FILE`, loaded from `.env`. For example:
+
+```bash
+# Accounts
+ACCOUNTS_FILE="${FIN_DATA_ROOT}/broker/ib/accounts/all/accounts.json"
+```
+
+The account JSON is a name-to-ID object. Only the friendly name is added to
+the snapshot filename, for example
+`pysystemtrade_market_snapshot_taxable_20261013_120000.parquet`; neither the
+account ID nor the mapping is persisted. `--ib-account` remains available for
+an explicit raw ID. When both options are omitted, the runner uses the first
+entry returned by TWS `managedAccounts`. Explicit IDs are validated against
+that list. TWS ordering, rather than account type, defines the default, so pass
+an account name when margin and retirement accounts share one login and the
+distinction matters. Account-margin currency
 defaults to USD because `managedAccounts` does not expose base currency; use
 `--ib-account-currency CHF` (or another three-letter ISO code) for a non-USD
 account. Both BUY and SELL previews must succeed. A failed preview is
@@ -740,13 +753,14 @@ volatility inputs once:
 futures-market-snapshot \
   --instruments all-pysystemtrade \
   --vol-source pysystemtrade \
-  --ib-account YOUR_ACCOUNT \
+  --ib-account-name taxable \
   --snapshot-output results/pysystemtrade_market_snapshot.parquet
 ```
 
-Omitting `--ib-account` selects `managedAccounts[0]`. Pass it explicitly when
-commission tiers, current positions, or margin differ across accounts. The
-snapshot stores results and currencies, not the account identifier.
+Omitting both account options selects `managedAccounts[0]`. Pass an account
+name explicitly when commission tiers, current positions, or margin differ
+across accounts. The snapshot stores results and currencies, not the account
+identifier.
 
 The command appends a Chicago-time timestamp. It does not calculate pooled
 EWMAC costs, affordability, liquidity gates, or Phase 2 eligibility. Those

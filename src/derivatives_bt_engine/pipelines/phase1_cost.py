@@ -43,6 +43,8 @@ import argparse
 import json
 import logging
 import math
+import os
+import re
 import time
 from datetime import date, datetime
 from pathlib import Path
@@ -51,6 +53,7 @@ from zoneinfo import ZoneInfo
 
 import duckdb
 import polars as pl
+from dotenv import load_dotenv
 from ib_tools.ibpysync import IBPySync, IBWhatIfOrderError, MarketOrder
 
 from derivatives_bt_engine.data.pysystemtrade_ib import (
@@ -232,6 +235,60 @@ def _resolve_what_if_account(ib, requested_account: Optional[str]) -> str:
         len(accounts),
     )
     return accounts[0]
+
+
+def _resolve_ib_account_name(
+    account_name: str,
+    *,
+    accounts_file: Optional[str] = None,
+) -> tuple[str, str]:
+    """Resolve a friendly IB account name to its private account identifier.
+
+    Parameters
+    ----------
+    account_name
+        Case-insensitive key such as ``taxable`` or ``roth``.
+    accounts_file
+        Optional path used mainly by tests. When omitted, ``ACCOUNTS_FILE`` is
+        read from the environment after the project ``.env`` has been loaded.
+
+    Returns
+    -------
+    tuple[str, str]
+        Canonical lowercase account name and the corresponding IB account ID.
+        The ID is used for TWS validation and what-if orders but is never
+        written to snapshot filenames, logs, or report data.
+    """
+    canonical_name = str(account_name).strip().lower()
+    if not canonical_name:
+        raise ValueError("--ib-account-name must not be empty")
+    configured_path = accounts_file or os.getenv("ACCOUNTS_FILE")
+    if not configured_path:
+        raise ValueError(
+            "ACCOUNTS_FILE is not set; define it in .env or the environment"
+        )
+    # expandvars also handles an externally supplied literal such as
+    # ${FIN_DATA_ROOT}/broker/ib/accounts/all/accounts.json.
+    path = Path(os.path.expandvars(configured_path)).expanduser()
+    if not path.is_file():
+        raise FileNotFoundError(f"ACCOUNTS_FILE does not exist: {path}")
+    with path.open("r", encoding="utf-8") as handle:
+        raw_accounts = json.load(handle)
+    if not isinstance(raw_accounts, dict):
+        raise ValueError("ACCOUNTS_FILE must contain a JSON object")
+    accounts = {
+        str(name).strip().lower(): str(account_id).strip()
+        for name, account_id in raw_accounts.items()
+        if str(name).strip() and str(account_id).strip()
+    }
+    if canonical_name not in accounts:
+        available = ", ".join(sorted(accounts)) or "none"
+        raise ValueError(
+            f"unknown IB account name {account_name!r}; available names: "
+            f"{available}"
+        )
+    log.info("ib_what_if_account selected alias=%s", canonical_name)
+    return canonical_name, accounts[canonical_name]
 
 
 def _what_if_margin_currency(value: Optional[str]) -> str:
@@ -2981,11 +3038,21 @@ def parse_args(argv=None):
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=7496)
     parser.add_argument("--client-id", type=int, default=23)
-    parser.add_argument(
+    account_group = parser.add_mutually_exclusive_group()
+    account_group.add_argument(
         "--ib-account",
         help=(
             "Account used for one-contract commission and margin previews; "
             "defaults to the first account returned by TWS"
+        ),
+    )
+    account_group.add_argument(
+        "--ib-account-name",
+        "--account-name",
+        dest="ib_account_name",
+        help=(
+            "Friendly account key resolved through the ACCOUNTS_FILE JSON "
+            "loaded from .env; also added to snapshot filenames"
         ),
     )
     parser.add_argument(
@@ -3599,6 +3666,26 @@ def _timestamped_output_path(output: Path, generated_at: datetime) -> Path:
     return output.with_name(f"{output.stem}_{stamp}{output.suffix}")
 
 
+def _account_infixed_output_path(
+    output: Path,
+    account_name: Optional[str],
+) -> Path:
+    """Insert a filesystem-safe account alias before a run timestamp.
+
+    The caller applies this to the untimestamped snapshot base, producing a
+    stable shape such as ``market_snapshot_taxable_20261013_120000.parquet``.
+    Raw IB account identifiers are deliberately never accepted here.
+    """
+    if not account_name:
+        return output
+    infix = re.sub(r"[^a-z0-9_-]+", "_", account_name.strip().lower()).strip(
+        "_-"
+    )
+    if not infix:
+        raise ValueError("IB account name has no filename-safe characters")
+    return output.with_name(f"{output.stem}_{infix}{output.suffix}")
+
+
 def _emit_report(report: pl.DataFrame, args) -> pl.DataFrame:
     generated_at = datetime.now(REPORT_TIMEZONE)
     report = report.with_columns(
@@ -3874,6 +3961,10 @@ def _emit_market_snapshot(
         )
     if output_base.suffix.lower() != ".parquet":
         raise ValueError("--snapshot-output must use a .parquet extension")
+    output_base = _account_infixed_output_path(
+        output_base,
+        getattr(args, "ib_account_name", None),
+    )
     output = _timestamped_output_path(output_base, generated_at)
     output.parent.mkdir(parents=True, exist_ok=True)
     snapshot.write_parquet(output)
@@ -3955,8 +4046,20 @@ def _load_market_snapshot(path: Path) -> pl.DataFrame:
 
 def run(argv=None, *, snapshot_only: bool = False) -> pl.DataFrame:
     """Build, emit, and return the report for Python/notebook callers."""
+    # Account aliases and the private JSON map belong to local configuration,
+    # not command lines or persisted market data.
+    load_dotenv(
+        dotenv_path=Path(__file__).resolve().parents[3] / ".env",
+        override=False,
+    )
     args = parse_args(argv)
     setup_logger()
+    if args.ib_account_name:
+        account_name, account_id = _resolve_ib_account_name(
+            args.ib_account_name
+        )
+        args.ib_account_name = account_name
+        args.ib_account = account_id
     instruments = _load_instruments(
         args.instruments,
         args.pysystemtrade_db,

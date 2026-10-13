@@ -25,6 +25,7 @@ from derivatives_bt_engine.pipelines.phase1_cost import (
     _historical_request_timed_out,
     _ib_contract_currency,
     _latest_dated_mark,
+    _resolve_ib_account_name,
     _resolve_what_if_account,
     _what_if_margin_currency,
     _what_if_order_preview,
@@ -80,6 +81,55 @@ def test_what_if_account_rejects_unknown_explicit_account():
 
     with pytest.raises(ValueError, match="not available among 2 managed"):
         _resolve_what_if_account(FakeIB(), "UNKNOWN")
+
+
+def test_friendly_ib_account_name_resolves_from_private_json(tmp_path):
+    """Friendly aliases resolve without exposing IDs in the public name."""
+    accounts_file = tmp_path / "accounts.json"
+    accounts_file.write_text(
+        '{"taxable": "U123456", "roth": "U987654"}',
+        encoding="utf-8",
+    )
+
+    name, account_id = _resolve_ib_account_name(
+        "RoTh",
+        accounts_file=str(accounts_file),
+    )
+
+    assert name == "roth"
+    assert account_id == "U987654"
+
+
+def test_friendly_ib_account_name_reads_accounts_file_environment(
+    tmp_path,
+    monkeypatch,
+):
+    """ACCOUNTS_FILE may contain the FIN_DATA_ROOT variable used in .env."""
+    accounts_file = (
+        tmp_path / "broker" / "ib" / "accounts" / "all" / "accounts.json"
+    )
+    accounts_file.parent.mkdir(parents=True)
+    accounts_file.write_text('{"taxable": "U123456"}', encoding="utf-8")
+    monkeypatch.setenv("FIN_DATA_ROOT", str(tmp_path))
+    monkeypatch.setenv(
+        "ACCOUNTS_FILE",
+        "${FIN_DATA_ROOT}/broker/ib/accounts/all/accounts.json",
+    )
+
+    assert _resolve_ib_account_name("taxable") == ("taxable", "U123456")
+
+
+def test_ib_account_id_and_name_are_mutually_exclusive():
+    """A run cannot ambiguously select both an alias and a raw account ID."""
+    with pytest.raises(SystemExit):
+        parse_args(
+            [
+                "--ib-account",
+                "U123456",
+                "--ib-account-name",
+                "taxable",
+            ]
+        )
 
 
 def test_what_if_account_requires_at_least_one_managed_account():
@@ -1033,6 +1083,21 @@ def test_timestamped_output_path_uses_chicago_and_preserves_csv_extension():
     )
 
     assert output == Path("pysystemtrade_cost_phase1_ib_20261001_095418.csv")
+
+
+def test_snapshot_output_filename_contains_friendly_account_name():
+    """Snapshot filenames identify the account without persisting its ID."""
+    generated_at = datetime(2026, 10, 13, 17, 0, 0, tzinfo=timezone.utc)
+    base = futures_cost_risk._account_infixed_output_path(
+        Path("pysystemtrade_market_snapshot.parquet"),
+        "Taxable",
+    )
+
+    output = futures_cost_risk._timestamped_output_path(base, generated_at)
+
+    assert output == Path(
+        "pysystemtrade_market_snapshot_taxable_20261013_120000.parquet"
+    )
 
 
 @pytest.mark.parametrize(
