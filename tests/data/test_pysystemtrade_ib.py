@@ -49,7 +49,7 @@ def test_ibkr_us_execution_restriction_uses_executable_ib_symbol():
 
 def test_ibkr_us_execution_restriction_excludes_unavailable_exchanges():
     """Known unavailable venues remain research-only for the US profile."""
-    for exchange in ("CDE", "EUREX", "FTA", "IPE", "MONEP"):
+    for exchange in ("CDE", "FTA", "IPE", "MONEP"):
         restricted = resolve_execution_eligibility(
             "TEST",
             ib_symbol="TEST",
@@ -68,6 +68,27 @@ def test_ibkr_us_execution_restriction_excludes_unavailable_exchanges():
     )
     assert ordinary["execution_eligible"]
     assert ordinary["execution_restriction_reason"] is None
+
+    # EUREX is not categorically unavailable. Only products for which this
+    # account returned explicit regulatory permission failures are screened.
+    for ib_symbol in ("ESE", "SX4P", "SXAP", "SXOP", "SXPP"):
+        eurex_product = resolve_execution_eligibility(
+            "TEST",
+            ib_symbol=ib_symbol,
+            exchange="EUREX",
+        )
+        assert not eurex_product["execution_eligible"]
+        assert (
+            eurex_product["execution_restriction_reason"]
+            == "ibkr_us_product_no_trading_permission"
+        )
+    eurex_bund = resolve_execution_eligibility(
+        "BUND",
+        ib_symbol="GBL",
+        exchange="EUREX",
+    )
+    assert eurex_bund["execution_eligible"]
+    assert eurex_bund["execution_restriction_reason"] is None
 
     # STI is explicitly restricted, but the rest of SGX remains subject to
     # live contract/account verification rather than a venue-wide assumption.

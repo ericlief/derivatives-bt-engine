@@ -3,12 +3,16 @@
     "ibkr_us": {
       "exchange_restrictions": {
         "CDE": "ibkr_us_exchange_no_trading_permission",
-        "EUREX": "ibkr_us_exchange_no_trading_permission",
         "FTA": "ibkr_us_exchange_no_trading_permission",
         "IPE": "ibkr_us_exchange_no_trading_permission",
         "MONEP": "ibkr_us_exchange_no_trading_permission"
       },
       "product_restrictions": {
+        "ESE": "ibkr_us_product_no_trading_permission",
+        "SX4P": "ibkr_us_product_no_trading_permission",
+        "SXAP": "ibkr_us_product_no_trading_permission",
+        "SXOP": "ibkr_us_product_no_trading_permission",
+        "SXPP": "ibkr_us_product_no_trading_permission",
         "STI": "ibkr_us_product_restriction"
       }
     }
