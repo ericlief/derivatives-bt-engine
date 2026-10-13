@@ -178,6 +178,24 @@ def test_what_if_preview_classifies_account_margin_rejection():
     assert "49940.63 USD" in preview["ib_whatif_error"]
 
 
+def test_what_if_preview_classifies_missing_trading_permission():
+    """An IPE product permission failure is a stable preselection reason."""
+    class FakeIB:
+        def what_if_order(self, contract, order):
+            raise IBWhatIfOrderError([(
+                428,
+                460,
+                "No trading permissions.",
+            )])
+
+    preview = _what_if_order_preview(FakeIB(), object(), "MARGIN")
+
+    assert not preview["ib_whatif_eligible"]
+    assert preview["ib_whatif_error_codes"] == "460"
+    assert preview["ib_whatif_error_req_ids"] == "428"
+    assert preview["ib_whatif_rejection_reason"] == "no_trading_permissions"
+
+
 def test_physical_delivery_rejection_advances_to_next_contract(monkeypatch):
     """An automatic expiry retries the next listing after IB delivery refusal."""
     front = SimpleNamespace(lastTradeDateOrContractMonth="20261120")
