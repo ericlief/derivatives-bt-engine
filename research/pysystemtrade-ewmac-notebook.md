@@ -124,6 +124,6 @@ Phase 2 estimates component-forecast correlations over its eligible history
 universe and then combines only the rules that passed each executable
 contract's cost gate. The exact combined forecasts, normalized positions, and
 subsystem returns remain in
-`pysystemtrade_phase2_forecasts_<timestamp>.parquet`; use the research object
+`pysystemtrade_selection_forecasts_<timestamp>.parquet`; use the research object
 to understand the component construction and that Parquet to audit the exact
 portfolio-context combination.

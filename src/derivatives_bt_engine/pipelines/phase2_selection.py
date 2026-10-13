@@ -177,7 +177,7 @@ def parse_args(argv=None):
 def _default_output_path(source: Path, generated_at: datetime) -> Path:
     """Return the timestamped Step 1 CSV path beside its Phase 1 source."""
     stamp = generated_at.astimezone(REPORT_TIMEZONE).strftime("%Y%m%d_%H%M%S")
-    return source.parent / f"pysystemtrade_phase2_step1_{stamp}.csv"
+    return source.parent / f"pysystemtrade_selection_candidates_{stamp}.csv"
 
 
 def _subsystem_correlation(
@@ -538,18 +538,18 @@ def _run_complete_selection(
     final_frame = pl.DataFrame(final_rows, infer_schema_length=None)
     stamp = generated_at.astimezone(REPORT_TIMEZONE).strftime("%Y%m%d_%H%M%S")
     output_dir = source.parent
-    audit_path = output_dir / f"pysystemtrade_phase2_forecast_audit_{stamp}.csv"
-    forecasts_path = output_dir / f"pysystemtrade_phase2_forecasts_{stamp}.parquet"
-    trials_path = output_dir / f"pysystemtrade_phase2_trials_{stamp}.csv"
+    audit_path = output_dir / f"pysystemtrade_selection_forecast_audit_{stamp}.csv"
+    forecasts_path = output_dir / f"pysystemtrade_selection_forecasts_{stamp}.parquet"
+    trials_path = output_dir / f"pysystemtrade_selection_trials_{stamp}.csv"
     trial_allocations_path = (
-        output_dir / f"pysystemtrade_phase2_trial_allocations_{stamp}.csv"
+        output_dir / f"pysystemtrade_selection_trial_allocations_{stamp}.csv"
     )
     selection_passes_path = (
-        output_dir / f"pysystemtrade_phase2_selection_passes_{stamp}.csv"
+        output_dir / f"pysystemtrade_selection_passes_{stamp}.csv"
     )
-    selection_path = output_dir / f"pysystemtrade_phase2_selection_{stamp}.csv"
+    selection_path = output_dir / f"pysystemtrade_selection_book_{stamp}.csv"
     net_pnl_path = (
-        output_dir / f"pysystemtrade_phase2_subsystem_net_pnl_{stamp}.parquet"
+        output_dir / f"pysystemtrade_selection_subsystem_net_pnl_{stamp}.parquet"
     )
     # Round only persisted public CSV copies. Full-precision daily analytical
     # frames remain available in Parquet and calculations above are untouched.
@@ -715,7 +715,7 @@ def run(argv=None) -> tuple[Path, pl.DataFrame]:
         report.height,
     )
     print(
-        f"Phase 2 Step 1 selected {selected.height}/{report.height} instruments"
+        f"Selection screen accepted {selected.height}/{report.height} instruments"
     )
     print(
         "Parameters: "

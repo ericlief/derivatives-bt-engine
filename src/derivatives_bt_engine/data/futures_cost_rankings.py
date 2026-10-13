@@ -7,6 +7,7 @@ import polars as pl
 
 
 DEFAULT_REPORT_PATTERNS = (
+    "pysystemtrade_selection_screen_*.csv",
     "pysystemtrade_cost_phase1_ib_*.csv",
     "pysystemtrade_cost_phase1_*.csv",
     "futures_cost_risk_*.csv",

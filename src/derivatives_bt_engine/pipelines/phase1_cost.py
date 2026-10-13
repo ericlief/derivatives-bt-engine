@@ -2597,7 +2597,7 @@ def parse_args(argv=None):
         default=None,
         help=(
             "CSV output base path; a Chicago-time run timestamp is appended to the "
-            "filename (default base: results/futures_cost_risk.csv)"
+            "filename (default base: results/pysystemtrade_selection_screen.csv)"
         ),
     )
     parser.add_argument("--no-save", action="store_true")
@@ -3112,7 +3112,7 @@ def _emit_report(report: pl.DataFrame, args) -> pl.DataFrame:
             output_base = (
                 Path(__file__).resolve().parents[3]
                 / "results"
-                / "futures_cost_risk.csv"
+                / "pysystemtrade_selection_screen.csv"
             )
         output = _timestamped_output_path(output_base, generated_at)
         output.parent.mkdir(parents=True, exist_ok=True)

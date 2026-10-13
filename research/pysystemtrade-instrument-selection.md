@@ -712,11 +712,11 @@ policy calculations can therefore be rerun later without IB. Build a Phase 1
 report from the cached live inputs with, for example:
 
 ```bash
-futures-cost-risk \
+futures-selection-screen \
   --snapshot-input results \
   --initial-capital-usd 75000 \
   --target-vol 0.20 \
-  --output results/pysystemtrade_cost_phase1_ib.csv
+  --output results/pysystemtrade_selection_screen.csv
 ```
 
 Changing capital, target volatility, cost limits, liquidity assumptions,
@@ -731,11 +731,11 @@ connect to IB and does not recalculate volume, volatility, cost, or any other
 Phase 1 metric. Run:
 
 ```bash
-futures-select-phase2 --report-dir results --weight-policy topdown_classif
+futures-build-selection --report-dir results --weight-policy topdown_classif
 ```
 
-The command loads the newest Phase 1 IB CSV and saves
-`pysystemtrade_phase2_step1_<timestamp>.csv` beside it. The output contains
+The command loads the newest selection-screen CSV and saves
+`pysystemtrade_selection_candidates_<timestamp>.csv` beside it. The output contains
 selected instruments only. A row must have saved `cost_elig`, `size_elig`,
 `liq_elig`, `data_elig`, rule eligibility, execution eligibility, and
 `phase2_elig` flags equal to true, plus `ib_avail=contract_qualified`. The CSV
@@ -757,8 +757,8 @@ An existing Phase 1 CSV can be reused at a different account size without an
 IB or Phase 1 rerun:
 
 ```bash
-futures-select-phase2 \
-  --input results/pysystemtrade_cost_phase1_ib_<timestamp>.csv \
+futures-build-selection \
+  --input results/pysystemtrade_selection_screen_<timestamp>.csv \
   --initial-capital-usd 75000 \
   --complete
 ```
@@ -771,25 +771,25 @@ observations or non-capital cost/data/execution gates.
 Add `--complete` to continue from that saved Step 1 universe through forecast
 combination and the unconstrained greedy AFTS baseline. The command writes:
 
-- `pysystemtrade_phase2_forecast_audit_<timestamp>.csv`, with component and
+- `pysystemtrade_selection_forecast_audit_<timestamp>.csv`, with component and
   combined null/non-finite counts, valid dates and observations, FDM, combined
   turnover, cost, and the precise exclusion reason;
-- `pysystemtrade_phase2_forecasts_<timestamp>.parquet`, containing the daily
+- `pysystemtrade_selection_forecasts_<timestamp>.parquet`, containing the daily
   component forecasts, combined forecast, validity flag, normalized position,
   and gross, cost, and net subsystem P&L for direct inspection;
-- `pysystemtrade_phase2_subsystem_net_pnl_<timestamp>.parquet`, the synchronized
+- `pysystemtrade_selection_subsystem_net_pnl_<timestamp>.parquet`, the synchronized
   return panel used by the bounded correlation estimator;
-- `pysystemtrade_phase2_trials_<timestamp>.csv`, one row per greedy trial; and
-- `pysystemtrade_phase2_trial_allocations_<timestamp>.csv`, one row per member
+- `pysystemtrade_selection_trials_<timestamp>.csv`, one row per greedy trial; and
+- `pysystemtrade_selection_trial_allocations_<timestamp>.csv`, one row per member
   of every hypothetical trial book, including its economic `cluster_path`,
   portfolio `weight`, sizing `limit_weight`, IDM, score, feasibility, and
   accepted flag; and
-- `pysystemtrade_phase2_selection_passes_<timestamp>.csv`, the readable
+- `pysystemtrade_selection_passes_<timestamp>.csv`, the readable
   accepted path only: `selection_step` identifies the pass, `added_symbol` is
   its winner, and each `symbol` row records that accepted book member's
   terminal subclass, subclass membership, subclass weight, and instrument weight;
   and
-- `pysystemtrade_phase2_selection_<timestamp>.csv`, the last accepted book.
+- `pysystemtrade_selection_book_<timestamp>.csv`, the last accepted book.
 
 In the final selection CSV, `net_sr` is an instrument-level input to the
 portfolio score: the common gross SR assumption less that instrument's annual
