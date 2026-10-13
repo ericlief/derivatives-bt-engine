@@ -473,12 +473,13 @@ stable `whatif_reject_reason` in both the cached market snapshot and public
 screen. An insufficient-net-liquidity error is classified as
 `account_margin_insufficient`; its quoted resulting account requirement is not
 misrepresented as incremental one-contract margin, and the instrument is
-excluded before the greedy search. IB error 460 (or an equivalent message) is
-classified as `no_trading_permissions` and excluded without trying another
-expiry: permissions apply to the account and product rather than one delivery
-month. A `physical_delivery_restricted` rejection on an automatically selected
-expiry instead advances the minimum-days cutoff past that contract and retries
-the next listed expiry, up to four contracts.
+excluded before the greedy search. IB error 460 and generic error 201 carrying
+`No Trading Permission, Regulatory Restriction` are both classified as
+`no_trading_permissions` and excluded without trying another expiry:
+permissions apply to the account and product rather than one delivery month.
+A `physical_delivery_restricted` rejection on an automatically selected expiry
+instead advances the minimum-days cutoff past that contract and retries the
+next listed expiry, up to four contracts.
 `whatif_expiry_attempts`, `whatif_retry_n`, and `whatif_retry_error` preserve
 that path. Explicitly configured expiries are never silently replaced.
 

@@ -246,6 +246,25 @@ def test_what_if_preview_classifies_missing_trading_permission():
     assert preview["ib_whatif_rejection_reason"] == "no_trading_permissions"
 
 
+def test_what_if_preview_classifies_regulatory_permission_rejection():
+    """EUREX code 201 permission text is not a delivery-month rejection."""
+    class FakeIB:
+        def what_if_order(self, contract, order):
+            raise IBWhatIfOrderError([(
+                2521,
+                201,
+                "No Trading Permission, Regulatory Restriction. "
+                "Please contact customer service for assistance.",
+            )])
+
+    preview = _what_if_order_preview(FakeIB(), object(), "MARGIN")
+
+    assert not preview["ib_whatif_eligible"]
+    assert preview["ib_whatif_error_codes"] == "201"
+    assert preview["ib_whatif_error_req_ids"] == "2521"
+    assert preview["ib_whatif_rejection_reason"] == "no_trading_permissions"
+
+
 def test_physical_delivery_rejection_advances_to_next_contract(monkeypatch):
     """An automatic expiry retries the next listing after IB delivery refusal."""
     front = SimpleNamespace(lastTradeDateOrContractMonth="20261120")

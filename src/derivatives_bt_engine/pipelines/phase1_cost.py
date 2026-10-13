@@ -394,10 +394,11 @@ def _classify_what_if_rejection(
         return "physical_delivery_restricted"
     if "net liq" in messages and "margin req" in messages:
         return "account_margin_insufficient"
-    # Error 460 is an account/product permission failure. Changing delivery
-    # month cannot make the same ICE/IPE product tradable, so keep it distinct
-    # from retryable contract-specific rejections.
-    if 460 in codes or "no trading permissions" in messages:
+    # IB reports the same account/product restriction as either code 460 or a
+    # generic code 201 with singular/plural "No Trading Permission(s)" text.
+    # Changing delivery month cannot make that product tradable, so keep it
+    # distinct from retryable contract-specific rejections.
+    if 460 in codes or "no trading permission" in messages:
         return "no_trading_permissions"
     if 201 in codes:
         return "order_rejected"
