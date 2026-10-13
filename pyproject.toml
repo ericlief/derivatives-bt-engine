@@ -63,7 +63,7 @@ where = ["src"]
 include = ["derivatives_bt_engine*"]
 
 [tool.setuptools.package-data]
-"derivatives_bt_engine.data" = ["*.csv"]
+"derivatives_bt_engine.data" = ["*.csv", "*.json"]
 
 # ib_tools is a local, editable sibling package (its own separate repo,
 # checked out at a machine-specific path) -- it can't be a static file://

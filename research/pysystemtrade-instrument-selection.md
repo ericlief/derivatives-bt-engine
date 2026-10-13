@@ -327,15 +327,6 @@ future is not a current execution candidate: CME converted and permanently
 delisted the contract in October 2024. The live audit therefore records BB3M as
 retired without sending an invalid `BSBY` security-definition request to IB.
 
-Execution permission is local account metadata, not Carver source metadata.
-The engine's `ibkr_us` eligibility profile marks the Carver `SGX` instrument
-(IB root `STI`) `exec_elig=false` with reason
-`ibkr_us_product_restriction`. Its history remains in the research and forecast
-scalar pools, and its cost row remains auditable; the asset-class ranking helper
-excludes explicitly restricted rows by default. `ib_avail` continues to
-describe contract/data qualification only and must not be read as permission to
-trade.
-
 Phase one also ranks candidates within each asset class separately by one-way
 SR cost, current notional, and current annual dollar volatility. The report
 assigns rank 1 to the lowest value: the cheapest risk-adjusted trading cost,
@@ -749,13 +740,6 @@ The live-data boundary is a reusable, full-precision Parquet snapshot. Acquire
 contract qualification, current quotes and FX, dated-contract spread and
 volume statistics, account-specific what-if commission and margin, and current
 volatility inputs once:
-
-The `ibkr_us` execution profile removes known untradable venues before the
-snapshot request loop. `CDE`, `EUREX`, `FTA`, `IPE`, `MONEP`, and `SGX`
-instruments remain in the research-history universe but are absent from the
-executable snapshot, so IB receives no contract, quote, history, spread,
-volume, or what-if request for them. Product-specific restrictions follow the
-same boundary.
 
 ```bash
 futures-market-snapshot \

@@ -6,6 +6,8 @@ from derivatives_bt_engine.data.pysystemtrade_ib import (
 )
 from derivatives_bt_engine.calculations.instruments import (
     resolve_active_months,
+)
+from derivatives_bt_engine.data.execution_profiles import (
     resolve_execution_eligibility,
 )
 

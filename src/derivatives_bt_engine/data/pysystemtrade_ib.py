@@ -15,9 +15,11 @@ import duckdb
 import polars as pl
 
 from derivatives_bt_engine.data.futures_history import DEFAULT_PYSYSTEMTRADE_DB_PATH
+from derivatives_bt_engine.data.execution_profiles import (
+    resolve_execution_eligibility,
+)
 from derivatives_bt_engine.calculations.instruments import (
     INSTRUMENTS,
-    resolve_execution_eligibility,
 )
 
 

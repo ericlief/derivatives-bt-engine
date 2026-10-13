@@ -116,12 +116,6 @@ Each `INSTRUMENTS` entry carries:
                     all-listed-month Carver history rather than CORN's
                     December-only seasonal history.
 
-Account-specific execution restrictions are deliberately separate from the
-contract specifications below. ``resolve_execution_eligibility`` applies our
-local broker/account profile to both native instruments and externally mapped
-research instruments without modifying their source metadata or removing them
-from research pools.
-
 Globex held-contract construction is also separate from ``active_months``.
 The latter describes empirically liquid delivery months; it is not necessarily
 the contract cycle a strategy chooses to hold. ``GLOBEX_ROLL_POLICY_DEFAULTS``
@@ -168,35 +162,6 @@ DEFAULT_DB_PATH = '/home/dev/fin/db/globex_mdp_3.0.duckdb'
 # session-merge fix, 2026-07) now the empirically-exact figure for the
 # CBOT grains specifically, not just a round-number default.
 DEFAULT_ANNUALIZATION_DAYS = 252
-
-DEFAULT_EXECUTION_PROFILE = 'ibkr_us'
-EXECUTION_ELIGIBILITY_OVERRIDES: dict[str, dict[str, dict[str, object]]] = {
-    'ibkr_us': {
-        # IB qualifies STI and may provide market data, but a US account is
-        # blocked from trading the SGX Straits Times Index future. Keep the
-        # Carver SGX history in research/scalar pools while excluding the
-        # execution contract from portfolio selection.
-        'STI': {
-            'execution_eligible': False,
-            'execution_restriction_reason': 'ibkr_us_product_restriction',
-        },
-    },
-}
-
-# Venue restrictions apply only to the executable universe for this account
-# profile. Their research histories remain available for pooling, signals, and
-# comparative analysis; the live market snapshot must not query them.
-EXECUTION_EXCHANGE_RESTRICTIONS: dict[str, dict[str, str]] = {
-    'ibkr_us': {
-        'CDE': 'ibkr_us_exchange_no_trading_permission',
-        'EUREX': 'ibkr_us_exchange_no_trading_permission',
-        'FTA': 'ibkr_us_exchange_no_trading_permission',
-        'IPE': 'ibkr_us_exchange_no_trading_permission',
-        'MONEP': 'ibkr_us_exchange_no_trading_permission',
-        'SGX': 'ibkr_us_exchange_no_trading_permission',
-    },
-}
-
 
 # Carver-aligned defaults for raw Globex roots. These values are pinned to the
 # same upstream pysystemtrade source commit as the packaged mappings and were
@@ -253,51 +218,6 @@ GLOBEX_ROLL_POLICY_OVERRIDES: dict[str, dict[str, object]] = {
     'MZW': {'carver_instrument': 'WHEAT_mini', 'hold_roll_cycle': 'HKNUZ', 'roll_offset_days': -30},
 }
 
-
-def resolve_execution_eligibility(
-    symbol: str,
-    *,
-    ib_symbol: Optional[str] = None,
-    exchange: Optional[str] = None,
-    profile: str = DEFAULT_EXECUTION_PROFILE,
-) -> dict[str, object]:
-    """Return our account-specific execution status for an instrument.
-
-    The IB symbol is checked first because externally sourced research codes
-    can differ from the executable contract root (Carver ``SGX`` -> IB
-    ``STI``). Product overrides take precedence over venue restrictions so a
-    future account-specific exception can reopen one contract without enabling
-    an entire exchange. An absent restriction means the live snapshot must
-    still verify contract qualification and account permissions.
-    """
-    overrides = EXECUTION_ELIGIBILITY_OVERRIDES.get(profile, {})
-    identifiers = [ib_symbol, symbol]
-    override = next(
-        (
-            overrides[identifier.upper()]
-            for identifier in identifiers
-            if identifier and identifier.upper() in overrides
-        ),
-        None,
-    )
-    if override is None and exchange:
-        exchange_reason = EXECUTION_EXCHANGE_RESTRICTIONS.get(
-            profile, {}
-        ).get(exchange.upper())
-        if exchange_reason:
-            override = {
-                'execution_eligible': False,
-                'execution_restriction_reason': exchange_reason,
-            }
-    return {
-        'execution_profile': profile,
-        'execution_eligible': (
-            bool(override['execution_eligible']) if override else True
-        ),
-        'execution_restriction_reason': (
-            override.get('execution_restriction_reason') if override else None
-        ),
-    }
 
 # ── Instrument universe ─────────────────────────────────────────────────────
 INSTRUMENTS: dict[str, dict] = {
