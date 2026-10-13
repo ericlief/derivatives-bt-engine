@@ -713,7 +713,7 @@ report from the cached live inputs with, for example:
 
 ```bash
 futures-cost-risk \
-  --snapshot-input results/pysystemtrade_market_snapshot_<timestamp>.parquet \
+  --snapshot-input results \
   --initial-capital-usd 75000 \
   --target-vol 0.20 \
   --output results/pysystemtrade_cost_phase1_ib.csv
@@ -723,6 +723,8 @@ Changing capital, target volatility, cost limits, liquidity assumptions,
 affordability parameters, or forecast-rule cost limits only requires this
 offline transformation. A new live snapshot is needed when the executable
 contract, quote/FX, spread, volume, or current volatility inputs are stale.
+Passing a directory to `--snapshot-input` selects its newest timestamped
+`*_market_snapshot_*.parquet`; passing a file keeps exact-run reproduction.
 
 Phase 2 Step 1 is deliberately only a persisted-gate selection. It does not
 connect to IB and does not recalculate volume, volatility, cost, or any other

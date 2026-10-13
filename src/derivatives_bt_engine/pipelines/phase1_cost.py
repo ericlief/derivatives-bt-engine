@@ -2500,8 +2500,9 @@ def parse_args(argv=None):
         "--snapshot-input",
         type=Path,
         help=(
-            "Full-precision Parquet produced by futures-market-snapshot; "
-            "skips every IB request and rebuilds Phase 1 from cached inputs"
+            "Full-precision Parquet produced by futures-market-snapshot, or "
+            "a directory whose newest snapshot should be used; skips every "
+            "IB request and rebuilds Phase 1 from cached inputs"
         ),
     )
     parser.add_argument(
@@ -3289,9 +3290,49 @@ def _emit_market_snapshot(
     return snapshot
 
 
-def _load_market_snapshot(path: Path) -> pl.DataFrame:
-    """Load and minimally validate a cached acquisition Parquet."""
+def _resolve_market_snapshot_path(path: Path) -> Path:
+    """Resolve an exact snapshot or the newest snapshot in a directory.
+
+    Directory discovery is intentionally explicit: omitting
+    ``--snapshot-input`` still means the backward-compatible live one-shot
+    Phase 1 run. Passing ``results`` (or another directory) selects its newest
+    ``*_market_snapshot_*.parquet`` file by embedded timestamp/name, with file
+    modification time as a deterministic tie-breaker.
+    """
     resolved = path.expanduser().resolve()
+    if resolved.is_file():
+        return resolved
+    if not resolved.is_dir():
+        raise FileNotFoundError(f"market snapshot input does not exist: {resolved}")
+    def snapshot_order(candidate: Path) -> tuple[datetime, int, str]:
+        # Every snapshot emitted here ends in YYYYMMDD_HHMMSS. Sorting that
+        # suffix lexically is chronological and remains independent of the
+        # user-selected filename prefix.
+        timestamp_suffix = candidate.stem[-15:]
+        try:
+            timestamp = datetime.strptime(timestamp_suffix, "%Y%m%d_%H%M%S")
+        except ValueError:
+            timestamp = datetime.min
+        return (
+            timestamp,
+            candidate.stat().st_mtime_ns,
+            candidate.name,
+        )
+
+    candidates = sorted(
+        resolved.glob("*_market_snapshot_*.parquet"),
+        key=snapshot_order,
+    )
+    if not candidates:
+        raise FileNotFoundError(
+            f"no timestamped market snapshot Parquet found in {resolved}"
+        )
+    return candidates[-1]
+
+
+def _load_market_snapshot(path: Path) -> pl.DataFrame:
+    """Load and minimally validate an exact or latest cached snapshot."""
+    resolved = _resolve_market_snapshot_path(path)
     if resolved.suffix.lower() != ".parquet":
         raise ValueError("--snapshot-input must be a .parquet file")
     snapshot = pl.read_parquet(resolved)
@@ -3312,6 +3353,7 @@ def _load_market_snapshot(path: Path) -> pl.DataFrame:
         resolved,
         snapshot.height,
     )
+    print(f"Using market snapshot {resolved}")
     return snapshot
 
 
