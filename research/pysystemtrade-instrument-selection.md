@@ -783,7 +783,11 @@ combination and the unconstrained greedy AFTS baseline. The command writes:
 - `pysystemtrade_selection_trial_allocations_<timestamp>.csv`, one row per member
   of every hypothetical trial book, including its economic `cluster_path`,
   portfolio `weight`, sizing `limit_weight`, IDM, score, feasibility, and
-  accepted flag; and
+  accepted flag. Every rejected row has a decision `reason`: hard-constraint
+  failures retain their feasibility reason, while feasible losers distinguish
+  a lower singleton rank, a lower rank than the iteration winner, or a best
+  score below the acceptance threshold. `iter_best`, `iter_best_score`, and
+  `min_accept_score` make that comparison directly auditable; and
 - `pysystemtrade_selection_passes_<timestamp>.csv`, the readable
   accepted path only: `selection_step` identifies the pass, `added_symbol` is
   its winner, and each `symbol` row records that accepted book member's

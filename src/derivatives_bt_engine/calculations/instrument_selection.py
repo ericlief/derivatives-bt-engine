@@ -552,8 +552,15 @@ class GreedyInstrumentSelector:
         # Match the published AFTS loop: singleton scoring chooses the seed,
         # while the first n+1 book establishes the tolerance benchmark.
         best_seen = 0.0
-        self._mark_accepted(trials, 0, selected[-1])
-        self._mark_accepted(trial_allocations, 0, selected[-1])
+        self._finalize_iteration(
+            trials,
+            trial_allocations,
+            iteration=0,
+            best_candidate=selected[-1],
+            best_score=current.score,
+            min_accept_score=None,
+            accepted=True,
+        )
 
         iteration = 1
         while True:
@@ -595,13 +602,30 @@ class GreedyInstrumentSelector:
             winner, winning_score = max(
                 feasible, key=lambda item: (item[1].score, item[0])
             )
-            if winning_score.score < self.config.score_threshold * best_seen:
+            min_accept_score = self.config.score_threshold * best_seen
+            if winning_score.score < min_accept_score:
+                self._finalize_iteration(
+                    trials,
+                    trial_allocations,
+                    iteration=iteration,
+                    best_candidate=winner,
+                    best_score=winning_score.score,
+                    min_accept_score=min_accept_score,
+                    accepted=False,
+                )
                 break
             selected.append(winner)
             current = winning_score
             best_seen = max(best_seen, winning_score.score)
-            self._mark_accepted(trials, iteration, winner)
-            self._mark_accepted(trial_allocations, iteration, winner)
+            self._finalize_iteration(
+                trials,
+                trial_allocations,
+                iteration=iteration,
+                best_candidate=winner,
+                best_score=winning_score.score,
+                min_accept_score=min_accept_score,
+                accepted=True,
+            )
             iteration += 1
 
         return GreedySelectionResult(
@@ -645,6 +669,9 @@ class GreedyInstrumentSelector:
             "feasible": score.feasible,
             "accepted": accepted,
             "reason": score.reason,
+            "iter_best": None,
+            "iter_best_score": None,
+            "min_accept_score": None,
         }
 
     @staticmethod
@@ -689,14 +716,70 @@ class GreedyInstrumentSelector:
                 "feasible": score.feasible,
                 "reason": score.reason,
                 "instr_reason": detail["reason"],
+                "iter_best": None,
+                "iter_best_score": None,
+                "min_accept_score": None,
             })
         return rows
 
-    @staticmethod
-    def _mark_accepted(
-        trials: list[dict[str, object]], iteration: int, candidate: str
+    @classmethod
+    def _finalize_iteration(
+        cls,
+        trials: list[dict[str, object]],
+        trial_allocations: list[dict[str, object]],
+        *,
+        iteration: int,
+        best_candidate: str,
+        best_score: float,
+        min_accept_score: float | None,
+        accepted: bool,
     ) -> None:
-        """Mark every summary or member row belonging to an accepted trial."""
-        for row in reversed(trials):
-            if row["iteration"] == iteration and row["candidate"] == candidate:
-                row["accepted"] = True
+        """Attach the competitive decision to every row in one search pass.
+
+        Feasibility reasons are calculated while scoring a hypothetical book.
+        This second step explains why each *feasible* book was or was not
+        chosen relative to the other books attempted in the same iteration.
+        Member-level allocation rows receive the identical decision metadata
+        so they remain interpretable without joining back to the trial CSV.
+        """
+        for rows in (trials, trial_allocations):
+            cls._finalize_iteration_rows(
+                rows,
+                iteration=iteration,
+                best_candidate=best_candidate,
+                best_score=best_score,
+                min_accept_score=min_accept_score,
+                accepted=accepted,
+            )
+
+    @staticmethod
+    def _finalize_iteration_rows(
+        rows: list[dict[str, object]],
+        *,
+        iteration: int,
+        best_candidate: str,
+        best_score: float,
+        min_accept_score: float | None,
+        accepted: bool,
+    ) -> None:
+        """Finalize winner metadata and rejection reasons for one row set."""
+        for row in rows:
+            if row["iteration"] != iteration:
+                continue
+            row["iter_best"] = best_candidate
+            row["iter_best_score"] = best_score
+            row["min_accept_score"] = min_accept_score
+            candidate = str(row["candidate"])
+            if candidate == best_candidate:
+                row["accepted"] = accepted
+                if not accepted and not row["reason"]:
+                    row["reason"] = "best_score_below_acceptance_threshold"
+            elif row["feasible"] and not row["reason"]:
+                # A feasible loser needs a competitive explanation; the hard
+                # constraint path above already populated infeasible reasons.
+                if iteration == 0:
+                    row["reason"] = "lower_rank_than_selected_seed"
+                elif accepted:
+                    row["reason"] = "lower_rank_than_iteration_winner"
+                else:
+                    row["reason"] = "lower_rank_than_iteration_best"

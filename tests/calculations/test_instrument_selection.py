@@ -71,6 +71,43 @@ def test_greedy_selector_stops_when_best_addition_falls_below_threshold():
         if row["candidate"] == "C" and row["iteration"] == 2
     ][0]
     assert c_final_trial["accepted"] is False
+    assert c_final_trial["reason"] == "best_score_below_acceptance_threshold"
+    assert c_final_trial["iter_best"] == "C"
+    assert (
+        c_final_trial["iter_best_score"]
+        < c_final_trial["min_accept_score"]
+    )
+
+
+def test_singleton_losers_record_competitive_rejection_reason():
+    """Feasible iteration-zero losers identify the selected seed and score."""
+    candidates = [
+        _candidate("CHEAP", 0.0),
+        _candidate("COSTLY", 10.0),
+    ]
+    selector = GreedyInstrumentSelector(
+        config=GreedySelectionConfig(capital=1_000_000.0),
+        weight_policy=EqualPortfolioWeights(),
+    )
+
+    result = selector.select(candidates, np.eye(2))
+
+    seed_rows = [row for row in result.trials if row["iteration"] == 0]
+    selected = next(row for row in seed_rows if row["accepted"])
+    rejected = next(row for row in seed_rows if not row["accepted"])
+    assert selected["candidate"] == "CHEAP"
+    assert selected["reason"] == ""
+    assert rejected["feasible"]
+    assert rejected["reason"] == "lower_rank_than_selected_seed"
+    assert rejected["iter_best"] == "CHEAP"
+    assert rejected["iter_best_score"] == pytest.approx(selected["score"])
+    rejected_allocations = [
+        row for row in result.trial_allocations
+        if row["iteration"] == 0 and row["candidate"] == "COSTLY"
+    ]
+    assert {row["reason"] for row in rejected_allocations} == {
+        "lower_rank_than_selected_seed"
+    }
 
 
 def test_greedy_selector_allows_only_one_instrument_per_economic_family():
