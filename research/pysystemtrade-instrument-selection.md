@@ -6,9 +6,11 @@ This is the executable-universe and static-selection companion to
 [pysystemtrade-data.md](pysystemtrade-data.md). Its phases are independent of
 the data import, hybrid-history, and carry phases in that document:
 
-1. Phase 1 resolves executable contracts and audits cost, risk, granularity,
+1. The live snapshot resolves executable contracts and caches the IB-dependent
+   quote, FX, spread, volume, and current-risk inputs.
+2. Phase 1 transforms that snapshot offline and audits cost, risk, granularity,
    rule affordability, and broker availability.
-2. Phase 2 selects a diversified static instrument set from the Phase 1
+3. Phase 2 selects a diversified static instrument set from the Phase 1
    candidates using the AFTS greedy procedure.
 
 The data report remains authoritative for source lineage, history construction,
@@ -693,6 +695,35 @@ carrying the roll inputs into Step 1 and adding the explicit cost and net-P&L
 stages shown above. It must not query a live contract again to reconstruct
 values that already belong to the saved Phase 1 run.
 
+The live-data boundary is a reusable, full-precision Parquet snapshot. Acquire
+contract qualification, current quotes and FX, dated-contract spread and
+volume statistics, and current volatility inputs once:
+
+```bash
+futures-market-snapshot \
+  --instruments all-pysystemtrade \
+  --vol-source pysystemtrade \
+  --snapshot-output results/pysystemtrade_market_snapshot.parquet
+```
+
+The command appends a Chicago-time timestamp. It does not calculate pooled
+EWMAC costs, affordability, liquidity gates, or Phase 2 eligibility. Those
+policy calculations can therefore be rerun later without IB. Build a Phase 1
+report from the cached live inputs with, for example:
+
+```bash
+futures-cost-risk \
+  --snapshot-input results/pysystemtrade_market_snapshot_<timestamp>.parquet \
+  --initial-capital-usd 75000 \
+  --target-vol 0.20 \
+  --output results/pysystemtrade_cost_phase1_ib.csv
+```
+
+Changing capital, target volatility, cost limits, liquidity assumptions,
+affordability parameters, or forecast-rule cost limits only requires this
+offline transformation. A new live snapshot is needed when the executable
+contract, quote/FX, spread, volume, or current volatility inputs are stale.
+
 Phase 2 Step 1 is deliberately only a persisted-gate selection. It does not
 connect to IB and does not recalculate volume, volatility, cost, or any other
 Phase 1 metric. Run:
@@ -719,6 +750,21 @@ weight policy; `legacy_handcraft` and `equal` are retained as explicit research
 comparators. Complete-selection reports persist the choice as `wt_policy` and
 record `asset_cls`, `econ_subcls`, and the resulting class path for each book
 member on every accepted pass.
+
+An existing Phase 1 CSV can be reused at a different account size without an
+IB or Phase 1 rerun:
+
+```bash
+futures-select-phase2 \
+  --input results/pysystemtrade_cost_phase1_ib_<timestamp>.csv \
+  --initial-capital-usd 75000 \
+  --complete
+```
+
+The override recalculates `max_ann_dvol`, `risk_traded_usd_day`,
+`pct_mkt_volume`, `size_elig`, `risk_volume_elig`, `liq_elig`, and
+`phase2_elig` before Step 1 filtering. It does not alter the saved market
+observations or non-capital cost/data/execution gates.
 
 Add `--complete` to continue from that saved Step 1 universe through forecast
 combination and the unconstrained greedy AFTS baseline. The command writes:

@@ -182,6 +182,141 @@ def phase2_step1_config(report: pl.DataFrame) -> dict[str, object]:
     return config
 
 
+def override_phase2_initial_capital(
+    report: pl.DataFrame,
+    initial_capital_usd: float,
+) -> pl.DataFrame:
+    """Recalculate capital-dependent Phase 2 gates from a Phase 1 CSV.
+
+    The Phase 1 report already persists annual dollar volatility, market risk
+    volume, and every non-capital gate.  This function changes only the run's
+    initial capital and derives the corresponding maximum contract dollar
+    volatility, daily risk traded, market-volume percentage, size gate,
+    relative-liquidity gate, and final Phase 2 eligibility.  It performs no
+    market-data or history request.
+
+    Parameters
+    ----------
+    report
+        Complete public Phase 1 cost report, before Step 1 filtering.
+    initial_capital_usd
+        Replacement account capital in USD; must be strictly positive.
+
+    Returns
+    -------
+    polars.DataFrame
+        A new report with consistent run-level parameters and gate columns.
+    """
+    if initial_capital_usd <= 0:
+        raise ValueError("initial_capital_usd must be positive")
+    config = phase2_step1_config(report)
+    required = {
+        "ann_dvol",
+        "mkt_risk_vol_usd_day",
+        "volume_elig",
+        "cost_elig",
+        "data_elig",
+        "instr_has_elig_ewmac_rule",
+        "exec_elig",
+        "ib_avail",
+    }
+    missing = sorted(required.difference(report.columns))
+    if missing:
+        raise ValueError(
+            "Phase 1 report cannot apply a capital override; missing fields "
+            f"{missing}"
+        )
+
+    target_vol = float(config["target_vol"])
+    liquidity_ann_trades = float(config["liq_ann_trades"])
+    liquidity_days = int(config["liq_days"])
+    max_pct_market_volume = float(config["max_pct_mkt_volume"])
+    max_ann_dvol = initial_capital_usd * target_vol
+    risk_traded_day = (
+        initial_capital_usd
+        * target_vol
+        * liquidity_ann_trades
+        / liquidity_days
+    )
+
+    recalculated = report.with_columns(
+        pl.lit(initial_capital_usd).alias("init_cap_usd"),
+        pl.lit(max_ann_dvol).alias("max_ann_dvol"),
+        pl.lit(risk_traded_day).alias("risk_traded_usd_day"),
+    ).with_columns(
+        pl.when(
+            pl.col("mkt_risk_vol_usd_day").is_not_null()
+            & pl.col("mkt_risk_vol_usd_day").is_finite()
+            & (pl.col("mkt_risk_vol_usd_day") > 0)
+        )
+        .then(
+            100.0
+            * pl.col("risk_traded_usd_day")
+            / pl.col("mkt_risk_vol_usd_day")
+        )
+        .otherwise(None)
+        .alias("pct_mkt_volume"),
+        (
+            pl.col("ann_dvol").is_not_null()
+            & pl.col("ann_dvol").is_finite()
+            & (pl.col("ann_dvol") <= max_ann_dvol)
+        ).alias("size_elig"),
+    ).with_columns(
+        (
+            pl.col("pct_mkt_volume").is_not_null()
+            & pl.col("pct_mkt_volume").is_finite()
+            & (pl.col("pct_mkt_volume") < max_pct_market_volume)
+        ).alias("risk_volume_elig"),
+    ).with_columns(
+        (
+            pl.col("volume_elig").fill_null(False)
+            & pl.col("risk_volume_elig").fill_null(False)
+        ).alias("liq_elig"),
+    ).with_columns(
+        (
+            pl.col("cost_elig").fill_null(False)
+            & pl.col("size_elig").fill_null(False)
+            & pl.col("liq_elig").fill_null(False)
+            & pl.col("data_elig").fill_null(False)
+            & pl.col("instr_has_elig_ewmac_rule").fill_null(False)
+            & pl.col("exec_elig").fill_null(False)
+            & (pl.col("ib_avail").fill_null("") == "contract_qualified")
+        ).alias("phase2_elig"),
+    )
+
+    # Keep the human-readable rejection column consistent when the source
+    # report carries it. Other non-capital reasons remain unchanged because
+    # their persisted gates are reused verbatim above.
+    if "phase2_excl" in recalculated.columns:
+        exclusions: list[str] = []
+        for row in recalculated.iter_rows(named=True):
+            reasons: list[str] = []
+            if not row.get("data_elig"):
+                reasons.append("data_unavailable")
+            if not row.get("cost_elig"):
+                reasons.append("cost")
+            if not row.get("size_elig"):
+                reasons.append("risk_size")
+            if row.get("avg_daily_volume") is None:
+                reasons.append("volume_unavailable")
+            else:
+                if not row.get("volume_elig"):
+                    reasons.append("contract_volume")
+                if not row.get("risk_volume_elig"):
+                    reasons.append("risk_volume")
+            if not row.get("instr_has_elig_ewmac_rule"):
+                reasons.append("no_eligible_rule")
+            if not row.get("exec_elig"):
+                reasons.append("execution")
+            if row.get("ib_avail") != "contract_qualified":
+                reasons.append("ib_unavailable")
+            exclusions.append(",".join(reasons))
+        recalculated = recalculated.with_columns(
+            pl.Series("phase2_excl", exclusions, dtype=pl.String)
+        )
+    return recalculated
+
+
 def phase2_step1_candidates(report: pl.DataFrame) -> pl.DataFrame:
     """Select Phase 2 candidates using only gates saved by Phase 1.
 

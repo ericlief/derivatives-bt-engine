@@ -23,8 +23,13 @@ null.
 
 Run with TWS/IB Gateway available::
 
-    .venv/bin/python -m derivatives_bt_engine.pipelines.phase1_cost \
-      --instruments all-pysystemtrade
+    futures-market-snapshot --instruments all-pysystemtrade
+
+Then rebuild the cost and eligibility report without another IB request::
+
+    futures-cost-risk \
+      --snapshot-input results/futures_market_snapshot_<timestamp>.parquet \
+      --initial-capital-usd 100000
 
 The public CSV leads with the selected current price, FX, volatility, spread,
 and cost path.  Snapshot alternatives use ``snap_*`` and imported Carver
@@ -2491,6 +2496,22 @@ def parse_args(argv=None):
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=7496)
     parser.add_argument("--client-id", type=int, default=23)
+    parser.add_argument(
+        "--snapshot-input",
+        type=Path,
+        help=(
+            "Full-precision Parquet produced by futures-market-snapshot; "
+            "skips every IB request and rebuilds Phase 1 from cached inputs"
+        ),
+    )
+    parser.add_argument(
+        "--snapshot-output",
+        type=Path,
+        help=(
+            "Parquet output base for futures-market-snapshot; a Chicago-time "
+            "run timestamp is appended"
+        ),
+    )
     parser.add_argument("--offline", action="store_true",
                         help="Build the full mixed-vol/mapping comparison without connecting to IB")
     parser.add_argument(
@@ -2689,6 +2710,14 @@ def _load_instruments(
 
 
 PUBLIC_REPORT_RENAMES = {
+    "market_snapshot_generated_at_ct": "snap_cache_ts_ct",
+    "market_snapshot_duration": "snap_hist_duration",
+    "market_snapshot_spread_duration": "snap_spread_duration",
+    "market_snapshot_volume_duration": "snap_volume_duration",
+    "market_snapshot_volume_lookback_days": "snap_volume_lookback_days",
+    "market_snapshot_market_data_type": "snap_market_data_type",
+    "market_snapshot_vol_source": "snap_vol_src",
+    "market_snapshot_use_rth": "snap_use_rth",
     "economic_subclass": "econ_subcls",
     "price": "cur_price",
     "price_source": "cur_price_source",
@@ -3092,7 +3121,201 @@ def _emit_report(report: pl.DataFrame, args) -> pl.DataFrame:
     return output_report
 
 
-def run(argv=None) -> pl.DataFrame:
+def _acquire_live_market_rows(
+    args: argparse.Namespace,
+    instruments: list[dict],
+    *,
+    pysystemtrade_provider: Optional[PysystemtradeHistoryProvider],
+    reference_fx_by_currency: dict[str, dict],
+) -> list[dict]:
+    """Acquire the IB-dependent inputs needed by later selection phases.
+
+    The returned dictionaries use the internal descriptive schema consumed by
+    the Phase 1 calculations.  They include contract identity, quote and FX,
+    spread and volume observations, and the selected volatility inputs.  No
+    capital, cost-limit, affordability, or Phase 2 eligibility policy is
+    applied here, which makes the result safe to cache and reuse.
+    """
+    log.info(
+        "futures_market_snapshot start instruments=%d duration=%s "
+        "fast_vol_span=%d slow_vol_years=%d slow_vol_weight=%.3f "
+        "vol_source=%s market_data_type=%s use_rth=%s",
+        len(instruments),
+        args.duration,
+        args.fast_vol_span,
+        args.slow_vol_years,
+        args.slow_vol_weight,
+        args.vol_source,
+        args.market_data_type,
+        args.use_rth,
+    )
+    ib = IBPySync()
+    ib.connect(args.host, args.port, args.client_id)
+    fx_by_currency = load_current_fx_to_usd(
+        ib,
+        {str(instr.get("currency") or "USD") for instr in instruments},
+        reference_fx_by_currency,
+        market_data_type=args.market_data_type,
+        quote_wait_seconds=args.quote_wait_seconds,
+    )
+    rows: list[dict] = []
+    try:
+        for instr in instruments:
+            symbol = instr["symbol"]
+            try:
+                row = diagnose_instrument(
+                    ib,
+                    instr,
+                    duration=args.duration,
+                    spread_duration=args.spread_duration,
+                    spread_use_rth=not args.spread_all_hours,
+                    volume_duration=args.volume_duration,
+                    volume_lookback_days=args.volume_lookback_days,
+                    min_days=args.min_days,
+                    contract_details_timeout=args.contract_details_timeout,
+                    quote_wait_seconds=args.quote_wait_seconds,
+                    use_rth=args.use_rth,
+                    vol_source=args.vol_source,
+                    fast_span=args.fast_vol_span,
+                    slow_years=args.slow_vol_years,
+                    slow_weight=args.slow_vol_weight,
+                    market_data_type=args.market_data_type,
+                    pysystemtrade_provider=pysystemtrade_provider,
+                    fx_by_currency=fx_by_currency,
+                )
+                rows.append(row)
+                log.info(
+                    "futures_market_snapshot acquired symbol=%s contract=%s "
+                    "notional_usd=%.2f ann_dvol_usd=%.2f spread_source=%s",
+                    symbol,
+                    row["contract_id"],
+                    row["notional_per_contract"],
+                    row["annual_dollar_vol_per_contract"],
+                    row["selected_spread_source"],
+                )
+            except Exception as exc:
+                log.warning(
+                    "futures_market_snapshot rejected symbol=%s reason=%s",
+                    symbol,
+                    exc,
+                )
+                fallback_vol = None
+                if pysystemtrade_provider is not None:
+                    try:
+                        _, fallback_vol = _history_volatility(
+                            ib,
+                            instr,
+                            vol_source="pysystemtrade",
+                            duration=args.duration,
+                            use_rth=args.use_rth,
+                            fast_span=args.fast_vol_span,
+                            slow_years=args.slow_vol_years,
+                            slow_weight=args.slow_vol_weight,
+                            pysystemtrade_provider=pysystemtrade_provider,
+                        )
+                    except Exception as vol_exc:
+                        log.warning(
+                            "futures_market_snapshot volatility_fallback_failed "
+                            "symbol=%s reason=%s",
+                            symbol,
+                            vol_exc,
+                        )
+                rows.append(
+                    _error_row(
+                        instr,
+                        exc,
+                        vol=fallback_vol,
+                        fx_by_currency=fx_by_currency,
+                    )
+                )
+    finally:
+        ib.disconnect()
+    return rows
+
+
+def _market_snapshot_frame(
+    rows: list[dict],
+    args: argparse.Namespace,
+    generated_at: datetime,
+) -> pl.DataFrame:
+    """Return full-precision acquired rows with reproducibility metadata."""
+    return pl.DataFrame(rows, infer_schema_length=None).with_columns(
+        pl.lit(generated_at.isoformat(timespec="seconds")).alias(
+            "market_snapshot_generated_at_ct"
+        ),
+        pl.lit(args.duration).alias("market_snapshot_duration"),
+        pl.lit(args.spread_duration).alias(
+            "market_snapshot_spread_duration"
+        ),
+        pl.lit(args.volume_duration).alias(
+            "market_snapshot_volume_duration"
+        ),
+        pl.lit(args.volume_lookback_days).alias(
+            "market_snapshot_volume_lookback_days"
+        ),
+        pl.lit(args.market_data_type).alias(
+            "market_snapshot_market_data_type"
+        ),
+        pl.lit(args.vol_source).alias("market_snapshot_vol_source"),
+        pl.lit(args.use_rth).alias("market_snapshot_use_rth"),
+    )
+
+
+def _emit_market_snapshot(
+    rows: list[dict],
+    args: argparse.Namespace,
+) -> pl.DataFrame:
+    """Persist one reusable, full-precision live-input Parquet snapshot."""
+    generated_at = datetime.now(REPORT_TIMEZONE)
+    snapshot = _market_snapshot_frame(rows, args, generated_at)
+    output_base = args.snapshot_output
+    if output_base is None:
+        output_base = (
+            Path(__file__).resolve().parents[3]
+            / "results"
+            / "futures_market_snapshot.parquet"
+        )
+    if output_base.suffix.lower() != ".parquet":
+        raise ValueError("--snapshot-output must use a .parquet extension")
+    output = _timestamped_output_path(output_base, generated_at)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    snapshot.write_parquet(output)
+    log.info(
+        "futures_market_snapshot complete output=%s rows=%d",
+        output,
+        snapshot.height,
+    )
+    print(f"Saved live market snapshot {output}")
+    return snapshot
+
+
+def _load_market_snapshot(path: Path) -> pl.DataFrame:
+    """Load and minimally validate a cached acquisition Parquet."""
+    resolved = path.expanduser().resolve()
+    if resolved.suffix.lower() != ".parquet":
+        raise ValueError("--snapshot-input must be a .parquet file")
+    snapshot = pl.read_parquet(resolved)
+    required = {
+        "symbol",
+        "annual_dollar_vol_per_contract",
+        "avg_daily_volume_contracts",
+        "selected_one_way_spread_points",
+        "ib_availability",
+    }
+    missing = sorted(required.difference(snapshot.columns))
+    if missing:
+        raise ValueError(
+            f"market snapshot is missing required fields {missing}"
+        )
+    log.info(
+        "futures_market_snapshot loaded input=%s rows=%d",
+        resolved,
+        snapshot.height,
+    )
+    return snapshot
+
+
+def run(argv=None, *, snapshot_only: bool = False) -> pl.DataFrame:
     """Build, emit, and return the report for Python/notebook callers."""
     args = parse_args(argv)
     setup_logger()
@@ -3133,27 +3356,27 @@ def run(argv=None) -> pl.DataFrame:
         if value <= 0:
             raise ValueError(f"{option} must be positive")
 
-    pooled_summaries = None
-    strategy_metrics_by_rule = None
-    if not args.skip_ewmac_cost_baseline:
-        strategy_provider = pysystemtrade_provider or PysystemtradeHistoryProvider(
-            db_path=args.pysystemtrade_db
+    if snapshot_only and args.snapshot_input is not None:
+        raise ValueError(
+            "futures-market-snapshot cannot also use --snapshot-input"
         )
-        pooled_summaries, strategy_metrics_by_rule = (
-            estimate_pooled_ewmac_cost_baselines(
-            strategy_provider,
-            db_path=args.pysystemtrade_db,
-            pooling_mapping_path=args.pysystemtrade_pooling_mapping,
-            fast_spans=args.cost_ewmac_fast_spans,
-            vol_span=args.cost_ewmac_vol_span,
-            vol_slow_years=args.cost_ewmac_vol_slow_years,
-            vol_slow_weight=args.cost_ewmac_vol_slow_weight,
-            vol_min_samples=args.cost_ewmac_vol_min_samples,
-            scalar_min_periods=args.cost_ewmac_scalar_min_periods,
-            )
+    if args.snapshot_input is not None and args.offline:
+        raise ValueError("--snapshot-input and --offline are mutually exclusive")
+    if snapshot_only:
+        if args.offline:
+            raise ValueError("futures-market-snapshot requires an IB connection")
+        rows = _acquire_live_market_rows(
+            args,
+            instruments,
+            pysystemtrade_provider=pysystemtrade_provider,
+            reference_fx_by_currency=reference_fx_by_currency,
         )
+        return _emit_market_snapshot(rows, args)
 
-    if args.offline:
+    if args.snapshot_input is not None:
+        snapshot = _load_market_snapshot(args.snapshot_input)
+        rows = snapshot.to_dicts()
+    elif args.offline:
         if pysystemtrade_provider is None:
             raise ValueError("--offline currently requires --vol-source pysystemtrade")
         rows = []
@@ -3179,113 +3402,35 @@ def run(argv=None) -> pl.DataFrame:
                 rows.append(row)
             except Exception as exc:
                 rows.append(_error_row(instr, exc, fx_by_currency=fx_by_currency))
-        rows = _attach_pooled_cost_estimates(
-            rows,
+    else:
+        rows = _acquire_live_market_rows(
+            args,
             instruments,
-            pooled_summaries=pooled_summaries,
-            strategy_metrics_by_rule=strategy_metrics_by_rule,
-            rule_cost_limit_sr=args.rule_cost_limit_sr,
+            pysystemtrade_provider=pysystemtrade_provider,
+            reference_fx_by_currency=reference_fx_by_currency,
         )
-        report = _attach_affordability_ranks(
-            pl.DataFrame(rows, infer_schema_length=None),
-            target_vol=args.affordability_target_vol,
-            min_contracts=args.affordability_min_contracts,
-            capital_usd=args.affordability_capital_usd,
-            idm=args.affordability_idm,
-            min_main_instruments=args.affordability_min_main_instruments,
-            main_asset_classes=args.affordability_main_asset_classes,
-        )
-        report = _attach_phase2_prefilters(
-            report,
-            initial_capital_usd=args.affordability_capital_usd,
-            target_vol=args.affordability_target_vol,
-            instrument_cost_limit_sr=args.instrument_cost_limit_sr,
-            liquidity_ann_trades=args.liquidity_ann_trades,
-            liquidity_business_days=args.liquidity_business_days,
-            max_market_volume_pct=args.max_market_volume_pct,
-            min_daily_volume_contracts=args.min_daily_volume,
-        )
-        return _emit_report(report, args)
 
-    log.info(
-        "futures_cost_risk start instruments=%d duration=%s fast_vol_span=%d "
-        "slow_vol_years=%d slow_vol_weight=%.3f vol_source=%s "
-        "market_data_type=%s use_rth=%s",
-        len(instruments), args.duration, args.fast_vol_span, args.slow_vol_years,
-        args.slow_vol_weight, args.vol_source, args.market_data_type,
-        args.use_rth,
-    )
-    ib = IBPySync()
-    ib.connect(args.host, args.port, args.client_id)
-    fx_by_currency = load_current_fx_to_usd(
-        ib,
-        {str(instr.get("currency") or "USD") for instr in instruments},
-        reference_fx_by_currency,
-        market_data_type=args.market_data_type,
-        quote_wait_seconds=args.quote_wait_seconds,
-    )
-    rows = []
-    try:
-        for instr in instruments:
-            symbol = instr["symbol"]
-            try:
-                row = diagnose_instrument(
-                    ib,
-                    instr,
-                    duration=args.duration,
-                    spread_duration=args.spread_duration,
-                    spread_use_rth=not args.spread_all_hours,
-                    volume_duration=args.volume_duration,
-                    volume_lookback_days=args.volume_lookback_days,
-                    min_days=args.min_days,
-                    contract_details_timeout=args.contract_details_timeout,
-                    quote_wait_seconds=args.quote_wait_seconds,
-                    use_rth=args.use_rth,
-                    vol_source=args.vol_source,
-                    fast_span=args.fast_vol_span,
-                    slow_years=args.slow_vol_years,
-                    slow_weight=args.slow_vol_weight,
-                    market_data_type=args.market_data_type,
-                    pysystemtrade_provider=pysystemtrade_provider,
-                    fx_by_currency=fx_by_currency,
-                )
-                rows.append(row)
-                log.info(
-                    "futures_cost_risk selected symbol=%s contract=%s notional_usd=%.2f "
-                    "annual_dvol_usd=%.2f one_way_cost_usd=%s spread_source=%s",
-                    symbol, row["contract_id"], row["notional_per_contract"],
-                    row["annual_dollar_vol_per_contract"], row["one_way_total_cost"],
-                    row["selected_spread_source"],
-                )
-            except Exception as exc:
-                log.warning("futures_cost_risk rejected symbol=%s reason=%s", symbol, exc)
-                fallback_vol = None
-                if pysystemtrade_provider is not None:
-                    try:
-                        _, fallback_vol = _history_volatility(
-                            ib,
-                            instr,
-                            vol_source="pysystemtrade",
-                            duration=args.duration,
-                            use_rth=args.use_rth,
-                            fast_span=args.fast_vol_span,
-                            slow_years=args.slow_vol_years,
-                            slow_weight=args.slow_vol_weight,
-                            pysystemtrade_provider=pysystemtrade_provider,
-                        )
-                    except Exception as vol_exc:
-                        log.warning(
-                            "futures_cost_risk volatility_fallback_failed symbol=%s reason=%s",
-                            symbol, vol_exc,
-                        )
-                rows.append(_error_row(
-                    instr,
-                    exc,
-                    vol=fallback_vol,
-                    fx_by_currency=fx_by_currency,
-                ))
-    finally:
-        ib.disconnect()
+    # Everything below this point is reproducible from the cached acquisition
+    # rows plus the local research database. No IB connection is required.
+    pooled_summaries = None
+    strategy_metrics_by_rule = None
+    if not args.skip_ewmac_cost_baseline:
+        strategy_provider = pysystemtrade_provider or PysystemtradeHistoryProvider(
+            db_path=args.pysystemtrade_db
+        )
+        pooled_summaries, strategy_metrics_by_rule = (
+            estimate_pooled_ewmac_cost_baselines(
+                strategy_provider,
+                db_path=args.pysystemtrade_db,
+                pooling_mapping_path=args.pysystemtrade_pooling_mapping,
+                fast_spans=args.cost_ewmac_fast_spans,
+                vol_span=args.cost_ewmac_vol_span,
+                vol_slow_years=args.cost_ewmac_vol_slow_years,
+                vol_slow_weight=args.cost_ewmac_vol_slow_weight,
+                vol_min_samples=args.cost_ewmac_vol_min_samples,
+                scalar_min_periods=args.cost_ewmac_scalar_min_periods,
+            )
+        )
 
     rows = _attach_pooled_cost_estimates(
         rows,
@@ -3319,6 +3464,11 @@ def run(argv=None) -> pl.DataFrame:
 def main(argv=None) -> None:
     """Console-script boundary; successful commands must return exit status zero."""
     run(argv)
+
+
+def snapshot_main(argv=None) -> None:
+    """Acquire and persist reusable live inputs without running Phase 1."""
+    run(argv, snapshot_only=True)
 
 
 if __name__ == "__main__":
