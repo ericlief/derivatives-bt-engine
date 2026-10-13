@@ -14,8 +14,10 @@ import derivatives_bt_engine.pipelines.phase1_cost as futures_cost_risk
 from derivatives_bt_engine.pipelines.phase1_cost import (
     _attach_affordability_ranks,
     _attach_phase2_prefilters,
-    _configured_cost_estimate,
+    _account_base_currency,
     _blend_recent_and_historical_return_volatility,
+    _configured_cost_estimate,
+    _convert_what_if_preview_to_usd,
     _emit_report,
     _ewmac_rule_performance,
     _historical_bid_ask_spread,
@@ -23,6 +25,8 @@ from derivatives_bt_engine.pipelines.phase1_cost import (
     _historical_request_timed_out,
     _ib_contract_currency,
     _latest_dated_mark,
+    _resolve_what_if_account,
+    _what_if_order_preview,
     _roll_rate_audit,
     _volume_stats_from_trade_bars,
     build_cost_risk_row,
@@ -57,6 +61,114 @@ def test_market_data_type_belongs_to_diagnostic_not_history_loader():
 
 def test_broad_audit_defaults_to_automatic_quote_fallback():
     assert parse_args([]).market_data_type == "auto"
+
+
+def test_multiple_ib_accounts_require_explicit_what_if_account():
+    class FakeIB:
+        def managed_accounts(self):
+            return ["MARGIN", "ROTH"]
+
+    with pytest.raises(ValueError, match="--ib-account is required"):
+        _resolve_what_if_account(FakeIB(), None)
+
+    assert _resolve_what_if_account(FakeIB(), "MARGIN") == "MARGIN"
+
+
+def test_account_base_currency_uses_selected_account_summary():
+    class FakeIB:
+        def account_summary(self, account):
+            assert account == "MARGIN"
+            return [
+                SimpleNamespace(
+                    tag="NetLiquidation",
+                    currency="USD",
+                    value="100000",
+                ),
+                SimpleNamespace(tag="CashBalance", currency="CHF", value="100"),
+            ]
+
+    assert _account_base_currency(FakeIB(), "MARGIN") == "USD"
+    assert _account_base_currency(FakeIB(), "MARGIN", "chf") == "CHF"
+
+
+def test_what_if_preview_uses_both_sides_and_conservative_usd_values():
+    class FakeIB:
+        def __init__(self):
+            self.orders = []
+
+        def what_if_order(self, contract, order):
+            self.orders.append(order)
+            if order.action == "BUY":
+                return SimpleNamespace(
+                    status="PreSubmitted",
+                    commission=2.5,
+                    commissionCurrency="CHF",
+                    initMarginChange="387.25",
+                    maintMarginChange="314.17",
+                )
+            return SimpleNamespace(
+                status="PreSubmitted",
+                commission=2.7,
+                commissionCurrency="CHF",
+                initMarginChange="400.0",
+                maintMarginChange="320.0",
+            )
+
+        def get_fx_to_usd(self, currency, **kwargs):
+            assert currency == "CHF"
+            return {
+                "rate": 1.25,
+                "queried_at_utc": "2026-10-13T12:00:00+00:00",
+                "source": "ib_live_mid",
+                "pair": "USDCHF",
+                "market_data_type": "live",
+            }
+
+    ib = FakeIB()
+    raw = _what_if_order_preview(ib, object(), "MARGIN")
+    converted = _convert_what_if_preview_to_usd(
+        ib,
+        raw,
+        # SARON commission is CHF, but IB reports margin changes in the
+        # selected account's base currency. Keep those units independent.
+        margin_currency="USD",
+        selected_fx={"USD": {"rate": 1.0}},
+        reference_fx={},
+        market_data_type="auto",
+        quote_wait_seconds=0.0,
+    )
+
+    assert [order.action for order in ib.orders] == ["BUY", "SELL"]
+    assert {order.account for order in ib.orders} == {"MARGIN"}
+    assert converted["ib_whatif_eligible"]
+    assert converted["ib_whatif_commission"] == pytest.approx(2.7)
+    assert converted["ib_whatif_commission_usd"] == pytest.approx(3.375)
+    assert converted["ib_whatif_initial_margin_usd"] == pytest.approx(400.0)
+    assert converted["ib_whatif_maintenance_margin_usd"] == pytest.approx(320.0)
+
+
+def test_what_if_preview_rejects_a_missing_side_commission():
+    converted = _convert_what_if_preview_to_usd(
+        SimpleNamespace(),
+        {
+            "ib_whatif_eligible": True,
+            "ib_whatif_buy_commission": 2.5,
+            "ib_whatif_buy_commission_currency": "USD",
+            "ib_whatif_sell_commission": None,
+            "ib_whatif_sell_commission_currency": "USD",
+        },
+        margin_currency="USD",
+        selected_fx={"USD": {"rate": 1.0, "source": "identity"}},
+        reference_fx={},
+        market_data_type="auto",
+        quote_wait_seconds=0.0,
+    )
+
+    assert not converted["ib_whatif_eligible"]
+    assert converted["ib_whatif_commission_usd"] is None
+    assert "commission_or_commission_fx_unavailable" in converted[
+        "ib_whatif_error"
+    ]
 
 
 def test_current_ib_fx_replaces_stale_reference_and_keeps_audit_fields():
@@ -627,6 +739,66 @@ def test_configured_cost_labels_snapshot_spread_separately_from_history():
     assert estimate["configured_cost_quality"] == "ib_snapshot_bid_ask"
 
 
+def test_configured_cost_prefers_ib_what_if_commission_over_static_value():
+    estimate = _configured_cost_estimate(
+        {
+            "commission": 99.0,
+            "per_trade_cost": 0.0,
+            "percentage_cost": 0.0,
+            "carver_spread_points": 0.0025,
+        },
+        {
+            "selected_one_way_spread_points": 0.00125,
+            "selected_spread_source": "ib_dated_contract",
+            "multiplier": 2500.0,
+            "price": 100.0,
+            "currency": "CHF",
+            "fx_to_usd": 1.25,
+            "annual_dollar_vol_per_contract": 1000.0,
+            "ib_whatif_attempted": True,
+            "ib_whatif_eligible": True,
+            "ib_whatif_commission": 2.5,
+            "ib_whatif_commission_currency": "CHF",
+            "ib_whatif_commission_usd": 3.125,
+        },
+        pooled_summaries=None,
+        strategy_metrics_by_rule=None,
+        rule_cost_limit_sr=0.15,
+    )
+
+    assert estimate["commission_source"] == "ib_what_if"
+    assert estimate["configured_commission"] == pytest.approx(3.125)
+    assert estimate["configured_trade_sr"] == pytest.approx(
+        (0.00125 * 2500.0 * 1.25 + 3.125) / 1000.0
+    )
+    assert estimate["configured_cost_quality"].startswith(
+        "ib_what_if_commission"
+    )
+
+
+def test_failed_ib_what_if_does_not_fall_back_to_static_commission():
+    estimate = _configured_cost_estimate(
+        {"commission": 0.0, "carver_spread_points": 0.0025},
+        {
+            "selected_one_way_spread_points": 0.00125,
+            "selected_spread_source": "ib_dated_contract",
+            "multiplier": 2500.0,
+            "price": 100.0,
+            "currency": "CHF",
+            "fx_to_usd": 1.25,
+            "annual_dollar_vol_per_contract": 1000.0,
+            "ib_whatif_attempted": True,
+            "ib_whatif_eligible": False,
+        },
+        pooled_summaries=None,
+        strategy_metrics_by_rule=None,
+        rule_cost_limit_sr=0.15,
+    )
+
+    assert estimate["configured_cost_quality"] == "ib_what_if_unavailable"
+    assert "configured_trade_sr" not in estimate
+
+
 def test_report_uses_auditable_precision_for_money_rates_and_other_floats():
     report = pl.DataFrame({
         "notional_per_contract": [12345.6789],
@@ -657,10 +829,19 @@ def test_public_report_leads_with_primary_values_and_normalizes_spreads():
         "daily_return_vol": [0.005858],
         "annual_dollar_vol_per_contract": [2432.0],
         "selected_one_way_spread_points": [3.177],
+        "commission_amount": [2.5],
+        "commission_currency": ["CHF"],
+        "configured_commission": [3.125],
+        "commission_source": ["ib_what_if"],
+        "ib_whatif_initial_margin_usd": [387.25],
+        "ib_whatif_attempted": [True],
+        "ib_whatif_eligible": [True],
         "configured_one_way_cost": [75.0],
         "configured_trade_sr": [0.03],
         "configured_roll_sr": [0.06],
         "full_spread_points": [3.25],
+        "commission_per_side": [99.0],
+        "one_way_total_cost": [100.0],
         "ib_historical_spread_mean_points": [6.354],
         "ib_historical_spread_median_points": [6.6],
         "ib_historical_spread_p90_points": [9.75],
@@ -687,6 +868,15 @@ def test_public_report_leads_with_primary_values_and_normalizes_spreads():
     assert report["ib_hspread_median_pts"][0] == pytest.approx(3.3)
     assert report["ib_hspread_p90_pts"][0] == pytest.approx(4.875)
     assert report["ref_spread_pts"][0] == pytest.approx(2.4)
+    assert report["comm"][0] == pytest.approx(2.5)
+    assert report["comm_ccy"][0] == "CHF"
+    assert report["comm_usd"][0] == pytest.approx(3.125)
+    assert report["comm_src"][0] == "ib_what_if"
+    assert report["init_margin_usd"][0] == pytest.approx(387.25)
+    assert report["whatif_attempted"][0]
+    assert report["whatif_elig"][0]
+    assert report["ref_config_comm_usd"][0] == pytest.approx(99.0)
+    assert report["snap_ref_config_cost_usd"][0] == pytest.approx(100.0)
     assert "cost_usd" in report.columns
     assert "ann_dvol" in report.columns
     assert "ewmac_4_16_ann_trades" in report.columns
@@ -706,6 +896,9 @@ def test_public_report_leads_with_primary_values_and_normalizes_spreads():
     assert report["ref_strat_roll_rate_src"][0] == "configured_hold_cycle"
     assert report.columns.index("spread_pts") < report.columns.index(
         "snap_spread_pts"
+    )
+    assert report.columns.index("comm") < report.columns.index(
+        "ref_config_comm_usd"
     )
     assert report.columns.index("daily_pt_vol") < report.columns.index(
         "ref_mixed_pt_vol"
@@ -789,7 +982,7 @@ def test_full_carver_mapping_passes_large_ib_multiplier_and_currency(monkeypatch
         def qualify_contracts(self, contract):
             return [contract]
 
-    _resolve_contract(FakeIB(), {
+    contract = _resolve_contract(FakeIB(), {
         "symbol": "JPY",
         "ib_symbol": "JPY",
         "exchange": "CME",
@@ -802,6 +995,7 @@ def test_full_carver_mapping_passes_large_ib_multiplier_and_currency(monkeypatch
     assert len(calls) == 2
     assert all(call[1]["multiplier"] == "12500000" for call in calls)
     assert all(call[1]["currency"] == "" for call in calls)
+    assert contract.lastTradeDateOrContractMonth == "20261215"
 
 
 def test_volatility_uses_carver_fast_slow_point_vol_blend():
@@ -1329,3 +1523,35 @@ def test_phase2_prefilter_buckets_missing_subscription_data_first():
     assert not selected["data_eligible"]
     assert selected["selection_bucket"] == "dont_add_no_data"
     assert "data_unavailable" in selected["phase2_exclusion"]
+
+
+def test_phase2_prefilter_rejects_a_failed_attempted_what_if_preview():
+    report = pl.DataFrame({
+        "symbol": ["SARONA"],
+        "price": [100.0],
+        "fx_to_usd": [1.0],
+        "multiplier": [2_500.0],
+        "annual_dollar_vol_per_contract": [1_000.0],
+        "configured_trade_sr": [0.005],
+        "avg_daily_volume_contracts": [1_000.0],
+        "instrument_has_eligible_ewmac_rule": [True],
+        "execution_eligible": [True],
+        "ib_availability": ["contract_qualified"],
+        "ib_whatif_attempted": [True],
+        "ib_whatif_eligible": [False],
+    })
+
+    selected = _attach_phase2_prefilters(
+        report,
+        initial_capital_usd=100_000.0,
+        target_vol=0.20,
+        instrument_cost_limit_sr=0.01,
+        liquidity_ann_trades=25.0,
+        liquidity_business_days=250,
+        max_market_volume_pct=1.0,
+        min_daily_volume_contracts=100.0,
+    ).row(0, named=True)
+
+    assert not selected["data_eligible"]
+    assert not selected["phase2_eligible"]
+    assert "ib_whatif" in selected["phase2_exclusion"]

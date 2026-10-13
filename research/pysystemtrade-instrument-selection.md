@@ -22,9 +22,10 @@ owns executable economics and instrument selection.
 `futures-cost-risk` is the executable-universe companion to the broad Carver
 research panel. It resolves the dated IBKR contract that would actually be
 traded and reports its current notional, Carver mixed volatility, daily and
-annual dollar volatility per contract, configured
-commission, live and historical bid/ask width when available, and one-way cost
-as a fraction of annual dollar volatility.
+annual dollar volatility per contract, account-specific IB what-if commission
+and margin, live and historical bid/ask width when available, and one-way cost
+as a fraction of annual dollar volatility. Configured commission remains an
+explicit fallback only for offline and legacy snapshots.
 
 The default volatility source is the full roll-neutral pysystemtrade history.
 The shared core helper calculates the *Advanced Futures Trading* specification:
@@ -433,6 +434,23 @@ USD quotation convention live in `IBPySync`: AUD/EUR/GBP/NZD use `CCYUSD`;
 other currencies use `USDCCY` and are inverted, with legacy `MXP` mapped to
 IB's current `MXN` code. The cost report does not probe both orientations.
 
+The same online acquisition previews a one-contract market order on both the
+BUY and SELL side with IB's `whatIfOrder` endpoint. A blank order TIF is set to
+`DAY`, avoiding account presets that silently convert an API order to `GTC`.
+The selected `comm`/`comm_ccy` is the more conservative side and `comm_usd`
+is converted using the commission currency returned by IB. Margin changes are
+account-level values, so `init_margin` and `maint_margin` use the account base
+`margin_ccy`, independently of the commission currency. Their USD values are
+`init_margin_usd` and `maint_margin_usd`.
+
+What-if orders require an account. The runner selects it automatically only
+when TWS exposes exactly one managed account; otherwise pass `--ib-account`.
+It normally infers the account base currency from account summary, while
+`--ib-account-currency` provides an explicit override. Both BUY and SELL
+previews must succeed. A failed preview is `whatif_elig=false` and does not
+silently restore the stale configured commission. `--skip-what-if` is the
+explicit compatibility mode for old/offline behavior.
+
 The public CSV is ordered around one primary calculation path, so it does not
 repeat a `selected_*` prefix. Current price, FX, volatility, dollar risk,
 spread, cash cost, and SR cost come first. Point-in-time quote alternatives use
@@ -516,7 +534,7 @@ derive the smaller search universe from it:
 pysystemtrade histories + reviewed economic classification + local execution overlays
     -> per-rule EWMAC performance, turnover, rolls, and cost eligibility
     -> resolve the exact dated IB contract
-    -> current price and FX, executable spread and commission
+    -> current price and FX, executable spread, IB commission, and margin
     -> 20-day mean contract volume
     -> mixed production volatility and one-contract dollar risk
     -> Phase 1 gates, sel_bucket, phase2_elig, and phase2_excl
@@ -697,14 +715,21 @@ values that already belong to the saved Phase 1 run.
 
 The live-data boundary is a reusable, full-precision Parquet snapshot. Acquire
 contract qualification, current quotes and FX, dated-contract spread and
-volume statistics, and current volatility inputs once:
+volume statistics, account-specific what-if commission and margin, and current
+volatility inputs once:
 
 ```bash
 futures-market-snapshot \
   --instruments all-pysystemtrade \
   --vol-source pysystemtrade \
+  --ib-account YOUR_ACCOUNT \
   --snapshot-output results/pysystemtrade_market_snapshot.parquet
 ```
+
+Omit `--ib-account` when the TWS session exposes exactly one managed account.
+For a multi-account login it is mandatory because commission tiers, current
+positions, and margin can differ by account. The snapshot stores results and
+currencies, not the account identifier.
 
 The command appends a Chicago-time timestamp. It does not calculate pooled
 EWMAC costs, affordability, liquidity gates, or Phase 2 eligibility. Those
@@ -752,6 +777,19 @@ weight policy; `legacy_handcraft` and `equal` are retained as explicit research
 comparators. Complete-selection reports persist the choice as `wt_policy` and
 record `asset_cls`, `econ_subcls`, and the resulting class path for each book
 member on every accepted pass.
+
+Use `--max-margin-pct P` with `--complete` to apply an optional capital-usage
+gate. Each trial multiplies IB's one-contract `init_margin_usd` by that
+instrument's maximum-forecast position and rejects the trial if the sum is
+greater than `P%` of initial capital. This additive estimate is deliberately
+simple and auditable; it does not model IB portfolio/SPAN offsets or nonlinear
+margin changes at larger quantities. The saved one-contract margin is itself
+the marginal change against the account's positions at snapshot time, so this
+gate is a prescreen rather than an exact funding promise. The default is no
+margin gate. If the gate is enabled, candidates without a usable IB
+initial-margin preview are rejected as `initial_margin_unavailable`; validate
+the final integer order book with a fresh portfolio-aware margin preview before
+execution.
 
 An existing Phase 1 CSV can be reused at a different account size without an
 IB or Phase 1 rerun:

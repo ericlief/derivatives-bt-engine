@@ -2078,6 +2078,13 @@ def _resolve_contract(
     min_days: int,
     contract_details_timeout: Optional[float] = None,
 ):
+    """Resolve and qualify the dated IB future described by ``instr``.
+
+    Automatic expiries select the nearest allowed contract at least
+    ``min_days`` from expiry. The return value is the first contract from IB's
+    qualification list, so downstream requests receive its resolved conId,
+    trading class, multiplier, and currency rather than the request template.
+    """
     from ib_tools.ibpysync import IBPySync
     ib_symbol = instr.get('ib_symbol') or instr['symbol']
     # Only pass multiplier when ib_symbol diverges from our local symbol
@@ -2117,8 +2124,15 @@ def _resolve_contract(
         )
     contract = IBPySync.future(ib_symbol, exchange=instr.get('exchange', 'CME'), expiration=expiry,
                                multiplier=multiplier, currency=currency)
-    ib.qualify_contracts(contract)
-    return contract
+    qualified = ib.qualify_contracts(contract)
+    if not qualified:
+        raise ValueError(
+            f"{instr['symbol']}: IB contract qualification returned no contract"
+        )
+    # IB qualification always returns a list, even for one requested future.
+    # Downstream quotes and what-if orders should use IB's resolved contract,
+    # including its conId/tradingClass, rather than the request template.
+    return qualified[0]
 
 
 def _fmt(v, spec='+.3f'):

@@ -18,6 +18,7 @@ def _candidate(
     family="",
     asset_class="equity",
     economic_subclass="us",
+    initial_margin_usd=None,
 ):
     return SelectionCandidate(
         symbol=symbol,
@@ -28,6 +29,7 @@ def _candidate(
         economic_subclass=economic_subclass,
         econ_family=family,
         mkt_risk_vol_day=1_000_000_000.0,
+        initial_margin_usd=initial_margin_usd,
     )
 
 
@@ -159,6 +161,32 @@ def test_cluster_instrument_limit_must_be_positive():
     """Zero cannot express a useful per-cluster instrument limit."""
     with pytest.raises(ValueError, match="max_instruments_per_cluster"):
         GreedySelectionConfig(max_instruments_per_cluster=0)
+
+
+def test_optional_margin_limit_rejects_overfunded_trial_book():
+    candidate = _candidate("SARONA", 0.0, initial_margin_usd=4_000.0)
+    selector = GreedyInstrumentSelector(
+        config=GreedySelectionConfig(
+            capital=100_000.0,
+            target_vol=0.20,
+            starting_weight=0.20,
+            max_margin_pct=10.0,
+        ),
+        weight_policy=EqualPortfolioWeights(),
+    )
+
+    score = selector.score(
+        ["SARONA"], {"SARONA": candidate}, ["SARONA"], np.eye(1),
+        starting=True,
+    )
+
+    # Max forecast position is 80 contracts, requiring $320k of additive
+    # one-lot initial margin against the configured $10k limit.
+    assert not score.feasible
+    assert "portfolio_margin_limit" in score.reason
+    assert score.details[0]["portfolio_margin_at_max_usd"] == pytest.approx(
+        320_000.0
+    )
 
 
 def test_handcrafted_weights_expose_recursive_cluster_paths():

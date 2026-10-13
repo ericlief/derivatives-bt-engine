@@ -6,8 +6,9 @@ The diagnostic deliberately separates research history from execution data:
   70% fast/30% slow mixed point-volatility estimate (32-session EWM standard
   deviation plus a ten-year EWM anchor); and
 * Carver's IB mapping resolves the dated contract that supplies current price,
-  expiry, and an optional live bid/ask snapshot.  Point value, commission,
-  native currency, and FX conversion remain explicit report inputs.
+  expiry, and an optional live bid/ask snapshot.  An account-scoped IB what-if
+  order supplies current commission and margin; point value, currencies, and
+  FX conversion remain explicit report inputs.
 * the reviewed normalization pool supplies causal EWMAC baselines for the
   4/16, 8/32, 16/64, 32/128, and 64/256 rules; and
 * each execution row combines its own one-way costs and current dollar risk
@@ -50,7 +51,7 @@ from zoneinfo import ZoneInfo
 
 import duckdb
 import polars as pl
-from ib_tools.ibpysync import IBPySync
+from ib_tools.ibpysync import IBPySync, MarketOrder
 
 from derivatives_bt_engine.data.pysystemtrade_ib import (
     add_local_execution_overlays,
@@ -146,6 +147,7 @@ DEFAULT_LIQUIDITY_ANNUAL_TRADES = 25.0
 DEFAULT_LIQUIDITY_BUSINESS_DAYS = 250
 DEFAULT_MAX_MARKET_VOLUME_PCT = 1.0
 DEFAULT_MIN_DAILY_VOLUME_CONTRACTS = 100.0
+IB_UNSET_DOUBLE_THRESHOLD = 1e300
 
 
 def _pooling_report_identity(instr: dict) -> dict:
@@ -187,6 +189,113 @@ def _nonnegative_finite(value) -> Optional[float]:
     except (TypeError, ValueError):
         return None
     return number if math.isfinite(number) and number >= 0 else None
+
+
+def _ib_finite_number(value) -> Optional[float]:
+    """Return a real IB numeric value, mapping its max-double sentinel to null."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or abs(number) >= IB_UNSET_DOUBLE_THRESHOLD:
+        return None
+    return number
+
+
+def _resolve_what_if_account(ib, requested_account: Optional[str]) -> str:
+    """Select one connected IB account without silently choosing among many."""
+    accounts = [str(value) for value in ib.managed_accounts()]
+    if requested_account:
+        if requested_account not in accounts:
+            raise ValueError(
+                f"IB account {requested_account!r} is not available; "
+                f"connected accounts={accounts}"
+            )
+        return requested_account
+    if len(accounts) == 1:
+        return accounts[0]
+    if not accounts:
+        raise ValueError("TWS returned no managed accounts for what-if orders")
+    raise ValueError(
+        "--ib-account is required when the TWS login manages multiple accounts"
+    )
+
+
+def _account_base_currency(
+    ib,
+    account: str,
+    explicit_currency: Optional[str] = None,
+) -> str:
+    """Resolve the currency used by IB's account-level margin fields."""
+    if explicit_currency:
+        return explicit_currency.upper()
+    summary = ib.account_summary(account)
+    preferred_tags = ("NetLiquidation", "EquityWithLoanValue")
+    for tag in preferred_tags:
+        currencies = {
+            str(getattr(value, "currency", "")).upper()
+            for value in summary
+            if getattr(value, "tag", None) == tag
+            and len(str(getattr(value, "currency", ""))) == 3
+        }
+        if len(currencies) == 1:
+            return currencies.pop()
+    raise ValueError(
+        f"could not infer base currency for IB account {account}; "
+        "pass --ib-account-currency"
+    )
+
+
+def _what_if_order_preview(ib, contract, account: str) -> dict[str, object]:
+    """Preview one BUY and SELL contract and retain auditable IB fields.
+
+    Both directions are required because an existing account position can
+    make one side appear artificially cheap through an offset. The selected
+    commission and margin values are computed after currency conversion.
+    """
+    result: dict[str, object] = {
+        "ib_whatif_attempted": True,
+        "ib_whatif_source": "ib_what_if",
+    }
+    successful_sides: list[str] = []
+    errors: list[str] = []
+    warnings: list[str] = []
+    for side in ("buy", "sell"):
+        try:
+            state = ib.what_if_order(
+                contract,
+                MarketOrder(side.upper(), 1, account=account),
+            )
+            successful_sides.append(side)
+            warning = str(getattr(state, "warningText", "") or "").strip()
+            if warning:
+                warnings.append(f"{side}:{warning}")
+            result.update({
+                f"ib_whatif_{side}_status": (
+                    str(getattr(state, "status", "") or "") or None
+                ),
+                f"ib_whatif_{side}_commission": _ib_finite_number(
+                    getattr(state, "commission", None)
+                ),
+                f"ib_whatif_{side}_commission_currency": (
+                    str(getattr(state, "commissionCurrency", "") or "").upper()
+                    or None
+                ),
+                f"ib_whatif_{side}_initial_margin_change": _ib_finite_number(
+                    getattr(state, "initMarginChange", None)
+                ),
+                f"ib_whatif_{side}_maintenance_margin_change": _ib_finite_number(
+                    getattr(state, "maintMarginChange", None)
+                ),
+            })
+        except Exception as exc:
+            errors.append(f"{side}:{exc}")
+    result.update({
+        "ib_whatif_eligible": len(successful_sides) == 2,
+        "ib_whatif_warning": ";".join(warnings) or None,
+        "ib_whatif_error": ";".join(errors) or None,
+    })
+    return result
 
 
 def _parse_fast_spans(value: str) -> tuple[int, ...]:
@@ -758,6 +867,17 @@ def _configured_cost_estimate(
     annual_dollar_vol = _positive_finite(
         report_row.get("annual_dollar_vol_per_contract")
     )
+    what_if_attempted = bool(report_row.get("ib_whatif_attempted"))
+    what_if_eligible = bool(report_row.get("ib_whatif_eligible"))
+    what_if_commission = _nonnegative_finite(
+        report_row.get("ib_whatif_commission")
+    )
+    what_if_commission_usd = _nonnegative_finite(
+        report_row.get("ib_whatif_commission_usd")
+    )
+    what_if_commission_currency = report_row.get(
+        "ib_whatif_commission_currency"
+    )
     per_block = _nonnegative_finite(instr.get("commission"))
     per_trade = _nonnegative_finite(instr.get("per_trade_cost"))
     percentage = _nonnegative_finite(instr.get("percentage_cost"))
@@ -773,28 +893,59 @@ def _configured_cost_estimate(
             "configured_cost_quality": "incomplete_static_inputs",
         }
 
-    percentage_commission = (
-        percentage * price * multiplier if percentage is not None else 0.0
-    )
-    commission_native = max(
-        per_block if per_block is not None else 0.0,
-        per_trade if per_trade is not None else 0.0,
-        percentage_commission,
-    )
+    if what_if_attempted:
+        if not what_if_eligible or what_if_commission_usd is None:
+            return {
+                **common,
+                "configured_cost_quality": "ib_what_if_unavailable",
+                "commission_source": "ib_what_if_failed",
+            }
+        commission_amount = what_if_commission
+        commission_currency = what_if_commission_currency
+        commission_usd = what_if_commission_usd
+        commission_source = "ib_what_if"
+    else:
+        percentage_commission = (
+            percentage * price * multiplier if percentage is not None else 0.0
+        )
+        commission_amount = max(
+            per_block if per_block is not None else 0.0,
+            per_trade if per_trade is not None else 0.0,
+            percentage_commission,
+        )
+        commission_currency = report_row.get("currency")
+        commission_usd = commission_amount * fx_to_usd
+        commission_source = "configured_fallback"
     spread_cash_native = spread_points * multiplier
-    one_way_native = spread_cash_native + commission_native
-    one_way_usd = one_way_native * fx_to_usd
+    spread_cash_usd = spread_cash_native * fx_to_usd
+    same_cost_currency = (
+        str(commission_currency or "").upper()
+        == str(report_row.get("currency") or "").upper()
+    )
+    one_way_native = (
+        spread_cash_native + commission_amount
+        if same_cost_currency and commission_amount is not None else None
+    )
+    one_way_usd = spread_cash_usd + commission_usd
     trade_sr = one_way_usd / annual_dollar_vol
-    roll_native = spread_cash_native + 2.0 * commission_native
-    roll_usd = roll_native * fx_to_usd
+    roll_native = (
+        spread_cash_native + 2.0 * commission_amount
+        if same_cost_currency and commission_amount is not None else None
+    )
+    roll_usd = spread_cash_usd + 2.0 * commission_usd
     roll_sr = roll_usd / annual_dollar_vol
     result: dict[str, object] = {
         **common,
         "carver_configured_one_way_spread_points": carver_spread_points,
         "selected_one_way_spread_points": spread_points,
         "selected_spread_source": spread_source,
-        "configured_commission_native": commission_native,
-        "configured_commission": commission_native * fx_to_usd,
+        "commission_amount": commission_amount,
+        "commission_currency": commission_currency,
+        "commission_source": commission_source,
+        "configured_commission_native": (
+            commission_amount if same_cost_currency else None
+        ),
+        "configured_commission": commission_usd,
         "configured_spread_cash_native": spread_cash_native,
         "configured_one_way_cost_native": one_way_native,
         "configured_one_way_cost": one_way_usd,
@@ -803,6 +954,12 @@ def _configured_cost_estimate(
         "configured_roll_cost": roll_usd,
         "configured_roll_sr": roll_sr,
         "configured_cost_quality": (
+            "ib_what_if_commission_ib_historical_bid_ask"
+            if commission_source == "ib_what_if"
+            and spread_source in {"ib_dated_contract", "ib_continuous_fallback"}
+            else "ib_what_if_commission_ib_snapshot_bid_ask"
+            if commission_source == "ib_what_if" and spread_source == "ib_snapshot"
+            else
             "ib_historical_bid_ask"
             if spread_source in {"ib_dated_contract", "ib_continuous_fallback"}
             else "ib_snapshot_bid_ask"
@@ -1072,6 +1229,8 @@ def _attach_phase2_prefilters(
         "avg_daily_volume_contracts",
         "instrument_has_eligible_ewmac_rule",
         "execution_eligible",
+        "ib_whatif_attempted",
+        "ib_whatif_eligible",
         "ib_availability",
         "price",
         "fx_to_usd",
@@ -1081,6 +1240,8 @@ def _attach_phase2_prefilters(
         if name in {
             "instrument_has_eligible_ewmac_rule",
             "execution_eligible",
+            "ib_whatif_attempted",
+            "ib_whatif_eligible",
         }:
             dtype = pl.Boolean
         elif name == "ib_availability":
@@ -1163,6 +1324,10 @@ def _attach_phase2_prefilters(
             & pl.col("avg_daily_volume_contracts").is_not_null()
             & pl.col("annual_dollar_vol_per_contract").is_not_null()
             & (pl.col("ib_availability") == "contract_qualified")
+            & (
+                ~pl.col("ib_whatif_attempted").fill_null(False)
+                | pl.col("ib_whatif_eligible").fill_null(False)
+            )
         ).alias("data_eligible"),
     ).with_columns(
         (
@@ -1217,6 +1382,8 @@ def _attach_phase2_prefilters(
             reasons.append("execution")
         if row.get("ib_availability") != "contract_qualified":
             reasons.append("ib_unavailable")
+        if row.get("ib_whatif_attempted") and not row.get("ib_whatif_eligible"):
+            reasons.append("ib_whatif")
         exclusions.append(",".join(reasons))
     return report.with_columns(
         pl.Series("phase2_exclusion", exclusions, dtype=pl.String)
@@ -1963,6 +2130,149 @@ def load_current_fx_to_usd(
     return selected
 
 
+def _ensure_current_fx_to_usd(
+    ib,
+    currency: Optional[str],
+    selected_fx: dict[str, dict],
+    reference_fx: dict[str, dict],
+    *,
+    market_data_type: str,
+    quote_wait_seconds: float,
+) -> Optional[dict]:
+    """Load an FX conversion discovered after initial snapshot setup."""
+    code = str(currency or "").upper()
+    if not code:
+        return None
+    if code not in selected_fx:
+        selected_fx.update(load_current_fx_to_usd(
+            ib,
+            {code},
+            reference_fx,
+            market_data_type=market_data_type,
+            quote_wait_seconds=quote_wait_seconds,
+        ))
+    return selected_fx.get(code)
+
+
+def _convert_what_if_preview_to_usd(
+    ib,
+    preview: dict[str, object],
+    *,
+    margin_currency: str,
+    selected_fx: dict[str, dict],
+    reference_fx: dict[str, dict],
+    market_data_type: str,
+    quote_wait_seconds: float,
+) -> dict[str, object]:
+    """Attach conservative USD commission and margin values to a preview.
+
+    A preview is execution-eligible only when both order directions produce a
+    usable commission after FX conversion. One usable side is insufficient:
+    choosing it could understate the fee on the other side of the strategy.
+    """
+    converted = dict(preview)
+    commission_candidates: list[tuple[float, float, str, str]] = []
+    margin_fx = _ensure_current_fx_to_usd(
+        ib,
+        margin_currency,
+        selected_fx,
+        reference_fx,
+        market_data_type=market_data_type,
+        quote_wait_seconds=quote_wait_seconds,
+    )
+    margin_rate = (
+        _positive_finite(margin_fx.get("rate")) if margin_fx is not None else None
+    )
+    initial_margin_values: list[float] = []
+    maintenance_margin_values: list[float] = []
+    for side in ("buy", "sell"):
+        commission = _nonnegative_finite(
+            preview.get(f"ib_whatif_{side}_commission")
+        )
+        commission_currency = preview.get(
+            f"ib_whatif_{side}_commission_currency"
+        )
+        commission_fx = _ensure_current_fx_to_usd(
+            ib,
+            str(commission_currency or ""),
+            selected_fx,
+            reference_fx,
+            market_data_type=market_data_type,
+            quote_wait_seconds=quote_wait_seconds,
+        )
+        commission_rate = (
+            _positive_finite(commission_fx.get("rate"))
+            if commission_fx is not None else None
+        )
+        commission_usd = (
+            commission * commission_rate
+            if commission is not None and commission_rate is not None
+            else None
+        )
+        converted[f"ib_whatif_{side}_commission_usd"] = commission_usd
+        if commission_usd is not None:
+            commission_candidates.append((
+                commission_usd,
+                commission,
+                str(commission_currency),
+                side,
+            ))
+
+        initial_margin = _ib_finite_number(
+            preview.get(f"ib_whatif_{side}_initial_margin_change")
+        )
+        maintenance_margin = _ib_finite_number(
+            preview.get(f"ib_whatif_{side}_maintenance_margin_change")
+        )
+        if initial_margin is not None:
+            initial_margin_values.append(max(initial_margin, 0.0))
+        if maintenance_margin is not None:
+            maintenance_margin_values.append(max(maintenance_margin, 0.0))
+
+    commission_complete = len(commission_candidates) == 2
+    if commission_complete:
+        commission_usd, amount, currency, side = max(commission_candidates)
+    else:
+        commission_usd = amount = currency = side = None
+    initial_margin = max(initial_margin_values) if initial_margin_values else None
+    maintenance_margin = (
+        max(maintenance_margin_values) if maintenance_margin_values else None
+    )
+    converted.update({
+        "ib_whatif_eligible": bool(
+            preview.get("ib_whatif_eligible") and commission_complete
+        ),
+        "ib_whatif_commission": amount,
+        "ib_whatif_commission_currency": currency,
+        "ib_whatif_commission_usd": commission_usd,
+        "ib_whatif_commission_side": side,
+        "ib_whatif_margin_currency": margin_currency,
+        "ib_whatif_initial_margin": initial_margin,
+        "ib_whatif_maintenance_margin": maintenance_margin,
+        "ib_whatif_initial_margin_usd": (
+            initial_margin * margin_rate
+            if initial_margin is not None and margin_rate is not None
+            else None
+        ),
+        "ib_whatif_maintenance_margin_usd": (
+            maintenance_margin * margin_rate
+            if maintenance_margin is not None and margin_rate is not None
+            else None
+        ),
+        "ib_whatif_margin_fx_to_usd": margin_rate,
+        "ib_whatif_margin_fx_source": (
+            margin_fx.get("source") if margin_fx is not None else None
+        ),
+    })
+    if preview.get("ib_whatif_eligible") and not commission_complete:
+        existing_error = str(converted.get("ib_whatif_error") or "").strip()
+        conversion_error = "commission_or_commission_fx_unavailable"
+        converted["ib_whatif_error"] = ";".join(
+            value for value in (existing_error, conversion_error) if value
+        )
+    return converted
+
+
 def _fx_report_fields(fx_info: dict[str, object]) -> dict[str, object]:
     return {
         "cur_fx_source": fx_info.get("source"),
@@ -2054,6 +2364,10 @@ def diagnose_instrument(
     market_data_type: str,
     pysystemtrade_provider: Optional[PysystemtradeHistoryProvider],
     fx_by_currency: dict[str, dict],
+    reference_fx_by_currency: Optional[dict[str, dict]] = None,
+    what_if_account: Optional[str] = None,
+    what_if_margin_currency: Optional[str] = None,
+    what_if_enabled: bool = False,
 ) -> dict:
     symbol = instr["symbol"]
     try:
@@ -2099,6 +2413,21 @@ def diagnose_instrument(
         min_days,
         contract_details_timeout=contract_details_timeout,
     )
+    what_if: dict[str, object] = {"ib_whatif_attempted": False}
+    if what_if_enabled:
+        if not what_if_account or not what_if_margin_currency:
+            raise ValueError(
+                "what-if preview requires an IB account and account currency"
+            )
+        what_if = _convert_what_if_preview_to_usd(
+            ib,
+            _what_if_order_preview(ib, contract, what_if_account),
+            margin_currency=what_if_margin_currency,
+            selected_fx=fx_by_currency,
+            reference_fx=reference_fx_by_currency or {},
+            market_data_type=market_data_type,
+            quote_wait_seconds=quote_wait_seconds,
+        )
     quote = ib.get_quote(
         contract,
         wait_seconds=quote_wait_seconds,
@@ -2375,6 +2704,7 @@ def diagnose_instrument(
         **spread_stats,
         "selected_one_way_spread_points": selected_one_way_spread,
         "selected_spread_source": selected_spread_source,
+        **what_if,
         **_pooling_report_identity(instr),
     })
     return row
@@ -2496,6 +2826,28 @@ def parse_args(argv=None):
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=7496)
     parser.add_argument("--client-id", type=int, default=23)
+    parser.add_argument(
+        "--ib-account",
+        help=(
+            "Account used for one-contract commission and margin previews; "
+            "required when the TWS login manages multiple accounts"
+        ),
+    )
+    parser.add_argument(
+        "--ib-account-currency",
+        help=(
+            "Account base currency for what-if margin fields; normally "
+            "inferred from the IB account summary"
+        ),
+    )
+    parser.add_argument(
+        "--skip-what-if",
+        action="store_true",
+        help=(
+            "Skip IB order previews and retain configured commissions; "
+            "intended only for compatibility diagnostics"
+        ),
+    )
     parser.add_argument(
         "--snapshot-input",
         type=Path,
@@ -2623,6 +2975,8 @@ def _error_row(
         "currency": instr.get("currency", "USD"),
         "mapping_status": instr.get("mapping_status", "local_registry"),
         "ib_availability": "unavailable_or_unverified",
+        "ib_whatif_attempted": False,
+        "ib_whatif_eligible": False,
         "carver_spread_points": instr.get("carver_spread_points"),
         **_pooling_report_identity(instr),
         "spread_quality": "error",
@@ -2736,6 +3090,18 @@ PUBLIC_REPORT_RENAMES = {
     "annual_dollar_vol_per_contract": "ann_dvol",
     "selected_one_way_spread_points": "spread_points",
     "selected_spread_source": "spread_source",
+    "commission_amount": "comm",
+    "commission_currency": "comm_ccy",
+    "commission_source": "comm_src",
+    "ib_whatif_attempted": "whatif_attempted",
+    "ib_whatif_eligible": "whatif_elig",
+    "ib_whatif_initial_margin": "init_margin",
+    "ib_whatif_initial_margin_usd": "init_margin_usd",
+    "ib_whatif_maintenance_margin": "maint_margin",
+    "ib_whatif_maintenance_margin_usd": "maint_margin_usd",
+    "ib_whatif_margin_currency": "margin_ccy",
+    "ib_whatif_margin_fx_to_usd": "margin_fx_to_usd",
+    "ib_whatif_margin_fx_source": "margin_fx_src",
     "configured_commission_native": "commission_native",
     "configured_commission": "commission_usd",
     "configured_spread_cash_native": "spread_cash_native",
@@ -2750,11 +3116,14 @@ PUBLIC_REPORT_RENAMES = {
     "bid": "snap_bid",
     "ask": "snap_ask",
     "full_spread_points": "snap_spread_points",
-    "commission_per_side": "snap_commission_usd",
+    # These fields are calculated while building the raw quote row, before the
+    # account-specific what-if preview is attached.  Label the configured
+    # commission explicitly so it cannot be mistaken for the selected IB fee.
+    "commission_per_side": "ref_config_commission_usd",
     "one_way_spread_cash": "snap_spread_cash_usd",
-    "one_way_total_cost": "snap_cost_usd",
-    "one_way_cost_per_annual_dollar_vol": "snap_sr_cost_per_trade",
-    "one_way_cost_bps_notional": "snap_cost_bps_notional",
+    "one_way_total_cost": "snap_ref_config_cost_usd",
+    "one_way_cost_per_annual_dollar_vol": "snap_ref_config_sr_cost_per_trade",
+    "one_way_cost_bps_notional": "snap_ref_config_cost_bps_notional",
     "spread_quality": "snap_spread_quality",
     "quote_timestamp_ct": "snap_quote_timestamp_ct",
     "quote_market_data_type": "snap_market_data_type",
@@ -3000,8 +3369,20 @@ def _public_report_schema(report: pl.DataFrame) -> pl.DataFrame:
         "sel_bucket",
         "spread_pts",
         "spread_src",
-        "comm_native",
+        "comm",
+        "comm_ccy",
         "comm_usd",
+        "comm_src",
+        "init_margin",
+        "init_margin_usd",
+        "maint_margin",
+        "maint_margin_usd",
+        "margin_ccy",
+        "margin_fx_to_usd",
+        "margin_fx_src",
+        "whatif_attempted",
+        "whatif_elig",
+        "comm_native",
         "spread_cash_native",
         "cost_native",
         "cost_usd",
@@ -3096,6 +3477,13 @@ def _emit_report(report: pl.DataFrame, args) -> pl.DataFrame:
         "incl_default_pool",
         "spread_pts",
         "spread_src",
+        "comm",
+        "comm_ccy",
+        "comm_usd",
+        "comm_src",
+        "init_margin_usd",
+        "maint_margin_usd",
+        "whatif_elig",
         "trade_sr",
         "cost_rank_in_asset_cls",
         "elig_ewmac_rule_count",
@@ -3144,7 +3532,7 @@ def _acquire_live_market_rows(
     log.info(
         "futures_market_snapshot start instruments=%d duration=%s "
         "fast_vol_span=%d slow_vol_years=%d slow_vol_weight=%.3f "
-        "vol_source=%s market_data_type=%s use_rth=%s",
+        "vol_source=%s market_data_type=%s use_rth=%s what_if_enabled=%s",
         len(instruments),
         args.duration,
         args.fast_vol_span,
@@ -3153,16 +3541,33 @@ def _acquire_live_market_rows(
         args.vol_source,
         args.market_data_type,
         args.use_rth,
+        not args.skip_what_if,
     )
     ib = IBPySync()
     ib.connect(args.host, args.port, args.client_id)
-    fx_by_currency = load_current_fx_to_usd(
-        ib,
-        {str(instr.get("currency") or "USD") for instr in instruments},
-        reference_fx_by_currency,
-        market_data_type=args.market_data_type,
-        quote_wait_seconds=args.quote_wait_seconds,
-    )
+    try:
+        what_if_account = None
+        what_if_margin_currency = None
+        if not args.skip_what_if:
+            what_if_account = _resolve_what_if_account(ib, args.ib_account)
+            what_if_margin_currency = _account_base_currency(
+                ib,
+                what_if_account,
+                args.ib_account_currency,
+            )
+        fx_by_currency = load_current_fx_to_usd(
+            ib,
+            {
+                str(instr.get("currency") or "USD")
+                for instr in instruments
+            } | ({what_if_margin_currency} if what_if_margin_currency else set()),
+            reference_fx_by_currency,
+            market_data_type=args.market_data_type,
+            quote_wait_seconds=args.quote_wait_seconds,
+        )
+    except Exception:
+        ib.disconnect()
+        raise
     rows: list[dict] = []
     try:
         for instr in instruments:
@@ -3187,16 +3592,24 @@ def _acquire_live_market_rows(
                     market_data_type=args.market_data_type,
                     pysystemtrade_provider=pysystemtrade_provider,
                     fx_by_currency=fx_by_currency,
+                    reference_fx_by_currency=reference_fx_by_currency,
+                    what_if_account=what_if_account,
+                    what_if_margin_currency=what_if_margin_currency,
+                    what_if_enabled=not args.skip_what_if,
                 )
                 rows.append(row)
                 log.info(
                     "futures_market_snapshot acquired symbol=%s contract=%s "
-                    "notional_usd=%.2f ann_dvol_usd=%.2f spread_source=%s",
+                    "notional_usd=%.2f ann_dvol_usd=%.2f spread_source=%s "
+                    "commission_usd=%s initial_margin_usd=%s what_if_eligible=%s",
                     symbol,
                     row["contract_id"],
                     row["notional_per_contract"],
                     row["annual_dollar_vol_per_contract"],
                     row["selected_spread_source"],
+                    row.get("ib_whatif_commission_usd"),
+                    row.get("ib_whatif_initial_margin_usd"),
+                    row.get("ib_whatif_eligible"),
                 )
             except Exception as exc:
                 log.warning(

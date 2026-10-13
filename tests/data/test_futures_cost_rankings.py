@@ -137,6 +137,15 @@ def _phase2_step1_report() -> pl.DataFrame:
         "max_pct_mkt_volume": [1.0] * 5,
         "trade_sr": [0.002] * 5,
         "roll_sr": [0.003] * 5,
+        "comm": [2.5] * 5,
+        "comm_ccy": ["USD"] * 5,
+        "comm_usd": [2.5] * 5,
+        "comm_src": ["ib_what_if"] * 5,
+        "init_margin_usd": [500.0] * 5,
+        "maint_margin_usd": [400.0] * 5,
+        "margin_ccy": ["USD"] * 5,
+        "whatif_attempted": [True] * 5,
+        "whatif_elig": [True] * 5,
         "ref_ann_rolls": [4.0] * 5,
         "cost_elig": [True] * 5,
         "size_elig": [True, True, False, True, True],
@@ -169,6 +178,9 @@ def test_phase2_step1_uses_saved_gates_and_keeps_only_selected_rows():
         0.003,
         4.0,
     )
+    assert selected.select(
+        "comm_usd", "init_margin_usd", "margin_ccy", "whatif_attempted"
+    ).row(0) == (2.5, 500.0, "USD", True)
     assert report.height == 5
 
 

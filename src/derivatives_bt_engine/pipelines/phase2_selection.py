@@ -168,6 +168,14 @@ def parse_args(argv=None):
         ),
     )
     parser.add_argument(
+        "--max-margin-pct",
+        type=float,
+        help=(
+            "Optional maximum summed IB what-if initial margin at forecast "
+            "cap, as a percent of initial capital"
+        ),
+    )
+    parser.add_argument(
         "--weight-policy",
         choices=("topdown_classif", "legacy_handcraft", "equal"),
         default="topdown_classif",
@@ -490,6 +498,11 @@ def _run_complete_selection(
                 if row.get("mkt_risk_vol_usd_day") is not None
                 else None
             ),
+            initial_margin_usd=(
+                float(row["init_margin_usd"])
+                if row.get("init_margin_usd") is not None
+                else None
+            ),
         ))
     if args.weight_policy == "legacy_handcraft":
         weight_policy = HandcraftedPortfolioWeights()
@@ -507,6 +520,7 @@ def _run_complete_selection(
             max_pct_market_volume=float(run_config["max_pct_mkt_volume"]),
             liquidity_days=int(run_config["liq_days"]),
             max_instruments_per_cluster=args.max_instr_per_cluster,
+            max_margin_pct=args.max_margin_pct,
         ),
         weight_policy=weight_policy,
     )
@@ -514,9 +528,12 @@ def _run_complete_selection(
     for trial in selection.trials:
         logger.debug(
             "phase2_trial iteration=%s candidate=%s book=%s score=%s idm=%s "
+            "portfolio_margin_at_max_usd=%s margin_limit_usd=%s "
             "feasible=%s accepted=%s reason=%s",
             trial["iteration"], trial["candidate"], trial["book"], trial["score"],
-            trial["idm"], trial["feasible"], trial["accepted"], trial["reason"],
+            trial["idm"], trial.get("portfolio_margin_at_max_usd"),
+            trial.get("margin_limit_usd"), trial["feasible"], trial["accepted"],
+            trial["reason"],
         )
     logger.info(
         "phase2_selection complete selected=%d candidates=%d score=%s idm=%s book=%s",
@@ -535,6 +552,7 @@ def _run_complete_selection(
             "symbol": symbol,
             "wt_policy": args.weight_policy,
             "max_instr_per_cluster": args.max_instr_per_cluster,
+            "max_margin_pct": args.max_margin_pct,
             "weight": selection.final_score.weights[symbol],
             "idm": selection.final_score.idm,
             "ann_dvol": candidate.ann_dvol,

@@ -73,6 +73,9 @@ class SelectionCandidate:
     ``econ_family`` prevents selecting duplicate routes for the same exposure.
     ``mkt_risk_vol_day`` is daily market volume expressed in annualized USD
     risk units, matching the Phase 2 participation calculation.
+    ``initial_margin_usd`` is the larger BUY/SELL one-contract marginal
+    initial-margin change from IB and supports an optional capital-usage
+    approximation.
     """
 
     symbol: str
@@ -83,6 +86,7 @@ class SelectionCandidate:
     economic_subclass: str
     econ_family: str = ""
     mkt_risk_vol_day: float | None = None
+    initial_margin_usd: float | None = None
 
     @property
     def annual_trade_cost_sr(self) -> float:
@@ -101,7 +105,11 @@ class GreedySelectionConfig:
     granularity rule. ``max_instruments_per_cluster`` optionally limits the
     number of selected instruments sharing one economic subclass, such as
     ``grains``. ``score_threshold`` controls the tolerated decline from the
-    best score observed so far.
+    best score observed so far. ``max_margin_pct`` optionally limits the sum
+    of one-contract IB initial margin multiplied by each instrument's maximum
+    forecast position. This is an additive screen: it deliberately does not
+    assume cross-product SPAN offsets, but remains an estimate because IB's
+    one-lot margin change depends on the account's positions at snapshot time.
     """
 
     capital: float = 100_000.0
@@ -116,6 +124,7 @@ class GreedySelectionConfig:
     liquidity_days: int = 250
     max_pct_market_volume: float = 1.0
     max_instruments_per_cluster: int | None = None
+    max_margin_pct: float | None = None
 
     def __post_init__(self) -> None:
         """Validate configuration ranges before any trial is evaluated."""
@@ -138,6 +147,8 @@ class GreedySelectionConfig:
             raise ValueError(
                 "max_instruments_per_cluster must be positive when set"
             )
+        if self.max_margin_pct is not None and not 0 < self.max_margin_pct <= 100:
+            raise ValueError("max_margin_pct must be in (0, 100] when set")
 
 
 @dataclass(frozen=True)
@@ -438,6 +449,10 @@ class GreedyInstrumentSelector:
         feasible = True
         reasons: list[str] = []
         net_sharpes: dict[str, float] = {}
+        margin_limit_usd = (
+            self.config.capital * self.config.max_margin_pct / 100.0
+            if self.config.max_margin_pct is not None else None
+        )
         if self.config.max_instruments_per_cluster is not None:
             cluster_counts: dict[str, int] = {}
             for symbol in symbols:
@@ -488,6 +503,11 @@ class GreedyInstrumentSelector:
                 and candidate.mkt_risk_vol_day > 0
                 else None
             )
+            margin_at_max_usd = (
+                max_position * candidate.initial_margin_usd
+                if candidate.initial_margin_usd is not None
+                else None
+            )
             reason = ""
             if not math.isfinite(size_penalty):
                 reason = "max_position_below_half_contract"
@@ -495,6 +515,8 @@ class GreedyInstrumentSelector:
                 reason = "market_risk_volume_unavailable"
             elif pct_market > self.config.max_pct_market_volume:
                 reason = "market_participation_limit"
+            elif margin_limit_usd is not None and margin_at_max_usd is None:
+                reason = "initial_margin_unavailable"
             if reason:
                 feasible = False
                 reasons.append(f"{symbol}:{reason}")
@@ -513,8 +535,30 @@ class GreedyInstrumentSelector:
                 "net_sr": net_sr,
                 "risk_traded_day": risk_traded_day,
                 "pct_mkt_volume": pct_market,
+                "init_margin_usd": candidate.initial_margin_usd,
+                "margin_at_max_usd": margin_at_max_usd,
+                "margin_limit_usd": margin_limit_usd,
                 "reason": reason,
             })
+
+        total_margin_at_max_usd = sum(
+            float(detail["margin_at_max_usd"])
+            for detail in details
+            if detail["margin_at_max_usd"] is not None
+        )
+        if (
+            margin_limit_usd is not None
+            and all(detail["margin_at_max_usd"] is not None for detail in details)
+            and total_margin_at_max_usd > margin_limit_usd
+        ):
+            feasible = False
+            reasons.append(
+                "portfolio_margin_limit "
+                f"margin_usd={total_margin_at_max_usd:.2f} "
+                f"max_usd={margin_limit_usd:.2f}"
+            )
+        for detail in details:
+            detail["portfolio_margin_at_max_usd"] = total_margin_at_max_usd
 
         # Portfolio score rewards diversification through the same w'Hw risk
         # denominator used by IDM, but applies each member's net SR in the
@@ -682,6 +726,7 @@ class GreedyInstrumentSelector:
         accepted: bool,
     ) -> dict[str, object]:
         """Flatten a portfolio score into one persisted candidate-trial row."""
+        first_detail = score.details[0] if score.details else {}
         return {
             "iteration": iteration,
             "candidate": candidate,
@@ -691,6 +736,10 @@ class GreedyInstrumentSelector:
             "feasible": score.feasible,
             "accepted": accepted,
             "reason": score.reason,
+            "portfolio_margin_at_max_usd": first_detail.get(
+                "portfolio_margin_at_max_usd"
+            ),
+            "margin_limit_usd": first_detail.get("margin_limit_usd"),
             "iter_best": None,
             "iter_best_score": None,
             "min_accept_score": None,
@@ -738,6 +787,12 @@ class GreedyInstrumentSelector:
                 "feasible": score.feasible,
                 "reason": score.reason,
                 "instr_reason": detail["reason"],
+                "init_margin_usd": detail["init_margin_usd"],
+                "margin_at_max_usd": detail["margin_at_max_usd"],
+                "portfolio_margin_at_max_usd": detail[
+                    "portfolio_margin_at_max_usd"
+                ],
+                "margin_limit_usd": detail["margin_limit_usd"],
                 "iter_best": None,
                 "iter_best_score": None,
                 "min_accept_score": None,
