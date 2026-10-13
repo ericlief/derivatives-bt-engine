@@ -126,6 +126,41 @@ def test_greedy_selector_allows_only_one_instrument_per_economic_family():
     assert len({"CORN", "MZC"}.intersection(result.selected)) == 1
 
 
+def test_greedy_selector_caps_selected_instruments_per_economic_subclass():
+    """A static cluster cap prevents an extra grain entering the book."""
+    candidates = [
+        _candidate("CORN", 0.0, economic_subclass="grains"),
+        _candidate("WHEAT", 0.0, economic_subclass="grains"),
+        _candidate("SOY", 0.0, economic_subclass="grains"),
+    ]
+    selector = GreedyInstrumentSelector(
+        config=GreedySelectionConfig(
+            capital=1_000_000.0,
+            score_threshold=0.0,
+            max_instruments_per_cluster=2,
+        )
+    )
+
+    result = selector.select(candidates, np.eye(3))
+
+    assert len(result.selected) == 2
+    capped_trial = next(
+        row for row in result.trials
+        if row["iteration"] == 2 and row["candidate"] not in result.selected
+    )
+    assert not capped_trial["feasible"]
+    assert capped_trial["score"] is None
+    assert capped_trial["reason"] == (
+        "cluster_instr_limit:grains n=3 max=2"
+    )
+
+
+def test_cluster_instrument_limit_must_be_positive():
+    """Zero cannot express a useful per-cluster instrument limit."""
+    with pytest.raises(ValueError, match="max_instruments_per_cluster"):
+        GreedySelectionConfig(max_instruments_per_cluster=0)
+
+
 def test_handcrafted_weights_expose_recursive_cluster_paths():
     """Similar correlation profiles should share an auditable terminal path."""
     symbols = ["ES", "NQ", "GC", "SI"]

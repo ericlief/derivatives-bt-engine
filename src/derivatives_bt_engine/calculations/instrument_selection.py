@@ -98,8 +98,10 @@ class GreedySelectionConfig:
     trials use correlation-derived portfolio weights. ``forecast_cap_ratio``
     is maximum forecast divided by average absolute forecast (20/10 = 2 in
     conventional Carver units). ``min_max_position`` enforces the half-contract
-    granularity rule. ``score_threshold`` controls the tolerated decline from
-    the best score observed so far.
+    granularity rule. ``max_instruments_per_cluster`` optionally limits the
+    number of selected instruments sharing one economic subclass, such as
+    ``grains``. ``score_threshold`` controls the tolerated decline from the
+    best score observed so far.
     """
 
     capital: float = 100_000.0
@@ -113,6 +115,7 @@ class GreedySelectionConfig:
     size_penalty_scale: float = 0.125
     liquidity_days: int = 250
     max_pct_market_volume: float = 1.0
+    max_instruments_per_cluster: int | None = None
 
     def __post_init__(self) -> None:
         """Validate configuration ranges before any trial is evaluated."""
@@ -128,6 +131,13 @@ class GreedySelectionConfig:
             raise ValueError("position and penalty parameters are invalid")
         if self.liquidity_days <= 0 or self.max_pct_market_volume <= 0:
             raise ValueError("liquidity parameters must be positive")
+        if (
+            self.max_instruments_per_cluster is not None
+            and self.max_instruments_per_cluster <= 0
+        ):
+            raise ValueError(
+                "max_instruments_per_cluster must be positive when set"
+            )
 
 
 @dataclass(frozen=True)
@@ -428,6 +438,18 @@ class GreedyInstrumentSelector:
         feasible = True
         reasons: list[str] = []
         net_sharpes: dict[str, float] = {}
+        if self.config.max_instruments_per_cluster is not None:
+            cluster_counts: dict[str, int] = {}
+            for symbol in symbols:
+                cluster = candidates[symbol].economic_subclass
+                cluster_counts[cluster] = cluster_counts.get(cluster, 0) + 1
+            for cluster, count in sorted(cluster_counts.items()):
+                if count > self.config.max_instruments_per_cluster:
+                    feasible = False
+                    reasons.append(
+                        f"cluster_instr_limit:{cluster} n={count} "
+                        f"max={self.config.max_instruments_per_cluster}"
+                    )
         for symbol in symbols:
             candidate = candidates[symbol]
             allocation = weights_for_limits[symbol]

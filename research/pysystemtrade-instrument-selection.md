@@ -795,6 +795,15 @@ combination and the unconstrained greedy AFTS baseline. The command writes:
   and
 - `pysystemtrade_selection_book_<timestamp>.csv`, the last accepted book.
 
+Use `--max-instr-per-cluster N` to run a static breadth-cap sensitivity. The
+cluster key is the reviewed `econ_subcls`, so `--max-instr-per-cluster 4`
+prevents a fifth `grains` instrument from entering a trial book. A rejected
+trial remains in both audit CSVs with a reason such as
+`cluster_instr_limit:grains n=5 max=4`. The default is unlimited. This static
+universe constraint is intentionally separate from the backtest/live
+`max_active_per_cluster` control, which ranks dated active signals by current
+model conviction after the universe has already been selected.
+
 In the final selection CSV, `net_sr` is an instrument-level input to the
 portfolio score: the common gross SR assumption less that instrument's annual
 combined-forecast trading cost and its final-book granularity penalty. It is

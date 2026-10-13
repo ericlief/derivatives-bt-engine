@@ -160,6 +160,14 @@ def parse_args(argv=None):
     parser.add_argument("--gross-sr", type=float, default=0.50)
     parser.add_argument("--starting-weight", type=float, default=0.20)
     parser.add_argument(
+        "--max-instr-per-cluster",
+        type=int,
+        help=(
+            "Maximum selected instruments in one economic subclass, such as "
+            "grains; default is unlimited"
+        ),
+    )
+    parser.add_argument(
         "--weight-policy",
         choices=("topdown_classif", "legacy_handcraft", "equal"),
         default="topdown_classif",
@@ -498,6 +506,7 @@ def _run_complete_selection(
             starting_weight=args.starting_weight,
             max_pct_market_volume=float(run_config["max_pct_mkt_volume"]),
             liquidity_days=int(run_config["liq_days"]),
+            max_instruments_per_cluster=args.max_instr_per_cluster,
         ),
         weight_policy=weight_policy,
     )
@@ -525,6 +534,7 @@ def _run_complete_selection(
             "rank": rank,
             "symbol": symbol,
             "wt_policy": args.weight_policy,
+            "max_instr_per_cluster": args.max_instr_per_cluster,
             "weight": selection.final_score.weights[symbol],
             "idm": selection.final_score.idm,
             "ann_dvol": candidate.ann_dvol,
@@ -556,12 +566,20 @@ def _run_complete_selection(
     public_audit = round_public_report(audit_frame)
     public_trials = round_public_report(
         pl.DataFrame(selection.trials, infer_schema_length=None).with_columns(
-            pl.lit(args.weight_policy).alias("wt_policy")
+            pl.lit(args.weight_policy).alias("wt_policy"),
+            pl.lit(args.max_instr_per_cluster, dtype=pl.Int64).alias(
+                "max_instr_per_cluster"
+            ),
         )
     )
     public_trial_allocations = round_public_report(
         pl.DataFrame(selection.trial_allocations, infer_schema_length=None)
-        .with_columns(pl.lit(args.weight_policy).alias("wt_policy"))
+        .with_columns(
+            pl.lit(args.weight_policy).alias("wt_policy"),
+            pl.lit(args.max_instr_per_cluster, dtype=pl.Int64).alias(
+                "max_instr_per_cluster"
+            ),
+        )
     )
     # The exhaustive trial-allocation audit is useful for reproducing rejected
     # decisions, but the accepted path is the readable answer to "what changed
@@ -570,11 +588,17 @@ def _run_complete_selection(
     public_selection_passes = round_public_report(
         pl.DataFrame(selection.trial_allocations, infer_schema_length=None)
         .filter(pl.col("accepted"))
-        .with_columns(pl.lit(args.weight_policy).alias("wt_policy"))
+        .with_columns(
+            pl.lit(args.weight_policy).alias("wt_policy"),
+            pl.lit(args.max_instr_per_cluster, dtype=pl.Int64).alias(
+                "max_instr_per_cluster"
+            ),
+        )
         .select(
             pl.col("iteration").alias("selection_step"),
             pl.col("candidate").alias("added_symbol"),
             "wt_policy",
+            "max_instr_per_cluster",
             "book",
             pl.col("book_symbol").alias("symbol"),
             "asset_cls",
