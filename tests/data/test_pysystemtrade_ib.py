@@ -49,7 +49,7 @@ def test_ibkr_us_execution_restriction_uses_executable_ib_symbol():
 
 def test_ibkr_us_execution_restriction_excludes_unavailable_exchanges():
     """Known unavailable venues remain research-only for the US profile."""
-    for exchange in ("CDE", "EUREX", "FTA", "IPE", "MONEP", "SGX"):
+    for exchange in ("CDE", "EUREX", "FTA", "IPE", "MONEP"):
         restricted = resolve_execution_eligibility(
             "TEST",
             ib_symbol="TEST",
@@ -68,6 +68,16 @@ def test_ibkr_us_execution_restriction_excludes_unavailable_exchanges():
     )
     assert ordinary["execution_eligible"]
     assert ordinary["execution_restriction_reason"] is None
+
+    # STI is explicitly restricted, but the rest of SGX remains subject to
+    # live contract/account verification rather than a venue-wide assumption.
+    sgx_product = resolve_execution_eligibility(
+        "IRON",
+        ib_symbol="SCI",
+        exchange="SGX",
+    )
+    assert sgx_product["execution_eligible"]
+    assert sgx_product["execution_restriction_reason"] is None
 
 
 def test_local_micros_borrow_matching_carver_histories():
