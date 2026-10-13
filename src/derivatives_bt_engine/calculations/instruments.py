@@ -188,9 +188,12 @@ EXECUTION_ELIGIBILITY_OVERRIDES: dict[str, dict[str, dict[str, object]]] = {
 # comparative analysis; the live market snapshot must not query them.
 EXECUTION_EXCHANGE_RESTRICTIONS: dict[str, dict[str, str]] = {
     'ibkr_us': {
+        'CDE': 'ibkr_us_exchange_no_trading_permission',
         'EUREX': 'ibkr_us_exchange_no_trading_permission',
         'FTA': 'ibkr_us_exchange_no_trading_permission',
         'IPE': 'ibkr_us_exchange_no_trading_permission',
+        'MONEP': 'ibkr_us_exchange_no_trading_permission',
+        'SGX': 'ibkr_us_exchange_no_trading_permission',
     },
 }
 

@@ -17,8 +17,9 @@ The diagnostic deliberately separates research history from execution data:
 All 252 instruments with usable Carver history have candidate IB identities.
 Five local CBOT grain micros and two Treasury micros absent from Carver are
 added as execution-only overlays, producing 259 mapped rows. The ``ibkr_us``
-execution profile removes 56 known research-only rows before any live request
-(46 EUREX, seven IPE, two FTA, and SGX STI), leaving 203 snapshot candidates;
+execution profile removes 77 known research-only rows before any live request
+(46 EUREX, 17 SGX, seven IPE, three CDE, two FTA, and two MONEP), leaving 182
+snapshot candidates;
 qualification against the connected account determines remaining availability.
 IB dated and continuous history remain explicit comparison modes.  A missing
 quote is never treated as a zero spread, and spread-dependent costs remain

@@ -47,7 +47,7 @@ def test_ibkr_us_execution_restriction_uses_executable_ib_symbol():
 
 def test_ibkr_us_execution_restriction_excludes_unavailable_exchanges():
     """Known unavailable venues remain research-only for the US profile."""
-    for exchange in ("EUREX", "FTA", "IPE"):
+    for exchange in ("CDE", "EUREX", "FTA", "IPE", "MONEP", "SGX"):
         restricted = resolve_execution_eligibility(
             "TEST",
             ib_symbol="TEST",
