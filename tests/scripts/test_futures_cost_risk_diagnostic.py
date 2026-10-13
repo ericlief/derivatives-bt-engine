@@ -63,15 +63,31 @@ def test_broad_audit_defaults_to_automatic_quote_fallback():
     assert parse_args([]).market_data_type == "auto"
 
 
-def test_multiple_ib_accounts_require_explicit_what_if_account():
+def test_what_if_account_defaults_to_first_managed_account():
     class FakeIB:
         def managed_accounts(self):
             return ["MARGIN", "ROTH"]
 
-    with pytest.raises(ValueError, match="--ib-account is required"):
-        _resolve_what_if_account(FakeIB(), None)
-
+    assert _resolve_what_if_account(FakeIB(), None) == "MARGIN"
     assert _resolve_what_if_account(FakeIB(), "MARGIN") == "MARGIN"
+
+
+def test_what_if_account_rejects_unknown_explicit_account():
+    class FakeIB:
+        def managed_accounts(self):
+            return ["MARGIN", "ROTH"]
+
+    with pytest.raises(ValueError, match="not available among 2 managed"):
+        _resolve_what_if_account(FakeIB(), "UNKNOWN")
+
+
+def test_what_if_account_requires_at_least_one_managed_account():
+    class FakeIB:
+        def managed_accounts(self):
+            return []
+
+    with pytest.raises(ValueError, match="no managed accounts"):
+        _resolve_what_if_account(FakeIB(), None)
 
 
 def test_account_base_currency_uses_selected_account_summary():

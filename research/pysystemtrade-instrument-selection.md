@@ -443,9 +443,12 @@ account-level values, so `init_margin` and `maint_margin` use the account base
 `margin_ccy`, independently of the commission currency. Their USD values are
 `init_margin_usd` and `maint_margin_usd`.
 
-What-if orders require an account. The runner selects it automatically only
-when TWS exposes exactly one managed account; otherwise pass `--ib-account`.
-It normally infers the account base currency from account summary, while
+What-if orders require an account. When `--ib-account` is omitted, the runner
+uses the first entry returned by TWS `managedAccounts`; an explicit value is
+validated against that list. TWS ordering, rather than account type, defines
+the default, so pass the account explicitly when margin and retirement
+accounts share one login and the distinction matters. The runner normally
+infers account base currency from account summary, while
 `--ib-account-currency` provides an explicit override. Both BUY and SELL
 previews must succeed. A failed preview is `whatif_elig=false` and does not
 silently restore the stale configured commission. `--skip-what-if` is the
@@ -726,10 +729,9 @@ futures-market-snapshot \
   --snapshot-output results/pysystemtrade_market_snapshot.parquet
 ```
 
-Omit `--ib-account` when the TWS session exposes exactly one managed account.
-For a multi-account login it is mandatory because commission tiers, current
-positions, and margin can differ by account. The snapshot stores results and
-currencies, not the account identifier.
+Omitting `--ib-account` selects `managedAccounts[0]`. Pass it explicitly when
+commission tiers, current positions, or margin differ across accounts. The
+snapshot stores results and currencies, not the account identifier.
 
 The command appends a Chicago-time timestamp. It does not calculate pooled
 EWMAC costs, affordability, liquidity gates, or Phase 2 eligibility. Those

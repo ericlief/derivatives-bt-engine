@@ -203,22 +203,33 @@ def _ib_finite_number(value) -> Optional[float]:
 
 
 def _resolve_what_if_account(ib, requested_account: Optional[str]) -> str:
-    """Select one connected IB account without silently choosing among many."""
-    accounts = [str(value) for value in ib.managed_accounts()]
-    if requested_account:
-        if requested_account not in accounts:
-            raise ValueError(
-                f"IB account {requested_account!r} is not available; "
-                f"connected accounts={accounts}"
-            )
-        return requested_account
-    if len(accounts) == 1:
-        return accounts[0]
+    """Select an explicit IB account or the first managed account.
+
+    TWS supplies ``managedAccounts`` in its own order. An explicit account is
+    validated against that list; without one, the first entry is used. Account
+    identifiers are deliberately omitted from logs and persisted reports.
+    """
+    accounts = [
+        str(value).strip()
+        for value in ib.managed_accounts()
+        if str(value).strip()
+    ]
     if not accounts:
         raise ValueError("TWS returned no managed accounts for what-if orders")
-    raise ValueError(
-        "--ib-account is required when the TWS login manages multiple accounts"
+    if requested_account:
+        requested = requested_account.strip()
+        if requested not in accounts:
+            raise ValueError(
+                "requested IB account is not available among "
+                f"{len(accounts)} managed account(s)"
+            )
+        log.info("ib_what_if_account selected source=explicit")
+        return requested
+    log.info(
+        "ib_what_if_account selected source=first_managed managed_account_count=%d",
+        len(accounts),
     )
+    return accounts[0]
 
 
 def _account_base_currency(
@@ -2830,7 +2841,7 @@ def parse_args(argv=None):
         "--ib-account",
         help=(
             "Account used for one-contract commission and margin previews; "
-            "required when the TWS login manages multiple accounts"
+            "defaults to the first account returned by TWS"
         ),
     )
     parser.add_argument(
