@@ -2716,7 +2716,11 @@ PUBLIC_REPORT_RENAMES = {
     "market_snapshot_spread_duration": "snap_spread_duration",
     "market_snapshot_volume_duration": "snap_volume_duration",
     "market_snapshot_volume_lookback_days": "snap_volume_lookback_days",
-    "market_snapshot_market_data_type": "snap_market_data_type",
+    # Keep the requested acquisition mode distinct from the market-data mode
+    # IB actually supplied for this contract quote.  In ``auto`` mode these
+    # commonly differ, and mapping both fields to ``snap_mkt_data_type`` also
+    # makes Polars reject the public report as a duplicate schema.
+    "market_snapshot_market_data_type": "snap_req_market_data_type",
     "market_snapshot_vol_source": "snap_vol_src",
     "market_snapshot_use_rth": "snap_use_rth",
     "economic_subclass": "econ_subcls",

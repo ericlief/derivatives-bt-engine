@@ -712,6 +712,18 @@ def test_public_report_leads_with_primary_values_and_normalizes_spreads():
     )
 
 
+def test_public_report_keeps_requested_and_resolved_snapshot_data_types():
+    """Snapshot metadata and the resolved IB quote mode remain distinct."""
+    report = futures_cost_risk._public_report_schema(pl.DataFrame({
+        "symbol": ["CORN"],
+        "market_snapshot_market_data_type": ["auto"],
+        "quote_market_data_type": ["delayed"],
+    }))
+
+    assert report["snap_req_mkt_data_type"][0] == "auto"
+    assert report["snap_mkt_data_type"][0] == "delayed"
+
+
 def test_emitted_report_includes_generation_timestamp(capsys):
     emitted = _emit_report(
         pl.DataFrame({"symbol": ["JPY"], "price": [0.0067]}),
