@@ -46,7 +46,9 @@ from derivatives_bt_engine.pipelines.pysystemtrade_ewmac import (
     load_ewmac_component_frames,
 )
 from derivatives_bt_engine.reports.formatting import round_public_report
-from derivatives_bt_engine.calculations.correlation import bounded_ewm_correlation_matrix
+from derivatives_bt_engine.calculations.correlation import (
+    bounded_pairwise_ewm_correlation_matrix,
+)
 from derivatives_bt_engine.calculations.costs import calculate_annual_sr_cost
 from derivatives_bt_engine.calculations.forecast_combination import (
     CombinedForecastEngine,
@@ -180,9 +182,10 @@ def _subsystem_correlation(
     """Estimate instrument correlations from combined subsystem net USD P&L.
 
     ``subsystem_frames`` is keyed by executable symbol, unlike
-    ``frames_by_history`` above. The function inner-joins each symbol's
-    ``net_pnl_usd`` on date to form ``net_pnl_wide`` and passes that
-    synchronized panel to the allocation layer's bounded EWM estimator.
+    ``frames_by_history`` above. The function outer-joins each symbol's
+    ``net_pnl_usd`` on date to form a sparse ``net_pnl_wide`` panel. The
+    estimator uses each pair's contemporaneous observations, so different
+    history starts and exchange holidays do not erase the entire universe.
 
     Returns the dense correlation matrix, its per-symbol coverage mask, and
     the wide return frame that was actually used.
@@ -194,17 +197,18 @@ def _subsystem_correlation(
             .select("date", pl.col("net_pnl_usd").alias(symbol))
             .drop_nulls()
         )
-        # Inner joining makes every matrix row a genuinely contemporaneous
-        # observation across the candidate universe.
+        # Preserve the union of dates here. Requiring a date shared by every
+        # candidate makes one young or differently calendared instrument erase
+        # otherwise valid histories for the whole Phase 2 universe.
         wide = returns if wide is None else wide.join(
-            returns, on="date", how="inner"
+            returns, on="date", how="full", coalesce=True
         )
     if wide is None or wide.is_empty():
         return np.eye(len(symbols)), np.zeros(len(symbols), dtype=bool), pl.DataFrame()
-    wide = wide.sort("date").drop_nulls()
+    wide = wide.sort("date")
     last = wide.get_column("date").max()
     as_of = (last.date() if isinstance(last, datetime) else last) + timedelta(days=1)
-    correlation, covered = bounded_ewm_correlation_matrix(
+    correlation, covered = bounded_pairwise_ewm_correlation_matrix(
         wide,
         symbols,
         as_of,
@@ -439,7 +443,7 @@ def _run_complete_selection(
             .otherwise(pl.col("subsystem_elig"))
             .alias("subsystem_elig"),
             pl.when(pl.col("symbol").is_in(uncovered))
-            .then(pl.lit("insufficient_synchronised_return_obs"))
+            .then(pl.lit("insufficient_pairwise_return_obs"))
             .otherwise(pl.col("subsystem_excl"))
             .alias("subsystem_excl"),
         )
@@ -447,7 +451,7 @@ def _run_complete_selection(
         eligible_symbols = [eligible_symbols[idx] for idx in keep]
         correlation = correlation[np.ix_(keep, keep)]
     if not eligible_symbols:
-        raise ValueError("no instrument has sufficient synchronized subsystem returns")
+        raise ValueError("no instrument has sufficient pairwise subsystem returns")
 
     audit_by_symbol = {
         row["symbol"]: row for row in audit_frame.iter_rows(named=True)
