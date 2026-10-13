@@ -447,12 +447,13 @@ What-if orders require an account. When `--ib-account` is omitted, the runner
 uses the first entry returned by TWS `managedAccounts`; an explicit value is
 validated against that list. TWS ordering, rather than account type, defines
 the default, so pass the account explicitly when margin and retirement
-accounts share one login and the distinction matters. The runner normally
-infers account base currency from account summary, while
-`--ib-account-currency` provides an explicit override. Both BUY and SELL
-previews must succeed. A failed preview is `whatif_elig=false` and does not
-silently restore the stale configured commission. `--skip-what-if` is the
-explicit compatibility mode for old/offline behavior.
+accounts share one login and the distinction matters. Account-margin currency
+defaults to USD because `managedAccounts` does not expose base currency; use
+`--ib-account-currency CHF` (or another three-letter ISO code) for a non-USD
+account. Both BUY and SELL previews must succeed. A failed preview is
+`whatif_elig=false` and does not silently restore the stale configured
+commission. `--skip-what-if` is the explicit compatibility mode for
+old/offline behavior.
 
 The public CSV is ordered around one primary calculation path, so it does not
 repeat a `selected_*` prefix. Current price, FX, volatility, dollar risk,

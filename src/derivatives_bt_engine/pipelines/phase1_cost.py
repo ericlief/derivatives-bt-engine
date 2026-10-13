@@ -147,6 +147,7 @@ DEFAULT_LIQUIDITY_ANNUAL_TRADES = 25.0
 DEFAULT_LIQUIDITY_BUSINESS_DAYS = 250
 DEFAULT_MAX_MARKET_VOLUME_PCT = 1.0
 DEFAULT_MIN_DAILY_VOLUME_CONTRACTS = 100.0
+DEFAULT_IB_ACCOUNT_CURRENCY = "USD"
 IB_UNSET_DOUBLE_THRESHOLD = 1e300
 
 
@@ -232,29 +233,17 @@ def _resolve_what_if_account(ib, requested_account: Optional[str]) -> str:
     return accounts[0]
 
 
-def _account_base_currency(
-    ib,
-    account: str,
-    explicit_currency: Optional[str] = None,
-) -> str:
-    """Resolve the currency used by IB's account-level margin fields."""
-    if explicit_currency:
-        return explicit_currency.upper()
-    summary = ib.account_summary(account)
-    preferred_tags = ("NetLiquidation", "EquityWithLoanValue")
-    for tag in preferred_tags:
-        currencies = {
-            str(getattr(value, "currency", "")).upper()
-            for value in summary
-            if getattr(value, "tag", None) == tag
-            and len(str(getattr(value, "currency", ""))) == 3
-        }
-        if len(currencies) == 1:
-            return currencies.pop()
-    raise ValueError(
-        f"could not infer base currency for IB account {account}; "
-        "pass --ib-account-currency"
-    )
+def _what_if_margin_currency(value: Optional[str]) -> str:
+    """Return the configured ISO currency for IB account-margin changes.
+
+    IB ``managedAccounts`` exposes account identifiers but not base currency.
+    The CLI therefore defaults to USD and permits an explicit three-letter
+    override for accounts whose base currency differs.
+    """
+    currency = str(value or DEFAULT_IB_ACCOUNT_CURRENCY).strip().upper()
+    if len(currency) != 3 or not currency.isalpha():
+        raise ValueError("--ib-account-currency must be a three-letter ISO code")
+    return currency
 
 
 def _what_if_order_preview(ib, contract, account: str) -> dict[str, object]:
@@ -2846,9 +2835,10 @@ def parse_args(argv=None):
     )
     parser.add_argument(
         "--ib-account-currency",
+        default=DEFAULT_IB_ACCOUNT_CURRENCY,
         help=(
-            "Account base currency for what-if margin fields; normally "
-            "inferred from the IB account summary"
+            "Account base currency for what-if margin fields "
+            "(default: %(default)s)"
         ),
     )
     parser.add_argument(
@@ -3561,10 +3551,8 @@ def _acquire_live_market_rows(
         what_if_margin_currency = None
         if not args.skip_what_if:
             what_if_account = _resolve_what_if_account(ib, args.ib_account)
-            what_if_margin_currency = _account_base_currency(
-                ib,
-                what_if_account,
-                args.ib_account_currency,
+            what_if_margin_currency = _what_if_margin_currency(
+                args.ib_account_currency
             )
         fx_by_currency = load_current_fx_to_usd(
             ib,

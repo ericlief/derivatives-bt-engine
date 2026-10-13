@@ -14,7 +14,6 @@ import derivatives_bt_engine.pipelines.phase1_cost as futures_cost_risk
 from derivatives_bt_engine.pipelines.phase1_cost import (
     _attach_affordability_ranks,
     _attach_phase2_prefilters,
-    _account_base_currency,
     _blend_recent_and_historical_return_volatility,
     _configured_cost_estimate,
     _convert_what_if_preview_to_usd,
@@ -26,6 +25,7 @@ from derivatives_bt_engine.pipelines.phase1_cost import (
     _ib_contract_currency,
     _latest_dated_mark,
     _resolve_what_if_account,
+    _what_if_margin_currency,
     _what_if_order_preview,
     _roll_rate_audit,
     _volume_stats_from_trade_bars,
@@ -90,21 +90,15 @@ def test_what_if_account_requires_at_least_one_managed_account():
         _resolve_what_if_account(FakeIB(), None)
 
 
-def test_account_base_currency_uses_selected_account_summary():
-    class FakeIB:
-        def account_summary(self, account):
-            assert account == "MARGIN"
-            return [
-                SimpleNamespace(
-                    tag="NetLiquidation",
-                    currency="USD",
-                    value="100000",
-                ),
-                SimpleNamespace(tag="CashBalance", currency="CHF", value="100"),
-            ]
+def test_what_if_margin_currency_defaults_to_usd_and_accepts_override():
+    assert _what_if_margin_currency(None) == "USD"
+    assert _what_if_margin_currency("chf") == "CHF"
+    assert parse_args([]).ib_account_currency == "USD"
 
-    assert _account_base_currency(FakeIB(), "MARGIN") == "USD"
-    assert _account_base_currency(FakeIB(), "MARGIN", "chf") == "CHF"
+
+def test_what_if_margin_currency_requires_iso_code():
+    with pytest.raises(ValueError, match="three-letter ISO"):
+        _what_if_margin_currency("US")
 
 
 def test_what_if_preview_uses_both_sides_and_conservative_usd_values():
