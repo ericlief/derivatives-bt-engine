@@ -44,14 +44,14 @@ import json
 import logging
 import math
 import time
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
 
 import duckdb
 import polars as pl
-from ib_tools.ibpysync import IBPySync, MarketOrder
+from ib_tools.ibpysync import IBPySync, IBWhatIfOrderError, MarketOrder
 
 from derivatives_bt_engine.data.pysystemtrade_ib import (
     add_local_execution_overlays,
@@ -110,6 +110,7 @@ DEFAULT_DELAYED_SPREAD_REQUEST_PLAN = (
 DEFAULT_MIN_DAYS = 7
 DEFAULT_QUOTE_WAIT_SECONDS = 3.0
 DEFAULT_CONTRACT_DETAILS_TIMEOUT = 8.0
+MAX_PHYSICAL_DELIVERY_CONTRACT_ATTEMPTS = 4
 DEFAULT_ROLL_AUDIT_RECENT_YEARS = 5
 MIN_ROLL_AUDIT_RECENT_YEARS = 3
 ROLL_RATE_MATCH_TOLERANCE = 0.25
@@ -259,6 +260,7 @@ def _what_if_order_preview(ib, contract, account: str) -> dict[str, object]:
     }
     successful_sides: list[str] = []
     errors: list[str] = []
+    structured_errors: list[tuple[str, int, int, str]] = []
     warnings: list[str] = []
     for side in ("buy", "sell"):
         try:
@@ -288,14 +290,149 @@ def _what_if_order_preview(ib, contract, account: str) -> dict[str, object]:
                     getattr(state, "maintMarginChange", None)
                 ),
             })
+        except IBWhatIfOrderError as exc:
+            errors.append(f"{side}:{exc}")
+            structured_errors.extend(
+                (side, request_id, error_code, message)
+                for request_id, error_code, message in exc.errors
+            )
         except Exception as exc:
             errors.append(f"{side}:{exc}")
+    rejection_reason = _classify_what_if_rejection(structured_errors)
     result.update({
         "ib_whatif_eligible": len(successful_sides) == 2,
         "ib_whatif_warning": ";".join(warnings) or None,
         "ib_whatif_error": ";".join(errors) or None,
+        "ib_whatif_error_codes": ",".join(
+            str(code) for code in sorted({item[2] for item in structured_errors})
+        ) or None,
+        "ib_whatif_error_req_ids": ",".join(
+            str(request_id)
+            for request_id in sorted({item[1] for item in structured_errors})
+        ) or None,
+        "ib_whatif_rejection_reason": rejection_reason,
     })
     return result
+
+
+def _classify_what_if_rejection(
+    errors: list[tuple[str, int, int, str]],
+) -> Optional[str]:
+    """Classify structured IB what-if errors into stable screening reasons.
+
+    Parameters
+    ----------
+    errors
+        ``(side, request_id, error_code, message)`` tuples captured while
+        previewing BUY and SELL orders.
+
+    Returns
+    -------
+    str or None
+        Stable reason used by contract retry and Phase 2 preselection.
+    """
+    messages = " ".join(item[3].lower() for item in errors)
+    codes = {item[2] for item in errors}
+    if "physical delivery" in messages:
+        return "physical_delivery_restricted"
+    if "net liq" in messages and "margin req" in messages:
+        return "account_margin_insufficient"
+    if 201 in codes:
+        return "order_rejected"
+    return "what_if_failed" if errors else None
+
+
+def _next_contract_min_days(contract, current_min_days: int) -> int:
+    """Return a cutoff just beyond a rejected contract's expiration.
+
+    Automatic resolution chooses the nearest expiry beyond ``min_days``. By
+    moving the cutoff past the rejected contract, the next lookup advances to
+    the next listed delivery rather than relying on a fixed calendar buffer.
+    """
+    expiration = str(
+        getattr(contract, "lastTradeDateOrContractMonth", "") or ""
+    )
+    try:
+        expiration_date = datetime.strptime(expiration[:8], "%Y%m%d").date()
+    except (TypeError, ValueError):
+        return current_min_days + 30
+    return max(current_min_days + 1, (expiration_date - date.today()).days + 1)
+
+
+def _resolve_contract_with_what_if(
+    ib,
+    instr: dict,
+    min_days: int,
+    *,
+    contract_details_timeout: float,
+    account: str,
+):
+    """Resolve an executable contract, advancing past delivery restrictions.
+
+    Only IB's physical-delivery rejection triggers another automatic expiry.
+    Account funding failures and all other order rejections remain attached to
+    the selected contract so the snapshot can exclude them transparently.
+
+    Returns
+    -------
+    tuple
+        Qualified contract and raw what-if preview diagnostics.
+    """
+    automatic_expiry = instr.get("expiry", "auto") == "auto"
+    current_min_days = min_days
+    attempted_expiries: list[str] = []
+    retry_errors: list[str] = []
+    retry_count = 0
+    contract = None
+    preview = None
+    for attempt in range(MAX_PHYSICAL_DELIVERY_CONTRACT_ATTEMPTS):
+        try:
+            candidate_contract = _resolve_contract(
+                ib,
+                instr,
+                current_min_days,
+                contract_details_timeout=contract_details_timeout,
+            )
+        except Exception as exc:
+            if contract is None or preview is None:
+                raise
+            # Preserve the original delivery rejection in the snapshot when
+            # no deferred contract can be resolved. The row remains excluded,
+            # and the retry failure is auditable without discarding its quote.
+            retry_errors.append(f"next_contract_resolution_failed:{exc}")
+            break
+        contract = candidate_contract
+        expiry = str(
+            getattr(contract, "lastTradeDateOrContractMonth", "") or ""
+        )
+        attempted_expiries.append(expiry)
+        preview = _what_if_order_preview(ib, contract, account)
+        rejection_reason = preview.get("ib_whatif_rejection_reason")
+        if (
+            rejection_reason != "physical_delivery_restricted"
+            or not automatic_expiry
+            or attempt + 1 >= MAX_PHYSICAL_DELIVERY_CONTRACT_ATTEMPTS
+        ):
+            break
+        retry_errors.append(str(preview.get("ib_whatif_error") or ""))
+        retry_count += 1
+        next_min_days = _next_contract_min_days(contract, current_min_days)
+        log.info(
+            "ib_what_if_delivery_retry symbol=%s rejected_expiry=%s "
+            "old_min_days=%d new_min_days=%d attempt=%d",
+            instr.get("symbol"), expiry, current_min_days, next_min_days,
+            attempt + 1,
+        )
+        current_min_days = next_min_days
+
+    if contract is None or preview is None:
+        raise RuntimeError("contract what-if resolution produced no attempt")
+    preview.update({
+        "ib_whatif_expiry_attempts": ",".join(attempted_expiries),
+        "ib_whatif_retry_count": retry_count,
+        "ib_whatif_retry_error": ";".join(retry_errors) or None,
+    })
+    return contract, preview
 
 
 def _parse_fast_spans(value: str) -> tuple[int, ...]:
@@ -1383,7 +1520,12 @@ def _attach_phase2_prefilters(
         if row.get("ib_availability") != "contract_qualified":
             reasons.append("ib_unavailable")
         if row.get("ib_whatif_attempted") and not row.get("ib_whatif_eligible"):
-            reasons.append("ib_whatif")
+            what_if_reason = str(
+                row.get("ib_whatif_rejection_reason") or ""
+            ).strip()
+            reasons.append(
+                f"ib_whatif_{what_if_reason}" if what_if_reason else "ib_whatif"
+            )
         exclusions.append(",".join(reasons))
     return report.with_columns(
         pl.Series("phase2_exclusion", exclusions, dtype=pl.String)
@@ -2407,26 +2549,34 @@ def diagnose_instrument(
             f"{symbol}: IB mapping requires specialised weekly/daily expiry filtering; "
             "candidate mapping retained but live contract selection skipped"
         )
-    contract = _resolve_contract(
-        ib,
-        instr,
-        min_days,
-        contract_details_timeout=contract_details_timeout,
-    )
     what_if: dict[str, object] = {"ib_whatif_attempted": False}
     if what_if_enabled:
         if not what_if_account or not what_if_margin_currency:
             raise ValueError(
                 "what-if preview requires an IB account and account currency"
             )
+        contract, raw_what_if = _resolve_contract_with_what_if(
+            ib,
+            instr,
+            min_days,
+            contract_details_timeout=contract_details_timeout,
+            account=what_if_account,
+        )
         what_if = _convert_what_if_preview_to_usd(
             ib,
-            _what_if_order_preview(ib, contract, what_if_account),
+            raw_what_if,
             margin_currency=what_if_margin_currency,
             selected_fx=fx_by_currency,
             reference_fx=reference_fx_by_currency or {},
             market_data_type=market_data_type,
             quote_wait_seconds=quote_wait_seconds,
+        )
+    else:
+        contract = _resolve_contract(
+            ib,
+            instr,
+            min_days,
+            contract_details_timeout=contract_details_timeout,
         )
     quote = ib.get_quote(
         contract,
@@ -3096,6 +3246,14 @@ PUBLIC_REPORT_RENAMES = {
     "commission_source": "comm_src",
     "ib_whatif_attempted": "whatif_attempted",
     "ib_whatif_eligible": "whatif_elig",
+    "ib_whatif_error_codes": "whatif_error_codes",
+    "ib_whatif_error_req_ids": "whatif_error_req_ids",
+    "ib_whatif_rejection_reason": "whatif_reject_reason",
+    "ib_whatif_error": "whatif_error",
+    "ib_whatif_warning": "whatif_warning",
+    "ib_whatif_expiry_attempts": "whatif_expiry_attempts",
+    "ib_whatif_retry_count": "whatif_retry_n",
+    "ib_whatif_retry_error": "whatif_retry_error",
     "ib_whatif_initial_margin": "init_margin",
     "ib_whatif_initial_margin_usd": "init_margin_usd",
     "ib_whatif_maintenance_margin": "maint_margin",
@@ -3383,6 +3541,14 @@ def _public_report_schema(report: pl.DataFrame) -> pl.DataFrame:
         "margin_fx_src",
         "whatif_attempted",
         "whatif_elig",
+        "whatif_error_codes",
+        "whatif_error_req_ids",
+        "whatif_reject_reason",
+        "whatif_error",
+        "whatif_warning",
+        "whatif_expiry_attempts",
+        "whatif_retry_n",
+        "whatif_retry_error",
         "comm_native",
         "spread_cash_native",
         "cost_native",
@@ -3485,6 +3651,10 @@ def _emit_report(report: pl.DataFrame, args) -> pl.DataFrame:
         "init_margin_usd",
         "maint_margin_usd",
         "whatif_elig",
+        "whatif_reject_reason",
+        "whatif_error_codes",
+        "whatif_expiry_attempts",
+        "whatif_retry_n",
         "trade_sr",
         "cost_rank_in_asset_cls",
         "elig_ewmac_rule_count",
@@ -3600,7 +3770,9 @@ def _acquire_live_market_rows(
                 log.info(
                     "futures_market_snapshot acquired symbol=%s contract=%s "
                     "notional_usd=%.2f ann_dvol_usd=%.2f spread_source=%s "
-                    "commission_usd=%s initial_margin_usd=%s what_if_eligible=%s",
+                    "commission_usd=%s initial_margin_usd=%s "
+                    "what_if_eligible=%s what_if_rejection_reason=%s "
+                    "what_if_error_codes=%s what_if_expiry_attempts=%s",
                     symbol,
                     row["contract_id"],
                     row["notional_per_contract"],
@@ -3609,6 +3781,9 @@ def _acquire_live_market_rows(
                     row.get("ib_whatif_commission_usd"),
                     row.get("ib_whatif_initial_margin_usd"),
                     row.get("ib_whatif_eligible"),
+                    row.get("ib_whatif_rejection_reason"),
+                    row.get("ib_whatif_error_codes"),
+                    row.get("ib_whatif_expiry_attempts"),
                 )
             except Exception as exc:
                 log.warning(

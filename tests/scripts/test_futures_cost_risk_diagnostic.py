@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 import polars as pl
 import pytest
+from ib_tools.ibpysync import IBWhatIfOrderError
 
 import derivatives_bt_engine.pipelines.phase1_cost as futures_cost_risk
 from derivatives_bt_engine.pipelines.phase1_cost import (
@@ -155,6 +156,72 @@ def test_what_if_preview_uses_both_sides_and_conservative_usd_values():
     assert converted["ib_whatif_commission_usd"] == pytest.approx(3.375)
     assert converted["ib_whatif_initial_margin_usd"] == pytest.approx(400.0)
     assert converted["ib_whatif_maintenance_margin_usd"] == pytest.approx(320.0)
+
+
+def test_what_if_preview_classifies_account_margin_rejection():
+    """The snapshot retains IB's code and stable insufficient-funding reason."""
+    class FakeIB:
+        def what_if_order(self, contract, order):
+            raise IBWhatIfOrderError([(
+                104,
+                201,
+                "NET LIQ [34696.60 USD] MUST EXCEED THE MARGIN REQ "
+                "[49940.63 USD]",
+            )])
+
+    preview = _what_if_order_preview(FakeIB(), object(), "MARGIN")
+
+    assert not preview["ib_whatif_eligible"]
+    assert preview["ib_whatif_error_codes"] == "201"
+    assert preview["ib_whatif_error_req_ids"] == "104"
+    assert preview["ib_whatif_rejection_reason"] == "account_margin_insufficient"
+    assert "49940.63 USD" in preview["ib_whatif_error"]
+
+
+def test_physical_delivery_rejection_advances_to_next_contract(monkeypatch):
+    """An automatic expiry retries the next listing after IB delivery refusal."""
+    front = SimpleNamespace(lastTradeDateOrContractMonth="20261120")
+    deferred = SimpleNamespace(lastTradeDateOrContractMonth="20261220")
+    resolved = []
+
+    def fake_resolve(ib, instr, min_days, *, contract_details_timeout):
+        resolved.append(min_days)
+        return front if len(resolved) == 1 else deferred
+
+    class FakeIB:
+        def what_if_order(self, contract, order):
+            if contract is front:
+                raise IBWhatIfOrderError([(
+                    45,
+                    201,
+                    "Order does not comply with physical delivery rules",
+                )])
+            return SimpleNamespace(
+                status="PreSubmitted",
+                commission=1.0,
+                commissionCurrency="USD",
+                initMarginChange="100.0",
+                maintMarginChange="80.0",
+                warningText="",
+            )
+
+    monkeypatch.setattr(futures_cost_risk, "_resolve_contract", fake_resolve)
+
+    contract, preview = futures_cost_risk._resolve_contract_with_what_if(
+        FakeIB(),
+        {"symbol": "PHYS", "expiry": "auto"},
+        7,
+        contract_details_timeout=8.0,
+        account="MARGIN",
+    )
+
+    assert contract is deferred
+    assert len(resolved) == 2
+    assert resolved[1] > resolved[0]
+    assert preview["ib_whatif_eligible"]
+    assert preview["ib_whatif_expiry_attempts"] == "20261120,20261220"
+    assert preview["ib_whatif_retry_count"] == 1
+    assert "physical delivery" in preview["ib_whatif_retry_error"]
 
 
 def test_what_if_preview_rejects_a_missing_side_commission():
@@ -1549,6 +1616,7 @@ def test_phase2_prefilter_rejects_a_failed_attempted_what_if_preview():
         "ib_availability": ["contract_qualified"],
         "ib_whatif_attempted": [True],
         "ib_whatif_eligible": [False],
+        "ib_whatif_rejection_reason": ["account_margin_insufficient"],
     })
 
     selected = _attach_phase2_prefilters(
@@ -1564,4 +1632,7 @@ def test_phase2_prefilter_rejects_a_failed_attempted_what_if_preview():
 
     assert not selected["data_eligible"]
     assert not selected["phase2_eligible"]
-    assert "ib_whatif" in selected["phase2_exclusion"]
+    assert (
+        "ib_whatif_account_margin_insufficient"
+        in selected["phase2_exclusion"]
+    )

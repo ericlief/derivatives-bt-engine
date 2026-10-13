@@ -455,6 +455,17 @@ account. Both BUY and SELL previews must succeed. A failed preview is
 commission. `--skip-what-if` is the explicit compatibility mode for
 old/offline behavior.
 
+Rejected previews retain IB's request IDs, error codes, full messages, and a
+stable `whatif_reject_reason` in both the cached market snapshot and public
+screen. An insufficient-net-liquidity error is classified as
+`account_margin_insufficient`; its quoted resulting account requirement is not
+misrepresented as incremental one-contract margin, and the instrument is
+excluded before the greedy search. A `physical_delivery_restricted` rejection
+on an automatically selected expiry instead advances the minimum-days cutoff
+past that contract and retries the next listed expiry, up to four contracts.
+`whatif_expiry_attempts`, `whatif_retry_n`, and `whatif_retry_error` preserve
+that path. Explicitly configured expiries are never silently replaced.
+
 The public CSV is ordered around one primary calculation path, so it does not
 repeat a `selected_*` prefix. Current price, FX, volatility, dollar risk,
 spread, cash cost, and SR cost come first. Point-in-time quote alternatives use
