@@ -1138,6 +1138,28 @@ def test_snapshot_output_filename_contains_friendly_account_name():
     )
 
 
+def test_snapshot_ib_log_is_timestamped_beside_account_snapshot():
+    """The dedicated IB log should be discoverable beside its live artifact."""
+    started_at = datetime(2026, 10, 13, 17, 0, 0, tzinfo=timezone.utc)
+    args = Namespace(
+        ib_log_output=None,
+        snapshot_output=Path("results/pysystemtrade_market_snapshot.parquet"),
+        output=None,
+        ib_account_name="Taxable",
+    )
+
+    output = futures_cost_risk._ib_log_output_path(
+        args,
+        snapshot_only=True,
+        started_at=started_at,
+    )
+
+    assert output == Path(
+        "results/pysystemtrade_market_snapshot_taxable_ib_"
+        "20261013_120000.log"
+    )
+
+
 @pytest.mark.parametrize(
     ("value", "expected"),
     [

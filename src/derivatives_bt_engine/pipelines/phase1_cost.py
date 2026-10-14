@@ -97,7 +97,7 @@ from derivatives_bt_engine.live.tsmom_rebalance import (
     _resolve_contract,
     build_instruments,
 )
-from derivatives_bt_engine.logging_config import setup_logger
+from derivatives_bt_engine.logging_config import setup_ib_logger, setup_logger
 
 
 log = logging.getLogger("derivatives_bt_engine.pipelines.phase1_cost")
@@ -3090,6 +3090,15 @@ def parse_args(argv=None):
             "run timestamp is appended"
         ),
     )
+    parser.add_argument(
+        "--ib-log-output",
+        type=Path,
+        help=(
+            "IB API diagnostic-log base path; a run timestamp and account "
+            "alias are appended. By default the log is written beside the "
+            "live snapshot or selection-screen output"
+        ),
+    )
     parser.add_argument("--offline", action="store_true",
                         help="Build the full mixed-vol/mapping comparison without connecting to IB")
     parser.add_argument(
@@ -3688,6 +3697,75 @@ def _account_infixed_output_path(
     return output.with_name(f"{output.stem}_{infix}{output.suffix}")
 
 
+def _ib_log_output_path(
+    args: argparse.Namespace,
+    *,
+    snapshot_only: bool,
+    started_at: datetime,
+) -> Path:
+    """Return the timestamped IB diagnostic path for one live acquisition.
+
+    An explicit ``--ib-log-output`` is treated as an untimestamped base. When
+    omitted, the path is derived from the snapshot or selection-screen output
+    so the broker diagnostics remain beside the artifact they explain. The
+    friendly account alias is retained; raw IB account identifiers are never
+    included in filenames.
+    """
+    explicit = getattr(args, "ib_log_output", None)
+    if explicit is not None:
+        base = Path(explicit)
+        if base.suffix.lower() != ".log":
+            raise ValueError("--ib-log-output must use a .log extension")
+        base = _account_infixed_output_path(
+            base,
+            getattr(args, "ib_account_name", None),
+        )
+    elif snapshot_only:
+        artifact = args.snapshot_output
+        if artifact is None:
+            artifact = (
+                Path(__file__).resolve().parents[3]
+                / "results"
+                / "futures_market_snapshot.parquet"
+            )
+        artifact = _account_infixed_output_path(
+            artifact,
+            getattr(args, "ib_account_name", None),
+        )
+        base = artifact.with_name(f"{artifact.stem}_ib.log")
+    else:
+        artifact = args.output
+        if artifact is None:
+            artifact = (
+                Path(__file__).resolve().parents[3]
+                / "results"
+                / "pysystemtrade_selection_screen.csv"
+            )
+        artifact = _account_infixed_output_path(
+            artifact,
+            getattr(args, "ib_account_name", None),
+        )
+        base = artifact.with_name(f"{artifact.stem}_ib.log")
+    return _timestamped_output_path(base, started_at)
+
+
+def _configure_live_ib_logging(
+    args: argparse.Namespace,
+    *,
+    snapshot_only: bool,
+) -> Path:
+    """Install and announce the dedicated IB diagnostic sink for a live run."""
+    path = _ib_log_output_path(
+        args,
+        snapshot_only=snapshot_only,
+        started_at=datetime.now(REPORT_TIMEZONE),
+    )
+    setup_ib_logger(path)
+    log.info("ib_api_diagnostics output=%s", path)
+    print(f"IB API diagnostics {path}")
+    return path
+
+
 def _emit_report(report: pl.DataFrame, args) -> pl.DataFrame:
     generated_at = datetime.now(REPORT_TIMEZONE)
     report = report.with_columns(
@@ -4140,9 +4218,14 @@ def run(argv=None, *, snapshot_only: bool = False) -> pl.DataFrame:
         )
     if args.snapshot_input is not None and args.offline:
         raise ValueError("--snapshot-input and --offline are mutually exclusive")
+    if snapshot_only and args.offline:
+        raise ValueError("futures-market-snapshot requires an IB connection")
+    live_acquisition = snapshot_only or (
+        args.snapshot_input is None and not args.offline
+    )
+    if live_acquisition:
+        _configure_live_ib_logging(args, snapshot_only=snapshot_only)
     if snapshot_only:
-        if args.offline:
-            raise ValueError("futures-market-snapshot requires an IB connection")
         rows = _acquire_live_market_rows(
             args,
             instruments,

@@ -15,6 +15,8 @@ from typing import Optional
 
 _PACKAGE_LOGGER_NAME = 'derivatives_bt_engine'
 _FILE_HANDLER_NAME = 'derivatives_bt_engine_file'
+_IB_LOGGER_NAME = 'ib_insync'
+_IB_FILE_HANDLER_NAME = 'derivatives_bt_engine_ib_file'
 
 
 def _default_log_path() -> Path:
@@ -56,6 +58,57 @@ def setup_logger(log_file: Optional[str] = None) -> logging.Logger:
     file_handler = logging.FileHandler(path)
     file_handler.set_name(_FILE_HANDLER_NAME)
     file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(logging.Formatter(
+        '%(asctime)s %(name)s [%(levelname)s] %(message)s'
+    ))
+    logger.addHandler(file_handler)
+    return logger
+
+
+def setup_ib_logger(log_file: str | Path) -> logging.Logger:
+    """Route IB API warnings and errors to one dedicated file.
+
+    Parameters
+    ----------
+    log_file
+        Destination for ``ib_insync`` diagnostics. Parent directories are
+        created when needed.
+
+    Returns
+    -------
+    logging.Logger
+        The configured ``ib_insync`` namespace logger.
+
+    Notes
+    -----
+    IB's wrapper emits request errors through ``ib_insync.wrapper``. Without
+    an installed handler those records reach Python's last-resort stderr
+    handler, which leaves the terminal output unavailable after a long market
+    snapshot. Owning the parent namespace captures the same records in a
+    durable audit file and prevents them from leaking into the application
+    log or terminal.
+    """
+    logger = logging.getLogger(_IB_LOGGER_NAME)
+    logger.setLevel(logging.WARNING)
+    logger.propagate = False
+
+    path = Path(log_file).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    # A notebook or test process can run more than one snapshot. Replace our
+    # prior sink when the requested run path changes instead of duplicating
+    # every IB record across stale files.
+    for handler in logger.handlers[:]:
+        if handler.get_name() != _IB_FILE_HANDLER_NAME:
+            continue
+        if Path(handler.baseFilename) == path.resolve():
+            return logger
+        logger.removeHandler(handler)
+        handler.close()
+
+    file_handler = logging.FileHandler(path)
+    file_handler.set_name(_IB_FILE_HANDLER_NAME)
+    file_handler.setLevel(logging.WARNING)
     file_handler.setFormatter(logging.Formatter(
         '%(asctime)s %(name)s [%(levelname)s] %(message)s'
     ))

@@ -759,6 +759,13 @@ EWMAC costs, affordability, liquidity gates, or Phase 2 eligibility. Those
 policy calculations can therefore be rerun later without IB. Build a Phase 1
 report from the cached live inputs with, for example:
 
+Each live acquisition also writes the `ib_insync` warnings and errors to a
+separate timestamped file beside the snapshot, for example
+`pysystemtrade_market_snapshot_taxable_ib_20261013_120000.log`. This preserves
+the complete IB request-error text without mixing broker diagnostics into the
+pipeline log. Use `--ib-log-output path/to/ib.log` to choose a different base
+path; the account alias and run timestamp are still appended.
+
 ```bash
 futures-selection-screen \
   --snapshot-input results \
