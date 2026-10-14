@@ -71,7 +71,25 @@ def test_ibkr_us_execution_restriction_excludes_unavailable_exchanges():
 
     # EUREX is not categorically unavailable. Only products for which this
     # account returned explicit regulatory permission failures are screened.
-    for ib_symbol in ("ESE", "SX4P", "SXAP", "SXOP", "SXPP"):
+    for ib_symbol in (
+        "DJESL",
+        "DJESS",
+        "ESE",
+        "ESU",
+        "OMXH25",
+        "SX3P",
+        "SX4P",
+        "SX86P",
+        "SX8E",
+        "SX8P",
+        "SXAP",
+        "SXDP",
+        "SXEP",
+        "SXKE",
+        "SXOP",
+        "SXPP",
+        "SXRP",
+    ):
         eurex_product = resolve_execution_eligibility(
             "TEST",
             ib_symbol=ib_symbol,
@@ -89,6 +107,59 @@ def test_ibkr_us_execution_restriction_excludes_unavailable_exchanges():
     )
     assert eurex_bund["execution_eligible"]
     assert eurex_bund["execution_restriction_reason"] is None
+
+    # Other venues remain live-checkable except for the exact products that
+    # returned account-level permission or sanctions failures.
+    restricted_products = (
+        ("3KTB", "KSE"),
+        ("EBM", "MATIF"),
+        ("ECF", "ENDEX"),
+        ("FIVNM30", "SGX"),
+        ("FLKTB", "KSE"),
+        ("FTMIB", "IDEM"),
+        ("JPNK400", "OSE.JPN"),
+        ("K200", "KSE"),
+        ("K200M", "KSE"),
+        ("KOSDQ150", "KSE"),
+        ("MTW", "HKFE"),
+    )
+    for ib_symbol, exchange in restricted_products:
+        product = resolve_execution_eligibility(
+            "TEST",
+            ib_symbol=ib_symbol,
+            exchange=exchange,
+        )
+        assert not product["execution_eligible"]
+        assert (
+            product["execution_restriction_reason"]
+            == "ibkr_us_product_no_trading_permission"
+        )
+
+    sanctions_product = resolve_execution_eligibility(
+        "HANGTECH",
+        ib_symbol="HSTECH",
+        exchange="HKFE",
+    )
+    assert not sanctions_product["execution_eligible"]
+    assert (
+        sanctions_product["execution_restriction_reason"]
+        == "ibkr_us_product_sanctions_restriction"
+    )
+
+    for ib_symbol, exchange in (
+        ("K300", "KSE"),
+        ("TFM", "ENDEX"),
+        ("ECO", "MATIF"),
+        ("HSI", "HKFE"),
+        ("N225M", "OSE.JPN"),
+    ):
+        unverified = resolve_execution_eligibility(
+            "TEST",
+            ib_symbol=ib_symbol,
+            exchange=exchange,
+        )
+        assert unverified["execution_eligible"]
+        assert unverified["execution_restriction_reason"] is None
 
     # STI is explicitly restricted, but the rest of SGX remains subject to
     # live contract/account verification rather than a venue-wide assumption.
