@@ -95,12 +95,20 @@ def test_executable_cash_pnl_separates_trade_and_policy_roll_costs():
     assert result.get_column("realized_roll_cons").to_list() == pytest.approx(
         [0.0, 0.0, 10.0, 0.0, 5.0]
     )
-    assert result.get_column("expected_roll_cons").to_list() == pytest.approx(
-        [0.0, 0.0, 7.5, 0.0, 7.5]
-    )
+    assert result.get_column("interval_avg_abs_cons").to_list() == [
+        7.5,
+        7.5,
+        7.5,
+        7.5,
+        7.5,
+    ]
+    assert result.get_column("expected_roll_cons").to_list() == [0, 0, 8, 0, 8]
     assert result.get_column("cash_trade_cost_usd").to_list() == pytest.approx(
         [-10.0, -10.0, 0.0, -10.0, 0.0]
     )
     assert result.get_column("cash_realized_roll_cost_usd").to_list() == (
         pytest.approx([0.0, 0.0, -30.0, 0.0, -15.0])
+    )
+    assert result.get_column("cash_expected_roll_cost_usd").to_list() == (
+        pytest.approx([0.0, 0.0, -24.0, 0.0, -24.0])
     )

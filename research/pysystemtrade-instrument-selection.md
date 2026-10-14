@@ -748,8 +748,10 @@ capital, target volatility, final `limit_weight`, and IDM; converts the
 combined forecast to a continuous target; and rounds it to whole contracts.
 Ordinary position changes are charged with the Phase 1 one-way trade cost.
 On each history-policy `is_roll` date, `realized_roll_cons` uses the rounded
-position held from the prior day. `expected_roll_cons` uses mean absolute
-rounded exposure over the interval ending on that roll date, which is the
+position held from the prior day. `interval_avg_abs_cons` retains the
+fractional mean absolute rounded exposure over the interval ending on that
+roll date. `expected_roll_cons` rounds that interval mean half-up to a whole
+executable contract before multiplying by `roll_cost_per_con`. This is the
 stable selection estimate analogous to pysystemtrade's average holding per
 roll interval. Both cost paths are persisted because they answer different
 questions: the realized series audits the supplied historical roll path, while

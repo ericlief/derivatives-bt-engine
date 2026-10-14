@@ -21,6 +21,16 @@ from derivatives_bt_engine.calculations.volatility import (
 )
 
 
+def _round_contracts_half_up(expression: pl.Expr) -> pl.Expr:
+    """Round signed continuous positions to whole contracts symmetrically."""
+    return (
+        pl.when(expression >= 0)
+        .then((expression + 0.5).floor())
+        .otherwise((expression - 0.5).ceil())
+        .cast(pl.Int64)
+    )
+
+
 def build_subsystem_pnl_curve(
     frame: pl.DataFrame,
     *,
@@ -298,15 +308,9 @@ def build_executable_cash_pnl_curve(
         if roll_col in frame.columns
         else pl.lit(False)
     )
-    target = pl.col("target_cons")
     # Polars' default rounding is bankers rounding. Futures positions use
     # symmetric half-up rounding so +/-0.5 becomes +/-1 contract.
-    rounded_target = (
-        pl.when(target >= 0)
-        .then((target + 0.5).floor())
-        .otherwise((target - 0.5).ceil())
-        .cast(pl.Int64)
-    )
+    rounded_target = _round_contracts_half_up(pl.col("target_cons"))
 
     result = (
         frame.sort("date")
@@ -381,10 +385,14 @@ def build_executable_cash_pnl_curve(
             .alias("interval_avg_abs_cons"),
         )
         .with_columns(
-            pl.when(pl.col("roll_event"))
-            .then(pl.col("interval_avg_abs_cons"))
-            .otherwise(0.0)
-            .alias("expected_roll_cons"),
+            # An expected roll still has to be executable. Keep the fractional
+            # interval mean beside it for audit, but charge the nearest whole
+            # contract using the same half-up convention as target positions.
+            _round_contracts_half_up(
+                pl.when(pl.col("roll_event"))
+                .then(pl.col("interval_avg_abs_cons"))
+                .otherwise(0.0)
+            ).alias("expected_roll_cons"),
             (
                 pl.col("held_cons")
                 * pl.col("point_change")
