@@ -129,7 +129,7 @@ def test_forecast_buffer_matches_pysystemtrade_reference_fixture():
 
     # Generated from pysystemtrade's apply_buffer(..., trade_to_edge=True,
     # roundpositions=True). Exact .5 boundaries also verify pandas-compatible
-    # ties-to-even rounding rather than Polars' project-level half-up helper.
+    # Polars' ties-to-even rounding matches pandas at exact half contracts.
     assert result.get_column("buffer_top_cons").to_list() == [
         6, 6, 7, 6, 5, 0, -1,
     ]

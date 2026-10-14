@@ -35,20 +35,6 @@ def _round_contracts_half_up(expression: pl.Expr) -> pl.Expr:
     )
 
 
-def _round_contract_like_pysystemtrade(value: float | None) -> int | None:
-    """Return pandas-compatible whole-contract rounding for one value.
-
-    Pysystemtrade calls :meth:`pandas.Series.round` before applying a position
-    buffer. Python's scalar ``round`` has the same ties-to-even convention.
-    Keeping this deliberately separate from the report's half-up roll-volume
-    convention makes the executable position path reproducible at exact
-    half-contract boundaries.
-    """
-    if value is None or not math.isfinite(value):
-        return None
-    return int(round(value))
-
-
 def apply_forecast_position_buffer(
     frame: pl.DataFrame,
     *,
@@ -85,10 +71,11 @@ def apply_forecast_position_buffer(
     Notes
     -----
     This follows pysystemtrade's ``apply_buffer`` ordering: forward-fill the
-    optimal position and band, round each to whole contracts, initialize at
-    the first rounded optimum (or zero), then retain the previous executable
-    position while it remains inside the band. The calculation is inherently
-    recursive because today's output depends on yesterday's held position.
+    optimal position and band, round each to whole contracts using Polars'
+    ties-to-even convention (the same convention as pandas), initialize at the
+    first rounded optimum (or zero), then retain the previous executable
+    position while it remains inside the band. Only the final state transition
+    is recursive because today's output depends on yesterday's held position.
     """
     required = {optimal_position_col, average_position_col}
     missing = sorted(required.difference(frame.columns))
@@ -109,27 +96,34 @@ def apply_forecast_position_buffer(
         (
             pl.col(optimal_position_col) - pl.col("buffer_width_cons")
         ).forward_fill().alias("_buffer_bot"),
+    ).with_columns(
+        pl.col("_buffer_optimal")
+        .round(0)
+        .cast(pl.Int64, strict=False)
+        .alias("_rounded_optimal"),
+        pl.col("_buffer_top")
+        .round(0)
+        .cast(pl.Int64, strict=False)
+        .alias("buffer_top_cons"),
+        pl.col("_buffer_bot")
+        .round(0)
+        .cast(pl.Int64, strict=False)
+        .alias("buffer_bot_cons"),
     )
 
-    rounded_optimal = [
-        _round_contract_like_pysystemtrade(value)
-        for value in buffered_input.get_column("_buffer_optimal").to_list()
-    ]
-    rounded_top = [
-        _round_contract_like_pysystemtrade(value)
-        for value in buffered_input.get_column("_buffer_top").to_list()
-    ]
-    rounded_bot = [
-        _round_contract_like_pysystemtrade(value)
-        for value in buffered_input.get_column("_buffer_bot").to_list()
-    ]
+    rounded_optimal = buffered_input.get_column("_rounded_optimal").to_list()
+    rounded_top = buffered_input.get_column("buffer_top_cons").to_list()
+    rounded_bot = buffered_input.get_column("buffer_bot_cons").to_list()
 
     if not rounded_optimal:
         return buffered_input.with_columns(
-            pl.Series("buffer_top_cons", [], dtype=pl.Int64),
-            pl.Series("buffer_bot_cons", [], dtype=pl.Int64),
             pl.Series("exec_cons", [], dtype=pl.Int64),
-        ).drop("_buffer_optimal", "_buffer_top", "_buffer_bot")
+        ).drop(
+            "_buffer_optimal",
+            "_buffer_top",
+            "_buffer_bot",
+            "_rounded_optimal",
+        )
 
     # Pysystemtrade starts at zero when the first optimum is unavailable.
     current_position = rounded_optimal[0]
@@ -157,10 +151,13 @@ def apply_forecast_position_buffer(
         executable_positions.append(current_position)
 
     return buffered_input.with_columns(
-        pl.Series("buffer_top_cons", rounded_top, dtype=pl.Int64),
-        pl.Series("buffer_bot_cons", rounded_bot, dtype=pl.Int64),
         pl.Series("exec_cons", executable_positions, dtype=pl.Int64),
-    ).drop("_buffer_optimal", "_buffer_top", "_buffer_bot")
+    ).drop(
+        "_buffer_optimal",
+        "_buffer_top",
+        "_buffer_bot",
+        "_rounded_optimal",
+    )
 
 
 def build_subsystem_pnl_curve(
