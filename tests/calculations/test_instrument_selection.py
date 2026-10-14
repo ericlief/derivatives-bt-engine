@@ -83,7 +83,32 @@ def test_scoring_reports_contract_volume_and_roll_cash_cost_without_ranking_it()
     assert detail["ann_trade_cost_usd"] == pytest.approx(40.0)
     assert detail["ann_roll_cost_usd"] == pytest.approx(32.0)
     assert detail["ann_cost_usd"] == pytest.approx(72.0)
+    assert detail["roll_cost_in_score"] is False
+    assert detail["score_cost_sr"] == pytest.approx(0.10)
     assert detail["net_sr"] == pytest.approx(0.40)
+
+    with_rolls = GreedyInstrumentSelector(
+        config=GreedySelectionConfig(
+            capital=10_000.0,
+            target_vol=0.20,
+            size_penalty_scale=0.0,
+            include_roll_cost_in_score=True,
+        ),
+        weight_policy=EqualPortfolioWeights(),
+    ).score(["A"], {"A": candidate}, ["A"], np.eye(1), starting=True)
+
+    roll_detail = with_rolls.details[0]
+    assert roll_detail["roll_cost_in_score"] is True
+    assert roll_detail["score_cost_sr"] == pytest.approx(0.18)
+    assert roll_detail["net_sr"] == pytest.approx(0.32)
+
+    # Persisted per-member trial rows carry the mode and all cost components.
+    rows: list[dict[str, object]] = []
+    GreedyInstrumentSelector._record_trial(
+        [], rows, 0, "A", with_rolls, accepted=True
+    )
+    assert rows[0]["score_cost_sr"] == pytest.approx(0.18)
+    assert rows[0]["ann_roll_cost_sr"] == pytest.approx(0.08)
 
 
 def test_greedy_selector_stops_when_best_addition_falls_below_threshold():

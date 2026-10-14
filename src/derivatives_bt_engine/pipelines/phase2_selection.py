@@ -169,6 +169,14 @@ def parse_args(argv=None):
     parser.add_argument("--score-threshold", type=float, default=0.90)
     parser.add_argument("--gross-sr", type=float, default=0.50)
     parser.add_argument(
+        "--include-roll-cost-in-score",
+        action="store_true",
+        help=(
+            "Deduct ref_ann_rolls * roll_sr as well as combined-forecast "
+            "trading cost in every greedy net-SR score"
+        ),
+    )
+    parser.add_argument(
         "--max-weight-idm",
         "--starting-weight",
         dest="max_weight_idm",
@@ -556,6 +564,7 @@ def _run_complete_selection(
             max_weight_idm=args.max_weight_idm,
             max_pct_market_volume=float(run_config["max_pct_mkt_volume"]),
             liquidity_days=int(run_config["liq_days"]),
+            include_roll_cost_in_score=args.include_roll_cost_in_score,
             max_instruments_per_cluster=args.max_instr_per_cluster,
             max_instrument_margin_pct=args.max_instr_margin_pct,
             max_book_margin_pct=effective_book_margin_pct,
@@ -569,13 +578,14 @@ def _run_complete_selection(
             "portfolio_cont_margin_at_max_usd=%s "
             "portfolio_margin_at_max_usd=%s instr_margin_limit_usd=%s "
             "book_margin_limit_usd=%s book_margin_remaining_usd=%s "
-            "feasible=%s accepted=%s reason=%s",
+            "roll_cost_in_score=%s feasible=%s accepted=%s reason=%s",
             trial["iteration"], trial["candidate"], trial["book"], trial["score"],
             trial["idm"], trial.get("portfolio_cont_margin_at_max_usd"),
             trial.get("portfolio_margin_at_max_usd"),
             trial.get("instr_margin_limit_usd"),
             trial.get("book_margin_limit_usd"),
             trial.get("book_margin_remaining_usd"),
+            args.include_roll_cost_in_score,
             trial["feasible"], trial["accepted"],
             trial["reason"],
         )
@@ -601,6 +611,7 @@ def _run_complete_selection(
             "max_instr_per_cluster": args.max_instr_per_cluster,
             "max_instr_margin_pct": args.max_instr_margin_pct,
             "max_book_margin_pct": effective_book_margin_pct,
+            "roll_cost_in_score": args.include_roll_cost_in_score,
             "weight": selection.final_score.weights[symbol],
             "idm": selection.final_score.idm,
             "ann_dvol": candidate.ann_dvol,
@@ -721,6 +732,9 @@ def _run_complete_selection(
                 pl.lit(args.max_instr_per_cluster, dtype=pl.Int64).alias(
                     "max_instr_per_cluster"
                 ),
+                pl.lit(args.include_roll_cost_in_score).alias(
+                    "roll_cost_in_score"
+                ),
             )
         )
     )
@@ -731,6 +745,9 @@ def _run_complete_selection(
                 pl.lit(args.weight_policy).alias("wt_policy"),
                 pl.lit(args.max_instr_per_cluster, dtype=pl.Int64).alias(
                     "max_instr_per_cluster"
+                ),
+                pl.lit(args.include_roll_cost_in_score).alias(
+                    "roll_cost_in_score"
                 ),
             )
         )
@@ -746,6 +763,9 @@ def _run_complete_selection(
             pl.lit(args.weight_policy).alias("wt_policy"),
             pl.lit(args.max_instr_per_cluster, dtype=pl.Int64).alias(
                 "max_instr_per_cluster"
+            ),
+            pl.lit(args.include_roll_cost_in_score).alias(
+                "roll_cost_in_score"
             ),
         )
         .select(
@@ -765,6 +785,11 @@ def _run_complete_selection(
             "limit_weight",
             "idm",
             "score",
+            "roll_cost_in_score",
+            "score_cost_sr",
+            "ann_trade_cost_sr",
+            "ann_roll_cost_sr",
+            "ann_cost_sr",
             "avg_cons",
             "ann_trade_cons",
             "ann_roll_cons",

@@ -53,6 +53,14 @@ def test_phase2_defaults_to_reviewed_classification_weights():
 
     assert args.weight_policy == "topdown_classif"
     assert args.max_weight_idm == pytest.approx(0.20)
+    assert args.include_roll_cost_in_score is False
+
+
+def test_phase2_can_include_roll_cost_in_greedy_score():
+    """The roll-cost sensitivity is opt-in and explicit at the CLI."""
+    args = parse_args(["--include-roll-cost-in-score"])
+
+    assert args.include_roll_cost_in_score is True
 
 
 def test_starting_weight_remains_alias_for_weight_idm_cap():

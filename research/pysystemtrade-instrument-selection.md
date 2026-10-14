@@ -735,10 +735,13 @@ earlier live results.
 
 The implemented runner carries `trade_sr`, `roll_sr`, and `ref_ann_rolls`
 through Step 1. The synchronized correlation panel uses the normalized net
-subsystem P&L after the full annual SR cost. The published AFTS greedy score
-deliberately retains Carver's trade-only objective, while every trial reports
-the roll SR and account-scaled annual trade and roll contract volume and USD
-cost alongside it.
+subsystem P&L after the full annual SR cost. By default the published AFTS
+greedy score retains Carver's trade-only objective. Pass
+`--include-roll-cost-in-score` to deduct both
+`trade_sr * subsystem_turnover` and `roll_sr * ref_ann_rolls` from every
+instrument's gross SR during singleton ranking and every n+1 trial. Each trial
+persists `roll_cost_in_score`, `score_cost_sr`, and both cost components, so
+the sensitivity cannot be confused with the baseline.
 
 After the final book is selected, a separate executable cash audit restores
 capital, target volatility, final `limit_weight`, and IDM; converts the
@@ -1146,15 +1149,19 @@ replace the AFTS cost input.
 
 Do not sum the eligible rules' individual turnovers: forecast combination and
 the changing volatility scalar determine the resulting subsystem turnover.
-Do not feed the Phase 1 `tot_ann_cost_sr` into this baseline either, because it
-includes a
-separate two-leg holding-roll allowance that the published AFTS selector omits.
-Report the more conservative production sensitivity separately:
+Do not feed an opaque Phase 1 total into the baseline. It includes a separate
+two-leg holding-roll allowance that the published AFTS selector omits. The
+more conservative production sensitivity is explicit:
 
 ```text
 afts_plus_rolls_annual_cost_SR
     = trade_sr × subsystem_turnover + roll_sr × ann_rolls
 ```
+
+Select that sensitivity with `--include-roll-cost-in-score`. Without the flag,
+`score_cost_sr` equals `ann_trade_cost_sr`; with it, `score_cost_sr` equals
+`ann_cost_sr`. The normalized correlation P&L and executable cash audit include
+rolls in either mode—the parameter changes only the greedy ranking objective.
 
 Both variants use the current one-way definition of `trade_sr`. This preserves
 the observed corn result at the

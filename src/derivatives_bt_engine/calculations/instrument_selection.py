@@ -134,14 +134,16 @@ class GreedySelectionConfig:
     ``max_instruments_per_cluster`` optionally limits the number of selected
     instruments sharing one economic subclass, such as ``grains``.
     ``score_threshold`` controls the tolerated decline from the best score
-    observed so far. ``max_instrument_margin_pct`` optionally limits any one
-    instrument's rounded maximum-position margin as a percentage of initial
-    capital. When that gate is enabled, the cumulative book margin defaults to
-    100% of initial capital; ``max_book_margin_pct`` can set a different book
-    ceiling. Both continuous and rounded estimates are retained for comparison.
-    These are additive screens: they deliberately do not assume cross-product
-    SPAN offsets, but remain estimates because IB's one-lot margin change
-    depends on the account's positions at snapshot time.
+    observed so far. ``include_roll_cost_in_score`` changes the greedy net-SR
+    deduction from ordinary trading cost alone to ordinary trading plus the
+    reference holding-roll allowance. ``max_instrument_margin_pct`` optionally
+    limits any one instrument's rounded maximum-position margin as a percentage
+    of initial capital. When that gate is enabled, the cumulative book margin
+    defaults to 100% of initial capital; ``max_book_margin_pct`` can set a
+    different book ceiling. Both continuous and rounded estimates are retained
+    for comparison. These are additive screens: they deliberately do not
+    assume cross-product SPAN offsets, but remain estimates because IB's
+    one-lot margin change depends on the account's positions at snapshot time.
     """
 
     capital: float = 100_000.0
@@ -158,6 +160,7 @@ class GreedySelectionConfig:
     max_instruments_per_cluster: int | None = None
     max_instrument_margin_pct: float | None = None
     max_book_margin_pct: float | None = None
+    include_roll_cost_in_score: bool = False
 
     def __post_init__(self) -> None:
         """Validate configuration ranges before any trial is evaluated."""
@@ -572,10 +575,14 @@ class GreedyInstrumentSelector:
                 if max_position < self.config.min_max_position
                 else self.config.size_penalty_scale / max_position**2
             )
-            # AFTS assumes a common gross SR and subtracts each instrument's
-            # own combined-forecast trading cost and granularity penalty.
-            annual_cost = candidate.annual_trade_cost_sr
-            net_sr = self.config.gross_sr - annual_cost - size_penalty
+            # The AFTS baseline subtracts combined-forecast trading cost. The
+            # optional conservative mode also deducts scheduled holding rolls.
+            score_cost_sr = (
+                candidate.annual_cost_sr
+                if self.config.include_roll_cost_in_score
+                else candidate.annual_trade_cost_sr
+            )
+            net_sr = self.config.gross_sr - score_cost_sr - size_penalty
             # The forecast-cap position is twice the average position under
             # the conventional 20/10 forecast ratio. Translate both turnover
             # and scheduled rolls into actual annual contract volume and USD
@@ -649,7 +656,9 @@ class GreedyInstrumentSelector:
                 "cluster_path": allocation_result.cluster_paths[symbol],
                 "weight": weights[symbol],
                 "limit_weight": allocation,
-                "ann_trade_cost_sr": annual_cost,
+                "roll_cost_in_score": self.config.include_roll_cost_in_score,
+                "score_cost_sr": score_cost_sr,
+                "ann_trade_cost_sr": candidate.annual_trade_cost_sr,
                 "ann_roll_cost_sr": candidate.annual_roll_cost_sr,
                 "ann_cost_sr": candidate.annual_cost_sr,
                 "avg_cons": avg_position,
@@ -881,6 +890,7 @@ class GreedyInstrumentSelector:
             "feasible": score.feasible,
             "accepted": accepted,
             "reason": score.reason,
+            "roll_cost_in_score": first_detail.get("roll_cost_in_score"),
             "portfolio_cont_margin_at_max_usd": first_detail.get(
                 "portfolio_cont_margin_at_max_usd"
             ),
@@ -940,6 +950,19 @@ class GreedyInstrumentSelector:
                 "limit_weight": detail["limit_weight"],
                 "idm": score.idm,
                 "score": score.score if math.isfinite(score.score) else None,
+                "roll_cost_in_score": detail["roll_cost_in_score"],
+                "score_cost_sr": detail["score_cost_sr"],
+                "ann_trade_cost_sr": detail["ann_trade_cost_sr"],
+                "ann_roll_cost_sr": detail["ann_roll_cost_sr"],
+                "ann_cost_sr": detail["ann_cost_sr"],
+                "avg_cons": detail["avg_cons"],
+                "ann_trade_cons": detail["ann_trade_cons"],
+                "ann_roll_cons": detail["ann_roll_cons"],
+                "trade_cost_usd_per_con": detail["trade_cost_usd_per_con"],
+                "roll_cost_usd_per_con": detail["roll_cost_usd_per_con"],
+                "ann_trade_cost_usd": detail["ann_trade_cost_usd"],
+                "ann_roll_cost_usd": detail["ann_roll_cost_usd"],
+                "ann_cost_usd": detail["ann_cost_usd"],
                 "feasible": score.feasible,
                 "reason": score.reason,
                 "instr_reason": detail["reason"],
