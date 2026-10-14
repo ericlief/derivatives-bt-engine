@@ -808,20 +808,34 @@ comparators. Complete-selection reports persist the choice as `wt_policy` and
 record `asset_cls`, `econ_subcls`, and the resulting class path for each book
 member on every accepted pass.
 
-Use `--max-margin-pct P` with `--complete` to apply an optional capital-usage
-gate. Each trial first calculates Carver's continuous maximum-forecast
-position, then rounds it to whole contracts with the allocator's deterministic
-half-up rule (`0.5` becomes one contract). It multiplies that `max_cons` value
-by IB's one-contract `init_margin_usd` and rejects the trial if the summed
-whole-contract margin is greater than `P%` of initial capital. The allocation
-audit retains `max_position` and `cont_margin_at_max_usd` beside `max_cons` and
-`margin_at_max_usd`, so the extra practical constraint can be compared directly
-with the fractional Carver baseline. This additive estimate is deliberately
+Use `--max-instr-margin-pct P` with `--complete` to prevent any one instrument
+from consuming more than `P%` of initial capital in margin.
+`--max-margin-pct` remains an alias for existing scripts. Each trial first
+calculates Carver's continuous maximum-forecast position, then rounds it to
+whole contracts with the allocator's deterministic half-up rule (`0.5` becomes
+one contract). It multiplies that `max_cons` value by IB's one-contract
+`init_margin_usd`. A position above the individual allowance is rejected as
+`instrument_margin_limit`.
+
+The selector also tracks the sum of those rounded instrument margins as the
+book grows. When the individual gate is enabled, total available book margin
+defaults to 100% of initial capital; `--max-book-margin-pct` can impose a lower
+total. A trial exceeding that cumulative allowance is rejected as
+`portfolio_margin_limit`. Thus a `$75,000` account with
+`--max-instr-margin-pct 20` allows at most `$15,000` for one instrument and
+`$75,000` for the book, not `$15,000` for the entire book.
+
+The allocation audit retains `max_position` and `cont_margin_at_max_usd`
+beside `max_cons`, `margin_at_max_usd`, `instr_margin_limit_usd`, and
+`book_margin_limit_usd`. `book_margin_remaining_usd` records the unused amount
+after every hypothetical addition, so the practical constraints can be
+compared directly with the fractional Carver baseline. This additive estimate
+is deliberately
 simple and auditable; it does not model IB portfolio/SPAN offsets or nonlinear
 margin changes at larger quantities. The saved one-contract margin is itself
 the marginal change against the account's positions at snapshot time, so this
 gate is a prescreen rather than an exact funding promise. The default is no
-margin gate. If the gate is enabled, candidates without a usable IB
+margin gate. If either gate is enabled, candidates without a usable IB
 initial-margin preview are rejected as `initial_margin_unavailable`; validate
 the final integer order book with a fresh portfolio-aware margin preview before
 execution.

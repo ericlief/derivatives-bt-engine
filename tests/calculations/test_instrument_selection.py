@@ -163,14 +163,15 @@ def test_cluster_instrument_limit_must_be_positive():
         GreedySelectionConfig(max_instruments_per_cluster=0)
 
 
-def test_optional_margin_limit_rejects_overfunded_trial_book():
+def test_instrument_margin_limit_rejects_one_overfunded_position():
+    """One instrument cannot consume more than its configured capital share."""
     candidate = _candidate("SARONA", 0.0, initial_margin_usd=4_000.0)
     selector = GreedyInstrumentSelector(
         config=GreedySelectionConfig(
             capital=100_000.0,
             target_vol=0.20,
             max_weight_idm=0.20,
-            max_margin_pct=10.0,
+            max_instrument_margin_pct=10.0,
         ),
         weight_policy=EqualPortfolioWeights(),
     )
@@ -183,7 +184,7 @@ def test_optional_margin_limit_rejects_overfunded_trial_book():
     # Max forecast position is 80 contracts, requiring $320k of additive
     # one-lot initial margin against the configured $10k limit.
     assert not score.feasible
-    assert "portfolio_margin_limit" in score.reason
+    assert "SARONA:instrument_margin_limit" in score.reason
     assert score.details[0]["portfolio_margin_at_max_usd"] == pytest.approx(
         320_000.0
     )
@@ -197,7 +198,7 @@ def test_margin_limit_uses_half_up_whole_contract_position():
             capital=1_875.0,
             target_vol=0.20,
             max_weight_idm=0.20,
-            max_margin_pct=9.0,
+            max_instrument_margin_pct=9.0,
         ),
         weight_policy=EqualPortfolioWeights(),
     )
@@ -213,6 +214,37 @@ def test_margin_limit_uses_half_up_whole_contract_position():
     assert detail["cont_margin_at_max_usd"] == pytest.approx(150.0)
     assert detail["margin_at_max_usd"] == pytest.approx(200.0)
     assert not score.feasible
+    assert "MARGIN:instrument_margin_limit" in score.reason
+
+
+def test_book_margin_limit_tracks_cumulative_capital_usage():
+    """Positions that pass individually can still exhaust total book margin."""
+    candidates = {
+        "A": _candidate("A", 0.0, initial_margin_usd=600.0),
+        "B": _candidate("B", 0.0, initial_margin_usd=600.0),
+    }
+    selector = GreedyInstrumentSelector(
+        config=GreedySelectionConfig(
+            capital=1_000.0,
+            target_vol=0.20,
+            max_weight_idm=0.20,
+            max_instrument_margin_pct=80.0,
+        ),
+        weight_policy=EqualPortfolioWeights(),
+    )
+
+    score = selector.score(
+        ["A", "B"], candidates, ["A", "B"], np.eye(2)
+    )
+
+    assert all(
+        detail["margin_at_max_usd"] == pytest.approx(600.0)
+        for detail in score.details
+    )
+    assert score.details[0]["instr_margin_limit_usd"] == pytest.approx(800.0)
+    assert score.details[0]["book_margin_limit_usd"] == pytest.approx(1_000.0)
+    assert score.details[0]["book_margin_remaining_usd"] == pytest.approx(-200.0)
+    assert not score.feasible
     assert "portfolio_margin_limit" in score.reason
 
 
@@ -227,7 +259,7 @@ def test_weight_idm_cap_applies_after_singleton_seed():
             capital=10_000.0,
             target_vol=0.20,
             max_weight_idm=0.20,
-            max_margin_pct=100.0,
+            max_instrument_margin_pct=100.0,
         ),
         weight_policy=EqualPortfolioWeights(),
     )

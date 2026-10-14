@@ -62,6 +62,14 @@ def test_starting_weight_remains_alias_for_weight_idm_cap():
     assert args.max_weight_idm == pytest.approx(0.25)
 
 
+def test_legacy_margin_option_is_per_instrument_cap():
+    """The old option name maps to the clarified per-instrument constraint."""
+    args = parse_args(["--max-margin-pct", "20"])
+
+    assert args.max_instr_margin_pct == pytest.approx(20.0)
+    assert args.max_book_margin_pct is None
+
+
 def test_run_loads_explicit_phase1_csv_and_saves_selected_rows(tmp_path):
     source = tmp_path / "pysystemtrade_cost_phase1_ib_20261005_120000.csv"
     output = tmp_path / "phase2_step1.csv"

@@ -179,12 +179,22 @@ def parse_args(argv=None):
         ),
     )
     parser.add_argument(
+        "--max-instr-margin-pct",
         "--max-margin-pct",
+        dest="max_instr_margin_pct",
         type=float,
         help=(
-            "Optional maximum summed IB what-if initial margin for rounded "
-            "whole-contract positions at the forecast cap, as a percent of "
-            "initial capital"
+            "Maximum IB what-if initial margin for any one instrument's "
+            "rounded maximum-forecast position, as a percent of initial "
+            "capital; --max-margin-pct remains a compatibility alias"
+        ),
+    )
+    parser.add_argument(
+        "--max-book-margin-pct",
+        type=float,
+        help=(
+            "Maximum cumulative rounded book margin as a percent of initial "
+            "capital; defaults to 100 when an instrument margin cap is set"
         ),
     )
     parser.add_argument(
@@ -522,6 +532,9 @@ def _run_complete_selection(
         weight_policy = EqualPortfolioWeights()
     else:
         weight_policy = None
+    effective_book_margin_pct = args.max_book_margin_pct
+    if effective_book_margin_pct is None and args.max_instr_margin_pct is not None:
+        effective_book_margin_pct = 100.0
     selector = GreedyInstrumentSelector(
         config=GreedySelectionConfig(
             capital=float(run_config["init_cap_usd"]),
@@ -532,7 +545,8 @@ def _run_complete_selection(
             max_pct_market_volume=float(run_config["max_pct_mkt_volume"]),
             liquidity_days=int(run_config["liq_days"]),
             max_instruments_per_cluster=args.max_instr_per_cluster,
-            max_margin_pct=args.max_margin_pct,
+            max_instrument_margin_pct=args.max_instr_margin_pct,
+            max_book_margin_pct=effective_book_margin_pct,
         ),
         weight_policy=weight_policy,
     )
@@ -541,12 +555,16 @@ def _run_complete_selection(
         logger.debug(
             "phase2_trial iteration=%s candidate=%s book=%s score=%s idm=%s "
             "portfolio_cont_margin_at_max_usd=%s "
-            "portfolio_margin_at_max_usd=%s margin_limit_usd=%s "
+            "portfolio_margin_at_max_usd=%s instr_margin_limit_usd=%s "
+            "book_margin_limit_usd=%s book_margin_remaining_usd=%s "
             "feasible=%s accepted=%s reason=%s",
             trial["iteration"], trial["candidate"], trial["book"], trial["score"],
             trial["idm"], trial.get("portfolio_cont_margin_at_max_usd"),
             trial.get("portfolio_margin_at_max_usd"),
-            trial.get("margin_limit_usd"), trial["feasible"], trial["accepted"],
+            trial.get("instr_margin_limit_usd"),
+            trial.get("book_margin_limit_usd"),
+            trial.get("book_margin_remaining_usd"),
+            trial["feasible"], trial["accepted"],
             trial["reason"],
         )
     logger.info(
@@ -566,7 +584,8 @@ def _run_complete_selection(
             "symbol": symbol,
             "wt_policy": args.weight_policy,
             "max_instr_per_cluster": args.max_instr_per_cluster,
-            "max_margin_pct": args.max_margin_pct,
+            "max_instr_margin_pct": args.max_instr_margin_pct,
+            "max_book_margin_pct": effective_book_margin_pct,
             "weight": selection.final_score.weights[symbol],
             "idm": selection.final_score.idm,
             "ann_dvol": candidate.ann_dvol,
@@ -649,7 +668,9 @@ def _run_complete_selection(
             "margin_at_max_usd",
             "portfolio_cont_margin_at_max_usd",
             "portfolio_margin_at_max_usd",
-            "margin_limit_usd",
+            "book_margin_remaining_usd",
+            "instr_margin_limit_usd",
+            "book_margin_limit_usd",
         )
         .sort("selection_step", "cluster_path", "symbol")
     )

@@ -109,13 +109,14 @@ class GreedySelectionConfig:
     ``max_instruments_per_cluster`` optionally limits the number of selected
     instruments sharing one economic subclass, such as ``grains``.
     ``score_threshold`` controls the tolerated decline from the best score
-    observed so far. ``max_margin_pct`` optionally limits the sum of
-    one-contract IB initial margin multiplied by each instrument's rounded
-    whole-contract position at the maximum forecast. Both continuous and
-    rounded estimates are retained for comparison. This is an additive screen:
-    it deliberately does not assume cross-product SPAN offsets, but remains an
-    estimate because IB's one-lot margin change depends on the account's
-    positions at snapshot time.
+    observed so far. ``max_instrument_margin_pct`` optionally limits any one
+    instrument's rounded maximum-position margin as a percentage of initial
+    capital. When that gate is enabled, the cumulative book margin defaults to
+    100% of initial capital; ``max_book_margin_pct`` can set a different book
+    ceiling. Both continuous and rounded estimates are retained for comparison.
+    These are additive screens: they deliberately do not assume cross-product
+    SPAN offsets, but remain estimates because IB's one-lot margin change
+    depends on the account's positions at snapshot time.
     """
 
     capital: float = 100_000.0
@@ -130,7 +131,8 @@ class GreedySelectionConfig:
     liquidity_days: int = 250
     max_pct_market_volume: float = 1.0
     max_instruments_per_cluster: int | None = None
-    max_margin_pct: float | None = None
+    max_instrument_margin_pct: float | None = None
+    max_book_margin_pct: float | None = None
 
     def __post_init__(self) -> None:
         """Validate configuration ranges before any trial is evaluated."""
@@ -153,8 +155,18 @@ class GreedySelectionConfig:
             raise ValueError(
                 "max_instruments_per_cluster must be positive when set"
             )
-        if self.max_margin_pct is not None and not 0 < self.max_margin_pct <= 100:
-            raise ValueError("max_margin_pct must be in (0, 100] when set")
+        if (
+            self.max_instrument_margin_pct is not None
+            and not 0 < self.max_instrument_margin_pct <= 100
+        ):
+            raise ValueError(
+                "max_instrument_margin_pct must be in (0, 100] when set"
+            )
+        if (
+            self.max_book_margin_pct is not None
+            and not 0 < self.max_book_margin_pct <= 100
+        ):
+            raise ValueError("max_book_margin_pct must be in (0, 100] when set")
 
 
 @dataclass(frozen=True)
@@ -487,9 +499,23 @@ class GreedyInstrumentSelector:
         feasible = True
         reasons: list[str] = []
         net_sharpes: dict[str, float] = {}
-        margin_limit_usd = (
-            self.config.capital * self.config.max_margin_pct / 100.0
-            if self.config.max_margin_pct is not None else None
+        instrument_margin_limit_usd = (
+            self.config.capital
+            * self.config.max_instrument_margin_pct
+            / 100.0
+            if self.config.max_instrument_margin_pct is not None else None
+        )
+        # Enabling the per-instrument gate also activates a cumulative book
+        # budget equal to starting capital unless the caller asks for less.
+        effective_book_margin_pct = self.config.max_book_margin_pct
+        if (
+            effective_book_margin_pct is None
+            and self.config.max_instrument_margin_pct is not None
+        ):
+            effective_book_margin_pct = 100.0
+        book_margin_limit_usd = (
+            self.config.capital * effective_book_margin_pct / 100.0
+            if effective_book_margin_pct is not None else None
         )
         if self.config.max_instruments_per_cluster is not None:
             cluster_counts: dict[str, int] = {}
@@ -561,8 +587,20 @@ class GreedyInstrumentSelector:
                 reason = "market_risk_volume_unavailable"
             elif pct_market > self.config.max_pct_market_volume:
                 reason = "market_participation_limit"
-            elif margin_limit_usd is not None and margin_at_max_usd is None:
+            elif (
+                (
+                    instrument_margin_limit_usd is not None
+                    or book_margin_limit_usd is not None
+                )
+                and margin_at_max_usd is None
+            ):
                 reason = "initial_margin_unavailable"
+            elif (
+                instrument_margin_limit_usd is not None
+                and margin_at_max_usd is not None
+                and margin_at_max_usd > instrument_margin_limit_usd
+            ):
+                reason = "instrument_margin_limit"
             if reason:
                 feasible = False
                 reasons.append(f"{symbol}:{reason}")
@@ -585,7 +623,8 @@ class GreedyInstrumentSelector:
                 "init_margin_usd": candidate.initial_margin_usd,
                 "cont_margin_at_max_usd": continuous_margin_at_max_usd,
                 "margin_at_max_usd": margin_at_max_usd,
-                "margin_limit_usd": margin_limit_usd,
+                "instr_margin_limit_usd": instrument_margin_limit_usd,
+                "book_margin_limit_usd": book_margin_limit_usd,
                 "reason": reason,
             })
 
@@ -600,21 +639,25 @@ class GreedyInstrumentSelector:
             if detail["margin_at_max_usd"] is not None
         )
         if (
-            margin_limit_usd is not None
+            book_margin_limit_usd is not None
             and all(detail["margin_at_max_usd"] is not None for detail in details)
-            and total_margin_at_max_usd > margin_limit_usd
+            and total_margin_at_max_usd > book_margin_limit_usd
         ):
             feasible = False
             reasons.append(
                 "portfolio_margin_limit "
                 f"margin_usd={total_margin_at_max_usd:.2f} "
-                f"max_usd={margin_limit_usd:.2f}"
+                f"max_usd={book_margin_limit_usd:.2f}"
             )
         for detail in details:
             detail["portfolio_cont_margin_at_max_usd"] = (
                 total_continuous_margin_at_max_usd
             )
             detail["portfolio_margin_at_max_usd"] = total_margin_at_max_usd
+            detail["book_margin_remaining_usd"] = (
+                book_margin_limit_usd - total_margin_at_max_usd
+                if book_margin_limit_usd is not None else None
+            )
 
         # Portfolio score rewards diversification through the same w'Hw risk
         # denominator used by IDM, but applies each member's net SR in the
@@ -798,7 +841,15 @@ class GreedyInstrumentSelector:
             "portfolio_margin_at_max_usd": first_detail.get(
                 "portfolio_margin_at_max_usd"
             ),
-            "margin_limit_usd": first_detail.get("margin_limit_usd"),
+            "book_margin_remaining_usd": first_detail.get(
+                "book_margin_remaining_usd"
+            ),
+            "instr_margin_limit_usd": first_detail.get(
+                "instr_margin_limit_usd"
+            ),
+            "book_margin_limit_usd": first_detail.get(
+                "book_margin_limit_usd"
+            ),
             "iter_best": None,
             "iter_best_score": None,
             "min_accept_score": None,
@@ -859,7 +910,11 @@ class GreedyInstrumentSelector:
                 "portfolio_margin_at_max_usd": detail[
                     "portfolio_margin_at_max_usd"
                 ],
-                "margin_limit_usd": detail["margin_limit_usd"],
+                "book_margin_remaining_usd": detail[
+                    "book_margin_remaining_usd"
+                ],
+                "instr_margin_limit_usd": detail["instr_margin_limit_usd"],
+                "book_margin_limit_usd": detail["book_margin_limit_usd"],
                 "iter_best": None,
                 "iter_best_score": None,
                 "min_accept_score": None,
