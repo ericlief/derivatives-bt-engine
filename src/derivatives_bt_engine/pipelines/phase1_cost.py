@@ -3557,6 +3557,45 @@ def _public_report_schema(report: pl.DataFrame) -> pl.DataFrame:
         for name in report.columns
         if _compact_public_column_name(name) != name
     }
+    # A cached snapshot already carries a reader-friendly primary commission
+    # summary. The screen recalculates that summary together with spread and SR
+    # costs, so prefer the recalculated internal source when both would map to
+    # the same public name (for example ``configured_commission`` and the
+    # snapshot's existing ``commission_usd``).
+    sources_by_target: dict[str, list[str]] = {}
+    for source, target in renames.items():
+        sources_by_target.setdefault(target, []).append(source)
+    duplicate_sources_to_drop: set[str] = set()
+    for target, sources in sources_by_target.items():
+        if len(sources) < 2:
+            continue
+        explicit_sources = [
+            source for source in sources
+            if source in PUBLIC_REPORT_RENAMES
+        ]
+        if len(explicit_sources) != 1:
+            raise ValueError(
+                "ambiguous public report columns map to "
+                f"{target!r}: {sources}"
+            )
+        preferred = explicit_sources[0]
+        duplicate_sources_to_drop.update(
+            source for source in sources if source != preferred
+        )
+    if duplicate_sources_to_drop:
+        report = report.drop(sorted(duplicate_sources_to_drop))
+        renames = {
+            source: target for source, target in renames.items()
+            if source not in duplicate_sources_to_drop
+        }
+
+    existing_targets = {
+        target
+        for source, target in renames.items()
+        if target in report.columns and source != target
+    }
+    if existing_targets:
+        report = report.drop(sorted(existing_targets))
     report = report.rename(renames)
 
     selected_first = [
@@ -4037,8 +4076,16 @@ def _market_snapshot_frame(
     args: argparse.Namespace,
     generated_at: datetime,
 ) -> pl.DataFrame:
-    """Return full-precision acquired rows with reproducibility metadata."""
-    return pl.DataFrame(rows, infer_schema_length=None).with_columns(
+    """Return an ordered, full-precision acquisition snapshot.
+
+    Account-specific IB what-if commission is the primary commission when it
+    is usable.  The configured commission used by the preliminary quote-row
+    calculation remains available under an explicit ``ref_`` name at the end
+    of the frame.  Keeping both values is useful for auditing, but their names
+    and order must not imply that the stale configured value drives the later
+    selection screen.
+    """
+    snapshot = pl.DataFrame(rows, infer_schema_length=None).with_columns(
         pl.lit(generated_at.isoformat(timespec="seconds")).alias(
             "market_snapshot_generated_at_ct"
         ),
@@ -4058,6 +4105,119 @@ def _market_snapshot_frame(
         pl.lit(args.vol_source).alias("market_snapshot_vol_source"),
         pl.lit(args.use_rth).alias("market_snapshot_use_rth"),
     )
+
+    def nullable_column(name: str, dtype: pl.DataType) -> pl.Expr:
+        """Return an existing snapshot column or a typed null expression."""
+        if name in snapshot.columns:
+            return pl.col(name)
+        return pl.lit(None, dtype=dtype)
+
+    what_if_attempted = nullable_column(
+        "ib_whatif_attempted", pl.Boolean
+    ).fill_null(False)
+    what_if_eligible = nullable_column(
+        "ib_whatif_eligible", pl.Boolean
+    ).fill_null(False)
+    what_if_usable = (
+        what_if_attempted
+        & what_if_eligible
+        & nullable_column("ib_whatif_commission_usd", pl.Float64).is_not_null()
+    )
+    configured_commission_usd = nullable_column(
+        "commission_per_side", pl.Float64
+    )
+
+    # These four columns are the commission summary a snapshot reader should
+    # encounter first. A failed what-if remains unavailable rather than
+    # silently reverting to the stale configured amount.
+    snapshot = snapshot.with_columns(
+        pl.when(what_if_usable)
+        .then(nullable_column("ib_whatif_commission", pl.Float64))
+        .when(~what_if_attempted)
+        .then(configured_commission_usd)
+        .otherwise(None)
+        .alias("commission_amount"),
+        pl.when(what_if_usable)
+        .then(nullable_column("ib_whatif_commission_currency", pl.String))
+        .when(~what_if_attempted & configured_commission_usd.is_not_null())
+        .then(pl.lit("USD"))
+        .otherwise(None)
+        .alias("commission_currency"),
+        pl.when(what_if_usable)
+        .then(nullable_column("ib_whatif_commission_usd", pl.Float64))
+        .when(~what_if_attempted)
+        .then(configured_commission_usd)
+        .otherwise(None)
+        .alias("commission_usd"),
+        pl.when(what_if_usable)
+        .then(pl.lit("ib_what_if"))
+        .when(what_if_attempted)
+        .then(pl.lit("ib_what_if_failed"))
+        .when(configured_commission_usd.is_not_null())
+        .then(pl.lit("configured_fallback"))
+        .otherwise(pl.lit("unavailable"))
+        .alias("commission_source"),
+    )
+
+    # The quote-row builder necessarily runs before the what-if preview is
+    # attached. Rename its cost fields at this persistence boundary so they
+    # cannot be mistaken for the primary account-specific commission path.
+    reference_renames = {
+        "commission_per_side": "ref_config_commission_usd",
+        "one_way_spread_cash": "snap_spread_cash_usd",
+        "one_way_total_cost": "snap_ref_config_cost_usd",
+        "one_way_cost_per_annual_dollar_vol": (
+            "snap_ref_config_sr_cost_per_trade"
+        ),
+        "one_way_cost_bps_notional": "snap_ref_config_cost_bps_notional",
+    }
+    snapshot = snapshot.rename({
+        source: target
+        for source, target in reference_renames.items()
+        if source in snapshot.columns
+    })
+
+    primary_columns = [
+        "symbol",
+        "signal_symbol",
+        "description",
+        "asset_class",
+        "economic_subclass",
+        "region",
+        "contract_id",
+        "expiration",
+        "ib_symbol",
+        "ib_exchange",
+        "ib_availability",
+        "price",
+        "price_source",
+        "currency",
+        "multiplier",
+        "notional_per_contract",
+        "annual_dollar_vol_per_contract",
+        "selected_one_way_spread_points",
+        "selected_spread_source",
+        "commission_amount",
+        "commission_currency",
+        "commission_usd",
+        "commission_source",
+        "ib_whatif_attempted",
+        "ib_whatif_eligible",
+        "ib_whatif_initial_margin_usd",
+        "ib_whatif_maintenance_margin_usd",
+    ]
+    primary = [name for name in primary_columns if name in snapshot.columns]
+    primary_set = set(primary)
+    reference_tail = [
+        name for name in snapshot.columns
+        if name.startswith("ref_") or name.startswith("snap_ref_")
+    ]
+    reference_set = set(reference_tail)
+    middle = [
+        name for name in snapshot.columns
+        if name not in primary_set and name not in reference_set
+    ]
+    return snapshot.select(*primary, *middle, *reference_tail)
 
 
 def _emit_market_snapshot(

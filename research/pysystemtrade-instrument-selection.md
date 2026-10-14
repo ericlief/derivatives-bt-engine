@@ -754,6 +754,15 @@ name explicitly when commission tiers, current positions, or margin differ
 across accounts. The snapshot stores results and currencies, not the account
 identifier.
 
+The snapshot presents `commission_amount`, `commission_currency`,
+`commission_usd`, and `commission_source` beside the primary contract fields.
+An eligible account-specific preview therefore appears as
+`commission_source=ib_what_if`. The older configured amount is retained only
+as `ref_config_commission_usd` near the end of the snapshot, together with
+`snap_ref_config_cost_usd`; these are audit fallbacks and do not override a
+successful what-if preview. A failed attempted preview remains
+`ib_what_if_failed` rather than silently selecting the reference amount.
+
 The command appends a Chicago-time timestamp. It does not calculate pooled
 EWMAC costs, affordability, liquidity gates, or Phase 2 eligibility. Those
 policy calculations can therefore be rerun later without IB. Build a Phase 1

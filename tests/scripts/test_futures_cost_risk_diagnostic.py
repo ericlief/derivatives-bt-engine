@@ -1138,6 +1138,61 @@ def test_snapshot_output_filename_contains_friendly_account_name():
     )
 
 
+def test_market_snapshot_promotes_what_if_commission_and_demotes_reference():
+    """The cached artifact must present the commission actually used first."""
+    generated_at = datetime(2026, 10, 13, 17, 0, 0, tzinfo=timezone.utc)
+    args = Namespace(
+        duration="1 Y",
+        spread_duration="5 D",
+        volume_duration="2 M",
+        volume_lookback_days=20,
+        market_data_type="auto",
+        vol_source="pysystemtrade",
+        use_rth=True,
+    )
+    snapshot = futures_cost_risk._market_snapshot_frame(
+        [{
+            "symbol": "COPPER-micro",
+            "signal_symbol": "MHG",
+            "commission_per_side": 1.47,
+            "one_way_spread_cash": 3.125,
+            "one_way_total_cost": 4.595,
+            "one_way_cost_per_annual_dollar_vol": 0.0014,
+            "one_way_cost_bps_notional": 2.75,
+            "ib_whatif_attempted": True,
+            "ib_whatif_eligible": True,
+            "ib_whatif_commission": 0.96,
+            "ib_whatif_commission_currency": "USD",
+            "ib_whatif_commission_usd": 0.96,
+        }],
+        args,
+        generated_at,
+    )
+
+    assert snapshot["commission_amount"][0] == pytest.approx(0.96)
+    assert snapshot["commission_currency"][0] == "USD"
+    assert snapshot["commission_usd"][0] == pytest.approx(0.96)
+    assert snapshot["commission_source"][0] == "ib_what_if"
+    assert snapshot["ref_config_commission_usd"][0] == pytest.approx(1.47)
+    assert snapshot["snap_ref_config_cost_usd"][0] == pytest.approx(4.595)
+    assert "commission_per_side" not in snapshot.columns
+    assert snapshot.columns.index("commission_usd") < snapshot.columns.index(
+        "ref_config_commission_usd"
+    )
+
+
+def test_public_report_prefers_recalculated_commission_over_snapshot_alias():
+    """A cached display alias must not duplicate or override screen costs."""
+    report = futures_cost_risk._public_report_schema(pl.DataFrame({
+        "symbol": ["COPPER-micro"],
+        "commission_usd": [99.0],
+        "configured_commission": [0.96],
+    }))
+
+    assert report.columns.count("comm_usd") == 1
+    assert report["comm_usd"][0] == pytest.approx(0.96)
+
+
 def test_snapshot_ib_log_is_timestamped_beside_account_snapshot():
     """The dedicated IB log should be discoverable beside its live artifact."""
     started_at = datetime(2026, 10, 13, 17, 0, 0, tzinfo=timezone.utc)
