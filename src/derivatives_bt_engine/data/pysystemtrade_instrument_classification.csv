@@ -6,7 +6,7 @@ ALUMINIUM_LME,metals,industrial
 AUD,fx,fx
 AUDJPY,fx,fx
 AUD_micro,fx,fx
-BB3M,bond,rates
+BB3M,bond,stir
 BBCOMM,other,commodity_index
 BITCOIN,crypto,crypto
 BOBL,bond,bonds
@@ -90,8 +90,8 @@ EUR,fx,fx
 EURAUD,fx,fx
 EURCAD,fx,fx
 EURCHF,fx,fx
-EURIBOR,bond,rates
-EURIBOR-ICE,bond,rates
+EURIBOR,bond,stir
+EURIBOR-ICE,bond,stir
 EURO600,equity,ex_us
 EUROSTX,equity,ex_us
 EUROSTX-LARGE,equity,ex_us
@@ -100,7 +100,7 @@ EUROSTX200-LARGE,equity,ex_us
 EUR_micro,fx,fx
 EUR_mini,fx,fx
 FANG,equity,us
-FED,bond,rates
+FED,bond,stir
 FEEDCOW,ags,livestock
 FTSE100,equity,ex_us
 FTSE250,equity,ex_us
@@ -194,7 +194,7 @@ RUBBER,ags,softs
 RUR,fx,fx
 RUSSELL,equity,us
 RUSSELL_mini,equity,us
-SARONA,bond,rates
+SARONA,bond,stir
 SEK,fx,fx
 SGD,fx,fx
 SGD_mini,fx,fx
@@ -203,8 +203,8 @@ SHATZ,bond,bonds
 SILVER,metals,precious
 SMI,equity,ex_us
 SMI-MID,equity,ex_us
-SOFR,bond,rates
-SONIA3,bond,rates
+SOFR,bond,stir
+SONIA3,bond,stir
 SOYBEAN,ags,grains
 SOYBEAN_mini,ags,grains
 SOYMEAL,ags,grains

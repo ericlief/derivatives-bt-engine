@@ -995,7 +995,7 @@ history-universe coverage before materializing the mapping as
 
 ```text
 ags      -> grains, softs, livestock
-bond     -> bonds, rates
+bond     -> bonds, stir
 equity   -> us, ex_us
 fx       -> fx
 metals   -> precious, industrial
@@ -1009,10 +1009,13 @@ other    -> housing, commodity_index
 special branches. The US home-price future stays separate from equities;
 EPRA-Europe remains equity because it tracks listed real-estate companies and
 REITs. Sector instruments are classified geographically as `equity/us` or
-`equity/ex_us`. Uppercase identifiers are reserved for instrument and contract
-symbols. Carver's source config currently groups crypto under Metals; this
-table separates it because crypto is a distinct exposure for portfolio
-allocation.
+`equity/ex_us`. The `bond/stir` branch contains short-term interest-rate
+contracts such as SOFR, EURIBOR, SONIA, SARON, Fed Funds, and bank bills.
+Short-maturity government-bond futures such as BTP3, Schatz, and US2 remain in
+`bond/bonds`; "short bond" does not mean STIR. Uppercase identifiers are
+reserved for instrument and contract symbols. Carver's source config currently
+groups crypto under Metals; this table separates it because crypto is a
+distinct exposure for portfolio allocation.
 
 Execution overlays inherit the classification of their explicit
 `pysystemtrade_instrument` parent. Thus MZC is `ags/grains` and shares the

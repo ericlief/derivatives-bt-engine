@@ -32,7 +32,7 @@ CLASSIFICATION_COLUMNS = {
 # real-estate and sector indexes use the equity geography branches.
 ALLOWED_CLASSIFICATION_TREE: dict[str, frozenset[str]] = {
     "ags": frozenset({"grains", "softs", "livestock"}),
-    "bond": frozenset({"bonds", "rates"}),
+    "bond": frozenset({"bonds", "stir"}),
     "equity": frozenset({"us", "ex_us"}),
     "fx": frozenset({"fx"}),
     "metals": frozenset({"precious", "industrial"}),

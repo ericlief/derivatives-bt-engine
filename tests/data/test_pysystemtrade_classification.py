@@ -35,6 +35,16 @@ def test_packaged_classification_is_complete_and_uses_lowercase_values():
         & (pl.col("asset_class") == "equity")
         & (pl.col("economic_subclass") == "ex_us")
     ).height == 1
+    assert classification.filter(
+        (pl.col("instrument_code") == "SOFR")
+        & (pl.col("asset_class") == "bond")
+        & (pl.col("economic_subclass") == "stir")
+    ).height == 1
+    assert classification.filter(
+        (pl.col("instrument_code") == "BTP3")
+        & (pl.col("asset_class") == "bond")
+        & (pl.col("economic_subclass") == "bonds")
+    ).height == 1
 
 
 def test_classification_rejects_noncanonical_capitalization(tmp_path: Path):
