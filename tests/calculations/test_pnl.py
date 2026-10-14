@@ -5,7 +5,10 @@ from datetime import date
 import polars as pl
 import pytest
 
-from derivatives_bt_engine.calculations.pnl import build_subsystem_pnl_curve
+from derivatives_bt_engine.calculations.pnl import (
+    build_executable_cash_pnl_curve,
+    build_subsystem_pnl_curve,
+)
 
 
 def test_subsystem_pnl_lags_position_and_accrues_cost_by_elapsed_year():
@@ -59,3 +62,45 @@ def test_subsystem_pnl_preserves_missing_historical_fx_as_invalid():
 
     assert result.get_column("net_pnl_usd").null_count() == 2
     assert result.get_column("pnl_valid").to_list() == [False, False]
+
+
+def test_executable_cash_pnl_separates_trade_and_policy_roll_costs():
+    """Rounded position changes and held-contract rolls remain independent."""
+    frame = pl.DataFrame({
+        "date": [date(2024, 1, day) for day in range(1, 6)],
+        "point_change": [None, 1.0, 1.0, 1.0, 1.0],
+        "point_vol": [1.0] * 5,
+        "forecast_multiplier": [1.0, 2.0, 2.0, 1.0, 1.0],
+        "fx_to_usd": [1.0] * 5,
+        "is_roll": [False, False, True, False, True],
+    })
+
+    result = build_executable_cash_pnl_curve(
+        frame,
+        capital=1_000.0,
+        target_vol=0.20,
+        weight=0.50,
+        idm=1.0,
+        multiplier=10.0,
+        trade_cost_usd_per_con=2.0,
+        roll_cost_usd_per_con=3.0,
+        annualization_days=4,
+    )
+
+    assert result.get_column("avg_cons").to_list() == pytest.approx([5.0] * 5)
+    assert result.get_column("exec_cons").to_list() == [5, 10, 10, 5, 5]
+    assert result.get_column("trade_cons").to_list() == pytest.approx(
+        [5.0, 5.0, 0.0, 5.0, 0.0]
+    )
+    assert result.get_column("realized_roll_cons").to_list() == pytest.approx(
+        [0.0, 0.0, 10.0, 0.0, 5.0]
+    )
+    assert result.get_column("expected_roll_cons").to_list() == pytest.approx(
+        [0.0, 0.0, 7.5, 0.0, 7.5]
+    )
+    assert result.get_column("cash_trade_cost_usd").to_list() == pytest.approx(
+        [-10.0, -10.0, 0.0, -10.0, 0.0]
+    )
+    assert result.get_column("cash_realized_roll_cost_usd").to_list() == (
+        pytest.approx([0.0, 0.0, -30.0, 0.0, -15.0])
+    )

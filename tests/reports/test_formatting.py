@@ -3,7 +3,10 @@
 import polars as pl
 import pytest
 
-from derivatives_bt_engine.reports.formatting import round_public_report
+from derivatives_bt_engine.reports.formatting import (
+    rename_public_report_columns,
+    round_public_report,
+)
 
 
 def test_round_public_report_formats_phase2_money_and_diagnostics():
@@ -39,3 +42,16 @@ def test_round_public_report_keeps_reproduction_rates_at_six_places():
 
     assert rounded["cur_fx_to_usd"][0] == pytest.approx(0.006604)
     assert rounded["ann_return_vol"][0] == pytest.approx(0.123456)
+
+
+def test_public_report_renames_cash_cost_columns_at_boundary():
+    """Internal unit-explicit cash names become compact public USD names."""
+    report = pl.DataFrame({
+        "trade_cost_usd_per_con": [1.234],
+        "ann_roll_cost_usd": [12.346],
+    })
+
+    public = round_public_report(rename_public_report_columns(report))
+
+    assert public.columns == ["trade_cost_per_con", "ann_roll_cost"]
+    assert public.row(0) == pytest.approx((1.23, 12.35))

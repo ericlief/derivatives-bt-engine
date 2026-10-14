@@ -67,10 +67,13 @@ class SelectionCandidate:
     """Store fixed inputs for one executable contract in every greedy trial.
 
     ``ann_dvol`` is annual USD volatility per contract. ``trade_sr`` is the
-    one-way cost in SR units, while ``combined_turnover`` is the measured
-    annual turnover of this symbol's combined subsystem. ``asset_class`` and
-    ``economic_subclass`` locate it in the reviewed allocation tree, while
-    ``econ_family`` prevents selecting duplicate routes for the same exposure.
+    one-way ordinary-trade cost in SR units, while ``combined_turnover`` is the
+    measured annual turnover of this symbol's combined subsystem. ``roll_sr``
+    is the cost of replacing an old contract with a new one and ``ann_rolls``
+    is the reference policy frequency. ``asset_class`` and
+    ``economic_subclass`` locate the instrument in the reviewed allocation
+    tree, while ``econ_family`` prevents selecting duplicate routes for the
+    same exposure.
     ``mkt_risk_vol_day`` is daily market volume expressed in annualized USD
     risk units, matching the Phase 2 participation calculation.
     ``initial_margin_usd`` is the larger BUY/SELL one-contract marginal
@@ -87,11 +90,33 @@ class SelectionCandidate:
     econ_family: str = ""
     mkt_risk_vol_day: float | None = None
     initial_margin_usd: float | None = None
+    roll_sr: float = 0.0
+    ann_rolls: float = 0.0
 
     @property
     def annual_trade_cost_sr(self) -> float:
         """Return one-way trade SR multiplied by combined annual turnover."""
         return self.trade_sr * self.combined_turnover
+
+    @property
+    def annual_roll_cost_sr(self) -> float:
+        """Return complete-roll SR multiplied by policy rolls per year."""
+        return self.roll_sr * self.ann_rolls
+
+    @property
+    def annual_cost_sr(self) -> float:
+        """Return annual ordinary-trade plus holding-roll cost in SR units."""
+        return self.annual_trade_cost_sr + self.annual_roll_cost_sr
+
+    @property
+    def trade_cost_usd_per_con(self) -> float:
+        """Return the current one-way ordinary-trade cost per contract."""
+        return self.trade_sr * self.ann_dvol
+
+    @property
+    def roll_cost_usd_per_con(self) -> float:
+        """Return the current complete-roll cost per held contract."""
+        return self.roll_sr * self.ann_dvol
 
 
 @dataclass(frozen=True)
@@ -551,6 +576,17 @@ class GreedyInstrumentSelector:
             # own combined-forecast trading cost and granularity penalty.
             annual_cost = candidate.annual_trade_cost_sr
             net_sr = self.config.gross_sr - annual_cost - size_penalty
+            # The forecast-cap position is twice the average position under
+            # the conventional 20/10 forecast ratio. Translate both turnover
+            # and scheduled rolls into actual annual contract volume and USD
+            # cost without changing the trade-only AFTS ranking objective.
+            avg_position = max_position / self.config.forecast_cap_ratio
+            ann_trade_cons = avg_position * candidate.combined_turnover
+            ann_roll_cons = avg_position * candidate.ann_rolls
+            ann_trade_cost_usd = (
+                ann_trade_cons * candidate.trade_cost_usd_per_con
+            )
+            ann_roll_cost_usd = ann_roll_cons * candidate.roll_cost_usd_per_con
             # Translate trial risk allocation and measured turnover into the
             # same annualized-dollar-risk units as market volume.
             risk_traded_day = (
@@ -614,6 +650,16 @@ class GreedyInstrumentSelector:
                 "weight": weights[symbol],
                 "limit_weight": allocation,
                 "ann_trade_cost_sr": annual_cost,
+                "ann_roll_cost_sr": candidate.annual_roll_cost_sr,
+                "ann_cost_sr": candidate.annual_cost_sr,
+                "avg_cons": avg_position,
+                "ann_trade_cons": ann_trade_cons,
+                "ann_roll_cons": ann_roll_cons,
+                "trade_cost_usd_per_con": candidate.trade_cost_usd_per_con,
+                "roll_cost_usd_per_con": candidate.roll_cost_usd_per_con,
+                "ann_trade_cost_usd": ann_trade_cost_usd,
+                "ann_roll_cost_usd": ann_roll_cost_usd,
+                "ann_cost_usd": ann_trade_cost_usd + ann_roll_cost_usd,
                 "max_position": max_position,
                 "max_cons": max_contracts,
                 "size_penalty_sr": size_penalty,

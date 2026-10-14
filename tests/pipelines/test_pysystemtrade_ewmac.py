@@ -23,7 +23,11 @@ def _history() -> SimpleNamespace:
         "point_change": [None, 1.0, 1.0, -1.0, 2.0, 1.0, -1.0, 2.0],
         "quality_flag": [""] * 8,
     })
-    return SimpleNamespace(panama_bars=lambda: bars)
+    marks = pl.DataFrame({
+        "trade_date": bars.get_column("ts_event"),
+        "is_roll": [False, False, False, True, False, False, False, False],
+    })
+    return SimpleNamespace(panama_bars=lambda: bars, marks=marks)
 
 
 def _pooled(rule: EwmacRule) -> PooledEwmacRuleData:
@@ -58,8 +62,14 @@ def test_component_builder_exposes_compact_and_detailed_shapes():
     detailed = build_ewmac_component_frame(_history(), pooled, detailed=True)
 
     assert compact.columns == [
-        "date", "point_vol", "point_change", "fcst_2_4", "fcst_4_8"
+        "date",
+        "point_vol",
+        "point_change",
+        "is_roll",
+        "fcst_2_4",
+        "fcst_4_8",
     ]
+    assert compact.get_column("is_roll").sum() == 1
     assert {
         "close",
         "raw_ewmac_2_4",

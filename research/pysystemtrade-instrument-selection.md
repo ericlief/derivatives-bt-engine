@@ -585,6 +585,7 @@ flowchart TD
     Phase1["Phase 1 row<br/>symbol · history code · currency · multiplier<br/>eligible rules · trade_sr · roll_sr · ref_ann_rolls"]
     RuleScreen["Phase 1 rule screen<br/>rule turnover × trade_sr<br/>+ ref_ann_rolls × roll_sr<br/>determines eligible rules only"]
     Prices["Daily signal history<br/>date · close · point change · mixed point vol"]
+    RollMarks["History roll policy<br/>date · is_roll"]
     Components["EWMAC component builder<br/>scaled forecast for each speed"]
 
     HistFX["Historical FX database<br/>raw.fx_prices"]
@@ -619,9 +620,11 @@ flowchart TD
     ReturnPanel["Synchronized pnl_usd panel"]
     Correlation["Subsystem correlation matrix"]
     Selection["Greedy Phase 2 selection<br/>weights · IDM · costs · size penalty"]
+    CashPnL["Executable cash audit for final book<br/>rounded contracts · ordinary trades<br/>actual and interval-average roll cost"]
 
     Runner --> Phase1
     Runner --> Prices
+    Runner --> RollMarks
     Runner --> FXProvider
 
     Prices --> Components
@@ -657,6 +660,8 @@ flowchart TD
     Cost --> Selection
     SummaryOutput --> Selection
     Correlation --> Selection
+    Selection --> CashPnL
+    RollMarks --> CashPnL
 ```
 
 The same ownership in terminal-readable form is:
@@ -728,13 +733,27 @@ are causal at that date; keep that annual cost calibration until the next
 scheduled selection refresh rather than backfilling a later snapshot into
 earlier live results.
 
-The current implementation has not completed this target cost path: Step 1
-retains `trade_sr` but drops `roll_sr` and `ref_ann_rolls`; the greedy score
-recalculates `trade_sr * subsystem_turnover`, while the synchronized subsystem
-return panel remains pre-cost. Completing the runner therefore requires
-carrying the roll inputs into Step 1 and adding the explicit cost and net-P&L
-stages shown above. It must not query a live contract again to reconstruct
-values that already belong to the saved Phase 1 run.
+The implemented runner carries `trade_sr`, `roll_sr`, and `ref_ann_rolls`
+through Step 1. The synchronized correlation panel uses the normalized net
+subsystem P&L after the full annual SR cost. The published AFTS greedy score
+deliberately retains Carver's trade-only objective, while every trial reports
+the roll SR and account-scaled annual trade and roll contract volume and USD
+cost alongside it.
+
+After the final book is selected, a separate executable cash audit restores
+capital, target volatility, final `limit_weight`, and IDM; converts the
+combined forecast to a continuous target; and rounds it to whole contracts.
+Ordinary position changes are charged with the Phase 1 one-way trade cost.
+On each history-policy `is_roll` date, `realized_roll_cons` uses the rounded
+position held from the prior day. `expected_roll_cons` uses mean absolute
+rounded exposure over the interval ending on that roll date, which is the
+stable selection estimate analogous to pysystemtrade's average holding per
+roll interval. Both cost paths are persisted because they answer different
+questions: the realized series audits the supplied historical roll path, while
+the interval-average series estimates a typical policy roll without depending
+on the forecast value on one date. Current snapshot costs are applied to the
+full history as a clearly labelled sensitivity; no live contract is queried
+again during Phase 2.
 
 The live-data boundary is a reusable, full-precision Parquet snapshot. Acquire
 contract qualification, current quotes and FX, dated-contract spread and
@@ -902,6 +921,10 @@ combination and the unconstrained greedy AFTS baseline. The command writes:
   and gross, cost, and net subsystem P&L for direct inspection;
 - `pysystemtrade_selection_subsystem_net_pnl_<timestamp>.parquet`, the synchronized
   return panel used by the bounded correlation estimator;
+- `pysystemtrade_selection_cash_pnl_<timestamp>.parquet`, the final book's
+  account-scaled daily continuous and rounded contracts, ordinary traded
+  contracts, actual and interval-average policy-roll contracts, and separate
+  gross, trade-cost, roll-cost, and net USD P&L paths;
 - `pysystemtrade_selection_trials_<timestamp>.csv`, one row per greedy trial; and
 - `pysystemtrade_selection_trial_allocations_<timestamp>.csv`, one row per member
   of every hypothetical trial book, including its economic `cluster_path`,

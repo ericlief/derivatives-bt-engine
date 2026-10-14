@@ -11,6 +11,18 @@ from __future__ import annotations
 import polars as pl
 
 
+# Internal calculations keep unit-explicit names. Public reports rely on the
+# project convention that primary monetary values are USD and shorten only the
+# boundary names here so every producer uses the same vocabulary.
+PUBLIC_REPORT_RENAMES = {
+    "trade_cost_usd_per_con": "trade_cost_per_con",
+    "roll_cost_usd_per_con": "roll_cost_per_con",
+    "ann_trade_cost_usd": "ann_trade_cost",
+    "ann_roll_cost_usd": "ann_roll_cost",
+    "ann_cost_usd": "ann_cost",
+}
+
+
 # USD amounts are reported to cents. The registry includes descriptive
 # internal names and their compact public-schema equivalents because reports
 # can apply formatting immediately before or after their rename boundary.
@@ -85,7 +97,48 @@ TWO_DECIMAL_MONEY_COLUMNS = {
     "cost_pnl_native",
     "cost_pnl_usd",
     "net_pnl_usd",
+    "risk_budget_usd",
+    "trade_cost_usd_per_con",
+    "roll_cost_usd_per_con",
+    "ann_trade_cost_usd",
+    "ann_roll_cost_usd",
+    "ann_cost_usd",
+    "trade_cost_per_con",
+    "roll_cost_per_con",
+    "ann_trade_cost",
+    "ann_roll_cost",
+    "ann_cost",
+    "cash_gross_pnl_usd",
+    "cash_trade_cost_usd",
+    "cash_realized_roll_cost_usd",
+    "cash_expected_roll_cost_usd",
+    "cash_realized_net_pnl_usd",
+    "cash_expected_net_pnl_usd",
 }
+
+
+def rename_public_report_columns(report: pl.DataFrame) -> pl.DataFrame:
+    """Apply the centralized compact-name map to a public report copy.
+
+    Only columns present in ``report`` are renamed. A report cannot contain
+    both an internal source and its compact public target because that would
+    make the boundary schema ambiguous.
+    """
+    renames = {
+        source: target
+        for source, target in PUBLIC_REPORT_RENAMES.items()
+        if source in report.columns
+    }
+    duplicates = sorted(
+        target for source, target in renames.items()
+        if target in report.columns and target != source
+    )
+    if duplicates:
+        raise ValueError(
+            "public report already contains compact columns: "
+            + ", ".join(duplicates)
+        )
+    return report.rename(renames)
 
 
 # FX and return-volatility rates need more precision than general diagnostics

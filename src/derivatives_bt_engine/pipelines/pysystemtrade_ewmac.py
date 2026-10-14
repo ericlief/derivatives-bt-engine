@@ -207,8 +207,9 @@ def build_ewmac_component_frame(
 ) -> pl.DataFrame:
     """Build a wide component-forecast frame for one instrument history.
 
-    The compact shape contains ``date``, ``point_vol``, ``point_change``,
-    and one ``fcst_<fast>_<slow>`` column per rule and is consumed by Phase 2.
+    The compact shape contains ``date``, ``point_vol``, ``point_change``, the
+    history policy's ``is_roll`` marker, and one ``fcst_<fast>_<slow>`` column
+    per rule and is consumed by Phase 2.
     With ``detailed=True`` the frame additionally exposes the Panama price,
     raw EWMAC difference, raw normalized forecast, and daily pooled scalar for
     every rule, using rule-suffixed column names suitable for a notebook.
@@ -261,7 +262,42 @@ def build_ewmac_component_frame(
         # date makes that ownership explicit while retaining one common vol.
         combined = combined.join(frame.select(columns), on="date", how="left")
     assert combined is not None
-    return combined.sort("date")
+    marks = getattr(history, "marks", None)
+    if isinstance(marks, pl.DataFrame) and {"trade_date", "is_roll"} <= set(
+        marks.columns
+    ):
+        # One Panama date owns one roll decision. Group defensively because a
+        # provider with multiple marks on a date should still emit one event.
+        roll_markers = (
+            marks.select(
+                pl.col("trade_date").alias("date"),
+                pl.col("is_roll").fill_null(False).cast(pl.Boolean),
+            )
+            .group_by("date")
+            .agg(pl.col("is_roll").any())
+        )
+        combined = combined.join(roll_markers, on="date", how="left")
+    else:
+        combined = combined.with_columns(pl.lit(False).alias("is_roll"))
+    combined = combined.with_columns(pl.col("is_roll").fill_null(False))
+
+    # Keep shared history and volatility fields together before the rule
+    # blocks. This makes compact frames and notebook tables scan consistently.
+    prefix = ["date"]
+    if detailed:
+        prefix.extend([
+            "close",
+            "fast_point_vol",
+            "slow_point_vol",
+            "point_vol",
+            "point_change",
+            "is_roll",
+            "quality_flag",
+        ])
+    else:
+        prefix.extend(["point_vol", "point_change", "is_roll"])
+    remaining = [column for column in combined.columns if column not in prefix]
+    return combined.select(prefix + remaining).sort("date")
 
 
 def load_ewmac_component_frames(

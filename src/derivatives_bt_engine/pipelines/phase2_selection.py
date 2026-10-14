@@ -15,6 +15,10 @@ then uses three deliberately different dataframe collections:
 ``net_pnl_wide``
     One synchronized frame with dates in rows and executable symbols in
     columns. This is the input to the instrument-correlation estimator.
+``cash_pnl_long``
+    One long account-scaled frame for the final selected book. It rounds the
+    combined forecasts to contracts and separates ordinary trade cost from
+    realized and interval-average policy-roll cost.
 
 The command persists each intermediate form so forecast gaps, turnover, and
 greedy selection decisions remain inspectable after a run.
@@ -46,7 +50,10 @@ from derivatives_bt_engine.data.fx_history import (
 from derivatives_bt_engine.pipelines.pysystemtrade_ewmac import (
     load_ewmac_component_frames,
 )
-from derivatives_bt_engine.reports.formatting import round_public_report
+from derivatives_bt_engine.reports.formatting import (
+    rename_public_report_columns,
+    round_public_report,
+)
 from derivatives_bt_engine.calculations.correlation import (
     bounded_pairwise_ewm_correlation_matrix,
 )
@@ -67,7 +74,10 @@ from derivatives_bt_engine.calculations.instrument_selection import (
     HandcraftedPortfolioWeights,
     SelectionCandidate,
 )
-from derivatives_bt_engine.calculations.pnl import build_subsystem_pnl_curve
+from derivatives_bt_engine.calculations.pnl import (
+    build_executable_cash_pnl_curve,
+    build_subsystem_pnl_curve,
+)
 from derivatives_bt_engine.logging_config import setup_logger
 
 
@@ -525,6 +535,8 @@ def _run_complete_selection(
                 if row.get("init_margin_usd") is not None
                 else None
             ),
+            roll_sr=float(row["roll_sr"]),
+            ann_rolls=float(row["ref_ann_rolls"]),
         ))
     if args.weight_policy == "legacy_handcraft":
         weight_policy = HandcraftedPortfolioWeights()
@@ -573,12 +585,15 @@ def _run_complete_selection(
         selection.final_score.idm, ",".join(selection.selected),
     )
 
+    candidate_by_symbol = {
+        candidate.symbol: candidate for candidate in candidate_list
+    }
     final_details = {
         detail["symbol"]: detail for detail in selection.final_score.details
     }
     final_rows = []
     for rank, symbol in enumerate(selection.selected, start=1):
-        candidate = next(item for item in candidate_list if item.symbol == symbol)
+        candidate = candidate_by_symbol[symbol]
         final_rows.append({
             "rank": rank,
             "symbol": symbol,
@@ -597,6 +612,87 @@ def _run_complete_selection(
             **final_details[symbol],
         })
     final_frame = pl.DataFrame(final_rows, infer_schema_length=None)
+
+    # Preserve the normalized cost-adjusted P&L above for correlations. This
+    # second path restores account capital and final-book sizing, rounds to
+    # executable contracts, and charges actual history-policy roll dates.
+    cash_output_frames: list[pl.DataFrame] = []
+    for symbol in selection.selected:
+        candidate = candidate_by_symbol[symbol]
+        detail = final_details[symbol]
+        row = source_rows[symbol]
+        cash_frame = build_executable_cash_pnl_curve(
+            subsystem_frames[symbol],
+            capital=float(run_config["init_cap_usd"]),
+            target_vol=float(run_config["target_vol"]),
+            weight=float(detail["limit_weight"]),
+            idm=selection.final_score.idm,
+            multiplier=float(row["mult"]),
+            trade_cost_usd_per_con=candidate.trade_cost_usd_per_con,
+            roll_cost_usd_per_con=candidate.roll_cost_usd_per_con,
+        )
+        roll_schedule_src = (
+            "history_marks"
+            if cash_frame.get_column("roll_event").any()
+            else "no_history_roll_markers"
+        )
+        cash_output_frames.append(
+            cash_frame.with_columns(
+                pl.lit(symbol).alias("symbol"),
+                pl.lit(str(row["hist_instr_code"])).alias("hist_instr_code"),
+                pl.lit(str(row.get("roll_policy_id") or "")).alias(
+                    "roll_policy_id"
+                ),
+                pl.lit(roll_schedule_src).alias("roll_schedule_src"),
+                pl.lit(float(detail["weight"])).alias("weight"),
+                pl.lit(float(detail["limit_weight"])).alias("limit_weight"),
+                pl.lit(selection.final_score.idm).alias("idm"),
+                pl.lit(candidate.trade_cost_usd_per_con).alias(
+                    "trade_cost_usd_per_con"
+                ),
+                pl.lit(candidate.roll_cost_usd_per_con).alias(
+                    "roll_cost_usd_per_con"
+                ),
+            ).select(
+                "date",
+                "symbol",
+                "hist_instr_code",
+                "roll_policy_id",
+                "roll_schedule_src",
+                "weight",
+                "limit_weight",
+                "idm",
+                "combined_forecast",
+                "forecast_multiplier",
+                "point_change",
+                "point_vol",
+                "fx_to_usd",
+                "fx_pair",
+                "fx_src",
+                "roll_event",
+                "roll_interval",
+                "risk_budget_usd",
+                "ann_dvol",
+                "avg_cons",
+                "target_cons",
+                "exec_cons",
+                "held_cons",
+                "trade_cons",
+                "realized_roll_cons",
+                "interval_avg_abs_cons",
+                "expected_roll_cons",
+                "trade_cost_usd_per_con",
+                "roll_cost_usd_per_con",
+                "cash_gross_pnl_usd",
+                "cash_trade_cost_usd",
+                "cash_realized_roll_cost_usd",
+                "cash_expected_roll_cost_usd",
+                "cash_realized_net_pnl_usd",
+                "cash_expected_net_pnl_usd",
+                "cash_pnl_valid",
+            )
+        )
+    cash_pnl_long = pl.concat(cash_output_frames, how="diagonal_relaxed")
     stamp = generated_at.astimezone(REPORT_TIMEZONE).strftime("%Y%m%d_%H%M%S")
     output_dir = source.parent
     audit_path = output_dir / f"pysystemtrade_selection_forecast_audit_{stamp}.csv"
@@ -612,31 +708,38 @@ def _run_complete_selection(
     net_pnl_path = (
         output_dir / f"pysystemtrade_selection_subsystem_net_pnl_{stamp}.parquet"
     )
+    cash_pnl_path = (
+        output_dir / f"pysystemtrade_selection_cash_pnl_{stamp}.parquet"
+    )
     # Round only persisted public CSV copies. Full-precision daily analytical
     # frames remain available in Parquet and calculations above are untouched.
-    public_audit = round_public_report(audit_frame)
+    public_audit = round_public_report(rename_public_report_columns(audit_frame))
     public_trials = round_public_report(
-        pl.DataFrame(selection.trials, infer_schema_length=None).with_columns(
-            pl.lit(args.weight_policy).alias("wt_policy"),
-            pl.lit(args.max_instr_per_cluster, dtype=pl.Int64).alias(
-                "max_instr_per_cluster"
-            ),
+        rename_public_report_columns(
+            pl.DataFrame(selection.trials, infer_schema_length=None).with_columns(
+                pl.lit(args.weight_policy).alias("wt_policy"),
+                pl.lit(args.max_instr_per_cluster, dtype=pl.Int64).alias(
+                    "max_instr_per_cluster"
+                ),
+            )
         )
     )
     public_trial_allocations = round_public_report(
-        pl.DataFrame(selection.trial_allocations, infer_schema_length=None)
-        .with_columns(
-            pl.lit(args.weight_policy).alias("wt_policy"),
-            pl.lit(args.max_instr_per_cluster, dtype=pl.Int64).alias(
-                "max_instr_per_cluster"
-            ),
+        rename_public_report_columns(
+            pl.DataFrame(selection.trial_allocations, infer_schema_length=None)
+            .with_columns(
+                pl.lit(args.weight_policy).alias("wt_policy"),
+                pl.lit(args.max_instr_per_cluster, dtype=pl.Int64).alias(
+                    "max_instr_per_cluster"
+                ),
+            )
         )
     )
     # The exhaustive trial-allocation audit is useful for reproducing rejected
     # decisions, but the accepted path is the readable answer to "what changed
     # on each selection pass?" Rename the two roles so the newly added symbol
     # cannot be confused with the existing members of its accepted book.
-    public_selection_passes = round_public_report(
+    selection_passes = (
         pl.DataFrame(selection.trial_allocations, infer_schema_length=None)
         .filter(pl.col("accepted"))
         .with_columns(
@@ -662,6 +765,14 @@ def _run_complete_selection(
             "limit_weight",
             "idm",
             "score",
+            "avg_cons",
+            "ann_trade_cons",
+            "ann_roll_cons",
+            "trade_cost_usd_per_con",
+            "roll_cost_usd_per_con",
+            "ann_trade_cost_usd",
+            "ann_roll_cost_usd",
+            "ann_cost_usd",
             "max_position",
             "max_cons",
             "cont_margin_at_max_usd",
@@ -674,7 +785,12 @@ def _run_complete_selection(
         )
         .sort("selection_step", "cluster_path", "symbol")
     )
-    public_selection = round_public_report(final_frame)
+    public_selection_passes = round_public_report(
+        rename_public_report_columns(selection_passes)
+    )
+    public_selection = round_public_report(
+        rename_public_report_columns(final_frame)
+    )
     public_audit.write_csv(audit_path)
     pl.concat(forecast_output_frames, how="diagonal_relaxed").write_parquet(
         forecasts_path
@@ -684,6 +800,7 @@ def _run_complete_selection(
     public_selection_passes.write_csv(selection_passes_path)
     public_selection.write_csv(selection_path)
     net_pnl_wide.write_parquet(net_pnl_path)
+    cash_pnl_long.write_parquet(cash_pnl_path)
     print(
         f"Phase 2 selected {len(selection.selected)}/{len(candidate_list)} "
         f"forecast-eligible instruments"
@@ -691,6 +808,7 @@ def _run_complete_selection(
     print(f"Saved forecast audit {audit_path}")
     print(f"Saved daily forecasts {forecasts_path}")
     print(f"Saved synchronized net P&L {net_pnl_path}")
+    print(f"Saved executable cash P&L {cash_pnl_path}")
     print(f"Saved trials {trials_path}")
     print(f"Saved trial allocations {trial_allocations_path}")
     print(f"Saved accepted selection passes {selection_passes_path}")

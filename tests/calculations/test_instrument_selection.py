@@ -50,6 +50,42 @@ def test_scoring_uses_combined_forecast_turnover_cost():
     assert detail["net_sr"] < 0.5
 
 
+def test_scoring_reports_contract_volume_and_roll_cash_cost_without_ranking_it():
+    """Cash diagnostics expose scale while AFTS net SR remains trade-only."""
+    candidate = SelectionCandidate(
+        symbol="A",
+        ann_dvol=100.0,
+        trade_sr=0.01,
+        combined_turnover=10.0,
+        asset_class="equity",
+        economic_subclass="us",
+        mkt_risk_vol_day=1_000_000_000.0,
+        roll_sr=0.02,
+        ann_rolls=4.0,
+    )
+    selector = GreedyInstrumentSelector(
+        config=GreedySelectionConfig(
+            capital=10_000.0,
+            target_vol=0.20,
+            size_penalty_scale=0.0,
+        ),
+        weight_policy=EqualPortfolioWeights(),
+    )
+
+    score = selector.score(
+        ["A"], {"A": candidate}, ["A"], np.eye(1), starting=True
+    )
+
+    detail = score.details[0]
+    assert detail["avg_cons"] == pytest.approx(4.0)
+    assert detail["ann_trade_cons"] == pytest.approx(40.0)
+    assert detail["ann_roll_cons"] == pytest.approx(16.0)
+    assert detail["ann_trade_cost_usd"] == pytest.approx(40.0)
+    assert detail["ann_roll_cost_usd"] == pytest.approx(32.0)
+    assert detail["ann_cost_usd"] == pytest.approx(72.0)
+    assert detail["net_sr"] == pytest.approx(0.40)
+
+
 def test_greedy_selector_stops_when_best_addition_falls_below_threshold():
     candidates = [
         _candidate("A", 0.0),
