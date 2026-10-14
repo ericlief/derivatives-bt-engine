@@ -1087,15 +1087,19 @@ rules, while a cheaper micro can retain more rules, without either outcome
 being hard-coded by symbol. Phase 2 then scores each surviving execution route
 with combined subsystem turnover, not the sum of those rule-screening costs.
 
-Seed the loop by ranking individual instruments with the same net-SR formula,
-but a configured nominal starting weight and `IDM=1`. Carver uses a 5% weight
-cap for a larger account and explicitly raises it for small accounts (20% in
-his `$100,000` example), so `starting_weight_cap` must be an exposed Phase 2
-parameter rather than a buried constant. The baseline loop is:
+Seed the loop by ranking individual instruments with the same net-SR formula
+and `IDM=1`. Carver uses a 5% cap on `instrument_weight * IDM` for a larger
+account and explicitly raises it for small accounts (20% in his `$100,000`
+example). His `calculate_maximum_position()` applies that cap again during
+every n+1 trial, not just while choosing the singleton seed. Phase 2 therefore
+exposes `max_weight_idm`; `--starting-weight` remains a compatibility alias.
+This avoids the otherwise discontinuous result where moving from one to two
+instruments resizes each market from a nominal 20% share to 50% before IDM.
+The baseline loop is:
 
 ```text
 eligible = hard_filter(phase1_candidates)
-selected = [best_single_candidate(eligible, starting_weight_cap)]
+selected = [best_single_candidate(eligible, max_weight_idm)]
 best_seen = 0.0  # published AFTS loop updates this from the first n+1 trial
 
 while unused candidates remain:
@@ -1108,7 +1112,8 @@ while unused candidates remain:
             levels=("asset_class", "economic_subclass", "instrument"),
         )
         idm = min(2.5, 1 / sqrt(w' H w))
-        positions = maximum_forecast_positions(book, w, idm)
+        sizing_weight_idm = min(w * idm, max_weight_idm)
+        positions = maximum_forecast_positions(book, sizing_weight_idm)
         penalties = annual_costs(book) + size_penalties(positions)
         trials.append((portfolio_score(book, w, H, penalties), candidate))
 

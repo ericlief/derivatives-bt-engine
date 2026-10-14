@@ -52,6 +52,14 @@ def test_phase2_defaults_to_reviewed_classification_weights():
     args = parse_args([])
 
     assert args.weight_policy == "topdown_classif"
+    assert args.max_weight_idm == pytest.approx(0.20)
+
+
+def test_starting_weight_remains_alias_for_weight_idm_cap():
+    """Existing run scripts keep working after the parameter is clarified."""
+    args = parse_args(["--starting-weight", "0.25"])
+
+    assert args.max_weight_idm == pytest.approx(0.25)
 
 
 def test_run_loads_explicit_phase1_csv_and_saves_selected_rows(tmp_path):

@@ -98,15 +98,19 @@ class SelectionCandidate:
 class GreedySelectionConfig:
     """Configure AFTS scoring, position granularity, and liquidity limits.
 
-    ``starting_weight`` is used only when comparing singleton seeds. Later
-    trials use correlation-derived portfolio weights. ``forecast_cap_ratio``
-    is maximum forecast divided by average absolute forecast (20/10 = 2 in
-    conventional Carver units). ``min_max_position`` enforces the half-contract
-    granularity rule. ``max_instruments_per_cluster`` optionally limits the
-    number of selected instruments sharing one economic subclass, such as
-    ``grains``. ``score_threshold`` controls the tolerated decline from the
-    best score observed so far. ``max_margin_pct`` optionally limits the sum
-    of one-contract IB initial margin multiplied by each instrument's rounded
+    ``max_weight_idm`` caps the product of an instrument's risk weight and the
+    trial-book IDM when calculating position size, liquidity usage, and margin.
+    This is Carver's small-account convention: the same cap ranks singleton
+    seeds and prevents a two-market trial from suddenly resizing both markets
+    to half of the diversified book. Portfolio score and IDM still use the
+    uncapped structural weights. ``forecast_cap_ratio`` is maximum forecast
+    divided by average absolute forecast (20/10 = 2 in conventional Carver
+    units). ``min_max_position`` enforces the half-contract granularity rule.
+    ``max_instruments_per_cluster`` optionally limits the number of selected
+    instruments sharing one economic subclass, such as ``grains``.
+    ``score_threshold`` controls the tolerated decline from the best score
+    observed so far. ``max_margin_pct`` optionally limits the sum of
+    one-contract IB initial margin multiplied by each instrument's rounded
     whole-contract position at the maximum forecast. Both continuous and
     rounded estimates are retained for comparison. This is an additive screen:
     it deliberately does not assume cross-product SPAN offsets, but remains an
@@ -118,7 +122,7 @@ class GreedySelectionConfig:
     target_vol: float = 0.20
     gross_sr: float = 0.50
     score_threshold: float = 0.90
-    starting_weight: float = 0.20
+    max_weight_idm: float = 0.20
     max_idm: float = 2.5
     forecast_cap_ratio: float = 2.0
     min_max_position: float = 0.5
@@ -134,8 +138,8 @@ class GreedySelectionConfig:
             raise ValueError("capital and target_vol must be positive")
         if not 0 <= self.score_threshold <= 1:
             raise ValueError("score_threshold must be between zero and one")
-        if not 0 < self.starting_weight <= 1:
-            raise ValueError("starting_weight must be in (0, 1]")
+        if not 0 < self.max_weight_idm <= 1:
+            raise ValueError("max_weight_idm must be in (0, 1]")
         if self.max_idm < 1 or self.forecast_cap_ratio <= 0:
             raise ValueError("max_idm and forecast_cap_ratio are invalid")
         if self.min_max_position <= 0 or self.size_penalty_scale < 0:
@@ -368,11 +372,12 @@ class GreedySelectionResult:
 class GreedyInstrumentSelector:
     """Add the best feasible candidate until score falls below tolerance.
 
-    The selector first scores every singleton using ``starting_weight`` and
-    IDM=1. It then tries every unused economic family as the next addition,
-    fully rescoring the hypothetical book. The first two-instrument book sets
-    the score benchmark; later winners must remain above
-    ``score_threshold * best_seen``.
+    The selector first scores every singleton with IDM=1, subject to
+    ``max_weight_idm``. It then tries every unused economic family as the next
+    addition, fully rescoring the hypothetical book. Every trial retains the
+    same cap on ``weight * IDM`` for sizing constraints. The first
+    two-instrument book sets the score benchmark; later winners must remain
+    above ``score_threshold * best_seen``.
     """
 
     def __init__(
@@ -459,16 +464,24 @@ class GreedyInstrumentSelector:
         )
         weights = allocation_result.weights
         if starting and len(symbols) == 1:
-            weights_for_limits = {symbols[0]: self.config.starting_weight}
             idm = 1.0
         else:
-            weights_for_limits = weights
             idm = _handcrafted_diversification_multiplier(
                 symbols,
                 correlation,
                 weights,
                 maximum=self.config.max_idm,
             )
+        # Carver caps instrument_weight * IDM inside maximum-position sizing.
+        # Express the capped product as an equivalent pre-IDM weight so the
+        # existing position and liquidity equations retain one clear form.
+        weights_for_limits = {
+            symbol: min(
+                weights[symbol],
+                self.config.max_weight_idm / idm,
+            )
+            for symbol in symbols
+        }
 
         details: list[dict[str, object]] = []
         feasible = True

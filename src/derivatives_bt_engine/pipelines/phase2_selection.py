@@ -158,7 +158,18 @@ def parse_args(argv=None):
     )
     parser.add_argument("--score-threshold", type=float, default=0.90)
     parser.add_argument("--gross-sr", type=float, default=0.50)
-    parser.add_argument("--starting-weight", type=float, default=0.20)
+    parser.add_argument(
+        "--max-weight-idm",
+        "--starting-weight",
+        dest="max_weight_idm",
+        type=float,
+        default=0.20,
+        help=(
+            "Maximum instrument weight multiplied by trial IDM for position, "
+            "liquidity, and margin calculations; --starting-weight remains "
+            "a backward-compatible alias"
+        ),
+    )
     parser.add_argument(
         "--max-instr-per-cluster",
         type=int,
@@ -517,7 +528,7 @@ def _run_complete_selection(
             target_vol=float(run_config["target_vol"]),
             gross_sr=args.gross_sr,
             score_threshold=args.score_threshold,
-            starting_weight=args.starting_weight,
+            max_weight_idm=args.max_weight_idm,
             max_pct_market_volume=float(run_config["max_pct_mkt_volume"]),
             liquidity_days=int(run_config["liq_days"]),
             max_instruments_per_cluster=args.max_instr_per_cluster,

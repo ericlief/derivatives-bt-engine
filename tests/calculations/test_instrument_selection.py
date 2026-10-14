@@ -169,7 +169,7 @@ def test_optional_margin_limit_rejects_overfunded_trial_book():
         config=GreedySelectionConfig(
             capital=100_000.0,
             target_vol=0.20,
-            starting_weight=0.20,
+            max_weight_idm=0.20,
             max_margin_pct=10.0,
         ),
         weight_policy=EqualPortfolioWeights(),
@@ -196,7 +196,7 @@ def test_margin_limit_uses_half_up_whole_contract_position():
         config=GreedySelectionConfig(
             capital=1_875.0,
             target_vol=0.20,
-            starting_weight=0.20,
+            max_weight_idm=0.20,
             max_margin_pct=9.0,
         ),
         weight_policy=EqualPortfolioWeights(),
@@ -214,6 +214,33 @@ def test_margin_limit_uses_half_up_whole_contract_position():
     assert detail["margin_at_max_usd"] == pytest.approx(200.0)
     assert not score.feasible
     assert "portfolio_margin_limit" in score.reason
+
+
+def test_weight_idm_cap_applies_after_singleton_seed():
+    """A two-market trial must not expand each market from 20% to 50% risk."""
+    candidates = {
+        "A": _candidate("A", 0.0, initial_margin_usd=100.0),
+        "B": _candidate("B", 0.0, initial_margin_usd=100.0),
+    }
+    selector = GreedyInstrumentSelector(
+        config=GreedySelectionConfig(
+            capital=10_000.0,
+            target_vol=0.20,
+            max_weight_idm=0.20,
+            max_margin_pct=100.0,
+        ),
+        weight_policy=EqualPortfolioWeights(),
+    )
+
+    score = selector.score(
+        ["A", "B"], candidates, ["A", "B"], np.eye(2)
+    )
+
+    assert score.idm == pytest.approx(2**0.5)
+    for detail in score.details:
+        assert detail["weight"] == pytest.approx(0.5)
+        assert detail["limit_weight"] * score.idm == pytest.approx(0.20)
+        assert detail["max_position"] == pytest.approx(8.0)
 
 
 def test_handcrafted_weights_expose_recursive_cluster_paths():
