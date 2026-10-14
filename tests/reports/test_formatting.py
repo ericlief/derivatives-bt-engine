@@ -55,3 +55,15 @@ def test_public_report_renames_cash_cost_columns_at_boundary():
 
     assert public.columns == ["trade_cost_per_con", "ann_roll_cost"]
     assert public.row(0) == pytest.approx((1.23, 12.35))
+
+
+def test_public_report_renames_buffer_parameters_at_boundary():
+    """Executable buffer parameters use centralized compact report tokens."""
+    report = pl.DataFrame({
+        "buffer_size": [0.10],
+        "buffer_trade_to_edge": [True],
+    })
+
+    public = rename_public_report_columns(report)
+
+    assert public.columns == ["buf_size", "buf_trade_to_edge"]

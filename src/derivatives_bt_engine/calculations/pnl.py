@@ -4,10 +4,11 @@ Forecast construction owns desired positions and turnover.  This module owns
 the next calculation boundary: lag the position, mark it through the daily
 point change, convert through the contract multiplier and historical FX, and
 accrue an annual SR cost through elapsed calendar time.  It also provides an
-account-scaled cash path that rounds the combined subsystem to executable
-contracts and charges ordinary trades and contract rolls separately.  The
-normalized net USD series remains suitable for subsystem correlation
-estimation; the cash series is an execution and affordability audit.
+account-scaled cash path that buffers and rounds the combined subsystem to
+executable contracts and charges ordinary trades and contract rolls
+separately.  The normalized net USD series remains suitable for subsystem
+correlation estimation; the cash series is an execution and affordability
+audit.
 """
 
 from __future__ import annotations
@@ -21,6 +22,9 @@ from derivatives_bt_engine.calculations.volatility import (
 )
 
 
+PYSYSTEMTRADE_FORECAST_BUFFER_SIZE = 0.10
+
+
 def _round_contracts_half_up(expression: pl.Expr) -> pl.Expr:
     """Round signed continuous positions to whole contracts symmetrically."""
     return (
@@ -29,6 +33,134 @@ def _round_contracts_half_up(expression: pl.Expr) -> pl.Expr:
         .otherwise((expression - 0.5).ceil())
         .cast(pl.Int64)
     )
+
+
+def _round_contract_like_pysystemtrade(value: float | None) -> int | None:
+    """Return pandas-compatible whole-contract rounding for one value.
+
+    Pysystemtrade calls :meth:`pandas.Series.round` before applying a position
+    buffer. Python's scalar ``round`` has the same ties-to-even convention.
+    Keeping this deliberately separate from the report's half-up roll-volume
+    convention makes the executable position path reproducible at exact
+    half-contract boundaries.
+    """
+    if value is None or not math.isfinite(value):
+        return None
+    return int(round(value))
+
+
+def apply_forecast_position_buffer(
+    frame: pl.DataFrame,
+    *,
+    optimal_position_col: str = "target_cons",
+    average_position_col: str = "avg_cons",
+    buffer_size: float = PYSYSTEMTRADE_FORECAST_BUFFER_SIZE,
+    trade_to_edge: bool = True,
+) -> pl.DataFrame:
+    """Append pysystemtrade-style buffered whole-contract positions.
+
+    Parameters
+    ----------
+    frame
+        One chronologically sorted instrument frame containing the continuous
+        optimal and average positions.
+    optimal_position_col
+        Desired continuous contract position after forecast scaling.
+    average_position_col
+        Contracts held at the target absolute forecast. This is the position
+        scale used to form the buffer and may vary with volatility and FX.
+    buffer_size
+        Nonnegative fraction of absolute average position used on each side of
+        the target. Pysystemtrade's default forecast buffer is ``0.10``.
+    trade_to_edge
+        If true, a breach moves to the nearest band edge. If false, it moves
+        to the rounded optimal position.
+
+    Returns
+    -------
+    polars.DataFrame
+        The input plus continuous ``buffer_width_cons``, effective rounded
+        ``buffer_top_cons`` and ``buffer_bot_cons``, and stateful ``exec_cons``.
+
+    Notes
+    -----
+    This follows pysystemtrade's ``apply_buffer`` ordering: forward-fill the
+    optimal position and band, round each to whole contracts, initialize at
+    the first rounded optimum (or zero), then retain the previous executable
+    position while it remains inside the band. The calculation is inherently
+    recursive because today's output depends on yesterday's held position.
+    """
+    required = {optimal_position_col, average_position_col}
+    missing = sorted(required.difference(frame.columns))
+    if missing:
+        raise ValueError(f"position-buffer input missing columns: {missing}")
+    if not math.isfinite(buffer_size) or buffer_size < 0:
+        raise ValueError("buffer_size must be finite and nonnegative")
+
+    buffered_input = frame.with_columns(
+        (
+            pl.col(average_position_col).abs() * buffer_size
+        ).alias("buffer_width_cons")
+    ).with_columns(
+        pl.col(optimal_position_col).forward_fill().alias("_buffer_optimal"),
+        (
+            pl.col(optimal_position_col) + pl.col("buffer_width_cons")
+        ).forward_fill().alias("_buffer_top"),
+        (
+            pl.col(optimal_position_col) - pl.col("buffer_width_cons")
+        ).forward_fill().alias("_buffer_bot"),
+    )
+
+    rounded_optimal = [
+        _round_contract_like_pysystemtrade(value)
+        for value in buffered_input.get_column("_buffer_optimal").to_list()
+    ]
+    rounded_top = [
+        _round_contract_like_pysystemtrade(value)
+        for value in buffered_input.get_column("_buffer_top").to_list()
+    ]
+    rounded_bot = [
+        _round_contract_like_pysystemtrade(value)
+        for value in buffered_input.get_column("_buffer_bot").to_list()
+    ]
+
+    if not rounded_optimal:
+        return buffered_input.with_columns(
+            pl.Series("buffer_top_cons", [], dtype=pl.Int64),
+            pl.Series("buffer_bot_cons", [], dtype=pl.Int64),
+            pl.Series("exec_cons", [], dtype=pl.Int64),
+        ).drop("_buffer_optimal", "_buffer_top", "_buffer_bot")
+
+    # Pysystemtrade starts at zero when the first optimum is unavailable.
+    current_position = rounded_optimal[0]
+    if current_position is None:
+        current_position = 0
+    executable_positions = [current_position]
+    for optimal_position, top_position, bot_position in zip(
+        rounded_optimal[1:], rounded_top[1:], rounded_bot[1:], strict=True
+    ):
+        if (
+            optimal_position is None
+            or top_position is None
+            or bot_position is None
+        ):
+            executable_positions.append(current_position)
+            continue
+        if current_position > top_position:
+            current_position = (
+                top_position if trade_to_edge else optimal_position
+            )
+        elif current_position < bot_position:
+            current_position = (
+                bot_position if trade_to_edge else optimal_position
+            )
+        executable_positions.append(current_position)
+
+    return buffered_input.with_columns(
+        pl.Series("buffer_top_cons", rounded_top, dtype=pl.Int64),
+        pl.Series("buffer_bot_cons", rounded_bot, dtype=pl.Int64),
+        pl.Series("exec_cons", executable_positions, dtype=pl.Int64),
+    ).drop("_buffer_optimal", "_buffer_top", "_buffer_bot")
 
 
 def build_subsystem_pnl_curve(
@@ -204,6 +336,8 @@ def build_executable_cash_pnl_curve(
     point_vol_col: str | None = None,
     fx_col: str = "fx_to_usd",
     roll_col: str = "is_roll",
+    buffer_size: float = PYSYSTEMTRADE_FORECAST_BUFFER_SIZE,
+    buffer_trade_to_edge: bool = True,
 ) -> pl.DataFrame:
     """Append account-scaled contracts and executable cash P&L diagnostics.
 
@@ -241,14 +375,21 @@ def build_executable_cash_pnl_curve(
     roll_col
         Boolean history-policy roll marker. When absent, the output retains a
         false marker and zero realized/expected roll quantities.
+    buffer_size
+        Forecast-method no-trade band as a fraction of absolute average
+        contracts. The default ``0.10`` matches pysystemtrade.
+    buffer_trade_to_edge
+        Move to the nearest band edge on a breach, matching pysystemtrade's
+        default. If false, move to the rounded optimal position instead.
 
     Returns
     -------
     polars.DataFrame
         The input plus daily annual dollar volatility, continuous average and
-        target contracts, rounded executable and lagged contracts, ordinary
-        trade quantities, realized and interval-average roll quantities, and
-        gross/expected/realized cash P&L in USD.
+        target contracts, buffer width and boundaries, buffered executable and
+        lagged contracts, ordinary trade quantities, realized and
+        interval-average roll quantities, and gross/expected/realized cash
+        P&L in USD.
 
     Notes
     -----
@@ -301,6 +442,8 @@ def build_executable_cash_pnl_curve(
             raise ValueError(f"{name} must be finite and nonnegative")
     if annualization_days <= 0:
         raise ValueError("annualization_days must be positive")
+    if not math.isfinite(buffer_size) or buffer_size < 0:
+        raise ValueError("buffer_size must be finite and nonnegative")
 
     risk_budget_usd = capital * target_vol * weight * idm
     roll_expr = (
@@ -308,11 +451,7 @@ def build_executable_cash_pnl_curve(
         if roll_col in frame.columns
         else pl.lit(False)
     )
-    # Polars' default rounding is bankers rounding. Futures positions use
-    # symmetric half-up rounding so +/-0.5 becomes +/-1 contract.
-    rounded_target = _round_contracts_half_up(pl.col("target_cons"))
-
-    result = (
+    target_frame = (
         frame.sort("date")
         .with_columns(
             roll_expr.alias("roll_event"),
@@ -346,7 +485,20 @@ def build_executable_cash_pnl_curve(
                 "target_cons"
             )
         )
-        .with_columns(rounded_target.alias("exec_cons"))
+    )
+    # Buffer after final portfolio scaling. At this point avg_cons already
+    # contains instrument weight and IDM, exactly as pysystemtrade's portfolio
+    # forecast buffer multiplies its volatility scalar by those quantities.
+    result = (
+        apply_forecast_position_buffer(
+            target_frame,
+            buffer_size=buffer_size,
+            trade_to_edge=buffer_trade_to_edge,
+        )
+        .with_columns(
+            pl.lit(buffer_size).alias("buffer_size"),
+            pl.lit(buffer_trade_to_edge).alias("buffer_trade_to_edge"),
+        )
         .with_columns(
             pl.col("exec_cons").shift(1).alias("held_cons"),
             # Keep the roll row in the interval that is ending on that date.

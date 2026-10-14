@@ -620,7 +620,7 @@ flowchart TD
     ReturnPanel["Synchronized pnl_usd panel"]
     Correlation["Subsystem correlation matrix"]
     Selection["Greedy Phase 2 selection<br/>weights · IDM · costs · size penalty"]
-    CashPnL["Executable cash audit for final book<br/>rounded contracts · ordinary trades<br/>actual and interval-average roll cost"]
+    CashPnL["Executable cash audit for final book<br/>10% average-position buffer · rounded contracts<br/>ordinary trades · actual and interval-average roll cost"]
 
     Runner --> Phase1
     Runner --> Prices
@@ -686,6 +686,9 @@ The same ownership in terminal-readable form is:
 9. Audit the wide daily frame and write the compact instrument summary.
 10. Align valid net USD subsystem P&L, estimate correlations, and run the
     greedy portfolio search. Retain the gross panel as an explicit sensitivity.
+11. For the selected book, restore capital, weight, and IDM; apply the
+    pysystemtrade forecast buffer to the continuous contract target; and use
+    the resulting whole-contract position for cash P&L and event costs.
 ```
 
 The Phase 1 `cur_fx_to_usd` value is a point-in-time cost and sizing snapshot;
@@ -745,7 +748,29 @@ the sensitivity cannot be confused with the baseline.
 
 After the final book is selected, a separate executable cash audit restores
 capital, target volatility, final `limit_weight`, and IDM; converts the
-combined forecast to a continuous target; and rounds it to whole contracts.
+combined forecast to a continuous target; and applies pysystemtrade's forecast
+buffer before producing whole contracts. Its position scale is algebraically
+the same despite the different presentation:
+
+```text
+our avg_cons
+  = capital × target_vol × weight × IDM / ann_dvol
+
+pysystemtrade portfolio average position
+  = (daily_cash_vol_target / daily_dvol) × weight × IDM
+  = ((capital × target_vol / sqrt(256))
+     / (ann_dvol / sqrt(256))) × weight × IDM
+  = our avg_cons
+```
+
+The default band on each date is `target_cons ± 0.10 × abs(avg_cons)`.
+Targets and boundaries use pandas-compatible whole-contract rounding. The
+previous executable position is retained while it remains within the band; a
+breach trades to the nearest edge by default. Use `--buffer-size` and
+`--no-buffer-trade-to-edge` for explicit sensitivities. This buffer affects
+the executable cash path only: the AFTS score continues to use the unbuffered
+`system.accounts.subsystem_turnover()` convention.
+
 Ordinary position changes are charged with the Phase 1 one-way trade cost.
 On each history-policy `is_roll` date, `realized_roll_cons` uses the rounded
 position held from the prior day. `interval_avg_abs_cons` retains the
@@ -927,9 +952,10 @@ combination and the unconstrained greedy AFTS baseline. The command writes:
 - `pysystemtrade_selection_subsystem_net_pnl_<timestamp>.parquet`, the synchronized
   return panel used by the bounded correlation estimator;
 - `pysystemtrade_selection_cash_pnl_<timestamp>.parquet`, the final book's
-  account-scaled daily continuous and rounded contracts, ordinary traded
-  contracts, actual and interval-average policy-roll contracts, and separate
-  gross, trade-cost, roll-cost, and net USD P&L paths;
+  account-scaled daily continuous target, average-position buffer width and
+  boundaries, buffered whole contracts, ordinary traded contracts, actual and
+  interval-average policy-roll contracts, and separate gross, trade-cost,
+  roll-cost, and net USD P&L paths;
 - `pysystemtrade_selection_trials_<timestamp>.csv`, one row per greedy trial; and
 - `pysystemtrade_selection_trial_allocations_<timestamp>.csv`, one row per member
   of every hypothetical trial book, including its economic `cluster_path`,

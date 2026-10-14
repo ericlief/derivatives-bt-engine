@@ -6,6 +6,7 @@ import polars as pl
 import pytest
 
 from derivatives_bt_engine.calculations.pnl import (
+    apply_forecast_position_buffer,
     build_executable_cash_pnl_curve,
     build_subsystem_pnl_curve,
 )
@@ -65,7 +66,7 @@ def test_subsystem_pnl_preserves_missing_historical_fx_as_invalid():
 
 
 def test_executable_cash_pnl_separates_trade_and_policy_roll_costs():
-    """Rounded position changes and held-contract rolls remain independent."""
+    """Buffered position changes and held-contract rolls remain independent."""
     frame = pl.DataFrame({
         "date": [date(2024, 1, day) for day in range(1, 6)],
         "point_change": [None, 1.0, 1.0, 1.0, 1.0],
@@ -88,27 +89,80 @@ def test_executable_cash_pnl_separates_trade_and_policy_roll_costs():
     )
 
     assert result.get_column("avg_cons").to_list() == pytest.approx([5.0] * 5)
-    assert result.get_column("exec_cons").to_list() == [5, 10, 10, 5, 5]
+    assert result.get_column("buffer_width_cons").to_list() == pytest.approx(
+        [0.5] * 5
+    )
+    assert result.get_column("exec_cons").to_list() == [5, 10, 10, 6, 6]
     assert result.get_column("trade_cons").to_list() == pytest.approx(
-        [5.0, 5.0, 0.0, 5.0, 0.0]
+        [5.0, 5.0, 0.0, 4.0, 0.0]
     )
     assert result.get_column("realized_roll_cons").to_list() == pytest.approx(
-        [0.0, 0.0, 10.0, 0.0, 5.0]
+        [0.0, 0.0, 10.0, 0.0, 6.0]
     )
     assert result.get_column("interval_avg_abs_cons").to_list() == [
         7.5,
         7.5,
         7.5,
-        7.5,
-        7.5,
+        8.0,
+        8.0,
     ]
     assert result.get_column("expected_roll_cons").to_list() == [0, 0, 8, 0, 8]
     assert result.get_column("cash_trade_cost_usd").to_list() == pytest.approx(
-        [-10.0, -10.0, 0.0, -10.0, 0.0]
+        [-10.0, -10.0, 0.0, -8.0, 0.0]
     )
     assert result.get_column("cash_realized_roll_cost_usd").to_list() == (
-        pytest.approx([0.0, 0.0, -30.0, 0.0, -15.0])
+        pytest.approx([0.0, 0.0, -30.0, 0.0, -18.0])
     )
     assert result.get_column("cash_expected_roll_cost_usd").to_list() == (
         pytest.approx([0.0, 0.0, -24.0, 0.0, -24.0])
     )
+
+
+def test_forecast_buffer_matches_pysystemtrade_reference_fixture():
+    """Match pysystemtrade apply_buffer with its default trade-to-edge policy."""
+    frame = pl.DataFrame({
+        "target_cons": [5.0, 5.4, 6.1, 5.7, 4.2, -0.6, -1.6],
+        "avg_cons": [5.0] * 7,
+    })
+
+    result = apply_forecast_position_buffer(frame)
+
+    # Generated from pysystemtrade's apply_buffer(..., trade_to_edge=True,
+    # roundpositions=True). Exact .5 boundaries also verify pandas-compatible
+    # ties-to-even rounding rather than Polars' project-level half-up helper.
+    assert result.get_column("buffer_top_cons").to_list() == [
+        6, 6, 7, 6, 5, 0, -1,
+    ]
+    assert result.get_column("buffer_bot_cons").to_list() == [
+        4, 5, 6, 5, 4, -1, -2,
+    ]
+    assert result.get_column("exec_cons").to_list() == [5, 5, 6, 6, 5, 0, -1]
+
+
+def test_average_contract_scalar_is_pysystemtrade_vol_scalar_with_weight_and_idm():
+    """Annual and daily formulations produce the same average contracts."""
+    capital = 100_000.0
+    target_vol = 0.20
+    weight = 0.10
+    idm = 2.5
+    annualization_days = 256
+    point_vol = 2.0
+    multiplier = 10.0
+    fx_to_usd = 1.25
+
+    ann_dvol = (
+        point_vol
+        * annualization_days**0.5
+        * multiplier
+        * fx_to_usd
+    )
+    our_avg_cons = capital * target_vol * weight * idm / ann_dvol
+
+    pst_daily_cash_vol_target = (
+        capital * target_vol / annualization_days**0.5
+    )
+    pst_daily_dvol = point_vol * multiplier * fx_to_usd
+    pst_vol_scalar = pst_daily_cash_vol_target / pst_daily_dvol
+    pst_portfolio_avg_cons = pst_vol_scalar * weight * idm
+
+    assert our_avg_cons == pytest.approx(pst_portfolio_avg_cons)

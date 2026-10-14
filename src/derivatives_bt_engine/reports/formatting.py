@@ -20,6 +20,8 @@ PUBLIC_REPORT_RENAMES = {
     "ann_trade_cost_usd": "ann_trade_cost",
     "ann_roll_cost_usd": "ann_roll_cost",
     "ann_cost_usd": "ann_cost",
+    "buffer_size": "buf_size",
+    "buffer_trade_to_edge": "buf_trade_to_edge",
 }
 
 

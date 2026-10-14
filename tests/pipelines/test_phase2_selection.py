@@ -80,6 +80,20 @@ def test_phase2_defaults_to_reviewed_classification_weights():
     assert args.weight_policy == "topdown_classif"
     assert args.max_weight_idm == pytest.approx(0.20)
     assert args.include_roll_cost_in_score is False
+    assert args.buffer_size == pytest.approx(0.10)
+    assert args.buffer_trade_to_edge is True
+
+
+def test_phase2_exposes_executable_buffer_sensitivities():
+    """Cash execution can disable the band or trade directly to optimum."""
+    args = parse_args([
+        "--buffer-size",
+        "0",
+        "--no-buffer-trade-to-edge",
+    ])
+
+    assert args.buffer_size == pytest.approx(0.0)
+    assert args.buffer_trade_to_edge is False
 
 
 def test_phase2_can_include_roll_cost_in_greedy_score():

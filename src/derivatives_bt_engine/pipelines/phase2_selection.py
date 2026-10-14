@@ -16,9 +16,9 @@ then uses three deliberately different dataframe collections:
     One synchronized frame with dates in rows and executable symbols in
     columns. This is the input to the instrument-correlation estimator.
 ``cash_pnl_long``
-    One long account-scaled frame for the final selected book. It rounds the
-    combined forecasts to contracts and separates ordinary trade cost from
-    realized and interval-average policy-roll cost.
+    One long account-scaled frame for the final selected book. It applies the
+    forecast buffer, rounds to contracts, and separates ordinary trade cost
+    from realized and interval-average policy-roll cost.
 
 The command persists each intermediate form so forecast gaps, turnover, and
 greedy selection decisions remain inspectable after a run.
@@ -75,6 +75,7 @@ from derivatives_bt_engine.calculations.instrument_selection import (
     SelectionCandidate,
 )
 from derivatives_bt_engine.calculations.pnl import (
+    PYSYSTEMTRADE_FORECAST_BUFFER_SIZE,
     build_executable_cash_pnl_curve,
     build_subsystem_pnl_curve,
 )
@@ -227,6 +228,24 @@ def parse_args(argv=None):
     parser.add_argument("--corr-window-years", type=float, default=20.0)
     parser.add_argument("--corr-halflife-days", type=float, default=250.0)
     parser.add_argument("--corr-min-rows", type=int, default=256)
+    parser.add_argument(
+        "--buffer-size",
+        type=float,
+        default=PYSYSTEMTRADE_FORECAST_BUFFER_SIZE,
+        help=(
+            "Executable-position no-trade band as a fraction of average "
+            "contracts; default 0.10 matches pysystemtrade"
+        ),
+    )
+    parser.add_argument(
+        "--buffer-trade-to-edge",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "On a buffer breach trade to the nearest edge (default), or use "
+            "--no-buffer-trade-to-edge to trade to the rounded optimum"
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -325,6 +344,13 @@ def _run_complete_selection(
 
     Returns the final selection CSV path and its in-memory dataframe.
     """
+    logger.info(
+        "phase2_complete start candidates=%d buffer_size=%s "
+        "buffer_trade_to_edge=%s",
+        selected.height,
+        args.buffer_size,
+        args.buffer_trade_to_edge,
+    )
     frames_by_history = load_ewmac_component_frames(
         selected.get_column("hist_instr_code").drop_nulls().to_list(),
         db_path=args.pysystemtrade_db.expanduser().resolve(),
@@ -636,6 +662,8 @@ def _run_complete_selection(
             "max_instr_margin_pct": args.max_instr_margin_pct,
             "max_book_margin_pct": effective_book_margin_pct,
             "roll_cost_in_score": args.include_roll_cost_in_score,
+            "buffer_size": args.buffer_size,
+            "buffer_trade_to_edge": args.buffer_trade_to_edge,
             "weight": selection.final_score.weights[symbol],
             "idm": selection.final_score.idm,
             "ann_dvol": candidate.ann_dvol,
@@ -665,6 +693,8 @@ def _run_complete_selection(
             multiplier=float(row["mult"]),
             trade_cost_usd_per_con=candidate.trade_cost_usd_per_con,
             roll_cost_usd_per_con=candidate.roll_cost_usd_per_con,
+            buffer_size=args.buffer_size,
+            buffer_trade_to_edge=args.buffer_trade_to_edge,
         )
         roll_schedule_src = (
             "history_marks"
@@ -710,6 +740,11 @@ def _run_complete_selection(
                 "ann_dvol",
                 "avg_cons",
                 "target_cons",
+                "buffer_size",
+                "buffer_trade_to_edge",
+                "buffer_width_cons",
+                "buffer_top_cons",
+                "buffer_bot_cons",
                 "exec_cons",
                 "held_cons",
                 "trade_cons",
