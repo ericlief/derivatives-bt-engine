@@ -829,16 +829,43 @@ The allocation audit retains `max_position` and `cont_margin_at_max_usd`
 beside `max_cons`, `margin_at_max_usd`, `instr_margin_limit_usd`, and
 `book_margin_limit_usd`. `book_margin_remaining_usd` records the unused amount
 after every hypothetical addition, so the practical constraints can be
-compared directly with the fractional Carver baseline. This additive estimate
-is deliberately
-simple and auditable; it does not model IB portfolio/SPAN offsets or nonlinear
-margin changes at larger quantities. The saved one-contract margin is itself
-the marginal change against the account's positions at snapshot time, so this
-gate is a prescreen rather than an exact funding promise. The default is no
-margin gate. If either gate is enabled, candidates without a usable IB
-initial-margin preview are rejected as `initial_margin_unavailable`; validate
-the final integer order book with a fresh portfolio-aware margin preview before
-execution.
+compared directly with the fractional Carver baseline. The columns have these
+specific meanings:
+
+- `cont_margin_at_max_usd` is the row's fractional `max_position` multiplied
+  by its saved one-contract initial margin. It preserves the continuous sizing
+  baseline but is not an executable margin estimate.
+- `margin_at_max_usd` is the row's half-up rounded `max_cons` multiplied by the
+  same one-contract margin. The individual-instrument gate uses this value.
+- `portfolio_cont_margin_at_max_usd` and
+  `portfolio_margin_at_max_usd` are the corresponding sums across the entire
+  trial book. The cumulative book gate uses the rounded latter value.
+- `book_margin_remaining_usd` is `book_margin_limit_usd` less the rounded
+  portfolio margin. A negative value identifies a trial that exhausted the
+  book allowance.
+
+The accepted-passes CSV contains one row for every member of the accepted book
+at every `selection_step`, rather than one summary row per step. Consequently,
+the instrument margin columns vary by `symbol`, while the portfolio margin and
+limit columns repeat on every row in the same step. Adding a symbol also
+recalculates weights, IDM, and maximum positions for the existing members, so
+an existing symbol's margin can change between steps. `added_symbol` identifies
+the new winner; it does not mean the other rows in that step were added again.
+
+Reports created before the separate instrument and book gates used the
+ambiguous `margin_limit_usd` column as the total-book allowance. New reports
+replace it with `instr_margin_limit_usd` and `book_margin_limit_usd`; old and
+new files should not be compared as if that legacy column were an individual
+instrument cap.
+
+This additive estimate is deliberately simple and auditable; it does not model
+IB portfolio/SPAN offsets or nonlinear margin changes at larger quantities.
+The saved one-contract margin is itself the marginal change against the
+account's positions at snapshot time, so this gate is a prescreen rather than
+an exact funding promise. The default is no margin gate. If either gate is
+enabled, candidates without a usable IB initial-margin preview are rejected as
+`initial_margin_unavailable`; validate the final integer order book with a
+fresh portfolio-aware margin preview before execution.
 
 An existing Phase 1 CSV can be reused at a different account size without an
 IB or Phase 1 rerun:
