@@ -1,12 +1,38 @@
+from datetime import date
+
 import polars as pl
 import pytest
 
 from derivatives_bt_engine.pipelines.phase2_selection import (
+    _label_forecast_output_frame,
     _subsystem_correlation,
     parse_args,
     run,
     slow_tilt_ewmac_weights,
 )
+
+
+def test_forecast_output_places_symbol_immediately_after_date():
+    """Persisted long forecasts lead with date and executable identity."""
+    frame = pl.DataFrame({
+        "date": [date(2024, 1, 2)],
+        "point_vol": [1.25],
+        "combined_forecast": [0.5],
+    })
+
+    labeled = _label_forecast_output_frame(
+        frame,
+        symbol="MZC",
+        hist_instr_code="CORN_mini",
+    )
+
+    assert labeled.columns == [
+        "date",
+        "symbol",
+        "hist_instr_code",
+        "point_vol",
+        "combined_forecast",
+    ]
 
 
 def test_slow_tilt_ewmac_weights_use_sixty_forty_full_template():

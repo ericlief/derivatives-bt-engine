@@ -236,6 +236,29 @@ def _default_output_path(source: Path, generated_at: datetime) -> Path:
     return source.parent / f"pysystemtrade_selection_candidates_{stamp}.csv"
 
 
+def _label_forecast_output_frame(
+    frame: pl.DataFrame,
+    *,
+    symbol: str,
+    hist_instr_code: str,
+) -> pl.DataFrame:
+    """Attach executable identity with ``symbol`` immediately after ``date``.
+
+    Phase 2 calculations keep executable identity outside each per-symbol
+    dataframe. This helper adds it only at the persisted long-frame boundary
+    and gives the identifiers a stable, scan-friendly leading order.
+    """
+    if "date" not in frame.columns:
+        raise ValueError("forecast output frame is missing date")
+    labeled = frame.with_columns(
+        pl.lit(symbol).alias("symbol"),
+        pl.lit(hist_instr_code).alias("hist_instr_code"),
+    )
+    leading = ["date", "symbol", "hist_instr_code"]
+    trailing = [column for column in labeled.columns if column not in leading]
+    return labeled.select(leading + trailing)
+
+
 def _subsystem_correlation(
     subsystem_frames: dict[str, pl.DataFrame],
     symbols: list[str],
@@ -464,9 +487,10 @@ def _run_complete_selection(
         }
         audit_rows.append(audit)
         forecast_output_frames.append(
-            pnl_frame.with_columns(
-                pl.lit(symbol).alias("symbol"),
-                pl.lit(str(row["hist_instr_code"])).alias("hist_instr_code"),
+            _label_forecast_output_frame(
+                pnl_frame,
+                symbol=symbol,
+                hist_instr_code=str(row["hist_instr_code"]),
             )
         )
         logger.log(
