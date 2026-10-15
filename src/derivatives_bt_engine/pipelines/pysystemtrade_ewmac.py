@@ -457,8 +457,9 @@ class EwmacResearchView:
 
         The method imports Matplotlib lazily and returns ``(figure, axes)`` so
         notebooks can further customize or save the plot. Forecasts use the
-        project's normalized -1 to +1 convention. This plot contains component
-        rules only; it does not claim a portfolio-derived FDM or combination.
+        project's mean-absolute-one, -2 to +2 convention. This plot contains
+        component rules only; it does not claim a portfolio-derived FDM or
+        combination.
         """
         import matplotlib.pyplot as plt
 
@@ -489,7 +490,7 @@ class EwmacResearchView:
                 linewidth=1.0,
             )
         axes[1].axhline(0.0, color="black", linewidth=0.6)
-        axes[1].set_ylabel("Forecast (-1 to +1)")
+        axes[1].set_ylabel("Forecast (-2 to +2)")
         axes[1].legend(ncol=min(len(active), 5))
         figure.tight_layout()
         return figure, axes

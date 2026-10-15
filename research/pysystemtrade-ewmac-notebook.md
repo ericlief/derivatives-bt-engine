@@ -60,7 +60,7 @@ Panama price
   -> fast EWMA - slow EWMA                  raw_ewmac_16_64
   -> divide by mixed point volatility      raw_fcst_16_64
   -> multiply by prior-data pooled scalar  scalar_16_64
-  -> cap to [-1, +1]                       fcst_16_64
+  -> cap to [-2, +2]                       fcst_16_64
 ```
 
 Inspect the global normalization itself in long form:
@@ -79,7 +79,7 @@ fig, axes = corn.plot(
 ```
 
 The upper panel is the additive Panama price and the lower panel contains the
-selected component forecasts in the project's normalized `-1` to `+1` units.
+selected component forecasts in mean-absolute-one, `-2` to `+2` units.
 The method returns the Matplotlib figure and axes so the notebook can customize
 labels, limits, or output files.
 
@@ -116,6 +116,58 @@ columns. ``result.weights``, ``result.fdm``, ``result.turnover``, and
 ``result.audit`` expose the corresponding summary values. Use
 ``build_ewmac_components`` when only the wide component frame is needed, or
 ``build_ewmac_rule_component`` to inspect a single speed.
+
+## Plot the combined forecast, positions, and P&L
+
+Wrap the combined result in the notebook view instead of rebuilding P&L and
+plotting each column in separate cells. The normalized subsystem curve is
+always produced. Executable contracts and cash P&L are produced only when the
+actual contract multiplier and explicit account settings are supplied:
+
+```python
+from derivatives_bt_engine.pipelines.ewmac_notebook import (
+    ExecutableCashSettings,
+    build_ewmac_notebook_view,
+)
+
+view = build_ewmac_notebook_view(
+    result,
+    instrument_code="ES",
+    multiplier=50.0,
+    fx_to_usd=1.0,
+    ann_cost_sr=0.0,
+    cash_settings=ExecutableCashSettings(
+        capital=75_000,
+        target_vol=0.20,
+        weight=1.0,
+        idm=1.0,
+        trade_cost_usd_per_con=1.00,
+        roll_cost_usd_per_con=0.0,
+    ),
+)
+
+view.plot(start="2021-01-01")
+```
+
+The linked hvPlot dashboard contains adjusted signal price, combined forecast,
+raw and smoothed position proxies, normalized position, cumulative subsystem
+P&L, buffered whole contracts, and cumulative executable cash P&L. The
+underlying Polars frames remain available for detailed inspection:
+
+```python
+view.forecasts
+view.forecast_positions(start="2021-01-01")
+view.pnl
+view.subsystem_pnl_curves()
+view.cash
+view.cash_pnl_curves()
+```
+
+`view.pnl` is intentionally a relative-risk path used for subsystem
+correlations; it is not an account equity curve. `view.cash` uses the supplied
+capital, risk target, weight, IDM, multiplier, buffering, and contract costs,
+so it is the executable account-scale diagnostic. Passing `multiplier=1` for
+ES is therefore appropriate only for a unit test, not an ES cash backtest.
 
 ## Combined Phase 2 forecasts
 
