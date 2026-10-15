@@ -853,6 +853,7 @@ def _run_complete_selection(
             "ann_trade_cost_sr",
             "ann_roll_cost_sr",
             "ann_cost_sr",
+            "size_penalty_sr",
             "avg_cons",
             "ann_trade_cons",
             "ann_roll_cons",

@@ -955,6 +955,7 @@ class GreedyInstrumentSelector:
                 "ann_trade_cost_sr": detail["ann_trade_cost_sr"],
                 "ann_roll_cost_sr": detail["ann_roll_cost_sr"],
                 "ann_cost_sr": detail["ann_cost_sr"],
+                "size_penalty_sr": detail["size_penalty_sr"],
                 "avg_cons": detail["avg_cons"],
                 "ann_trade_cons": detail["ann_trade_cons"],
                 "ann_roll_cons": detail["ann_roll_cons"],

@@ -971,7 +971,8 @@ combination and the unconstrained greedy AFTS baseline. The command writes:
 - `pysystemtrade_selection_passes_<timestamp>.csv`, the readable
   accepted path only: `selection_step` identifies the pass, `added_symbol` is
   its winner, and each `symbol` row records that accepted book member's
-  terminal subclass, subclass membership, subclass weight, and instrument weight;
+  terminal subclass, subclass membership, subclass weight, instrument weight,
+  and per-instrument `size_penalty_sr` alongside the annual cost components;
   and
 - `pysystemtrade_selection_book_<timestamp>.csv`, the last accepted book.
 
@@ -990,6 +991,8 @@ combined-forecast trading cost and its final-book granularity penalty. It is
 not the book score when the ranked instrument was added. The accepted rows in
 the trials CSV record that sequence: `book` is the hypothetical portfolio and
 `score` is its portfolio-level score at that iteration.
+The accepted passes CSV includes the per-instrument `size_penalty_sr` used in
+that calculation so changes in granularity can be inspected pass by pass.
 
 All Phase 1 and Phase 2 public CSVs use the shared report formatter at the
 write boundary. USD amounts are rounded to cents, reproduction-sensitive FX
