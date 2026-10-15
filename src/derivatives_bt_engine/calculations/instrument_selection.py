@@ -733,6 +733,11 @@ class GreedyInstrumentSelector:
             detail["marginal_contribution_score"] = (
                 weighted_net_sr if math.isfinite(weighted_net_sr) else None
             )
+            detail["scaled_contribution"] = (
+                weighted_net_sr / denominator
+                if denominator > 0 and math.isfinite(weighted_net_sr)
+                else None
+            )
         return PortfolioScore(
             symbols=tuple(symbols),
             weights=weights,
@@ -973,6 +978,7 @@ class GreedyInstrumentSelector:
                 "marginal_contribution_score": detail[
                     "marginal_contribution_score"
                 ],
+                "scaled_contribution": detail["scaled_contribution"],
                 "avg_cons": detail["avg_cons"],
                 "ann_trade_cons": detail["ann_trade_cons"],
                 "ann_roll_cons": detail["ann_roll_cons"],

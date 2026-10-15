@@ -857,6 +857,7 @@ def _run_complete_selection(
             "size_penalty_sr",
             "score_denom",
             "marginal_contribution_score",
+            "scaled_contribution",
             "avg_cons",
             "ann_trade_cons",
             "ann_roll_cons",
