@@ -955,7 +955,10 @@ combination and the unconstrained greedy AFTS baseline. The command writes:
   account-scaled daily continuous target, average-position buffer width and
   boundaries, buffered whole contracts, ordinary traded contracts, actual and
   interval-average policy-roll contracts, and separate gross, trade-cost,
-  roll-cost, and net USD P&L paths;
+  roll-cost, and net USD P&L paths. Its `close` is the locally generated
+  additive-Panama adjusted level used by the signal history, retained beside
+  the roll-neutral `point_change` for audit; it is not the raw executable
+  dated-contract mark;
 - `pysystemtrade_selection_trials_<timestamp>.csv`, one row per greedy trial; and
 - `pysystemtrade_selection_trial_allocations_<timestamp>.csv`, one row per member
   of every hypothetical trial book, including its economic `cluster_path`,

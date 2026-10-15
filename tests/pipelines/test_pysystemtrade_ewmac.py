@@ -63,12 +63,16 @@ def test_component_builder_exposes_compact_and_detailed_shapes():
 
     assert compact.columns == [
         "date",
+        "close",
         "point_vol",
         "point_change",
         "is_roll",
         "fcst_2_4",
         "fcst_4_8",
     ]
+    assert compact.get_column("close").to_list() == _history().panama_bars().get_column(
+        "close"
+    ).to_list()
     assert compact.get_column("is_roll").sum() == 1
     assert {
         "close",

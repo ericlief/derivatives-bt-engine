@@ -207,9 +207,11 @@ def build_ewmac_component_frame(
 ) -> pl.DataFrame:
     """Build a wide component-forecast frame for one instrument history.
 
-    The compact shape contains ``date``, ``point_vol``, ``point_change``, the
-    history policy's ``is_roll`` marker, and one ``fcst_<fast>_<slow>`` column
-    per rule and is consumed by Phase 2.
+    The compact shape contains ``date``, the locally generated additive-Panama
+    ``close``, ``point_vol``, ``point_change``, the history policy's
+    ``is_roll`` marker, and one ``fcst_<fast>_<slow>`` column per rule. It is
+    consumed by Phase 2 and retains the adjusted price level so downstream
+    cash-P&L output can be audited against its roll-neutral daily change.
     With ``detailed=True`` the frame additionally exposes the Panama price,
     raw EWMAC difference, raw normalized forecast, and daily pooled scalar for
     every rule, using rule-suffixed column names suitable for a notebook.
@@ -227,6 +229,7 @@ def build_ewmac_component_frame(
         if combined is None:
             base_columns = [
                 pl.col("ts_event").alias("date"),
+                "close",
                 "point_vol",
                 "point_change",
                 pooled.rule.column,
@@ -295,7 +298,7 @@ def build_ewmac_component_frame(
             "quality_flag",
         ])
     else:
-        prefix.extend(["point_vol", "point_change", "is_roll"])
+        prefix.extend(["close", "point_vol", "point_change", "is_roll"])
     remaining = [column for column in combined.columns if column not in prefix]
     return combined.select(prefix + remaining).sort("date")
 

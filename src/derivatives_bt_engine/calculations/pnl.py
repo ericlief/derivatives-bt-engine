@@ -343,8 +343,11 @@ def build_executable_cash_pnl_curve(
     frame
         One combined-subsystem frame containing ``date``, ``point_change``,
         ``forecast_multiplier``, point volatility, historical USD FX, and an
-        optional boolean roll marker. The position must already represent the
-        final net forecast rather than separate rule sleeves.
+        optional boolean roll marker. Phase 2 also supplies ``close`` as the
+        locally generated additive-Panama price; it is retained for audit but
+        is not treated as a raw executable dated-contract mark. The position
+        must already represent the final net forecast rather than separate
+        rule sleeves.
     capital
         Account capital in USD.
     target_vol
@@ -382,11 +385,11 @@ def build_executable_cash_pnl_curve(
     Returns
     -------
     polars.DataFrame
-        The input plus daily annual dollar volatility, continuous average and
-        target contracts, buffer width and boundaries, buffered executable and
-        lagged contracts, ordinary trade quantities, realized and
-        interval-average roll quantities, and gross/expected/realized cash
-        P&L in USD.
+        The input (including ``close`` when supplied) plus daily annual dollar
+        volatility, continuous average and target contracts, buffer width and
+        boundaries, buffered executable and lagged contracts, ordinary trade
+        quantities, realized and interval-average roll quantities, and
+        gross/expected/realized cash P&L in USD.
 
     Notes
     -----

@@ -18,7 +18,8 @@ then uses three deliberately different dataframe collections:
 ``cash_pnl_long``
     One long account-scaled frame for the final selected book. It applies the
     forecast buffer, rounds to contracts, and separates ordinary trade cost
-    from realized and interval-average policy-roll cost.
+    from realized and interval-average policy-roll cost. The generated Panama
+    ``close`` is retained beside its roll-neutral ``point_change`` for audit.
 
 The command persists each intermediate form so forecast gaps, turnover, and
 greedy selection decisions remain inspectable after a run.
@@ -727,6 +728,9 @@ def _run_complete_selection(
                 "weight",
                 "limit_weight",
                 "idm",
+                # This is the locally generated additive-Panama signal level,
+                # not a raw executable dated-contract settlement.
+                "close",
                 "combined_forecast",
                 "forecast_multiplier",
                 "point_change",

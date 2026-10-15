@@ -69,6 +69,7 @@ def test_executable_cash_pnl_separates_trade_and_policy_roll_costs():
     """Buffered position changes and held-contract rolls remain independent."""
     frame = pl.DataFrame({
         "date": [date(2024, 1, day) for day in range(1, 6)],
+        "close": [100.0, 101.0, 102.0, 103.0, 104.0],
         "point_change": [None, 1.0, 1.0, 1.0, 1.0],
         "point_vol": [1.0] * 5,
         "forecast_multiplier": [1.0, 2.0, 2.0, 1.0, 1.0],
@@ -88,6 +89,9 @@ def test_executable_cash_pnl_separates_trade_and_policy_roll_costs():
         annualization_days=4,
     )
 
+    assert result.get_column("close").to_list() == frame.get_column(
+        "close"
+    ).to_list()
     assert result.get_column("avg_cons").to_list() == pytest.approx([5.0] * 5)
     assert result.get_column("buffer_width_cons").to_list() == pytest.approx(
         [0.5] * 5
