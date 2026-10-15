@@ -22,6 +22,7 @@ PUBLIC_REPORT_RENAMES = {
     "ann_cost_usd": "ann_cost",
     "buffer_size": "buf_size",
     "buffer_trade_to_edge": "buf_trade_to_edge",
+    "marginal_contribution_score": "marg_score",
 }
 
 

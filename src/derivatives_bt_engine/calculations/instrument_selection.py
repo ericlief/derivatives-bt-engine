@@ -721,6 +721,18 @@ class GreedyInstrumentSelector:
         denominator = math.sqrt(max(float(vector @ correlation @ vector), 0.0))
         numerator = sum(weights[symbol] * net_sharpes[symbol] for symbol in symbols)
         score = numerator / denominator if denominator > 0 and feasible else -math.inf
+        # Keep each member's weighted net SR (the book-score numerator
+        # contribution) and the shared risk denominator available for audit.
+        # The book score is the sum of these marginal contributions divided
+        # by the denominator.
+        for detail in details:
+            symbol = str(detail["symbol"])
+            net_sr = net_sharpes[symbol]
+            weighted_net_sr = weights[symbol] * net_sr
+            detail["score_denom"] = denominator
+            detail["marginal_contribution_score"] = (
+                weighted_net_sr if math.isfinite(weighted_net_sr) else None
+            )
         return PortfolioScore(
             symbols=tuple(symbols),
             weights=weights,
@@ -955,7 +967,12 @@ class GreedyInstrumentSelector:
                 "ann_trade_cost_sr": detail["ann_trade_cost_sr"],
                 "ann_roll_cost_sr": detail["ann_roll_cost_sr"],
                 "ann_cost_sr": detail["ann_cost_sr"],
+                "net_sr": detail["net_sr"],
                 "size_penalty_sr": detail["size_penalty_sr"],
+                "score_denom": detail["score_denom"],
+                "marginal_contribution_score": detail[
+                    "marginal_contribution_score"
+                ],
                 "avg_cons": detail["avg_cons"],
                 "ann_trade_cons": detail["ann_trade_cons"],
                 "ann_roll_cons": detail["ann_roll_cons"],

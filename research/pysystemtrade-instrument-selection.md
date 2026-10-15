@@ -972,7 +972,8 @@ combination and the unconstrained greedy AFTS baseline. The command writes:
   accepted path only: `selection_step` identifies the pass, `added_symbol` is
   its winner, and each `symbol` row records that accepted book member's
   terminal subclass, subclass membership, subclass weight, instrument weight,
-  and per-instrument `size_penalty_sr` alongside the annual cost components;
+  `net_sr`, `size_penalty_sr`, the shared `score_denom`, and its weighted-net
+  `marg_score` contribution alongside annual cost components;
   and
 - `pysystemtrade_selection_book_<timestamp>.csv`, the last accepted book.
 
@@ -992,7 +993,11 @@ not the book score when the ranked instrument was added. The accepted rows in
 the trials CSV record that sequence: `book` is the hypothetical portfolio and
 `score` is its portfolio-level score at that iteration.
 The accepted passes CSV includes the per-instrument `size_penalty_sr` used in
-that calculation so changes in granularity can be inspected pass by pass.
+that calculation so changes in granularity can be inspected pass by pass. It
+also records `net_sr`, the shared book `score_denom`, and each member's
+`marg_score`, defined as `weight * net_sr`. The book-level `score` is the sum
+of member `marg_score` values divided by `score_denom`; both the denominator
+and numerator contributions are therefore visible in each accepted pass.
 
 All Phase 1 and Phase 2 public CSVs use the shared report formatter at the
 write boundary. USD amounts are rounded to cents, reproduction-sensitive FX
