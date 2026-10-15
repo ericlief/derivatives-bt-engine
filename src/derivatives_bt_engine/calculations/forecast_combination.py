@@ -167,8 +167,9 @@ class FixedForecastDiversification(ForecastDiversificationPolicy):
 class ForecastCombinationConfig:
     """Configure combined-forecast scaling, turnover, and validity gates.
 
-    Forecasts use the project's normalized Carver convention: target average
-    absolute forecast 0.5 and cap 1.0 correspond to conventional 10 and 20.
+    Forecasts use Carver's 10/20 convention divided by 10: target average
+    absolute forecast 1.0 and cap 2.0.  On the default scale the combined
+    forecast is therefore the signed multiple of average risk-sized position.
     ``average_position_ewm_com`` is the pandas-compatible EWM ``com`` applied
     only to the average-position denominator in turnover. It never smooths
     the forecast. ``turnover_rolling_days`` controls the trailing diagnostic
@@ -202,10 +203,10 @@ class ForecastCombinationConfig:
 class CombinedForecastResult:
     """Hold one executable symbol's daily subsystem and summary diagnostics.
 
-    ``frame`` contains component forecasts, the combined forecast, its signed
-    multiple of the target-average forecast, average and optimal position
-    proxies, normalized position, its absolute daily change, and trailing
-    turnover diagnostics. ``weights`` and ``fdm`` explain the combination;
+    ``frame`` contains component forecasts, the combined forecast, average and
+    optimal position proxies, normalized position, its absolute daily change,
+    and trailing turnover diagnostics. ``weights`` and ``fdm`` explain the
+    combination;
     ``turnover`` is annualized; ``audit`` contains null/non-finite counts and
     the eligibility decision. Cash P&L belongs to ``calculations.pnl`` because
     it additionally needs an executable multiplier, historical FX, and costs.
@@ -328,14 +329,6 @@ class CombinedForecastEngine:
                 .alias("combined_forecast")
             )
             .with_columns(
-                # Express the combined signal as a signed multiple of the
-                # target-average position. With our 0.5 target, forecasts of
-                # +0.5 and +1.0 mean +1x and +2x average position; negative
-                # values represent short positions of the same magnitude.
-                (
-                    pl.col("combined_forecast")
-                    / self.config.target_abs_forecast
-                ).alias("forecast_multiplier"),
                 # Inverse daily point volatility has the same relative path as
                 # the properly risk-sized number of contracts or shares. This
                 # is deliberately a position proxy, not an executable count:
@@ -348,12 +341,15 @@ class CombinedForecastEngine:
                 .alias("avg_position"),
             )
             .with_columns(
-                # The unbuffered optimal position is the average risk-sized
-                # position multiplied by current forecast conviction. It has
-                # the same arbitrary contract/share scale as avg_position.
+                # The unbuffered optimal position applies forecast conviction
+                # to average risk sizing.  With the default mean-absolute-one
+                # scale, combined_forecast is already the signed position
+                # factor.  Retaining the division supports explicit nondefault
+                # forecast scales without exposing a redundant dataframe field.
                 (
                     pl.col("avg_position")
-                    * pl.col("forecast_multiplier")
+                    * pl.col("combined_forecast")
+                    / self.config.target_abs_forecast
                 ).alias("subsystem_position"),
                 # Volatility changes make avg_position move even with a flat
                 # forecast. Carver smooths this denominator so daily volatility

@@ -28,8 +28,12 @@ from derivatives_bt_engine.calculations.volatility import (
 )
 
 
-EWMAC_FORECAST_TARGET_ABS = 0.5
-EWMAC_FORECAST_CAP = 1.0
+# Carver's conventional forecast scale has mean absolute 10 and a cap of 20.
+# Dividing by 10 gives a more readable position-factor scale: mean absolute 1
+# and a cap of 2.  A forecast can therefore be used directly as the signed
+# multiple of the average risk-sized position.
+EWMAC_FORECAST_TARGET_ABS = 1.0
+EWMAC_FORECAST_CAP = 2.0
 EWMAC_SCALAR_MIN_PERIODS = 500
 EWMAC_SCALAR_POOLS = ("fixed", "global", "cluster", "instrument")
 

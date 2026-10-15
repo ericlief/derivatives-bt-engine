@@ -96,7 +96,8 @@ observation-stacked pre-cost Sharpes remain diagnostics. They do not determine
 whether a rule or instrument is affordable.
 
 Forecast turnover is estimated separately for every representative and speed as
-`256 × mean(abs(change in forecast)) / 0.5`, then pooled with Carver's
+`256 × mean(abs(change in forecast))`; the mean-absolute-one forecast scale
+makes the former target divisor equal to one. It is then pooled with Carver's
 history-length weighting. Each execution row uses that speed's pooled rule
 turnover, its own one-way spread, commission, point value, FX conversion, and
 current-price-scaled dollar volatility. The selected research representative's
@@ -596,7 +597,7 @@ flowchart TD
 
     subgraph PerSymbol["Per-symbol pipeline"]
         Combine["1. Combine forecasts<br/>weights · FDM · cap"]
-        ForecastFrame["combined_forecast<br/>forecast_multiplier"]
+        ForecastFrame["combined_forecast<br/>mean abs 1 · cap 2<br/>signed average-position factor"]
 
         Valuation["2. Attach valuation inputs<br/>fx_to_usd · multiplier"]
 

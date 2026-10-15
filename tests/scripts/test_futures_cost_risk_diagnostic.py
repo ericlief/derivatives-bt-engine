@@ -670,7 +670,7 @@ def test_short_selection_aliases_are_adjustable():
 def test_ewmac_performance_delays_forecast_and_annualizes_turnover():
     frame = pl.DataFrame({
         "ts_event": [date(2024, 1, day) for day in range(1, 6)],
-        "ewmac_forecast": [None, 0.5, 0.5, -0.5, -0.5],
+        "ewmac_forecast": [None, 1.0, 1.0, -1.0, -1.0],
         "point_vol": [1.0] * 5,
         "point_change": [None, 1.0, 2.0, -1.0, 2.0],
     })
@@ -686,7 +686,7 @@ def test_ewmac_performance_delays_forecast_and_annualizes_turnover():
     assert pnl["risk_adjusted_pnl"].to_list() == expected_pnl
     assert metrics["ewmac_pre_cost_sharpe"] == pytest.approx(expected_sharpe)
     assert metrics["ewmac_forecast_turnover"] == pytest.approx(
-        256 * (1.0 / 3) / 0.5
+        256 * (2.0 / 3)
     )
 
 

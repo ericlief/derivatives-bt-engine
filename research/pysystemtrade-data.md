@@ -943,8 +943,9 @@ forecasts may be joined by date for comparison.
 
 Forecast units also remain explicit. The current backtester supports one
 EWMAC speed pair, computes
-`clip(((fast_ewma - slow_ewma) / point_vol) * forecast_scalar, -20, 20)`, and
-then divides by 20 for its internal `[-1, 1]` exposure. This preserves
+`clip(((fast_ewma - slow_ewma) / point_vol) * forecast_scalar, -2, 2)`, and
+then divides by 2 for its common internal `[-1, 1]` exposure. The native
+EWMAC forecast itself is the signed average-position factor. This preserves
 comparability with the repository's bounded tanh signal without applying a
 second nonlinear squash to Carver's already capped forecast.
 
@@ -1087,9 +1088,9 @@ point volatility: a 32-session fast EWM standard deviation blended 70/30 with
 a ten-year-span EWM mean of fast volatility. The fast estimator requires ten
 point changes; the slow component begins equal to fast at that first valid
 observation and matures causally rather than imposing a ten-year minimum. The
-repository-native forecast directly targets average absolute 0.5 and caps at
-`[-1, 1]`. This is exactly the traditional Carver 10/20 scale divided by 20,
-so position and turnover normalization use 0.5. The mixed-volatility change,
+repository-native forecast directly targets average absolute 1 and caps at
+`[-2, 2]`. This is exactly the traditional Carver 10/20 scale divided by 10,
+so the forecast itself is the signed average-position factor. The mixed-volatility change,
 unlike the scale conversion, intentionally changes raw forecasts and requires
 the version-3 panel to be rebuilt.
 
@@ -1118,10 +1119,10 @@ the carry flag set; changing data source therefore recalculates the traded
 hybrid rule, while reuse or extrapolation of the separately calibrated scalar
 is visible and range-checked.
 When an EWMAC family is added, scale and cap each speed rule to average
-absolute 0.5 and `[-1, 1]` first, combine those forecasts with weights summing
+absolute 1 and `[-2, 2]` first, combine those forecasts with weights summing
 to one, apply a causal forecast-diversification multiplier if used, and cap
 the combined forecast again. A component's forecast weight does not change
-its own average-absolute-0.5 calibration target.
+its own average-absolute-one calibration target.
 
 The TSMOM backtester now consumes the same separation through
 `data.tsmom_history`. Its source-neutral rows expose `close` as the current

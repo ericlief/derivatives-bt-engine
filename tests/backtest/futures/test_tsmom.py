@@ -137,7 +137,7 @@ def test_source_neutral_backtest_runs_all_three_signal_classes(monkeypatch, sign
         assert any(event['ewmac_forecast'] is not None for event in result['trend_signals'])
         assert all(
             event['ewmac_forecast'] is None
-            or abs(event['ewmac_forecast']) <= 1.0
+            or abs(event['ewmac_forecast']) <= 2.0
             for event in result['trend_signals']
         )
         scalar_history = result['ewmac_scalar_history']
@@ -147,8 +147,8 @@ def test_source_neutral_backtest_runs_all_three_signal_classes(monkeypatch, sign
             'configured_backtest_symbols'
         ]
         assert scalar_history['configured_instrument_count'].unique().to_list() == [1]
-        assert scalar_history['target_abs_forecast'].unique().to_list() == [0.5]
-        assert scalar_history['forecast_cap'].unique().to_list() == [1.0]
+        assert scalar_history['target_abs_forecast'].unique().to_list() == [1.0]
+        assert scalar_history['forecast_cap'].unique().to_list() == [2.0]
         assert scalar_history['vol_span'].unique().to_list() == [20]
         assert scalar_history['vol_slow_years'].unique().to_list() == [10]
         assert scalar_history['vol_slow_weight'].unique().to_list() == [0.3]

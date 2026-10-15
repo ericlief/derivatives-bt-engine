@@ -17,6 +17,7 @@ import math
 
 import polars as pl
 
+from derivatives_bt_engine.calculations.ewmac import EWMAC_FORECAST_TARGET_ABS
 from derivatives_bt_engine.calculations.volatility import (
     MIXED_VOL_ANNUALIZATION_DAYS,
 )
@@ -329,6 +330,7 @@ def build_executable_cash_pnl_curve(
     multiplier: float,
     trade_cost_usd_per_con: float,
     roll_cost_usd_per_con: float,
+    target_abs_forecast: float = EWMAC_FORECAST_TARGET_ABS,
     annualization_days: int = MIXED_VOL_ANNUALIZATION_DAYS,
     point_vol_col: str | None = None,
     fx_col: str = "fx_to_usd",
@@ -342,7 +344,7 @@ def build_executable_cash_pnl_curve(
     ----------
     frame
         One combined-subsystem frame containing ``date``, ``point_change``,
-        ``forecast_multiplier``, point volatility, historical USD FX, and an
+        ``combined_forecast``, point volatility, historical USD FX, and an
         optional boolean roll marker. Phase 2 also supplies ``close`` as the
         locally generated additive-Panama price; it is retained for audit but
         is not treated as a raw executable dated-contract mark. The position
@@ -365,6 +367,10 @@ def build_executable_cash_pnl_curve(
     roll_cost_usd_per_con
         Current cost of one complete old-to-new contract roll in USD. The
         Phase 1 convention is one calendar-spread width plus two commissions.
+    target_abs_forecast
+        Mean absolute forecast represented by a 1x average position. The
+        default is 1.0, so ``combined_forecast`` is directly the signed
+        position factor. Nondefault scales are divided by this value inline.
     annualization_days
         Trading days used to annualize daily point volatility.
     point_vol_col
@@ -416,7 +422,7 @@ def build_executable_cash_pnl_curve(
     required = {
         "date",
         "point_change",
-        "forecast_multiplier",
+        "combined_forecast",
         point_vol_col,
         fx_col,
     }
@@ -442,6 +448,8 @@ def build_executable_cash_pnl_curve(
             raise ValueError(f"{name} must be finite and nonnegative")
     if annualization_days <= 0:
         raise ValueError("annualization_days must be positive")
+    if not math.isfinite(target_abs_forecast) or target_abs_forecast <= 0:
+        raise ValueError("target_abs_forecast must be finite and positive")
     if not math.isfinite(buffer_size) or buffer_size < 0:
         raise ValueError("buffer_size must be finite and nonnegative")
 
@@ -481,9 +489,11 @@ def build_executable_cash_pnl_curve(
             .alias("avg_cons")
         )
         .with_columns(
-            (pl.col("avg_cons") * pl.col("forecast_multiplier")).alias(
-                "target_cons"
-            )
+            (
+                pl.col("avg_cons")
+                * pl.col("combined_forecast")
+                / target_abs_forecast
+            ).alias("target_cons")
         )
     )
     # Buffer after final portfolio scaling. At this point avg_cons already

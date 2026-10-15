@@ -42,7 +42,7 @@ def test_rule_component_derives_changes_and_causal_scalar():
     assert result.get_column("point_change")[0] is None
     assert result.get_column("scalar_4_16").head(3).null_count() == 3
     assert result.get_column("scalar_4_16").drop_nulls().len() > 0
-    assert result.get_column("fcst_4_16").drop_nulls().abs().max() <= 1.0
+    assert result.get_column("fcst_4_16").drop_nulls().abs().max() <= 2.0
 
 
 def test_component_builder_retains_history_and_joins_requested_speeds():

@@ -695,6 +695,7 @@ def _run_complete_selection(
             multiplier=float(row["mult"]),
             trade_cost_usd_per_con=candidate.trade_cost_usd_per_con,
             roll_cost_usd_per_con=candidate.roll_cost_usd_per_con,
+            target_abs_forecast=engine.config.target_abs_forecast,
             buffer_size=args.buffer_size,
             buffer_trade_to_edge=args.buffer_trade_to_edge,
         )
@@ -733,7 +734,6 @@ def _run_complete_selection(
                 # not a raw executable dated-contract settlement.
                 "close",
                 "combined_forecast",
-                "forecast_multiplier",
                 "point_change",
                 "point_vol",
                 "fx_to_usd",

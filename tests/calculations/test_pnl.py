@@ -72,7 +72,7 @@ def test_executable_cash_pnl_separates_trade_and_policy_roll_costs():
         "close": [100.0, 101.0, 102.0, 103.0, 104.0],
         "point_change": [None, 1.0, 1.0, 1.0, 1.0],
         "point_vol": [1.0] * 5,
-        "forecast_multiplier": [1.0, 2.0, 2.0, 1.0, 1.0],
+        "combined_forecast": [1.0, 2.0, 2.0, 1.0, 1.0],
         "fx_to_usd": [1.0] * 5,
         "is_roll": [False, False, True, False, True],
     })

@@ -28,8 +28,8 @@ def _frame(values_4, values_64):
 
 def test_combined_turnover_is_measured_after_combining_components():
     frame = _frame(
-        [0.5, -0.5, 0.5, -0.5, 0.5],
-        [-0.5, 0.5, -0.5, 0.5, -0.5],
+        [1.0, -1.0, 1.0, -1.0, 1.0],
+        [-1.0, 1.0, -1.0, 1.0, -1.0],
     )
     engine = CombinedForecastEngine(config=ForecastCombinationConfig(
         min_valid_observations=3,
@@ -44,8 +44,8 @@ def test_combined_turnover_is_measured_after_combining_components():
     # Renormalized weights are 1/7 and 6/7. Turnover is calculated from the
     # resulting position series, rather than summing the two rule turnovers.
     expected_fdm = 1.0 / np.sqrt((1 / 7) ** 2 + (6 / 7) ** 2)
-    combined = np.array([-2.5 / 7, 2.5 / 7, -2.5 / 7, 2.5 / 7, -2.5 / 7])
-    expected = np.abs(np.diff(combined * expected_fdm / 0.5)).mean() * 256
+    combined = np.array([-5 / 7, 5 / 7, -5 / 7, 5 / 7, -5 / 7])
+    expected = np.abs(np.diff(combined * expected_fdm)).mean() * 256
     assert result.fdm == pytest.approx(expected_fdm)
     assert result.turnover == pytest.approx(expected)
     assert result.audit["forecast_elig"] is True
@@ -109,13 +109,11 @@ def test_turnover_ewm_applies_to_average_position_not_forecast():
     assert result.frame.get_column("combined_forecast").to_list() == pytest.approx(
         [0.2] * 5
     )
-    assert result.frame.get_column("forecast_multiplier").to_list() == pytest.approx(
-        [0.4] * 5
-    )
+    assert "forecast_multiplier" not in result.frame.columns
     last = result.frame.tail(1).row(0, named=True)
     assert last["avg_position"] == pytest.approx(0.25)
     assert last["subsystem_position"] == pytest.approx(
-        last["avg_position"] * last["forecast_multiplier"]
+        last["avg_position"] * last["combined_forecast"]
     )
     assert last["smooth_avg_position"] != pytest.approx(last["avg_position"])
     daily_changes = result.frame.get_column("abs_position_change")
@@ -157,7 +155,7 @@ def test_dataframe_helper_builds_components_and_disables_fdm():
     expected = (
         valid.get_column("fcst_4_16") * 0.25
         + valid.get_column("fcst_8_32") * 0.75
-    ).clip(-1.0, 1.0)
+    ).clip(-2.0, 2.0)
     assert result.fdm == 1.0
     assert "date" in result.frame.columns
     assert "ts_event" not in result.frame.columns
@@ -171,7 +169,8 @@ def test_dataframe_helper_builds_components_and_disables_fdm():
     assert valid.get_column("combined_forecast").to_list() == pytest.approx(
         expected.to_list()
     )
-    assert valid.get_column("forecast_multiplier").to_list() == pytest.approx(
-        (expected / 0.5).to_list()
+    assert "forecast_multiplier" not in valid.columns
+    assert valid.get_column("subsystem_position").to_list() == pytest.approx(
+        (valid.get_column("avg_position") * expected).to_list()
     )
     assert result.audit["forecast_elig"] is True
