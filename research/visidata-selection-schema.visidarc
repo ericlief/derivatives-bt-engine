@@ -1,6 +1,6 @@
 # VisiData column types for the futures selection CSV and Parquet reports.
 #
-# Load this file from ~/.visidarc (for example: exec(open(".../visidata-selection-schema.visidarc").read())).
+# Load this file from ~/.visidatarc (for example: exec(open(".../visidata-selection-schema.visidarc").read())).
 # Parquet files preserve their native schema; these declarations are most useful
 # for CSVs, where values otherwise arrive as strings.
 
