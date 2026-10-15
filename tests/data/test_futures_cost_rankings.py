@@ -27,10 +27,10 @@ def _report() -> pl.DataFrame:
 
 
 def test_load_latest_phase1_cost_report_prefers_newest_ib_file(tmp_path):
-    older = tmp_path / "pysystemtrade_cost_phase1_ib_20261001_120000.csv"
-    newer = tmp_path / "pysystemtrade_cost_phase1_ib_20261002_120000.csv"
-    _report().head(1).write_csv(older)
-    _report().head(2).write_csv(newer)
+    older = tmp_path / "pysystemtrade_cost_phase1_ib_20261001_120000.parquet"
+    newer = tmp_path / "pysystemtrade_cost_phase1_ib_20261002_120000.parquet"
+    _report().head(1).write_parquet(older)
+    _report().head(2).write_parquet(newer)
     os.utime(older, ns=(1_000_000_000, 1_000_000_000))
     os.utime(newer, ns=(2_000_000_000, 2_000_000_000))
 
@@ -38,6 +38,16 @@ def test_load_latest_phase1_cost_report_prefers_newest_ib_file(tmp_path):
 
     assert path == newer.resolve()
     assert report.height == 2
+
+
+def test_load_latest_phase1_cost_report_keeps_legacy_csv_compatibility(tmp_path):
+    legacy = tmp_path / "pysystemtrade_cost_phase1_ib_20261002_120000.csv"
+    _report().write_csv(legacy)
+
+    path, report = load_latest_phase1_cost_report(tmp_path)
+
+    assert path == legacy.resolve()
+    assert report.height == _report().height
 
 
 def test_find_latest_phase1_cost_report_raises_for_empty_directory(tmp_path):

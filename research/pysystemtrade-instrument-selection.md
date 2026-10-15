@@ -125,7 +125,7 @@ tot_ann_cost_sr(speed)
 
 #### Turnover units and AFTS reconciliation
 
-The Phase 1 CSV uses `ann_trades` for Carver's one-way strategy trades and
+The Phase 1 Parquet report uses `ann_trades` for Carver's one-way strategy trades and
 `ann_rolls` for complete roll events. It deliberately has no `total_tx`
 column. Under the Carver-style `calendar_spread` roll-cost model:
 
@@ -261,7 +261,7 @@ comparable and must not be halved again. Observation count, date range,
 successful bar size, attempts, and failures are retained under the compact
 `ib_hspread_*` prefix.
 
-Timestamped Phase 1 filenames and the CSV fields `report_ts_ct`,
+Timestamped Phase 1 filenames and the report fields `report_ts_ct`,
 `snap_quote_timestamp_ct`, `ib_hspread_start`, and `ib_hspread_end` use the
 daylight-saving-aware `America/Chicago` timezone. This aligns report review
 with CME hours; each ISO timestamp retains its explicit `-05:00` or `-06:00`
@@ -341,7 +341,7 @@ The portfolio scenario defaults to `$100,000`, `IDM=1`, four average contracts,
 and at least 15 ordinary instruments. Fifteen is the lower end of Carver's
 [15-to-30 instrument guidance](https://qoppac.blogspot.com/2021/06/static-optimisation-of-best-set-of.html)
 for adequate futures diversification. Its equal-weight risk budget is
-`capital × target vol × IDM / minimum main instruments`; the CSV reports the
+`capital × target vol × IDM / minimum main instruments`; the report contains the
 resulting average contracts and the capital required to reach four. The seven
 main asset classes are `equity, ags, vol, energy, fx, metals, bond`. Crypto and
 `other` are special additions: they retain affordability metrics but do not
@@ -474,7 +474,7 @@ next listed expiry, up to four contracts.
 `whatif_expiry_attempts`, `whatif_retry_n`, and `whatif_retry_error` preserve
 that path. Explicitly configured expiries are never silently replaced.
 
-The public CSV is ordered around one primary calculation path, so it does not
+The public report is ordered around one primary calculation path, so it does not
 repeat a `selected_*` prefix. Current price, FX, volatility, dollar risk,
 spread, cash cost, and SR cost come first. Point-in-time quote alternatives use
 `snap_*`; unused Carver inputs and fallbacks use `ref_*` at the diagnostic
@@ -494,7 +494,7 @@ are bounded to eight seconds by default (`--contract-details-timeout`) so a
 stale mapping cannot stall the broad-universe audit for the wrapper's normal
 30-second request timeout.
 
-Saved CSV reports round monetary notional, commission, cash-cost, and dollar-
+Saved public reports round monetary notional, commission, cash-cost, and dollar-
 volatility fields to two decimal places. Other floating-point diagnostics are
 rounded to four decimal places; identifiers and observation counts are left
 unchanged.
@@ -549,7 +549,7 @@ actual search must also respect the EWMAC-rule and execution-family checks.
 
 ### Phase 1 to Phase 2 pipeline
 
-The saved Phase 1 CSV is the durable handoff, not a throwaway display table.
+The saved Phase 1 Parquet report is the durable handoff, not a throwaway display table.
 Keep every audited row in that file so exclusions remain reproducible, then
 derive the smaller search universe from it:
 
@@ -561,8 +561,8 @@ pysystemtrade histories + reviewed economic classification + local execution ove
     -> 20-day mean contract volume
     -> mixed production volatility and one-contract dollar risk
     -> Phase 1 gates, sel_bucket, phase2_elig, and phase2_excl
-    -> full auditable Phase 1 CSV
-    -> phase2_search_universe(CSV)
+    -> full auditable Phase 1 Parquet report
+    -> phase2_search_universe(report)
     -> combined forecast and subsystem return for each surviving instrument
     -> trial-book correlations, top-down classification weights, and IDM
     -> portfolio-specific positions, turnover, cost, and market participation
@@ -829,7 +829,7 @@ futures-selection-screen \
   --snapshot-input results \
   --initial-capital-usd 75000 \
   --target-vol 0.20 \
-  --output results/pysystemtrade_selection_screen.csv
+  --output results/pysystemtrade_selection_screen.parquet
 ```
 
 Changing capital, target volatility, cost limits, liquidity assumptions,
@@ -847,11 +847,11 @@ Phase 1 metric. Run:
 futures-build-selection --report-dir results --weight-policy topdown_classif
 ```
 
-The command loads the newest selection-screen CSV and saves
-`pysystemtrade_selection_candidates_<timestamp>.csv` beside it. The output contains
+The command loads the newest selection-screen Parquet report and saves
+`pysystemtrade_selection_candidates_<timestamp>.parquet` beside it. The output contains
 selected instruments only. A row must have saved `cost_elig`, `size_elig`,
 `liq_elig`, `data_elig`, rule eligibility, execution eligibility, and
-`phase2_elig` flags equal to true, plus `ib_avail=contract_qualified`. The CSV
+`phase2_elig` flags equal to true, plus `ib_avail=contract_qualified`. The Parquet
 retains the instrument and executable-contract identifiers, `ann_dvol`, raw
 volume and market-risk-volume values, liquidity percentages and limits, and
 the saved gate flags needed to audit why each row entered the Phase 2 search.
@@ -859,7 +859,7 @@ It also repeats the validated run-level inputs `init_cap_usd`, `target_vol`,
 `cost_lim_sr`, `rule_cost_lim_sr`, `liq_ann_trades`, `liq_days`,
 `min_daily_volume`, and `max_pct_mkt_volume` on each selected row. Step 1 fails
 if any of these are absent, null, or inconsistent across the Phase 1 report.
-Use `--input <phase1.csv>` to select a particular audit and `--output <path>`
+Use `--input <phase1.parquet>` to select a particular audit and `--output <path>`
 to choose the exact intermediate filename. `topdown_classif` is the default
 weight policy; `legacy_handcraft` and `equal` are retained as explicit research
 comparators. Complete-selection reports persist the choice as `wt_policy` and
@@ -902,7 +902,7 @@ specific meanings:
   portfolio margin. A negative value identifies a trial that exhausted the
   book allowance.
 
-The accepted-passes CSV contains one row for every member of the accepted book
+The accepted-passes Parquet table contains one row for every member of the accepted book
 at every `selection_step`, rather than one summary row per step. Consequently,
 the instrument margin columns vary by `symbol`, while the portfolio margin and
 limit columns repeat on every row in the same step. Adding a symbol also
@@ -925,12 +925,12 @@ enabled, candidates without a usable IB initial-margin preview are rejected as
 `initial_margin_unavailable`; validate the final integer order book with a
 fresh portfolio-aware margin preview before execution.
 
-An existing Phase 1 CSV can be reused at a different account size without an
+An existing Phase 1 Parquet report can be reused at a different account size without an
 IB or Phase 1 rerun:
 
 ```bash
 futures-build-selection \
-  --input results/pysystemtrade_selection_screen_<timestamp>.csv \
+  --input results/pysystemtrade_selection_screen_<timestamp>.parquet \
   --initial-capital-usd 75000 \
   --complete
 ```
@@ -943,7 +943,7 @@ observations or non-capital cost/data/execution gates.
 Add `--complete` to continue from that saved Step 1 universe through forecast
 combination and the unconstrained greedy AFTS baseline. The command writes:
 
-- `pysystemtrade_selection_forecast_audit_<timestamp>.csv`, with component and
+- `pysystemtrade_selection_forecast_audit_<timestamp>.parquet`, with component and
   combined null/non-finite counts, valid dates and observations, FDM, combined
   turnover, cost, and the precise exclusion reason;
 - `pysystemtrade_selection_forecasts_<timestamp>.parquet`, containing the daily
@@ -959,8 +959,8 @@ combination and the unconstrained greedy AFTS baseline. The command writes:
   additive-Panama adjusted level used by the signal history, retained beside
   the roll-neutral `point_change` for audit; it is not the raw executable
   dated-contract mark;
-- `pysystemtrade_selection_trials_<timestamp>.csv`, one row per greedy trial; and
-- `pysystemtrade_selection_trial_allocations_<timestamp>.csv`, one row per member
+- `pysystemtrade_selection_trials_<timestamp>.parquet`, one row per greedy trial; and
+- `pysystemtrade_selection_trial_allocations_<timestamp>.parquet`, one row per member
   of every hypothetical trial book, including its economic `cluster_path`,
   portfolio `weight`, sizing `limit_weight`, IDM, score, feasibility, and
   accepted flag. Every rejected row has a decision `reason`: hard-constraint
@@ -968,7 +968,7 @@ combination and the unconstrained greedy AFTS baseline. The command writes:
   a lower singleton rank, a lower rank than the iteration winner, or a best
   score below the acceptance threshold. `iter_best`, `iter_best_score`, and
   `min_accept_score` make that comparison directly auditable; and
-- `pysystemtrade_selection_passes_<timestamp>.csv`, the readable
+- `pysystemtrade_selection_passes_<timestamp>.parquet`, the readable
   accepted path only: `selection_step` identifies the pass, `added_symbol` is
   its winner, and each `symbol` row records that accepted book member's
   terminal subclass, subclass membership, subclass weight, instrument weight,
@@ -976,24 +976,24 @@ combination and the unconstrained greedy AFTS baseline. The command writes:
   `marg_score` and denominator-scaled `scaled_contrib` alongside annual cost
   components;
   and
-- `pysystemtrade_selection_book_<timestamp>.csv`, the last accepted book.
+- `pysystemtrade_selection_book_<timestamp>.parquet`, the last accepted book.
 
 Use `--max-instr-per-cluster N` to run a static breadth-cap sensitivity. The
 cluster key is the reviewed `econ_subcls`, so `--max-instr-per-cluster 4`
 prevents a fifth `grains` instrument from entering a trial book. A rejected
-trial remains in both audit CSVs with a reason such as
+trial remains in both audit Parquet tables with a reason such as
 `cluster_instr_limit:grains n=5 max=4`. The default is unlimited. This static
 universe constraint is intentionally separate from the backtest/live
 `max_active_per_cluster` control, which ranks dated active signals by current
 model conviction after the universe has already been selected.
 
-In the final selection CSV, `net_sr` is an instrument-level input to the
+In the final selection report, `net_sr` is an instrument-level input to the
 portfolio score: the common gross SR assumption less that instrument's annual
 combined-forecast trading cost and its final-book granularity penalty. It is
 not the book score when the ranked instrument was added. The accepted rows in
-the trials CSV record that sequence: `book` is the hypothetical portfolio and
+the trials Parquet table records that sequence: `book` is the hypothetical portfolio and
 `score` is its portfolio-level score at that iteration.
-The accepted passes CSV includes the per-instrument `size_penalty_sr` used in
+The accepted passes Parquet report includes the per-instrument `size_penalty_sr` used in
 that calculation so changes in granularity can be inspected pass by pass. It
 also records `net_sr`, the shared book `score_denom`, and each member's
 `marg_score`, defined as `weight * net_sr`, and `scaled_contrib`, defined as
@@ -1001,8 +1001,9 @@ also records `net_sr`, the shared book `score_denom`, and each member's
 book-level `score` in each accepted pass; the raw numerator contributions and
 shared denominator are also available for audit.
 
-All Phase 1 and Phase 2 public CSVs use the shared report formatter at the
-write boundary. USD amounts are rounded to cents, reproduction-sensitive FX
+All Phase 1 and Phase 2 public Parquet reports use the shared report formatter
+at the write boundary. Native Parquet types are retained for dates, booleans,
+and numbers. USD amounts are rounded to cents, reproduction-sensitive FX
 and return-volatility rates to six decimal places, and other floating-point
 diagnostics to four. Forecast and synchronized-return Parquet files retain
 full calculation precision.

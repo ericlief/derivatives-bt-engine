@@ -1,4 +1,4 @@
-"""Notebook helpers for inspecting Phase 1 futures cost rankings."""
+"""Notebook helpers for loading and inspecting Phase 1 futures cost reports."""
 
 from collections.abc import Iterable, Sequence
 from pathlib import Path
@@ -7,9 +7,13 @@ import polars as pl
 
 
 DEFAULT_REPORT_PATTERNS = (
+    "pysystemtrade_selection_screen_*.parquet",
     "pysystemtrade_selection_screen_*.csv",
+    "pysystemtrade_cost_phase1_ib_*.parquet",
     "pysystemtrade_cost_phase1_ib_*.csv",
+    "pysystemtrade_cost_phase1_*.parquet",
     "pysystemtrade_cost_phase1_*.csv",
+    "futures_cost_risk_*.parquet",
     "futures_cost_risk_*.csv",
 )
 
@@ -205,7 +209,7 @@ def override_phase2_initial_capital(
     report: pl.DataFrame,
     initial_capital_usd: float,
 ) -> pl.DataFrame:
-    """Recalculate capital-dependent Phase 2 gates from a Phase 1 CSV.
+    """Recalculate capital-dependent Phase 2 gates from a Phase 1 report.
 
     The Phase 1 report already persists annual dollar volatility, market risk
     volume, and every non-capital gate.  This function changes only the run's
@@ -398,7 +402,12 @@ def find_latest_phase1_cost_report(
     *,
     patterns: Sequence[str] = DEFAULT_REPORT_PATTERNS,
 ) -> Path:
-    """Find the newest Phase 1 CSV in ``report_dir`` or its results folder."""
+    """Find the newest Phase 1 report in ``report_dir`` or its results folder.
+
+    New reports are Parquet; CSV patterns remain available for legacy runs.
+    Report-family precedence prefers the selection screen, then progressively
+    broader Phase 1 cost report names.
+    """
     root = Path(report_dir).expanduser()
     search_dirs = (root, root / "results")
     candidates: list[Path] = []
@@ -427,9 +436,26 @@ def load_latest_phase1_cost_report(
     *,
     patterns: Sequence[str] = DEFAULT_REPORT_PATTERNS,
 ) -> tuple[Path, pl.DataFrame]:
-    """Load the newest Phase 1 cost report and return its resolved path."""
+    """Load the newest Phase 1 report and return its resolved path.
+
+    Parquet preserves the report's dates, booleans, and numeric schema. CSV is
+    read only to maintain compatibility with previously saved reports.
+    """
     path = find_latest_phase1_cost_report(report_dir, patterns=patterns)
-    return path, pl.read_csv(path, infer_schema_length=None)
+    return path, read_phase1_cost_report(path)
+
+
+def read_phase1_cost_report(path: Path | str) -> pl.DataFrame:
+    """Read one Phase 1 report, preferring its native Parquet schema."""
+    report_path = Path(path)
+    if report_path.suffix.lower() == ".parquet":
+        return pl.read_parquet(report_path)
+    if report_path.suffix.lower() == ".csv":
+        return pl.read_csv(report_path, infer_schema_length=None)
+    raise ValueError(
+        f"Unsupported Phase 1 report format {report_path.suffix!r}; "
+        "expected .parquet or legacy .csv"
+    )
 
 
 def _resolve_rank_column(report: pl.DataFrame, rank_by: str) -> str:

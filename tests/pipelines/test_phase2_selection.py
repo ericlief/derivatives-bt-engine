@@ -118,9 +118,9 @@ def test_legacy_margin_option_is_per_instrument_cap():
     assert args.max_book_margin_pct is None
 
 
-def test_run_loads_explicit_phase1_csv_and_saves_selected_rows(tmp_path):
-    source = tmp_path / "pysystemtrade_cost_phase1_ib_20261005_120000.csv"
-    output = tmp_path / "phase2_step1.csv"
+def test_run_loads_explicit_phase1_parquet_and_saves_typed_rows(tmp_path):
+    source = tmp_path / "pysystemtrade_cost_phase1_ib_20261005_120000.parquet"
+    output = tmp_path / "phase2_step1.parquet"
     pl.DataFrame({
         "symbol": ["MZC", "VIX"],
         "asset_cls": ["ags", "vol"],
@@ -144,7 +144,7 @@ def test_run_loads_explicit_phase1_csv_and_saves_selected_rows(tmp_path):
         "exec_elig": [True, True],
         "phase2_elig": [True, False],
         "ib_avail": ["contract_qualified", "unavailable_or_unverified"],
-    }).write_csv(source)
+    }).write_parquet(source)
 
     saved_path, selected = run([
         "--input",
@@ -155,13 +155,24 @@ def test_run_loads_explicit_phase1_csv_and_saves_selected_rows(tmp_path):
 
     assert saved_path == output.resolve()
     assert selected.get_column("symbol").to_list() == ["MZC"]
-    saved = pl.read_csv(output)
+    saved = pl.read_parquet(output)
     assert saved.get_column("symbol").to_list() == ["MZC"]
     assert saved.get_column("ann_dvol").to_list() == [600.13]
     assert selected.get_column("ann_dvol").to_list() == [600.13]
     assert saved.get_column("init_cap_usd").to_list() == [100_000.0]
     assert saved.get_column("target_vol").to_list() == [0.2]
     assert saved.columns == selected.columns
+
+
+def test_run_rejects_csv_output_path(tmp_path):
+    source = tmp_path / "phase1.parquet"
+    pl.DataFrame({
+        "symbol": ["ES"],
+        "phase2_elig": [True],
+    }).write_parquet(source)
+
+    with pytest.raises(ValueError, match=r"\.parquet extension"):
+        run(["--input", str(source), "--output", str(tmp_path / "step1.csv")])
 
 
 def test_subsystem_correlation_uses_daily_date_key():

@@ -1,6 +1,6 @@
 """Build and score the Phase 2 instrument-selection universe.
 
-The persisted Phase 1 CSV supplies executable symbols, their borrowed signal
+The persisted Phase 1 Parquet report supplies executable symbols, their borrowed signal
 history identifiers, costs, dollar volatility, and eligibility flags. Phase 2
 then uses three deliberately different dataframe collections:
 
@@ -43,6 +43,7 @@ from derivatives_bt_engine.data.futures_cost_rankings import (
     override_phase2_initial_capital,
     phase2_step1_candidates,
     phase2_step1_config,
+    read_phase1_cost_report,
 )
 from derivatives_bt_engine.data.fx_history import (
     align_fx_to_history,
@@ -112,7 +113,7 @@ def slow_tilt_ewmac_weights(
 
 
 def _parse_rules(eligible_rules: str | Iterable[str]) -> list[str]:
-    """Normalize a CSV rule field or iterable into non-empty rule keys."""
+    """Normalize a serialized report rule field or iterable into rule keys."""
     if isinstance(eligible_rules, str):
         return [rule.strip() for rule in eligible_rules.split(",") if rule.strip()]
     return [str(rule).strip() for rule in eligible_rules if str(rule).strip()]
@@ -122,7 +123,7 @@ def parse_args(argv=None):
     """Parse the Step 1 and optional complete Phase 2 command arguments."""
     parser = argparse.ArgumentParser(
         description=(
-            "Load a Phase 1 futures cost CSV and save the instruments that "
+            "Load a Phase 1 futures cost Parquet report and save the instruments that "
             "already passed its cost, dollar-vol, liquidity, data, rule, "
             "execution, and IB-availability gates."
         )
@@ -130,13 +131,13 @@ def parse_args(argv=None):
     parser.add_argument(
         "--input",
         type=Path,
-        help="Explicit Phase 1 CSV; otherwise use the latest report.",
+        help="Explicit Phase 1 Parquet report; legacy CSV input is also accepted.",
     )
     parser.add_argument(
         "--report-dir",
         type=Path,
         default=Path("."),
-        help="Directory (and its results/ child) searched for the latest CSV.",
+        help="Directory (and its results/ child) searched for the latest report.",
     )
     parser.add_argument(
         "--output",
@@ -148,7 +149,7 @@ def parse_args(argv=None):
         type=float,
         help=(
             "Override the Phase 1 capital and recompute its capital-dependent "
-            "size and relative-liquidity gates from the saved CSV"
+            "size and relative-liquidity gates from the saved report"
         ),
     )
     parser.add_argument(
@@ -251,9 +252,9 @@ def parse_args(argv=None):
 
 
 def _default_output_path(source: Path, generated_at: datetime) -> Path:
-    """Return the timestamped Step 1 CSV path beside its Phase 1 source."""
+    """Return the timestamped Step 1 Parquet path beside its Phase 1 source."""
     stamp = generated_at.astimezone(REPORT_TIMEZONE).strftime("%Y%m%d_%H%M%S")
-    return source.parent / f"pysystemtrade_selection_candidates_{stamp}.csv"
+    return source.parent / f"pysystemtrade_selection_candidates_{stamp}.parquet"
 
 
 def _label_forecast_output_frame(
@@ -343,7 +344,7 @@ def _run_complete_selection(
     It persists the daily forecast panel, audit, correlation input, greedy
     trials, and final accepted book.
 
-    Returns the final selection CSV path and its in-memory dataframe.
+    Returns the final selection Parquet path and its in-memory dataframe.
     """
     logger.info(
         "phase2_complete start candidates=%d buffer_size=%s "
@@ -769,23 +770,23 @@ def _run_complete_selection(
     cash_pnl_long = pl.concat(cash_output_frames, how="diagonal_relaxed")
     stamp = generated_at.astimezone(REPORT_TIMEZONE).strftime("%Y%m%d_%H%M%S")
     output_dir = source.parent
-    audit_path = output_dir / f"pysystemtrade_selection_forecast_audit_{stamp}.csv"
+    audit_path = output_dir / f"pysystemtrade_selection_forecast_audit_{stamp}.parquet"
     forecasts_path = output_dir / f"pysystemtrade_selection_forecasts_{stamp}.parquet"
-    trials_path = output_dir / f"pysystemtrade_selection_trials_{stamp}.csv"
+    trials_path = output_dir / f"pysystemtrade_selection_trials_{stamp}.parquet"
     trial_allocations_path = (
-        output_dir / f"pysystemtrade_selection_trial_allocations_{stamp}.csv"
+        output_dir / f"pysystemtrade_selection_trial_allocations_{stamp}.parquet"
     )
     selection_passes_path = (
-        output_dir / f"pysystemtrade_selection_passes_{stamp}.csv"
+        output_dir / f"pysystemtrade_selection_passes_{stamp}.parquet"
     )
-    selection_path = output_dir / f"pysystemtrade_selection_book_{stamp}.csv"
+    selection_path = output_dir / f"pysystemtrade_selection_book_{stamp}.parquet"
     net_pnl_path = (
         output_dir / f"pysystemtrade_selection_subsystem_net_pnl_{stamp}.parquet"
     )
     cash_pnl_path = (
         output_dir / f"pysystemtrade_selection_cash_pnl_{stamp}.parquet"
     )
-    # Round only persisted public CSV copies. Full-precision daily analytical
+    # Round only persisted public report copies. Full-precision daily analytical
     # frames remain available in Parquet and calculations above are untouched.
     public_audit = round_public_report(rename_public_report_columns(audit_frame))
     public_trials = round_public_report(
@@ -884,14 +885,14 @@ def _run_complete_selection(
     public_selection = round_public_report(
         rename_public_report_columns(final_frame)
     )
-    public_audit.write_csv(audit_path)
+    public_audit.write_parquet(audit_path)
     pl.concat(forecast_output_frames, how="diagonal_relaxed").write_parquet(
         forecasts_path
     )
-    public_trials.write_csv(trials_path)
-    public_trial_allocations.write_csv(trial_allocations_path)
-    public_selection_passes.write_csv(selection_passes_path)
-    public_selection.write_csv(selection_path)
+    public_trials.write_parquet(trials_path)
+    public_trial_allocations.write_parquet(trial_allocations_path)
+    public_selection_passes.write_parquet(selection_passes_path)
+    public_selection.write_parquet(selection_path)
     net_pnl_wide.write_parquet(net_pnl_path)
     cash_pnl_long.write_parquet(cash_pnl_path)
     print(
@@ -918,12 +919,14 @@ def run(argv=None) -> tuple[Path, pl.DataFrame]:
     """
     args = parse_args(argv)
     setup_logger()
+    if args.output is not None and args.output.suffix.lower() != ".parquet":
+        raise ValueError("--output must use a .parquet extension")
 
     if args.input is None:
         source, report = load_latest_phase1_cost_report(args.report_dir)
     else:
         source = args.input.expanduser().resolve()
-        report = pl.read_csv(source, infer_schema_length=None)
+        report = read_phase1_cost_report(source)
 
     logger.info(
         "phase2_step1 start source=%s instruments=%d",
@@ -999,9 +1002,9 @@ def run(argv=None) -> tuple[Path, pl.DataFrame]:
     )
     output.parent.mkdir(parents=True, exist_ok=True)
     # Step 1 is a public report boundary. Keep ``selected`` at calculation
-    # precision for the optional complete search and round only its CSV copy.
+    # precision for the optional complete search and round only its report copy.
     public_selected = round_public_report(selected)
-    public_selected.write_csv(output)
+    public_selected.write_parquet(output)
     logger.info(
         "phase2_step1 complete source=%s output=%s selected=%d total=%d",
         source,

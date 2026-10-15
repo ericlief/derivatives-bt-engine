@@ -1100,7 +1100,7 @@ def test_public_report_keeps_requested_and_resolved_snapshot_data_types():
     assert report["snap_mkt_data_type"][0] == "delayed"
 
 
-def test_emitted_report_includes_generation_timestamp(capsys):
+def test_emitted_report_includes_typed_generation_timestamp(capsys):
     emitted = _emit_report(
         pl.DataFrame({"symbol": ["JPY"], "price": [0.0067]}),
         Namespace(no_save=True),
@@ -1108,19 +1108,38 @@ def test_emitted_report_includes_generation_timestamp(capsys):
 
     assert "report_ts_ct" in emitted.columns
     timestamp = emitted["report_ts_ct"][0]
-    assert timestamp.endswith(("-05:00", "-06:00"))
-    assert "T" in timestamp
+    assert timestamp.tzinfo is not None
+    assert timestamp.utcoffset() is not None
     capsys.readouterr()
 
 
-def test_timestamped_output_path_uses_chicago_and_preserves_csv_extension():
+def test_timestamped_output_path_uses_chicago_and_preserves_parquet_extension():
     generated_at = datetime(2026, 10, 1, 14, 54, 18, tzinfo=timezone.utc)
 
     output = futures_cost_risk._timestamped_output_path(
-        Path("pysystemtrade_cost_phase1_ib.csv"), generated_at
+        Path("pysystemtrade_cost_phase1_ib.parquet"), generated_at
     )
 
-    assert output == Path("pysystemtrade_cost_phase1_ib_20261001_095418.csv")
+    assert output == Path("pysystemtrade_cost_phase1_ib_20261001_095418.parquet")
+
+
+def test_emitted_phase1_report_writes_parquet_with_typed_columns(tmp_path, capsys):
+    output_base = tmp_path / "selection_screen.parquet"
+    emitted = _emit_report(
+        pl.DataFrame({
+            "symbol": ["MZC"],
+            "price": [497.25],
+            "execution_eligible": [True],
+        }),
+        Namespace(no_save=False, output=output_base),
+    )
+
+    output = next(tmp_path.glob("selection_screen_*.parquet"))
+    saved = pl.read_parquet(output)
+    assert saved.schema["report_ts_ct"].time_zone == "America/Chicago"
+    assert saved.schema["exec_elig"] == pl.Boolean
+    assert saved["cur_px"].to_list() == emitted["cur_px"].to_list()
+    capsys.readouterr()
 
 
 def test_snapshot_output_filename_contains_friendly_account_name():

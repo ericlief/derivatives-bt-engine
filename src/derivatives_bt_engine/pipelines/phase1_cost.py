@@ -33,7 +33,7 @@ Then rebuild the cost and eligibility report without another IB request::
       --snapshot-input results/futures_market_snapshot_<timestamp>.parquet \
       --initial-capital-usd 100000
 
-The public CSV leads with the selected current price, FX, volatility, spread,
+The public Parquet report leads with the selected current price, FX, volatility, spread,
 and cost path.  Snapshot alternatives use ``snap_*`` and imported Carver
 references use ``ref_*`` so neither can be mistaken for the selected inputs.
 """
@@ -2073,7 +2073,7 @@ def _spread_stats_from_bid_ask_bars(
         # IB timestamps carry each exchange's local timezone. Report rows
         # span exchanges, and Polars cannot construct one datetime column
         # from values such as MET and US/Eastern. Central-time ISO text is
-        # portable across CSV output and aligns report inspection with CME
+        # portable across report output and aligns inspection with CME
         # hours while preserving the absolute instant and UTC offset.
         "ib_historical_spread_start": _timestamp_as_central_iso(spread_start),
         "ib_historical_spread_end": _timestamp_as_central_iso(spread_end),
@@ -3182,8 +3182,9 @@ def parse_args(argv=None):
         type=Path,
         default=None,
         help=(
-            "CSV output base path; a Chicago-time run timestamp is appended to the "
-            "filename (default base: results/pysystemtrade_selection_screen.csv)"
+            "Parquet output base path; a Chicago-time run timestamp is appended "
+            "to the filename (default base: "
+            "results/pysystemtrade_selection_screen.parquet)"
         ),
     )
     parser.add_argument("--no-save", action="store_true")
@@ -3778,7 +3779,7 @@ def _ib_log_output_path(
             artifact = (
                 Path(__file__).resolve().parents[3]
                 / "results"
-                / "pysystemtrade_selection_screen.csv"
+                / "pysystemtrade_selection_screen.parquet"
             )
         artifact = _account_infixed_output_path(
             artifact,
@@ -3808,9 +3809,7 @@ def _configure_live_ib_logging(
 def _emit_report(report: pl.DataFrame, args) -> pl.DataFrame:
     generated_at = datetime.now(REPORT_TIMEZONE)
     report = report.with_columns(
-        pl.lit(generated_at.isoformat(timespec="seconds")).alias(
-            "report_generated_at_ct"
-        )
+        pl.lit(generated_at).alias("report_generated_at_ct")
     )
     output_report = round_public_report(_public_report_schema(report))
     summary_columns = [
@@ -3886,11 +3885,13 @@ def _emit_report(report: pl.DataFrame, args) -> pl.DataFrame:
             output_base = (
                 Path(__file__).resolve().parents[3]
                 / "results"
-                / "pysystemtrade_selection_screen.csv"
+                / "pysystemtrade_selection_screen.parquet"
             )
+        if output_base.suffix.lower() != ".parquet":
+            raise ValueError("--output must use a .parquet extension")
         output = _timestamped_output_path(output_base, generated_at)
         output.parent.mkdir(parents=True, exist_ok=True)
-        output_report.write_csv(output)
+        output_report.write_parquet(output)
         log.info("futures_cost_risk complete output=%s rows=%d", output, output_report.height)
         print(f"Saved {output}")
     return output_report
@@ -4086,9 +4087,7 @@ def _market_snapshot_frame(
     selection screen.
     """
     snapshot = pl.DataFrame(rows, infer_schema_length=None).with_columns(
-        pl.lit(generated_at.isoformat(timespec="seconds")).alias(
-            "market_snapshot_generated_at_ct"
-        ),
+        pl.lit(generated_at).alias("market_snapshot_generated_at_ct"),
         pl.lit(args.duration).alias("market_snapshot_duration"),
         pl.lit(args.spread_duration).alias(
             "market_snapshot_spread_duration"
@@ -4329,6 +4328,14 @@ def run(argv=None, *, snapshot_only: bool = False) -> pl.DataFrame:
     )
     args = parse_args(argv)
     setup_logger()
+    if args.output is not None and args.output.suffix.lower() != ".parquet":
+        raise ValueError("--output must use a .parquet extension")
+    if (
+        snapshot_only
+        and args.snapshot_output is not None
+        and args.snapshot_output.suffix.lower() != ".parquet"
+    ):
+        raise ValueError("--snapshot-output must use a .parquet extension")
     if args.ib_account_name:
         account_name, account_id = _resolve_ib_account_name(
             args.ib_account_name

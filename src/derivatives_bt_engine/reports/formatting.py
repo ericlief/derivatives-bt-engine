@@ -1,6 +1,6 @@
 """Apply the shared numeric precision contract at public report boundaries.
 
-Calculation dataframes retain full precision. CSV/report producers call
+Calculation dataframes retain full precision. Public report producers call
 ``round_public_report`` only on the copy being persisted or returned for
 display, which prevents presentation rounding from feeding back into costs,
 selection, or portfolio calculations.
@@ -170,7 +170,7 @@ def round_public_report(report: pl.DataFrame) -> pl.DataFrame:
     Parameters
     ----------
     report
-        Polars dataframe ready to cross a public CSV/report boundary.
+        Polars dataframe ready to cross a public report boundary.
 
     Returns
     -------

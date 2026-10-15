@@ -36,7 +36,11 @@
 ## Public report schemas
 
 - Keep internal dataframe and calculation names descriptive. Compact names only
-  at the public CSV/report boundary.
+  at the public report boundary.
+- Use Parquet for Phase 1 and Phase 2 outputs, including the human-readable
+  selection/audit reports, so dates, booleans, and numbers retain their types.
+  Keep CSV input only for backward compatibility with previously generated
+  Phase 1 reports; do not emit duplicate CSV copies unless explicitly asked.
 - A futures cost-report row represents one executable contract. Primary
   monetary values are USD, so use `notional`, `daily_dvol`, and `ann_dvol`.
   Retain suffixes such as `_native` only when they distinguish parallel values
@@ -52,7 +56,7 @@
 - Add new abbreviations to the centralized public-schema rename/token map, not
   as one-off aliases. Update report ordering, ranking/notebook helpers,
   documentation, and schema tests together.
-- Pass every public Polars CSV/report dataframe through
+- Pass every public Polars report dataframe through
   `data.report_formatting.round_public_report` at the output boundary. Keep
   calculation dataframes at full precision, and register new monetary or
   reproduction-sensitive rate columns in that shared formatter rather than
