@@ -1,0 +1,154 @@
+# VisiData column types for the futures selection CSV and Parquet reports.
+#
+# Load this file from ~/.visidarc (for example: exec(open(".../visidata-selection-schema.visidarc").read())).
+# Parquet files preserve their native schema; these declarations are most useful
+# for CSVs, where values otherwise arrive as strings.
+
+
+def _vd_set_type(names, dtype):
+    """Assign one VisiData type to a whitespace-separated set of columns."""
+    for name in names.split():
+        Sheet.knownCols[name].type = dtype
+
+
+# Identifiers, labels, categories, serialized dictionaries, and explanatory text.
+_vd_set_type(
+    """
+    symbol signal_symbol hist_instr_code desc description
+    asset_cls econ_subcls region econ_fam_id
+    roll_policy_id dup_grp_id pool_role rep_instr exec_prof
+    con_id expiry ib_symbol ib_exch ib_ccy ib_avail ccy currency
+    cur_px_src cur_fx_src cur_fx_pair cur_fx_mkt_data_type cur_fx_err
+    vol_src volume_src spread_src comm_ccy comm_src cost_qual
+    margin_ccy margin_fx_src
+    whatif_error_codes whatif_error_req_ids whatif_reject_reason
+    whatif_error whatif_warning whatif_retry_error
+    exec_restrict_reason phase2_excl sel_bucket
+    elig_ewmac_rules forecast_weights forecast_excl subsystem_excl
+    fx_pair fx_src fx_error reason instr_reason
+    candidate book added_symbol wt_policy cluster_path cluster_members
+    snap_hist_duration snap_spread_duration snap_volume_duration
+    snap_req_market_data_type snap_vol_src snap_market_data_type
+    snap_error_codes snap_selected_error_codes snap_spread_quality
+    ref_vol_source ref_spread_source ref_strategy_instrument
+    ref_strategy_roll_policy ref_strategy_hold_roll_cycle
+    ref_strategy_roll_rate_audit
+    ib_fast_duration ib_fast_bar_size ib_fast_market_data_type
+    ib_hspread_duration ib_hspread_bar_size ib_hspread_source
+    """,
+    str,
+)
+
+# Calendar dates. Expiry is deliberately text above: it is a contract identifier,
+# not a date value (and may contain exchange-specific formatting).
+_vd_set_type(
+    """
+    date volume_start volume_end forecast_start forecast_end
+    pnl_start pnl_end fx_start fx_end fx_date
+    ref_history_start ref_history_end
+    ref_strategy_history_start ref_strategy_history_end
+    ib_fast_start ib_fast_end ib_hspread_start ib_hspread_end
+    """,
+    date,
+)
+
+# ISO-formatted timestamp columns in CSV reports.
+_vd_set_type(
+    "report_ts_ct snap_cache_ts_ct snap_quote_timestamp_ct fx_source_ts",
+    datetime,
+)
+
+# Eligibility, validity, feasibility, and event flags.
+_vd_set_type(
+    """
+    exec_elig whatif_attempted whatif_elig cost_elig size_elig data_elig
+    volume_elig risk_volume_elig liq_elig phase2_elig
+    instr_has_elig_ewmac_rule include_default_pool
+    forecast_elig subsystem_elig forecast_valid fx_valid pnl_valid
+    cash_fx_valid cash_pnl_valid is_roll roll_event feasible accepted
+    roll_cost_in_score buf_trade_to_edge snap_use_rth
+    main_instr_afford_for_scen counts_toward_main_instr_min
+    equal_wt_meets_min_cons ib_fast_requests_allowed
+    """,
+    bool,
+)
+
+# Counts, ranks, spans, and retry/observation counts.
+_vd_set_type(
+    """
+    rank selection_step iteration max_instr_per_cluster
+    eligible_ewmac_rule_count volume_n ann_days liq_days
+    history_obs forecast_valid_obs forecast_invalid_obs
+    forecast_post_warmup_invalid_obs combined_nulls combined_nonfinite
+    pnl_valid_obs pnl_post_start_invalid_obs fx_missing_forecast_obs
+    whatif_expiry_attempts whatif_retry_n
+    ib_fast_n ib_hspread_n ib_hspread_attempts ib_hspread_failures
+    ref_history_n ref_vol_n ref_strategy_history_n
+    ref_strategy_rolls_full ref_strategy_recent_rolls
+    ref_strategy_recent_start_year ref_strategy_recent_end_year
+    ib_price_magnifier price_magnifier
+    """,
+    int,
+)
+
+# Prices, contract sizes, volatility, dollar risk/cost, weights, scores,
+# portfolio diagnostics, and numeric configuration values.
+_vd_set_type(
+    """
+    cur_px cur_price price
+    mult ib_mult ib_multiplier multiplier
+    notional notional_native
+    daily_ret_vol ann_ret_vol daily_pt_vol daily_point_vol
+    daily_dvol ann_dvol risk_traded_usd_day mkt_risk_vol_usd_day
+    pct_mkt_volume min_daily_volume max_pct_mkt_volume
+    spread_pts spread_points comm comm_usd
+    init_margin init_margin_usd maint_margin maint_margin_usd
+    margin_fx_to_usd comm_native spread_cash_native cost_native cost_usd
+    trade_sr roll_sr rule_cost_lim_sr cost_lim_sr max_ann_dvol
+    init_capital_usd target_vol cost_limit_sr
+    risk_target daily_risk_pts ann_risk_pts
+    max_position max_weight_idm max_instr_margin_pct max_book_margin_pct
+    average_daily_volume avg_daily_volume one_way_cost_per_dvol
+    score iter_best_score min_accept_score idm weight limit_weight
+    score_cost_sr ann_trade_cost_sr ann_roll_cost_sr ann_cost_sr net_sr
+    size_penalty_sr score_denom marg_score scaled_contrib
+    avg_cons ann_trade_cons ann_roll_cons max_cons
+    trade_cost_per_con roll_cost_per_con
+    ann_trade_cost ann_roll_cost ann_cost
+    trade_cost_usd_per_con roll_cost_usd_per_con
+    ann_trade_cost_usd ann_roll_cost_usd ann_cost_usd
+    portfolio_init_margin portfolio_maint_margin
+    portfolio_init_margin_usd portfolio_maint_margin_usd
+    init_margin_change maint_margin_change
+    init_margin_pct_cap book_margin_pct_cap
+    cluster_weight cluster_score fdm comb_turnover
+    forecast_multiplier combined_forecast avg_position subsystem_position
+    smooth_avg_position normalized_position abs_position_change
+    rolling_mean_abs_position_change rolling_ann_turnover
+    close point_change point_vol fx_to_usd period_year_fraction
+    pnl_avg_position pnl_position held_pnl_position gross_pnl_pts
+    gross_pnl_native gross_pnl_usd ann_cost_pts cost_pnl_pts
+    cost_pnl_native cost_pnl_usd net_pnl_usd risk_budget_usd
+    target_cons buf_size buffer_size buffer_width_cons
+    buffer_top_cons buffer_bot_cons exec_cons held_cons trade_cons
+    realized_roll_cons interval_avg_abs_cons expected_roll_cons
+    cash_gross_pnl_usd cash_trade_cost_usd
+    cash_realized_roll_cost_usd cash_expected_roll_cost_usd
+    cash_realized_net_pnl_usd cash_expected_net_pnl_usd
+    ref_fast_point_vol ref_slow_point_vol ref_mixed_point_vol ref_price
+    ref_cur_price_ratio ref_slow_return_vol ref_spread_points
+    ref_slow_history_years ref_slow_vol_weight ref_zero_return_fraction
+    ref_strategy_rolls_per_year ref_strategy_recent_rolls_per_year
+    ref_strategy_recent_years ref_strategy_configured_rolls_per_year
+    ref_strategy_roll_rate_diff ref_ann_rolls
+    snap_bid snap_ask snap_spread_points snap_spread_cash_usd
+    snap_market_price snap_market_volume snap_market_high snap_market_low
+    ib_fast_mean_points ib_fast_median_points ib_fast_p90_points
+    ib_hspread_mean_points ib_hspread_median_points ib_hspread_p90_points
+    """,
+    float,
+)
+
+# Rule columns vary with the configured forecast speeds; cover the standard set.
+for _fast, _slow in ((4, 16), (8, 32), (16, 64), (32, 128), (64, 256)):
+    Sheet.knownCols[f"fcst_{_fast}_{_slow}"].type = float
