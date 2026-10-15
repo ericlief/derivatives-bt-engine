@@ -52,10 +52,16 @@ _vd_set_type(
     date,
 )
 
-# ISO-formatted timestamp columns in CSV reports.
+# ISO-formatted timestamp columns in CSV reports. Older VisiData releases may
+# not expose a separate datetime type; its date type can still parse ISO values.
+try:
+    _vd_datetime_type = datetime
+except NameError:
+    _vd_datetime_type = date
+
 _vd_set_type(
     "report_ts_ct snap_cache_ts_ct snap_quote_timestamp_ct fx_source_ts",
-    datetime,
+    _vd_datetime_type,
 )
 
 # Eligibility, validity, feasibility, and event flags.
