@@ -52,6 +52,9 @@ class SelectionScenario:
     maximum_instruments_per_cluster: int | None
     include_roll_cost_in_score: bool
     weight_policy: str
+    low_contract_penalty_scale: float = 0.0
+    high_contract_penalty_scale: float = 0.0
+    score_tie_tolerance_percent: float = 0.0
 
     @property
     def scenario_id(self) -> str:
@@ -61,16 +64,29 @@ class SelectionScenario:
             if self.maximum_instruments_per_cluster is None
             else str(self.maximum_instruments_per_cluster)
         )
-        return "_".join((
+        tokens = [
             f"tv{_number_token(self.target_volatility)}",
             f"im{_number_token(self.maximum_instrument_margin_percent)}",
             f"bm{_number_token(self.maximum_book_margin_percent)}",
             f"wi{_number_token(self.maximum_weight_idm)}",
             f"st{_number_token(self.score_threshold)}",
+        ]
+        if (
+            self.low_contract_penalty_scale
+            or self.high_contract_penalty_scale
+            or self.score_tie_tolerance_percent
+        ):
+            tokens.extend((
+                f"lp{_number_token(self.low_contract_penalty_scale)}",
+                f"hp{_number_token(self.high_contract_penalty_scale)}",
+                f"tie{_number_token(self.score_tie_tolerance_percent)}",
+            ))
+        tokens.extend((
             f"cl{cluster}",
             f"roll{int(self.include_roll_cost_in_score)}",
             self.weight_policy,
         ))
+        return "_".join(tokens)
 
 
 def _number_token(value: float) -> str:
@@ -84,6 +100,29 @@ def _positive_float_list(value: str) -> tuple[float, ...]:
     values = tuple(dict.fromkeys(float(item.strip()) for item in value.split(",")))
     if not values or any(item <= 0 for item in values):
         raise argparse.ArgumentTypeError("values must be positive numbers")
+    return values
+
+
+def _non_negative_float_list(value: str) -> tuple[float, ...]:
+    """Parse a comma-separated list of unique non-negative floats."""
+    try:
+        values = tuple(
+            dict.fromkeys(float(item.strip()) for item in value.split(","))
+        )
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "values must be comma-separated non-negative numbers"
+        ) from exc
+    if not values or any(item < 0 for item in values):
+        raise argparse.ArgumentTypeError("values must be non-negative numbers")
+    return values
+
+
+def _percent_list(value: str) -> tuple[float, ...]:
+    """Parse unique percentage values from zero through one hundred."""
+    values = _non_negative_float_list(value)
+    if any(item > 100 for item in values):
+        raise argparse.ArgumentTypeError("percentage values must be in [0, 100]")
     return values
 
 
@@ -210,6 +249,30 @@ def parse_args(argv=None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--low-con-penalty-scales",
+        dest="low_contract_penalty_scales",
+        type=_non_negative_float_list,
+        default=(0.0,),
+        help="Comma-separated low-position SR penalty scales (default: 0).",
+    )
+    parser.add_argument(
+        "--high-con-penalty-scales",
+        dest="high_contract_penalty_scales",
+        type=_non_negative_float_list,
+        default=(0.0,),
+        help="Comma-separated high-position SR penalty scales (default: 0).",
+    )
+    parser.add_argument(
+        "--score-tie-tolerance-pcts",
+        dest="score_tie_tolerance_percents",
+        type=_percent_list,
+        default=(0.0,),
+        help=(
+            "Comma-separated within-iteration near-tie windows in percent "
+            "(default: 0; suggested: .25,.5,1)."
+        ),
+    )
+    parser.add_argument(
         "--max-instr-per-clusters",
         type=_cluster_limit_list,
         default=(None,),
@@ -260,6 +323,9 @@ def build_scenarios(args: argparse.Namespace) -> list[SelectionScenario]:
             maximum_book_margin_percent=book_margin,
             maximum_weight_idm=weight_idm,
             score_threshold=score_threshold,
+            low_contract_penalty_scale=low_contract_penalty_scale,
+            high_contract_penalty_scale=high_contract_penalty_scale,
+            score_tie_tolerance_percent=score_tie_tolerance_percent,
             maximum_instruments_per_cluster=cluster_limit,
             include_roll_cost_in_score=include_roll_cost,
             weight_policy=args.weight_policy,
@@ -270,6 +336,9 @@ def build_scenarios(args: argparse.Namespace) -> list[SelectionScenario]:
             book_margin,
             weight_idm,
             score_threshold,
+            low_contract_penalty_scale,
+            high_contract_penalty_scale,
+            score_tie_tolerance_percent,
             cluster_limit,
             include_roll_cost,
         ) in product(
@@ -278,6 +347,9 @@ def build_scenarios(args: argparse.Namespace) -> list[SelectionScenario]:
             args.max_book_margin_pcts,
             args.max_weight_idms,
             args.score_thresholds,
+            args.low_contract_penalty_scales,
+            args.high_contract_penalty_scales,
+            args.score_tie_tolerance_percents,
             args.max_instr_per_clusters,
             roll_modes,
         )
@@ -315,6 +387,12 @@ def _selection_command(
         str(scenario.maximum_weight_idm),
         "--score-threshold",
         str(scenario.score_threshold),
+        "--low-con-penalty-scale",
+        str(scenario.low_contract_penalty_scale),
+        "--high-con-penalty-scale",
+        str(scenario.high_contract_penalty_scale),
+        "--score-tie-tolerance-pct",
+        str(scenario.score_tie_tolerance_percent),
         "--weight-policy",
         scenario.weight_policy,
     ]
@@ -358,6 +436,9 @@ def _summary_row(
         "maximum_book_margin_percent": scenario.maximum_book_margin_percent,
         "maximum_weight_idm": scenario.maximum_weight_idm,
         "score_threshold": scenario.score_threshold,
+        "low_contract_penalty_scale": scenario.low_contract_penalty_scale,
+        "high_contract_penalty_scale": scenario.high_contract_penalty_scale,
+        "score_tie_tolerance_percent": scenario.score_tie_tolerance_percent,
         "maximum_instruments_per_cluster": (
             scenario.maximum_instruments_per_cluster
         ),
@@ -371,6 +452,11 @@ def _summary_row(
         "selected_symbols": "",
         "final_idm": None,
         "construction_score": None,
+        "base_construction_score": None,
+        "low_contract_weight": None,
+        "band_contract_weight": None,
+        "high_contract_weight": None,
+        "contract_band_loss": None,
         "maximum_instrument_margin_usd": None,
         "book_margin_at_maximum_usd": None,
         "error": error,
@@ -407,6 +493,11 @@ def _summary_row(
         "selected_symbols": ",".join(symbols),
         "final_idm": _column_max(book, "idm"),
         "construction_score": construction_score,
+        "base_construction_score": _column_max(book, "base_score"),
+        "low_contract_weight": _column_max(book, "low_con_weight"),
+        "band_contract_weight": _column_max(book, "band_con_weight"),
+        "high_contract_weight": _column_max(book, "high_con_weight"),
+        "contract_band_loss": _column_max(book, "con_band_loss"),
         "maximum_instrument_margin_usd": _column_max(
             book, "margin_at_max_usd"
         ),
@@ -472,6 +563,9 @@ def _attach_baseline_overlap(summary: pl.DataFrame) -> pl.DataFrame:
             + (pl.col("maximum_book_margin_percent") - 75.0).abs() / 100.0
             + (pl.col("maximum_weight_idm") - 0.20).abs()
             + (pl.col("score_threshold") - 0.90).abs()
+            + pl.col("low_contract_penalty_scale").abs()
+            + pl.col("high_contract_penalty_scale").abs()
+            + pl.col("score_tie_tolerance_percent").abs() / 100.0
             + pl.when(pl.col("maximum_instruments_per_cluster").is_null())
               .then(0.0).otherwise(1.0)
             + pl.when(pl.col("include_roll_cost_in_score"))

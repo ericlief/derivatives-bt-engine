@@ -219,6 +219,48 @@ def parse_args(argv=None, *, complete_default: bool = False):
     parser.add_argument("--score-threshold", type=float, default=0.90)
     parser.add_argument("--gross-sr", type=float, default=0.50)
     parser.add_argument(
+        "--low-con-penalty-scale",
+        dest="low_contract_penalty_scale",
+        type=float,
+        default=0.0,
+        help=(
+            "Log-squared SR penalty scale below --con-band-min; disabled at 0"
+        ),
+    )
+    parser.add_argument(
+        "--high-con-penalty-scale",
+        dest="high_contract_penalty_scale",
+        type=float,
+        default=0.0,
+        help=(
+            "Log-squared SR penalty scale above --con-band-max; disabled at 0"
+        ),
+    )
+    parser.add_argument(
+        "--con-band-min",
+        dest="contract_band_min",
+        type=float,
+        default=2.5,
+        help="Lower continuous maximum-position boundary (default: 2.5).",
+    )
+    parser.add_argument(
+        "--con-band-max",
+        dest="contract_band_max",
+        type=float,
+        default=5.5,
+        help="Upper continuous maximum-position boundary (default: 5.5).",
+    )
+    parser.add_argument(
+        "--score-tie-tolerance-pct",
+        dest="score_tie_tolerance_percent",
+        type=float,
+        default=0.0,
+        help=(
+            "Within-iteration score window in percent for the contract-band "
+            "tie-break; disabled at 0 (suggested sensitivities: .25,.5,1)"
+        ),
+    )
+    parser.add_argument(
         "--include-roll-cost-in-score",
         action="store_true",
         help=(
@@ -660,6 +702,11 @@ def _run_complete_selection(
             target_vol=float(run_config["target_vol"]),
             gross_sr=args.gross_sr,
             score_threshold=args.score_threshold,
+            low_contract_penalty_scale=args.low_contract_penalty_scale,
+            high_contract_penalty_scale=args.high_contract_penalty_scale,
+            contract_band_min=args.contract_band_min,
+            contract_band_max=args.contract_band_max,
+            score_tie_tolerance_percent=args.score_tie_tolerance_percent,
             max_weight_idm=args.max_weight_idm,
             max_pct_market_volume=float(run_config["max_pct_mkt_volume"]),
             liquidity_days=int(run_config["liq_days"]),
@@ -673,12 +720,17 @@ def _run_complete_selection(
     selection = selector.select(candidate_list, correlation)
     for trial in selection.trials:
         logger.debug(
-            "selection_trial iteration=%s candidate=%s book=%s score=%s idm=%s "
+            "selection_trial iteration=%s candidate=%s book=%s score=%s "
+            "base_score=%s contract_band_loss=%s tie_eligible=%s "
+            "tie_break_applied=%s idm=%s "
             "portfolio_cont_margin_at_max_usd=%s "
             "portfolio_margin_at_max_usd=%s instr_margin_limit_usd=%s "
             "book_margin_limit_usd=%s book_margin_remaining_usd=%s "
             "roll_cost_in_score=%s feasible=%s accepted=%s reason=%s",
             trial["iteration"], trial["candidate"], trial["book"], trial["score"],
+            trial["base_score"], trial["contract_band_loss"],
+            trial["tie_eligible"],
+            trial["tie_break_applied"],
             trial["idm"], trial.get("portfolio_cont_margin_at_max_usd"),
             trial.get("portfolio_margin_at_max_usd"),
             trial.get("instr_margin_limit_usd"),
@@ -710,6 +762,11 @@ def _run_complete_selection(
             "max_instr_per_cluster": args.max_instr_per_cluster,
             "max_instr_margin_pct": args.max_instr_margin_pct,
             "max_book_margin_pct": effective_book_margin_pct,
+            "low_contract_penalty_scale": args.low_contract_penalty_scale,
+            "high_contract_penalty_scale": args.high_contract_penalty_scale,
+            "contract_band_min": args.contract_band_min,
+            "contract_band_max": args.contract_band_max,
+            "score_tie_tolerance_percent": args.score_tie_tolerance_percent,
             "roll_cost_in_score": args.include_roll_cost_in_score,
             "buffer_size": args.buffer_size,
             "buffer_trade_to_edge": args.buffer_trade_to_edge,
@@ -718,6 +775,11 @@ def _run_complete_selection(
             # This is the whole-book score; repeat it on each membership row
             # so the grid summary can read it from the selected-book Parquet.
             "score": selection.final_score.score,
+            "base_score": selection.final_score.base_score,
+            "low_contract_weight": selection.final_score.low_contract_weight,
+            "band_contract_weight": selection.final_score.band_contract_weight,
+            "high_contract_weight": selection.final_score.high_contract_weight,
+            "contract_band_loss": selection.final_score.contract_band_loss,
             "ann_dvol": candidate.ann_dvol,
             "trade_sr": candidate.trade_sr,
             "roll_sr": candidate.roll_sr,
@@ -850,6 +912,17 @@ def _run_complete_selection(
                 pl.lit(args.include_roll_cost_in_score).alias(
                     "roll_cost_in_score"
                 ),
+                pl.lit(args.low_contract_penalty_scale).alias(
+                    "low_contract_penalty_scale"
+                ),
+                pl.lit(args.high_contract_penalty_scale).alias(
+                    "high_contract_penalty_scale"
+                ),
+                pl.lit(args.contract_band_min).alias("contract_band_min"),
+                pl.lit(args.contract_band_max).alias("contract_band_max"),
+                pl.lit(args.score_tie_tolerance_percent).alias(
+                    "score_tie_tolerance_percent"
+                ),
             )
         )
     )
@@ -863,6 +936,17 @@ def _run_complete_selection(
                 ),
                 pl.lit(args.include_roll_cost_in_score).alias(
                     "roll_cost_in_score"
+                ),
+                pl.lit(args.low_contract_penalty_scale).alias(
+                    "low_contract_penalty_scale"
+                ),
+                pl.lit(args.high_contract_penalty_scale).alias(
+                    "high_contract_penalty_scale"
+                ),
+                pl.lit(args.contract_band_min).alias("contract_band_min"),
+                pl.lit(args.contract_band_max).alias("contract_band_max"),
+                pl.lit(args.score_tie_tolerance_percent).alias(
+                    "score_tie_tolerance_percent"
                 ),
             )
         )
@@ -882,6 +966,17 @@ def _run_complete_selection(
             pl.lit(args.include_roll_cost_in_score).alias(
                 "roll_cost_in_score"
             ),
+            pl.lit(args.low_contract_penalty_scale).alias(
+                "low_contract_penalty_scale"
+            ),
+            pl.lit(args.high_contract_penalty_scale).alias(
+                "high_contract_penalty_scale"
+            ),
+            pl.lit(args.contract_band_min).alias("contract_band_min"),
+            pl.lit(args.contract_band_max).alias("contract_band_max"),
+            pl.lit(args.score_tie_tolerance_percent).alias(
+                "score_tie_tolerance_percent"
+            ),
         )
         .select(
             pl.col("iteration").alias("selection_step"),
@@ -900,19 +995,39 @@ def _run_complete_selection(
             "limit_weight",
             "idm",
             "score",
+            "base_score",
+            "low_contract_weight",
+            "band_contract_weight",
+            "high_contract_weight",
+            "contract_band_loss",
+            "low_contract_penalty_scale",
+            "high_contract_penalty_scale",
+            "contract_band_min",
+            "contract_band_max",
+            "score_tie_tolerance_percent",
+            "iter_score_best",
+            "iter_score_best_score",
+            "tie_score_floor",
+            "tie_eligible",
+            "tie_break_applied",
             "roll_cost_in_score",
             "score_cost_sr",
             "ann_trade_cost_sr",
             "ann_roll_cost_sr",
             "ann_cost_sr",
             "net_sr",
+            "base_net_sr",
             "size_penalty_sr",
+            "low_contract_penalty_sr",
+            "high_contract_penalty_sr",
+            "contract_band_penalty_sr",
             "score_denom",
             "marginal_contribution_score",
             "scaled_contribution",
             "avg_cons",
             "ann_trade_cons",
             "ann_roll_cons",
+            "annual_contract_load",
             "trade_cost_usd_per_con",
             "roll_cost_usd_per_con",
             "ann_trade_cost_usd",
@@ -973,6 +1088,18 @@ def run(
     supplied.
     """
     args = parse_args(argv, complete_default=complete_default)
+    if (
+        args.low_contract_penalty_scale < 0
+        or args.high_contract_penalty_scale < 0
+    ):
+        raise ValueError("contract penalty scales must be non-negative")
+    if (
+        args.contract_band_min <= 0
+        or args.contract_band_max <= args.contract_band_min
+    ):
+        raise ValueError("contract band must have positive increasing bounds")
+    if not 0 <= args.score_tie_tolerance_percent <= 100:
+        raise ValueError("score tie tolerance must be in [0, 100]")
     setup_logger()
     if args.output is not None and args.output.suffix.lower() != ".parquet":
         raise ValueError("--output must use a .parquet extension")

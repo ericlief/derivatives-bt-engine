@@ -26,7 +26,8 @@ _vd_set_type(
     exec_restrict_reason selection_excl sel_bucket
     elig_ewmac_rules forecast_weights forecast_excl subsystem_excl
     fx_pair fx_src fx_error reason instr_reason
-    candidate book added_symbol wt_policy cluster_path cluster_members
+    candidate book added_symbol iter_best iter_score_best
+    wt_policy cluster_path cluster_members
     snap_hist_duration snap_spread_duration snap_volume_duration
     snap_req_market_data_type snap_vol_src snap_market_data_type
     snap_error_codes snap_selected_error_codes snap_spread_quality
@@ -72,6 +73,7 @@ _vd_set_type(
     instr_has_elig_ewmac_rule include_default_pool
     forecast_elig subsystem_elig forecast_valid fx_valid pnl_valid
     cash_fx_valid cash_pnl_valid is_roll roll_event feasible accepted
+    tie_eligible tie_break_applied
     roll_cost_in_score buf_trade_to_edge snap_use_rth
     main_instr_afford_for_scen counts_toward_main_instr_min
     equal_wt_meets_min_cons ib_fast_requests_allowed
@@ -115,10 +117,17 @@ _vd_set_type(
     risk_target daily_risk_pts ann_risk_pts
     max_position max_weight_idm max_instr_margin_pct max_book_margin_pct
     average_daily_volume avg_daily_volume one_way_cost_per_dvol
-    score iter_best_score min_accept_score idm weight limit_weight
-    score_cost_sr ann_trade_cost_sr ann_roll_cost_sr ann_cost_sr net_sr
-    size_penalty_sr score_denom marg_score scaled_contrib
-    avg_cons ann_trade_cons ann_roll_cons max_cons
+    score base_score construction_score base_construction_score
+    iter_best_score iter_score_best_score tie_score_floor min_accept_score
+    idm weight limit_weight
+    score_cost_sr ann_trade_cost_sr ann_roll_cost_sr ann_cost_sr
+    base_net_sr net_sr size_penalty_sr
+    low_con_penalty_sr high_con_penalty_sr con_band_penalty_sr
+    low_con_penalty_scale high_con_penalty_scale
+    con_band_min con_band_max score_tie_tolerance_pct
+    low_con_weight band_con_weight high_con_weight con_band_loss
+    score_denom marg_score scaled_contrib
+    avg_cons ann_trade_cons ann_roll_cons ann_con_load max_cons
     trade_cost_per_con roll_cost_per_con
     ann_trade_cost ann_roll_cost ann_cost
     trade_cost_usd_per_con roll_cost_usd_per_con

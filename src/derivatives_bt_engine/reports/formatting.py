@@ -37,6 +37,19 @@ PUBLIC_REPORT_RENAMES = {
     "buffer_trade_to_edge": "buf_trade_to_edge",
     "marginal_contribution_score": "marg_score",
     "scaled_contribution": "scaled_contrib",
+    "low_contract_penalty_scale": "low_con_penalty_scale",
+    "high_contract_penalty_scale": "high_con_penalty_scale",
+    "contract_band_min": "con_band_min",
+    "contract_band_max": "con_band_max",
+    "score_tie_tolerance_percent": "score_tie_tolerance_pct",
+    "low_contract_weight": "low_con_weight",
+    "band_contract_weight": "band_con_weight",
+    "high_contract_weight": "high_con_weight",
+    "contract_band_loss": "con_band_loss",
+    "low_contract_penalty_sr": "low_con_penalty_sr",
+    "high_contract_penalty_sr": "high_con_penalty_sr",
+    "contract_band_penalty_sr": "con_band_penalty_sr",
+    "annual_contract_load": "ann_con_load",
 }
 
 
@@ -173,6 +186,10 @@ SIX_DECIMAL_RATE_COLUMNS = {
     "ann_return_vol",
     "daily_ret_vol",
     "ann_ret_vol",
+    "low_contract_penalty_scale",
+    "high_contract_penalty_scale",
+    "low_con_penalty_scale",
+    "high_con_penalty_scale",
 }
 
 

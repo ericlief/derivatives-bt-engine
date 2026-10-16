@@ -987,15 +987,18 @@ baseline by default. The command writes:
   accepted flag. Every rejected row has a decision `reason`: hard-constraint
   failures retain their feasibility reason, while feasible losers distinguish
   a lower singleton rank, a lower rank than the iteration winner, or a best
-  score below the acceptance threshold. `iter_best`, `iter_best_score`, and
-  `min_accept_score` make that comparison directly auditable; and
+  score below the acceptance threshold. Near-tie losers identify the
+  contract-band tie break. `iter_best`, `iter_best_score`,
+  `iter_score_best`, `iter_score_best_score`, `tie_score_floor`, and
+  `min_accept_score` make those comparisons directly auditable; and
 - `multi_speed_ewmac_selection_passes_<timestamp>.parquet`, the readable
   accepted path only: `selection_step` identifies the pass, `added_symbol` is
   its winner, and each `symbol` row records that accepted book member's
   terminal subclass, subclass membership, subclass weight, instrument weight,
-  `net_sr`, `size_penalty_sr`, the shared `score_denom`, and its weighted-net
+  `base_net_sr`, `net_sr`, the size and contract-penalty columns, continuous
+  position-band weights, the shared `score_denom`, and its weighted-net
   `marg_score` and denominator-scaled `scaled_contrib` alongside annual cost
-  components;
+  and contract-load components;
   and
 - `multi_speed_ewmac_selection_book_<timestamp>.parquet`, the last accepted book.
 
@@ -1010,13 +1013,15 @@ model conviction after the universe has already been selected.
 
 In the final selection report, `net_sr` is an instrument-level input to the
 portfolio score: the common gross SR assumption less that instrument's annual
-combined-forecast trading cost and its final-book granularity penalty. It is
+combined-forecast trading cost, size penalty, and optional low/high contract
+penalties. `base_net_sr` omits only the low/high contract penalties. It is
 not the book score when the ranked instrument was added. The accepted rows in
 the trials Parquet table records that sequence: `book` is the hypothetical portfolio and
 `score` is its portfolio-level score at that iteration.
-The accepted passes Parquet report includes the per-instrument `size_penalty_sr` used in
-that calculation so changes in granularity can be inspected pass by pass. It
-also records `net_sr`, the shared book `score_denom`, and each member's
+The accepted passes Parquet report includes `size_penalty_sr`,
+`low_con_penalty_sr`, `high_con_penalty_sr`, and `con_band_penalty_sr` so
+changes in granularity can be inspected pass by pass. It also records
+`base_score`, the adjusted `score`, `net_sr`, the shared book `score_denom`, and each member's
 `marg_score`, defined as `weight * net_sr`, and `scaled_contrib`, defined as
 `marg_score / score_denom`. The `scaled_contrib` values sum to the repeated
 book-level `score` in each accepted pass; the raw numerator contributions and
@@ -1181,9 +1186,29 @@ contracts; otherwise:
 
 ```text
 size_penalty_i = 0.125 / P_i**2
-net_SR_i = 0.5 - annual_trading_cost_SR_i - size_penalty_i
+base_net_SR_i = 0.5 - annual_trading_cost_SR_i - size_penalty_i
 portfolio_score(B) = (w . net_SR) / sqrt(w' H w)
 ```
+
+Small-account construction can add separate penalties below and above a target
+continuous maximum-position band. With the default band `[2.5, 5.5)`, the
+unpenalized interval rounds half-up to three through five contracts:
+
+```text
+low_con_penalty_SR_i
+    = lambda_low * max(0, log(2.5 / P_i))**2
+high_con_penalty_SR_i
+    = lambda_high * max(0, log(P_i / 5.5))**2
+net_SR_i
+    = base_net_SR_i - low_con_penalty_SR_i - high_con_penalty_SR_i
+```
+
+`--low-con-penalty-scale` and `--high-con-penalty-scale` set the two lambdas;
+both default to zero, preserving the AFTS baseline. `--con-band-min` and
+`--con-band-max` change the continuous boundaries. Reports retain
+`base_score`, the adjusted `score`, each penalty component, and the low, band,
+and high risk-weight masses. `ann_con_load` reports ordinary annual trade
+contracts plus twice annual roll contracts as a separate operational measure.
 
 The constant gross Sharpe assumption of 0.5 is intentional. Instrument-specific
 pre-cost backtest performance must not decide which markets survive. The exact
@@ -1377,6 +1402,30 @@ scenarios. To test the saved-path retention values, sweep
 scenarios for each combination of the other selected settings. A value of
 `1.00` only admits a candidate if it matches the best score seen at that step.
 
+An optional near-tie rule can change which candidate enters rather than only
+changing where the same greedy path stops. Set `--score-tie-tolerance-pct` to
+the allowed percentage below the iteration's best adjusted construction score.
+The selector first applies hard feasibility and the global score-acceptance
+floor. It then chooses the candidate with the lowest soft contract-band loss
+inside the near-tie window:
+
+```text
+loss = max(0, low_con_weight - 0.50)**2
+     + max(0, 0.30 - band_con_weight)**2
+     + max(0, high_con_weight - 0.15)**2
+```
+
+The value defaults to zero, which preserves highest-score selection. Trial
+audits save the score leader, selected candidate, tie score floor, eligibility,
+loss, and whether the tie rule changed the winner. The grid runner accepts
+`--score-tie-tolerance-pcts 0,.25,.5,1`.
+
+Contract penalties are grid axes as well. Use
+`--low-con-penalty-scales 0,.06,.12,.24` and
+`--high-con-penalty-scales 0,.0075,.015,.03`. Run these in stages rather than
+forming the complete Cartesian product: first select a low-position scale,
+then test the high-position scale, and finally test the near-tie window.
+
 Then vary one structural family at a time around a stable central scenario:
 
 - `max_book_margin_pct=50,75,100` tests total account margin usage;
@@ -1452,8 +1501,11 @@ Run secondary constraint tests separately, for example:
   --target-vols 0.20 \
   --max-instr-margin-pcts 20 \
   --roll-cost-modes include \
-  --score-thresholds 0.90,0.95,0.975,0.99,1.00 \
-  --max-book-margin-pcts 50,75,100 \
-  --max-weight-idms 0.15,0.20,0.25 \
-  --max-instr-per-clusters 2,3,none
+  --score-thresholds 0.99,1.00 \
+  --max-book-margin-pcts 50,75 \
+  --max-weight-idms 0.20 \
+  --max-instr-per-clusters 2 \
+  --low-con-penalty-scales 0,.06,.12,.24 \
+  --high-con-penalty-scales 0 \
+  --score-tie-tolerance-pcts 0
 ```

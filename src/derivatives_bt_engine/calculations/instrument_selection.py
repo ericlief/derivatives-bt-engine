@@ -134,7 +134,14 @@ class GreedySelectionConfig:
     ``max_instruments_per_cluster`` optionally limits the number of selected
     instruments sharing one economic subclass, such as ``grains``.
     ``score_threshold`` controls the tolerated decline from the best score
-    observed so far. ``include_roll_cost_in_score`` changes the greedy net-SR
+    observed so far. ``low_contract_penalty_scale`` and
+    ``high_contract_penalty_scale`` apply separate log-squared penalties
+    outside the continuous maximum-position interval from
+    ``contract_band_min`` through ``contract_band_max``.
+    ``score_tie_tolerance_percent`` optionally admits trial scores within that
+    percentage of the iteration leader, then prefers the book with the
+    smallest contract-band concentration loss.
+    ``include_roll_cost_in_score`` changes the greedy net-SR
     deduction from ordinary trading cost alone to ordinary trading plus the
     reference holding-roll allowance. ``max_instrument_margin_pct`` optionally
     limits any one instrument's rounded maximum-position margin as a percentage
@@ -155,6 +162,11 @@ class GreedySelectionConfig:
     forecast_cap_ratio: float = 2.0
     min_max_position: float = 0.5
     size_penalty_scale: float = 0.125
+    low_contract_penalty_scale: float = 0.0
+    high_contract_penalty_scale: float = 0.0
+    contract_band_min: float = 2.5
+    contract_band_max: float = 5.5
+    score_tie_tolerance_percent: float = 0.0
     liquidity_days: int = 250
     max_pct_market_volume: float = 1.0
     max_instruments_per_cluster: int | None = None
@@ -174,6 +186,18 @@ class GreedySelectionConfig:
             raise ValueError("max_idm and forecast_cap_ratio are invalid")
         if self.min_max_position <= 0 or self.size_penalty_scale < 0:
             raise ValueError("position and penalty parameters are invalid")
+        if (
+            self.low_contract_penalty_scale < 0
+            or self.high_contract_penalty_scale < 0
+        ):
+            raise ValueError("contract penalty scales must be non-negative")
+        if (
+            self.contract_band_min <= 0
+            or self.contract_band_max <= self.contract_band_min
+        ):
+            raise ValueError("contract band must have positive increasing bounds")
+        if not 0 <= self.score_tie_tolerance_percent <= 100:
+            raise ValueError("score_tie_tolerance_percent must be in [0, 100]")
         if self.liquidity_days <= 0 or self.max_pct_market_volume <= 0:
             raise ValueError("liquidity parameters must be positive")
         if (
@@ -384,9 +408,12 @@ class HandcraftedPortfolioWeights(PortfolioWeightPolicy):
 class PortfolioScore:
     """Describe one complete trial book and all instrument-level diagnostics.
 
-    ``score`` is negative infinity when any member violates a hard size or
-    liquidity constraint. ``details`` retains the calculated position, cost,
-    penalty, risk traded, and participation for every member.
+    ``base_score`` retains the AFTS cost and size-penalty result before the
+    optional low/high contract penalties; ``score`` includes those penalties.
+    Both are negative infinity when any member violates a hard constraint.
+    The three contract weights and ``contract_band_loss`` summarize the soft
+    book-level tie break. ``details`` retains the position, cost, penalty,
+    contract load, risk traded, and participation for every member.
     """
 
     symbols: tuple[str, ...]
@@ -394,6 +421,11 @@ class PortfolioScore:
     cluster_paths: dict[str, str]
     idm: float
     score: float
+    base_score: float
+    low_contract_weight: float
+    band_contract_weight: float
+    high_contract_weight: float
+    contract_band_loss: float
     feasible: bool
     reason: str
     details: tuple[dict[str, object], ...]
@@ -467,6 +499,75 @@ class GreedyInstrumentSelector:
             raise ValueError("max_position must be finite and non-negative")
         return 0 if max_position < 0.5 else math.floor(max_position + 0.5)
 
+    def _contract_penalties(self, max_position: float) -> tuple[float, float]:
+        """Return low- and high-position SR penalties outside the target band.
+
+        The ratio-based logarithm treats equal multiplicative misses from the
+        band symmetrically while allowing the two tails to use different
+        scales. Position is continuous so rounding does not create artificial
+        score jumps at whole-contract boundaries.
+        """
+        low_penalty = self.config.low_contract_penalty_scale * max(
+            0.0, math.log(self.config.contract_band_min / max_position)
+        ) ** 2
+        high_penalty = self.config.high_contract_penalty_scale * max(
+            0.0, math.log(max_position / self.config.contract_band_max)
+        ) ** 2
+        return low_penalty, high_penalty
+
+    def _choose_near_tie(
+        self,
+        feasible: list[tuple[str, PortfolioScore]],
+        *,
+        min_accept_score: float | None = None,
+    ) -> tuple[
+        tuple[str, PortfolioScore],
+        tuple[str, PortfolioScore],
+        float,
+        frozenset[str],
+    ]:
+        """Choose the score leader or the best-granularity near-tie candidate.
+
+        The score window is measured before applying the book-level tie break,
+        using the iteration's highest penalty-adjusted construction score.
+        When enabled, books below the global acceptance floor remain excluded.
+        Within the surviving window, contract-band loss is minimized before
+        score and symbol provide deterministic ties.
+        """
+        score_leader = max(feasible, key=lambda item: (item[1].score, item[0]))
+        best_score = score_leader[1].score
+        tolerance = self.config.score_tie_tolerance_percent
+        tie_score_floor = best_score - abs(best_score) * tolerance / 100.0
+        if tolerance == 0:
+            return (
+                score_leader,
+                score_leader,
+                tie_score_floor,
+                frozenset((score_leader[0],)),
+            )
+        effective_floor = (
+            tie_score_floor
+            if min_accept_score is None
+            else max(tie_score_floor, min_accept_score)
+        )
+        tie_candidates = [
+            item for item in feasible if item[1].score >= effective_floor
+        ]
+        winner = max(
+            tie_candidates,
+            key=lambda item: (
+                -item[1].contract_band_loss,
+                item[1].score,
+                item[0],
+            ),
+        )
+        return (
+            winner,
+            score_leader,
+            effective_floor,
+            frozenset(symbol for symbol, _ in tie_candidates),
+        )
+
     def score(
         self,
         symbols: list[str],
@@ -527,6 +628,7 @@ class GreedyInstrumentSelector:
         feasible = True
         reasons: list[str] = []
         net_sharpes: dict[str, float] = {}
+        base_net_sharpes: dict[str, float] = {}
         instrument_margin_limit_usd = (
             self.config.capital
             * self.config.max_instrument_margin_pct
@@ -575,6 +677,10 @@ class GreedyInstrumentSelector:
                 if max_position < self.config.min_max_position
                 else self.config.size_penalty_scale / max_position**2
             )
+            low_contract_penalty, high_contract_penalty = self._contract_penalties(
+                max_position
+            )
+            contract_band_penalty = low_contract_penalty + high_contract_penalty
             # The AFTS baseline subtracts combined-forecast trading cost. The
             # optional conservative mode also deducts scheduled holding rolls.
             score_cost_sr = (
@@ -582,7 +688,8 @@ class GreedyInstrumentSelector:
                 if self.config.include_roll_cost_in_score
                 else candidate.annual_trade_cost_sr
             )
-            net_sr = self.config.gross_sr - score_cost_sr - size_penalty
+            base_net_sr = self.config.gross_sr - score_cost_sr - size_penalty
+            net_sr = base_net_sr - contract_band_penalty
             # The forecast-cap position is twice the average position under
             # the conventional 20/10 forecast ratio. Translate both turnover
             # and scheduled rolls into actual annual contract volume and USD
@@ -590,6 +697,7 @@ class GreedyInstrumentSelector:
             avg_position = max_position / self.config.forecast_cap_ratio
             ann_trade_cons = avg_position * candidate.combined_turnover
             ann_roll_cons = avg_position * candidate.ann_rolls
+            annual_contract_load = ann_trade_cons + 2.0 * ann_roll_cons
             ann_trade_cost_usd = (
                 ann_trade_cons * candidate.trade_cost_usd_per_con
             )
@@ -648,6 +756,7 @@ class GreedyInstrumentSelector:
                 feasible = False
                 reasons.append(f"{symbol}:{reason}")
             net_sharpes[symbol] = net_sr
+            base_net_sharpes[symbol] = base_net_sr
             details.append({
                 "symbol": symbol,
                 "asset_cls": candidate.asset_class,
@@ -664,6 +773,7 @@ class GreedyInstrumentSelector:
                 "avg_cons": avg_position,
                 "ann_trade_cons": ann_trade_cons,
                 "ann_roll_cons": ann_roll_cons,
+                "annual_contract_load": annual_contract_load,
                 "trade_cost_usd_per_con": candidate.trade_cost_usd_per_con,
                 "roll_cost_usd_per_con": candidate.roll_cost_usd_per_con,
                 "ann_trade_cost_usd": ann_trade_cost_usd,
@@ -672,6 +782,10 @@ class GreedyInstrumentSelector:
                 "max_position": max_position,
                 "max_cons": max_contracts,
                 "size_penalty_sr": size_penalty,
+                "low_contract_penalty_sr": low_contract_penalty,
+                "high_contract_penalty_sr": high_contract_penalty,
+                "contract_band_penalty_sr": contract_band_penalty,
+                "base_net_sr": base_net_sr,
                 "net_sr": net_sr,
                 "risk_traded_day": risk_traded_day,
                 "pct_mkt_volume": pct_market,
@@ -720,7 +834,35 @@ class GreedyInstrumentSelector:
         vector = np.array([weights[symbol] for symbol in symbols])
         denominator = math.sqrt(max(float(vector @ correlation @ vector), 0.0))
         numerator = sum(weights[symbol] * net_sharpes[symbol] for symbol in symbols)
+        base_numerator = sum(
+            weights[symbol] * base_net_sharpes[symbol] for symbol in symbols
+        )
         score = numerator / denominator if denominator > 0 and feasible else -math.inf
+        base_score = (
+            base_numerator / denominator
+            if denominator > 0 and feasible else -math.inf
+        )
+        low_contract_weight = sum(
+            weights[str(detail["symbol"])] for detail in details
+            if float(detail["max_position"]) < self.config.contract_band_min
+        )
+        band_contract_weight = sum(
+            weights[str(detail["symbol"])] for detail in details
+            if self.config.contract_band_min
+            <= float(detail["max_position"])
+            < self.config.contract_band_max
+        )
+        high_contract_weight = sum(
+            weights[str(detail["symbol"])] for detail in details
+            if float(detail["max_position"]) >= self.config.contract_band_max
+        )
+        # Reference levels come from the small-account EDA. They are a soft
+        # secondary preference and never make a trial infeasible.
+        contract_band_loss = (
+            max(0.0, low_contract_weight - 0.50) ** 2
+            + max(0.0, 0.30 - band_contract_weight) ** 2
+            + max(0.0, high_contract_weight - 0.15) ** 2
+        )
         # Keep each member's weighted net SR (the book-score numerator
         # contribution) and the shared risk denominator available for audit.
         # The book score is the sum of these marginal contributions divided
@@ -744,6 +886,11 @@ class GreedyInstrumentSelector:
             cluster_paths=allocation_result.cluster_paths,
             idm=idm,
             score=score,
+            base_score=base_score,
+            low_contract_weight=low_contract_weight,
+            band_contract_weight=band_contract_weight,
+            high_contract_weight=high_contract_weight,
+            contract_band_loss=contract_band_loss,
             feasible=feasible,
             reason=";".join(reasons),
             details=tuple(details),
@@ -784,7 +931,15 @@ class GreedyInstrumentSelector:
         feasible_singletons = [score for score in singleton_scores if score.feasible]
         if not feasible_singletons:
             raise ValueError("no candidate passed singleton granularity and liquidity")
-        current = max(feasible_singletons, key=lambda item: (item.score, item.symbols[0]))
+        singleton_trials = [
+            (score.symbols[0], score) for score in feasible_singletons
+        ]
+        (
+            (seed_symbol, current),
+            (seed_score_leader, seed_leader_score),
+            seed_tie_floor,
+            seed_tie_eligible,
+        ) = self._choose_near_tie(singleton_trials)
         selected = list(current.symbols)
         # Match the published AFTS loop: singleton scoring chooses the seed,
         # while the first n+1 book establishes the tolerance benchmark.
@@ -793,8 +948,12 @@ class GreedyInstrumentSelector:
             trials,
             trial_allocations,
             iteration=0,
-            best_candidate=selected[-1],
+            best_candidate=seed_symbol,
             best_score=current.score,
+            score_best_candidate=seed_score_leader,
+            score_best_score=seed_leader_score.score,
+            tie_score_floor=seed_tie_floor,
+            tie_eligible=seed_tie_eligible,
             min_accept_score=None,
             accepted=True,
         )
@@ -836,30 +995,50 @@ class GreedyInstrumentSelector:
             feasible = [item for item in scored_trials if item[1].feasible]
             if not feasible:
                 break
-            winner, winning_score = max(
+            min_accept_score = self.config.score_threshold * best_seen
+            score_leader, leader_score = max(
                 feasible, key=lambda item: (item[1].score, item[0])
             )
-            min_accept_score = self.config.score_threshold * best_seen
-            if winning_score.score < min_accept_score:
+            if leader_score.score < min_accept_score:
                 self._finalize_iteration(
                     trials,
                     trial_allocations,
                     iteration=iteration,
-                    best_candidate=winner,
-                    best_score=winning_score.score,
+                    best_candidate=score_leader,
+                    best_score=leader_score.score,
+                    score_best_candidate=score_leader,
+                    score_best_score=leader_score.score,
+                    tie_score_floor=leader_score.score,
+                    tie_eligible=frozenset((score_leader,)),
                     min_accept_score=min_accept_score,
                     accepted=False,
                 )
                 break
+            (
+                (winner, winning_score),
+                (score_leader, leader_score),
+                tie_score_floor,
+                tie_eligible,
+            ) = self._choose_near_tie(
+                feasible,
+                min_accept_score=min_accept_score,
+            )
             selected.append(winner)
             current = winning_score
-            best_seen = max(best_seen, winning_score.score)
+            # The acceptance benchmark follows the best score available in
+            # the iteration, even when the opt-in tie rule selects a nearby
+            # book with better contract granularity.
+            best_seen = max(best_seen, leader_score.score)
             self._finalize_iteration(
                 trials,
                 trial_allocations,
                 iteration=iteration,
                 best_candidate=winner,
                 best_score=winning_score.score,
+                score_best_candidate=score_leader,
+                score_best_score=leader_score.score,
+                tie_score_floor=tie_score_floor,
+                tie_eligible=tie_eligible,
                 min_accept_score=min_accept_score,
                 accepted=True,
             )
@@ -903,7 +1082,14 @@ class GreedyInstrumentSelector:
             "candidate": candidate,
             "book": ",".join(score.symbols),
             "score": score.score if math.isfinite(score.score) else None,
+            "base_score": (
+                score.base_score if math.isfinite(score.base_score) else None
+            ),
             "idm": score.idm,
+            "low_contract_weight": score.low_contract_weight,
+            "band_contract_weight": score.band_contract_weight,
+            "high_contract_weight": score.high_contract_weight,
+            "contract_band_loss": score.contract_band_loss,
             "feasible": score.feasible,
             "accepted": accepted,
             "reason": score.reason,
@@ -925,6 +1111,11 @@ class GreedyInstrumentSelector:
             ),
             "iter_best": None,
             "iter_best_score": None,
+            "iter_score_best": None,
+            "iter_score_best_score": None,
+            "tie_score_floor": None,
+            "tie_eligible": False,
+            "tie_break_applied": False,
             "min_accept_score": None,
         }
 
@@ -967,13 +1158,26 @@ class GreedyInstrumentSelector:
                 "limit_weight": detail["limit_weight"],
                 "idm": score.idm,
                 "score": score.score if math.isfinite(score.score) else None,
+                "base_score": (
+                    score.base_score if math.isfinite(score.base_score) else None
+                ),
+                "low_contract_weight": score.low_contract_weight,
+                "band_contract_weight": score.band_contract_weight,
+                "high_contract_weight": score.high_contract_weight,
+                "contract_band_loss": score.contract_band_loss,
                 "roll_cost_in_score": detail["roll_cost_in_score"],
                 "score_cost_sr": detail["score_cost_sr"],
                 "ann_trade_cost_sr": detail["ann_trade_cost_sr"],
                 "ann_roll_cost_sr": detail["ann_roll_cost_sr"],
                 "ann_cost_sr": detail["ann_cost_sr"],
                 "net_sr": detail["net_sr"],
+                "base_net_sr": detail["base_net_sr"],
                 "size_penalty_sr": detail["size_penalty_sr"],
+                "low_contract_penalty_sr": detail["low_contract_penalty_sr"],
+                "high_contract_penalty_sr": detail["high_contract_penalty_sr"],
+                "contract_band_penalty_sr": detail[
+                    "contract_band_penalty_sr"
+                ],
                 "score_denom": detail["score_denom"],
                 "marginal_contribution_score": detail[
                     "marginal_contribution_score"
@@ -982,6 +1186,7 @@ class GreedyInstrumentSelector:
                 "avg_cons": detail["avg_cons"],
                 "ann_trade_cons": detail["ann_trade_cons"],
                 "ann_roll_cons": detail["ann_roll_cons"],
+                "annual_contract_load": detail["annual_contract_load"],
                 "trade_cost_usd_per_con": detail["trade_cost_usd_per_con"],
                 "roll_cost_usd_per_con": detail["roll_cost_usd_per_con"],
                 "ann_trade_cost_usd": detail["ann_trade_cost_usd"],
@@ -1010,6 +1215,11 @@ class GreedyInstrumentSelector:
                 "book_margin_limit_usd": detail["book_margin_limit_usd"],
                 "iter_best": None,
                 "iter_best_score": None,
+                "iter_score_best": None,
+                "iter_score_best_score": None,
+                "tie_score_floor": None,
+                "tie_eligible": False,
+                "tie_break_applied": False,
                 "min_accept_score": None,
             })
         return rows
@@ -1023,6 +1233,10 @@ class GreedyInstrumentSelector:
         iteration: int,
         best_candidate: str,
         best_score: float,
+        score_best_candidate: str,
+        score_best_score: float,
+        tie_score_floor: float,
+        tie_eligible: frozenset[str],
         min_accept_score: float | None,
         accepted: bool,
     ) -> None:
@@ -1040,6 +1254,10 @@ class GreedyInstrumentSelector:
                 iteration=iteration,
                 best_candidate=best_candidate,
                 best_score=best_score,
+                score_best_candidate=score_best_candidate,
+                score_best_score=score_best_score,
+                tie_score_floor=tie_score_floor,
+                tie_eligible=tie_eligible,
                 min_accept_score=min_accept_score,
                 accepted=accepted,
             )
@@ -1051,6 +1269,10 @@ class GreedyInstrumentSelector:
         iteration: int,
         best_candidate: str,
         best_score: float,
+        score_best_candidate: str,
+        score_best_score: float,
+        tie_score_floor: float,
+        tie_eligible: frozenset[str],
         min_accept_score: float | None,
         accepted: bool,
     ) -> None:
@@ -1060,8 +1282,13 @@ class GreedyInstrumentSelector:
                 continue
             row["iter_best"] = best_candidate
             row["iter_best_score"] = best_score
+            row["iter_score_best"] = score_best_candidate
+            row["iter_score_best_score"] = score_best_score
+            row["tie_score_floor"] = tie_score_floor
             row["min_accept_score"] = min_accept_score
             candidate = str(row["candidate"])
+            row["tie_eligible"] = candidate in tie_eligible
+            row["tie_break_applied"] = best_candidate != score_best_candidate
             if candidate == best_candidate:
                 row["accepted"] = accepted
                 if not accepted and not row["reason"]:
@@ -1070,8 +1297,16 @@ class GreedyInstrumentSelector:
                 # A feasible loser needs a competitive explanation; the hard
                 # constraint path above already populated infeasible reasons.
                 if iteration == 0:
-                    row["reason"] = "lower_rank_than_selected_seed"
+                    row["reason"] = (
+                        "not_selected_by_contract_band_tie_break"
+                        if candidate in tie_eligible
+                        else "lower_rank_than_selected_seed"
+                    )
                 elif accepted:
-                    row["reason"] = "lower_rank_than_iteration_winner"
+                    row["reason"] = (
+                        "not_selected_by_contract_band_tie_break"
+                        if candidate in tie_eligible
+                        else "lower_rank_than_iteration_winner"
+                    )
                 else:
                     row["reason"] = "lower_rank_than_iteration_best"
