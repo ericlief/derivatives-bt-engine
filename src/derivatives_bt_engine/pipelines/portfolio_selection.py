@@ -717,6 +717,7 @@ def _run_complete_selection(
             "idm": selection.final_score.idm,
             "ann_dvol": candidate.ann_dvol,
             "trade_sr": candidate.trade_sr,
+            "roll_sr": candidate.roll_sr,
             "comb_turnover": candidate.combined_turnover,
             "ann_trade_cost_sr": audit_by_symbol[symbol]["ann_trade_cost_sr"],
             "ann_roll_cost_sr": audit_by_symbol[symbol]["ann_roll_cost_sr"],
