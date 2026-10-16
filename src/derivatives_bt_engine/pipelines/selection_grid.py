@@ -337,6 +337,9 @@ def _summary_row(
         return row, None
 
     book = pl.read_parquet(book_path)
+    construction_score = _column_max(book, "score")
+    if construction_score is None:
+        construction_score = _score_from_selection_passes(book_path.parent)
     symbols = book.get_column("symbol").cast(pl.String).to_list()
     identity_columns = [
         name for name in ("symbol", "asset_cls", "econ_subcls")
@@ -361,7 +364,7 @@ def _summary_row(
         ),
         "selected_symbols": ",".join(symbols),
         "final_idm": _column_max(book, "idm"),
-        "construction_score": _column_max(book, "score"),
+        "construction_score": construction_score,
         "maximum_instrument_margin_usd": _column_max(
             book, "margin_at_max_usd"
         ),
@@ -378,6 +381,31 @@ def _column_max(frame: pl.DataFrame, name: str) -> float | None:
         return None
     values = frame.get_column(name).drop_nulls()
     return float(values.max()) if values.len() else None
+
+
+def _score_from_selection_passes(scenario_dir: Path) -> float | None:
+    """Recover the final book score from accepted-pass reports.
+
+    Older selection-book Parquets omitted the portfolio-level score, while
+    their accepted-pass reports retained it. This keeps resumed grid scenarios
+    auditable without requiring those selections to be rerun.
+    """
+    reports = sorted(scenario_dir.glob("*selection_passes_*.parquet"))
+    if not reports:
+        return None
+    passes = pl.read_parquet(reports[-1])
+    if "score" not in passes.columns or passes.is_empty():
+        return None
+    step_column = (
+        "selection_step" if "selection_step" in passes.columns
+        else "iteration" if "iteration" in passes.columns
+        else None
+    )
+    if step_column is not None:
+        last_step = passes.get_column(step_column).max()
+        passes = passes.filter(pl.col(step_column) == last_step)
+    scores = passes.get_column("score").drop_nulls()
+    return float(scores[0]) if scores.len() else None
 
 
 def _attach_baseline_overlap(summary: pl.DataFrame) -> pl.DataFrame:

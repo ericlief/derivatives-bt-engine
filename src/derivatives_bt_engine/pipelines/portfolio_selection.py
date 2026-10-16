@@ -715,6 +715,9 @@ def _run_complete_selection(
             "buffer_trade_to_edge": args.buffer_trade_to_edge,
             "weight": selection.final_score.weights[symbol],
             "idm": selection.final_score.idm,
+            # This is the whole-book score; repeat it on each membership row
+            # so the grid summary can read it from the selected-book Parquet.
+            "score": selection.final_score.score,
             "ann_dvol": candidate.ann_dvol,
             "trade_sr": candidate.trade_sr,
             "roll_sr": candidate.roll_sr,

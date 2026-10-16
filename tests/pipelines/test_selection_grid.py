@@ -5,10 +5,54 @@ from pathlib import Path
 import polars as pl
 
 from derivatives_bt_engine.pipelines.selection_grid import (
+    SelectionScenario,
+    _summary_row,
     build_scenarios,
     parse_args,
     run,
 )
+
+
+def test_grid_summary_recovers_score_from_accepted_passes_for_legacy_book(
+    tmp_path: Path,
+):
+    """Older selected-book reports recover their score from pass audit."""
+    book_path = tmp_path / "multi_speed_ewmac_selection_book_20261016.parquet"
+    pl.DataFrame({
+        "symbol": ["MZC"],
+        "idm": [2.0],
+        "margin_at_max_usd": [1000.0],
+        "portfolio_margin_at_max_usd": [1000.0],
+    }).write_parquet(book_path)
+    pl.DataFrame({
+        "selection_step": [1, 2, 2],
+        "score": [0.40, 0.42, 0.42],
+    }).write_parquet(
+        tmp_path / "multi_speed_ewmac_selection_passes_20261016.parquet"
+    )
+    scenario = SelectionScenario(
+        target_volatility=0.20,
+        maximum_instrument_margin_percent=20.0,
+        maximum_book_margin_percent=75.0,
+        maximum_weight_idm=0.20,
+        maximum_instruments_per_cluster=None,
+        include_roll_cost_in_score=True,
+        weight_policy="topdown_classif",
+    )
+
+    row, _ = _summary_row(
+        scenario,
+        status="complete",
+        elapsed_seconds=1.0,
+        book_path=book_path,
+        rule_cache=pl.DataFrame({
+            "symbol": ["MZC"],
+            "asset_cls": ["ags"],
+            "econ_subcls": ["grains"],
+        }),
+    )
+
+    assert row["construction_score"] == 0.42
 
 
 def test_default_grid_varies_construction_scenarios_not_performance_inputs():
