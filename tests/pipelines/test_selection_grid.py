@@ -35,6 +35,7 @@ def test_grid_summary_recovers_score_from_accepted_passes_for_legacy_book(
         maximum_instrument_margin_percent=20.0,
         maximum_book_margin_percent=75.0,
         maximum_weight_idm=0.20,
+        score_threshold=0.90,
         maximum_instruments_per_cluster=None,
         include_roll_cost_in_score=True,
         weight_policy="topdown_classif",
@@ -74,6 +75,7 @@ def test_default_grid_varies_construction_scenarios_not_performance_inputs():
     assert {scenario.maximum_book_margin_percent for scenario in scenarios} == {
         75.0
     }
+    assert {scenario.score_threshold for scenario in scenarios} == {0.90}
 
 
 def test_grid_accepts_secondary_constraint_lists():
@@ -101,6 +103,30 @@ def test_grid_accepts_secondary_constraint_lists():
     assert {scenario.maximum_instruments_per_cluster for scenario in scenarios} == {
         2, None
     }
+
+
+def test_grid_sweeps_greedy_score_acceptance_thresholds():
+    """Acceptance thresholds are a first-class scenario dimension."""
+    args = parse_args([
+        "--input",
+        "screen.parquet",
+        "--target-vols",
+        "0.20",
+        "--max-instr-margin-pcts",
+        "20",
+        "--roll-cost-modes",
+        "include",
+        "--score-thresholds",
+        "0.90,0.95,0.975,0.99,1.00",
+    ])
+
+    scenarios = build_scenarios(args)
+
+    assert len(scenarios) == 5
+    assert {scenario.score_threshold for scenario in scenarios} == {
+        0.90, 0.95, 0.975, 0.99, 1.0
+    }
+    assert len({scenario.scenario_id for scenario in scenarios}) == 5
 
 
 def test_dry_run_writes_reproducible_commands_without_running_selection(
@@ -131,6 +157,7 @@ def test_dry_run_writes_reproducible_commands_without_running_selection(
     assert commands_path.parent.name.startswith("selection_grid_")
     assert "--target-vol 0.2" in command_text
     assert "--max-instr-margin-pct 20.0" in command_text
+    assert "--score-threshold 0.9" in command_text
     assert "--include-roll-cost-in-score" in command_text
     assert not list(output.rglob("multi_speed_ewmac_selection_book_*.parquet"))
 

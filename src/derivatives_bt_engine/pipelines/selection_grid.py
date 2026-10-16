@@ -48,6 +48,7 @@ class SelectionScenario:
     maximum_instrument_margin_percent: float
     maximum_book_margin_percent: float
     maximum_weight_idm: float
+    score_threshold: float
     maximum_instruments_per_cluster: int | None
     include_roll_cost_in_score: bool
     weight_policy: str
@@ -65,6 +66,7 @@ class SelectionScenario:
             f"im{_number_token(self.maximum_instrument_margin_percent)}",
             f"bm{_number_token(self.maximum_book_margin_percent)}",
             f"wi{_number_token(self.maximum_weight_idm)}",
+            f"st{_number_token(self.score_threshold)}",
             f"cl{cluster}",
             f"roll{int(self.include_roll_cost_in_score)}",
             self.weight_policy,
@@ -108,6 +110,23 @@ def _cluster_limit_list(value: str) -> tuple[int | None, ...]:
     if not parsed:
         raise argparse.ArgumentTypeError("at least one cluster limit is required")
     return tuple(parsed)
+
+
+def _score_threshold_list(value: str) -> tuple[float, ...]:
+    """Parse unique greedy acceptance thresholds from zero through one."""
+    try:
+        thresholds = tuple(
+            dict.fromkeys(float(item.strip()) for item in value.split(","))
+        )
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "score thresholds must be comma-separated numbers in [0, 1]"
+        ) from exc
+    if not thresholds or any(not 0.0 <= item <= 1.0 for item in thresholds):
+        raise argparse.ArgumentTypeError(
+            "score thresholds must be comma-separated numbers in [0, 1]"
+        )
+    return thresholds
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -182,6 +201,15 @@ def parse_args(argv=None) -> argparse.Namespace:
         help="Comma-separated instrument weight-times-IDM caps (default: .20).",
     )
     parser.add_argument(
+        "--score-thresholds",
+        type=_score_threshold_list,
+        default=(0.90,),
+        help=(
+            "Comma-separated greedy acceptance floors as fractions of the best "
+            "score seen (default: .90)."
+        ),
+    )
+    parser.add_argument(
         "--max-instr-per-clusters",
         type=_cluster_limit_list,
         default=(None,),
@@ -231,6 +259,7 @@ def build_scenarios(args: argparse.Namespace) -> list[SelectionScenario]:
             maximum_instrument_margin_percent=instrument_margin,
             maximum_book_margin_percent=book_margin,
             maximum_weight_idm=weight_idm,
+            score_threshold=score_threshold,
             maximum_instruments_per_cluster=cluster_limit,
             include_roll_cost_in_score=include_roll_cost,
             weight_policy=args.weight_policy,
@@ -240,6 +269,7 @@ def build_scenarios(args: argparse.Namespace) -> list[SelectionScenario]:
             instrument_margin,
             book_margin,
             weight_idm,
+            score_threshold,
             cluster_limit,
             include_roll_cost,
         ) in product(
@@ -247,6 +277,7 @@ def build_scenarios(args: argparse.Namespace) -> list[SelectionScenario]:
             args.max_instr_margin_pcts,
             args.max_book_margin_pcts,
             args.max_weight_idms,
+            args.score_thresholds,
             args.max_instr_per_clusters,
             roll_modes,
         )
@@ -282,6 +313,8 @@ def _selection_command(
         str(scenario.maximum_book_margin_percent),
         "--max-weight-idm",
         str(scenario.maximum_weight_idm),
+        "--score-threshold",
+        str(scenario.score_threshold),
         "--weight-policy",
         scenario.weight_policy,
     ]
@@ -324,6 +357,7 @@ def _summary_row(
         ),
         "maximum_book_margin_percent": scenario.maximum_book_margin_percent,
         "maximum_weight_idm": scenario.maximum_weight_idm,
+        "score_threshold": scenario.score_threshold,
         "maximum_instruments_per_cluster": (
             scenario.maximum_instruments_per_cluster
         ),
@@ -421,7 +455,8 @@ def _attach_baseline_overlap(summary: pl.DataFrame) -> pl.DataFrame:
 
     The central scenario is the successful run closest to 20% target
     volatility, 20% per-instrument margin, 75% book margin, 0.20 maximum
-    weight-times-IDM, unlimited subclass count, and roll costs included.
+    weight-times-IDM, 0.90 score threshold, unlimited subclass count, and roll
+    costs included.
     This is a stability reference, not an assertion that the scenario is best.
     """
     complete = summary.filter(pl.col("status") == "complete")
@@ -436,6 +471,7 @@ def _attach_baseline_overlap(summary: pl.DataFrame) -> pl.DataFrame:
             + (pl.col("maximum_instrument_margin_percent") - 20.0).abs() / 100.0
             + (pl.col("maximum_book_margin_percent") - 75.0).abs() / 100.0
             + (pl.col("maximum_weight_idm") - 0.20).abs()
+            + (pl.col("score_threshold") - 0.90).abs()
             + pl.when(pl.col("maximum_instruments_per_cluster").is_null())
               .then(0.0).otherwise(1.0)
             + pl.when(pl.col("include_roll_cost_in_score"))

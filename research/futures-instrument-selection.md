@@ -1369,6 +1369,14 @@ cost should normally remain enabled in the eventual production configuration;
 the no-roll case attributes how much book membership depends on that cost
 allowance rather than representing an equally realistic cost model.
 
+The greedy acceptance floor is a separate, directly configurable grid axis.
+It defaults to `score_threshold=0.90` (accept candidates whose score is at
+least 90% of the best score seen), so the default construction grid remains 18
+scenarios. To test the saved-path retention values, sweep
+`--score-thresholds 0.90,0.95,0.975,0.99,1.00`; this adds five threshold
+scenarios for each combination of the other selected settings. A value of
+`1.00` only admits a candidate if it matches the best score seen at that step.
+
 Then vary one structural family at a time around a stable central scenario:
 
 - `max_book_margin_pct=50,75,100` tests total account margin usage;
@@ -1444,6 +1452,7 @@ Run secondary constraint tests separately, for example:
   --target-vols 0.20 \
   --max-instr-margin-pcts 20 \
   --roll-cost-modes include \
+  --score-thresholds 0.90,0.95,0.975,0.99,1.00 \
   --max-book-margin-pcts 50,75,100 \
   --max-weight-idms 0.15,0.20,0.25 \
   --max-instr-per-clusters 2,3,none
