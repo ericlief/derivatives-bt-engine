@@ -358,12 +358,152 @@ A hard global instrument-count ceiling can be included as a transparent
 operational sensitivity, for example 15, 18, and 21, but should follow class
 coverage and should not replace the granularity and tracking-error measures.
 
+## Score-threshold follow-up
+
+The completed grid in `selection_grid_20261016_155645` tests score thresholds
+of `0.90, 0.95, 0.975, 0.99, 1.00` at 50% and 75% book margin, weight-IDM caps
+of 0.15 and 0.20, and subclass caps of two and three. The corrected summary
+contains the actual final construction score for all 40 runs.
+
+### Threshold tightening is useful but insufficient
+
+Every stricter-threshold book is a nested prefix of its matched 0.90 book.
+The threshold does not prefer a higher-contract candidate over a lower-
+contract candidate; it only stops the existing greedy path sooner and causes
+the retained classification weights to be recalculated.
+
+The endpoints show that this mechanical truncation improves the low-count
+tail, but does not concentrate most weight in the desired band:
+
+| Book margin | Weight × IDM | Subclass cap | Instruments, 0.90→1.00 | One-contract weight, 0.90→1.00 | 3–5 max-contract weight, 0.90→1.00 | Weight below 1 average contract, 0.90→1.00 | Classes/subclasses, 0.90→1.00 |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 50% | 0.15 | 2 | 16→15 | 34.7%→33.3% | 20.8%→25.0% | 59.7%→58.3% | 6/9→6/8 |
+| 50% | 0.15 | 3 | 21→16 | 38.1%→23.6% | 23.8%→22.2% | 71.4%→58.4% | 7/9→6/7 |
+| 50% | 0.20 | 2 | 18→14 | 33.3%→25.0% | 21.4%→20.8% | 60.7%→41.7% | 7/11→6/8 |
+| 50% | 0.20 | 3 | 21→15 | 35.7%→18.1% | 23.8%→16.7% | 54.7%→36.1% | 7/9→6/7 |
+| 75% | 0.15 | 2 | 19→15 | 38.9%→33.3% | 12.5%→25.0% | 72.2%→58.3% | 6/10→6/8 |
+| 75% | 0.15 | 3 | 22→17 | 45.4%→23.6% | 11.1%→22.2% | 72.2%→55.6% | 6/9→6/7 |
+| 75% | 0.20 | 2 | 19→15 | 34.7%→25.0% | 0.0%→20.8% | 55.6%→41.7% | 6/10→6/8 |
+| 75% | 0.20 | 3 | 22→16 | 45.4%→18.1% | 11.1%→16.7% | 55.6%→36.1% | 6/9→6/7 |
+
+Across the eight matched families, moving from 0.90 to 1.00 removes 4.4
+instruments on average, reduces one-contract weight by 13.3 percentage points,
+and reduces weight below one average contract by 14.5 points. Desired-band
+weight rises by only 5.6 points on average and actually falls in three of the
+four 50%-margin families. Median average contracts rise by just 0.22.
+
+Using the continuous boundaries that round half-up to three through five
+contracts, the strict books still allocate 62.5–75.0% of weight below the
+`2.5 <= max_position < 5.5` band. Only 16.7–25.0% is inside it and 8.3–16.7%
+is above it. Average-position concentration is weaker still: most strict books
+have no weight at three to five average contracts.
+
+Threshold tightening also sacrifices coverage. Mean subclass count falls from
+9.5 at 0.90 to 7.5 at 1.00. The 50%-margin books that contain a seventh asset
+class at 0.90 lose it under tighter stopping because `IRON` enters late. A
+coverage-first rule must therefore run before the score stop if preserving the
+main-class opportunity set is required.
+
+The 50% / 0.15 / cap-two family is mostly margin-bound: thresholds from 0.90
+through 0.99 all return the same 16-member book. This is another reason not to
+expect the stopping threshold to control contract concentration reliably.
+
+### Penalize low and high contract counts differently
+
+Low contract counts are a risk-quantization problem. High contract counts
+provide finer risk increments; they become undesirable through transaction
+cost, market impact, and operational load. The selector should therefore keep
+the existing monetary cost and Carver size penalty visible and add two
+separately named penalties.
+
+For a direct position-band sensitivity, use the continuous maximum position
+`P`, rather than rounded `max_cons`. The continuous interval `[2.5, 5.5)` is
+exactly the interval that rounds half-up to three through five contracts. A
+smooth ratio-symmetric penalty is:
+
+```text
+low_con_penalty_sr(P)
+    = lambda_low * max(0, log(2.5 / P))**2
+
+high_con_penalty_sr(P)
+    = lambda_high * max(0, log(P / 5.5))**2
+
+con_band_penalty_sr(P)
+    = low_con_penalty_sr(P) + high_con_penalty_sr(P)
+```
+
+Add `con_band_penalty_sr` to the instrument penalty used in `net_sr`, but
+retain `size_penalty_sr`, `low_con_penalty_sr`, and `high_con_penalty_sr` as
+separate audit columns. The logarithm makes equal multiplicative misses from
+the band comparable and avoids a discontinuity at an integer boundary.
+
+A useful first calibration is `lambda_low=0.12` and `lambda_high=0.015`:
+
+| Continuous maximum position | Added penalty SR |
+|---:|---:|
+| 0.5 | 0.311 |
+| 1.0 | 0.101 |
+| 1.5 | 0.031 |
+| 2.0 | 0.006 |
+| 2.5–5.5 | 0 |
+| 10 | 0.005 |
+| 20 | 0.025 |
+| 57.6, current Ether micro | 0.083 |
+
+The asymmetry is intentional: a one-contract instrument creates material
+rounding risk, while a stable ten-contract position is operationally modest.
+Sweep `lambda_low` over `0.06, 0.12, 0.24` first, holding the high term at
+zero. Then fix a defensible low penalty and sweep `lambda_high` over
+`0.0075, 0.015, 0.03`. This avoids a large, difficult-to-attribute Cartesian
+grid.
+
+For high counts, annual executable contract load is the better production
+measure:
+
+```text
+contract_load_i = ann_trade_cons_i + 2 * ann_roll_cons_i
+```
+
+In the strict 75% / 0.20 / cap-two book, Ether micro has 58 maximum contracts,
+annual contract load of 1,035, and 69.2% of the book's total contract load. It
+is the only instrument above ten maximum contracts anywhere in this grid,
+appearing in 25 of 40 scenarios with 43–58 maximum contracts. A high-load
+penalty or explicit annual-contract budget targets the actual execution burden
+more accurately than treating all positions above five as risk-granularity
+failures. Its 0.1247 annual cost SR already captures monetary spread and
+commission cost, so an additional load penalty should represent operational
+capacity or unmodelled impact only.
+
+### Add a book-level concentration control
+
+Instrument penalties can still leave a book with many small weights below the
+band. Report these continuous-position masses for every trial:
+
+```text
+low_con_weight  = sum(weight_i for P_i < 2.5)
+band_con_weight = sum(weight_i for 2.5 <= P_i < 5.5)
+high_con_weight = sum(weight_i for P_i >= 5.5)
+```
+
+Start with soft reference levels of no more than 50% low-count weight, at least
+30% band weight, and no more than 15% high-count weight. The present strict
+books do not meet the first two levels, so they should begin as penalties or
+near-tie preferences rather than hard admission gates.
+
+One robust selection rule is to preserve the base score calculation, retain
+candidates within 0.25%, 0.5%, or 1% of the iteration's best unadjusted score,
+then choose the candidate with the lowest book-level contract-band loss. This
+can substitute a better-granularity candidate, which the score threshold alone
+cannot do. The audit should save both the unadjusted AFTS score and the
+granularity tie-break value.
+
 ## Next grid
 
-Use the 20% target and subclass cap two as the center. Carry both 50% book-
-margin anchors (`weight × IDM` 0.15 and 0.20) plus the 75% / 0.20 baseline.
-Cross those with the acceptance-tolerance and granularity-penalty values above.
-This isolates the small-account construction question before changing input
+Use the 20% target, weight-IDM 0.20, and subclass cap two as the center. Carry
+50% and 75% book margin and score thresholds 0.99 and 1.00. First vary the low-
+contract penalty alone, then the high-contract or operational-load penalty,
+and finally the near-tie book-level concentration rule. This isolates actual
+candidate substitution from mere path truncation before changing input
 eligibility.
 
 Then run the already planned boundary grids separately:
