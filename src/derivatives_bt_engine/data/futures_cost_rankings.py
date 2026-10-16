@@ -622,10 +622,22 @@ def selection_search_universe(
 ) -> pl.DataFrame:
     """Return only rows that passed the market-screen hard pre-selection gates."""
     if eligible_column not in report.columns and eligible_column == "selection_elig":
-        eligible_column = "phase2_elig" if "phase2_elig" in report.columns else "phase2_eligible"
+        eligible_column = next(
+            (
+                column
+                for column in (
+                    "selection_eligible",
+                    "phase2_elig",
+                    "phase2_eligible",
+                )
+                if column in report.columns
+            ),
+            eligible_column,
+        )
     if eligible_column not in report.columns:
         raise ValueError(
-            f"Report has no {eligible_column} column; rerun the market-screen audit"
+            "Report has no selection-eligibility column; "
+            "rerun the market-screen audit"
         )
     filtered = report.filter(pl.col(eligible_column).fill_null(False))
     sort_columns = [

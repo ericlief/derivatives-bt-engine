@@ -66,8 +66,8 @@ def test_latest_report_prefers_rule_cache_over_legacy_selection_screen(tmp_path)
     assert report.height == 1
 
 
-def test_find_latest_phase1_cost_report_raises_for_empty_directory(tmp_path):
-    with pytest.raises(FileNotFoundError, match="No Phase 1 cost report"):
+def test_find_latest_market_report_raises_for_empty_directory(tmp_path):
+    with pytest.raises(FileNotFoundError, match="No market-screen cost report"):
         find_latest_phase1_cost_report(tmp_path)
 
 
@@ -129,9 +129,9 @@ def test_top_n_by_asset_class_excludes_restricted_execution_by_default():
     assert all_rows["Equity"]["symbol"].to_list() == ["SGX"]
 
 
-def test_phase2_search_universe_filters_without_mutating_audit_report():
+def test_selection_search_universe_filters_without_mutating_audit_report():
     report = _report().with_columns(
-        pl.Series("selection_eligible", [True, False, None, True, False])
+        pl.Series("selection_elig", [True, False, None, True, False])
     )
 
     selected = phase2_search_universe(report)
@@ -140,8 +140,8 @@ def test_phase2_search_universe_filters_without_mutating_audit_report():
     assert report.height == 5
 
 
-def test_phase2_search_universe_requires_new_phase1_schema():
-    with pytest.raises(ValueError, match="rerun the Phase 1 audit"):
+def test_selection_search_universe_requires_market_screen_schema():
+    with pytest.raises(ValueError, match="rerun the market-screen audit"):
         phase2_search_universe(_report())
 
 
