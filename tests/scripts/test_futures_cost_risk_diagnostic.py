@@ -11,10 +11,10 @@ import polars as pl
 import pytest
 from ib_tools.ibpysync import IBWhatIfOrderError
 
-import derivatives_bt_engine.pipelines.phase1_cost as futures_cost_risk
-from derivatives_bt_engine.pipelines.phase1_cost import (
+import derivatives_bt_engine.pipelines.market_screen as futures_cost_risk
+from derivatives_bt_engine.pipelines.market_screen import (
     _attach_affordability_ranks,
-    _attach_phase2_prefilters,
+    _attach_selection_prefilters,
     _attach_rule_cache_ranks,
     _blend_recent_and_historical_return_volatility,
     _configured_cost_estimate,
@@ -1163,14 +1163,14 @@ def test_snapshot_output_filename_contains_friendly_account_name():
     """Snapshot filenames identify the account without persisting its ID."""
     generated_at = datetime(2026, 10, 13, 17, 0, 0, tzinfo=timezone.utc)
     base = futures_cost_risk._account_infixed_output_path(
-        Path("pysystemtrade_market_snapshot.parquet"),
+        Path("futures_market_snapshot.parquet"),
         "Taxable",
     )
 
     output = futures_cost_risk._timestamped_output_path(base, generated_at)
 
     assert output == Path(
-        "pysystemtrade_market_snapshot_taxable_20261013_120000.parquet"
+        "futures_market_snapshot_taxable_20261013_120000.parquet"
     )
 
 
@@ -1234,7 +1234,7 @@ def test_snapshot_ib_log_is_timestamped_beside_account_snapshot():
     started_at = datetime(2026, 10, 13, 17, 0, 0, tzinfo=timezone.utc)
     args = Namespace(
         ib_log_output=None,
-        snapshot_output=Path("results/pysystemtrade_market_snapshot.parquet"),
+        snapshot_output=Path("results/futures_market_snapshot.parquet"),
         output=None,
         ib_account_name="Taxable",
     )
@@ -1246,7 +1246,7 @@ def test_snapshot_ib_log_is_timestamped_beside_account_snapshot():
     )
 
     assert output == Path(
-        "results/pysystemtrade_market_snapshot_taxable_ib_"
+        "results/futures_market_snapshot_taxable_ib_"
         "20261013_120000.log"
     )
 
@@ -1747,7 +1747,7 @@ def test_phase2_prefilter_uses_relative_market_risk_volume():
         "ib_availability": ["contract_qualified"],
     })
 
-    filtered = _attach_phase2_prefilters(
+    filtered = _attach_selection_prefilters(
         report,
         initial_capital_usd=500_000.0,
         target_vol=0.25,
@@ -1762,9 +1762,9 @@ def test_phase2_prefilter_uses_relative_market_risk_volume():
     assert selected["risk_traded_usd_day"] == pytest.approx(12_500.0)
     assert selected["mkt_risk_vol_usd_day"] == pytest.approx(110_000_000.0)
     assert selected["pct_mkt_volume"] == pytest.approx(0.011363636)
-    assert selected["phase2_eligible"]
+    assert selected["selection_eligible"]
     assert selected["selection_bucket"] == "add_first"
-    assert selected["phase2_exclusion"] == ""
+    assert selected["selection_exclusion"] == ""
     public = futures_cost_risk._public_report_schema(filtered)
     assert public["avg_daily_volume"][0] == pytest.approx(100_000.0)
     assert public["ann_dvol"][0] == pytest.approx(1_100.0)
@@ -1787,7 +1787,7 @@ def test_phase2_prefilter_requires_more_than_hundred_contracts():
         "ib_availability": ["contract_qualified"],
     })
 
-    selected = _attach_phase2_prefilters(
+    selected = _attach_selection_prefilters(
         report,
         initial_capital_usd=100_000.0,
         target_vol=0.20,
@@ -1801,9 +1801,9 @@ def test_phase2_prefilter_requires_more_than_hundred_contracts():
     assert selected["pct_mkt_volume"] < 1.0
     assert not selected["contract_volume_eligible"]
     assert selected["risk_volume_eligible"]
-    assert not selected["phase2_eligible"]
+    assert not selected["selection_eligible"]
     assert selected["selection_bucket"] == "add_later"
-    assert selected["phase2_exclusion"] == "contract_volume"
+    assert selected["selection_exclusion"] == "contract_volume"
 
 
 def test_phase2_prefilter_buckets_missing_subscription_data_first():
@@ -1820,7 +1820,7 @@ def test_phase2_prefilter_buckets_missing_subscription_data_first():
         "ib_availability": ["unavailable_or_unverified"],
     })
 
-    selected = _attach_phase2_prefilters(
+    selected = _attach_selection_prefilters(
         report,
         initial_capital_usd=100_000.0,
         target_vol=0.20,
@@ -1833,7 +1833,7 @@ def test_phase2_prefilter_buckets_missing_subscription_data_first():
 
     assert not selected["data_eligible"]
     assert selected["selection_bucket"] == "dont_add_no_data"
-    assert "data_unavailable" in selected["phase2_exclusion"]
+    assert "data_unavailable" in selected["selection_exclusion"]
 
 
 def test_phase2_prefilter_rejects_a_failed_attempted_what_if_preview():
@@ -1853,7 +1853,7 @@ def test_phase2_prefilter_rejects_a_failed_attempted_what_if_preview():
         "ib_whatif_rejection_reason": ["account_margin_insufficient"],
     })
 
-    selected = _attach_phase2_prefilters(
+    selected = _attach_selection_prefilters(
         report,
         initial_capital_usd=100_000.0,
         target_vol=0.20,
@@ -1865,8 +1865,8 @@ def test_phase2_prefilter_rejects_a_failed_attempted_what_if_preview():
     ).row(0, named=True)
 
     assert not selected["data_eligible"]
-    assert not selected["phase2_eligible"]
+    assert not selected["selection_eligible"]
     assert (
         "ib_whatif_account_margin_insufficient"
-        in selected["phase2_exclusion"]
+        in selected["selection_exclusion"]
     )

@@ -1,8 +1,8 @@
 """Load cached futures rule costs and construct selection candidates.
 
 The rule-cost cache is the durable boundary between expensive historical
-EWMAC calibration and cheap portfolio-scenario filtering.  This module keeps
-legacy Phase 1 screen readers working, but new selection runs derive their
+EWMAC calibration and cheap portfolio-scenario filtering. This module keeps
+legacy report readers working, but new selection runs derive their
 capital, cost, size, liquidity, data, and execution gates from the cached
 market and rule inputs each time.
 """
@@ -14,6 +14,8 @@ import polars as pl
 
 
 DEFAULT_REPORT_PATTERNS = (
+    "multi_speed_ewmac_rule_cache_*.parquet",
+    "futures_market_screen_*.parquet",
     "pysystemtrade_rule_cache_*.parquet",
     "pysystemtrade_selection_screen_*.parquet",
     "pysystemtrade_selection_screen_*.csv",
@@ -89,8 +91,8 @@ DEFAULT_VIEW_COLUMNS = (
     "size_elig",
     "data_elig",
     "sel_bucket",
-    "phase2_elig",
-    "phase2_excl",
+    "selection_elig",
+    "selection_excl",
     "afford_cluster_role",
     "counts_toward_main_instr_min",
     "afford_scen_cap",
@@ -110,17 +112,17 @@ DEFAULT_VIEW_COLUMNS = (
     "ib_avail",
 )
 
-PHASE2_STEP1_GATE_COLUMNS = (
+SELECTION_CANDIDATE_GATE_COLUMNS = (
     "cost_elig",
     "size_elig",
     "liq_elig",
     "data_elig",
     "instr_has_elig_ewmac_rule",
     "exec_elig",
-    "phase2_elig",
+    "selection_elig",
 )
 
-PHASE2_STEP1_PARAM_COLUMNS = (
+SELECTION_SCREEN_PARAM_COLUMNS = (
     "init_cap_usd",
     "target_vol",
     "cost_lim_sr",
@@ -131,7 +133,7 @@ PHASE2_STEP1_PARAM_COLUMNS = (
     "max_pct_mkt_volume",
 )
 
-PHASE2_STEP1_COLUMNS = (
+SELECTION_CANDIDATE_COLUMNS = (
     "symbol",
     "signal_symbol",
     "hist_instr_code",
@@ -195,26 +197,26 @@ PHASE2_STEP1_COLUMNS = (
     "elig_ewmac_rules",
     "instr_has_elig_ewmac_rule",
     "exec_elig",
-    "phase2_elig",
+    "selection_elig",
     "report_ts_ct",
 )
 
 
-def phase2_step1_config(report: pl.DataFrame) -> dict[str, object]:
-    """Return the single persisted Phase 1 configuration for Step 1."""
-    missing = sorted(set(PHASE2_STEP1_PARAM_COLUMNS).difference(report.columns))
+def selection_screen_config(report: pl.DataFrame) -> dict[str, object]:
+    """Return one consistent run configuration from a legacy screen report."""
+    missing = sorted(set(SELECTION_SCREEN_PARAM_COLUMNS).difference(report.columns))
     if missing:
         raise ValueError(
-            "Phase 1 report is missing Step 1 parameter fields "
+            "market-screen report is missing Step 1 parameter fields "
             f"{missing}; rerun the current futures-cost-risk audit"
         )
 
     config: dict[str, object] = {}
-    for column in PHASE2_STEP1_PARAM_COLUMNS:
+    for column in SELECTION_SCREEN_PARAM_COLUMNS:
         values = report.get_column(column).drop_nulls().unique().to_list()
         if len(values) != 1 or report.get_column(column).null_count():
             raise ValueError(
-                f"Phase 1 report has inconsistent {column}; expected one "
+                f"market-screen report has inconsistent {column}; expected one "
                 "non-null run-level value"
             )
         config[column] = values[0]
@@ -244,7 +246,7 @@ def _persisted_run_value(
     return values[0]
 
 
-def resolve_phase2_selection_config(
+def resolve_selection_config(
     report: pl.DataFrame,
     *,
     initial_capital_usd: float | None = None,
@@ -302,7 +304,7 @@ def resolve_phase2_selection_config(
     return config
 
 
-def apply_phase2_selection_filters(
+def apply_selection_filters(
     report: pl.DataFrame,
     *,
     config: dict[str, object],
@@ -446,7 +448,7 @@ def apply_phase2_selection_filters(
             & pl.col("instr_has_elig_ewmac_rule").fill_null(False)
             & pl.col("exec_elig").fill_null(False)
             & (pl.col("ib_avail") == "contract_qualified")
-        ).alias("phase2_elig"),
+        ).alias("selection_elig"),
         (
             pl.when(~pl.col("data_elig"))
             .then(pl.lit("dont_add_no_data"))
@@ -485,30 +487,30 @@ def apply_phase2_selection_filters(
             reasons.append("ib_unavailable")
         exclusions.append(",".join(reasons))
     return filtered.with_columns(
-        pl.Series("phase2_excl", exclusions, dtype=pl.String)
+        pl.Series("selection_excl", exclusions, dtype=pl.String)
     )
 
 
-def override_phase2_selection_scenario(
+def override_selection_scenario(
     report: pl.DataFrame,
     *,
     initial_capital_usd: float | None = None,
     target_vol: float | None = None,
 ) -> pl.DataFrame:
-    """Recalculate risk-budget-dependent gates from a Phase 1 report.
+    """Recalculate risk-budget-dependent gates from a market-screen report.
 
-    The Phase 1 report already persists annual dollar volatility, market risk
+    The market-screen report already persists annual dollar volatility, market risk
     volume, and every non-capital gate.  This function changes only the run's
     initial capital and/or target volatility and derives the corresponding
     maximum contract dollar volatility, daily risk traded, market-volume
-    percentage, size gate, relative-liquidity gate, and final Phase 2
+    percentage, size gate, relative-liquidity gate, and final selection
     eligibility. It performs no market-data or history request, which lets a
     robustness grid reuse one cached executable-market screen.
 
     Parameters
     ----------
     report
-        Complete public Phase 1 cost report, before Step 1 filtering.
+        Complete public market-screen cost report, before Step 1 filtering.
     initial_capital_usd
         Replacement account capital in USD. ``None`` retains the persisted
         value.
@@ -521,7 +523,7 @@ def override_phase2_selection_scenario(
     polars.DataFrame
         A new report with consistent run-level parameters and gate columns.
     """
-    config = phase2_step1_config(report)
+    config = selection_screen_config(report)
     selected_capital = (
         float(config["init_cap_usd"])
         if initial_capital_usd is None
@@ -541,34 +543,51 @@ def override_phase2_selection_scenario(
         "init_cap_usd": selected_capital,
         "target_vol": selected_target_vol,
     }
-    return apply_phase2_selection_filters(report, config=override_config)
+    return apply_selection_filters(report, config=override_config)
 
 
-def override_phase2_initial_capital(
+def override_selection_initial_capital(
     report: pl.DataFrame,
     initial_capital_usd: float,
 ) -> pl.DataFrame:
-    """Recalculate Phase 2 gates for a replacement account capital.
+    """Recalculate selection gates for a replacement account capital.
 
     This compatibility wrapper preserves the original public helper while the
     more general scenario function also supports target-volatility sweeps.
     """
-    return override_phase2_selection_scenario(
+    return override_selection_scenario(
         report,
         initial_capital_usd=initial_capital_usd,
     )
 
 
-def phase2_step1_candidates(report: pl.DataFrame) -> pl.DataFrame:
-    """Select Phase 2 candidates using only gates saved by Phase 1.
+def selection_candidates(report: pl.DataFrame) -> pl.DataFrame:
+    """Select candidates using only gates saved by the market screen.
 
     This function deliberately performs no market-data request and no metric
-    calculation. It filters the complete Phase 1 audit using its persisted
+    calculation. It filters the complete market-screen audit using its persisted
     cost, dollar-vol size, liquidity, data, rule, execution, and IB contract
     decisions, then returns the compact columns needed by the next stage.
     """
+    # Older saved reports used phase-numbered gate names; normalize at this
+    # input boundary so all new filtering and output uses function names.
+    if "selection_elig" not in report.columns:
+        legacy_gate = next(
+            (
+                column for column in ("phase2_elig", "phase2_eligible")
+                if column in report.columns
+            ),
+            None,
+        )
+        if legacy_gate is not None:
+            report = report.with_columns(
+                pl.col(legacy_gate).alias("selection_elig")
+            )
+    if "selection_excl" not in report.columns and "phase2_excl" in report.columns:
+        report = report.with_columns(pl.col("phase2_excl").alias("selection_excl"))
+
     required = {
-        *PHASE2_STEP1_GATE_COLUMNS,
+        *SELECTION_CANDIDATE_GATE_COLUMNS,
         "ib_avail",
         "symbol",
         "asset_cls",
@@ -577,18 +596,18 @@ def phase2_step1_candidates(report: pl.DataFrame) -> pl.DataFrame:
     missing = sorted(required.difference(report.columns))
     if missing:
         raise ValueError(
-            "Phase 1 report is missing Step 1 selection fields "
+            "market-screen report is missing Step 1 selection fields "
             f"{missing}; rerun the current futures-cost-risk audit"
         )
-    phase2_step1_config(report)
+    selection_screen_config(report)
 
     gate = pl.lit(True)
-    for column in PHASE2_STEP1_GATE_COLUMNS:
+    for column in SELECTION_CANDIDATE_GATE_COLUMNS:
         gate &= pl.col(column).fill_null(False)
     gate &= pl.col("ib_avail").fill_null("") == "contract_qualified"
 
     selected = report.filter(gate)
-    columns = [name for name in PHASE2_STEP1_COLUMNS if name in selected.columns]
+    columns = [name for name in SELECTION_CANDIDATE_COLUMNS if name in selected.columns]
     selected = selected.select(columns)
     sort_columns = [
         name for name in ("asset_cls", "symbol") if name in selected.columns
@@ -596,17 +615,17 @@ def phase2_step1_candidates(report: pl.DataFrame) -> pl.DataFrame:
     return selected.sort(sort_columns) if sort_columns else selected
 
 
-def phase2_search_universe(
+def selection_search_universe(
     report: pl.DataFrame,
     *,
-    eligible_column: str = "phase2_elig",
+    eligible_column: str = "selection_elig",
 ) -> pl.DataFrame:
-    """Return only rows that passed the Phase 1 hard pre-selection gates."""
-    if eligible_column not in report.columns and eligible_column == "phase2_elig":
-        eligible_column = "phase2_eligible"
+    """Return only rows that passed the market-screen hard pre-selection gates."""
+    if eligible_column not in report.columns and eligible_column == "selection_elig":
+        eligible_column = "phase2_elig" if "phase2_elig" in report.columns else "phase2_eligible"
     if eligible_column not in report.columns:
         raise ValueError(
-            f"Report has no {eligible_column} column; rerun the Phase 1 audit"
+            f"Report has no {eligible_column} column; rerun the market-screen audit"
         )
     filtered = report.filter(pl.col(eligible_column).fill_null(False))
     sort_columns = [
@@ -616,16 +635,16 @@ def phase2_search_universe(
     return filtered.sort(sort_columns) if sort_columns else filtered
 
 
-def find_latest_phase1_cost_report(
+def find_latest_market_report(
     report_dir: Path | str = ".",
     *,
     patterns: Sequence[str] = DEFAULT_REPORT_PATTERNS,
 ) -> Path:
-    """Find the newest Phase 1 report in ``report_dir`` or its results folder.
+    """Find the newest market-screen report in ``report_dir`` or its results folder.
 
     New reports are Parquet; CSV patterns remain available for legacy runs.
     Report-family precedence prefers the scenario-neutral rule cache, then the
-    legacy selection screen and progressively broader Phase 1 report names.
+    legacy selection screen and progressively broader market-screen report names.
     """
     root = Path(report_dir).expanduser()
     search_dirs = (root, root / "results")
@@ -644,37 +663,54 @@ def find_latest_phase1_cost_report(
     if not candidates:
         pattern_text = ", ".join(patterns)
         raise FileNotFoundError(
-            f"No Phase 1 cost report found under {root.resolve()} "
+            f"No market-screen cost report found under {root.resolve()} "
             f"(patterns: {pattern_text})"
         )
     return max(set(candidates), key=lambda path: path.stat().st_mtime_ns)
 
 
-def load_latest_phase1_cost_report(
+def load_latest_market_report(
     report_dir: Path | str = ".",
     *,
     patterns: Sequence[str] = DEFAULT_REPORT_PATTERNS,
 ) -> tuple[Path, pl.DataFrame]:
-    """Load the newest Phase 1 report and return its resolved path.
+    """Load the newest market-screen report and return its resolved path.
 
     Parquet preserves the report's dates, booleans, and numeric schema. CSV is
     read only to maintain compatibility with previously saved reports.
     """
-    path = find_latest_phase1_cost_report(report_dir, patterns=patterns)
-    return path, read_phase1_cost_report(path)
+    path = find_latest_market_report(report_dir, patterns=patterns)
+    return path, read_market_report(path)
 
 
-def read_phase1_cost_report(path: Path | str) -> pl.DataFrame:
-    """Read one Phase 1 report, preferring its native Parquet schema."""
+def read_market_report(path: Path | str) -> pl.DataFrame:
+    """Read one market report, preferring its native Parquet schema."""
     report_path = Path(path)
     if report_path.suffix.lower() == ".parquet":
         return pl.read_parquet(report_path)
     if report_path.suffix.lower() == ".csv":
         return pl.read_csv(report_path, infer_schema_length=None)
     raise ValueError(
-        f"Unsupported Phase 1 report format {report_path.suffix!r}; "
+        f"Unsupported market report format {report_path.suffix!r}; "
         "expected .parquet or legacy .csv"
     )
+
+
+# Compatibility aliases for notebooks and scripts written before the pipeline
+# was organized around market screening and portfolio selection functions.
+PHASE2_STEP1_GATE_COLUMNS = SELECTION_CANDIDATE_GATE_COLUMNS
+PHASE2_STEP1_PARAM_COLUMNS = SELECTION_SCREEN_PARAM_COLUMNS
+PHASE2_STEP1_COLUMNS = SELECTION_CANDIDATE_COLUMNS
+phase2_step1_config = selection_screen_config
+resolve_phase2_selection_config = resolve_selection_config
+apply_phase2_selection_filters = apply_selection_filters
+override_phase2_selection_scenario = override_selection_scenario
+override_phase2_initial_capital = override_selection_initial_capital
+phase2_step1_candidates = selection_candidates
+phase2_search_universe = selection_search_universe
+find_latest_phase1_cost_report = find_latest_market_report
+load_latest_phase1_cost_report = load_latest_market_report
+read_phase1_cost_report = read_market_report
 
 
 def _resolve_rank_column(report: pl.DataFrame, rank_by: str) -> str:

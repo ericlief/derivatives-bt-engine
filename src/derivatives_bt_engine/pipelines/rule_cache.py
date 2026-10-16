@@ -1,8 +1,8 @@
 """Build the reusable futures EWMAC rule/cost cache from a live snapshot.
 
 This command is the narrow offline boundary between IB-dependent market-data
-acquisition and parameterized instrument selection. It delegates the existing
-pooled EWMAC implementation to :mod:`phase1_cost`, but deliberately exposes no
+acquisition and parameterized instrument selection. It delegates pooled EWMAC
+calibration to :mod:`market_screen`, but deliberately exposes no
 capital, target-volatility, liquidity, margin, or portfolio-weight options.
 """
 
@@ -26,7 +26,7 @@ from derivatives_bt_engine.data.futures_history import (
 from derivatives_bt_engine.data.pysystemtrade_pooling import (
     DEFAULT_POOLING_MAPPING_PATH,
 )
-from derivatives_bt_engine.pipelines.phase1_cost import (
+from derivatives_bt_engine.pipelines.market_screen import (
     DEFAULT_COST_EWMAC_FAST_SPANS,
     DEFAULT_RULE_COST_LIMIT_SR,
     run as run_cost_pipeline,
@@ -57,16 +57,20 @@ def parse_args(argv=None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--history-db",
         "--pysystemtrade-db",
+        dest="history_db",
         type=Path,
         default=DEFAULT_PYSYSTEMTRADE_DB_PATH,
-        help="Reviewed pysystemtrade history database.",
+        help="Historical signal database used to calibrate EWMAC rules.",
     )
     parser.add_argument(
+        "--pooling-map",
         "--pysystemtrade-pooling-mapping",
+        dest="pysystemtrade_pooling_mapping",
         type=Path,
         default=DEFAULT_POOLING_MAPPING_PATH,
-        help="Reviewed normalization-pool and economic classification mapping.",
+        help="Reviewed forecast normalization-pool and economic classification map.",
     )
     parser.add_argument(
         "--cost-ewmac-fast-spans",
@@ -120,7 +124,7 @@ def parse_args(argv=None) -> argparse.Namespace:
         type=Path,
         help=(
             "Parquet output base; defaults to "
-            "results/pysystemtrade_rule_cache.parquet."
+            "results/multi_speed_ewmac_rule_cache.parquet."
         ),
     )
     parser.add_argument(
@@ -142,7 +146,7 @@ def run(argv=None) -> pl.DataFrame:
         "--snapshot-input",
         str(args.snapshot_input),
         "--pysystemtrade-db",
-        str(args.pysystemtrade_db),
+        str(args.history_db),
         "--pysystemtrade-pooling-mapping",
         str(args.pysystemtrade_pooling_mapping),
         "--cost-ewmac-fast-spans",

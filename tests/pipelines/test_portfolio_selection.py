@@ -3,7 +3,7 @@ from datetime import date
 import polars as pl
 import pytest
 
-from derivatives_bt_engine.pipelines.phase2_selection import (
+from derivatives_bt_engine.pipelines.portfolio_selection import (
     _label_forecast_output_frame,
     _subsystem_correlation,
     parse_args,
@@ -74,7 +74,7 @@ def test_slow_tilt_ewmac_weights_reject_invalid_rule_sets(rules, message):
         slow_tilt_ewmac_weights(rules)
 
 
-def test_phase2_defaults_to_reviewed_classification_weights():
+def test_selection_defaults_to_reviewed_classification_weights():
     args = parse_args([])
 
     assert args.weight_policy == "topdown_classif"
@@ -95,7 +95,7 @@ def test_build_selection_entrypoint_defaults_to_complete_pipeline():
     assert candidates_only.complete is False
 
 
-def test_phase2_exposes_executable_buffer_sensitivities():
+def test_selection_exposes_executable_buffer_sensitivities():
     """Cash execution can disable the band or trade directly to optimum."""
     args = parse_args([
         "--buffer-size",
@@ -107,14 +107,14 @@ def test_phase2_exposes_executable_buffer_sensitivities():
     assert args.buffer_trade_to_edge is False
 
 
-def test_phase2_exposes_offline_target_volatility_override():
+def test_selection_exposes_offline_target_volatility_override():
     """A cached screen can be resized without another market-data request."""
     args = parse_args(["--target-vol", "0.15"])
 
     assert args.target_vol == pytest.approx(0.15)
 
 
-def test_phase2_can_include_roll_cost_in_greedy_score():
+def test_selection_can_include_roll_cost_in_greedy_score():
     """The roll-cost sensitivity is opt-in and explicit at the CLI."""
     args = parse_args(["--include-roll-cost-in-score"])
 
@@ -136,7 +136,7 @@ def test_legacy_margin_option_is_per_instrument_cap():
     assert args.max_book_margin_pct is None
 
 
-def test_run_loads_explicit_phase1_parquet_and_saves_typed_rows(tmp_path):
+def test_run_loads_explicit_market_parquet_and_saves_typed_rows(tmp_path):
     source = tmp_path / "pysystemtrade_cost_phase1_ib_20261005_120000.parquet"
     output = tmp_path / "phase2_step1.parquet"
     pl.DataFrame({
@@ -160,7 +160,7 @@ def test_run_loads_explicit_phase1_parquet_and_saves_typed_rows(tmp_path):
         "data_elig": [True, False],
         "instr_has_elig_ewmac_rule": [True, True],
         "exec_elig": [True, True],
-        "phase2_elig": [True, False],
+        "selection_elig": [True, False],
         "ib_avail": ["contract_qualified", "unavailable_or_unverified"],
     }).write_parquet(source)
 
@@ -186,7 +186,7 @@ def test_run_rejects_csv_output_path(tmp_path):
     source = tmp_path / "phase1.parquet"
     pl.DataFrame({
         "symbol": ["ES"],
-        "phase2_elig": [True],
+        "selection_elig": [True],
     }).write_parquet(source)
 
     with pytest.raises(ValueError, match=r"\.parquet extension"):
@@ -194,7 +194,7 @@ def test_run_rejects_csv_output_path(tmp_path):
 
 
 def test_subsystem_correlation_uses_daily_date_key():
-    """Phase 2 correlation retains ``date`` in its persisted input panel."""
+    """Selection correlation retains ``date`` in its persisted input panel."""
     dates = pl.date_range(
         pl.date(2024, 1, 1), pl.date(2024, 3, 20), eager=True
     )

@@ -23,7 +23,7 @@ _vd_set_type(
     margin_ccy margin_fx_src
     whatif_error_codes whatif_error_req_ids whatif_reject_reason
     whatif_error whatif_warning whatif_retry_error
-    exec_restrict_reason phase2_excl sel_bucket
+    exec_restrict_reason selection_excl sel_bucket
     elig_ewmac_rules forecast_weights forecast_excl subsystem_excl
     fx_pair fx_src fx_error reason instr_reason
     candidate book added_symbol wt_policy cluster_path cluster_members
@@ -68,7 +68,7 @@ _vd_set_type(
 _vd_set_type(
     """
     exec_elig whatif_attempted whatif_elig cost_elig size_elig data_elig
-    volume_elig risk_volume_elig liq_elig phase2_elig
+    volume_elig risk_volume_elig liq_elig selection_elig
     instr_has_elig_ewmac_rule include_default_pool
     forecast_elig subsystem_elig forecast_valid fx_valid pnl_valid
     cash_fx_valid cash_pnl_valid is_roll roll_event feasible accepted

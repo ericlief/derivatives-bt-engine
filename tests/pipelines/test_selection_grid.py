@@ -86,4 +86,4 @@ def test_dry_run_writes_reproducible_commands_without_running_selection(
     assert "--target-vol 0.2" in command_text
     assert "--max-instr-margin-pct 20.0" in command_text
     assert "--include-roll-cost-in-score" in command_text
-    assert not list(output.rglob("pysystemtrade_selection_book_*.parquet"))
+    assert not list(output.rglob("multi_speed_ewmac_selection_book_*.parquet"))

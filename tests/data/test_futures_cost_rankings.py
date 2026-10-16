@@ -55,7 +55,7 @@ def test_load_latest_phase1_cost_report_keeps_legacy_csv_compatibility(tmp_path)
 
 def test_latest_report_prefers_rule_cache_over_legacy_selection_screen(tmp_path):
     """Automatic discovery uses the scenario-neutral cache when both exist."""
-    cache = tmp_path / "pysystemtrade_rule_cache_20261015_120000.parquet"
+    cache = tmp_path / "multi_speed_ewmac_rule_cache_20261015_120000.parquet"
     screen = tmp_path / "pysystemtrade_selection_screen_20261015_130000.parquet"
     _report().head(1).write_parquet(cache)
     _report().head(2).write_parquet(screen)
@@ -131,7 +131,7 @@ def test_top_n_by_asset_class_excludes_restricted_execution_by_default():
 
 def test_phase2_search_universe_filters_without_mutating_audit_report():
     report = _report().with_columns(
-        pl.Series("phase2_eligible", [True, False, None, True, False])
+        pl.Series("selection_eligible", [True, False, None, True, False])
     )
 
     selected = phase2_search_universe(report)
@@ -179,7 +179,7 @@ def _phase2_step1_report() -> pl.DataFrame:
         "data_elig": [True, True, True, True, False],
         "instr_has_elig_ewmac_rule": [True] * 5,
         "exec_elig": [True] * 5,
-        "phase2_elig": [True, False, False, True, False],
+        "selection_elig": [True, False, False, True, False],
         "ib_avail": [
             "contract_qualified",
             "contract_qualified",
@@ -265,7 +265,7 @@ def test_phase2_scenario_override_recalculates_target_dependent_gates():
         "size_elig"
     ).item() is False
     assert recalculated.filter(pl.col("symbol") == "PASS").select(
-        "phase2_elig"
+        "selection_elig"
     ).item() is True
 
 
@@ -296,5 +296,5 @@ def test_rule_cache_filters_resolve_defaults_without_cached_target_vol():
     assert config["target_vol"] == pytest.approx(0.20)
     assert config["liq_ann_trades"] == pytest.approx(25.6)
     assert config["liq_days"] == 256
-    assert filtered.select("phase2_elig").item() is True
+    assert filtered.select("selection_elig").item() is True
     assert "target_vol" not in cache.columns

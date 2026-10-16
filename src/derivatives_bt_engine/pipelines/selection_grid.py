@@ -3,7 +3,7 @@
 This runner is deliberately a robustness tool rather than a performance
 optimizer. It holds the executable market snapshot and historical inputs fixed,
 varies explicit portfolio-construction assumptions, and saves each scenario's
-normal Phase 2 audit reports in an isolated directory. The final summary reports
+normal portfolio-selection audit reports in an isolated directory. The final summary reports
 membership and feasibility; it does not rank scenarios by backtested returns.
 """
 
@@ -38,7 +38,7 @@ REPORT_TIMEZONE = ZoneInfo("America/Chicago")
 
 @dataclass(frozen=True)
 class SelectionScenario:
-    """One immutable set of Phase 2 portfolio-construction assumptions.
+    """One immutable set of portfolio-construction assumptions.
 
     Percent fields use human CLI units, so ``20`` means 20% of initial capital.
     Target volatility is a decimal, so ``0.20`` means a 20% annual target.
@@ -114,7 +114,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     """Parse the construction-grid command line."""
     parser = argparse.ArgumentParser(
         description=(
-            "Run a Phase 2 robustness grid from one exact cached rule-cost "
+            "Run a portfolio-construction robustness grid from one exact cached rule-cost "
             "report. Scenarios are compared by membership and feasibility, "
             "not treated as walk-forward performance tests."
         )
@@ -134,10 +134,12 @@ def parse_args(argv=None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--history-db",
         "--pysystemtrade-db",
+        dest="history_db",
         type=Path,
         default=DEFAULT_PYSYSTEMTRADE_DB_PATH,
-        help="Reviewed pysystemtrade history database used by Phase 2.",
+        help="Historical signal database used to construct EWMAC forecasts.",
     )
     parser.add_argument(
         "--initial-capital-usd",
@@ -187,12 +189,12 @@ def parse_args(argv=None) -> argparse.Namespace:
         "--weight-policy",
         choices=("topdown_classif", "legacy_handcraft", "equal"),
         default="topdown_classif",
-        help="Fixed Phase 2 risk-weight policy.",
+        help="Fixed portfolio risk-weight policy.",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Write and print the command plan without running Phase 2.",
+        help="Write and print the command plan without running selection.",
     )
     parser.add_argument(
         "--resume",
@@ -252,17 +254,17 @@ def _selection_command(
     database: Path,
     initial_capital_usd: float | None,
 ) -> list[str]:
-    """Build one auditable Phase 2 subprocess command."""
+    """Build one auditable portfolio-selection subprocess command."""
     command = [
         sys.executable,
         "-m",
-        "derivatives_bt_engine.pipelines.phase2_selection",
+        "derivatives_bt_engine.pipelines.portfolio_selection",
         "--input",
         str(scenario_input),
         "--output",
         str(candidates_output),
         "--complete",
-        "--pysystemtrade-db",
+        "--history-db",
         str(database),
         "--target-vol",
         str(scenario.target_volatility),
@@ -288,8 +290,10 @@ def _selection_command(
 
 
 def _latest_book(scenario_dir: Path) -> Path | None:
-    """Return the newest completed Phase 2 book in a scenario directory."""
-    books = sorted(scenario_dir.glob("pysystemtrade_selection_book_*.parquet"))
+    """Return the newest completed selection book, including legacy filenames."""
+    books = sorted(scenario_dir.glob("multi_speed_ewmac_selection_book_*.parquet"))
+    if not books:
+        books = sorted(scenario_dir.glob("pysystemtrade_selection_book_*.parquet"))
     return books[-1] if books else None
 
 
@@ -436,7 +440,7 @@ def run(argv=None) -> tuple[Path, Path | None]:
     source = args.input.expanduser().resolve()
     if not source.is_file() or source.suffix.lower() != ".parquet":
         raise ValueError("--input must be an exact existing Parquet report")
-    database = args.pysystemtrade_db.expanduser().resolve()
+    database = args.history_db.expanduser().resolve()
     if args.initial_capital_usd is not None and args.initial_capital_usd <= 0:
         raise ValueError("--initial-capital-usd must be positive")
 
@@ -453,8 +457,8 @@ def run(argv=None) -> tuple[Path, Path | None]:
     planned: list[tuple[SelectionScenario, Path, list[str]]] = []
     for scenario in scenarios:
         scenario_dir = output_dir / scenario.scenario_id
-        scenario_input = scenario_dir / "rule_cache.parquet"
-        candidates_output = scenario_dir / "selection_candidates.parquet"
+        scenario_input = scenario_dir / "multi_speed_ewmac_rule_cache.parquet"
+        candidates_output = scenario_dir / "multi_speed_ewmac_selection_candidates.parquet"
         scenario_dir.mkdir(parents=True, exist_ok=True)
         if not scenario_input.exists():
             shutil.copy2(source, scenario_input)

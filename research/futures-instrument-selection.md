@@ -1,4 +1,4 @@
-# Pysystemtrade executable costs and instrument selection
+# Futures executable costs and instrument selection
 
 Research date: 2026-10-04.
 
@@ -19,7 +19,7 @@ The data report remains authoritative for source lineage, history construction,
 overlap validation, and the data-side implementation phases. This document
 owns executable economics and instrument selection.
 
-## Phase 1: Executable-contract cost and granularity diagnostic
+## Executable-contract cost and granularity screen
 
 `futures-cost-risk` is the executable-universe companion to the broad Carver
 research panel. It resolves the dated IBKR contract that would actually be
@@ -128,7 +128,7 @@ tot_ann_cost_sr(speed)
 
 #### Turnover units and AFTS reconciliation
 
-The Phase 1 Parquet report uses `ann_trades` for Carver's one-way strategy trades and
+The market screen Parquet report uses `ann_trades` for Carver's one-way strategy trades and
 `ann_rolls` for complete roll events. It deliberately has no `total_tx`
 column. Under the Carver-style `calendar_spread` roll-cost model:
 
@@ -211,7 +211,7 @@ contract-level counterfactuals through explicit, run-local roll-policy
 overrides; the next performance comparison should use those generated paths,
 not add another raw market-data table.
 
-This Phase 1 calculation matches pysystemtrade's current **rule affordability**
+This market screen calculation matches pysystemtrade's current **rule affordability**
 contract: [`get_SR_cost_for_instrument_forecast`](https://github.com/pst-group/pysystemtrade/blob/b4a25e6e1e33a54a3ecfb45c0f6db5e2b60b84f8/systems/accounts/account_costs.py#L14-L33)
 adds forecast transaction cost to holding cost, and
 [`get_SR_holding_cost_only`](https://github.com/pst-group/pysystemtrade/blob/b4a25e6e1e33a54a3ecfb45c0f6db5e2b60b84f8/systems/accounts/account_costs.py#L183-L190)
@@ -224,11 +224,11 @@ The published AFTS static selector uses a different cost contract. Its
 [`calculate_trading_cost`](https://github.com/pst-group/pysystemtrade/blob/b4a25e6e1e33a54a3ecfb45c0f6db5e2b60b84f8/systems/provided/static_small_system_optimise/optimise_small_system.py#L292-L300)
 multiplies combined `subsystem_turnover` by one-way SR cost per trade; it
 does not call `get_SR_cost_given_turnover` and therefore does not add a
-separate holding-roll term. Phase 2 must reproduce that definition for its
+separate holding-roll term. portfolio selection must reproduce that definition for its
 exact AFTS baseline. It should also report a clearly labelled
 `afts_plus_rolls` sensitivity using
-`trade_sr × subsystem_turnover + roll_sr × ann_rolls`. The Phase 1 per-rule total is
-neither of those Phase 2 inputs: it screens individual rules before their
+`trade_sr × subsystem_turnover + roll_sr × ann_rolls`. The market screen per-rule total is
+neither of those portfolio selection inputs: it screens individual rules before their
 forecasts are combined.
 
 Each rule passes when total annual SR cost is no greater than `0.15`, the AFTS
@@ -264,7 +264,7 @@ comparable and must not be halved again. Observation count, date range,
 successful bar size, attempts, and failures are retained under the compact
 `ib_hspread_*` prefix.
 
-Timestamped Phase 1 filenames and the report fields `report_ts_ct`,
+Timestamped market screen filenames and the report fields `report_ts_ct`,
 `snap_quote_timestamp_ct`, `ib_hspread_start`, and `ib_hspread_end` use the
 daylight-saving-aware `America/Chicago` timezone. This aligns report review
 with CME hours; each ISO timestamp retains its explicit `-05:00` or `-06:00`
@@ -353,8 +353,8 @@ satisfy the minimum-15 breadth count. The US home-price future uses
 Portfolio construction should
 first try to cover all seven main classes, then fill the remaining main slots;
 coverage is a preference when contract granularity makes a class infeasible.
-These figures are deliberately a Phase 1 stress scenario. Four contracts and
-15 instruments must not become simultaneous hard admission gates in Phase 2:
+These figures are deliberately a market screen stress scenario. Four contracts and
+15 instruments must not become simultaneous hard admission gates in portfolio selection:
 that would reject diversification before allowing its higher IDM to reduce the
 capital needed per instrument.
 
@@ -387,28 +387,28 @@ mixed-volatility inputs, scalar warm-up, and the SR cost ceiling have separate
 AFTS EWMAC speeds and the 32-session/ten-year/30% mixed volatility, while
 remaining independently overridable for research.
 
-Load the newest timestamped Phase 1 report and show the top five instruments
+Load the newest timestamped market screen report and show the top five instruments
 in every asset class from a notebook with:
 
 ```python
 from derivatives_bt_engine.data.futures_cost_rankings import (
     display_asset_class_rankings,
-    load_latest_phase1_cost_report,
+    load_latest_market_screen_cost_report,
     top_n_by_asset_class,
 )
 
-report_path, phase1 = load_latest_phase1_cost_report(".")
+report_path, market_screen = load_latest_market_screen_cost_report(".")
 print(report_path)
 
-rankings = top_n_by_asset_class(phase1, n=5, rank_by="cost")
+rankings = top_n_by_asset_class(market_screen, n=5, rank_by="cost")
 display_asset_class_rankings(rankings)
 ```
 
-Set `rank_by` to `"affordability"` or `"notional"` for the other Phase 1
+Set `rank_by` to `"affordability"` or `"notional"` for the other market screen
 rankings. Pass `asset_classes=["Equity", "Rates"]` to show selected classes,
 or `columns=None` to retain all report columns in each returned frame.
 
-### Phase 1 operational modes and public output
+### market screen operational modes and public output
 
 `--offline` writes the complete 259-row comparison without connecting to IB.
 Prices and volatility then end at the imported Carver history boundary, live
@@ -448,7 +448,7 @@ ACCOUNTS_FILE="${FIN_DATA_ROOT}/broker/ib/accounts/all/accounts.json"
 
 The account JSON is a name-to-ID object. Only the friendly name is added to
 the snapshot filename, for example
-`pysystemtrade_market_snapshot_taxable_20261013_120000.parquet`; neither the
+`futures_market_snapshot_taxable_20261013_120000.parquet`; neither the
 account ID nor the mapping is persisted. `--ib-account` remains available for
 an explicit raw ID. When both options are omitted, the runner uses the first
 entry returned by TWS `managedAccounts`. Explicit IDs are validated against
@@ -534,10 +534,10 @@ The defaults are `--min-daily-volume 100`, `--max-market-volume-pct 1`,
 
 The rule cache retains every row without applying these scenario assumptions.
 The selection runner adds separate cost, one-contract risk-size,
-contract-volume, and relative-risk-volume flags. `phase2_elig` also
+contract-volume, and relative-risk-volume flags. `selection_elig` also
 requires at least one affordable EWMAC rule, an allowed execution profile, and
-a qualified IB contract. `phase2_excl` records all failed gates. The
-`phase2_search_universe()` notebook helper reads only eligible rows before the
+a qualified IB contract. `selection_excl` records all failed gates. The
+`selection_search_universe()` notebook helper reads only eligible rows before the
 greedy search; it does not destructively condense the saved audit. The size
 gate compares the production mixed annual dollar volatility per contract with
 `init_capital_usd * target_vol`; futures notional is reported but is not a
@@ -548,7 +548,7 @@ price, FX, multiplier, or 20-day close/volume data is `dont_add_no_data`;
 there is no numeric substitute for a missing data subscription. Rows with
 data that fail cost, dollar-vol size, or either liquidity gate are
 `add_later`. Rows passing those four numeric gates are `add_first`.
-`phase2_elig` is intentionally narrower than `add_first`, because the
+`selection_elig` is intentionally narrower than `add_first`, because the
 actual search must also respect the EWMAC-rule and execution-family checks.
 
 ### Snapshot, rule cache, and selection pipeline
@@ -567,14 +567,14 @@ pysystemtrade histories + reviewed economic classification + local execution ove
     -> per-rule EWMAC performance, turnover, rolls, and cost eligibility
     -> scenario-neutral rule-cache Parquet
     -> selection cost, size, liquidity, data, and execution gates
-    -> candidate Parquet with sel_bucket, phase2_elig, and phase2_excl
+    -> candidate Parquet with sel_bucket, selection_elig, and selection_excl
     -> combined forecast and subsystem return for each surviving instrument
     -> trial-book correlations, top-down classification weights, and IDM
     -> portfolio-specific positions, turnover, cost, and market participation
     -> greedy AFTS selection with core-class coverage and score tolerance
 ```
 
-#### Target Phase 2 pipeline runner
+#### Target portfolio selection pipeline runner
 
 The complete path has one explicit runner that coordinates narrow data and
 calculation stages. Each stage appends the columns it owns to the same
@@ -587,8 +587,8 @@ that should already be present in the daily frame.
 flowchart TD
     Runner["Phase2PipelineRunner"]
 
-    Phase1["Phase 1 row<br/>symbol · history code · currency · multiplier<br/>eligible rules · trade_sr · roll_sr · ref_ann_rolls"]
-    RuleScreen["Phase 1 rule screen<br/>rule turnover × trade_sr<br/>+ ref_ann_rolls × roll_sr<br/>determines eligible rules only"]
+    Phase1["market screen row<br/>symbol · history code · currency · multiplier<br/>eligible rules · trade_sr · roll_sr · ref_ann_rolls"]
+    RuleScreen["market screen rule screen<br/>rule turnover × trade_sr<br/>+ ref_ann_rolls × roll_sr<br/>determines eligible rules only"]
     Prices["Daily signal history<br/>date · close · point change · mixed point vol"]
     RollMarks["History roll policy<br/>date · is_roll"]
     Components["EWMAC component builder<br/>scaled forecast for each speed"]
@@ -624,7 +624,7 @@ flowchart TD
     SummaryOutput["One-row instrument audit / CSV"]
     ReturnPanel["Synchronized pnl_usd panel"]
     Correlation["Subsystem correlation matrix"]
-    Selection["Greedy Phase 2 selection<br/>weights · IDM · costs · size penalty"]
+    Selection["Greedy portfolio selection selection<br/>weights · IDM · costs · size penalty"]
     CashPnL["Executable cash audit for final book<br/>10% average-position buffer · rounded contracts<br/>ordinary trades · actual and interval-average roll cost"]
 
     Runner --> Phase1
@@ -672,7 +672,7 @@ flowchart TD
 The same ownership in terminal-readable form is:
 
 ```text
-1. Load Phase 1 row and daily signal history.
+1. Load market screen row and daily signal history.
 2. Build and combine eligible EWMAC forecasts.
 3. Load historical FX once per currency and attach multiplier and
    backward-as-of FX to the frame. A later live runner may append IB history,
@@ -680,8 +680,8 @@ The same ownership in terminal-readable form is:
 4. Convert mixed point volatility into average and desired subsystem positions.
 5. Calculate the actual combined-subsystem turnover from normalized desired-
    position changes. This replaces, rather than averages, the individual-rule
-   turnover estimates used by the Phase 1 screen.
-6. Reuse Phase 1 `trade_sr`, `roll_sr`, and `ref_ann_rolls` to calculate the
+   turnover estimates used by the market screen screen.
+6. Reuse market screen `trade_sr`, `roll_sr`, and `ref_ann_rolls` to calculate the
    combined subsystem's annual trading cost and holding-roll cost.
 7. Lag the desired position and calculate gross point, native-currency, and
    USD P&L.
@@ -696,22 +696,22 @@ The same ownership in terminal-readable form is:
     the resulting whole-contract position for cash P&L and event costs.
 ```
 
-The Phase 1 `cur_fx_to_usd` value is a point-in-time cost and sizing snapshot;
+The market screen `cur_fx_to_usd` value is a point-in-time cost and sizing snapshot;
 it must never be filled backward through the historical subsystem frame. The
 FX loader records the pair and observation date of every rate. USD receives
 an explicit identity series.
 
 #### Cost ownership, backtests, and live selection
 
-Phase 1 calculates two different kinds of cost information. The executable
+market screen calculates two different kinds of cost information. The executable
 contract supplies the reusable per-event inputs `trade_sr` and `roll_sr`, plus
 the saved reference roll frequency `ref_ann_rolls`. The individual EWMAC rule turnovers are screening
 inputs only. They answer whether each rule is cheap enough to enter the
 combined forecast; their annual costs must not be summed, averaged, or carried
 forward as the combined subsystem cost.
 
-After Phase 2 combines the eligible rules, it measures the resulting position
-turnover and replaces the Phase 1 rule-turnover estimate:
+After portfolio selection combines the eligible rules, it measures the resulting position
+turnover and replaces the market screen rule-turnover estimate:
 
 ```text
 ann_trade_cost_sr = trade_sr * subsystem_turnover
@@ -731,12 +731,12 @@ correlation panel uses `net_pnl_usd`.
 
 This pro-rata series does not make the cost estimate rolling or causal by
 itself. Carver's standard SR-cost account curve uses a full-sample turnover
-scalar and a terminal recent-cost calibration. Using one Phase 1 snapshot over
+scalar and a terminal recent-cost calibration. Using one market screen snapshot over
 an entire historical run has the same fixed-calibration interpretation: it is
 valid as an explicitly stated cost stress, but it is not a walk-forward cost
 backtest. A causal historical selection run must cut all histories off at each
-selection date and rerun Phase 1 and Phase 2 as of that date. For a live
-selection, the current Phase 1 snapshot and all history ending at the run date
+selection date and rerun market screen and portfolio selection as of that date. For a live
+selection, the current market screen snapshot and all history ending at the run date
 are causal at that date; keep that annual cost calibration until the next
 scheduled selection refresh rather than backfilling a later snapshot into
 earlier live results.
@@ -776,7 +776,7 @@ breach trades to the nearest edge by default. Use `--buffer-size` and
 the executable cash path only: the AFTS score continues to use the unbuffered
 `system.accounts.subsystem_turnover()` convention.
 
-Ordinary position changes are charged with the Phase 1 one-way trade cost.
+Ordinary position changes are charged with the market screen one-way trade cost.
 On each history-policy `is_roll` date, `realized_roll_cons` uses the rounded
 position held from the prior day. `interval_avg_abs_cons` retains the
 fractional mean absolute rounded exposure over the interval ending on that
@@ -788,7 +788,7 @@ questions: the realized series audits the supplied historical roll path, while
 the interval-average series estimates a typical policy roll without depending
 on the forecast value on one date. Current snapshot costs are applied to the
 full history as a clearly labelled sensitivity; no live contract is queried
-again during Phase 2.
+again during portfolio selection.
 
 The live-data boundary is a reusable, full-precision Parquet snapshot. Acquire
 contract qualification, current quotes and FX, dated-contract spread and
@@ -800,7 +800,7 @@ futures-market-snapshot \
   --instruments all-pysystemtrade \
   --vol-source pysystemtrade \
   --ib-account-name taxable \
-  --snapshot-output results/pysystemtrade_market_snapshot.parquet
+  --snapshot-output results/futures_market_snapshot.parquet
 ```
 
 Omitting both account options selects `managedAccounts[0]`. Pass an account
@@ -823,7 +823,7 @@ later without IB.
 
 Each live acquisition also writes the `ib_insync` warnings and errors to a
 separate timestamped file beside the snapshot, for example
-`pysystemtrade_market_snapshot_taxable_ib_20261013_120000.log`. This preserves
+`futures_market_snapshot_taxable_ib_20261013_120000.log`. This preserves
 the complete IB request-error text without mixing broker diagnostics into the
 pipeline log. Use `--ib-log-output path/to/ib.log` to choose a different base
 path; the account alias and run timestamp are still appended.
@@ -835,13 +835,13 @@ futures-rule-cache \
   --snapshot-input results \
   --cost-ewmac-fast-spans 4,8,16,32,64 \
   --rule-cost-limit-sr 0.15 \
-  --pysystemtrade-db /home/dev/fin/db/pysystemtrade_reference.duckdb \
-  --output results/pysystemtrade_rule_cache.parquet
+  --history-db /home/dev/fin/db/pysystemtrade_reference.duckdb \
+  --output results/multi_speed_ewmac_rule_cache.parquet
 ```
 
 Passing a directory to `--snapshot-input` selects its newest timestamped
 `*_market_snapshot_*.parquet`; passing a file pins exact-run reproduction. The
-result is `pysystemtrade_rule_cache_<timestamp>.parquet`. It retains all market
+result is `multi_speed_ewmac_rule_cache_<timestamp>.parquet`. It retains all market
 snapshot inputs plus pooled EWMAC turnover/cost statistics, `trade_sr`,
 `roll_sr`, `ref_ann_rolls`, and the eligible rule list. It deliberately has no
 `init_cap_usd`, `target_vol`, market-participation calculation, or final
@@ -873,16 +873,16 @@ futures-build-selection \
 selection-screen files. It first derives `max_ann_dvol`, daily risk traded,
 market-risk volume, participation percentage, and all hard gate flags. It
 saves the accepted rows as
-`pysystemtrade_selection_candidates_<timestamp>.parquet`, then runs forecast
+`multi_speed_ewmac_selection_candidates_<timestamp>.parquet`, then runs forecast
 combination and greedy selection and saves the final book plus all normal audit
 artifacts. Use `--candidates-only` to stop after the filtered candidate file.
 The old `futures-selection-screen`, `futures-cost-risk`, and
-`futures-select-phase2` commands remain compatibility entry points.
+`futures-select-selection` commands remain compatibility entry points.
 
 The candidate Parquet repeats the resolved scenario inputs `init_cap_usd`,
 `target_vol`, `cost_lim_sr`, `rule_cost_lim_sr`, `liq_ann_trades`, `liq_days`,
 `min_daily_volume`, and `max_pct_mkt_volume`, together with every gate and
-`phase2_excl`. `topdown_classif` is the default weight policy;
+`selection_excl`. `topdown_classif` is the default weight policy;
 `legacy_handcraft` and `equal` remain explicit research comparators.
 Complete-selection reports persist the choice as `wt_policy` and record
 `asset_cls`, `econ_subcls`, and the resulting class path for each book member
@@ -952,27 +952,27 @@ or historical-rule rerun:
 
 ```bash
 futures-build-selection \
-  --input results/pysystemtrade_rule_cache_<timestamp>.parquet \
+  --input results/multi_speed_ewmac_rule_cache_<timestamp>.parquet \
   --initial-capital-usd 75000
 ```
 
 The built-in filter calculates `max_ann_dvol`, `risk_traded_usd_day`,
 `pct_mkt_volume`, `size_elig`, `risk_volume_elig`, `liq_elig`, and
-`phase2_elig` before candidate filtering. It does not alter the saved market
+`selection_elig` before candidate filtering. It does not alter the saved market
 observations or cached per-rule statistics.
 
 The build command continues through forecast combination and the greedy AFTS
 baseline by default. The command writes:
 
-- `pysystemtrade_selection_forecast_audit_<timestamp>.parquet`, with component and
+- `multi_speed_ewmac_selection_forecast_audit_<timestamp>.parquet`, with component and
   combined null/non-finite counts, valid dates and observations, FDM, combined
   turnover, cost, and the precise exclusion reason;
-- `pysystemtrade_selection_forecasts_<timestamp>.parquet`, containing the daily
+- `multi_speed_ewmac_selection_forecasts_<timestamp>.parquet`, containing the daily
   component forecasts, combined forecast, validity flag, normalized position,
   and gross, cost, and net subsystem P&L for direct inspection;
-- `pysystemtrade_selection_subsystem_net_pnl_<timestamp>.parquet`, the synchronized
+- `multi_speed_ewmac_selection_subsystem_net_pnl_<timestamp>.parquet`, the synchronized
   return panel used by the bounded correlation estimator;
-- `pysystemtrade_selection_cash_pnl_<timestamp>.parquet`, the final book's
+- `multi_speed_ewmac_selection_cash_pnl_<timestamp>.parquet`, the final book's
   account-scaled daily continuous target, average-position buffer width and
   boundaries, buffered whole contracts, ordinary traded contracts, actual and
   interval-average policy-roll contracts, and separate gross, trade-cost,
@@ -980,8 +980,8 @@ baseline by default. The command writes:
   additive-Panama adjusted level used by the signal history, retained beside
   the roll-neutral `point_change` for audit; it is not the raw executable
   dated-contract mark;
-- `pysystemtrade_selection_trials_<timestamp>.parquet`, one row per greedy trial; and
-- `pysystemtrade_selection_trial_allocations_<timestamp>.parquet`, one row per member
+- `multi_speed_ewmac_selection_trials_<timestamp>.parquet`, one row per greedy trial; and
+- `multi_speed_ewmac_selection_trial_allocations_<timestamp>.parquet`, one row per member
   of every hypothetical trial book, including its economic `cluster_path`,
   portfolio `weight`, sizing `limit_weight`, IDM, score, feasibility, and
   accepted flag. Every rejected row has a decision `reason`: hard-constraint
@@ -989,7 +989,7 @@ baseline by default. The command writes:
   a lower singleton rank, a lower rank than the iteration winner, or a best
   score below the acceptance threshold. `iter_best`, `iter_best_score`, and
   `min_accept_score` make that comparison directly auditable; and
-- `pysystemtrade_selection_passes_<timestamp>.parquet`, the readable
+- `multi_speed_ewmac_selection_passes_<timestamp>.parquet`, the readable
   accepted path only: `selection_step` identifies the pass, `added_symbol` is
   its winner, and each `symbol` row records that accepted book member's
   terminal subclass, subclass membership, subclass weight, instrument weight,
@@ -997,7 +997,7 @@ baseline by default. The command writes:
   `marg_score` and denominator-scaled `scaled_contrib` alongside annual cost
   components;
   and
-- `pysystemtrade_selection_book_<timestamp>.parquet`, the last accepted book.
+- `multi_speed_ewmac_selection_book_<timestamp>.parquet`, the last accepted book.
 
 Use `--max-instr-per-cluster N` to run a static breadth-cap sensitivity. The
 cluster key is the reviewed `econ_subcls`, so `--max-instr-per-cluster 4`
@@ -1022,7 +1022,7 @@ also records `net_sr`, the shared book `score_denom`, and each member's
 book-level `score` in each accepted pass; the raw numerator contributions and
 shared denominator are also available for audit.
 
-All Phase 1 and Phase 2 public Parquet reports use the shared report formatter
+All market screen and portfolio selection public Parquet reports use the shared report formatter
 at the write boundary. Native Parquet types are retained for dates, booleans,
 and numbers. USD amounts are rounded to cents, reproduction-sensitive FX
 and return-volatility rates to six decimal places, and other floating-point
@@ -1039,18 +1039,18 @@ aggregate score.
 
 For interactive inspection of one instrument's history, pooled normalization,
 raw momentum, and component forecasts without running either report, use the
-[pysystemtrade EWMAC notebook workflow](pysystemtrade-ewmac-notebook.md).
+[multi-speed EWMAC notebook workflow](multi-speed-ewmac-notebook.md).
 
-The Phase 1 `liquidity_ann_trades=25` calculation is Carver's conservative
+The market screen `liquidity_ann_trades=25` calculation is Carver's conservative
 single-instrument scenario. It is useful for coarse triage, but it is not the
-final capacity estimate for a Phase 2 trial book. Phase 2 must first combine
+final capacity estimate for a portfolio selection trial book. portfolio selection must first combine
 the surviving rules into the instrument forecast and measure the resulting
 subsystem turnover. It must then use the trial weight and trial IDM to compute
 that instrument's risk allocation and daily risk traded. Do not average or sum
 the individual rule turnovers as a substitute for the combined subsystem.
 
-Likewise, the Phase 1 one-way `trade_sr <= 0.01` test is an initial cost screen.
-The Phase 2 score uses the combined subsystem turnover:
+Likewise, the market screen one-way `trade_sr <= 0.01` test is an initial cost screen.
+The portfolio selection score uses the combined subsystem turnover:
 
 ```text
 instr_risk = capital * target_vol * weight * IDM
@@ -1061,8 +1061,8 @@ annual_trade_cost_sr = trade_sr * subsystem_turnover
 
 Add `roll_sr * ann_rolls` only in the separately reported production-cost
 sensitivity. The baseline AFTS score excludes that holding-roll allowance, as
-described below. Thus Phase 1 answers “is this executable contract worth
-carrying into the search?”, while Phase 2 answers “does this contract fit this
+described below. Thus market screen answers “is this executable contract worth
+carrying into the search?”, while portfolio selection answers “does this contract fit this
 particular diversified trial book?”
 
 The initial combination policy uses the five ordinary EWMAC speeds only:
@@ -1072,14 +1072,14 @@ The initial combination policy uses the five ordinary EWMAC speeds only:
 ```
 
 This gives 60% to `32/128` and `64/256` and 40% to the faster three rules. A
-rule removed by the Phase 1 cost gate receives zero weight and the remaining
+rule removed by the market screen cost gate receives zero weight and the remaining
 weights are renormalized; for example, `16/64,32/128,64/256` becomes
 `25%,37.5%,37.5%`. Each component is causally scaled and capped first. The
 weighted forecast then receives a correlation-estimated FDM,
 `min(2.5, 1/sqrt(w' C w))`, and is capped again. FDM is separate from the rule
 weights and is not baked into their reported percentages.
 
-## Phase 2: Iterative AFTS instrument selection
+## Iterative AFTS portfolio selection
 
 ### Reviewed economic hierarchy
 
@@ -1125,18 +1125,18 @@ algorithm](https://qoppac.blogspot.com/2021/06/static-optimisation-of-best-set-o
 is a greedy portfolio search, not a sort followed by a fixed contract-count
 filter. At each iteration it tries every unused instrument as the next member,
 rebuilds the hypothetical portfolio, and keeps the candidate with the highest
-expected portfolio Sharpe ratio. This is the appropriate baseline for Phase 2.
+expected portfolio Sharpe ratio. This is the appropriate baseline for portfolio selection.
 
-The Phase 1 pre-selection filters are hard for entry to the search: a candidate
+The market screen pre-selection filters are hard for entry to the search: a candidate
 needs usable history, price, FX, contract multiplier, annual dollar volatility,
 at least one cost-eligible rule, one-way `trade_sr <= 0.01`, and a qualified
 contract allowed by the selected broker profile. It must pass both the
 100-contract daily volume floor and the coarse relative market-risk
 participation calculation above, as described in
 [Adding new instruments](https://qoppac.blogspot.com/2021/05/adding-new-instruments-or-how-i-learned.html).
-Every Phase 2 trial then recalculates turnover, position size, and market
+Every portfolio selection trial then recalculates turnover, position size, and market
 participation using the combined subsystem and the trial book's weight and IDM;
-the fixed 25-trade Phase 1 scenario must not replace that calculation.
+the fixed 25-trade market screen scenario must not replace that calculation.
 Full, mini, and micro contracts that express the same signal are one economic
 family: normally select at most one execution route, unless the report already
 establishes a materially distinct contract or roll path. An execution overlay
@@ -1154,7 +1154,7 @@ groups. Every represented asset class receives equal risk; represented
 subclasses split their class allocation equally; instruments then split their
 subclass allocation equally. The former correlation-only recursive
 `HandcraftedPortfolioWeights` remains an explicitly selected legacy
-sensitivity, not the Phase 2 default.
+sensitivity, not the portfolio selection default.
 
 For example, a book containing two grains, one soft, one US equity, and one
 ex-US equity assigns 50% to `ags` and 50% to `equity`. Within `ags`, grains and
@@ -1206,13 +1206,13 @@ The separate default `buffer_size=0.10` is a no-trade band, not a smoothing
 parameter. With forecast buffering, the band is 10% of average position and a
 breach trades to the nearest edge. The published static-small-system AFTS code
 uses `system.accounts.subsystem_turnover()`, which measures the unbuffered
-subsystem position, so the Phase 2 baseline does the same. A buffered
+subsystem position, so the portfolio selection baseline does the same. A buffered
 portfolio-turnover sensitivity may be reported separately; it must not silently
 replace the AFTS cost input.
 
 Do not sum the eligible rules' individual turnovers: forecast combination and
 the changing volatility scalar determine the resulting subsystem turnover.
-Do not feed an opaque Phase 1 total into the baseline. It includes a separate
+Do not feed an opaque market screen total into the baseline. It includes a separate
 two-leg holding-roll allowance that the published AFTS selector omits. The
 more conservative production sensitivity is explicit:
 
@@ -1230,21 +1230,21 @@ Both variants use the current one-way definition of `trade_sr`. This preserves
 the observed corn result at the
 screening stage: a higher-cost full or mini contract can lose its fast EWMAC
 rules, while a cheaper micro can retain more rules, without either outcome
-being hard-coded by symbol. Phase 2 then scores each surviving execution route
+being hard-coded by symbol. portfolio selection then scores each surviving execution route
 with combined subsystem turnover, not the sum of those rule-screening costs.
 
 Seed the loop by ranking individual instruments with the same net-SR formula
 and `IDM=1`. Carver uses a 5% cap on `instrument_weight * IDM` for a larger
 account and explicitly raises it for small accounts (20% in his `$100,000`
 example). His `calculate_maximum_position()` applies that cap again during
-every n+1 trial, not just while choosing the singleton seed. Phase 2 therefore
+every n+1 trial, not just while choosing the singleton seed. portfolio selection therefore
 exposes `max_weight_idm`; `--starting-weight` remains a compatibility alias.
 This avoids the otherwise discontinuous result where moving from one to two
 instruments resizes each market from a nominal 20% share to 50% before IDM.
 The baseline loop is:
 
 ```text
-eligible = hard_filter(phase1_candidates)
+eligible = hard_filter(market_screen_candidates)
 selected = [best_single_candidate(eligible, max_weight_idm)]
 best_seen = 0.0  # published AFTS loop updates this from the first n+1 trial
 
@@ -1319,7 +1319,7 @@ common-history coverage, risk weights, IDM, annual dollar volatility, average
 and maximum-forecast contracts, trading-cost and size penalties, score before
 and after, best score so far, tolerance boundary, and the exact accept/reject
 reason. `DEBUG` logs should contain every trial; `INFO` should contain the
-selected winner, stopping decision, and final book. This gives Phase 2 enough
+selected winner, stopping decision, and final book. This gives portfolio selection enough
 evidence to explain why it advanced to the next candidate instead of merely
 publishing a final rank.
 
@@ -1391,8 +1391,8 @@ identify why membership changed.
 `buffer_size` is also separate. It affects executable positions, turnover, and
 cash P&L, but the published AFTS selection score uses unbuffered subsystem
 turnover. Test buffers such as `0.05, 0.10, 0.20` after fixing a book. The
-Phase 1 affordability fields (`affordability_min_contracts`, scenario IDM, and
-minimum main instruments) remain diagnostics and are not Phase 2 hard gates.
+market screen affordability fields (`affordability_min_contracts`, scenario IDM, and
+minimum main instruments) remain diagnostics and are not portfolio selection hard gates.
 
 Judge the construction grid using book size, Jaccard membership overlap,
 additions and removals, asset-class and subclass coverage, maximum instrument
@@ -1415,17 +1415,17 @@ The recommended 18-scenario first pass is the CLI default:
 
 ```bash
 .venv/bin/futures-selection-grid \
-  --input results/pysystemtrade_rule_cache_<timestamp>.parquet \
-  --pysystemtrade-db /home/dev/fin/db/pysystemtrade_reference.duckdb \
+  --input results/multi_speed_ewmac_rule_cache_<timestamp>.parquet \
+  --history-db /home/dev/fin/db/pysystemtrade_reference.duckdb \
   --initial-capital-usd 75000
 ```
 
-Preview the exact commands without running Phase 2 with `--dry-run`. The runner
+Preview the exact commands without running selection with `--dry-run`. The runner
 creates an isolated directory for every scenario and can resume completed
 directories after interruption. It writes:
 
 - `selection_grid_commands.sh`, the reproducible command plan;
-- one normal set of typed Phase 2 Parquet audits per scenario;
+- one normal set of typed portfolio-selection Parquet audits per scenario;
 - `selection_grid_summary.parquet`, containing parameters, feasibility,
   membership, margins, the central-scenario overlap, and the explicitly named
   `construction_score`; and
@@ -1435,8 +1435,8 @@ Run secondary constraint tests separately, for example:
 
 ```bash
 .venv/bin/futures-selection-grid \
-  --input results/pysystemtrade_rule_cache_<timestamp>.parquet \
-  --pysystemtrade-db /home/dev/fin/db/pysystemtrade_reference.duckdb \
+  --input results/multi_speed_ewmac_rule_cache_<timestamp>.parquet \
+  --history-db /home/dev/fin/db/pysystemtrade_reference.duckdb \
   --initial-capital-usd 75000 \
   --target-vols 0.20 \
   --max-instr-margin-pcts 20 \

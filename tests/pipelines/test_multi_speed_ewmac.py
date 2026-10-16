@@ -1,11 +1,11 @@
-"""Tests for reusable EWMAC construction and notebook-facing views."""
+"""Tests for reusable multi-speed EWMAC construction and notebook views."""
 
 from types import SimpleNamespace
 
 import polars as pl
 import pytest
 
-from derivatives_bt_engine.pipelines.pysystemtrade_ewmac import (
+from derivatives_bt_engine.strats.multi_speed_ewmac import (
     EwmacResearchView,
     PooledEwmacRuleData,
     build_ewmac_component_frame,
