@@ -1,0 +1,89 @@
+"""Tests for the command-line Phase 2 robustness-grid coordinator."""
+
+from pathlib import Path
+
+import polars as pl
+
+from derivatives_bt_engine.pipelines.selection_grid import (
+    build_scenarios,
+    parse_args,
+    run,
+)
+
+
+def test_default_grid_varies_construction_scenarios_not_performance_inputs():
+    """The recommended first pass is the documented 3x3x2 grid."""
+    args = parse_args(["--input", "screen.parquet"])
+
+    scenarios = build_scenarios(args)
+
+    assert len(scenarios) == 18
+    assert {scenario.target_volatility for scenario in scenarios} == {
+        0.15, 0.20, 0.25
+    }
+    assert {
+        scenario.maximum_instrument_margin_percent for scenario in scenarios
+    } == {15.0, 20.0, 25.0}
+    assert {scenario.include_roll_cost_in_score for scenario in scenarios} == {
+        False, True
+    }
+    assert {scenario.maximum_book_margin_percent for scenario in scenarios} == {
+        75.0
+    }
+
+
+def test_grid_accepts_secondary_constraint_lists():
+    """Book margin, weight-IDM, and subclass caps can be swept separately."""
+    args = parse_args([
+        "--input",
+        "screen.parquet",
+        "--target-vols",
+        "0.20",
+        "--max-instr-margin-pcts",
+        "20",
+        "--max-book-margin-pcts",
+        "50,100",
+        "--max-weight-idms",
+        "0.15,0.25",
+        "--max-instr-per-clusters",
+        "2,none",
+        "--roll-cost-modes",
+        "include",
+    ])
+
+    scenarios = build_scenarios(args)
+
+    assert len(scenarios) == 8
+    assert {scenario.maximum_instruments_per_cluster for scenario in scenarios} == {
+        2, None
+    }
+
+
+def test_dry_run_writes_reproducible_commands_without_running_selection(
+    tmp_path: Path,
+):
+    """Dry-run mode creates the shell plan but no Phase 2 book artifacts."""
+    source = tmp_path / "screen.parquet"
+    output = tmp_path / "grid"
+    pl.DataFrame({"symbol": ["MZC"]}).write_parquet(source)
+
+    commands_path, summary_path = run([
+        "--input",
+        str(source),
+        "--output-dir",
+        str(output),
+        "--target-vols",
+        "0.20",
+        "--max-instr-margin-pcts",
+        "20",
+        "--roll-cost-modes",
+        "include",
+        "--dry-run",
+    ])
+
+    command_text = commands_path.read_text(encoding="utf-8")
+    assert summary_path is None
+    assert "--target-vol 0.2" in command_text
+    assert "--max-instr-margin-pct 20.0" in command_text
+    assert "--include-roll-cost-in-score" in command_text
+    assert not list(output.rglob("pysystemtrade_selection_book_*.parquet"))

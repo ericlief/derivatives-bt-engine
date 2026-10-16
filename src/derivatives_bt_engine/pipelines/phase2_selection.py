@@ -40,7 +40,7 @@ import polars as pl
 
 from derivatives_bt_engine.data.futures_cost_rankings import (
     load_latest_phase1_cost_report,
-    override_phase2_initial_capital,
+    override_phase2_selection_scenario,
     phase2_step1_candidates,
     phase2_step1_config,
     read_phase1_cost_report,
@@ -150,6 +150,14 @@ def parse_args(argv=None):
         help=(
             "Override the Phase 1 capital and recompute its capital-dependent "
             "size and relative-liquidity gates from the saved report"
+        ),
+    )
+    parser.add_argument(
+        "--target-vol",
+        type=float,
+        help=(
+            "Override the Phase 1 annual volatility target and recompute its "
+            "risk-size and relative-liquidity gates from the saved report"
         ),
     )
     parser.add_argument(
@@ -934,16 +942,28 @@ def run(argv=None) -> tuple[Path, pl.DataFrame]:
         report.height,
     )
     persisted_config = phase2_step1_config(report)
-    if args.initial_capital_usd is not None:
-        report = override_phase2_initial_capital(
+    if args.initial_capital_usd is not None or args.target_vol is not None:
+        report = override_phase2_selection_scenario(
             report,
-            args.initial_capital_usd,
+            initial_capital_usd=args.initial_capital_usd,
+            target_vol=args.target_vol,
         )
         logger.info(
-            "phase2_step1 capital_override old_init_cap_usd=%s "
-            "new_init_cap_usd=%s source=%s",
+            "phase2_step1 scenario_override old_init_cap_usd=%s "
+            "new_init_cap_usd=%s old_target_vol=%s new_target_vol=%s "
+            "source=%s",
             persisted_config["init_cap_usd"],
-            args.initial_capital_usd,
+            (
+                persisted_config["init_cap_usd"]
+                if args.initial_capital_usd is None
+                else args.initial_capital_usd
+            ),
+            persisted_config["target_vol"],
+            (
+                persisted_config["target_vol"]
+                if args.target_vol is None
+                else args.target_vol
+            ),
             source,
         )
     config = phase2_step1_config(report)

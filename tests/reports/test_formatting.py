@@ -67,3 +67,23 @@ def test_public_report_renames_buffer_parameters_at_boundary():
     public = rename_public_report_columns(report)
 
     assert public.columns == ["buf_size", "buf_trade_to_edge"]
+
+
+def test_public_report_renames_grid_parameters_and_rounds_margin_money():
+    """Grid summaries share compact names and the central money precision."""
+    report = pl.DataFrame({
+        "target_volatility": [0.20],
+        "maximum_instrument_margin_percent": [20.0],
+        "maximum_instrument_margin_usd": [12_345.678],
+        "book_margin_at_maximum_usd": [54_321.987],
+    })
+
+    public = round_public_report(rename_public_report_columns(report))
+
+    assert public.columns == [
+        "target_vol",
+        "max_instr_margin_pct",
+        "max_instr_margin_usd",
+        "book_margin_at_max_usd",
+    ]
+    assert public.row(0) == pytest.approx((0.20, 20.0, 12_345.68, 54_321.99))

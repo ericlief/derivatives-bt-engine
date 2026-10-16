@@ -205,34 +205,53 @@ def phase2_step1_config(report: pl.DataFrame) -> dict[str, object]:
     return config
 
 
-def override_phase2_initial_capital(
+def override_phase2_selection_scenario(
     report: pl.DataFrame,
-    initial_capital_usd: float,
+    *,
+    initial_capital_usd: float | None = None,
+    target_vol: float | None = None,
 ) -> pl.DataFrame:
-    """Recalculate capital-dependent Phase 2 gates from a Phase 1 report.
+    """Recalculate risk-budget-dependent gates from a Phase 1 report.
 
     The Phase 1 report already persists annual dollar volatility, market risk
     volume, and every non-capital gate.  This function changes only the run's
-    initial capital and derives the corresponding maximum contract dollar
-    volatility, daily risk traded, market-volume percentage, size gate,
-    relative-liquidity gate, and final Phase 2 eligibility.  It performs no
-    market-data or history request.
+    initial capital and/or target volatility and derives the corresponding
+    maximum contract dollar volatility, daily risk traded, market-volume
+    percentage, size gate, relative-liquidity gate, and final Phase 2
+    eligibility. It performs no market-data or history request, which lets a
+    robustness grid reuse one cached executable-market screen.
 
     Parameters
     ----------
     report
         Complete public Phase 1 cost report, before Step 1 filtering.
     initial_capital_usd
-        Replacement account capital in USD; must be strictly positive.
+        Replacement account capital in USD. ``None`` retains the persisted
+        value.
+    target_vol
+        Replacement annual portfolio volatility target as a decimal. ``None``
+        retains the persisted value.
 
     Returns
     -------
     polars.DataFrame
         A new report with consistent run-level parameters and gate columns.
     """
-    if initial_capital_usd <= 0:
-        raise ValueError("initial_capital_usd must be positive")
     config = phase2_step1_config(report)
+    selected_capital = (
+        float(config["init_cap_usd"])
+        if initial_capital_usd is None
+        else float(initial_capital_usd)
+    )
+    selected_target_vol = (
+        float(config["target_vol"])
+        if target_vol is None
+        else float(target_vol)
+    )
+    if selected_capital <= 0:
+        raise ValueError("initial_capital_usd must be positive")
+    if selected_target_vol <= 0:
+        raise ValueError("target_vol must be positive")
     required = {
         "ann_dvol",
         "mkt_risk_vol_usd_day",
@@ -246,24 +265,25 @@ def override_phase2_initial_capital(
     missing = sorted(required.difference(report.columns))
     if missing:
         raise ValueError(
-            "Phase 1 report cannot apply a capital override; missing fields "
+            "Phase 1 report cannot apply a selection-scenario override; "
+            "missing fields "
             f"{missing}"
         )
 
-    target_vol = float(config["target_vol"])
     liquidity_ann_trades = float(config["liq_ann_trades"])
     liquidity_days = int(config["liq_days"])
     max_pct_market_volume = float(config["max_pct_mkt_volume"])
-    max_ann_dvol = initial_capital_usd * target_vol
+    max_ann_dvol = selected_capital * selected_target_vol
     risk_traded_day = (
-        initial_capital_usd
-        * target_vol
+        selected_capital
+        * selected_target_vol
         * liquidity_ann_trades
         / liquidity_days
     )
 
     recalculated = report.with_columns(
-        pl.lit(initial_capital_usd).alias("init_cap_usd"),
+        pl.lit(selected_capital).alias("init_cap_usd"),
+        pl.lit(selected_target_vol).alias("target_vol"),
         pl.lit(max_ann_dvol).alias("max_ann_dvol"),
         pl.lit(risk_traded_day).alias("risk_traded_usd_day"),
     ).with_columns(
@@ -338,6 +358,21 @@ def override_phase2_initial_capital(
             pl.Series("phase2_excl", exclusions, dtype=pl.String)
         )
     return recalculated
+
+
+def override_phase2_initial_capital(
+    report: pl.DataFrame,
+    initial_capital_usd: float,
+) -> pl.DataFrame:
+    """Recalculate Phase 2 gates for a replacement account capital.
+
+    This compatibility wrapper preserves the original public helper while the
+    more general scenario function also supports target-volatility sweeps.
+    """
+    return override_phase2_selection_scenario(
+        report,
+        initial_capital_usd=initial_capital_usd,
+    )
 
 
 def phase2_step1_candidates(report: pl.DataFrame) -> pl.DataFrame:

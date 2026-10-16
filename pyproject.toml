@@ -57,6 +57,7 @@ futures-market-snapshot = "derivatives_bt_engine.pipelines.phase1_cost:snapshot_
 futures-selection-screen = "derivatives_bt_engine.pipelines.phase1_cost:main"
 futures-select-phase2 = "derivatives_bt_engine.pipelines.phase2_selection:main"
 futures-build-selection = "derivatives_bt_engine.pipelines.phase2_selection:main"
+futures-selection-grid = "derivatives_bt_engine.pipelines.selection_grid:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

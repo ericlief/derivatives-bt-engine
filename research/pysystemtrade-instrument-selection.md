@@ -1322,3 +1322,104 @@ Then compare unconstrained and coverage-constrained selections at `$100,000`
 under 20% and 25% targets, reporting the evolving IDM and contract counts at
 each step. ERC and HRP runs are sensitivity comparisons, not substitutes for
 the handcrafted baseline.
+
+### Construction-parameter robustness grid
+
+The greedy selector's reported score is not a walk-forward backtest result.
+The current run estimates forecast correlations, IDM, costs, and the static
+book from the available history, so choosing whichever parameter combination
+maximizes that score would be circular. Parameter sweeps are therefore
+**construction-scenario robustness checks**. They answer whether a contract
+book remains feasible and reasonably stable under defensible operating
+assumptions; they do not estimate out-of-sample performance.
+
+The first grid varies the three assumptions most directly tied to a small
+account:
+
+| Parameter | First-pass values | Interpretation |
+|---|---:|---|
+| `target_vol` | `0.15, 0.20, 0.25` | Annual portfolio risk target; changes the one-contract risk gate, liquidity usage, positions, and margin |
+| `max_instr_margin_pct` | `15, 20, 25` | Maximum rounded maximum-forecast initial margin in any one instrument, as a percent of capital |
+| `roll_cost_in_score` | `false, true` | AFTS trade-cost baseline versus the production-cost sensitivity that also charges configured rolls |
+
+Hold `max_book_margin_pct=75`, `max_weight_idm=0.20`, the reviewed top-down
+classification weights, and unlimited subclass count for this first pass. The
+result is 18 scenarios rather than a large undirected Cartesian search. Roll
+cost should normally remain enabled in the eventual production configuration;
+the no-roll case attributes how much book membership depends on that cost
+allowance rather than representing an equally realistic cost model.
+
+Then vary one structural family at a time around a stable central scenario:
+
+- `max_book_margin_pct=50,75,100` tests total account margin usage;
+- `max_weight_idm=0.15,0.20,0.25` tests the per-instrument risk cap after IDM;
+- `max_instr_per_cluster=2,3,unlimited` tests economic-subclass concentration,
+  such as the number of grains; and
+- `weight_policy=equal` is a structural benchmark for
+  `topdown_classif`, not another setting to choose by in-sample score.
+
+Cost and liquidity boundaries can be stressed separately after the
+construction grid. Useful comparisons are `instrument_cost_limit_sr` of
+`0.0075, 0.01, 0.015`, `rule_cost_limit_sr` of `0.10, 0.15, 0.20`, market
+participation limits of `0.5%` and `1%`, and daily contract-volume floors of
+100 and 250. Those values change the Phase 1 search universe and therefore
+require separate screen reports. Do not mix them into the first construction
+grid or it becomes difficult to identify why membership changed.
+
+`buffer_size` is also separate. It affects executable positions, turnover, and
+cash P&L, but the published AFTS selection score uses unbuffered subsystem
+turnover. Test buffers such as `0.05, 0.10, 0.20` after fixing a book. The
+Phase 1 affordability fields (`affordability_min_contracts`, scenario IDM, and
+minimum main instruments) remain diagnostics and are not Phase 2 hard gates.
+
+Judge the construction grid using book size, Jaccard membership overlap,
+additions and removals, asset-class and subclass coverage, maximum instrument
+margin, total book margin, contract granularity, cost sensitivity, and binding
+rejection reasons. Do not rank the scenarios by the greedy construction score.
+A performance comparison requires a separate walk-forward selector that, at
+each rebalance date, uses only then-available eligibility, costs, forecasts,
+correlations, margins, and contract definitions.
+
+#### Command-line runner
+
+`futures-selection-grid` pins one exact cached selection-screen Parquet and
+runs every construction scenario without making an IB request. A target-vol
+override recomputes the saved capital/risk-size and relative-liquidity gates
+offline; it does not rebuild market history or the executable snapshot. Pass
+an exact file rather than a report directory so a newer screen cannot enter the
+grid midway through a run.
+
+The recommended 18-scenario first pass is the CLI default:
+
+```bash
+.venv/bin/futures-selection-grid \
+  --input results/pysystemtrade_selection_screen_<timestamp>.parquet \
+  --pysystemtrade-db /home/dev/fin/db/pysystemtrade_reference.duckdb \
+  --initial-capital-usd 75000
+```
+
+Preview the exact commands without running Phase 2 with `--dry-run`. The runner
+creates an isolated directory for every scenario and can resume completed
+directories after interruption. It writes:
+
+- `selection_grid_commands.sh`, the reproducible command plan;
+- one normal set of typed Phase 2 Parquet audits per scenario;
+- `selection_grid_summary.parquet`, containing parameters, feasibility,
+  membership, margins, the central-scenario overlap, and the explicitly named
+  `construction_score`; and
+- `selection_grid_membership.parquet`, the long scenario-by-symbol book panel.
+
+Run secondary constraint tests separately, for example:
+
+```bash
+.venv/bin/futures-selection-grid \
+  --input results/pysystemtrade_selection_screen_<timestamp>.parquet \
+  --pysystemtrade-db /home/dev/fin/db/pysystemtrade_reference.duckdb \
+  --initial-capital-usd 75000 \
+  --target-vols 0.20 \
+  --max-instr-margin-pcts 20 \
+  --roll-cost-modes include \
+  --max-book-margin-pcts 50,75,100 \
+  --max-weight-idms 0.15,0.20,0.25 \
+  --max-instr-per-clusters 2,3,none
+```

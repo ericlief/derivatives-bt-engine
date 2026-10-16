@@ -96,6 +96,13 @@ def test_phase2_exposes_executable_buffer_sensitivities():
     assert args.buffer_trade_to_edge is False
 
 
+def test_phase2_exposes_offline_target_volatility_override():
+    """A cached screen can be resized without another market-data request."""
+    args = parse_args(["--target-vol", "0.15"])
+
+    assert args.target_vol == pytest.approx(0.15)
+
+
 def test_phase2_can_include_roll_cost_in_greedy_score():
     """The roll-cost sensitivity is opt-in and explicit at the CLI."""
     args = parse_args(["--include-roll-cost-in-score"])

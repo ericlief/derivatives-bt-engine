@@ -6,6 +6,7 @@ import pytest
 from derivatives_bt_engine.data.futures_cost_rankings import (
     find_latest_phase1_cost_report,
     load_latest_phase1_cost_report,
+    override_phase2_selection_scenario,
     phase2_search_universe,
     phase2_step1_candidates,
     phase2_step1_config,
@@ -223,3 +224,31 @@ def test_phase2_step1_rejects_inconsistent_run_parameters():
 
     with pytest.raises(ValueError, match="inconsistent init_cap_usd"):
         phase2_step1_config(report)
+
+
+def test_phase2_scenario_override_recalculates_target_dependent_gates():
+    """Target-vol grids reuse persisted market data but refresh hard gates."""
+    report = _phase2_step1_report().with_columns(
+        pl.Series("mkt_risk_vol_usd_day", [1_000_000.0] * 5),
+        pl.Series("volume_elig", [True, False, True, True, False]),
+    )
+
+    recalculated = override_phase2_selection_scenario(
+        report,
+        initial_capital_usd=75_000.0,
+        target_vol=0.15,
+    )
+
+    assert recalculated.get_column("init_cap_usd").unique().to_list() == [
+        75_000.0
+    ]
+    assert recalculated.get_column("target_vol").unique().to_list() == [0.15]
+    assert recalculated.get_column("max_ann_dvol").unique().to_list() == [
+        11_250.0
+    ]
+    assert recalculated.filter(pl.col("symbol") == "BIG").select(
+        "size_elig"
+    ).item() is False
+    assert recalculated.filter(pl.col("symbol") == "PASS").select(
+        "phase2_elig"
+    ).item() is True
