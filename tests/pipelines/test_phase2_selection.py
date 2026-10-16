@@ -84,6 +84,17 @@ def test_phase2_defaults_to_reviewed_classification_weights():
     assert args.buffer_trade_to_edge is True
 
 
+def test_build_selection_entrypoint_defaults_to_complete_pipeline():
+    """The new command emits candidates and a book unless asked to stop."""
+    args = parse_args([], complete_default=True)
+    candidates_only = parse_args(
+        ["--candidates-only"], complete_default=True
+    )
+
+    assert args.complete is True
+    assert candidates_only.complete is False
+
+
 def test_phase2_exposes_executable_buffer_sensitivities():
     """Cash execution can disable the band or trade directly to optimum."""
     args = parse_args([

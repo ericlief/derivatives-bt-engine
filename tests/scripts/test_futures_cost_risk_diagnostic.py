@@ -15,6 +15,7 @@ import derivatives_bt_engine.pipelines.phase1_cost as futures_cost_risk
 from derivatives_bt_engine.pipelines.phase1_cost import (
     _attach_affordability_ranks,
     _attach_phase2_prefilters,
+    _attach_rule_cache_ranks,
     _blend_recent_and_historical_return_volatility,
     _configured_cost_estimate,
     _convert_what_if_preview_to_usd,
@@ -1140,6 +1141,22 @@ def test_emitted_phase1_report_writes_parquet_with_typed_columns(tmp_path, capsy
     assert saved.schema["exec_elig"] == pl.Boolean
     assert saved["cur_px"].to_list() == emitted["cur_px"].to_list()
     capsys.readouterr()
+
+
+def test_rule_cache_ranks_do_not_add_selection_scenario_fields():
+    """Cached historical rule inputs remain independent of account sizing."""
+    cache = _attach_rule_cache_ranks(pl.DataFrame({
+        "symbol": ["MZC"],
+        "asset_class": ["ags"],
+        "configured_trade_sr": [0.0045],
+        "annual_dollar_vol_per_contract": [610.0],
+        "notional_per_contract": [2_500.0],
+    }))
+
+    assert cache["cost_rank_in_asset_class"].to_list() == [1]
+    assert cache["affordability_rank_in_asset_class"].to_list() == [1]
+    assert "selection_target_vol" not in cache.columns
+    assert "initial_capital_usd" not in cache.columns
 
 
 def test_snapshot_output_filename_contains_friendly_account_name():

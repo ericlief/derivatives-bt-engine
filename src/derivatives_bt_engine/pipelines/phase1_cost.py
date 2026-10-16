@@ -33,6 +33,16 @@ Then rebuild the cost and eligibility report without another IB request::
       --snapshot-input results/futures_market_snapshot_<timestamp>.parquet \
       --initial-capital-usd 100000
 
+For the normal split pipeline, cache only the expensive historical rule and
+cost inputs::
+
+    futures-rule-cache \
+      --snapshot-input results/futures_market_snapshot_<timestamp>.parquet
+
+``futures-build-selection`` then owns capital, target-volatility, liquidity,
+and final candidate gates.  The older one-shot cost/screen commands remain as
+compatibility entry points.
+
 The public Parquet report leads with the selected current price, FX, volatility, spread,
 and cost path.  Snapshot alternatives use ``snap_*`` and imported Carver
 references use ``ref_*`` so neither can be mistaken for the selected inputs.
@@ -1380,6 +1390,37 @@ def _attach_affordability_ranks(
         ).alias("main_instrument_affordable_for_scenario"),
     )
     return ranked.with_columns(
+        pl.col("configured_trade_sr")
+        .rank("ordinal")
+        .over("asset_class")
+        .alias("cost_rank_in_asset_class"),
+        pl.col("annual_dollar_vol_per_contract")
+        .rank("ordinal")
+        .over("asset_class")
+        .alias("affordability_rank_in_asset_class"),
+        pl.col("notional_per_contract")
+        .rank("ordinal")
+        .over("asset_class")
+        .alias("notional_rank_in_asset_class"),
+    )
+
+
+def _attach_rule_cache_ranks(report: pl.DataFrame) -> pl.DataFrame:
+    """Attach only scenario-neutral cost, risk, and notional ranks.
+
+    The rule cache must not depend on account capital, target volatility, or a
+    hypothesized number of instruments.  Rank 1 remains the cheapest or
+    smallest executable contract within its broad asset class.
+    """
+    required = {
+        "asset_class",
+        "configured_trade_sr",
+        "annual_dollar_vol_per_contract",
+        "notional_per_contract",
+    }
+    if not required.issubset(report.columns):
+        return report
+    return report.with_columns(
         pl.col("configured_trade_sr")
         .rank("ordinal")
         .over("asset_class")
@@ -2924,8 +2965,18 @@ def diagnose_instrument(
     return row
 
 
-def parse_args(argv=None):
+def parse_args(argv=None, *, rule_cache_only: bool = False):
+    """Parse live-snapshot, rule-cache, or legacy one-shot arguments.
+
+    The shared parser preserves old command lines. Selection-only policy
+    options are hidden from ``futures-rule-cache --help`` because that artifact
+    is intentionally independent of those values.
+    """
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+
+    def selection_help(text: str) -> str:
+        """Hide downstream policy help for the scenario-neutral cache CLI."""
+        return argparse.SUPPRESS if rule_cache_only else text
     parser.add_argument(
         "--instruments",
         default="all-pysystemtrade",
@@ -3107,13 +3158,17 @@ def parse_args(argv=None):
         dest="affordability_target_vol",
         type=float,
         default=DEFAULT_AFFORDABILITY_TARGET_VOL,
-        help="Risk target used for the capital-independent minimum-contract diagnostic",
+        help=selection_help(
+            "Risk target used for the capital-independent minimum-contract diagnostic"
+        ),
     )
     parser.add_argument(
         "--affordability-min-contracts",
         type=int,
         default=DEFAULT_AFFORDABILITY_MIN_CONTRACTS,
-        help="Minimum average contract count used by the affordability diagnostic",
+        help=selection_help(
+            "Minimum average contract count used by the affordability diagnostic"
+        ),
     )
     parser.add_argument(
         "--initial-capital-usd",
@@ -3121,49 +3176,57 @@ def parse_args(argv=None):
         dest="affordability_capital_usd",
         type=float,
         default=DEFAULT_AFFORDABILITY_CAPITAL_USD,
-        help="Capital for the equal-weight affordability scenario",
+        help=selection_help("Capital for the equal-weight affordability scenario"),
     )
     parser.add_argument(
         "--instrument-cost-limit-sr",
         type=float,
         default=DEFAULT_INSTRUMENT_COST_LIMIT_SR,
-        help="Maximum one-way SR cost per trade for Phase 2 eligibility",
+        help=selection_help(
+            "Maximum one-way SR cost per trade for Phase 2 eligibility"
+        ),
     )
     parser.add_argument(
         "--liquidity-ann-trades",
         type=float,
         default=DEFAULT_LIQUIDITY_ANNUAL_TRADES,
-        help="Annual strategy turnover used to estimate daily risk traded",
+        help=selection_help(
+            "Annual strategy turnover used to estimate daily risk traded"
+        ),
     )
     parser.add_argument(
         "--liquidity-business-days",
         type=int,
         default=DEFAULT_LIQUIDITY_BUSINESS_DAYS,
-        help="Trading days used to convert annual turnover to daily risk traded",
+        help=selection_help(
+            "Trading days used to convert annual turnover to daily risk traded"
+        ),
     )
     parser.add_argument(
         "--max-market-volume-pct",
         type=float,
         default=DEFAULT_MAX_MARKET_VOLUME_PCT,
-        help="Maximum strategy risk traded as a percent of market risk volume",
+        help=selection_help(
+            "Maximum strategy risk traded as a percent of market risk volume"
+        ),
     )
     parser.add_argument(
         "--min-daily-volume",
         type=float,
         default=DEFAULT_MIN_DAILY_VOLUME_CONTRACTS,
-        help="Minimum 20-day average contracts traded per day",
+        help=selection_help("Minimum 20-day average contracts traded per day"),
     )
     parser.add_argument(
         "--affordability-idm",
         type=float,
         default=DEFAULT_AFFORDABILITY_IDM,
-        help="IDM for the equal-weight affordability scenario",
+        help=selection_help("IDM for the equal-weight affordability scenario"),
     )
     parser.add_argument(
         "--affordability-min-main-instruments",
         type=int,
         default=DEFAULT_AFFORDABILITY_MIN_MAIN_INSTRUMENTS,
-        help=(
+        help=selection_help(
             "Minimum ordinary instruments sharing the scenario risk budget; "
             "special-cluster additions do not satisfy this count"
         ),
@@ -3172,7 +3235,7 @@ def parse_args(argv=None):
         "--affordability-main-asset-classes",
         type=_parse_asset_classes,
         default=DEFAULT_AFFORDABILITY_MAIN_ASSET_CLASSES,
-        help=(
+        help=selection_help(
             "Comma-separated core asset classes counted toward the minimum "
             "(default: equity,ags,vol,energy,fx,metals,bond)"
         ),
@@ -3183,8 +3246,10 @@ def parse_args(argv=None):
         default=None,
         help=(
             "Parquet output base path; a Chicago-time run timestamp is appended "
-            "to the filename (default base: "
-            "results/pysystemtrade_selection_screen.parquet)"
+            "to the filename (default base: results/pysystemtrade_rule_cache.parquet)"
+            if rule_cache_only
+            else "Parquet output base path; a Chicago-time run timestamp is appended "
+            "to the filename (default base: results/pysystemtrade_selection_screen.parquet)"
         ),
     )
     parser.add_argument("--no-save", action="store_true")
@@ -3806,7 +3871,13 @@ def _configure_live_ib_logging(
     return path
 
 
-def _emit_report(report: pl.DataFrame, args) -> pl.DataFrame:
+def _emit_report(
+    report: pl.DataFrame,
+    args,
+    *,
+    rule_cache_only: bool = False,
+) -> pl.DataFrame:
+    """Persist a typed public rule cache or legacy cost-selection screen."""
     generated_at = datetime.now(REPORT_TIMEZONE)
     report = report.with_columns(
         pl.lit(generated_at).alias("report_generated_at_ct")
@@ -3885,7 +3956,11 @@ def _emit_report(report: pl.DataFrame, args) -> pl.DataFrame:
             output_base = (
                 Path(__file__).resolve().parents[3]
                 / "results"
-                / "pysystemtrade_selection_screen.parquet"
+                / (
+                    "pysystemtrade_rule_cache.parquet"
+                    if rule_cache_only
+                    else "pysystemtrade_selection_screen.parquet"
+                )
             )
         if output_base.suffix.lower() != ".parquet":
             raise ValueError("--output must use a .parquet extension")
@@ -4318,16 +4393,31 @@ def _load_market_snapshot(path: Path) -> pl.DataFrame:
     return snapshot
 
 
-def run(argv=None, *, snapshot_only: bool = False) -> pl.DataFrame:
-    """Build, emit, and return the report for Python/notebook callers."""
+def run(
+    argv=None,
+    *,
+    snapshot_only: bool = False,
+    rule_cache_only: bool = False,
+) -> pl.DataFrame:
+    """Build and return a live snapshot, rule cache, or legacy full screen.
+
+    ``rule_cache_only`` stops after the expensive pooled EWMAC and executable-
+    cost statistics. It deliberately omits all account/scenario selection
+    fields so the downstream selection command can apply them repeatedly.
+    """
     # Account aliases and the private JSON map belong to local configuration,
     # not command lines or persisted market data.
     load_dotenv(
         dotenv_path=Path(__file__).resolve().parents[3] / ".env",
         override=False,
     )
-    args = parse_args(argv)
+    args = parse_args(argv, rule_cache_only=rule_cache_only)
     setup_logger()
+    if rule_cache_only and args.snapshot_input is None:
+        raise ValueError(
+            "futures-rule-cache requires --snapshot-input from "
+            "futures-market-snapshot"
+        )
     if args.output is not None and args.output.suffix.lower() != ".parquet":
         raise ValueError("--output must use a .parquet extension")
     if (
@@ -4467,26 +4557,30 @@ def run(argv=None, *, snapshot_only: bool = False) -> pl.DataFrame:
         strategy_metrics_by_rule=strategy_metrics_by_rule,
         rule_cost_limit_sr=args.rule_cost_limit_sr,
     )
-    report = _attach_affordability_ranks(
-        pl.DataFrame(rows, infer_schema_length=None),
-        target_vol=args.affordability_target_vol,
-        min_contracts=args.affordability_min_contracts,
-        capital_usd=args.affordability_capital_usd,
-        idm=args.affordability_idm,
-        min_main_instruments=args.affordability_min_main_instruments,
-        main_asset_classes=args.affordability_main_asset_classes,
-    )
-    report = _attach_phase2_prefilters(
-        report,
-        initial_capital_usd=args.affordability_capital_usd,
-        target_vol=args.affordability_target_vol,
-        instrument_cost_limit_sr=args.instrument_cost_limit_sr,
-        liquidity_ann_trades=args.liquidity_ann_trades,
-        liquidity_business_days=args.liquidity_business_days,
-        max_market_volume_pct=args.max_market_volume_pct,
-        min_daily_volume_contracts=args.min_daily_volume,
-    )
-    return _emit_report(report, args)
+    report = pl.DataFrame(rows, infer_schema_length=None)
+    if rule_cache_only:
+        report = _attach_rule_cache_ranks(report)
+    else:
+        report = _attach_affordability_ranks(
+            report,
+            target_vol=args.affordability_target_vol,
+            min_contracts=args.affordability_min_contracts,
+            capital_usd=args.affordability_capital_usd,
+            idm=args.affordability_idm,
+            min_main_instruments=args.affordability_min_main_instruments,
+            main_asset_classes=args.affordability_main_asset_classes,
+        )
+        report = _attach_phase2_prefilters(
+            report,
+            initial_capital_usd=args.affordability_capital_usd,
+            target_vol=args.affordability_target_vol,
+            instrument_cost_limit_sr=args.instrument_cost_limit_sr,
+            liquidity_ann_trades=args.liquidity_ann_trades,
+            liquidity_business_days=args.liquidity_business_days,
+            max_market_volume_pct=args.max_market_volume_pct,
+            min_daily_volume_contracts=args.min_daily_volume,
+        )
+    return _emit_report(report, args, rule_cache_only=rule_cache_only)
 
 
 def main(argv=None) -> None:
@@ -4497,6 +4591,11 @@ def main(argv=None) -> None:
 def snapshot_main(argv=None) -> None:
     """Acquire and persist reusable live inputs without running Phase 1."""
     run(argv, snapshot_only=True)
+
+
+def rule_cache_main(argv=None) -> None:
+    """Build the reusable historical rule/cost cache from a market snapshot."""
+    run(argv, rule_cache_only=True)
 
 
 if __name__ == "__main__":

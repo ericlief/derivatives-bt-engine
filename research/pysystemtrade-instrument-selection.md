@@ -8,10 +8,12 @@ the data import, hybrid-history, and carry phases in that document:
 
 1. The live snapshot resolves executable contracts and caches the IB-dependent
    quote, FX, spread, volume, and current-risk inputs.
-2. Phase 1 transforms that snapshot offline and audits cost, risk, granularity,
-   rule affordability, and broker availability.
-3. Phase 2 selects a diversified static instrument set from the Phase 1
-   candidates using the AFTS greedy procedure.
+2. The rule-cache stage combines that snapshot with historical pooled EWMAC
+   turnover and cost statistics. It is expensive but independent of account
+   capital, target volatility, and portfolio-construction parameters.
+3. The selection stage applies its built-in cost, size, liquidity, data, and
+   execution filters, saves the accepted candidates, and selects a diversified
+   static book using the AFTS greedy procedure.
 
 The data report remains authoritative for source lineage, history construction,
 overlap validation, and the data-side implementation phases. This document
@@ -500,7 +502,7 @@ volatility fields to two decimal places. Other floating-point diagnostics are
 rounded to four decimal places; identifiers and observation counts are left
 unchanged.
 
-### Phase 1 liquidity and Phase 2 pre-filter
+### Selection liquidity and candidate pre-filter
 
 The IB-connected audit also saves the exact executable contract's mean daily
 volume over its latest 20 valid daily `TRADES` bars as `avg_daily_volume`.
@@ -530,8 +532,9 @@ The defaults are `--min-daily-volume 100`, `--max-market-volume-pct 1`,
 `--liquidity-ann-trades 25`, `--volume-lookback-days 20`,
 `--initial-capital-usd 100000`, and `--target-vol 0.20`.
 
-Phase 1 retains every row for audit and adds separate cost, one-contract risk-
-size, contract-volume, and relative-risk-volume flags. `phase2_elig` also
+The rule cache retains every row without applying these scenario assumptions.
+The selection runner adds separate cost, one-contract risk-size,
+contract-volume, and relative-risk-volume flags. `phase2_elig` also
 requires at least one affordable EWMAC rule, an allowed execution profile, and
 a qualified IB contract. `phase2_excl` records all failed gates. The
 `phase2_search_universe()` notebook helper reads only eligible rows before the
@@ -548,22 +551,23 @@ data that fail cost, dollar-vol size, or either liquidity gate are
 `phase2_elig` is intentionally narrower than `add_first`, because the
 actual search must also respect the EWMAC-rule and execution-family checks.
 
-### Phase 1 to Phase 2 pipeline
+### Snapshot, rule cache, and selection pipeline
 
-The saved Phase 1 Parquet report is the durable handoff, not a throwaway display table.
-Keep every audited row in that file so exclusions remain reproducible, then
-derive the smaller search universe from it:
+The saved rule-cache Parquet is the durable historical-statistics handoff, not
+a throwaway display table. Keep every audited row in that file, then have each
+selection scenario derive and save its smaller candidate universe:
 
 ```text
 pysystemtrade histories + reviewed economic classification + local execution overlays
-    -> per-rule EWMAC performance, turnover, rolls, and cost eligibility
     -> resolve the exact dated IB contract
     -> current price and FX, executable spread, IB commission, and margin
     -> 20-day mean contract volume
     -> mixed production volatility and one-contract dollar risk
-    -> Phase 1 gates, sel_bucket, phase2_elig, and phase2_excl
-    -> full auditable Phase 1 Parquet report
-    -> phase2_search_universe(report)
+    -> reusable live market snapshot
+    -> per-rule EWMAC performance, turnover, rolls, and cost eligibility
+    -> scenario-neutral rule-cache Parquet
+    -> selection cost, size, liquidity, data, and execution gates
+    -> candidate Parquet with sel_bucket, phase2_elig, and phase2_excl
     -> combined forecast and subsystem return for each surviving instrument
     -> trial-book correlations, top-down classification weights, and IDM
     -> portfolio-specific positions, turnover, cost, and market participation
@@ -814,9 +818,8 @@ successful what-if preview. A failed attempted preview remains
 `ib_what_if_failed` rather than silently selecting the reference amount.
 
 The command appends a Chicago-time timestamp. It does not calculate pooled
-EWMAC costs, affordability, liquidity gates, or Phase 2 eligibility. Those
-policy calculations can therefore be rerun later without IB. Build a Phase 1
-report from the cached live inputs with, for example:
+EWMAC costs or selection gates. Those calculations can therefore be rerun
+later without IB.
 
 Each live acquisition also writes the `ib_insync` warnings and errors to a
 separate timestamped file beside the snapshot, for example
@@ -825,50 +828,68 @@ the complete IB request-error text without mixing broker diagnostics into the
 pipeline log. Use `--ib-log-output path/to/ib.log` to choose a different base
 path; the account alias and run timestamp are still appended.
 
+Build the expensive, reusable historical rule/cost cache from that snapshot:
+
 ```bash
-futures-selection-screen \
+futures-rule-cache \
   --snapshot-input results \
+  --cost-ewmac-fast-spans 4,8,16,32,64 \
+  --rule-cost-limit-sr 0.15 \
+  --pysystemtrade-db /home/dev/fin/db/pysystemtrade_reference.duckdb \
+  --output results/pysystemtrade_rule_cache.parquet
+```
+
+Passing a directory to `--snapshot-input` selects its newest timestamped
+`*_market_snapshot_*.parquet`; passing a file pins exact-run reproduction. The
+result is `pysystemtrade_rule_cache_<timestamp>.parquet`. It retains all market
+snapshot inputs plus pooled EWMAC turnover/cost statistics, `trade_sr`,
+`roll_sr`, `ref_ann_rolls`, and the eligible rule list. It deliberately has no
+`init_cap_usd`, `target_vol`, market-participation calculation, or final
+candidate flag.
+
+Rerun this cache when the market snapshot changes or when changing EWMAC
+speeds, forecast-scalar/turnover methodology, volatility methodology,
+commission/spread/roll assumptions, or `--rule-cost-limit-sr`. Capital, target
+volatility, the generic instrument cost limit, liquidity assumptions, margin
+limits, weights, and cluster limits do not require a new rule cache.
+
+The selection command owns those inexpensive scenario filters and the greedy
+search:
+
+```bash
+futures-build-selection \
+  --report-dir results \
   --initial-capital-usd 75000 \
   --target-vol 0.20 \
-  --output results/pysystemtrade_selection_screen.parquet
+  --instrument-cost-limit-sr 0.01 \
+  --liquidity-ann-trades 25.6 \
+  --liquidity-business-days 256 \
+  --min-daily-volume 100 \
+  --max-market-volume-pct 1 \
+  --weight-policy topdown_classif
 ```
 
-Changing capital, target volatility, cost limits, liquidity assumptions,
-affordability parameters, or forecast-rule cost limits only requires this
-offline transformation. A new live snapshot is needed when the executable
-contract, quote/FX, spread, volume, or current volatility inputs are stale.
-Passing a directory to `--snapshot-input` selects its newest timestamped
-`*_market_snapshot_*.parquet`; passing a file keeps exact-run reproduction.
+`futures-build-selection` discovers the newest rule cache before legacy
+selection-screen files. It first derives `max_ann_dvol`, daily risk traded,
+market-risk volume, participation percentage, and all hard gate flags. It
+saves the accepted rows as
+`pysystemtrade_selection_candidates_<timestamp>.parquet`, then runs forecast
+combination and greedy selection and saves the final book plus all normal audit
+artifacts. Use `--candidates-only` to stop after the filtered candidate file.
+The old `futures-selection-screen`, `futures-cost-risk`, and
+`futures-select-phase2` commands remain compatibility entry points.
 
-Phase 2 Step 1 is deliberately only a persisted-gate selection. It does not
-connect to IB and does not recalculate volume, volatility, cost, or any other
-Phase 1 metric. Run:
+The candidate Parquet repeats the resolved scenario inputs `init_cap_usd`,
+`target_vol`, `cost_lim_sr`, `rule_cost_lim_sr`, `liq_ann_trades`, `liq_days`,
+`min_daily_volume`, and `max_pct_mkt_volume`, together with every gate and
+`phase2_excl`. `topdown_classif` is the default weight policy;
+`legacy_handcraft` and `equal` remain explicit research comparators.
+Complete-selection reports persist the choice as `wt_policy` and record
+`asset_cls`, `econ_subcls`, and the resulting class path for each book member
+on every accepted pass.
 
-```bash
-futures-build-selection --report-dir results --weight-policy topdown_classif
-```
-
-The command loads the newest selection-screen Parquet report and saves
-`pysystemtrade_selection_candidates_<timestamp>.parquet` beside it. The output contains
-selected instruments only. A row must have saved `cost_elig`, `size_elig`,
-`liq_elig`, `data_elig`, rule eligibility, execution eligibility, and
-`phase2_elig` flags equal to true, plus `ib_avail=contract_qualified`. The Parquet
-retains the instrument and executable-contract identifiers, `ann_dvol`, raw
-volume and market-risk-volume values, liquidity percentages and limits, and
-the saved gate flags needed to audit why each row entered the Phase 2 search.
-It also repeats the validated run-level inputs `init_cap_usd`, `target_vol`,
-`cost_lim_sr`, `rule_cost_lim_sr`, `liq_ann_trades`, `liq_days`,
-`min_daily_volume`, and `max_pct_mkt_volume` on each selected row. Step 1 fails
-if any of these are absent, null, or inconsistent across the Phase 1 report.
-Use `--input <phase1.parquet>` to select a particular audit and `--output <path>`
-to choose the exact intermediate filename. `topdown_classif` is the default
-weight policy; `legacy_handcraft` and `equal` are retained as explicit research
-comparators. Complete-selection reports persist the choice as `wt_policy` and
-record `asset_cls`, `econ_subcls`, and the resulting class path for each book
-member on every accepted pass.
-
-Use `--max-instr-margin-pct P` with `--complete` to prevent any one instrument
-from consuming more than `P%` of initial capital in margin.
+Use `--max-instr-margin-pct P` to prevent any one instrument from consuming
+more than `P%` of initial capital in margin during the complete selection.
 `--max-margin-pct` remains an alias for existing scripts. Each trial first
 calculates Carver's continuous maximum-forecast position, then rounds it to
 whole contracts with the allocator's deterministic half-up rule (`0.5` becomes
@@ -926,23 +947,22 @@ enabled, candidates without a usable IB initial-margin preview are rejected as
 `initial_margin_unavailable`; validate the final integer order book with a
 fresh portfolio-aware margin preview before execution.
 
-An existing Phase 1 Parquet report can be reused at a different account size without an
-IB or Phase 1 rerun:
+An existing rule cache can be reused at a different account size without an IB
+or historical-rule rerun:
 
 ```bash
 futures-build-selection \
-  --input results/pysystemtrade_selection_screen_<timestamp>.parquet \
-  --initial-capital-usd 75000 \
-  --complete
+  --input results/pysystemtrade_rule_cache_<timestamp>.parquet \
+  --initial-capital-usd 75000
 ```
 
-The override recalculates `max_ann_dvol`, `risk_traded_usd_day`,
+The built-in filter calculates `max_ann_dvol`, `risk_traded_usd_day`,
 `pct_mkt_volume`, `size_elig`, `risk_volume_elig`, `liq_elig`, and
-`phase2_elig` before Step 1 filtering. It does not alter the saved market
-observations or non-capital cost/data/execution gates.
+`phase2_elig` before candidate filtering. It does not alter the saved market
+observations or cached per-rule statistics.
 
-Add `--complete` to continue from that saved Step 1 universe through forecast
-combination and the unconstrained greedy AFTS baseline. The command writes:
+The build command continues through forecast combination and the greedy AFTS
+baseline by default. The command writes:
 
 - `pysystemtrade_selection_forecast_audit_<timestamp>.parquet`, with component and
   combined null/non-finite counts, valid dates and observations, FDM, combined
@@ -1362,9 +1382,11 @@ Cost and liquidity boundaries can be stressed separately after the
 construction grid. Useful comparisons are `instrument_cost_limit_sr` of
 `0.0075, 0.01, 0.015`, `rule_cost_limit_sr` of `0.10, 0.15, 0.20`, market
 participation limits of `0.5%` and `1%`, and daily contract-volume floors of
-100 and 250. Those values change the Phase 1 search universe and therefore
-require separate screen reports. Do not mix them into the first construction
-grid or it becomes difficult to identify why membership changed.
+100 and 250. Instrument cost and liquidity values are cheap selection-filter
+parameters and reuse one rule cache. The rule-cost limit changes the eligible
+EWMAC list itself and therefore requires a separate rule cache. Do not mix
+these tests into the first construction grid or it becomes difficult to
+identify why membership changed.
 
 `buffer_size` is also separate. It affects executable positions, turnover, and
 cash P&L, but the published AFTS selection score uses unbuffered subsystem
@@ -1382,7 +1404,7 @@ correlations, margins, and contract definitions.
 
 #### Command-line runner
 
-`futures-selection-grid` pins one exact cached selection-screen Parquet and
+`futures-selection-grid` pins one exact cached rule-cost Parquet and
 runs every construction scenario without making an IB request. A target-vol
 override recomputes the saved capital/risk-size and relative-liquidity gates
 offline; it does not rebuild market history or the executable snapshot. Pass
@@ -1393,7 +1415,7 @@ The recommended 18-scenario first pass is the CLI default:
 
 ```bash
 .venv/bin/futures-selection-grid \
-  --input results/pysystemtrade_selection_screen_<timestamp>.parquet \
+  --input results/pysystemtrade_rule_cache_<timestamp>.parquet \
   --pysystemtrade-db /home/dev/fin/db/pysystemtrade_reference.duckdb \
   --initial-capital-usd 75000
 ```
@@ -1413,7 +1435,7 @@ Run secondary constraint tests separately, for example:
 
 ```bash
 .venv/bin/futures-selection-grid \
-  --input results/pysystemtrade_selection_screen_<timestamp>.parquet \
+  --input results/pysystemtrade_rule_cache_<timestamp>.parquet \
   --pysystemtrade-db /home/dev/fin/db/pysystemtrade_reference.duckdb \
   --initial-capital-usd 75000 \
   --target-vols 0.20 \

@@ -1,8 +1,11 @@
-"""Build and score the Phase 2 instrument-selection universe.
+"""Filter a cached rule universe and build the selected futures book.
 
-The persisted Phase 1 Parquet report supplies executable symbols, their borrowed signal
-history identifiers, costs, dollar volatility, and eligibility flags. Phase 2
-then uses three deliberately different dataframe collections:
+The persisted rule-cost cache supplies executable symbols, their borrowed
+signal-history identifiers, costs, dollar volatility, and eligible EWMAC
+rules. This command first applies the requested account, cost, risk-size,
+liquidity, data, and execution filters and saves that candidate set. It can
+then run the full greedy selection and uses three deliberately different
+dataframe collections:
 
 ``frames_by_history``
     One daily component-forecast frame per unique ``hist_instr_code``. Several
@@ -39,11 +42,11 @@ import numpy as np
 import polars as pl
 
 from derivatives_bt_engine.data.futures_cost_rankings import (
+    apply_phase2_selection_filters,
     load_latest_phase1_cost_report,
-    override_phase2_selection_scenario,
     phase2_step1_candidates,
-    phase2_step1_config,
     read_phase1_cost_report,
+    resolve_phase2_selection_config,
 )
 from derivatives_bt_engine.data.fx_history import (
     align_fx_to_history,
@@ -119,19 +122,19 @@ def _parse_rules(eligible_rules: str | Iterable[str]) -> list[str]:
     return [str(rule).strip() for rule in eligible_rules if str(rule).strip()]
 
 
-def parse_args(argv=None):
-    """Parse the Step 1 and optional complete Phase 2 command arguments."""
+def parse_args(argv=None, *, complete_default: bool = False):
+    """Parse candidate-filter and optional complete-selection arguments."""
     parser = argparse.ArgumentParser(
         description=(
-            "Load a Phase 1 futures cost Parquet report and save the instruments that "
-            "already passed its cost, dollar-vol, liquidity, data, rule, "
-            "execution, and IB-availability gates."
+            "Load a cached futures rule-cost Parquet report, apply selection "
+            "filters, save the accepted candidates, and optionally build the "
+            "complete greedy-selected book."
         )
     )
     parser.add_argument(
         "--input",
         type=Path,
-        help="Explicit Phase 1 Parquet report; legacy CSV input is also accepted.",
+        help="Explicit rule-cache Parquet; legacy Phase 1 CSV is also accepted.",
     )
     parser.add_argument(
         "--report-dir",
@@ -142,29 +145,63 @@ def parse_args(argv=None):
     parser.add_argument(
         "--output",
         type=Path,
-        help="Exact Step 1 output path; defaults beside the input report.",
+        help="Exact candidate output path; defaults beside the input cache.",
     )
     parser.add_argument(
         "--initial-capital-usd",
         type=float,
         help=(
-            "Override the Phase 1 capital and recompute its capital-dependent "
-            "size and relative-liquidity gates from the saved report"
+            "Account capital used by the built-in risk-size and relative-"
+            "liquidity filters; defaults to a legacy cached value or 100000"
         ),
     )
     parser.add_argument(
         "--target-vol",
         type=float,
         help=(
-            "Override the Phase 1 annual volatility target and recompute its "
-            "risk-size and relative-liquidity gates from the saved report"
+            "Annual portfolio volatility target used by selection filters; "
+            "defaults to a legacy cached value or 0.20"
         ),
     )
     parser.add_argument(
+        "--instrument-cost-limit-sr",
+        type=float,
+        help="Maximum cached one-way trade cost in SR units (default: 0.01).",
+    )
+    parser.add_argument(
+        "--liquidity-ann-trades",
+        type=float,
+        help="Annual trades used by the market-participation screen (default: 25.6).",
+    )
+    parser.add_argument(
+        "--liquidity-business-days",
+        type=int,
+        help="Business days used to convert annual trades to daily risk (default: 256).",
+    )
+    parser.add_argument(
+        "--max-market-volume-pct",
+        type=float,
+        help="Maximum strategy share of daily market risk volume (default: 1).",
+    )
+    parser.add_argument(
+        "--min-daily-volume",
+        type=float,
+        help="Minimum mean executable-contract volume (default: 100).",
+    )
+    completion = parser.add_mutually_exclusive_group()
+    completion.add_argument(
         "--complete",
+        dest="complete",
         action="store_true",
         help="Build combined forecasts and run the iterative greedy selector.",
     )
+    completion.add_argument(
+        "--candidates-only",
+        dest="complete",
+        action="store_false",
+        help="Stop after saving the filtered candidate report.",
+    )
+    parser.set_defaults(complete=complete_default)
     parser.add_argument(
         "--pysystemtrade-db",
         type=Path,
@@ -260,7 +297,7 @@ def parse_args(argv=None):
 
 
 def _default_output_path(source: Path, generated_at: datetime) -> Path:
-    """Return the timestamped Step 1 Parquet path beside its Phase 1 source."""
+    """Return the timestamped candidate path beside its rule-cache source."""
     stamp = generated_at.astimezone(REPORT_TIMEZONE).strftime("%Y%m%d_%H%M%S")
     return source.parent / f"pysystemtrade_selection_candidates_{stamp}.parquet"
 
@@ -346,7 +383,7 @@ def _run_complete_selection(
 ) -> tuple[Path, pl.DataFrame]:
     """Audit forecasts, exclude invalid instruments, and run greedy Phase 2.
 
-    ``selected`` contains one row per executable symbol from Step 1. The
+    ``selected`` contains one row per executable symbol from candidate filtering. The
     function first builds reusable history-level forecasts, then creates a
     symbol-level combined subsystem using that symbol's eligible-rule subset.
     It persists the daily forecast panel, audit, correlation input, greedy
@@ -383,7 +420,7 @@ def _run_complete_selection(
     # Historical FX is identical for every instrument in a currency. Cache it
     # at the pipeline boundary instead of reopening DuckDB for every symbol.
     fx_history_by_currency: dict[str, pl.DataFrame | None] = {}
-    # Preserve each compact Step 1 row for later sizing and liquidity inputs.
+    # Preserve each compact candidate row for later sizing and liquidity inputs.
     source_rows: dict[str, dict[str, object]] = {}
     for row in selected.iter_rows(named=True):
         symbol = str(row["symbol"])
@@ -918,14 +955,18 @@ def _run_complete_selection(
     return selection_path, public_selection
 
 
-def run(argv=None) -> tuple[Path, pl.DataFrame]:
-    """Run persisted-gate Step 1 and optionally the complete Phase 2 search.
+def run(
+    argv=None,
+    *,
+    complete_default: bool = False,
+) -> tuple[Path, pl.DataFrame]:
+    """Filter a rule cache and optionally run the complete greedy search.
 
-    Returns the last output path and dataframe produced: the compact Step 1
+    Returns the last output path and dataframe produced: the compact candidate
     universe normally, or the final greedy selection when ``--complete`` is
     supplied.
     """
-    args = parse_args(argv)
+    args = parse_args(argv, complete_default=complete_default)
     setup_logger()
     if args.output is not None and args.output.suffix.lower() != ".parquet":
         raise ValueError("--output must use a .parquet extension")
@@ -937,38 +978,24 @@ def run(argv=None) -> tuple[Path, pl.DataFrame]:
         report = read_phase1_cost_report(source)
 
     logger.info(
-        "phase2_step1 start source=%s instruments=%d",
+        "selection_candidate_filter start source=%s instruments=%d",
         source,
         report.height,
     )
-    persisted_config = phase2_step1_config(report)
-    if args.initial_capital_usd is not None or args.target_vol is not None:
-        report = override_phase2_selection_scenario(
-            report,
-            initial_capital_usd=args.initial_capital_usd,
-            target_vol=args.target_vol,
-        )
-        logger.info(
-            "phase2_step1 scenario_override old_init_cap_usd=%s "
-            "new_init_cap_usd=%s old_target_vol=%s new_target_vol=%s "
-            "source=%s",
-            persisted_config["init_cap_usd"],
-            (
-                persisted_config["init_cap_usd"]
-                if args.initial_capital_usd is None
-                else args.initial_capital_usd
-            ),
-            persisted_config["target_vol"],
-            (
-                persisted_config["target_vol"]
-                if args.target_vol is None
-                else args.target_vol
-            ),
-            source,
-        )
-    config = phase2_step1_config(report)
+    config = resolve_phase2_selection_config(
+        report,
+        initial_capital_usd=args.initial_capital_usd,
+        target_vol=args.target_vol,
+        instrument_cost_limit_sr=args.instrument_cost_limit_sr,
+        liquidity_ann_trades=args.liquidity_ann_trades,
+        liquidity_business_days=args.liquidity_business_days,
+        min_daily_volume=args.min_daily_volume,
+        max_market_volume_pct=args.max_market_volume_pct,
+    )
+    report = apply_phase2_selection_filters(report, config=config)
     logger.info(
-        "phase2_step1 config init_cap_usd=%s target_vol=%s cost_lim_sr=%s "
+        "selection_candidate_filter config init_cap_usd=%s target_vol=%s "
+        "cost_lim_sr=%s "
         "rule_cost_lim_sr=%s liq_ann_trades=%s liq_days=%s "
         "min_daily_volume_cons=%s max_pct_mkt_volume=%s",
         config["init_cap_usd"],
@@ -996,7 +1023,7 @@ def run(argv=None) -> tuple[Path, pl.DataFrame]:
         symbol = row.get("symbol")
         if symbol in selected_symbols:
             logger.debug(
-                "phase2_step1 accepted symbol=%s ann_dvol=%s "
+                "selection_candidate_filter accepted symbol=%s ann_dvol=%s "
                 "avg_daily_volume_cons=%s pct_mkt_volume=%s",
                 symbol,
                 row.get("ann_dvol"),
@@ -1005,7 +1032,7 @@ def run(argv=None) -> tuple[Path, pl.DataFrame]:
             )
         else:
             logger.debug(
-                "phase2_step1 rejected symbol=%s ann_dvol=%s "
+                "selection_candidate_filter rejected symbol=%s ann_dvol=%s "
                 "avg_daily_volume_cons=%s pct_mkt_volume=%s reason=%s",
                 symbol,
                 row.get("ann_dvol"),
@@ -1021,19 +1048,20 @@ def run(argv=None) -> tuple[Path, pl.DataFrame]:
         else _default_output_path(source, generated_at)
     )
     output.parent.mkdir(parents=True, exist_ok=True)
-    # Step 1 is a public report boundary. Keep ``selected`` at calculation
+    # Candidate filtering is a public report boundary. Keep ``selected`` at calculation
     # precision for the optional complete search and round only its report copy.
     public_selected = round_public_report(selected)
     public_selected.write_parquet(output)
     logger.info(
-        "phase2_step1 complete source=%s output=%s selected=%d total=%d",
+        "selection_candidate_filter complete source=%s output=%s "
+        "selected=%d total=%d",
         source,
         output,
         selected.height,
         report.height,
     )
     print(
-        f"Selection screen accepted {selected.height}/{report.height} instruments"
+        f"Candidate filter accepted {selected.height}/{report.height} instruments"
     )
     print(
         "Parameters: "
@@ -1059,8 +1087,13 @@ def run(argv=None) -> tuple[Path, pl.DataFrame]:
 
 
 def main(argv=None) -> None:
-    """CLI entry point for ``futures-select-phase2``."""
+    """Backward-compatible candidate-only CLI entry point."""
     run(argv)
+
+
+def build_selection_main(argv=None) -> None:
+    """Build candidates and the complete book unless explicitly disabled."""
+    run(argv, complete_default=True)
 
 
 if __name__ == "__main__":

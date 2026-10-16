@@ -1,4 +1,11 @@
-"""Notebook helpers for loading and inspecting Phase 1 futures cost reports."""
+"""Load cached futures rule costs and construct selection candidates.
+
+The rule-cost cache is the durable boundary between expensive historical
+EWMAC calibration and cheap portfolio-scenario filtering.  This module keeps
+legacy Phase 1 screen readers working, but new selection runs derive their
+capital, cost, size, liquidity, data, and execution gates from the cached
+market and rule inputs each time.
+"""
 
 from collections.abc import Iterable, Sequence
 from pathlib import Path
@@ -7,6 +14,7 @@ import polars as pl
 
 
 DEFAULT_REPORT_PATTERNS = (
+    "pysystemtrade_rule_cache_*.parquet",
     "pysystemtrade_selection_screen_*.parquet",
     "pysystemtrade_selection_screen_*.csv",
     "pysystemtrade_cost_phase1_ib_*.parquet",
@@ -16,6 +24,14 @@ DEFAULT_REPORT_PATTERNS = (
     "futures_cost_risk_*.parquet",
     "futures_cost_risk_*.csv",
 )
+
+DEFAULT_SELECTION_INITIAL_CAPITAL_USD = 100_000.0
+DEFAULT_SELECTION_TARGET_VOL = 0.20
+DEFAULT_SELECTION_INSTRUMENT_COST_LIMIT_SR = 0.01
+DEFAULT_SELECTION_LIQUIDITY_ANNUAL_TRADES = 25.6
+DEFAULT_SELECTION_LIQUIDITY_BUSINESS_DAYS = 256
+DEFAULT_SELECTION_MIN_DAILY_VOLUME = 100.0
+DEFAULT_SELECTION_MAX_MARKET_VOLUME_PCT = 1.0
 
 RANK_COLUMNS = {
     "cost": "cost_rank_in_asset_cls",
@@ -205,6 +221,274 @@ def phase2_step1_config(report: pl.DataFrame) -> dict[str, object]:
     return config
 
 
+def _persisted_run_value(
+    report: pl.DataFrame,
+    column: str,
+) -> object | None:
+    """Return one consistent cached run value, or ``None`` when absent.
+
+    A rule cache intentionally omits selection-scenario parameters, whereas a
+    legacy selection screen persists them on every row.  If a field exists it
+    must still be complete and constant; silently accepting mixed scenarios
+    would make candidate reconstruction non-reproducible.
+    """
+    if column not in report.columns:
+        return None
+    series = report.get_column(column)
+    values = series.drop_nulls().unique().to_list()
+    if len(values) != 1 or series.null_count():
+        raise ValueError(
+            f"cached report has inconsistent {column}; expected one "
+            "non-null run-level value"
+        )
+    return values[0]
+
+
+def resolve_phase2_selection_config(
+    report: pl.DataFrame,
+    *,
+    initial_capital_usd: float | None = None,
+    target_vol: float | None = None,
+    instrument_cost_limit_sr: float | None = None,
+    liquidity_ann_trades: float | None = None,
+    liquidity_business_days: int | None = None,
+    min_daily_volume: float | None = None,
+    max_market_volume_pct: float | None = None,
+) -> dict[str, object]:
+    """Resolve one selection scenario from CLI overrides, cache, and defaults.
+
+    CLI values have precedence.  Legacy screens then provide backward-
+    compatible persisted values.  A scenario-neutral rule cache falls through
+    to the documented defaults.  ``rule_cost_lim_sr`` is always read from the
+    cache because changing it requires rebuilding eligible-rule statistics.
+    """
+    requested = {
+        "init_cap_usd": initial_capital_usd,
+        "target_vol": target_vol,
+        "cost_lim_sr": instrument_cost_limit_sr,
+        "liq_ann_trades": liquidity_ann_trades,
+        "liq_days": liquidity_business_days,
+        "min_daily_volume": min_daily_volume,
+        "max_pct_mkt_volume": max_market_volume_pct,
+    }
+    defaults: dict[str, object] = {
+        "init_cap_usd": DEFAULT_SELECTION_INITIAL_CAPITAL_USD,
+        "target_vol": DEFAULT_SELECTION_TARGET_VOL,
+        "cost_lim_sr": DEFAULT_SELECTION_INSTRUMENT_COST_LIMIT_SR,
+        "liq_ann_trades": DEFAULT_SELECTION_LIQUIDITY_ANNUAL_TRADES,
+        "liq_days": DEFAULT_SELECTION_LIQUIDITY_BUSINESS_DAYS,
+        "min_daily_volume": DEFAULT_SELECTION_MIN_DAILY_VOLUME,
+        "max_pct_mkt_volume": DEFAULT_SELECTION_MAX_MARKET_VOLUME_PCT,
+    }
+    config: dict[str, object] = {}
+    for column, cli_value in requested.items():
+        cached_value = _persisted_run_value(report, column)
+        config[column] = (
+            cli_value
+            if cli_value is not None
+            else cached_value if cached_value is not None else defaults[column]
+        )
+    rule_limit = _persisted_run_value(report, "rule_cost_lim_sr")
+    if rule_limit is None:
+        raise ValueError(
+            "cached report is missing rule_cost_lim_sr; rebuild it with "
+            "futures-rule-cache"
+        )
+    config["rule_cost_lim_sr"] = rule_limit
+
+    for column, value in config.items():
+        if float(value) <= 0:
+            raise ValueError(f"{column} must be positive")
+    return config
+
+
+def apply_phase2_selection_filters(
+    report: pl.DataFrame,
+    *,
+    config: dict[str, object],
+) -> pl.DataFrame:
+    """Attach scenario-dependent hard gates to a cached rule-cost report.
+
+    The input contains observed executable-contract data and cached rule
+    eligibility.  This function performs no IB or historical-data request. It
+    derives the account risk budget, market participation, cost, data, and
+    execution gates for exactly one selection scenario and retains every row
+    so rejection reasons can be written before candidate filtering.
+    """
+    required = {
+        "symbol",
+        "ann_dvol",
+        "avg_daily_volume",
+        "instr_has_elig_ewmac_rule",
+        "exec_elig",
+        "ib_avail",
+    }
+    missing = sorted(required.difference(report.columns))
+    if missing:
+        raise ValueError(
+            "rule-cost cache cannot construct a selection scenario; missing "
+            f"fields {missing}"
+        )
+
+    if "whatif_attempted" not in report.columns:
+        report = report.with_columns(pl.lit(False).alias("whatif_attempted"))
+    if "whatif_elig" not in report.columns:
+        report = report.with_columns(pl.lit(False).alias("whatif_elig"))
+
+    if "trade_sr" in report.columns:
+        cost_eligible = (
+            pl.col("trade_sr").is_not_null()
+            & pl.col("trade_sr").is_finite()
+            & (pl.col("trade_sr") <= float(config["cost_lim_sr"]))
+        )
+    elif "cost_elig" in report.columns:
+        # Compatibility for compact historical test/screens that persisted
+        # the decision but not its underlying trade-SR value.
+        cost_eligible = pl.col("cost_elig").fill_null(False)
+    else:
+        raise ValueError("rule-cost cache is missing trade_sr")
+
+    data_inputs = {"cur_px", "cur_fx_to_usd", "mult"}
+    if data_inputs.issubset(report.columns):
+        data_eligible = (
+            pl.col("cur_px").is_not_null()
+            & pl.col("cur_px").is_finite()
+            & (pl.col("cur_px") > 0)
+            & pl.col("cur_fx_to_usd").is_not_null()
+            & pl.col("cur_fx_to_usd").is_finite()
+            & (pl.col("cur_fx_to_usd") > 0)
+            & pl.col("mult").is_not_null()
+            & pl.col("mult").is_finite()
+            & (pl.col("mult").abs() > 0)
+            & pl.col("avg_daily_volume").is_not_null()
+            & pl.col("ann_dvol").is_not_null()
+            & (pl.col("ib_avail") == "contract_qualified")
+            & (
+                ~pl.col("whatif_attempted").fill_null(False)
+                | pl.col("whatif_elig").fill_null(False)
+            )
+        )
+    elif "data_elig" in report.columns:
+        # Full current caches always take the branch above. This fallback only
+        # keeps previously generated compact screens readable.
+        data_eligible = pl.col("data_elig").fill_null(False)
+    else:
+        missing_data_inputs = sorted(data_inputs.difference(report.columns))
+        raise ValueError(
+            "rule-cost cache cannot reconstruct data eligibility; missing "
+            f"fields {missing_data_inputs}"
+        )
+
+    initial_capital = float(config["init_cap_usd"])
+    target_volatility = float(config["target_vol"])
+    cost_limit = float(config["cost_lim_sr"])
+    annual_trades = float(config["liq_ann_trades"])
+    business_days = int(config["liq_days"])
+    minimum_volume = float(config["min_daily_volume"])
+    maximum_participation = float(config["max_pct_mkt_volume"])
+    maximum_contract_dvol = initial_capital * target_volatility
+    daily_risk_traded = (
+        initial_capital * target_volatility * annual_trades / business_days
+    )
+
+    filtered = report.with_columns(
+        pl.lit(initial_capital).alias("init_cap_usd"),
+        pl.lit(target_volatility).alias("target_vol"),
+        pl.lit(cost_limit).alias("cost_lim_sr"),
+        pl.lit(float(config["rule_cost_lim_sr"])).alias("rule_cost_lim_sr"),
+        pl.lit(annual_trades).alias("liq_ann_trades"),
+        pl.lit(business_days).alias("liq_days"),
+        pl.lit(minimum_volume).alias("min_daily_volume"),
+        pl.lit(maximum_participation).alias("max_pct_mkt_volume"),
+        pl.lit(maximum_contract_dvol).alias("max_ann_dvol"),
+        pl.lit(daily_risk_traded).alias("risk_traded_usd_day"),
+        (pl.col("avg_daily_volume") * pl.col("ann_dvol")).alias(
+            "mkt_risk_vol_usd_day"
+        ),
+    ).with_columns(
+        pl.when(pl.col("mkt_risk_vol_usd_day") > 0)
+        .then(
+            100.0
+            * pl.col("risk_traded_usd_day")
+            / pl.col("mkt_risk_vol_usd_day")
+        )
+        .otherwise(None)
+        .alias("pct_mkt_volume"),
+        cost_eligible.alias("cost_elig"),
+        (
+            pl.col("ann_dvol").is_not_null()
+            & pl.col("ann_dvol").is_finite()
+            & (pl.col("ann_dvol") <= maximum_contract_dvol)
+        ).alias("size_elig"),
+        (
+            pl.col("avg_daily_volume").is_not_null()
+            & pl.col("avg_daily_volume").is_finite()
+            & (pl.col("avg_daily_volume") > minimum_volume)
+        ).alias("volume_elig"),
+        data_eligible.alias("data_elig"),
+    ).with_columns(
+        (
+            pl.col("pct_mkt_volume").is_not_null()
+            & pl.col("pct_mkt_volume").is_finite()
+            & (pl.col("pct_mkt_volume") < maximum_participation)
+        ).alias("risk_volume_elig"),
+    ).with_columns(
+        (
+            pl.col("volume_elig").fill_null(False)
+            & pl.col("risk_volume_elig").fill_null(False)
+        ).alias("liq_elig"),
+    ).with_columns(
+        (
+            pl.col("cost_elig").fill_null(False)
+            & pl.col("size_elig").fill_null(False)
+            & pl.col("liq_elig").fill_null(False)
+            & pl.col("data_elig").fill_null(False)
+            & pl.col("instr_has_elig_ewmac_rule").fill_null(False)
+            & pl.col("exec_elig").fill_null(False)
+            & (pl.col("ib_avail") == "contract_qualified")
+        ).alias("phase2_elig"),
+        (
+            pl.when(~pl.col("data_elig"))
+            .then(pl.lit("dont_add_no_data"))
+            .when(
+                pl.col("cost_elig")
+                & pl.col("size_elig")
+                & pl.col("volume_elig")
+                & pl.col("risk_volume_elig")
+            )
+            .then(pl.lit("add_first"))
+            .otherwise(pl.lit("add_later"))
+        ).alias("sel_bucket"),
+    )
+
+    exclusions: list[str] = []
+    for row in filtered.iter_rows(named=True):
+        reasons: list[str] = []
+        if not row.get("data_elig"):
+            reasons.append("data_unavailable")
+        if not row.get("cost_elig"):
+            reasons.append("cost")
+        if not row.get("size_elig"):
+            reasons.append("risk_size")
+        if row.get("avg_daily_volume") is None:
+            reasons.append("volume_unavailable")
+        else:
+            if not row.get("volume_elig"):
+                reasons.append("contract_volume")
+            if not row.get("risk_volume_elig"):
+                reasons.append("risk_volume")
+        if not row.get("instr_has_elig_ewmac_rule"):
+            reasons.append("no_eligible_rule")
+        if not row.get("exec_elig"):
+            reasons.append("execution")
+        if row.get("ib_avail") != "contract_qualified":
+            reasons.append("ib_unavailable")
+        exclusions.append(",".join(reasons))
+    return filtered.with_columns(
+        pl.Series("phase2_excl", exclusions, dtype=pl.String)
+    )
+
+
 def override_phase2_selection_scenario(
     report: pl.DataFrame,
     *,
@@ -252,112 +536,12 @@ def override_phase2_selection_scenario(
         raise ValueError("initial_capital_usd must be positive")
     if selected_target_vol <= 0:
         raise ValueError("target_vol must be positive")
-    required = {
-        "ann_dvol",
-        "mkt_risk_vol_usd_day",
-        "volume_elig",
-        "cost_elig",
-        "data_elig",
-        "instr_has_elig_ewmac_rule",
-        "exec_elig",
-        "ib_avail",
+    override_config = {
+        **config,
+        "init_cap_usd": selected_capital,
+        "target_vol": selected_target_vol,
     }
-    missing = sorted(required.difference(report.columns))
-    if missing:
-        raise ValueError(
-            "Phase 1 report cannot apply a selection-scenario override; "
-            "missing fields "
-            f"{missing}"
-        )
-
-    liquidity_ann_trades = float(config["liq_ann_trades"])
-    liquidity_days = int(config["liq_days"])
-    max_pct_market_volume = float(config["max_pct_mkt_volume"])
-    max_ann_dvol = selected_capital * selected_target_vol
-    risk_traded_day = (
-        selected_capital
-        * selected_target_vol
-        * liquidity_ann_trades
-        / liquidity_days
-    )
-
-    recalculated = report.with_columns(
-        pl.lit(selected_capital).alias("init_cap_usd"),
-        pl.lit(selected_target_vol).alias("target_vol"),
-        pl.lit(max_ann_dvol).alias("max_ann_dvol"),
-        pl.lit(risk_traded_day).alias("risk_traded_usd_day"),
-    ).with_columns(
-        pl.when(
-            pl.col("mkt_risk_vol_usd_day").is_not_null()
-            & pl.col("mkt_risk_vol_usd_day").is_finite()
-            & (pl.col("mkt_risk_vol_usd_day") > 0)
-        )
-        .then(
-            100.0
-            * pl.col("risk_traded_usd_day")
-            / pl.col("mkt_risk_vol_usd_day")
-        )
-        .otherwise(None)
-        .alias("pct_mkt_volume"),
-        (
-            pl.col("ann_dvol").is_not_null()
-            & pl.col("ann_dvol").is_finite()
-            & (pl.col("ann_dvol") <= max_ann_dvol)
-        ).alias("size_elig"),
-    ).with_columns(
-        (
-            pl.col("pct_mkt_volume").is_not_null()
-            & pl.col("pct_mkt_volume").is_finite()
-            & (pl.col("pct_mkt_volume") < max_pct_market_volume)
-        ).alias("risk_volume_elig"),
-    ).with_columns(
-        (
-            pl.col("volume_elig").fill_null(False)
-            & pl.col("risk_volume_elig").fill_null(False)
-        ).alias("liq_elig"),
-    ).with_columns(
-        (
-            pl.col("cost_elig").fill_null(False)
-            & pl.col("size_elig").fill_null(False)
-            & pl.col("liq_elig").fill_null(False)
-            & pl.col("data_elig").fill_null(False)
-            & pl.col("instr_has_elig_ewmac_rule").fill_null(False)
-            & pl.col("exec_elig").fill_null(False)
-            & (pl.col("ib_avail").fill_null("") == "contract_qualified")
-        ).alias("phase2_elig"),
-    )
-
-    # Keep the human-readable rejection column consistent when the source
-    # report carries it. Other non-capital reasons remain unchanged because
-    # their persisted gates are reused verbatim above.
-    if "phase2_excl" in recalculated.columns:
-        exclusions: list[str] = []
-        for row in recalculated.iter_rows(named=True):
-            reasons: list[str] = []
-            if not row.get("data_elig"):
-                reasons.append("data_unavailable")
-            if not row.get("cost_elig"):
-                reasons.append("cost")
-            if not row.get("size_elig"):
-                reasons.append("risk_size")
-            if row.get("avg_daily_volume") is None:
-                reasons.append("volume_unavailable")
-            else:
-                if not row.get("volume_elig"):
-                    reasons.append("contract_volume")
-                if not row.get("risk_volume_elig"):
-                    reasons.append("risk_volume")
-            if not row.get("instr_has_elig_ewmac_rule"):
-                reasons.append("no_eligible_rule")
-            if not row.get("exec_elig"):
-                reasons.append("execution")
-            if row.get("ib_avail") != "contract_qualified":
-                reasons.append("ib_unavailable")
-            exclusions.append(",".join(reasons))
-        recalculated = recalculated.with_columns(
-            pl.Series("phase2_excl", exclusions, dtype=pl.String)
-        )
-    return recalculated
+    return apply_phase2_selection_filters(report, config=override_config)
 
 
 def override_phase2_initial_capital(
@@ -440,8 +624,8 @@ def find_latest_phase1_cost_report(
     """Find the newest Phase 1 report in ``report_dir`` or its results folder.
 
     New reports are Parquet; CSV patterns remain available for legacy runs.
-    Report-family precedence prefers the selection screen, then progressively
-    broader Phase 1 cost report names.
+    Report-family precedence prefers the scenario-neutral rule cache, then the
+    legacy selection screen and progressively broader Phase 1 report names.
     """
     root = Path(report_dir).expanduser()
     search_dirs = (root, root / "results")

@@ -4,12 +4,14 @@ import polars as pl
 import pytest
 
 from derivatives_bt_engine.data.futures_cost_rankings import (
+    apply_phase2_selection_filters,
     find_latest_phase1_cost_report,
     load_latest_phase1_cost_report,
     override_phase2_selection_scenario,
     phase2_search_universe,
     phase2_step1_candidates,
     phase2_step1_config,
+    resolve_phase2_selection_config,
     top_n_by_asset_class,
 )
 
@@ -49,6 +51,19 @@ def test_load_latest_phase1_cost_report_keeps_legacy_csv_compatibility(tmp_path)
 
     assert path == legacy.resolve()
     assert report.height == _report().height
+
+
+def test_latest_report_prefers_rule_cache_over_legacy_selection_screen(tmp_path):
+    """Automatic discovery uses the scenario-neutral cache when both exist."""
+    cache = tmp_path / "pysystemtrade_rule_cache_20261015_120000.parquet"
+    screen = tmp_path / "pysystemtrade_selection_screen_20261015_130000.parquet"
+    _report().head(1).write_parquet(cache)
+    _report().head(2).write_parquet(screen)
+
+    path, report = load_latest_phase1_cost_report(tmp_path)
+
+    assert path == cache.resolve()
+    assert report.height == 1
 
 
 def test_find_latest_phase1_cost_report_raises_for_empty_directory(tmp_path):
@@ -252,3 +267,34 @@ def test_phase2_scenario_override_recalculates_target_dependent_gates():
     assert recalculated.filter(pl.col("symbol") == "PASS").select(
         "phase2_elig"
     ).item() is True
+
+
+def test_rule_cache_filters_resolve_defaults_without_cached_target_vol():
+    """A rule cache needs no capital or target-volatility columns."""
+    cache = pl.DataFrame({
+        "symbol": ["PASS"],
+        "asset_cls": ["ags"],
+        "econ_subcls": ["grains"],
+        "ann_dvol": [500.0],
+        "avg_daily_volume": [1_000.0],
+        "trade_sr": [0.002],
+        "rule_cost_lim_sr": [0.15],
+        "instr_has_elig_ewmac_rule": [True],
+        "exec_elig": [True],
+        "ib_avail": ["contract_qualified"],
+        "cur_px": [500.0],
+        "cur_fx_to_usd": [1.0],
+        "mult": [5.0],
+        "whatif_attempted": [True],
+        "whatif_elig": [True],
+    })
+
+    config = resolve_phase2_selection_config(cache)
+    filtered = apply_phase2_selection_filters(cache, config=config)
+
+    assert config["init_cap_usd"] == pytest.approx(100_000.0)
+    assert config["target_vol"] == pytest.approx(0.20)
+    assert config["liq_ann_trades"] == pytest.approx(25.6)
+    assert config["liq_days"] == 256
+    assert filtered.select("phase2_elig").item() is True
+    assert "target_vol" not in cache.columns

@@ -1,4 +1,4 @@
-"""Run Phase 2 construction-scenario grids from one cached selection screen.
+"""Run construction-scenario grids from one cached rule-cost universe.
 
 This runner is deliberately a robustness tool rather than a performance
 optimizer. It holds the executable market snapshot and historical inputs fixed,
@@ -114,8 +114,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     """Parse the construction-grid command line."""
     parser = argparse.ArgumentParser(
         description=(
-            "Run a Phase 2 robustness grid from one exact cached selection "
-            "screen. Scenarios are compared by membership and feasibility, "
+            "Run a Phase 2 robustness grid from one exact cached rule-cost "
+            "report. Scenarios are compared by membership and feasibility, "
             "not treated as walk-forward performance tests."
         )
     )
@@ -123,7 +123,7 @@ def parse_args(argv=None) -> argparse.Namespace:
         "--input",
         type=Path,
         required=True,
-        help="Exact selection-screen Parquet to pin across every scenario.",
+        help="Exact rule-cache Parquet to pin across every scenario.",
     )
     parser.add_argument(
         "--output-dir",
@@ -142,7 +142,10 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument(
         "--initial-capital-usd",
         type=float,
-        help="Optional fixed capital override; otherwise use the screen value.",
+        help=(
+            "Optional fixed capital override; otherwise use a legacy cached "
+            "value or the selection default."
+        ),
     )
     parser.add_argument(
         "--target-vols",
@@ -296,7 +299,7 @@ def _summary_row(
     status: str,
     elapsed_seconds: float,
     book_path: Path | None,
-    screen: pl.DataFrame,
+    rule_cache: pl.DataFrame,
     error: str = "",
 ) -> tuple[dict[str, object], pl.DataFrame | None]:
     """Summarize one scenario and return its labelled membership frame."""
@@ -333,10 +336,10 @@ def _summary_row(
     symbols = book.get_column("symbol").cast(pl.String).to_list()
     identity_columns = [
         name for name in ("symbol", "asset_cls", "econ_subcls")
-        if name in screen.columns
+        if name in rule_cache.columns
     ]
     membership = book.join(
-        screen.select(identity_columns).unique(subset=["symbol"]),
+        rule_cache.select(identity_columns).unique(subset=["symbol"]),
         on="symbol",
         how="left",
     ).with_columns(
@@ -426,8 +429,8 @@ def run(argv=None) -> tuple[Path, Path | None]:
     """Execute or print the requested grid and save typed comparison reports.
 
     Returns the command-plan path and, after execution, the summary Parquet
-    path. Every scenario copies the small Phase 1 screen into its own directory
-    so the existing Phase 2 writer naturally keeps all audit artifacts isolated.
+    path. Every scenario copies the small rule cache into its own directory so
+    the selection writer naturally keeps all audit artifacts isolated.
     """
     args = parse_args(argv)
     source = args.input.expanduser().resolve()
@@ -444,13 +447,13 @@ def run(argv=None) -> tuple[Path, Path | None]:
         else (Path("results") / f"selection_grid_{stamp}").resolve()
     )
     output_dir.mkdir(parents=True, exist_ok=True)
-    screen = pl.read_parquet(source)
+    rule_cache = pl.read_parquet(source)
     scenarios = build_scenarios(args)
 
     planned: list[tuple[SelectionScenario, Path, list[str]]] = []
     for scenario in scenarios:
         scenario_dir = output_dir / scenario.scenario_id
-        scenario_input = scenario_dir / "selection_screen.parquet"
+        scenario_input = scenario_dir / "rule_cache.parquet"
         candidates_output = scenario_dir / "selection_candidates.parquet"
         scenario_dir.mkdir(parents=True, exist_ok=True)
         if not scenario_input.exists():
@@ -518,7 +521,7 @@ def run(argv=None) -> tuple[Path, Path | None]:
             status=status,
             elapsed_seconds=elapsed,
             book_path=book_path,
-            screen=screen,
+            rule_cache=rule_cache,
             error=error,
         )
         summary_rows.append(row)
