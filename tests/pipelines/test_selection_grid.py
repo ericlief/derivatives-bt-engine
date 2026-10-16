@@ -127,7 +127,33 @@ def test_dry_run_writes_reproducible_commands_without_running_selection(
 
     command_text = commands_path.read_text(encoding="utf-8")
     assert summary_path is None
+    assert commands_path.parent.parent == output
+    assert commands_path.parent.name.startswith("selection_grid_")
     assert "--target-vol 0.2" in command_text
     assert "--max-instr-margin-pct 20.0" in command_text
     assert "--include-roll-cost-in-score" in command_text
     assert not list(output.rglob("multi_speed_ewmac_selection_book_*.parquet"))
+
+
+def test_grid_can_pin_an_exact_run_directory_for_resume(tmp_path: Path):
+    """An explicit run directory supports resuming without another timestamp."""
+    source = tmp_path / "screen.parquet"
+    run_dir = tmp_path / "selection_grid_existing"
+    pl.DataFrame({"symbol": ["MZC"]}).write_parquet(source)
+
+    commands_path, summary_path = run([
+        "--input",
+        str(source),
+        "--run-dir",
+        str(run_dir),
+        "--target-vols",
+        "0.20",
+        "--max-instr-margin-pcts",
+        "20",
+        "--roll-cost-modes",
+        "include",
+        "--dry-run",
+    ])
+
+    assert commands_path.parent == run_dir
+    assert summary_path is None

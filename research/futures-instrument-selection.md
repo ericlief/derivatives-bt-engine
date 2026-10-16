@@ -1420,9 +1420,12 @@ The recommended 18-scenario first pass is the CLI default:
   --initial-capital-usd 75000
 ```
 
-Preview the exact commands without running selection with `--dry-run`. The runner
-creates an isolated directory for every scenario and can resume completed
-directories after interruption. It writes:
+Preview the exact commands without running selection with `--dry-run`. Each
+invocation creates a timestamped `selection_grid_<timestamp>` folder under the
+output root (the default root is `results/`). The runner creates an isolated
+directory for every scenario and can resume completed directories after
+interruption. To resume a particular run, pass its exact folder with
+`--run-dir`; `--output-dir` always means the parent output root. It writes:
 
 - `selection_grid_commands.sh`, the reproducible command plan;
 - one normal set of typed portfolio-selection Parquet audits per scenario;

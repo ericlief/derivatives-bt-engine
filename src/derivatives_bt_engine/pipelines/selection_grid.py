@@ -129,8 +129,16 @@ def parse_args(argv=None) -> argparse.Namespace:
         "--output-dir",
         type=Path,
         help=(
-            "Grid directory; defaults to "
-            "results/selection_grid_<Chicago timestamp>."
+            "Parent directory for timestamped grid-run folders; defaults to "
+            "results/. Each run creates selection_grid_<Chicago timestamp>."
+        ),
+    )
+    parser.add_argument(
+        "--run-dir",
+        type=Path,
+        help=(
+            "Use this exact existing/new grid-run directory. Intended for "
+            "resuming a specific run; mutually exclusive with --output-dir."
         ),
     )
     parser.add_argument(
@@ -465,6 +473,8 @@ def run(argv=None) -> tuple[Path, Path | None]:
     the selection writer naturally keeps all audit artifacts isolated.
     """
     args = parse_args(argv)
+    if args.output_dir is not None and args.run_dir is not None:
+        raise ValueError("--output-dir and --run-dir cannot be used together")
     source = args.input.expanduser().resolve()
     if not source.is_file() or source.suffix.lower() != ".parquet":
         raise ValueError("--input must be an exact existing Parquet report")
@@ -473,11 +483,15 @@ def run(argv=None) -> tuple[Path, Path | None]:
         raise ValueError("--initial-capital-usd must be positive")
 
     stamp = datetime.now(REPORT_TIMEZONE).strftime("%Y%m%d_%H%M%S")
-    output_dir = (
-        args.output_dir.expanduser().resolve()
-        if args.output_dir is not None
-        else (Path("results") / f"selection_grid_{stamp}").resolve()
-    )
+    if args.run_dir is not None:
+        output_dir = args.run_dir.expanduser().resolve()
+    else:
+        output_root = (
+            args.output_dir.expanduser().resolve()
+            if args.output_dir is not None
+            else Path("results").resolve()
+        )
+        output_dir = output_root / f"selection_grid_{stamp}"
     output_dir.mkdir(parents=True, exist_ok=True)
     rule_cache = pl.read_parquet(source)
     scenarios = build_scenarios(args)
