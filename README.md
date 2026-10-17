@@ -71,15 +71,17 @@ instrument; the weights sum to one. That weight has three related uses in
    `high_con_weight`. These fields therefore mean shares of total portfolio
    risk weight—not contract counts, margin shares, or P&L.
 
-The book-level `contract_band_loss` is a soft preference for a reference mix:
-no more than 50% of weight in the low band, at least 30% in the middle band,
-and no more than 15% in the high band. It is the sum of squared shortfalls or
-excesses from those limits, so zero means all three are satisfied. The loss
-does **not** reduce the book's SR score. It only breaks a near tie: when
-`--score-tie-tolerance-pct` is greater than zero, Phase 2 admits candidates
-within that percentage of the iteration's best score and chooses the one with
-the smallest band loss. The default tolerance is zero, so this tie-break is
-off.
+The book-level `contract_band_loss` is a soft preference for a configurable
+reference mix. `--tie-max-low-con-weight`, `--tie-min-band-con-weight`, and
+`--tie-max-high-con-weight` set the low-band cap, middle-band floor, and
+high-band cap. Their initial values are 50%, 30%, and 15% for reproducibility;
+they are assumptions to sweep rather than validated limits. The loss is the
+sum of squared shortfalls or excesses from those references, so zero means all
+three are satisfied. It does **not** reduce the book's SR score. It only breaks
+a near tie: when `--score-tie-tolerance-pct` is greater than zero, Phase 2
+admits candidates within that percentage of the iteration's best score and
+chooses the one with the smallest band loss. The default tolerance is zero, so
+this tie-break is off.
 
 This book-level tie-break is separate from `--low-con-penalty-scale` and
 `--high-con-penalty-scale`. Those optional settings subtract per-instrument

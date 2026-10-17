@@ -1410,15 +1410,28 @@ floor. It then chooses the candidate with the lowest soft contract-band loss
 inside the near-tie window:
 
 ```text
-loss = max(0, low_con_weight - 0.50)**2
-     + max(0, 0.30 - band_con_weight)**2
-     + max(0, high_con_weight - 0.15)**2
+loss = max(0, low_con_weight - tie_max_low_con_weight)**2
+     + max(0, tie_min_band_con_weight - band_con_weight)**2
+     + max(0, high_con_weight - tie_max_high_con_weight)**2
 ```
 
 The value defaults to zero, which preserves highest-score selection. Trial
 audits save the score leader, selected candidate, tie score floor, eligibility,
 loss, and whether the tie rule changed the winner. The grid runner accepts
 `--score-tie-tolerance-pcts 0,.25,.5,1`.
+
+The three band-weight references are explicit parameters because the EDA did
+not validate a universal allowance for low- or high-contract instruments:
+
+- `--tie-max-low-con-weight` sets the low-band cap;
+- `--tie-min-band-con-weight` sets the target-band floor; and
+- `--tie-max-high-con-weight` sets the high-band cap.
+
+Their initial defaults remain `.50`, `.30`, and `.15` for reproducibility.
+They are inactive while the tie tolerance is zero. The grid forms accept the
+plural options `--tie-max-low-con-weights`, `--tie-min-band-con-weights`, and
+`--tie-max-high-con-weights`. Sweep the low cap directly if the intended book
+should allocate materially less than half its risk weight below 2.5 contracts.
 
 Contract penalties are grid axes as well. Use
 `--low-con-penalty-scales 0,.06,.12,.24` and
@@ -1505,7 +1518,10 @@ Run secondary constraint tests separately, for example:
   --max-book-margin-pcts 50,75 \
   --max-weight-idms 0.20 \
   --max-instr-per-clusters 2 \
-  --low-con-penalty-scales 0,.06,.12,.24 \
+  --low-con-penalty-scales .12 \
   --high-con-penalty-scales 0 \
-  --score-tie-tolerance-pcts 0
+  --score-tie-tolerance-pcts .25,.5,1 \
+  --tie-max-low-con-weights .25,.35,.50 \
+  --tie-min-band-con-weights .30 \
+  --tie-max-high-con-weights .15
 ```

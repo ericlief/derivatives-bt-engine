@@ -490,12 +490,18 @@ Start with soft reference levels of no more than 50% low-count weight, at least
 books do not meet the first two levels, so they should begin as penalties or
 near-tie preferences rather than hard admission gates.
 
+These figures are exploratory rather than calibrated limits. Treat them as
+the configurable `tie_max_low_con_weight`, `tie_min_band_con_weight`, and
+`tie_max_high_con_weight` parameters. In particular, sweep the low-band cap
+rather than assuming that a 50% allocation below 2.5 contracts is acceptable.
+
 One robust selection rule is to preserve the base score calculation, retain
-candidates within 0.25%, 0.5%, or 1% of the iteration's best unadjusted score,
-then choose the candidate with the lowest book-level contract-band loss. This
-can substitute a better-granularity candidate, which the score threshold alone
-cannot do. The audit should save both the unadjusted AFTS score and the
-granularity tie-break value.
+candidates within 0.25%, 0.5%, or 1% of the iteration's best construction
+score before the book-level tie break, then choose the candidate with the
+lowest contract-band loss. This can substitute a better-granularity candidate,
+which the score threshold alone cannot do. The audit should save the base AFTS
+score, the penalty-adjusted construction score, and the granularity tie-break
+value.
 
 ## Next grid
 

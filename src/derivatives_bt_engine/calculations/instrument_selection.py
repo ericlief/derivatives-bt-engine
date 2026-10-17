@@ -140,7 +140,9 @@ class GreedySelectionConfig:
     ``contract_band_min`` through ``contract_band_max``.
     ``score_tie_tolerance_percent`` optionally admits trial scores within that
     percentage of the iteration leader, then prefers the book with the
-    smallest contract-band concentration loss.
+    smallest contract-band concentration loss. The three ``tie_*`` weight
+    parameters define the soft low-band cap, target-band floor, and high-band
+    cap used by that loss.
     ``include_roll_cost_in_score`` changes the greedy net-SR
     deduction from ordinary trading cost alone to ordinary trading plus the
     reference holding-roll allowance. ``max_instrument_margin_pct`` optionally
@@ -167,6 +169,9 @@ class GreedySelectionConfig:
     contract_band_min: float = 2.5
     contract_band_max: float = 5.5
     score_tie_tolerance_percent: float = 0.0
+    tie_max_low_contract_weight: float = 0.50
+    tie_min_band_contract_weight: float = 0.30
+    tie_max_high_contract_weight: float = 0.15
     liquidity_days: int = 250
     max_pct_market_volume: float = 1.0
     max_instruments_per_cluster: int | None = None
@@ -198,6 +203,13 @@ class GreedySelectionConfig:
             raise ValueError("contract band must have positive increasing bounds")
         if not 0 <= self.score_tie_tolerance_percent <= 100:
             raise ValueError("score_tie_tolerance_percent must be in [0, 100]")
+        tie_weight_parameters = (
+            self.tie_max_low_contract_weight,
+            self.tie_min_band_contract_weight,
+            self.tie_max_high_contract_weight,
+        )
+        if any(not 0 <= value <= 1 for value in tie_weight_parameters):
+            raise ValueError("contract tie weight parameters must be in [0, 1]")
         if self.liquidity_days <= 0 or self.max_pct_market_volume <= 0:
             raise ValueError("liquidity parameters must be positive")
         if (
@@ -856,12 +868,21 @@ class GreedyInstrumentSelector:
             weights[str(detail["symbol"])] for detail in details
             if float(detail["max_position"]) >= self.config.contract_band_max
         )
-        # Reference levels come from the small-account EDA. They are a soft
-        # secondary preference and never make a trial infeasible.
+        # These configured reference levels are a soft secondary preference
+        # and never make a trial infeasible.
         contract_band_loss = (
-            max(0.0, low_contract_weight - 0.50) ** 2
-            + max(0.0, 0.30 - band_contract_weight) ** 2
-            + max(0.0, high_contract_weight - 0.15) ** 2
+            max(
+                0.0,
+                low_contract_weight - self.config.tie_max_low_contract_weight,
+            ) ** 2
+            + max(
+                0.0,
+                self.config.tie_min_band_contract_weight - band_contract_weight,
+            ) ** 2
+            + max(
+                0.0,
+                high_contract_weight - self.config.tie_max_high_contract_weight,
+            ) ** 2
         )
         # Keep each member's weighted net SR (the book-score numerator
         # contribution) and the shared risk denominator available for audit.

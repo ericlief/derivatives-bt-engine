@@ -55,6 +55,9 @@ class SelectionScenario:
     low_contract_penalty_scale: float = 0.0
     high_contract_penalty_scale: float = 0.0
     score_tie_tolerance_percent: float = 0.0
+    tie_max_low_contract_weight: float = 0.50
+    tie_min_band_contract_weight: float = 0.30
+    tie_max_high_contract_weight: float = 0.15
 
     @property
     def scenario_id(self) -> str:
@@ -75,11 +78,17 @@ class SelectionScenario:
             self.low_contract_penalty_scale
             or self.high_contract_penalty_scale
             or self.score_tie_tolerance_percent
+            or self.tie_max_low_contract_weight != 0.50
+            or self.tie_min_band_contract_weight != 0.30
+            or self.tie_max_high_contract_weight != 0.15
         ):
             tokens.extend((
                 f"lp{_number_token(self.low_contract_penalty_scale)}",
                 f"hp{_number_token(self.high_contract_penalty_scale)}",
                 f"tie{_number_token(self.score_tie_tolerance_percent)}",
+                f"tlw{_number_token(self.tie_max_low_contract_weight)}",
+                f"tbw{_number_token(self.tie_min_band_contract_weight)}",
+                f"thw{_number_token(self.tie_max_high_contract_weight)}",
             ))
         tokens.extend((
             f"cl{cluster}",
@@ -123,6 +132,14 @@ def _percent_list(value: str) -> tuple[float, ...]:
     values = _non_negative_float_list(value)
     if any(item > 100 for item in values):
         raise argparse.ArgumentTypeError("percentage values must be in [0, 100]")
+    return values
+
+
+def _unit_interval_list(value: str) -> tuple[float, ...]:
+    """Parse unique decimal weights from zero through one."""
+    values = _non_negative_float_list(value)
+    if any(item > 1 for item in values):
+        raise argparse.ArgumentTypeError("weight values must be in [0, 1]")
     return values
 
 
@@ -273,6 +290,27 @@ def parse_args(argv=None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--tie-max-low-con-weights",
+        dest="tie_max_low_contract_weights",
+        type=_unit_interval_list,
+        default=(0.50,),
+        help="Comma-separated soft low-position weight caps (default: .50).",
+    )
+    parser.add_argument(
+        "--tie-min-band-con-weights",
+        dest="tie_min_band_contract_weights",
+        type=_unit_interval_list,
+        default=(0.30,),
+        help="Comma-separated soft target-band weight floors (default: .30).",
+    )
+    parser.add_argument(
+        "--tie-max-high-con-weights",
+        dest="tie_max_high_contract_weights",
+        type=_unit_interval_list,
+        default=(0.15,),
+        help="Comma-separated soft high-position weight caps (default: .15).",
+    )
+    parser.add_argument(
         "--max-instr-per-clusters",
         type=_cluster_limit_list,
         default=(None,),
@@ -326,6 +364,9 @@ def build_scenarios(args: argparse.Namespace) -> list[SelectionScenario]:
             low_contract_penalty_scale=low_contract_penalty_scale,
             high_contract_penalty_scale=high_contract_penalty_scale,
             score_tie_tolerance_percent=score_tie_tolerance_percent,
+            tie_max_low_contract_weight=tie_max_low_contract_weight,
+            tie_min_band_contract_weight=tie_min_band_contract_weight,
+            tie_max_high_contract_weight=tie_max_high_contract_weight,
             maximum_instruments_per_cluster=cluster_limit,
             include_roll_cost_in_score=include_roll_cost,
             weight_policy=args.weight_policy,
@@ -339,6 +380,9 @@ def build_scenarios(args: argparse.Namespace) -> list[SelectionScenario]:
             low_contract_penalty_scale,
             high_contract_penalty_scale,
             score_tie_tolerance_percent,
+            tie_max_low_contract_weight,
+            tie_min_band_contract_weight,
+            tie_max_high_contract_weight,
             cluster_limit,
             include_roll_cost,
         ) in product(
@@ -350,6 +394,9 @@ def build_scenarios(args: argparse.Namespace) -> list[SelectionScenario]:
             args.low_contract_penalty_scales,
             args.high_contract_penalty_scales,
             args.score_tie_tolerance_percents,
+            args.tie_max_low_contract_weights,
+            args.tie_min_band_contract_weights,
+            args.tie_max_high_contract_weights,
             args.max_instr_per_clusters,
             roll_modes,
         )
@@ -393,6 +440,12 @@ def _selection_command(
         str(scenario.high_contract_penalty_scale),
         "--score-tie-tolerance-pct",
         str(scenario.score_tie_tolerance_percent),
+        "--tie-max-low-con-weight",
+        str(scenario.tie_max_low_contract_weight),
+        "--tie-min-band-con-weight",
+        str(scenario.tie_min_band_contract_weight),
+        "--tie-max-high-con-weight",
+        str(scenario.tie_max_high_contract_weight),
         "--weight-policy",
         scenario.weight_policy,
     ]
@@ -439,6 +492,9 @@ def _summary_row(
         "low_contract_penalty_scale": scenario.low_contract_penalty_scale,
         "high_contract_penalty_scale": scenario.high_contract_penalty_scale,
         "score_tie_tolerance_percent": scenario.score_tie_tolerance_percent,
+        "tie_max_low_contract_weight": scenario.tie_max_low_contract_weight,
+        "tie_min_band_contract_weight": scenario.tie_min_band_contract_weight,
+        "tie_max_high_contract_weight": scenario.tie_max_high_contract_weight,
         "maximum_instruments_per_cluster": (
             scenario.maximum_instruments_per_cluster
         ),
@@ -566,6 +622,9 @@ def _attach_baseline_overlap(summary: pl.DataFrame) -> pl.DataFrame:
             + pl.col("low_contract_penalty_scale").abs()
             + pl.col("high_contract_penalty_scale").abs()
             + pl.col("score_tie_tolerance_percent").abs() / 100.0
+            + (pl.col("tie_max_low_contract_weight") - 0.50).abs()
+            + (pl.col("tie_min_band_contract_weight") - 0.30).abs()
+            + (pl.col("tie_max_high_contract_weight") - 0.15).abs()
             + pl.when(pl.col("maximum_instruments_per_cluster").is_null())
               .then(0.0).otherwise(1.0)
             + pl.when(pl.col("include_roll_cost_in_score"))

@@ -125,6 +125,7 @@ _vd_set_type(
     low_con_penalty_sr high_con_penalty_sr con_band_penalty_sr
     low_con_penalty_scale high_con_penalty_scale
     con_band_min con_band_max score_tie_tolerance_pct
+    tie_max_low_con_weight tie_min_band_con_weight tie_max_high_con_weight
     low_con_weight band_con_weight high_con_weight con_band_loss
     score_denom marg_score scaled_contrib
     avg_cons ann_trade_cons ann_roll_cons ann_con_load max_cons

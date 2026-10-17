@@ -261,6 +261,27 @@ def parse_args(argv=None, *, complete_default: bool = False):
         ),
     )
     parser.add_argument(
+        "--tie-max-low-con-weight",
+        dest="tie_max_low_contract_weight",
+        type=float,
+        default=0.50,
+        help="Soft low-position risk-weight cap used by the tie rule.",
+    )
+    parser.add_argument(
+        "--tie-min-band-con-weight",
+        dest="tie_min_band_contract_weight",
+        type=float,
+        default=0.30,
+        help="Soft target-band risk-weight floor used by the tie rule.",
+    )
+    parser.add_argument(
+        "--tie-max-high-con-weight",
+        dest="tie_max_high_contract_weight",
+        type=float,
+        default=0.15,
+        help="Soft high-position risk-weight cap used by the tie rule.",
+    )
+    parser.add_argument(
         "--include-roll-cost-in-score",
         action="store_true",
         help=(
@@ -707,6 +728,9 @@ def _run_complete_selection(
             contract_band_min=args.contract_band_min,
             contract_band_max=args.contract_band_max,
             score_tie_tolerance_percent=args.score_tie_tolerance_percent,
+            tie_max_low_contract_weight=args.tie_max_low_contract_weight,
+            tie_min_band_contract_weight=args.tie_min_band_contract_weight,
+            tie_max_high_contract_weight=args.tie_max_high_contract_weight,
             max_weight_idm=args.max_weight_idm,
             max_pct_market_volume=float(run_config["max_pct_mkt_volume"]),
             liquidity_days=int(run_config["liq_days"]),
@@ -767,6 +791,9 @@ def _run_complete_selection(
             "contract_band_min": args.contract_band_min,
             "contract_band_max": args.contract_band_max,
             "score_tie_tolerance_percent": args.score_tie_tolerance_percent,
+            "tie_max_low_contract_weight": args.tie_max_low_contract_weight,
+            "tie_min_band_contract_weight": args.tie_min_band_contract_weight,
+            "tie_max_high_contract_weight": args.tie_max_high_contract_weight,
             "roll_cost_in_score": args.include_roll_cost_in_score,
             "buffer_size": args.buffer_size,
             "buffer_trade_to_edge": args.buffer_trade_to_edge,
@@ -923,6 +950,15 @@ def _run_complete_selection(
                 pl.lit(args.score_tie_tolerance_percent).alias(
                     "score_tie_tolerance_percent"
                 ),
+                pl.lit(args.tie_max_low_contract_weight).alias(
+                    "tie_max_low_contract_weight"
+                ),
+                pl.lit(args.tie_min_band_contract_weight).alias(
+                    "tie_min_band_contract_weight"
+                ),
+                pl.lit(args.tie_max_high_contract_weight).alias(
+                    "tie_max_high_contract_weight"
+                ),
             )
         )
     )
@@ -947,6 +983,15 @@ def _run_complete_selection(
                 pl.lit(args.contract_band_max).alias("contract_band_max"),
                 pl.lit(args.score_tie_tolerance_percent).alias(
                     "score_tie_tolerance_percent"
+                ),
+                pl.lit(args.tie_max_low_contract_weight).alias(
+                    "tie_max_low_contract_weight"
+                ),
+                pl.lit(args.tie_min_band_contract_weight).alias(
+                    "tie_min_band_contract_weight"
+                ),
+                pl.lit(args.tie_max_high_contract_weight).alias(
+                    "tie_max_high_contract_weight"
                 ),
             )
         )
@@ -977,6 +1022,15 @@ def _run_complete_selection(
             pl.lit(args.score_tie_tolerance_percent).alias(
                 "score_tie_tolerance_percent"
             ),
+            pl.lit(args.tie_max_low_contract_weight).alias(
+                "tie_max_low_contract_weight"
+            ),
+            pl.lit(args.tie_min_band_contract_weight).alias(
+                "tie_min_band_contract_weight"
+            ),
+            pl.lit(args.tie_max_high_contract_weight).alias(
+                "tie_max_high_contract_weight"
+            ),
         )
         .select(
             pl.col("iteration").alias("selection_step"),
@@ -1005,6 +1059,9 @@ def _run_complete_selection(
             "contract_band_min",
             "contract_band_max",
             "score_tie_tolerance_percent",
+            "tie_max_low_contract_weight",
+            "tie_min_band_contract_weight",
+            "tie_max_high_contract_weight",
             "iter_score_best",
             "iter_score_best_score",
             "tie_score_floor",
@@ -1100,6 +1157,13 @@ def run(
         raise ValueError("contract band must have positive increasing bounds")
     if not 0 <= args.score_tie_tolerance_percent <= 100:
         raise ValueError("score tie tolerance must be in [0, 100]")
+    tie_weight_parameters = (
+        args.tie_max_low_contract_weight,
+        args.tie_min_band_contract_weight,
+        args.tie_max_high_contract_weight,
+    )
+    if any(not 0 <= value <= 1 for value in tie_weight_parameters):
+        raise ValueError("contract tie weight parameters must be in [0, 1]")
     setup_logger()
     if args.output is not None and args.output.suffix.lower() != ".parquet":
         raise ValueError("--output must use a .parquet extension")
