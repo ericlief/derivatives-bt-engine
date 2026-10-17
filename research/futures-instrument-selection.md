@@ -996,17 +996,18 @@ baseline by default. The command writes:
   failures retain their feasibility reason, while feasible losers distinguish
   a lower singleton rank, a lower rank than the iteration winner, or a best
   score below the acceptance threshold. Near-tie losers identify the
-  contract-band tie break. `iter_best`, `iter_best_score`,
+  reference-position tie break. `candidate_ref_max_position`,
+  `candidate_ref_con_band_distance`, `iter_best`, `iter_best_score`,
   `iter_score_best`, `iter_score_best_score`, `tie_score_floor`, and
   `min_accept_score` make those comparisons directly auditable; and
 - `multi_speed_ewmac_selection_passes_<timestamp>.parquet`, the readable
   accepted path only: `selection_step` identifies the pass, `added_symbol` is
   its winner, and each `symbol` row records that accepted book member's
   terminal subclass, subclass membership, subclass weight, instrument weight,
-  `base_net_sr`, `net_sr`, the size and contract-penalty columns, continuous
-  position-band weights, the shared `score_denom`, and its weighted-net
-  `marg_score` and denominator-scaled `scaled_contrib` alongside annual cost
-  and contract-load components;
+  `base_net_sr`, `net_sr`, the size and contract-penalty columns, fixed
+  reference weight and position, continuous position-band weights, the shared
+  `score_denom`, and its weighted-net `marg_score` and denominator-scaled
+  `scaled_contrib` alongside annual cost and contract-load components;
   and
 - `multi_speed_ewmac_selection_book_<timestamp>.parquet`, the last accepted book.
 
@@ -1414,32 +1415,27 @@ An optional near-tie rule can change which candidate enters rather than only
 changing where the same greedy path stops. Set `--score-tie-tolerance-pct` to
 the allowed percentage below the iteration's best adjusted construction score.
 The selector first applies hard feasibility and the global score-acceptance
-floor. It then chooses the candidate with the lowest soft contract-band loss
-inside the near-tie window:
+floor. It then compares the candidate instruments using a stable reference
+maximum position. `--tie-ref-book-count` sets an estimated final book size
+(default 15), giving each candidate the fixed reference weight `1 / count`:
 
 ```text
-loss = max(0, low_con_weight - tie_max_low_con_weight)**2
-     + max(0, tie_min_band_con_weight - band_con_weight)**2
-     + max(0, high_con_weight - tie_max_high_con_weight)**2
+ref_weight_idm = min(max_idm / tie_ref_book_count, max_weight_idm)
+
+ref_max_position_i = capital * target_vol * ref_weight_idm
+                     * forecast_cap_ratio / ann_dvol_i
 ```
 
-The value defaults to zero, which preserves highest-score selection. Trial
-audits save the score leader, selected candidate, tie score floor, eligibility,
-loss, and whether the tie rule changed the winner. The grid runner accepts
-`--score-tie-tolerance-pcts 0,.25,.5,1`.
-
-The three band-weight references are explicit parameters because the EDA did
-not validate a universal allowance for low- or high-contract instruments:
-
-- `--tie-max-low-con-weight` sets the low-band cap;
-- `--tie-min-band-con-weight` sets the target-band floor; and
-- `--tie-max-high-con-weight` sets the high-band cap.
-
-Their initial defaults remain `.50`, `.30`, and `.15` for reproducibility.
-They are inactive while the tie tolerance is zero. The grid forms accept the
-plural options `--tie-max-low-con-weights`, `--tie-min-band-con-weights`, and
-`--tie-max-high-con-weights`. Sweep the low cap directly if the intended book
-should allocate materially less than half its risk weight below 2.5 contracts.
+Candidates whose reference position lies inside `[con_band_min, con_band_max)`
+have zero distance. Candidates outside it are compared by squared log distance
+to the nearest boundary. Score and symbol break any remaining tie. Because the
+reference does not use current partial-book weights or IDM, its classification
+cannot migrate as later instruments enter. A zero tolerance preserves
+highest-score selection. Trial audits save the score leader, selected
+candidate, score floor, eligibility, candidate reference position and distance,
+and whether the tie rule changed the winner. The grid runner accepts
+`--score-tie-tolerance-pcts 0,.25,.5,1` and
+`--tie-ref-book-counts 15,18,21`.
 
 Contract penalties are grid axes as well. Use
 `--low-con-penalty-scales 0,.06,.12,.24` and
@@ -1529,7 +1525,5 @@ Run secondary constraint tests separately, for example:
   --low-con-penalty-scales .12 \
   --high-con-penalty-scales 0 \
   --score-tie-tolerance-pcts .25,.5,1 \
-  --tie-max-low-con-weights .25,.35,.50 \
-  --tie-min-band-con-weights .30 \
-  --tie-max-high-con-weights .15
+  --tie-ref-book-counts 15,18,21
 ```

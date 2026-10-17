@@ -139,10 +139,11 @@ class GreedySelectionConfig:
     outside the continuous maximum-position interval from
     ``contract_band_min`` through ``contract_band_max``.
     ``score_tie_tolerance_percent`` optionally admits trial scores within that
-    percentage of the iteration leader, then prefers the book with the
-    smallest contract-band concentration loss. The three ``tie_*`` weight
-    parameters define the soft low-band cap, target-band floor, and high-band
-    cap used by that loss.
+    percentage of the iteration leader, then prefers the candidate whose
+    reference maximum position is closest to the configured contract band.
+    ``tie_reference_book_count`` supplies the stable equal-weight book size;
+    the reference sizing calculation uses ``max_idm`` and does not change as
+    the partial greedy book grows.
     ``include_roll_cost_in_score`` changes the greedy net-SR
     deduction from ordinary trading cost alone to ordinary trading plus the
     reference holding-roll allowance. ``max_instrument_margin_pct`` optionally
@@ -169,9 +170,7 @@ class GreedySelectionConfig:
     contract_band_min: float = 2.5
     contract_band_max: float = 5.5
     score_tie_tolerance_percent: float = 0.0
-    tie_max_low_contract_weight: float = 0.50
-    tie_min_band_contract_weight: float = 0.30
-    tie_max_high_contract_weight: float = 0.15
+    tie_reference_book_count: int = 15
     liquidity_days: int = 250
     max_pct_market_volume: float = 1.0
     max_instruments_per_cluster: int | None = None
@@ -203,13 +202,8 @@ class GreedySelectionConfig:
             raise ValueError("contract band must have positive increasing bounds")
         if not 0 <= self.score_tie_tolerance_percent <= 100:
             raise ValueError("score_tie_tolerance_percent must be in [0, 100]")
-        tie_weight_parameters = (
-            self.tie_max_low_contract_weight,
-            self.tie_min_band_contract_weight,
-            self.tie_max_high_contract_weight,
-        )
-        if any(not 0 <= value <= 1 for value in tie_weight_parameters):
-            raise ValueError("contract tie weight parameters must be in [0, 1]")
+        if self.tie_reference_book_count <= 0:
+            raise ValueError("tie_reference_book_count must be positive")
         if self.liquidity_days <= 0 or self.max_pct_market_volume <= 0:
             raise ValueError("liquidity parameters must be positive")
         if (
@@ -423,8 +417,8 @@ class PortfolioScore:
     ``base_score`` retains the AFTS cost and size-penalty result before the
     optional low/high contract penalties; ``score`` includes those penalties.
     Both are negative infinity when any member violates a hard constraint.
-    The three contract weights and ``contract_band_loss`` summarize the soft
-    book-level tie break. ``details`` retains the position, cost, penalty,
+    The three contract weights summarize the final trial allocation.
+    ``details`` retains actual and reference positions, costs, penalties,
     contract load, risk traded, and participation for every member.
     """
 
@@ -437,7 +431,6 @@ class PortfolioScore:
     low_contract_weight: float
     band_contract_weight: float
     high_contract_weight: float
-    contract_band_loss: float
     feasible: bool
     reason: str
     details: tuple[dict[str, object], ...]
@@ -527,6 +520,48 @@ class GreedyInstrumentSelector:
         ) ** 2
         return low_penalty, high_penalty
 
+    def _reference_position(
+        self,
+        candidate: SelectionCandidate,
+    ) -> tuple[float, float, float]:
+        """Return stable equal-weight sizing inputs for a tie-break candidate.
+
+        The reference assumes the configured final book count and maximum IDM.
+        It is independent of the current partial book, so a candidate's band
+        classification cannot migrate merely because later markets are added.
+        """
+        reference_weight = 1.0 / self.config.tie_reference_book_count
+        reference_weight_idm = min(
+            reference_weight * self.config.max_idm,
+            self.config.max_weight_idm,
+        )
+        reference_max_position = (
+            self.config.capital
+            * self.config.target_vol
+            * reference_weight_idm
+            * self.config.forecast_cap_ratio
+            / candidate.ann_dvol
+        )
+        return reference_weight, reference_weight_idm, reference_max_position
+
+    def _contract_band_distance(self, max_position: float) -> float:
+        """Return zero inside the target band and log distance outside it."""
+        return (
+            max(0.0, math.log(self.config.contract_band_min / max_position)) ** 2
+            + max(0.0, math.log(max_position / self.config.contract_band_max)) ** 2
+        )
+
+    @staticmethod
+    def _candidate_detail(
+        candidate: str,
+        score: PortfolioScore,
+    ) -> dict[str, object]:
+        """Return the added candidate's member diagnostics from a trial book."""
+        return next(
+            detail for detail in score.details
+            if detail["symbol"] == candidate
+        )
+
     def _choose_near_tie(
         self,
         feasible: list[tuple[str, PortfolioScore]],
@@ -538,13 +573,14 @@ class GreedyInstrumentSelector:
         float,
         frozenset[str],
     ]:
-        """Choose the score leader or the best-granularity near-tie candidate.
+        """Choose the score leader or best reference-position near tie.
 
-        The score window is measured before applying the book-level tie break,
+        The score window is measured before applying the candidate tie break,
         using the iteration's highest penalty-adjusted construction score.
         When enabled, books below the global acceptance floor remain excluded.
-        Within the surviving window, contract-band loss is minimized before
-        score and symbol provide deterministic ties.
+        Within the surviving window, the added candidate's stable reference
+        distance from the contract band is minimized before score and symbol
+        provide deterministic ties.
         """
         score_leader = max(feasible, key=lambda item: (item[1].score, item[0]))
         best_score = score_leader[1].score
@@ -568,7 +604,11 @@ class GreedyInstrumentSelector:
         winner = max(
             tie_candidates,
             key=lambda item: (
-                -item[1].contract_band_loss,
+                -float(
+                    self._candidate_detail(item[0], item[1])[
+                        "reference_contract_band_distance"
+                    ]
+                ),
                 item[1].score,
                 item[0],
             ),
@@ -674,6 +714,14 @@ class GreedyInstrumentSelector:
         for symbol in symbols:
             candidate = candidates[symbol]
             allocation = weights_for_limits[symbol]
+            (
+                reference_weight,
+                reference_weight_idm,
+                reference_max_position,
+            ) = self._reference_position(candidate)
+            reference_contract_band_distance = self._contract_band_distance(
+                reference_max_position
+            )
             # Maximum contracts at the forecast cap. A value below 0.5 cannot
             # reliably express even one signed contract after rounding.
             max_position = (
@@ -777,6 +825,12 @@ class GreedyInstrumentSelector:
                 "cluster_path": allocation_result.cluster_paths[symbol],
                 "weight": weights[symbol],
                 "limit_weight": allocation,
+                "reference_weight": reference_weight,
+                "reference_weight_idm": reference_weight_idm,
+                "reference_max_position": reference_max_position,
+                "reference_contract_band_distance": (
+                    reference_contract_band_distance
+                ),
                 "roll_cost_in_score": self.config.include_roll_cost_in_score,
                 "score_cost_sr": score_cost_sr,
                 "ann_trade_cost_sr": candidate.annual_trade_cost_sr,
@@ -868,22 +922,6 @@ class GreedyInstrumentSelector:
             weights[str(detail["symbol"])] for detail in details
             if float(detail["max_position"]) >= self.config.contract_band_max
         )
-        # These configured reference levels are a soft secondary preference
-        # and never make a trial infeasible.
-        contract_band_loss = (
-            max(
-                0.0,
-                low_contract_weight - self.config.tie_max_low_contract_weight,
-            ) ** 2
-            + max(
-                0.0,
-                self.config.tie_min_band_contract_weight - band_contract_weight,
-            ) ** 2
-            + max(
-                0.0,
-                high_contract_weight - self.config.tie_max_high_contract_weight,
-            ) ** 2
-        )
         # Keep each member's weighted net SR (the book-score numerator
         # contribution) and the shared risk denominator available for audit.
         # The book score is the sum of these marginal contributions divided
@@ -911,7 +949,6 @@ class GreedyInstrumentSelector:
             low_contract_weight=low_contract_weight,
             band_contract_weight=band_contract_weight,
             high_contract_weight=high_contract_weight,
-            contract_band_loss=contract_band_loss,
             feasible=feasible,
             reason=";".join(reasons),
             details=tuple(details),
@@ -1098,6 +1135,9 @@ class GreedyInstrumentSelector:
     ) -> dict[str, object]:
         """Flatten a portfolio score into one persisted candidate-trial row."""
         first_detail = score.details[0] if score.details else {}
+        candidate_detail = GreedyInstrumentSelector._candidate_detail(
+            candidate, score
+        )
         return {
             "iteration": iteration,
             "candidate": candidate,
@@ -1110,7 +1150,12 @@ class GreedyInstrumentSelector:
             "low_contract_weight": score.low_contract_weight,
             "band_contract_weight": score.band_contract_weight,
             "high_contract_weight": score.high_contract_weight,
-            "contract_band_loss": score.contract_band_loss,
+            "candidate_reference_max_position": candidate_detail[
+                "reference_max_position"
+            ],
+            "candidate_reference_contract_band_distance": candidate_detail[
+                "reference_contract_band_distance"
+            ],
             "feasible": score.feasible,
             "accepted": accepted,
             "reason": score.reason,
@@ -1185,7 +1230,12 @@ class GreedyInstrumentSelector:
                 "low_contract_weight": score.low_contract_weight,
                 "band_contract_weight": score.band_contract_weight,
                 "high_contract_weight": score.high_contract_weight,
-                "contract_band_loss": score.contract_band_loss,
+                "reference_weight": detail["reference_weight"],
+                "reference_weight_idm": detail["reference_weight_idm"],
+                "reference_max_position": detail["reference_max_position"],
+                "reference_contract_band_distance": detail[
+                    "reference_contract_band_distance"
+                ],
                 "roll_cost_in_score": detail["roll_cost_in_score"],
                 "score_cost_sr": detail["score_cost_sr"],
                 "ann_trade_cost_sr": detail["ann_trade_cost_sr"],

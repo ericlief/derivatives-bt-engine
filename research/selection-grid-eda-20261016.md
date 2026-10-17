@@ -474,7 +474,7 @@ failures. Its 0.1247 annual cost SR already captures monetary spread and
 commission cost, so an additional load penalty should represent operational
 capacity or unmodelled impact only.
 
-### Add a book-level concentration control
+### Failed partial-book concentration control
 
 Instrument penalties can still leave a book with many small weights below the
 band. Report these continuous-position masses for every trial:
@@ -485,30 +485,32 @@ band_con_weight = sum(weight_i for 2.5 <= P_i < 5.5)
 high_con_weight = sum(weight_i for P_i >= 5.5)
 ```
 
-Start with soft reference levels of no more than 50% low-count weight, at least
-30% band weight, and no more than 15% high-count weight. The present strict
-books do not meet the first two levels, so they should begin as penalties or
-near-tie preferences rather than hard admission gates.
+An initial implementation used soft reference levels of no more than 50%
+low-count weight, at least 30% band weight, and no more than 15% high-count
+weight to break score ties. Standalone 50%-margin runs invalidated that rule.
+At 1% score tolerance, low-band mass rose from 78.6% to 87.5%, band mass fell
+from 21.4% to 4.2%, and asset-class coverage fell from seven to six. Tightening
+the references did not repair the result.
 
-These figures are exploratory rather than calibrated limits. Treat them as
-the configurable `tie_max_low_con_weight`, `tie_min_band_con_weight`, and
-`tie_max_high_con_weight` parameters. In particular, sweep the low-band cap
-rather than assuming that a 50% allocation below 2.5 contracts is acceptable.
+The failure came from evaluating the current partial book. Top-down weights
+and IDM are recalculated after every addition, so instruments that entered in
+the target band later migrated below 2.5 contracts. The soft book-mass targets
+and `contract_band_loss` have therefore been removed from the selector.
 
-One robust selection rule is to preserve the base score calculation, retain
-candidates within 0.25%, 0.5%, or 1% of the iteration's best construction
-score before the book-level tie break, then choose the candidate with the
-lowest contract-band loss. This can substitute a better-granularity candidate,
-which the score threshold alone cannot do. The audit should save the base AFTS
-score, the penalty-adjusted construction score, and the granularity tie-break
-value.
+The replacement retains candidates within the configured score tolerance,
+then compares only their stable reference maximum positions. Each candidate
+receives weight `1 / tie_ref_book_count`; maximum IDM and the existing
+weight-times-IDM cap convert that weight to a fixed risk budget. Candidates in
+the 2.5-to-5.5 band rank first, followed by candidates closest to a boundary.
+The trial audit saves the reference position and distance alongside actual
+trial-book positions and final low, band, and high weight diagnostics.
 
 ## Next grid
 
 Use the 20% target, weight-IDM 0.20, and subclass cap two as the center. Carry
 50% and 75% book margin and score thresholds 0.99 and 1.00. First vary the low-
 contract penalty alone, then the high-contract or operational-load penalty,
-and finally the near-tie book-level concentration rule. This isolates actual
+and finally the near-tie reference-position rule. This isolates actual
 candidate substitution from mere path truncation before changing input
 eligibility.
 

@@ -71,25 +71,34 @@ instrument; the weights sum to one. That weight has three related uses in
    `high_con_weight`. These fields therefore mean shares of total portfolio
    risk weight—not contract counts, margin shares, or P&L.
 
-The book-level `contract_band_loss` is a soft preference for a configurable
-reference mix. `--tie-max-low-con-weight`, `--tie-min-band-con-weight`, and
-`--tie-max-high-con-weight` set the low-band cap, middle-band floor, and
-high-band cap. Their initial values are 50%, 30%, and 15% for reproducibility;
-they are assumptions to sweep rather than validated limits. The loss is the
-sum of squared shortfalls or excesses from those references, so zero means all
-three are satisfied. It does **not** reduce the book's SR score. It only breaks
-a near tie: when `--score-tie-tolerance-pct` is greater than zero, Phase 2
-admits candidates within that percentage of the iteration's best score and
-chooses the one with the smallest band loss. The default tolerance is zero, so
-this tie-break is off.
+The optional near-tie rule uses a stable candidate reference position rather
+than the changing weights of a partial greedy book. `--tie-ref-book-count`
+sets the estimated final book size, with a default of 15. The reference gives
+every candidate weight `1 / count`, applies the configured maximum IDM and
+`max_weight_idm` cap, and calculates:
 
-This book-level tie-break is separate from `--low-con-penalty-scale` and
+```text
+ref_max_position_i = capital * target_vol
+                     * min(max_idm / count, max_weight_idm)
+                     * forecast_cap_ratio / ann_dvol_i
+```
+
+When `--score-tie-tolerance-pct` is greater than zero, Phase 2 first admits
+candidates within that percentage of the iteration's best score. It then
+chooses the candidate whose `ref_max_position` is inside or closest to the
+configured contract band, breaking any remaining tie by score and symbol.
+The reference position does not change as the selected book grows. The
+default tolerance is zero, so this tie-break is off.
+
+This candidate tie-break is separate from `--low-con-penalty-scale` and
 `--high-con-penalty-scale`. Those optional settings subtract per-instrument
 SR penalties when an instrument's continuous maximum position lies outside
 the band; both also default to zero. The boundaries themselves can be changed
 with `--con-band-min` and `--con-band-max` (defaults 2.5 and 5.5). The main
-calculation is in `PortfolioSelector.score()`; `_choose_near_tie()` applies
-the book-level loss only after score eligibility is established.
+calculation is in `GreedyInstrumentSelector.score()`; `_choose_near_tie()` applies
+the candidate reference-position comparison only after score eligibility is
+established. Actual trial-book positions and low, band, and high risk-weight
+masses remain in the reports as final-allocation diagnostics.
 
 ## Installation
 

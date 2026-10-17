@@ -271,25 +271,14 @@ def parse_args(argv=None, *, complete_default: bool = False):
         ),
     )
     parser.add_argument(
-        "--tie-max-low-con-weight",
-        dest="tie_max_low_contract_weight",
-        type=float,
-        default=0.50,
-        help="Soft low-position risk-weight cap used by the tie rule.",
-    )
-    parser.add_argument(
-        "--tie-min-band-con-weight",
-        dest="tie_min_band_contract_weight",
-        type=float,
-        default=0.30,
-        help="Soft target-band risk-weight floor used by the tie rule.",
-    )
-    parser.add_argument(
-        "--tie-max-high-con-weight",
-        dest="tie_max_high_contract_weight",
-        type=float,
-        default=0.15,
-        help="Soft high-position risk-weight cap used by the tie rule.",
+        "--tie-ref-book-count",
+        dest="tie_reference_book_count",
+        type=int,
+        default=15,
+        help=(
+            "Estimated final book count used for stable equal-weight candidate "
+            "position comparisons inside the near-tie window (default: 15)."
+        ),
     )
     parser.add_argument(
         "--include-roll-cost-in-score",
@@ -413,17 +402,13 @@ def _selection_scenario_id(
         args.low_contract_penalty_scale
         or args.high_contract_penalty_scale
         or args.score_tie_tolerance_percent
-        or args.tie_max_low_contract_weight != 0.50
-        or args.tie_min_band_contract_weight != 0.30
-        or args.tie_max_high_contract_weight != 0.15
+        or args.tie_reference_book_count != 15
     ):
         tokens.extend((
             f"lp{_number_token(args.low_contract_penalty_scale)}",
             f"hp{_number_token(args.high_contract_penalty_scale)}",
             f"tie{_number_token(args.score_tie_tolerance_percent)}",
-            f"tlw{_number_token(args.tie_max_low_contract_weight)}",
-            f"tbw{_number_token(args.tie_min_band_contract_weight)}",
-            f"thw{_number_token(args.tie_max_high_contract_weight)}",
+            f"refn{args.tie_reference_book_count}",
         ))
     tokens.extend((
         f"cl{cluster}",
@@ -810,9 +795,7 @@ def _run_complete_selection(
             contract_band_min=args.contract_band_min,
             contract_band_max=args.contract_band_max,
             score_tie_tolerance_percent=args.score_tie_tolerance_percent,
-            tie_max_low_contract_weight=args.tie_max_low_contract_weight,
-            tie_min_band_contract_weight=args.tie_min_band_contract_weight,
-            tie_max_high_contract_weight=args.tie_max_high_contract_weight,
+            tie_reference_book_count=args.tie_reference_book_count,
             max_weight_idm=args.max_weight_idm,
             max_pct_market_volume=float(run_config["max_pct_mkt_volume"]),
             liquidity_days=int(run_config["liq_days"]),
@@ -827,14 +810,16 @@ def _run_complete_selection(
     for trial in selection.trials:
         logger.debug(
             "selection_trial iteration=%s candidate=%s book=%s score=%s "
-            "base_score=%s contract_band_loss=%s tie_eligible=%s "
+            "base_score=%s candidate_ref_max_position=%s "
+            "candidate_ref_con_band_distance=%s tie_eligible=%s "
             "tie_break_applied=%s idm=%s "
             "portfolio_cont_margin_at_max_usd=%s "
             "portfolio_margin_at_max_usd=%s instr_margin_limit_usd=%s "
             "book_margin_limit_usd=%s book_margin_remaining_usd=%s "
             "roll_cost_in_score=%s feasible=%s accepted=%s reason=%s",
             trial["iteration"], trial["candidate"], trial["book"], trial["score"],
-            trial["base_score"], trial["contract_band_loss"],
+            trial["base_score"], trial["candidate_reference_max_position"],
+            trial["candidate_reference_contract_band_distance"],
             trial["tie_eligible"],
             trial["tie_break_applied"],
             trial["idm"], trial.get("portfolio_cont_margin_at_max_usd"),
@@ -873,9 +858,7 @@ def _run_complete_selection(
             "contract_band_min": args.contract_band_min,
             "contract_band_max": args.contract_band_max,
             "score_tie_tolerance_percent": args.score_tie_tolerance_percent,
-            "tie_max_low_contract_weight": args.tie_max_low_contract_weight,
-            "tie_min_band_contract_weight": args.tie_min_band_contract_weight,
-            "tie_max_high_contract_weight": args.tie_max_high_contract_weight,
+            "tie_reference_book_count": args.tie_reference_book_count,
             "roll_cost_in_score": args.include_roll_cost_in_score,
             "buffer_size": args.buffer_size,
             "buffer_trade_to_edge": args.buffer_trade_to_edge,
@@ -888,7 +871,6 @@ def _run_complete_selection(
             "low_contract_weight": selection.final_score.low_contract_weight,
             "band_contract_weight": selection.final_score.band_contract_weight,
             "high_contract_weight": selection.final_score.high_contract_weight,
-            "contract_band_loss": selection.final_score.contract_band_loss,
             "ann_dvol": candidate.ann_dvol,
             "trade_sr": candidate.trade_sr,
             "roll_sr": candidate.roll_sr,
@@ -1031,14 +1013,8 @@ def _run_complete_selection(
                 pl.lit(args.score_tie_tolerance_percent).alias(
                     "score_tie_tolerance_percent"
                 ),
-                pl.lit(args.tie_max_low_contract_weight).alias(
-                    "tie_max_low_contract_weight"
-                ),
-                pl.lit(args.tie_min_band_contract_weight).alias(
-                    "tie_min_band_contract_weight"
-                ),
-                pl.lit(args.tie_max_high_contract_weight).alias(
-                    "tie_max_high_contract_weight"
+                pl.lit(args.tie_reference_book_count).alias(
+                    "tie_reference_book_count"
                 ),
             )
         )
@@ -1065,14 +1041,8 @@ def _run_complete_selection(
                 pl.lit(args.score_tie_tolerance_percent).alias(
                     "score_tie_tolerance_percent"
                 ),
-                pl.lit(args.tie_max_low_contract_weight).alias(
-                    "tie_max_low_contract_weight"
-                ),
-                pl.lit(args.tie_min_band_contract_weight).alias(
-                    "tie_min_band_contract_weight"
-                ),
-                pl.lit(args.tie_max_high_contract_weight).alias(
-                    "tie_max_high_contract_weight"
+                pl.lit(args.tie_reference_book_count).alias(
+                    "tie_reference_book_count"
                 ),
             )
         )
@@ -1103,14 +1073,8 @@ def _run_complete_selection(
             pl.lit(args.score_tie_tolerance_percent).alias(
                 "score_tie_tolerance_percent"
             ),
-            pl.lit(args.tie_max_low_contract_weight).alias(
-                "tie_max_low_contract_weight"
-            ),
-            pl.lit(args.tie_min_band_contract_weight).alias(
-                "tie_min_band_contract_weight"
-            ),
-            pl.lit(args.tie_max_high_contract_weight).alias(
-                "tie_max_high_contract_weight"
+            pl.lit(args.tie_reference_book_count).alias(
+                "tie_reference_book_count"
             ),
         )
         .select(
@@ -1128,21 +1092,22 @@ def _run_complete_selection(
             "cluster_weight",
             "weight",
             "limit_weight",
+            "reference_weight",
+            "reference_weight_idm",
+            "reference_max_position",
+            "reference_contract_band_distance",
             "idm",
             "score",
             "base_score",
             "low_contract_weight",
             "band_contract_weight",
             "high_contract_weight",
-            "contract_band_loss",
             "low_contract_penalty_scale",
             "high_contract_penalty_scale",
             "contract_band_min",
             "contract_band_max",
             "score_tie_tolerance_percent",
-            "tie_max_low_contract_weight",
-            "tie_min_band_contract_weight",
-            "tie_max_high_contract_weight",
+            "tie_reference_book_count",
             "iter_score_best",
             "iter_score_best_score",
             "tie_score_floor",
@@ -1238,13 +1203,8 @@ def run(
         raise ValueError("contract band must have positive increasing bounds")
     if not 0 <= args.score_tie_tolerance_percent <= 100:
         raise ValueError("score tie tolerance must be in [0, 100]")
-    tie_weight_parameters = (
-        args.tie_max_low_contract_weight,
-        args.tie_min_band_contract_weight,
-        args.tie_max_high_contract_weight,
-    )
-    if any(not 0 <= value <= 1 for value in tie_weight_parameters):
-        raise ValueError("contract tie weight parameters must be in [0, 1]")
+    if args.tie_reference_book_count <= 0:
+        raise ValueError("tie reference book count must be positive")
     setup_logger()
     if args.output is not None and args.output.suffix.lower() != ".parquet":
         raise ValueError("--output must use a .parquet extension")

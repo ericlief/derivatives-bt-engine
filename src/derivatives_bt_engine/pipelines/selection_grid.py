@@ -55,9 +55,7 @@ class SelectionScenario:
     low_contract_penalty_scale: float = 0.0
     high_contract_penalty_scale: float = 0.0
     score_tie_tolerance_percent: float = 0.0
-    tie_max_low_contract_weight: float = 0.50
-    tie_min_band_contract_weight: float = 0.30
-    tie_max_high_contract_weight: float = 0.15
+    tie_reference_book_count: int = 15
 
     @property
     def scenario_id(self) -> str:
@@ -78,17 +76,13 @@ class SelectionScenario:
             self.low_contract_penalty_scale
             or self.high_contract_penalty_scale
             or self.score_tie_tolerance_percent
-            or self.tie_max_low_contract_weight != 0.50
-            or self.tie_min_band_contract_weight != 0.30
-            or self.tie_max_high_contract_weight != 0.15
+            or self.tie_reference_book_count != 15
         ):
             tokens.extend((
                 f"lp{_number_token(self.low_contract_penalty_scale)}",
                 f"hp{_number_token(self.high_contract_penalty_scale)}",
                 f"tie{_number_token(self.score_tie_tolerance_percent)}",
-                f"tlw{_number_token(self.tie_max_low_contract_weight)}",
-                f"tbw{_number_token(self.tie_min_band_contract_weight)}",
-                f"thw{_number_token(self.tie_max_high_contract_weight)}",
+                f"refn{self.tie_reference_book_count}",
             ))
         tokens.extend((
             f"cl{cluster}",
@@ -135,11 +129,18 @@ def _percent_list(value: str) -> tuple[float, ...]:
     return values
 
 
-def _unit_interval_list(value: str) -> tuple[float, ...]:
-    """Parse unique decimal weights from zero through one."""
-    values = _non_negative_float_list(value)
-    if any(item > 1 for item in values):
-        raise argparse.ArgumentTypeError("weight values must be in [0, 1]")
+def _positive_int_list(value: str) -> tuple[int, ...]:
+    """Parse a comma-separated list of unique positive integers."""
+    try:
+        values = tuple(
+            dict.fromkeys(int(item.strip()) for item in value.split(","))
+        )
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "values must be comma-separated positive integers"
+        ) from exc
+    if not values or any(item <= 0 for item in values):
+        raise argparse.ArgumentTypeError("values must be positive integers")
     return values
 
 
@@ -290,25 +291,14 @@ def parse_args(argv=None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--tie-max-low-con-weights",
-        dest="tie_max_low_contract_weights",
-        type=_unit_interval_list,
-        default=(0.50,),
-        help="Comma-separated soft low-position weight caps (default: .50).",
-    )
-    parser.add_argument(
-        "--tie-min-band-con-weights",
-        dest="tie_min_band_contract_weights",
-        type=_unit_interval_list,
-        default=(0.30,),
-        help="Comma-separated soft target-band weight floors (default: .30).",
-    )
-    parser.add_argument(
-        "--tie-max-high-con-weights",
-        dest="tie_max_high_contract_weights",
-        type=_unit_interval_list,
-        default=(0.15,),
-        help="Comma-separated soft high-position weight caps (default: .15).",
+        "--tie-ref-book-counts",
+        dest="tie_reference_book_counts",
+        type=_positive_int_list,
+        default=(15,),
+        help=(
+            "Comma-separated estimated final book counts for stable equal-"
+            "weight candidate position comparisons (default: 15)."
+        ),
     )
     parser.add_argument(
         "--max-instr-per-clusters",
@@ -364,9 +354,7 @@ def build_scenarios(args: argparse.Namespace) -> list[SelectionScenario]:
             low_contract_penalty_scale=low_contract_penalty_scale,
             high_contract_penalty_scale=high_contract_penalty_scale,
             score_tie_tolerance_percent=score_tie_tolerance_percent,
-            tie_max_low_contract_weight=tie_max_low_contract_weight,
-            tie_min_band_contract_weight=tie_min_band_contract_weight,
-            tie_max_high_contract_weight=tie_max_high_contract_weight,
+            tie_reference_book_count=tie_reference_book_count,
             maximum_instruments_per_cluster=cluster_limit,
             include_roll_cost_in_score=include_roll_cost,
             weight_policy=args.weight_policy,
@@ -380,9 +368,7 @@ def build_scenarios(args: argparse.Namespace) -> list[SelectionScenario]:
             low_contract_penalty_scale,
             high_contract_penalty_scale,
             score_tie_tolerance_percent,
-            tie_max_low_contract_weight,
-            tie_min_band_contract_weight,
-            tie_max_high_contract_weight,
+            tie_reference_book_count,
             cluster_limit,
             include_roll_cost,
         ) in product(
@@ -394,9 +380,7 @@ def build_scenarios(args: argparse.Namespace) -> list[SelectionScenario]:
             args.low_contract_penalty_scales,
             args.high_contract_penalty_scales,
             args.score_tie_tolerance_percents,
-            args.tie_max_low_contract_weights,
-            args.tie_min_band_contract_weights,
-            args.tie_max_high_contract_weights,
+            args.tie_reference_book_counts,
             args.max_instr_per_clusters,
             roll_modes,
         )
@@ -440,12 +424,8 @@ def _selection_command(
         str(scenario.high_contract_penalty_scale),
         "--score-tie-tolerance-pct",
         str(scenario.score_tie_tolerance_percent),
-        "--tie-max-low-con-weight",
-        str(scenario.tie_max_low_contract_weight),
-        "--tie-min-band-con-weight",
-        str(scenario.tie_min_band_contract_weight),
-        "--tie-max-high-con-weight",
-        str(scenario.tie_max_high_contract_weight),
+        "--tie-ref-book-count",
+        str(scenario.tie_reference_book_count),
         "--weight-policy",
         scenario.weight_policy,
     ]
@@ -492,9 +472,7 @@ def _summary_row(
         "low_contract_penalty_scale": scenario.low_contract_penalty_scale,
         "high_contract_penalty_scale": scenario.high_contract_penalty_scale,
         "score_tie_tolerance_percent": scenario.score_tie_tolerance_percent,
-        "tie_max_low_contract_weight": scenario.tie_max_low_contract_weight,
-        "tie_min_band_contract_weight": scenario.tie_min_band_contract_weight,
-        "tie_max_high_contract_weight": scenario.tie_max_high_contract_weight,
+        "tie_reference_book_count": scenario.tie_reference_book_count,
         "maximum_instruments_per_cluster": (
             scenario.maximum_instruments_per_cluster
         ),
@@ -512,7 +490,6 @@ def _summary_row(
         "low_contract_weight": None,
         "band_contract_weight": None,
         "high_contract_weight": None,
-        "contract_band_loss": None,
         "maximum_instrument_margin_usd": None,
         "book_margin_at_maximum_usd": None,
         "error": error,
@@ -553,7 +530,6 @@ def _summary_row(
         "low_contract_weight": _column_max(book, "low_con_weight"),
         "band_contract_weight": _column_max(book, "band_con_weight"),
         "high_contract_weight": _column_max(book, "high_con_weight"),
-        "contract_band_loss": _column_max(book, "con_band_loss"),
         "maximum_instrument_margin_usd": _column_max(
             book, "margin_at_max_usd"
         ),
@@ -622,9 +598,7 @@ def _attach_baseline_overlap(summary: pl.DataFrame) -> pl.DataFrame:
             + pl.col("low_contract_penalty_scale").abs()
             + pl.col("high_contract_penalty_scale").abs()
             + pl.col("score_tie_tolerance_percent").abs() / 100.0
-            + (pl.col("tie_max_low_contract_weight") - 0.50).abs()
-            + (pl.col("tie_min_band_contract_weight") - 0.30).abs()
-            + (pl.col("tie_max_high_contract_weight") - 0.15).abs()
+            + (pl.col("tie_reference_book_count") - 15).abs() / 15.0
             + pl.when(pl.col("maximum_instruments_per_cluster").is_null())
               .then(0.0).otherwise(1.0)
             + pl.when(pl.col("include_roll_cost_in_score"))
