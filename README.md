@@ -39,6 +39,56 @@ by its concrete responsibility; strategy entry points may orchestrate the
 reusable data, calculation, and backtest layers but should not duplicate their
 financial logic.
 
+## Futures selection: contract-size bands
+
+Phase 2 estimates each selected instrument's **continuous maximum position**
+in contracts: the position implied at the configured forecast cap, before
+rounding to whole contracts. `SelectionConfig` defaults this position band to
+`[2.5, 5.5)`, which corresponds to about three through five contracts when
+rounded half-up. A position below 2.5 is “low”; 2.5 through less than 5.5 is
+“band”; 5.5 or more is “high.” These are capacity/granularity categories, not
+the number of contracts the portfolio holds every day.
+
+For each trial book, the configured weight policy (by default,
+`topdown_classif`) assigns a normalized structural risk weight `w_i` to each
+instrument; the weights sum to one. That weight has three related uses in
+`calculations/instrument_selection.py`:
+
+1. It weights each instrument's net Sharpe in the book-score numerator and
+   combines the trial book's correlations in the score denominator.
+2. It contributes to the maximum-position estimate, together with capital,
+   target volatility, the trial's IDM, the forecast-cap ratio, and the
+   instrument's annual dollar volatility. Position sizing applies the
+   `max_weight_idm` cap to `w_i * IDM` for this estimate:
+
+   ```text
+   max_position_i = capital * target_vol * min(w_i, max_weight_idm / IDM)
+                    * IDM * forecast_cap_ratio / ann_dvol_i
+   ```
+
+3. The **uncapped structural weights** of instruments in each position band
+   are summed into `low_con_weight`, `band_con_weight`, and
+   `high_con_weight`. These fields therefore mean shares of total portfolio
+   risk weight—not contract counts, margin shares, or P&L.
+
+The book-level `contract_band_loss` is a soft preference for a reference mix:
+no more than 50% of weight in the low band, at least 30% in the middle band,
+and no more than 15% in the high band. It is the sum of squared shortfalls or
+excesses from those limits, so zero means all three are satisfied. The loss
+does **not** reduce the book's SR score. It only breaks a near tie: when
+`--score-tie-tolerance-pct` is greater than zero, Phase 2 admits candidates
+within that percentage of the iteration's best score and chooses the one with
+the smallest band loss. The default tolerance is zero, so this tie-break is
+off.
+
+This book-level tie-break is separate from `--low-con-penalty-scale` and
+`--high-con-penalty-scale`. Those optional settings subtract per-instrument
+SR penalties when an instrument's continuous maximum position lies outside
+the band; both also default to zero. The boundaries themselves can be changed
+with `--con-band-min` and `--con-band-max` (defaults 2.5 and 5.5). The main
+calculation is in `PortfolioSelector.score()`; `_choose_near_tie()` applies
+the book-level loss only after score eligibility is established.
+
 ## Installation
 
 1. Clone the repository
