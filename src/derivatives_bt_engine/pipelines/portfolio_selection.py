@@ -142,10 +142,19 @@ def parse_args(argv=None, *, complete_default: bool = False):
         default=Path("."),
         help="Directory (and its results/ child) searched for the latest report.",
     )
-    parser.add_argument(
+    output_location = parser.add_mutually_exclusive_group()
+    output_location.add_argument(
         "--output",
         type=Path,
         help="Exact candidate output path; defaults beside the input cache.",
+    )
+    output_location.add_argument(
+        "--output-dir",
+        type=Path,
+        help=(
+            "Directory for the timestamped candidate report and all complete-"
+            "selection reports; defaults beside the input cache."
+        ),
     )
     parser.add_argument(
         "--initial-capital-usd",
@@ -361,10 +370,10 @@ def parse_args(argv=None, *, complete_default: bool = False):
     return parser.parse_args(argv)
 
 
-def _default_output_path(source: Path, generated_at: datetime) -> Path:
-    """Return the timestamped candidate path beside its rule-cache source."""
+def _default_output_path(output_dir: Path, generated_at: datetime) -> Path:
+    """Return the timestamped candidate path in ``output_dir``."""
     stamp = generated_at.astimezone(REPORT_TIMEZONE).strftime("%Y%m%d_%H%M%S")
-    return source.parent / f"multi_speed_ewmac_selection_candidates_{stamp}.parquet"
+    return output_dir / f"multi_speed_ewmac_selection_candidates_{stamp}.parquet"
 
 
 def _label_forecast_output_frame(
@@ -441,7 +450,7 @@ def _subsystem_correlation(
 def _run_complete_selection(
     selected: pl.DataFrame,
     *,
-    source: Path,
+    output_dir: Path,
     generated_at: datetime,
     run_config: dict[str, object],
     args: argparse.Namespace,
@@ -909,7 +918,6 @@ def _run_complete_selection(
         )
     cash_pnl_long = pl.concat(cash_output_frames, how="diagonal_relaxed")
     stamp = generated_at.astimezone(REPORT_TIMEZONE).strftime("%Y%m%d_%H%M%S")
-    output_dir = source.parent
     audit_path = output_dir / f"multi_speed_ewmac_selection_forecast_audit_{stamp}.parquet"
     forecasts_path = output_dir / f"multi_speed_ewmac_selection_forecasts_{stamp}.parquet"
     trials_path = output_dir / f"multi_speed_ewmac_selection_trials_{stamp}.parquet"
@@ -1239,10 +1247,15 @@ def run(
             )
 
     generated_at = datetime.now(REPORT_TIMEZONE)
+    report_output_dir = (
+        args.output_dir.expanduser().resolve()
+        if args.output_dir is not None
+        else source.parent
+    )
     output = (
         args.output.expanduser().resolve()
         if args.output is not None
-        else _default_output_path(source, generated_at)
+        else _default_output_path(report_output_dir, generated_at)
     )
     output.parent.mkdir(parents=True, exist_ok=True)
     # Candidate filtering is a public report boundary. Keep ``selected`` at calculation
@@ -1275,7 +1288,7 @@ def run(
     if args.complete:
         return _run_complete_selection(
             selected,
-            source=source,
+            output_dir=report_output_dir,
             generated_at=generated_at,
             run_config=config,
             args=args,
