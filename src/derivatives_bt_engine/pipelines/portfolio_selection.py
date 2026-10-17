@@ -152,8 +152,9 @@ def parse_args(argv=None, *, complete_default: bool = False):
         "--output-dir",
         type=Path,
         help=(
-            "Directory for the timestamped candidate report and all complete-"
-            "selection reports; defaults beside the input cache."
+            "Parent directory for selection_run_<timestamp>/<parameters>; all "
+            "candidate and complete-selection reports are written there. "
+            "Without this option, reports default beside the input cache."
         ),
     )
     parser.add_argument(
@@ -374,6 +375,78 @@ def _default_output_path(output_dir: Path, generated_at: datetime) -> Path:
     """Return the timestamped candidate path in ``output_dir``."""
     stamp = generated_at.astimezone(REPORT_TIMEZONE).strftime("%Y%m%d_%H%M%S")
     return output_dir / f"multi_speed_ewmac_selection_candidates_{stamp}.parquet"
+
+
+def _number_token(value: float) -> str:
+    """Return a compact decimal token without filesystem punctuation."""
+    rendered = f"{value:.6f}".rstrip("0").rstrip(".")
+    return rendered.replace("-", "m").replace(".", "p")
+
+
+def _optional_number_token(value: float | None) -> str:
+    """Return a numeric path token, using ``none`` for an inactive limit."""
+    return "none" if value is None else _number_token(value)
+
+
+def _selection_scenario_id(
+    *,
+    run_config: dict[str, object],
+    args: argparse.Namespace,
+) -> str:
+    """Return the grid-style parameter identifier for one selection run."""
+    effective_book_margin_pct = args.max_book_margin_pct
+    if effective_book_margin_pct is None and args.max_instr_margin_pct is not None:
+        effective_book_margin_pct = 100.0
+    cluster = (
+        "none"
+        if args.max_instr_per_cluster is None
+        else str(args.max_instr_per_cluster)
+    )
+    tokens = [
+        f"tv{_number_token(float(run_config['target_vol']))}",
+        f"im{_optional_number_token(args.max_instr_margin_pct)}",
+        f"bm{_optional_number_token(effective_book_margin_pct)}",
+        f"wi{_number_token(args.max_weight_idm)}",
+        f"st{_number_token(args.score_threshold)}",
+    ]
+    if (
+        args.low_contract_penalty_scale
+        or args.high_contract_penalty_scale
+        or args.score_tie_tolerance_percent
+        or args.tie_max_low_contract_weight != 0.50
+        or args.tie_min_band_contract_weight != 0.30
+        or args.tie_max_high_contract_weight != 0.15
+    ):
+        tokens.extend((
+            f"lp{_number_token(args.low_contract_penalty_scale)}",
+            f"hp{_number_token(args.high_contract_penalty_scale)}",
+            f"tie{_number_token(args.score_tie_tolerance_percent)}",
+            f"tlw{_number_token(args.tie_max_low_contract_weight)}",
+            f"tbw{_number_token(args.tie_min_band_contract_weight)}",
+            f"thw{_number_token(args.tie_max_high_contract_weight)}",
+        ))
+    tokens.extend((
+        f"cl{cluster}",
+        f"roll{int(args.include_roll_cost_in_score)}",
+        args.weight_policy,
+    ))
+    return "_".join(tokens)
+
+
+def _selection_run_output_dir(
+    output_root: Path,
+    *,
+    generated_at: datetime,
+    run_config: dict[str, object],
+    args: argparse.Namespace,
+) -> Path:
+    """Return the timestamped run and parameter directory below a root."""
+    stamp = generated_at.astimezone(REPORT_TIMEZONE).strftime("%Y%m%d_%H%M%S")
+    return (
+        output_root
+        / f"selection_run_{stamp}"
+        / _selection_scenario_id(run_config=run_config, args=args)
+    )
 
 
 def _label_forecast_output_frame(
@@ -1248,7 +1321,12 @@ def run(
 
     generated_at = datetime.now(REPORT_TIMEZONE)
     report_output_dir = (
-        args.output_dir.expanduser().resolve()
+        _selection_run_output_dir(
+            args.output_dir.expanduser().resolve(),
+            generated_at=generated_at,
+            run_config=config,
+            args=args,
+        )
         if args.output_dir is not None
         else source.parent
     )

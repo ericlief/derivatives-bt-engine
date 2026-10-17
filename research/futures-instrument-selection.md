@@ -872,11 +872,15 @@ futures-build-selection \
 
 `futures-build-selection` discovers the newest rule cache before legacy
 selection-screen files. `--report-dir` controls input discovery, while the
-optional `--output-dir` places the candidate report and every complete-selection
-report in a separate directory. Without `--output-dir`, reports remain beside
-the input cache. The command first derives `max_ann_dvol`, daily risk traded,
-market-risk volume, participation percentage, and all hard gate flags. It saves
-the accepted rows as
+optional `--output-dir` is a parent output root. Each invocation creates a
+`selection_run_<timestamp>/<parameters>` directory below it and places the
+candidate report and every complete-selection report there. The parameter
+directory uses the same compact tokens as the grid, such as
+`tv0p2_im20_bm50_wi0p2_st0p9_cl2_roll1_topdown_classif`; active contract
+penalties or tie rules append their parameter tokens. Without `--output-dir`,
+reports remain beside the input cache. The command first derives `max_ann_dvol`,
+daily risk traded, market-risk volume, participation percentage, and all hard
+gate flags. It saves the accepted rows as
 `multi_speed_ewmac_selection_candidates_<timestamp>.parquet`, then runs forecast
 combination and greedy selection and saves the final book plus all normal audit
 artifacts. Use `--candidates-only` to stop after the filtered candidate file.
