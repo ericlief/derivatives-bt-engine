@@ -641,7 +641,6 @@ def _run_complete_selection(
         )
         reference_frame = apply_subsystem_reference_cost(
             reference_frame,
-            capital=float(run_config["init_cap_usd"]),
             ann_cost_sr=annual_cost.ann_cost_sr,
         ).with_columns(
             pl.lit(annual_cost.ann_trade_cost_sr).alias("ann_trade_cost_sr"),

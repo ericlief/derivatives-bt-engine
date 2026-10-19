@@ -611,9 +611,9 @@ flowchart TD
 
         Cost["5. Calibrate combined-subsystem cost<br/>ann_trade_cost_sr = trade_sr × subsystem turnover<br/>ann_roll_cost_sr = roll_sr × ref_ann_rolls"]
 
-        GrossPnL["6. Calculate reference gross return<br/>held_ref_pos = prior ref_targ_pos<br/>cash change / reference capital"]
+        GrossPnL["6. Calculate reference gross return<br/>held_ref_pos = prior ref_targ_pos<br/>cash change / implied allocation capital"]
 
-        CostPnL["7. Accrue reference cost return<br/>annual SR cost × fixed reference risk fraction<br/>× elapsed year fraction"]
+        CostPnL["7. Accrue reference cost return<br/>annual SR cost × subsystem target vol<br/>× elapsed year fraction"]
 
         NetPnL["8. Calculate reference net return<br/>ref_net_ret = ref_gross_ret + ref_cost_ret"]
 
@@ -688,11 +688,12 @@ The same ownership in terminal-readable form is:
 6. Reuse market screen `trade_sr`, `roll_sr`, and `ref_ann_rolls` to calculate the
    combined subsystem's annual trading cost and holding-roll cost.
 7. Lag the continuous reference target, calculate its cash change through the
-   multiplier and dated FX, and divide by reference capital to obtain the
-   candidate's gross return contribution.
-8. Convert the annual SR-cost estimate into a pro-rata return using the fixed
-   reference risk fraction and elapsed year fraction; add it to gross return
-   to obtain the net subsystem-reference return.
+   multiplier and dated FX, and divide by the allocation capital implied by
+   the reference risk budget to obtain the candidate's normalized gross
+   subsystem return.
+8. Convert the annual SR-cost estimate into a pro-rata subsystem return using
+   the same allocation capital and elapsed year fraction; add it to gross
+   return to obtain the net subsystem-reference return.
 9. Audit the wide daily frame and write the compact instrument summary.
 10. Align valid net subsystem-reference returns, estimate correlations, and
     run the greedy portfolio search.
@@ -727,9 +728,10 @@ ann_cost_sr       = ann_trade_cost_sr + ann_roll_cost_sr
 There are then two deliberate consumers. The published AFTS selection score
 uses `ann_trade_cost_sr` only. The subsystem-reference curve uses the full
 `ann_cost_sr`, including holding rolls, and spreads it across the return index
-as a loss proportional to elapsed year fraction and the fixed equal-weight
-reference risk fraction. Multiplier and historical FX convert point movement
-to cash before division by reference capital. Persist
+as a loss proportional to elapsed year fraction and the annual target risk of
+the subsystem. Multiplier and historical FX convert point movement to cash
+before division by `reference_return_capital_usd`, the allocation base implied
+by the fixed reference risk budget. Persist
 `reference_gross_return`, `reference_cost_return`, and
 `reference_net_return` separately; the default correlation panel uses
 `reference_net_return`.
@@ -1441,17 +1443,21 @@ candidate and every date:
 ```text
 ref_ann_risk_usd   = capital * target_vol * ref_weight_idm
 ref_daily_risk_usd = ref_ann_risk_usd / sqrt(ann_days)
+ref_ret_cap_usd    = ref_ann_risk_usd / target_vol
+                   = capital * ref_weight_idm
 daily_dvol_i,t     = point_vol_i,t * multiplier_i * fx_i,t
 ref_avg_pos_i,t    = ref_daily_risk_usd / daily_dvol_i,t
 ref_targ_pos_i,t   = ref_avg_pos_i,t * combined_forecast_i,t
                      / target_abs_forecast
 ref_gross_ret_i,t  = held_ref_pos_i,t * point_change_i,t
-                     * multiplier_i * fx_i,t / capital
+                     * multiplier_i * fx_i,t / ref_ret_cap_usd
 ```
 
-These positions remain continuous. Whole-contract rounding, buffering, and
-per-contract execution costs enter only after selection in the portfolio cash
-curve.
+The account capital and reference allocation determine the continuous contract
+position. Dividing by the implied allocation capital removes that allocation
+scale from the return, matching a normalized Carver-style subsystem return.
+Whole-contract rounding, buffering, and per-contract execution costs enter only
+after selection in the portfolio cash curve.
 
 Candidates whose reference position lies inside `[con_band_min, con_band_max)`
 have zero distance. Candidates outside it are compared by squared log distance

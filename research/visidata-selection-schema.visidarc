@@ -156,7 +156,8 @@ _vd_set_type(
     cost_pnl_native cost_pnl_usd net_pnl_usd risk_budget_usd
     reference_weight reference_idm reference_weight_idm
     reference_annual_risk_budget_usd reference_daily_risk_budget_usd
-    ref_ann_risk_usd ref_daily_risk_usd daily_dollar_vol_per_contract
+    reference_return_capital_usd ref_ann_risk_usd ref_daily_risk_usd
+    ref_ret_cap_usd daily_dollar_vol_per_contract
     reference_average_position reference_target_position
     held_reference_position ref_avg_pos ref_targ_pos held_ref_pos
     reference_gross_return reference_annual_cost_return

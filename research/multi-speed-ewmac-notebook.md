@@ -143,9 +143,10 @@ reference.head(600)
 
 Set ``multiplier`` and ``fx_to_usd`` to the instrument's actual contract and
 currency values. The returned ``reference_net_return`` is a continuous,
-capital-normalized reference series for cross-instrument comparison, and
-``reference_turnover`` is measured from its target and smoothed average
-positions. Use ``build_executable_cash_pnl_curve`` after final portfolio
+allocation-capital-normalized subsystem series for cross-instrument comparison,
+and ``reference_turnover`` is measured from its target and smoothed average
+positions. ``reference_return_capital_usd`` records the denominator implied by
+the risk budget. Use ``build_executable_cash_pnl_curve`` after final portfolio
 weights are known.
 
 ## Plot the combined forecast, positions, and P&L
@@ -206,11 +207,12 @@ view.cash_pnl_curves()
 
 `view.reference` assigns the instrument `1 / reference_book_count`, caps the
 weight-times-IDM product, sizes continuous positions from daily dollar
-volatility, and divides the resulting P&L by reference capital. It is the
-candidate return used for subsystem correlations. `view.cash` uses final
-portfolio weight and IDM, buffering, whole contracts, and per-contract costs,
-so it is the executable account-scale diagnostic. Passing `multiplier=1` for
-ES is appropriate only for a unit test.
+volatility, and divides the resulting P&L by the allocation capital implied by
+the reference risk budget. It is the normalized candidate subsystem return
+used for correlations. `view.cash` uses final portfolio weight and IDM,
+buffering, whole contracts, and per-contract costs, so it is the executable
+account-scale diagnostic. Passing `multiplier=1` for ES is appropriate only
+for a unit test.
 
 ## Combined portfolio-selection forecasts
 

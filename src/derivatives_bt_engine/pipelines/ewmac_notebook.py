@@ -71,8 +71,8 @@ class SubsystemReferenceSettings:
     auditable continuous position. ``reference_book_count`` assigns every
     candidate the same structural weight, while ``reference_idm`` and
     ``max_weight_idm`` apply the same fixed sizing convention as the selection
-    tie rule. The resulting P&L is divided by ``capital`` and exposed as a
-    reference return.
+    tie rule. The resulting P&L is divided by the allocation capital implied by
+    that risk budget and exposed as a normalized subsystem-reference return.
     """
 
     capital: float

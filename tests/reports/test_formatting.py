@@ -84,6 +84,7 @@ def test_public_report_renames_subsystem_reference_columns():
         "reference_book_count": [15],
         "reference_idm": [2.5],
         "reference_annual_risk_budget_usd": [2_500.126],
+        "reference_return_capital_usd": [12_500.126],
         "reference_average_position": [3.45678],
         "reference_target_position": [4.56789],
         "held_reference_position": [4.0],
@@ -97,14 +98,24 @@ def test_public_report_renames_subsystem_reference_columns():
         "ref_book_n",
         "ref_idm",
         "ref_ann_risk_usd",
+        "ref_ret_cap_usd",
         "ref_avg_pos",
         "ref_targ_pos",
         "held_ref_pos",
         "ref_net_ret",
         "ref_ret_valid",
     ]
-    assert public.row(0)[:7] == pytest.approx(
-        (15, 2.5, 2_500.13, 3.4568, 4.5679, 4.0, 0.001234)
+    assert public.row(0)[:8] == pytest.approx(
+        (
+            15,
+            2.5,
+            2_500.13,
+            12_500.13,
+            3.4568,
+            4.5679,
+            4.0,
+            0.001234,
+        )
     )
     assert public["ref_ret_valid"][0]
 

@@ -50,6 +50,9 @@ def test_subsystem_reference_return_uses_equal_weight_risk_budget():
         "reference_daily_risk_budget_usd"
     ).to_list() == pytest.approx([5.0] * 3)
     assert result.get_column(
+        "reference_return_capital_usd"
+    ).to_list() == pytest.approx([500.0] * 3)
+    assert result.get_column(
         "daily_dollar_vol_per_contract"
     ).to_list() == pytest.approx([40.0] * 3)
     assert result.get_column(
@@ -64,14 +67,14 @@ def test_subsystem_reference_return_uses_equal_weight_risk_budget():
     assert result.get_column(
         "reference_gross_return"
     ).to_list()[1:] == pytest.approx(
-        [0.0025, 0.005]
+        [0.005, 0.01]
     )
     costs = result.get_column("reference_cost_return").to_list()
     assert costs[0] is None
-    assert costs[1] == pytest.approx(-0.008 * (1 / 365.25))
-    assert costs[2] == pytest.approx(-0.008 * (3 / 365.25))
+    assert costs[1] == pytest.approx(-0.016 * (1 / 365.25))
+    assert costs[2] == pytest.approx(-0.016 * (3 / 365.25))
     assert result.get_column("reference_net_return")[1] == pytest.approx(
-        0.0025 + costs[1]
+        0.005 + costs[1]
     )
     assert turnover is not None
     assert "smoothed_reference_average_position" in result.columns

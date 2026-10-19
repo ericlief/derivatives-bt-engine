@@ -262,7 +262,6 @@ def append_reference_position_turnover(
 def apply_subsystem_reference_cost(
     frame: pl.DataFrame,
     *,
-    capital: float,
     ann_cost_sr: float,
 ) -> pl.DataFrame:
     """Apply an annual SR cost to an already sized reference return frame.
@@ -270,18 +269,19 @@ def apply_subsystem_reference_cost(
     The helper is separate from sizing so the pipeline can first measure
     turnover from the reference positions, convert that turnover to annual SR
     cost, and then apply the resulting cost without rebuilding the positions.
+    Cash cost is normalized by ``reference_return_capital_usd``, which is the
+    allocation capital implied by the reference annual risk budget.
     """
     required = {
         "held_reference_position",
         "period_year_fraction",
         "reference_annual_risk_budget_usd",
+        "reference_return_capital_usd",
         "reference_gross_return",
     }
     missing = sorted(required.difference(frame.columns))
     if missing:
         raise ValueError(f"reference cost input missing columns: {missing}")
-    if not math.isfinite(capital) or capital <= 0:
-        raise ValueError("capital must be finite and positive")
     if not math.isfinite(ann_cost_sr) or ann_cost_sr < 0:
         raise ValueError("ann_cost_sr must be finite and nonnegative")
 
@@ -290,7 +290,7 @@ def apply_subsystem_reference_cost(
             (
                 -ann_cost_sr
                 * pl.col("reference_annual_risk_budget_usd")
-                / capital
+                / pl.col("reference_return_capital_usd")
             ).alias("reference_annual_cost_return")
         )
         .with_columns(
@@ -348,8 +348,9 @@ def build_subsystem_reference_return_curve(
         with legacy ``point_vol`` accepted for compact Phase 2 frames.
     capital
         Reference account capital in USD. This supplies a reproducible
-        position scale; the resulting P&L is divided by the same capital and
-        therefore exposed as a return rather than an account cash curve.
+        position scale. Returns are normalized by the reference allocation
+        capital implied by the instrument risk budget, not by this entire
+        account value.
     target_vol
         Annual portfolio volatility target as a decimal fraction.
     reference_book_count
@@ -381,8 +382,9 @@ def build_subsystem_reference_return_curve(
     -------
     polars.DataFrame
         The input plus reference weights and risk budgets, daily dollar
-        volatility per contract, continuous average, target, and held
-        positions, gross/cost/net returns, and a row-level validity flag.
+        volatility per contract, reference return capital, continuous average,
+        target, and held positions, gross/cost/net subsystem returns, and a
+        row-level validity flag.
 
     Notes
     -----
@@ -443,6 +445,7 @@ def build_subsystem_reference_return_curve(
     annual_risk_budget_usd = (
         capital * target_vol * reference_weight_idm
     )
+    reference_return_capital_usd = annual_risk_budget_usd / target_vol
     daily_risk_budget_usd = annual_risk_budget_usd / annualization_sqrt
     reference = (
         frame.sort("date")
@@ -465,6 +468,9 @@ def build_subsystem_reference_return_curve(
             pl.lit(reference_weight_idm).alias("reference_weight_idm"),
             pl.lit(annual_risk_budget_usd).alias(
                 "reference_annual_risk_budget_usd"
+            ),
+            pl.lit(reference_return_capital_usd).alias(
+                "reference_return_capital_usd"
             ),
             pl.lit(daily_risk_budget_usd).alias(
                 "reference_daily_risk_budget_usd"
@@ -505,13 +511,12 @@ def build_subsystem_reference_return_curve(
                 * pl.col("point_change")
                 * multiplier
                 * pl.col(fx_col)
-                / capital
+                / pl.col("reference_return_capital_usd")
             ).alias("reference_gross_return"),
         )
     )
     return apply_subsystem_reference_cost(
         reference,
-        capital=capital,
         ann_cost_sr=ann_cost_sr,
     )
 
