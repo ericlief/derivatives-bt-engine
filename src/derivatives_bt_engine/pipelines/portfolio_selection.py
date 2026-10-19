@@ -1014,6 +1014,12 @@ def _run_complete_selection(
                 "cash_expected_roll_cost_usd",
                 "cash_realized_net_pnl_usd",
                 "cash_expected_net_pnl_usd",
+                "cash_gross_return_contribution",
+                "cash_realized_net_return_contribution",
+                "cash_expected_net_return_contribution",
+                "cumulative_cash_gross_return_contribution",
+                "cumulative_cash_realized_net_return_contribution",
+                "cumulative_cash_expected_net_return_contribution",
                 "cash_pnl_valid",
             )
         )

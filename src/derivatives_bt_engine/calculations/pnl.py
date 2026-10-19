@@ -598,7 +598,9 @@ def build_executable_cash_pnl_curve(
         volatility, continuous average and target positions, buffer width and
         boundaries, buffered executable and lagged contracts, ordinary trade
         quantities, realized and interval-average roll quantities, and
-        gross/expected/realized cash P&L in USD.
+        gross/expected/realized cash P&L in USD. Daily and cumulative return
+        contributions divide each instrument's cash P&L by total account
+        capital, so they add across instruments to the portfolio return.
 
     Notes
     -----
@@ -794,7 +796,42 @@ def build_executable_cash_pnl_curve(
                 & pl.col("cash_realized_net_pnl_usd").is_finite()
                 & pl.col("cash_expected_net_pnl_usd").is_not_null()
                 & pl.col("cash_expected_net_pnl_usd").is_finite()
-            ).alias("cash_pnl_valid")
+            ).alias("cash_pnl_valid"),
+            pl.when(
+                pl.col("cash_gross_pnl_usd").is_not_null()
+                & pl.col("cash_gross_pnl_usd").is_finite()
+            )
+            .then(pl.col("cash_gross_pnl_usd") / capital)
+            .otherwise(0.0)
+            .alias("cash_gross_return_contribution"),
+            pl.when(
+                pl.col("cash_realized_net_pnl_usd").is_not_null()
+                & pl.col("cash_realized_net_pnl_usd").is_finite()
+            )
+            .then(pl.col("cash_realized_net_pnl_usd") / capital)
+            .otherwise(0.0)
+            .alias("cash_realized_net_return_contribution"),
+            pl.when(
+                pl.col("cash_expected_net_pnl_usd").is_not_null()
+                & pl.col("cash_expected_net_pnl_usd").is_finite()
+            )
+            .then(pl.col("cash_expected_net_pnl_usd") / capital)
+            .otherwise(0.0)
+            .alias("cash_expected_net_return_contribution"),
+        )
+        .with_columns(
+            pl.col("cash_gross_return_contribution")
+            .fill_null(0.0)
+            .cum_sum()
+            .alias("cumulative_cash_gross_return_contribution"),
+            pl.col("cash_realized_net_return_contribution")
+            .fill_null(0.0)
+            .cum_sum()
+            .alias("cumulative_cash_realized_net_return_contribution"),
+            pl.col("cash_expected_net_return_contribution")
+            .fill_null(0.0)
+            .cum_sum()
+            .alias("cumulative_cash_expected_net_return_contribution"),
         )
     )
     return result

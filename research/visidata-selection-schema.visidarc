@@ -174,6 +174,9 @@ _vd_set_type(
     gross_equity_usd realized_equity_usd expected_equity_usd
     gross_ret realized_net_ret expected_net_ret
     cum_gross_ret cum_realized_net_ret cum_expected_net_ret
+    cash_gross_ret_contrib cash_realized_net_ret_contrib
+    cash_expected_net_ret_contrib cum_cash_gross_ret_contrib
+    cum_cash_realized_net_ret_contrib cum_cash_expected_net_ret_contrib
     ref_fast_point_vol ref_slow_point_vol ref_mixed_point_vol ref_price
     ref_cur_price_ratio ref_slow_return_vol ref_spread_points
     ref_slow_history_years ref_slow_vol_weight ref_zero_return_fraction

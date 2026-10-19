@@ -994,7 +994,10 @@ baseline by default. The command writes:
   account-scaled daily continuous target, average-position buffer width and
   boundaries, buffered whole contracts, ordinary traded contracts, actual and
   interval-average policy-roll contracts, and separate gross, trade-cost,
-  roll-cost, and net USD P&L paths. Its `close` is the locally generated
+  roll-cost, and net USD P&L paths. Gross, realized-net, and expected-net
+  return contributions divide each instrument's P&L by the common initial
+  account capital, so their daily values add to the portfolio curve. Its
+  `close` is the locally generated
   additive-Panama adjusted level used by the signal history, retained beside
   the roll-neutral `point_change` for audit; it is not the raw executable
   dated-contract mark;
