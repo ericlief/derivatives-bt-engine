@@ -23,17 +23,12 @@ def _combined_result() -> CombinedForecastResult:
         "point_change": [None, 1.0, 1.0, -1.0, 2.0],
         "point_vol": [1.0] * 5,
         "combined_forecast": [1.0, 2.0, 2.0, 1.0, -1.0],
-        "avg_position": [1.0] * 5,
-        "smooth_avg_position": [1.0] * 5,
-        "subsystem_position": [1.0, 2.0, 2.0, 1.0, -1.0],
-        "normalized_position": [1.0, 2.0, 2.0, 1.0, -1.0],
         "is_roll": [False, False, True, False, False],
     })
     return CombinedForecastResult(
         frame=frame,
         weights={"16/64": 1.0},
         fdm=1.0,
-        turnover=1.0,
         audit={"forecast_elig": True},
     )
 
@@ -64,6 +59,7 @@ def test_notebook_view_builds_reference_return_and_cash_paths():
 
     assert view.forecasts is result.frame
     assert "reference_net_return" in view.reference.columns
+    assert view.reference_turnover is not None
     assert view.cash is not None
     assert {
         "target_position",

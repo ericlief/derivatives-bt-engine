@@ -607,7 +607,7 @@ flowchart TD
 
         Sizing["3. Size equal-weight reference<br/>ref_weight = 1 / assumed book count<br/>daily_dvol · ref_avg_pos · ref_targ_pos"]
 
-        Turnover["4. Calculate actual subsystem turnover<br/>smooth_avg_position<br/>normalized_position<br/>abs_position_change<br/>full-sample and rolling audit estimates"]
+        Turnover["4. Calculate actual subsystem turnover<br/>smoothed_reference_average_position<br/>reference_normalized_position<br/>reference_abs_position_change<br/>full-sample and rolling audit estimates"]
 
         Cost["5. Calibrate combined-subsystem cost<br/>ann_trade_cost_sr = trade_sr × subsystem turnover<br/>ann_roll_cost_sr = roll_sr × ref_ann_rolls"]
 
@@ -682,8 +682,9 @@ The same ownership in terminal-readable form is:
    `1 / tie_ref_book_n`, apply the fixed reference IDM and `max_weight_idm`
    cap, and calculate continuous reference average and target positions.
 5. Calculate the actual combined-subsystem turnover from normalized desired-
-   position changes. This replaces, rather than averages, the individual-rule
-   turnover estimates used by the market screen screen.
+   position changes using the continuous reference target and smoothed
+   reference average position. This replaces, rather than averages, the
+   individual-rule turnover estimates used by the market screen.
 6. Reuse market screen `trade_sr`, `roll_sr`, and `ref_ann_rolls` to calculate the
    combined subsystem's annual trading cost and holding-roll cost.
 7. Lag the continuous reference target, calculate its cash change through the
@@ -1237,10 +1238,11 @@ afts_annual_trading_cost_SR
 ```
 
 Here `subsystem_turnover` follows pysystemtrade's `turnover(x, y)` definition.
-`x` is the unbuffered combined subsystem position. Its EWMAC forecast is not
-smoothed again. The function applies an EWM with `com=250` only to `y`, the
-time-varying average-position/volatility denominator, before measuring changes
-in `x / y`. The implementation calls this parameter
+`x` is `reference_target_position`, the unbuffered continuous reference
+position after the equal book weight, IDM, multiplier, and dated FX are
+applied. Its EWMAC forecast is not smoothed again. The function applies an EWM
+with `com=250` only to `y`, `reference_average_position`, before measuring
+changes in `x / y`. The implementation calls this parameter
 `average_position_ewm_com` to avoid implying forecast smoothing.
 
 The separate default `buffer_size=0.10` is a no-trade band, not a smoothing

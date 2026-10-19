@@ -22,6 +22,7 @@ from derivatives_bt_engine.calculations.forecast_combination import (
 )
 from derivatives_bt_engine.calculations.pnl import (
     PYSYSTEMTRADE_FORECAST_BUFFER_SIZE,
+    append_reference_position_turnover,
     build_executable_cash_pnl_curve,
     build_subsystem_reference_return_curve,
 )
@@ -106,20 +107,22 @@ class EwmacNotebookView:
     """Hold forecast, subsystem-reference, and optional cash-P&L frames.
 
     ``forecasts`` contains the detailed combined-forecast result. ``reference``
-    is the equal-weight continuous return path used for correlations. ``cash``
-    is present only when executable account settings were supplied and
-    contains the selected portfolio's continuous targets, buffered whole
-    contracts, and cash costs.
+    is the equal-weight continuous position and return path used for turnover
+    and correlations. ``reference_turnover`` is its annualized Carver-style
+    turnover. ``cash`` is present only when executable account settings were
+    supplied and contains the selected portfolio's continuous targets,
+    buffered whole contracts, and cash costs.
     """
 
     instrument_code: str
     result: CombinedForecastResult
     reference: pl.DataFrame
+    reference_turnover: float | None
     cash: pl.DataFrame | None = None
 
     @property
     def forecasts(self) -> pl.DataFrame:
-        """Return the full combined-forecast and position audit frame."""
+        """Return the combined-forecast frame before reference sizing."""
         return self.result.frame
 
     def forecast_positions(
@@ -128,16 +131,16 @@ class EwmacNotebookView:
         start: date | datetime | str | None = None,
         end: date | datetime | str | None = None,
     ) -> pl.DataFrame:
-        """Return the principal forecast and relative-position diagnostics."""
-        frame = _date_slice(self.forecasts, start=start, end=end)
+        """Return the forecast and sized reference-position diagnostics."""
+        frame = _date_slice(self.reference, start=start, end=end)
         columns = [
             "date",
             "close",
             "combined_forecast",
-            "avg_position",
-            "smooth_avg_position",
-            "subsystem_position",
-            "normalized_position",
+            "reference_average_position",
+            "smoothed_reference_average_position",
+            "reference_target_position",
+            "reference_normalized_position",
         ]
         available_columns = [
             column for column in columns if column in frame.columns
@@ -204,8 +207,8 @@ class EwmacNotebookView:
     ):
         """Return a vertically linked hvPlot dashboard for notebook display.
 
-        Panels show the adjusted signal price, combined forecast, position
-        proxies, volatility-normalized position, cumulative reference return,
+        Panels show the adjusted signal price, combined forecast, sized
+        reference positions, normalized position, cumulative reference return,
         and—when configured—whole-contract positions and cumulative cash P&L.
         hvPlot is imported lazily so non-notebook pipelines do not initialize a
         plotting backend.
@@ -213,11 +216,11 @@ class EwmacNotebookView:
         import holoviews as hv
         import hvplot.polars  # noqa: F401 - registers Polars' ``hvplot`` API
 
-        forecast = _date_slice(self.forecasts, start=start, end=end)
-        if forecast.is_empty():
+        reference = _date_slice(self.reference, start=start, end=end)
+        if reference.is_empty():
             raise ValueError("plot date range contains no forecast observations")
 
-        price_plot = forecast.hvplot.line(
+        price_plot = reference.hvplot.line(
             x="date",
             y="close",
             title=f"{self.instrument_code} adjusted signal price",
@@ -225,7 +228,7 @@ class EwmacNotebookView:
             width=width,
             height=height,
         )
-        forecast_plot = forecast.hvplot.line(
+        forecast_plot = reference.hvplot.line(
             x="date",
             y="combined_forecast",
             title="Combined forecast (mean abs 1, cap 2)",
@@ -233,18 +236,22 @@ class EwmacNotebookView:
             width=width,
             height=height,
         ) * hv.HLine(0.0).opts(color="black", line_width=1)
-        proxy_plot = forecast.hvplot.line(
+        proxy_plot = reference.hvplot.line(
             x="date",
-            y=["avg_position", "smooth_avg_position", "subsystem_position"],
-            title="Relative subsystem position proxies",
-            ylabel="Inverse-point-vol units",
+            y=[
+                "reference_average_position",
+                "smoothed_reference_average_position",
+                "reference_target_position",
+            ],
+            title="Equal-weight reference positions",
+            ylabel="Continuous contracts",
             width=width,
             height=height,
         )
-        normalized_plot = forecast.hvplot.line(
+        normalized_plot = reference.hvplot.line(
             x="date",
-            y=["combined_forecast", "normalized_position"],
-            title="Forecast versus volatility-normalized position",
+            y=["combined_forecast", "reference_normalized_position"],
+            title="Forecast versus reference-normalized position",
             ylabel="Smoothed average-position units",
             width=width,
             height=height,
@@ -360,6 +367,9 @@ def build_ewmac_notebook_view(
         ann_cost_sr=ann_cost_sr,
         target_abs_forecast=target_abs_forecast,
     )
+    reference, reference_turnover = append_reference_position_turnover(
+        reference
+    )
     cash = None
     if cash_settings is not None:
         cash = build_executable_cash_pnl_curve(
@@ -379,5 +389,6 @@ def build_ewmac_notebook_view(
         instrument_code=instrument_code,
         result=result,
         reference=reference,
+        reference_turnover=reference_turnover,
         cash=cash,
     )

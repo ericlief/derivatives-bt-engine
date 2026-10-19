@@ -26,7 +26,7 @@ def _frame(values_4, values_64):
     })
 
 
-def test_combined_turnover_is_measured_after_combining_components():
+def test_components_are_combined_before_reference_sizing():
     frame = _frame(
         [1.0, -1.0, 1.0, -1.0, 1.0],
         [-1.0, 1.0, -1.0, 1.0, -1.0],
@@ -41,13 +41,15 @@ def test_combined_turnover_is_measured_after_combining_components():
         ["4/16", "64/256"],
     )
 
-    # Renormalized weights are 1/7 and 6/7. Turnover is calculated from the
-    # resulting position series, rather than summing the two rule turnovers.
+    # Renormalized weights are 1/7 and 6/7. Reference sizing and turnover are
+    # deliberately deferred until multiplier and FX inputs are available.
     expected_fdm = 1.0 / np.sqrt((1 / 7) ** 2 + (6 / 7) ** 2)
     combined = np.array([-5 / 7, 5 / 7, -5 / 7, 5 / 7, -5 / 7])
-    expected = np.abs(np.diff(combined * expected_fdm)).mean() * 256
     assert result.fdm == pytest.approx(expected_fdm)
-    assert result.turnover == pytest.approx(expected)
+    assert result.frame.get_column("combined_forecast").to_list() == pytest.approx(
+        (combined * expected_fdm).tolist()
+    )
+    assert "avg_position" not in result.frame.columns
     assert result.audit["forecast_elig"] is True
 
 
@@ -70,10 +72,6 @@ def test_forecast_gap_after_warmup_is_audited_and_excluded():
     assert result.audit["forecast_post_warmup_invalid_obs"] == 1
     assert result.audit["forecast_elig"] is False
     assert result.audit["forecast_excl"] == "forecast_gaps_after_warmup"
-    # The daily turnover input preserves both the invalid row and the first
-    # row after it as null, so the calculation never jumps across the gap.
-    assert result.frame.get_column("abs_position_change")[3] is None
-    assert result.frame.get_column("abs_position_change")[4] is None
 
 
 def test_forecast_diversification_is_capped():
@@ -89,7 +87,7 @@ def test_forecast_diversification_is_capped():
     assert multiplier == pytest.approx(np.sqrt(5))
 
 
-def test_turnover_ewm_applies_to_average_position_not_forecast():
+def test_combination_does_not_manufacture_an_average_position_proxy():
     frame = pl.DataFrame({
         "date": pl.date_range(
             pl.date(2024, 1, 1), pl.date(2024, 1, 5), eager=True
@@ -99,8 +97,6 @@ def test_turnover_ewm_applies_to_average_position_not_forecast():
         "fcst_4_16": [0.2] * 5,
     })
     engine = CombinedForecastEngine(config=ForecastCombinationConfig(
-        average_position_ewm_com=2,
-        turnover_rolling_days=3,
         min_valid_observations=3,
     ))
 
@@ -110,22 +106,8 @@ def test_turnover_ewm_applies_to_average_position_not_forecast():
         [0.2] * 5
     )
     assert "forecast_multiplier" not in result.frame.columns
-    last = result.frame.tail(1).row(0, named=True)
-    assert last["avg_position"] == pytest.approx(0.25)
-    assert last["subsystem_position"] == pytest.approx(
-        last["avg_position"] * last["combined_forecast"]
-    )
-    assert last["smooth_avg_position"] != pytest.approx(last["avg_position"])
-    daily_changes = result.frame.get_column("abs_position_change")
-    assert daily_changes.head(2).null_count() == 2
-    assert daily_changes.tail(3).null_count() == 0
-    assert result.turnover == pytest.approx(daily_changes.drop_nulls().mean() * 256)
-    rolling_mean = result.frame.get_column("rolling_mean_abs_position_change")
-    assert rolling_mean.head(4).null_count() == 4
-    assert rolling_mean[-1] == pytest.approx(daily_changes.tail(3).mean())
-    assert result.frame.get_column("rolling_ann_turnover")[-1] == pytest.approx(
-        rolling_mean[-1] * 256
-    )
+    assert "avg_position" not in result.frame.columns
+    assert "subsystem_position" not in result.frame.columns
     assert "subsystem_return" not in result.frame.columns
 
 
@@ -170,7 +152,6 @@ def test_dataframe_helper_builds_components_and_disables_fdm():
         expected.to_list()
     )
     assert "forecast_multiplier" not in valid.columns
-    assert valid.get_column("subsystem_position").to_list() == pytest.approx(
-        (valid.get_column("avg_position") * expected).to_list()
-    )
+    assert "avg_position" not in valid.columns
+    assert "subsystem_position" not in valid.columns
     assert result.audit["forecast_elig"] is True

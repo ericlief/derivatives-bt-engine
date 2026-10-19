@@ -146,9 +146,10 @@ _vd_set_type(
     init_margin_change maint_margin_change
     init_margin_pct_cap book_margin_pct_cap
     cluster_weight cluster_score fdm comb_turnover
-    combined_forecast avg_position subsystem_position
-    smooth_avg_position normalized_position abs_position_change
-    rolling_mean_abs_position_change rolling_ann_turnover
+    combined_forecast reference_average_position reference_target_position
+    smoothed_reference_average_position reference_normalized_position
+    reference_abs_position_change reference_rolling_mean_abs_position_change
+    reference_rolling_ann_turnover
     close point_change point_vol fx_to_usd period_year_fraction
     pnl_avg_position pnl_position held_pnl_position gross_pnl_pts
     gross_pnl_native gross_pnl_usd ann_cost_pts cost_pnl_pts

@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 from collections.abc import Iterable
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -82,6 +83,8 @@ from derivatives_bt_engine.calculations.instrument_selection import (
 )
 from derivatives_bt_engine.calculations.pnl import (
     PYSYSTEMTRADE_FORECAST_BUFFER_SIZE,
+    append_reference_position_turnover,
+    apply_subsystem_reference_cost,
     build_executable_cash_pnl_curve,
     build_subsystem_reference_return_curve,
 )
@@ -583,12 +586,6 @@ def _run_complete_selection(
                 "futures-cost-risk audit"
             )
 
-        annual_cost = calculate_annual_sr_cost(
-            trade_sr=float(row["trade_sr"]),
-            roll_sr=float(row["roll_sr"]),
-            subsystem_turnover=float(result.turnover or 0.0),
-            ann_rolls=float(row["ref_ann_rolls"]),
-        )
         currency = str(row["ccy"]).upper()
         fx_error = ""
         if currency not in fx_history_by_currency:
@@ -628,8 +625,24 @@ def _run_complete_selection(
             reference_idm=GreedySelectionConfig.max_idm,
             max_weight_idm=args.max_weight_idm,
             multiplier=float(row["mult"]),
-            ann_cost_sr=annual_cost.ann_cost_sr,
+            # Turnover must be measured from these sized positions before its
+            # SR cost can be known. The zero placeholder is replaced below.
+            ann_cost_sr=0.0,
             target_abs_forecast=engine.config.target_abs_forecast,
+        )
+        reference_frame, combined_turnover = (
+            append_reference_position_turnover(reference_frame)
+        )
+        annual_cost = calculate_annual_sr_cost(
+            trade_sr=float(row["trade_sr"]),
+            roll_sr=float(row["roll_sr"]),
+            subsystem_turnover=float(combined_turnover or 0.0),
+            ann_rolls=float(row["ref_ann_rolls"]),
+        )
+        reference_frame = apply_subsystem_reference_cost(
+            reference_frame,
+            capital=float(run_config["init_cap_usd"]),
+            ann_cost_sr=annual_cost.ann_cost_sr,
         ).with_columns(
             pl.lit(annual_cost.ann_trade_cost_sr).alias("ann_trade_cost_sr"),
             pl.lit(annual_cost.ann_roll_cost_sr).alias("ann_roll_cost_sr"),
@@ -665,11 +678,15 @@ def _run_complete_selection(
         fx_sources = fx_used.get_column("fx_src").drop_nulls().unique().to_list()
         subsystem_elig = bool(
             result.audit["forecast_elig"]
+            and combined_turnover is not None
+            and math.isfinite(combined_turnover)
             and valid_reference_returns.height >= args.min_forecast_obs
             and reference_return_post_start_invalid == 0
         )
         if not result.audit["forecast_elig"]:
             subsystem_excl = str(result.audit["forecast_excl"])
+        elif combined_turnover is None or not math.isfinite(combined_turnover):
+            subsystem_excl = "invalid_combined_turnover"
         elif valid_reference_returns.height < args.min_forecast_obs:
             subsystem_excl = "insufficient_valid_reference_return_obs"
         elif reference_return_post_start_invalid:
@@ -682,7 +699,7 @@ def _run_complete_selection(
             "elig_ewmac_rules": ",".join(result.weights),
             "forecast_weights": json.dumps(result.weights, sort_keys=True),
             "fdm": result.fdm,
-            "comb_turnover": result.turnover,
+            "comb_turnover": combined_turnover,
             "ann_trade_cost_sr": annual_cost.ann_trade_cost_sr,
             "ann_roll_cost_sr": annual_cost.ann_roll_cost_sr,
             "ann_cost_sr": annual_cost.ann_cost_sr,
@@ -728,7 +745,7 @@ def _run_complete_selection(
             result.audit["forecast_valid_obs"],
             valid_reference_returns.height,
             reference_return_post_start_invalid,
-            result.turnover,
+            combined_turnover,
             subsystem_excl,
         )
 

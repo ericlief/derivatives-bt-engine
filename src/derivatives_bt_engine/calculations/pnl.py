@@ -1,13 +1,14 @@
 """Build auditable subsystem-reference returns and executable cash P&L.
 
-Forecast construction owns the combined forecast and turnover. This module
-owns the next calculation boundary: size and lag the position, mark it through
-the daily point change, convert through the contract multiplier and historical
-FX, and accrue an annual SR cost through elapsed calendar time. The subsystem
-reference path uses a fixed equal-weight book assumption to produce comparable
-instrument returns for correlation estimation.  The separate selected-book
-cash path applies final weights and IDM, buffers and rounds to executable
-contracts, and charges ordinary trades and contract rolls separately.
+Forecast construction owns the combined forecast. This module owns the next
+calculation boundary: size and lag positions, measure turnover from those
+positions, mark them through daily point changes, convert through the contract
+multiplier and historical FX, and accrue annual SR cost through elapsed
+calendar time. The subsystem-reference path uses a fixed equal-weight book
+assumption to produce comparable instrument returns for correlation estimation.
+The separate selected-book cash path applies final weights and IDM, buffers and
+rounds to executable contracts, and charges ordinary trades and contract rolls
+separately.
 """
 
 from __future__ import annotations
@@ -160,6 +161,167 @@ def apply_forecast_position_buffer(
     )
 
 
+def append_reference_position_turnover(
+    frame: pl.DataFrame,
+    *,
+    average_position_ewm_com: int = 250,
+    turnover_rolling_days: int = MIXED_VOL_ANNUALIZATION_DAYS,
+    annualization_days: int = MIXED_VOL_ANNUALIZATION_DAYS,
+) -> tuple[pl.DataFrame, float | None]:
+    """Append Carver-style turnover from sized reference positions.
+
+    Parameters
+    ----------
+    frame
+        Chronological reference frame containing ``reference_average_position``
+        and ``reference_target_position`` in continuous contracts.
+    average_position_ewm_com
+        EWM ``com`` used to smooth the changing average-position denominator.
+        The target position and forecast are not smoothed.
+    turnover_rolling_days
+        Complete trailing window used for the row-level annualized turnover
+        diagnostic.
+    annualization_days
+        Trading-day count used to annualize mean absolute daily changes.
+
+    Returns
+    -------
+    tuple[polars.DataFrame, float | None]
+        The input plus the smoothed reference average position, normalized
+        target position, absolute changes, rolling diagnostics, and the
+        full-history annual turnover. The scalar is ``None`` when no finite
+        position change exists.
+
+    Notes
+    -----
+    This implements the turnover ratio as target position divided by smoothed
+    average position. Because both inputs are already sized with historical FX
+    and the contract multiplier, the audit does not rely on an inverse-volatility
+    proxy or assume that FX is constant through time.
+    """
+    required = {"reference_average_position", "reference_target_position"}
+    missing = sorted(required.difference(frame.columns))
+    if missing:
+        raise ValueError(f"reference turnover input missing columns: {missing}")
+    if average_position_ewm_com <= 0:
+        raise ValueError("average_position_ewm_com must be positive")
+    if turnover_rolling_days <= 0:
+        raise ValueError("turnover_rolling_days must be positive")
+    if annualization_days <= 0:
+        raise ValueError("annualization_days must be positive")
+
+    result = (
+        frame.sort("date")
+        .with_columns(
+            pl.col("reference_average_position")
+            .ewm_mean(
+                com=average_position_ewm_com,
+                adjust=True,
+                min_samples=2,
+            )
+            .alias("smoothed_reference_average_position")
+        )
+        .with_columns(
+            pl.when(pl.col("smoothed_reference_average_position") > 0)
+            .then(
+                pl.col("reference_target_position")
+                / pl.col("smoothed_reference_average_position")
+            )
+            .otherwise(None)
+            .alias("reference_normalized_position")
+        )
+        .with_columns(
+            pl.col("reference_normalized_position")
+            .diff()
+            .abs()
+            .alias("reference_abs_position_change")
+        )
+        .with_columns(
+            pl.col("reference_abs_position_change")
+            .rolling_mean(
+                window_size=turnover_rolling_days,
+                min_samples=turnover_rolling_days,
+            )
+            .alias("reference_rolling_mean_abs_position_change")
+        )
+        .with_columns(
+            (
+                pl.col("reference_rolling_mean_abs_position_change")
+                * annualization_days
+            ).alias("reference_rolling_ann_turnover")
+        )
+    )
+    changes = result.get_column("reference_abs_position_change")
+    changes = changes.filter(changes.is_not_null() & changes.is_finite())
+    turnover = (
+        float(changes.mean() * annualization_days) if changes.len() else None
+    )
+    return result, turnover
+
+
+def apply_subsystem_reference_cost(
+    frame: pl.DataFrame,
+    *,
+    capital: float,
+    ann_cost_sr: float,
+) -> pl.DataFrame:
+    """Apply an annual SR cost to an already sized reference return frame.
+
+    The helper is separate from sizing so the pipeline can first measure
+    turnover from the reference positions, convert that turnover to annual SR
+    cost, and then apply the resulting cost without rebuilding the positions.
+    """
+    required = {
+        "held_reference_position",
+        "period_year_fraction",
+        "reference_annual_risk_budget_usd",
+        "reference_gross_return",
+    }
+    missing = sorted(required.difference(frame.columns))
+    if missing:
+        raise ValueError(f"reference cost input missing columns: {missing}")
+    if not math.isfinite(capital) or capital <= 0:
+        raise ValueError("capital must be finite and positive")
+    if not math.isfinite(ann_cost_sr) or ann_cost_sr < 0:
+        raise ValueError("ann_cost_sr must be finite and nonnegative")
+
+    return (
+        frame.with_columns(
+            (
+                -ann_cost_sr
+                * pl.col("reference_annual_risk_budget_usd")
+                / capital
+            ).alias("reference_annual_cost_return")
+        )
+        .with_columns(
+            # Costs begin only once a position was actually held. Calendar
+            # elapsed time spreads the annual charge over irregular rows.
+            pl.when(
+                pl.col("held_reference_position").is_not_null()
+                & pl.col("period_year_fraction").is_not_null()
+            )
+            .then(
+                pl.col("reference_annual_cost_return")
+                * pl.col("period_year_fraction")
+            )
+            .otherwise(None)
+            .alias("reference_cost_return")
+        )
+        .with_columns(
+            (
+                pl.col("reference_gross_return")
+                + pl.col("reference_cost_return")
+            ).alias("reference_net_return")
+        )
+        .with_columns(
+            (
+                pl.col("reference_net_return").is_not_null()
+                & pl.col("reference_net_return").is_finite()
+            ).alias("reference_return_valid")
+        )
+    )
+
+
 def build_subsystem_reference_return_curve(
     frame: pl.DataFrame,
     *,
@@ -282,8 +444,7 @@ def build_subsystem_reference_return_curve(
         capital * target_vol * reference_weight_idm
     )
     daily_risk_budget_usd = annual_risk_budget_usd / annualization_sqrt
-    annual_risk_fraction = annual_risk_budget_usd / capital
-    return (
+    reference = (
         frame.sort("date")
         .with_columns(
             (
@@ -346,37 +507,12 @@ def build_subsystem_reference_return_curve(
                 * pl.col(fx_col)
                 / capital
             ).alias("reference_gross_return"),
-            pl.lit(-ann_cost_sr * annual_risk_fraction).alias(
-                "reference_annual_cost_return"
-            ),
         )
-        .with_columns(
-            # Costs begin only once a position was actually held.  Calendar
-            # elapsed time spreads an annual SR charge over irregular daily
-            # rows without pretending every gap is one business day.
-            pl.when(
-                pl.col("held_reference_position").is_not_null()
-                & pl.col("period_year_fraction").is_not_null()
-            )
-            .then(
-                pl.col("reference_annual_cost_return")
-                * pl.col("period_year_fraction")
-            )
-            .otherwise(None)
-            .alias("reference_cost_return"),
-        )
-        .with_columns(
-            (
-                pl.col("reference_gross_return")
-                + pl.col("reference_cost_return")
-            ).alias("reference_net_return")
-        )
-        .with_columns(
-            (
-                pl.col("reference_net_return").is_not_null()
-                & pl.col("reference_net_return").is_finite()
-            ).alias("reference_return_valid")
-        )
+    )
+    return apply_subsystem_reference_cost(
+        reference,
+        capital=capital,
+        ann_cost_sr=ann_cost_sr,
     )
 
 

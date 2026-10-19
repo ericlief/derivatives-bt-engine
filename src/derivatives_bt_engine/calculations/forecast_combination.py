@@ -1,10 +1,12 @@
-"""Turn one instrument history into an auditable combined EWMAC subsystem.
+"""Turn one instrument history into an auditable combined EWMAC forecast.
 
 The input is a single daily signal-history dataframe containing the five
 already-scaled EWMAC component forecasts. The engine selects the rules that
-passed the executable contract's Phase 1 cost gate, combines them, converts the
-forecast to a volatility-scaled position, measures turnover, and returns both
-the daily calculations and a compact validity audit.
+passed the executable contract's Phase 1 cost gate, combines them into one
+capped forecast, and returns the daily calculations and a compact validity
+audit.
+Reference sizing and turnover require multiplier and historical FX inputs and
+therefore belong to the following P&L calculation stage.
 
 Forecast diversification and instrument diversification are intentionally
 separate. This module calculates FDM across component rules for one history;
@@ -165,62 +167,50 @@ class FixedForecastDiversification(ForecastDiversificationPolicy):
 
 @dataclass(frozen=True)
 class ForecastCombinationConfig:
-    """Configure combined-forecast scaling, turnover, and validity gates.
+    """Configure combined-forecast scaling and validity gates.
 
     Forecasts use Carver's 10/20 convention divided by 10: target average
     absolute forecast 1.0 and cap 2.0.  On the default scale the combined
     forecast is therefore the signed multiple of average risk-sized position.
-    ``average_position_ewm_com`` is the pandas-compatible EWM ``com`` applied
-    only to the average-position denominator in turnover. It never smooths
-    the forecast. ``turnover_rolling_days`` controls the trailing diagnostic
-    window; a complete valid window is required. ``min_valid_observations``
-    excludes short histories.
+    ``min_valid_observations`` excludes short histories. Position sizing and
+    turnover are calculated later from equal-weight reference positions after
+    multiplier and historical FX data are attached.
     """
 
     target_abs_forecast: float = EWMAC_FORECAST_TARGET_ABS
     forecast_cap: float = EWMAC_FORECAST_CAP
     annualization_days: int = MIXED_VOL_ANNUALIZATION_DAYS
-    # This is pysystemtrade turnover()'s ``smooth_y_days``: the EWM ``com``
-    # applied only to the changing average-position/volatility denominator.
-    # It does not smooth the EWMAC forecast or the optimal position.
-    average_position_ewm_com: int = 250
-    turnover_rolling_days: int = MIXED_VOL_ANNUALIZATION_DAYS
     min_valid_observations: int = 256
 
     def __post_init__(self) -> None:
-        """Reject nonsensical forecast, turnover, and history parameters."""
+        """Reject nonsensical forecast and history parameters."""
         if self.target_abs_forecast <= 0 or self.forecast_cap <= 0:
             raise ValueError("forecast target and cap must be positive")
-        if self.annualization_days <= 0 or self.average_position_ewm_com <= 0:
-            raise ValueError("turnover day parameters must be positive")
-        if self.turnover_rolling_days <= 0:
-            raise ValueError("turnover_rolling_days must be positive")
+        if self.annualization_days <= 0:
+            raise ValueError("annualization_days must be positive")
         if self.min_valid_observations < 2:
             raise ValueError("min_valid_observations must be at least 2")
 
 
 @dataclass(frozen=True)
 class CombinedForecastResult:
-    """Hold one executable symbol's daily subsystem and summary diagnostics.
+    """Hold one executable symbol's combined forecast and diagnostics.
 
-    ``frame`` contains component forecasts, the combined forecast, average and
-    optimal position proxies, normalized position, its absolute daily change,
-    and trailing turnover diagnostics. ``weights`` and ``fdm`` explain the
-    combination;
-    ``turnover`` is annualized; ``audit`` contains null/non-finite counts and
-    the eligibility decision. Cash P&L belongs to ``calculations.pnl`` because
-    it additionally needs an executable multiplier, historical FX, and costs.
+    ``frame`` contains component forecasts and the combined forecast.
+    ``weights`` and ``fdm`` explain the combination; ``audit`` contains
+    null/non-finite counts and the forecast eligibility decision. Reference
+    position sizing, turnover, and returns belong to ``calculations.pnl``
+    because they additionally need an executable multiplier and historical FX.
     """
 
     frame: pl.DataFrame
     weights: dict[str, float]
     fdm: float
-    turnover: float | None
     audit: dict[str, object]
 
 
 class CombinedForecastEngine:
-    """Combine rule forecasts, calculate subsystem turnover, and audit gaps.
+    """Combine rule forecasts and audit forecast-data gaps.
 
     The three constructor policies make forecast weighting, FDM, and numeric
     conventions replaceable without changing the Phase 2 orchestration code.
@@ -247,7 +237,7 @@ class CombinedForecastEngine:
         forecast_correlation: np.ndarray,
         correlation_rules: list[str],
     ) -> CombinedForecastResult:
-        """Return a combined forecast and its unbuffered subsystem turnover.
+        """Return a combined forecast and its forecast-data audit.
 
         Parameters
         ----------
@@ -267,8 +257,8 @@ class CombinedForecastEngine:
         Returns
         -------
         CombinedForecastResult
-            The daily subsystem frame, applied weights and FDM, annualized
-            turnover, and forecast-data audit.
+            The daily forecast frame, applied weights and FDM, and
+            forecast-data audit.
 
         Warm-up nulls are retained in the audit.  A row is usable only when
         every active component, point volatility, and the point change are
@@ -328,89 +318,6 @@ class CombinedForecastEngine:
                 .otherwise(None)
                 .alias("combined_forecast")
             )
-            .with_columns(
-                # Inverse daily point volatility has the same relative path as
-                # the properly risk-sized number of contracts or shares. This
-                # is deliberately a position proxy, not an executable count:
-                # capital, risk target, annualization, contract multiplier,
-                # and constant FX terms are omitted because they cancel when
-                # turnover is expressed in average-position units.
-                pl.when(pl.col("forecast_valid"))
-                .then(1.0 / pl.col(point_vol_column))
-                .otherwise(None)
-                .alias("avg_position"),
-            )
-            .with_columns(
-                # The unbuffered optimal position applies forecast conviction
-                # to average risk sizing.  With the default mean-absolute-one
-                # scale, combined_forecast is already the signed position
-                # factor.  Retaining the division supports explicit nondefault
-                # forecast scales without exposing a redundant dataframe field.
-                (
-                    pl.col("avg_position")
-                    * pl.col("combined_forecast")
-                    / self.config.target_abs_forecast
-                ).alias("subsystem_position"),
-                # Volatility changes make avg_position move even with a flat
-                # forecast. Carver smooths this denominator so daily volatility
-                # estimation noise does not redefine one unit of turnover.
-                pl.col("avg_position")
-                .ewm_mean(
-                    com=self.config.average_position_ewm_com,
-                    adjust=True,
-                    min_samples=2,
-                )
-                .alias("smooth_avg_position"),
-            )
-            .with_columns(
-                # This dimensionless series says how many smoothed average-
-                # position units the strategy currently wants. Turnover is the
-                # annualized mean absolute daily change in this series.
-                pl.when(pl.col("smooth_avg_position") > 0)
-                .then(pl.col("subsystem_position") / pl.col("smooth_avg_position"))
-                .otherwise(None)
-                .alias("normalized_position"),
-            )
-            .with_columns(
-                # Preserve the row-level turnover input for inspection. A null
-                # normalized position produces a null change on that row and
-                # the following row, rather than silently measuring across a
-                # warm-up or missing-data gap.
-                pl.col("normalized_position")
-                .diff()
-                .abs()
-                .alias("abs_position_change")
-            )
-            .with_columns(
-                # A full trailing window is mandatory. Consequently the
-                # rolling estimate stays null during warm-up and whenever its
-                # window contains a missing turnover observation.
-                pl.col("abs_position_change")
-                .rolling_mean(
-                    window_size=self.config.turnover_rolling_days,
-                    min_samples=self.config.turnover_rolling_days,
-                )
-                .alias("rolling_mean_abs_position_change")
-            )
-            .with_columns(
-                # Convert the mean daily change into the same annual-turnover
-                # units returned by CombinedForecastResult.turnover.
-                (
-                    pl.col("rolling_mean_abs_position_change")
-                    * self.config.annualization_days
-                ).alias("rolling_ann_turnover")
-            )
-        )
-        # Each absolute change is a fraction of an average risk-sized position;
-        # only finite observations enter the mean, while the dataframe retains
-        # nulls for warm-up and gap auditing. Multiplying the mean daily change
-        # by the trading-day count annualizes it.
-        changes = subsystem_frame.get_column("abs_position_change")
-        changes = changes.filter(changes.is_not_null() & changes.is_finite())
-        turnover = (
-            float(changes.mean() * self.config.annualization_days)
-            if changes.len()
-            else None
         )
 
         valid = subsystem_frame.filter(pl.col("forecast_valid"))
@@ -449,8 +356,6 @@ class CombinedForecastEngine:
             valid.height >= self.config.min_valid_observations
             and audit["forecast_post_warmup_invalid_obs"] == 0
             and audit["combined_nonfinite"] == 0
-            and turnover is not None
-            and math.isfinite(turnover)
         )
         if valid.height < self.config.min_valid_observations:
             audit["forecast_excl"] = "insufficient_valid_forecast_obs"
@@ -458,13 +363,9 @@ class CombinedForecastEngine:
             audit["forecast_excl"] = "forecast_gaps_after_warmup"
         elif audit["combined_nonfinite"]:
             audit["forecast_excl"] = "nonfinite_combined_forecast"
-        elif turnover is None or not math.isfinite(turnover):
-            audit["forecast_excl"] = "invalid_combined_turnover"
         else:
             audit["forecast_excl"] = ""
-        return CombinedForecastResult(
-            subsystem_frame, weights, fdm, turnover, audit
-        )
+        return CombinedForecastResult(subsystem_frame, weights, fdm, audit)
 
 
 def combine_ewmac_forecasts(
@@ -510,7 +411,7 @@ def combine_ewmac_forecasts(
         Fixed forecast diversification multiplier.  The default ``1.0``
         disables FDM, which is useful for a standalone stock dataframe.
     config
-        Forecast cap, turnover, and validity settings for the combined engine.
+        Forecast scaling and validity settings for the combined engine.
     vol_span, vol_slow_years, vol_slow_weight, vol_min_samples
         Mixed point-volatility settings shared by every component rule.
 

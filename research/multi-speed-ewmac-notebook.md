@@ -111,9 +111,9 @@ forecasts
 ```
 
 ``result.frame`` retains the input columns, mixed-volatility diagnostics, all
-five rule-component calculations, the combined forecast, and turnover audit
-columns. ``result.weights``, ``result.fdm``, ``result.turnover``, and
-``result.audit`` expose the corresponding summary values. Use
+five rule-component calculations, and the combined forecast. ``result.weights``,
+``result.fdm``, and ``result.audit`` expose the corresponding summary values.
+Reference sizing and turnover are added after multiplier and FX are known. Use
 ``build_ewmac_components`` when only the wide component frame is needed, or
 ``build_ewmac_rule_component`` to inspect a single speed.
 
@@ -122,6 +122,7 @@ use the same explicit reference assumptions as the selection pipeline:
 
 ```python
 from derivatives_bt_engine.calculations.pnl import (
+    append_reference_position_turnover,
     build_subsystem_reference_return_curve,
 )
 
@@ -135,14 +136,17 @@ reference = build_subsystem_reference_return_curve(
     multiplier=50.0,
     ann_cost_sr=0.0,
 )
+reference, reference_turnover = append_reference_position_turnover(reference)
 
 reference.head(600)
 ```
 
 Set ``multiplier`` and ``fx_to_usd`` to the instrument's actual contract and
 currency values. The returned ``reference_net_return`` is a continuous,
-capital-normalized reference series for cross-instrument comparison. Use
-``build_executable_cash_pnl_curve`` after final portfolio weights are known.
+capital-normalized reference series for cross-instrument comparison, and
+``reference_turnover`` is measured from its target and smoothed average
+positions. Use ``build_executable_cash_pnl_curve`` after final portfolio
+weights are known.
 
 ## Plot the combined forecast, positions, and P&L
 
@@ -185,15 +189,16 @@ view.plot(start="2021-01-01")
 ```
 
 The linked hvPlot dashboard contains adjusted signal price, combined forecast,
-raw and smoothed position proxies, normalized position, cumulative
-subsystem-reference return, buffered whole contracts, and cumulative
-executable cash P&L. The underlying Polars frames remain available for
-detailed inspection:
+sized and smoothed reference positions, normalized reference position,
+cumulative subsystem-reference return, buffered whole contracts, and
+cumulative executable cash P&L. The underlying Polars frames and annualized
+reference turnover remain available for detailed inspection:
 
 ```python
 view.forecasts
 view.forecast_positions(start="2021-01-01")
 view.reference
+view.reference_turnover
 view.subsystem_reference_return_curves()
 view.cash
 view.cash_pnl_curves()

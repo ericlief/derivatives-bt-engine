@@ -7,6 +7,7 @@ import pytest
 
 from derivatives_bt_engine.calculations.pnl import (
     apply_forecast_position_buffer,
+    append_reference_position_turnover,
     build_executable_cash_pnl_curve,
     build_subsystem_reference_return_curve,
 )
@@ -30,6 +31,12 @@ def test_subsystem_reference_return_uses_equal_weight_risk_budget():
         max_weight_idm=1.0,
         multiplier=10.0,
         ann_cost_sr=0.10,
+        annualization_days=256,
+    )
+    result, turnover = append_reference_position_turnover(
+        result,
+        average_position_ewm_com=2,
+        turnover_rolling_days=2,
         annualization_days=256,
     )
 
@@ -66,6 +73,9 @@ def test_subsystem_reference_return_uses_equal_weight_risk_budget():
     assert result.get_column("reference_net_return")[1] == pytest.approx(
         0.0025 + costs[1]
     )
+    assert turnover is not None
+    assert "smoothed_reference_average_position" in result.columns
+    assert "reference_normalized_position" in result.columns
 
 
 def test_subsystem_reference_preserves_missing_historical_fx_as_invalid():
