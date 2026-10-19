@@ -349,6 +349,8 @@ def build_subsystem_reference_return_curve(
             pl.lit(-ann_cost_sr * annual_risk_fraction).alias(
                 "reference_annual_cost_return"
             ),
+        )
+        .with_columns(
             # Costs begin only once a position was actually held.  Calendar
             # elapsed time spreads an annual SR charge over irregular daily
             # rows without pretending every gap is one business day.

@@ -117,6 +117,33 @@ columns. ``result.weights``, ``result.fdm``, ``result.turnover``, and
 ``build_ewmac_components`` when only the wide component frame is needed, or
 ``build_ewmac_rule_component`` to inspect a single speed.
 
+For a direct inspection of the equal-weight subsystem-reference return curve,
+use the same explicit reference assumptions as the selection pipeline:
+
+```python
+from derivatives_bt_engine.calculations.pnl import (
+    build_subsystem_reference_return_curve,
+)
+
+reference = build_subsystem_reference_return_curve(
+    result.frame.with_columns(pl.lit(1.0).alias("fx_to_usd")),
+    capital=75_000,
+    target_vol=0.20,
+    reference_book_count=15,
+    reference_idm=2.5,
+    max_weight_idm=0.20,
+    multiplier=50.0,
+    ann_cost_sr=0.0,
+)
+
+reference.head(600)
+```
+
+Set ``multiplier`` and ``fx_to_usd`` to the instrument's actual contract and
+currency values. The returned ``reference_net_return`` is a continuous,
+capital-normalized reference series for cross-instrument comparison. Use
+``build_executable_cash_pnl_curve`` after final portfolio weights are known.
+
 ## Plot the combined forecast, positions, and P&L
 
 Wrap the combined result in the notebook view instead of rebuilding sizing and
