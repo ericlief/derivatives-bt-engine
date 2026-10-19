@@ -27,6 +27,40 @@ from derivatives_bt_engine.calculations.volatility import (
 
 PYSYSTEMTRADE_FORECAST_BUFFER_SIZE = 0.10
 
+_REFERENCE_ACCOUNTING_COLUMNS = (
+    "ref_book_count",
+    "ref_weight",
+    "ref_idm",
+    "max_weight_idm",
+    "ref_weight_idm",
+    "ref_annual_risk_budget_usd",
+    "ref_daily_risk_budget_usd",
+    "ref_return_capital_usd",
+    "daily_dollar_vol_per_contract",
+    "ref_average_position",
+    "ref_target_position",
+    "held_ref_position",
+    "ref_gross_pnl_usd",
+    "ref_cost_pnl_usd",
+    "ref_net_pnl_usd",
+    "ref_gross_return",
+    "ref_annual_cost_return",
+    "ref_cost_return",
+    "ref_net_return",
+    "ref_return_valid",
+)
+
+
+def _group_reference_accounting_columns(frame: pl.DataFrame) -> pl.DataFrame:
+    """Place reference sizing, dollar P&L, and returns in one audit block."""
+    accounting = [
+        column
+        for column in _REFERENCE_ACCOUNTING_COLUMNS
+        if column in frame.columns
+    ]
+    other = [column for column in frame.columns if column not in accounting]
+    return frame.select(*other, *accounting)
+
 
 def _round_contracts_half_up(expression: pl.Expr) -> pl.Expr:
     """Round signed continuous positions to whole contracts symmetrically."""
@@ -279,6 +313,7 @@ def apply_subsystem_reference_cost(
         "period_year_fraction",
         "ref_annual_risk_budget_usd",
         "ref_return_capital_usd",
+        "ref_gross_pnl_usd",
         "ref_gross_return",
     }
     missing = sorted(required.difference(frame.columns))
@@ -287,7 +322,7 @@ def apply_subsystem_reference_cost(
     if not math.isfinite(ann_cost_sr) or ann_cost_sr < 0:
         raise ValueError("ann_cost_sr must be finite and nonnegative")
 
-    return (
+    result = (
         frame.with_columns(
             (
                 -ann_cost_sr
@@ -311,9 +346,21 @@ def apply_subsystem_reference_cost(
         )
         .with_columns(
             (
-                pl.col("ref_gross_return")
-                + pl.col("ref_cost_return")
-            ).alias("ref_net_return")
+                pl.col("ref_cost_return")
+                * pl.col("ref_return_capital_usd")
+            ).alias("ref_cost_pnl_usd"),
+        )
+        .with_columns(
+            (
+                pl.col("ref_gross_pnl_usd")
+                + pl.col("ref_cost_pnl_usd")
+            ).alias("ref_net_pnl_usd"),
+        )
+        .with_columns(
+            (
+                pl.col("ref_net_pnl_usd")
+                / pl.col("ref_return_capital_usd")
+            ).alias("ref_net_return"),
         )
         .with_columns(
             (
@@ -322,6 +369,7 @@ def apply_subsystem_reference_cost(
             ).alias("ref_return_valid")
         )
     )
+    return _group_reference_accounting_columns(result)
 
 
 def build_subsystem_reference_return_curve(
@@ -385,8 +433,8 @@ def build_subsystem_reference_return_curve(
     polars.DataFrame
         The input plus reference weights and risk budgets, daily dollar
         volatility per contract, reference return capital, continuous average,
-        target, and held positions, gross/cost/net subsystem returns, and a
-        row-level validity flag.
+        target, and held positions, gross/cost/net hypothetical reference P&L
+        in USD, matching subsystem returns, and a row-level validity flag.
 
     Notes
     -----
@@ -513,6 +561,11 @@ def build_subsystem_reference_return_curve(
                 * pl.col("point_change")
                 * multiplier
                 * pl.col(fx_col)
+            ).alias("ref_gross_pnl_usd"),
+        )
+        .with_columns(
+            (
+                pl.col("ref_gross_pnl_usd")
                 / pl.col("ref_return_capital_usd")
             ).alias("ref_gross_return"),
         )

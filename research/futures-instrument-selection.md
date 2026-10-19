@@ -1457,8 +1457,12 @@ daily_dvol_i,t     = point_vol_i,t * multiplier_i * fx_i,t
 ref_avg_pos_i,t    = ref_daily_risk_usd / daily_dvol_i,t
 ref_targ_pos_i,t   = ref_avg_pos_i,t * combined_forecast_i,t
                      / target_abs_forecast
-ref_gross_ret_i,t  = held_ref_pos_i,t * point_change_i,t
-                     * multiplier_i * fx_i,t / ref_ret_cap_usd
+ref_gross_pnl_i,t  = held_ref_pos_i,t * point_change_i,t
+                     * multiplier_i * fx_i,t
+ref_gross_ret_i,t  = ref_gross_pnl_i,t / ref_ret_cap_usd
+ref_cost_pnl_i,t   = ref_cost_ret_i,t * ref_ret_cap_usd
+ref_net_pnl_i,t    = ref_gross_pnl_i,t + ref_cost_pnl_i,t
+ref_net_ret_i,t    = ref_net_pnl_i,t / ref_ret_cap_usd
 ```
 
 The account capital and reference allocation determine the continuous contract

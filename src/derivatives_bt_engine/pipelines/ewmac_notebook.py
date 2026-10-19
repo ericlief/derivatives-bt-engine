@@ -171,6 +171,27 @@ class EwmacNotebookView:
             .alias("cum_ref_net_return"),
         )
 
+    def subsystem_reference_accounting(
+        self,
+        *,
+        start: date | datetime | str | None = None,
+        end: date | datetime | str | None = None,
+    ) -> pl.DataFrame:
+        """Return grouped reference capital, P&L, and return diagnostics."""
+        frame = _date_slice(self.reference, start=start, end=end)
+        return frame.select(
+            "date",
+            "ref_annual_risk_budget_usd",
+            "ref_daily_risk_budget_usd",
+            "ref_return_capital_usd",
+            "ref_gross_pnl_usd",
+            "ref_cost_pnl_usd",
+            "ref_net_pnl_usd",
+            "ref_gross_return",
+            "ref_cost_return",
+            "ref_net_return",
+        )
+
     def cash_pnl_curves(
         self,
         *,
