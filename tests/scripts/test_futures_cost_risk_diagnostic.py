@@ -1681,7 +1681,7 @@ def test_affordability_ranks_are_within_asset_class():
     assert micro["affordability_cluster_role"] == "main"
     assert micro["counts_toward_main_instrument_minimum"]
     assert micro["equal_weight_dvol_budget"] == pytest.approx(20_000.0 / 15)
-    assert micro["equal_weight_average_contracts"] == pytest.approx(2.0 / 9.0)
+    assert micro["equal_weight_average_position"] == pytest.approx(2.0 / 9.0)
     assert not micro["equal_weight_meets_min_contracts"]
     assert not micro["main_instrument_affordable_for_scenario"]
     assert bond["affordability_cluster_role"] == "special"
@@ -1709,7 +1709,7 @@ def test_affordability_scenario_splits_risk_across_main_instruments():
     row = ranked.row(0, named=True)
 
     assert row["equal_weight_dvol_budget"] == pytest.approx(10_000.0)
-    assert row["equal_weight_average_contracts"] == pytest.approx(4.0)
+    assert row["equal_weight_average_position"] == pytest.approx(4.0)
     assert row["equal_weight_meets_min_contracts"]
     assert row["main_instrument_affordable_for_scenario"]
     assert row["min_capital_equal_weight"] == pytest.approx(100_000.0)

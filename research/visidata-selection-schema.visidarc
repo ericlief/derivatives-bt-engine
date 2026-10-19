@@ -129,7 +129,7 @@ _vd_set_type(
     ref_con_band_distance candidate_ref_max_position
     candidate_ref_con_band_distance low_con_weight band_con_weight high_con_weight
     score_denom marg_score scaled_contrib
-    avg_cons ann_trade_cons ann_roll_cons ann_con_load max_cons
+    avg_pos ann_trade_cons ann_roll_cons ann_con_load max_cons
     trade_cost_per_con roll_cost_per_con
     ann_trade_cost ann_roll_cost ann_cost
     trade_cost_usd_per_con roll_cost_usd_per_con
@@ -146,7 +146,7 @@ _vd_set_type(
     pnl_avg_position pnl_position held_pnl_position gross_pnl_pts
     gross_pnl_native gross_pnl_usd ann_cost_pts cost_pnl_pts
     cost_pnl_native cost_pnl_usd net_pnl_usd risk_budget_usd
-    target_cons buf_size buffer_size buffer_width_cons
+    targ_pos buf_size buffer_size buf_width_pos
     buffer_top_cons buffer_bot_cons exec_cons held_cons trade_cons
     realized_roll_cons interval_avg_abs_cons expected_roll_cons
     cash_gross_pnl_usd cash_trade_cost_usd

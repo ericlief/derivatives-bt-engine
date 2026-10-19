@@ -58,6 +58,9 @@ PUBLIC_REPORT_RENAMES = {
     "high_contract_penalty_sr": "high_con_penalty_sr",
     "contract_band_penalty_sr": "con_band_penalty_sr",
     "annual_contract_load": "ann_con_load",
+    "average_position": "avg_pos",
+    "target_position": "targ_pos",
+    "buffer_width_position": "buf_width_pos",
 }
 
 

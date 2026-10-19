@@ -39,8 +39,8 @@ def _round_contracts_half_up(expression: pl.Expr) -> pl.Expr:
 def apply_forecast_position_buffer(
     frame: pl.DataFrame,
     *,
-    optimal_position_col: str = "target_cons",
-    average_position_col: str = "avg_cons",
+    optimal_position_col: str = "target_position",
+    average_position_col: str = "average_position",
     buffer_size: float = PYSYSTEMTRADE_FORECAST_BUFFER_SIZE,
     trade_to_edge: bool = True,
 ) -> pl.DataFrame:
@@ -66,7 +66,7 @@ def apply_forecast_position_buffer(
     Returns
     -------
     polars.DataFrame
-        The input plus continuous ``buffer_width_cons``, effective rounded
+        The input plus continuous ``buffer_width_position``, effective rounded
         ``buffer_top_cons`` and ``buffer_bot_cons``, and stateful ``exec_cons``.
 
     Notes
@@ -88,14 +88,14 @@ def apply_forecast_position_buffer(
     buffered_input = frame.with_columns(
         (
             pl.col(average_position_col).abs() * buffer_size
-        ).alias("buffer_width_cons")
+        ).alias("buffer_width_position")
     ).with_columns(
         pl.col(optimal_position_col).forward_fill().alias("_buffer_optimal"),
         (
-            pl.col(optimal_position_col) + pl.col("buffer_width_cons")
+            pl.col(optimal_position_col) + pl.col("buffer_width_position")
         ).forward_fill().alias("_buffer_top"),
         (
-            pl.col(optimal_position_col) - pl.col("buffer_width_cons")
+            pl.col(optimal_position_col) - pl.col("buffer_width_position")
         ).forward_fill().alias("_buffer_bot"),
     ).with_columns(
         pl.col("_buffer_optimal")
@@ -392,7 +392,7 @@ def build_executable_cash_pnl_curve(
     -------
     polars.DataFrame
         The input (including ``close`` when supplied) plus daily annual dollar
-        volatility, continuous average and target contracts, buffer width and
+        volatility, continuous average and target positions, buffer width and
         boundaries, buffered executable and lagged contracts, ordinary trade
         quantities, realized and interval-average roll quantities, and
         gross/expected/realized cash P&L in USD.
@@ -486,19 +486,19 @@ def build_executable_cash_pnl_curve(
             )
             .then(risk_budget_usd / pl.col("ann_dvol"))
             .otherwise(None)
-            .alias("avg_cons")
+            .alias("average_position")
         )
         .with_columns(
             (
-                pl.col("avg_cons")
+                pl.col("average_position")
                 * pl.col("combined_forecast")
                 / target_abs_forecast
-            ).alias("target_cons")
+            ).alias("target_position")
         )
     )
-    # Buffer after final portfolio scaling. At this point avg_cons already
-    # contains instrument weight and IDM, exactly as pysystemtrade's portfolio
-    # forecast buffer multiplies its volatility scalar by those quantities.
+    # At this point average_position already contains instrument weight and IDM,
+    # exactly as pysystemtrade's portfolio forecast buffer multiplies its
+    # volatility scalar by those quantities.
     result = (
         apply_forecast_position_buffer(
             target_frame,

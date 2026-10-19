@@ -57,9 +57,11 @@ def test_notebook_view_builds_subsystem_and_executable_cash_paths():
     assert view.forecasts is result.frame
     assert "net_pnl_usd" in view.pnl.columns
     assert view.cash is not None
-    assert {"target_cons", "exec_cons", "cash_realized_net_pnl_usd"} <= set(
-        view.cash.columns
-    )
+    assert {
+        "target_position",
+        "exec_cons",
+        "cash_realized_net_pnl_usd",
+    } <= set(view.cash.columns)
     assert view.forecast_positions(start="2024-01-03").height == 3
 
     subsystem = view.subsystem_pnl_curves()

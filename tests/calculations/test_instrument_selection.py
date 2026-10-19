@@ -77,7 +77,7 @@ def test_scoring_reports_contract_volume_and_roll_cash_cost_without_ranking_it()
     )
 
     detail = score.details[0]
-    assert detail["avg_cons"] == pytest.approx(4.0)
+    assert detail["average_position"] == pytest.approx(4.0)
     assert detail["ann_trade_cons"] == pytest.approx(40.0)
     assert detail["ann_roll_cons"] == pytest.approx(16.0)
     assert detail["ann_trade_cost_usd"] == pytest.approx(40.0)

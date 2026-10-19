@@ -92,10 +92,12 @@ def test_executable_cash_pnl_separates_trade_and_policy_roll_costs():
     assert result.get_column("close").to_list() == frame.get_column(
         "close"
     ).to_list()
-    assert result.get_column("avg_cons").to_list() == pytest.approx([5.0] * 5)
-    assert result.get_column("buffer_width_cons").to_list() == pytest.approx(
-        [0.5] * 5
+    assert result.get_column("average_position").to_list() == pytest.approx(
+        [5.0] * 5
     )
+    assert result.get_column(
+        "buffer_width_position"
+    ).to_list() == pytest.approx([0.5] * 5)
     assert result.get_column("exec_cons").to_list() == [5, 10, 10, 6, 6]
     assert result.get_column("trade_cons").to_list() == pytest.approx(
         [5.0, 5.0, 0.0, 4.0, 0.0]
@@ -125,8 +127,8 @@ def test_executable_cash_pnl_separates_trade_and_policy_roll_costs():
 def test_forecast_buffer_matches_pysystemtrade_reference_fixture():
     """Match pysystemtrade apply_buffer with its default trade-to-edge policy."""
     frame = pl.DataFrame({
-        "target_cons": [5.0, 5.4, 6.1, 5.7, 4.2, -0.6, -1.6],
-        "avg_cons": [5.0] * 7,
+        "target_position": [5.0, 5.4, 6.1, 5.7, 4.2, -0.6, -1.6],
+        "average_position": [5.0] * 7,
     })
 
     result = apply_forecast_position_buffer(frame)
@@ -143,7 +145,7 @@ def test_forecast_buffer_matches_pysystemtrade_reference_fixture():
     assert result.get_column("exec_cons").to_list() == [5, 5, 6, 6, 5, 0, -1]
 
 
-def test_average_contract_scalar_is_pysystemtrade_vol_scalar_with_weight_and_idm():
+def test_average_position_is_pysystemtrade_vol_scalar_with_weight_and_idm():
     """Annual and daily formulations produce the same average contracts."""
     capital = 100_000.0
     target_vol = 0.20
@@ -160,13 +162,13 @@ def test_average_contract_scalar_is_pysystemtrade_vol_scalar_with_weight_and_idm
         * multiplier
         * fx_to_usd
     )
-    our_avg_cons = capital * target_vol * weight * idm / ann_dvol
+    our_avg_position = capital * target_vol * weight * idm / ann_dvol
 
     pst_daily_cash_vol_target = (
         capital * target_vol / annualization_days**0.5
     )
     pst_daily_dvol = point_vol * multiplier * fx_to_usd
     pst_vol_scalar = pst_daily_cash_vol_target / pst_daily_dvol
-    pst_portfolio_avg_cons = pst_vol_scalar * weight * idm
+    pst_portfolio_avg_position = pst_vol_scalar * weight * idm
 
-    assert our_avg_cons == pytest.approx(pst_portfolio_avg_cons)
+    assert our_avg_position == pytest.approx(pst_portfolio_avg_position)

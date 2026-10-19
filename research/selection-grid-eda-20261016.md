@@ -92,8 +92,8 @@ to six unique results:
 | 25% | unlimited | 28 | 15.7 | 6 | 9 | 70.2% | 44.0% | 58.3% | 35.4% |
 
 `Effective instruments` is `1 / sum(weight^2)`. `One-contract weight` is the
-sum of portfolio risk weights for rows with `max_cons == 1`. Average contracts
-use the forecast-10 `avg_cons`; maximum contracts use the rounded forecast-20
+sum of portfolio risk weights for rows with `max_cons == 1`. Average positions
+use the forecast-10 `avg_pos`; maximum contracts use the rounded forecast-20
 `max_cons`.
 
 The 15% target does not solve the small-account problem. It reduces intended
@@ -280,7 +280,7 @@ For each trial book, report:
 
 ```text
 one_contract_weight = sum(weight_i for max_cons_i == 1)
-low_average_weight = sum(weight_i for avg_cons_i < 1)
+low_average_weight = sum(weight_i for avg_pos_i < 1)
 target_band_weight = sum(weight_i for 3 <= max_cons_i <= 5)
 effective_instruments = 1 / sum(weight_i**2)
 ```

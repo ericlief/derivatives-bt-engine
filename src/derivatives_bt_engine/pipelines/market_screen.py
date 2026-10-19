@@ -1374,7 +1374,7 @@ def _attach_affordability_ranks(
         (
             equal_weight_dvol_budget
             / pl.col("annual_dollar_vol_per_contract")
-        ).alias("equal_weight_average_contracts"),
+        ).alias("equal_weight_average_position"),
         (
             equal_weight_dvol_budget
             / pl.col("annual_dollar_vol_per_contract")
@@ -3575,6 +3575,7 @@ PUBLIC_COLUMN_TOKEN_ABBREVIATIONS = {
     "point": "pt",
     "pooling": "pool",
     "points": "pts",
+    "position": "pos",
     "price": "px",
     "quality": "qual",
     "representative": "rep",
@@ -3923,7 +3924,7 @@ def _emit_report(
         "afford_min_main_instrs",
         "afford_main_cluster_count",
         "equal_wt_dvol_budget",
-        "equal_wt_avg_cons",
+        "equal_wt_avg_pos",
         "equal_wt_meets_min_cons",
         "main_instr_afford_for_scen",
         "min_cap_usd_full_wt_idm1",

@@ -482,8 +482,8 @@ repeat a `selected_*` prefix. Current price, FX, volatility, dollar risk,
 spread, cash cost, and SR cost come first. Point-in-time quote alternatives use
 `snap_*`; unused Carver inputs and fallbacks use `ref_*` at the diagnostic
 tail. Primary `notional` and `dvol` values are USD per row contract; native
-amounts retain `_native`. Common abbreviations include `con`, `instr`, `exec`,
-`elig`, `ann`, `dvol`, `sr`, `pct`, `avg`, `min`, `max`, and `n`.
+amounts retain `_native`. Common abbreviations include `con`, `pos`, `instr`,
+`exec`, `elig`, `ann`, `dvol`, `sr`, `pct`, `avg`, `min`, `max`, and `n`.
 
 For an IB-connected audit, the command defaults to `--market-data-type auto`:
 it tries real-time (`1`), then delayed (`3`), then delayed-frozen (`4`), and
@@ -758,21 +758,22 @@ buffer before producing whole contracts. Its position scale is algebraically
 the same despite the different presentation:
 
 ```text
-our avg_cons
+our avg_pos
   = capital × target_vol × weight × IDM / ann_dvol
 
 pysystemtrade portfolio average position
   = (daily_cash_vol_target / daily_dvol) × weight × IDM
   = ((capital × target_vol / sqrt(256))
      / (ann_dvol / sqrt(256))) × weight × IDM
-  = our avg_cons
+  = our avg_pos
 ```
 
-The default band on each date is `target_cons ± 0.10 × abs(avg_cons)`.
-Targets and boundaries use pandas-compatible whole-contract rounding. The
-previous executable position is retained while it remains within the band; a
-breach trades to the nearest edge by default. Use `--buffer-size` and
-`--no-buffer-trade-to-edge` for explicit sensitivities. This buffer affects
+The default band on each date is `targ_pos ± 0.10 × abs(avg_pos)`.
+The continuous target and band edges are rounded only when forming the
+whole-contract boundaries and executable position. The previous executable
+position is retained while it remains within the band; a breach trades to the
+nearest edge by default. Use `--buffer-size` and `--no-buffer-trade-to-edge`
+for explicit sensitivities. This buffer affects
 the executable cash path only: the AFTS score continues to use the unbuffered
 `system.accounts.subsystem_turnover()` convention.
 

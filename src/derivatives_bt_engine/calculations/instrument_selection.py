@@ -836,7 +836,7 @@ class GreedyInstrumentSelector:
                 "ann_trade_cost_sr": candidate.annual_trade_cost_sr,
                 "ann_roll_cost_sr": candidate.annual_roll_cost_sr,
                 "ann_cost_sr": candidate.annual_cost_sr,
-                "avg_cons": avg_position,
+                "average_position": avg_position,
                 "ann_trade_cons": ann_trade_cons,
                 "ann_roll_cons": ann_roll_cons,
                 "annual_contract_load": annual_contract_load,
@@ -1254,7 +1254,7 @@ class GreedyInstrumentSelector:
                     "marginal_contribution_score"
                 ],
                 "scaled_contribution": detail["scaled_contribution"],
-                "avg_cons": detail["avg_cons"],
+                "average_position": detail["average_position"],
                 "ann_trade_cons": detail["ann_trade_cons"],
                 "ann_roll_cons": detail["ann_roll_cons"],
                 "annual_contract_load": detail["annual_contract_load"],

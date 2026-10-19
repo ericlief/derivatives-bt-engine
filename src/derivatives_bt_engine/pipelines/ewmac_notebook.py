@@ -245,7 +245,7 @@ class EwmacNotebookView:
             cash = _date_slice(self.cash, start=start, end=end)
             contract_plot = cash.hvplot.line(
                 x="date",
-                y=["target_cons", "exec_cons", "held_cons"],
+                y=["target_position", "exec_cons", "held_cons"],
                 title="Executable contract positions",
                 ylabel="Contracts",
                 width=width,

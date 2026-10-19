@@ -100,7 +100,7 @@ DEFAULT_VIEW_COLUMNS = (
     "afford_min_main_instrs",
     "afford_main_cluster_count",
     "equal_wt_dvol_budget",
-    "equal_wt_avg_cons",
+    "equal_wt_avg_pos",
     "equal_wt_meets_min_cons",
     "main_instr_afford_for_scen",
     "min_cap_usd_full_wt_idm1",

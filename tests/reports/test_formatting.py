@@ -58,15 +58,24 @@ def test_public_report_renames_cash_cost_columns_at_boundary():
 
 
 def test_public_report_renames_buffer_parameters_at_boundary():
-    """Executable buffer parameters use centralized compact report tokens."""
+    """Continuous positions and buffer parameters use compact report tokens."""
     report = pl.DataFrame({
+        "average_position": [2.5],
+        "target_position": [4.0],
+        "buffer_width_position": [0.25],
         "buffer_size": [0.10],
         "buffer_trade_to_edge": [True],
     })
 
     public = rename_public_report_columns(report)
 
-    assert public.columns == ["buf_size", "buf_trade_to_edge"]
+    assert public.columns == [
+        "avg_pos",
+        "targ_pos",
+        "buf_width_pos",
+        "buf_size",
+        "buf_trade_to_edge",
+    ]
 
 
 def test_public_report_renames_grid_parameters_and_rounds_margin_money():

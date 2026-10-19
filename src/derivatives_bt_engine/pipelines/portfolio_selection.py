@@ -947,11 +947,11 @@ def _run_complete_selection(
                 "roll_interval",
                 "risk_budget_usd",
                 "ann_dvol",
-                "avg_cons",
-                "target_cons",
+                "average_position",
+                "target_position",
                 "buffer_size",
                 "buffer_trade_to_edge",
-                "buffer_width_cons",
+                "buffer_width_position",
                 "buffer_top_cons",
                 "buffer_bot_cons",
                 "exec_cons",
@@ -1127,7 +1127,7 @@ def _run_complete_selection(
             "score_denom",
             "marginal_contribution_score",
             "scaled_contribution",
-            "avg_cons",
+            "average_position",
             "ann_trade_cons",
             "ann_roll_cons",
             "annual_contract_load",
@@ -1163,7 +1163,10 @@ def _run_complete_selection(
     public_selection_passes.write_parquet(selection_passes_path)
     public_selection.write_parquet(selection_path)
     net_pnl_wide.write_parquet(net_pnl_path)
-    cash_pnl_long.write_parquet(cash_pnl_path)
+    public_cash_pnl = round_public_report(
+        rename_public_report_columns(cash_pnl_long)
+    )
+    public_cash_pnl.write_parquet(cash_pnl_path)
     print(
         f"Portfolio selection accepted {len(selection.selected)}/{len(candidate_list)} "
         f"forecast-eligible instruments"
