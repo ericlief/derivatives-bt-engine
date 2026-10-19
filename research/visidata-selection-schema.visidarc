@@ -75,7 +75,7 @@ _vd_set_type(
     instr_has_elig_ewmac_rule include_default_pool
     forecast_elig subsystem_elig forecast_valid fx_valid pnl_valid
     reference_return_valid ref_ret_valid
-    cash_fx_valid cash_pnl_valid is_roll roll_event feasible accepted
+    cash_fx_valid cash_pnl_valid ret_valid is_roll roll_event feasible accepted
     tie_eligible tie_break_applied
     roll_cost_in_score buf_trade_to_edge snap_use_rth
     main_instr_afford_for_scen counts_toward_main_instr_min
@@ -88,7 +88,7 @@ _vd_set_type(
 _vd_set_type(
     """
     rank selection_step iteration max_instr_per_cluster reference_book_count
-    ref_book_n tie_ref_book_n
+    ref_book_n tie_ref_book_n book_n_instr pnl_valid_n_instr
     eligible_ewmac_rule_count volume_n ann_days liq_days
     history_obs forecast_valid_obs forecast_invalid_obs
     forecast_post_warmup_invalid_obs combined_nulls combined_nonfinite
@@ -169,6 +169,11 @@ _vd_set_type(
     cash_gross_pnl_usd cash_trade_cost_usd
     cash_realized_roll_cost_usd cash_expected_roll_cost_usd
     cash_realized_net_pnl_usd cash_expected_net_pnl_usd
+    cum_cash_gross_pnl_usd cum_cash_realized_net_pnl_usd
+    cum_cash_expected_net_pnl_usd
+    gross_equity_usd realized_equity_usd expected_equity_usd
+    gross_ret realized_net_ret expected_net_ret
+    cum_gross_ret cum_realized_net_ret cum_expected_net_ret
     ref_fast_point_vol ref_slow_point_vol ref_mixed_point_vol ref_price
     ref_cur_price_ratio ref_slow_return_vol ref_spread_points
     ref_slow_history_years ref_slow_vol_weight ref_zero_return_fraction

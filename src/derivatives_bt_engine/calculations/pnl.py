@@ -1,4 +1,4 @@
-"""Build auditable subsystem-reference returns and executable cash P&L.
+"""Build reference returns, executable cash P&L, and portfolio audit curves.
 
 Forecast construction owns the combined forecast. This module owns the next
 calculation boundary: size and lag positions, measure turnover from those
@@ -8,7 +8,9 @@ calendar time. The subsystem-reference path uses a fixed equal-weight book
 assumption to produce comparable instrument returns for correlation estimation.
 The separate selected-book cash path applies final weights and IDM, buffers and
 rounds to executable contracts, and charges ordinary trades and contract rolls
-separately.
+separately. Its long instrument output can then be aggregated into a fixed
+initial-capital portfolio return and equity curve without changing the
+positions that produced the cash P&L.
 """
 
 from __future__ import annotations
@@ -796,3 +798,141 @@ def build_executable_cash_pnl_curve(
         )
     )
     return result
+
+
+def build_fixed_capital_portfolio_curve(
+    cash_pnl_long: pl.DataFrame,
+    *,
+    initial_capital_usd: float,
+) -> pl.DataFrame:
+    """Aggregate selected-instrument cash P&L into one portfolio curve.
+
+    Parameters
+    ----------
+    cash_pnl_long
+        Long selected-book frame with one row per instrument and date. It must
+        contain ``symbol``, ``date``, ``cash_pnl_valid``, and the gross, cost,
+        realized-net, and expected-net USD columns produced by
+        :func:`build_executable_cash_pnl_curve`.
+    initial_capital_usd
+        Positive USD account capital used as the common denominator for every
+        instrument and date.
+
+    Returns
+    -------
+    polars.DataFrame
+        One row per date with summed daily USD cash flows, fixed-capital daily
+        and cumulative returns, gross and net equity paths, and instrument
+        coverage counts.
+
+    Notes
+    -----
+    This is a fixed-capital audit curve. The executable positions were sized
+    from ``initial_capital_usd`` before their cash P&L was calculated, so the
+    curve does not resize positions as equity changes. Null or non-finite cash
+    values contribute zero to the daily sum; ``portfolio_valid_pnl_instruments``
+    records how many instrument rows supplied a valid P&L observation.
+    """
+    if not math.isfinite(initial_capital_usd) or initial_capital_usd <= 0:
+        raise ValueError("initial_capital_usd must be finite and positive")
+
+    cash_columns = (
+        "cash_gross_pnl_usd",
+        "cash_trade_cost_usd",
+        "cash_realized_roll_cost_usd",
+        "cash_expected_roll_cost_usd",
+        "cash_realized_net_pnl_usd",
+        "cash_expected_net_pnl_usd",
+    )
+    required = {"date", "symbol", "cash_pnl_valid", *cash_columns}
+    missing = sorted(required.difference(cash_pnl_long.columns))
+    if missing:
+        raise ValueError(f"portfolio curve input missing columns: {missing}")
+
+    def finite_or_zero(column: str) -> pl.Expr:
+        """Return a finite cash value or zero for portfolio aggregation."""
+        return (
+            pl.when(pl.col(column).is_not_null() & pl.col(column).is_finite())
+            .then(pl.col(column))
+            .otherwise(0.0)
+        )
+
+    daily = (
+        cash_pnl_long.group_by("date")
+        .agg(
+            pl.col("symbol")
+            .n_unique()
+            .cast(pl.Int64)
+            .alias("portfolio_instrument_count"),
+            pl.col("cash_pnl_valid")
+            .fill_null(False)
+            .cast(pl.Int64)
+            .sum()
+            .alias("portfolio_valid_pnl_instruments"),
+            *[
+                finite_or_zero(column)
+                .sum()
+                .alias(f"portfolio_{column}")
+                for column in cash_columns
+            ],
+        )
+        .sort("date")
+        .with_columns(
+            pl.lit(initial_capital_usd).alias("initial_capital_usd"),
+            (pl.col("portfolio_valid_pnl_instruments") > 0).alias(
+                "portfolio_return_valid"
+            ),
+        )
+        .with_columns(
+            (
+                pl.col("portfolio_cash_gross_pnl_usd")
+                / initial_capital_usd
+            ).alias("portfolio_gross_return"),
+            (
+                pl.col("portfolio_cash_realized_net_pnl_usd")
+                / initial_capital_usd
+            ).alias("portfolio_realized_net_return"),
+            (
+                pl.col("portfolio_cash_expected_net_pnl_usd")
+                / initial_capital_usd
+            ).alias("portfolio_expected_net_return"),
+        )
+        .with_columns(
+            pl.col("portfolio_cash_gross_pnl_usd")
+            .cum_sum()
+            .alias("cumulative_portfolio_cash_gross_pnl_usd"),
+            pl.col("portfolio_cash_realized_net_pnl_usd")
+            .cum_sum()
+            .alias("cumulative_portfolio_cash_realized_net_pnl_usd"),
+            pl.col("portfolio_cash_expected_net_pnl_usd")
+            .cum_sum()
+            .alias("cumulative_portfolio_cash_expected_net_pnl_usd"),
+        )
+        .with_columns(
+            (
+                pl.col("cumulative_portfolio_cash_gross_pnl_usd")
+                / initial_capital_usd
+            ).alias("cumulative_portfolio_gross_return"),
+            (
+                pl.col("cumulative_portfolio_cash_realized_net_pnl_usd")
+                / initial_capital_usd
+            ).alias("cumulative_portfolio_realized_net_return"),
+            (
+                pl.col("cumulative_portfolio_cash_expected_net_pnl_usd")
+                / initial_capital_usd
+            ).alias("cumulative_portfolio_expected_net_return"),
+            (
+                initial_capital_usd
+                + pl.col("cumulative_portfolio_cash_gross_pnl_usd")
+            ).alias("portfolio_gross_equity_usd"),
+            (
+                initial_capital_usd
+                + pl.col("cumulative_portfolio_cash_realized_net_pnl_usd")
+            ).alias("portfolio_realized_equity_usd"),
+            (
+                initial_capital_usd
+                + pl.col("cumulative_portfolio_cash_expected_net_pnl_usd")
+            ).alias("portfolio_expected_equity_usd"),
+        )
+    )
+    return daily

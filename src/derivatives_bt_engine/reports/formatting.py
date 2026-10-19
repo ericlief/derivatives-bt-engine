@@ -80,6 +80,40 @@ PUBLIC_REPORT_RENAMES = {
     "average_position": "avg_pos",
     "target_position": "targ_pos",
     "buffer_width_position": "buf_width_pos",
+    "initial_capital_usd": "init_cap_usd",
+    "portfolio_instrument_count": "book_n_instr",
+    "portfolio_valid_pnl_instruments": "pnl_valid_n_instr",
+    "portfolio_return_valid": "ret_valid",
+    "portfolio_cash_gross_pnl_usd": "cash_gross_pnl_usd",
+    "portfolio_cash_trade_cost_usd": "cash_trade_cost_usd",
+    "portfolio_cash_realized_roll_cost_usd": (
+        "cash_realized_roll_cost_usd"
+    ),
+    "portfolio_cash_expected_roll_cost_usd": (
+        "cash_expected_roll_cost_usd"
+    ),
+    "portfolio_cash_realized_net_pnl_usd": (
+        "cash_realized_net_pnl_usd"
+    ),
+    "portfolio_cash_expected_net_pnl_usd": (
+        "cash_expected_net_pnl_usd"
+    ),
+    "portfolio_gross_return": "gross_ret",
+    "portfolio_realized_net_return": "realized_net_ret",
+    "portfolio_expected_net_return": "expected_net_ret",
+    "cumulative_portfolio_cash_gross_pnl_usd": "cum_cash_gross_pnl_usd",
+    "cumulative_portfolio_cash_realized_net_pnl_usd": (
+        "cum_cash_realized_net_pnl_usd"
+    ),
+    "cumulative_portfolio_cash_expected_net_pnl_usd": (
+        "cum_cash_expected_net_pnl_usd"
+    ),
+    "cumulative_portfolio_gross_return": "cum_gross_ret",
+    "cumulative_portfolio_realized_net_return": "cum_realized_net_ret",
+    "cumulative_portfolio_expected_net_return": "cum_expected_net_ret",
+    "portfolio_gross_equity_usd": "gross_equity_usd",
+    "portfolio_realized_equity_usd": "realized_equity_usd",
+    "portfolio_expected_equity_usd": "expected_equity_usd",
 }
 
 
@@ -184,6 +218,24 @@ TWO_DECIMAL_MONEY_COLUMNS = {
     "cash_expected_roll_cost_usd",
     "cash_realized_net_pnl_usd",
     "cash_expected_net_pnl_usd",
+    "portfolio_cash_gross_pnl_usd",
+    "portfolio_cash_trade_cost_usd",
+    "portfolio_cash_realized_roll_cost_usd",
+    "portfolio_cash_expected_roll_cost_usd",
+    "portfolio_cash_realized_net_pnl_usd",
+    "portfolio_cash_expected_net_pnl_usd",
+    "cumulative_portfolio_cash_gross_pnl_usd",
+    "cumulative_portfolio_cash_realized_net_pnl_usd",
+    "cumulative_portfolio_cash_expected_net_pnl_usd",
+    "cum_cash_gross_pnl_usd",
+    "cum_cash_realized_net_pnl_usd",
+    "cum_cash_expected_net_pnl_usd",
+    "portfolio_gross_equity_usd",
+    "portfolio_realized_equity_usd",
+    "portfolio_expected_equity_usd",
+    "gross_equity_usd",
+    "realized_equity_usd",
+    "expected_equity_usd",
 }
 
 
@@ -234,6 +286,18 @@ SIX_DECIMAL_RATE_COLUMNS = {
     "ref_ann_cost_ret",
     "ref_cost_ret",
     "ref_net_ret",
+    "portfolio_gross_return",
+    "portfolio_realized_net_return",
+    "portfolio_expected_net_return",
+    "cumulative_portfolio_gross_return",
+    "cumulative_portfolio_realized_net_return",
+    "cumulative_portfolio_expected_net_return",
+    "gross_ret",
+    "realized_net_ret",
+    "expected_net_ret",
+    "cum_gross_ret",
+    "cum_realized_net_ret",
+    "cum_expected_net_ret",
 }
 
 

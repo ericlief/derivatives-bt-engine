@@ -998,6 +998,11 @@ baseline by default. The command writes:
   additive-Panama adjusted level used by the signal history, retained beside
   the roll-neutral `point_change` for audit; it is not the raw executable
   dated-contract mark;
+- `multi_speed_ewmac_selection_portfolio_curve_<timestamp>.parquet`, the daily
+  selected-book cash flows summed across instruments, with one common initial
+  capital denominator for gross, realized-net, and expected-net daily and
+  cumulative returns and equity. This is a fixed-capital audit curve: its
+  executable positions are not resized as the reported equity changes;
 - `multi_speed_ewmac_selection_trials_<timestamp>.parquet`, one row per greedy trial; and
 - `multi_speed_ewmac_selection_trial_allocations_<timestamp>.parquet`, one row per member
   of every hypothetical trial book, including its economic `cluster_path`,

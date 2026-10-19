@@ -24,6 +24,10 @@ dataframe collections:
     forecast buffer, rounds to contracts, and separates ordinary trade cost
     from realized and interval-average policy-roll cost. The generated Panama
     ``close`` is retained beside its roll-neutral ``point_change`` for audit.
+``portfolio_curve``
+    One fixed initial-capital row per date. It sums the selected instruments'
+    executable cash P&L and reports daily and cumulative returns plus gross,
+    realized-net, and expected-net equity paths.
 
 The command persists each intermediate form so forecast gaps, turnover, and
 greedy selection decisions remain inspectable after a run.
@@ -86,6 +90,7 @@ from derivatives_bt_engine.calculations.pnl import (
     append_reference_position_turnover,
     apply_subsystem_reference_cost,
     build_executable_cash_pnl_curve,
+    build_fixed_capital_portfolio_curve,
     build_subsystem_reference_return_curve,
 )
 from derivatives_bt_engine.logging_config import setup_logger
@@ -1013,6 +1018,10 @@ def _run_complete_selection(
             )
         )
     cash_pnl_long = pl.concat(cash_output_frames, how="diagonal_relaxed")
+    portfolio_curve = build_fixed_capital_portfolio_curve(
+        cash_pnl_long,
+        initial_capital_usd=float(run_config["init_cap_usd"]),
+    )
     stamp = generated_at.astimezone(REPORT_TIMEZONE).strftime("%Y%m%d_%H%M%S")
     audit_path = output_dir / f"multi_speed_ewmac_selection_forecast_audit_{stamp}.parquet"
     forecasts_path = output_dir / f"multi_speed_ewmac_selection_forecasts_{stamp}.parquet"
@@ -1030,6 +1039,10 @@ def _run_complete_selection(
     )
     cash_pnl_path = (
         output_dir / f"multi_speed_ewmac_selection_cash_pnl_{stamp}.parquet"
+    )
+    portfolio_curve_path = (
+        output_dir
+        / f"multi_speed_ewmac_selection_portfolio_curve_{stamp}.parquet"
     )
     # Round only persisted public report copies. Full-precision daily analytical
     # frames remain available in Parquet and calculations above are untouched.
@@ -1209,6 +1222,10 @@ def _run_complete_selection(
         rename_public_report_columns(cash_pnl_long)
     )
     public_cash_pnl.write_parquet(cash_pnl_path)
+    public_portfolio_curve = round_public_report(
+        rename_public_report_columns(portfolio_curve)
+    )
+    public_portfolio_curve.write_parquet(portfolio_curve_path)
     print(
         f"Portfolio selection accepted {len(selection.selected)}/{len(candidate_list)} "
         f"forecast-eligible instruments"
@@ -1217,6 +1234,7 @@ def _run_complete_selection(
     print(f"Saved daily forecasts {forecasts_path}")
     print(f"Saved synchronized subsystem reference returns {reference_return_path}")
     print(f"Saved executable cash P&L {cash_pnl_path}")
+    print(f"Saved fixed-capital portfolio curve {portfolio_curve_path}")
     print(f"Saved trials {trials_path}")
     print(f"Saved trial allocations {trial_allocations_path}")
     print(f"Saved accepted selection passes {selection_passes_path}")
