@@ -58,7 +58,7 @@ def test_notebook_view_builds_reference_return_and_cash_paths():
     )
 
     assert view.forecasts is result.frame
-    assert "ref_net_return" in view.reference.columns
+    assert "ref_net_pct" in view.reference.columns
     assert view.reference_turnover is not None
     assert view.cash is not None
     assert {
@@ -68,14 +68,14 @@ def test_notebook_view_builds_reference_return_and_cash_paths():
     } <= set(view.cash.columns)
     assert view.forecast_positions(start="2024-01-03").height == 3
 
-    reference = view.subsystem_reference_return_curves()
+    reference = view.subsystem_reference_pct_curves()
     expected_reference_net = (
-        view.reference.get_column("ref_net_return")
+        view.reference.get_column("ref_net_pct")
         .fill_null(0.0)
         .sum()
     )
     assert reference.get_column(
-        "cum_ref_net_return"
+        "cum_ref_net_pct"
     )[-1] == pytest.approx(
         expected_reference_net
     )

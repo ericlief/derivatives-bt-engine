@@ -1,8 +1,8 @@
-"""Notebook diagnostics for EWMAC reference returns and portfolio cash P&L.
+"""Notebook diagnostics for EWMAC reference percentages and portfolio cash P&L.
 
 This module is the interactive inspection boundary after forecast combination.
 It accepts the same :class:`CombinedForecastResult` used by Phase 2, adds the
-equal-weight subsystem-reference return and optional executable cash P&L
+equal-weight subsystem-reference percentage and optional executable cash P&L
 paths, and exposes small Polars tables plus a lazy hvPlot dashboard. It does
 not reimplement forecast, sizing, buffering, or cost calculations; those
 remain owned by the calculation modules used by production selection.
@@ -71,8 +71,8 @@ class SubsystemReferenceSettings:
     auditable continuous position. ``ref_book_count`` assigns every
     candidate the same structural weight, while ``ref_idm`` and
     ``max_weight_idm`` apply the same fixed sizing convention as the selection
-    tie rule. The resulting P&L is divided by the allocation capital implied by
-    that risk budget and exposed as a normalized subsystem-reference return.
+    tie rule. The resulting USD series is divided by ``ref_budget_usd`` and
+    exposed as a normalized subsystem-reference percentage series.
     """
 
     capital: float
@@ -147,28 +147,28 @@ class EwmacNotebookView:
         ]
         return frame.select(available_columns)
 
-    def subsystem_reference_return_curves(
+    def subsystem_reference_pct_curves(
         self,
         *,
         start: date | datetime | str | None = None,
         end: date | datetime | str | None = None,
     ) -> pl.DataFrame:
-        """Return cumulative gross, cost, and net reference returns."""
+        """Return cumulative gross, cost, and net reference percentages."""
         frame = _date_slice(self.reference, start=start, end=end)
         return frame.select(
             "date",
-            pl.col("ref_gross_return")
+            pl.col("ref_gross_pct")
             .fill_null(0.0)
             .cum_sum()
-            .alias("cum_ref_gross_return"),
-            pl.col("ref_cost_return")
+            .alias("cum_ref_gross_pct"),
+            pl.col("ref_cost_pct")
             .fill_null(0.0)
             .cum_sum()
-            .alias("cum_ref_cost_return"),
-            pl.col("ref_net_return")
+            .alias("cum_ref_cost_pct"),
+            pl.col("ref_net_pct")
             .fill_null(0.0)
             .cum_sum()
-            .alias("cum_ref_net_return"),
+            .alias("cum_ref_net_pct"),
         )
 
     def subsystem_reference_accounting(
@@ -177,19 +177,20 @@ class EwmacNotebookView:
         start: date | datetime | str | None = None,
         end: date | datetime | str | None = None,
     ) -> pl.DataFrame:
-        """Return grouped reference capital, P&L, and return diagnostics."""
+        """Return grouped reference budget, USD, and percentage diagnostics."""
         frame = _date_slice(self.reference, start=start, end=end)
         return frame.select(
             "date",
-            "ref_annual_risk_budget_usd",
-            "ref_daily_risk_budget_usd",
-            "ref_return_capital_usd",
-            "ref_gross_pnl_usd",
-            "ref_cost_pnl_usd",
-            "ref_net_pnl_usd",
-            "ref_gross_return",
-            "ref_cost_return",
-            "ref_net_return",
+            "ref_budget_usd",
+            "ref_ann_risk_usd",
+            "ref_daily_risk_usd",
+            "ref_gross_usd",
+            "ref_cost_usd",
+            "ref_net_usd",
+            "ref_gross_pct",
+            "ref_ann_cost_pct",
+            "ref_cost_pct",
+            "ref_net_pct",
         )
 
     def cash_pnl_curves(
@@ -263,8 +264,9 @@ class EwmacNotebookView:
         """Return a vertically linked hvPlot dashboard for notebook display.
 
         Panels show the adjusted signal price, combined forecast, sized
-        reference positions, normalized position, cumulative reference return,
-        and—when configured—whole-contract positions and cumulative cash P&L.
+        reference positions, normalized position, cumulative reference
+        percentage, and—when configured—whole-contract positions and
+        cumulative cash P&L.
         hvPlot is imported lazily so non-notebook pipelines do not initialize a
         plotting backend.
         """
@@ -312,14 +314,14 @@ class EwmacNotebookView:
             height=height,
         ) * hv.HLine(0.0).opts(color="black", line_width=1)
 
-        reference_curves = self.subsystem_reference_return_curves(
+        reference_curves = self.subsystem_reference_pct_curves(
             start=start, end=end
         )
         reference_plot = reference_curves.hvplot.line(
             x="date",
-            y=["cum_ref_gross_return", "cum_ref_net_return"],
-            title="Cumulative equal-weight subsystem-reference return",
-            ylabel="Return",
+            y=["cum_ref_gross_pct", "cum_ref_net_pct"],
+            title="Cumulative equal-weight subsystem-reference percentage",
+            ylabel="Percent",
             width=width,
             height=height,
         )

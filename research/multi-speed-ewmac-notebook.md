@@ -117,7 +117,7 @@ Reference sizing and turnover are added after multiplier and FX are known. Use
 ``build_ewmac_components`` when only the wide component frame is needed, or
 ``build_ewmac_rule_component`` to inspect a single speed.
 
-For a direct inspection of the equal-weight subsystem-reference return curve,
+For a direct inspection of the equal-weight subsystem-reference percentage curve,
 use the same explicit reference assumptions as the selection pipeline:
 
 ```python
@@ -142,12 +142,12 @@ reference.head(600)
 ```
 
 Set ``multiplier`` and ``fx_to_usd`` to the instrument's actual contract and
-currency values. The returned ``reference_net_return`` is a continuous,
-allocation-capital-normalized subsystem series for cross-instrument comparison,
-and ``reference_turnover`` is measured from its target and smoothed average
-positions. ``reference_return_capital_usd`` records the denominator implied by
-the risk budget. Use ``build_executable_cash_pnl_curve`` after final portfolio
-weights are known.
+currency values. The returned ``ref_net_pct`` is a continuous, budget-normalized
+subsystem percentage series for cross-instrument comparison, and
+``reference_turnover`` is measured from its target and smoothed average
+positions. ``ref_budget_usd`` records the denominator implied by the risk
+budget. Use ``build_executable_cash_pnl_curve`` after final portfolio weights
+are known.
 
 ## Plot the combined forecast, positions, and P&L
 
@@ -191,7 +191,7 @@ view.plot(start="2021-01-01")
 
 The linked hvPlot dashboard contains adjusted signal price, combined forecast,
 sized and smoothed reference positions, normalized reference position,
-cumulative subsystem-reference return, buffered whole contracts, and
+cumulative subsystem-reference percentage, buffered whole contracts, and
 cumulative executable cash P&L. The underlying Polars frames and annualized
 reference turnover remain available for detailed inspection:
 
@@ -201,7 +201,7 @@ view.forecast_positions(start="2021-01-01")
 view.reference
 view.reference_turnover
 view.subsystem_reference_accounting()
-view.subsystem_reference_return_curves()
+view.subsystem_reference_pct_curves()
 view.cash
 view.cash_pnl_curves()
 view.cash_return_contribution_curves()
@@ -209,11 +209,11 @@ view.cash_return_contribution_curves()
 
 `view.reference` assigns the instrument `1 / reference_book_count`, caps the
 weight-times-IDM product, sizes continuous positions from daily dollar
-volatility, and divides the resulting P&L by the allocation capital implied by
-the reference risk budget. It is the normalized candidate subsystem return
-used for correlations. `view.subsystem_reference_accounting()` groups that
-allocation capital and its annual and daily risk budgets with gross, cost, and
-net reference P&L and the matching returns. `view.cash` uses final portfolio
+volatility, and divides the resulting USD values by the fixed reference budget.
+It is the normalized candidate subsystem percentage series used for
+correlations. `view.subsystem_reference_accounting()` groups that budget and
+its annual and daily risk budgets with gross, cost, and net USD values and the
+matching percentages. `view.cash` uses final portfolio
 weight and IDM, buffering, whole contracts, and per-contract costs, so it is
 the executable account-scale diagnostic.
 `view.cash_return_contribution_curves()` divides its gross, realized-net, and

@@ -478,7 +478,7 @@ def _subsystem_reference_correlation(
 
     ``subsystem_reference_frames`` is keyed by executable symbol, unlike
     ``frames_by_history`` above. The function outer-joins each symbol's
-    ``ref_net_return`` on date to form a sparse return panel. The
+    ``ref_net_pct`` on date to form a sparse percentage-return panel. The
     estimator uses each pair's contemporaneous observations, so different
     history starts and exchange holidays do not erase the entire universe.
 
@@ -489,7 +489,7 @@ def _subsystem_reference_correlation(
     for symbol in symbols:
         returns = (
             subsystem_reference_frames[symbol]
-            .select("date", pl.col("ref_net_return").alias(symbol))
+            .select("date", pl.col("ref_net_pct").alias(symbol))
             .drop_nulls()
         )
         # Preserve the union of dates here. Requiring a date shared by every

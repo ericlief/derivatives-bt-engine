@@ -79,16 +79,16 @@ def test_public_report_renames_buffer_parameters_at_boundary():
 
 
 def test_public_report_renames_subsystem_reference_columns():
-    """Reference sizing and returns remain distinct from portfolio cash P&L."""
+    """Reference sizing and percentages remain distinct from portfolio cash."""
     report = pl.DataFrame({
         "ref_book_count": [15],
         "ref_idm": [2.5],
-        "ref_annual_risk_budget_usd": [2_500.126],
-        "ref_return_capital_usd": [12_500.126],
+        "ref_ann_risk_usd": [2_500.126],
+        "ref_budget_usd": [12_500.126],
         "ref_average_position": [3.45678],
         "ref_target_position": [4.56789],
         "held_ref_position": [4.0],
-        "ref_net_return": [0.00123449],
+        "ref_net_pct": [0.123449],
         "ref_return_valid": [True],
     })
 
@@ -98,11 +98,11 @@ def test_public_report_renames_subsystem_reference_columns():
         "ref_book_n",
         "ref_idm",
         "ref_ann_risk_usd",
-        "ref_ret_cap_usd",
+        "ref_budget_usd",
         "ref_avg_pos",
         "ref_targ_pos",
         "held_ref_pos",
-        "ref_net_ret",
+        "ref_net_pct",
         "ref_ret_valid",
     ]
     assert public.row(0)[:8] == pytest.approx(
@@ -114,7 +114,7 @@ def test_public_report_renames_subsystem_reference_columns():
             3.4568,
             4.5679,
             4.0,
-            0.001234,
+            0.123449,
         )
     )
     assert public["ref_ret_valid"][0]

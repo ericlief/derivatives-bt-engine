@@ -157,13 +157,11 @@ _vd_set_type(
     reference_weight reference_idm reference_weight_idm
     reference_annual_risk_budget_usd reference_daily_risk_budget_usd
     reference_return_capital_usd ref_ann_risk_usd ref_daily_risk_usd
-    ref_ret_cap_usd daily_dollar_vol_per_contract
+    ref_budget_usd daily_dollar_vol_per_contract
     reference_average_position reference_target_position
     held_reference_position ref_avg_pos ref_targ_pos held_ref_pos
-    reference_gross_return reference_annual_cost_return
-    reference_cost_return reference_net_return
-    ref_gross_pnl_usd ref_cost_pnl_usd ref_net_pnl_usd
-    ref_gross_ret ref_ann_cost_ret ref_cost_ret ref_net_ret
+    ref_gross_usd ref_cost_usd ref_net_usd
+    ref_gross_pct ref_ann_cost_pct ref_cost_pct ref_net_pct
     targ_pos buf_size buffer_size buf_width_pos
     buffer_top_cons buffer_bot_cons exec_cons held_cons trade_cons
     realized_roll_cons interval_avg_abs_cons expected_roll_cons

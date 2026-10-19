@@ -1,4 +1,4 @@
-"""Build reference returns, executable cash P&L, and portfolio audit curves.
+"""Build reference percentages, executable cash P&L, and portfolio audit curves.
 
 Forecast construction owns the combined forecast. This module owns the next
 calculation boundary: size and lag positions, measure turnover from those
@@ -33,26 +33,26 @@ _REFERENCE_ACCOUNTING_COLUMNS = (
     "ref_idm",
     "max_weight_idm",
     "ref_weight_idm",
-    "ref_annual_risk_budget_usd",
-    "ref_daily_risk_budget_usd",
-    "ref_return_capital_usd",
+    "ref_budget_usd",
+    "ref_ann_risk_usd",
+    "ref_daily_risk_usd",
     "daily_dollar_vol_per_contract",
     "ref_average_position",
     "ref_target_position",
     "held_ref_position",
-    "ref_gross_pnl_usd",
-    "ref_cost_pnl_usd",
-    "ref_net_pnl_usd",
-    "ref_gross_return",
-    "ref_annual_cost_return",
-    "ref_cost_return",
-    "ref_net_return",
+    "ref_gross_usd",
+    "ref_cost_usd",
+    "ref_net_usd",
+    "ref_gross_pct",
+    "ref_ann_cost_pct",
+    "ref_cost_pct",
+    "ref_net_pct",
     "ref_return_valid",
 )
 
 
 def _group_reference_accounting_columns(frame: pl.DataFrame) -> pl.DataFrame:
-    """Place reference sizing, dollar P&L, and returns in one audit block."""
+    """Place reference sizing, USD values, and percentages in one block."""
     accounting = [
         column
         for column in _REFERENCE_ACCOUNTING_COLUMNS
@@ -300,21 +300,21 @@ def apply_subsystem_reference_cost(
     *,
     ann_cost_sr: float,
 ) -> pl.DataFrame:
-    """Apply an annual SR cost to an already sized reference return frame.
+    """Apply an annual SR cost to an already sized reference percentage frame.
 
     The helper is separate from sizing so the pipeline can first measure
     turnover from the reference positions, convert that turnover to annual SR
     cost, and then apply the resulting cost without rebuilding the positions.
-    Cash cost is normalized by ``ref_return_capital_usd``, which is the
-    allocation capital implied by the reference annual risk budget.
+    Cost percentage is normalized by ``ref_budget_usd``, the equal-weight
+    reference budget implied by the annual risk budget and target volatility.
     """
     required = {
         "held_ref_position",
         "period_year_fraction",
-        "ref_annual_risk_budget_usd",
-        "ref_return_capital_usd",
-        "ref_gross_pnl_usd",
-        "ref_gross_return",
+        "ref_ann_risk_usd",
+        "ref_budget_usd",
+        "ref_gross_usd",
+        "ref_gross_pct",
     }
     missing = sorted(required.difference(frame.columns))
     if missing:
@@ -326,9 +326,10 @@ def apply_subsystem_reference_cost(
         frame.with_columns(
             (
                 -ann_cost_sr
-                * pl.col("ref_annual_risk_budget_usd")
-                / pl.col("ref_return_capital_usd")
-            ).alias("ref_annual_cost_return")
+                * pl.col("ref_ann_risk_usd")
+                / pl.col("ref_budget_usd")
+                * 100.0
+            ).alias("ref_ann_cost_pct")
         )
         .with_columns(
             # Costs begin only once a position was actually held. Calendar
@@ -338,34 +339,36 @@ def apply_subsystem_reference_cost(
                 & pl.col("period_year_fraction").is_not_null()
             )
             .then(
-                pl.col("ref_annual_cost_return")
+                pl.col("ref_ann_cost_pct")
                 * pl.col("period_year_fraction")
             )
             .otherwise(None)
-            .alias("ref_cost_return")
+            .alias("ref_cost_pct")
         )
         .with_columns(
             (
-                pl.col("ref_cost_return")
-                * pl.col("ref_return_capital_usd")
-            ).alias("ref_cost_pnl_usd"),
+                pl.col("ref_cost_pct")
+                / 100.0
+                * pl.col("ref_budget_usd")
+            ).alias("ref_cost_usd"),
         )
         .with_columns(
             (
-                pl.col("ref_gross_pnl_usd")
-                + pl.col("ref_cost_pnl_usd")
-            ).alias("ref_net_pnl_usd"),
+                pl.col("ref_gross_usd")
+                + pl.col("ref_cost_usd")
+            ).alias("ref_net_usd"),
         )
         .with_columns(
             (
-                pl.col("ref_net_pnl_usd")
-                / pl.col("ref_return_capital_usd")
-            ).alias("ref_net_return"),
+                pl.col("ref_net_usd")
+                / pl.col("ref_budget_usd")
+                * 100.0
+            ).alias("ref_net_pct"),
         )
         .with_columns(
             (
-                pl.col("ref_net_return").is_not_null()
-                & pl.col("ref_net_return").is_finite()
+                pl.col("ref_net_pct").is_not_null()
+                & pl.col("ref_net_pct").is_finite()
             ).alias("ref_return_valid")
         )
     )
@@ -398,9 +401,8 @@ def build_subsystem_reference_return_curve(
         with legacy ``point_vol`` accepted for compact Phase 2 frames.
     capital
         Reference account capital in USD. This supplies a reproducible
-        position scale. Returns are normalized by the reference allocation
-        capital implied by the instrument risk budget, not by this entire
-        account value.
+        position scale. Percentages are normalized by ``ref_budget_usd``,
+        which is implied by the instrument risk budget and target volatility.
     target_vol
         Annual portfolio volatility target as a decimal fraction.
     reference_book_count
@@ -432,9 +434,9 @@ def build_subsystem_reference_return_curve(
     -------
     polars.DataFrame
         The input plus reference weights and risk budgets, daily dollar
-        volatility per contract, reference return capital, continuous average,
-        target, and held positions, gross/cost/net hypothetical reference P&L
-        in USD, matching subsystem returns, and a row-level validity flag.
+        volatility per contract, reference budget, continuous average, target,
+        and held positions, gross/cost/net hypothetical reference values in
+        USD, matching subsystem percentages, and a row-level validity flag.
 
     Notes
     -----
@@ -495,7 +497,7 @@ def build_subsystem_reference_return_curve(
     annual_risk_budget_usd = (
         capital * target_vol * ref_weight_idm
     )
-    ref_return_capital_usd = annual_risk_budget_usd / target_vol
+    ref_budget_usd = annual_risk_budget_usd / target_vol
     daily_risk_budget_usd = annual_risk_budget_usd / annualization_sqrt
     reference = (
         frame.sort("date")
@@ -516,15 +518,11 @@ def build_subsystem_reference_return_curve(
             pl.lit(reference_idm).alias("ref_idm"),
             pl.lit(max_weight_idm).alias("max_weight_idm"),
             pl.lit(ref_weight_idm).alias("ref_weight_idm"),
-            pl.lit(annual_risk_budget_usd).alias(
-                "ref_annual_risk_budget_usd"
+            pl.lit(annual_risk_budget_usd).alias("ref_ann_risk_usd"),
+            pl.lit(ref_budget_usd).alias(
+                "ref_budget_usd"
             ),
-            pl.lit(ref_return_capital_usd).alias(
-                "ref_return_capital_usd"
-            ),
-            pl.lit(daily_risk_budget_usd).alias(
-                "ref_daily_risk_budget_usd"
-            ),
+            pl.lit(daily_risk_budget_usd).alias("ref_daily_risk_usd"),
             pl.when(pl.col("fx_valid"))
             .then(pl.col(point_vol_col) * multiplier * pl.col(fx_col))
             .otherwise(None)
@@ -561,13 +559,14 @@ def build_subsystem_reference_return_curve(
                 * pl.col("point_change")
                 * multiplier
                 * pl.col(fx_col)
-            ).alias("ref_gross_pnl_usd"),
+            ).alias("ref_gross_usd"),
         )
         .with_columns(
             (
-                pl.col("ref_gross_pnl_usd")
-                / pl.col("ref_return_capital_usd")
-            ).alias("ref_gross_return"),
+                pl.col("ref_gross_usd")
+                / pl.col("ref_budget_usd")
+                * 100.0
+            ).alias("ref_gross_pct"),
         )
     )
     return apply_subsystem_reference_cost(

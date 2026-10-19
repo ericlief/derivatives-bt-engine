@@ -611,11 +611,11 @@ flowchart TD
 
         Cost["5. Calibrate combined-subsystem cost<br/>ann_trade_cost_sr = trade_sr × subsystem turnover<br/>ann_roll_cost_sr = roll_sr × ref_ann_rolls"]
 
-        GrossPnL["6. Calculate reference gross return<br/>held_ref_pos = prior ref_targ_pos<br/>cash change / implied allocation capital"]
+        GrossPnL["6. Calculate reference gross percentage<br/>held_ref_pos = prior ref_targ_pos<br/>100 × gross USD / ref_budget_usd"]
 
-        CostPnL["7. Accrue reference cost return<br/>annual SR cost × subsystem target vol<br/>× elapsed year fraction"]
+        CostPnL["7. Accrue reference cost percentage<br/>annual SR cost × subsystem target vol<br/>× elapsed year fraction × 100"]
 
-        NetPnL["8. Calculate reference net return<br/>ref_net_ret = ref_gross_ret + ref_cost_ret"]
+        NetPnL["8. Calculate reference net percentage<br/>ref_net_pct = ref_gross_pct + ref_cost_pct"]
 
         Audit["9. Audit subsystem reference<br/>forecast gaps · FX gaps · return gaps<br/>cost calibration · valid observations · eligibility reason"]
     end
@@ -688,12 +688,11 @@ The same ownership in terminal-readable form is:
 6. Reuse market screen `trade_sr`, `roll_sr`, and `ref_ann_rolls` to calculate the
    combined subsystem's annual trading cost and holding-roll cost.
 7. Lag the continuous reference target, calculate its cash change through the
-   multiplier and dated FX, and divide by the allocation capital implied by
-   the reference risk budget to obtain the candidate's normalized gross
-   subsystem return.
-8. Convert the annual SR-cost estimate into a pro-rata subsystem return using
-   the same allocation capital and elapsed year fraction; add it to gross
-   return to obtain the net subsystem-reference return.
+   multiplier and dated FX, and divide by `ref_budget_usd` to obtain the
+   candidate's normalized gross subsystem percentage.
+8. Convert the annual SR-cost estimate into a pro-rata subsystem percentage
+   using the same budget and elapsed year fraction; add it to gross percentage
+   to obtain the net subsystem-reference percentage.
 9. Audit the wide daily frame and write the compact instrument summary.
 10. Align valid net subsystem-reference returns, estimate correlations, and
     run the greedy portfolio search.
@@ -730,11 +729,9 @@ uses `ann_trade_cost_sr` only. The subsystem-reference curve uses the full
 `ann_cost_sr`, including holding rolls, and spreads it across the return index
 as a loss proportional to elapsed year fraction and the annual target risk of
 the subsystem. Multiplier and historical FX convert point movement to cash
-before division by `reference_return_capital_usd`, the allocation base implied
-by the fixed reference risk budget. Persist
-`reference_gross_return`, `reference_cost_return`, and
-`reference_net_return` separately; the default correlation panel uses
-`reference_net_return`.
+before division by `ref_budget_usd`. Persist `ref_gross_pct`, `ref_cost_pct`,
+and `ref_net_pct` separately; the default correlation panel uses
+`ref_net_pct`.
 
 This pro-rata series does not make the cost estimate rolling or causal by
 itself. Carver's standard SR-cost account curve uses a full-sample turnover
@@ -986,7 +983,7 @@ baseline by default. The command writes:
 - `multi_speed_ewmac_selection_forecasts_<timestamp>.parquet`, containing the daily
   component forecasts, combined forecast, validity flag, normalized position,
   equal-weight reference risk budgets and continuous positions, and gross,
-  cost, and net subsystem-reference returns for direct inspection;
+  cost, and net subsystem-reference percentages for direct inspection;
 - `multi_speed_ewmac_selection_subsystem_reference_returns_<timestamp>.parquet`,
   the synchronized reference-return panel used by the bounded correlation
   estimator;
@@ -1276,7 +1273,7 @@ afts_plus_rolls_annual_cost_SR
 
 Select that sensitivity with `--include-roll-cost-in-score`. Without the flag,
 `score_cost_sr` equals `ann_trade_cost_sr`; with it, `score_cost_sr` equals
-`ann_cost_sr`. The normalized correlation P&L and executable cash audit include
+`ann_cost_sr`. The normalized correlation percentage series and executable cash audit include
 rolls in either mode—the parameter changes only the greedy ranking objective.
 
 Both variants use the current one-way definition of `trade_sr`. This preserves
@@ -1451,23 +1448,23 @@ candidate and every date:
 ```text
 ref_ann_risk_usd   = capital * target_vol * ref_weight_idm
 ref_daily_risk_usd = ref_ann_risk_usd / sqrt(ann_days)
-ref_ret_cap_usd    = ref_ann_risk_usd / target_vol
+ref_budget_usd     = ref_ann_risk_usd / target_vol
                    = capital * ref_weight_idm
 daily_dvol_i,t     = point_vol_i,t * multiplier_i * fx_i,t
 ref_avg_pos_i,t    = ref_daily_risk_usd / daily_dvol_i,t
 ref_targ_pos_i,t   = ref_avg_pos_i,t * combined_forecast_i,t
                      / target_abs_forecast
-ref_gross_pnl_i,t  = held_ref_pos_i,t * point_change_i,t
+ref_gross_usd_i,t  = held_ref_pos_i,t * point_change_i,t
                      * multiplier_i * fx_i,t
-ref_gross_ret_i,t  = ref_gross_pnl_i,t / ref_ret_cap_usd
-ref_cost_pnl_i,t   = ref_cost_ret_i,t * ref_ret_cap_usd
-ref_net_pnl_i,t    = ref_gross_pnl_i,t + ref_cost_pnl_i,t
-ref_net_ret_i,t    = ref_net_pnl_i,t / ref_ret_cap_usd
+ref_gross_pct_i,t  = 100 * ref_gross_usd_i,t / ref_budget_usd
+ref_cost_usd_i,t   = ref_cost_pct_i,t / 100 * ref_budget_usd
+ref_net_usd_i,t    = ref_gross_usd_i,t + ref_cost_usd_i,t
+ref_net_pct_i,t    = 100 * ref_net_usd_i,t / ref_budget_usd
 ```
 
 The account capital and reference allocation determine the continuous contract
-position. Dividing by the implied allocation capital removes that allocation
-scale from the return, matching a normalized Carver-style subsystem return.
+position. Dividing by the fixed reference budget removes that allocation scale
+from the percentage curve, matching Carver's percentage account-curve form.
 Whole-contract rounding, buffering, and per-contract execution costs enter only
 after selection in the portfolio cash curve.
 

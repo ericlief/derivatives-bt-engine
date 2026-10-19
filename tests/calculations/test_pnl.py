@@ -1,4 +1,4 @@
-"""Tests for subsystem-reference returns and executable cash P&L."""
+"""Tests for subsystem-reference percentages and executable cash P&L."""
 
 from datetime import date
 
@@ -13,7 +13,7 @@ from derivatives_bt_engine.calculations.pnl import (
 )
 
 
-def test_subsystem_reference_return_uses_equal_weight_risk_budget():
+def test_subsystem_reference_pct_uses_equal_weight_risk_budget():
     frame = pl.DataFrame({
         "date": [date(2024, 1, 1), date(2024, 1, 2), date(2024, 1, 5)],
         "point_change": [None, 1.0, 1.0],
@@ -44,13 +44,13 @@ def test_subsystem_reference_return_uses_equal_weight_risk_budget():
         [0.5] * 3
     )
     assert result.get_column(
-        "ref_annual_risk_budget_usd"
+        "ref_ann_risk_usd"
     ).to_list() == pytest.approx([80.0] * 3)
     assert result.get_column(
-        "ref_daily_risk_budget_usd"
+        "ref_daily_risk_usd"
     ).to_list() == pytest.approx([5.0] * 3)
     assert result.get_column(
-        "ref_return_capital_usd"
+        "ref_budget_usd"
     ).to_list() == pytest.approx([500.0] * 3)
     assert result.get_column(
         "daily_dollar_vol_per_contract"
@@ -65,16 +65,25 @@ def test_subsystem_reference_return_uses_equal_weight_risk_budget():
     assert held[0] is None
     assert held[1:] == pytest.approx([0.125, 0.25])
     assert result.get_column(
-        "ref_gross_return"
+        "ref_gross_pct"
     ).to_list()[1:] == pytest.approx(
-        [0.005, 0.01]
+        [0.5, 1.0]
     )
-    costs = result.get_column("ref_cost_return").to_list()
+    assert result.get_column("ref_gross_usd").to_list()[1:] == pytest.approx(
+        [2.5, 5.0]
+    )
+    costs = result.get_column("ref_cost_pct").to_list()
     assert costs[0] is None
-    assert costs[1] == pytest.approx(-0.016 * (1 / 365.25))
-    assert costs[2] == pytest.approx(-0.016 * (3 / 365.25))
-    assert result.get_column("ref_net_return")[1] == pytest.approx(
-        0.005 + costs[1]
+    assert costs[1] == pytest.approx(-1.6 * (1 / 365.25))
+    assert costs[2] == pytest.approx(-1.6 * (3 / 365.25))
+    assert result.get_column("ref_net_pct")[1] == pytest.approx(
+        0.5 + costs[1]
+    )
+    assert result.get_column("ref_cost_usd")[1] == pytest.approx(
+        costs[1] / 100.0 * 500.0
+    )
+    assert result.get_column("ref_net_usd")[1] == pytest.approx(
+        2.5 + costs[1] / 100.0 * 500.0
     )
     assert turnover is not None
     assert "smoothed_ref_average_position" in result.columns
@@ -101,7 +110,7 @@ def test_subsystem_reference_preserves_missing_historical_fx_as_invalid():
         ann_cost_sr=0.0,
     )
 
-    assert result.get_column("ref_net_return").null_count() == 2
+    assert result.get_column("ref_net_pct").null_count() == 2
     assert result.get_column("ref_return_valid").to_list() == [False, False]
 
 

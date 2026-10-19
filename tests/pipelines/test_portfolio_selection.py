@@ -201,13 +201,13 @@ def test_subsystem_reference_correlation_uses_daily_date_key():
     frames = {
         "A": pl.DataFrame({
             "date": dates,
-            "ref_net_return": [
+            "ref_net_pct": [
                 index * 0.001 for index in range(len(dates))
             ],
         }),
         "B": pl.DataFrame({
             "date": dates,
-            "ref_net_return": [
+            "ref_net_pct": [
                 index * -0.002 for index in range(len(dates))
             ],
         }),
