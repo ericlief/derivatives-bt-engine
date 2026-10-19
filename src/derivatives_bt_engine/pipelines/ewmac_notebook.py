@@ -197,6 +197,40 @@ class EwmacNotebookView:
             .alias("cum_cash_realized_net_pnl_usd"),
         )
 
+    def cash_return_contribution_curves(
+        self,
+        *,
+        start: date | datetime | str | None = None,
+        end: date | datetime | str | None = None,
+    ) -> pl.DataFrame:
+        """Return daily and cumulative executable portfolio contributions.
+
+        Each contribution divides this instrument's executable cash P&L by
+        total account capital. Contributions from all selected instruments
+        therefore add to the corresponding portfolio return.
+        """
+        if self.cash is None:
+            raise ValueError("cash P&L was not requested for this notebook view")
+        frame = _date_slice(self.cash, start=start, end=end)
+        return frame.select(
+            "date",
+            "cash_gross_return_contribution",
+            "cash_realized_net_return_contribution",
+            "cash_expected_net_return_contribution",
+            pl.col("cash_gross_return_contribution")
+            .fill_null(0.0)
+            .cum_sum()
+            .alias("cumulative_cash_gross_return_contribution"),
+            pl.col("cash_realized_net_return_contribution")
+            .fill_null(0.0)
+            .cum_sum()
+            .alias("cumulative_cash_realized_net_return_contribution"),
+            pl.col("cash_expected_net_return_contribution")
+            .fill_null(0.0)
+            .cum_sum()
+            .alias("cumulative_cash_expected_net_return_contribution"),
+        )
+
     def plot(
         self,
         *,

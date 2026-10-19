@@ -203,6 +203,7 @@ view.reference_turnover
 view.subsystem_reference_return_curves()
 view.cash
 view.cash_pnl_curves()
+view.cash_return_contribution_curves()
 ```
 
 `view.reference` assigns the instrument `1 / reference_book_count`, caps the
@@ -211,8 +212,10 @@ volatility, and divides the resulting P&L by the allocation capital implied by
 the reference risk budget. It is the normalized candidate subsystem return
 used for correlations. `view.cash` uses final portfolio weight and IDM,
 buffering, whole contracts, and per-contract costs, so it is the executable
-account-scale diagnostic. Passing `multiplier=1` for ES is appropriate only
-for a unit test.
+account-scale diagnostic. `view.cash_return_contribution_curves()` divides its
+gross, realized-net, and expected-net cash P&L by the common account capital;
+the daily contributions add across selected instruments to the portfolio
+return. Passing `multiplier=1` for ES is appropriate only for a unit test.
 
 ## Combined portfolio-selection forecasts
 
