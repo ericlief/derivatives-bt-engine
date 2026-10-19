@@ -1,11 +1,11 @@
-"""Notebook diagnostics for combined EWMAC forecasts, positions, and P&L.
+"""Notebook diagnostics for EWMAC reference returns and portfolio cash P&L.
 
 This module is the interactive inspection boundary after forecast combination.
 It accepts the same :class:`CombinedForecastResult` used by Phase 2, adds the
-normalized subsystem P&L and optional executable cash P&L paths, and exposes
-small Polars tables plus a lazy hvPlot dashboard.  It does not reimplement
-forecast, sizing, buffering, or cost calculations; those remain owned by the
-calculation modules used by production selection.
+equal-weight subsystem-reference return and optional executable cash P&L
+paths, and exposes small Polars tables plus a lazy hvPlot dashboard. It does
+not reimplement forecast, sizing, buffering, or cost calculations; those
+remain owned by the calculation modules used by production selection.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from derivatives_bt_engine.calculations.forecast_combination import (
 from derivatives_bt_engine.calculations.pnl import (
     PYSYSTEMTRADE_FORECAST_BUFFER_SIZE,
     build_executable_cash_pnl_curve,
-    build_subsystem_pnl_curve,
+    build_subsystem_reference_return_curve,
 )
 
 
@@ -63,6 +63,25 @@ def _attach_fx(frame: pl.DataFrame, fx_to_usd: float) -> pl.DataFrame:
 
 
 @dataclass(frozen=True)
+class SubsystemReferenceSettings:
+    """Configure the equal-weight candidate return used for correlations.
+
+    ``capital`` and ``target_vol`` turn daily dollar volatility into an
+    auditable continuous position. ``reference_book_count`` assigns every
+    candidate the same structural weight, while ``reference_idm`` and
+    ``max_weight_idm`` apply the same fixed sizing convention as the selection
+    tie rule. The resulting P&L is divided by ``capital`` and exposed as a
+    reference return.
+    """
+
+    capital: float
+    target_vol: float
+    reference_book_count: int = 15
+    reference_idm: float = 2.5
+    max_weight_idm: float = 0.20
+
+
+@dataclass(frozen=True)
 class ExecutableCashSettings:
     """Configure the optional account-scaled executable cash curve.
 
@@ -84,17 +103,18 @@ class ExecutableCashSettings:
 
 @dataclass(frozen=True)
 class EwmacNotebookView:
-    """Hold aligned forecast, subsystem-P&L, and optional cash-P&L frames.
+    """Hold forecast, subsystem-reference, and optional cash-P&L frames.
 
-    ``forecasts`` contains the detailed combined-forecast result. ``pnl`` is
-    the scale-free subsystem path used for correlations. ``cash`` is present
-    only when executable account settings were supplied and contains actual
-    continuous targets, buffered whole contracts, and cash costs.
+    ``forecasts`` contains the detailed combined-forecast result. ``reference``
+    is the equal-weight continuous return path used for correlations. ``cash``
+    is present only when executable account settings were supplied and
+    contains the selected portfolio's continuous targets, buffered whole
+    contracts, and cash costs.
     """
 
     instrument_code: str
     result: CombinedForecastResult
-    pnl: pl.DataFrame
+    reference: pl.DataFrame
     cash: pl.DataFrame | None = None
 
     @property
@@ -124,28 +144,28 @@ class EwmacNotebookView:
         ]
         return frame.select(available_columns)
 
-    def subsystem_pnl_curves(
+    def subsystem_reference_return_curves(
         self,
         *,
         start: date | datetime | str | None = None,
         end: date | datetime | str | None = None,
     ) -> pl.DataFrame:
-        """Return cumulative gross, cost, and net subsystem P&L in USD units."""
-        frame = _date_slice(self.pnl, start=start, end=end)
+        """Return cumulative gross, cost, and net reference returns."""
+        frame = _date_slice(self.reference, start=start, end=end)
         return frame.select(
             "date",
-            pl.col("gross_pnl_usd")
+            pl.col("reference_gross_return")
             .fill_null(0.0)
             .cum_sum()
-            .alias("cum_gross_pnl_usd"),
-            pl.col("cost_pnl_usd")
+            .alias("cum_reference_gross_return"),
+            pl.col("reference_cost_return")
             .fill_null(0.0)
             .cum_sum()
-            .alias("cum_cost_pnl_usd"),
-            pl.col("net_pnl_usd")
+            .alias("cum_reference_cost_return"),
+            pl.col("reference_net_return")
             .fill_null(0.0)
             .cum_sum()
-            .alias("cum_net_pnl_usd"),
+            .alias("cum_reference_net_return"),
         )
 
     def cash_pnl_curves(
@@ -185,7 +205,7 @@ class EwmacNotebookView:
         """Return a vertically linked hvPlot dashboard for notebook display.
 
         Panels show the adjusted signal price, combined forecast, position
-        proxies, volatility-normalized position, cumulative subsystem P&L,
+        proxies, volatility-normalized position, cumulative reference return,
         and—when configured—whole-contract positions and cumulative cash P&L.
         hvPlot is imported lazily so non-notebook pipelines do not initialize a
         plotting backend.
@@ -230,16 +250,24 @@ class EwmacNotebookView:
             height=height,
         ) * hv.HLine(0.0).opts(color="black", line_width=1)
 
-        subsystem_curves = self.subsystem_pnl_curves(start=start, end=end)
-        pnl_plot = subsystem_curves.hvplot.line(
+        reference_curves = self.subsystem_reference_return_curves(
+            start=start, end=end
+        )
+        reference_plot = reference_curves.hvplot.line(
             x="date",
-            y=["cum_gross_pnl_usd", "cum_net_pnl_usd"],
-            title="Cumulative subsystem P&L (relative-risk scale)",
-            ylabel="USD-scaled units",
+            y=["cum_reference_gross_return", "cum_reference_net_return"],
+            title="Cumulative equal-weight subsystem-reference return",
+            ylabel="Return",
             width=width,
             height=height,
         )
-        panels = price_plot + forecast_plot + proxy_plot + normalized_plot + pnl_plot
+        panels = (
+            price_plot
+            + forecast_plot
+            + proxy_plot
+            + normalized_plot
+            + reference_plot
+        )
 
         if self.cash is not None:
             cash = _date_slice(self.cash, start=start, end=end)
@@ -274,6 +302,7 @@ def build_ewmac_notebook_view(
     *,
     instrument_code: str,
     multiplier: float,
+    reference_settings: SubsystemReferenceSettings,
     fx_to_usd: float = 1.0,
     ann_cost_sr: float = 0.0,
     cash_settings: ExecutableCashSettings | None = None,
@@ -295,7 +324,10 @@ def build_ewmac_notebook_view(
         Historical portfolio research should continue to use the Phase 2 FX
         loader rather than treating this notebook convenience as dated FX.
     ann_cost_sr
-        Annual subsystem cost in SR units for the relative-risk P&L path.
+        Annual subsystem cost in SR units for the reference return path.
+    reference_settings
+        Equal-weight book assumption used to size the continuous candidate
+        reference return. This is independent of final portfolio membership.
     cash_settings
         Optional account sizing and per-contract execution costs. When absent,
         no claim is made about executable contracts or cash P&L.
@@ -306,8 +338,8 @@ def build_ewmac_notebook_view(
     Returns
     -------
     EwmacNotebookView
-        The original forecast result plus aligned subsystem and optional cash
-        P&L frames and a reusable hvPlot dashboard.
+        The original forecast result plus aligned subsystem-reference return
+        and optional portfolio cash P&L frames and a reusable hvPlot dashboard.
     """
     if not instrument_code.strip():
         raise ValueError("instrument_code must not be empty")
@@ -317,10 +349,16 @@ def build_ewmac_notebook_view(
         raise ValueError("target_abs_forecast must be finite and positive")
 
     forecast = _attach_fx(result.frame, fx_to_usd)
-    pnl = build_subsystem_pnl_curve(
+    reference = build_subsystem_reference_return_curve(
         forecast,
+        capital=reference_settings.capital,
+        target_vol=reference_settings.target_vol,
+        reference_book_count=reference_settings.reference_book_count,
+        reference_idm=reference_settings.reference_idm,
+        max_weight_idm=reference_settings.max_weight_idm,
         multiplier=multiplier,
         ann_cost_sr=ann_cost_sr,
+        target_abs_forecast=target_abs_forecast,
     )
     cash = None
     if cash_settings is not None:
@@ -340,6 +378,6 @@ def build_ewmac_notebook_view(
     return EwmacNotebookView(
         instrument_code=instrument_code,
         result=result,
-        pnl=pnl,
+        reference=reference,
         cash=cash,
     )

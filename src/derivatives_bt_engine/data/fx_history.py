@@ -2,8 +2,8 @@
 
 The pysystemtrade reference database stores daily FX observations separately
 from futures histories.  This module reads those immutable observations and
-performs backward as-of joins, so a subsystem P&L row can only use an FX rate
-known on or before that row's date.
+performs backward as-of joins, so a subsystem-reference or portfolio cash row
+can only use an FX rate known on or before that row's date.
 """
 
 from __future__ import annotations

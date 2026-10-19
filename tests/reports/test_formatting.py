@@ -78,6 +78,37 @@ def test_public_report_renames_buffer_parameters_at_boundary():
     ]
 
 
+def test_public_report_renames_subsystem_reference_columns():
+    """Reference sizing and returns remain distinct from portfolio cash P&L."""
+    report = pl.DataFrame({
+        "reference_book_count": [15],
+        "reference_idm": [2.5],
+        "reference_annual_risk_budget_usd": [2_500.126],
+        "reference_average_position": [3.45678],
+        "reference_target_position": [4.56789],
+        "held_reference_position": [4.0],
+        "reference_net_return": [0.00123449],
+        "reference_return_valid": [True],
+    })
+
+    public = round_public_report(rename_public_report_columns(report))
+
+    assert public.columns == [
+        "ref_book_n",
+        "ref_idm",
+        "ref_ann_risk_usd",
+        "ref_avg_pos",
+        "ref_targ_pos",
+        "held_ref_pos",
+        "ref_net_ret",
+        "ref_ret_valid",
+    ]
+    assert public.row(0)[:7] == pytest.approx(
+        (15, 2.5, 2_500.13, 3.4568, 4.5679, 4.0, 0.001234)
+    )
+    assert public["ref_ret_valid"][0]
+
+
 def test_public_report_renames_grid_parameters_and_rounds_margin_money():
     """Grid summaries share compact names and the central money precision."""
     report = pl.DataFrame({

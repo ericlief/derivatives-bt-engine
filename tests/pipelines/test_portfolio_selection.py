@@ -5,7 +5,7 @@ import pytest
 
 from derivatives_bt_engine.pipelines.portfolio_selection import (
     _label_forecast_output_frame,
-    _subsystem_correlation,
+    _subsystem_reference_correlation,
     parse_args,
     run,
     slow_tilt_ewmac_weights,
@@ -193,23 +193,27 @@ def test_run_rejects_csv_output_path(tmp_path):
         run(["--input", str(source), "--output", str(tmp_path / "step1.csv")])
 
 
-def test_subsystem_correlation_uses_daily_date_key():
-    """Selection correlation retains ``date`` in its persisted input panel."""
+def test_subsystem_reference_correlation_uses_daily_date_key():
+    """Reference-return correlation retains date in its persisted input panel."""
     dates = pl.date_range(
         pl.date(2024, 1, 1), pl.date(2024, 3, 20), eager=True
     )
     frames = {
         "A": pl.DataFrame({
             "date": dates,
-            "net_pnl_usd": [index * 0.001 for index in range(len(dates))],
+            "reference_net_return": [
+                index * 0.001 for index in range(len(dates))
+            ],
         }),
         "B": pl.DataFrame({
             "date": dates,
-            "net_pnl_usd": [index * -0.002 for index in range(len(dates))],
+            "reference_net_return": [
+                index * -0.002 for index in range(len(dates))
+            ],
         }),
     }
 
-    correlation, covered, wide = _subsystem_correlation(
+    correlation, covered, wide = _subsystem_reference_correlation(
         frames,
         ["A", "B"],
         window_years=1.0,

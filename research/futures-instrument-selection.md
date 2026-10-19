@@ -605,24 +605,24 @@ flowchart TD
 
         Valuation["2. Attach valuation inputs<br/>fx_to_usd · multiplier"]
 
-        Sizing["3. Size subsystem position<br/>daily_dvol_per_con<br/>avg_position<br/>subsystem_position"]
+        Sizing["3. Size equal-weight reference<br/>ref_weight = 1 / assumed book count<br/>daily_dvol · ref_avg_pos · ref_targ_pos"]
 
         Turnover["4. Calculate actual subsystem turnover<br/>smooth_avg_position<br/>normalized_position<br/>abs_position_change<br/>full-sample and rolling audit estimates"]
 
         Cost["5. Calibrate combined-subsystem cost<br/>ann_trade_cost_sr = trade_sr × subsystem turnover<br/>ann_roll_cost_sr = roll_sr × ref_ann_rolls"]
 
-        GrossPnL["6. Calculate gross P&L<br/>held_position = prior position<br/>point_pnl<br/>gross_pnl_native · gross_pnl_usd"]
+        GrossPnL["6. Calculate reference gross return<br/>held_ref_pos = prior ref_targ_pos<br/>cash change / reference capital"]
 
-        CostPnL["7. Accrue annual SR cost pro rata<br/>time-varying average risk × elapsed year fraction<br/>cost_pnl_native · cost_pnl_usd"]
+        CostPnL["7. Accrue reference cost return<br/>annual SR cost × fixed reference risk fraction<br/>× elapsed year fraction"]
 
-        NetPnL["8. Calculate net P&L<br/>net_pnl_usd = gross_pnl_usd + cost_pnl_usd"]
+        NetPnL["8. Calculate reference net return<br/>ref_net_ret = ref_gross_ret + ref_cost_ret"]
 
-        Audit["9. Audit subsystem<br/>forecast gaps · FX gaps · P&L gaps<br/>cost calibration · valid observations · eligibility reason"]
+        Audit["9. Audit subsystem reference<br/>forecast gaps · FX gaps · return gaps<br/>cost calibration · valid observations · eligibility reason"]
     end
 
     DailyOutput["Wide daily audit frame / Parquet<br/>all intermediate columns retained"]
     SummaryOutput["One-row instrument audit / CSV"]
-    ReturnPanel["Synchronized pnl_usd panel"]
+    ReturnPanel["Synchronized subsystem-reference return panel"]
     Correlation["Subsystem correlation matrix"]
     Selection["Greedy portfolio selection selection<br/>weights · IDM · costs · size penalty"]
     CashPnL["Executable cash audit for final book<br/>10% average-position buffer · rounded contracts<br/>ordinary trades · actual and interval-average roll cost"]
@@ -677,21 +677,25 @@ The same ownership in terminal-readable form is:
 3. Load historical FX once per currency and attach multiplier and
    backward-as-of FX to the frame. A later live runner may append IB history,
    but it must not backfill a current quote through old P&L dates.
-4. Convert mixed point volatility into average and desired subsystem positions.
+4. Convert mixed point volatility, multiplier, and dated FX to daily dollar
+   volatility per contract. Give every candidate the fixed structural weight
+   `1 / tie_ref_book_n`, apply the fixed reference IDM and `max_weight_idm`
+   cap, and calculate continuous reference average and target positions.
 5. Calculate the actual combined-subsystem turnover from normalized desired-
    position changes. This replaces, rather than averages, the individual-rule
    turnover estimates used by the market screen screen.
 6. Reuse market screen `trade_sr`, `roll_sr`, and `ref_ann_rolls` to calculate the
    combined subsystem's annual trading cost and holding-roll cost.
-7. Lag the desired position and calculate gross point, native-currency, and
-   USD P&L.
-8. Convert the annual SR-cost estimate into a pro-rata cost P&L series using
-   the time-varying average risk, multiplier, and historical FX; add it to
-   gross P&L to obtain net subsystem P&L.
+7. Lag the continuous reference target, calculate its cash change through the
+   multiplier and dated FX, and divide by reference capital to obtain the
+   candidate's gross return contribution.
+8. Convert the annual SR-cost estimate into a pro-rata return using the fixed
+   reference risk fraction and elapsed year fraction; add it to gross return
+   to obtain the net subsystem-reference return.
 9. Audit the wide daily frame and write the compact instrument summary.
-10. Align valid net USD subsystem P&L, estimate correlations, and run the
-    greedy portfolio search. Retain the gross panel as an explicit sensitivity.
-11. For the selected book, restore capital, weight, and IDM; apply the
+10. Align valid net subsystem-reference returns, estimate correlations, and
+    run the greedy portfolio search.
+11. For the selected book, apply its final weight and IDM; apply the
     pysystemtrade forecast buffer to the continuous contract target; and use
     the resulting whole-contract position for cash P&L and event costs.
 ```
@@ -720,14 +724,14 @@ ann_cost_sr       = ann_trade_cost_sr + ann_roll_cost_sr
 ```
 
 There are then two deliberate consumers. The published AFTS selection score
-uses `ann_trade_cost_sr` only. The Carver-style subsystem account curve uses
-the full `ann_cost_sr`, including holding rolls, and spreads it across the P&L
-index as a small loss proportional to elapsed year fraction and the
-time-varying average risk position. Multiplier and historical FX convert both
-gross and cost P&L through the same native-to-USD path. Persist
-`gross_pnl_usd`, `cost_pnl_usd`, and `net_pnl_usd` separately so the choice of
-gross or net correlation inputs is auditable; the Carver-compatible default
-correlation panel uses `net_pnl_usd`.
+uses `ann_trade_cost_sr` only. The subsystem-reference curve uses the full
+`ann_cost_sr`, including holding rolls, and spreads it across the return index
+as a loss proportional to elapsed year fraction and the fixed equal-weight
+reference risk fraction. Multiplier and historical FX convert point movement
+to cash before division by reference capital. Persist
+`reference_gross_return`, `reference_cost_return`, and
+`reference_net_return` separately; the default correlation panel uses
+`reference_net_return`.
 
 This pro-rata series does not make the cost estimate rolling or causal by
 itself. Carver's standard SR-cost account curve uses a full-sample turnover
@@ -742,9 +746,9 @@ scheduled selection refresh rather than backfilling a later snapshot into
 earlier live results.
 
 The implemented runner carries `trade_sr`, `roll_sr`, and `ref_ann_rolls`
-through Step 1. The synchronized correlation panel uses the normalized net
-subsystem P&L after the full annual SR cost. By default the published AFTS
-greedy score retains Carver's trade-only objective. Pass
+through Step 1. The synchronized correlation panel uses the equal-weight net
+subsystem-reference return after the full annual SR cost. By default the
+published AFTS greedy score retains Carver's trade-only objective. Pass
 `--include-roll-cost-in-score` to deduct both
 `trade_sr * subsystem_turnover` and `roll_sr * ref_ann_rolls` from every
 instrument's gross SR during singleton ranking and every n+1 trial. Each trial
@@ -978,9 +982,11 @@ baseline by default. The command writes:
   turnover, cost, and the precise exclusion reason;
 - `multi_speed_ewmac_selection_forecasts_<timestamp>.parquet`, containing the daily
   component forecasts, combined forecast, validity flag, normalized position,
-  and gross, cost, and net subsystem P&L for direct inspection;
-- `multi_speed_ewmac_selection_subsystem_net_pnl_<timestamp>.parquet`, the synchronized
-  return panel used by the bounded correlation estimator;
+  equal-weight reference risk budgets and continuous positions, and gross,
+  cost, and net subsystem-reference returns for direct inspection;
+- `multi_speed_ewmac_selection_subsystem_reference_returns_<timestamp>.parquet`,
+  the synchronized reference-return panel used by the bounded correlation
+  estimator;
 - `multi_speed_ewmac_selection_cash_pnl_<timestamp>.parquet`, the final book's
   account-scaled daily continuous target, average-position buffer width and
   boundaries, buffered whole contracts, ordinary traded contracts, actual and
@@ -1426,6 +1432,24 @@ ref_weight_idm = min(max_idm / tie_ref_book_count, max_weight_idm)
 ref_max_position_i = capital * target_vol * ref_weight_idm
                      * forecast_cap_ratio / ann_dvol_i
 ```
+
+The subsystem-reference return uses the same fixed allocation for every
+candidate and every date:
+
+```text
+ref_ann_risk_usd   = capital * target_vol * ref_weight_idm
+ref_daily_risk_usd = ref_ann_risk_usd / sqrt(ann_days)
+daily_dvol_i,t     = point_vol_i,t * multiplier_i * fx_i,t
+ref_avg_pos_i,t    = ref_daily_risk_usd / daily_dvol_i,t
+ref_targ_pos_i,t   = ref_avg_pos_i,t * combined_forecast_i,t
+                     / target_abs_forecast
+ref_gross_ret_i,t  = held_ref_pos_i,t * point_change_i,t
+                     * multiplier_i * fx_i,t / capital
+```
+
+These positions remain continuous. Whole-contract rounding, buffering, and
+per-contract execution costs enter only after selection in the portfolio cash
+curve.
 
 Candidates whose reference position lies inside `[con_band_min, con_band_max)`
 have zero distance. Candidates outside it are compared by squared log distance

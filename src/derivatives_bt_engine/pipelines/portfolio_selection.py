@@ -11,11 +11,12 @@ dataframe collections:
     One daily component-forecast frame per unique ``hist_instr_code``. Several
     executable symbols can reuse the same history, so these expensive EWMAC
     calculations are performed once.
-``subsystem_frames``
-    One daily combined-forecast, position, historical-FX, and net-P&L frame per
-    executable ``symbol``. Symbols sharing history may differ here because
-    their market-screen cost gates can leave them with different eligible rules.
-``net_pnl_wide``
+``subsystem_reference_frames``
+    One daily combined-forecast, equal-weight reference position, historical
+    FX, and net-return frame per executable ``symbol``. Symbols sharing history
+    may differ here because their market-screen cost gates can leave them with
+    different eligible rules.
+``reference_return_wide``
     One synchronized frame with dates in rows and executable symbols in
     columns. This is the input to the instrument-correlation estimator.
 ``cash_pnl_long``
@@ -82,7 +83,7 @@ from derivatives_bt_engine.calculations.instrument_selection import (
 from derivatives_bt_engine.calculations.pnl import (
     PYSYSTEMTRADE_FORECAST_BUFFER_SIZE,
     build_executable_cash_pnl_curve,
-    build_subsystem_pnl_curve,
+    build_subsystem_reference_return_curve,
 )
 from derivatives_bt_engine.logging_config import setup_logger
 
@@ -457,19 +458,19 @@ def _label_forecast_output_frame(
     return labeled.select(leading + trailing)
 
 
-def _subsystem_correlation(
-    subsystem_frames: dict[str, pl.DataFrame],
+def _subsystem_reference_correlation(
+    subsystem_reference_frames: dict[str, pl.DataFrame],
     symbols: list[str],
     *,
     window_years: float,
     halflife_days: float,
     min_rows: int,
 ) -> tuple[np.ndarray, np.ndarray, pl.DataFrame]:
-    """Estimate instrument correlations from combined subsystem net USD P&L.
+    """Estimate correlations from equal-weight subsystem-reference returns.
 
-    ``subsystem_frames`` is keyed by executable symbol, unlike
+    ``subsystem_reference_frames`` is keyed by executable symbol, unlike
     ``frames_by_history`` above. The function outer-joins each symbol's
-    ``net_pnl_usd`` on date to form a sparse ``net_pnl_wide`` panel. The
+    ``reference_net_return`` on date to form a sparse return panel. The
     estimator uses each pair's contemporaneous observations, so different
     history starts and exchange holidays do not erase the entire universe.
 
@@ -479,8 +480,8 @@ def _subsystem_correlation(
     wide: pl.DataFrame | None = None
     for symbol in symbols:
         returns = (
-            subsystem_frames[symbol]
-            .select("date", pl.col("net_pnl_usd").alias(symbol))
+            subsystem_reference_frames[symbol]
+            .select("date", pl.col("reference_net_return").alias(symbol))
             .drop_nulls()
         )
         # Preserve the union of dates here. Requiring a date shared by every
@@ -545,10 +546,11 @@ def _run_complete_selection(
     # Long-form output copies: one symbol-labelled frame is appended here and
     # all are concatenated only when the daily forecast Parquet is written.
     forecast_output_frames: list[pl.DataFrame] = []
-    # Executable symbol -> combined forecast, position, FX, and net-P&L history.
+    # Executable symbol -> combined forecast, equal-weight reference position,
+    # FX, and net-return history.
     # MZC and CORN_mini can point to the same raw history but remain separate
     # because their eligible rules and transaction costs can differ.
-    subsystem_frames: dict[str, pl.DataFrame] = {}
+    subsystem_reference_frames: dict[str, pl.DataFrame] = {}
     # Historical FX is identical for every instrument in a currency. Cache it
     # at the pipeline boundary instead of reopening DuckDB for every symbol.
     fx_history_by_currency: dict[str, pl.DataFrame | None] = {}
@@ -618,46 +620,60 @@ def _run_complete_selection(
                 pl.lit(None, dtype=pl.Datetime("us")).alias("fx_source_ts"),
                 pl.lit(None, dtype=pl.String).alias("fx_src"),
             )
-        pnl_frame = build_subsystem_pnl_curve(
+        reference_frame = build_subsystem_reference_return_curve(
             fx_frame,
+            capital=float(run_config["init_cap_usd"]),
+            target_vol=float(run_config["target_vol"]),
+            reference_book_count=args.tie_reference_book_count,
+            reference_idm=GreedySelectionConfig.max_idm,
+            max_weight_idm=args.max_weight_idm,
             multiplier=float(row["mult"]),
             ann_cost_sr=annual_cost.ann_cost_sr,
+            target_abs_forecast=engine.config.target_abs_forecast,
         ).with_columns(
             pl.lit(annual_cost.ann_trade_cost_sr).alias("ann_trade_cost_sr"),
             pl.lit(annual_cost.ann_roll_cost_sr).alias("ann_roll_cost_sr"),
             pl.lit(annual_cost.ann_cost_sr).alias("ann_cost_sr"),
         )
-        subsystem_frames[symbol] = pnl_frame
+        subsystem_reference_frames[symbol] = reference_frame
 
-        pnl_valid = pnl_frame.filter(pl.col("pnl_valid"))
-        first_pnl_date = (
-            pnl_valid.get_column("date").min() if pnl_valid.height else None
+        valid_reference_returns = reference_frame.filter(
+            pl.col("reference_return_valid")
         )
-        pnl_after_start = (
-            pnl_frame.filter(pl.col("date") >= first_pnl_date)
-            if first_pnl_date is not None
-            else pnl_frame
+        first_reference_return_date = (
+            valid_reference_returns.get_column("date").min()
+            if valid_reference_returns.height
+            else None
         )
-        pnl_post_start_invalid = pnl_after_start.filter(
-            pl.col("forecast_valid") & ~pl.col("pnl_valid")
-        ).height
-        fx_missing_obs = pnl_frame.filter(
+        reference_returns_after_start = (
+            reference_frame.filter(
+                pl.col("date") >= first_reference_return_date
+            )
+            if first_reference_return_date is not None
+            else reference_frame
+        )
+        reference_return_post_start_invalid = (
+            reference_returns_after_start.filter(
+                pl.col("forecast_valid") & ~pl.col("reference_return_valid")
+            ).height
+        )
+        fx_missing_obs = reference_frame.filter(
             pl.col("forecast_valid") & pl.col("fx_to_usd").is_null()
         ).height
-        fx_used = pnl_frame.filter(pl.col("fx_to_usd").is_not_null())
+        fx_used = reference_frame.filter(pl.col("fx_to_usd").is_not_null())
         fx_pairs = fx_used.get_column("fx_pair").drop_nulls().unique().to_list()
         fx_sources = fx_used.get_column("fx_src").drop_nulls().unique().to_list()
         subsystem_elig = bool(
             result.audit["forecast_elig"]
-            and pnl_valid.height >= args.min_forecast_obs
-            and pnl_post_start_invalid == 0
+            and valid_reference_returns.height >= args.min_forecast_obs
+            and reference_return_post_start_invalid == 0
         )
         if not result.audit["forecast_elig"]:
             subsystem_excl = str(result.audit["forecast_excl"])
-        elif pnl_valid.height < args.min_forecast_obs:
-            subsystem_excl = "insufficient_valid_pnl_obs"
-        elif pnl_post_start_invalid:
-            subsystem_excl = "pnl_gaps_after_start"
+        elif valid_reference_returns.height < args.min_forecast_obs:
+            subsystem_excl = "insufficient_valid_reference_return_obs"
+        elif reference_return_post_start_invalid:
+            subsystem_excl = "reference_return_gaps_after_start"
         else:
             subsystem_excl = ""
         audit = {
@@ -670,11 +686,15 @@ def _run_complete_selection(
             "ann_trade_cost_sr": annual_cost.ann_trade_cost_sr,
             "ann_roll_cost_sr": annual_cost.ann_roll_cost_sr,
             "ann_cost_sr": annual_cost.ann_cost_sr,
-            "pnl_valid_obs": pnl_valid.height,
-            "pnl_post_start_invalid_obs": pnl_post_start_invalid,
-            "pnl_start": first_pnl_date,
-            "pnl_end": (
-                pnl_valid.get_column("date").max() if pnl_valid.height else None
+            "reference_return_valid_obs": valid_reference_returns.height,
+            "reference_return_post_start_invalid_obs": (
+                reference_return_post_start_invalid
+            ),
+            "reference_return_start": first_reference_return_date,
+            "reference_return_end": (
+                valid_reference_returns.get_column("date").max()
+                if valid_reference_returns.height
+                else None
             ),
             "fx_missing_forecast_obs": fx_missing_obs,
             "fx_pair": ",".join(sorted(fx_pairs)) or f"{currency}USD",
@@ -693,20 +713,21 @@ def _run_complete_selection(
         audit_rows.append(audit)
         forecast_output_frames.append(
             _label_forecast_output_frame(
-                pnl_frame,
+                reference_frame,
                 symbol=symbol,
                 hist_instr_code=str(row["hist_instr_code"]),
             )
         )
         logger.log(
             logging.INFO if subsystem_elig else logging.DEBUG,
-            "selection_subsystem_audit symbol=%s eligible=%s forecast_obs=%s "
-            "pnl_obs=%s post_start_invalid_obs=%s comb_turnover=%s reason=%s",
+            "selection_subsystem_reference_audit symbol=%s eligible=%s "
+            "forecast_obs=%s reference_return_obs=%s "
+            "post_start_invalid_obs=%s comb_turnover=%s reason=%s",
             symbol,
             subsystem_elig,
             result.audit["forecast_valid_obs"],
-            pnl_valid.height,
-            pnl_post_start_invalid,
+            valid_reference_returns.height,
+            reference_return_post_start_invalid,
             result.turnover,
             subsystem_excl,
         )
@@ -717,14 +738,16 @@ def _run_complete_selection(
     if not eligible_symbols:
         raise ValueError("no instrument passed the combined-forecast audit")
 
-    # Correlations belong to executable subsystem returns, not raw market
-    # returns or the individual EWMAC component forecasts.
-    correlation, covered, net_pnl_wide = _subsystem_correlation(
-        subsystem_frames,
-        eligible_symbols,
-        window_years=args.corr_window_years,
-        halflife_days=args.corr_halflife_days,
-        min_rows=args.corr_min_rows,
+    # Correlations belong to equal-weight subsystem-reference returns, not raw
+    # market returns or the individual EWMAC component forecasts.
+    correlation, covered, reference_return_wide = (
+        _subsystem_reference_correlation(
+            subsystem_reference_frames,
+            eligible_symbols,
+            window_years=args.corr_window_years,
+            halflife_days=args.corr_halflife_days,
+            min_rows=args.corr_min_rows,
+        )
     )
     if not covered.all():
         uncovered = [
@@ -745,7 +768,9 @@ def _run_complete_selection(
         eligible_symbols = [eligible_symbols[idx] for idx in keep]
         correlation = correlation[np.ix_(keep, keep)]
     if not eligible_symbols:
-        raise ValueError("no instrument has sufficient pairwise subsystem returns")
+        raise ValueError(
+            "no instrument has sufficient pairwise subsystem-reference returns"
+        )
 
     audit_by_symbol = {
         row["symbol"]: row for row in audit_frame.iter_rows(named=True)
@@ -882,16 +907,16 @@ def _run_complete_selection(
         })
     final_frame = pl.DataFrame(final_rows, infer_schema_length=None)
 
-    # Preserve the normalized cost-adjusted P&L above for correlations. This
-    # second path restores account capital and final-book sizing, rounds to
-    # executable contracts, and charges actual history-policy roll dates.
+    # Reference returns above are used only for candidate correlations. This
+    # selected-book path applies final weights and IDM, rounds to executable
+    # contracts, and charges actual history-policy roll dates in cash.
     cash_output_frames: list[pl.DataFrame] = []
     for symbol in selection.selected:
         candidate = candidate_by_symbol[symbol]
         detail = final_details[symbol]
         row = source_rows[symbol]
         cash_frame = build_executable_cash_pnl_curve(
-            subsystem_frames[symbol],
+            subsystem_reference_frames[symbol],
             capital=float(run_config["init_cap_usd"]),
             target_vol=float(run_config["target_vol"]),
             weight=float(detail["limit_weight"]),
@@ -983,8 +1008,9 @@ def _run_complete_selection(
         output_dir / f"multi_speed_ewmac_selection_passes_{stamp}.parquet"
     )
     selection_path = output_dir / f"multi_speed_ewmac_selection_book_{stamp}.parquet"
-    net_pnl_path = (
-        output_dir / f"multi_speed_ewmac_selection_subsystem_net_pnl_{stamp}.parquet"
+    reference_return_path = (
+        output_dir
+        / f"multi_speed_ewmac_selection_subsystem_reference_returns_{stamp}.parquet"
     )
     cash_pnl_path = (
         output_dir / f"multi_speed_ewmac_selection_cash_pnl_{stamp}.parquet"
@@ -1162,7 +1188,7 @@ def _run_complete_selection(
     public_trial_allocations.write_parquet(trial_allocations_path)
     public_selection_passes.write_parquet(selection_passes_path)
     public_selection.write_parquet(selection_path)
-    net_pnl_wide.write_parquet(net_pnl_path)
+    reference_return_wide.write_parquet(reference_return_path)
     public_cash_pnl = round_public_report(
         rename_public_report_columns(cash_pnl_long)
     )
@@ -1173,7 +1199,7 @@ def _run_complete_selection(
     )
     print(f"Saved forecast audit {audit_path}")
     print(f"Saved daily forecasts {forecasts_path}")
-    print(f"Saved synchronized net P&L {net_pnl_path}")
+    print(f"Saved synchronized subsystem reference returns {reference_return_path}")
     print(f"Saved executable cash P&L {cash_pnl_path}")
     print(f"Saved trials {trials_path}")
     print(f"Saved trial allocations {trial_allocations_path}")

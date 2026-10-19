@@ -10,6 +10,7 @@ from derivatives_bt_engine.calculations.forecast_combination import (
 )
 from derivatives_bt_engine.pipelines.ewmac_notebook import (
     ExecutableCashSettings,
+    SubsystemReferenceSettings,
     build_ewmac_notebook_view,
 )
 
@@ -37,14 +38,21 @@ def _combined_result() -> CombinedForecastResult:
     )
 
 
-def test_notebook_view_builds_subsystem_and_executable_cash_paths():
-    """The facade keeps relative-risk and account-scaled P&L distinct."""
+def test_notebook_view_builds_reference_return_and_cash_paths():
+    """The facade keeps equal-weight reference returns and cash P&L distinct."""
     result = _combined_result()
     view = build_ewmac_notebook_view(
         result,
         instrument_code="TEST",
         multiplier=10.0,
         ann_cost_sr=0.01,
+        reference_settings=SubsystemReferenceSettings(
+            capital=1_000.0,
+            target_vol=0.20,
+            reference_book_count=2,
+            reference_idm=1.0,
+            max_weight_idm=1.0,
+        ),
         cash_settings=ExecutableCashSettings(
             capital=1_000.0,
             target_vol=0.20,
@@ -55,7 +63,7 @@ def test_notebook_view_builds_subsystem_and_executable_cash_paths():
     )
 
     assert view.forecasts is result.frame
-    assert "net_pnl_usd" in view.pnl.columns
+    assert "reference_net_return" in view.reference.columns
     assert view.cash is not None
     assert {
         "target_position",
@@ -64,10 +72,16 @@ def test_notebook_view_builds_subsystem_and_executable_cash_paths():
     } <= set(view.cash.columns)
     assert view.forecast_positions(start="2024-01-03").height == 3
 
-    subsystem = view.subsystem_pnl_curves()
-    expected_subsystem_net = view.pnl.get_column("net_pnl_usd").fill_null(0.0).sum()
-    assert subsystem.get_column("cum_net_pnl_usd")[-1] == pytest.approx(
-        expected_subsystem_net
+    reference = view.subsystem_reference_return_curves()
+    expected_reference_net = (
+        view.reference.get_column("reference_net_return")
+        .fill_null(0.0)
+        .sum()
+    )
+    assert reference.get_column(
+        "cum_reference_net_return"
+    )[-1] == pytest.approx(
+        expected_reference_net
     )
     cash = view.cash_pnl_curves()
     expected_cash_net = (
@@ -84,6 +98,10 @@ def test_notebook_view_hvplot_contains_cash_panels_when_requested():
         _combined_result(),
         instrument_code="TEST",
         multiplier=10.0,
+        reference_settings=SubsystemReferenceSettings(
+            capital=1_000.0,
+            target_vol=0.20,
+        ),
         cash_settings=ExecutableCashSettings(
             capital=1_000.0,
             target_vol=0.20,
@@ -96,11 +114,15 @@ def test_notebook_view_hvplot_contains_cash_panels_when_requested():
 
 
 def test_cash_curve_is_explicitly_optional():
-    """A relative-risk view must not silently claim executable cash results."""
+    """A reference-return view must not silently claim executable cash results."""
     view = build_ewmac_notebook_view(
         _combined_result(),
         instrument_code="TEST",
         multiplier=10.0,
+        reference_settings=SubsystemReferenceSettings(
+            capital=1_000.0,
+            target_vol=0.20,
+        ),
     )
 
     assert view.cash is None

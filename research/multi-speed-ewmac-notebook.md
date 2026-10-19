@@ -119,14 +119,15 @@ columns. ``result.weights``, ``result.fdm``, ``result.turnover``, and
 
 ## Plot the combined forecast, positions, and P&L
 
-Wrap the combined result in the notebook view instead of rebuilding P&L and
-plotting each column in separate cells. The normalized subsystem curve is
-always produced. Executable contracts and cash P&L are produced only when the
-actual contract multiplier and explicit account settings are supplied:
+Wrap the combined result in the notebook view instead of rebuilding sizing and
+returns in separate cells. The equal-weight subsystem-reference curve is
+always produced from explicit reference settings. Executable contracts and
+cash P&L are produced only when final portfolio settings are also supplied:
 
 ```python
 from derivatives_bt_engine.pipelines.ewmac_notebook import (
     ExecutableCashSettings,
+    SubsystemReferenceSettings,
     build_ewmac_notebook_view,
 )
 
@@ -136,6 +137,13 @@ view = build_ewmac_notebook_view(
     multiplier=50.0,
     fx_to_usd=1.0,
     ann_cost_sr=0.0,
+    reference_settings=SubsystemReferenceSettings(
+        capital=75_000,
+        target_vol=0.20,
+        reference_book_count=15,
+        reference_idm=2.5,
+        max_weight_idm=0.20,
+    ),
     cash_settings=ExecutableCashSettings(
         capital=75_000,
         target_vol=0.20,
@@ -150,24 +158,27 @@ view.plot(start="2021-01-01")
 ```
 
 The linked hvPlot dashboard contains adjusted signal price, combined forecast,
-raw and smoothed position proxies, normalized position, cumulative subsystem
-P&L, buffered whole contracts, and cumulative executable cash P&L. The
-underlying Polars frames remain available for detailed inspection:
+raw and smoothed position proxies, normalized position, cumulative
+subsystem-reference return, buffered whole contracts, and cumulative
+executable cash P&L. The underlying Polars frames remain available for
+detailed inspection:
 
 ```python
 view.forecasts
 view.forecast_positions(start="2021-01-01")
-view.pnl
-view.subsystem_pnl_curves()
+view.reference
+view.subsystem_reference_return_curves()
 view.cash
 view.cash_pnl_curves()
 ```
 
-`view.pnl` is intentionally a relative-risk path used for subsystem
-correlations; it is not an account equity curve. `view.cash` uses the supplied
-capital, risk target, weight, IDM, multiplier, buffering, and contract costs,
+`view.reference` assigns the instrument `1 / reference_book_count`, caps the
+weight-times-IDM product, sizes continuous positions from daily dollar
+volatility, and divides the resulting P&L by reference capital. It is the
+candidate return used for subsystem correlations. `view.cash` uses final
+portfolio weight and IDM, buffering, whole contracts, and per-contract costs,
 so it is the executable account-scale diagnostic. Passing `multiplier=1` for
-ES is therefore appropriate only for a unit test, not an ES cash backtest.
+ES is appropriate only for a unit test.
 
 ## Combined portfolio-selection forecasts
 
