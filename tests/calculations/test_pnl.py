@@ -40,45 +40,45 @@ def test_subsystem_reference_return_uses_equal_weight_risk_budget():
         annualization_days=256,
     )
 
-    assert result.get_column("reference_weight").to_list() == pytest.approx(
+    assert result.get_column("ref_weight").to_list() == pytest.approx(
         [0.5] * 3
     )
     assert result.get_column(
-        "reference_annual_risk_budget_usd"
+        "ref_annual_risk_budget_usd"
     ).to_list() == pytest.approx([80.0] * 3)
     assert result.get_column(
-        "reference_daily_risk_budget_usd"
+        "ref_daily_risk_budget_usd"
     ).to_list() == pytest.approx([5.0] * 3)
     assert result.get_column(
-        "reference_return_capital_usd"
+        "ref_return_capital_usd"
     ).to_list() == pytest.approx([500.0] * 3)
     assert result.get_column(
         "daily_dollar_vol_per_contract"
     ).to_list() == pytest.approx([40.0] * 3)
     assert result.get_column(
-        "reference_average_position"
+        "ref_average_position"
     ).to_list() == pytest.approx([0.125] * 3)
     assert result.get_column(
-        "reference_target_position"
+        "ref_target_position"
     ).to_list() == pytest.approx([0.125, 0.25, 0.375])
-    held = result.get_column("held_reference_position").to_list()
+    held = result.get_column("held_ref_position").to_list()
     assert held[0] is None
     assert held[1:] == pytest.approx([0.125, 0.25])
     assert result.get_column(
-        "reference_gross_return"
+        "ref_gross_return"
     ).to_list()[1:] == pytest.approx(
         [0.005, 0.01]
     )
-    costs = result.get_column("reference_cost_return").to_list()
+    costs = result.get_column("ref_cost_return").to_list()
     assert costs[0] is None
     assert costs[1] == pytest.approx(-0.016 * (1 / 365.25))
     assert costs[2] == pytest.approx(-0.016 * (3 / 365.25))
-    assert result.get_column("reference_net_return")[1] == pytest.approx(
+    assert result.get_column("ref_net_return")[1] == pytest.approx(
         0.005 + costs[1]
     )
     assert turnover is not None
-    assert "smoothed_reference_average_position" in result.columns
-    assert "reference_normalized_position" in result.columns
+    assert "smoothed_ref_average_position" in result.columns
+    assert "ref_normalized_position" in result.columns
 
 
 def test_subsystem_reference_preserves_missing_historical_fx_as_invalid():
@@ -101,8 +101,8 @@ def test_subsystem_reference_preserves_missing_historical_fx_as_invalid():
         ann_cost_sr=0.0,
     )
 
-    assert result.get_column("reference_net_return").null_count() == 2
-    assert result.get_column("reference_return_valid").to_list() == [False, False]
+    assert result.get_column("ref_net_return").null_count() == 2
+    assert result.get_column("ref_return_valid").to_list() == [False, False]
 
 
 def test_executable_cash_pnl_separates_trade_and_policy_roll_costs():

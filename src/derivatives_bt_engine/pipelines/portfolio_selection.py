@@ -275,7 +275,7 @@ def parse_args(argv=None, *, complete_default: bool = False):
         ),
     )
     parser.add_argument(
-        "--tie-ref-book-count",
+        "--tie-reference-book-count",
         dest="tie_reference_book_count",
         type=int,
         default=15,
@@ -473,7 +473,7 @@ def _subsystem_reference_correlation(
 
     ``subsystem_reference_frames`` is keyed by executable symbol, unlike
     ``frames_by_history`` above. The function outer-joins each symbol's
-    ``reference_net_return`` on date to form a sparse return panel. The
+    ``ref_net_return`` on date to form a sparse return panel. The
     estimator uses each pair's contemporaneous observations, so different
     history starts and exchange holidays do not erase the entire universe.
 
@@ -484,7 +484,7 @@ def _subsystem_reference_correlation(
     for symbol in symbols:
         returns = (
             subsystem_reference_frames[symbol]
-            .select("date", pl.col("reference_net_return").alias(symbol))
+            .select("date", pl.col("ref_net_return").alias(symbol))
             .drop_nulls()
         )
         # Preserve the union of dates here. Requiring a date shared by every
@@ -650,7 +650,7 @@ def _run_complete_selection(
         subsystem_reference_frames[symbol] = reference_frame
 
         valid_reference_returns = reference_frame.filter(
-            pl.col("reference_return_valid")
+            pl.col("ref_return_valid")
         )
         first_reference_return_date = (
             valid_reference_returns.get_column("date").min()
@@ -666,7 +666,7 @@ def _run_complete_selection(
         )
         reference_return_post_start_invalid = (
             reference_returns_after_start.filter(
-                pl.col("forecast_valid") & ~pl.col("reference_return_valid")
+                pl.col("forecast_valid") & ~pl.col("ref_return_valid")
             ).height
         )
         fx_missing_obs = reference_frame.filter(
@@ -687,9 +687,9 @@ def _run_complete_selection(
         elif combined_turnover is None or not math.isfinite(combined_turnover):
             subsystem_excl = "invalid_combined_turnover"
         elif valid_reference_returns.height < args.min_forecast_obs:
-            subsystem_excl = "insufficient_valid_reference_return_obs"
+            subsystem_excl = "insufficient_valid_ref_return_obs"
         elif reference_return_post_start_invalid:
-            subsystem_excl = "reference_return_gaps_after_start"
+            subsystem_excl = "ref_return_gaps_after_start"
         else:
             subsystem_excl = ""
         audit = {
@@ -702,12 +702,12 @@ def _run_complete_selection(
             "ann_trade_cost_sr": annual_cost.ann_trade_cost_sr,
             "ann_roll_cost_sr": annual_cost.ann_roll_cost_sr,
             "ann_cost_sr": annual_cost.ann_cost_sr,
-            "reference_return_valid_obs": valid_reference_returns.height,
-            "reference_return_post_start_invalid_obs": (
+            "ref_return_valid_obs": valid_reference_returns.height,
+            "ref_return_post_start_invalid_obs": (
                 reference_return_post_start_invalid
             ),
-            "reference_return_start": first_reference_return_date,
-            "reference_return_end": (
+            "ref_return_start": first_reference_return_date,
+            "ref_return_end": (
                 valid_reference_returns.get_column("date").max()
                 if valid_reference_returns.height
                 else None
@@ -859,8 +859,8 @@ def _run_complete_selection(
             "book_margin_limit_usd=%s book_margin_remaining_usd=%s "
             "roll_cost_in_score=%s feasible=%s accepted=%s reason=%s",
             trial["iteration"], trial["candidate"], trial["book"], trial["score"],
-            trial["base_score"], trial["candidate_reference_max_position"],
-            trial["candidate_reference_contract_band_distance"],
+            trial["base_score"], trial["candidate_ref_max_position"],
+            trial["candidate_ref_contract_band_distance"],
             trial["tie_eligible"],
             trial["tie_break_applied"],
             trial["idm"], trial.get("portfolio_cont_margin_at_max_usd"),
@@ -899,7 +899,7 @@ def _run_complete_selection(
             "contract_band_min": args.contract_band_min,
             "contract_band_max": args.contract_band_max,
             "score_tie_tolerance_percent": args.score_tie_tolerance_percent,
-            "tie_reference_book_count": args.tie_reference_book_count,
+            "tie_ref_book_count": args.tie_reference_book_count,
             "roll_cost_in_score": args.include_roll_cost_in_score,
             "buffer_size": args.buffer_size,
             "buffer_trade_to_edge": args.buffer_trade_to_edge,
@@ -1056,7 +1056,7 @@ def _run_complete_selection(
                     "score_tie_tolerance_percent"
                 ),
                 pl.lit(args.tie_reference_book_count).alias(
-                    "tie_reference_book_count"
+                    "tie_ref_book_count"
                 ),
             )
         )
@@ -1084,7 +1084,7 @@ def _run_complete_selection(
                     "score_tie_tolerance_percent"
                 ),
                 pl.lit(args.tie_reference_book_count).alias(
-                    "tie_reference_book_count"
+                    "tie_ref_book_count"
                 ),
             )
         )
@@ -1116,7 +1116,7 @@ def _run_complete_selection(
                 "score_tie_tolerance_percent"
             ),
             pl.lit(args.tie_reference_book_count).alias(
-                "tie_reference_book_count"
+                "tie_ref_book_count"
             ),
         )
         .select(
@@ -1134,10 +1134,10 @@ def _run_complete_selection(
             "cluster_weight",
             "weight",
             "limit_weight",
-            "reference_weight",
-            "reference_weight_idm",
-            "reference_max_position",
-            "reference_contract_band_distance",
+            "ref_weight",
+            "ref_weight_idm",
+            "ref_max_position",
+            "ref_contract_band_distance",
             "idm",
             "score",
             "base_score",
@@ -1149,7 +1149,7 @@ def _run_complete_selection(
             "contract_band_min",
             "contract_band_max",
             "score_tie_tolerance_percent",
-            "tie_reference_book_count",
+            "tie_ref_book_count",
             "iter_score_best",
             "iter_score_best_score",
             "tie_score_floor",

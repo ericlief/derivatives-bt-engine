@@ -56,6 +56,10 @@
 - Add new abbreviations to the centralized public-schema rename/token map, not
   as one-off aliases. Update report ordering, ranking/notebook helpers,
   documentation, and schema tests together.
+- In every dataframe schema, use `ref` (not `reference`) consistently for
+  reference inputs, fallbacks, and comparison series, including internal
+  calculation frames and persisted audit frames. Keep full `reference` in
+  prose and readable function/API names where it improves clarity.
 - Pass every public Polars report dataframe through
   `data.report_formatting.round_public_report` at the output boundary. Keep
   calculation dataframes at full precision, and register new monetary or

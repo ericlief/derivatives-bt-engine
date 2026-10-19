@@ -74,7 +74,7 @@ def test_nonpositive_prices_keep_point_path_but_mask_ratio_path() -> None:
     assert result.signal.get_column("signal_index").to_list() == [100.0, 100.0, 100.0, 120.0]
     assert result.signal.get_column("return_valid").to_list() == [False, False, False, True]
     assert "nonpositive_current" in result.signal.get_column("quality_flag")[1]
-    assert "nonpositive_reference" in result.signal.get_column("quality_flag")[2]
+    assert "nonpositive_ref" in result.signal.get_column("quality_flag")[2]
 
 
 def test_daily_selection_chains_all_intraday_moves_and_propagates_invalidity() -> None:

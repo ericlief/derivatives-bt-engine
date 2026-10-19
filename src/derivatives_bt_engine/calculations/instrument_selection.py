@@ -530,19 +530,19 @@ class GreedyInstrumentSelector:
         It is independent of the current partial book, so a candidate's band
         classification cannot migrate merely because later markets are added.
         """
-        reference_weight = 1.0 / self.config.tie_reference_book_count
-        reference_weight_idm = min(
-            reference_weight * self.config.max_idm,
+        ref_weight = 1.0 / self.config.tie_reference_book_count
+        ref_weight_idm = min(
+            ref_weight * self.config.max_idm,
             self.config.max_weight_idm,
         )
-        reference_max_position = (
+        ref_max_position = (
             self.config.capital
             * self.config.target_vol
-            * reference_weight_idm
+            * ref_weight_idm
             * self.config.forecast_cap_ratio
             / candidate.ann_dvol
         )
-        return reference_weight, reference_weight_idm, reference_max_position
+        return ref_weight, ref_weight_idm, ref_max_position
 
     def _contract_band_distance(self, max_position: float) -> float:
         """Return zero inside the target band and log distance outside it."""
@@ -606,7 +606,7 @@ class GreedyInstrumentSelector:
             key=lambda item: (
                 -float(
                     self._candidate_detail(item[0], item[1])[
-                        "reference_contract_band_distance"
+                        "ref_contract_band_distance"
                     ]
                 ),
                 item[1].score,
@@ -715,12 +715,12 @@ class GreedyInstrumentSelector:
             candidate = candidates[symbol]
             allocation = weights_for_limits[symbol]
             (
-                reference_weight,
-                reference_weight_idm,
-                reference_max_position,
+                ref_weight,
+                ref_weight_idm,
+                ref_max_position,
             ) = self._reference_position(candidate)
-            reference_contract_band_distance = self._contract_band_distance(
-                reference_max_position
+            ref_contract_band_distance = self._contract_band_distance(
+                ref_max_position
             )
             # Maximum contracts at the forecast cap. A value below 0.5 cannot
             # reliably express even one signed contract after rounding.
@@ -825,11 +825,11 @@ class GreedyInstrumentSelector:
                 "cluster_path": allocation_result.cluster_paths[symbol],
                 "weight": weights[symbol],
                 "limit_weight": allocation,
-                "reference_weight": reference_weight,
-                "reference_weight_idm": reference_weight_idm,
-                "reference_max_position": reference_max_position,
-                "reference_contract_band_distance": (
-                    reference_contract_band_distance
+                "ref_weight": ref_weight,
+                "ref_weight_idm": ref_weight_idm,
+                "ref_max_position": ref_max_position,
+                "ref_contract_band_distance": (
+                    ref_contract_band_distance
                 ),
                 "roll_cost_in_score": self.config.include_roll_cost_in_score,
                 "score_cost_sr": score_cost_sr,
@@ -1150,11 +1150,11 @@ class GreedyInstrumentSelector:
             "low_contract_weight": score.low_contract_weight,
             "band_contract_weight": score.band_contract_weight,
             "high_contract_weight": score.high_contract_weight,
-            "candidate_reference_max_position": candidate_detail[
-                "reference_max_position"
+            "candidate_ref_max_position": candidate_detail[
+                "ref_max_position"
             ],
-            "candidate_reference_contract_band_distance": candidate_detail[
-                "reference_contract_band_distance"
+            "candidate_ref_contract_band_distance": candidate_detail[
+                "ref_contract_band_distance"
             ],
             "feasible": score.feasible,
             "accepted": accepted,
@@ -1230,11 +1230,11 @@ class GreedyInstrumentSelector:
                 "low_contract_weight": score.low_contract_weight,
                 "band_contract_weight": score.band_contract_weight,
                 "high_contract_weight": score.high_contract_weight,
-                "reference_weight": detail["reference_weight"],
-                "reference_weight_idm": detail["reference_weight_idm"],
-                "reference_max_position": detail["reference_max_position"],
-                "reference_contract_band_distance": detail[
-                    "reference_contract_band_distance"
+                "ref_weight": detail["ref_weight"],
+                "ref_weight_idm": detail["ref_weight_idm"],
+                "ref_max_position": detail["ref_max_position"],
+                "ref_contract_band_distance": detail[
+                    "ref_contract_band_distance"
                 ],
                 "roll_cost_in_score": detail["roll_cost_in_score"],
                 "score_cost_sr": detail["score_cost_sr"],

@@ -81,15 +81,15 @@ def test_public_report_renames_buffer_parameters_at_boundary():
 def test_public_report_renames_subsystem_reference_columns():
     """Reference sizing and returns remain distinct from portfolio cash P&L."""
     report = pl.DataFrame({
-        "reference_book_count": [15],
-        "reference_idm": [2.5],
-        "reference_annual_risk_budget_usd": [2_500.126],
-        "reference_return_capital_usd": [12_500.126],
-        "reference_average_position": [3.45678],
-        "reference_target_position": [4.56789],
-        "held_reference_position": [4.0],
-        "reference_net_return": [0.00123449],
-        "reference_return_valid": [True],
+        "ref_book_count": [15],
+        "ref_idm": [2.5],
+        "ref_annual_risk_budget_usd": [2_500.126],
+        "ref_return_capital_usd": [12_500.126],
+        "ref_average_position": [3.45678],
+        "ref_target_position": [4.56789],
+        "held_ref_position": [4.0],
+        "ref_net_return": [0.00123449],
+        "ref_return_valid": [True],
     })
 
     public = round_public_report(rename_public_report_columns(report))

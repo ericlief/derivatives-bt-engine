@@ -137,8 +137,8 @@ def build_continuous_futures(
 
         flag = _quality(
             "unmatched_roll" if is_roll and not contract_match else "",
-            "missing_reference" if reference is None else "",
-            "nonpositive_reference" if reference is not None and reference <= 0 else "",
+            "missing_ref" if reference is None else "",
+            "nonpositive_ref" if reference is not None and reference <= 0 else "",
             "nonpositive_current" if current <= 0 else "",
         )
         point_changes.append(point_change)
@@ -168,7 +168,7 @@ def build_continuous_futures(
     ]
 
     enriched = frame.with_columns(
-        pl.Series("reference_price", references, dtype=pl.Float64),
+        pl.Series("ref_price", references, dtype=pl.Float64),
         pl.Series("point_change", point_changes, dtype=pl.Float64),
         pl.Series("ret_1d", returns, dtype=pl.Float64),
         pl.Series("signal_index", indices, dtype=pl.Float64),
@@ -182,7 +182,7 @@ def build_continuous_futures(
         "source_timestamp",
         "current_price",
         pl.col("current_contract").alias("contract_id"),
-        "reference_price",
+        "ref_price",
         "point_change",
         "ret_1d",
         "signal_index",
@@ -244,7 +244,7 @@ def select_daily_continuous(
         pl.when(pl.col("ret_1d").is_not_null())
         .then(pl.col("current_price") / (1.0 + pl.col("ret_1d")))
         .otherwise(None)
-        .alias("reference_price"),
+        .alias("ref_price"),
         (~pl.col("trade_date").is_in(invalid_dates)
          & pl.col("ret_1d").is_not_null()).alias("return_valid"),
         pl.when(pl.col("trade_date").is_in(invalid_dates))

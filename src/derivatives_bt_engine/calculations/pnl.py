@@ -173,8 +173,8 @@ def append_reference_position_turnover(
     Parameters
     ----------
     frame
-        Chronological reference frame containing ``reference_average_position``
-        and ``reference_target_position`` in continuous contracts.
+        Chronological reference frame containing ``ref_average_position``
+        and ``ref_target_position`` in continuous contracts.
     average_position_ewm_com
         EWM ``com`` used to smooth the changing average-position denominator.
         The target position and forecast are not smoothed.
@@ -199,7 +199,7 @@ def append_reference_position_turnover(
     and the contract multiplier, the audit does not rely on an inverse-volatility
     proxy or assume that FX is constant through time.
     """
-    required = {"reference_average_position", "reference_target_position"}
+    required = {"ref_average_position", "ref_target_position"}
     missing = sorted(required.difference(frame.columns))
     if missing:
         raise ValueError(f"reference turnover input missing columns: {missing}")
@@ -213,45 +213,45 @@ def append_reference_position_turnover(
     result = (
         frame.sort("date")
         .with_columns(
-            pl.col("reference_average_position")
+            pl.col("ref_average_position")
             .ewm_mean(
                 com=average_position_ewm_com,
                 adjust=True,
                 min_samples=2,
             )
-            .alias("smoothed_reference_average_position")
+            .alias("smoothed_ref_average_position")
         )
         .with_columns(
-            pl.when(pl.col("smoothed_reference_average_position") > 0)
+            pl.when(pl.col("smoothed_ref_average_position") > 0)
             .then(
-                pl.col("reference_target_position")
-                / pl.col("smoothed_reference_average_position")
+                pl.col("ref_target_position")
+                / pl.col("smoothed_ref_average_position")
             )
             .otherwise(None)
-            .alias("reference_normalized_position")
+            .alias("ref_normalized_position")
         )
         .with_columns(
-            pl.col("reference_normalized_position")
+            pl.col("ref_normalized_position")
             .diff()
             .abs()
-            .alias("reference_abs_position_change")
+            .alias("ref_abs_position_change")
         )
         .with_columns(
-            pl.col("reference_abs_position_change")
+            pl.col("ref_abs_position_change")
             .rolling_mean(
                 window_size=turnover_rolling_days,
                 min_samples=turnover_rolling_days,
             )
-            .alias("reference_rolling_mean_abs_position_change")
+            .alias("ref_rolling_mean_abs_position_change")
         )
         .with_columns(
             (
-                pl.col("reference_rolling_mean_abs_position_change")
+                pl.col("ref_rolling_mean_abs_position_change")
                 * annualization_days
-            ).alias("reference_rolling_ann_turnover")
+            ).alias("ref_rolling_ann_turnover")
         )
     )
-    changes = result.get_column("reference_abs_position_change")
+    changes = result.get_column("ref_abs_position_change")
     changes = changes.filter(changes.is_not_null() & changes.is_finite())
     turnover = (
         float(changes.mean() * annualization_days) if changes.len() else None
@@ -269,15 +269,15 @@ def apply_subsystem_reference_cost(
     The helper is separate from sizing so the pipeline can first measure
     turnover from the reference positions, convert that turnover to annual SR
     cost, and then apply the resulting cost without rebuilding the positions.
-    Cash cost is normalized by ``reference_return_capital_usd``, which is the
+    Cash cost is normalized by ``ref_return_capital_usd``, which is the
     allocation capital implied by the reference annual risk budget.
     """
     required = {
-        "held_reference_position",
+        "held_ref_position",
         "period_year_fraction",
-        "reference_annual_risk_budget_usd",
-        "reference_return_capital_usd",
-        "reference_gross_return",
+        "ref_annual_risk_budget_usd",
+        "ref_return_capital_usd",
+        "ref_gross_return",
     }
     missing = sorted(required.difference(frame.columns))
     if missing:
@@ -289,35 +289,35 @@ def apply_subsystem_reference_cost(
         frame.with_columns(
             (
                 -ann_cost_sr
-                * pl.col("reference_annual_risk_budget_usd")
-                / pl.col("reference_return_capital_usd")
-            ).alias("reference_annual_cost_return")
+                * pl.col("ref_annual_risk_budget_usd")
+                / pl.col("ref_return_capital_usd")
+            ).alias("ref_annual_cost_return")
         )
         .with_columns(
             # Costs begin only once a position was actually held. Calendar
             # elapsed time spreads the annual charge over irregular rows.
             pl.when(
-                pl.col("held_reference_position").is_not_null()
+                pl.col("held_ref_position").is_not_null()
                 & pl.col("period_year_fraction").is_not_null()
             )
             .then(
-                pl.col("reference_annual_cost_return")
+                pl.col("ref_annual_cost_return")
                 * pl.col("period_year_fraction")
             )
             .otherwise(None)
-            .alias("reference_cost_return")
+            .alias("ref_cost_return")
         )
         .with_columns(
             (
-                pl.col("reference_gross_return")
-                + pl.col("reference_cost_return")
-            ).alias("reference_net_return")
+                pl.col("ref_gross_return")
+                + pl.col("ref_cost_return")
+            ).alias("ref_net_return")
         )
         .with_columns(
             (
-                pl.col("reference_net_return").is_not_null()
-                & pl.col("reference_net_return").is_finite()
-            ).alias("reference_return_valid")
+                pl.col("ref_net_return").is_not_null()
+                & pl.col("ref_net_return").is_finite()
+            ).alias("ref_return_valid")
         )
     )
 
@@ -437,15 +437,15 @@ def build_subsystem_reference_return_curve(
         raise ValueError("annualization_days must be positive")
 
     annualization_sqrt = math.sqrt(annualization_days)
-    reference_weight = 1.0 / reference_book_count
-    reference_weight_idm = min(
-        reference_weight * reference_idm,
+    ref_weight = 1.0 / reference_book_count
+    ref_weight_idm = min(
+        ref_weight * reference_idm,
         max_weight_idm,
     )
     annual_risk_budget_usd = (
-        capital * target_vol * reference_weight_idm
+        capital * target_vol * ref_weight_idm
     )
-    reference_return_capital_usd = annual_risk_budget_usd / target_vol
+    ref_return_capital_usd = annual_risk_budget_usd / target_vol
     daily_risk_budget_usd = annual_risk_budget_usd / annualization_sqrt
     reference = (
         frame.sort("date")
@@ -461,19 +461,19 @@ def build_subsystem_reference_return_curve(
             ).alias("period_year_fraction"),
         )
         .with_columns(
-            pl.lit(reference_book_count).alias("reference_book_count"),
-            pl.lit(reference_weight).alias("reference_weight"),
-            pl.lit(reference_idm).alias("reference_idm"),
+            pl.lit(reference_book_count).alias("ref_book_count"),
+            pl.lit(ref_weight).alias("ref_weight"),
+            pl.lit(reference_idm).alias("ref_idm"),
             pl.lit(max_weight_idm).alias("max_weight_idm"),
-            pl.lit(reference_weight_idm).alias("reference_weight_idm"),
+            pl.lit(ref_weight_idm).alias("ref_weight_idm"),
             pl.lit(annual_risk_budget_usd).alias(
-                "reference_annual_risk_budget_usd"
+                "ref_annual_risk_budget_usd"
             ),
-            pl.lit(reference_return_capital_usd).alias(
-                "reference_return_capital_usd"
+            pl.lit(ref_return_capital_usd).alias(
+                "ref_return_capital_usd"
             ),
             pl.lit(daily_risk_budget_usd).alias(
-                "reference_daily_risk_budget_usd"
+                "ref_daily_risk_budget_usd"
             ),
             pl.when(pl.col("fx_valid"))
             .then(pl.col(point_vol_col) * multiplier * pl.col(fx_col))
@@ -490,29 +490,29 @@ def build_subsystem_reference_return_curve(
                 / pl.col("daily_dollar_vol_per_contract")
             )
             .otherwise(None)
-            .alias("reference_average_position"),
+            .alias("ref_average_position"),
         )
         .with_columns(
             (
-                pl.col("reference_average_position")
+                pl.col("ref_average_position")
                 * pl.col("combined_forecast")
                 / target_abs_forecast
-            ).alias("reference_target_position"),
+            ).alias("ref_target_position"),
         )
         .with_columns(
             # End-of-day positions earn the following observation's move.
-            pl.col("reference_target_position")
+            pl.col("ref_target_position")
             .shift(1)
-            .alias("held_reference_position"),
+            .alias("held_ref_position"),
         )
         .with_columns(
             (
-                pl.col("held_reference_position")
+                pl.col("held_ref_position")
                 * pl.col("point_change")
                 * multiplier
                 * pl.col(fx_col)
-                / pl.col("reference_return_capital_usd")
-            ).alias("reference_gross_return"),
+                / pl.col("ref_return_capital_usd")
+            ).alias("ref_gross_return"),
         )
     )
     return apply_subsystem_reference_cost(

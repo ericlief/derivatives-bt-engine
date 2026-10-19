@@ -974,7 +974,7 @@ def _configured_cost_estimate(
 ) -> dict[str, object]:
     """Calculate one-way trade and complete-roll costs in annual SR units."""
     common: dict[str, object] = {
-        "strategy_reference_instrument": (
+        "strategy_ref_instrument": (
             instr.get("representative_instrument")
             or instr.get("instrument_code")
             or instr.get("symbol")
@@ -984,51 +984,51 @@ def _configured_cost_estimate(
     first_metrics = next(iter((strategy_metrics_by_rule or {}).values()), None)
     if first_metrics is not None:
         common.update(
-            strategy_reference_history_start=first_metrics.get(
+            strategy_ref_history_start=first_metrics.get(
                 "strategy_history_start"
             ),
-            strategy_reference_history_end=first_metrics.get(
+            strategy_ref_history_end=first_metrics.get(
                 "strategy_history_end"
             ),
-            strategy_reference_history_observations=first_metrics.get(
+            strategy_ref_history_observations=first_metrics.get(
                 "strategy_history_observations"
             ),
-            strategy_reference_rolls=first_metrics.get("strategy_rolls"),
-            strategy_reference_observed_rolls_per_year_full=first_metrics.get(
+            strategy_ref_rolls=first_metrics.get("strategy_rolls"),
+            strategy_ref_observed_rolls_per_year_full=first_metrics.get(
                 "strategy_observed_rolls_per_year_full"
             ),
-            strategy_reference_recent_rolls=first_metrics.get(
+            strategy_ref_recent_rolls=first_metrics.get(
                 "strategy_recent_rolls"
             ),
-            strategy_reference_observed_rolls_per_year_recent=first_metrics.get(
+            strategy_ref_observed_rolls_per_year_recent=first_metrics.get(
                 "strategy_observed_rolls_per_year_recent"
             ),
-            strategy_reference_recent_roll_start_year=first_metrics.get(
+            strategy_ref_recent_roll_start_year=first_metrics.get(
                 "strategy_recent_roll_start_year"
             ),
-            strategy_reference_recent_roll_end_year=first_metrics.get(
+            strategy_ref_recent_roll_end_year=first_metrics.get(
                 "strategy_recent_roll_end_year"
             ),
-            strategy_reference_recent_roll_years=first_metrics.get(
+            strategy_ref_recent_roll_years=first_metrics.get(
                 "strategy_recent_roll_years"
             ),
-            strategy_reference_hold_roll_cycle=first_metrics.get(
+            strategy_ref_hold_roll_cycle=first_metrics.get(
                 "strategy_hold_roll_cycle"
             ),
-            strategy_reference_configured_rolls_per_year=first_metrics.get(
+            strategy_ref_configured_rolls_per_year=first_metrics.get(
                 "strategy_configured_rolls_per_year"
             ),
-            strategy_reference_full_minus_configured_rolls_per_year=(
+            strategy_ref_full_minus_configured_rolls_per_year=(
                 first_metrics.get(
                     "strategy_full_minus_configured_rolls_per_year"
                 )
             ),
-            strategy_reference_recent_minus_configured_rolls_per_year=(
+            strategy_ref_recent_minus_configured_rolls_per_year=(
                 first_metrics.get(
                     "strategy_recent_minus_configured_rolls_per_year"
                 )
             ),
-            strategy_reference_roll_rate_audit=first_metrics.get(
+            strategy_ref_roll_rate_audit=first_metrics.get(
                 "strategy_roll_rate_audit"
             ),
         )
@@ -1059,8 +1059,8 @@ def _configured_cost_estimate(
             else "unavailable"
         )
     common.update(
-        strategy_reference_ann_rolls=rolls_per_year,
-        strategy_reference_roll_rate_source=roll_rate_source,
+        strategy_ref_ann_rolls=rolls_per_year,
+        strategy_ref_roll_rate_source=roll_rate_source,
         roll_cost_model="calendar_spread",
     )
 
@@ -1220,7 +1220,7 @@ def _configured_cost_estimate(
             f"{prefix}_median_instrument_pre_cost_sharpe": summary.get(
                 "ewmac_median_instrument_pre_cost_sharpe"
             ),
-            f"{prefix}_reference_pre_cost_sharpe": metrics.get(
+            f"{prefix}_ref_pre_cost_sharpe": metrics.get(
                 "ewmac_pre_cost_sharpe"
             ),
         })
@@ -1695,7 +1695,7 @@ def volatility_from_bars(
         "slow_vol_span": last["slow_vol_span"][0],
         "slow_vol_weight": last["slow_vol_weight"][0],
         "zero_return_fraction": zero_return_fraction,
-        "reference_price": clean["close"][-1],
+        "ref_price": clean["close"][-1],
     }
 
 
@@ -1827,10 +1827,10 @@ def _blend_recent_and_historical_return_volatility(
         raise ValueError("slow_weight must be between zero and one")
     fast_return_vol = _positive_finite(recent.get("ib_recent_fast_return_vol"))
     slow_point_vol = _positive_finite(historical.get("slow_point_vol"))
-    reference_price = _positive_finite(historical.get("reference_price"))
-    if fast_return_vol is None or slow_point_vol is None or reference_price is None:
+    ref_price = _positive_finite(historical.get("ref_price"))
+    if fast_return_vol is None or slow_point_vol is None or ref_price is None:
         raise ValueError("recent fast and historical slow volatility are required")
-    slow_return_vol = slow_point_vol / reference_price
+    slow_return_vol = slow_point_vol / ref_price
     mixed_return_vol = (
         (1.0 - slow_weight) * fast_return_vol
         + slow_weight * slow_return_vol
@@ -1868,9 +1868,9 @@ def volatility_from_pysystemtrade_history(
         raise ValueError(f"{instrument_code}: no valid mixed point volatility")
     changes = bars["point_change"].drop_nulls().tail(fast_span)
     if history.carry.height:
-        reference_price = history.carry.sort("trade_date")["current_price"][-1]
+        ref_price = history.carry.sort("trade_date")["current_price"][-1]
     else:
-        reference_price = history.marks.sort("trade_date")["mark_price"][-1]
+        ref_price = history.marks.sort("trade_date")["mark_price"][-1]
     return {
         "history_rows": bars.height,
         "history_start": bars["ts_event"].min(),
@@ -1886,7 +1886,7 @@ def volatility_from_pysystemtrade_history(
         "zero_return_fraction": (
             int((changes == 0).sum()) / changes.len() if changes.len() else None
         ),
-        "reference_price": reference_price,
+        "ref_price": ref_price,
     }
 
 
@@ -1905,7 +1905,7 @@ def build_cost_risk_row(
     history_start,
     history_end,
     vol_source: str = "dated_contract",
-    vol_reference_price: Optional[float] = None,
+    vol_ref_price: Optional[float] = None,
     daily_return_vol_override: Optional[float] = None,
     fast_point_vol: Optional[float] = None,
     slow_point_vol: Optional[float] = None,
@@ -1960,13 +1960,13 @@ def build_cost_risk_row(
 
     notional_native = price * mult
     notional = notional_native * fx
-    vol_reference = _positive_finite(vol_reference_price) or price
+    vol_reference = _positive_finite(vol_ref_price) or price
     daily_return_vol = (
         _positive_finite(daily_return_vol_override)
         or point_vol / abs(vol_reference)
     )
     annual_return_vol = daily_return_vol * math.sqrt(annualization_days)
-    price_scale_to_vol_reference = price / vol_reference
+    price_scale_to_vol_ref = price / vol_reference
     current_mixed_point_vol = daily_return_vol * price
     daily_dollar_vol = current_mixed_point_vol * mult * fx
     annual_dollar_vol = daily_dollar_vol * math.sqrt(annualization_days)
@@ -1996,8 +1996,8 @@ def build_cost_risk_row(
         "fast_point_vol": fast_point_vol,
         "slow_point_vol": slow_point_vol,
         "mixed_point_vol": point_vol,
-        "vol_reference_price": vol_reference,
-        "price_scale_to_vol_reference": price_scale_to_vol_reference,
+        "vol_ref_price": vol_reference,
+        "price_scale_to_vol_ref": price_scale_to_vol_ref,
         "current_mixed_point_vol": current_mixed_point_vol,
         "daily_return_vol": daily_return_vol,
         "annual_return_vol": annual_return_vol,
@@ -2264,9 +2264,9 @@ def load_latest_fx_to_usd(db_path: Path | str) -> dict[str, dict]:
             "pair": "USDUSD",
             "market_data_type": None,
             "error": None,
-            "reference_rate": 1.0,
-            "reference_asof": None,
-            "reference_source": "identity",
+            "ref_rate": 1.0,
+            "ref_asof": None,
+            "ref_source": "identity",
         }
     }
     for row in fx.iter_rows(named=True):
@@ -2280,9 +2280,9 @@ def load_latest_fx_to_usd(db_path: Path | str) -> dict[str, dict]:
                 "pair": pair,
                 "market_data_type": None,
                 "error": None,
-                "reference_rate": row["price"],
-                "reference_asof": row["source_timestamp"],
-                "reference_source": "pysystemtrade_reference",
+                "ref_rate": row["price"],
+                "ref_asof": row["source_timestamp"],
+                "ref_source": "pysystemtrade_reference",
             }
     return result
 
@@ -2307,9 +2307,9 @@ def load_current_fx_to_usd(
                 "pair": "USDUSD",
                 "market_data_type": None,
                 "error": None,
-                "reference_rate": 1.0,
-                "reference_asof": None,
-                "reference_source": "identity",
+                "ref_rate": 1.0,
+                "ref_asof": None,
+                "ref_source": "identity",
             })
             continue
 
@@ -2326,18 +2326,18 @@ def load_current_fx_to_usd(
                 "pair": ib_fx["pair"],
                 "market_data_type": ib_fx["market_data_type"],
                 "error": None,
-                "reference_rate": (
-                    reference.get("reference_rate", reference.get("rate"))
+                "ref_rate": (
+                    reference.get("ref_rate", reference.get("rate"))
                     if reference is not None
                     else None
                 ),
-                "reference_asof": (
-                    reference.get("reference_asof", reference.get("asof"))
+                "ref_asof": (
+                    reference.get("ref_asof", reference.get("asof"))
                     if reference is not None
                     else None
                 ),
-                "reference_source": (
-                    reference.get("reference_source", reference.get("source"))
+                "ref_source": (
+                    reference.get("ref_source", reference.get("source"))
                     if reference is not None
                     else None
                 ),
@@ -2526,9 +2526,9 @@ def _fx_report_fields(fx_info: dict[str, object]) -> dict[str, object]:
         "cur_fx_pair": fx_info.get("pair"),
         "cur_fx_market_data_type": fx_info.get("market_data_type"),
         "cur_fx_error": fx_info.get("error"),
-        "ref_fx_to_usd": fx_info.get("reference_rate", fx_info.get("rate")),
-        "ref_fx_asof": fx_info.get("reference_asof", fx_info.get("asof")),
-        "ref_fx_source": fx_info.get("reference_source", fx_info.get("source")),
+        "ref_fx_to_usd": fx_info.get("ref_rate", fx_info.get("rate")),
+        "ref_fx_asof": fx_info.get("ref_asof", fx_info.get("asof")),
+        "ref_fx_source": fx_info.get("ref_source", fx_info.get("source")),
     }
 
 
@@ -2770,13 +2770,13 @@ def diagnose_instrument(
                 "ib_recent_vol_end": None,
                 "ib_recent_vol_duration": duration,
                 "carver_slow_return_vol": (
-                    vol["slow_point_vol"] / vol["reference_price"]
+                    vol["slow_point_vol"] / vol["ref_price"]
                     if _positive_finite(vol.get("slow_point_vol")) is not None
-                    and _positive_finite(vol.get("reference_price")) is not None
+                    and _positive_finite(vol.get("ref_price")) is not None
                     else None
                 ),
                 "risk_daily_return_vol": (
-                    vol["mixed_point_vol"] / vol["reference_price"]
+                    vol["mixed_point_vol"] / vol["ref_price"]
                 ),
                 "risk_return_vol_source": "carver_mixed_scaled_fallback",
             })
@@ -2919,7 +2919,7 @@ def diagnose_instrument(
             timespec="seconds"
         ),
         quote_quality=f"{resolved_market_data_type}_snapshot",
-        vol_reference_price=vol["reference_price"],
+        vol_ref_price=vol["ref_price"],
     )
     row.update(_fx_report_fields(fx_info))
     historical_full_spread = _nonnegative_finite(
@@ -3289,7 +3289,7 @@ def _error_row(
         "spread_quality": "error",
         "error": str(exc),
     }
-    if vol is None or vol.get("reference_price") is None:
+    if vol is None or vol.get("ref_price") is None:
         return identity
     currency = instr.get("currency", "USD")
     fx_info = (fx_by_currency or {}).get(currency)
@@ -3301,7 +3301,7 @@ def _error_row(
             signal_symbol=resolve_signal_symbol(instr),
             contract_id="",
             expiration="",
-            current_price=vol["reference_price"],
+            current_price=vol["ref_price"],
             multiplier=instr["multiplier"],
             commission_per_side=instr["commission"],
             mixed_point_vol=vol["mixed_point_vol"],
@@ -3310,7 +3310,7 @@ def _error_row(
             history_start=vol["history_start"],
             history_end=vol["history_end"],
             vol_source="pysystemtrade_roll_neutral",
-            vol_reference_price=vol["reference_price"],
+            vol_ref_price=vol["ref_price"],
             fast_point_vol=vol["fast_point_vol"],
             slow_point_vol=vol["slow_point_vol"],
             vol_observations=vol["vol_observations"],
@@ -3448,8 +3448,8 @@ PUBLIC_REPORT_RENAMES = {
     "fast_point_vol": "ref_fast_point_vol",
     "slow_point_vol": "ref_slow_point_vol",
     "mixed_point_vol": "ref_mixed_point_vol",
-    "vol_reference_price": "ref_price",
-    "price_scale_to_vol_reference": "ref_cur_price_ratio",
+    "vol_ref_price": "ref_price",
+    "price_scale_to_vol_ref": "ref_cur_price_ratio",
     "history_rows": "ref_history_n",
     "history_start": "ref_history_start",
     "history_end": "ref_history_end",
@@ -3462,38 +3462,38 @@ PUBLIC_REPORT_RENAMES = {
     "zero_return_fraction": "ref_zero_return_fraction",
     "carver_slow_return_vol": "ref_slow_return_vol",
     "carver_configured_one_way_spread_points": "ref_spread_points",
-    "strategy_reference_instrument": "ref_strategy_instrument",
-    "strategy_reference_history_start": "ref_strategy_history_start",
-    "strategy_reference_history_end": "ref_strategy_history_end",
-    "strategy_reference_history_observations": "ref_strategy_history_n",
-    "strategy_reference_rolls": "ref_strategy_observed_rolls_full",
-    "strategy_reference_observed_rolls_per_year_full": (
+    "strategy_ref_instrument": "ref_strategy_instrument",
+    "strategy_ref_history_start": "ref_strategy_history_start",
+    "strategy_ref_history_end": "ref_strategy_history_end",
+    "strategy_ref_history_observations": "ref_strategy_history_n",
+    "strategy_ref_rolls": "ref_strategy_observed_rolls_full",
+    "strategy_ref_observed_rolls_per_year_full": (
         "ref_strategy_observed_rolls_per_year_full"
     ),
-    "strategy_reference_recent_rolls": "ref_strategy_recent_rolls",
-    "strategy_reference_observed_rolls_per_year_recent": (
+    "strategy_ref_recent_rolls": "ref_strategy_recent_rolls",
+    "strategy_ref_observed_rolls_per_year_recent": (
         "ref_strategy_observed_rolls_per_year_recent"
     ),
-    "strategy_reference_recent_roll_start_year": (
+    "strategy_ref_recent_roll_start_year": (
         "ref_strategy_recent_roll_start_year"
     ),
-    "strategy_reference_recent_roll_end_year": (
+    "strategy_ref_recent_roll_end_year": (
         "ref_strategy_recent_roll_end_year"
     ),
-    "strategy_reference_recent_roll_years": "ref_strategy_recent_roll_years",
-    "strategy_reference_hold_roll_cycle": "ref_strategy_hold_roll_cycle",
-    "strategy_reference_configured_rolls_per_year": (
+    "strategy_ref_recent_roll_years": "ref_strategy_recent_roll_years",
+    "strategy_ref_hold_roll_cycle": "ref_strategy_hold_roll_cycle",
+    "strategy_ref_configured_rolls_per_year": (
         "ref_strategy_configured_rolls_per_year"
     ),
-    "strategy_reference_full_minus_configured_rolls_per_year": (
+    "strategy_ref_full_minus_configured_rolls_per_year": (
         "ref_strategy_full_minus_configured_rolls_per_year"
     ),
-    "strategy_reference_recent_minus_configured_rolls_per_year": (
+    "strategy_ref_recent_minus_configured_rolls_per_year": (
         "ref_strategy_recent_minus_configured_rolls_per_year"
     ),
-    "strategy_reference_roll_rate_audit": "ref_strategy_roll_rate_audit",
-    "strategy_reference_ann_rolls": "ref_ann_rolls",
-    "strategy_reference_roll_rate_source": "ref_strategy_roll_rate_source",
+    "strategy_ref_roll_rate_audit": "ref_strategy_roll_rate_audit",
+    "strategy_ref_ann_rolls": "ref_ann_rolls",
+    "strategy_ref_roll_rate_source": "ref_strategy_roll_rate_source",
     "ib_recent_fast_return_vol": "ib_fast_return_vol",
     "ib_recent_vol_observations": "ib_fast_n",
     "ib_recent_vol_start": "ib_fast_start",
@@ -3601,7 +3601,6 @@ def _compact_public_column_name(name: str) -> str:
     compact = compact.replace("total", "tot").replace("annual", "ann")
     compact = compact.replace("sharpe", "sr")
     compact = compact.replace("strategy_reference", "ref_strategy")
-    compact = compact.replace("reference_pre_cost", "ref_pre_cost")
     return "_".join(
         PUBLIC_COLUMN_TOKEN_ABBREVIATIONS.get(token, token)
         for token in compact.split("_")

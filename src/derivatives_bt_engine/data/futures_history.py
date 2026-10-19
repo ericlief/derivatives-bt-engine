@@ -854,12 +854,12 @@ class HybridHistoryProvider:
             [
                 old_signal.select(
                     "trade_date", "source_timestamp", "current_price",
-                    "contract_id", "reference_price", "point_change",
+                    "contract_id", "ref_price", "point_change",
                     "ret_1d", "is_roll", "return_valid", "quality_flag",
                 ).with_columns(pl.lit(old.source).alias("source_segment")),
                 new_signal.select(
                     "trade_date", "source_timestamp", "current_price",
-                    "contract_id", "reference_price", "point_change",
+                    "contract_id", "ref_price", "point_change",
                     "ret_1d", "is_roll", "return_valid", "quality_flag",
                 ).with_columns(pl.lit(new.source).alias("source_segment")),
             ],
@@ -987,7 +987,7 @@ def align_history_to_previous_sessions(
         pl.when(pl.col("ret_1d").is_not_null())
         .then(pl.col("current_price") / (1.0 + pl.col("ret_1d")))
         .otherwise(None)
-        .alias("reference_price"),
+        .alias("ref_price"),
         pl.col("ret_1d").is_not_null().alias("return_valid"),
     )
     panama = remap(history.panama).sort("trade_date").with_columns(

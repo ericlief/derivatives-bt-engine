@@ -375,9 +375,9 @@ def test_current_ib_fx_replaces_stale_reference_and_keeps_audit_fields():
                 "rate": 1.077585,
                 "asof": "2024-03-29",
                 "source": "pysystemtrade_reference",
-                "reference_rate": 1.077585,
-                "reference_asof": "2024-03-29",
-                "reference_source": "pysystemtrade_reference",
+                "ref_rate": 1.077585,
+                "ref_asof": "2024-03-29",
+                "ref_source": "pysystemtrade_reference",
             }
         },
         market_data_type="auto",
@@ -387,11 +387,11 @@ def test_current_ib_fx_replaces_stale_reference_and_keeps_audit_fields():
     assert selected["EUR"]["rate"] == pytest.approx(1.175)
     assert selected["EUR"]["source"] == "ib_delayed_mid"
     assert selected["EUR"]["pair"] == "EURUSD"
-    assert selected["EUR"]["reference_rate"] == pytest.approx(1.077585)
-    assert selected["EUR"]["reference_asof"] == "2024-03-29"
+    assert selected["EUR"]["ref_rate"] == pytest.approx(1.077585)
+    assert selected["EUR"]["ref_asof"] == "2024-03-29"
 
 
-def test_unavailable_ib_fx_makes_reference_rate_the_selected_rate():
+def test_unavailable_ib_fx_makes_ref_rate_the_selected_rate():
     class FakeIB:
         def get_fx_to_usd(self, currency, **kwargs):
             raise ValueError("USDCAD: IB cash-FX contract did not qualify")
@@ -404,9 +404,9 @@ def test_unavailable_ib_fx_makes_reference_rate_the_selected_rate():
                 "rate": 0.72,
                 "asof": "2024-03-29",
                 "source": "pysystemtrade_reference",
-                "reference_rate": 0.72,
-                "reference_asof": "2024-03-29",
-                "reference_source": "pysystemtrade_reference",
+                "ref_rate": 0.72,
+                "ref_asof": "2024-03-29",
+                "ref_source": "pysystemtrade_reference",
             }
         },
         market_data_type="auto",
@@ -509,7 +509,7 @@ def test_delayed_quote_runs_dated_vol_and_spread_after_live_354(monkeypatch):
         "mixed_point_vol": 50.0,
         "fast_point_vol": 55.0,
         "slow_point_vol": 40.0,
-        "reference_price": 5_000.0,
+        "ref_price": 5_000.0,
         "history_rows": 1_000,
         "history_start": date(2020, 1, 1),
         "history_end": date(2024, 1, 1),
@@ -731,7 +731,7 @@ def test_configured_cost_uses_pooled_turnover_and_reference_rolls():
         {
             "multiplier": 50.0,
             "price": 100.0,
-            "vol_reference_price": 100.0,
+            "vol_ref_price": 100.0,
             "mixed_point_vol": 1.0,
             "fx_to_usd": 1.0,
             "annualization_days": 256,
@@ -764,7 +764,7 @@ def test_configured_cost_uses_pooled_turnover_and_reference_rolls():
 
     per_trade_sr = 14.5 / 800.0
     per_roll_sr = 16.5 / 800.0
-    assert estimate["strategy_reference_instrument"] == "FULL"
+    assert estimate["strategy_ref_instrument"] == "FULL"
     assert estimate["configured_one_way_cost_native"] == pytest.approx(14.5)
     assert estimate["configured_trade_sr"] == pytest.approx(per_trade_sr)
     assert estimate["configured_roll_sr"] == pytest.approx(per_roll_sr)
@@ -824,15 +824,15 @@ def test_configured_cost_uses_current_cycle_not_full_history_roll_rate():
     )
 
     assert estimate[
-        "strategy_reference_observed_rolls_per_year_full"
+        "strategy_ref_observed_rolls_per_year_full"
     ] == pytest.approx(2.4622)
     assert estimate[
-        "strategy_reference_configured_rolls_per_year"
+        "strategy_ref_configured_rolls_per_year"
     ] == pytest.approx(5.0)
-    assert estimate["strategy_reference_ann_rolls"] == pytest.approx(
+    assert estimate["strategy_ref_ann_rolls"] == pytest.approx(
         5.0
     )
-    assert estimate["strategy_reference_roll_rate_source"] == (
+    assert estimate["strategy_ref_roll_rate_source"] == (
         "configured_hold_cycle"
     )
     assert estimate["ewmac_64_256_ann_trades"] == pytest.approx(5.5685)
@@ -866,10 +866,10 @@ def test_roll_audit_survives_missing_execution_cost_inputs():
     )
 
     assert estimate["configured_cost_quality"] == "incomplete_static_inputs"
-    assert estimate["strategy_reference_ann_rolls"] == pytest.approx(
+    assert estimate["strategy_ref_ann_rolls"] == pytest.approx(
         5.0
     )
-    assert estimate["strategy_reference_roll_rate_audit"] == (
+    assert estimate["strategy_ref_roll_rate_audit"] == (
         "historical_policy_change"
     )
 
@@ -1030,12 +1030,12 @@ def test_public_report_leads_with_primary_values_and_normalizes_spreads():
         "ib_historical_spread_median_points": [6.6],
         "ib_historical_spread_p90_points": [9.75],
         "mixed_point_vol": [5.847],
-        "vol_reference_price": [883.25],
+        "vol_ref_price": [883.25],
         "carver_configured_one_way_spread_points": [2.4],
-        "strategy_reference_configured_rolls_per_year": [12.0],
-        "strategy_reference_ann_rolls": [12.0],
-        "strategy_reference_roll_rate_source": ["configured_hold_cycle"],
-        "strategy_reference_roll_rate_audit": [
+        "strategy_ref_configured_rolls_per_year": [12.0],
+        "strategy_ref_ann_rolls": [12.0],
+        "strategy_ref_roll_rate_source": ["configured_hold_cycle"],
+        "strategy_ref_roll_rate_audit": [
             "consistent_with_configured_cycle"
         ],
         "ewmac_4_16_ann_trades": [56.0],
@@ -1043,7 +1043,7 @@ def test_public_report_leads_with_primary_values_and_normalizes_spreads():
         "ewmac_4_16_trade_ann_cost_sr": [1.68],
         "ewmac_4_16_roll_ann_cost_sr": [0.72],
         "ewmac_4_16_tot_ann_cost_sr": [2.4],
-        "ewmac_4_16_reference_pre_cost_sharpe": [0.1],
+        "ewmac_4_16_ref_pre_cost_sharpe": [0.1],
     }))
 
     assert report["spread_pts"][0] == pytest.approx(3.177)
@@ -1375,7 +1375,7 @@ def test_return_vol_uses_history_price_not_current_execution_price():
         multiplier=50.0,
         commission_per_side=2.25,
         mixed_point_vol=30.0436603917,
-        vol_reference_price=5304.25,
+        vol_ref_price=5304.25,
         annualization_days=256,
         history_rows=10559,
         history_start=date(1982, 9, 14),
@@ -1384,10 +1384,10 @@ def test_return_vol_uses_history_price_not_current_execution_price():
 
     expected_daily = 30.0436603917 / 5304.25
     assert row["price"] == 7700.0
-    assert row["vol_reference_price"] == 5304.25
+    assert row["vol_ref_price"] == 5304.25
     assert row["daily_return_vol"] == pytest.approx(expected_daily)
     assert row["annual_return_vol"] == pytest.approx(expected_daily * 16.0)
-    assert row["price_scale_to_vol_reference"] == pytest.approx(7700.0 / 5304.25)
+    assert row["price_scale_to_vol_ref"] == pytest.approx(7700.0 / 5304.25)
     assert row["annual_dollar_vol_per_contract"] == pytest.approx(
         expected_daily * 7700.0 * 50.0 * 16.0
     )
@@ -1403,7 +1403,7 @@ def test_current_return_vol_override_sets_current_dollar_risk():
         multiplier=50.0,
         commission_per_side=2.25,
         mixed_point_vol=30.0,
-        vol_reference_price=5300.0,
+        vol_ref_price=5300.0,
         daily_return_vol_override=0.01,
         annualization_days=256,
         history_rows=10_000,
@@ -1419,7 +1419,7 @@ def test_current_return_vol_override_sets_current_dollar_risk():
 def test_recent_fast_return_vol_blends_with_carver_slow_anchor():
     blended = _blend_recent_and_historical_return_volatility(
         {"ib_recent_fast_return_vol": 0.02},
-        {"slow_point_vol": 50.0, "reference_price": 5_000.0},
+        {"slow_point_vol": 50.0, "ref_price": 5_000.0},
         slow_weight=0.3,
     )
 

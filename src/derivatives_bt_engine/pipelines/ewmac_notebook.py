@@ -68,8 +68,8 @@ class SubsystemReferenceSettings:
     """Configure the equal-weight candidate return used for correlations.
 
     ``capital`` and ``target_vol`` turn daily dollar volatility into an
-    auditable continuous position. ``reference_book_count`` assigns every
-    candidate the same structural weight, while ``reference_idm`` and
+    auditable continuous position. ``ref_book_count`` assigns every
+    candidate the same structural weight, while ``ref_idm`` and
     ``max_weight_idm`` apply the same fixed sizing convention as the selection
     tie rule. The resulting P&L is divided by the allocation capital implied by
     that risk budget and exposed as a normalized subsystem-reference return.
@@ -137,10 +137,10 @@ class EwmacNotebookView:
             "date",
             "close",
             "combined_forecast",
-            "reference_average_position",
-            "smoothed_reference_average_position",
-            "reference_target_position",
-            "reference_normalized_position",
+            "ref_average_position",
+            "smoothed_ref_average_position",
+            "ref_target_position",
+            "ref_normalized_position",
         ]
         available_columns = [
             column for column in columns if column in frame.columns
@@ -157,18 +157,18 @@ class EwmacNotebookView:
         frame = _date_slice(self.reference, start=start, end=end)
         return frame.select(
             "date",
-            pl.col("reference_gross_return")
+            pl.col("ref_gross_return")
             .fill_null(0.0)
             .cum_sum()
-            .alias("cum_reference_gross_return"),
-            pl.col("reference_cost_return")
+            .alias("cum_ref_gross_return"),
+            pl.col("ref_cost_return")
             .fill_null(0.0)
             .cum_sum()
-            .alias("cum_reference_cost_return"),
-            pl.col("reference_net_return")
+            .alias("cum_ref_cost_return"),
+            pl.col("ref_net_return")
             .fill_null(0.0)
             .cum_sum()
-            .alias("cum_reference_net_return"),
+            .alias("cum_ref_net_return"),
         )
 
     def cash_pnl_curves(
@@ -239,9 +239,9 @@ class EwmacNotebookView:
         proxy_plot = reference.hvplot.line(
             x="date",
             y=[
-                "reference_average_position",
-                "smoothed_reference_average_position",
-                "reference_target_position",
+                "ref_average_position",
+                "smoothed_ref_average_position",
+                "ref_target_position",
             ],
             title="Equal-weight reference positions",
             ylabel="Continuous contracts",
@@ -250,7 +250,7 @@ class EwmacNotebookView:
         )
         normalized_plot = reference.hvplot.line(
             x="date",
-            y=["combined_forecast", "reference_normalized_position"],
+            y=["combined_forecast", "ref_normalized_position"],
             title="Forecast versus reference-normalized position",
             ylabel="Smoothed average-position units",
             width=width,
@@ -262,7 +262,7 @@ class EwmacNotebookView:
         )
         reference_plot = reference_curves.hvplot.line(
             x="date",
-            y=["cum_reference_gross_return", "cum_reference_net_return"],
+            y=["cum_ref_gross_return", "cum_ref_net_return"],
             title="Cumulative equal-weight subsystem-reference return",
             ylabel="Return",
             width=width,

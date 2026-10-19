@@ -291,7 +291,7 @@ def parse_args(argv=None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--tie-ref-book-counts",
+        "--tie-reference-book-counts",
         dest="tie_reference_book_counts",
         type=_positive_int_list,
         default=(15,),
@@ -380,7 +380,7 @@ def build_scenarios(args: argparse.Namespace) -> list[SelectionScenario]:
             args.low_contract_penalty_scales,
             args.high_contract_penalty_scales,
             args.score_tie_tolerance_percents,
-            args.tie_reference_book_counts,
+        args.tie_reference_book_counts,
             args.max_instr_per_clusters,
             roll_modes,
         )
@@ -424,7 +424,7 @@ def _selection_command(
         str(scenario.high_contract_penalty_scale),
         "--score-tie-tolerance-pct",
         str(scenario.score_tie_tolerance_percent),
-        "--tie-ref-book-count",
+        "--tie-reference-book-count",
         str(scenario.tie_reference_book_count),
         "--weight-policy",
         scenario.weight_policy,
@@ -472,7 +472,7 @@ def _summary_row(
         "low_contract_penalty_scale": scenario.low_contract_penalty_scale,
         "high_contract_penalty_scale": scenario.high_contract_penalty_scale,
         "score_tie_tolerance_percent": scenario.score_tie_tolerance_percent,
-        "tie_reference_book_count": scenario.tie_reference_book_count,
+        "tie_ref_book_count": scenario.tie_reference_book_count,
         "maximum_instruments_per_cluster": (
             scenario.maximum_instruments_per_cluster
         ),
@@ -598,7 +598,7 @@ def _attach_baseline_overlap(summary: pl.DataFrame) -> pl.DataFrame:
             + pl.col("low_contract_penalty_scale").abs()
             + pl.col("high_contract_penalty_scale").abs()
             + pl.col("score_tie_tolerance_percent").abs() / 100.0
-            + (pl.col("tie_reference_book_count") - 15).abs() / 15.0
+        + (pl.col("tie_ref_book_count") - 15).abs() / 15.0
             + pl.when(pl.col("maximum_instruments_per_cluster").is_null())
               .then(0.0).otherwise(1.0)
             + pl.when(pl.col("include_roll_cost_in_score"))
