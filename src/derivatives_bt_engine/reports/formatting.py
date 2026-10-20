@@ -107,22 +107,6 @@ PUBLIC_REPORT_RENAMES = {
     "portfolio_gross_equity_usd": "gross_equity_usd",
     "portfolio_realized_equity_usd": "realized_equity_usd",
     "portfolio_expected_equity_usd": "expected_equity_usd",
-    "cash_gross_return_contribution": "cash_gross_ret_contrib",
-    "cash_realized_net_return_contribution": (
-        "cash_realized_net_ret_contrib"
-    ),
-    "cash_expected_net_return_contribution": (
-        "cash_expected_net_ret_contrib"
-    ),
-    "cumulative_cash_gross_return_contribution": (
-        "cum_cash_gross_ret_contrib"
-    ),
-    "cumulative_cash_realized_net_return_contribution": (
-        "cum_cash_realized_net_ret_contrib"
-    ),
-    "cumulative_cash_expected_net_return_contribution": (
-        "cum_cash_expected_net_ret_contrib"
-    ),
 }
 
 
@@ -303,12 +287,6 @@ SIX_DECIMAL_RATE_COLUMNS = {
     "cum_gross_ret",
     "cum_realized_net_ret",
     "cum_expected_net_ret",
-    "cash_gross_return_contribution",
-    "cash_realized_net_return_contribution",
-    "cash_expected_net_return_contribution",
-    "cumulative_cash_gross_return_contribution",
-    "cumulative_cash_realized_net_return_contribution",
-    "cumulative_cash_expected_net_return_contribution",
     "cash_gross_ret_contrib",
     "cash_realized_net_ret_contrib",
     "cash_expected_net_ret_contrib",

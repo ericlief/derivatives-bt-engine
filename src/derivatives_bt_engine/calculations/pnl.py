@@ -855,35 +855,35 @@ def build_executable_cash_pnl_curve(
             )
             .then(pl.col("cash_gross_pnl_usd") / capital)
             .otherwise(0.0)
-            .alias("cash_gross_return_contribution"),
+            .alias("cash_gross_ret_contrib"),
             pl.when(
                 pl.col("cash_realized_net_pnl_usd").is_not_null()
                 & pl.col("cash_realized_net_pnl_usd").is_finite()
             )
             .then(pl.col("cash_realized_net_pnl_usd") / capital)
             .otherwise(0.0)
-            .alias("cash_realized_net_return_contribution"),
+            .alias("cash_realized_net_ret_contrib"),
             pl.when(
                 pl.col("cash_expected_net_pnl_usd").is_not_null()
                 & pl.col("cash_expected_net_pnl_usd").is_finite()
             )
             .then(pl.col("cash_expected_net_pnl_usd") / capital)
             .otherwise(0.0)
-            .alias("cash_expected_net_return_contribution"),
+            .alias("cash_expected_net_ret_contrib"),
         )
         .with_columns(
-            pl.col("cash_gross_return_contribution")
+            pl.col("cash_gross_ret_contrib")
             .fill_null(0.0)
             .cum_sum()
-            .alias("cumulative_cash_gross_return_contribution"),
-            pl.col("cash_realized_net_return_contribution")
+            .alias("cum_cash_gross_ret_contrib"),
+            pl.col("cash_realized_net_ret_contrib")
             .fill_null(0.0)
             .cum_sum()
-            .alias("cumulative_cash_realized_net_return_contribution"),
-            pl.col("cash_expected_net_return_contribution")
+            .alias("cum_cash_realized_net_ret_contrib"),
+            pl.col("cash_expected_net_ret_contrib")
             .fill_null(0.0)
             .cum_sum()
-            .alias("cumulative_cash_expected_net_return_contribution"),
+            .alias("cum_cash_expected_net_ret_contrib"),
         )
     )
     return result

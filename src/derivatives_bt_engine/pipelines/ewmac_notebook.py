@@ -236,21 +236,21 @@ class EwmacNotebookView:
         frame = _date_slice(self.cash, start=start, end=end)
         return frame.select(
             "date",
-            "cash_gross_return_contribution",
-            "cash_realized_net_return_contribution",
-            "cash_expected_net_return_contribution",
-            pl.col("cash_gross_return_contribution")
+            "cash_gross_ret_contrib",
+            "cash_realized_net_ret_contrib",
+            "cash_expected_net_ret_contrib",
+            pl.col("cash_gross_ret_contrib")
             .fill_null(0.0)
             .cum_sum()
-            .alias("cumulative_cash_gross_return_contribution"),
-            pl.col("cash_realized_net_return_contribution")
+            .alias("cum_cash_gross_ret_contrib"),
+            pl.col("cash_realized_net_ret_contrib")
             .fill_null(0.0)
             .cum_sum()
-            .alias("cumulative_cash_realized_net_return_contribution"),
-            pl.col("cash_expected_net_return_contribution")
+            .alias("cum_cash_realized_net_ret_contrib"),
+            pl.col("cash_expected_net_ret_contrib")
             .fill_null(0.0)
             .cum_sum()
-            .alias("cumulative_cash_expected_net_return_contribution"),
+            .alias("cum_cash_expected_net_ret_contrib"),
         )
 
     def plot(
