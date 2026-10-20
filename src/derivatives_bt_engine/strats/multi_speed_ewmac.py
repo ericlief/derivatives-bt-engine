@@ -26,6 +26,7 @@ import polars as pl
 from derivatives_bt_engine.data.pysystemtrade_pooling import (
     DEFAULT_POOLING_MAPPING_PATH,
 )
+from derivatives_bt_engine.data.fx_history import align_fx_to_history
 from derivatives_bt_engine.data.futures_history import (
     DEFAULT_PYSYSTEMTRADE_DB_PATH,
     FuturesHistory,
@@ -508,8 +509,9 @@ def load_ewmac_research(
 
     This reads only local reviewed/cached data: it does not connect to IB or
     invoke the cost or selection reports. The returned detailed frame includes
-    all requested raw and scaled momentum columns, while pooled scalar rows are
-    kept separately in long form for direct display and plotting.
+    all requested raw and scaled momentum columns plus causally aligned
+    ``fx_to_usd``. Pooled scalar rows are kept separately in long form for
+    direct display and plotting.
     """
     rule_tuple = tuple(rules)
     # Load the requested history before normalization so ``cache_hit`` reports
@@ -522,6 +524,13 @@ def load_ewmac_research(
         rules=rule_tuple,
     )
     forecasts = build_ewmac_component_frame(history, pooled, detailed=True)
+    # Notebook cash sizing uses the instrument currency from Carver's
+    # metadata and a causal as-of join to the reference FX history.
+    forecasts = align_fx_to_history(
+        forecasts,
+        str(history.metadata["currency"]),
+        db_path=db_path,
+    )
     scalar_frames = []
     for key, item in pooled.items():
         scalar_frames.append(

@@ -28,6 +28,8 @@ corn.history.carry    # same-timestamp current/carry contract observations
 `history.metadata["cache_hit"]` reports whether the four history streams came
 from their Parquet cache. `cache_status()` separately reports the full-universe
 forecast-panel and causal pooled-scalar cache hits for every EWMAC speed.
+The detailed notebook forecast frame also includes a causal `fx_to_usd` rate
+from the reference database (USD uses the identity conversion).
 
 ## Display forecasts and their inputs
 
@@ -167,7 +169,6 @@ view = build_ewmac_notebook_view(
     result,
     instrument_code="ES",
     multiplier=50.0,
-    fx_to_usd=1.0,
     ann_cost_sr=0.0,
     reference_settings=SubsystemReferenceSettings(
         capital=75_000,
@@ -215,7 +216,9 @@ correlations. `view.subsystem_reference_accounting()` groups that budget and
 its annual and daily risk budgets with gross, cost, and net USD values and the
 matching percentages. `view.cash` uses final portfolio
 weight and IDM, buffering, whole contracts, and per-contract costs, so it is
-the executable account-scale diagnostic.
+the executable account-scale diagnostic. The Carver research loader carries
+the dated FX conversion into the combined forecast frame, so cash sizing does
+not need an ad hoc constant FX column.
 `view.cash_return_contribution_curves()` divides its gross, realized-net, and
 expected-net cash P&L by the common account capital; the daily contributions
 add across selected instruments to the portfolio return. Passing
