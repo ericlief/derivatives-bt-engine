@@ -62,9 +62,10 @@ def test_notebook_view_builds_reference_return_and_cash_paths():
     assert view.reference_turnover is not None
     assert {
         "ref_avg_pos",
-        "ref_smoothed_avg_pos",
+        "ref_smooth_avg_pos",
         "ref_targ_pos",
         "ref_norm_pos",
+        "ref_abs_pos_change",
         "ref_roll_mean_abs_pos_change",
         "daily_dvol",
     } <= set(view.reference.columns)

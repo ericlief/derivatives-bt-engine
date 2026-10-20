@@ -51,11 +51,12 @@ PUBLIC_REPORT_RENAMES = {
     "ref_idm": "ref_idm",
     "ref_weight_idm": "ref_weight_idm",
     "ref_average_position": "ref_avg_pos",
-    "smoothed_ref_average_position": "ref_smoothed_avg_pos",
+    "smoothed_ref_average_position": "ref_smooth_avg_pos",
     "ref_target_position": "ref_targ_pos",
     "ref_normalized_position": "ref_norm_pos",
     "held_ref_position": "held_ref_pos",
     "ref_abs_position_change": "ref_abs_pos_change",
+    "ref_abs_position_changes": "ref_abs_pos_change",
     "ref_rolling_mean_abs_position_change": (
         "ref_roll_mean_abs_pos_change"
     ),

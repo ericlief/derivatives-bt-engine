@@ -139,7 +139,7 @@ class EwmacNotebookView:
             "close",
             "combined_forecast",
             "ref_avg_pos",
-            "ref_smoothed_avg_pos",
+            "ref_smooth_avg_pos",
             "ref_targ_pos",
             "ref_norm_pos",
         ]
@@ -292,7 +292,7 @@ class EwmacNotebookView:
             x="date",
             y=[
                 "ref_avg_pos",
-                "ref_smoothed_avg_pos",
+                "ref_smooth_avg_pos",
                 "ref_targ_pos",
             ],
             title="Equal-weight reference positions",

@@ -607,7 +607,7 @@ flowchart TD
 
         Sizing["3. Size equal-weight reference<br/>ref_weight = 1 / assumed book count<br/>daily_dvol · ref_avg_pos · ref_targ_pos"]
 
-        Turnover["4. Calculate actual subsystem turnover<br/>ref_smoothed_avg_pos<br/>ref_norm_pos<br/>ref_abs_pos_change<br/>full-sample and rolling audit estimates"]
+        Turnover["4. Calculate actual subsystem turnover<br/>ref_smooth_avg_pos<br/>ref_norm_pos<br/>ref_abs_pos_change<br/>full-sample and rolling audit estimates"]
 
         Cost["5. Calibrate combined-subsystem cost<br/>ann_trade_cost_sr = trade_sr × subsystem turnover<br/>ann_roll_cost_sr = roll_sr × ref_ann_rolls"]
 

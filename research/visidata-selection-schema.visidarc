@@ -146,7 +146,7 @@ _vd_set_type(
     init_margin_change maint_margin_change
     init_margin_pct_cap book_margin_pct_cap
     cluster_weight cluster_score fdm comb_turnover
-    combined_forecast ref_avg_pos ref_targ_pos ref_smoothed_avg_pos
+    combined_forecast ref_avg_pos ref_targ_pos ref_smooth_avg_pos
     ref_norm_pos
     ref_abs_pos_change ref_roll_mean_abs_pos_change ref_roll_ann_turnover
     close point_change point_vol fx_to_usd period_year_fraction
