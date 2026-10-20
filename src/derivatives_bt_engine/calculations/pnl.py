@@ -843,6 +843,22 @@ def build_executable_cash_pnl_curve(
             ).alias("cash_expected_net_pnl_usd"),
         )
         .with_columns(
+            # Dollar P&L is retained alongside return contribution so an
+            # instrument-level audit can reconcile to the portfolio curve.
+            pl.col("cash_gross_pnl_usd")
+            .fill_null(0.0)
+            .cum_sum()
+            .alias("cum_cash_gross_pnl_usd"),
+            pl.col("cash_realized_net_pnl_usd")
+            .fill_null(0.0)
+            .cum_sum()
+            .alias("cum_cash_realized_net_pnl_usd"),
+            pl.col("cash_expected_net_pnl_usd")
+            .fill_null(0.0)
+            .cum_sum()
+            .alias("cum_cash_expected_net_pnl_usd"),
+        )
+        .with_columns(
             (
                 pl.col("cash_realized_net_pnl_usd").is_not_null()
                 & pl.col("cash_realized_net_pnl_usd").is_finite()

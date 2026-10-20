@@ -171,6 +171,15 @@ def test_executable_cash_pnl_separates_trade_and_policy_roll_costs():
     assert result.get_column("cash_expected_roll_cost_usd").to_list() == (
         pytest.approx([0.0, 0.0, -24.0, 0.0, -24.0])
     )
+    assert result.get_column("cum_cash_gross_pnl_usd").to_list() == pytest.approx(
+        [0.0, 50.0, 150.0, 250.0, 310.0]
+    )
+    assert result.get_column(
+        "cum_cash_realized_net_pnl_usd"
+    ).to_list() == pytest.approx([0.0, 40.0, 110.0, 202.0, 244.0])
+    assert result.get_column(
+        "cum_cash_expected_net_pnl_usd"
+    ).to_list() == pytest.approx([0.0, 40.0, 116.0, 208.0, 244.0])
 
 
 def test_forecast_buffer_matches_pysystemtrade_reference_fixture():

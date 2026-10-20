@@ -205,18 +205,9 @@ class EwmacNotebookView:
         frame = _date_slice(self.cash, start=start, end=end)
         return frame.select(
             "date",
-            pl.col("cash_gross_pnl_usd")
-            .fill_null(0.0)
-            .cum_sum()
-            .alias("cum_cash_gross_pnl_usd"),
-            pl.col("cash_expected_net_pnl_usd")
-            .fill_null(0.0)
-            .cum_sum()
-            .alias("cum_cash_expected_net_pnl_usd"),
-            pl.col("cash_realized_net_pnl_usd")
-            .fill_null(0.0)
-            .cum_sum()
-            .alias("cum_cash_realized_net_pnl_usd"),
+            "cum_cash_gross_pnl_usd",
+            "cum_cash_expected_net_pnl_usd",
+            "cum_cash_realized_net_pnl_usd",
         )
 
     def cash_return_contribution_curves(
