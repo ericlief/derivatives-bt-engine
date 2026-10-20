@@ -123,6 +123,7 @@ def test_executable_cash_pnl_separates_trade_and_policy_roll_costs():
         "point_change": [None, 1.0, 1.0, 1.0, 1.0],
         "point_vol": [1.0] * 5,
         "combined_forecast": [1.0, 2.0, 2.0, 1.0, 1.0],
+        "ref_normalized_position": [0.1, 0.2, 0.3, 0.4, 0.5],
         "fx_to_usd": [1.0] * 5,
         "is_roll": [False, False, True, False, True],
     })
@@ -142,27 +143,32 @@ def test_executable_cash_pnl_separates_trade_and_policy_roll_costs():
     assert result.get_column("close").to_list() == frame.get_column(
         "close"
     ).to_list()
-    assert result.get_column("average_position").to_list() == pytest.approx(
+    assert result.get_column("avg_pos").to_list() == pytest.approx(
         [5.0] * 5
     )
+    assert result.get_column("ref_norm_pos").to_list() == pytest.approx(
+        [0.1, 0.2, 0.3, 0.4, 0.5]
+    )
+    assert "average_position" not in result.columns
+    assert "ref_normalized_position" not in result.columns
     assert result.get_column(
-        "buffer_width_position"
+        "buf_width_pos"
     ).to_list() == pytest.approx([0.5] * 5)
-    assert result.get_column("exec_cons").to_list() == [5, 10, 10, 6, 6]
-    assert result.get_column("trade_cons").to_list() == pytest.approx(
+    assert result.get_column("exec_con").to_list() == [5, 10, 10, 6, 6]
+    assert result.get_column("trade_con").to_list() == pytest.approx(
         [5.0, 5.0, 0.0, 4.0, 0.0]
     )
-    assert result.get_column("realized_roll_cons").to_list() == pytest.approx(
+    assert result.get_column("realized_roll_con").to_list() == pytest.approx(
         [0.0, 0.0, 10.0, 0.0, 6.0]
     )
-    assert result.get_column("interval_avg_abs_cons").to_list() == [
+    assert result.get_column("interval_avg_abs_con").to_list() == [
         7.5,
         7.5,
         7.5,
         8.0,
         8.0,
     ]
-    assert result.get_column("avg_roll_cons").to_list() == [0, 0, 8, 0, 8]
+    assert result.get_column("avg_roll_con").to_list() == [0, 0, 8, 0, 8]
     assert result.get_column("cash_trade_cost_usd").to_list() == pytest.approx(
         [-10.0, -10.0, 0.0, -8.0, 0.0]
     )

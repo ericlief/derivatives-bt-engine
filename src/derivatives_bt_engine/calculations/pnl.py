@@ -19,6 +19,8 @@ import math
 
 import polars as pl
 
+from derivatives_bt_engine.reports.formatting import rename_public_report_columns
+
 from derivatives_bt_engine.calculations.ewmac import EWMAC_FORECAST_TARGET_ABS
 from derivatives_bt_engine.calculations.volatility import (
     MIXED_VOL_ANNUALIZATION_DAYS,
@@ -654,7 +656,9 @@ def build_executable_cash_pnl_curve(
         cumulative percentage-point contributions for gross returns, costs,
         and net returns. Cash contributions divide each instrument's USD
         amount by total account capital and multiply by 100, so they add
-        across instruments to the portfolio percentage return.
+        across instruments to the portfolio percentage return. Returned
+        dataframe columns use the centralized compact report vocabulary (for
+        example, ``avg_pos``, ``ref_norm_pos``, and ``exec_con``).
 
     Notes
     -----
@@ -950,7 +954,10 @@ def build_executable_cash_pnl_curve(
             .alias("cum_cash_avg_roll_net_pct_contrib"),
         )
     )
-    return result
+    # This cash-audit builder is consumed directly by notebooks as well as
+    # persisted by selection, so expose its completed frame with the shared
+    # compact schema. All calculations above use descriptive working names.
+    return rename_public_report_columns(result)
 
 
 def build_fixed_capital_portfolio_curve(
