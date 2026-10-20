@@ -36,14 +36,14 @@ def test_round_public_report_keeps_reproduction_rates_at_six_places():
     report = pl.DataFrame({
         "cur_fx_to_usd": [0.00660449],
         "ann_return_vol": [0.12345649],
-        "cash_trade_cost_pct_contrib": [-0.00012649],
+        "trade_cost_pct_contrib": [-0.00012649],
     })
 
     rounded = round_public_report(report)
 
     assert rounded["cur_fx_to_usd"][0] == pytest.approx(0.006604)
     assert rounded["ann_return_vol"][0] == pytest.approx(0.123456)
-    assert rounded["cash_trade_cost_pct_contrib"][0] == pytest.approx(-0.000126)
+    assert rounded["trade_cost_pct_contrib"][0] == pytest.approx(-0.000126)
 
 
 def test_public_report_uses_percentage_points_for_portfolio_cash_curve():
@@ -75,6 +75,26 @@ def test_public_report_renames_cash_cost_columns_at_boundary():
 
     assert public.columns == ["trade_cost_per_con", "ann_roll_cost"]
     assert public.row(0) == pytest.approx((1.23, 12.35))
+
+
+def test_joined_cash_audit_columns_drop_cash_prefix():
+    """Per-instrument cash fields stay concise beside forecasts/reference data."""
+    report = pl.DataFrame({
+        "cash_pnl_valid": [True],
+        "cash_gross_pnl_usd": [12.346],
+        "cash_realized_net_pct_contrib": [0.1234567],
+        "cum_cash_realized_net_pnl_usd": [20.0],
+    })
+
+    public = round_public_report(rename_public_report_columns(report))
+
+    assert public.columns == [
+        "pnl_valid",
+        "gross_pnl_usd",
+        "realized_net_pct_contrib",
+        "cum_realized_net_pnl_usd",
+    ]
+    assert public.row(0) == (True, 12.35, 0.123457, 20.0)
 
 
 def test_public_report_renames_buffer_parameters_at_boundary():

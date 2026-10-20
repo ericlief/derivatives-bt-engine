@@ -971,7 +971,7 @@ def build_fixed_capital_portfolio_curve(
     ----------
     cash_pnl_long
         Long selected-book frame with one row per instrument and date. It must
-        contain ``symbol``, ``date``, ``cash_pnl_valid``, and the gross, cost,
+        contain ``symbol``, ``date``, ``pnl_valid``, and the gross, cost,
         realized-net and average-roll-net USD columns produced by
         :func:`build_executable_cash_pnl_curve`.
     initial_capital_usd
@@ -997,14 +997,16 @@ def build_fixed_capital_portfolio_curve(
         raise ValueError("initial_capital_usd must be finite and positive")
 
     cash_columns = (
-        "cash_gross_pnl_usd",
-        "cash_trade_cost_usd",
-        "cash_realized_roll_cost_usd",
-        "cash_avg_roll_cost_usd",
-        "cash_realized_net_pnl_usd",
-        "cash_avg_roll_net_pnl_usd",
+        ("gross_pnl_usd", "portfolio_cash_gross_pnl_usd"),
+        ("trade_cost_usd", "portfolio_cash_trade_cost_usd"),
+        ("realized_roll_cost_usd", "portfolio_cash_realized_roll_cost_usd"),
+        ("avg_roll_cost_usd", "portfolio_cash_avg_roll_cost_usd"),
+        ("realized_net_pnl_usd", "portfolio_cash_realized_net_pnl_usd"),
+        ("avg_roll_net_pnl_usd", "portfolio_cash_avg_roll_net_pnl_usd"),
     )
-    required = {"date", "symbol", "cash_pnl_valid", *cash_columns}
+    required = {"date", "symbol", "pnl_valid"} | {
+        source for source, _ in cash_columns
+    }
     missing = sorted(required.difference(cash_pnl_long.columns))
     if missing:
         raise ValueError(f"portfolio curve input missing columns: {missing}")
@@ -1024,16 +1026,16 @@ def build_fixed_capital_portfolio_curve(
             .n_unique()
             .cast(pl.Int64)
             .alias("portfolio_instrument_count"),
-            pl.col("cash_pnl_valid")
+            pl.col("pnl_valid")
             .fill_null(False)
             .cast(pl.Int64)
             .sum()
             .alias("portfolio_valid_pnl_instruments"),
             *[
-                finite_or_zero(column)
+                finite_or_zero(source)
                 .sum()
-                .alias(f"portfolio_{column}")
-                for column in cash_columns
+                .alias(aggregate)
+                for source, aggregate in cash_columns
             ],
         )
         .sort("date")

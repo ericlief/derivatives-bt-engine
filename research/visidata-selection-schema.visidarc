@@ -75,7 +75,7 @@ _vd_set_type(
     instr_has_elig_ewmac_rule include_default_pool
     forecast_elig subsystem_elig forecast_valid fx_valid pnl_valid
     reference_return_valid ref_ret_valid
-    cash_fx_valid cash_pnl_valid ret_valid is_roll roll_event feasible accepted
+    pnl_fx_valid pnl_valid ret_valid is_roll roll_event feasible accepted
     tie_eligible tie_break_applied
     roll_cost_in_score buf_trade_to_edge snap_use_rth
     main_instr_afford_for_scen counts_toward_main_instr_min
@@ -163,11 +163,11 @@ _vd_set_type(
     targ_pos buf_size buffer_size buf_width_pos
     buffer_top_con buffer_bot_con exec_con held_con trade_con
     realized_roll_con interval_avg_abs_con avg_roll_con
-    cash_gross_pnl_usd cash_trade_cost_usd
-    cash_realized_roll_cost_usd cash_avg_roll_cost_usd
-    cash_realized_net_pnl_usd cash_avg_roll_net_pnl_usd
-    cum_cash_gross_pnl_usd cum_cash_realized_net_pnl_usd
-    cum_cash_avg_roll_net_pnl_usd
+    gross_pnl_usd trade_cost_usd
+    realized_roll_cost_usd avg_roll_cost_usd
+    realized_net_pnl_usd avg_roll_net_pnl_usd
+    cum_gross_pnl_usd cum_realized_net_pnl_usd
+    cum_avg_roll_net_pnl_usd
     gross_equity_usd realized_equity_usd avg_roll_equity_usd
     gross_pct realized_net_pct avg_roll_net_pct
     portfolio_trade_cost_pct portfolio_realized_roll_cost_pct
@@ -177,15 +177,15 @@ _vd_set_type(
     cumulative_portfolio_realized_roll_cost_pct
     cumulative_portfolio_avg_roll_cost_pct cum_realized_cost_pct
     cum_avg_roll_total_cost_pct
-    cash_gross_pct_contrib cash_trade_cost_pct_contrib
-    cash_realized_roll_cost_pct_contrib cash_avg_roll_cost_pct_contrib
-    cash_realized_cost_pct_contrib cash_avg_roll_total_cost_pct_contrib
-    cash_realized_net_pct_contrib cash_avg_roll_net_pct_contrib
-    cum_cash_gross_pct_contrib cum_cash_trade_cost_pct_contrib
-    cum_cash_realized_roll_cost_pct_contrib
-    cum_cash_avg_roll_cost_pct_contrib
-    cum_cash_realized_cost_pct_contrib cum_cash_avg_roll_total_cost_pct_contrib
-    cum_cash_realized_net_pct_contrib cum_cash_avg_roll_net_pct_contrib
+    gross_pct_contrib trade_cost_pct_contrib
+    realized_roll_cost_pct_contrib avg_roll_cost_pct_contrib
+    realized_cost_pct_contrib avg_roll_total_cost_pct_contrib
+    realized_net_pct_contrib avg_roll_net_pct_contrib
+    cum_gross_pct_contrib cum_trade_cost_pct_contrib
+    cum_realized_roll_cost_pct_contrib
+    cum_avg_roll_cost_pct_contrib
+    cum_realized_cost_pct_contrib cum_avg_roll_total_cost_pct_contrib
+    cum_realized_net_pct_contrib cum_avg_roll_net_pct_contrib
     ref_fast_point_vol ref_slow_point_vol ref_mixed_point_vol ref_price
     ref_cur_price_ratio ref_slow_return_vol ref_spread_points
     ref_slow_history_years ref_slow_vol_weight ref_zero_return_fraction
