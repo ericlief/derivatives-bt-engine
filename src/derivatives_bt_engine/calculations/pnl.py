@@ -650,9 +650,11 @@ def build_executable_cash_pnl_curve(
         volatility, continuous average and target positions, buffer width and
         boundaries, buffered executable and lagged contracts, ordinary trade
         quantities, realized and interval-average roll quantities, and
-        gross/expected/realized cash P&L in USD. Daily and cumulative return
-        contributions divide each instrument's cash P&L by total account
-        capital, so they add across instruments to the portfolio return.
+        gross/expected/realized cash P&L in USD, plus daily and cumulative
+        percentage-point contributions for gross returns, execution costs,
+        and net returns. Cash contributions divide each instrument's USD
+        amount by total account capital and multiply by 100, so they add
+        across instruments to the portfolio percentage return.
 
     Notes
     -----
@@ -832,12 +834,12 @@ def build_executable_cash_pnl_curve(
         )
         .with_columns(
             (
-                pl.col("cash_gross_pnl_usd")
+                pl.col("cash_gross_pnl_usd").fill_null(0.0)
                 + pl.col("cash_trade_cost_usd")
                 + pl.col("cash_realized_roll_cost_usd")
             ).alias("cash_realized_net_pnl_usd"),
             (
-                pl.col("cash_gross_pnl_usd")
+                pl.col("cash_gross_pnl_usd").fill_null(0.0)
                 + pl.col("cash_trade_cost_usd")
                 + pl.col("cash_expected_roll_cost_usd")
             ).alias("cash_expected_net_pnl_usd"),
@@ -865,41 +867,84 @@ def build_executable_cash_pnl_curve(
                 & pl.col("cash_expected_net_pnl_usd").is_not_null()
                 & pl.col("cash_expected_net_pnl_usd").is_finite()
             ).alias("cash_pnl_valid"),
+            # Cash and subsystem return columns both use percentage points:
+            # USD contribution divided by the relevant capital base, then ×100.
             pl.when(
                 pl.col("cash_gross_pnl_usd").is_not_null()
                 & pl.col("cash_gross_pnl_usd").is_finite()
             )
-            .then(pl.col("cash_gross_pnl_usd") / capital)
+            .then(pl.col("cash_gross_pnl_usd") / capital * 100.0)
             .otherwise(0.0)
-            .alias("cash_gross_ret_contrib"),
+            .alias("cash_gross_pct_contrib"),
+            (pl.col("cash_trade_cost_usd") / capital * 100.0).alias(
+                "cash_trade_cost_pct_contrib"
+            ),
+            (pl.col("cash_realized_roll_cost_usd") / capital * 100.0).alias(
+                "cash_realized_roll_cost_pct_contrib"
+            ),
+            (pl.col("cash_expected_roll_cost_usd") / capital * 100.0).alias(
+                "cash_expected_roll_cost_pct_contrib"
+            ),
+            (
+                (pl.col("cash_trade_cost_usd")
+                 + pl.col("cash_realized_roll_cost_usd"))
+                / capital
+                * 100.0
+            ).alias("cash_realized_cost_pct_contrib"),
+            (
+                (pl.col("cash_trade_cost_usd")
+                 + pl.col("cash_expected_roll_cost_usd"))
+                / capital
+                * 100.0
+            ).alias("cash_expected_cost_pct_contrib"),
             pl.when(
                 pl.col("cash_realized_net_pnl_usd").is_not_null()
                 & pl.col("cash_realized_net_pnl_usd").is_finite()
             )
-            .then(pl.col("cash_realized_net_pnl_usd") / capital)
+            .then(pl.col("cash_realized_net_pnl_usd") / capital * 100.0)
             .otherwise(0.0)
-            .alias("cash_realized_net_ret_contrib"),
+            .alias("cash_realized_net_pct_contrib"),
             pl.when(
                 pl.col("cash_expected_net_pnl_usd").is_not_null()
                 & pl.col("cash_expected_net_pnl_usd").is_finite()
             )
-            .then(pl.col("cash_expected_net_pnl_usd") / capital)
+            .then(pl.col("cash_expected_net_pnl_usd") / capital * 100.0)
             .otherwise(0.0)
-            .alias("cash_expected_net_ret_contrib"),
+            .alias("cash_expected_net_pct_contrib"),
         )
         .with_columns(
-            pl.col("cash_gross_ret_contrib")
+            pl.col("cash_gross_pct_contrib")
             .fill_null(0.0)
             .cum_sum()
-            .alias("cum_cash_gross_ret_contrib"),
-            pl.col("cash_realized_net_ret_contrib")
+            .alias("cum_cash_gross_pct_contrib"),
+            pl.col("cash_trade_cost_pct_contrib")
             .fill_null(0.0)
             .cum_sum()
-            .alias("cum_cash_realized_net_ret_contrib"),
-            pl.col("cash_expected_net_ret_contrib")
+            .alias("cum_cash_trade_cost_pct_contrib"),
+            pl.col("cash_realized_roll_cost_pct_contrib")
             .fill_null(0.0)
             .cum_sum()
-            .alias("cum_cash_expected_net_ret_contrib"),
+            .alias("cum_cash_realized_roll_cost_pct_contrib"),
+            pl.col("cash_expected_roll_cost_pct_contrib")
+            .fill_null(0.0)
+            .cum_sum()
+            .alias("cum_cash_expected_roll_cost_pct_contrib"),
+            pl.col("cash_realized_cost_pct_contrib")
+            .fill_null(0.0)
+            .cum_sum()
+            .alias("cum_cash_realized_cost_pct_contrib"),
+            pl.col("cash_expected_cost_pct_contrib")
+            .fill_null(0.0)
+            .cum_sum()
+            .alias("cum_cash_expected_cost_pct_contrib"),
+            pl.col("cash_realized_net_pct_contrib")
+            .fill_null(0.0)
+            .cum_sum()
+            .alias("cum_cash_realized_net_pct_contrib"),
+            pl.col("cash_expected_net_pct_contrib")
+            .fill_null(0.0)
+            .cum_sum()
+            .alias("cum_cash_expected_net_pct_contrib"),
         )
     )
     return result
@@ -927,8 +972,8 @@ def build_fixed_capital_portfolio_curve(
     -------
     polars.DataFrame
         One row per date with summed daily USD cash flows, fixed-capital daily
-        and cumulative returns, gross and net equity paths, and instrument
-        coverage counts.
+        and cumulative percentage-point returns/costs, gross and net equity
+        paths, and instrument coverage counts.
 
     Notes
     -----
@@ -989,18 +1034,46 @@ def build_fixed_capital_portfolio_curve(
             ),
         )
         .with_columns(
-            (
-                pl.col("portfolio_cash_gross_pnl_usd")
-                / initial_capital_usd
-            ).alias("portfolio_gross_return"),
+            (pl.col("portfolio_cash_gross_pnl_usd") / initial_capital_usd * 100.0)
+            .alias("portfolio_gross_pct"),
             (
                 pl.col("portfolio_cash_realized_net_pnl_usd")
                 / initial_capital_usd
-            ).alias("portfolio_realized_net_return"),
+                * 100.0
+            ).alias("portfolio_realized_net_pct"),
             (
                 pl.col("portfolio_cash_expected_net_pnl_usd")
                 / initial_capital_usd
-            ).alias("portfolio_expected_net_return"),
+                * 100.0
+            ).alias("portfolio_expected_net_pct"),
+            (pl.col("portfolio_cash_trade_cost_usd") / initial_capital_usd * 100.0)
+            .alias("portfolio_trade_cost_pct"),
+            (
+                pl.col("portfolio_cash_realized_roll_cost_usd")
+                / initial_capital_usd
+                * 100.0
+            ).alias("portfolio_realized_roll_cost_pct"),
+            (
+                pl.col("portfolio_cash_expected_roll_cost_usd")
+                / initial_capital_usd
+                * 100.0
+            ).alias("portfolio_expected_roll_cost_pct"),
+            (
+                (
+                    pl.col("portfolio_cash_trade_cost_usd")
+                    + pl.col("portfolio_cash_realized_roll_cost_usd")
+                )
+                / initial_capital_usd
+                * 100.0
+            ).alias("portfolio_realized_cost_pct"),
+            (
+                (
+                    pl.col("portfolio_cash_trade_cost_usd")
+                    + pl.col("portfolio_cash_expected_roll_cost_usd")
+                )
+                / initial_capital_usd
+                * 100.0
+            ).alias("portfolio_expected_cost_pct"),
         )
         .with_columns(
             pl.col("portfolio_cash_gross_pnl_usd")
@@ -1017,15 +1090,49 @@ def build_fixed_capital_portfolio_curve(
             (
                 pl.col("cumulative_portfolio_cash_gross_pnl_usd")
                 / initial_capital_usd
-            ).alias("cumulative_portfolio_gross_return"),
+                * 100.0
+            ).alias("cumulative_portfolio_gross_pct"),
             (
                 pl.col("cumulative_portfolio_cash_realized_net_pnl_usd")
                 / initial_capital_usd
-            ).alias("cumulative_portfolio_realized_net_return"),
+                * 100.0
+            ).alias("cumulative_portfolio_realized_net_pct"),
             (
                 pl.col("cumulative_portfolio_cash_expected_net_pnl_usd")
                 / initial_capital_usd
-            ).alias("cumulative_portfolio_expected_net_return"),
+                * 100.0
+            ).alias("cumulative_portfolio_expected_net_pct"),
+            (
+                pl.col("portfolio_cash_trade_cost_usd").cum_sum()
+                / initial_capital_usd
+                * 100.0
+            ).alias("cumulative_portfolio_trade_cost_pct"),
+            (
+                pl.col("portfolio_cash_realized_roll_cost_usd").cum_sum()
+                / initial_capital_usd
+                * 100.0
+            ).alias("cumulative_portfolio_realized_roll_cost_pct"),
+            (
+                pl.col("portfolio_cash_expected_roll_cost_usd").cum_sum()
+                / initial_capital_usd
+                * 100.0
+            ).alias("cumulative_portfolio_expected_roll_cost_pct"),
+            (
+                (
+                    pl.col("portfolio_cash_trade_cost_usd").cum_sum()
+                    + pl.col("portfolio_cash_realized_roll_cost_usd").cum_sum()
+                )
+                / initial_capital_usd
+                * 100.0
+            ).alias("cumulative_portfolio_realized_cost_pct"),
+            (
+                (
+                    pl.col("portfolio_cash_trade_cost_usd").cum_sum()
+                    + pl.col("portfolio_cash_expected_roll_cost_usd").cum_sum()
+                )
+                / initial_capital_usd
+                * 100.0
+            ).alias("cumulative_portfolio_expected_cost_pct"),
             (
                 initial_capital_usd
                 + pl.col("cumulative_portfolio_cash_gross_pnl_usd")

@@ -32,16 +32,36 @@ def test_round_public_report_formats_phase2_money_and_diagnostics():
 
 
 def test_round_public_report_keeps_reproduction_rates_at_six_places():
-    """FX and return-volatility inputs retain the precision needed for audit."""
+    """FX and percentage-point returns retain audit precision."""
     report = pl.DataFrame({
         "cur_fx_to_usd": [0.00660449],
         "ann_return_vol": [0.12345649],
+        "cash_trade_cost_pct_contrib": [-0.00012649],
     })
 
     rounded = round_public_report(report)
 
     assert rounded["cur_fx_to_usd"][0] == pytest.approx(0.006604)
     assert rounded["ann_return_vol"][0] == pytest.approx(0.123456)
+    assert rounded["cash_trade_cost_pct_contrib"][0] == pytest.approx(-0.000126)
+
+
+def test_public_report_uses_percentage_points_for_portfolio_cash_curve():
+    """Portfolio curve percent fields receive compact names at its boundary."""
+    report = pl.DataFrame({
+        "portfolio_gross_pct": [1.23456789],
+        "portfolio_realized_cost_pct": [-0.00012649],
+        "cumulative_portfolio_realized_cost_pct": [-0.12345678],
+    })
+
+    public = round_public_report(rename_public_report_columns(report))
+
+    assert public.columns == [
+        "gross_pct",
+        "realized_cost_pct",
+        "cum_realized_cost_pct",
+    ]
+    assert public.row(0) == pytest.approx((1.234568, -0.000126, -0.123457))
 
 
 def test_public_report_renames_cash_cost_columns_at_boundary():

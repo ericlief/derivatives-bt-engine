@@ -91,9 +91,11 @@ PUBLIC_REPORT_RENAMES = {
     "portfolio_cash_expected_net_pnl_usd": (
         "cash_expected_net_pnl_usd"
     ),
-    "portfolio_gross_return": "gross_ret",
-    "portfolio_realized_net_return": "realized_net_ret",
-    "portfolio_expected_net_return": "expected_net_ret",
+    "portfolio_gross_pct": "gross_pct",
+    "portfolio_realized_net_pct": "realized_net_pct",
+    "portfolio_expected_net_pct": "expected_net_pct",
+    "portfolio_realized_cost_pct": "realized_cost_pct",
+    "portfolio_expected_cost_pct": "expected_cost_pct",
     "cumulative_portfolio_cash_gross_pnl_usd": "cum_cash_gross_pnl_usd",
     "cumulative_portfolio_cash_realized_net_pnl_usd": (
         "cum_cash_realized_net_pnl_usd"
@@ -101,9 +103,11 @@ PUBLIC_REPORT_RENAMES = {
     "cumulative_portfolio_cash_expected_net_pnl_usd": (
         "cum_cash_expected_net_pnl_usd"
     ),
-    "cumulative_portfolio_gross_return": "cum_gross_ret",
-    "cumulative_portfolio_realized_net_return": "cum_realized_net_ret",
-    "cumulative_portfolio_expected_net_return": "cum_expected_net_ret",
+    "cumulative_portfolio_gross_pct": "cum_gross_pct",
+    "cumulative_portfolio_realized_net_pct": "cum_realized_net_pct",
+    "cumulative_portfolio_expected_net_pct": "cum_expected_net_pct",
+    "cumulative_portfolio_realized_cost_pct": "cum_realized_cost_pct",
+    "cumulative_portfolio_expected_cost_pct": "cum_expected_cost_pct",
     "portfolio_gross_equity_usd": "gross_equity_usd",
     "portfolio_realized_equity_usd": "realized_equity_usd",
     "portfolio_expected_equity_usd": "expected_equity_usd",
@@ -256,8 +260,8 @@ def rename_public_report_columns(report: pl.DataFrame) -> pl.DataFrame:
     return report.rename(renames)
 
 
-# FX and return-volatility rates need more precision than general diagnostics
-# so rounded inputs still reproduce reported USD notionals and dollar vol.
+# FX, return-volatility rates, and percentage-point contributions need more
+# precision than general diagnostics for useful cash-flow and sizing audits.
 SIX_DECIMAL_RATE_COLUMNS = {
     "fx_to_usd",
     "daily_return_vol",
@@ -275,33 +279,58 @@ SIX_DECIMAL_RATE_COLUMNS = {
     "ref_ann_cost_pct",
     "ref_cost_pct",
     "ref_net_pct",
-    "portfolio_gross_return",
-    "portfolio_realized_net_return",
-    "portfolio_expected_net_return",
-    "cumulative_portfolio_gross_return",
-    "cumulative_portfolio_realized_net_return",
-    "cumulative_portfolio_expected_net_return",
-    "gross_ret",
-    "realized_net_ret",
-    "expected_net_ret",
-    "cum_gross_ret",
-    "cum_realized_net_ret",
-    "cum_expected_net_ret",
-    "cash_gross_ret_contrib",
-    "cash_realized_net_ret_contrib",
-    "cash_expected_net_ret_contrib",
-    "cum_cash_gross_ret_contrib",
-    "cum_cash_realized_net_ret_contrib",
-    "cum_cash_expected_net_ret_contrib",
+    "portfolio_gross_pct",
+    "portfolio_realized_net_pct",
+    "portfolio_expected_net_pct",
+    "portfolio_trade_cost_pct",
+    "portfolio_realized_roll_cost_pct",
+    "portfolio_expected_roll_cost_pct",
+    "portfolio_realized_cost_pct",
+    "portfolio_expected_cost_pct",
+    "cumulative_portfolio_gross_pct",
+    "cumulative_portfolio_realized_net_pct",
+    "cumulative_portfolio_expected_net_pct",
+    "cumulative_portfolio_trade_cost_pct",
+    "cumulative_portfolio_realized_roll_cost_pct",
+    "cumulative_portfolio_expected_roll_cost_pct",
+    "cumulative_portfolio_realized_cost_pct",
+    "cumulative_portfolio_expected_cost_pct",
+    "gross_pct",
+    "realized_net_pct",
+    "expected_net_pct",
+    "realized_cost_pct",
+    "expected_cost_pct",
+    "cum_gross_pct",
+    "cum_realized_net_pct",
+    "cum_expected_net_pct",
+    "cum_realized_cost_pct",
+    "cum_expected_cost_pct",
+    "cash_gross_pct_contrib",
+    "cash_trade_cost_pct_contrib",
+    "cash_realized_roll_cost_pct_contrib",
+    "cash_expected_roll_cost_pct_contrib",
+    "cash_realized_cost_pct_contrib",
+    "cash_expected_cost_pct_contrib",
+    "cash_realized_net_pct_contrib",
+    "cash_expected_net_pct_contrib",
+    "cum_cash_gross_pct_contrib",
+    "cum_cash_trade_cost_pct_contrib",
+    "cum_cash_realized_roll_cost_pct_contrib",
+    "cum_cash_expected_roll_cost_pct_contrib",
+    "cum_cash_realized_cost_pct_contrib",
+    "cum_cash_expected_cost_pct_contrib",
+    "cum_cash_realized_net_pct_contrib",
+    "cum_cash_expected_net_pct_contrib",
 }
 
 
 def round_public_report(report: pl.DataFrame) -> pl.DataFrame:
     """Return a presentation-rounded copy of a public report dataframe.
 
-    Monetary values use two decimals, reproduction-sensitive FX and
-    return-volatility rates use six, and all other floating-point diagnostics
-    use four. Integer, boolean, temporal, and identifier columns are unchanged.
+    Monetary values use two decimals, FX, return-volatility rates, and
+    percentage-point contributions use six, and all other floating-point
+    diagnostics use four. Integer, boolean, temporal, and identifier columns
+    are unchanged.
     The input frame is not mutated and should remain the calculation source.
 
     Parameters

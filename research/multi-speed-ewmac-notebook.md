@@ -220,8 +220,12 @@ the executable account-scale diagnostic. The Carver research loader carries
 the dated FX conversion into the combined forecast frame, so cash sizing does
 not need an ad hoc constant FX column.
 `view.cash_return_contribution_curves()` divides its gross, realized-net, and
-expected-net cash P&L by the common account capital; the daily contributions
-add across selected instruments to the portfolio return. Passing
+expected-net cash P&L by the common account capital and multiplies by 100, so
+the output is percentage points (for example, `0.01` means 0.01%). Trade and
+realized/expected roll costs are included as negative daily and cumulative
+percentage-point contributions; they are zero except on execution dates.
+The decimal return columns are not emitted. Contributions add across selected
+instruments to the portfolio percentage return. Passing
 `multiplier=1` for ES is appropriate only for a unit test.
 
 ## Combined portfolio-selection forecasts

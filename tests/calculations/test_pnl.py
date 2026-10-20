@@ -9,6 +9,7 @@ from derivatives_bt_engine.calculations.pnl import (
     apply_forecast_position_buffer,
     append_reference_position_turnover,
     build_executable_cash_pnl_curve,
+    build_fixed_capital_portfolio_curve,
     build_subsystem_reference_return_curve,
 )
 
@@ -171,15 +172,76 @@ def test_executable_cash_pnl_separates_trade_and_policy_roll_costs():
     assert result.get_column("cash_expected_roll_cost_usd").to_list() == (
         pytest.approx([0.0, 0.0, -24.0, 0.0, -24.0])
     )
+    assert result.get_column("cash_trade_cost_pct_contrib").to_list() == (
+        pytest.approx([-1.0, -1.0, 0.0, -0.8, 0.0])
+    )
+    assert result.get_column(
+        "cash_realized_roll_cost_pct_contrib"
+    ).to_list() == pytest.approx([0.0, 0.0, -3.0, 0.0, -1.8])
+    assert result.get_column(
+        "cash_expected_roll_cost_pct_contrib"
+    ).to_list() == pytest.approx([0.0, 0.0, -2.4, 0.0, -2.4])
+    assert result.get_column("cash_realized_cost_pct_contrib").to_list() == (
+        pytest.approx([-1.0, -1.0, -3.0, -0.8, -1.8])
+    )
+    assert result.get_column("cash_expected_cost_pct_contrib").to_list() == (
+        pytest.approx([-1.0, -1.0, -2.4, -0.8, -2.4])
+    )
+    assert result.get_column("cum_cash_realized_cost_pct_contrib").to_list() == (
+        pytest.approx([-1.0, -2.0, -5.0, -5.8, -7.6])
+    )
+    assert result.get_column("cum_cash_expected_cost_pct_contrib").to_list() == (
+        pytest.approx([-1.0, -2.0, -4.4, -5.2, -7.6])
+    )
+    assert result.get_column("cash_gross_pct_contrib").to_list() == (
+        pytest.approx([0.0, 5.0, 10.0, 10.0, 6.0])
+    )
+    assert result.get_column("cash_realized_net_pct_contrib").to_list() == (
+        pytest.approx([-1.0, 4.0, 7.0, 9.2, 4.2])
+    )
+    assert result.get_column("cash_expected_net_pct_contrib").to_list() == (
+        pytest.approx([-1.0, 4.0, 7.6, 9.2, 3.6])
+    )
+    assert not any(name.endswith("_ret_contrib") for name in result.columns)
     assert result.get_column("cum_cash_gross_pnl_usd").to_list() == pytest.approx(
         [0.0, 50.0, 150.0, 250.0, 310.0]
     )
     assert result.get_column(
         "cum_cash_realized_net_pnl_usd"
-    ).to_list() == pytest.approx([0.0, 40.0, 110.0, 202.0, 244.0])
+    ).to_list() == pytest.approx([-10.0, 30.0, 100.0, 192.0, 234.0])
     assert result.get_column(
         "cum_cash_expected_net_pnl_usd"
-    ).to_list() == pytest.approx([0.0, 40.0, 116.0, 208.0, 244.0])
+    ).to_list() == pytest.approx([-10.0, 30.0, 106.0, 198.0, 234.0])
+
+
+def test_fixed_capital_portfolio_curve_reports_percentage_points():
+    """Portfolio USD flows and instrument contributions share account capital."""
+    cash = pl.DataFrame({
+        "date": [date(2024, 1, 1)],
+        "symbol": ["MES"],
+        "cash_pnl_valid": [True],
+        "cash_gross_pnl_usd": [50.0],
+        "cash_trade_cost_usd": [-10.0],
+        "cash_realized_roll_cost_usd": [-20.0],
+        "cash_expected_roll_cost_usd": [-15.0],
+        "cash_realized_net_pnl_usd": [20.0],
+        "cash_expected_net_pnl_usd": [25.0],
+    })
+
+    result = build_fixed_capital_portfolio_curve(
+        cash,
+        initial_capital_usd=1_000.0,
+    )
+
+    assert result["portfolio_gross_pct"][0] == pytest.approx(5.0)
+    assert result["portfolio_trade_cost_pct"][0] == pytest.approx(-1.0)
+    assert result["portfolio_realized_roll_cost_pct"][0] == pytest.approx(-2.0)
+    assert result["portfolio_realized_cost_pct"][0] == pytest.approx(-3.0)
+    assert result["portfolio_realized_net_pct"][0] == pytest.approx(2.0)
+    assert result["portfolio_expected_net_pct"][0] == pytest.approx(2.5)
+    assert result["cumulative_portfolio_realized_cost_pct"][0] == pytest.approx(
+        -3.0
+    )
 
 
 def test_forecast_buffer_matches_pysystemtrade_reference_fixture():

@@ -218,30 +218,33 @@ class EwmacNotebookView:
     ) -> pl.DataFrame:
         """Return daily and cumulative executable portfolio contributions.
 
-        Each contribution divides this instrument's executable cash P&L by
-        total account capital. Contributions from all selected instruments
-        therefore add to the corresponding portfolio return.
+        Each percentage-point contribution divides this instrument's
+        executable cash flow by total account capital and multiplies by 100.
+        Contributions from all selected instruments therefore add to the
+        corresponding portfolio percentage return. Cost columns are negative
+        percentage points and are nonzero only on trade or roll dates.
         """
         if self.cash is None:
             raise ValueError("cash P&L was not requested for this notebook view")
         frame = _date_slice(self.cash, start=start, end=end)
         return frame.select(
             "date",
-            "cash_gross_ret_contrib",
-            "cash_realized_net_ret_contrib",
-            "cash_expected_net_ret_contrib",
-            pl.col("cash_gross_ret_contrib")
-            .fill_null(0.0)
-            .cum_sum()
-            .alias("cum_cash_gross_ret_contrib"),
-            pl.col("cash_realized_net_ret_contrib")
-            .fill_null(0.0)
-            .cum_sum()
-            .alias("cum_cash_realized_net_ret_contrib"),
-            pl.col("cash_expected_net_ret_contrib")
-            .fill_null(0.0)
-            .cum_sum()
-            .alias("cum_cash_expected_net_ret_contrib"),
+            "cash_gross_pct_contrib",
+            "cash_trade_cost_pct_contrib",
+            "cash_realized_roll_cost_pct_contrib",
+            "cash_expected_roll_cost_pct_contrib",
+            "cash_realized_cost_pct_contrib",
+            "cash_expected_cost_pct_contrib",
+            "cash_realized_net_pct_contrib",
+            "cash_expected_net_pct_contrib",
+            "cum_cash_gross_pct_contrib",
+            "cum_cash_trade_cost_pct_contrib",
+            "cum_cash_realized_roll_cost_pct_contrib",
+            "cum_cash_expected_roll_cost_pct_contrib",
+            "cum_cash_realized_cost_pct_contrib",
+            "cum_cash_expected_cost_pct_contrib",
+            "cum_cash_realized_net_pct_contrib",
+            "cum_cash_expected_net_pct_contrib",
         )
 
     def plot(

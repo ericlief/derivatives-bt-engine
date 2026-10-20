@@ -991,17 +991,22 @@ baseline by default. The command writes:
   account-scaled daily continuous target, average-position buffer width and
   boundaries, buffered whole contracts, ordinary traded contracts, actual and
   interval-average policy-roll contracts, and separate gross, trade-cost,
-  roll-cost, and net USD P&L paths. Gross, realized-net, and expected-net
-  return contributions divide each instrument's P&L by the common initial
-  account capital, so their daily values add to the portfolio curve. Its
+  roll-cost, and net USD P&L paths. It also reports gross, trade-cost,
+  realized/expected roll-cost, total-cost, and net contributions as
+  percentage points of common initial account capital (`USD / capital * 100`);
+  the per-instrument daily contributions therefore add to the portfolio
+  percentage return. Costs are negative and appear on trade/roll dates; the
+  separate expected-roll path is a policy comparison, not an additional cost
+  charged on top of realized rolls. Its
   `close` is the locally generated
   additive-Panama adjusted level used by the signal history, retained beside
   the roll-neutral `point_change` for audit; it is not the raw executable
   dated-contract mark;
 - `multi_speed_ewmac_selection_portfolio_curve_<timestamp>.parquet`, the daily
   selected-book cash flows summed across instruments, with one common initial
-  capital denominator for gross, realized-net, and expected-net daily and
-  cumulative returns and equity. This is a fixed-capital audit curve: its
+  capital denominator for gross, cost, realized-net, and expected-net daily
+  and cumulative percentage-point contributions and equity. This is a
+  fixed-capital audit curve: its
   executable positions are not resized as the reported equity changes;
 - `multi_speed_ewmac_selection_trials_<timestamp>.parquet`, one row per greedy trial; and
 - `multi_speed_ewmac_selection_trial_allocations_<timestamp>.parquet`, one row per member
