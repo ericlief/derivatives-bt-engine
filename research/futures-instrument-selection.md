@@ -607,7 +607,7 @@ flowchart TD
 
         Sizing["3. Size equal-weight reference<br/>ref_weight = 1 / assumed book count<br/>daily_dvol · ref_avg_pos · ref_targ_pos"]
 
-        Turnover["4. Calculate actual subsystem turnover<br/>smoothed_reference_average_position<br/>reference_normalized_position<br/>reference_abs_position_change<br/>full-sample and rolling audit estimates"]
+        Turnover["4. Calculate actual subsystem turnover<br/>ref_smoothed_avg_pos<br/>ref_norm_pos<br/>ref_abs_pos_change<br/>full-sample and rolling audit estimates"]
 
         Cost["5. Calibrate combined-subsystem cost<br/>ann_trade_cost_sr = trade_sr × subsystem turnover<br/>ann_roll_cost_sr = roll_sr × ref_ann_rolls"]
 
@@ -785,15 +785,20 @@ Ordinary position changes are charged with the market screen one-way trade cost.
 On each history-policy `is_roll` date, `realized_roll_cons` uses the rounded
 position held from the prior day. `interval_avg_abs_cons` retains the
 fractional mean absolute rounded exposure over the interval ending on that
-roll date. `expected_roll_cons` rounds that interval mean half-up to a whole
+roll date. `avg_roll_cons` rounds that interval mean half-up to a whole
 executable contract before multiplying by `roll_cost_per_con`. This is the
 stable selection estimate analogous to pysystemtrade's average holding per
 roll interval. Both cost paths are persisted because they answer different
 questions: the realized series audits the supplied historical roll path, while
 the interval-average series estimates a typical policy roll without depending
-on the forecast value on one date. Current snapshot costs are applied to the
-full history as a clearly labelled sensitivity; no live contract is queried
-again during portfolio selection.
+on the forecast value on one date. The cash field names use `avg_roll` rather
+than `expected`: this is a deterministic interval-mean estimate, not a
+probability-weighted expectation. The `realized` and `avg_roll` net P&L paths
+share gross P&L and ordinary trade costs; they differ only in roll cost on roll
+dates, so they are usually identical between rolls and may also match on a roll
+when actual held contracts equal the interval average. Current snapshot costs
+are applied to the full history as a clearly labelled sensitivity; no live
+contract is queried again during portfolio selection.
 
 The live-data boundary is a reusable, full-precision Parquet snapshot. Acquire
 contract qualification, current quotes and FX, dated-contract spread and
@@ -992,11 +997,11 @@ baseline by default. The command writes:
   boundaries, buffered whole contracts, ordinary traded contracts, actual and
   interval-average policy-roll contracts, and separate gross, trade-cost,
   roll-cost, and net USD P&L paths. It also reports gross, trade-cost,
-  realized/expected roll-cost, total-cost, and net contributions as
+  realized/average-roll cost, total-cost, and net contributions as
   percentage points of common initial account capital (`USD / capital * 100`);
   the per-instrument daily contributions therefore add to the portfolio
   percentage return. Costs are negative and appear on trade/roll dates; the
-  separate expected-roll path is a policy comparison, not an additional cost
+  separate average-roll path is a policy comparison, not an additional cost
   charged on top of realized rolls. Its
   `close` is the locally generated
   additive-Panama adjusted level used by the signal history, retained beside
@@ -1004,7 +1009,7 @@ baseline by default. The command writes:
   dated-contract mark;
 - `multi_speed_ewmac_selection_portfolio_curve_<timestamp>.parquet`, the daily
   selected-book cash flows summed across instruments, with one common initial
-  capital denominator for gross, cost, realized-net, and expected-net daily
+  capital denominator for gross, cost, realized-net, and average-roll-net daily
   and cumulative percentage-point contributions and equity. This is a
   fixed-capital audit curve: its
   executable positions are not resized as the reported equity changes;

@@ -52,7 +52,12 @@
 - Use short, unambiguous report tokens consistently: `con`, `instr`, `exec`,
   `elig`, `ann`, `dvol`, `sr`, `pct`, `avg`, `min`, `max`, `n`, `px`, `pt`,
   `pts`, `ccy`, `mult`, `src`, `hist`, `ref`, `snap`, `cap`, `wt`, and `cls`.
-  In public column names, abbreviate `contract` as `con`.
+  In public column names, abbreviate `contract` as `con`, `position` as `pos`,
+  `normalized` as `norm`, and `average` as `avg`. Use `dvol` for dollar
+  volatility (for example, `daily_dvol` and `ann_dvol`).
+- Avoid ambiguous labels such as `expected` for deterministic policy
+  calculations. Name interval-average roll estimates `avg_roll` and keep them
+  distinct from realized roll quantities and costs.
 - Add new abbreviations to the centralized public-schema rename/token map, not
   as one-off aliases. Update report ordering, ranking/notebook helpers,
   documentation, and schema tests together.

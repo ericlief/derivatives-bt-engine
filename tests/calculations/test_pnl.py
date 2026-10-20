@@ -162,14 +162,14 @@ def test_executable_cash_pnl_separates_trade_and_policy_roll_costs():
         8.0,
         8.0,
     ]
-    assert result.get_column("expected_roll_cons").to_list() == [0, 0, 8, 0, 8]
+    assert result.get_column("avg_roll_cons").to_list() == [0, 0, 8, 0, 8]
     assert result.get_column("cash_trade_cost_usd").to_list() == pytest.approx(
         [-10.0, -10.0, 0.0, -8.0, 0.0]
     )
     assert result.get_column("cash_realized_roll_cost_usd").to_list() == (
         pytest.approx([0.0, 0.0, -30.0, 0.0, -18.0])
     )
-    assert result.get_column("cash_expected_roll_cost_usd").to_list() == (
+    assert result.get_column("cash_avg_roll_cost_usd").to_list() == (
         pytest.approx([0.0, 0.0, -24.0, 0.0, -24.0])
     )
     assert result.get_column("cash_trade_cost_pct_contrib").to_list() == (
@@ -179,18 +179,18 @@ def test_executable_cash_pnl_separates_trade_and_policy_roll_costs():
         "cash_realized_roll_cost_pct_contrib"
     ).to_list() == pytest.approx([0.0, 0.0, -3.0, 0.0, -1.8])
     assert result.get_column(
-        "cash_expected_roll_cost_pct_contrib"
+        "cash_avg_roll_cost_pct_contrib"
     ).to_list() == pytest.approx([0.0, 0.0, -2.4, 0.0, -2.4])
     assert result.get_column("cash_realized_cost_pct_contrib").to_list() == (
         pytest.approx([-1.0, -1.0, -3.0, -0.8, -1.8])
     )
-    assert result.get_column("cash_expected_cost_pct_contrib").to_list() == (
+    assert result.get_column("cash_avg_roll_total_cost_pct_contrib").to_list() == (
         pytest.approx([-1.0, -1.0, -2.4, -0.8, -2.4])
     )
     assert result.get_column("cum_cash_realized_cost_pct_contrib").to_list() == (
         pytest.approx([-1.0, -2.0, -5.0, -5.8, -7.6])
     )
-    assert result.get_column("cum_cash_expected_cost_pct_contrib").to_list() == (
+    assert result.get_column("cum_cash_avg_roll_total_cost_pct_contrib").to_list() == (
         pytest.approx([-1.0, -2.0, -4.4, -5.2, -7.6])
     )
     assert result.get_column("cash_gross_pct_contrib").to_list() == (
@@ -199,7 +199,7 @@ def test_executable_cash_pnl_separates_trade_and_policy_roll_costs():
     assert result.get_column("cash_realized_net_pct_contrib").to_list() == (
         pytest.approx([-1.0, 4.0, 7.0, 9.2, 4.2])
     )
-    assert result.get_column("cash_expected_net_pct_contrib").to_list() == (
+    assert result.get_column("cash_avg_roll_net_pct_contrib").to_list() == (
         pytest.approx([-1.0, 4.0, 7.6, 9.2, 3.6])
     )
     assert not any(name.endswith("_ret_contrib") for name in result.columns)
@@ -210,7 +210,7 @@ def test_executable_cash_pnl_separates_trade_and_policy_roll_costs():
         "cum_cash_realized_net_pnl_usd"
     ).to_list() == pytest.approx([-10.0, 30.0, 100.0, 192.0, 234.0])
     assert result.get_column(
-        "cum_cash_expected_net_pnl_usd"
+        "cum_cash_avg_roll_net_pnl_usd"
     ).to_list() == pytest.approx([-10.0, 30.0, 106.0, 198.0, 234.0])
 
 
@@ -223,9 +223,9 @@ def test_fixed_capital_portfolio_curve_reports_percentage_points():
         "cash_gross_pnl_usd": [50.0],
         "cash_trade_cost_usd": [-10.0],
         "cash_realized_roll_cost_usd": [-20.0],
-        "cash_expected_roll_cost_usd": [-15.0],
+        "cash_avg_roll_cost_usd": [-15.0],
         "cash_realized_net_pnl_usd": [20.0],
-        "cash_expected_net_pnl_usd": [25.0],
+        "cash_avg_roll_net_pnl_usd": [25.0],
     })
 
     result = build_fixed_capital_portfolio_curve(
@@ -238,7 +238,7 @@ def test_fixed_capital_portfolio_curve_reports_percentage_points():
     assert result["portfolio_realized_roll_cost_pct"][0] == pytest.approx(-2.0)
     assert result["portfolio_realized_cost_pct"][0] == pytest.approx(-3.0)
     assert result["portfolio_realized_net_pct"][0] == pytest.approx(2.0)
-    assert result["portfolio_expected_net_pct"][0] == pytest.approx(2.5)
+    assert result["portfolio_avg_roll_net_pct"][0] == pytest.approx(2.5)
     assert result["cumulative_portfolio_realized_cost_pct"][0] == pytest.approx(
         -3.0
     )

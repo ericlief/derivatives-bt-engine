@@ -140,6 +140,32 @@ def test_public_report_renames_subsystem_reference_columns():
     assert public["ref_ret_valid"][0]
 
 
+def test_public_report_uses_position_dvol_and_contract_tokens():
+    """Research cash reports compact reference, dollar-vol, and contract names."""
+    report = pl.DataFrame({
+        "ref_rolling_mean_abs_position_change": [0.123456],
+        "daily_dollar_vol_per_contract": [123.456],
+        "smoothed_ref_average_position": [2.34567],
+        "ref_normalized_position": [1.23456],
+        "realized_roll_cons": [3.0],
+        "avg_roll_cons": [2.0],
+    })
+
+    public = round_public_report(rename_public_report_columns(report))
+
+    assert public.columns == [
+        "ref_roll_mean_abs_pos_change",
+        "daily_dvol",
+        "ref_smoothed_avg_pos",
+        "ref_norm_pos",
+        "realized_roll_con",
+        "avg_roll_con",
+    ]
+    assert public.row(0) == pytest.approx(
+        (0.1235, 123.46, 2.3457, 1.2346, 3.0, 2.0)
+    )
+
+
 def test_public_report_renames_grid_parameters_and_rounds_margin_money():
     """Grid summaries share compact names and the central money precision."""
     report = pl.DataFrame({

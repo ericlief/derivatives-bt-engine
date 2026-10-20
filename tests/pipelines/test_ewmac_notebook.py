@@ -60,12 +60,25 @@ def test_notebook_view_builds_reference_return_and_cash_paths():
     assert view.forecasts is result.frame
     assert "ref_net_pct" in view.reference.columns
     assert view.reference_turnover is not None
+    assert {
+        "ref_avg_pos",
+        "ref_smoothed_avg_pos",
+        "ref_targ_pos",
+        "ref_norm_pos",
+        "ref_roll_mean_abs_pos_change",
+        "daily_dvol",
+    } <= set(view.reference.columns)
+    assert "daily_dollar_vol_per_contract" not in view.reference.columns
     assert view.cash is not None
     assert {
-        "target_position",
-        "exec_cons",
+        "targ_pos",
+        "exec_con",
+        "held_con",
+        "ann_dvol",
+        "cash_avg_roll_net_pnl_usd",
         "cash_realized_net_pnl_usd",
     } <= set(view.cash.columns)
+    assert "cash_expected_net_pnl_usd" not in view.cash.columns
     assert view.forecast_positions(start="2024-01-03").height == 3
 
     reference = view.subsystem_reference_pct_curves()

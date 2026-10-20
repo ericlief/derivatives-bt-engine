@@ -78,7 +78,10 @@ from derivatives_bt_engine.strats.multi_speed_ewmac import (
     build_ewmac_rule_forecast,
     load_pooled_ewmac_rule,
 )
-from derivatives_bt_engine.reports.formatting import round_public_report
+from derivatives_bt_engine.reports.formatting import (
+    PUBLIC_REPORT_RENAMES as CENTRAL_REPORT_RENAMES,
+    round_public_report,
+)
 from derivatives_bt_engine.calculations.ewmac import (
     EWMAC_FORECAST_CAP,
     EWMAC_FORECAST_TARGET_ABS,
@@ -3393,8 +3396,6 @@ PUBLIC_REPORT_RENAMES = {
     "notional_native_per_contract": "notional_native",
     "notional_per_contract": "notional",
     "current_mixed_point_vol": "daily_point_vol",
-    "daily_dollar_vol_per_contract": "daily_dvol",
-    "annual_dollar_vol_per_contract": "ann_dvol",
     "selected_one_way_spread_points": "spread_points",
     "selected_spread_source": "spread_source",
     "commission_amount": "comm",
@@ -3596,7 +3597,10 @@ PUBLIC_COLUMN_TOKEN_ABBREVIATIONS = {
 
 
 def _compact_public_column_name(name: str) -> str:
-    compact = PUBLIC_REPORT_RENAMES.get(name, name)
+    compact = PUBLIC_REPORT_RENAMES.get(
+        name,
+        CENTRAL_REPORT_RENAMES.get(name, name),
+    )
     compact = compact.replace("one_year", "1y")
     compact = compact.replace("total", "tot").replace("annual", "ann")
     compact = compact.replace("sharpe", "sr")

@@ -27,7 +27,7 @@ dataframe collections:
 ``portfolio_curve``
     One fixed initial-capital row per date. It sums the selected instruments'
     executable cash P&L and reports daily and cumulative returns plus gross,
-    realized-net, and expected-net equity paths.
+    realized-net and average-roll-net equity paths.
 
 The command persists each intermediate form so forecast gaps, turnover, and
 greedy selection decisions remain inspectable after a run.
@@ -1005,34 +1005,34 @@ def _run_complete_selection(
                 "trade_cons",
                 "realized_roll_cons",
                 "interval_avg_abs_cons",
-                "expected_roll_cons",
+                "avg_roll_cons",
                 "trade_cost_usd_per_con",
                 "roll_cost_usd_per_con",
                 "cash_gross_pnl_usd",
                 "cash_trade_cost_usd",
                 "cash_realized_roll_cost_usd",
-                "cash_expected_roll_cost_usd",
+                "cash_avg_roll_cost_usd",
                 "cash_gross_pct_contrib",
                 "cash_trade_cost_pct_contrib",
                 "cash_realized_roll_cost_pct_contrib",
-                "cash_expected_roll_cost_pct_contrib",
+                "cash_avg_roll_cost_pct_contrib",
                 "cash_realized_cost_pct_contrib",
-                "cash_expected_cost_pct_contrib",
+                "cash_avg_roll_total_cost_pct_contrib",
                 "cash_realized_net_pct_contrib",
-                "cash_expected_net_pct_contrib",
+                "cash_avg_roll_net_pct_contrib",
                 "cash_realized_net_pnl_usd",
-                "cash_expected_net_pnl_usd",
+                "cash_avg_roll_net_pnl_usd",
                 "cum_cash_gross_pnl_usd",
                 "cum_cash_realized_net_pnl_usd",
-                "cum_cash_expected_net_pnl_usd",
+                "cum_cash_avg_roll_net_pnl_usd",
                 "cum_cash_gross_pct_contrib",
                 "cum_cash_trade_cost_pct_contrib",
                 "cum_cash_realized_roll_cost_pct_contrib",
-                "cum_cash_expected_roll_cost_pct_contrib",
+                "cum_cash_avg_roll_cost_pct_contrib",
                 "cum_cash_realized_cost_pct_contrib",
-                "cum_cash_expected_cost_pct_contrib",
+                "cum_cash_avg_roll_total_cost_pct_contrib",
                 "cum_cash_realized_net_pct_contrib",
-                "cum_cash_expected_net_pct_contrib",
+                "cum_cash_avg_roll_net_pct_contrib",
                 "cash_pnl_valid",
             )
         )

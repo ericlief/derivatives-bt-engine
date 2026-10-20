@@ -26,6 +26,7 @@ from derivatives_bt_engine.calculations.pnl import (
     build_executable_cash_pnl_curve,
     build_subsystem_reference_return_curve,
 )
+from derivatives_bt_engine.reports.formatting import rename_public_report_columns
 
 
 def _coerce_date(value: date | datetime | str | None) -> date | None:
@@ -137,10 +138,10 @@ class EwmacNotebookView:
             "date",
             "close",
             "combined_forecast",
-            "ref_average_position",
-            "smoothed_ref_average_position",
-            "ref_target_position",
-            "ref_normalized_position",
+            "ref_avg_pos",
+            "ref_smoothed_avg_pos",
+            "ref_targ_pos",
+            "ref_norm_pos",
         ]
         available_columns = [
             column for column in columns if column in frame.columns
@@ -206,7 +207,7 @@ class EwmacNotebookView:
         return frame.select(
             "date",
             "cum_cash_gross_pnl_usd",
-            "cum_cash_expected_net_pnl_usd",
+            "cum_cash_avg_roll_net_pnl_usd",
             "cum_cash_realized_net_pnl_usd",
         )
 
@@ -232,19 +233,19 @@ class EwmacNotebookView:
             "cash_gross_pct_contrib",
             "cash_trade_cost_pct_contrib",
             "cash_realized_roll_cost_pct_contrib",
-            "cash_expected_roll_cost_pct_contrib",
+            "cash_avg_roll_cost_pct_contrib",
             "cash_realized_cost_pct_contrib",
-            "cash_expected_cost_pct_contrib",
+            "cash_avg_roll_total_cost_pct_contrib",
             "cash_realized_net_pct_contrib",
-            "cash_expected_net_pct_contrib",
+            "cash_avg_roll_net_pct_contrib",
             "cum_cash_gross_pct_contrib",
             "cum_cash_trade_cost_pct_contrib",
             "cum_cash_realized_roll_cost_pct_contrib",
-            "cum_cash_expected_roll_cost_pct_contrib",
+            "cum_cash_avg_roll_cost_pct_contrib",
             "cum_cash_realized_cost_pct_contrib",
-            "cum_cash_expected_cost_pct_contrib",
+            "cum_cash_avg_roll_total_cost_pct_contrib",
             "cum_cash_realized_net_pct_contrib",
-            "cum_cash_expected_net_pct_contrib",
+            "cum_cash_avg_roll_net_pct_contrib",
         )
 
     def plot(
@@ -290,9 +291,9 @@ class EwmacNotebookView:
         proxy_plot = reference.hvplot.line(
             x="date",
             y=[
-                "ref_average_position",
-                "smoothed_ref_average_position",
-                "ref_target_position",
+                "ref_avg_pos",
+                "ref_smoothed_avg_pos",
+                "ref_targ_pos",
             ],
             title="Equal-weight reference positions",
             ylabel="Continuous contracts",
@@ -301,7 +302,7 @@ class EwmacNotebookView:
         )
         normalized_plot = reference.hvplot.line(
             x="date",
-            y=["combined_forecast", "ref_normalized_position"],
+            y=["combined_forecast", "ref_norm_pos"],
             title="Forecast versus reference-normalized position",
             ylabel="Smoothed average-position units",
             width=width,
@@ -331,7 +332,7 @@ class EwmacNotebookView:
             cash = _date_slice(self.cash, start=start, end=end)
             contract_plot = cash.hvplot.line(
                 x="date",
-                y=["target_position", "exec_cons", "held_cons"],
+                y=["targ_pos", "exec_con", "held_con"],
                 title="Executable contract positions",
                 ylabel="Contracts",
                 width=width,
@@ -342,7 +343,7 @@ class EwmacNotebookView:
                 x="date",
                 y=[
                     "cum_cash_gross_pnl_usd",
-                    "cum_cash_expected_net_pnl_usd",
+                    "cum_cash_avg_roll_net_pnl_usd",
                     "cum_cash_realized_net_pnl_usd",
                 ],
                 title="Cumulative executable cash P&L",
@@ -436,6 +437,12 @@ def build_ewmac_notebook_view(
             buffer_size=cash_settings.buffer_size,
             buffer_trade_to_edge=cash_settings.buffer_trade_to_edge,
         )
+    # This facade is consumed directly in notebooks, so expose its aligned
+    # audit frames with the same compact, centralized vocabulary as reports.
+    # Keep the underlying calculation frames descriptive and full precision.
+    reference = rename_public_report_columns(reference)
+    if cash is not None:
+        cash = rename_public_report_columns(cash)
     return EwmacNotebookView(
         instrument_code=instrument_code,
         result=result,
