@@ -19,6 +19,7 @@ equity bear market had already bottomed.
 
 | Trough / window | Context | Classification / note |
 |---|---|---|
+| **May 31, 1984** | The market was in a May–June slide amid rising interest rates and stress around Continental Illinois, which faced a depositor run and a federal rescue announced May 17. | A local ES-series turn/date of interest, not a major S&P bear-market trough; the S&P's broader decline continued into June/July. The S&P fell about 6% from early May through mid-June. [Federal Reserve Bank of San Francisco review](https://fraser.stlouisfed.org/title/economic-letter-federal-reserve-bank-san-francisco-4960/market-responses-continental-illinois-517590/fulltext), [Federal Reserve history of Continental Illinois](https://www.federalreservehistory.org/essays/continental-illinois) |
 | **Oct–Dec 1987**; cash S&P trough **Dec 4** | Black Monday on Oct 19 was the acute crash, amid market-structure stress and program/portfolio-insurance selling. The market continued falling after crash day. | Major bear market; do not mark Oct 19 as the final low. [Federal Reserve history](https://www.federalreservehistory.org/essays/stock-market-crash-of-1987), [trough chronology](https://historyofmarket.com/sp500/bear-markets/1987/) |
 | **Oct 11, 1990** | Recession fears and the oil-price shock following Iraq's invasion of Kuwait. | Near-bear correction: about 19.9% peak-to-trough, just short of the conventional 20% threshold. [Market chronology](https://www.getswoopr.com/market-history/1990-91-gulf-war-oil-shock-1990/) |
 | **Aug 1998**; initial cash-index low **Aug 31** | Asian financial crisis, Russia's debt default/devaluation, and stress around Long-Term Capital Management (LTCM). | Sharp correction and volatility spike, rather than a prolonged bear market. [Federal Reserve history on LTCM](https://www.federalreservehistory.org/essays/ltcm-near-failure), [drawdown chronology](https://tideline.jbpscapital.com/market-data/sp500-bear-markets) |
@@ -32,7 +33,8 @@ equity bear market had already bottomed.
 
 ## Suggested chart annotations
 
-For a first visual review, annotate **1987, 1990, 1998, 2000–02, 2007–09, 2011,
+For a first visual review, annotate **May–July 1984** (with May 31 as a local ES
+turn to inspect), **1987, 1990, 1998, 2000–02, 2007–09, 2011,
 2015–16, 2018, 2020, and 2022**. The 1990, 2011, and 2018 episodes are useful
 examples of large selloffs that sit near the conventional 20% bear-market boundary;
 they should not all be treated as equivalent to the 2000–02 or 2007–09 prolonged
