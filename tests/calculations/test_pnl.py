@@ -176,6 +176,12 @@ def test_executable_cash_pnl_separates_trade_and_policy_roll_costs():
     assert result.get_column("avg_pos").to_list() == pytest.approx(
         [5.0] * 5
     )
+    assert result.get_column("tracking_error_ann_usd").to_list() == (
+        pytest.approx([100.0, 100.0, 0.0, 100.0, 20.0])
+    )
+    assert result.get_column("tracking_error_ann_pct_cap").to_list() == (
+        pytest.approx([10.0, 10.0, 0.0, 10.0, 2.0])
+    )
     assert result.get_column("ref_norm_pos").to_list() == pytest.approx(
         [0.1, 0.2, 0.3, 0.4, 0.5]
     )
@@ -276,6 +282,12 @@ def test_ann_pct_vol_is_null_without_raw_contract_close():
     )
 
     assert result.get_column("ann_pct_vol").null_count() == 1
+    assert result.get_column("tracking_error_ann_usd").to_list() == (
+        pytest.approx([100.0])
+    )
+    assert result.get_column("tracking_error_ann_pct_cap").to_list() == (
+        pytest.approx([10.0])
+    )
 
 
 def test_fixed_capital_portfolio_curve_reports_percentage_points():

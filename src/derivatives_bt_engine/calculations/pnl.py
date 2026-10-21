@@ -674,9 +674,12 @@ def build_executable_cash_pnl_curve(
         cumulative percentage-point returns and costs. Cash percentages
         divide each instrument's USD amount by total account capital and
         multiply by 100, so they add across instruments to the portfolio
-        percentage return. Returned dataframe columns use the centralized
-        compact report vocabulary (for example, ``avg_pos``, ``ref_norm_pos``,
-        and ``exec_con``).
+        percentage return. Annualized tracking error compares the continuous
+        target with the position held over each P&L interval and is exposed as
+        ``tracking_error_ann_usd`` and ``tracking_error_ann_pct_cap``; the
+        first null held position is treated as flat. Returned dataframe
+        columns use the centralized compact report vocabulary (for example,
+        ``avg_pos``, ``ref_norm_pos``, and ``exec_con``).
 
     Notes
     -----
@@ -827,6 +830,31 @@ def build_executable_cash_pnl_curve(
         )
         .with_columns(
             pl.col("exec_cons").shift(1).alias("held_cons"),
+        )
+        .with_columns(
+            pl.when(
+                pl.col("target_position").is_not_null()
+                & pl.col("target_position").is_finite()
+                & pl.col("annual_dollar_vol_per_contract").is_not_null()
+                & pl.col("annual_dollar_vol_per_contract").is_finite()
+                & (pl.col("annual_dollar_vol_per_contract") > 0)
+            )
+            .then(
+                (
+                    pl.col("target_position")
+                    - pl.col("held_cons").fill_null(0)
+                ).abs()
+                * pl.col("annual_dollar_vol_per_contract")
+            )
+            .otherwise(None)
+            .alias("annual_tracking_error_usd"),
+        )
+        .with_columns(
+            (
+                pl.col("annual_tracking_error_usd")
+                / capital
+                * 100.0
+            ).alias("annual_tracking_error_pct_capital"),
         )
         .with_columns(
             pl.when(pl.col("exec_cons").is_not_null())

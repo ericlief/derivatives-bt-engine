@@ -126,6 +126,22 @@ def test_public_report_renames_buffer_parameters_at_boundary():
     ]
 
 
+def test_public_report_renames_and_rounds_tracking_error_columns():
+    """Tracking error uses USD cents and account percentage-point precision."""
+    report = pl.DataFrame({
+        "annual_tracking_error_usd": [123.456],
+        "annual_tracking_error_pct_capital": [0.12345678],
+    })
+
+    public = round_public_report(rename_public_report_columns(report))
+
+    assert public.columns == [
+        "tracking_error_ann_usd",
+        "tracking_error_ann_pct_cap",
+    ]
+    assert public.row(0) == pytest.approx((123.46, 0.123457))
+
+
 def test_public_report_renames_subsystem_reference_columns():
     """Reference sizing and percentages remain distinct from portfolio cash."""
     report = pl.DataFrame({
