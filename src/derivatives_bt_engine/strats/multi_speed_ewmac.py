@@ -253,16 +253,16 @@ def build_ewmac_component_frame(
             combined = frame.select(base_columns)
             continue
 
-        columns: list[str | pl.Expr] = [
-            pl.col("ts_event").alias("date"),
-            pooled.rule.column,
-        ]
+        columns: list[str | pl.Expr] = [pl.col("ts_event").alias("date")]
         if detailed:
             columns.extend([
                 pl.col("raw_ewmac").alias(f"raw_ewmac_{suffix}"),
                 pl.col("raw_forecast").alias(f"raw_fcst_{suffix}"),
                 pl.col("forecast_scalar").alias(f"scalar_{suffix}"),
             ])
+        # Keep each speed's forecast immediately after its scalar diagnostics;
+        # otherwise a final rule's forecast is left ahead of its own details.
+        columns.append(pooled.rule.column)
         # All rules are calculated from the same Panama history; joining on
         # date makes that ownership explicit while retaining one common vol.
         combined = combined.join(frame.select(columns), on="date", how="left")

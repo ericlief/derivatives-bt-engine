@@ -86,6 +86,12 @@ def test_component_builder_exposes_compact_and_detailed_shapes():
         "fcst_4_8",
     } <= set(detailed.columns)
     assert detailed.get_column("scalar_2_4").drop_nulls().unique().to_list() == [0.5]
+    assert detailed.columns.index("fcst_2_4") == (
+        detailed.columns.index("scalar_2_4") + 1
+    )
+    assert detailed.columns.index("fcst_4_8") == (
+        detailed.columns.index("scalar_4_8") + 1
+    )
 
 
 def test_research_view_filters_display_tables_without_mutating_full_history():
