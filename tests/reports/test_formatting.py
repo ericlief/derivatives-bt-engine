@@ -36,6 +36,7 @@ def test_round_public_report_keeps_reproduction_rates_at_six_places():
     report = pl.DataFrame({
         "cur_fx_to_usd": [0.00660449],
         "ann_return_vol": [0.12345649],
+        "ann_pct_vol": [1.23456789],
         "trade_cost_pct_contrib": [-0.00012649],
     })
 
@@ -43,6 +44,7 @@ def test_round_public_report_keeps_reproduction_rates_at_six_places():
 
     assert rounded["cur_fx_to_usd"][0] == pytest.approx(0.006604)
     assert rounded["ann_return_vol"][0] == pytest.approx(0.123456)
+    assert rounded["ann_pct_vol"][0] == pytest.approx(1.234568)
     assert rounded["trade_cost_pct_contrib"][0] == pytest.approx(-0.000126)
 
 

@@ -648,8 +648,10 @@ def build_executable_cash_pnl_curve(
     Returns
     -------
     polars.DataFrame
-        The input (including ``close`` when supplied) plus daily annual dollar
-        volatility, continuous average and target positions, buffer width and
+        The input (including ``close`` when supplied) plus daily and annual
+        dollar volatility per contract and annualized volatility as a percent
+        of close-based contract notional, continuous average and target
+        positions, buffer width and
         boundaries, buffered executable and lagged contracts, ordinary trade
         quantities, realized and interval-average roll quantities, and
         gross, realized-roll, and average-roll cash P&L in USD, plus daily and
@@ -737,19 +739,49 @@ def build_executable_cash_pnl_curve(
         .with_columns(
             (
                 pl.col(point_vol_col)
-                * math.sqrt(annualization_days)
                 * multiplier
                 * pl.col(fx_col)
-            ).alias("ann_dvol"),
+            ).alias("daily_dollar_vol_per_contract"),
             pl.lit(risk_budget_usd).alias("risk_budget_usd"),
+        )
+        .with_columns(
+            (
+                pl.col("daily_dollar_vol_per_contract")
+                * math.sqrt(annualization_days)
+            ).alias("annual_dollar_vol_per_contract"),
+        )
+        .with_columns(
+            (
+                pl.when(
+                    pl.col("cash_fx_valid")
+                    & pl.col("close").is_not_null()
+                    & pl.col("close").is_finite()
+                    & (pl.col("close") > 0)
+                    & pl.col("annual_dollar_vol_per_contract").is_finite()
+                )
+                .then(
+                    pl.col("annual_dollar_vol_per_contract")
+                    / (
+                        pl.col("close")
+                        * multiplier
+                        * pl.col(fx_col)
+                    )
+                    * 100.0
+                )
+                .otherwise(None)
+                if "close" in frame.columns
+                else pl.lit(None, dtype=pl.Float64)
+            ).alias("annual_percentage_vol"),
         )
         .with_columns(
             pl.when(
                 pl.col("cash_fx_valid")
-                & pl.col("ann_dvol").is_finite()
-                & (pl.col("ann_dvol") > 0)
+                & pl.col("annual_dollar_vol_per_contract").is_finite()
+                & (pl.col("annual_dollar_vol_per_contract") > 0)
             )
-            .then(risk_budget_usd / pl.col("ann_dvol"))
+            .then(
+                risk_budget_usd / pl.col("annual_dollar_vol_per_contract")
+            )
             .otherwise(None)
             .alias("average_position")
         )
@@ -957,7 +989,37 @@ def build_executable_cash_pnl_curve(
     # This cash-audit builder is consumed directly by notebooks as well as
     # persisted by selection, so expose its completed frame with the shared
     # compact schema. All calculations above use descriptive working names.
-    return rename_public_report_columns(result)
+    public = rename_public_report_columns(result)
+    # Keep per-contract risk metrics beside the point-volatility inputs they
+    # derive from, rather than buried among position and P&L audit columns.
+    point_vol_columns = [
+        column
+        for column in (
+            "fast_point_vol",
+            "slow_point_vol",
+            "point_vol",
+            "mixed_point_vol",
+        )
+        if column in public.columns
+    ]
+    risk_columns = [
+        column
+        for column in ("daily_dvol", "ann_dvol", "ann_pct_vol")
+        if column in public.columns
+    ]
+    if point_vol_columns and risk_columns:
+        remaining = [
+            column for column in public.columns
+            if column not in risk_columns
+        ]
+        insert_after = max(remaining.index(column) for column in point_vol_columns)
+        ordered = (
+            remaining[:insert_after + 1]
+            + risk_columns
+            + remaining[insert_after + 1:]
+        )
+        public = public.select(ordered)
+    return public
 
 
 def build_fixed_capital_portfolio_curve(

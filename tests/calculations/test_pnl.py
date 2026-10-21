@@ -121,6 +121,8 @@ def test_executable_cash_pnl_separates_trade_and_policy_roll_costs():
         "date": [date(2024, 1, day) for day in range(1, 6)],
         "close": [100.0, 101.0, 102.0, 103.0, 104.0],
         "point_change": [None, 1.0, 1.0, 1.0, 1.0],
+        "fast_point_vol": [0.8] * 5,
+        "slow_point_vol": [1.2] * 5,
         "point_vol": [1.0] * 5,
         "combined_forecast": [1.0, 2.0, 2.0, 1.0, 1.0],
         "ref_normalized_position": [0.1, 0.2, 0.3, 0.4, 0.5],
@@ -143,6 +145,29 @@ def test_executable_cash_pnl_separates_trade_and_policy_roll_costs():
     assert result.get_column("close").to_list() == frame.get_column(
         "close"
     ).to_list()
+    assert result.columns[
+        result.columns.index("fast_point_vol"):
+        result.columns.index("ann_pct_vol") + 1
+    ] == [
+        "fast_point_vol",
+        "slow_point_vol",
+        "point_vol",
+        "daily_dvol",
+        "ann_dvol",
+        "ann_pct_vol",
+    ]
+    assert result.get_column("daily_dvol").to_list() == pytest.approx(
+        [10.0] * 5
+    )
+    assert result.get_column("ann_dvol").to_list() == pytest.approx(
+        [20.0] * 5
+    )
+    assert result.get_column("ann_pct_vol").to_list() == pytest.approx(
+        [
+            20.0 / (close * 10.0) * 100.0
+            for close in frame.get_column("close").to_list()
+        ]
+    )
     assert result.get_column("avg_pos").to_list() == pytest.approx(
         [5.0] * 5
     )
