@@ -64,6 +64,7 @@ PUBLIC_REPORT_RENAMES = {
     "daily_dollar_vol_per_contract": "daily_dvol",
     "annual_dollar_vol_per_contract": "ann_dvol",
     "annual_percentage_vol": "ann_pct_vol",
+    "contract_close": "con_px",
     "buffer_top_cons": "buffer_top_con",
     "buffer_bot_cons": "buffer_bot_con",
     "exec_cons": "exec_con",
@@ -324,10 +325,11 @@ def rename_public_report_columns(report: pl.DataFrame) -> pl.DataFrame:
     return report.rename(renames)
 
 
-# FX, return-volatility rates, and percentage-point contributions need more
-# precision than general diagnostics for useful cash-flow and sizing audits.
-SIX_DECIMAL_RATE_COLUMNS = {
+# Contract prices, FX, return-volatility rates, and percentage-point
+# contributions need extra precision for reproducible sizing and audit work.
+SIX_DECIMAL_COLUMNS = {
     "fx_to_usd",
+    "con_px",
     "daily_return_vol",
     "annual_return_vol",
     "cur_fx_to_usd",
@@ -415,7 +417,7 @@ def round_public_report(report: pl.DataFrame) -> pl.DataFrame:
             continue
         if name in TWO_DECIMAL_MONEY_COLUMNS:
             decimals = 2
-        elif name in SIX_DECIMAL_RATE_COLUMNS:
+        elif name in SIX_DECIMAL_COLUMNS:
             decimals = 6
         else:
             decimals = 4

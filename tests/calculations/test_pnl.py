@@ -120,6 +120,8 @@ def test_executable_cash_pnl_separates_trade_and_policy_roll_costs():
     frame = pl.DataFrame({
         "date": [date(2024, 1, day) for day in range(1, 6)],
         "close": [100.0, 101.0, 102.0, 103.0, 104.0],
+        # Distinct from additive Panama close: notional must use raw contract px.
+        "contract_close": [200.0, 202.0, 204.0, 206.0, 208.0],
         "point_change": [None, 1.0, 1.0, 1.0, 1.0],
         "fast_point_vol": [0.8] * 5,
         "slow_point_vol": [1.2] * 5,
@@ -145,6 +147,9 @@ def test_executable_cash_pnl_separates_trade_and_policy_roll_costs():
     assert result.get_column("close").to_list() == frame.get_column(
         "close"
     ).to_list()
+    assert result.get_column("con_px").to_list() == frame.get_column(
+        "contract_close"
+    ).to_list()
     assert result.columns[
         result.columns.index("fast_point_vol"):
         result.columns.index("ann_pct_vol") + 1
@@ -165,7 +170,7 @@ def test_executable_cash_pnl_separates_trade_and_policy_roll_costs():
     assert result.get_column("ann_pct_vol").to_list() == pytest.approx(
         [
             20.0 / (close * 10.0) * 100.0
-            for close in frame.get_column("close").to_list()
+            for close in frame.get_column("contract_close").to_list()
         ]
     )
     assert result.get_column("avg_pos").to_list() == pytest.approx(
@@ -244,6 +249,30 @@ def test_executable_cash_pnl_separates_trade_and_policy_roll_costs():
         "cum_avg_roll_net_pnl_usd"
     ).to_list() == pytest.approx([-10.0, 30.0, 106.0, 198.0, 234.0])
     assert not any(column.startswith("cash_") for column in result.columns)
+
+
+def test_ann_pct_vol_is_null_without_raw_contract_close():
+    """Adjusted Panama levels are never substituted for missing notional px."""
+    frame = pl.DataFrame({
+        "date": [date(2024, 1, 1)],
+        "close": [100.0],
+        "point_change": [1.0],
+        "point_vol": [2.0],
+        "combined_forecast": [1.0],
+        "fx_to_usd": [1.0],
+    })
+    result = build_executable_cash_pnl_curve(
+        frame,
+        capital=1_000.0,
+        target_vol=0.20,
+        weight=0.50,
+        idm=1.0,
+        multiplier=10.0,
+        trade_cost_usd_per_con=0.0,
+        roll_cost_usd_per_con=0.0,
+    )
+
+    assert result.get_column("ann_pct_vol").null_count() == 1
 
 
 def test_fixed_capital_portfolio_curve_reports_percentage_points():

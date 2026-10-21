@@ -25,6 +25,10 @@ def _history() -> SimpleNamespace:
     })
     marks = pl.DataFrame({
         "trade_date": bars.get_column("ts_event"),
+        "mark_price": [
+            200.0, 201.0, 202.0, 203.0,
+            204.0, 205.0, 206.0, 207.0,
+        ],
         "is_roll": [False, False, False, True, False, False, False, False],
     })
     return SimpleNamespace(panama_bars=lambda: bars, marks=marks)
@@ -64,6 +68,7 @@ def test_component_builder_exposes_compact_and_detailed_shapes():
     assert compact.columns == [
         "date",
         "close",
+        "contract_close",
         "point_vol",
         "point_change",
         "is_roll",
@@ -73,6 +78,16 @@ def test_component_builder_exposes_compact_and_detailed_shapes():
     assert compact.get_column("close").to_list() == _history().panama_bars().get_column(
         "close"
     ).to_list()
+    assert compact.get_column("contract_close").to_list() == [
+        200.0,
+        201.0,
+        202.0,
+        203.0,
+        204.0,
+        205.0,
+        206.0,
+        207.0,
+    ]
     assert compact.get_column("is_roll").sum() == 1
     assert {
         "close",

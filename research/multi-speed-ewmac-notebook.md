@@ -219,6 +219,12 @@ weight and IDM, buffering, whole contracts, and per-contract costs, so it is
 the executable account-scale diagnostic. The Carver research loader carries
 the dated FX conversion into the combined forecast frame, so cash sizing does
 not need an ad hoc constant FX column.
+For futures, the component frame also carries `con_px`, the date-aligned raw
+close of the selected contract. `ann_pct_vol` is annual dollar volatility per
+contract divided by that contract's raw USD notional; the additive Panama
+`close` is only for signal construction and is never used as a notional price.
+If a source has no raw contract mark, `ann_pct_vol` remains null instead of
+using its adjusted signal price.
 `view.cash_return_contribution_curves()` divides its gross, realized-net, and
 average-roll-net cash P&L by the common account capital and multiplies by 100, so
 the output is percentage points (for example, `0.01` means 0.01%). Trade and

@@ -602,11 +602,13 @@ def build_executable_cash_pnl_curve(
     frame
         One combined-subsystem frame containing ``date``, ``point_change``,
         ``combined_forecast``, point volatility, historical USD FX, and an
-        optional boolean roll marker. Phase 2 also supplies ``close`` as the
-        locally generated additive-Panama price; it is retained for audit but
-        is not treated as a raw executable dated-contract mark. The position
-        must already represent the final net forecast rather than separate
-        rule sleeves.
+        optional boolean roll marker. ``close`` may be the locally generated
+        additive-Panama signal price. When present, ``contract_close`` is the
+        date-aligned raw mark of the selected contract and is used for annual
+        volatility as a percentage of notional. Without it, ``ann_pct_vol``
+        is null rather than inferred from an adjusted price. The position must
+        already represent the final net forecast rather than separate rule
+        sleeves.
     capital
         Account capital in USD.
     target_vol
@@ -650,10 +652,10 @@ def build_executable_cash_pnl_curve(
     polars.DataFrame
         The input (including ``close`` when supplied) plus daily and annual
         dollar volatility per contract and annualized volatility as a percent
-        of close-based contract notional, continuous average and target
-        positions, buffer width and
-        boundaries, buffered executable and lagged contracts, ordinary trade
-        quantities, realized and interval-average roll quantities, and
+        of raw contract notional when a contract close is available,
+        continuous average and target positions, buffer width and boundaries,
+        buffered executable and lagged contracts, ordinary trade quantities,
+        realized and interval-average roll quantities, and
         gross, realized-roll, and average-roll cash P&L in USD, plus daily and
         cumulative percentage-point contributions for gross returns, costs,
         and net returns. Cash contributions divide each instrument's USD
@@ -754,22 +756,22 @@ def build_executable_cash_pnl_curve(
             (
                 pl.when(
                     pl.col("cash_fx_valid")
-                    & pl.col("close").is_not_null()
-                    & pl.col("close").is_finite()
-                    & (pl.col("close") > 0)
+                    & pl.col("contract_close").is_not_null()
+                    & pl.col("contract_close").is_finite()
+                    & (pl.col("contract_close") > 0)
                     & pl.col("annual_dollar_vol_per_contract").is_finite()
                 )
                 .then(
                     pl.col("annual_dollar_vol_per_contract")
                     / (
-                        pl.col("close")
+                        pl.col("contract_close")
                         * multiplier
                         * pl.col(fx_col)
                     )
                     * 100.0
                 )
                 .otherwise(None)
-                if "close" in frame.columns
+                if "contract_close" in frame.columns
                 else pl.lit(None, dtype=pl.Float64)
             ).alias("annual_percentage_vol"),
         )

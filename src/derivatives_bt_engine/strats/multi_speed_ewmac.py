@@ -210,10 +210,11 @@ def build_ewmac_component_frame(
     """Build a wide component-forecast frame for one instrument history.
 
     The compact shape contains ``date``, the locally generated additive-Panama
-    ``close``, ``point_vol``, ``point_change``, the history policy's
-    ``is_roll`` marker, and one ``fcst_<fast>_<slow>`` column per rule. It is
-    consumed by portfolio selection and retains the adjusted price level so downstream
-    cash-P&L output can be audited against its roll-neutral daily change.
+    ``close``, the date-aligned raw ``contract_close``, ``point_vol``,
+    ``point_change``, the history policy's ``is_roll`` marker, and one
+    ``fcst_<fast>_<slow>`` column per rule. The adjusted price drives signal
+    construction; the raw contract close supports executable notional and
+    volatility diagnostics.
     With ``detailed=True`` the frame additionally exposes the Panama price,
     raw EWMAC difference, raw normalized forecast, and daily pooled scalar for
     every rule, using rule-suffixed column names suitable for a notebook.
@@ -268,6 +269,25 @@ def build_ewmac_component_frame(
         combined = combined.join(frame.select(columns), on="date", how="left")
     assert combined is not None
     marks = getattr(history, "marks", None)
+    if isinstance(marks, pl.DataFrame) and {
+        "trade_date",
+        "mark_price",
+    } <= set(marks.columns):
+        # The Panama ``close`` is an additive signal level, not a contract
+        # notional. Retain the actual selected-contract mark on the same date.
+        contract_marks = (
+            marks.select(
+                pl.col("trade_date").alias("date"),
+                pl.col("mark_price").alias("contract_close"),
+            )
+            .sort("date")
+            .unique(subset="date", keep="last", maintain_order=True)
+        )
+        combined = combined.join(contract_marks, on="date", how="left")
+    else:
+        combined = combined.with_columns(
+            pl.lit(None, dtype=pl.Float64).alias("contract_close")
+        )
     if isinstance(marks, pl.DataFrame) and {"trade_date", "is_roll"} <= set(
         marks.columns
     ):
@@ -292,6 +312,7 @@ def build_ewmac_component_frame(
     if detailed:
         prefix.extend([
             "close",
+            "contract_close",
             "fast_point_vol",
             "slow_point_vol",
             "point_vol",
@@ -300,7 +321,13 @@ def build_ewmac_component_frame(
             "quality_flag",
         ])
     else:
-        prefix.extend(["close", "point_vol", "point_change", "is_roll"])
+        prefix.extend([
+            "close",
+            "contract_close",
+            "point_vol",
+            "point_change",
+            "is_roll",
+        ])
     remaining = [column for column in combined.columns if column not in prefix]
     return combined.select(prefix + remaining).sort("date")
 
