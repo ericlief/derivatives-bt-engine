@@ -1015,6 +1015,25 @@ def build_executable_cash_pnl_curve(
             + remaining[insert_after + 1:]
         )
         public = public.select(ordered)
+    # Keep the executable, held, traded, and roll contract quantities together
+    # so the position transition can be audited without scanning the frame.
+    contract_state_columns = [
+        column
+        for column in ("held_con", "trade_con", "roll_con")
+        if column in public.columns
+    ]
+    if "exec_con" in public.columns and contract_state_columns:
+        remaining = [
+            column for column in public.columns
+            if column not in contract_state_columns
+        ]
+        insert_after = remaining.index("exec_con") + 1
+        ordered = (
+            remaining[:insert_after]
+            + contract_state_columns
+            + remaining[insert_after:]
+        )
+        public = public.select(ordered)
     return public
 
 
