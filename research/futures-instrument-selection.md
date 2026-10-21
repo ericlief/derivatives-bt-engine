@@ -785,25 +785,16 @@ Ordinary position changes are charged with the market screen one-way trade cost.
 By default, each history-policy `is_roll` date resets the executable position
 to the rounded target instead of carrying the buffered position through the
 roll. Use `--no-rebalance-on-roll` to preserve the buffered holding. The
-`realized_roll_con` quantity is the same-direction overlap between the prior
-holding and the new executable position; the remaining size change stays in
+`roll_con` quantity is the same-direction overlap between the prior holding
+and the new executable position; the remaining size change stays in
 `trade_con`. For example, moving from 8 to 7 contracts records 7 rolls and one
-ordinary reduction. `interval_avg_abs_con` retains the
-fractional mean absolute rounded exposure over the interval ending on that
-roll date. `avg_roll_con` rounds that interval mean half-up to a whole
-executable contract before multiplying by `roll_cost_per_con`. This is the
-stable selection estimate analogous to pysystemtrade's average holding per
-roll interval. Both cost paths are persisted because they answer different
-questions: the realized series audits the supplied historical roll path, while
-the interval-average series estimates a typical policy roll without depending
-on the forecast value on one date. The cash field names use `avg_roll` rather
-than `expected`: this is a deterministic interval-mean estimate, not a
-probability-weighted expectation. The `realized` and `avg_roll` net P&L paths
-share gross P&L and ordinary trade costs; they differ only in roll cost on roll
-dates, so they are usually identical between rolls and may also match on a roll
-when actual held contracts equal the interval average. Current snapshot costs
-are applied to the full history as a clearly labelled sensitivity; no live
-contract is queried again during portfolio selection.
+ordinary reduction. The cash audit persists per-contract trade and roll cost
+inputs alongside actual quantities and debits, so each cost can be reproduced
+directly. `net_pnl_usd` is gross P&L plus ordinary trade costs plus actual roll
+cost; cumulative USD and percentage-point columns use this single realized
+execution path. Current snapshot costs are applied to the full history as a
+clearly labelled sensitivity; no live contract is queried again during
+portfolio selection.
 
 The live-data boundary is a reusable, full-precision Parquet snapshot. Acquire
 contract qualification, current quotes and FX, dated-contract spread and

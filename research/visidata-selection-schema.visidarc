@@ -162,31 +162,13 @@ _vd_set_type(
     ref_gross_usd ref_cost_usd ref_net_usd
     ref_gross_pct ref_ann_cost_pct ref_cost_pct ref_net_pct
     targ_pos buf_size buffer_size buf_width_pos
-    buffer_top_con buffer_bot_con exec_con held_con trade_con
-    realized_roll_con interval_avg_abs_con avg_roll_con
-    gross_pnl_usd trade_cost_usd
-    realized_roll_cost_usd avg_roll_cost_usd
-    realized_net_pnl_usd avg_roll_net_pnl_usd
-    cum_gross_pnl_usd cum_realized_net_pnl_usd
-    cum_avg_roll_net_pnl_usd
-    gross_equity_usd realized_equity_usd avg_roll_equity_usd
-    gross_pct realized_net_pct avg_roll_net_pct
-    portfolio_trade_cost_pct portfolio_realized_roll_cost_pct
-    portfolio_avg_roll_cost_pct realized_cost_pct avg_roll_total_cost_pct
-    cum_gross_pct cum_realized_net_pct
-    cum_avg_roll_net_pct cumulative_portfolio_trade_cost_pct
-    cumulative_portfolio_realized_roll_cost_pct
-    cumulative_portfolio_avg_roll_cost_pct cum_realized_cost_pct
-    cum_avg_roll_total_cost_pct
-    gross_pct_contrib trade_cost_pct_contrib
-    realized_roll_cost_pct_contrib avg_roll_cost_pct_contrib
-    realized_cost_pct_contrib avg_roll_total_cost_pct_contrib
-    realized_net_pct_contrib avg_roll_net_pct_contrib
-    cum_gross_pct_contrib cum_trade_cost_pct_contrib
-    cum_realized_roll_cost_pct_contrib
-    cum_avg_roll_cost_pct_contrib
-    cum_realized_cost_pct_contrib cum_avg_roll_total_cost_pct_contrib
-    cum_realized_net_pct_contrib cum_avg_roll_net_pct_contrib
+    buffer_top_con buffer_bot_con exec_con held_con trade_con roll_con
+    gross_pnl_usd trade_cost_per_con roll_cost_per_con
+    trade_cost_usd roll_cost_usd net_pnl_usd
+    cum_gross_pnl_usd cum_net_pnl_usd gross_equity_usd net_equity_usd
+    gross_pct trade_cost_pct roll_cost_pct total_cost_pct net_pct
+    cum_gross_pct cum_trade_cost_pct cum_roll_cost_pct
+    cum_total_cost_pct cum_net_pct
     ref_fast_point_vol ref_slow_point_vol ref_mixed_point_vol ref_price
     ref_cur_price_ratio ref_slow_return_vol ref_spread_points
     ref_slow_history_years ref_slow_vol_weight ref_zero_return_fraction

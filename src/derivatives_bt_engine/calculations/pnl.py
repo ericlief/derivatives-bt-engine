@@ -64,16 +64,6 @@ def _group_reference_accounting_columns(frame: pl.DataFrame) -> pl.DataFrame:
     return frame.select(*other, *accounting)
 
 
-def _round_contracts_half_up(expression: pl.Expr) -> pl.Expr:
-    """Round signed continuous positions to whole contracts symmetrically."""
-    return (
-        pl.when(expression >= 0)
-        .then((expression + 0.5).floor())
-        .otherwise((expression - 0.5).ceil())
-        .cast(pl.Int64)
-    )
-
-
 def apply_forecast_position_buffer(
     frame: pl.DataFrame,
     *,
@@ -679,28 +669,22 @@ def build_executable_cash_pnl_curve(
         dollar volatility per contract and annualized volatility as a percent
         of raw contract notional when a contract close is available,
         continuous average and target positions, buffer width and boundaries,
-        buffered executable and lagged contracts, ordinary trade quantities,
-        realized and interval-average roll quantities, and
-        gross, realized-roll, and average-roll cash P&L in USD, plus daily and
-        cumulative percentage-point contributions for gross returns, costs,
-        and net returns. Cash contributions divide each instrument's USD
-        amount by total account capital and multiply by 100, so they add
-        across instruments to the portfolio percentage return. Returned
-        dataframe columns use the centralized compact report vocabulary (for
-        example, ``avg_pos``, ``ref_norm_pos``, and ``exec_con``).
+        buffered executable and lagged contracts, ordinary trade and roll
+        quantities, and gross, cost, and net cash P&L in USD, plus daily and
+        cumulative percentage-point returns and costs. Cash percentages
+        divide each instrument's USD amount by total account capital and
+        multiply by 100, so they add across instruments to the portfolio
+        percentage return. Returned dataframe columns use the centralized
+        compact report vocabulary (for example, ``avg_pos``, ``ref_norm_pos``,
+        and ``exec_con``).
 
     Notes
     -----
-    With roll rebalancing enabled, ``realized_roll_cons`` is the same-direction
+    With roll rebalancing enabled, ``roll_cons`` is the same-direction
     overlap between the prior holding and the newly rounded target. Any size
     change is retained in ``trade_cons`` as an ordinary trade. With roll
     rebalancing disabled, the executable position normally remains unchanged
-    and the complete prior holding is rolled. ``avg_roll_cons`` is a comparison
-    estimate using the
-    rounded mean absolute held exposure since the previous roll. It is not a
-    second realized trade and is not an additional charge: the average-roll
-    net-P&L path substitutes this estimated roll cost for the realized roll
-    cost while keeping ordinary trades identical. Ordinary position changes
+    and the complete prior holding is rolled. Ordinary position changes
     are charged independently, including the initial entry from zero. Current
     point-in-time cost rates are intentionally applied to the full history;
     this is an execution-cost sensitivity, not a claim that historical
@@ -838,17 +822,11 @@ def build_executable_cash_pnl_curve(
             pl.lit(buffer_size).alias("buffer_size"),
             pl.lit(buffer_trade_to_edge).alias("buffer_trade_to_edge"),
             pl.lit(rebalance_on_roll).alias("rebalance_on_roll"),
+            pl.lit(trade_cost_usd_per_con).alias("trade_cost_usd_per_con"),
+            pl.lit(roll_cost_usd_per_con).alias("roll_cost_usd_per_con"),
         )
         .with_columns(
             pl.col("exec_cons").shift(1).alias("held_cons"),
-            # Keep the roll row in the interval that is ending on that date.
-            # The following observation starts the next exposure interval.
-            pl.col("roll_event")
-            .cast(pl.Int64)
-            .cum_sum()
-            .shift(1)
-            .fill_null(0)
-            .alias("roll_interval"),
         )
         .with_columns(
             pl.when(pl.col("exec_cons").is_not_null())
@@ -878,33 +856,15 @@ def build_executable_cash_pnl_curve(
             )
             .otherwise(0)
             .cast(pl.Float64)
-            .alias("realized_roll_cons"),
+            .alias("roll_cons"),
             (
                 pl.lit(rebalance_on_roll)
                 & pl.col("roll_event")
                 & pl.col("target_position").is_not_null()
                 & pl.col("target_position").is_finite()
             ).alias("roll_rebalanced"),
-            # Average-roll volume averages the contracts actually held over
-            # the completed interval, rather than the new end-of-day target on
-            # the roll row. Null initial exposure is excluded by mean().
-            pl.col("held_cons")
-            .abs()
-            .cast(pl.Float64)
-            .mean()
-            .over("roll_interval")
-            .alias("interval_avg_abs_cons"),
         )
         .with_columns(
-            # The average-roll estimate still has to be executable. Keep the
-            # fractional interval mean beside it for audit, but charge the
-            # nearest whole contract using the same half-up convention as
-            # target positions.
-            _round_contracts_half_up(
-                pl.when(pl.col("roll_event"))
-                .then(pl.col("interval_avg_abs_cons"))
-                .otherwise(0.0)
-            ).alias("avg_roll_cons"),
             (
                 pl.col("held_cons")
                 * pl.col("point_change")
@@ -914,49 +874,33 @@ def build_executable_cash_pnl_curve(
             (-pl.col("trade_cons") * trade_cost_usd_per_con).alias(
                 "cash_trade_cost_usd"
             ),
-            (-pl.col("realized_roll_cons") * roll_cost_usd_per_con).alias(
-                "cash_realized_roll_cost_usd"
-            ),
-        )
-        .with_columns(
-            (-pl.col("avg_roll_cons") * roll_cost_usd_per_con).alias(
-                "cash_avg_roll_cost_usd"
+            (-pl.col("roll_cons") * roll_cost_usd_per_con).alias(
+                "cash_roll_cost_usd"
             ),
         )
         .with_columns(
             (
                 pl.col("cash_gross_pnl_usd").fill_null(0.0)
                 + pl.col("cash_trade_cost_usd")
-                + pl.col("cash_realized_roll_cost_usd")
-            ).alias("cash_realized_net_pnl_usd"),
-            (
-                pl.col("cash_gross_pnl_usd").fill_null(0.0)
-                + pl.col("cash_trade_cost_usd")
-                + pl.col("cash_avg_roll_cost_usd")
-            ).alias("cash_avg_roll_net_pnl_usd"),
+                + pl.col("cash_roll_cost_usd")
+            ).alias("cash_net_pnl_usd"),
         )
         .with_columns(
-            # Dollar P&L is retained alongside return contribution so an
+            # Dollar P&L is retained alongside percentage returns so an
             # instrument-level audit can reconcile to the portfolio curve.
             pl.col("cash_gross_pnl_usd")
             .fill_null(0.0)
             .cum_sum()
             .alias("cum_cash_gross_pnl_usd"),
-            pl.col("cash_realized_net_pnl_usd")
+            pl.col("cash_net_pnl_usd")
             .fill_null(0.0)
             .cum_sum()
-            .alias("cum_cash_realized_net_pnl_usd"),
-            pl.col("cash_avg_roll_net_pnl_usd")
-            .fill_null(0.0)
-            .cum_sum()
-            .alias("cum_cash_avg_roll_net_pnl_usd"),
+            .alias("cum_cash_net_pnl_usd"),
         )
         .with_columns(
             (
-                pl.col("cash_realized_net_pnl_usd").is_not_null()
-                & pl.col("cash_realized_net_pnl_usd").is_finite()
-                & pl.col("cash_avg_roll_net_pnl_usd").is_not_null()
-                & pl.col("cash_avg_roll_net_pnl_usd").is_finite()
+                pl.col("cash_net_pnl_usd").is_not_null()
+                & pl.col("cash_net_pnl_usd").is_finite()
             ).alias("cash_pnl_valid"),
             # Cash and subsystem return columns both use percentage points:
             # USD contribution divided by the relevant capital base, then ×100.
@@ -966,76 +910,48 @@ def build_executable_cash_pnl_curve(
             )
             .then(pl.col("cash_gross_pnl_usd") / capital * 100.0)
             .otherwise(0.0)
-            .alias("cash_gross_pct_contrib"),
+            .alias("cash_gross_pct"),
             (pl.col("cash_trade_cost_usd") / capital * 100.0).alias(
-                "cash_trade_cost_pct_contrib"
+                "cash_trade_cost_pct"
             ),
-            (pl.col("cash_realized_roll_cost_usd") / capital * 100.0).alias(
-                "cash_realized_roll_cost_pct_contrib"
-            ),
-            (pl.col("cash_avg_roll_cost_usd") / capital * 100.0).alias(
-                "cash_avg_roll_cost_pct_contrib"
+            (pl.col("cash_roll_cost_usd") / capital * 100.0).alias(
+                "cash_roll_cost_pct"
             ),
             (
                 (pl.col("cash_trade_cost_usd")
-                 + pl.col("cash_realized_roll_cost_usd"))
+                 + pl.col("cash_roll_cost_usd"))
                 / capital
                 * 100.0
-            ).alias("cash_realized_cost_pct_contrib"),
-            (
-                (pl.col("cash_trade_cost_usd")
-                 + pl.col("cash_avg_roll_cost_usd"))
-                / capital
-                * 100.0
-            ).alias("cash_avg_roll_total_cost_pct_contrib"),
+            ).alias("cash_total_cost_pct"),
             pl.when(
-                pl.col("cash_realized_net_pnl_usd").is_not_null()
-                & pl.col("cash_realized_net_pnl_usd").is_finite()
+                pl.col("cash_net_pnl_usd").is_not_null()
+                & pl.col("cash_net_pnl_usd").is_finite()
             )
-            .then(pl.col("cash_realized_net_pnl_usd") / capital * 100.0)
+            .then(pl.col("cash_net_pnl_usd") / capital * 100.0)
             .otherwise(0.0)
-            .alias("cash_realized_net_pct_contrib"),
-            pl.when(
-                pl.col("cash_avg_roll_net_pnl_usd").is_not_null()
-                & pl.col("cash_avg_roll_net_pnl_usd").is_finite()
-            )
-            .then(pl.col("cash_avg_roll_net_pnl_usd") / capital * 100.0)
-            .otherwise(0.0)
-            .alias("cash_avg_roll_net_pct_contrib"),
+            .alias("cash_net_pct"),
         )
         .with_columns(
-            pl.col("cash_gross_pct_contrib")
+            pl.col("cash_gross_pct")
             .fill_null(0.0)
             .cum_sum()
-            .alias("cum_cash_gross_pct_contrib"),
-            pl.col("cash_trade_cost_pct_contrib")
+            .alias("cum_cash_gross_pct"),
+            pl.col("cash_trade_cost_pct")
             .fill_null(0.0)
             .cum_sum()
-            .alias("cum_cash_trade_cost_pct_contrib"),
-            pl.col("cash_realized_roll_cost_pct_contrib")
+            .alias("cum_cash_trade_cost_pct"),
+            pl.col("cash_roll_cost_pct")
             .fill_null(0.0)
             .cum_sum()
-            .alias("cum_cash_realized_roll_cost_pct_contrib"),
-            pl.col("cash_avg_roll_cost_pct_contrib")
+            .alias("cum_cash_roll_cost_pct"),
+            pl.col("cash_total_cost_pct")
             .fill_null(0.0)
             .cum_sum()
-            .alias("cum_cash_avg_roll_cost_pct_contrib"),
-            pl.col("cash_realized_cost_pct_contrib")
+            .alias("cum_cash_total_cost_pct"),
+            pl.col("cash_net_pct")
             .fill_null(0.0)
             .cum_sum()
-            .alias("cum_cash_realized_cost_pct_contrib"),
-            pl.col("cash_avg_roll_total_cost_pct_contrib")
-            .fill_null(0.0)
-            .cum_sum()
-            .alias("cum_cash_avg_roll_total_cost_pct_contrib"),
-            pl.col("cash_realized_net_pct_contrib")
-            .fill_null(0.0)
-            .cum_sum()
-            .alias("cum_cash_realized_net_pct_contrib"),
-            pl.col("cash_avg_roll_net_pct_contrib")
-            .fill_null(0.0)
-            .cum_sum()
-            .alias("cum_cash_avg_roll_net_pct_contrib"),
+            .alias("cum_cash_net_pct"),
         )
     )
     # This cash-audit builder is consumed directly by notebooks as well as
@@ -1086,7 +1002,7 @@ def build_fixed_capital_portfolio_curve(
     cash_pnl_long
         Long selected-book frame with one row per instrument and date. It must
         contain ``symbol``, ``date``, ``pnl_valid``, and the gross, cost,
-        realized-net and average-roll-net USD columns produced by
+        and net USD columns produced by
         :func:`build_executable_cash_pnl_curve`.
     initial_capital_usd
         Positive USD account capital used as the common denominator for every
@@ -1113,10 +1029,8 @@ def build_fixed_capital_portfolio_curve(
     cash_columns = (
         ("gross_pnl_usd", "portfolio_cash_gross_pnl_usd"),
         ("trade_cost_usd", "portfolio_cash_trade_cost_usd"),
-        ("realized_roll_cost_usd", "portfolio_cash_realized_roll_cost_usd"),
-        ("avg_roll_cost_usd", "portfolio_cash_avg_roll_cost_usd"),
-        ("realized_net_pnl_usd", "portfolio_cash_realized_net_pnl_usd"),
-        ("avg_roll_net_pnl_usd", "portfolio_cash_avg_roll_net_pnl_usd"),
+        ("roll_cost_usd", "portfolio_cash_roll_cost_usd"),
+        ("net_pnl_usd", "portfolio_cash_net_pnl_usd"),
     )
     required = {"date", "symbol", "pnl_valid"} | {
         source for source, _ in cash_columns
@@ -1162,55 +1076,28 @@ def build_fixed_capital_portfolio_curve(
         .with_columns(
             (pl.col("portfolio_cash_gross_pnl_usd") / initial_capital_usd * 100.0)
             .alias("portfolio_gross_pct"),
-            (
-                pl.col("portfolio_cash_realized_net_pnl_usd")
-                / initial_capital_usd
-                * 100.0
-            ).alias("portfolio_realized_net_pct"),
-            (
-                pl.col("portfolio_cash_avg_roll_net_pnl_usd")
-                / initial_capital_usd
-                * 100.0
-            ).alias("portfolio_avg_roll_net_pct"),
+            (pl.col("portfolio_cash_net_pnl_usd") / initial_capital_usd * 100.0)
+            .alias("portfolio_net_pct"),
             (pl.col("portfolio_cash_trade_cost_usd") / initial_capital_usd * 100.0)
             .alias("portfolio_trade_cost_pct"),
-            (
-                pl.col("portfolio_cash_realized_roll_cost_usd")
-                / initial_capital_usd
-                * 100.0
-            ).alias("portfolio_realized_roll_cost_pct"),
-            (
-                pl.col("portfolio_cash_avg_roll_cost_usd")
-                / initial_capital_usd
-                * 100.0
-            ).alias("portfolio_avg_roll_cost_pct"),
+            (pl.col("portfolio_cash_roll_cost_usd") / initial_capital_usd * 100.0)
+            .alias("portfolio_roll_cost_pct"),
             (
                 (
                     pl.col("portfolio_cash_trade_cost_usd")
-                    + pl.col("portfolio_cash_realized_roll_cost_usd")
+                    + pl.col("portfolio_cash_roll_cost_usd")
                 )
                 / initial_capital_usd
                 * 100.0
-            ).alias("portfolio_realized_cost_pct"),
-            (
-                (
-                    pl.col("portfolio_cash_trade_cost_usd")
-                    + pl.col("portfolio_cash_avg_roll_cost_usd")
-                )
-                / initial_capital_usd
-                * 100.0
-            ).alias("portfolio_avg_roll_total_cost_pct"),
+            ).alias("portfolio_total_cost_pct"),
         )
         .with_columns(
             pl.col("portfolio_cash_gross_pnl_usd")
             .cum_sum()
             .alias("cumulative_portfolio_cash_gross_pnl_usd"),
-            pl.col("portfolio_cash_realized_net_pnl_usd")
+            pl.col("portfolio_cash_net_pnl_usd")
             .cum_sum()
-            .alias("cumulative_portfolio_cash_realized_net_pnl_usd"),
-            pl.col("portfolio_cash_avg_roll_net_pnl_usd")
-            .cum_sum()
-            .alias("cumulative_portfolio_cash_avg_roll_net_pnl_usd"),
+            .alias("cumulative_portfolio_cash_net_pnl_usd"),
         )
         .with_columns(
             (
@@ -1219,58 +1106,36 @@ def build_fixed_capital_portfolio_curve(
                 * 100.0
             ).alias("cumulative_portfolio_gross_pct"),
             (
-                pl.col("cumulative_portfolio_cash_realized_net_pnl_usd")
+                pl.col("cumulative_portfolio_cash_net_pnl_usd")
                 / initial_capital_usd
                 * 100.0
-            ).alias("cumulative_portfolio_realized_net_pct"),
-            (
-                pl.col("cumulative_portfolio_cash_avg_roll_net_pnl_usd")
-                / initial_capital_usd
-                * 100.0
-            ).alias("cumulative_portfolio_avg_roll_net_pct"),
+            ).alias("cumulative_portfolio_net_pct"),
             (
                 pl.col("portfolio_cash_trade_cost_usd").cum_sum()
                 / initial_capital_usd
                 * 100.0
             ).alias("cumulative_portfolio_trade_cost_pct"),
             (
-                pl.col("portfolio_cash_realized_roll_cost_usd").cum_sum()
+                pl.col("portfolio_cash_roll_cost_usd").cum_sum()
                 / initial_capital_usd
                 * 100.0
-            ).alias("cumulative_portfolio_realized_roll_cost_pct"),
-            (
-                pl.col("portfolio_cash_avg_roll_cost_usd").cum_sum()
-                / initial_capital_usd
-                * 100.0
-            ).alias("cumulative_portfolio_avg_roll_cost_pct"),
+            ).alias("cumulative_portfolio_roll_cost_pct"),
             (
                 (
                     pl.col("portfolio_cash_trade_cost_usd").cum_sum()
-                    + pl.col("portfolio_cash_realized_roll_cost_usd").cum_sum()
+                    + pl.col("portfolio_cash_roll_cost_usd").cum_sum()
                 )
                 / initial_capital_usd
                 * 100.0
-            ).alias("cumulative_portfolio_realized_cost_pct"),
-            (
-                (
-                    pl.col("portfolio_cash_trade_cost_usd").cum_sum()
-                    + pl.col("portfolio_cash_avg_roll_cost_usd").cum_sum()
-                )
-                / initial_capital_usd
-                * 100.0
-            ).alias("cumulative_portfolio_avg_roll_total_cost_pct"),
+            ).alias("cumulative_portfolio_total_cost_pct"),
             (
                 initial_capital_usd
                 + pl.col("cumulative_portfolio_cash_gross_pnl_usd")
             ).alias("portfolio_gross_equity_usd"),
             (
                 initial_capital_usd
-                + pl.col("cumulative_portfolio_cash_realized_net_pnl_usd")
-            ).alias("portfolio_realized_equity_usd"),
-            (
-                initial_capital_usd
-                + pl.col("cumulative_portfolio_cash_avg_roll_net_pnl_usd")
-            ).alias("portfolio_avg_roll_equity_usd"),
+                + pl.col("cumulative_portfolio_cash_net_pnl_usd")
+            ).alias("portfolio_net_equity_usd"),
         )
     )
     return daily

@@ -206,7 +206,7 @@ view.subsystem_reference_accounting()
 view.subsystem_reference_pct_curves()
 view.cash
 view.cash_pnl_curves()
-view.cash_return_contribution_curves()
+view.cash_return_curves()
 ```
 
 `view.reference` assigns the instrument `1 / reference_book_count`, caps the
@@ -226,12 +226,12 @@ contract divided by that contract's raw USD notional; the additive Panama
 `close` is only for signal construction and is never used as a notional price.
 If a source has no raw contract mark, `ann_pct_vol` remains null instead of
 using its adjusted signal price.
-`view.cash_return_contribution_curves()` divides its gross, realized-net, and
-average-roll-net cash P&L by the common account capital and multiplies by 100, so
-the output is percentage points (for example, `0.01` means 0.01%). Trade and
-realized/average-roll costs are included as negative daily and cumulative
-percentage-point contributions; they are zero except on execution dates.
-The decimal return columns are not emitted. Contributions add across selected
+`view.cash_return_curves()` divides gross and net cash P&L, trade costs, and
+actual roll costs by common account capital and multiplies by 100, so the
+output is percentage points (for example, `0.01` means 0.01%). The frame
+contains a single realized execution path; cost inputs per contract, realized
+quantities, daily costs, and cumulative costs are available in `view.cash` for
+audit. These per-instrument percentage-point values add across selected
 instruments to the portfolio percentage return. Passing
 `multiplier=1` for ES is appropriate only for a unit test.
 

@@ -208,19 +208,18 @@ class EwmacNotebookView:
         return frame.select(
             "date",
             "cum_gross_pnl_usd",
-            "cum_avg_roll_net_pnl_usd",
-            "cum_realized_net_pnl_usd",
+            "cum_net_pnl_usd",
         )
 
-    def cash_return_contribution_curves(
+    def cash_return_curves(
         self,
         *,
         start: date | datetime | str | None = None,
         end: date | datetime | str | None = None,
     ) -> pl.DataFrame:
-        """Return daily and cumulative executable portfolio contributions.
+        """Return daily and cumulative executable cash percentage returns.
 
-        Each percentage-point contribution divides this instrument's
+        Each percentage-point return divides this instrument's
         executable cash flow by total account capital and multiplies by 100.
         Contributions from all selected instruments therefore add to the
         corresponding portfolio percentage return. Cost columns are negative
@@ -231,22 +230,16 @@ class EwmacNotebookView:
         frame = _date_slice(self.cash, start=start, end=end)
         return frame.select(
             "date",
-            "gross_pct_contrib",
-            "trade_cost_pct_contrib",
-            "realized_roll_cost_pct_contrib",
-            "avg_roll_cost_pct_contrib",
-            "realized_cost_pct_contrib",
-            "avg_roll_total_cost_pct_contrib",
-            "realized_net_pct_contrib",
-            "avg_roll_net_pct_contrib",
-            "cum_gross_pct_contrib",
-            "cum_trade_cost_pct_contrib",
-            "cum_realized_roll_cost_pct_contrib",
-            "cum_avg_roll_cost_pct_contrib",
-            "cum_realized_cost_pct_contrib",
-            "cum_avg_roll_total_cost_pct_contrib",
-            "cum_realized_net_pct_contrib",
-            "cum_avg_roll_net_pct_contrib",
+            "gross_pct",
+            "trade_cost_pct",
+            "roll_cost_pct",
+            "total_cost_pct",
+            "net_pct",
+            "cum_gross_pct",
+            "cum_trade_cost_pct",
+            "cum_roll_cost_pct",
+            "cum_total_cost_pct",
+            "cum_net_pct",
         )
 
     def plot(
@@ -344,8 +337,7 @@ class EwmacNotebookView:
                 x="date",
                 y=[
                     "cum_gross_pnl_usd",
-                    "cum_avg_roll_net_pnl_usd",
-                    "cum_realized_net_pnl_usd",
+                    "cum_net_pnl_usd",
                 ],
                 title="Cumulative executable cash P&L",
                 ylabel="USD",

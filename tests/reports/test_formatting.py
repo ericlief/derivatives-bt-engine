@@ -38,7 +38,7 @@ def test_round_public_report_keeps_reproduction_rates_at_six_places():
         "ann_return_vol": [0.12345649],
         "ann_pct_vol": [1.23456789],
         "con_px": [123.456789123],
-        "trade_cost_pct_contrib": [-0.00012649],
+        "trade_cost_pct": [-0.00012649],
     })
 
     rounded = round_public_report(report)
@@ -47,23 +47,23 @@ def test_round_public_report_keeps_reproduction_rates_at_six_places():
     assert rounded["ann_return_vol"][0] == pytest.approx(0.123456)
     assert rounded["ann_pct_vol"][0] == pytest.approx(1.234568)
     assert rounded["con_px"][0] == pytest.approx(123.456789)
-    assert rounded["trade_cost_pct_contrib"][0] == pytest.approx(-0.000126)
+    assert rounded["trade_cost_pct"][0] == pytest.approx(-0.000126)
 
 
 def test_public_report_uses_percentage_points_for_portfolio_cash_curve():
     """Portfolio curve percent fields receive compact names at its boundary."""
     report = pl.DataFrame({
         "portfolio_gross_pct": [1.23456789],
-        "portfolio_realized_cost_pct": [-0.00012649],
-        "cumulative_portfolio_realized_cost_pct": [-0.12345678],
+        "portfolio_total_cost_pct": [-0.00012649],
+        "cumulative_portfolio_total_cost_pct": [-0.12345678],
     })
 
     public = round_public_report(rename_public_report_columns(report))
 
     assert public.columns == [
         "gross_pct",
-        "realized_cost_pct",
-        "cum_realized_cost_pct",
+        "total_cost_pct",
+        "cum_total_cost_pct",
     ]
     assert public.row(0) == pytest.approx((1.234568, -0.000126, -0.123457))
 
@@ -86,8 +86,8 @@ def test_joined_cash_audit_columns_drop_cash_prefix():
     report = pl.DataFrame({
         "cash_pnl_valid": [True],
         "cash_gross_pnl_usd": [12.346],
-        "cash_realized_net_pct_contrib": [0.1234567],
-        "cum_cash_realized_net_pnl_usd": [20.0],
+        "cash_net_pct": [0.1234567],
+        "cum_cash_net_pnl_usd": [20.0],
     })
 
     public = round_public_report(rename_public_report_columns(report))
@@ -95,8 +95,8 @@ def test_joined_cash_audit_columns_drop_cash_prefix():
     assert public.columns == [
         "pnl_valid",
         "gross_pnl_usd",
-        "realized_net_pct_contrib",
-        "cum_realized_net_pnl_usd",
+        "net_pct",
+        "cum_net_pnl_usd",
     ]
     assert public.row(0) == (True, 12.35, 0.123457, 20.0)
 
@@ -176,8 +176,7 @@ def test_public_report_uses_position_dvol_and_contract_tokens():
         "daily_dollar_vol_per_contract": [123.456],
         "smoothed_ref_average_position": [2.34567],
         "ref_normalized_position": [1.23456],
-        "realized_roll_cons": [3.0],
-        "avg_roll_cons": [2.0],
+        "roll_cons": [3.0],
     })
 
     public = round_public_report(rename_public_report_columns(report))
@@ -188,11 +187,10 @@ def test_public_report_uses_position_dvol_and_contract_tokens():
         "daily_dvol",
         "ref_smooth_avg_pos",
         "ref_norm_pos",
-        "realized_roll_con",
-        "avg_roll_con",
+        "roll_con",
     ]
     assert public.row(0) == pytest.approx(
-        (0.0123, 0.1235, 123.46, 2.3457, 1.2346, 3.0, 2.0)
+        (0.0123, 0.1235, 123.46, 2.3457, 1.2346, 3.0)
     )
 
 
