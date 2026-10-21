@@ -82,6 +82,7 @@ def test_selection_defaults_to_reviewed_classification_weights():
     assert args.include_roll_cost_in_score is False
     assert args.buffer_size == pytest.approx(0.10)
     assert args.buffer_trade_to_edge is True
+    assert args.rebalance_on_roll is True
 
 
 def test_build_selection_entrypoint_defaults_to_complete_pipeline():
@@ -101,10 +102,12 @@ def test_selection_exposes_executable_buffer_sensitivities():
         "--buffer-size",
         "0",
         "--no-buffer-trade-to-edge",
+        "--no-rebalance-on-roll",
     ])
 
     assert args.buffer_size == pytest.approx(0.0)
     assert args.buffer_trade_to_edge is False
+    assert args.rebalance_on_roll is False
 
 
 def test_selection_exposes_offline_target_volatility_override():

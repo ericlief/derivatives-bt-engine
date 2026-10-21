@@ -184,6 +184,7 @@ view = build_ewmac_notebook_view(
         idm=1.0,
         trade_cost_usd_per_con=1.00,
         roll_cost_usd_per_con=0.0,
+        rebalance_on_roll=True,
     ),
 )
 

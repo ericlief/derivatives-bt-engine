@@ -79,6 +79,7 @@ def apply_forecast_position_buffer(
     *,
     optimal_position_col: str = "target_position",
     average_position_col: str = "average_position",
+    force_rebalance_col: str | None = None,
     buffer_size: float = PYSYSTEMTRADE_FORECAST_BUFFER_SIZE,
     trade_to_edge: bool = True,
 ) -> pl.DataFrame:
@@ -94,6 +95,9 @@ def apply_forecast_position_buffer(
     average_position_col
         Contracts held at the target absolute forecast. This is the position
         scale used to form the buffer and may vary with volatility and FX.
+    force_rebalance_col
+        Optional boolean column whose true rows reset the executable position
+        to the rounded optimum, bypassing the no-trade band for that row.
     buffer_size
         Nonnegative fraction of absolute average position used on each side of
         the target. Pysystemtrade's default forecast buffer is ``0.10``.
@@ -115,8 +119,11 @@ def apply_forecast_position_buffer(
     first rounded optimum (or zero), then retain the previous executable
     position while it remains inside the band. Only the final state transition
     is recursive because today's output depends on yesterday's held position.
+    A configured force-rebalance row overrides that state transition.
     """
     required = {optimal_position_col, average_position_col}
+    if force_rebalance_col is not None:
+        required.add(force_rebalance_col)
     missing = sorted(required.difference(frame.columns))
     if missing:
         raise ValueError(f"position-buffer input missing columns: {missing}")
@@ -153,6 +160,14 @@ def apply_forecast_position_buffer(
     rounded_optimal = buffered_input.get_column("_rounded_optimal").to_list()
     rounded_top = buffered_input.get_column("buffer_top_cons").to_list()
     rounded_bot = buffered_input.get_column("buffer_bot_cons").to_list()
+    force_rebalance = (
+        buffered_input.get_column(force_rebalance_col)
+        .fill_null(False)
+        .cast(pl.Boolean)
+        .to_list()
+        if force_rebalance_col is not None
+        else [False] * buffered_input.height
+    )
 
     if not rounded_optimal:
         return buffered_input.with_columns(
@@ -169,8 +184,12 @@ def apply_forecast_position_buffer(
     if current_position is None:
         current_position = 0
     executable_positions = [current_position]
-    for optimal_position, top_position, bot_position in zip(
-        rounded_optimal[1:], rounded_top[1:], rounded_bot[1:], strict=True
+    for optimal_position, top_position, bot_position, force_position in zip(
+        rounded_optimal[1:],
+        rounded_top[1:],
+        rounded_bot[1:],
+        force_rebalance[1:],
+        strict=True,
     ):
         if (
             optimal_position is None
@@ -179,7 +198,9 @@ def apply_forecast_position_buffer(
         ):
             executable_positions.append(current_position)
             continue
-        if current_position > top_position:
+        if force_position:
+            current_position = optimal_position
+        elif current_position > top_position:
             current_position = (
                 top_position if trade_to_edge else optimal_position
             )
@@ -594,6 +615,7 @@ def build_executable_cash_pnl_curve(
     roll_col: str = "is_roll",
     buffer_size: float = PYSYSTEMTRADE_FORECAST_BUFFER_SIZE,
     buffer_trade_to_edge: bool = True,
+    rebalance_on_roll: bool = True,
 ) -> pl.DataFrame:
     """Append account-scaled contracts and executable cash P&L diagnostics.
 
@@ -646,6 +668,9 @@ def build_executable_cash_pnl_curve(
     buffer_trade_to_edge
         Move to the nearest band edge on a breach, matching pysystemtrade's
         default. If false, move to the rounded optimal position instead.
+    rebalance_on_roll
+        If true, reset executable contracts to the rounded target on each roll
+        date. If false, retain the normal stateful no-trade buffer policy.
 
     Returns
     -------
@@ -666,8 +691,12 @@ def build_executable_cash_pnl_curve(
 
     Notes
     -----
-    ``realized_roll_cons`` uses the rounded position held immediately before a
-    history-policy roll. ``avg_roll_cons`` is a comparison estimate using the
+    With roll rebalancing enabled, ``realized_roll_cons`` is the same-direction
+    overlap between the prior holding and the newly rounded target. Any size
+    change is retained in ``trade_cons`` as an ordinary trade. With roll
+    rebalancing disabled, the executable position normally remains unchanged
+    and the complete prior holding is rolled. ``avg_roll_cons`` is a comparison
+    estimate using the
     rounded mean absolute held exposure since the previous roll. It is not a
     second realized trade and is not an additional charge: the average-roll
     net-P&L path substitutes this estimated roll cost for the realized roll
@@ -801,12 +830,14 @@ def build_executable_cash_pnl_curve(
     result = (
         apply_forecast_position_buffer(
             target_frame,
+            force_rebalance_col=("roll_event" if rebalance_on_roll else None),
             buffer_size=buffer_size,
             trade_to_edge=buffer_trade_to_edge,
         )
         .with_columns(
             pl.lit(buffer_size).alias("buffer_size"),
             pl.lit(buffer_trade_to_edge).alias("buffer_trade_to_edge"),
+            pl.lit(rebalance_on_roll).alias("rebalance_on_roll"),
         )
         .with_columns(
             pl.col("exec_cons").shift(1).alias("held_cons"),
@@ -831,10 +862,29 @@ def build_executable_cash_pnl_curve(
             .cast(pl.Float64)
             .alias("trade_cons"),
             pl.when(pl.col("roll_event"))
-            .then(pl.col("held_cons").abs().fill_null(0))
+            .then(
+                pl.when(
+                    pl.col("held_cons").is_not_null()
+                    & pl.col("exec_cons").is_not_null()
+                    & ((pl.col("held_cons") * pl.col("exec_cons")) > 0)
+                )
+                .then(
+                    pl.min_horizontal(
+                        pl.col("held_cons").abs(),
+                        pl.col("exec_cons").abs(),
+                    )
+                )
+                .otherwise(0)
+            )
             .otherwise(0)
             .cast(pl.Float64)
             .alias("realized_roll_cons"),
+            (
+                pl.lit(rebalance_on_roll)
+                & pl.col("roll_event")
+                & pl.col("target_position").is_not_null()
+                & pl.col("target_position").is_finite()
+            ).alias("roll_rebalanced"),
             # Average-roll volume averages the contracts actually held over
             # the completed interval, rather than the new end-of-day target on
             # the roll row. Null initial exposure is excluded by mean().

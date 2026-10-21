@@ -101,6 +101,7 @@ class ExecutableCashSettings:
     roll_cost_usd_per_con: float = 0.0
     buffer_size: float = PYSYSTEMTRADE_FORECAST_BUFFER_SIZE
     buffer_trade_to_edge: bool = True
+    rebalance_on_roll: bool = True
 
 
 @dataclass(frozen=True)
@@ -436,6 +437,7 @@ def build_ewmac_notebook_view(
             target_abs_forecast=target_abs_forecast,
             buffer_size=cash_settings.buffer_size,
             buffer_trade_to_edge=cash_settings.buffer_trade_to_edge,
+            rebalance_on_roll=cash_settings.rebalance_on_roll,
         )
     # This facade is consumed directly in notebooks, so expose its aligned
     # audit frames with the same compact, centralized vocabulary as reports.

@@ -184,13 +184,17 @@ def test_executable_cash_pnl_separates_trade_and_policy_roll_costs():
     assert result.get_column(
         "buf_width_pos"
     ).to_list() == pytest.approx([0.5] * 5)
-    assert result.get_column("exec_con").to_list() == [5, 10, 10, 6, 6]
+    assert result.get_column("exec_con").to_list() == [5, 10, 10, 6, 5]
     assert result.get_column("trade_con").to_list() == pytest.approx(
-        [5.0, 5.0, 0.0, 4.0, 0.0]
+        [5.0, 5.0, 0.0, 4.0, 1.0]
     )
     assert result.get_column("realized_roll_con").to_list() == pytest.approx(
-        [0.0, 0.0, 10.0, 0.0, 6.0]
+        [0.0, 0.0, 10.0, 0.0, 5.0]
     )
+    assert result.get_column("rebalance_on_roll").to_list() == [True] * 5
+    assert result.get_column("roll_rebalanced").to_list() == [
+        False, False, True, False, True,
+    ]
     assert result.get_column("interval_avg_abs_con").to_list() == [
         7.5,
         7.5,
@@ -200,43 +204,43 @@ def test_executable_cash_pnl_separates_trade_and_policy_roll_costs():
     ]
     assert result.get_column("avg_roll_con").to_list() == [0, 0, 8, 0, 8]
     assert result.get_column("trade_cost_usd").to_list() == pytest.approx(
-        [-10.0, -10.0, 0.0, -8.0, 0.0]
+        [-10.0, -10.0, 0.0, -8.0, -2.0]
     )
     assert result.get_column("realized_roll_cost_usd").to_list() == (
-        pytest.approx([0.0, 0.0, -30.0, 0.0, -18.0])
+        pytest.approx([0.0, 0.0, -30.0, 0.0, -15.0])
     )
     assert result.get_column("avg_roll_cost_usd").to_list() == (
         pytest.approx([0.0, 0.0, -24.0, 0.0, -24.0])
     )
     assert result.get_column("trade_cost_pct_contrib").to_list() == (
-        pytest.approx([-1.0, -1.0, 0.0, -0.8, 0.0])
+        pytest.approx([-1.0, -1.0, 0.0, -0.8, -0.2])
     )
     assert result.get_column(
         "realized_roll_cost_pct_contrib"
-    ).to_list() == pytest.approx([0.0, 0.0, -3.0, 0.0, -1.8])
+    ).to_list() == pytest.approx([0.0, 0.0, -3.0, 0.0, -1.5])
     assert result.get_column(
         "avg_roll_cost_pct_contrib"
     ).to_list() == pytest.approx([0.0, 0.0, -2.4, 0.0, -2.4])
     assert result.get_column("realized_cost_pct_contrib").to_list() == (
-        pytest.approx([-1.0, -1.0, -3.0, -0.8, -1.8])
+        pytest.approx([-1.0, -1.0, -3.0, -0.8, -1.7])
     )
     assert result.get_column("avg_roll_total_cost_pct_contrib").to_list() == (
-        pytest.approx([-1.0, -1.0, -2.4, -0.8, -2.4])
+        pytest.approx([-1.0, -1.0, -2.4, -0.8, -2.6])
     )
     assert result.get_column("cum_realized_cost_pct_contrib").to_list() == (
-        pytest.approx([-1.0, -2.0, -5.0, -5.8, -7.6])
+        pytest.approx([-1.0, -2.0, -5.0, -5.8, -7.5])
     )
     assert result.get_column("cum_avg_roll_total_cost_pct_contrib").to_list() == (
-        pytest.approx([-1.0, -2.0, -4.4, -5.2, -7.6])
+        pytest.approx([-1.0, -2.0, -4.4, -5.2, -7.8])
     )
     assert result.get_column("gross_pct_contrib").to_list() == (
         pytest.approx([0.0, 5.0, 10.0, 10.0, 6.0])
     )
     assert result.get_column("realized_net_pct_contrib").to_list() == (
-        pytest.approx([-1.0, 4.0, 7.0, 9.2, 4.2])
+        pytest.approx([-1.0, 4.0, 7.0, 9.2, 4.3])
     )
     assert result.get_column("avg_roll_net_pct_contrib").to_list() == (
-        pytest.approx([-1.0, 4.0, 7.6, 9.2, 3.6])
+        pytest.approx([-1.0, 4.0, 7.6, 9.2, 3.4])
     )
     assert not any(name.endswith("_ret_contrib") for name in result.columns)
     assert result.get_column("cum_gross_pnl_usd").to_list() == pytest.approx(
@@ -244,11 +248,30 @@ def test_executable_cash_pnl_separates_trade_and_policy_roll_costs():
     )
     assert result.get_column(
         "cum_realized_net_pnl_usd"
-    ).to_list() == pytest.approx([-10.0, 30.0, 100.0, 192.0, 234.0])
+    ).to_list() == pytest.approx([-10.0, 30.0, 100.0, 192.0, 235.0])
     assert result.get_column(
         "cum_avg_roll_net_pnl_usd"
-    ).to_list() == pytest.approx([-10.0, 30.0, 106.0, 198.0, 234.0])
+    ).to_list() == pytest.approx([-10.0, 30.0, 106.0, 198.0, 232.0])
     assert not any(column.startswith("cash_") for column in result.columns)
+
+    buffered_roll = build_executable_cash_pnl_curve(
+        frame,
+        capital=1_000.0,
+        target_vol=0.20,
+        weight=0.50,
+        idm=1.0,
+        multiplier=10.0,
+        trade_cost_usd_per_con=2.0,
+        roll_cost_usd_per_con=3.0,
+        annualization_days=4,
+        rebalance_on_roll=False,
+    )
+    assert buffered_roll.get_column("exec_con").to_list() == [
+        5, 10, 10, 6, 6,
+    ]
+    assert buffered_roll.get_column("realized_roll_con").to_list() == (
+        pytest.approx([0.0, 0.0, 10.0, 0.0, 6.0])
+    )
 
 
 def test_ann_pct_vol_is_null_without_raw_contract_close():

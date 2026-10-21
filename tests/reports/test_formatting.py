@@ -109,6 +109,8 @@ def test_public_report_renames_buffer_parameters_at_boundary():
         "buffer_width_position": [0.25],
         "buffer_size": [0.10],
         "buffer_trade_to_edge": [True],
+        "rebalance_on_roll": [True],
+        "roll_rebalanced": [False],
     })
 
     public = rename_public_report_columns(report)
@@ -119,6 +121,8 @@ def test_public_report_renames_buffer_parameters_at_boundary():
         "buf_width_pos",
         "buf_size",
         "buf_trade_to_edge",
+        "rebalance_on_roll",
+        "roll_rebalanced",
     ]
 
 

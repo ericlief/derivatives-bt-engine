@@ -782,10 +782,15 @@ the executable cash path only: the AFTS score continues to use the unbuffered
 `system.accounts.subsystem_turnover()` convention.
 
 Ordinary position changes are charged with the market screen one-way trade cost.
-On each history-policy `is_roll` date, `realized_roll_cons` uses the rounded
-position held from the prior day. `interval_avg_abs_cons` retains the
+By default, each history-policy `is_roll` date resets the executable position
+to the rounded target instead of carrying the buffered position through the
+roll. Use `--no-rebalance-on-roll` to preserve the buffered holding. The
+`realized_roll_con` quantity is the same-direction overlap between the prior
+holding and the new executable position; the remaining size change stays in
+`trade_con`. For example, moving from 8 to 7 contracts records 7 rolls and one
+ordinary reduction. `interval_avg_abs_con` retains the
 fractional mean absolute rounded exposure over the interval ending on that
-roll date. `avg_roll_cons` rounds that interval mean half-up to a whole
+roll date. `avg_roll_con` rounds that interval mean half-up to a whole
 executable contract before multiplying by `roll_cost_per_con`. This is the
 stable selection estimate analogous to pysystemtrade's average holding per
 roll interval. Both cost paths are persisted because they answer different
@@ -1517,6 +1522,8 @@ identify why membership changed.
 `buffer_size` is also separate. It affects executable positions, turnover, and
 cash P&L, but the published AFTS selection score uses unbuffered subsystem
 turnover. Test buffers such as `0.05, 0.10, 0.20` after fixing a book. The
+default roll-date rebalance can be disabled with `--no-rebalance-on-roll` for
+a Carver-compatible sensitivity that rolls the buffered holding unchanged. The
 market screen affordability fields (`affordability_min_contracts`, scenario IDM, and
 minimum main instruments) remain diagnostics and are not portfolio selection hard gates.
 

@@ -366,6 +366,16 @@ def parse_args(argv=None, *, complete_default: bool = False):
             "--no-buffer-trade-to-edge to trade to the rounded optimum"
         ),
     )
+    parser.add_argument(
+        "--rebalance-on-roll",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Reset executable contracts to the rounded target on roll dates "
+            "(default); use --no-rebalance-on-roll to preserve the buffered "
+            "holding"
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -534,10 +544,11 @@ def _run_complete_selection(
     """
     logger.info(
         "portfolio_selection start candidates=%d buffer_size=%s "
-        "buffer_trade_to_edge=%s",
+        "buffer_trade_to_edge=%s rebalance_on_roll=%s",
         selected.height,
         args.buffer_size,
         args.buffer_trade_to_edge,
+        args.rebalance_on_roll,
     )
     frames_by_history = load_ewmac_component_frames(
         selected.get_column("hist_instr_code").drop_nulls().to_list(),
@@ -908,6 +919,7 @@ def _run_complete_selection(
             "roll_cost_in_score": args.include_roll_cost_in_score,
             "buffer_size": args.buffer_size,
             "buffer_trade_to_edge": args.buffer_trade_to_edge,
+            "rebalance_on_roll": args.rebalance_on_roll,
             "weight": selection.final_score.weights[symbol],
             "idm": selection.final_score.idm,
             # This is the whole-book score; repeat it on each membership row
@@ -948,6 +960,7 @@ def _run_complete_selection(
             target_abs_forecast=engine.config.target_abs_forecast,
             buffer_size=args.buffer_size,
             buffer_trade_to_edge=args.buffer_trade_to_edge,
+            rebalance_on_roll=args.rebalance_on_roll,
         )
         roll_schedule_src = (
             "history_marks"
@@ -997,6 +1010,8 @@ def _run_complete_selection(
                 "targ_pos",
                 "buf_size",
                 "buf_trade_to_edge",
+                "rebalance_on_roll",
+                "roll_rebalanced",
                 "buf_width_pos",
                 "buffer_top_con",
                 "buffer_bot_con",
@@ -1005,7 +1020,7 @@ def _run_complete_selection(
                 "trade_con",
                 "realized_roll_con",
                 "interval_avg_abs_con",
-                "avg_roll_cons",
+                "avg_roll_con",
                 "trade_cost_usd_per_con",
                 "roll_cost_usd_per_con",
                 "gross_pnl_usd",

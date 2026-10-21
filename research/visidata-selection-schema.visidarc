@@ -77,7 +77,8 @@ _vd_set_type(
     reference_return_valid ref_ret_valid
     pnl_fx_valid pnl_valid ret_valid is_roll roll_event feasible accepted
     tie_eligible tie_break_applied
-    roll_cost_in_score buf_trade_to_edge snap_use_rth
+    roll_cost_in_score buf_trade_to_edge rebalance_on_roll roll_rebalanced
+    snap_use_rth
     main_instr_afford_for_scen counts_toward_main_instr_min
     equal_wt_meets_min_con ib_fast_requests_allowed
     """,
