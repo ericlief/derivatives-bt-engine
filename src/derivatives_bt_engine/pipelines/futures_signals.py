@@ -43,7 +43,8 @@ def run_futures_signal(
     kind = FuturesSignalClass(signal_class)
     kwargs = dict(parameters or {})
     if kind == FuturesSignalClass.EWMAC:
-        return ewmac(history.panama_bars(), **kwargs)
+        bars = history.panama_bars().rename({"date": "ts_event"})
+        return ewmac(bars, **kwargs)
 
     eligible = history.signal.filter(
         pl.col("return_valid") | (pl.col("quality_flag") == "initial_observation")

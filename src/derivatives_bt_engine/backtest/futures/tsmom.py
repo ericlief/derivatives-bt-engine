@@ -823,7 +823,7 @@ def _load_pysystemtrade_ewmac_universe(
         coverage_rows: list[dict[str, object]] = []
         for position, instrument_code in enumerate(instrument_codes, start=1):
             history = provider.load(instrument_code)
-            bars = history.panama_bars()
+            bars = history.panama_bars().rename({'date': 'ts_event'})
             raw = ewmac(
                 bars,
                 fast_span=config.ewmac_fast_span,

@@ -182,7 +182,7 @@ def build_ewmac_rule_forecast(
     scalar = pooled.global_scalar().select("ts_event", "forecast_scalar")
     return (
         ewmac(
-            history.panama_bars(),
+            history.panama_bars().rename({"date": "ts_event"}),
             fast_span=pooled.rule.fast,
             slow_span=pooled.rule.slow,
             vol_span=pooled.vol_span,

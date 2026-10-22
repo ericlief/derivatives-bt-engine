@@ -120,10 +120,12 @@ class FuturesHistory:
             raise ValueError("signal_index must be non-null and strictly positive")
 
     def signal_bars(self) -> pl.DataFrame:
-        """Adapt the positive signal index to existing signal-code columns.
+        """Adapt the positive signal index to public daily-bar columns.
 
         This is deliberately signal-only.  It must not be used as an
-        executable price or a contract mark.
+        executable price or a contract mark. The adapted frame uses ``date``;
+        callers entering legacy signal calculations translate that key to
+        their internal ``ts_event`` convention at the calculation boundary.
         """
         signal = self.signal
         if "return_valid" in signal.columns:
@@ -133,28 +135,29 @@ class FuturesHistory:
             )
         return (
             signal.select(
-                pl.col("trade_date").alias("ts_event"),
+                pl.col("trade_date").alias("date"),
                 pl.col("signal_index").alias("close"),
                 "ret_1d",
                 "quality_flag",
             )
-            .sort("ts_event")
+            .sort("date")
         )
 
     def panama_bars(self) -> pl.DataFrame:
-        """Adapt generated additive prices to canonical EWMAC input columns.
+        """Adapt generated additive prices to public daily-bar columns.
 
         The stored Panama stream and this adapter both use ``point_change`` so
-        the EWMAC pipeline has one name from history construction onward.
+        the EWMAC pipeline has one name from history construction onward. The
+        public date key is ``date``; legacy calculations adapt it internally.
         """
         if self.panama.is_empty():
             raise ValueError("history has no generated Panama stream")
         return self.panama.select(
-            pl.col("trade_date").alias("ts_event"),
+            pl.col("trade_date").alias("date"),
             pl.col("panama_price").alias("close"),
             "point_change",
             "quality_flag",
-        ).sort("ts_event")
+        ).sort("date")
 
 
 def _validate_stream(

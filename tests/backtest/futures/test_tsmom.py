@@ -332,7 +332,7 @@ def test_full_pysystemtrade_forecast_and_scalar_caches(monkeypatch, tmp_path) ->
             self.metadata = {'asset_class': 'Equity'}
             offset = 0.0 if instrument_code == 'A' else 10.0
             self._bars = pl.DataFrame({
-                'ts_event': dates,
+                'date': dates,
                 'close': [
                     100.0 + offset + i + (0.5 if i % 2 else -0.25)
                     for i in range(len(dates))

@@ -123,7 +123,9 @@ def _bounded(frame: pl.DataFrame, start: date, end: date) -> pl.DataFrame:
 
 
 def _trend_frame(history: FuturesHistory, prefix: str) -> pl.DataFrame:
-    trend = continuous_momentum(build_features(history.signal_bars()))
+    trend = continuous_momentum(
+        build_features(history.signal_bars().rename({"date": "ts_event"}))
+    )
     return trend.select(
         pl.col("ts_event").alias("trade_date"),
         pl.col("ts_fast").alias(f"{prefix}_ts_fast"),

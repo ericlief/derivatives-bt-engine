@@ -16,7 +16,7 @@ from derivatives_bt_engine.calculations.ewmac import EwmacRule
 def _history() -> SimpleNamespace:
     """Return the minimal Panama-history interface needed by the builder."""
     bars = pl.DataFrame({
-        "ts_event": pl.date_range(
+        "date": pl.date_range(
             pl.date(2024, 1, 1), pl.date(2024, 1, 8), eager=True
         ),
         "close": [100.0, 101.0, 102.0, 101.0, 103.0, 104.0, 103.0, 105.0],
@@ -24,7 +24,7 @@ def _history() -> SimpleNamespace:
         "quality_flag": [""] * 8,
     })
     marks = pl.DataFrame({
-        "trade_date": bars.get_column("ts_event"),
+        "trade_date": bars.get_column("date"),
         "mark_price": [
             200.0, 201.0, 202.0, 203.0,
             204.0, 205.0, 206.0, 207.0,

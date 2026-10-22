@@ -1858,7 +1858,7 @@ def volatility_from_pysystemtrade_history(
 ) -> dict:
     """Calculate mixed point vol from the full roll-neutral Carver history."""
     history = provider.load(instrument_code)
-    bars = history.panama_bars()
+    bars = history.panama_bars().rename({"date": "ts_event"})
     mixed = mixed_point_volatility(
         bars,
         annualization_days=annualization_days,

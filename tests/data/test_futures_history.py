@@ -304,12 +304,20 @@ def test_carver_loader_builds_generated_panama_and_contract_returns(
         0.0, 0.0, None, 0.0
     ]
     signal_bars = history.signal_bars()
+    assert "date" in signal_bars.columns
+    assert "ts_event" not in signal_bars.columns
     assert signal_bars.get_column("close").min() > 0
     assert signal_bars.select(pl.col("close").pct_change()).to_series().to_list() == [
         None,
         pytest.approx(0.01),
         pytest.approx(102.0 / 101.0 - 1.0),
         pytest.approx(108.0 / 107.0 - 1.0),
+    ]
+    panama_bars = history.panama_bars()
+    assert "date" in panama_bars.columns
+    assert "ts_event" not in panama_bars.columns
+    assert panama_bars.get_column("close").to_list() == [
+        105.0, 106.0, 107.0, 108.0
     ]
     assert history.marks.get_column("is_roll").to_list() == [
         False,
