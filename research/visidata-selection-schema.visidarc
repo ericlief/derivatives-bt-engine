@@ -162,7 +162,7 @@ _vd_set_type(
     ref_gross_usd ref_cost_usd ref_net_usd
     ref_gross_pct ref_ann_cost_pct ref_cost_pct ref_net_pct
     tgt_pos buf_size buffer_size buf_width_pos
-    buffer_top_con buffer_bot_con exec_con held_con trade_con trade_abs_con roll_con
+    buffer_top_con buffer_bot_con exec_con held_con trade_con roll_con
     track_err_ann_usd track_err_ann_pct_cap
     gross_pnl_usd trade_cost_per_con roll_cost_per_con
     trade_cost_usd roll_cost_usd net_pnl_usd

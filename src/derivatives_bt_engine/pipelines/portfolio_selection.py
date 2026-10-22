@@ -1017,7 +1017,6 @@ def _run_complete_selection(
                 "exec_con",
                 "held_con",
                 "trade_con",
-                "trade_abs_con",
                 "roll_con",
                 "trade_cost_per_con",
                 "roll_cost_per_con",

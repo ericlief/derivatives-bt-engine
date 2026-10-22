@@ -686,10 +686,10 @@ def build_executable_cash_pnl_curve(
     -----
     With roll rebalancing enabled, ``roll_cons`` is the same-direction
     overlap between the prior holding and the newly rounded target. Any size
-    change is retained in signed ``trade_con`` as an ordinary trade; its
-    absolute size is reported separately as ``trade_abs_con`` and is used for
-    transaction costs. Positive signed trades increase the net position and
-    negative trades decrease it. With roll rebalancing disabled, the
+    change is retained in signed ``trade_con`` as an ordinary trade. Its
+    absolute size is used internally for transaction costs. Positive signed
+    trades increase the net position and negative trades decrease it. With
+    roll rebalancing disabled, the
     executable position normally remains unchanged
     and the complete prior holding is rolled. Ordinary position changes
     are charged independently, including the initial entry from zero. Current
@@ -876,16 +876,6 @@ def build_executable_cash_pnl_curve(
             .otherwise(None)
             .cast(pl.Float64)
             .alias("signed_trade_cons"),
-            pl.when(pl.col("exec_cons").is_not_null())
-            .then(
-                (
-                    pl.col("exec_cons")
-                    - pl.col("held_cons").fill_null(0)
-                ).abs()
-            )
-            .otherwise(None)
-            .cast(pl.Float64)
-            .alias("trade_cons"),
             pl.when(pl.col("roll_event"))
             .then(
                 pl.when(
@@ -918,7 +908,7 @@ def build_executable_cash_pnl_curve(
                 * multiplier
                 * pl.col(fx_col)
             ).alias("cash_gross_pnl_usd"),
-            (-pl.col("trade_cons") * trade_cost_usd_per_con).alias(
+            (-pl.col("signed_trade_cons").abs() * trade_cost_usd_per_con).alias(
                 "cash_trade_cost_usd"
             ),
             (-pl.col("roll_cons") * roll_cost_usd_per_con).alias(
@@ -1041,7 +1031,6 @@ def build_executable_cash_pnl_curve(
         for column in (
             "held_con",
             "trade_con",
-            "trade_abs_con",
             "roll_con",
         )
         if column in public.columns
