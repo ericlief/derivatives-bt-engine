@@ -16,13 +16,13 @@ from derivatives_bt_engine.data.pysystemtrade_pooling import (
 def _pair_history(dates, levels):
     signal = pl.DataFrame(
         {
-            "trade_date": dates,
+            "date": dates,
             "signal_index": levels,
         }
     ).with_columns(pl.col("signal_index").pct_change().alias("ret_1d"))
     marks = pl.DataFrame(
         schema={
-            "trade_date": pl.Date,
+            "date": pl.Date,
             "contract_id": pl.String,
             "is_roll": pl.Boolean,
         }

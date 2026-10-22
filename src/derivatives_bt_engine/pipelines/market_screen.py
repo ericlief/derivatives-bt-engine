@@ -610,14 +610,14 @@ def _roll_rate_audit(
     """
     if recent_years <= 0:
         raise ValueError("recent_years must be positive")
-    required = {"trade_date", "is_roll"}
+    required = {"date", "is_roll"}
     missing = required - set(marks.columns)
     if missing:
         raise ValueError(f"roll audit marks missing columns: {sorted(missing)}")
 
-    history_start = marks.get_column("trade_date").min()
-    history_end = marks.get_column("trade_date").max()
-    roll_dates = marks.filter(pl.col("is_roll")).get_column("trade_date")
+    history_start = marks.get_column("date").min()
+    history_end = marks.get_column("date").max()
+    roll_dates = marks.filter(pl.col("is_roll")).get_column("date")
     observed_rolls = roll_dates.len()
     elapsed_years = (
         (history_end - history_start).days / 365.25
@@ -1872,9 +1872,9 @@ def volatility_from_pysystemtrade_history(
         raise ValueError(f"{instrument_code}: no valid mixed point volatility")
     changes = bars["point_change"].drop_nulls().tail(fast_span)
     if history.carry.height:
-        ref_price = history.carry.sort("trade_date")["current_price"][-1]
+        ref_price = history.carry.sort("date")["current_price"][-1]
     else:
-        ref_price = history.marks.sort("trade_date")["mark_price"][-1]
+        ref_price = history.marks.sort("date")["mark_price"][-1]
     return {
         "history_rows": bars.height,
         "history_start": bars["ts_event"].min(),

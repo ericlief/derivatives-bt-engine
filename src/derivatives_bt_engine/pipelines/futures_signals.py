@@ -50,7 +50,7 @@ def run_futures_signal(
         pl.col("return_valid") | (pl.col("quality_flag") == "initial_observation")
     )
     bars = eligible.select(
-        pl.col("trade_date").alias("ts_event"),
+        pl.col("date").alias("ts_event"),
         pl.col("signal_index").alias("close"),
         "ret_1d",
         "quality_flag",

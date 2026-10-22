@@ -117,8 +117,8 @@ class OverlapReport:
 
 
 def _bounded(frame: pl.DataFrame, start: date, end: date) -> pl.DataFrame:
-    return frame.filter(pl.col("trade_date").is_between(start, end)).sort(
-        "trade_date"
+    return frame.filter(pl.col("date").is_between(start, end)).sort(
+        "date"
     )
 
 
@@ -127,14 +127,14 @@ def _trend_frame(history: FuturesHistory, prefix: str) -> pl.DataFrame:
         build_features(history.signal_bars().rename({"date": "ts_event"}))
     )
     return trend.select(
-        pl.col("ts_event").alias("trade_date"),
+        pl.col("ts_event").alias("date"),
         pl.col("ts_fast").alias(f"{prefix}_ts_fast"),
         pl.col("ts_slow").alias(f"{prefix}_ts_slow"),
         pl.col("signal").alias(f"{prefix}_trend_signal"),
     )
 
 
-def _replace_trade_dates(
+def _replace_dates(
     frame: pl.DataFrame,
     date_map: dict[date, date],
 ) -> tuple[pl.DataFrame, int]:
@@ -143,12 +143,12 @@ def _replace_trade_dates(
     before = frame.height
     mapped = (
         frame.with_columns(
-            pl.col("trade_date")
-            .replace_strict(date_map, default=pl.col("trade_date"))
-            .alias("trade_date")
+            pl.col("date")
+            .replace_strict(date_map, default=pl.col("date"))
+            .alias("date")
         )
-        .sort("trade_date", "source_timestamp")
-        .unique(subset="trade_date", keep="last", maintain_order=True)
+        .sort("date", "source_timestamp")
+        .unique(subset="date", keep="last", maintain_order=True)
     )
     return mapped, before - mapped.height
 
@@ -168,26 +168,26 @@ def _align_carver_dates(
     if mapping.carver_date_alignment_through is None:
         raise ValueError("Carver date alignment requires an inclusive end date")
 
-    globex_dates = sorted(set(globex.signal.get_column("trade_date").to_list()))
+    globex_dates = sorted(set(globex.signal.get_column("date").to_list()))
     date_map: dict[date, date] = {}
-    for value in carver.signal.get_column("trade_date").to_list():
+    for value in carver.signal.get_column("date").to_list():
         if value > mapping.carver_date_alignment_through:
             continue
         position = bisect.bisect_left(globex_dates, value) - 1
         if position >= 0:
             date_map[value] = globex_dates[position]
 
-    signal, collapsed = _replace_trade_dates(carver.signal, date_map)
-    marks, _ = _replace_trade_dates(carver.marks, date_map)
-    carry, _ = _replace_trade_dates(carver.carry, date_map)
-    panama, _ = _replace_trade_dates(carver.panama, date_map)
+    signal, collapsed = _replace_dates(carver.signal, date_map)
+    marks, _ = _replace_dates(carver.marks, date_map)
+    carry, _ = _replace_dates(carver.carry, date_map)
+    panama, _ = _replace_dates(carver.panama, date_map)
     marks = marks.with_columns(
         (pl.col("contract_id") != pl.col("contract_id").shift(1))
         .fill_null(False)
         .alias("is_roll")
     )
     if {"adjusted_price", "current_price"}.issubset(signal.columns):
-        signal = signal.sort("trade_date").with_columns(
+        signal = signal.sort("date").with_columns(
             pl.col("adjusted_price").diff().alias("adjusted_point_change")
         )
         signal = signal.with_columns(
@@ -199,7 +199,7 @@ def _align_carver_dates(
             .otherwise(None)
             .alias("ret_1d")
         )
-    signal = signal.sort("trade_date").with_columns(
+    signal = signal.sort("date").with_columns(
         (
             (1.0 + pl.col("ret_1d").fill_null(0.0)).cum_prod()
             * 100.0
@@ -235,28 +235,28 @@ def _comparison_frame(
     end: date,
 ) -> pl.DataFrame:
     carver_signal = _bounded(carver.signal, start, end).select(
-        "trade_date",
+        "date",
         pl.col("ret_1d").alias("carver_return"),
         pl.col("signal_index").alias("carver_signal_index"),
         pl.col("contract_id").alias("carver_contract"),
         pl.col("is_roll").alias("carver_is_roll"),
     )
     globex_signal = _bounded(globex.signal, start, end).select(
-        "trade_date",
+        "date",
         pl.col("ret_1d").alias("globex_return"),
         pl.col("signal_index").alias("globex_signal_index"),
         pl.col("contract_id").alias("globex_contract"),
         pl.col("is_roll").alias("globex_is_roll"),
     )
     return (
-        carver_signal.join(globex_signal, on="trade_date", how="inner")
-        .join(_trend_frame(carver, "carver"), on="trade_date", how="left")
-        .join(_trend_frame(globex, "globex"), on="trade_date", how="left")
+        carver_signal.join(globex_signal, on="date", how="inner")
+        .join(_trend_frame(carver, "carver"), on="date", how="left")
+        .join(_trend_frame(globex, "globex"), on="date", how="left")
         .with_columns(
             pl.col("carver_contract").str.slice(0, 6).alias("carver_contract_month"),
             pl.col("globex_contract").str.slice(0, 6).alias("globex_contract_month"),
         )
-        .sort("trade_date")
+        .sort("date")
     )
 
 
@@ -278,26 +278,26 @@ def _shifted_return_correlation(
     globex_shift_days: int,
 ) -> tuple[Optional[float], int]:
     left = _bounded(carver.signal, start, end).select(
-        "trade_date",
+        "date",
         pl.col("ret_1d").alias("carver_return"),
         pl.col("is_roll").alias("carver_is_roll"),
     )
     right = _bounded(globex.signal, start, end).select(
-        (pl.col("trade_date") + pl.duration(days=globex_shift_days)).alias(
-            "trade_date"
+        (pl.col("date") + pl.duration(days=globex_shift_days)).alias(
+            "date"
         ),
         pl.col("ret_1d").alias("globex_return"),
         pl.col("is_roll").alias("globex_is_roll"),
     )
-    joined = left.join(right, on="trade_date", how="inner").filter(
+    joined = left.join(right, on="date", how="inner").filter(
         ~pl.col("carver_is_roll") & ~pl.col("globex_is_roll")
     ).drop_nulls(["carver_return", "globex_return"])
     return _correlation(joined, "carver_return", "globex_return"), joined.height
 
 
 def _volatility_frame(history: FuturesHistory, prefix: str) -> pl.DataFrame:
-    return history.signal.sort("trade_date").select(
-        "trade_date",
+    return history.signal.sort("date").select(
+        "date",
         (
             pl.col("ret_1d")
             .rolling_std(
@@ -318,11 +318,11 @@ def _shifted_volatility_correlation(
 ) -> tuple[Optional[float], int]:
     left = _bounded(_volatility_frame(carver, "carver"), start, end)
     right = _bounded(_volatility_frame(globex, "globex"), start, end).with_columns(
-        (pl.col("trade_date") + pl.duration(days=globex_shift_days)).alias(
-            "trade_date"
+        (pl.col("date") + pl.duration(days=globex_shift_days)).alias(
+            "date"
         )
     )
-    joined = left.join(right, on="trade_date", how="inner").drop_nulls(
+    joined = left.join(right, on="date", how="inner").drop_nulls(
         ["carver_volatility", "globex_volatility"]
     )
     return _correlation(joined, "carver_volatility", "globex_volatility"), joined.height
@@ -335,15 +335,15 @@ def _roll_events(
     end: date,
 ) -> pl.DataFrame:
     return (
-        history.marks.sort("trade_date")
+        history.marks.sort("date")
         .with_columns(
             pl.col("contract_id").shift(1).alias(f"{prefix}_from_contract")
         )
         .filter(
-            pl.col("trade_date").is_between(start, end) & pl.col("is_roll")
+            pl.col("date").is_between(start, end) & pl.col("is_roll")
         )
         .select(
-            pl.col("trade_date").alias(f"{prefix}_roll_date"),
+            pl.col("date").alias(f"{prefix}_roll_date"),
             f"{prefix}_from_contract",
             pl.col("contract_id").alias(f"{prefix}_to_contract"),
         )
@@ -411,16 +411,16 @@ def _missing_dates(
     start: date,
     end: date,
 ) -> pl.DataFrame:
-    carver_dates = _bounded(carver.signal, start, end).select("trade_date")
-    globex_dates = _bounded(globex.signal, start, end).select("trade_date")
+    carver_dates = _bounded(carver.signal, start, end).select("date")
+    globex_dates = _bounded(globex.signal, start, end).select("date")
     missing_from_globex = carver_dates.join(
-        globex_dates, on="trade_date", how="anti"
+        globex_dates, on="date", how="anti"
     ).with_columns(
         pl.lit("pysystemtrade").alias("present_in"),
         pl.lit("globex").alias("missing_from"),
     )
     missing_from_carver = globex_dates.join(
-        carver_dates, on="trade_date", how="anti"
+        carver_dates, on="date", how="anti"
     ).with_columns(
         pl.lit("globex").alias("present_in"),
         pl.lit("pysystemtrade").alias("missing_from"),
@@ -433,10 +433,10 @@ def _missing_dates(
         "canonical_market_id",
         "carver_instrument",
         "globex_asset",
-        "trade_date",
+        "date",
         "present_in",
         "missing_from",
-    ).sort("trade_date", "missing_from")
+    ).sort("date", "missing_from")
 
 
 def _mean_boolean(frame: pl.DataFrame, expression: pl.Expr) -> Optional[float]:
@@ -485,8 +485,8 @@ def compare_market(
     )
     carver, collapsed_alignment_rows = _align_carver_dates(mapping, carver, globex)
     detail = _comparison_frame(carver, globex, start, end)
-    carver_dates = _bounded(carver.signal, start, end).select("trade_date")
-    globex_dates = _bounded(globex.signal, start, end).select("trade_date")
+    carver_dates = _bounded(carver.signal, start, end).select("date")
+    globex_dates = _bounded(globex.signal, start, end).select("date")
     nonroll = detail.filter(
         ~pl.col("carver_is_roll") & ~pl.col("globex_is_roll")
     )
@@ -562,16 +562,16 @@ def compare_market(
             if unaligned_shift_results
             else None
         ),
-        "overlap_start": detail.get_column("trade_date").min(),
-        "overlap_end": detail.get_column("trade_date").max(),
+        "overlap_start": detail.get_column("date").min(),
+        "overlap_end": detail.get_column("date").max(),
         "carver_dates": carver_dates.height,
         "globex_dates": globex_dates.height,
         "common_dates": detail.height,
         "carver_only_dates": carver_dates.join(
-            globex_dates, on="trade_date", how="anti"
+            globex_dates, on="date", how="anti"
         ).height,
         "globex_only_dates": globex_dates.join(
-            carver_dates, on="trade_date", how="anti"
+            carver_dates, on="date", how="anti"
         ).height,
         "same_day_nonroll_return_correlation": _correlation(
             nonroll, "carver_return", "globex_return"

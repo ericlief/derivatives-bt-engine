@@ -47,7 +47,7 @@ from derivatives_bt_engine.logging_config import setup_logger
 
 logger = setup_logger()
 
-HISTORY_SCHEMA_VERSION = 9
+HISTORY_SCHEMA_VERSION = 10
 DEFAULT_PYSYSTEMTRADE_DB_PATH = Path(
     "/home/dev/fin/db/pysystemtrade_reference.duckdb"
 )
@@ -55,14 +55,14 @@ DEFAULT_GLOBEX_DB_PATH = Path("/home/dev/fin/db/globex_mdp_3.0.duckdb")
 DEFAULT_FUTURES_CACHE_ROOT = Path(__file__).resolve().parents[3] / ".cache" / "futures"
 
 _SIGNAL_COLUMNS = {
-    "trade_date",
+    "date",
     "source_timestamp",
     "ret_1d",
     "signal_index",
     "quality_flag",
 }
 _MARK_COLUMNS = {
-    "trade_date",
+    "date",
     "source_timestamp",
     "mark_price",
     "contract_id",
@@ -70,7 +70,7 @@ _MARK_COLUMNS = {
     "quality_flag",
 }
 _CARRY_COLUMNS = {
-    "trade_date",
+    "date",
     "source_timestamp",
     "current_price",
     "current_contract",
@@ -79,7 +79,7 @@ _CARRY_COLUMNS = {
     "quality_flag",
 }
 _PANAMA_COLUMNS = {
-    "trade_date",
+    "date",
     "source_timestamp",
     "panama_price",
     "point_change",
@@ -108,7 +108,7 @@ class FuturesHistory:
     panama: pl.DataFrame = field(default_factory=lambda: _empty_panama_frame())
 
     def __post_init__(self) -> None:
-        """Validate stream schemas, date uniqueness, and signal-index levels."""
+        """Normalize date keys and validate stream schemas and levels."""
         _validate_stream("signal", self.signal, _SIGNAL_COLUMNS)
         _validate_stream("marks", self.marks, _MARK_COLUMNS)
         _validate_stream("carry", self.carry, _CARRY_COLUMNS, allow_empty=True)
@@ -135,7 +135,7 @@ class FuturesHistory:
             )
         return (
             signal.select(
-                pl.col("trade_date").alias("date"),
+                "date",
                 pl.col("signal_index").alias("close"),
                 "ret_1d",
                 "quality_flag",
@@ -153,7 +153,7 @@ class FuturesHistory:
         if self.panama.is_empty():
             raise ValueError("history has no generated Panama stream")
         return self.panama.select(
-            pl.col("trade_date").alias("date"),
+            "date",
             pl.col("panama_price").alias("close"),
             "point_change",
             "quality_flag",
@@ -175,18 +175,18 @@ def _validate_stream(
         return
     if frame.is_empty():
         raise ValueError(f"{name} stream must not be empty")
-    if frame.get_column("trade_date").null_count():
-        raise ValueError(f"{name} stream contains null trade dates")
-    duplicate_dates = frame.group_by("trade_date").len().filter(pl.col("len") > 1)
+    if frame.get_column("date").null_count():
+        raise ValueError(f"{name} stream contains null dates")
+    duplicate_dates = frame.group_by("date").len().filter(pl.col("len") > 1)
     if duplicate_dates.height:
-        raise ValueError(f"{name} stream contains duplicate trade dates")
+        raise ValueError(f"{name} stream contains duplicate dates")
 
 
 def _empty_carry_frame() -> pl.DataFrame:
     """Return a typed zero-row carry stream for sources without carry data."""
     return pl.DataFrame(
         schema={
-            "trade_date": pl.Date,
+            "date": pl.Date,
             "source_timestamp": pl.Datetime("us"),
             "current_price": pl.Float64,
             "current_contract": pl.String,
@@ -201,7 +201,7 @@ def _empty_panama_frame() -> pl.DataFrame:
     """Return a typed zero-row additive-price stream placeholder."""
     return pl.DataFrame(
         schema={
-            "trade_date": pl.Date,
+            "date": pl.Date,
             "source_timestamp": pl.Datetime("us"),
             "panama_price": pl.Float64,
             "point_change": pl.Float64,
@@ -312,12 +312,12 @@ class PysystemtradeHistoryProvider:
                     source_commit,
                 )
                 signal, marks, carry, panama = self._load_uncached(con, instrument_code)
-                if self.save_cache:
-                    cache_paths["signal"].parent.mkdir(parents=True, exist_ok=True)
-                    signal.write_parquet(cache_paths["signal"])
-                    marks.write_parquet(cache_paths["marks"])
-                    carry.write_parquet(cache_paths["carry"])
-                    panama.write_parquet(cache_paths["panama"])
+            if not cache_hit and self.save_cache:
+                cache_paths["signal"].parent.mkdir(parents=True, exist_ok=True)
+                signal.write_parquet(cache_paths["signal"])
+                marks.write_parquet(cache_paths["marks"])
+                carry.write_parquet(cache_paths["carry"])
+                panama.write_parquet(cache_paths["panama"])
         finally:
             con.close()
 
@@ -356,7 +356,7 @@ class PysystemtradeHistoryProvider:
         adjusted = con.execute(
             """
             SELECT
-                trade_date,
+                trade_date AS date,
                 source_timestamp,
                 adjusted_price
             FROM daily.adjusted_prices
@@ -368,7 +368,7 @@ class PysystemtradeHistoryProvider:
         raw_roll_inputs = con.execute(
             """
             SELECT
-                trade_date,
+                trade_date AS date,
                 source_timestamp,
                 price AS current_price,
                 price_contract AS current_contract,
@@ -385,7 +385,7 @@ class PysystemtradeHistoryProvider:
         marks = con.execute(
             """
             SELECT
-                trade_date,
+                trade_date AS date,
                 source_timestamp,
                 mark_price,
                 contract_id
@@ -399,7 +399,7 @@ class PysystemtradeHistoryProvider:
             raise ValueError(f"No price history for {instrument_code}")
 
         marks = (
-            marks.sort("trade_date")
+            marks.sort("date")
             .with_columns(
                 (
                     pl.col("contract_id")
@@ -420,18 +420,18 @@ class PysystemtradeHistoryProvider:
         generated = select_daily_continuous(build_continuous_futures(raw_roll_inputs))
         signal = generated.signal.join(
             adjusted.select(
-                "trade_date",
+                "date",
                 pl.col("adjusted_price").alias("source_adjusted_price"),
             ),
-            on="trade_date",
+            on="date",
             how="left",
         )
         panama = generated.panama.join(
             adjusted.select(
-                "trade_date",
+                "date",
                 pl.col("adjusted_price").alias("source_adjusted_price"),
             ),
-            on="trade_date",
+            on="date",
             how="left",
         ).with_columns(
             (pl.col("panama_price") - pl.col("source_adjusted_price"))
@@ -441,7 +441,7 @@ class PysystemtradeHistoryProvider:
         carry = con.execute(
             """
             SELECT
-                trade_date,
+                trade_date AS date,
                 source_timestamp,
                 current_price,
                 current_contract,
@@ -483,7 +483,7 @@ WITH bars AS (
 )
 SELECT
     ts_event AS source_timestamp,
-    CAST(ts_event AS DATE) AS trade_date,
+    CAST(ts_event AS DATE) AS date,
     open,
     high,
     low,
@@ -540,7 +540,7 @@ naive_front AS (
 )
 SELECT
     b.ts_event AS source_timestamp,
-    CAST(b.ts_event AS DATE) AS trade_date,
+    CAST(b.ts_event AS DATE) AS date,
     b.open,
     b.high,
     b.low,
@@ -563,12 +563,12 @@ def select_calendar_contract_observations(
 ) -> pl.DataFrame:
     """Select one held contract per session under a calendar roll policy.
 
-    ``raw`` must contain ``trade_date``, ``expiration``, and ``volume`` for
+    ``raw`` must contain ``date``, ``expiration``, and ``volume`` for
     every available dated contract. The contract calendar is formed before
     daily rows are selected, so a missing held-contract observation remains a
     gap instead of silently substituting another expiry.
     """
-    required = {"trade_date", "expiration", "volume"}
+    required = {"date", "expiration", "volume"}
     missing = required - set(raw.columns)
     if missing:
         raise ValueError(
@@ -577,14 +577,14 @@ def select_calendar_contract_observations(
     if policy.mode != "calendar":
         raise ValueError("calendar contract selection requires a calendar policy")
 
-    all_dates = raw.get_column("trade_date").unique().sort().to_list()
+    all_dates = raw.get_column("date").unique().sort().to_list()
     allowed = (
         raw.filter(
             pl.col("expiration").dt.month().is_in(policy.hold_month_numbers)
         )
-        .sort("trade_date", "expiration", "volume")
+        .sort("date", "expiration", "volume")
         .unique(
-            subset=["trade_date", "expiration"],
+            subset=["date", "expiration"],
             keep="last",
             maintain_order=True,
         )
@@ -593,35 +593,35 @@ def select_calendar_contract_observations(
         return allowed
     contracts = (
         allowed.group_by("expiration")
-        .agg(pl.col("trade_date").min().alias("first_trade_date"))
+        .agg(pl.col("date").min().alias("first_date"))
         .sort("expiration")
         .to_dicts()
     )
     schedule_dates: list[date] = []
     schedule_expirations: list[date] = []
-    for trade_date in all_dates:
+    for session_date in all_dates:
         held_expiration = next(
             (
                 row["expiration"]
                 for row in contracts
-                if row["first_trade_date"] <= trade_date
-                and trade_date
+                if row["first_date"] <= session_date
+                and session_date
                 < row["expiration"] + timedelta(days=policy.roll_offset_days)
             ),
             None,
         )
         if held_expiration is not None:
-            schedule_dates.append(trade_date)
+            schedule_dates.append(session_date)
             schedule_expirations.append(held_expiration)
     schedule = pl.DataFrame({
-        "trade_date": pl.Series(schedule_dates, dtype=pl.Date),
+        "date": pl.Series(schedule_dates, dtype=pl.Date),
         "expiration": pl.Series(schedule_expirations, dtype=pl.Date),
     })
     return schedule.join(
         allowed,
-        on=["trade_date", "expiration"],
+        on=["date", "expiration"],
         how="inner",
-    ).sort("trade_date")
+    ).sort("date")
 
 
 def build_contract_history_streams(
@@ -629,13 +629,13 @@ def build_contract_history_streams(
 ) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, pl.DataFrame]:
     """Transform selected dated-contract rows into canonical history streams.
 
-    Required columns are ``trade_date``, ``source_timestamp``, ``mark_price``,
+    Required columns are ``date``, ``source_timestamp``, ``mark_price``,
     ``instrument_id``, ``expiration``, ``volume``, and
     ``previous_contract_close``. The returned tuple contains signal, marks,
     empty carry, and additive continuous-price streams.
     """
     required = {
-        "trade_date",
+        "date",
         "source_timestamp",
         "mark_price",
         "instrument_id",
@@ -648,11 +648,11 @@ def build_contract_history_streams(
         raise ValueError(
             f"selected contract input missing columns: {sorted(missing)}"
         )
-    raw = raw.sort("trade_date").with_columns(
+    raw = raw.sort("date").with_columns(
         pl.col("expiration").dt.strftime("%Y%m00").alias("contract_id")
     )
     marks = raw.select(
-        "trade_date",
+        "date",
         "source_timestamp",
         "mark_price",
         "contract_id",
@@ -670,7 +670,7 @@ def build_contract_history_streams(
     )
 
     inputs = raw.select(
-        "trade_date",
+        "date",
         "source_timestamp",
         pl.col("mark_price").alias("current_price"),
         pl.col("contract_id").alias("current_contract"),
@@ -776,12 +776,15 @@ class GlobexHistoryProvider:
                         f"contract observations for {instrument_code}"
                     )
             signal, marks, carry, panama = build_contract_history_streams(raw)
-            if self.save_cache:
-                cache_paths["signal"].parent.mkdir(parents=True, exist_ok=True)
-                signal.write_parquet(cache_paths["signal"])
-                marks.write_parquet(cache_paths["marks"])
-                carry.write_parquet(cache_paths["carry"])
-                panama.write_parquet(cache_paths["panama"])
+        cache_hit = self.use_cache and all(
+            path.exists() for path in cache_paths.values()
+        )
+        if not cache_hit and self.save_cache:
+            cache_paths["signal"].parent.mkdir(parents=True, exist_ok=True)
+            signal.write_parquet(cache_paths["signal"])
+            marks.write_parquet(cache_paths["marks"])
+            carry.write_parquet(cache_paths["carry"])
+            panama.write_parquet(cache_paths["panama"])
 
         try:
             spec = get_spec(instrument_code)
@@ -843,11 +846,11 @@ class HybridHistoryProvider:
                 raise ValueError("historical date alignment requires an end date")
             old = align_history_to_previous_sessions(
                 old,
-                new.signal.get_column("trade_date").to_list(),
+                new.signal.get_column("date").to_list(),
                 through=self.historical_date_alignment_through,
             )
-        primary_start = new.signal.get_column("trade_date").min()
-        historical_end = old.signal.get_column("trade_date").max()
+        primary_start = new.signal.get_column("date").min()
+        historical_end = old.signal.get_column("date").max()
         if primary_start is None or historical_end is None:
             raise ValueError(f"hybrid source is empty for {instrument_code}")
         if historical_end < primary_start:
@@ -857,7 +860,7 @@ class HybridHistoryProvider:
             )
         first_primary_return = (
             new.signal.filter(pl.col("return_valid"))
-            .get_column("trade_date")
+            .get_column("date")
             .min()
         )
         handoff = self.handoff_date or first_primary_return
@@ -876,8 +879,8 @@ class HybridHistoryProvider:
         # Stream ownership changes exactly once: historical owns dates before
         # handoff and primary owns handoff onward. Concatenate daily economic
         # increments first, then rebuild the arbitrary index level below.
-        old_signal = old.signal.filter(pl.col("trade_date") < handoff)
-        new_signal = new.signal.filter(pl.col("trade_date") >= handoff)
+        old_signal = old.signal.filter(pl.col("date") < handoff)
+        new_signal = new.signal.filter(pl.col("date") >= handoff)
         signal = pl.concat(
             [
                 _select_hybrid_signal(old_signal).with_columns(
@@ -888,7 +891,7 @@ class HybridHistoryProvider:
                 ),
             ],
             how="vertical",
-        ).sort("trade_date")
+        ).sort("date")
         # Vendor signal indices have unrelated bases. Rebase the spliced return
         # path to 100 so the handoff cannot create a false level jump.
         signal = signal.with_columns(
@@ -903,21 +906,21 @@ class HybridHistoryProvider:
         # latest raw signal price, matching Carver's convention that the most
         # recent contract remains unadjusted while later roll differentials
         # accumulate into earlier prices.
-        old_panama = old.panama.filter(pl.col("trade_date") < handoff)
-        new_panama = new.panama.filter(pl.col("trade_date") >= handoff)
+        old_panama = old.panama.filter(pl.col("date") < handoff)
+        new_panama = new.panama.filter(pl.col("date") >= handoff)
         increments = pl.concat(
             [
                 old_panama.select(
-                    "trade_date", "source_timestamp", "point_change",
+                    "date", "source_timestamp", "point_change",
                     "contract_id", "is_roll", "quality_flag",
                 ).with_columns(pl.lit(old.source).alias("source_segment")),
                 new_panama.select(
-                    "trade_date", "source_timestamp", "point_change",
+                    "date", "source_timestamp", "point_change",
                     "contract_id", "is_roll", "quality_flag",
                 ).with_columns(pl.lit(new.source).alias("source_segment")),
             ],
             how="vertical",
-        ).sort("trade_date")
+        ).sort("date")
         latest_signal_price = signal.get_column("current_price")[-1]
         total_point_change = increments.get_column("point_change").sum()
         if latest_signal_price is None or total_point_change is None:
@@ -937,22 +940,22 @@ class HybridHistoryProvider:
         # normalized across the handoff.
         marks = pl.concat(
             [
-                old.marks.filter(pl.col("trade_date") < handoff),
-                new.marks.filter(pl.col("trade_date") >= handoff),
+                old.marks.filter(pl.col("date") < handoff),
+                new.marks.filter(pl.col("date") >= handoff),
             ],
             how="diagonal_relaxed",
-        ).sort("trade_date").with_columns(
+        ).sort("date").with_columns(
             (pl.col("contract_id") != pl.col("contract_id").shift(1))
             .fill_null(False)
             .alias("is_roll")
         )
         carry = pl.concat(
             [
-                old.carry.filter(pl.col("trade_date") < handoff),
-                new.carry.filter(pl.col("trade_date") >= handoff),
+                old.carry.filter(pl.col("date") < handoff),
+                new.carry.filter(pl.col("date") >= handoff),
             ],
             how="diagonal_relaxed",
-        ).sort("trade_date")
+        ).sort("date")
         metadata = {
             "historical_source": old.source,
             "historical_instrument": historical_code,
@@ -1002,7 +1005,7 @@ def _select_hybrid_signal(signal: pl.DataFrame) -> pl.DataFrame:
             "hybrid signal is missing ref_price/reference_price column"
         )
     return signal.select(
-        "trade_date",
+        "date",
         "source_timestamp",
         "current_price",
         "contract_id",
@@ -1047,8 +1050,8 @@ def stitch_futures_histories(
 
     handoffs: list[date] = []
     for older, newer in zip(ordered, ordered[1:]):
-        older_end = older.signal.get_column("trade_date").max()
-        newer_start = newer.signal.get_column("trade_date").min()
+        older_end = older.signal.get_column("date").max()
+        newer_start = newer.signal.get_column("date").min()
         if older_end is None or newer_start is None:
             raise ValueError("history stitching cannot use an empty source")
         if older_end < newer_start:
@@ -1059,7 +1062,7 @@ def stitch_futures_histories(
             )
         first_valid = (
             newer.signal.filter(pl.col("return_valid"))
-            .get_column("trade_date")
+            .get_column("date")
             .min()
         )
         if first_valid is None:
@@ -1072,9 +1075,9 @@ def stitch_futures_histories(
         """Select the date interval owned by one priority-ordered source."""
         expression = pl.lit(True)
         if index > 0:
-            expression &= pl.col("trade_date") >= handoffs[index - 1]
+            expression &= pl.col("date") >= handoffs[index - 1]
         if index < len(handoffs):
-            expression &= pl.col("trade_date") < handoffs[index]
+            expression &= pl.col("date") < handoffs[index]
         return frame.filter(expression)
 
     signal = (
@@ -1086,8 +1089,8 @@ def stitch_futures_histories(
             ],
             how="vertical",
         )
-        .sort("trade_date", "source_timestamp")
-        .unique(subset="trade_date", keep="last", maintain_order=True)
+        .sort("date", "source_timestamp")
+        .unique(subset="date", keep="last", maintain_order=True)
         .with_columns(
             (
                 (1.0 + pl.col("ret_1d").fill_null(0.0)).cum_prod()
@@ -1101,7 +1104,7 @@ def stitch_futures_histories(
             [
                 owned_rows(history.panama, index)
                 .select(
-                    "trade_date",
+                    "date",
                     "source_timestamp",
                     "point_change",
                     "contract_id",
@@ -1113,8 +1116,8 @@ def stitch_futures_histories(
             ],
             how="vertical",
         )
-        .sort("trade_date", "source_timestamp")
-        .unique(subset="trade_date", keep="last", maintain_order=True)
+        .sort("date", "source_timestamp")
+        .unique(subset="date", keep="last", maintain_order=True)
     )
     latest_price = signal.get_column("current_price")[-1]
     if latest_price is None:
@@ -1139,8 +1142,8 @@ def stitch_futures_histories(
             ],
             how="diagonal_relaxed",
         )
-        .sort("trade_date", "source_timestamp")
-        .unique(subset="trade_date", keep="last", maintain_order=True)
+        .sort("date", "source_timestamp")
+        .unique(subset="date", keep="last", maintain_order=True)
         .with_columns(
             (pl.col("contract_id") != pl.col("contract_id").shift(1))
             .fill_null(False)
@@ -1157,8 +1160,8 @@ def stitch_futures_histories(
             ],
             how="diagonal_relaxed",
         )
-        .sort("trade_date", "source_timestamp")
-        .unique(subset="trade_date", keep="last", maintain_order=True)
+        .sort("date", "source_timestamp")
+        .unique(subset="date", keep="last", maintain_order=True)
     )
 
     logger.info(
@@ -1198,7 +1201,7 @@ def align_history_to_previous_sessions(
     if not sessions:
         raise ValueError("primary session calendar is empty")
     date_map: dict[date, date] = {}
-    for value in history.signal.get_column("trade_date").to_list():
+    for value in history.signal.get_column("date").to_list():
         if value > through:
             continue
         position = bisect.bisect_left(sessions, value) - 1
@@ -1211,15 +1214,15 @@ def align_history_to_previous_sessions(
             return frame
         return (
             frame.with_columns(
-                pl.col("trade_date")
-                .replace_strict(date_map, default=pl.col("trade_date"))
-                .alias("trade_date")
+                pl.col("date")
+                .replace_strict(date_map, default=pl.col("date"))
+                .alias("date")
             )
-            .sort("trade_date", "source_timestamp")
-            .unique(subset="trade_date", keep="last", maintain_order=True)
+            .sort("date", "source_timestamp")
+            .unique(subset="date", keep="last", maintain_order=True)
         )
 
-    signal = remap(history.signal).sort("trade_date").with_columns(
+    signal = remap(history.signal).sort("date").with_columns(
         pl.col("signal_index").pct_change().alias("ret_1d"),
         (pl.col("contract_id") != pl.col("contract_id").shift(1))
         .fill_null(False)
@@ -1231,10 +1234,10 @@ def align_history_to_previous_sessions(
         .alias("ref_price"),
         pl.col("ret_1d").is_not_null().alias("return_valid"),
     )
-    panama = remap(history.panama).sort("trade_date").with_columns(
+    panama = remap(history.panama).sort("date").with_columns(
         pl.col("panama_price").diff().alias("point_change")
     )
-    marks = remap(history.marks).sort("trade_date").with_columns(
+    marks = remap(history.marks).sort("date").with_columns(
         (pl.col("contract_id") != pl.col("contract_id").shift(1))
         .fill_null(False)
         .alias("is_roll")

@@ -14,7 +14,7 @@ from derivatives_bt_engine.data import tsmom_history as th
 
 def _history() -> FuturesHistory:
     raw = pl.DataFrame({
-        'trade_date': [date(2020, 1, 1), date(2020, 1, 2), date(2020, 1, 3)],
+        'date': [date(2020, 1, 1), date(2020, 1, 2), date(2020, 1, 3)],
         'source_timestamp': [datetime(2020, 1, 1, 23), datetime(2020, 1, 2, 23), datetime(2020, 1, 3, 23)],
         'current_price': [100.0, 101.0, 122.0],
         'current_contract': ['20200100', '20200100', '20200200'],
@@ -23,12 +23,12 @@ def _history() -> FuturesHistory:
     })
     generated = build_continuous_futures(raw)
     marks = generated.signal.select(
-        'trade_date', 'source_timestamp',
+        'date', 'source_timestamp',
         pl.col('current_price').alias('mark_price'), 'contract_id', 'is_roll',
         'quality_flag',
     )
     carry = pl.DataFrame(schema={
-        'trade_date': pl.Date, 'source_timestamp': pl.Datetime('us'),
+        'date': pl.Date, 'source_timestamp': pl.Datetime('us'),
         'current_price': pl.Float64, 'current_contract': pl.String,
         'carry_price': pl.Float64, 'carry_contract': pl.String,
         'quality_flag': pl.String,
@@ -42,6 +42,8 @@ def _history() -> FuturesHistory:
 def test_history_adapter_separates_mark_signal_and_pnl_levels() -> None:
     bars = th.history_to_tsmom_bars(_history())
 
+    assert bars.columns[0] == 'date'
+    assert 'trade_date' not in bars.columns and 'ts_event' not in bars.columns
     assert bars.get_column('close').to_list() == [100.0, 101.0, 122.0]
     assert bars.get_column('pnl_close').to_list() == [120.0, 121.0, 122.0]
     assert bars.get_column('signal_index').to_list()[0] == 100.0

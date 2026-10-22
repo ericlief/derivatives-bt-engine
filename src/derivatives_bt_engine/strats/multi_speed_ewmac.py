@@ -270,14 +270,14 @@ def build_ewmac_component_frame(
     assert combined is not None
     marks = getattr(history, "marks", None)
     if isinstance(marks, pl.DataFrame) and {
-        "trade_date",
+        "date",
         "mark_price",
     } <= set(marks.columns):
         # The Panama ``close`` is an additive signal level, not a contract
         # notional. Retain the actual selected-contract mark on the same date.
         contract_marks = (
             marks.select(
-                pl.col("trade_date").alias("date"),
+                "date",
                 pl.col("mark_price").alias("contract_close"),
             )
             .sort("date")
@@ -288,14 +288,14 @@ def build_ewmac_component_frame(
         combined = combined.with_columns(
             pl.lit(None, dtype=pl.Float64).alias("contract_close")
         )
-    if isinstance(marks, pl.DataFrame) and {"trade_date", "is_roll"} <= set(
+    if isinstance(marks, pl.DataFrame) and {"date", "is_roll"} <= set(
         marks.columns
     ):
         # One Panama date owns one roll decision. Group defensively because a
         # provider with multiple marks on a date should still emit one event.
         roll_markers = (
             marks.select(
-                pl.col("trade_date").alias("date"),
+                "date",
                 pl.col("is_roll").fill_null(False).cast(pl.Boolean),
             )
             .group_by("date")

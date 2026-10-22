@@ -20,7 +20,7 @@ from derivatives_bt_engine.data.futures_history import FuturesHistory
 def _empty_carry() -> pl.DataFrame:
     return pl.DataFrame(
         schema={
-            "trade_date": pl.Date,
+            "date": pl.Date,
             "source_timestamp": pl.Datetime("us"),
             "current_price": pl.Float64,
             "current_contract": pl.String,
@@ -49,7 +49,7 @@ def _history(source: str, roll_index: int) -> FuturesHistory:
     is_roll[roll_index] = True
     signal = pl.DataFrame(
         {
-            "trade_date": dates,
+            "date": dates,
             "source_timestamp": timestamps,
             "ret_1d": returns,
             "signal_index": index_values,
@@ -60,7 +60,7 @@ def _history(source: str, roll_index: int) -> FuturesHistory:
     )
     marks = pl.DataFrame(
         {
-            "trade_date": dates,
+            "date": dates,
             "source_timestamp": timestamps,
             "mark_price": [100.0 + index * 0.01 for index in range(400)],
             "contract_id": contracts,
@@ -82,7 +82,7 @@ def _dated_history(source: str, dates: list[date]) -> FuturesHistory:
     timestamps = [datetime.combine(value, datetime.min.time()) for value in dates]
     signal = pl.DataFrame(
         {
-            "trade_date": dates,
+            "date": dates,
             "source_timestamp": timestamps,
             "ret_1d": [None, 0.01, 0.02],
             "signal_index": [100.0, 101.0, 103.02],
@@ -93,7 +93,7 @@ def _dated_history(source: str, dates: list[date]) -> FuturesHistory:
     )
     marks = pl.DataFrame(
         {
-            "trade_date": dates,
+            "date": dates,
             "source_timestamp": timestamps,
             "mark_price": [100.0, 101.0, 102.0],
             "contract_id": ["20200300"] * 3,
@@ -170,7 +170,7 @@ def test_previous_session_alignment_uses_actual_globex_dates_not_calendar_days()
         _dated_history("globex", globex_dates),
     )
 
-    assert aligned.signal.get_column("trade_date").to_list() == globex_dates
+    assert aligned.signal.get_column("date").to_list() == globex_dates
     assert all(value.weekday() < 5 for value in globex_dates)
     assert collapsed == 0
 

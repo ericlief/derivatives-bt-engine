@@ -360,7 +360,7 @@ def test_carver_cache_path_is_source_and_version_namespaced(tmp_path: Path) -> N
         tmp_path
         / "cache"
         / "pysystemtrade"
-        / "v9"
+        / "v10"
         / SOURCE_COMMIT[:12]
         / "SP500_signal.parquet"
     )
@@ -417,15 +417,15 @@ def test_carver_loader_collapses_sunday_into_monday_and_recomputes_return(
 
     history = provider.load("SP500")
 
-    assert history.signal.get_column("trade_date")[-1] == monday_trade_date
+    assert history.signal.get_column("date")[-1] == monday_trade_date
     assert history.signal.get_column("source_timestamp")[-1] == monday_timestamp
     assert history.signal.get_column("point_change")[-1] == pytest.approx(92.0)
     assert history.signal.get_column("ret_1d")[-1] == pytest.approx(200.0 / 108.0 - 1.0)
-    assert date(2020, 1, 5) not in history.signal.get_column("trade_date").to_list()
+    assert date(2020, 1, 5) not in history.signal.get_column("date").to_list()
     assert history.signal.height == 5
-    assert history.marks.get_column("trade_date")[-1] == monday_trade_date
+    assert history.marks.get_column("date")[-1] == monday_trade_date
     assert history.marks.get_column("source_timestamp")[-1] == monday_timestamp
-    assert history.carry.get_column("trade_date")[-1] == monday_trade_date
+    assert history.carry.get_column("date")[-1] == monday_trade_date
     assert history.carry.get_column("source_timestamp")[-1] == monday_timestamp
 
 
@@ -572,7 +572,7 @@ def test_globex_calendar_policy_reports_empty_schedule(tmp_path: Path) -> None:
 def test_history_rejects_nonpositive_signal_index() -> None:
     signal = pl.DataFrame(
         {
-            "trade_date": [datetime(2020, 1, 1).date()],
+            "date": [datetime(2020, 1, 1).date()],
             "source_timestamp": [datetime(2020, 1, 1)],
             "ret_1d": [None],
             "signal_index": [0.0],
@@ -581,7 +581,7 @@ def test_history_rejects_nonpositive_signal_index() -> None:
     )
     marks = pl.DataFrame(
         {
-            "trade_date": [datetime(2020, 1, 1).date()],
+            "date": [datetime(2020, 1, 1).date()],
             "source_timestamp": [datetime(2020, 1, 1)],
             "mark_price": [100.0],
             "contract_id": ["20200300"],
@@ -599,7 +599,7 @@ def test_history_rejects_nonpositive_signal_index() -> None:
             marks=marks,
             carry=pl.DataFrame(
                 schema={
-                    "trade_date": pl.Date,
+                    "date": pl.Date,
                     "source_timestamp": pl.Datetime,
                     "current_price": pl.Float64,
                     "current_contract": pl.String,

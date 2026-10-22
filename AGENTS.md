@@ -35,6 +35,12 @@
 
 ## Public report schemas
 
+- Use `date` as the canonical date column in project data/history frames,
+  notebook-facing frames, and persisted reports. Native Globex tables and
+  legacy calculation APIs may retain `ts_event` at their native boundary;
+  adapt to or from `date` at that boundary. Do not expose `trade_date` as a
+  dataframe column; source-database fields may keep their upstream name.
+
 - Keep internal dataframe and calculation names descriptive. Compact names only
   at the public report boundary.
 - Use Parquet for Phase 1 and Phase 2 outputs, including the human-readable

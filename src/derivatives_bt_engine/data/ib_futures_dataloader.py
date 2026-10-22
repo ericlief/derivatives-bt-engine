@@ -240,7 +240,7 @@ def load_roll_cycle_ib_contract_history(
     Returns
     -------
     polars.DataFrame
-        Overlapping dated-contract bars concatenated by ``trade_date`` and
+        Overlapping dated-contract bars concatenated by ``date`` and
         ``contract_month``. Contract IDs, local symbols, exact expiries, and
         Roll metadata are retained so a later step can select the held
         contract and construct roll-neutral increments.
@@ -371,8 +371,8 @@ def load_roll_cycle_ib_contract_history(
                 f"{instrument_code} {contract_month}: IB bars missing date column"
             )
         histories.append(
-            bars.rename({'date': 'trade_date'}).with_columns(
-                pl.col('trade_date').cast(pl.Date),
+            bars.with_columns(
+                pl.col('date').cast(pl.Date),
                 pl.lit('ib').alias('source'),
                 pl.lit(instrument_code).alias('instrument_code'),
                 pl.lit(ib_symbol).alias('ib_symbol'),
@@ -397,11 +397,11 @@ def load_roll_cycle_ib_contract_history(
     result = (
         pl.concat(histories, how='diagonal_relaxed')
         .unique(
-            subset=['ib_contract_id', 'trade_date'],
+            subset=['ib_contract_id', 'date'],
             keep='last',
             maintain_order=True,
         )
-        .sort('trade_date', 'contract_month')
+        .sort('date', 'contract_month')
     )
     logger.info(
         "ib_dated_history complete instrument=%s contracts=%d rows=%d "
@@ -409,8 +409,8 @@ def load_roll_cycle_ib_contract_history(
         instrument_code,
         result.get_column('ib_contract_id').n_unique(),
         result.height,
-        result.get_column('trade_date').min(),
-        result.get_column('trade_date').max(),
+        result.get_column('date').min(),
+        result.get_column('date').max(),
     )
     return result
 
@@ -437,7 +437,7 @@ def build_ib_contract_history(
         constructed continuous signal paths.
     """
     required = {
-        'trade_date',
+        'date',
         'close',
         'volume',
         'expiration',
@@ -477,13 +477,13 @@ def build_ib_contract_history(
     # the first held day after a roll has a same-contract reference price.
     raw = (
         contract_history.unique(
-            subset=['ib_contract_id', 'trade_date'],
+            subset=['ib_contract_id', 'date'],
             keep='last',
             maintain_order=True,
         )
-        .sort('ib_contract_id', 'trade_date')
+        .sort('ib_contract_id', 'date')
         .with_columns(
-            pl.col('trade_date')
+            pl.col('date')
             .cast(pl.Datetime('us'))
             .alias('source_timestamp'),
             pl.col('close').cast(pl.Float64).alias('mark_price'),
@@ -494,7 +494,7 @@ def build_ib_contract_history(
             .over('ib_contract_id')
             .alias('previous_contract_close'),
         )
-        .sort('trade_date', 'expiration')
+        .sort('date', 'expiration')
     )
     selected = select_calendar_contract_observations(raw, policy)
     if selected.is_empty():

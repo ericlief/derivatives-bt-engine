@@ -28,7 +28,7 @@ def _observations(
     dates = [start + timedelta(days=i) for i in range(len(prices))]
     return pl.DataFrame(
         {
-            "trade_date": dates,
+            "date": dates,
             "source_timestamp": [datetime.combine(value, datetime.min.time()) for value in dates],
             "current_price": prices,
             "current_contract": contracts,
@@ -83,7 +83,7 @@ def test_daily_selection_chains_all_intraday_moves_and_propagates_invalidity() -
     day_two = date(2020, 1, 2)
     observations = pl.DataFrame(
         {
-            "trade_date": [day_one, day_one, day_two, day_two],
+            "date": [day_one, day_one, day_two, day_two],
             "source_timestamp": [
                 datetime(2020, 1, 1, 12), datetime(2020, 1, 1, 23),
                 datetime(2020, 1, 2, 12), datetime(2020, 1, 2, 23),
@@ -108,7 +108,7 @@ def test_daily_selection_chains_all_intraday_moves_and_propagates_invalidity() -
 def test_daily_selection_rebuilds_index_after_invalid_session_mask() -> None:
     observations = pl.DataFrame(
         {
-            "trade_date": [
+            "date": [
                 date(2020, 1, 1),
                 date(2020, 1, 2), date(2020, 1, 2),
                 date(2020, 1, 3), date(2020, 1, 3),
@@ -148,7 +148,7 @@ def _history(source: str, start: date, prices: list[float]) -> FuturesHistory:
         )
     )
     marks = generated.signal.select(
-        "trade_date",
+        "date",
         "source_timestamp",
         pl.col("current_price").alias("mark_price"),
         "contract_id",
@@ -157,7 +157,7 @@ def _history(source: str, start: date, prices: list[float]) -> FuturesHistory:
     )
     carry = pl.DataFrame(
         schema={
-            "trade_date": pl.Date,
+            "date": pl.Date,
             "source_timestamp": pl.Datetime("us"),
             "current_price": pl.Float64,
             "current_contract": pl.String,
@@ -186,7 +186,7 @@ def test_hybrid_provider_rebuilds_levels_and_three_signal_harness_routes_inputs(
         handoff_date=date(2020, 1, 4),
     ).load("TEST")
 
-    assert history.signal.get_column("trade_date").to_list() == [
+    assert history.signal.get_column("date").to_list() == [
         date(2020, 1, 1), date(2020, 1, 2), date(2020, 1, 3),
         date(2020, 1, 4), date(2020, 1, 5), date(2020, 1, 6),
     ]

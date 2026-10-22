@@ -50,7 +50,7 @@ def history_to_tsmom_bars(history: FuturesHistory) -> pl.DataFrame:
     and ``contract_id`` retain the selected executable mark and roll identity.
     """
     signal_columns = [
-        "trade_date",
+        "date",
         "source_timestamp",
         "signal_index",
         "ret_1d",
@@ -61,26 +61,25 @@ def history_to_tsmom_bars(history: FuturesHistory) -> pl.DataFrame:
         signal_columns.append("source_segment")
     signal = history.signal.select(signal_columns)
     marks = history.marks.select(
-        "trade_date",
+        "date",
         pl.col("mark_price").alias("close"),
         "contract_id",
         "is_roll",
     )
     panama = history.panama.select(
-        "trade_date",
+        "date",
         "panama_price",
         "point_change",
     )
     # An inner join makes every downstream row fully owned by all three input
     # streams; silently forward-filling a missing mark or Panama increment here
     # would manufacture either P&L or a signal observation.
-    bars = signal.join(marks, on="trade_date", how="inner").join(
-        panama, on="trade_date", how="inner"
-    ).sort("trade_date")
+    bars = signal.join(marks, on="date", how="inner").join(
+        panama, on="date", how="inner"
+    ).sort("date")
     if "source_segment" not in bars.columns:
         bars = bars.with_columns(pl.lit(history.source).alias("source_segment"))
     return bars.with_columns(
-        pl.col("trade_date").alias("ts_event"),
         pl.col("panama_price").alias("pnl_close"),
         pl.when(pl.col("source_segment") == "pysystemtrade")
         .then(pl.lit("research_approximation"))
@@ -92,7 +91,7 @@ def history_to_tsmom_bars(history: FuturesHistory) -> pl.DataFrame:
             dtype=pl.Date,
         ),
     ).select(
-        "ts_event",
+        "date",
         "close",
         "pnl_close",
         "signal_index",
@@ -211,8 +210,8 @@ def load_source_neutral_histories(
             "history_schema_version": history.schema_version,
             "resolved_globex_symbol": globex_symbol,
             "source": history.source,
-            "start_date": history.signal.get_column("trade_date").min(),
-            "end_date": history.signal.get_column("trade_date").max(),
+            "start_date": history.signal.get_column("date").min(),
+            "end_date": history.signal.get_column("date").max(),
             "invalid_return_rows": invalid.height,
             "quality_flags": invalid.group_by("quality_flag").len().to_dicts(),
             "globex_roll_policy_resolution": roll_policy_resolution,

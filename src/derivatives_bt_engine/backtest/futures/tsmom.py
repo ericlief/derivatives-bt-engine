@@ -610,6 +610,12 @@ def _load_backtest_data(
         allow_candidate_mappings=config.allow_candidate_mappings,
         globex_roll_policy_overrides=config.globex_roll_policy_overrides,
     )
+    # The source-neutral public adapter uses ``date``. TSMOM's existing
+    # calculation engine retains its historical ``ts_event`` key internally.
+    price_data = {
+        symbol: frame.rename({'date': 'ts_event'})
+        for symbol, frame in price_data.items()
+    }
     vix = pl.read_parquet(VIX_FILE_PATH).select(['date', 'close']).rename(
         {'close': 'vix_close'}
     ).sort('date')

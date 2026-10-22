@@ -37,7 +37,7 @@ def build_continuous_futures(
 ) -> ContinuousFuturesResult:
     """Build roll-neutral returns and an additive Panama series.
 
-    Required columns are ``trade_date``, ``source_timestamp``,
+    Required columns are ``date``, ``source_timestamp``,
     ``current_price`` and ``current_contract``.  Carver-style input also has
     ``forward_price`` and ``forward_contract``: on a roll, yesterday's
     forward quote must identify today's selected contract.  A provider that
@@ -54,7 +54,7 @@ def build_continuous_futures(
     remain valid across negative prices when the contract match is valid.
     """
     required = {
-        "trade_date",
+        "date",
         "source_timestamp",
         "current_price",
         "current_contract",
@@ -178,7 +178,7 @@ def build_continuous_futures(
         pl.Series("quality_flag", qualities, dtype=pl.String),
     )
     signal = enriched.select(
-        "trade_date",
+        "date",
         "source_timestamp",
         "current_price",
         pl.col("current_contract").alias("contract_id"),
@@ -193,7 +193,7 @@ def build_continuous_futures(
     panama = enriched.with_columns(
         pl.Series("panama_price", panama_prices, dtype=pl.Float64)
     ).select(
-        "trade_date",
+        "date",
         "source_timestamp",
         "panama_price",
         "point_change",
@@ -209,9 +209,9 @@ def build_continuous_futures(
 def select_daily_last(frame: pl.DataFrame) -> pl.DataFrame:
     """Select the last derived observation per normalized trade session."""
     return (
-        frame.sort("trade_date", "source_timestamp")
-        .unique(subset="trade_date", keep="last", maintain_order=True)
-        .sort("trade_date")
+        frame.sort("date", "source_timestamp")
+        .unique(subset="date", keep="last", maintain_order=True)
+        .sort("date")
     )
 
 
@@ -231,7 +231,7 @@ def select_daily_continuous(
             ~pl.col("return_valid")
             & (pl.col("quality_flag") != "initial_observation")
         )
-        .get_column("trade_date")
+        .get_column("date")
         .unique()
         .to_list()
     )
@@ -245,9 +245,9 @@ def select_daily_continuous(
         .then(pl.col("current_price") / (1.0 + pl.col("ret_1d")))
         .otherwise(None)
         .alias("ref_price"),
-        (~pl.col("trade_date").is_in(invalid_dates)
+        (~pl.col("date").is_in(invalid_dates)
          & pl.col("ret_1d").is_not_null()).alias("return_valid"),
-        pl.when(pl.col("trade_date").is_in(invalid_dates))
+        pl.when(pl.col("date").is_in(invalid_dates))
         .then(pl.lit("invalid_intraday_return"))
         .when(pl.col("ret_1d").is_null())
         .then(pl.lit("initial_observation"))
@@ -268,8 +268,8 @@ def select_daily_continuous(
             * 100.0
         ).alias("signal_index")
     ).join(
-        panama.select("trade_date", "point_change"),
-        on="trade_date",
+        panama.select("date", "point_change"),
+        on="date",
         how="left",
         suffix="_panama",
     ).drop("point_change").rename(

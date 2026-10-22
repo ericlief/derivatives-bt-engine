@@ -24,7 +24,7 @@ def _history() -> SimpleNamespace:
         "quality_flag": [""] * 8,
     })
     marks = pl.DataFrame({
-        "trade_date": bars.get_column("date"),
+        "date": bars.get_column("date"),
         "mark_price": [
             200.0, 201.0, 202.0, 203.0,
             204.0, 205.0, 206.0, 207.0,

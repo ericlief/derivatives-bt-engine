@@ -432,16 +432,16 @@ def _history_pair_metrics(left, right) -> dict[str, object]:
     # either source omits an intermediate date.
     returns = (
         left.signal.select(
-            "trade_date", pl.col("signal_index").alias("index_a")
+            "date", pl.col("signal_index").alias("index_a")
         )
         .join(
             right.signal.select(
-                "trade_date", pl.col("signal_index").alias("index_b")
+                "date", pl.col("signal_index").alias("index_b")
             ),
-            on="trade_date",
+            on="date",
             how="inner",
         )
-        .sort("trade_date")
+        .sort("date")
         .with_columns(
             pl.col("index_a").pct_change().alias("return_a"),
             pl.col("index_b").pct_change().alias("return_b"),
@@ -454,14 +454,14 @@ def _history_pair_metrics(left, right) -> dict[str, object]:
         else None
     )
     contracts = left.marks.select(
-        "trade_date",
+        "date",
         pl.col("contract_id").alias("contract_a"),
     ).join(
         right.marks.select(
-            "trade_date",
+            "date",
             pl.col("contract_id").alias("contract_b"),
         ),
-        on="trade_date",
+        on="date",
         how="inner",
     )
     if contracts.height:
@@ -479,8 +479,8 @@ def _history_pair_metrics(left, right) -> dict[str, object]:
             "contract_month_agreement": None,
             "contract_id_agreement": None,
         }
-    rolls_left = left.marks.filter(pl.col("is_roll"))["trade_date"].to_list()
-    rolls_right = right.marks.filter(pl.col("is_roll"))["trade_date"].to_list()
+    rolls_left = left.marks.filter(pl.col("is_roll"))["date"].to_list()
+    rolls_right = right.marks.filter(pl.col("is_roll"))["date"].to_list()
     return {
         "overlap_return_days": returns.height,
         "return_correlation": return_correlation,
