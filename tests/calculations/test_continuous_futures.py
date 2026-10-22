@@ -193,6 +193,12 @@ def test_hybrid_provider_rebuilds_levels_and_three_signal_harness_routes_inputs(
     assert history.signal.get_column("source_segment").to_list() == [
         "carver", "carver", "carver", "globex", "globex", "globex"
     ]
+    assert history.panama.get_column("panama_price").to_list() == [
+        198.0, 199.0, 200.0, 202.0, 204.0, 206.0
+    ]
+    assert history.panama.get_column("panama_price")[-1] == (
+        history.signal.get_column("current_price")[-1]
+    )
     ewmac = run_futures_signal(
         history,
         FuturesSignalClass.CARVER_EWMAC,

@@ -870,8 +870,11 @@ class HybridHistoryProvider:
             ).alias("signal_index")
         )
 
-        # Additive price levels are likewise vendor-specific. Preserve point
-        # changes and reconstruct one continuous path from a neutral 1000 base.
+        # Panama levels are vendor-specific, but their point changes carry the
+        # roll-neutral increments. Rebuild those increments backward from the
+        # latest raw signal price, matching Carver's convention that the most
+        # recent contract remains unadjusted while later roll differentials
+        # accumulate into earlier prices.
         old_panama = old.panama.filter(pl.col("trade_date") < handoff)
         new_panama = new.panama.filter(pl.col("trade_date") >= handoff)
         increments = pl.concat(
@@ -887,9 +890,16 @@ class HybridHistoryProvider:
             ],
             how="vertical",
         ).sort("trade_date")
+        latest_signal_price = signal.get_column("current_price")[-1]
+        total_point_change = increments.get_column("point_change").sum()
+        if latest_signal_price is None or total_point_change is None:
+            raise ValueError(
+                f"hybrid Panama stream has no terminal price for {instrument_code}"
+            )
+        panama_start = float(latest_signal_price) - float(total_point_change)
         panama = increments.with_columns(
             (
-                pl.lit(1000.0)
+                pl.lit(panama_start)
                 + pl.col("point_change").fill_null(0.0).cum_sum()
             ).alias("panama_price")
         )
