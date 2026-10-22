@@ -28,7 +28,7 @@ import os
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Mapping, Optional, Protocol
+from typing import Mapping, Optional, Protocol, Sequence
 
 import duckdb
 import polars as pl
@@ -554,6 +554,132 @@ ORDER BY b.ts_event
 """
 
 
+def select_calendar_contract_observations(
+    raw: pl.DataFrame,
+    policy: ContractRollPolicy,
+) -> pl.DataFrame:
+    """Select one held contract per session under a calendar roll policy.
+
+    ``raw`` must contain ``trade_date``, ``expiration``, and ``volume`` for
+    every available dated contract. The contract calendar is formed before
+    daily rows are selected, so a missing held-contract observation remains a
+    gap instead of silently substituting another expiry.
+    """
+    required = {"trade_date", "expiration", "volume"}
+    missing = required - set(raw.columns)
+    if missing:
+        raise ValueError(
+            f"calendar contract input missing columns: {sorted(missing)}"
+        )
+    if policy.mode != "calendar":
+        raise ValueError("calendar contract selection requires a calendar policy")
+
+    all_dates = raw.get_column("trade_date").unique().sort().to_list()
+    allowed = (
+        raw.filter(
+            pl.col("expiration").dt.month().is_in(policy.hold_month_numbers)
+        )
+        .sort("trade_date", "expiration", "volume")
+        .unique(
+            subset=["trade_date", "expiration"],
+            keep="last",
+            maintain_order=True,
+        )
+    )
+    if allowed.is_empty():
+        return allowed
+    contracts = (
+        allowed.group_by("expiration")
+        .agg(pl.col("trade_date").min().alias("first_trade_date"))
+        .sort("expiration")
+        .to_dicts()
+    )
+    schedule_dates: list[date] = []
+    schedule_expirations: list[date] = []
+    for trade_date in all_dates:
+        held_expiration = next(
+            (
+                row["expiration"]
+                for row in contracts
+                if row["first_trade_date"] <= trade_date
+                and trade_date
+                < row["expiration"] + timedelta(days=policy.roll_offset_days)
+            ),
+            None,
+        )
+        if held_expiration is not None:
+            schedule_dates.append(trade_date)
+            schedule_expirations.append(held_expiration)
+    schedule = pl.DataFrame({
+        "trade_date": pl.Series(schedule_dates, dtype=pl.Date),
+        "expiration": pl.Series(schedule_expirations, dtype=pl.Date),
+    })
+    return schedule.join(
+        allowed,
+        on=["trade_date", "expiration"],
+        how="inner",
+    ).sort("trade_date")
+
+
+def build_contract_history_streams(
+    raw: pl.DataFrame,
+) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, pl.DataFrame]:
+    """Transform selected dated-contract rows into canonical history streams.
+
+    Required columns are ``trade_date``, ``source_timestamp``, ``mark_price``,
+    ``instrument_id``, ``expiration``, ``volume``, and
+    ``previous_contract_close``. The returned tuple contains signal, marks,
+    empty carry, and additive continuous-price streams.
+    """
+    required = {
+        "trade_date",
+        "source_timestamp",
+        "mark_price",
+        "instrument_id",
+        "expiration",
+        "volume",
+        "previous_contract_close",
+    }
+    missing = required - set(raw.columns)
+    if missing:
+        raise ValueError(
+            f"selected contract input missing columns: {sorted(missing)}"
+        )
+    raw = raw.sort("trade_date").with_columns(
+        pl.col("expiration").dt.strftime("%Y%m00").alias("contract_id")
+    )
+    marks = raw.select(
+        "trade_date",
+        "source_timestamp",
+        "mark_price",
+        "contract_id",
+        "instrument_id",
+        "expiration",
+        "volume",
+    ).with_columns(
+        (pl.col("contract_id") != pl.col("contract_id").shift(1))
+        .fill_null(False)
+        .alias("is_roll"),
+        pl.when(pl.col("mark_price") <= 0)
+        .then(pl.lit("nonpositive_mark"))
+        .otherwise(pl.lit(""))
+        .alias("quality_flag"),
+    )
+
+    inputs = raw.select(
+        "trade_date",
+        "source_timestamp",
+        pl.col("mark_price").alias("current_price"),
+        pl.col("contract_id").alias("current_contract"),
+        "previous_contract_close",
+    )
+    generated = build_continuous_futures(
+        inputs,
+        direct_reference_column="previous_contract_close",
+    )
+    return generated.signal, marks, _empty_carry_frame(), generated.panama
+
+
 @dataclass
 class GlobexHistoryProvider:
     """Build a policy-selected signal stream from paid/raw Globex contracts."""
@@ -640,13 +766,13 @@ class GlobexHistoryProvider:
             if raw.is_empty():
                 raise KeyError(f"Unknown or empty Globex futures asset: {instrument_code}")
             if policy.mode == "calendar":
-                raw = self._select_calendar_contracts(raw, policy)
+                raw = select_calendar_contract_observations(raw, policy)
                 if raw.is_empty():
                     raise ValueError(
                         f"Globex roll policy {policy.policy_id} selected no "
                         f"contract observations for {instrument_code}"
                     )
-            signal, marks, carry, panama = self._from_raw(raw)
+            signal, marks, carry, panama = build_contract_history_streams(raw)
             if self.save_cache:
                 cache_paths["signal"].parent.mkdir(parents=True, exist_ok=True)
                 signal.write_parquet(cache_paths["signal"])
@@ -675,107 +801,6 @@ class GlobexHistoryProvider:
                 "selected_rolls": int(marks.get_column("is_roll").sum()),
             },
         )
-
-    @staticmethod
-    def _select_calendar_contracts(
-        raw: pl.DataFrame,
-        policy: ContractRollPolicy,
-    ) -> pl.DataFrame:
-        """Select one deterministic held contract for every market date.
-
-        A contract is held from the prior held contract's desired roll date
-        until its own ``expiration + roll_offset_days``. The schedule is
-        determined from the contract calendar before joining daily marks, so
-        a missing held-contract bar becomes an honest gap rather than silently
-        substituting a different expiry.
-        """
-        all_dates = raw.get_column("trade_date").unique().sort().to_list()
-        allowed = (
-            raw.filter(pl.col("expiration").dt.month().is_in(
-                policy.hold_month_numbers
-            ))
-            .sort("trade_date", "expiration", "volume")
-            .unique(
-                subset=["trade_date", "expiration"],
-                keep="last",
-                maintain_order=True,
-            )
-        )
-        if allowed.is_empty():
-            return allowed
-        contracts = (
-            allowed.group_by("expiration")
-            .agg(pl.col("trade_date").min().alias("first_trade_date"))
-            .sort("expiration")
-            .to_dicts()
-        )
-        schedule_dates: list[date] = []
-        schedule_expirations: list[date] = []
-        for trade_date in all_dates:
-            held_expiration = next(
-                (
-                    row["expiration"]
-                    for row in contracts
-                    if row["first_trade_date"] <= trade_date
-                    and trade_date
-                    < row["expiration"] + timedelta(days=policy.roll_offset_days)
-                ),
-                None,
-            )
-            if held_expiration is not None:
-                schedule_dates.append(trade_date)
-                schedule_expirations.append(held_expiration)
-        schedule = pl.DataFrame({
-            "trade_date": pl.Series(schedule_dates, dtype=pl.Date),
-            "expiration": pl.Series(schedule_expirations, dtype=pl.Date),
-        })
-        return schedule.join(
-            allowed,
-            on=["trade_date", "expiration"],
-            how="inner",
-        ).sort("trade_date")
-
-    @staticmethod
-    def _from_raw(
-        raw: pl.DataFrame,
-    ) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, pl.DataFrame]:
-        """Transform selected Globex rows into the four history streams."""
-        raw = raw.sort("trade_date").with_columns(
-            pl.col("expiration").dt.strftime("%Y%m00").alias("contract_id")
-        )
-        marks = raw.select(
-            "trade_date",
-            "source_timestamp",
-            "mark_price",
-            "contract_id",
-            "instrument_id",
-            "expiration",
-            "volume",
-        ).with_columns(
-            (
-                pl.col("contract_id") != pl.col("contract_id").shift(1)
-            )
-            .fill_null(False)
-            .alias("is_roll"),
-            pl.when(pl.col("mark_price") <= 0)
-            .then(pl.lit("nonpositive_mark"))
-            .otherwise(pl.lit(""))
-            .alias("quality_flag"),
-        )
-
-        inputs = raw.select(
-            "trade_date",
-            "source_timestamp",
-            pl.col("mark_price").alias("current_price"),
-            pl.col("contract_id").alias("current_contract"),
-            "previous_contract_close",
-        )
-        generated = build_continuous_futures(
-            inputs,
-            direct_reference_column="previous_contract_close",
-        )
-        return generated.signal, marks, _empty_carry_frame(), generated.panama
-
 
 @dataclass
 class HybridHistoryProvider:
@@ -984,6 +1009,178 @@ def _select_hybrid_signal(signal: pl.DataFrame) -> pl.DataFrame:
         "is_roll",
         "return_valid",
         "quality_flag",
+    )
+
+
+def stitch_futures_histories(
+    histories: Sequence[FuturesHistory],
+    *,
+    instrument_code: str,
+) -> FuturesHistory:
+    """Stitch ordered history sources into one duplicate-free daily history.
+
+    ``histories`` must be ordered from the oldest fallback to the newest
+    preferred source. Each newer source takes ownership from its first valid
+    return onward. Source-specific index and additive-price levels are
+    discarded; their daily increments are concatenated and rebuilt into one
+    path. Marks retain their actual prices and contract identities.
+
+    Parameters
+    ----------
+    histories
+        Two or more loaded histories ordered by increasing source priority.
+    instrument_code
+        Identifier assigned to the combined history.
+
+    Returns
+    -------
+    FuturesHistory
+        Daily signal, mark, carry, and additive-price streams with one row per
+        date and a ``source_segment`` column identifying row ownership.
+    """
+    ordered = list(histories)
+    if len(ordered) < 2:
+        raise ValueError("history stitching requires at least two sources")
+
+    handoffs: list[date] = []
+    for older, newer in zip(ordered, ordered[1:]):
+        older_end = older.signal.get_column("trade_date").max()
+        newer_start = newer.signal.get_column("trade_date").min()
+        if older_end is None or newer_start is None:
+            raise ValueError("history stitching cannot use an empty source")
+        if older_end < newer_start:
+            raise ValueError(
+                "history sources do not overlap: "
+                f"older_source={older.source} older_end={older_end} "
+                f"newer_source={newer.source} newer_start={newer_start}"
+            )
+        first_valid = (
+            newer.signal.filter(pl.col("return_valid"))
+            .get_column("trade_date")
+            .min()
+        )
+        if first_valid is None:
+            raise ValueError(
+                f"history source {newer.source} has no valid return"
+            )
+        handoffs.append(first_valid)
+
+    def owned_rows(frame: pl.DataFrame, index: int) -> pl.DataFrame:
+        """Select the date interval owned by one priority-ordered source."""
+        expression = pl.lit(True)
+        if index > 0:
+            expression &= pl.col("trade_date") >= handoffs[index - 1]
+        if index < len(handoffs):
+            expression &= pl.col("trade_date") < handoffs[index]
+        return frame.filter(expression)
+
+    signal = (
+        pl.concat(
+            [
+                _select_hybrid_signal(owned_rows(history.signal, index))
+                .with_columns(pl.lit(history.source).alias("source_segment"))
+                for index, history in enumerate(ordered)
+            ],
+            how="vertical",
+        )
+        .sort("trade_date", "source_timestamp")
+        .unique(subset="trade_date", keep="last", maintain_order=True)
+        .with_columns(
+            (
+                (1.0 + pl.col("ret_1d").fill_null(0.0)).cum_prod()
+                * 100.0
+            ).alias("signal_index")
+        )
+    )
+
+    increments = (
+        pl.concat(
+            [
+                owned_rows(history.panama, index)
+                .select(
+                    "trade_date",
+                    "source_timestamp",
+                    "point_change",
+                    "contract_id",
+                    "is_roll",
+                    "quality_flag",
+                )
+                .with_columns(pl.lit(history.source).alias("source_segment"))
+                for index, history in enumerate(ordered)
+            ],
+            how="vertical",
+        )
+        .sort("trade_date", "source_timestamp")
+        .unique(subset="trade_date", keep="last", maintain_order=True)
+    )
+    latest_price = signal.get_column("current_price")[-1]
+    if latest_price is None:
+        raise ValueError("stitched history has no terminal contract price")
+    total_point_change = float(
+        increments.get_column("point_change").drop_nulls().sum()
+    )
+    panama = increments.with_columns(
+        (
+            pl.lit(float(latest_price) - total_point_change)
+            + pl.col("point_change").fill_null(0.0).cum_sum()
+        ).alias("panama_price")
+    )
+
+    marks = (
+        pl.concat(
+            [
+                owned_rows(history.marks, index).with_columns(
+                    pl.lit(history.source).alias("source_segment")
+                )
+                for index, history in enumerate(ordered)
+            ],
+            how="diagonal_relaxed",
+        )
+        .sort("trade_date", "source_timestamp")
+        .unique(subset="trade_date", keep="last", maintain_order=True)
+        .with_columns(
+            (pl.col("contract_id") != pl.col("contract_id").shift(1))
+            .fill_null(False)
+            .alias("is_roll")
+        )
+    )
+    carry = (
+        pl.concat(
+            [
+                owned_rows(history.carry, index).with_columns(
+                    pl.lit(history.source).alias("source_segment")
+                )
+                for index, history in enumerate(ordered)
+            ],
+            how="diagonal_relaxed",
+        )
+        .sort("trade_date", "source_timestamp")
+        .unique(subset="trade_date", keep="last", maintain_order=True)
+    )
+
+    logger.info(
+        "stitched_history instrument=%s sources=%s handoffs=%s rows=%d",
+        instrument_code,
+        [history.source for history in ordered],
+        handoffs,
+        signal.height,
+    )
+    return FuturesHistory(
+        source="stitched",
+        instrument_code=instrument_code,
+        schema_version=max(history.schema_version for history in ordered),
+        signal=signal,
+        marks=marks,
+        carry=carry,
+        panama=panama,
+        metadata={
+            "source_priority": [history.source for history in ordered],
+            "handoff_dates": handoffs,
+            "source_instruments": [
+                history.instrument_code for history in ordered
+            ],
+            "source_metadata": [dict(history.metadata) for history in ordered],
+        },
     )
 
 

@@ -44,8 +44,17 @@ from derivatives_bt_engine.calculations.instruments import (
     INSTRUMENTS,
     resolve_signal_symbol,
 )
+from derivatives_bt_engine.calculations.roll_policy import ContractRollPolicy
 from derivatives_bt_engine.data.futures_history import (
+    DEFAULT_GLOBEX_DB_PATH,
     DEFAULT_PYSYSTEMTRADE_DB_PATH as DEFAULT_REFERENCE_DB_PATH,
+    HISTORY_SCHEMA_VERSION,
+    FuturesHistory,
+    GlobexHistoryProvider,
+    PysystemtradeHistoryProvider as ReferenceHistoryProvider,
+    build_contract_history_streams,
+    select_calendar_contract_observations,
+    stitch_futures_histories,
 )
 from derivatives_bt_engine.data.pysystemtrade_ib import (
     DEFAULT_IB_MAPPING_PATH as DEFAULT_BROKER_MAPPING_PATH,
@@ -404,6 +413,176 @@ def load_roll_cycle_ib_contract_history(
         result.get_column('trade_date').max(),
     )
     return result
+
+
+def build_ib_contract_history(
+    contract_history: pl.DataFrame,
+) -> FuturesHistory:
+    """Build canonical daily history from overlapping IB contract bars.
+
+    The input is the dataframe returned by
+    :func:`load_roll_cycle_ib_contract_history`. The configured hold cycle and
+    roll offset select one dated contract per session. Contract-consistent
+    daily changes then produce signal, mark, and additive-price streams.
+
+    Parameters
+    ----------
+    contract_history
+        Overlapping daily rows for every downloaded dated contract.
+
+    Returns
+    -------
+    FuturesHistory
+        One-row-per-session IB history with actual contract marks and locally
+        constructed continuous signal paths.
+    """
+    required = {
+        'trade_date',
+        'close',
+        'volume',
+        'expiration',
+        'ib_contract_id',
+        'instrument_code',
+        'hold_roll_cycle',
+        'roll_offset_days',
+    }
+    missing = required - set(contract_history.columns)
+    if missing:
+        raise ValueError(
+            f"IB contract history missing columns: {sorted(missing)}"
+        )
+    if contract_history.is_empty():
+        raise ValueError("IB contract history must not be empty")
+
+    identity_columns = (
+        'instrument_code',
+        'hold_roll_cycle',
+        'roll_offset_days',
+    )
+    identities = contract_history.select(identity_columns).unique()
+    if identities.height != 1:
+        raise ValueError(
+            "IB contract history must contain one instrument and roll policy"
+        )
+    identity = identities.row(0, named=True)
+    instrument_code = str(identity['instrument_code'])
+    policy = ContractRollPolicy(
+        policy_id=f"configured_{instrument_code}",
+        hold_roll_cycle=str(identity['hold_roll_cycle']),
+        roll_offset_days=int(identity['roll_offset_days']),
+        source="reference_config",
+    )
+
+    # Preserve the within-contract close before the roll-policy selection so
+    # the first held day after a roll has a same-contract reference price.
+    raw = (
+        contract_history.unique(
+            subset=['ib_contract_id', 'trade_date'],
+            keep='last',
+            maintain_order=True,
+        )
+        .sort('ib_contract_id', 'trade_date')
+        .with_columns(
+            pl.col('trade_date')
+            .cast(pl.Datetime('us'))
+            .alias('source_timestamp'),
+            pl.col('close').cast(pl.Float64).alias('mark_price'),
+            pl.col('ib_contract_id').cast(pl.String).alias('instrument_id'),
+            pl.col('close')
+            .cast(pl.Float64)
+            .shift(1)
+            .over('ib_contract_id')
+            .alias('previous_contract_close'),
+        )
+        .sort('trade_date', 'expiration')
+    )
+    selected = select_calendar_contract_observations(raw, policy)
+    if selected.is_empty():
+        raise ValueError(
+            f"roll policy selected no IB rows for {instrument_code}"
+        )
+    signal, marks, carry, panama = build_contract_history_streams(selected)
+    return FuturesHistory(
+        source='ib',
+        instrument_code=instrument_code,
+        schema_version=HISTORY_SCHEMA_VERSION,
+        signal=signal,
+        marks=marks,
+        carry=carry,
+        panama=panama,
+        metadata={
+            'hold_roll_cycle': policy.hold_roll_cycle,
+            'roll_offset_days': policy.roll_offset_days,
+            'contracts': contract_history.get_column(
+                'ib_contract_id'
+            ).n_unique(),
+            'raw_rows': contract_history.height,
+            'selected_rows': selected.height,
+        },
+    )
+
+
+def build_stitched_futures_history(
+    contract_history: pl.DataFrame,
+    *,
+    globex_asset: str,
+    reference_instrument_code: str | None = None,
+    globex_db_path: Path | str = DEFAULT_GLOBEX_DB_PATH,
+    reference_db_path: Path | str = DEFAULT_REFERENCE_DB_PATH,
+    use_cache: bool = True,
+    save_cache: bool = True,
+) -> FuturesHistory:
+    """Combine reference, Globex, and IB histories by date and source priority.
+
+    The reference source supplies the oldest segment, Globex replaces it from
+    the first valid Globex return, and IB replaces Globex from the first valid
+    IB return. The IB roll policy is also applied to Globex so both recent
+    segments hold the same contract cycle. Duplicate dates are removed before
+    continuous levels are rebuilt from daily increments.
+
+    Parameters
+    ----------
+    contract_history
+        Overlapping dated-contract rows returned by the IB download helper.
+    globex_asset
+        Raw Globex asset identifier, such as ``GC`` or ``ES``.
+    reference_instrument_code
+        Long-history identifier. Defaults to the instrument in
+        ``contract_history``.
+    globex_db_path, reference_db_path
+        Read-only database inputs for the middle and oldest history segments.
+    use_cache, save_cache
+        Cache controls forwarded to both database-backed providers.
+
+    Returns
+    -------
+    FuturesHistory
+        A duplicate-free history whose ``source_segment`` column records
+        ownership of every signal, mark, and additive-price row.
+    """
+    ib_history = build_ib_contract_history(contract_history)
+    reference_code = reference_instrument_code or ib_history.instrument_code
+    roll_policy = ContractRollPolicy(
+        policy_id=f"configured_{ib_history.instrument_code}",
+        hold_roll_cycle=str(ib_history.metadata['hold_roll_cycle']),
+        roll_offset_days=int(ib_history.metadata['roll_offset_days']),
+        source="reference_config",
+    )
+    globex_history = GlobexHistoryProvider(
+        db_path=globex_db_path,
+        use_cache=use_cache,
+        save_cache=save_cache,
+        roll_policy=roll_policy,
+    ).load(globex_asset)
+    reference_history = ReferenceHistoryProvider(
+        db_path=reference_db_path,
+        use_cache=use_cache,
+        save_cache=save_cache,
+    ).load(reference_code)
+    return stitch_futures_histories(
+        [reference_history, globex_history, ib_history],
+        instrument_code=ib_history.instrument_code,
+    )
 
 
 @dataclass
