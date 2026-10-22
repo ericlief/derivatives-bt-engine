@@ -142,22 +142,22 @@ the API.
 
 ## Dated-contract history helper
 
-`load_carver_cycle_ib_history` implements the raw-data collection step. It reads the
-Carver instrument's IB identity and held-contract roll cycle, resolves each cycle month
+`load_roll_cycle_ib_contract_history` implements the raw-data collection step. It reads
+the instrument's broker identity and held-contract roll cycle, resolves each cycle month
 in the prior and current calendar years, and requests one year of daily history for each
 available dated contract. The result retains overlapping rows and contract identity; it
 does not select a held contract or construct a continuous series.
 
 ```python
 from derivatives_bt_engine.data.ib_futures_dataloader import (
-    load_carver_cycle_ib_history,
+    load_roll_cycle_ib_contract_history,
 )
 
-mgc_contracts = load_carver_cycle_ib_history(ib, "GOLD_micro")
+mgc_contracts = load_roll_cycle_ib_contract_history(ib, "GOLD_micro")
 ```
 
 Expired-contract requests end immediately after the resolved expiry so their historical
-window is not measured backward from today. The later IB-to-Globex-to-Carver stitch must
+window is not measured backward from today. The later broker-to-exchange-to-reference stitch must
 apply one roll policy to these dated bars and rebuild the Panama level once from the final
 IB contract price.
 

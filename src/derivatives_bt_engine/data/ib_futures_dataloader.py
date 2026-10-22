@@ -7,7 +7,7 @@ duckdb-backed `daily` table -- shaped identically (same load_data() ->
 ts_event/open/high/low/close/volume) so Backtester can consume either
 source interchangeably. Used by strats/naked_futures.py's --use-ib-data.
 
-The Carver-cycle helper separately downloads raw dated-contract histories for
+The roll-cycle helper separately downloads raw dated-contract histories for
 the prior and current calendar years. Those overlapping histories retain
 contract identity and are inputs for a locally controlled continuous-futures
 stitch; they do not use IB's opaque continuous-contract adjustment.
@@ -45,11 +45,11 @@ from derivatives_bt_engine.calculations.instruments import (
     resolve_signal_symbol,
 )
 from derivatives_bt_engine.data.futures_history import (
-    DEFAULT_PYSYSTEMTRADE_DB_PATH,
+    DEFAULT_PYSYSTEMTRADE_DB_PATH as DEFAULT_REFERENCE_DB_PATH,
 )
 from derivatives_bt_engine.data.pysystemtrade_ib import (
-    DEFAULT_IB_MAPPING_PATH,
-    load_pysystemtrade_ib_mapping,
+    DEFAULT_IB_MAPPING_PATH as DEFAULT_BROKER_MAPPING_PATH,
+    load_pysystemtrade_ib_mapping as load_broker_mapping,
 )
 from derivatives_bt_engine.logging_config import setup_logger
 
@@ -99,11 +99,11 @@ def _format_ib_multiplier(value: float) -> str:
     return str(int(value)) if value.is_integer() else format(value, "g")
 
 
-def _carver_roll_config(
+def _load_roll_config(
     instrument_code: str,
     db_path: Path | str,
 ) -> tuple[str, int]:
-    """Return Carver's held-contract cycle and roll offset for one instrument."""
+    """Return the held-contract cycle and roll offset for one instrument."""
     con = duckdb.connect(str(db_path), read_only=True)
     try:
         row = con.execute(
@@ -117,15 +117,15 @@ def _carver_roll_config(
     finally:
         con.close()
     if row is None:
-        raise KeyError(f"No Carver roll configuration for {instrument_code}")
+        raise KeyError(f"No roll configuration for {instrument_code}")
     return str(row[0]), int(row[1])
 
 
-def _is_carver_monthly_local_symbol(
+def _is_monthly_contract_symbol(
     instrument_code: str,
     local_symbol: str,
 ) -> bool:
-    """Apply pysystemtrade's pinned filters for products with weekly/daily expiries."""
+    """Identify monthly contracts for products with weekly or daily expiries."""
     if instrument_code == 'VIX':
         if re.fullmatch(r"VX\d\d[A-Z]\d", local_symbol):
             return False
@@ -148,14 +148,14 @@ def _is_carver_monthly_local_symbol(
     )
 
 
-def _select_carver_contract_detail(
+def _select_contract_detail(
     details: list,
     *,
     instrument_code: str,
     contract_month: str,
     ignore_weekly: bool,
 ):
-    """Return the unique IB detail matching a Carver contract month."""
+    """Return the unique IB detail matching a configured contract month."""
     matching = [
         detail
         for detail in details
@@ -165,7 +165,7 @@ def _select_carver_contract_detail(
         matching = [
             detail
             for detail in matching
-            if _is_carver_monthly_local_symbol(
+            if _is_monthly_contract_symbol(
                 instrument_code,
                 str(detail.contract.localSymbol),
             )
@@ -195,7 +195,7 @@ def _contract_expiration_date(detail, contract_month: str) -> date:
     return date(year, month, calendar.monthrange(year, month)[1])
 
 
-def load_carver_cycle_ib_history(
+def load_roll_cycle_ib_contract_history(
     ib: IBPySync,
     instrument_code: str,
     *,
@@ -205,17 +205,17 @@ def load_carver_cycle_ib_history(
     bar_size: str = DEFAULT_IB_BAR_SIZE,
     what_to_show: str = 'TRADES',
     use_rth: bool = True,
-    db_path: Path | str = DEFAULT_PYSYSTEMTRADE_DB_PATH,
-    mapping_path: Path | str = DEFAULT_IB_MAPPING_PATH,
+    db_path: Path | str = DEFAULT_REFERENCE_DB_PATH,
+    mapping_path: Path | str = DEFAULT_BROKER_MAPPING_PATH,
 ) -> pl.DataFrame:
-    """Download and concatenate dated IB histories on Carver's roll cycle.
+    """Download and concatenate dated IB histories on a configured roll cycle.
 
     Parameters
     ----------
     ib
         Connected synchronous IB client.
     instrument_code
-        Carver instrument identifier, such as ``GOLD_micro``.
+        Instrument identifier, such as ``GOLD_micro``.
     as_of
         Date defining the current contract year. Defaults to today.
     prior_years
@@ -226,14 +226,14 @@ def load_carver_cycle_ib_history(
     bar_size, what_to_show, use_rth
         Values forwarded to ``IBPySync.get_historical_bars``.
     db_path, mapping_path
-        Pinned Carver roll configuration and Carver-to-IB mapping inputs.
+        Reference roll configuration and broker mapping inputs.
 
     Returns
     -------
     polars.DataFrame
         Overlapping dated-contract bars concatenated by ``trade_date`` and
         ``contract_month``. Contract IDs, local symbols, exact expiries, and
-        Carver roll metadata are retained so a later step can select the held
+        Roll metadata are retained so a later step can select the held
         contract and construct roll-neutral increments.
 
     Notes
@@ -246,13 +246,13 @@ def load_carver_cycle_ib_history(
     if prior_years < 0:
         raise ValueError("prior_years must be nonnegative")
     effective_as_of = as_of or date.today()
-    mapping = load_pysystemtrade_ib_mapping(mapping_path).filter(
+    mapping = load_broker_mapping(mapping_path).filter(
         pl.col('instrument_code') == instrument_code
     )
     if mapping.height != 1:
-        raise KeyError(f"No unique Carver-to-IB mapping for {instrument_code}")
+        raise KeyError(f"No unique broker mapping for {instrument_code}")
     broker = mapping.row(0, named=True)
-    hold_roll_cycle, roll_offset_days = _carver_roll_config(
+    hold_roll_cycle, roll_offset_days = _load_roll_config(
         instrument_code,
         db_path,
     )
@@ -306,7 +306,7 @@ def load_carver_cycle_ib_history(
                 exc,
             )
             continue
-        detail = _select_carver_contract_detail(
+        detail = _select_contract_detail(
             details,
             instrument_code=instrument_code,
             contract_month=contract_month,
