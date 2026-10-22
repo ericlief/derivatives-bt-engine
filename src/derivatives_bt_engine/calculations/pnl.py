@@ -674,10 +674,11 @@ def build_executable_cash_pnl_curve(
         cumulative percentage-point returns and costs. Cash percentages
         divide each instrument's USD amount by total account capital and
         multiply by 100, so they add across instruments to the portfolio
-        percentage return. Annualized tracking error compares the continuous
-        target with the position held over each P&L interval and is exposed as
-        ``track_err_ann_usd`` and ``track_err_ann_pct_cap``; the
-        first null held position is treated as flat. Returned dataframe
+        percentage return. Annualized tracking error is aligned to the date a
+        target becomes held: each row compares the prior row's continuous
+        target and dollar volatility with the current row's held contracts.
+        The first row has no prior target and is null. It is exposed as
+        ``track_err_ann_usd`` and ``track_err_ann_pct_cap``. Returned dataframe
         columns use the centralized compact report vocabulary (for example,
         ``avg_pos``, ``ref_norm_pos``, and ``exec_con``).
 
@@ -833,18 +834,26 @@ def build_executable_cash_pnl_curve(
         )
         .with_columns(
             pl.when(
-                pl.col("target_position").is_not_null()
-                & pl.col("target_position").is_finite()
-                & pl.col("annual_dollar_vol_per_contract").is_not_null()
-                & pl.col("annual_dollar_vol_per_contract").is_finite()
-                & (pl.col("annual_dollar_vol_per_contract") > 0)
+                pl.col("target_position").shift(1).is_not_null()
+                & pl.col("target_position").shift(1).is_finite()
+                & pl.col("held_cons").is_not_null()
+                & pl.col("annual_dollar_vol_per_contract")
+                .shift(1)
+                .is_not_null()
+                & pl.col("annual_dollar_vol_per_contract")
+                .shift(1)
+                .is_finite()
+                & (
+                    pl.col("annual_dollar_vol_per_contract").shift(1)
+                    > 0
+                )
             )
             .then(
                 (
-                    pl.col("target_position")
-                    - pl.col("held_cons").fill_null(0)
+                    pl.col("target_position").shift(1)
+                    - pl.col("held_cons")
                 ).abs()
-                * pl.col("annual_dollar_vol_per_contract")
+                * pl.col("annual_dollar_vol_per_contract").shift(1)
             )
             .otherwise(None)
             .alias("annual_tracking_error_usd"),

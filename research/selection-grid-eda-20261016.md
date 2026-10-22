@@ -319,7 +319,8 @@ band.
 ### 4. Measure integer tracking error from the saved forecast path
 
 Contract counts are a proxy for the actual concern. For every trial book,
-round the saved continuous targets using the production rule and report:
+round the saved continuous targets using the production rule, align each
+target forward to the next date's held position, and report:
 
 - annualized RMS dollar-risk tracking error divided by the portfolio risk
   target;
