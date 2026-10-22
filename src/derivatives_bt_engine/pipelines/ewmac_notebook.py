@@ -141,7 +141,7 @@ class EwmacNotebookView:
             "combined_forecast",
             "ref_avg_pos",
             "ref_smooth_avg_pos",
-            "ref_targ_pos",
+            "ref_tgt_pos",
             "ref_norm_pos",
         ]
         available_columns = [
@@ -287,7 +287,7 @@ class EwmacNotebookView:
             y=[
                 "ref_avg_pos",
                 "ref_smooth_avg_pos",
-                "ref_targ_pos",
+                "ref_tgt_pos",
             ],
             title="Equal-weight reference positions",
             ylabel="Continuous contracts",

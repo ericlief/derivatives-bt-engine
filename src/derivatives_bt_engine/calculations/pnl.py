@@ -38,10 +38,10 @@ _REFERENCE_ACCOUNTING_COLUMNS = (
     "ref_budget_usd",
     "ref_ann_risk_usd",
     "ref_daily_risk_usd",
-    "daily_dollar_vol_per_contract",
-    "ref_average_position",
-    "ref_target_position",
-    "held_ref_position",
+    "daily_dvol",
+    "ref_avg_pos",
+    "ref_tgt_pos",
+    "ref_held_pos",
     "ref_gross_usd",
     "ref_cost_usd",
     "ref_net_usd",
@@ -226,8 +226,8 @@ def append_reference_position_turnover(
     Parameters
     ----------
     frame
-        Chronological reference frame containing ``ref_average_position``
-        and ``ref_target_position`` in continuous contracts.
+        Chronological reference frame containing ``ref_avg_pos`` and
+        ``ref_tgt_pos`` in continuous contracts.
     average_position_ewm_com
         EWM ``com`` used to smooth the changing average-position denominator.
         The target position and forecast are not smoothed.
@@ -240,8 +240,8 @@ def append_reference_position_turnover(
     Returns
     -------
     tuple[polars.DataFrame, float | None]
-        The input plus the smoothed reference average position, normalized
-        target position, absolute changes, rolling diagnostics, and the
+        The input plus ``ref_smooth_avg_pos``, ``ref_norm_pos``, absolute
+        position changes, rolling diagnostics, and the
         full-history annual turnover. The scalar is ``None`` when no finite
         position change exists.
 
@@ -252,7 +252,7 @@ def append_reference_position_turnover(
     and the contract multiplier, the audit does not rely on an inverse-volatility
     proxy or assume that FX is constant through time.
     """
-    required = {"ref_average_position", "ref_target_position"}
+    required = {"ref_avg_pos", "ref_tgt_pos"}
     missing = sorted(required.difference(frame.columns))
     if missing:
         raise ValueError(f"reference turnover input missing columns: {missing}")
@@ -266,45 +266,45 @@ def append_reference_position_turnover(
     result = (
         frame.sort("date")
         .with_columns(
-            pl.col("ref_average_position")
+            pl.col("ref_avg_pos")
             .ewm_mean(
                 com=average_position_ewm_com,
                 adjust=True,
                 min_samples=2,
             )
-            .alias("smoothed_ref_average_position")
+            .alias("ref_smooth_avg_pos")
         )
         .with_columns(
-            pl.when(pl.col("smoothed_ref_average_position") > 0)
+            pl.when(pl.col("ref_smooth_avg_pos") > 0)
             .then(
-                pl.col("ref_target_position")
-                / pl.col("smoothed_ref_average_position")
+                pl.col("ref_tgt_pos")
+                / pl.col("ref_smooth_avg_pos")
             )
             .otherwise(None)
-            .alias("ref_normalized_position")
+            .alias("ref_norm_pos")
         )
         .with_columns(
-            pl.col("ref_normalized_position")
+            pl.col("ref_norm_pos")
             .diff()
             .abs()
-            .alias("ref_abs_position_change")
+            .alias("ref_abs_pos_change")
         )
         .with_columns(
-            pl.col("ref_abs_position_change")
+            pl.col("ref_abs_pos_change")
             .rolling_mean(
                 window_size=turnover_rolling_days,
                 min_samples=turnover_rolling_days,
             )
-            .alias("ref_rolling_mean_abs_position_change")
+            .alias("ref_roll_mean_abs_pos_change")
         )
         .with_columns(
             (
-                pl.col("ref_rolling_mean_abs_position_change")
+                pl.col("ref_roll_mean_abs_pos_change")
                 * annualization_days
-            ).alias("ref_rolling_ann_turnover")
+            ).alias("ref_roll_ann_turnover")
         )
     )
-    changes = result.get_column("ref_abs_position_change")
+    changes = result.get_column("ref_abs_pos_change")
     changes = changes.filter(changes.is_not_null() & changes.is_finite())
     turnover = (
         float(changes.mean() * annualization_days) if changes.len() else None
@@ -326,7 +326,7 @@ def apply_subsystem_reference_cost(
     reference budget implied by the annual risk budget and target volatility.
     """
     required = {
-        "held_ref_position",
+        "ref_held_pos",
         "period_year_fraction",
         "ref_ann_risk_usd",
         "ref_budget_usd",
@@ -352,7 +352,7 @@ def apply_subsystem_reference_cost(
             # Costs begin only once a position was actually held. Calendar
             # elapsed time spreads the annual charge over irregular rows.
             pl.when(
-                pl.col("held_ref_position").is_not_null()
+                pl.col("ref_held_pos").is_not_null()
                 & pl.col("period_year_fraction").is_not_null()
             )
             .then(
@@ -564,36 +564,36 @@ def build_subsystem_reference_return_curve(
             pl.when(pl.col("fx_valid"))
             .then(pl.col(point_vol_col) * multiplier * pl.col(fx_col))
             .otherwise(None)
-            .alias("daily_dollar_vol_per_contract"),
+            .alias("daily_dvol"),
         )
         .with_columns(
             pl.when(
-                pl.col("daily_dollar_vol_per_contract").is_finite()
-                & (pl.col("daily_dollar_vol_per_contract") > 0)
+                pl.col("daily_dvol").is_finite()
+                & (pl.col("daily_dvol") > 0)
             )
             .then(
                 daily_risk_budget_usd
-                / pl.col("daily_dollar_vol_per_contract")
+                / pl.col("daily_dvol")
             )
             .otherwise(None)
-            .alias("ref_average_position"),
+            .alias("ref_avg_pos"),
         )
         .with_columns(
             (
-                pl.col("ref_average_position")
+                pl.col("ref_avg_pos")
                 * pl.col("combined_forecast")
                 / target_abs_forecast
-            ).alias("ref_target_position"),
+            ).alias("ref_tgt_pos"),
         )
         .with_columns(
             # End-of-day positions earn the following observation's move.
-            pl.col("ref_target_position")
+            pl.col("ref_tgt_pos")
             .shift(1)
-            .alias("held_ref_position"),
+            .alias("ref_held_pos"),
         )
         .with_columns(
             (
-                pl.col("held_ref_position")
+                pl.col("ref_held_pos")
                 * pl.col("point_change")
                 * multiplier
                 * pl.col(fx_col)
@@ -788,12 +788,12 @@ def build_executable_cash_pnl_curve(
                 pl.col(point_vol_col)
                 * multiplier
                 * pl.col(fx_col)
-            ).alias("daily_dollar_vol_per_contract"),
+            ).alias("daily_dvol"),
             pl.lit(risk_budget_usd).alias("risk_budget_usd"),
         )
         .with_columns(
             (
-                pl.col("daily_dollar_vol_per_contract")
+                pl.col("daily_dvol")
                 * math.sqrt(annualization_days)
             ).alias("annual_dollar_vol_per_contract"),
         )

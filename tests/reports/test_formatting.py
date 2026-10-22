@@ -186,8 +186,8 @@ def test_public_report_renames_subsystem_reference_columns():
         "ref_ann_risk_usd",
         "ref_budget_usd",
         "ref_avg_pos",
-        "ref_targ_pos",
-        "held_ref_pos",
+        "ref_tgt_pos",
+        "ref_held_pos",
         "ref_net_pct",
         "ref_ret_valid",
     ]

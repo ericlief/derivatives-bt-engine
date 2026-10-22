@@ -63,7 +63,7 @@ def test_notebook_view_builds_reference_return_and_cash_paths():
     assert {
         "ref_avg_pos",
         "ref_smooth_avg_pos",
-        "ref_targ_pos",
+        "ref_tgt_pos",
         "ref_norm_pos",
         "ref_abs_pos_change",
         "ref_roll_mean_abs_pos_change",

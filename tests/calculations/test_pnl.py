@@ -54,15 +54,15 @@ def test_subsystem_reference_pct_uses_equal_weight_risk_budget():
         "ref_budget_usd"
     ).to_list() == pytest.approx([500.0] * 3)
     assert result.get_column(
-        "daily_dollar_vol_per_contract"
+        "daily_dvol"
     ).to_list() == pytest.approx([40.0] * 3)
     assert result.get_column(
-        "ref_average_position"
+        "ref_avg_pos"
     ).to_list() == pytest.approx([0.125] * 3)
     assert result.get_column(
-        "ref_target_position"
+        "ref_tgt_pos"
     ).to_list() == pytest.approx([0.125, 0.25, 0.375])
-    held = result.get_column("held_ref_position").to_list()
+    held = result.get_column("ref_held_pos").to_list()
     assert held[0] is None
     assert held[1:] == pytest.approx([0.125, 0.25])
     assert result.get_column(
@@ -114,8 +114,19 @@ def test_subsystem_reference_pct_uses_equal_weight_risk_budget():
         ])
     )
     assert turnover is not None
-    assert "smoothed_ref_average_position" in result.columns
-    assert "ref_normalized_position" in result.columns
+    assert "ref_smooth_avg_pos" in result.columns
+    assert "ref_norm_pos" in result.columns
+    assert not {
+        "daily_dollar_vol_per_contract",
+        "ref_average_position",
+        "ref_target_position",
+        "held_ref_position",
+        "smoothed_ref_average_position",
+        "ref_normalized_position",
+        "ref_abs_position_change",
+        "ref_rolling_mean_abs_position_change",
+        "ref_rolling_ann_turnover",
+    }.intersection(result.columns)
 
 
 def test_subsystem_reference_preserves_missing_historical_fx_as_invalid():
@@ -154,7 +165,7 @@ def test_executable_cash_pnl_separates_trade_and_policy_roll_costs():
         "slow_point_vol": [1.2] * 5,
         "point_vol": [1.0] * 5,
         "combined_forecast": [1.0, 2.0, 2.0, 1.0, 1.0],
-        "ref_normalized_position": [0.1, 0.2, 0.3, 0.4, 0.5],
+        "ref_norm_pos": [0.1, 0.2, 0.3, 0.4, 0.5],
         "fx_to_usd": [1.0] * 5,
         "is_roll": [False, False, True, False, True],
     })
