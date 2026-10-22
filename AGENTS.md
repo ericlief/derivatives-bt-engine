@@ -57,7 +57,7 @@
   `pts`, `pos`, `tol`, `cand`, `ccy`, `mult`, `src`, `hist`, `ref`, `snap`,
   `cap`, `wt`, `cls`, `comb` (combined), `fcst` (forecast), `port`
   (portfolio), `init` (initial), `maint` (maintenance), `marg` (margin),
-  `lim` (limit), `inval` (invalid), and `turn` (turnover).
+  `lim` (limit), `inval` (invalid), `turn` (turnover), and `yr` (year).
   In public column names, abbreviate `contract` as `con`, `position` as `pos`,
   `normalized` as `norm`, and `average` as `avg`. Use `dvol` for dollar
   volatility (for example, `daily_dvol` and `ann_dvol`).

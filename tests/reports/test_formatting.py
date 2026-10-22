@@ -168,14 +168,15 @@ def test_public_report_abbreviates_combined_and_portfolio():
     """Public schemas use the agreed comb/port tokens consistently."""
     report = pl.DataFrame({
         "combined_forecast": [1.25],
+        "period_year_fraction": [0.002738],
         "forecast_valid": [True],
         "portfolio_cash_net_pnl_usd": [12.345],
     })
 
     public = round_public_report(rename_public_report_columns(report))
 
-    assert public.columns == ["comb_fcst", "fcst_valid", "port_net"]
-    assert public.row(0) == (1.25, True, 12.34)
+    assert public.columns == ["comb_fcst", "yr_frac", "fcst_valid", "port_net"]
+    assert public.row(0) == (1.25, 0.002738, True, 12.34)
 
 
 def test_public_report_abbreviates_candidate_position_and_tolerance():
