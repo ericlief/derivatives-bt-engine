@@ -72,7 +72,7 @@ def test_notebook_view_builds_reference_return_and_cash_paths():
     assert "daily_dollar_vol_per_contract" not in view.reference.columns
     assert view.cash is not None
     assert {
-        "targ_pos",
+        "tgt_pos",
         "exec_con",
         "held_con",
         "ann_dvol",

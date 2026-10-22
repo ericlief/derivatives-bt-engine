@@ -676,7 +676,7 @@ def build_executable_cash_pnl_curve(
         multiply by 100, so they add across instruments to the portfolio
         percentage return. Annualized tracking error compares the continuous
         target with the position held over each P&L interval and is exposed as
-        ``tracking_error_ann_usd`` and ``tracking_error_ann_pct_cap``; the
+        ``track_err_ann_usd`` and ``track_err_ann_pct_cap``; the
         first null held position is treated as flat. Returned dataframe
         columns use the centralized compact report vocabulary (for example,
         ``avg_pos``, ``ref_norm_pos``, and ``exec_con``).

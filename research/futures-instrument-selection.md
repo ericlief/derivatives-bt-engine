@@ -772,7 +772,7 @@ pysystemtrade portfolio average position
   = our avg_pos
 ```
 
-The default band on each date is `targ_pos ± 0.10 × abs(avg_pos)`.
+The default band on each date is `tgt_pos ± 0.10 × abs(avg_pos)`.
 The continuous target and band edges are rounded only when forming the
 whole-contract boundaries and executable position. The previous executable
 position is retained while it remains within the band; a breach trades to the

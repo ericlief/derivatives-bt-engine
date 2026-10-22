@@ -1006,7 +1006,7 @@ def _run_complete_selection(
                 "risk_budget_usd",
                 "ann_dvol",
                 "avg_pos",
-                "targ_pos",
+                "tgt_pos",
                 "buf_size",
                 "buf_trade_to_edge",
                 "rebalance_on_roll",

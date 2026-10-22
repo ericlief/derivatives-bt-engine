@@ -117,7 +117,7 @@ def test_public_report_renames_buffer_parameters_at_boundary():
 
     assert public.columns == [
         "avg_pos",
-        "targ_pos",
+        "tgt_pos",
         "buf_width_pos",
         "buf_size",
         "buf_trade_to_edge",
@@ -136,8 +136,8 @@ def test_public_report_renames_and_rounds_tracking_error_columns():
     public = round_public_report(rename_public_report_columns(report))
 
     assert public.columns == [
-        "tracking_error_ann_usd",
-        "tracking_error_ann_pct_cap",
+        "track_err_ann_usd",
+        "track_err_ann_pct_cap",
     ]
     assert public.row(0) == pytest.approx((123.46, 0.123457))
 
