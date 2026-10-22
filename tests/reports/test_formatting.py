@@ -15,7 +15,7 @@ def test_round_public_report_formats_phase2_money_and_diagnostics():
         "symbol": ["MZC"],
         "ann_dvol": [610.216],
         "risk_traded_day": [56.3289],
-        "net_pnl_usd": [123.456],
+        "net_pnl": [123.456],
         "weight": [0.0250958569],
         "net_sr": [0.4409032124],
         "rank": [9],
@@ -25,7 +25,7 @@ def test_round_public_report_formats_phase2_money_and_diagnostics():
 
     assert rounded["ann_dvol"][0] == pytest.approx(610.22)
     assert rounded["risk_traded_day"][0] == pytest.approx(56.33)
-    assert rounded["net_pnl_usd"][0] == pytest.approx(123.46)
+    assert rounded["net_pnl"][0] == pytest.approx(123.46)
     assert rounded["weight"][0] == pytest.approx(0.0251)
     assert rounded["net_sr"][0] == pytest.approx(0.4409)
     assert rounded["rank"][0] == 9
@@ -61,9 +61,9 @@ def test_public_report_uses_percentage_points_for_portfolio_cash_curve():
     public = round_public_report(rename_public_report_columns(report))
 
     assert public.columns == [
-        "gross_pct",
-        "total_cost_pct",
-        "cum_total_cost_pct",
+        "port_gross_pct",
+        "port_total_cost_pct",
+        "cum_port_total_cost_pct",
     ]
     assert public.row(0) == pytest.approx((1.234568, -0.000126, -0.123457))
 
@@ -81,11 +81,11 @@ def test_public_report_renames_cash_cost_columns_at_boundary():
     assert public.row(0) == pytest.approx((1.23, 12.35))
 
 
-def test_reference_cumulative_usd_uses_consistent_report_rounding():
-    """Reference cumulative USD fields round like other monetary outputs."""
+def test_reference_cumulative_amounts_use_consistent_report_rounding():
+    """Reference amounts use cents without an implicit USD suffix."""
     public = round_public_report(pl.DataFrame({
-        "cum_ref_gross_usd": [12.346],
-        "cum_ref_net_usd": [10.005],
+        "cum_ref_gross": [12.346],
+        "cum_ref_net": [10.005],
     }))
 
     assert public.row(0) == pytest.approx((12.35, 10.01))
@@ -104,9 +104,9 @@ def test_joined_cash_audit_columns_drop_cash_prefix():
 
     assert public.columns == [
         "pnl_valid",
-        "gross_pnl_usd",
+        "gross_pnl",
         "net_pct",
-        "cum_net_pnl_usd",
+        "cum_net_pnl",
     ]
     assert public.row(0) == (True, 12.35, 0.123457, 20.0)
 
@@ -158,10 +158,43 @@ def test_public_report_renames_and_rounds_tracking_error_columns():
     public = round_public_report(rename_public_report_columns(report))
 
     assert public.columns == [
-        "track_err_ann_usd",
+        "track_err_ann",
         "track_err_ann_pct_cap",
     ]
     assert public.row(0) == pytest.approx((123.46, 0.123457))
+
+
+def test_public_report_abbreviates_combined_and_portfolio():
+    """Public schemas use the agreed comb/port tokens consistently."""
+    report = pl.DataFrame({
+        "combined_forecast": [1.25],
+        "forecast_valid": [True],
+        "portfolio_cash_net_pnl_usd": [12.345],
+    })
+
+    public = round_public_report(rename_public_report_columns(report))
+
+    assert public.columns == ["comb_fcst", "fcst_valid", "port_net"]
+    assert public.row(0) == (1.25, True, 12.34)
+
+
+def test_public_report_abbreviates_candidate_position_and_tolerance():
+    """Candidate, position, and tolerance terms use consistent short tokens."""
+    report = pl.DataFrame({
+        "candidate_ref_max_position": [4.25],
+        "candidate_ref_contract_band_distance": [0.5],
+        "ref_max_position": [5.0],
+        "score_tie_tolerance_percent": [2.5],
+    })
+
+    public = rename_public_report_columns(report)
+
+    assert public.columns == [
+        "cand_ref_max_pos",
+        "cand_ref_con_band_distance",
+        "ref_max_pos",
+        "score_tie_tol_pct",
+    ]
 
 
 def test_public_report_renames_subsystem_reference_columns():
@@ -183,8 +216,8 @@ def test_public_report_renames_subsystem_reference_columns():
     assert public.columns == [
         "ref_book_n",
         "ref_idm",
-        "ref_ann_risk_usd",
-        "ref_budget_usd",
+        "ref_ann_risk",
+        "ref_budget",
         "ref_avg_pos",
         "ref_tgt_pos",
         "ref_held_pos",

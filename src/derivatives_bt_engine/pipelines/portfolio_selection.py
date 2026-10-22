@@ -996,14 +996,14 @@ def _run_complete_selection(
                 # This is the locally generated additive-Panama signal level,
                 # not a raw executable dated-contract settlement.
                 "close",
-                "combined_forecast",
+                "comb_fcst",
                 "point_change",
                 "point_vol",
                 "fx_to_usd",
                 "fx_pair",
                 "fx_src",
                 "roll_event",
-                "risk_budget_usd",
+                "risk_budget",
                 "ann_dvol",
                 "avg_pos",
                 "tgt_pos",
@@ -1020,17 +1020,17 @@ def _run_complete_selection(
                 "roll_con",
                 "trade_cost_per_con",
                 "roll_cost_per_con",
-                "gross_pnl_usd",
-                "trade_cost_usd",
-                "roll_cost_usd",
+                "gross_pnl",
+                "trade_cost",
+                "roll_cost",
                 "gross_pct",
                 "trade_cost_pct",
                 "roll_cost_pct",
                 "total_cost_pct",
                 "net_pct",
-                "net_pnl_usd",
-                "cum_gross_pnl_usd",
-                "cum_net_pnl_usd",
+                "net_pnl",
+                "cum_gross_pnl",
+                "cum_net_pnl",
                 "cum_gross_pct",
                 "cum_trade_cost_pct",
                 "cum_roll_cost_pct",
@@ -1232,9 +1232,12 @@ def _run_complete_selection(
         rename_public_report_columns(final_frame)
     )
     public_audit.write_parquet(audit_path)
-    pl.concat(forecast_output_frames, how="diagonal_relaxed").write_parquet(
-        forecasts_path
+    public_forecasts = round_public_report(
+        rename_public_report_columns(
+            pl.concat(forecast_output_frames, how="diagonal_relaxed")
+        )
     )
+    public_forecasts.write_parquet(forecasts_path)
     public_trials.write_parquet(trials_path)
     public_trial_allocations.write_parquet(trial_allocations_path)
     public_selection_passes.write_parquet(selection_passes_path)

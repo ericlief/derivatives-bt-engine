@@ -45,13 +45,13 @@ def test_subsystem_reference_pct_uses_equal_weight_risk_budget():
         [0.5] * 3
     )
     assert result.get_column(
-        "ref_ann_risk_usd"
+        "ref_ann_risk"
     ).to_list() == pytest.approx([80.0] * 3)
     assert result.get_column(
-        "ref_daily_risk_usd"
+        "ref_daily_risk"
     ).to_list() == pytest.approx([5.0] * 3)
     assert result.get_column(
-        "ref_budget_usd"
+        "ref_budget"
     ).to_list() == pytest.approx([500.0] * 3)
     assert result.get_column(
         "daily_dvol"
@@ -70,7 +70,7 @@ def test_subsystem_reference_pct_uses_equal_weight_risk_budget():
     ).to_list()[1:] == pytest.approx(
         [0.5, 1.0]
     )
-    assert result.get_column("ref_gross_usd").to_list()[1:] == pytest.approx(
+    assert result.get_column("ref_gross").to_list()[1:] == pytest.approx(
         [2.5, 5.0]
     )
     costs = result.get_column("ref_cost_pct").to_list()
@@ -80,26 +80,26 @@ def test_subsystem_reference_pct_uses_equal_weight_risk_budget():
     assert result.get_column("ref_net_pct")[1] == pytest.approx(
         0.5 + costs[1]
     )
-    assert result.get_column("ref_cost_usd")[1] == pytest.approx(
+    assert result.get_column("ref_cost")[1] == pytest.approx(
         costs[1] / 100.0 * 500.0
     )
-    assert result.get_column("ref_net_usd")[1] == pytest.approx(
+    assert result.get_column("ref_net")[1] == pytest.approx(
         2.5 + costs[1] / 100.0 * 500.0
     )
-    assert result.get_column("cum_ref_gross_usd").to_list() == (
+    assert result.get_column("cum_ref_gross").to_list() == (
         pytest.approx([0.0, 2.5, 7.5])
     )
-    assert result.get_column("cum_ref_net_usd").to_list() == (
+    assert result.get_column("cum_ref_net").to_list() == (
         pytest.approx([
             0.0,
-            result.get_column("ref_net_usd")[1],
-            result.get_column("ref_net_usd")[1]
-            + result.get_column("ref_net_usd")[2],
+            result.get_column("ref_net")[1],
+            result.get_column("ref_net")[1]
+            + result.get_column("ref_net")[2],
         ])
     )
-    assert result.get_column("cum_ref_net_usd").to_list() == pytest.approx(
+    assert result.get_column("cum_ref_net").to_list() == pytest.approx(
         result.select(
-            pl.col("ref_net_usd").fill_null(0.0).cum_sum()
+            pl.col("ref_net").fill_null(0.0).cum_sum()
         ).to_series().to_list()
     )
     assert result.get_column("cum_ref_gross_pct").to_list() == (
@@ -214,7 +214,7 @@ def test_executable_cash_pnl_separates_trade_and_policy_roll_costs():
     assert result.get_column("avg_pos").to_list() == pytest.approx(
         [5.0] * 5
     )
-    assert result.get_column("track_err_ann_usd").to_list() == (
+    assert result.get_column("track_err_ann").to_list() == (
         pytest.approx([None, 0.0, 0.0, 0.0, 20.0])
     )
     assert result.get_column("track_err_ann_pct_cap").to_list() == (
@@ -250,10 +250,10 @@ def test_executable_cash_pnl_separates_trade_and_policy_roll_costs():
     assert result.get_column("roll_cost_per_con").to_list() == [
         3.0, 3.0, 3.0, 3.0, 3.0,
     ]
-    assert result.get_column("trade_cost_usd").to_list() == pytest.approx(
+    assert result.get_column("trade_cost").to_list() == pytest.approx(
         [-10.0, -10.0, 0.0, -8.0, -2.0]
     )
-    assert result.get_column("roll_cost_usd").to_list() == (
+    assert result.get_column("roll_cost").to_list() == (
         pytest.approx([0.0, 0.0, -30.0, 0.0, -15.0])
     )
     assert result.get_column("trade_cost_pct").to_list() == (
@@ -274,11 +274,11 @@ def test_executable_cash_pnl_separates_trade_and_policy_roll_costs():
     assert result.get_column("net_pct").to_list() == (
         pytest.approx([-1.0, 4.0, 7.0, 9.2, 4.3])
     )
-    assert result.get_column("cum_gross_pnl_usd").to_list() == pytest.approx(
+    assert result.get_column("cum_gross_pnl").to_list() == pytest.approx(
         [0.0, 50.0, 150.0, 250.0, 310.0]
     )
     assert result.get_column(
-        "cum_net_pnl_usd"
+        "cum_net_pnl"
     ).to_list() == pytest.approx([-10.0, 30.0, 100.0, 192.0, 235.0])
     assert not any("avg_roll" in name or "_contrib" in name for name in result.columns)
     assert not any(column.startswith("cash_") for column in result.columns)
@@ -325,7 +325,7 @@ def test_ann_pct_vol_is_null_without_raw_contract_close():
     )
 
     assert result.get_column("ann_pct_vol").null_count() == 1
-    assert result.get_column("track_err_ann_usd").null_count() == 1
+    assert result.get_column("track_err_ann").null_count() == 1
     assert result.get_column("track_err_ann_pct_cap").null_count() == 1
 
 
@@ -335,10 +335,10 @@ def test_fixed_capital_portfolio_curve_reports_percentage_points():
         "date": [date(2024, 1, 1)],
         "symbol": ["MES"],
         "pnl_valid": [True],
-        "gross_pnl_usd": [50.0],
-        "trade_cost_usd": [-10.0],
-        "roll_cost_usd": [-20.0],
-        "net_pnl_usd": [20.0],
+        "gross_pnl": [50.0],
+        "trade_cost": [-10.0],
+        "roll_cost": [-20.0],
+        "net_pnl": [20.0],
     })
 
     result = build_fixed_capital_portfolio_curve(

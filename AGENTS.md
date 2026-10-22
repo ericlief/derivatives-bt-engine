@@ -43,6 +43,9 @@
   Phase 1 reports; do not emit duplicate CSV copies unless explicitly asked.
 - A futures cost-report row represents one executable contract. Primary
   monetary values are USD, so use `notional`, `daily_dvol`, and `ann_dvol`.
+  Omit `_usd` when USD is the implicit primary currency, and abbreviate
+  `combined` as `comb`, `forecast` as `fcst`, and `portfolio` as `port` in
+  public column names.
   Retain suffixes such as `_native` only when they distinguish parallel values
   or units. Cost SR calculations use `ann_dvol`; do not add a duplicate
   cost-specific dollar-volatility field.
@@ -51,7 +54,9 @@
   fallbacks.
 - Use short, unambiguous report tokens consistently: `con`, `instr`, `exec`,
   `elig`, `ann`, `dvol`, `sr`, `pct`, `avg`, `min`, `max`, `n`, `px`, `pt`,
-  `pts`, `ccy`, `mult`, `src`, `hist`, `ref`, `snap`, `cap`, `wt`, and `cls`.
+  `pts`, `pos`, `tol`, `cand`, `ccy`, `mult`, `src`, `hist`, `ref`, `snap`,
+  `cap`, `wt`, `cls`, `comb` (combined), `fcst` (forecast), and `port`
+  (portfolio).
   In public column names, abbreviate `contract` as `con`, `position` as `pos`,
   `normalized` as `norm`, and `average` as `avg`. Use `dvol` for dollar
   volatility (for example, `daily_dvol` and `ann_dvol`).

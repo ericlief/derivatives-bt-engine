@@ -35,22 +35,22 @@ _REFERENCE_ACCOUNTING_COLUMNS = (
     "ref_idm",
     "max_weight_idm",
     "ref_weight_idm",
-    "ref_budget_usd",
-    "ref_ann_risk_usd",
-    "ref_daily_risk_usd",
+    "ref_budget",
+    "ref_ann_risk",
+    "ref_daily_risk",
     "daily_dvol",
     "ref_avg_pos",
     "ref_tgt_pos",
     "ref_held_pos",
-    "ref_gross_usd",
-    "ref_cost_usd",
-    "ref_net_usd",
+    "ref_gross",
+    "ref_cost",
+    "ref_net",
     "ref_gross_pct",
     "ref_ann_cost_pct",
     "ref_cost_pct",
     "ref_net_pct",
-    "cum_ref_gross_usd",
-    "cum_ref_net_usd",
+    "cum_ref_gross",
+    "cum_ref_net",
     "cum_ref_gross_pct",
     "cum_ref_net_pct",
     "ref_return_valid",
@@ -322,15 +322,15 @@ def apply_subsystem_reference_cost(
     The helper is separate from sizing so the pipeline can first measure
     turnover from the reference positions, convert that turnover to annual SR
     cost, and then apply the resulting cost without rebuilding the positions.
-    Cost percentage is normalized by ``ref_budget_usd``, the equal-weight
+    Cost percentage is normalized by ``ref_budget``, the equal-weight
     reference budget implied by the annual risk budget and target volatility.
     """
     required = {
         "ref_held_pos",
         "period_year_fraction",
-        "ref_ann_risk_usd",
-        "ref_budget_usd",
-        "ref_gross_usd",
+        "ref_ann_risk",
+        "ref_budget",
+        "ref_gross",
         "ref_gross_pct",
     }
     missing = sorted(required.difference(frame.columns))
@@ -343,8 +343,8 @@ def apply_subsystem_reference_cost(
         frame.with_columns(
             (
                 -ann_cost_sr
-                * pl.col("ref_ann_risk_usd")
-                / pl.col("ref_budget_usd")
+                * pl.col("ref_ann_risk")
+                / pl.col("ref_budget")
                 * 100.0
             ).alias("ref_ann_cost_pct")
         )
@@ -366,19 +366,19 @@ def apply_subsystem_reference_cost(
             (
                 pl.col("ref_cost_pct")
                 / 100.0
-                * pl.col("ref_budget_usd")
-            ).alias("ref_cost_usd"),
+                * pl.col("ref_budget")
+            ).alias("ref_cost"),
         )
         .with_columns(
             (
-                pl.col("ref_gross_usd")
-                + pl.col("ref_cost_usd")
-            ).alias("ref_net_usd"),
+                pl.col("ref_gross")
+                + pl.col("ref_cost")
+            ).alias("ref_net"),
         )
         .with_columns(
             (
-                pl.col("ref_net_usd")
-                / pl.col("ref_budget_usd")
+                pl.col("ref_net")
+                / pl.col("ref_budget")
                 * 100.0
             ).alias("ref_net_pct"),
         )
@@ -392,14 +392,14 @@ def apply_subsystem_reference_cost(
             # Keep the cumulative path at calculation precision. At a public
             # report boundary, summing individually rounded daily USD rows
             # can differ by cents from this rounded cumulative value.
-            pl.col("ref_gross_usd")
+            pl.col("ref_gross")
             .fill_null(0.0)
             .cum_sum()
-            .alias("cum_ref_gross_usd"),
-            pl.col("ref_net_usd")
+            .alias("cum_ref_gross"),
+            pl.col("ref_net")
             .fill_null(0.0)
             .cum_sum()
-            .alias("cum_ref_net_usd"),
+            .alias("cum_ref_net"),
             pl.col("ref_gross_pct")
             .fill_null(0.0)
             .cum_sum()
@@ -439,7 +439,7 @@ def build_subsystem_reference_return_curve(
         with legacy ``point_vol`` accepted for compact Phase 2 frames.
     capital
         Reference account capital in USD. This supplies a reproducible
-        position scale. Percentages are normalized by ``ref_budget_usd``,
+        position scale. Percentages are normalized by ``ref_budget``,
         which is implied by the instrument risk budget and target volatility.
     target_vol
         Annual portfolio volatility target as a decimal fraction.
@@ -556,11 +556,11 @@ def build_subsystem_reference_return_curve(
             pl.lit(reference_idm).alias("ref_idm"),
             pl.lit(max_weight_idm).alias("max_weight_idm"),
             pl.lit(ref_weight_idm).alias("ref_weight_idm"),
-            pl.lit(annual_risk_budget_usd).alias("ref_ann_risk_usd"),
+            pl.lit(annual_risk_budget_usd).alias("ref_ann_risk"),
             pl.lit(ref_budget_usd).alias(
-                "ref_budget_usd"
+                "ref_budget"
             ),
-            pl.lit(daily_risk_budget_usd).alias("ref_daily_risk_usd"),
+            pl.lit(daily_risk_budget_usd).alias("ref_daily_risk"),
             pl.when(pl.col("fx_valid"))
             .then(pl.col(point_vol_col) * multiplier * pl.col(fx_col))
             .otherwise(None)
@@ -597,12 +597,12 @@ def build_subsystem_reference_return_curve(
                 * pl.col("point_change")
                 * multiplier
                 * pl.col(fx_col)
-            ).alias("ref_gross_usd"),
+            ).alias("ref_gross"),
         )
         .with_columns(
             (
-                pl.col("ref_gross_usd")
-                / pl.col("ref_budget_usd")
+                pl.col("ref_gross")
+                / pl.col("ref_budget")
                 * 100.0
             ).alias("ref_gross_pct"),
         )
@@ -703,7 +703,7 @@ def build_executable_cash_pnl_curve(
         target becomes held: each row compares the prior row's continuous
         target and dollar volatility with the current row's held contracts.
         The first row has no prior target and is null. It is exposed as
-        ``track_err_ann_usd`` and ``track_err_ann_pct_cap``. Returned dataframe
+        ``track_err_ann`` and ``track_err_ann_pct_cap``. Returned dataframe
         columns use the centralized compact report vocabulary (for example,
         ``avg_pos``, ``ref_norm_pos``, and ``exec_con``).
 
@@ -1086,8 +1086,8 @@ def build_fixed_capital_portfolio_curve(
     ----------
     cash_pnl_long
         Long selected-book frame with one row per instrument and date. It must
-        contain ``symbol``, ``date``, ``pnl_valid``, and the gross, cost,
-        and net USD columns produced by
+        contain ``symbol``, ``date``, ``pnl_valid``, and compact gross, cost,
+        and net amount columns produced by
         :func:`build_executable_cash_pnl_curve`.
     initial_capital_usd
         Positive USD account capital used as the common denominator for every
@@ -1112,10 +1112,10 @@ def build_fixed_capital_portfolio_curve(
         raise ValueError("initial_capital_usd must be finite and positive")
 
     cash_columns = (
-        ("gross_pnl_usd", "portfolio_cash_gross_pnl_usd"),
-        ("trade_cost_usd", "portfolio_cash_trade_cost_usd"),
-        ("roll_cost_usd", "portfolio_cash_roll_cost_usd"),
-        ("net_pnl_usd", "portfolio_cash_net_pnl_usd"),
+        ("gross_pnl", "portfolio_cash_gross_pnl_usd"),
+        ("trade_cost", "portfolio_cash_trade_cost_usd"),
+        ("roll_cost", "portfolio_cash_roll_cost_usd"),
+        ("net_pnl", "portfolio_cash_net_pnl_usd"),
     )
     required = {"date", "symbol", "pnl_valid"} | {
         source for source, _ in cash_columns

@@ -72,7 +72,7 @@ class SubsystemReferenceSettings:
     auditable continuous position. ``ref_book_count`` assigns every
     candidate the same structural weight, while ``ref_idm`` and
     ``max_weight_idm`` apply the same fixed sizing convention as the selection
-    tie rule. The resulting USD series is divided by ``ref_budget_usd`` and
+    tie rule. The resulting USD series is divided by ``ref_budget`` and
     exposed as a normalized subsystem-reference percentage series.
     """
 
@@ -138,7 +138,7 @@ class EwmacNotebookView:
         columns = [
             "date",
             "close",
-            "combined_forecast",
+            "comb_fcst",
             "ref_avg_pos",
             "ref_smooth_avg_pos",
             "ref_tgt_pos",
@@ -183,12 +183,12 @@ class EwmacNotebookView:
         frame = _date_slice(self.reference, start=start, end=end)
         return frame.select(
             "date",
-            "ref_budget_usd",
-            "ref_ann_risk_usd",
-            "ref_daily_risk_usd",
-            "ref_gross_usd",
-            "ref_cost_usd",
-            "ref_net_usd",
+            "ref_budget",
+            "ref_ann_risk",
+            "ref_daily_risk",
+            "ref_gross",
+            "ref_cost",
+            "ref_net",
             "ref_gross_pct",
             "ref_ann_cost_pct",
             "ref_cost_pct",
@@ -207,8 +207,8 @@ class EwmacNotebookView:
         frame = _date_slice(self.cash, start=start, end=end)
         return frame.select(
             "date",
-            "cum_gross_pnl_usd",
-            "cum_net_pnl_usd",
+            "cum_gross_pnl",
+            "cum_net_pnl",
         )
 
     def cash_return_curves(
@@ -276,7 +276,7 @@ class EwmacNotebookView:
         )
         forecast_plot = reference.hvplot.line(
             x="date",
-            y="combined_forecast",
+            y="comb_fcst",
             title="Combined forecast (mean abs 1, cap 2)",
             ylabel="Average-position multiple",
             width=width,
@@ -296,7 +296,7 @@ class EwmacNotebookView:
         )
         normalized_plot = reference.hvplot.line(
             x="date",
-            y=["combined_forecast", "ref_norm_pos"],
+            y=["comb_fcst", "ref_norm_pos"],
             title="Forecast versus reference-normalized position",
             ylabel="Smoothed average-position units",
             width=width,
@@ -336,8 +336,8 @@ class EwmacNotebookView:
             cash_plot = cash_curves.hvplot.line(
                 x="date",
                 y=[
-                    "cum_gross_pnl_usd",
-                    "cum_net_pnl_usd",
+                    "cum_gross_pnl",
+                    "cum_net_pnl",
                 ],
                 title="Cumulative executable cash P&L",
                 ylabel="USD",

@@ -78,7 +78,7 @@ def test_notebook_view_builds_reference_return_and_cash_paths():
         "ann_dvol",
         "trade_cost_per_con",
         "roll_cost_per_con",
-        "net_pnl_usd",
+        "net_pnl",
     } <= set(view.cash.columns)
     assert not any("avg_roll" in name for name in view.cash.columns)
     assert view.forecast_positions(start="2024-01-03").height == 3
@@ -96,9 +96,9 @@ def test_notebook_view_builds_reference_return_and_cash_paths():
     )
     cash = view.cash_pnl_curves()
     expected_cash_net = (
-        view.cash.get_column("net_pnl_usd").fill_null(0.0).sum()
+        view.cash.get_column("net_pnl").fill_null(0.0).sum()
     )
-    assert cash.get_column("cum_net_pnl_usd")[-1] == pytest.approx(
+    assert cash.get_column("cum_net_pnl")[-1] == pytest.approx(
         expected_cash_net
     )
 
