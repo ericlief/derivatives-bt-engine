@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, datetime, timedelta
 
 import polars as pl
@@ -210,3 +211,29 @@ def test_hybrid_provider_rebuilds_levels_and_three_signal_harness_routes_inputs(
     assert "raw_ewmac" in ewmac.columns
     assert "ts_fast" in return_tsmom.columns
     assert "regime" in goulding.columns
+
+
+def test_hybrid_provider_accepts_cached_reference_price_column_name() -> None:
+    old = _history("carver", date(2020, 1, 1), [100, 101, 102, 103])
+    old = replace(
+        old,
+        signal=old.signal.rename({"ref_price": "reference_price"}),
+    )
+    new = _history("globex", date(2020, 1, 3), [200, 202, 204, 206])
+
+    history = HybridHistoryProvider(
+        historical=_Provider(old),
+        primary=_Provider(new),
+        handoff_date=date(2020, 1, 4),
+    ).load("TEST")
+
+    assert "ref_price" in history.signal.columns
+    assert "reference_price" not in history.signal.columns
+    assert history.signal.get_column("ref_price").to_list() == [
+        None,
+        100.0,
+        101.0,
+        200.0,
+        202.0,
+        204.0,
+    ]

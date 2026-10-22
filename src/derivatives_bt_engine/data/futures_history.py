@@ -852,16 +852,12 @@ class HybridHistoryProvider:
         new_signal = new.signal.filter(pl.col("trade_date") >= handoff)
         signal = pl.concat(
             [
-                old_signal.select(
-                    "trade_date", "source_timestamp", "current_price",
-                    "contract_id", "ref_price", "point_change",
-                    "ret_1d", "is_roll", "return_valid", "quality_flag",
-                ).with_columns(pl.lit(old.source).alias("source_segment")),
-                new_signal.select(
-                    "trade_date", "source_timestamp", "current_price",
-                    "contract_id", "ref_price", "point_change",
-                    "ret_1d", "is_roll", "return_valid", "quality_flag",
-                ).with_columns(pl.lit(new.source).alias("source_segment")),
+                _select_hybrid_signal(old_signal).with_columns(
+                    pl.lit(old.source).alias("source_segment")
+                ),
+                _select_hybrid_signal(new_signal).with_columns(
+                    pl.lit(new.source).alias("source_segment")
+                ),
             ],
             how="vertical",
         ).sort("trade_date")
@@ -944,6 +940,41 @@ class HybridHistoryProvider:
             metadata=metadata,
             panama=panama,
         )
+
+
+def _select_hybrid_signal(signal: pl.DataFrame) -> pl.DataFrame:
+    """Select hybrid signal columns while normalizing legacy reference names.
+
+    Older cached Carver histories may store the previous-price field as
+    ``reference_price`` while current generated histories call it
+    ``ref_price``. The splice needs one stable internal schema before vertical
+    concatenation; both fields represent the prior reference price in native
+    price points.
+    """
+    reference_column = next(
+        (
+            name
+            for name in ("ref_price", "reference_price")
+            if name in signal.columns
+        ),
+        None,
+    )
+    if reference_column is None:
+        raise ValueError(
+            "hybrid signal is missing ref_price/reference_price column"
+        )
+    return signal.select(
+        "trade_date",
+        "source_timestamp",
+        "current_price",
+        "contract_id",
+        pl.col(reference_column).alias("ref_price"),
+        "point_change",
+        "ret_1d",
+        "is_roll",
+        "return_valid",
+        "quality_flag",
+    )
 
 
 def align_history_to_previous_sessions(
