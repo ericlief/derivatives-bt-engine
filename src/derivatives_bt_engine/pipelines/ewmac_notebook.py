@@ -337,12 +337,14 @@ class EwmacNotebookView:
         width: int = 950,
         height: int = 240,
     ):
-        """Return a vertically linked hvPlot dashboard for notebook display.
+        """Return a vertically stacked hvPlot dashboard for notebook display.
 
         Panels show the adjusted signal price, combined forecast, sized
         reference positions, normalized position, cumulative reference
         percentage, and—when configured—whole-contract positions and
-        cumulative cash P&L.
+        cumulative cash P&L. Each panel has an independent y-axis so the
+        account-scale cash curve cannot flatten contract- or signal-scale
+        diagnostics. Every panel uses the same requested date range.
         hvPlot is imported lazily so non-notebook pipelines do not initialize a
         plotting backend.
         """
@@ -433,7 +435,7 @@ class EwmacNotebookView:
             )
             panels = panels + contract_plot + cash_plot
 
-        return panels.cols(1)
+        return panels.cols(1).opts(shared_axes=False)
 
 
 def build_ewmac_notebook_view(
