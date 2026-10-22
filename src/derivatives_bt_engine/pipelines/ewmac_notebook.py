@@ -125,6 +125,19 @@ def _screen_number(
     label: str,
 ) -> float:
     """Extract a finite numeric screen value with supported schema aliases."""
+    value = _screen_optional_number(row, names)
+    if value is not None:
+        return value
+    raise ValueError(
+        f"screen row is missing a finite {label}; expected one of {names}"
+    )
+
+
+def _screen_optional_number(
+    row: dict[str, object],
+    names: tuple[str, ...],
+) -> float | None:
+    """Return the first finite numeric value, skipping null screen fields."""
     for name in names:
         value = row.get(name)
         if value is None:
@@ -135,9 +148,7 @@ def _screen_number(
             continue
         if math.isfinite(number):
             return number
-    raise ValueError(
-        f"screen row is missing a finite {label}; expected one of {names}"
-    )
+    return None
 
 
 @dataclass(frozen=True)
@@ -559,7 +570,10 @@ def build_ewmac_notebook_view_from_screen(
     cash_settings
         Optional account-level settings. When provided, per-contract trade
         and roll costs are taken from the matched screen row rather than the
-        settings object's cost defaults.
+        settings object's cost defaults. If account-specific costs are null,
+        the helper uses the screen's explicitly labelled snapshot/configured
+        trade estimate and estimates a calendar-spread roll as spread plus two
+        reference commissions; the output frames identify those sources.
     instrument_code
         Plot label. Defaults to ``screen_symbol``; can differ from the signal
         instrument when sizing (for example, ES forecast with MES terms).
@@ -582,27 +596,69 @@ def build_ewmac_notebook_view_from_screen(
         ("mult", "multiplier", "ib_mult"),
         label="contract multiplier",
     )
-    trade_sr = _screen_number(
-        screen_row, ("trade_sr",), label="trade_sr"
-    )
-    roll_sr = _screen_number(
-        screen_row, ("roll_sr",), label="roll_sr"
-    )
     annual_rolls = _screen_number(
         screen_row,
         ("ref_ann_rolls", "ann_rolls"),
         label="annual roll count",
     )
-    trade_cost = _screen_number(
+    ann_dvol = _screen_optional_number(
+        screen_row, ("ann_dvol", "annual_dollar_vol_per_contract")
+    )
+    trade_cost = _screen_optional_number(
         screen_row,
         ("cost_usd", "trade_cost_per_con", "trade_cost_usd_per_con"),
-        label="one-way trade cost per contract in USD",
     )
-    roll_cost = _screen_number(
+    trade_cost_src = "screen_cost"
+    if trade_cost is None:
+        # The account-specific IB WhatIf commission may be unavailable (for
+        # example, when the test order fails its margin check). Preserve the
+        # screen's explicitly labelled snapshot/configured estimate as a
+        # research fallback instead of silently treating it as a WhatIf cost.
+        trade_cost = _screen_number(
+            screen_row,
+            ("snap_ref_config_cost_usd",),
+            label="one-way snapshot/configured trade cost per contract in USD",
+        )
+        trade_cost_src = "snap_ref_config"
+
+    roll_cost = _screen_optional_number(
         screen_row,
         ("roll_cost_usd", "roll_cost_per_con", "roll_cost_usd_per_con"),
-        label="roll cost per contract in USD",
     )
+    roll_cost_src = "screen_roll_cost"
+    if roll_cost is None:
+        spread_cash = _screen_optional_number(
+            screen_row, ("snap_spread_cash_usd",)
+        )
+        reference_commission = _screen_optional_number(
+            screen_row, ("ref_config_comm_usd",)
+        )
+        if spread_cash is None or reference_commission is None:
+            raise ValueError(
+                "screen row has no finite roll cost; expected a roll-cost "
+                "field or snapshot spread cash plus reference commission"
+            )
+        # Calendar-spread roll estimate: spread crossing plus two sides of
+        # the explicitly labelled reference commission.
+        roll_cost = spread_cash + 2.0 * reference_commission
+        roll_cost_src = "snap_ref_config_calendar_spread"
+
+    trade_sr = _screen_optional_number(screen_row, ("trade_sr",))
+    if trade_sr is None:
+        if ann_dvol is None or ann_dvol <= 0:
+            raise ValueError(
+                "screen row has no finite trade_sr or positive ann_dvol "
+                "to derive it from the selected trade cost"
+            )
+        trade_sr = trade_cost / ann_dvol
+    roll_sr = _screen_optional_number(screen_row, ("roll_sr",))
+    if roll_sr is None:
+        if ann_dvol is None or ann_dvol <= 0:
+            raise ValueError(
+                "screen row has no finite roll_sr or positive ann_dvol "
+                "to derive it from the selected roll cost"
+            )
+        roll_sr = roll_cost / ann_dvol
 
     forecast = _forecast_with_fx(result, fx_to_usd)
     reference = build_subsystem_reference_return_curve(
@@ -635,7 +691,7 @@ def build_ewmac_notebook_view_from_screen(
             roll_cost_usd_per_con=roll_cost,
         )
 
-    return build_ewmac_notebook_view(
+    view = build_ewmac_notebook_view(
         result,
         instrument_code=instrument_code or screen_symbol,
         multiplier=multiplier,
@@ -645,3 +701,18 @@ def build_ewmac_notebook_view_from_screen(
         cash_settings=cash_settings,
         target_abs_forecast=target_abs_forecast,
     )
+    # Retain cost provenance next to the per-contract costs in notebook frames;
+    # snapshot estimates must remain distinguishable from account WhatIf data.
+    reference = view.reference.with_columns(
+        pl.lit(trade_cost_src).alias("trade_cost_src"),
+        pl.lit(roll_cost_src).alias("roll_cost_src"),
+    )
+    cash = (
+        view.cash.with_columns(
+            pl.lit(trade_cost_src).alias("trade_cost_src"),
+            pl.lit(roll_cost_src).alias("roll_cost_src"),
+        )
+        if view.cash is not None
+        else None
+    )
+    return replace(view, reference=reference, cash=cash)

@@ -160,6 +160,47 @@ def test_notebook_view_loads_contract_costs_from_screen_row(tmp_path):
     assert view.cash["daily_dvol"][2] == pytest.approx(1.0 * 5.0 * 1.25)
 
 
+def test_notebook_view_uses_labeled_snapshot_costs_when_whatif_is_null():
+    """Margin-rejected WhatIf rows can use the screen's explicit estimate."""
+    view = build_ewmac_notebook_view_from_screen(
+        _combined_result(),
+        screen=pl.DataFrame({
+            "symbol": ["GOLD"],
+            "signal_symbol": ["GC"],
+            "mult": [100.0],
+            "ann_dvol": [100_000.0],
+            "trade_sr": [None],
+            "roll_sr": [None],
+            "ref_ann_rolls": [6.0],
+            "cost_usd": [None],
+            "roll_cost_usd": [None],
+            "snap_ref_config_cost_usd": [22.47],
+            "snap_spread_cash_usd": [20.0],
+            "ref_config_comm_usd": [2.47],
+        }),
+        screen_symbol="GOLD",
+        reference_settings=SubsystemReferenceSettings(
+            capital=1_000.0,
+            target_vol=0.20,
+            reference_book_count=2,
+            reference_idm=1.0,
+            max_weight_idm=1.0,
+        ),
+        cash_settings=ExecutableCashSettings(
+            capital=1_000.0,
+            target_vol=0.20,
+        ),
+    )
+
+    assert view.cash is not None
+    assert view.cash["trade_cost_per_con"][0] == pytest.approx(22.47)
+    assert view.cash["roll_cost_per_con"][0] == pytest.approx(24.94)
+    assert view.cash["trade_cost_src"][0] == "snap_ref_config"
+    assert view.cash["roll_cost_src"][0] == "snap_ref_config_calendar_spread"
+    assert view.reference["trade_cost_src"][0] == "snap_ref_config"
+    assert view.reference["roll_cost_src"][0] == "snap_ref_config_calendar_spread"
+
+
 def test_notebook_view_hvplot_contains_cash_panels_when_requested():
     """The notebook dashboard renders all forecast, position, and P&L panels."""
     view = build_ewmac_notebook_view(
