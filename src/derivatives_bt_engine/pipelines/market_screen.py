@@ -80,6 +80,7 @@ from derivatives_bt_engine.strats.multi_speed_ewmac import (
 )
 from derivatives_bt_engine.reports.formatting import (
     PUBLIC_REPORT_RENAMES as CENTRAL_REPORT_RENAMES,
+    PUBLIC_COLUMN_TOKEN_ABBREVIATIONS,
     round_public_report,
 )
 from derivatives_bt_engine.calculations.ewmac import (
@@ -3411,10 +3412,6 @@ PUBLIC_REPORT_RENAMES = {
     "ib_whatif_expiry_attempts": "whatif_expiry_attempts",
     "ib_whatif_retry_count": "whatif_retry_n",
     "ib_whatif_retry_error": "whatif_retry_error",
-    "ib_whatif_initial_margin": "init_margin",
-    "ib_whatif_initial_margin_usd": "init_margin_usd",
-    "ib_whatif_maintenance_margin": "maint_margin",
-    "ib_whatif_maintenance_margin_usd": "maint_margin_usd",
     "ib_whatif_margin_currency": "margin_ccy",
     "ib_whatif_margin_fx_to_usd": "margin_fx_to_usd",
     "ib_whatif_margin_fx_source": "margin_fx_src",
@@ -3521,7 +3518,6 @@ PUBLIC_REPORT_RENAMES = {
     "min_capital_equal_weight": "min_capital_usd_equal_weight",
     "avg_daily_volume_contracts": "avg_daily_volume",
     "volume_observations": "volume_n",
-    "initial_capital_usd": "init_capital_usd",
     "selection_target_vol": "target_vol",
     "selection_bucket": "sel_bucket",
     "liquidity_business_days": "liq_days",
@@ -3534,67 +3530,6 @@ PUBLIC_REPORT_RENAMES = {
     "max_contract_ann_dvol_usd": "max_ann_dvol",
     "report_generated_at_ct": "report_ts_ct",
 }
-
-PUBLIC_COLUMN_TOKEN_ABBREVIATIONS = {
-    "affordability": "afford",
-    "affordable": "afford",
-    "average": "avg",
-    "availability": "avail",
-    "capital": "cap",
-    "class": "cls",
-    "commission": "comm",
-    "configured": "cfg",
-    "contract": "con",
-    "contracts": "cons",
-    "currency": "ccy",
-    "description": "desc",
-    "duplicate": "dup",
-    "duration": "dur",
-    "economic": "econ",
-    "error": "err",
-    "eligible": "elig",
-    "eligibility": "elig",
-    "exclusion": "excl",
-    "execution": "exec",
-    "exchange": "exch",
-    "expiration": "expiry",
-    "historical": "hist",
-    "history": "hist",
-    "include": "incl",
-    "instrument": "instr",
-    "instruments": "instrs",
-    "family": "fam",
-    "fraction": "frac",
-    "generated": "gen",
-    "group": "grp",
-    "liquidity": "liq",
-    "market": "mkt",
-    "minimum": "min",
-    "limit": "lim",
-    "multiplier": "mult",
-    "observations": "n",
-    "point": "pt",
-    "pooling": "pool",
-    "points": "pts",
-    "position": "pos",
-    "price": "px",
-    "quality": "qual",
-    "representative": "rep",
-    "restriction": "restrict",
-    "profile": "prof",
-    "return": "ret",
-    "scenario": "scen",
-    "status": "stat",
-    "source": "src",
-    "strategy": "strat",
-    "transactions": "trades",
-    "transaction": "trade",
-    "timestamp": "ts",
-    "volatility": "vol",
-    "weight": "wt",
-    "years": "yrs",
-}
-
 
 def _compact_public_column_name(name: str) -> str:
     compact = PUBLIC_REPORT_RENAMES.get(
@@ -3650,12 +3585,21 @@ def _public_report_schema(report: pl.DataFrame) -> pl.DataFrame:
             source for source in sources
             if source in PUBLIC_REPORT_RENAMES
         ]
-        if len(explicit_sources) != 1:
+        # Fresh account what-if margin supersedes the margin cached in the
+        # snapshot, but both compact to the same public field.
+        whatif_sources = [
+            source for source in explicit_sources
+            if source.startswith("ib_whatif_")
+        ]
+        if len(whatif_sources) == 1:
+            preferred = whatif_sources[0]
+        elif len(explicit_sources) == 1:
+            preferred = explicit_sources[0]
+        else:
             raise ValueError(
                 "ambiguous public report columns map to "
                 f"{target!r}: {sources}"
             )
-        preferred = explicit_sources[0]
         duplicate_sources_to_drop.update(
             source for source in sources if source != preferred
         )
@@ -3731,10 +3675,10 @@ def _public_report_schema(report: pl.DataFrame) -> pl.DataFrame:
         "comm_ccy",
         "comm_usd",
         "comm_src",
-        "init_margin",
-        "init_margin_usd",
-        "maint_margin",
-        "maint_margin_usd",
+        "init_marg_native",
+        "init_marg",
+        "maint_marg_native",
+        "maint_marg",
         "margin_ccy",
         "margin_fx_to_usd",
         "margin_fx_src",
@@ -3940,8 +3884,8 @@ def _emit_report(
         "comm_ccy",
         "comm_usd",
         "comm_src",
-        "init_margin_usd",
-        "maint_margin_usd",
+        "init_marg",
+        "maint_marg",
         "whatif_elig",
         "whatif_reject_reason",
         "whatif_error_codes",

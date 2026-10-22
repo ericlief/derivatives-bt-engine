@@ -278,8 +278,38 @@ def test_public_report_renames_grid_parameters_and_rounds_margin_money():
 
     assert public.columns == [
         "target_vol",
-        "max_instr_margin_pct",
-        "max_instr_margin_usd",
-        "book_margin_at_max_usd",
+        "max_instr_marg_pct",
+        "max_instr_marg",
+        "book_marg_at_max",
     ]
     assert public.row(0) == pytest.approx((0.20, 20.0, 12_345.68, 54_321.99))
+
+
+def test_public_report_compacts_margin_and_forecast_audit_names():
+    """Margin terminology and long forecast-audit counts use shared tokens."""
+    report = pl.DataFrame({
+        "ib_whatif_initial_margin": [101.234],
+        "ib_whatif_initial_margin_usd": [202.345],
+        "ib_whatif_maintenance_margin": [81.234],
+        "ib_whatif_maintenance_margin_usd": [162.345],
+        "portfolio_margin_at_max_usd": [500.555],
+        "instr_margin_limit_usd": [250.555],
+        "forecast_post_warmup_invalid_obs": [3],
+        "ref_rolling_ann_turnover": [12.345],
+    })
+
+    public = round_public_report(rename_public_report_columns(report))
+
+    assert public.columns == [
+        "init_marg_native",
+        "init_marg",
+        "maint_marg_native",
+        "maint_marg",
+        "port_marg_at_max",
+        "instr_marg_lim",
+        "fcst_post_warmup_inval_n",
+        "ref_roll_ann_turn",
+    ]
+    assert public.row(0) == pytest.approx(
+        (101.23, 202.34, 81.23, 162.34, 500.56, 250.56, 3, 12.345)
+    )

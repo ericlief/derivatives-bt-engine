@@ -1056,7 +1056,7 @@ def test_public_report_leads_with_primary_values_and_normalizes_spreads():
     assert report["comm_ccy"][0] == "CHF"
     assert report["comm_usd"][0] == pytest.approx(3.125)
     assert report["comm_src"][0] == "ib_what_if"
-    assert report["init_margin_usd"][0] == pytest.approx(387.25)
+    assert report["init_marg"][0] == pytest.approx(387.25)
     assert report["whatif_attempted"][0]
     assert report["whatif_elig"][0]
     assert report["ref_config_comm_usd"][0] == pytest.approx(99.0)
@@ -1768,7 +1768,7 @@ def test_phase2_prefilter_uses_relative_market_risk_volume():
     public = futures_cost_risk._public_report_schema(filtered)
     assert public["avg_daily_volume"][0] == pytest.approx(100_000.0)
     assert public["ann_dvol"][0] == pytest.approx(1_100.0)
-    assert public["init_cap_usd"][0] == pytest.approx(500_000.0)
+    assert public["init_cap"][0] == pytest.approx(500_000.0)
     assert "liq_ann_dvol" not in public.columns
     assert not any(name.startswith("selected_") for name in public.columns)
 

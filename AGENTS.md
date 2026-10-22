@@ -55,8 +55,9 @@
 - Use short, unambiguous report tokens consistently: `con`, `instr`, `exec`,
   `elig`, `ann`, `dvol`, `sr`, `pct`, `avg`, `min`, `max`, `n`, `px`, `pt`,
   `pts`, `pos`, `tol`, `cand`, `ccy`, `mult`, `src`, `hist`, `ref`, `snap`,
-  `cap`, `wt`, `cls`, `comb` (combined), `fcst` (forecast), and `port`
-  (portfolio).
+  `cap`, `wt`, `cls`, `comb` (combined), `fcst` (forecast), `port`
+  (portfolio), `init` (initial), `maint` (maintenance), `marg` (margin),
+  `lim` (limit), `inval` (invalid), and `turn` (turnover).
   In public column names, abbreviate `contract` as `con`, `position` as `pos`,
   `normalized` as `norm`, and `average` as `avg`. Use `dvol` for dollar
   volatility (for example, `daily_dvol` and `ann_dvol`).
