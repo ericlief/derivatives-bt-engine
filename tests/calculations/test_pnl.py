@@ -186,7 +186,21 @@ def test_executable_cash_pnl_separates_trade_and_policy_roll_costs():
         roll_cost_usd_per_con=3.0,
         annualization_days=4,
     )
+    compact_result = build_executable_cash_pnl_curve(
+        frame.rename({"combined_forecast": "comb_fcst"}),
+        capital=1_000.0,
+        target_vol=0.20,
+        weight=0.50,
+        idm=1.0,
+        multiplier=10.0,
+        trade_cost_usd_per_con=2.0,
+        roll_cost_usd_per_con=3.0,
+        annualization_days=4,
+    )
 
+    assert compact_result.get_column("cum_net_pnl").to_list() == pytest.approx(
+        result.get_column("cum_net_pnl").to_list()
+    )
     assert result.get_column("close").to_list() == frame.get_column(
         "close"
     ).to_list()

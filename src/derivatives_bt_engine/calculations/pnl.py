@@ -652,8 +652,9 @@ def build_executable_cash_pnl_curve(
     ----------
     frame
         One combined-subsystem frame containing ``date``, ``point_change``,
-        ``combined_forecast``, point volatility, historical USD FX, and an
-        optional boolean roll marker. ``close`` may be the locally generated
+        ``combined_forecast`` (or its public alias ``comb_fcst``), point
+        volatility, historical USD FX, and an optional boolean roll marker.
+        ``close`` may be the locally generated
         additive-Panama signal price. When present, ``contract_close`` is the
         date-aligned raw mark of the selected contract and is used for annual
         volatility as a percentage of notional. Without it, ``ann_pct_vol``
@@ -736,6 +737,12 @@ def build_executable_cash_pnl_curve(
     this is an execution-cost sensitivity, not a claim that historical
     commissions and spreads were constant.
     """
+    # Reference-curve outputs use public compact names; selection passes that
+    # frame directly into this calculation. Normalize the alias here so all
+    # sizing expressions below retain the descriptive internal column name.
+    if "combined_forecast" not in frame.columns and "comb_fcst" in frame.columns:
+        frame = frame.rename({"comb_fcst": "combined_forecast"})
+
     if point_vol_col is None:
         if "mixed_point_vol" in frame.columns:
             point_vol_col = "mixed_point_vol"
