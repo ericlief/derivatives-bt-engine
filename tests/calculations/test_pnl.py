@@ -20,6 +20,7 @@ def test_subsystem_reference_pct_uses_equal_weight_risk_budget():
         "point_change": [None, 1.0, 1.0],
         "point_vol": [2.0, 2.0, 2.0],
         "combined_forecast": [1.0, 2.0, 3.0],
+        "forecast_valid": [False, True, True],
         "fx_to_usd": [2.0, 2.0, 2.0],
     })
 
@@ -41,6 +42,10 @@ def test_subsystem_reference_pct_uses_equal_weight_risk_budget():
         annualization_days=256,
     )
 
+    assert "combined_forecast" not in result.columns
+    assert "forecast_valid" not in result.columns
+    assert result.get_column("comb_fcst").to_list() == [1.0, 2.0, 3.0]
+    assert result.get_column("fcst_valid").to_list() == [False, True, True]
     assert result.get_column("ref_weight").to_list() == pytest.approx(
         [0.5] * 3
     )

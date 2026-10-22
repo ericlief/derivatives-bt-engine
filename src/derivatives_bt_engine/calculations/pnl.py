@@ -19,6 +19,9 @@ import math
 
 import polars as pl
 
+from derivatives_bt_engine.reports.formatting import (
+    PUBLIC_REPORT_RENAMES,
+)
 from derivatives_bt_engine.reports.formatting import rename_public_report_columns
 
 from derivatives_bt_engine.calculations.ewmac import EWMAC_FORECAST_TARGET_ABS
@@ -475,6 +478,8 @@ def build_subsystem_reference_return_curve(
         volatility per contract, reference budget, continuous average, target,
         and held positions, gross/cost/net hypothetical reference values in
         USD, matching subsystem percentages, and a row-level validity flag.
+        The forecast context uses the shared report tokens ``comb_fcst`` and
+        ``fcst_valid`` so reference frames are directly usable in audits.
 
     Notes
     -----
@@ -607,10 +612,19 @@ def build_subsystem_reference_return_curve(
             ).alias("ref_gross_pct"),
         )
     )
-    return apply_subsystem_reference_cost(
+    result = apply_subsystem_reference_cost(
         reference,
         ann_cost_sr=ann_cost_sr,
     )
+    # Reference curves are also the notebook/audit boundary. Apply the
+    # centralized tokens here so callers do not have to rename signal context
+    # after every cost or turnover transformation.
+    signal_renames = {
+        source: PUBLIC_REPORT_RENAMES[source]
+        for source in ("combined_forecast", "forecast_valid")
+        if source in result.columns
+    }
+    return result.rename(signal_renames) if signal_renames else result
 
 
 def build_executable_cash_pnl_curve(

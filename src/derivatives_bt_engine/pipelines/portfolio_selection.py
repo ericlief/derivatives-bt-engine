@@ -682,11 +682,11 @@ def _run_complete_selection(
         )
         reference_return_post_start_invalid = (
             reference_returns_after_start.filter(
-                pl.col("forecast_valid") & ~pl.col("ref_return_valid")
+                pl.col("fcst_valid") & ~pl.col("ref_return_valid")
             ).height
         )
         fx_missing_obs = reference_frame.filter(
-            pl.col("forecast_valid") & pl.col("fx_to_usd").is_null()
+            pl.col("fcst_valid") & pl.col("fx_to_usd").is_null()
         ).height
         fx_used = reference_frame.filter(pl.col("fx_to_usd").is_not_null())
         fx_pairs = fx_used.get_column("fx_pair").drop_nulls().unique().to_list()
