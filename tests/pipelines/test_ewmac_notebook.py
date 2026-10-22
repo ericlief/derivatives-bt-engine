@@ -12,6 +12,7 @@ from derivatives_bt_engine.pipelines.ewmac_notebook import (
     ExecutableCashSettings,
     SubsystemReferenceSettings,
     build_ewmac_notebook_view,
+    build_ewmac_notebook_view_from_screen,
 )
 
 
@@ -103,6 +104,60 @@ def test_notebook_view_builds_reference_return_and_cash_paths():
     assert cash.get_column("cum_net_pnl")[-1] == pytest.approx(
         expected_cash_net
     )
+
+
+def test_notebook_view_loads_contract_costs_from_screen_row(tmp_path):
+    """A screen row supplies MES terms while retaining the input signal FX."""
+    result = _combined_result()
+    result = CombinedForecastResult(
+        frame=result.frame.with_columns(pl.lit(1.25).alias("fx_to_usd")),
+        weights=result.weights,
+        fdm=result.fdm,
+        audit=result.audit,
+    )
+    screen = pl.DataFrame({
+        "signal_symbol": ["MES"],
+        "mult": [5.0],
+        "trade_sr": [0.001],
+        "roll_sr": [0.002],
+        "ref_ann_rolls": [4.0],
+        "cost_usd": [1.25],
+        "roll_cost_usd": [3.5],
+    })
+    screen_path = tmp_path / "screen.parquet"
+    screen.write_parquet(screen_path)
+
+    view = build_ewmac_notebook_view_from_screen(
+        result,
+        screen=screen_path,
+        screen_symbol="MES",
+        instrument_code="ES signal / MES execution",
+        reference_settings=SubsystemReferenceSettings(
+            capital=1_000.0,
+            target_vol=0.20,
+            reference_book_count=2,
+            reference_idm=1.0,
+            max_weight_idm=1.0,
+        ),
+        cash_settings=ExecutableCashSettings(
+            capital=1_000.0,
+            target_vol=0.20,
+            weight=0.50,
+            idm=1.0,
+        ),
+    )
+
+    assert view.instrument_code == "ES signal / MES execution"
+    assert view.reference_turnover is not None
+    expected_ann_cost_sr = 0.001 * view.reference_turnover + 0.002 * 4.0
+    assert view.reference["ref_ann_cost_pct"][0] == pytest.approx(
+        -expected_ann_cost_sr * 0.20 * 100.0
+    )
+    assert view.reference["daily_dvol"][2] == pytest.approx(1.0 * 5.0 * 1.25)
+    assert view.cash is not None
+    assert view.cash["trade_cost_per_con"][0] == pytest.approx(1.25)
+    assert view.cash["roll_cost_per_con"][0] == pytest.approx(3.5)
+    assert view.cash["daily_dvol"][2] == pytest.approx(1.0 * 5.0 * 1.25)
 
 
 def test_notebook_view_hvplot_contains_cash_panels_when_requested():

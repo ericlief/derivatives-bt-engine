@@ -163,6 +163,7 @@ from derivatives_bt_engine.pipelines.ewmac_notebook import (
     ExecutableCashSettings,
     SubsystemReferenceSettings,
     build_ewmac_notebook_view,
+    build_ewmac_notebook_view_from_screen,
 )
 
 view = build_ewmac_notebook_view(
@@ -190,6 +191,42 @@ view = build_ewmac_notebook_view(
 
 view.plot(start="2021-01-01")
 ```
+
+When a saved Phase 1 selection-screen report is available, the notebook
+helper can load the matching row and fill in the executable multiplier,
+trade/roll SR rates, annual roll count, and per-contract cash costs. Account
+capital, target volatility, instrument weight, and IDM remain explicit. This
+also supports an ES signal sized with the MES contract row:
+
+```python
+view = build_ewmac_notebook_view_from_screen(
+    result,  # CombinedForecastResult built from the desired signal history
+    screen="~/fin/misc/pysystemtrade_selection_screen.parquet",
+    screen_symbol="MES",
+    instrument_code="ES signal / MES execution",
+    reference_settings=SubsystemReferenceSettings(
+        capital=75_000,
+        target_vol=0.20,
+        reference_book_count=15,
+        reference_idm=2.5,
+        max_weight_idm=0.20,
+    ),
+    cash_settings=ExecutableCashSettings(
+        capital=75_000,
+        target_vol=0.20,
+        weight=0.067,
+        idm=2.5,
+    ),
+)
+
+view.plot(start="2021-01-01")
+```
+
+The helper accepts a typed Polars frame or a Parquet/legacy CSV path. It
+preserves the forecast frame's causal `fx_to_usd` series unless an explicit
+constant override is supplied. A market snapshot alone is insufficient for
+the costed path because it does not include the screen's annualized trading
+and roll cost inputs; use the selection-screen output.
 
 The linked hvPlot dashboard contains adjusted signal price, combined forecast,
 sized and smoothed reference positions, normalized reference position,

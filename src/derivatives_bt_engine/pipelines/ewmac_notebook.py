@@ -3,7 +3,8 @@
 This module is the interactive inspection boundary after forecast combination.
 It accepts the same :class:`CombinedForecastResult` used by Phase 2, adds the
 equal-weight subsystem-reference percentage and optional executable cash P&L
-paths, and exposes small Polars tables plus a lazy hvPlot dashboard. It does
+paths, and exposes small Polars tables plus a lazy hvPlot dashboard. A helper
+can join a saved Phase 1 selection screen for contract and cost inputs. It does
 not reimplement forecast, sizing, buffering, or cost calculations; those
 remain owned by the calculation modules used by production selection.
 """
@@ -11,8 +12,9 @@ remain owned by the calculation modules used by production selection.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
+from pathlib import Path
 
 import polars as pl
 
@@ -20,6 +22,7 @@ from derivatives_bt_engine.calculations.ewmac import EWMAC_FORECAST_TARGET_ABS
 from derivatives_bt_engine.calculations.forecast_combination import (
     CombinedForecastResult,
 )
+from derivatives_bt_engine.calculations.costs import calculate_annual_sr_cost
 from derivatives_bt_engine.calculations.pnl import (
     PYSYSTEMTRADE_FORECAST_BUFFER_SIZE,
     append_reference_position_turnover,
@@ -62,6 +65,79 @@ def _attach_fx(frame: pl.DataFrame, fx_to_usd: float) -> pl.DataFrame:
     if not math.isfinite(fx_to_usd) or fx_to_usd <= 0:
         raise ValueError("fx_to_usd must be finite and positive")
     return frame.with_columns(pl.lit(float(fx_to_usd)).alias("fx_to_usd"))
+
+
+def _forecast_with_fx(
+    result: CombinedForecastResult,
+    fx_to_usd: float | None,
+) -> pl.DataFrame:
+    """Use causal forecast FX when present, otherwise attach a constant rate."""
+    if fx_to_usd is not None:
+        return _attach_fx(result.frame, fx_to_usd)
+    if "fx_to_usd" in result.frame.columns:
+        return result.frame
+    return _attach_fx(result.frame, 1.0)
+
+
+def _read_screen_frame(
+    screen: pl.DataFrame | Path | str,
+) -> pl.DataFrame:
+    """Load a selection-screen report from a Polars frame or local file."""
+    if isinstance(screen, pl.DataFrame):
+        return screen
+    path = Path(screen).expanduser()
+    if path.suffix.lower() in {".parquet", ".pq"}:
+        return pl.read_parquet(path)
+    if path.suffix.lower() == ".csv":
+        return pl.read_csv(path, try_parse_dates=True)
+    raise ValueError(
+        "screen must be a Polars dataframe or a .parquet/.csv report path"
+    )
+
+
+def _screen_row(
+    screen: pl.DataFrame,
+    screen_symbol: str,
+) -> dict[str, object]:
+    """Resolve exactly one screen row by its executable or signal symbol."""
+    for column in ("signal_symbol", "symbol", "ib_symbol", "hist_instr_code"):
+        if column not in screen.columns:
+            continue
+        matches = screen.filter(pl.col(column).cast(pl.String) == screen_symbol)
+        if matches.height == 0:
+            continue
+        if matches.height != 1:
+            raise ValueError(
+                f"screen symbol {screen_symbol!r} matches "
+                f"{matches.height} rows in {column!r}; use a unique symbol"
+            )
+        return matches.row(0, named=True)
+    raise ValueError(
+        f"screen has no row for {screen_symbol!r}; checked "
+        "signal_symbol, symbol, ib_symbol, and hist_instr_code"
+    )
+
+
+def _screen_number(
+    row: dict[str, object],
+    names: tuple[str, ...],
+    *,
+    label: str,
+) -> float:
+    """Extract a finite numeric screen value with supported schema aliases."""
+    for name in names:
+        value = row.get(name)
+        if value is None:
+            continue
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(number):
+            return number
+    raise ValueError(
+        f"screen row is missing a finite {label}; expected one of {names}"
+    )
 
 
 @dataclass(frozen=True)
@@ -108,12 +184,12 @@ class ExecutableCashSettings:
 class EwmacNotebookView:
     """Hold forecast, subsystem-reference, and optional cash-P&L frames.
 
-    ``forecasts`` contains the detailed combined-forecast result. ``reference``
-    is the equal-weight continuous position and return path used for turnover
-    and correlations. ``reference_turnover`` is its annualized Carver-style
-    turnover. ``cash`` is present only when executable account settings were
-    supplied and contains the selected portfolio's continuous targets,
-    buffered whole contracts, and cash costs.
+    ``forecasts`` returns the combined-forecast result at the compact public
+    schema boundary. ``reference`` is the equal-weight continuous position
+    and return path used for turnover and correlations.
+    ``reference_turnover`` is its annualized Carver-style turnover. ``cash``
+    is present only when executable account settings were supplied and
+    contains continuous targets, buffered whole contracts, and cash costs.
     """
 
     instrument_code: str
@@ -355,7 +431,7 @@ def build_ewmac_notebook_view(
     instrument_code: str,
     multiplier: float,
     reference_settings: SubsystemReferenceSettings,
-    fx_to_usd: float = 1.0,
+    fx_to_usd: float | None = None,
     ann_cost_sr: float = 0.0,
     cash_settings: ExecutableCashSettings | None = None,
     target_abs_forecast: float = EWMAC_FORECAST_TARGET_ABS,
@@ -372,9 +448,9 @@ def build_ewmac_notebook_view(
     multiplier
         Native-currency value of one price point for the actual instrument.
     fx_to_usd
-        Constant native-currency-to-USD conversion. Use 1.0 for USD assets.
-        Historical portfolio research should continue to use the Phase 2 FX
-        loader rather than treating this notebook convenience as dated FX.
+        Optional constant native-currency-to-USD conversion. If omitted, use
+        the forecast frame's causal ``fx_to_usd`` series when present, or the
+        identity rate for USD frames without FX data.
     ann_cost_sr
         Annual subsystem cost in SR units for the reference return path.
     reference_settings
@@ -400,7 +476,7 @@ def build_ewmac_notebook_view(
     if not math.isfinite(target_abs_forecast) or target_abs_forecast <= 0:
         raise ValueError("target_abs_forecast must be finite and positive")
 
-    forecast = _attach_fx(result.frame, fx_to_usd)
+    forecast = _forecast_with_fx(result, fx_to_usd)
     reference = build_subsystem_reference_return_curve(
         forecast,
         capital=reference_settings.capital,
@@ -443,4 +519,129 @@ def build_ewmac_notebook_view(
         reference=reference,
         reference_turnover=reference_turnover,
         cash=cash,
+    )
+
+
+def build_ewmac_notebook_view_from_screen(
+    result: CombinedForecastResult,
+    *,
+    screen: pl.DataFrame | Path | str,
+    screen_symbol: str,
+    reference_settings: SubsystemReferenceSettings,
+    cash_settings: ExecutableCashSettings | None = None,
+    instrument_code: str | None = None,
+    fx_to_usd: float | None = None,
+    target_abs_forecast: float = EWMAC_FORECAST_TARGET_ABS,
+) -> EwmacNotebookView:
+    """Build reference and optional cash curves using a Phase 1 screen row.
+
+    The screen supplies executable contract multiplier, one-contract trading
+    and roll costs, SR-normalized costs, and annual rolls. The combined
+    forecast remains the supplied time series, so an ES signal can be sized
+    with a MES screen row. Account capital, target volatility, weight, IDM, and
+    buffer policy stay explicit in the settings objects.
+
+    ``screen`` may be a typed Parquet report (preferred), a legacy CSV report,
+    or an already-loaded Polars dataframe. A market snapshot alone is not
+    sufficient for costed curves because it does not contain the selection
+    screen's annual SR cost rates and roll-policy cost assumptions.
+
+    Parameters
+    ----------
+    result
+        Combined forecast history to use as the strategy signal.
+    screen
+        Phase 1 selection-screen frame or path to its Parquet/CSV report.
+    screen_symbol
+        Exact symbol in the screen's ``signal_symbol`` or ``symbol`` field.
+    reference_settings
+        Equal-weight subsystem-reference sizing assumptions.
+    cash_settings
+        Optional account-level settings. When provided, per-contract trade
+        and roll costs are taken from the matched screen row rather than the
+        settings object's cost defaults.
+    instrument_code
+        Plot label. Defaults to ``screen_symbol``; can differ from the signal
+        instrument when sizing (for example, ES forecast with MES terms).
+    fx_to_usd
+        Optional constant FX override. Omit to preserve a causal FX series
+        already attached to ``result.frame``.
+    target_abs_forecast
+        Forecast value corresponding to one average position.
+
+    Returns
+    -------
+    EwmacNotebookView
+        Compact forecast, costed reference, optional executable cash frames,
+        and plotting methods.
+    """
+    screen_frame = _read_screen_frame(screen)
+    screen_row = _screen_row(screen_frame, screen_symbol)
+    multiplier = _screen_number(
+        screen_row,
+        ("mult", "multiplier", "ib_mult"),
+        label="contract multiplier",
+    )
+    trade_sr = _screen_number(
+        screen_row, ("trade_sr",), label="trade_sr"
+    )
+    roll_sr = _screen_number(
+        screen_row, ("roll_sr",), label="roll_sr"
+    )
+    annual_rolls = _screen_number(
+        screen_row,
+        ("ref_ann_rolls", "ann_rolls"),
+        label="annual roll count",
+    )
+    trade_cost = _screen_number(
+        screen_row,
+        ("cost_usd", "trade_cost_per_con", "trade_cost_usd_per_con"),
+        label="one-way trade cost per contract in USD",
+    )
+    roll_cost = _screen_number(
+        screen_row,
+        ("roll_cost_usd", "roll_cost_per_con", "roll_cost_usd_per_con"),
+        label="roll cost per contract in USD",
+    )
+
+    forecast = _forecast_with_fx(result, fx_to_usd)
+    reference = build_subsystem_reference_return_curve(
+        forecast,
+        capital=reference_settings.capital,
+        target_vol=reference_settings.target_vol,
+        reference_book_count=reference_settings.reference_book_count,
+        reference_idm=reference_settings.reference_idm,
+        max_weight_idm=reference_settings.max_weight_idm,
+        multiplier=multiplier,
+        ann_cost_sr=0.0,
+        target_abs_forecast=target_abs_forecast,
+    )
+    _, turnover = append_reference_position_turnover(reference)
+    if turnover is None or not math.isfinite(turnover):
+        raise ValueError(
+            f"cannot estimate reference turnover for {screen_symbol!r}"
+        )
+    annual_cost = calculate_annual_sr_cost(
+        trade_sr=trade_sr,
+        roll_sr=roll_sr,
+        subsystem_turnover=turnover,
+        ann_rolls=annual_rolls,
+    )
+
+    if cash_settings is not None:
+        cash_settings = replace(
+            cash_settings,
+            trade_cost_usd_per_con=trade_cost,
+            roll_cost_usd_per_con=roll_cost,
+        )
+
+    return build_ewmac_notebook_view(
+        result,
+        instrument_code=instrument_code or screen_symbol,
+        multiplier=multiplier,
+        reference_settings=reference_settings,
+        fx_to_usd=fx_to_usd,
+        ann_cost_sr=annual_cost.ann_cost_sr,
+        cash_settings=cash_settings,
+        target_abs_forecast=target_abs_forecast,
     )
