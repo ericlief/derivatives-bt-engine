@@ -119,6 +119,36 @@ Reference sizing and turnover are added after multiplier and FX are known. Use
 ``build_ewmac_components`` when only the wide component frame is needed, or
 ``build_ewmac_rule_component`` to inspect a single speed.
 
+## Load dated futures contracts from IB
+
+Given a connected ``IBPySync`` client, load the current and prior calendar
+years of dated contracts using the instrument's configured roll cycle:
+
+```python
+from derivatives_bt_engine.data.ib_futures_dataloader import (
+    load_roll_cycle_ib_contract_history,
+)
+
+mgc_contracts = load_roll_cycle_ib_contract_history(
+    ib,
+    "GOLD_micro",
+    prior_years=1,
+)
+
+mgc_contracts.select(
+    "trade_date",
+    "contract_month",
+    "expiration",
+    "ib_local_symbol",
+    "close",
+    "volume",
+).tail(30)
+```
+
+The result deliberately retains overlapping contract rows and contract
+identity. It is raw input for an explicit roll selection and continuous-price
+construction, rather than an IB continuous contract.
+
 For a direct inspection of the equal-weight subsystem-reference percentage curve,
 use the same explicit reference assumptions as the selection pipeline:
 
