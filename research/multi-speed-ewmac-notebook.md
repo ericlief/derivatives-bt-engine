@@ -137,7 +137,7 @@ mgc_contracts = load_roll_cycle_ib_contract_history(
 )
 
 mgc_contracts.select(
-    "trade_date",
+    "date",
     "contract_month",
     "expiration",
     "ib_local_symbol",
@@ -152,13 +152,13 @@ gold_history = build_stitched_futures_history(
 
 gold_history.metadata["handoff_dates"]
 gold_history.signal.select(
-    "trade_date",
+    "date",
     "source_segment",
     "ret_1d",
     "signal_index",
 ).tail(30)
 
-gold_prices = gold_history.panama_bars().rename({"ts_event": "date"})
+gold_prices = gold_history.panama_bars()
 ```
 
 The result deliberately retains overlapping contract rows and contract
