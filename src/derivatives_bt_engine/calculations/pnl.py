@@ -49,6 +49,10 @@ _REFERENCE_ACCOUNTING_COLUMNS = (
     "ref_ann_cost_pct",
     "ref_cost_pct",
     "ref_net_pct",
+    "cum_ref_gross_pnl_usd",
+    "cum_ref_net_pnl_usd",
+    "cum_ref_gross_pct",
+    "cum_ref_net_pct",
     "ref_return_valid",
 )
 
@@ -383,6 +387,24 @@ def apply_subsystem_reference_cost(
                 pl.col("ref_net_pct").is_not_null()
                 & pl.col("ref_net_pct").is_finite()
             ).alias("ref_return_valid")
+        )
+        .with_columns(
+            pl.col("ref_gross_usd")
+            .fill_null(0.0)
+            .cum_sum()
+            .alias("cum_ref_gross_pnl_usd"),
+            pl.col("ref_net_usd")
+            .fill_null(0.0)
+            .cum_sum()
+            .alias("cum_ref_net_pnl_usd"),
+            pl.col("ref_gross_pct")
+            .fill_null(0.0)
+            .cum_sum()
+            .alias("cum_ref_gross_pct"),
+            pl.col("ref_net_pct")
+            .fill_null(0.0)
+            .cum_sum()
+            .alias("cum_ref_net_pct"),
         )
     )
     return _group_reference_accounting_columns(result)
