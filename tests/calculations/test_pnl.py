@@ -192,10 +192,13 @@ def test_executable_cash_pnl_separates_trade_and_policy_roll_costs():
     ).to_list() == pytest.approx([0.5] * 5)
     assert result.get_column("exec_con").to_list() == [5, 10, 10, 6, 5]
     exec_idx = result.columns.index("exec_con")
-    assert result.columns[exec_idx:exec_idx + 4] == [
-        "exec_con", "held_con", "trade_con", "roll_con",
+    assert result.columns[exec_idx:exec_idx + 5] == [
+        "exec_con", "held_con", "trade_con", "trade_abs_con", "roll_con",
     ]
     assert result.get_column("trade_con").to_list() == pytest.approx(
+        [5.0, 5.0, 0.0, -4.0, -1.0]
+    )
+    assert result.get_column("trade_abs_con").to_list() == pytest.approx(
         [5.0, 5.0, 0.0, 4.0, 1.0]
     )
     assert result.get_column("roll_con").to_list() == pytest.approx(

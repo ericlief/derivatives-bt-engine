@@ -126,6 +126,19 @@ def test_public_report_renames_buffer_parameters_at_boundary():
     ]
 
 
+def test_public_trade_delta_is_signed_and_turnover_is_absolute():
+    """Public trade direction stays distinct from contracts charged."""
+    report = pl.DataFrame({
+        "signed_trade_cons": [-2.0],
+        "trade_cons": [2.0],
+    })
+
+    public = rename_public_report_columns(report)
+
+    assert public.columns == ["trade_con", "trade_abs_con"]
+    assert public.row(0) == (-2.0, 2.0)
+
+
 def test_public_report_renames_and_rounds_tracking_error_columns():
     """Tracking error uses USD cents and account percentage-point precision."""
     report = pl.DataFrame({

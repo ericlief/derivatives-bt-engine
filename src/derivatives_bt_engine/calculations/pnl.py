@@ -686,8 +686,11 @@ def build_executable_cash_pnl_curve(
     -----
     With roll rebalancing enabled, ``roll_cons`` is the same-direction
     overlap between the prior holding and the newly rounded target. Any size
-    change is retained in ``trade_cons`` as an ordinary trade. With roll
-    rebalancing disabled, the executable position normally remains unchanged
+    change is retained in signed ``trade_con`` as an ordinary trade; its
+    absolute size is reported separately as ``trade_abs_con`` and is used for
+    transaction costs. Positive signed trades increase the net position and
+    negative trades decrease it. With roll rebalancing disabled, the
+    executable position normally remains unchanged
     and the complete prior holding is rolled. Ordinary position changes
     are charged independently, including the initial entry from zero. Current
     point-in-time cost rates are intentionally applied to the full history;
@@ -868,6 +871,13 @@ def build_executable_cash_pnl_curve(
         .with_columns(
             pl.when(pl.col("exec_cons").is_not_null())
             .then(
+                pl.col("exec_cons") - pl.col("held_cons").fill_null(0)
+            )
+            .otherwise(None)
+            .cast(pl.Float64)
+            .alias("signed_trade_cons"),
+            pl.when(pl.col("exec_cons").is_not_null())
+            .then(
                 (
                     pl.col("exec_cons")
                     - pl.col("held_cons").fill_null(0)
@@ -1028,7 +1038,12 @@ def build_executable_cash_pnl_curve(
     # so the position transition can be audited without scanning the frame.
     contract_state_columns = [
         column
-        for column in ("held_con", "trade_con", "roll_con")
+        for column in (
+            "held_con",
+            "trade_con",
+            "trade_abs_con",
+            "roll_con",
+        )
         if column in public.columns
     ]
     if "exec_con" in public.columns and contract_state_columns:
