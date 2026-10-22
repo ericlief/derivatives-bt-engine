@@ -86,16 +86,21 @@ def test_subsystem_reference_pct_uses_equal_weight_risk_budget():
     assert result.get_column("ref_net_usd")[1] == pytest.approx(
         2.5 + costs[1] / 100.0 * 500.0
     )
-    assert result.get_column("cum_ref_gross_pnl_usd").to_list() == (
+    assert result.get_column("cum_ref_gross_usd").to_list() == (
         pytest.approx([0.0, 2.5, 7.5])
     )
-    assert result.get_column("cum_ref_net_pnl_usd").to_list() == (
+    assert result.get_column("cum_ref_net_usd").to_list() == (
         pytest.approx([
             0.0,
             result.get_column("ref_net_usd")[1],
             result.get_column("ref_net_usd")[1]
             + result.get_column("ref_net_usd")[2],
         ])
+    )
+    assert result.get_column("cum_ref_net_usd").to_list() == pytest.approx(
+        result.select(
+            pl.col("ref_net_usd").fill_null(0.0).cum_sum()
+        ).to_series().to_list()
     )
     assert result.get_column("cum_ref_gross_pct").to_list() == (
         pytest.approx([0.0, 0.5, 1.5])

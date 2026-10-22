@@ -49,8 +49,8 @@ _REFERENCE_ACCOUNTING_COLUMNS = (
     "ref_ann_cost_pct",
     "ref_cost_pct",
     "ref_net_pct",
-    "cum_ref_gross_pnl_usd",
-    "cum_ref_net_pnl_usd",
+    "cum_ref_gross_usd",
+    "cum_ref_net_usd",
     "cum_ref_gross_pct",
     "cum_ref_net_pct",
     "ref_return_valid",
@@ -389,14 +389,17 @@ def apply_subsystem_reference_cost(
             ).alias("ref_return_valid")
         )
         .with_columns(
+            # Keep the cumulative path at calculation precision. At a public
+            # report boundary, summing individually rounded daily USD rows
+            # can differ by cents from this rounded cumulative value.
             pl.col("ref_gross_usd")
             .fill_null(0.0)
             .cum_sum()
-            .alias("cum_ref_gross_pnl_usd"),
+            .alias("cum_ref_gross_usd"),
             pl.col("ref_net_usd")
             .fill_null(0.0)
             .cum_sum()
-            .alias("cum_ref_net_pnl_usd"),
+            .alias("cum_ref_net_usd"),
             pl.col("ref_gross_pct")
             .fill_null(0.0)
             .cum_sum()

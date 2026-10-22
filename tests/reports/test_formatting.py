@@ -81,6 +81,16 @@ def test_public_report_renames_cash_cost_columns_at_boundary():
     assert public.row(0) == pytest.approx((1.23, 12.35))
 
 
+def test_reference_cumulative_usd_uses_consistent_report_rounding():
+    """Reference cumulative USD fields round like other monetary outputs."""
+    public = round_public_report(pl.DataFrame({
+        "cum_ref_gross_usd": [12.346],
+        "cum_ref_net_usd": [10.005],
+    }))
+
+    assert public.row(0) == pytest.approx((12.35, 10.01))
+
+
 def test_joined_cash_audit_columns_drop_cash_prefix():
     """Per-instrument cash fields stay concise beside forecasts/reference data."""
     report = pl.DataFrame({
