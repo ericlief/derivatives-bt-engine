@@ -124,8 +124,8 @@ class EwmacNotebookView:
 
     @property
     def forecasts(self) -> pl.DataFrame:
-        """Return the combined-forecast frame before reference sizing."""
-        return self.result.frame
+        """Return the compact public forecast frame before reference sizing."""
+        return rename_public_report_columns(self.result.frame)
 
     def forecast_positions(
         self,

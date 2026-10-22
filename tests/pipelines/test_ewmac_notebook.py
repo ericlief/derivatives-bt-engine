@@ -57,7 +57,9 @@ def test_notebook_view_builds_reference_return_and_cash_paths():
         ),
     )
 
-    assert view.forecasts is result.frame
+    assert view.forecasts is not result.frame
+    assert "comb_fcst" in view.forecasts.columns
+    assert "combined_forecast" not in view.forecasts.columns
     assert "ref_net_pct" in view.reference.columns
     assert view.reference_turnover is not None
     assert {
