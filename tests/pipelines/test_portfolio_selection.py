@@ -183,6 +183,15 @@ def test_run_loads_explicit_market_parquet_and_saves_typed_rows(tmp_path):
     assert saved.get_column("init_cap_usd").to_list() == [100_000.0]
     assert saved.get_column("target_vol").to_list() == [0.2]
     assert saved.columns == selected.columns
+    screen_paths = list(
+        tmp_path.glob("multi_speed_ewmac_selection_screen_*.parquet")
+    )
+    assert len(screen_paths) == 1
+    screen = pl.read_parquet(screen_paths[0])
+    assert screen.height == 2
+    assert screen.get_column("symbol").to_list() == ["MZC", "VIX"]
+    assert screen.get_column("selection_elig").to_list() == [True, False]
+    assert screen.get_column("selection_excl")[1] is not None
 
 
 def test_run_rejects_csv_output_path(tmp_path):

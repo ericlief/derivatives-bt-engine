@@ -1398,14 +1398,25 @@ def run(
         else _default_output_path(report_output_dir, generated_at)
     )
     output.parent.mkdir(parents=True, exist_ok=True)
+    screen_path = report_output_dir / (
+        "multi_speed_ewmac_selection_screen_"
+        f"{generated_at.astimezone(REPORT_TIMEZONE).strftime('%Y%m%d_%H%M%S')}"
+        ".parquet"
+    )
+    screen_path.parent.mkdir(parents=True, exist_ok=True)
+    # Keep the complete instrument universe and its pass/fail reasons so the
+    # embedded selection screen is auditable alongside the passing candidates.
+    public_screen = round_public_report(report)
+    public_screen.write_parquet(screen_path)
     # Candidate filtering is a public report boundary. Keep ``selected`` at calculation
     # precision for the optional complete search and round only its report copy.
     public_selected = round_public_report(selected)
     public_selected.write_parquet(output)
     logger.info(
-        "selection_candidate_filter complete source=%s output=%s "
+        "selection_candidate_filter complete source=%s screen=%s output=%s "
         "selected=%d total=%d",
         source,
+        screen_path,
         output,
         selected.height,
         report.height,
@@ -1424,6 +1435,7 @@ def run(
         f"min_daily_volume={config['min_daily_volume']} "
         f"max_pct_mkt_volume={config['max_pct_mkt_volume']}"
     )
+    print(f"Saved selection screen {screen_path}")
     print(f"Saved {output}")
     if args.complete:
         return _run_complete_selection(
