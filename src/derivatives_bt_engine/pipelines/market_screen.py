@@ -172,6 +172,9 @@ IB_UNSET_DOUBLE_THRESHOLD = 1e300
 
 def _pooling_report_identity(instr: dict) -> dict:
     return {
+        "pysystemtrade_instrument_code": (
+            instr.get("pst_instr_code") or instr.get("instrument_code")
+        ),
         "history_instrument_code": (
             instr.get("history_instrument_code")
             or instr.get("instrument_code")
@@ -3621,6 +3624,7 @@ def _public_report_schema(report: pl.DataFrame) -> pl.DataFrame:
 
     selected_first = [
         "symbol",
+        "pst_instr_code",
         "signal_symbol",
         "desc",
         "asset_cls",
@@ -4208,6 +4212,7 @@ def _market_snapshot_frame(
 
     primary_columns = [
         "symbol",
+        "pysystemtrade_instrument_code",
         "signal_symbol",
         "description",
         "asset_class",
@@ -4246,7 +4251,15 @@ def _market_snapshot_frame(
         name for name in snapshot.columns
         if name not in primary_set and name not in reference_set
     ]
-    return snapshot.select(*primary, *middle, *reference_tail)
+    ordered = snapshot.select(*primary, *middle, *reference_tail)
+    # Snapshots retain their established full-precision field vocabulary,
+    # while identity abbreviations still come from the shared report map.
+    identity_rename = {
+        name: CENTRAL_REPORT_RENAMES[name]
+        for name in ("pysystemtrade_instrument_code",)
+        if name in ordered.columns and name in CENTRAL_REPORT_RENAMES
+    }
+    return ordered.rename(identity_rename) if identity_rename else ordered
 
 
 def _emit_market_snapshot(

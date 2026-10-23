@@ -49,6 +49,7 @@ LEGACY_RANK_COLUMNS = {
 
 DEFAULT_VIEW_COLUMNS = (
     "symbol",
+    "pst_instr_code",
     "hist_instr_code",
     "desc",
     "asset_cls",
@@ -135,6 +136,7 @@ SELECTION_SCREEN_PARAM_COLUMNS = (
 
 SELECTION_CANDIDATE_COLUMNS = (
     "symbol",
+    "pst_instr_code",
     "signal_symbol",
     "hist_instr_code",
     "desc",

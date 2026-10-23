@@ -1,10 +1,12 @@
-"""Carver instrument-code to Interactive Brokers futures metadata.
+"""Resolve executable symbols and Carver identity for IB futures metadata.
 
 The bundled mapping is copied from pysystemtrade's
 ``sysbrokers/IB/config/ib_config_futures.csv``.  It is broker identity
 metadata, not an assertion that a particular IBKR account has market-data or
 trading permission for the contract.  Live qualification remains the final
-availability test.
+availability test. Public ``symbol`` values are unique executable keys;
+``pst_instr_code`` retains the history-provider identity. Reused IB roots are
+disambiguated in ``pysystemtrade_executable_symbols.csv``.
 """
 
 from __future__ import annotations
@@ -24,6 +26,12 @@ from derivatives_bt_engine.calculations.instruments import (
 
 
 DEFAULT_IB_MAPPING_PATH = Path(__file__).with_name("pysystemtrade_ib_mappings.csv")
+# A few broker roots are reused across venues/products. These explicit
+# executable aliases keep the public ``symbol`` key unique while preserving
+# the upstream PST instrument code as a separate identity column.
+DEFAULT_EXECUTABLE_SYMBOL_MAPPING_PATH = Path(__file__).with_name(
+    "pysystemtrade_executable_symbols.csv"
+)
 # Provenance for the packaged copy of sysbrokers/IB/config/ib_config_futures.csv.
 PYSYSTEMTRADE_IB_MAPPING_COMMIT = "b4a25e6e1e33a54a3ecfb45c0f6db5e2b60b84f8"
 
@@ -115,10 +123,101 @@ def load_pysystemtrade_ib_mapping(
     )
 
 
+def load_executable_symbol_mapping(
+    path: Path | str = DEFAULT_EXECUTABLE_SYMBOL_MAPPING_PATH,
+) -> pl.DataFrame:
+    """Load explicit executable-symbol aliases for reused IB broker roots.
+
+    The CSV schema starts with ``symbol`` (the unique execution/report key),
+    followed by ``pst_instr_code`` and the expected raw ``ib_symbol``. Only
+    products whose raw broker root is ambiguous need an override row.
+    """
+    mapping = pl.read_csv(path, infer_schema_length=10_000)
+    required = {"symbol", "pst_instr_code", "ib_symbol"}
+    missing = required.difference(mapping.columns)
+    if missing:
+        raise ValueError(
+            "executable-symbol mapping is missing columns: "
+            + ", ".join(sorted(missing))
+        )
+    mapping = mapping.select("symbol", "pst_instr_code", "ib_symbol")
+    if mapping.filter(
+        pl.any_horizontal(pl.all().is_null())
+    ).height:
+        raise ValueError("executable-symbol mapping contains null values")
+    if mapping["symbol"].n_unique() != mapping.height:
+        raise ValueError("executable-symbol mapping contains duplicate symbols")
+    if mapping["pst_instr_code"].n_unique() != mapping.height:
+        raise ValueError(
+            "executable-symbol mapping contains duplicate PST instrument codes"
+        )
+    return mapping
+
+
+def _assign_executable_symbols(
+    instruments: pl.DataFrame,
+    *,
+    mapping_path: Path | str = DEFAULT_EXECUTABLE_SYMBOL_MAPPING_PATH,
+) -> pl.DataFrame:
+    """Set unique execution keys, defaulting to an unambiguous IB root."""
+    collisions = instruments.group_by("ib_symbol").len().filter(pl.col("len") > 1)
+    overrides = load_executable_symbol_mapping(mapping_path)
+    override_check = overrides.join(
+        instruments.select(
+            pl.col("instrument_code").alias("pst_instr_code"),
+            pl.col("ib_symbol").alias("actual_ib_symbol"),
+        ),
+        on="pst_instr_code",
+        how="inner",
+    ).filter(pl.col("ib_symbol") != pl.col("actual_ib_symbol"))
+    if override_check.height:
+        raise ValueError(
+            "executable-symbol mapping has incorrect IB roots for PST codes: "
+            f"{override_check['pst_instr_code'].to_list()}"
+        )
+    collision_codes = instruments.join(
+        collisions.select("ib_symbol"), on="ib_symbol", how="inner"
+    ).select(pl.col("instrument_code").alias("pst_instr_code"))
+    missing = collision_codes.join(
+        overrides.select("pst_instr_code"), on="pst_instr_code", how="anti"
+    )
+    if missing.height:
+        raise ValueError(
+            "missing executable-symbol aliases for reused IB roots: "
+            f"{missing['pst_instr_code'].to_list()}"
+        )
+    assigned = instruments.with_columns(
+        pl.when(pl.col("ib_symbol").is_duplicated())
+        .then(pl.lit(None, dtype=pl.String))
+        .otherwise(pl.col("ib_symbol"))
+        .alias("symbol")
+    ).join(
+        overrides.select(
+            "pst_instr_code", pl.col("symbol").alias("mapped_symbol")
+        ),
+        left_on="instrument_code",
+        right_on="pst_instr_code",
+        how="left",
+        validate="1:1",
+    ).with_columns(
+        pl.coalesce("mapped_symbol", "symbol").alias("symbol")
+    ).drop("mapped_symbol")
+    if assigned["symbol"].n_unique() != assigned.height:
+        duplicates = (
+            assigned.group_by("symbol").len().filter(pl.col("len") > 1)
+        )
+        raise ValueError(
+            "executable symbols must be unique; collisions: "
+            f"{duplicates['symbol'].to_list()}"
+        )
+    return assigned
+
+
 def load_pysystemtrade_ib_instruments(
     db_path: Path | str = DEFAULT_PYSYSTEMTRADE_DB_PATH,
     *,
     mapping_path: Path | str = DEFAULT_IB_MAPPING_PATH,
+    executable_symbol_mapping_path: Path | str = DEFAULT_EXECUTABLE_SYMBOL_MAPPING_PATH,
     pooling_mapping_path: Path | str | None = None,
     history_only: bool = True,
 ) -> list[dict]:
@@ -185,11 +284,21 @@ def load_pysystemtrade_ib_instruments(
         joined,
         mapping_path=pooling_mapping_path or DEFAULT_POOLING_MAPPING_PATH,
     )
+    joined = _assign_executable_symbols(
+        joined, mapping_path=executable_symbol_mapping_path
+    )
 
     return [
         {
-            "symbol": row["instrument_code"],
+            "symbol": row["symbol"],
+            "pst_instr_code": row["instrument_code"],
             "instrument_code": row["instrument_code"],
+            # Registry-level signal siblings (for example MGC -> GC) remain
+            # independent of both the executable key and PST history code.
+            "signal_symbol": (
+                INSTRUMENTS.get(row["symbol"], {}).get("signal_symbol")
+                or row["ib_symbol"]
+            ),
             "description": row["description"],
             "ib_symbol": row["ib_symbol"],
             "exchange": row["ib_exchange"],

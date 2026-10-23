@@ -906,6 +906,7 @@ def _run_complete_selection(
         final_rows.append({
             "rank": rank,
             "symbol": symbol,
+            "pst_instr_code": source_rows[symbol].get("pst_instr_code"),
             "wt_policy": args.weight_policy,
             "max_instr_per_cluster": args.max_instr_per_cluster,
             "max_instr_margin_pct": args.max_instr_margin_pct,
@@ -1225,6 +1226,19 @@ def _run_complete_selection(
         )
         .sort("selection_step", "cluster_path", "symbol")
     )
+    if "pst_instr_code" in selected.columns:
+        selection_passes = selection_passes.join(
+            selected.select("symbol", "pst_instr_code").unique("symbol"),
+            on="symbol",
+            how="left",
+            validate="m:1",
+        )
+        pass_columns = selection_passes.columns
+        pass_columns.remove("pst_instr_code")
+        pass_columns.insert(
+            pass_columns.index("symbol") + 1, "pst_instr_code"
+        )
+        selection_passes = selection_passes.select(pass_columns)
     public_selection_passes = round_public_report(
         rename_public_report_columns(selection_passes)
     )

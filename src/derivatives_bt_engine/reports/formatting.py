@@ -15,6 +15,7 @@ import polars as pl
 # project convention that primary monetary values are USD and shorten only the
 # boundary names here so every producer uses the same vocabulary.
 PUBLIC_REPORT_RENAMES = {
+    "pysystemtrade_instrument_code": "pst_instr_code",
     "target_volatility": "target_vol",
     "maximum_instrument_margin_percent": "max_instr_marg_pct",
     "maximum_book_margin_percent": "max_book_marg_pct",

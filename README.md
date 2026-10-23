@@ -39,6 +39,22 @@ by its concrete responsibility; strategy entry points may orchestrate the
 reusable data, calculation, and backtest layers but should not duplicate their
 financial logic.
 
+## Futures instrument identities
+
+Snapshot, screen, and selection reports use `symbol` as the unique executable
+IB-facing key (for example, `MGC`). `pst_instr_code` is the separate
+pysystemtrade history/configuration identity (for example, `GOLD_micro`), and
+`signal_symbol` identifies the market series used to generate the signal (for
+example, `GC`). Selection joins and notebook screen lookups key only on
+`symbol`; the other fields preserve provenance and signal lineage.
+
+The bundled IB mapping supplies the raw broker root by PST code. Where a raw
+IB root is reused across products or venues, the explicit
+`data/pysystemtrade_executable_symbols.csv` table assigns a unique execution
+key and validates the expected broker root. Unambiguous roots continue to be
+used directly. Thus execution identity is stable without overloading the PST
+history identifier or assuming signal and execution symbols are the same.
+
 ## Futures selection: contract-size bands
 
 Phase 2 estimates each selected instrument's **continuous maximum position**

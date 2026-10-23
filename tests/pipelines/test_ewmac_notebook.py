@@ -11,6 +11,7 @@ from derivatives_bt_engine.calculations.forecast_combination import (
 from derivatives_bt_engine.pipelines.ewmac_notebook import (
     ExecutableCashSettings,
     SubsystemReferenceSettings,
+    _screen_row,
     build_ewmac_notebook_view,
     build_ewmac_notebook_view_from_screen,
 )
@@ -116,6 +117,8 @@ def test_notebook_view_loads_contract_costs_from_screen_row(tmp_path):
         audit=result.audit,
     )
     screen = pl.DataFrame({
+        "symbol": ["MES"],
+        "pst_instr_code": ["MES"],
         "signal_symbol": ["MES"],
         "mult": [5.0],
         "trade_sr": [0.001],
@@ -165,7 +168,8 @@ def test_notebook_view_uses_labeled_snapshot_costs_when_whatif_is_null():
     view = build_ewmac_notebook_view_from_screen(
         _combined_result(),
         screen=pl.DataFrame({
-            "symbol": ["GOLD"],
+            "symbol": ["MGC"],
+            "pst_instr_code": ["GOLD_micro"],
             "signal_symbol": ["GC"],
             "mult": [100.0],
             "ann_dvol": [100_000.0],
@@ -178,7 +182,7 @@ def test_notebook_view_uses_labeled_snapshot_costs_when_whatif_is_null():
             "snap_spread_cash_usd": [20.0],
             "ref_config_comm_usd": [2.47],
         }),
-        screen_symbol="GOLD",
+        screen_symbol="MGC",
         reference_settings=SubsystemReferenceSettings(
             capital=1_000.0,
             target_vol=0.20,
@@ -199,6 +203,18 @@ def test_notebook_view_uses_labeled_snapshot_costs_when_whatif_is_null():
     assert view.cash["roll_cost_src"][0] == "snap_ref_config_calendar_spread"
     assert view.reference["trade_cost_src"][0] == "snap_ref_config"
     assert view.reference["roll_cost_src"][0] == "snap_ref_config_calendar_spread"
+
+
+def test_notebook_screen_lookup_uses_executable_symbol_not_signal_symbol():
+    screen = pl.DataFrame({
+        "symbol": ["MGC"],
+        "pst_instr_code": ["GOLD_micro"],
+        "signal_symbol": ["GC"],
+    })
+
+    assert _screen_row(screen, "MGC")["pst_instr_code"] == "GOLD_micro"
+    with pytest.raises(ValueError, match="no executable symbol row"):
+        _screen_row(screen, "GC")
 
 
 def test_notebook_view_hvplot_contains_cash_panels_when_requested():

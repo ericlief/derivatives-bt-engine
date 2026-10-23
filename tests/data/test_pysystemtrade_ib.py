@@ -1,6 +1,8 @@
 import pytest
+import polars as pl
 
 from derivatives_bt_engine.data.pysystemtrade_ib import (
+    _assign_executable_symbols,
     add_local_execution_overlays,
     load_pysystemtrade_ib_mapping,
 )
@@ -29,6 +31,50 @@ def test_na_ib_currency_becomes_unspecified_not_literal_na():
     mapping = load_pysystemtrade_ib_mapping()
     corn = mapping.filter(mapping["instrument_code"] == "CORN").row(0, named=True)
     assert corn["ib_currency"] == ""
+
+
+def test_executable_symbols_use_unique_ib_roots_and_explicit_collision_aliases():
+    mapping = load_pysystemtrade_ib_mapping()
+    instruments = mapping.select("instrument_code", "ib_symbol")
+    assigned = _assign_executable_symbols(instruments)
+    assert assigned["symbol"].n_unique() == assigned.height
+
+    by_code = {
+        row["instrument_code"]: row["symbol"]
+        for row in assigned.iter_rows(named=True)
+    }
+    assert by_code["GOLD"] == "GC"
+    assert by_code["GOLD_micro"] == "MGC"
+    assert by_code["AUD"] == "AUD"
+    assert by_code["AUD-ICE"] == "AUD-ICEUS"
+    assert by_code["MIB_micro"] == "MIB-micro"
+
+
+def test_executable_symbol_identity_keeps_pst_code_as_second_report_key():
+    from derivatives_bt_engine.pipelines.market_screen import (
+        _public_report_schema,
+    )
+    from derivatives_bt_engine.reports.formatting import (
+        rename_public_report_columns,
+    )
+
+    report = rename_public_report_columns(
+        pl.DataFrame({
+            "symbol": ["MGC"],
+            "pysystemtrade_instrument_code": ["GOLD_micro"],
+        })
+    )
+    assert report.columns == ["symbol", "pst_instr_code"]
+    assert report.row(0) == ("MGC", "GOLD_micro")
+
+    screen = _public_report_schema(pl.DataFrame({
+        "symbol": ["MGC"],
+        "pysystemtrade_instrument_code": ["GOLD_micro"],
+        "signal_symbol": ["GC"],
+    }))
+    assert screen.columns[:3] == [
+        "symbol", "pst_instr_code", "signal_symbol"
+    ]
 
 
 def test_ibkr_us_execution_restriction_uses_executable_ib_symbol():

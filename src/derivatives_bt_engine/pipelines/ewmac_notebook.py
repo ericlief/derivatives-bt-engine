@@ -132,23 +132,20 @@ def _screen_row(
     screen: pl.DataFrame,
     screen_symbol: str,
 ) -> dict[str, object]:
-    """Resolve exactly one screen row by its executable or signal symbol."""
-    for column in ("signal_symbol", "symbol", "ib_symbol", "hist_instr_code"):
-        if column not in screen.columns:
-            continue
-        matches = screen.filter(pl.col(column).cast(pl.String) == screen_symbol)
-        if matches.height == 0:
-            continue
-        if matches.height != 1:
-            raise ValueError(
-                f"screen symbol {screen_symbol!r} matches "
-                f"{matches.height} rows in {column!r}; use a unique symbol"
-            )
-        return matches.row(0, named=True)
-    raise ValueError(
-        f"screen has no row for {screen_symbol!r}; checked "
-        "signal_symbol, symbol, ib_symbol, and hist_instr_code"
-    )
+    """Resolve one screen row by its executable ``symbol`` key."""
+    if "symbol" not in screen.columns:
+        raise ValueError("screen has no executable 'symbol' column")
+    matches = screen.filter(pl.col("symbol").cast(pl.String) == screen_symbol)
+    if matches.height == 0:
+        raise ValueError(
+            f"screen has no executable symbol row for {screen_symbol!r}"
+        )
+    if matches.height != 1:
+        raise ValueError(
+            f"executable symbol {screen_symbol!r} matches {matches.height} "
+            "screen rows; symbol must uniquely identify execution"
+        )
+    return matches.row(0, named=True)
 
 
 def _screen_number(
