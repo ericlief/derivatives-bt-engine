@@ -369,6 +369,143 @@ class EwmacNotebookView:
             "cum_net_pct",
         )
 
+    def annual_turnover_audit(
+        self,
+        *,
+        start: date | datetime | str | None = None,
+        end: date | datetime | str | None = None,
+    ) -> pl.DataFrame:
+        """Compare annual reference turnover with executable trading.
+
+        Executable turnover is the absolute ordinary contract trade divided
+        by the smoothed reference average position on the same date. This is
+        directly comparable with reference turnover when the reference and
+        executable curves use the same instrument risk budget. Contract rolls
+        are excluded from both turnover measures and reported separately;
+        ``con_load`` counts an ordinary trade as one contract operation and a
+        roll as the closing and opening of one contract.
+
+        Parameters
+        ----------
+        start, end
+            Optional inclusive date limits applied before calendar-year
+            aggregation. A limit inside a year therefore produces a partial
+            first or last year.
+
+        Returns
+        -------
+        polars.DataFrame
+            One row per calendar year with executable and reference turnover,
+            ordinary and rolled contract quantities, total contract load,
+            and the proportions of reference turnover retained and
+            suppressed by whole-contract buffering.
+
+        Raises
+        ------
+        ValueError
+            If the view has no executable cash curve or the reference and
+            executable annual risk budgets differ.
+        """
+        if self.cash is None:
+            raise ValueError("cash P&L was not requested for this notebook view")
+
+        reference = _date_slice(self.reference, start=start, end=end).select(
+            "date",
+            "ref_ann_risk",
+            "ref_smooth_avg_pos",
+            "ref_abs_pos_change",
+        )
+        cash = _date_slice(self.cash, start=start, end=end).select(
+            "date",
+            "risk_budget",
+            "trade_con",
+            "roll_con",
+        )
+        joined = reference.join(cash, on="date", how="inner").sort("date")
+        if joined.is_empty():
+            return pl.DataFrame(
+                schema={
+                    "date": pl.Date,
+                    "exec_turn": pl.Float64,
+                    "ref_turn": pl.Float64,
+                    "trade_con": pl.Int64,
+                    "roll_con": pl.Int64,
+                    "con_load": pl.Int64,
+                    "turn_retained": pl.Float64,
+                    "turn_suppression": pl.Float64,
+                }
+            )
+
+        budget_mismatch = joined.filter(
+            pl.col("ref_ann_risk").is_not_null()
+            & pl.col("risk_budget").is_not_null()
+            & (
+                (pl.col("ref_ann_risk") - pl.col("risk_budget")).abs()
+                > (
+                    pl.max_horizontal(
+                        pl.col("ref_ann_risk").abs(),
+                        pl.col("risk_budget").abs(),
+                        pl.lit(1.0),
+                    )
+                    * 1e-9
+                )
+            )
+        )
+        if not budget_mismatch.is_empty():
+            raise ValueError(
+                "annual turnover audit requires matching reference and "
+                "executable instrument risk budgets"
+            )
+
+        annual = (
+            joined.with_columns(
+                pl.when(
+                    pl.col("ref_smooth_avg_pos").is_not_null()
+                    & pl.col("ref_smooth_avg_pos").is_finite()
+                    & (pl.col("ref_smooth_avg_pos") > 0)
+                )
+                .then(
+                    pl.col("trade_con").abs()
+                    / pl.col("ref_smooth_avg_pos")
+                )
+                .otherwise(None)
+                .alias("exec_turn_row")
+            )
+            .group_by_dynamic(
+                "date",
+                every="1y",
+                closed="left",
+                label="left",
+            )
+            .agg(
+                pl.col("exec_turn_row").sum().alias("exec_turn"),
+                pl.col("ref_abs_pos_change").sum().alias("ref_turn"),
+                pl.col("trade_con").abs().sum().alias("trade_con"),
+                pl.col("roll_con").sum().alias("roll_con"),
+            )
+            .with_columns(
+                pl.col("trade_con").cast(pl.Int64),
+                pl.col("roll_con").cast(pl.Int64),
+            )
+            .with_columns(
+                (
+                    pl.col("trade_con") + 2 * pl.col("roll_con")
+                ).alias("con_load"),
+                pl.when(
+                    pl.col("ref_turn").is_not_null()
+                    & pl.col("ref_turn").is_finite()
+                    & (pl.col("ref_turn") > 0)
+                )
+                .then(pl.col("exec_turn") / pl.col("ref_turn"))
+                .otherwise(None)
+                .alias("turn_retained"),
+            )
+            .with_columns(
+                (1.0 - pl.col("turn_retained")).alias("turn_suppression")
+            )
+        )
+        return annual
+
     def plot(
         self,
         *,

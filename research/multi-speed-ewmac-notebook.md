@@ -350,7 +350,17 @@ view.subsystem_reference_pct_curves()
 view.cash
 view.cash_pnl_curves()
 view.cash_return_curves()
+view.annual_turnover_audit()
 ```
+
+`view.annual_turnover_audit()` compares calendar-year executable ordinary
+turnover with continuous reference turnover when both curves use the same
+instrument risk budget. It also reports ordinary contracts, rolled contracts,
+total contract load (`trade_con + 2 * roll_con`), and the proportions of
+reference turnover retained and suppressed by whole-contract buffering. Rolls
+remain separate because replacing a dated contract does not change the
+executable position level. Partial first and last years remain in the output
+when the requested date range begins or ends inside a calendar year.
 
 `view.reference` assigns the instrument `1 / reference_book_count`, caps the
 weight-times-IDM product, sizes continuous positions from daily dollar
