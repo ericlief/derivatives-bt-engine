@@ -153,7 +153,10 @@ from derivatives_bt_engine.data.ib_futures_dataloader import (
     load_roll_cycle_ib_contract_history,
 )
 
-mgc_contracts = load_roll_cycle_ib_contract_history(ib, "GOLD_micro")
+mgc_contracts = load_roll_cycle_ib_contract_history(
+    ib,
+    pst_instr_code="GOLD_micro",
+)
 ```
 
 Expired-contract requests end immediately after the resolved expiry so their historical

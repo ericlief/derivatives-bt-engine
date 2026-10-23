@@ -11,6 +11,8 @@ from derivatives_bt_engine.calculations.forecast_combination import (
 from derivatives_bt_engine.pipelines.ewmac_notebook import (
     ExecutableCashSettings,
     SubsystemReferenceSettings,
+    _resolve_globex_asset,
+    _resolve_stitched_symbol_mappings,
     _screen_row,
     build_ewmac_notebook_view,
     build_ewmac_notebook_view_from_screen,
@@ -40,7 +42,7 @@ def test_notebook_view_builds_reference_return_and_cash_paths():
     result = _combined_result()
     view = build_ewmac_notebook_view(
         result,
-        instrument_code="TEST",
+        symbol="TEST",
         multiplier=10.0,
         ann_cost_sr=0.01,
         reference_settings=SubsystemReferenceSettings(
@@ -133,8 +135,7 @@ def test_notebook_view_loads_contract_costs_from_screen_row(tmp_path):
     view = build_ewmac_notebook_view_from_screen(
         result,
         screen=screen_path,
-        screen_symbol="MES",
-        instrument_code="ES signal / MES execution",
+        symbol="MES",
         reference_settings=SubsystemReferenceSettings(
             capital=1_000.0,
             target_vol=0.20,
@@ -150,7 +151,7 @@ def test_notebook_view_loads_contract_costs_from_screen_row(tmp_path):
         ),
     )
 
-    assert view.instrument_code == "ES signal / MES execution"
+    assert view.symbol == "MES"
     assert view.reference_turnover is not None
     expected_ann_cost_sr = 0.001 * view.reference_turnover + 0.002 * 4.0
     assert view.reference["ref_ann_cost_pct"][0] == pytest.approx(
@@ -182,7 +183,7 @@ def test_notebook_view_uses_labeled_snapshot_costs_when_whatif_is_null():
             "snap_spread_cash_usd": [20.0],
             "ref_config_comm_usd": [2.47],
         }),
-        screen_symbol="MGC",
+        symbol="MGC",
         reference_settings=SubsystemReferenceSettings(
             capital=1_000.0,
             target_vol=0.20,
@@ -217,11 +218,42 @@ def test_notebook_screen_lookup_uses_executable_symbol_not_signal_symbol():
         _screen_row(screen, "GC")
 
 
+def test_stitched_view_resolves_executable_and_signal_mappings_separately():
+    mappings = [
+        {
+            "symbol": "MGC",
+            "pst_instr_code": "GOLD_micro",
+            "signal_symbol": "GC",
+            "ib_symbol": "MGC",
+            "multiplier": 10.0,
+        },
+        {
+            "symbol": "GC",
+            "pst_instr_code": "GOLD",
+            "signal_symbol": "GC",
+            "ib_symbol": "GC",
+            "multiplier": 100.0,
+        },
+    ]
+
+    executable, signal = _resolve_stitched_symbol_mappings(
+        mappings,
+        symbol="MGC",
+        signal_symbol=None,
+    )
+
+    assert executable["symbol"] == "MGC"
+    assert executable["pst_instr_code"] == "GOLD_micro"
+    assert signal["symbol"] == "GC"
+    assert signal["pst_instr_code"] == "GOLD"
+    assert _resolve_globex_asset(signal["pst_instr_code"]) == "GC"
+
+
 def test_notebook_view_hvplot_contains_cash_panels_when_requested():
     """The notebook dashboard renders all forecast, position, and P&L panels."""
     view = build_ewmac_notebook_view(
         _combined_result(),
-        instrument_code="TEST",
+        symbol="TEST",
         multiplier=10.0,
         reference_settings=SubsystemReferenceSettings(
             capital=1_000.0,
@@ -242,7 +274,7 @@ def test_cash_curve_is_explicitly_optional():
     """A reference-return view must not silently claim executable cash results."""
     view = build_ewmac_notebook_view(
         _combined_result(),
-        instrument_code="TEST",
+        symbol="TEST",
         multiplier=10.0,
         reference_settings=SubsystemReferenceSettings(
             capital=1_000.0,

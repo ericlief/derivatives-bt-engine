@@ -42,6 +42,7 @@ from derivatives_bt_engine.calculations.pnl import (
     build_subsystem_reference_return_curve,
 )
 from derivatives_bt_engine.data.fx_history import align_fx_to_history
+from derivatives_bt_engine.data.futures_overlap import load_mappings
 from derivatives_bt_engine.data.futures_history import (
     DEFAULT_GLOBEX_DB_PATH,
     DEFAULT_PYSYSTEMTRADE_DB_PATH as DEFAULT_REFERENCE_DB_PATH,
@@ -52,8 +53,10 @@ from derivatives_bt_engine.data.ib_futures_dataloader import (
     DEFAULT_IB_BAR_SIZE,
     DEFAULT_IB_DATED_CONTRACT_DURATION,
     build_stitched_futures_history,
-    load_broker_mapping,
     load_roll_cycle_ib_contract_history,
+)
+from derivatives_bt_engine.data.pysystemtrade_ib import (
+    load_pysystemtrade_ib_instruments,
 )
 from derivatives_bt_engine.data.pysystemtrade_pooling import (
     DEFAULT_POOLING_MAPPING_PATH,
@@ -130,19 +133,19 @@ def _read_screen_frame(
 
 def _screen_row(
     screen: pl.DataFrame,
-    screen_symbol: str,
+    symbol: str,
 ) -> dict[str, object]:
     """Resolve one screen row by its executable ``symbol`` key."""
     if "symbol" not in screen.columns:
         raise ValueError("screen has no executable 'symbol' column")
-    matches = screen.filter(pl.col("symbol").cast(pl.String) == screen_symbol)
+    matches = screen.filter(pl.col("symbol").cast(pl.String) == symbol)
     if matches.height == 0:
         raise ValueError(
-            f"screen has no executable symbol row for {screen_symbol!r}"
+            f"screen has no executable symbol row for {symbol!r}"
         )
     if matches.height != 1:
         raise ValueError(
-            f"executable symbol {screen_symbol!r} matches {matches.height} "
+            f"executable symbol {symbol!r} matches {matches.height} "
             "screen rows; symbol must uniquely identify execution"
         )
     return matches.row(0, named=True)
@@ -236,7 +239,7 @@ class EwmacNotebookView:
     overlapping dated-contract download used to build its newest segment.
     """
 
-    instrument_code: str
+    symbol: str
     result: CombinedForecastResult
     reference: pl.DataFrame
     reference_turnover: float | None
@@ -393,7 +396,7 @@ class EwmacNotebookView:
         price_plot = reference.hvplot.line(
             x="date",
             y="close",
-            title=f"{self.instrument_code} adjusted signal price",
+            title=f"{self.symbol} adjusted signal price",
             ylabel="Price points",
             width=width,
             height=height,
@@ -476,7 +479,7 @@ class EwmacNotebookView:
 def build_ewmac_notebook_view(
     result: CombinedForecastResult,
     *,
-    instrument_code: str,
+    symbol: str,
     multiplier: float,
     reference_settings: SubsystemReferenceSettings,
     fx_to_usd: float | None = None,
@@ -491,8 +494,8 @@ def build_ewmac_notebook_view(
     result
         Output from :func:`combine_ewmac_forecasts` or
         :meth:`CombinedForecastEngine.combine`.
-    instrument_code
-        Display identity used in plot titles.
+    symbol
+        Executable instrument identity used in plot titles and view metadata.
     multiplier
         Native-currency value of one price point for the actual instrument.
     fx_to_usd
@@ -517,8 +520,8 @@ def build_ewmac_notebook_view(
         The original forecast result plus aligned subsystem-reference return
         and optional portfolio cash P&L frames and a reusable hvPlot dashboard.
     """
-    if not instrument_code.strip():
-        raise ValueError("instrument_code must not be empty")
+    if not symbol.strip():
+        raise ValueError("symbol must not be empty")
     if not math.isfinite(multiplier) or multiplier <= 0:
         raise ValueError("multiplier must be finite and positive")
     if not math.isfinite(target_abs_forecast) or target_abs_forecast <= 0:
@@ -562,7 +565,7 @@ def build_ewmac_notebook_view(
     if cash is not None:
         cash = rename_public_report_columns(cash)
     return EwmacNotebookView(
-        instrument_code=instrument_code,
+        symbol=symbol,
         result=result,
         reference=reference,
         reference_turnover=reference_turnover,
@@ -574,10 +577,9 @@ def build_ewmac_notebook_view_from_screen(
     result: CombinedForecastResult,
     *,
     screen: pl.DataFrame | Path | str,
-    screen_symbol: str,
+    symbol: str,
     reference_settings: SubsystemReferenceSettings,
     cash_settings: ExecutableCashSettings | None = None,
-    instrument_code: str | None = None,
     fx_to_usd: float | None = None,
     target_abs_forecast: float = EWMAC_FORECAST_TARGET_ABS,
 ) -> EwmacNotebookView:
@@ -600,8 +602,8 @@ def build_ewmac_notebook_view_from_screen(
         Combined forecast history to use as the strategy signal.
     screen
         Phase 1 selection-screen frame or path to its Parquet/CSV report.
-    screen_symbol
-        Exact symbol in the screen's ``signal_symbol`` or ``symbol`` field.
+    symbol
+        Exact executable symbol used to select the screen row and label the view.
     reference_settings
         Equal-weight subsystem-reference sizing assumptions.
     cash_settings
@@ -611,9 +613,6 @@ def build_ewmac_notebook_view_from_screen(
         the helper uses the screen's explicitly labelled snapshot/configured
         trade estimate and estimates a calendar-spread roll as spread plus two
         reference commissions; the output frames identify those sources.
-    instrument_code
-        Plot label. Defaults to ``screen_symbol``; can differ from the signal
-        instrument when sizing (for example, ES forecast with MES terms).
     fx_to_usd
         Optional constant FX override. Omit to preserve a causal FX series
         already attached to ``result.frame``.
@@ -627,7 +626,7 @@ def build_ewmac_notebook_view_from_screen(
         and plotting methods.
     """
     screen_frame = _read_screen_frame(screen)
-    screen_row = _screen_row(screen_frame, screen_symbol)
+    screen_row = _screen_row(screen_frame, symbol)
     multiplier = _screen_number(
         screen_row,
         ("mult", "multiplier", "ib_mult"),
@@ -712,7 +711,7 @@ def build_ewmac_notebook_view_from_screen(
     _, turnover = append_reference_position_turnover(reference)
     if turnover is None or not math.isfinite(turnover):
         raise ValueError(
-            f"cannot estimate reference turnover for {screen_symbol!r}"
+            f"cannot estimate reference turnover for {symbol!r}"
         )
     annual_cost = calculate_annual_sr_cost(
         trade_sr=trade_sr,
@@ -730,7 +729,7 @@ def build_ewmac_notebook_view_from_screen(
 
     view = build_ewmac_notebook_view(
         result,
-        instrument_code=instrument_code or screen_symbol,
+        symbol=symbol,
         multiplier=multiplier,
         reference_settings=reference_settings,
         fx_to_usd=fx_to_usd,
@@ -755,53 +754,6 @@ def build_ewmac_notebook_view_from_screen(
     return replace(view, reference=reference, cash=cash)
 
 
-def _contract_point_value(contract_history: pl.DataFrame) -> float:
-    """Return the unique native-currency point value in downloaded contracts."""
-    required = {"ib_multiplier", "price_magnifier"}
-    missing = required - set(contract_history.columns)
-    if missing:
-        raise ValueError(
-            f"contract history missing point-value columns: {sorted(missing)}"
-        )
-    values = (
-        contract_history.select(
-            (
-                pl.col("ib_multiplier").cast(pl.Float64)
-                / pl.col("price_magnifier").cast(pl.Float64)
-            ).alias("point_value")
-        )
-        .drop_nulls()
-        .unique()
-    )
-    if values.height != 1:
-        raise ValueError("contract history must contain one point value")
-    point_value = float(values.item())
-    if not math.isfinite(point_value) or point_value <= 0:
-        raise ValueError("contract point value must be finite and positive")
-    return point_value
-
-
-def _mapped_contract_point_value(
-    instrument_code: str,
-    mapping_path: Path | str,
-) -> float:
-    """Return an execution instrument's mapped native point value."""
-    mapping = load_broker_mapping(mapping_path).filter(
-        pl.col("instrument_code") == instrument_code
-    )
-    if mapping.height != 1:
-        raise KeyError(f"No unique broker mapping for {instrument_code}")
-    row = mapping.row(0, named=True)
-    point_value = float(row["ib_multiplier"]) / float(
-        row["price_magnifier"]
-    )
-    if not math.isfinite(point_value) or point_value <= 0:
-        raise ValueError(
-            f"{instrument_code} mapped point value must be finite and positive"
-        )
-    return point_value
-
-
 def _history_currency(history: FuturesHistory) -> str:
     """Return the reference segment's currency from stitched metadata."""
     metadata = history.metadata.get("source_metadata", [])
@@ -815,15 +767,60 @@ def _history_currency(history: FuturesHistory) -> str:
     raise ValueError("stitched history has no reference currency metadata")
 
 
+def _resolve_stitched_symbol_mappings(
+    instrument_rows: list[dict],
+    *,
+    symbol: str,
+    signal_symbol: str | None,
+) -> tuple[dict, dict]:
+    """Resolve executable and signal identities without conflating their roles.
+
+    Public executable ``symbol`` selects contract sizing and the view label.
+    ``signal_symbol`` selects a broker-mapped history instrument; its PST code
+    owns the historical price series and roll policy.
+    """
+    executable_rows = [row for row in instrument_rows if row["symbol"] == symbol]
+    if len(executable_rows) != 1:
+        raise KeyError(f"No unique executable-symbol mapping for {symbol!r}")
+    executable = executable_rows[0]
+    resolved_signal_symbol = signal_symbol or executable["signal_symbol"]
+    signal_rows = [
+        row for row in instrument_rows if row["symbol"] == resolved_signal_symbol
+    ]
+    if not signal_rows:
+        signal_rows = [
+            row for row in instrument_rows if row["ib_symbol"] == resolved_signal_symbol
+        ]
+    if len(signal_rows) != 1:
+        raise KeyError(
+            f"signal_symbol {resolved_signal_symbol!r} does not resolve to one "
+            "PST/IB history mapping; pass an unambiguous IB signal symbol"
+        )
+    return executable, signal_rows[0]
+
+
+def _resolve_globex_asset(pst_instr_code: str) -> str:
+    """Resolve the Globex root from the reviewed PST-to-Globex crosswalk."""
+    mappings = [
+        mapping
+        for mapping in load_mappings()
+        if mapping.carver_instrument == pst_instr_code
+        and mapping.mapping_status != "rejected"
+    ]
+    if len(mappings) != 1:
+        raise KeyError(
+            f"PST instrument {pst_instr_code!r} has no unique non-rejected "
+            "Globex crosswalk mapping"
+        )
+    return mappings[0].globex_asset
+
+
 def build_stitched_ewmac_notebook_view(
     ib: IBPySync,
     *,
-    instrument_code: str,
-    globex_asset: str,
+    symbol: str,
     reference_settings: SubsystemReferenceSettings,
-    signal_instrument_code: str | None = None,
-    reference_instrument_code: str | None = None,
-    display_instrument_code: str | None = None,
+    signal_symbol: str | None = None,
     as_of: date | None = None,
     prior_years: int = 1,
     duration: str = DEFAULT_IB_DATED_CONTRACT_DURATION,
@@ -837,7 +834,6 @@ def build_stitched_ewmac_notebook_view(
     ann_cost_sr: float = 0.0,
     cash_settings: ExecutableCashSettings | None = None,
     screen: pl.DataFrame | Path | str | None = None,
-    screen_symbol: str | None = None,
     reference_db_path: Path | str = DEFAULT_REFERENCE_DB_PATH,
     globex_db_path: Path | str = DEFAULT_GLOBEX_DB_PATH,
     broker_mapping_path: Path | str = DEFAULT_BROKER_MAPPING_PATH,
@@ -857,22 +853,17 @@ def build_stitched_ewmac_notebook_view(
     ----------
     ib
         Connected synchronous IB client.
-    instrument_code
-        Executable instrument identifier used for contract specifications,
-        screen lookup, and the default display label.
-    globex_asset
-        Raw Globex asset identifier used by the signal history.
+    symbol
+        Executable instrument key, such as ``MGC``. It owns the screen lookup,
+        multiplier, cash sizing, and view label.
     reference_settings
         Equal-weight subsystem reference sizing assumptions.
-    signal_instrument_code
-        Instrument identifier used to download the newest signal history and
-        select its roll configuration. Defaults to ``instrument_code``. This
-        permits a micro contract to use its full-size sibling's deeper price
-        history while retaining the micro's point value for sizing and P&L.
-    reference_instrument_code
-        Oldest-history identifier. Defaults to ``signal_instrument_code``.
-    display_instrument_code
-        Optional plot label. Defaults to ``instrument_code``.
+    signal_symbol
+        IB ticker used to download the newest signal history. Defaults to the
+        mapped signal ticker for ``symbol``. For example, ``MGC`` can use
+        ``GC`` signal history while retaining the micro contract's sizing.
+        The corresponding PST history code is resolved from the IB mapping;
+        callers do not pass a PST code as an executable/display identity.
     as_of, prior_years, duration, bar_size, what_to_show, use_rth
         Dated-contract download settings forwarded to the IB history loader.
     rules
@@ -881,14 +872,13 @@ def build_stitched_ewmac_notebook_view(
         Fixed single-market forecast diversification and numeric conventions.
     multiplier
         Optional native-currency point-value override. When absent, infer it
-        from ``instrument_code`` broker specifications. The downloaded
-        contracts provide it when the signal and executable instruments are
-        the same.
+        from the executable ``symbol`` mapping. The signal contract multiplier
+        is never substituted for the traded contract's point value.
     ann_cost_sr, cash_settings
         Inputs for the standard reference and optional executable cash paths.
-    screen, screen_symbol
-        Optional Phase 1 screen inputs. When supplied, screen costs and the
-        screen multiplier replace ``ann_cost_sr`` and ``multiplier``.
+    screen
+        Optional Phase 1 screen input, matched by executable ``symbol``. The
+        screen costs and multiplier replace ``ann_cost_sr`` and ``multiplier``.
     reference_db_path, globex_db_path, broker_mapping_path
         Read-only history, roll configuration, and broker mapping inputs.
     pooling_mapping_path
@@ -903,17 +893,25 @@ def build_stitched_ewmac_notebook_view(
         methods, the stitched history in ``view.history``, and the overlapping
         IB rows in ``view.contract_history``.
     """
-    if screen is None and screen_symbol is not None:
-        raise ValueError("screen_symbol requires screen")
     rule_tuple = tuple(rules)
     if not rule_tuple:
         raise ValueError("at least one EWMAC rule is required")
     config = combination_config or ForecastCombinationConfig()
 
-    signal_code = signal_instrument_code or instrument_code
+    instrument_rows = load_pysystemtrade_ib_instruments(
+        db_path=reference_db_path,
+        mapping_path=broker_mapping_path,
+    )
+    executable, signal_mapping = _resolve_stitched_symbol_mappings(
+        instrument_rows,
+        symbol=symbol,
+        signal_symbol=signal_symbol,
+    )
+    pst_instr_code = signal_mapping["pst_instr_code"]
+    globex_asset = _resolve_globex_asset(pst_instr_code)
     contracts = load_roll_cycle_ib_contract_history(
         ib,
-        signal_code,
+        pst_instr_code=pst_instr_code,
         as_of=as_of,
         prior_years=prior_years,
         duration=duration,
@@ -922,13 +920,12 @@ def build_stitched_ewmac_notebook_view(
         use_rth=use_rth,
         db_path=reference_db_path,
         mapping_path=broker_mapping_path,
-    )
+    ).with_columns(pl.lit(symbol).alias("symbol"))
     history = build_stitched_futures_history(
         contracts,
+        symbol=symbol,
         globex_asset=globex_asset,
-        reference_instrument_code=(
-            reference_instrument_code or signal_code
-        ),
+        pst_instr_code=pst_instr_code,
         globex_db_path=globex_db_path,
         reference_db_path=reference_db_path,
         use_cache=use_cache,
@@ -962,32 +959,21 @@ def build_stitched_ewmac_notebook_view(
         rule_keys,
     )
 
-    display_code = display_instrument_code or instrument_code
     if screen is not None:
         view = build_ewmac_notebook_view_from_screen(
             result,
             screen=screen,
-            screen_symbol=screen_symbol or instrument_code,
+            symbol=symbol,
             reference_settings=reference_settings,
             cash_settings=cash_settings,
-            instrument_code=display_code,
             target_abs_forecast=config.target_abs_forecast,
         )
     else:
         view = build_ewmac_notebook_view(
             result,
-            instrument_code=display_code,
+            symbol=symbol,
             multiplier=(
-                (
-                    _contract_point_value(contracts)
-                    if signal_code == instrument_code
-                    else _mapped_contract_point_value(
-                        instrument_code,
-                        broker_mapping_path,
-                    )
-                )
-                if multiplier is None
-                else multiplier
+                float(executable["multiplier"]) if multiplier is None else multiplier
             ),
             ann_cost_sr=ann_cost_sr,
             reference_settings=reference_settings,

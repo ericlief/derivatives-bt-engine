@@ -134,8 +134,8 @@ from derivatives_bt_engine.pipelines.ewmac_notebook import (
 
 gold = build_stitched_ewmac_notebook_view(
     ib,
-    instrument_code="GOLD",
-    globex_asset="GC",
+    symbol="GC",
+    signal_symbol="GC",
     reference_settings=SubsystemReferenceSettings(
         capital=75_000,
         target_vol=0.20,
@@ -167,21 +167,21 @@ gold.contract_history.select(
 gold.plot(start="2021-01-01")
 ```
 
-The downloaded point value supplies the default multiplier. Pass ``screen``
-and ``screen_symbol`` to use Phase 1 multiplier and cost inputs instead. The
+The executable ``symbol`` supplies the default multiplier. Pass ``screen``
+to use Phase 1 multiplier and cost inputs instead; the screen is matched by
+that executable symbol. The
 view retains the overlapping download in ``contract_history`` and the
 duplicate-free stitched streams in ``history`` for roll and handoff audits.
 
-To trade micro gold from the deeper full-size gold signal history, separate
-the executable instrument from the signal instrument:
+To trade micro gold from the full-size gold signal history, use the micro
+executable key and its signal ticker. The helper resolves ``GC`` to its PST
+history code for roll policy and long-history stitching:
 
 ```python
 mgc = build_stitched_ewmac_notebook_view(
     ib,
-    instrument_code="GOLD_micro",
-    signal_instrument_code="GOLD",
-    globex_asset="GC",
-    display_instrument_code="MGC",
+    symbol="MGC",
+    signal_symbol="GC",
     reference_settings=SubsystemReferenceSettings(
         capital=75_000,
         target_vol=0.20,
@@ -193,10 +193,11 @@ mgc = build_stitched_ewmac_notebook_view(
 )
 ```
 
-This downloads and stitches ``GOLD``/``GC`` prices for the EWMAC calculation,
-then uses the mapped ``GOLD_micro`` point value of 10 for reference sizing and
-executable cash P&L. With a Phase 1 screen, pass ``screen_symbol="MGC"`` so its
-cost and contract inputs also come from the micro row.
+This downloads and stitches ``GC`` prices for the EWMAC calculation, resolving
+the associated Globex root from the PST/Globex crosswalk, then uses the ``MGC``
+point value of 10 for reference sizing and executable cash P&L.
+With a Phase 1 screen, the helper reads costs and contract inputs from the
+``MGC`` row automatically.
 
 For a direct inspection of the equal-weight subsystem-reference percentage curve,
 use the same explicit reference assumptions as the selection pipeline:
@@ -247,7 +248,7 @@ from derivatives_bt_engine.pipelines.ewmac_notebook import (
 
 view = build_ewmac_notebook_view(
     result,
-    instrument_code="ES",
+    symbol="ES",
     multiplier=50.0,
     ann_cost_sr=0.0,
     reference_settings=SubsystemReferenceSettings(
@@ -281,8 +282,8 @@ also supports an ES signal sized with the MES contract row:
 view = build_ewmac_notebook_view_from_screen(
     result,  # CombinedForecastResult built from the desired signal history
     screen="~/fin/misc/pysystemtrade_selection_screen.parquet",
-    screen_symbol="MES",
-    instrument_code="ES signal / MES execution",
+    symbol="MES",
+    symbol="MES",
     reference_settings=SubsystemReferenceSettings(
         capital=75_000,
         target_vol=0.20,

@@ -109,7 +109,7 @@ def _format_ib_multiplier(value: float) -> str:
 
 
 def _load_roll_config(
-    instrument_code: str,
+    pst_instr_code: str,
     db_path: Path | str,
 ) -> tuple[str, int]:
     """Return the held-contract cycle and roll offset for one instrument."""
@@ -121,12 +121,12 @@ def _load_roll_config(
             FROM raw.roll_config
             WHERE instrument_code = ?
             """,
-            [instrument_code],
+            [pst_instr_code],
         ).fetchone()
     finally:
         con.close()
     if row is None:
-        raise KeyError(f"No roll configuration for {instrument_code}")
+        raise KeyError(f"No roll configuration for PST instrument {pst_instr_code}")
     return str(row[0]), int(row[1])
 
 
@@ -206,8 +206,8 @@ def _contract_expiration_date(detail, contract_month: str) -> date:
 
 def load_roll_cycle_ib_contract_history(
     ib: IBPySync,
-    instrument_code: str,
     *,
+    pst_instr_code: str,
     as_of: date | None = None,
     prior_years: int = 1,
     duration: str = DEFAULT_IB_DATED_CONTRACT_DURATION,
@@ -223,8 +223,8 @@ def load_roll_cycle_ib_contract_history(
     ----------
     ib
         Connected synchronous IB client.
-    instrument_code
-        Instrument identifier, such as ``GOLD_micro``.
+    pst_instr_code
+        PST instrument code owning the IB contract mapping and roll policy.
     as_of
         Date defining the current contract year. Defaults to today.
     prior_years
@@ -256,19 +256,19 @@ def load_roll_cycle_ib_contract_history(
         raise ValueError("prior_years must be nonnegative")
     effective_as_of = as_of or date.today()
     mapping = load_broker_mapping(mapping_path).filter(
-        pl.col('instrument_code') == instrument_code
+        pl.col('instrument_code') == pst_instr_code
     )
     if mapping.height != 1:
-        raise KeyError(f"No unique broker mapping for {instrument_code}")
+        raise KeyError(f"No unique broker mapping for PST instrument {pst_instr_code}")
     broker = mapping.row(0, named=True)
     hold_roll_cycle, roll_offset_days = _load_roll_config(
-        instrument_code,
+        pst_instr_code,
         db_path,
     )
     invalid_cycle = set(hold_roll_cycle) - set(CME_MONTH_LETTERS)
     if invalid_cycle:
         raise ValueError(
-            f"{instrument_code}: invalid hold-roll cycle letters "
+            f"{pst_instr_code}: invalid hold-roll cycle letters "
             f"{sorted(invalid_cycle)}"
         )
 
@@ -286,7 +286,7 @@ def load_roll_cycle_ib_contract_history(
     logger.info(
         "ib_dated_history start instrument=%s ib_symbol=%s exchange=%s "
         "hold_roll_cycle=%s contract_months=%s duration=%s",
-        instrument_code,
+        pst_instr_code,
         ib_symbol,
         exchange,
         hold_roll_cycle,
@@ -310,14 +310,14 @@ def load_roll_cycle_ib_contract_history(
             logger.warning(
                 "ib_dated_history contract_lookup_failed instrument=%s "
                 "contract_month=%s error=%s",
-                instrument_code,
+                pst_instr_code,
                 contract_month,
                 exc,
             )
             continue
         detail = _select_contract_detail(
             details,
-            instrument_code=instrument_code,
+            instrument_code=pst_instr_code,
             contract_month=contract_month,
             ignore_weekly=ignore_weekly,
         )
@@ -325,7 +325,7 @@ def load_roll_cycle_ib_contract_history(
             logger.debug(
                 "ib_dated_history contract_unavailable instrument=%s "
                 "contract_month=%s",
-                instrument_code,
+                pst_instr_code,
                 contract_month,
             )
             continue
@@ -351,7 +351,7 @@ def load_roll_cycle_ib_contract_history(
             logger.warning(
                 "ib_dated_history bars_failed instrument=%s "
                 "contract_month=%s contract_id=%s error=%s",
-                instrument_code,
+                pst_instr_code,
                 contract_month,
                 contract.conId,
                 exc,
@@ -361,20 +361,21 @@ def load_roll_cycle_ib_contract_history(
             logger.debug(
                 "ib_dated_history bars_empty instrument=%s contract_month=%s "
                 "contract_id=%s",
-                instrument_code,
+                pst_instr_code,
                 contract_month,
                 contract.conId,
             )
             continue
         if 'date' not in bars.columns:
             raise ValueError(
-                f"{instrument_code} {contract_month}: IB bars missing date column"
+                f"PST instrument {pst_instr_code} {contract_month}: "
+                "IB bars missing date column"
             )
         histories.append(
             bars.with_columns(
                 pl.col('date').cast(pl.Date),
                 pl.lit('ib').alias('source'),
-                pl.lit(instrument_code).alias('instrument_code'),
+                pl.lit(pst_instr_code).alias('pst_instr_code'),
                 pl.lit(ib_symbol).alias('ib_symbol'),
                 pl.lit(exchange).alias('ib_exchange'),
                 pl.lit(currency).alias('ib_currency'),
@@ -392,7 +393,7 @@ def load_roll_cycle_ib_contract_history(
 
     if not histories:
         raise RuntimeError(
-            f"No IB dated-contract history returned for {instrument_code}"
+            f"No IB dated-contract history returned for PST instrument {pst_instr_code}"
         )
     result = (
         pl.concat(histories, how='diagonal_relaxed')
@@ -404,9 +405,9 @@ def load_roll_cycle_ib_contract_history(
         .sort('date', 'contract_month')
     )
     logger.info(
-        "ib_dated_history complete instrument=%s contracts=%d rows=%d "
+        "ib_dated_history complete pst_instr_code=%s contracts=%d rows=%d "
         "start=%s end=%s",
-        instrument_code,
+        pst_instr_code,
         result.get_column('ib_contract_id').n_unique(),
         result.height,
         result.get_column('date').min(),
@@ -442,7 +443,7 @@ def build_ib_contract_history(
         'volume',
         'expiration',
         'ib_contract_id',
-        'instrument_code',
+        'pst_instr_code',
         'hold_roll_cycle',
         'roll_offset_days',
     }
@@ -455,7 +456,7 @@ def build_ib_contract_history(
         raise ValueError("IB contract history must not be empty")
 
     identity_columns = (
-        'instrument_code',
+        'pst_instr_code',
         'hold_roll_cycle',
         'roll_offset_days',
     )
@@ -465,9 +466,9 @@ def build_ib_contract_history(
             "IB contract history must contain one instrument and roll policy"
         )
     identity = identities.row(0, named=True)
-    instrument_code = str(identity['instrument_code'])
+    pst_instr_code = str(identity['pst_instr_code'])
     policy = ContractRollPolicy(
-        policy_id=f"configured_{instrument_code}",
+        policy_id=f"configured_{pst_instr_code}",
         hold_roll_cycle=str(identity['hold_roll_cycle']),
         roll_offset_days=int(identity['roll_offset_days']),
         source="reference_config",
@@ -499,12 +500,12 @@ def build_ib_contract_history(
     selected = select_calendar_contract_observations(raw, policy)
     if selected.is_empty():
         raise ValueError(
-            f"roll policy selected no IB rows for {instrument_code}"
+            f"roll policy selected no IB rows for PST instrument {pst_instr_code}"
         )
     signal, marks, carry, panama = build_contract_history_streams(selected)
     return FuturesHistory(
         source='ib',
-        instrument_code=instrument_code,
+        instrument_code=pst_instr_code,
         schema_version=HISTORY_SCHEMA_VERSION,
         signal=signal,
         marks=marks,
@@ -525,8 +526,9 @@ def build_ib_contract_history(
 def build_stitched_futures_history(
     contract_history: pl.DataFrame,
     *,
+    symbol: str,
     globex_asset: str,
-    reference_instrument_code: str | None = None,
+    pst_instr_code: str | None = None,
     globex_db_path: Path | str = DEFAULT_GLOBEX_DB_PATH,
     reference_db_path: Path | str = DEFAULT_REFERENCE_DB_PATH,
     use_cache: bool = True,
@@ -544,10 +546,12 @@ def build_stitched_futures_history(
     ----------
     contract_history
         Overlapping dated-contract rows returned by the IB download helper.
+    symbol
+        Executable instrument key that owns the returned stitched history.
     globex_asset
         Raw Globex asset identifier, such as ``GC`` or ``ES``.
-    reference_instrument_code
-        Long-history identifier. Defaults to the instrument in
+    pst_instr_code
+        Long-history PST identifier. Defaults to the instrument in
         ``contract_history``.
     globex_db_path, reference_db_path
         Read-only database inputs for the middle and oldest history segments.
@@ -561,7 +565,7 @@ def build_stitched_futures_history(
         ownership of every signal, mark, and additive-price row.
     """
     ib_history = build_ib_contract_history(contract_history)
-    reference_code = reference_instrument_code or ib_history.instrument_code
+    reference_code = pst_instr_code or ib_history.instrument_code
     roll_policy = ContractRollPolicy(
         policy_id=f"configured_{ib_history.instrument_code}",
         hold_roll_cycle=str(ib_history.metadata['hold_roll_cycle']),
@@ -581,7 +585,7 @@ def build_stitched_futures_history(
     ).load(reference_code)
     return stitch_futures_histories(
         [reference_history, globex_history, ib_history],
-        instrument_code=ib_history.instrument_code,
+        instrument_code=symbol,
     )
 
 
