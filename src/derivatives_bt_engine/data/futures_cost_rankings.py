@@ -12,6 +12,11 @@ from pathlib import Path
 
 import polars as pl
 
+from derivatives_bt_engine.calculations.instruments import INSTRUMENTS
+from derivatives_bt_engine.data.pysystemtrade_ib import (
+    load_executable_symbol_mapping,
+)
+
 
 DEFAULT_REPORT_PATTERNS = (
     "multi_speed_ewmac_rule_cache_*.parquet",
@@ -698,16 +703,121 @@ def load_latest_market_report(
 
 
 def read_market_report(path: Path | str) -> pl.DataFrame:
-    """Read one market report, preferring its native Parquet schema."""
+    """Read one market report and normalize legacy instrument identities.
+
+    Reports written before executable symbols were separated from history
+    provider codes stored the provider code in ``symbol``. The reader upgrades
+    those frames so every downstream selection output uses the current public
+    contract: ``symbol`` is the executable key, ``pst_instr_code`` retains the
+    provider identity, and ``signal_symbol`` identifies the signal market.
+    """
     report_path = Path(path)
     if report_path.suffix.lower() == ".parquet":
-        return pl.read_parquet(report_path)
-    if report_path.suffix.lower() == ".csv":
-        return pl.read_csv(report_path, infer_schema_length=None)
-    raise ValueError(
-        f"Unsupported market report format {report_path.suffix!r}; "
-        "expected .parquet or legacy .csv"
+        report = pl.read_parquet(report_path)
+    elif report_path.suffix.lower() == ".csv":
+        report = pl.read_csv(report_path, infer_schema_length=None)
+    else:
+        raise ValueError(
+            f"Unsupported market report format {report_path.suffix!r}; "
+            "expected .parquet or legacy .csv"
+        )
+    return normalize_report_instrument_identities(report)
+
+
+def normalize_report_instrument_identities(
+    report: pl.DataFrame,
+) -> pl.DataFrame:
+    """Upgrade legacy report identity columns to the public symbol contract.
+
+    Parameters
+    ----------
+    report
+        Public market or rule-cost report. Current reports already contain
+        ``pst_instr_code`` and pass through unchanged.
+
+    Returns
+    -------
+    polars.DataFrame
+        The original frame for current schemas, or a legacy frame with its
+        provider code moved to ``pst_instr_code`` and its executable and signal
+        symbols resolved from the bundled mappings.
+    """
+    if "symbol" not in report.columns or "pst_instr_code" in report.columns:
+        return report
+
+    is_overlay = (
+        pl.col("mapping_stat") == "local_execution_overlay"
+        if "mapping_stat" in report.columns
+        else pl.lit(False)
     )
+    provider_code = (
+        pl.when(is_overlay)
+        .then(pl.col("hist_instr_code"))
+        .otherwise(pl.col("symbol"))
+        if "hist_instr_code" in report.columns
+        else pl.col("symbol")
+    )
+    normalized = report.with_columns(
+        provider_code.cast(pl.String).alias("pst_instr_code"),
+        pl.col("symbol").alias("legacy_symbol"),
+    )
+
+    aliases = load_executable_symbol_mapping().select(
+        "pst_instr_code",
+        pl.col("symbol").alias("mapped_exec_symbol"),
+    )
+    normalized = normalized.join(
+        aliases,
+        on="pst_instr_code",
+        how="left",
+        validate="m:1",
+        maintain_order="left",
+    )
+    executable_fallbacks = [pl.col("mapped_exec_symbol")]
+    if "ib_symbol" in normalized.columns:
+        executable_fallbacks.append(pl.col("ib_symbol"))
+    executable_fallbacks.append(pl.col("legacy_symbol"))
+    normalized = normalized.with_columns(
+        pl.when(is_overlay)
+        .then(pl.col("legacy_symbol"))
+        .otherwise(pl.coalesce(executable_fallbacks))
+        .alias("symbol")
+    )
+
+    signal_rows = [
+        {
+            "symbol": symbol,
+            "mapped_signal_symbol": (
+                spec.get("signal_symbol")
+                or spec.get("ib_symbol")
+                or symbol
+            ),
+        }
+        for symbol, spec in INSTRUMENTS.items()
+    ]
+    if signal_rows:
+        normalized = normalized.join(
+            pl.DataFrame(signal_rows),
+            on="symbol",
+            how="left",
+            validate="m:1",
+            maintain_order="left",
+        )
+        signal_fallbacks = [pl.col("mapped_signal_symbol")]
+        if "ib_symbol" in normalized.columns:
+            signal_fallbacks.append(pl.col("ib_symbol"))
+        if "signal_symbol" in normalized.columns:
+            signal_fallbacks.append(pl.col("signal_symbol"))
+        signal_fallbacks.append(pl.col("symbol"))
+        normalized = normalized.with_columns(
+            pl.coalesce(signal_fallbacks).alias("signal_symbol")
+        ).drop("mapped_signal_symbol")
+
+    normalized = normalized.drop("legacy_symbol", "mapped_exec_symbol")
+    columns = normalized.columns
+    columns.remove("pst_instr_code")
+    columns.insert(columns.index("symbol") + 1, "pst_instr_code")
+    return normalized.select(columns)
 
 
 # Compatibility aliases for notebooks and scripts written before the pipeline
