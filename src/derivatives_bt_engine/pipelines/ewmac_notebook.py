@@ -884,7 +884,9 @@ def build_stitched_ewmac_notebook_view(
         Fixed single-market forecast diversification and numeric conventions.
     multiplier
         Optional native-currency point-value override. When absent, infer it
-        from the downloaded broker multiplier and price magnifier.
+        from ``instrument_code`` broker specifications. The downloaded
+        contracts provide it when the signal and executable instruments are
+        the same.
     ann_cost_sr, cash_settings
         Inputs for the standard reference and optional executable cash paths.
     screen, screen_symbol
