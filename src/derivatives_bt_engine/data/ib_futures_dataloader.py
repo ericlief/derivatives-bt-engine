@@ -25,10 +25,12 @@ default) for full-history backtests.
 from __future__ import annotations
 
 import calendar
+import hashlib
+import json
 import math
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
 from functools import cached_property
 from pathlib import Path
@@ -46,6 +48,7 @@ from derivatives_bt_engine.calculations.instruments import (
 )
 from derivatives_bt_engine.calculations.roll_policy import ContractRollPolicy
 from derivatives_bt_engine.data.futures_history import (
+    DEFAULT_FUTURES_CACHE_ROOT,
     DEFAULT_GLOBEX_DB_PATH,
     DEFAULT_PYSYSTEMTRADE_DB_PATH as DEFAULT_REFERENCE_DB_PATH,
     HISTORY_SCHEMA_VERSION,
@@ -53,8 +56,15 @@ from derivatives_bt_engine.data.futures_history import (
     GlobexHistoryProvider,
     PysystemtradeHistoryProvider as ReferenceHistoryProvider,
     build_contract_history_streams,
+    futures_history_parquet_cache_exists,
+    read_futures_history_parquet_cache,
     select_calendar_contract_observations,
     stitch_futures_histories,
+    write_futures_history_parquet_cache,
+)
+from derivatives_bt_engine.data.ib_futures_history_store import (
+    DEFAULT_IB_FUTURES_HISTORY_DB_PATH,
+    IBFuturesHistoryStore,
 )
 from derivatives_bt_engine.data.pysystemtrade_ib import (
     DEFAULT_IB_MAPPING_PATH as DEFAULT_BROKER_MAPPING_PATH,
@@ -216,6 +226,8 @@ def load_roll_cycle_ib_contract_history(
     use_rth: bool = True,
     db_path: Path | str = DEFAULT_REFERENCE_DB_PATH,
     mapping_path: Path | str = DEFAULT_BROKER_MAPPING_PATH,
+    history_db_path: Path | str = DEFAULT_IB_FUTURES_HISTORY_DB_PATH,
+    update_history: bool = True,
 ) -> pl.DataFrame:
     """Download and concatenate dated IB histories on a configured roll cycle.
 
@@ -236,6 +248,12 @@ def load_roll_cycle_ib_contract_history(
         Values forwarded to ``IBPySync.get_historical_bars``.
     db_path, mapping_path
         Reference roll configuration and broker mapping inputs.
+    history_db_path
+        Dedicated DuckDB containing raw IB futures contracts and bars.
+    update_history
+        When true, fetch missing/current contract histories from IB and upsert
+        them before reading. When false, perform no broker request and require
+        sufficient rows to already exist in ``history_db_path``.
 
     Returns
     -------
@@ -283,6 +301,13 @@ def load_roll_cycle_ib_contract_history(
     currency = str(broker['ib_currency'])
     multiplier = _format_ib_multiplier(float(broker['ib_multiplier']))
     ignore_weekly = bool(broker['ignore_weekly'])
+    store = IBFuturesHistoryStore(history_db_path)
+    complete_months = store.complete_contract_months(
+        pst_instr_code=pst_instr_code,
+        bar_size=bar_size,
+        what_to_show=what_to_show,
+        use_rth=use_rth,
+    )
     logger.info(
         "ib_dated_history start instrument=%s ib_symbol=%s exchange=%s "
         "hold_roll_cycle=%s contract_months=%s duration=%s",
@@ -294,8 +319,17 @@ def load_roll_cycle_ib_contract_history(
         duration,
     )
 
-    histories: list[pl.DataFrame] = []
-    for contract_month in contract_months:
+    for contract_month in contract_months if update_history else []:
+        # A successful expired-contract request is immutable at the raw-source
+        # boundary. Current contracts remain refreshable on each cache miss.
+        if contract_month in complete_months:
+            logger.debug(
+                "ib_dated_history raw_cache_complete instrument=%s "
+                "contract_month=%s",
+                pst_instr_code,
+                contract_month,
+            )
+            continue
         pattern = IBPySync.future(
             ib_symbol,
             exchange=exchange,
@@ -348,6 +382,17 @@ def load_roll_cycle_ib_contract_history(
                 use_rth=use_rth,
             )
         except Exception as exc:
+            store.log_fetch_failure(
+                pst_instr_code=pst_instr_code,
+                contract_month=contract_month,
+                duration=duration,
+                bar_size=bar_size,
+                what_to_show=what_to_show,
+                use_rth=use_rth,
+                requested_end=end_date,
+                error=str(exc),
+                con_id=int(contract.conId),
+            )
             logger.warning(
                 "ib_dated_history bars_failed instrument=%s "
                 "contract_month=%s contract_id=%s error=%s",
@@ -371,32 +416,46 @@ def load_roll_cycle_ib_contract_history(
                 f"PST instrument {pst_instr_code} {contract_month}: "
                 "IB bars missing date column"
             )
-        histories.append(
-            bars.with_columns(
-                pl.col('date').cast(pl.Date),
-                pl.lit('ib').alias('source'),
-                pl.lit(pst_instr_code).alias('pst_instr_code'),
-                pl.lit(ib_symbol).alias('ib_symbol'),
-                pl.lit(exchange).alias('ib_exchange'),
-                pl.lit(currency).alias('ib_currency'),
-                pl.lit(float(broker['ib_multiplier'])).alias('ib_multiplier'),
-                pl.lit(float(broker['price_magnifier'])).alias('price_magnifier'),
-                pl.lit(hold_roll_cycle).alias('hold_roll_cycle'),
-                pl.lit(roll_offset_days).alias('roll_offset_days'),
-                pl.lit(contract_month).alias('contract_month'),
-                pl.lit(expiration).alias('expiration'),
-                pl.lit(int(contract.conId)).alias('ib_contract_id'),
-                pl.lit(str(contract.localSymbol)).alias('ib_local_symbol'),
-                pl.lit(str(contract.tradingClass)).alias('ib_trading_class'),
-            )
+        store.upsert_contract_and_bars(
+            contract={
+                'con_id': int(contract.conId),
+                'pst_instr_code': pst_instr_code,
+                'ib_symbol': ib_symbol,
+                'exchange': exchange,
+                'currency': currency,
+                'multiplier': float(broker['ib_multiplier']),
+                'price_magnifier': float(broker['price_magnifier']),
+                'contract_month': contract_month,
+                'expiration': expiration,
+                'local_symbol': str(contract.localSymbol),
+                'trading_class': str(contract.tradingClass),
+            },
+            bars=bars,
+            duration=duration,
+            bar_size=bar_size,
+            what_to_show=what_to_show,
+            use_rth=use_rth,
+            requested_end=end_date,
+            complete_contract=expiration < effective_as_of,
         )
 
-    if not histories:
+    result = store.load_bars(
+        pst_instr_code=pst_instr_code,
+        contract_months=contract_months,
+        bar_size=bar_size,
+        what_to_show=what_to_show,
+        use_rth=use_rth,
+    )
+    if result.is_empty():
         raise RuntimeError(
-            f"No IB dated-contract history returned for PST instrument {pst_instr_code}"
+            "No raw IB dated-contract history is available for PST instrument "
+            f"{pst_instr_code} in {Path(history_db_path).expanduser()}"
         )
     result = (
-        pl.concat(histories, how='diagonal_relaxed')
+        result.with_columns(
+            pl.lit(hold_roll_cycle).alias('hold_roll_cycle'),
+            pl.lit(roll_offset_days).alias('roll_offset_days'),
+        )
         .unique(
             subset=['ib_contract_id', 'date'],
             keep='last',
@@ -521,6 +580,214 @@ def build_ib_contract_history(
             'selected_rows': selected.height,
         },
     )
+
+
+@dataclass
+class IBHistoryProvider:
+    """Load canonical IB history through the raw dated-contract store.
+
+    The provider implements the common ``load(instrument_code)`` history
+    interface. ``instrument_code`` is the PST code owning broker identity and
+    roll configuration. Raw bars are read from the isolated DuckDB after an
+    optional broker update; no adjusted or stitched levels are persisted there.
+    """
+
+    ib: IBPySync
+    as_of: date | None = None
+    prior_years: int = 1
+    duration: str = DEFAULT_IB_DATED_CONTRACT_DURATION
+    bar_size: str = DEFAULT_IB_BAR_SIZE
+    what_to_show: str = 'TRADES'
+    use_rth: bool = True
+    reference_db_path: Path | str = DEFAULT_REFERENCE_DB_PATH
+    mapping_path: Path | str = DEFAULT_BROKER_MAPPING_PATH
+    history_db_path: Path | str = DEFAULT_IB_FUTURES_HISTORY_DB_PATH
+    update_history: bool = True
+    contract_history: pl.DataFrame | None = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
+
+    def load(self, instrument_code: str) -> FuturesHistory:
+        """Load raw bars for one PST code and build its canonical streams."""
+        self.contract_history = load_roll_cycle_ib_contract_history(
+            self.ib,
+            pst_instr_code=instrument_code,
+            as_of=self.as_of,
+            prior_years=self.prior_years,
+            duration=self.duration,
+            bar_size=self.bar_size,
+            what_to_show=self.what_to_show,
+            use_rth=self.use_rth,
+            db_path=self.reference_db_path,
+            mapping_path=self.mapping_path,
+            history_db_path=self.history_db_path,
+            update_history=self.update_history,
+        )
+        return build_ib_contract_history(self.contract_history)
+
+
+def _history_input_fingerprint(path: Path | str) -> dict[str, object]:
+    """Return stable local-file identity for a stitched-cache input."""
+    resolved = Path(path).expanduser().resolve()
+    stat = resolved.stat()
+    return {
+        'path': str(resolved),
+        'size': stat.st_size,
+        'mtime_ns': stat.st_mtime_ns,
+    }
+
+
+@dataclass
+class IBStitchedHistoryProvider:
+    """Load reference, Globex, and IB history with a stitched Parquet cache.
+
+    Raw IB observations live in a dedicated DuckDB through
+    :class:`IBHistoryProvider`. The final duplicate-free ``FuturesHistory`` and
+    its overlapping IB audit rows are cached as one Parquet bundle. A cache hit
+    therefore performs no IB request and no restitching.
+    """
+
+    ib: IBPySync
+    pst_instr_code: str
+    globex_asset: str
+    as_of: date | None = None
+    prior_years: int = 1
+    duration: str = DEFAULT_IB_DATED_CONTRACT_DURATION
+    bar_size: str = DEFAULT_IB_BAR_SIZE
+    what_to_show: str = 'TRADES'
+    use_rth: bool = True
+    reference_db_path: Path | str = DEFAULT_REFERENCE_DB_PATH
+    globex_db_path: Path | str = DEFAULT_GLOBEX_DB_PATH
+    mapping_path: Path | str = DEFAULT_BROKER_MAPPING_PATH
+    history_db_path: Path | str = DEFAULT_IB_FUTURES_HISTORY_DB_PATH
+    cache_root: Path | str = DEFAULT_FUTURES_CACHE_ROOT
+    use_cache: bool = True
+    save_cache: bool = True
+    update_history: bool = True
+    contract_history: pl.DataFrame | None = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
+
+    def _cache_directory(self, symbol: str) -> Path:
+        """Return a versioned cache directory for all stitched-view inputs."""
+        effective_as_of = self.as_of or date.today()
+        identity = {
+            'history_schema_version': HISTORY_SCHEMA_VERSION,
+            'symbol': symbol,
+            'pst_instr_code': self.pst_instr_code,
+            'globex_asset': self.globex_asset,
+            'as_of': effective_as_of.isoformat(),
+            'prior_years': self.prior_years,
+            'duration': self.duration,
+            'bar_size': self.bar_size,
+            'what_to_show': self.what_to_show,
+            'use_rth': self.use_rth,
+            'reference_db': _history_input_fingerprint(self.reference_db_path),
+            'globex_db': _history_input_fingerprint(self.globex_db_path),
+            'mapping': _history_input_fingerprint(self.mapping_path),
+        }
+        digest = hashlib.sha256(
+            json.dumps(identity, sort_keys=True).encode('utf-8')
+        ).hexdigest()[:20]
+        safe_symbol = re.sub(r'[^A-Za-z0-9_.-]+', '_', symbol)
+        return (
+            Path(self.cache_root)
+            / 'stitched'
+            / f'v{HISTORY_SCHEMA_VERSION}'
+            / safe_symbol
+            / digest
+        )
+
+    def load(self, instrument_code: str) -> FuturesHistory:
+        """Load one executable symbol from cache or rebuild all three sources."""
+        cache_directory = self._cache_directory(instrument_code)
+        contract_path = cache_directory / 'ib_contract_history.parquet'
+        cache_hit = (
+            self.use_cache
+            and contract_path.exists()
+            and futures_history_parquet_cache_exists(cache_directory)
+        )
+        if cache_hit:
+            history = read_futures_history_parquet_cache(cache_directory)
+            self.contract_history = pl.read_parquet(contract_path)
+            logger.info(
+                'stitched_ib_history cache_hit symbol=%s pst_instr_code=%s '
+                'cache=%s',
+                instrument_code,
+                self.pst_instr_code,
+                cache_directory,
+            )
+            return replace(
+                history,
+                metadata={
+                    **dict(history.metadata),
+                    'cache_hit': True,
+                    'cache_directory': str(cache_directory),
+                },
+            )
+
+        ib_provider = IBHistoryProvider(
+            ib=self.ib,
+            as_of=self.as_of,
+            prior_years=self.prior_years,
+            duration=self.duration,
+            bar_size=self.bar_size,
+            what_to_show=self.what_to_show,
+            use_rth=self.use_rth,
+            reference_db_path=self.reference_db_path,
+            mapping_path=self.mapping_path,
+            history_db_path=self.history_db_path,
+            update_history=self.update_history,
+        )
+        ib_history = ib_provider.load(self.pst_instr_code)
+        if ib_provider.contract_history is None:
+            raise RuntimeError('IB history provider did not retain raw audit rows')
+        self.contract_history = ib_provider.contract_history.with_columns(
+            pl.lit(instrument_code).alias('symbol')
+        )
+        roll_policy = ContractRollPolicy(
+            policy_id=f'configured_{self.pst_instr_code}',
+            hold_roll_cycle=str(ib_history.metadata['hold_roll_cycle']),
+            roll_offset_days=int(ib_history.metadata['roll_offset_days']),
+            source='reference_config',
+        )
+        globex_history = GlobexHistoryProvider(
+            db_path=self.globex_db_path,
+            cache_root=self.cache_root,
+            use_cache=self.use_cache,
+            save_cache=self.save_cache,
+            roll_policy=roll_policy,
+        ).load(self.globex_asset)
+        reference_history = ReferenceHistoryProvider(
+            db_path=self.reference_db_path,
+            cache_root=self.cache_root,
+            use_cache=self.use_cache,
+            save_cache=self.save_cache,
+        ).load(self.pst_instr_code)
+        history = stitch_futures_histories(
+            [reference_history, globex_history, ib_history],
+            instrument_code=instrument_code,
+        )
+        history = replace(
+            history,
+            metadata={
+                **dict(history.metadata),
+                'cache_hit': False,
+                'cache_directory': str(cache_directory),
+                'ib_history_db': str(Path(self.history_db_path).expanduser()),
+            },
+        )
+        if self.save_cache:
+            cache_directory.mkdir(parents=True, exist_ok=True)
+            temporary_contract_path = contract_path.with_suffix('.parquet.tmp')
+            self.contract_history.write_parquet(temporary_contract_path)
+            temporary_contract_path.replace(contract_path)
+            write_futures_history_parquet_cache(history, cache_directory)
+        return history
 
 
 def build_stitched_futures_history(

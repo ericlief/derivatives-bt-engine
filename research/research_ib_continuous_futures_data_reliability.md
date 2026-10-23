@@ -159,6 +159,20 @@ mgc_contracts = load_roll_cycle_ib_contract_history(
 )
 ```
 
+The raw bars persist in the separate
+``/home/dev/fin/db/ib_futures_history.duckdb`` source database. Its versioned
+schema contains:
+
+- ``raw.contracts``: one row per qualified IB ``con_id``;
+- ``raw.daily_bars``: unadjusted observations keyed by contract, date, bar
+  size, data type, and regular-hours choice;
+- ``raw.fetch_log``: request coverage, completeness, and failures; and
+- ``meta.schema_version``: the independent source-schema version.
+
+Stitched histories are derived from this raw source and cached separately as
+Parquet bundles. The DuckDB never stores Panama levels, signal indices,
+forecasts, or notebook curves.
+
 Expired-contract requests end immediately after the resolved expiry so their historical
 window is not measured backward from today. The later broker-to-exchange-to-reference stitch must
 apply one roll policy to these dated bars and rebuild the Panama level once from the final

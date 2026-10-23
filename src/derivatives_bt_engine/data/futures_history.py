@@ -24,9 +24,10 @@ Globex database or the pysystemtrade sidecar.
 from __future__ import annotations
 
 import bisect
+import json
 import os
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Mapping, Optional, Protocol, Sequence
 
@@ -53,6 +54,7 @@ DEFAULT_PYSYSTEMTRADE_DB_PATH = Path(
 )
 DEFAULT_GLOBEX_DB_PATH = Path("/home/dev/fin/db/globex_mdp_3.0.duckdb")
 DEFAULT_FUTURES_CACHE_ROOT = Path(__file__).resolve().parents[3] / ".cache" / "futures"
+FUTURES_HISTORY_CACHE_SCHEMA_VERSION = 1
 
 _SIGNAL_COLUMNS = {
     "date",
@@ -158,6 +160,130 @@ class FuturesHistory:
             "point_change",
             "quality_flag",
         ).sort("date")
+
+
+def futures_history_parquet_paths(
+    directory: Path | str,
+) -> dict[str, Path]:
+    """Return the stable Parquet paths for one cached history bundle.
+
+    A bundle stores the four canonical streams separately because they have
+    different schemas. The manifest is written last and therefore also acts
+    as the cache-completeness marker.
+    """
+    root = Path(directory)
+    return {
+        stream: root / f"{stream}.parquet"
+        for stream in ("signal", "marks", "carry", "panama", "manifest")
+    }
+
+
+def futures_history_parquet_cache_exists(directory: Path | str) -> bool:
+    """Return whether every file in one history Parquet bundle exists."""
+    return all(
+        path.exists()
+        for path in futures_history_parquet_paths(directory).values()
+    )
+
+
+def _history_metadata_json_default(value: object) -> object:
+    """Encode non-JSON metadata values with explicit type tags."""
+    if isinstance(value, datetime):
+        return {"__history_type__": "datetime", "value": value.isoformat()}
+    if isinstance(value, date):
+        return {"__history_type__": "date", "value": value.isoformat()}
+    if isinstance(value, Path):
+        return {"__history_type__": "path", "value": str(value)}
+    raise TypeError(f"Unsupported futures-history metadata value: {value!r}")
+
+
+def _history_metadata_json_hook(value: dict[str, object]) -> object:
+    """Restore explicitly tagged metadata values from a cache manifest."""
+    value_type = value.get("__history_type__")
+    raw_value = value.get("value")
+    if value_type == "datetime" and isinstance(raw_value, str):
+        return datetime.fromisoformat(raw_value)
+    if value_type == "date" and isinstance(raw_value, str):
+        return date.fromisoformat(raw_value)
+    if value_type == "path" and isinstance(raw_value, str):
+        return Path(raw_value)
+    return value
+
+
+def write_futures_history_parquet_cache(
+    history: FuturesHistory,
+    directory: Path | str,
+) -> None:
+    """Write one canonical history as an atomic Parquet cache bundle.
+
+    Stream files are replaced before the manifest. A failed or interrupted
+    write therefore cannot present a complete new cache to readers.
+    """
+    paths = futures_history_parquet_paths(directory)
+    paths["manifest"].parent.mkdir(parents=True, exist_ok=True)
+    paths["manifest"].unlink(missing_ok=True)
+    streams = {
+        "signal": history.signal,
+        "marks": history.marks,
+        "carry": history.carry,
+        "panama": history.panama,
+    }
+    for stream, frame in streams.items():
+        temporary = paths[stream].with_suffix(".parquet.tmp")
+        frame.write_parquet(temporary)
+        temporary.replace(paths[stream])
+
+    manifest = pl.DataFrame({
+        "cache_schema_version": [FUTURES_HISTORY_CACHE_SCHEMA_VERSION],
+        "history_schema_version": [history.schema_version],
+        "source": [history.source],
+        "instrument_code": [history.instrument_code],
+        "metadata_json": [
+            json.dumps(
+                dict(history.metadata),
+                default=_history_metadata_json_default,
+                sort_keys=True,
+            )
+        ],
+    })
+    temporary_manifest = paths["manifest"].with_suffix(".parquet.tmp")
+    manifest.write_parquet(temporary_manifest)
+    temporary_manifest.replace(paths["manifest"])
+
+
+def read_futures_history_parquet_cache(
+    directory: Path | str,
+) -> FuturesHistory:
+    """Read and validate one canonical history Parquet cache bundle."""
+    paths = futures_history_parquet_paths(directory)
+    if not all(path.exists() for path in paths.values()):
+        raise FileNotFoundError(f"Incomplete futures-history cache: {directory}")
+    manifest = pl.read_parquet(paths["manifest"])
+    if manifest.height != 1:
+        raise ValueError("futures-history cache manifest must contain one row")
+    row = manifest.row(0, named=True)
+    cache_version = int(row["cache_schema_version"])
+    if cache_version != FUTURES_HISTORY_CACHE_SCHEMA_VERSION:
+        raise ValueError(
+            "Unsupported futures-history cache schema version: "
+            f"{cache_version}"
+        )
+    metadata = json.loads(
+        str(row["metadata_json"]),
+        object_hook=_history_metadata_json_hook,
+    )
+    if not isinstance(metadata, dict):
+        raise ValueError("futures-history cache metadata must be an object")
+    return FuturesHistory(
+        source=str(row["source"]),
+        instrument_code=str(row["instrument_code"]),
+        schema_version=int(row["history_schema_version"]),
+        signal=pl.read_parquet(paths["signal"]),
+        marks=pl.read_parquet(paths["marks"]),
+        carry=pl.read_parquet(paths["carry"]),
+        panama=pl.read_parquet(paths["panama"]),
+        metadata=metadata,
+    )
 
 
 def _validate_stream(

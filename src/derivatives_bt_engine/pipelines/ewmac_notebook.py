@@ -52,8 +52,10 @@ from derivatives_bt_engine.data.ib_futures_dataloader import (
     DEFAULT_BROKER_MAPPING_PATH,
     DEFAULT_IB_BAR_SIZE,
     DEFAULT_IB_DATED_CONTRACT_DURATION,
-    build_stitched_futures_history,
-    load_roll_cycle_ib_contract_history,
+    IBStitchedHistoryProvider,
+)
+from derivatives_bt_engine.data.ib_futures_history_store import (
+    DEFAULT_IB_FUTURES_HISTORY_DB_PATH,
 )
 from derivatives_bt_engine.data.pysystemtrade_ib import (
     load_pysystemtrade_ib_instruments,
@@ -837,9 +839,11 @@ def build_stitched_ewmac_notebook_view(
     reference_db_path: Path | str = DEFAULT_REFERENCE_DB_PATH,
     globex_db_path: Path | str = DEFAULT_GLOBEX_DB_PATH,
     broker_mapping_path: Path | str = DEFAULT_BROKER_MAPPING_PATH,
+    ib_history_db_path: Path | str = DEFAULT_IB_FUTURES_HISTORY_DB_PATH,
     pooling_mapping_path: Path | str = DEFAULT_POOLING_MAPPING_PATH,
     use_cache: bool = True,
     save_cache: bool = True,
+    update_ib_history: bool = True,
 ) -> EwmacNotebookView:
     """Build a complete stitched-history EWMAC notebook view in one call.
 
@@ -881,10 +885,17 @@ def build_stitched_ewmac_notebook_view(
         screen costs and multiplier replace ``ann_cost_sr`` and ``multiplier``.
     reference_db_path, globex_db_path, broker_mapping_path
         Read-only history, roll configuration, and broker mapping inputs.
+    ib_history_db_path
+        Dedicated writable DuckDB for raw IB dated-contract bars.
     pooling_mapping_path
         Reviewed pooling decisions used by causal scalar normalization.
     use_cache, save_cache
-        Cache controls for the database-backed history providers.
+        Read and write controls for the stitched Parquet view and underlying
+        reference/Globex caches. Set ``use_cache=False`` and
+        ``save_cache=True`` to refresh the stitched view.
+    update_ib_history
+        Fetch current or missing raw bars into ``ib_history_db_path`` on a
+        stitched-cache miss. False rebuilds only from stored raw bars.
 
     Returns
     -------
@@ -909,28 +920,28 @@ def build_stitched_ewmac_notebook_view(
     )
     pst_instr_code = signal_mapping["pst_instr_code"]
     globex_asset = _resolve_globex_asset(pst_instr_code)
-    contracts = load_roll_cycle_ib_contract_history(
-        ib,
+    history_provider = IBStitchedHistoryProvider(
+        ib=ib,
         pst_instr_code=pst_instr_code,
+        globex_asset=globex_asset,
         as_of=as_of,
         prior_years=prior_years,
         duration=duration,
         bar_size=bar_size,
         what_to_show=what_to_show,
         use_rth=use_rth,
-        db_path=reference_db_path,
-        mapping_path=broker_mapping_path,
-    ).with_columns(pl.lit(symbol).alias("symbol"))
-    history = build_stitched_futures_history(
-        contracts,
-        symbol=symbol,
-        globex_asset=globex_asset,
-        pst_instr_code=pst_instr_code,
-        globex_db_path=globex_db_path,
         reference_db_path=reference_db_path,
+        globex_db_path=globex_db_path,
+        mapping_path=broker_mapping_path,
+        history_db_path=ib_history_db_path,
         use_cache=use_cache,
         save_cache=save_cache,
+        update_history=update_ib_history,
     )
+    history = history_provider.load(symbol)
+    contracts = history_provider.contract_history
+    if contracts is None:
+        raise RuntimeError("stitched history provider did not retain IB audit rows")
     pooled = load_pooled_ewmac_rules(
         db_path=reference_db_path,
         pooling_mapping_path=pooling_mapping_path,

@@ -199,6 +199,32 @@ point value of 10 for reference sizing and executable cash P&L.
 With a Phase 1 screen, the helper reads costs and contract inputs from the
 ``MGC`` row automatically.
 
+Raw IB dated-contract observations are persisted separately in
+``/home/dev/fin/db/ib_futures_history.duckdb``. Its ``raw.contracts`` table
+owns qualified contract identity, ``raw.daily_bars`` owns unadjusted OHLCV
+rows by contract and request settings, and ``raw.fetch_log`` records coverage
+and failures. No adjusted, continuous, or forecast values are written there.
+
+The completed reference-to-Globex-to-IB history is cached as a versioned
+Parquet bundle under ``.cache/futures/stitched``. The default call reads that
+bundle when available. To rebuild the stitched view and update current IB raw
+bars, use:
+
+```python
+mgc = build_stitched_ewmac_notebook_view(
+    ib,
+    symbol="MGC",
+    reference_settings=reference_settings,
+    use_cache=False,
+    save_cache=True,
+    update_ib_history=True,
+)
+```
+
+Set ``update_ib_history=False`` to rebuild solely from the raw bars already in
+the dedicated DuckDB. Set both cache flags false for an uncached stitched
+result; ``update_ib_history`` independently controls writes to the raw source.
+
 For a direct inspection of the equal-weight subsystem-reference percentage curve,
 use the same explicit reference assumptions as the selection pipeline:
 
