@@ -52,6 +52,7 @@ from derivatives_bt_engine.data.ib_futures_dataloader import (
     DEFAULT_IB_BAR_SIZE,
     DEFAULT_IB_DATED_CONTRACT_DURATION,
     build_stitched_futures_history,
+    load_broker_mapping,
     load_roll_cycle_ib_contract_history,
 )
 from derivatives_bt_engine.data.pysystemtrade_pooling import (
@@ -783,6 +784,27 @@ def _contract_point_value(contract_history: pl.DataFrame) -> float:
     return point_value
 
 
+def _mapped_contract_point_value(
+    instrument_code: str,
+    mapping_path: Path | str,
+) -> float:
+    """Return an execution instrument's mapped native point value."""
+    mapping = load_broker_mapping(mapping_path).filter(
+        pl.col("instrument_code") == instrument_code
+    )
+    if mapping.height != 1:
+        raise KeyError(f"No unique broker mapping for {instrument_code}")
+    row = mapping.row(0, named=True)
+    point_value = float(row["ib_multiplier"]) / float(
+        row["price_magnifier"]
+    )
+    if not math.isfinite(point_value) or point_value <= 0:
+        raise ValueError(
+            f"{instrument_code} mapped point value must be finite and positive"
+        )
+    return point_value
+
+
 def _history_currency(history: FuturesHistory) -> str:
     """Return the reference segment's currency from stitched metadata."""
     metadata = history.metadata.get("source_metadata", [])
@@ -802,6 +824,7 @@ def build_stitched_ewmac_notebook_view(
     instrument_code: str,
     globex_asset: str,
     reference_settings: SubsystemReferenceSettings,
+    signal_instrument_code: str | None = None,
     reference_instrument_code: str | None = None,
     display_instrument_code: str | None = None,
     as_of: date | None = None,
@@ -838,13 +861,19 @@ def build_stitched_ewmac_notebook_view(
     ib
         Connected synchronous IB client.
     instrument_code
-        Instrument identifier used for broker mapping and roll configuration.
+        Executable instrument identifier used for contract specifications,
+        screen lookup, and the default display label.
     globex_asset
-        Raw Globex asset identifier used for the middle history segment.
+        Raw Globex asset identifier used by the signal history.
     reference_settings
         Equal-weight subsystem reference sizing assumptions.
+    signal_instrument_code
+        Instrument identifier used to download the newest signal history and
+        select its roll configuration. Defaults to ``instrument_code``. This
+        permits a micro contract to use its full-size sibling's deeper price
+        history while retaining the micro's point value for sizing and P&L.
     reference_instrument_code
-        Oldest-history identifier. Defaults to ``instrument_code``.
+        Oldest-history identifier. Defaults to ``signal_instrument_code``.
     display_instrument_code
         Optional plot label. Defaults to ``instrument_code``.
     as_of, prior_years, duration, bar_size, what_to_show, use_rth
@@ -882,9 +911,10 @@ def build_stitched_ewmac_notebook_view(
         raise ValueError("at least one EWMAC rule is required")
     config = combination_config or ForecastCombinationConfig()
 
+    signal_code = signal_instrument_code or instrument_code
     contracts = load_roll_cycle_ib_contract_history(
         ib,
-        instrument_code,
+        signal_code,
         as_of=as_of,
         prior_years=prior_years,
         duration=duration,
@@ -897,7 +927,9 @@ def build_stitched_ewmac_notebook_view(
     history = build_stitched_futures_history(
         contracts,
         globex_asset=globex_asset,
-        reference_instrument_code=reference_instrument_code,
+        reference_instrument_code=(
+            reference_instrument_code or signal_code
+        ),
         globex_db_path=globex_db_path,
         reference_db_path=reference_db_path,
         use_cache=use_cache,
@@ -947,7 +979,14 @@ def build_stitched_ewmac_notebook_view(
             result,
             instrument_code=display_code,
             multiplier=(
-                _contract_point_value(contracts)
+                (
+                    _contract_point_value(contracts)
+                    if signal_code == instrument_code
+                    else _mapped_contract_point_value(
+                        instrument_code,
+                        broker_mapping_path,
+                    )
+                )
                 if multiplier is None
                 else multiplier
             ),

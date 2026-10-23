@@ -172,6 +172,32 @@ and ``screen_symbol`` to use Phase 1 multiplier and cost inputs instead. The
 view retains the overlapping download in ``contract_history`` and the
 duplicate-free stitched streams in ``history`` for roll and handoff audits.
 
+To trade micro gold from the deeper full-size gold signal history, separate
+the executable instrument from the signal instrument:
+
+```python
+mgc = build_stitched_ewmac_notebook_view(
+    ib,
+    instrument_code="GOLD_micro",
+    signal_instrument_code="GOLD",
+    globex_asset="GC",
+    display_instrument_code="MGC",
+    reference_settings=SubsystemReferenceSettings(
+        capital=75_000,
+        target_vol=0.20,
+        reference_book_count=15,
+        reference_idm=2.5,
+        max_weight_idm=0.20,
+    ),
+    prior_years=1,
+)
+```
+
+This downloads and stitches ``GOLD``/``GC`` prices for the EWMAC calculation,
+then uses the mapped ``GOLD_micro`` point value of 10 for reference sizing and
+executable cash P&L. With a Phase 1 screen, pass ``screen_symbol="MGC"`` so its
+cost and contract inputs also come from the micro row.
+
 For a direct inspection of the equal-weight subsystem-reference percentage curve,
 use the same explicit reference assumptions as the selection pipeline:
 
