@@ -73,8 +73,10 @@ def test_notebook_view_builds_reference_return_and_cash_paths():
         "ref_norm_pos",
         "ref_abs_pos_change",
         "ref_roll_mean_abs_pos_change",
+        "ref_roll_ann_turn",
         "daily_dvol",
     } <= set(view.reference.columns)
+    assert "ref_roll_ann_turnover" not in view.reference.columns
     assert "daily_dollar_vol_per_contract" not in view.reference.columns
     assert view.cash is not None
     assert {

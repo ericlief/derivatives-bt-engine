@@ -83,6 +83,9 @@ PUBLIC_REPORT_RENAMES = {
         "ref_roll_mean_abs_pos_change"
     ),
     "ref_rolling_ann_turnover": "ref_roll_ann_turn",
+    # The reference-position calculation currently emits this compact
+    # intermediate name; normalize it at the same public schema boundary.
+    "ref_roll_ann_turnover": "ref_roll_ann_turn",
     "daily_dollar_vol_per_contract": "daily_dvol",
     "annual_dollar_vol_per_contract": "ann_dvol",
     "annual_percentage_vol": "ann_pct_vol",

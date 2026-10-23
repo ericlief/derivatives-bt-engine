@@ -296,7 +296,7 @@ def test_public_report_compacts_margin_and_forecast_audit_names():
         "portfolio_margin_at_max_usd": [500.555],
         "instr_margin_limit_usd": [250.555],
         "forecast_post_warmup_invalid_obs": [3],
-        "ref_rolling_ann_turnover": [12.345],
+        "ref_roll_ann_turnover": [12.345],
     })
 
     public = round_public_report(rename_public_report_columns(report))
