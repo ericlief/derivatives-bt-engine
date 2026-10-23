@@ -119,24 +119,43 @@ Reference sizing and turnover are added after multiplier and FX are known. Use
 ``build_ewmac_components`` when only the wide component frame is needed, or
 ``build_ewmac_rule_component`` to inspect a single speed.
 
-## Load dated futures contracts from IB
+## Build a stitched EWMAC notebook view
 
-Given a connected ``IBPySync`` client, load the current and prior calendar
-years of dated contracts using the instrument's configured roll cycle:
+Given a connected ``IBPySync`` client, one helper downloads the dated
+contracts, stitches IB over Globex and reference history, loads pooled EWMAC
+scalars, combines the component forecasts, aligns FX, and builds the standard
+notebook view:
 
 ```python
-from derivatives_bt_engine.data.ib_futures_dataloader import (
-    build_stitched_futures_history,
-    load_roll_cycle_ib_contract_history,
+from derivatives_bt_engine.pipelines.ewmac_notebook import (
+    SubsystemReferenceSettings,
+    build_stitched_ewmac_notebook_view,
 )
 
-mgc_contracts = load_roll_cycle_ib_contract_history(
+gold = build_stitched_ewmac_notebook_view(
     ib,
-    "GOLD_micro",
+    instrument_code="GOLD",
+    globex_asset="GC",
+    reference_settings=SubsystemReferenceSettings(
+        capital=75_000,
+        target_vol=0.20,
+        reference_book_count=15,
+        reference_idm=2.5,
+        max_weight_idm=0.20,
+    ),
     prior_years=1,
 )
 
-mgc_contracts.select(
+gold.result.frame.tail(30)
+gold.history.metadata["handoff_dates"]
+gold.history.signal.select(
+    "date",
+    "source_segment",
+    "ret_1d",
+    "signal_index",
+).tail(30)
+
+gold.contract_history.select(
     "date",
     "contract_month",
     "expiration",
@@ -145,30 +164,13 @@ mgc_contracts.select(
     "volume",
 ).tail(30)
 
-gold_history = build_stitched_futures_history(
-    mgc_contracts,
-    globex_asset="GC",
-)
-
-gold_history.metadata["handoff_dates"]
-gold_history.signal.select(
-    "date",
-    "source_segment",
-    "ret_1d",
-    "signal_index",
-).tail(30)
-
-gold_prices = gold_history.panama_bars()
+gold.plot(start="2021-01-01")
 ```
 
-The result deliberately retains overlapping contract rows and contract
-identity. It is raw input for an explicit roll selection and continuous-price
-construction, rather than an IB continuous contract. The stitch applies the
-downloaded instrument's roll cycle to Globex, then uses reference history as
-the oldest segment. IB has priority over Globex, and Globex has priority over
-the reference source. Each handoff removes duplicate dates before rebuilding
-the return index and additive price path. ``gold_prices`` is ready for the
-notebook forecast functions above.
+The downloaded point value supplies the default multiplier. Pass ``screen``
+and ``screen_symbol`` to use Phase 1 multiplier and cost inputs instead. The
+view retains the overlapping download in ``contract_history`` and the
+duplicate-free stitched streams in ``history`` for roll and handoff audits.
 
 For a direct inspection of the equal-weight subsystem-reference percentage curve,
 use the same explicit reference assumptions as the selection pipeline:

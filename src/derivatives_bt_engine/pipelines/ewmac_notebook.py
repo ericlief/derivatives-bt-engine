@@ -6,21 +6,33 @@ equal-weight subsystem-reference percentage and optional executable cash P&L
 paths, and exposes small Polars tables plus a lazy hvPlot dashboard. A helper
 can join a saved Phase 1 selection screen for contract and cost inputs. It does
 not reimplement forecast, sizing, buffering, or cost calculations; those
-remain owned by the calculation modules used by production selection.
+remain owned by the calculation modules used by production selection. The
+stitched-history entry point also orchestrates dated-contract loading, history
+ownership, pooled forecast construction, and this same view boundary.
 """
 
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from datetime import date, datetime
 from pathlib import Path
 
+import numpy as np
 import polars as pl
+from ib_tools.ibpysync import IBPySync
 
-from derivatives_bt_engine.calculations.ewmac import EWMAC_FORECAST_TARGET_ABS
+from derivatives_bt_engine.calculations.ewmac import (
+    CANONICAL_EWMAC_RULES,
+    EWMAC_FORECAST_TARGET_ABS,
+    EwmacRule,
+)
 from derivatives_bt_engine.calculations.forecast_combination import (
+    CombinedForecastEngine,
     CombinedForecastResult,
+    FixedForecastDiversification,
+    ForecastCombinationConfig,
 )
 from derivatives_bt_engine.calculations.costs import calculate_annual_sr_cost
 from derivatives_bt_engine.calculations.pnl import (
@@ -29,7 +41,27 @@ from derivatives_bt_engine.calculations.pnl import (
     build_executable_cash_pnl_curve,
     build_subsystem_reference_return_curve,
 )
+from derivatives_bt_engine.data.fx_history import align_fx_to_history
+from derivatives_bt_engine.data.futures_history import (
+    DEFAULT_GLOBEX_DB_PATH,
+    DEFAULT_PYSYSTEMTRADE_DB_PATH as DEFAULT_REFERENCE_DB_PATH,
+    FuturesHistory,
+)
+from derivatives_bt_engine.data.ib_futures_dataloader import (
+    DEFAULT_BROKER_MAPPING_PATH,
+    DEFAULT_IB_BAR_SIZE,
+    DEFAULT_IB_DATED_CONTRACT_DURATION,
+    build_stitched_futures_history,
+    load_roll_cycle_ib_contract_history,
+)
+from derivatives_bt_engine.data.pysystemtrade_pooling import (
+    DEFAULT_POOLING_MAPPING_PATH,
+)
 from derivatives_bt_engine.reports.formatting import rename_public_report_columns
+from derivatives_bt_engine.strats.multi_speed_ewmac import (
+    build_ewmac_component_frame,
+    load_pooled_ewmac_rules,
+)
 
 
 def _coerce_date(value: date | datetime | str | None) -> date | None:
@@ -198,9 +230,12 @@ class EwmacNotebookView:
     ``forecasts`` returns the combined-forecast result at the compact public
     schema boundary. ``reference`` is the equal-weight continuous position
     and return path used for turnover and correlations.
-    ``reference_turnover`` is its annualized Carver-style turnover. ``cash``
+    ``reference_turnover`` is its annualized average-position turnover. ``cash``
     is present only when executable account settings were supplied and
     contains continuous targets, buffered whole contracts, and cash costs.
+    ``history`` retains the source-owned futures streams when the stitched
+    history helper constructed the view. ``contract_history`` retains the
+    overlapping dated-contract download used to build its newest segment.
     """
 
     instrument_code: str
@@ -208,6 +243,8 @@ class EwmacNotebookView:
     reference: pl.DataFrame
     reference_turnover: float | None
     cash: pl.DataFrame | None = None
+    history: FuturesHistory | None = None
+    contract_history: pl.DataFrame | None = None
 
     @property
     def forecasts(self) -> pl.DataFrame:
@@ -718,3 +755,209 @@ def build_ewmac_notebook_view_from_screen(
         else None
     )
     return replace(view, reference=reference, cash=cash)
+
+
+def _contract_point_value(contract_history: pl.DataFrame) -> float:
+    """Return the unique native-currency point value in downloaded contracts."""
+    required = {"ib_multiplier", "price_magnifier"}
+    missing = required - set(contract_history.columns)
+    if missing:
+        raise ValueError(
+            f"contract history missing point-value columns: {sorted(missing)}"
+        )
+    values = (
+        contract_history.select(
+            (
+                pl.col("ib_multiplier").cast(pl.Float64)
+                / pl.col("price_magnifier").cast(pl.Float64)
+            ).alias("point_value")
+        )
+        .drop_nulls()
+        .unique()
+    )
+    if values.height != 1:
+        raise ValueError("contract history must contain one point value")
+    point_value = float(values.item())
+    if not math.isfinite(point_value) or point_value <= 0:
+        raise ValueError("contract point value must be finite and positive")
+    return point_value
+
+
+def _history_currency(history: FuturesHistory) -> str:
+    """Return the reference segment's currency from stitched metadata."""
+    metadata = history.metadata.get("source_metadata", [])
+    if isinstance(metadata, list):
+        for source_metadata in metadata:
+            if not isinstance(source_metadata, dict):
+                continue
+            currency = str(source_metadata.get("currency") or "").strip()
+            if currency:
+                return currency
+    raise ValueError("stitched history has no reference currency metadata")
+
+
+def build_stitched_ewmac_notebook_view(
+    ib: IBPySync,
+    *,
+    instrument_code: str,
+    globex_asset: str,
+    reference_settings: SubsystemReferenceSettings,
+    reference_instrument_code: str | None = None,
+    display_instrument_code: str | None = None,
+    as_of: date | None = None,
+    prior_years: int = 1,
+    duration: str = DEFAULT_IB_DATED_CONTRACT_DURATION,
+    bar_size: str = DEFAULT_IB_BAR_SIZE,
+    what_to_show: str = "TRADES",
+    use_rth: bool = True,
+    rules: Iterable[EwmacRule] = CANONICAL_EWMAC_RULES,
+    fdm: float = 1.0,
+    combination_config: ForecastCombinationConfig | None = None,
+    multiplier: float | None = None,
+    ann_cost_sr: float = 0.0,
+    cash_settings: ExecutableCashSettings | None = None,
+    screen: pl.DataFrame | Path | str | None = None,
+    screen_symbol: str | None = None,
+    reference_db_path: Path | str = DEFAULT_REFERENCE_DB_PATH,
+    globex_db_path: Path | str = DEFAULT_GLOBEX_DB_PATH,
+    broker_mapping_path: Path | str = DEFAULT_BROKER_MAPPING_PATH,
+    pooling_mapping_path: Path | str = DEFAULT_POOLING_MAPPING_PATH,
+    use_cache: bool = True,
+    save_cache: bool = True,
+) -> EwmacNotebookView:
+    """Build a complete stitched-history EWMAC notebook view in one call.
+
+    The helper downloads overlapping dated contracts from IB, constructs the
+    configured held-contract path, and stitches it over Globex and the long
+    reference history. It then loads the causal pooled EWMAC scalars, builds
+    every requested component, aligns historical FX, combines the forecasts,
+    and delegates sizing and plotting to the standard notebook view.
+
+    Parameters
+    ----------
+    ib
+        Connected synchronous IB client.
+    instrument_code
+        Instrument identifier used for broker mapping and roll configuration.
+    globex_asset
+        Raw Globex asset identifier used for the middle history segment.
+    reference_settings
+        Equal-weight subsystem reference sizing assumptions.
+    reference_instrument_code
+        Oldest-history identifier. Defaults to ``instrument_code``.
+    display_instrument_code
+        Optional plot label. Defaults to ``instrument_code``.
+    as_of, prior_years, duration, bar_size, what_to_show, use_rth
+        Dated-contract download settings forwarded to the IB history loader.
+    rules
+        EWMAC rules to normalize, calculate, and combine.
+    fdm, combination_config
+        Fixed single-market forecast diversification and numeric conventions.
+    multiplier
+        Optional native-currency point-value override. When absent, infer it
+        from the downloaded broker multiplier and price magnifier.
+    ann_cost_sr, cash_settings
+        Inputs for the standard reference and optional executable cash paths.
+    screen, screen_symbol
+        Optional Phase 1 screen inputs. When supplied, screen costs and the
+        screen multiplier replace ``ann_cost_sr`` and ``multiplier``.
+    reference_db_path, globex_db_path, broker_mapping_path
+        Read-only history, roll configuration, and broker mapping inputs.
+    pooling_mapping_path
+        Reviewed pooling decisions used by causal scalar normalization.
+    use_cache, save_cache
+        Cache controls for the database-backed history providers.
+
+    Returns
+    -------
+    EwmacNotebookView
+        Combined forecasts, reference sizing, optional cash P&L, plotting
+        methods, the stitched history in ``view.history``, and the overlapping
+        IB rows in ``view.contract_history``.
+    """
+    if screen is None and screen_symbol is not None:
+        raise ValueError("screen_symbol requires screen")
+    rule_tuple = tuple(rules)
+    if not rule_tuple:
+        raise ValueError("at least one EWMAC rule is required")
+    config = combination_config or ForecastCombinationConfig()
+
+    contracts = load_roll_cycle_ib_contract_history(
+        ib,
+        instrument_code,
+        as_of=as_of,
+        prior_years=prior_years,
+        duration=duration,
+        bar_size=bar_size,
+        what_to_show=what_to_show,
+        use_rth=use_rth,
+        db_path=reference_db_path,
+        mapping_path=broker_mapping_path,
+    )
+    history = build_stitched_futures_history(
+        contracts,
+        globex_asset=globex_asset,
+        reference_instrument_code=reference_instrument_code,
+        globex_db_path=globex_db_path,
+        reference_db_path=reference_db_path,
+        use_cache=use_cache,
+        save_cache=save_cache,
+    )
+    pooled = load_pooled_ewmac_rules(
+        db_path=reference_db_path,
+        pooling_mapping_path=pooling_mapping_path,
+        rules=rule_tuple,
+        target_abs_forecast=config.target_abs_forecast,
+        forecast_cap=config.forecast_cap,
+    )
+    components = build_ewmac_component_frame(
+        history,
+        pooled,
+        detailed=True,
+    )
+    components = align_fx_to_history(
+        components,
+        _history_currency(history),
+        db_path=reference_db_path,
+    )
+    rule_keys = [rule.key for rule in rule_tuple]
+    result = CombinedForecastEngine(
+        diversification_policy=FixedForecastDiversification(fdm),
+        config=config,
+    ).combine(
+        components,
+        rule_keys,
+        np.eye(len(rule_keys)),
+        rule_keys,
+    )
+
+    display_code = display_instrument_code or instrument_code
+    if screen is not None:
+        view = build_ewmac_notebook_view_from_screen(
+            result,
+            screen=screen,
+            screen_symbol=screen_symbol or instrument_code,
+            reference_settings=reference_settings,
+            cash_settings=cash_settings,
+            instrument_code=display_code,
+            target_abs_forecast=config.target_abs_forecast,
+        )
+    else:
+        view = build_ewmac_notebook_view(
+            result,
+            instrument_code=display_code,
+            multiplier=(
+                _contract_point_value(contracts)
+                if multiplier is None
+                else multiplier
+            ),
+            ann_cost_sr=ann_cost_sr,
+            reference_settings=reference_settings,
+            cash_settings=cash_settings,
+            target_abs_forecast=config.target_abs_forecast,
+        )
+    return replace(
+        view,
+        history=history,
+        contract_history=contracts,
+    )
