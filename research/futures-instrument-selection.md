@@ -605,7 +605,7 @@ flowchart TD
 
         Valuation["2. Attach valuation inputs<br/>fx_to_usd · multiplier"]
 
-        Sizing["3. Size equal-weight reference<br/>ref_weight = 1 / assumed book count<br/>daily_dvol · ref_vol_scalar · ref_targ_pos"]
+        Sizing["3. Size equal-weight reference<br/>ref_weight = 1 / assumed book count<br/>daily_dvol · vol_scalar · ref_targ_pos"]
 
         Turnover["4. Calculate actual subsystem turnover<br/>ref_avg_pos (smoothed)<br/>ref_norm_pos<br/>ref_abs_pos_change<br/>full-sample and rolling audit estimates"]
 
@@ -762,17 +762,17 @@ buffer before producing whole contracts. Its position scale is algebraically
 the same despite the different presentation:
 
 ```text
-our avg_pos
+our vol_scalar
   = capital × target_vol × weight × IDM / ann_dvol
 
 pysystemtrade portfolio average position
   = (daily_cash_vol_target / daily_dvol) × weight × IDM
   = ((capital × target_vol / sqrt(256))
      / (ann_dvol / sqrt(256))) × weight × IDM
-  = our avg_pos
+  = our vol_scalar
 ```
 
-The default band on each date is `tgt_pos ± 0.10 × abs(avg_pos)`.
+The default band on each date is `tgt_pos ± 0.10 × abs(vol_scalar)`.
 The continuous target and band edges are rounded only when forming the
 whole-contract boundaries and executable position. The previous executable
 position is retained while it remains within the band; a breach trades to the
@@ -1457,10 +1457,10 @@ ref_daily_risk_usd = ref_ann_risk_usd / sqrt(ann_days)
 ref_budget_usd     = ref_ann_risk_usd / target_vol
                    = capital * ref_weight_idm
 daily_dvol_i,t     = point_vol_i,t * multiplier_i * fx_i,t
-ref_vol_scalar_i,t = ref_daily_risk_usd / daily_dvol_i,t
-ref_targ_pos_i,t   = ref_vol_scalar_i,t * combined_forecast_i,t
+vol_scalar_i,t     = ref_daily_risk_usd / daily_dvol_i,t
+ref_targ_pos_i,t   = vol_scalar_i,t * combined_forecast_i,t
                      / target_abs_forecast
-ref_avg_pos_i,t    = EWM(ref_vol_scalar_i,t, com=250)
+ref_avg_pos_i,t    = EWM(vol_scalar_i,t, com=250)
 ref_norm_pos_i,t   = ref_targ_pos_i,t / ref_avg_pos_i,t
 ref_gross_usd_i,t  = held_ref_pos_i,t * point_change_i,t
                      * multiplier_i * fx_i,t

@@ -137,7 +137,7 @@ _vd_set_type(
     ref_con_band_distance candidate_ref_max_position
     candidate_ref_con_band_distance low_con_weight band_con_weight high_con_weight
     score_denom marg_score scaled_contrib
-    avg_pos ann_trade_con ann_roll_con ann_con_load max_con
+    avg_pos vol_scalar ann_trade_con ann_roll_con ann_con_load max_con
     trade_cost_per_con roll_cost_per_con
     ann_trade_cost ann_roll_cost ann_cost
     trade_cost_usd_per_con roll_cost_usd_per_con
@@ -147,7 +147,7 @@ _vd_set_type(
     init_margin_change maint_margin_change
     init_margin_pct_cap book_margin_pct_cap
     cluster_weight cluster_score fdm comb_turnover
-    combined_forecast ref_vol_scalar ref_avg_pos ref_targ_pos
+    combined_forecast vol_scalar ref_avg_pos ref_targ_pos
     ref_norm_pos
     ref_abs_pos_change ref_roll_mean_abs_pos_change ref_roll_ann_turnover
     close point_change point_vol fx_to_usd period_year_fraction
@@ -158,7 +158,7 @@ _vd_set_type(
     reference_annual_risk_budget_usd reference_daily_risk_budget_usd
     reference_return_capital_usd ref_ann_risk_usd ref_daily_risk_usd
     ref_budget_usd daily_dvol
-    ref_vol_scalar ref_avg_pos ref_targ_pos held_ref_pos
+    vol_scalar ref_avg_pos ref_targ_pos held_ref_pos
     ref_gross_usd ref_cost_usd ref_net_usd
     cum_ref_gross_usd cum_ref_net_usd
     ref_gross_pct ref_ann_cost_pct ref_cost_pct ref_net_pct

@@ -62,7 +62,7 @@ def test_subsystem_reference_pct_uses_equal_weight_risk_budget():
         "daily_dvol"
     ).to_list() == pytest.approx([40.0] * 3)
     assert result.get_column(
-        "ref_vol_scalar"
+        "vol_scalar"
     ).to_list() == pytest.approx([0.125] * 3)
     smoothed_avg_pos = result.get_column("ref_avg_pos").to_list()
     assert smoothed_avg_pos[0] is None
@@ -237,7 +237,7 @@ def test_executable_cash_pnl_separates_trade_and_policy_roll_costs():
             for close in frame.get_column("contract_close").to_list()
         ]
     )
-    assert result.get_column("avg_pos").to_list() == pytest.approx(
+    assert result.get_column("vol_scalar").to_list() == pytest.approx(
         [5.0] * 5
     )
     assert result.get_column("track_err_ann").to_list() == (

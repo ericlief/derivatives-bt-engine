@@ -42,7 +42,7 @@ _REFERENCE_ACCOUNTING_COLUMNS = (
     "ref_ann_risk",
     "ref_daily_risk",
     "daily_dvol",
-    "ref_vol_scalar",
+    "vol_scalar",
     "ref_tgt_pos",
     "ref_held_pos",
     "ref_gross",
@@ -229,7 +229,7 @@ def append_reference_position_turnover(
     Parameters
     ----------
     frame
-        Chronological reference frame containing ``ref_vol_scalar`` and
+        Chronological reference frame containing ``vol_scalar`` and
         ``ref_tgt_pos`` in continuous contracts.
     average_position_ewm_com
         EWM ``com`` used to smooth the changing average-position denominator.
@@ -255,7 +255,7 @@ def append_reference_position_turnover(
     and the contract multiplier, the audit does not rely on an inverse-volatility
     proxy or assume that FX is constant through time.
     """
-    required = {"ref_vol_scalar", "ref_tgt_pos"}
+    required = {"vol_scalar", "ref_tgt_pos"}
     missing = sorted(required.difference(frame.columns))
     if missing:
         raise ValueError(f"reference turnover input missing columns: {missing}")
@@ -269,7 +269,7 @@ def append_reference_position_turnover(
     result = (
         frame.sort("date")
         .with_columns(
-            pl.col("ref_vol_scalar")
+            pl.col("vol_scalar")
             .ewm_mean(
                 com=average_position_ewm_com,
                 adjust=True,
@@ -581,11 +581,11 @@ def build_subsystem_reference_return_curve(
                 / pl.col("daily_dvol")
             )
             .otherwise(None)
-            .alias("ref_vol_scalar"),
+            .alias("vol_scalar"),
         )
         .with_columns(
             (
-                pl.col("ref_vol_scalar")
+                pl.col("vol_scalar")
                 * pl.col("combined_forecast")
                 / target_abs_forecast
             ).alias("ref_tgt_pos"),
@@ -851,22 +851,23 @@ def build_executable_cash_pnl_curve(
                 risk_budget_usd / pl.col("annual_dollar_vol_per_contract")
             )
             .otherwise(None)
-            .alias("average_position")
+            .alias("volatility_scalar")
         )
         .with_columns(
             (
-                pl.col("average_position")
+                pl.col("volatility_scalar")
                 * pl.col("combined_forecast")
                 / target_abs_forecast
             ).alias("target_position")
         )
     )
-    # At this point average_position already contains instrument weight and IDM,
-    # exactly as pysystemtrade's portfolio forecast buffer multiplies its
-    # volatility scalar by those quantities.
+    # The instantaneous position scale is a volatility scalar, not a smoothed
+    # historical average position. It already includes weight and IDM, as in
+    # pysystemtrade's portfolio forecast sizing.
     result = (
         apply_forecast_position_buffer(
             target_frame,
+            average_position_col="volatility_scalar",
             force_rebalance_col=("roll_event" if rebalance_on_roll else None),
             buffer_size=buffer_size,
             trade_to_edge=buffer_trade_to_edge,

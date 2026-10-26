@@ -266,7 +266,7 @@ class EwmacNotebookView:
             "date",
             "close",
             "comb_fcst",
-            "ref_vol_scalar",
+            "vol_scalar",
             "ref_avg_pos",
             "ref_tgt_pos",
             "ref_norm_pos",
@@ -379,7 +379,7 @@ class EwmacNotebookView:
 
         Executable turnover is the absolute ordinary contract trade divided
         by the smoothed ``ref_avg_pos`` on the same date, not the instantaneous
-        ``ref_vol_scalar``. This is directly comparable with reference turnover
+        ``vol_scalar``. This is directly comparable with reference turnover
         when the reference and executable curves use the same instrument risk
         budget. Contract rolls
         are excluded from both turnover measures and reported separately;
@@ -552,7 +552,7 @@ class EwmacNotebookView:
         proxy_plot = reference.hvplot.line(
             x="date",
             y=[
-                "ref_vol_scalar",
+                "vol_scalar",
                 "ref_avg_pos",
                 "ref_tgt_pos",
             ],

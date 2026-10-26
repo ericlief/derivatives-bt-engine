@@ -115,6 +115,7 @@ def test_public_report_renames_buffer_parameters_at_boundary():
     """Continuous positions and buffer parameters use compact report tokens."""
     report = pl.DataFrame({
         "average_position": [2.5],
+        "volatility_scalar": [5.0],
         "target_position": [4.0],
         "buffer_width_position": [0.25],
         "buffer_size": [0.10],
@@ -127,6 +128,7 @@ def test_public_report_renames_buffer_parameters_at_boundary():
 
     assert public.columns == [
         "avg_pos",
+        "vol_scalar",
         "tgt_pos",
         "buf_width_pos",
         "buf_size",
@@ -219,7 +221,7 @@ def test_public_report_renames_subsystem_reference_columns():
         "ref_idm",
         "ref_ann_risk",
         "ref_budget",
-        "ref_vol_scalar",
+        "vol_scalar",
         "ref_tgt_pos",
         "ref_held_pos",
         "ref_net_pct",

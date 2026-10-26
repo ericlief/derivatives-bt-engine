@@ -1006,7 +1006,7 @@ def _run_complete_selection(
                 "roll_event",
                 "risk_budget",
                 "ann_dvol",
-                "avg_pos",
+                "vol_scalar",
                 "tgt_pos",
                 "buf_size",
                 "buf_trade_to_edge",
