@@ -62,11 +62,17 @@ def test_subsystem_reference_pct_uses_equal_weight_risk_budget():
         "daily_dvol"
     ).to_list() == pytest.approx([40.0] * 3)
     assert result.get_column(
-        "ref_avg_pos"
+        "ref_vol_scalar"
     ).to_list() == pytest.approx([0.125] * 3)
+    smoothed_avg_pos = result.get_column("ref_avg_pos").to_list()
+    assert smoothed_avg_pos[0] is None
+    assert smoothed_avg_pos[1:] == pytest.approx([0.125, 0.125])
     assert result.get_column(
         "ref_tgt_pos"
     ).to_list() == pytest.approx([0.125, 0.25, 0.375])
+    normalized_position = result.get_column("ref_norm_pos").to_list()
+    assert normalized_position[0] is None
+    assert normalized_position[1:] == pytest.approx([2.0, 3.0])
     held = result.get_column("ref_held_pos").to_list()
     assert held[0] is None
     assert held[1:] == pytest.approx([0.125, 0.25])
@@ -119,7 +125,7 @@ def test_subsystem_reference_pct_uses_equal_weight_risk_budget():
         ])
     )
     assert turnover is not None
-    assert "ref_smooth_avg_pos" in result.columns
+    assert "ref_avg_pos" in result.columns
     assert "ref_norm_pos" in result.columns
     assert not {
         "daily_dollar_vol_per_contract",
@@ -131,6 +137,7 @@ def test_subsystem_reference_pct_uses_equal_weight_risk_budget():
         "ref_abs_position_change",
         "ref_rolling_mean_abs_position_change",
         "ref_rolling_ann_turnover",
+        "ref_smooth_avg_pos",
     }.intersection(result.columns)
 
 

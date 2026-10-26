@@ -219,7 +219,7 @@ def test_public_report_renames_subsystem_reference_columns():
         "ref_idm",
         "ref_ann_risk",
         "ref_budget",
-        "ref_avg_pos",
+        "ref_vol_scalar",
         "ref_tgt_pos",
         "ref_held_pos",
         "ref_net_pct",
@@ -257,7 +257,7 @@ def test_public_report_uses_position_dvol_and_contract_tokens():
         "ref_abs_pos_change",
         "ref_roll_mean_abs_pos_change",
         "daily_dvol",
-        "ref_smooth_avg_pos",
+        "ref_avg_pos",
         "ref_norm_pos",
         "roll_con",
     ]

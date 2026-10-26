@@ -266,8 +266,8 @@ class EwmacNotebookView:
             "date",
             "close",
             "comb_fcst",
+            "ref_vol_scalar",
             "ref_avg_pos",
-            "ref_smooth_avg_pos",
             "ref_tgt_pos",
             "ref_norm_pos",
         ]
@@ -378,9 +378,10 @@ class EwmacNotebookView:
         """Compare annual reference turnover with executable trading.
 
         Executable turnover is the absolute ordinary contract trade divided
-        by the smoothed reference average position on the same date. This is
-        directly comparable with reference turnover when the reference and
-        executable curves use the same instrument risk budget. Contract rolls
+        by the smoothed ``ref_avg_pos`` on the same date, not the instantaneous
+        ``ref_vol_scalar``. This is directly comparable with reference turnover
+        when the reference and executable curves use the same instrument risk
+        budget. Contract rolls
         are excluded from both turnover measures and reported separately;
         ``con_load`` counts an ordinary trade as one contract operation and a
         roll as the closing and opening of one contract.
@@ -412,7 +413,7 @@ class EwmacNotebookView:
         reference = _date_slice(self.reference, start=start, end=end).select(
             "date",
             "ref_ann_risk",
-            "ref_smooth_avg_pos",
+            "ref_avg_pos",
             "ref_abs_pos_change",
         )
         cash = _date_slice(self.cash, start=start, end=end).select(
@@ -460,13 +461,13 @@ class EwmacNotebookView:
         annual = (
             joined.with_columns(
                 pl.when(
-                    pl.col("ref_smooth_avg_pos").is_not_null()
-                    & pl.col("ref_smooth_avg_pos").is_finite()
-                    & (pl.col("ref_smooth_avg_pos") > 0)
+                    pl.col("ref_avg_pos").is_not_null()
+                    & pl.col("ref_avg_pos").is_finite()
+                    & (pl.col("ref_avg_pos") > 0)
                 )
                 .then(
                     pl.col("trade_con").abs()
-                    / pl.col("ref_smooth_avg_pos")
+                    / pl.col("ref_avg_pos")
                 )
                 .otherwise(None)
                 .alias("exec_turn_row")
@@ -551,8 +552,8 @@ class EwmacNotebookView:
         proxy_plot = reference.hvplot.line(
             x="date",
             y=[
+                "ref_vol_scalar",
                 "ref_avg_pos",
-                "ref_smooth_avg_pos",
                 "ref_tgt_pos",
             ],
             title="Equal-weight reference positions",

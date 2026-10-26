@@ -42,7 +42,7 @@ _REFERENCE_ACCOUNTING_COLUMNS = (
     "ref_ann_risk",
     "ref_daily_risk",
     "daily_dvol",
-    "ref_avg_pos",
+    "ref_vol_scalar",
     "ref_tgt_pos",
     "ref_held_pos",
     "ref_gross",
@@ -229,7 +229,7 @@ def append_reference_position_turnover(
     Parameters
     ----------
     frame
-        Chronological reference frame containing ``ref_avg_pos`` and
+        Chronological reference frame containing ``ref_vol_scalar`` and
         ``ref_tgt_pos`` in continuous contracts.
     average_position_ewm_com
         EWM ``com`` used to smooth the changing average-position denominator.
@@ -243,7 +243,7 @@ def append_reference_position_turnover(
     Returns
     -------
     tuple[polars.DataFrame, float | None]
-        The input plus ``ref_smooth_avg_pos``, ``ref_norm_pos``, absolute
+        The input plus smoothed ``ref_avg_pos``, ``ref_norm_pos``, absolute
         position changes, rolling diagnostics, and the
         full-history annual turnover. The scalar is ``None`` when no finite
         position change exists.
@@ -255,7 +255,7 @@ def append_reference_position_turnover(
     and the contract multiplier, the audit does not rely on an inverse-volatility
     proxy or assume that FX is constant through time.
     """
-    required = {"ref_avg_pos", "ref_tgt_pos"}
+    required = {"ref_vol_scalar", "ref_tgt_pos"}
     missing = sorted(required.difference(frame.columns))
     if missing:
         raise ValueError(f"reference turnover input missing columns: {missing}")
@@ -269,19 +269,19 @@ def append_reference_position_turnover(
     result = (
         frame.sort("date")
         .with_columns(
-            pl.col("ref_avg_pos")
+            pl.col("ref_vol_scalar")
             .ewm_mean(
                 com=average_position_ewm_com,
                 adjust=True,
                 min_samples=2,
             )
-            .alias("ref_smooth_avg_pos")
+            .alias("ref_avg_pos")
         )
         .with_columns(
-            pl.when(pl.col("ref_smooth_avg_pos") > 0)
+            pl.when(pl.col("ref_avg_pos") > 0)
             .then(
                 pl.col("ref_tgt_pos")
-                / pl.col("ref_smooth_avg_pos")
+                / pl.col("ref_avg_pos")
             )
             .otherwise(None)
             .alias("ref_norm_pos")
@@ -581,11 +581,11 @@ def build_subsystem_reference_return_curve(
                 / pl.col("daily_dvol")
             )
             .otherwise(None)
-            .alias("ref_avg_pos"),
+            .alias("ref_vol_scalar"),
         )
         .with_columns(
             (
-                pl.col("ref_avg_pos")
+                pl.col("ref_vol_scalar")
                 * pl.col("combined_forecast")
                 / target_abs_forecast
             ).alias("ref_tgt_pos"),

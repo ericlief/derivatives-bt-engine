@@ -147,7 +147,7 @@ _vd_set_type(
     init_margin_change maint_margin_change
     init_margin_pct_cap book_margin_pct_cap
     cluster_weight cluster_score fdm comb_turnover
-    combined_forecast ref_avg_pos ref_targ_pos ref_smooth_avg_pos
+    combined_forecast ref_vol_scalar ref_avg_pos ref_targ_pos
     ref_norm_pos
     ref_abs_pos_change ref_roll_mean_abs_pos_change ref_roll_ann_turnover
     close point_change point_vol fx_to_usd period_year_fraction
@@ -158,7 +158,7 @@ _vd_set_type(
     reference_annual_risk_budget_usd reference_daily_risk_budget_usd
     reference_return_capital_usd ref_ann_risk_usd ref_daily_risk_usd
     ref_budget_usd daily_dvol
-    ref_avg_pos ref_targ_pos held_ref_pos
+    ref_vol_scalar ref_avg_pos ref_targ_pos held_ref_pos
     ref_gross_usd ref_cost_usd ref_net_usd
     cum_ref_gross_usd cum_ref_net_usd
     ref_gross_pct ref_ann_cost_pct ref_cost_pct ref_net_pct

@@ -67,8 +67,8 @@ def test_notebook_view_builds_reference_return_and_cash_paths():
     assert "ref_net_pct" in view.reference.columns
     assert view.reference_turnover is not None
     assert {
+        "ref_vol_scalar",
         "ref_avg_pos",
-        "ref_smooth_avg_pos",
         "ref_tgt_pos",
         "ref_norm_pos",
         "ref_abs_pos_change",
