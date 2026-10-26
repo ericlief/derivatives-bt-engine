@@ -939,18 +939,26 @@ def _resolve_stitched_symbol_mappings(
     return executable, signal_rows[0]
 
 
-def _resolve_globex_asset(pst_instr_code: str) -> str:
-    """Resolve the Globex root from the reviewed PST-to-Globex crosswalk."""
+def _resolve_globex_asset(pst_instr_code: str) -> str | None:
+    """Resolve an optional Globex root from the reviewed crosswalk.
+
+    A missing row means that the middle Globex segment is unavailable. The
+    stitched provider can still join long reference history directly to the
+    recent IB segment. Multiple usable rows remain an error because source
+    ownership would be ambiguous.
+    """
     mappings = [
         mapping
         for mapping in load_mappings()
         if mapping.carver_instrument == pst_instr_code
         and mapping.mapping_status != "rejected"
     ]
+    if not mappings:
+        return None
     if len(mappings) != 1:
         raise KeyError(
-            f"PST instrument {pst_instr_code!r} has no unique non-rejected "
-            "Globex crosswalk mapping"
+            f"PST instrument {pst_instr_code!r} has multiple non-rejected "
+            "Globex crosswalk mappings"
         )
     return mappings[0].globex_asset
 
@@ -986,10 +994,11 @@ def build_stitched_ewmac_notebook_view(
     """Build a complete stitched-history EWMAC notebook view in one call.
 
     The helper downloads overlapping dated contracts from IB, constructs the
-    configured held-contract path, and stitches it over Globex and the long
-    reference history. It then loads the causal pooled EWMAC scalars, builds
-    every requested component, aligns historical FX, combines the forecasts,
-    and delegates sizing and plotting to the standard notebook view.
+    configured held-contract path, and stitches it over the long reference
+    history, with a Globex middle segment when the reviewed crosswalk provides
+    one. It then loads the causal pooled EWMAC scalars, builds every requested
+    component, aligns historical FX, combines the forecasts, and delegates
+    sizing and plotting to the standard notebook view.
 
     Parameters
     ----------

@@ -362,6 +362,12 @@ remain separate because replacing a dated contract does not change the
 executable position level. Partial first and last years remain in the output
 when the requested date range begins or ends inside a calendar year.
 
+The stitched helper uses reference, Globex, and IB history when the reviewed
+crosswalk contains a Globex market. If the signal market is absent from the
+Globex dataset, as with YM, it stitches the long reference history directly to
+the overlapping IB dated-contract history. The executable symbol can still use
+the corresponding micro contract, such as MYM, for sizing and cash P&L.
+
 `view.reference` assigns the instrument `1 / reference_book_count`, caps the
 weight-times-IDM product, sizes continuous positions from daily dollar
 volatility, and divides the resulting USD values by the fixed reference budget.

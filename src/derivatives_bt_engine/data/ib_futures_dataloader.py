@@ -641,17 +641,19 @@ def _history_input_fingerprint(path: Path | str) -> dict[str, object]:
 
 @dataclass
 class IBStitchedHistoryProvider:
-    """Load reference, Globex, and IB history with a stitched Parquet cache.
+    """Load reference and IB history, using Globex when it is available.
 
     Raw IB observations live in a dedicated DuckDB through
     :class:`IBHistoryProvider`. The final duplicate-free ``FuturesHistory`` and
     its overlapping IB audit rows are cached as one Parquet bundle. A cache hit
-    therefore performs no IB request and no restitching.
+    therefore performs no IB request and no restitching. Instruments absent
+    from the Globex database stitch directly from the long reference history
+    into IB history.
     """
 
     ib: IBPySync
     pst_instr_code: str
-    globex_asset: str
+    globex_asset: str | None
     as_of: date | None = None
     prior_years: int = 1
     duration: str = DEFAULT_IB_DATED_CONTRACT_DURATION
@@ -687,7 +689,11 @@ class IBStitchedHistoryProvider:
             'what_to_show': self.what_to_show,
             'use_rth': self.use_rth,
             'reference_db': _history_input_fingerprint(self.reference_db_path),
-            'globex_db': _history_input_fingerprint(self.globex_db_path),
+            'globex_db': (
+                _history_input_fingerprint(self.globex_db_path)
+                if self.globex_asset is not None
+                else None
+            ),
             'mapping': _history_input_fingerprint(self.mapping_path),
         }
         digest = hashlib.sha256(
@@ -703,7 +709,7 @@ class IBStitchedHistoryProvider:
         )
 
     def load(self, instrument_code: str) -> FuturesHistory:
-        """Load one executable symbol from cache or rebuild all three sources."""
+        """Load one symbol from cache or stitch its available sources."""
         cache_directory = self._cache_directory(instrument_code)
         contract_path = cache_directory / 'ib_contract_history.parquet'
         cache_hit = (
@@ -755,21 +761,35 @@ class IBStitchedHistoryProvider:
             roll_offset_days=int(ib_history.metadata['roll_offset_days']),
             source='reference_config',
         )
-        globex_history = GlobexHistoryProvider(
-            db_path=self.globex_db_path,
-            cache_root=self.cache_root,
-            use_cache=self.use_cache,
-            save_cache=self.save_cache,
-            roll_policy=roll_policy,
-        ).load(self.globex_asset)
         reference_history = ReferenceHistoryProvider(
             db_path=self.reference_db_path,
             cache_root=self.cache_root,
             use_cache=self.use_cache,
             save_cache=self.save_cache,
         ).load(self.pst_instr_code)
+        histories = [reference_history]
+        if self.globex_asset is not None:
+            try:
+                globex_history = GlobexHistoryProvider(
+                    db_path=self.globex_db_path,
+                    cache_root=self.cache_root,
+                    use_cache=self.use_cache,
+                    save_cache=self.save_cache,
+                    roll_policy=roll_policy,
+                ).load(self.globex_asset)
+            except KeyError:
+                logger.info(
+                    'stitched_ib_history globex_unavailable symbol=%s '
+                    'pst_instr_code=%s globex_asset=%s fallback=reference_to_ib',
+                    instrument_code,
+                    self.pst_instr_code,
+                    self.globex_asset,
+                )
+            else:
+                histories.append(globex_history)
+        histories.append(ib_history)
         history = stitch_futures_histories(
-            [reference_history, globex_history, ib_history],
+            histories,
             instrument_code=instrument_code,
         )
         history = replace(
