@@ -370,6 +370,90 @@ class EwmacNotebookView:
             "cum_net_pct",
         )
 
+    def cash_return_significance(
+        self,
+        *,
+        start: date | datetime | str | None = None,
+        end: date | datetime | str | None = None,
+        annualization_days: int = 256,
+    ) -> pl.DataFrame:
+        """Summarize executable net-return magnitude and IID significance.
+
+        Daily ``net_pct`` values are percentage-point contributions relative
+        to fixed account capital. The annual mean is cumulative net percentage
+        divided by elapsed calendar years; annual volatility scales the daily
+        sample standard deviation by ``sqrt(annualization_days)``. The reported
+        t-statistic is the corresponding Sharpe ratio times ``sqrt(years)``.
+        It is a simple IID diagnostic and does not adjust for serial dependence,
+        non-normal tails, or repeated strategy comparisons.
+
+        Parameters
+        ----------
+        start, end
+            Optional inclusive boundaries for the cash-return sample.
+        annualization_days
+            Trading-day count used to annualize daily volatility.
+
+        Returns
+        -------
+        polars.DataFrame
+            One row containing sample dates, observation count, elapsed years,
+            cumulative and annualized net return percentages, annualized
+            volatility, Sharpe ratio, and approximate IID t-statistic.
+        """
+        if self.cash is None:
+            raise ValueError("cash P&L was not requested for this notebook view")
+        if annualization_days <= 0:
+            raise ValueError("annualization_days must be positive")
+        sample = (
+            _date_slice(self.cash, start=start, end=end)
+            .select("date", "net_pct")
+            .filter(
+                pl.col("net_pct").is_not_null()
+                & pl.col("net_pct").is_finite()
+            )
+            .sort("date")
+        )
+        if sample.height < 2:
+            raise ValueError(
+                "cash return significance requires at least two observations"
+            )
+        start_date = sample.get_column("date").min()
+        end_date = sample.get_column("date").max()
+        if start_date is None or end_date is None or end_date <= start_date:
+            raise ValueError(
+                "cash return significance requires a positive date span"
+            )
+        hist_years = (end_date - start_date).days / 365.25
+        net_returns = sample.get_column("net_pct")
+        cumulative_net_pct = float(net_returns.sum())
+        daily_vol_pct = net_returns.std(ddof=1)
+        if daily_vol_pct is None or not math.isfinite(daily_vol_pct):
+            raise ValueError("cash net-return volatility is not finite")
+        annual_mean_pct = cumulative_net_pct / hist_years
+        annual_vol_pct = daily_vol_pct * math.sqrt(annualization_days)
+        sharpe = (
+            annual_mean_pct / annual_vol_pct
+            if annual_vol_pct > 0
+            else None
+        )
+        iid_t_stat = (
+            sharpe * math.sqrt(hist_years)
+            if sharpe is not None
+            else None
+        )
+        return pl.DataFrame({
+            "start": [start_date],
+            "end": [end_date],
+            "n_obs": [sample.height],
+            "hist_years": [hist_years],
+            "cum_net_pct": [cumulative_net_pct],
+            "ann_mean_pct": [annual_mean_pct],
+            "ann_vol_pct": [annual_vol_pct],
+            "sharpe": [sharpe],
+            "iid_t_stat": [iid_t_stat],
+        })
+
     def annual_turnover_audit(
         self,
         *,

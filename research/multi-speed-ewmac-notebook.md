@@ -351,8 +351,15 @@ view.subsystem_reference_pct_curves()
 view.cash
 view.cash_pnl_curves()
 view.cash_return_curves()
+view.cash_return_significance()
 view.annual_turnover_audit()
 ```
+
+`view.cash_return_significance()` reports the executable curve's cumulative
+net percentage contribution, annualized arithmetic mean and volatility,
+Sharpe ratio, and approximate IID t-statistic. The t-statistic is a basic
+diagnostic; it does not correct for serial dependence, non-normal tails, or
+repeated strategy comparisons.
 
 `view.annual_turnover_audit()` compares calendar-year executable ordinary
 turnover with continuous reference turnover when both curves use the same
