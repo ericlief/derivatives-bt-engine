@@ -1017,6 +1017,9 @@ def build_stitched_ewmac_notebook_view(
         callers do not pass a PST code as an executable/display identity.
     as_of, prior_years, duration, bar_size, what_to_show, use_rth
         Dated-contract download settings forwarded to the IB history loader.
+        When no Globex segment is available, the provider requests one extra
+        contract year automatically if the initial IB history does not overlap
+        the end of the long reference series.
     rules
         EWMAC rules to normalize, calculate, and combine.
     fdm, combination_config

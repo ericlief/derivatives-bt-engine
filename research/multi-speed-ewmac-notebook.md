@@ -366,7 +366,10 @@ The stitched helper uses reference, Globex, and IB history when the reviewed
 crosswalk contains a Globex market. If the signal market is absent from the
 Globex dataset, as with YM, it stitches the long reference history directly to
 the overlapping IB dated-contract history. The executable symbol can still use
-the corresponding micro contract, such as MYM, for sizing and cash P&L.
+the corresponding micro contract, such as MYM, for sizing and cash P&L. If the
+default IB contract-year window starts after the reference series ends, the
+provider retrieves one additional contract year to establish the required
+overlap before stitching; this covers quarterly boundaries such as RTY/M2K.
 
 `view.reference` assigns the instrument `1 / reference_book_count`, caps the
 weight-times-IDM product, sizes continuous positions from daily dollar

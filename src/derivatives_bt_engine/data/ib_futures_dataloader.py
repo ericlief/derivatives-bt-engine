@@ -736,25 +736,35 @@ class IBStitchedHistoryProvider:
                 },
             )
 
-        ib_provider = IBHistoryProvider(
-            ib=self.ib,
-            as_of=self.as_of,
-            prior_years=self.prior_years,
-            duration=self.duration,
-            bar_size=self.bar_size,
-            what_to_show=self.what_to_show,
-            use_rth=self.use_rth,
-            reference_db_path=self.reference_db_path,
-            mapping_path=self.mapping_path,
-            history_db_path=self.history_db_path,
-            update_history=self.update_history,
-        )
-        ib_history = ib_provider.load(self.pst_instr_code)
-        if ib_provider.contract_history is None:
-            raise RuntimeError('IB history provider did not retain raw audit rows')
-        self.contract_history = ib_provider.contract_history.with_columns(
-            pl.lit(instrument_code).alias('symbol')
-        )
+        def load_ib_segment(prior_years: int) -> FuturesHistory:
+            """Load IB history and retain its dated-contract audit rows."""
+            ib_provider = IBHistoryProvider(
+                ib=self.ib,
+                as_of=self.as_of,
+                prior_years=prior_years,
+                duration=self.duration,
+                bar_size=self.bar_size,
+                what_to_show=self.what_to_show,
+                use_rth=self.use_rth,
+                reference_db_path=self.reference_db_path,
+                mapping_path=self.mapping_path,
+                history_db_path=self.history_db_path,
+                update_history=self.update_history,
+            )
+            loaded = ib_provider.load(self.pst_instr_code)
+            if ib_provider.contract_history is None:
+                raise RuntimeError(
+                    'IB history provider did not retain raw audit rows'
+                )
+            self.contract_history = (
+                ib_provider.contract_history.with_columns(
+                    pl.lit(instrument_code).alias('symbol')
+                )
+            )
+            return loaded
+
+        ib_prior_years = self.prior_years
+        ib_history = load_ib_segment(ib_prior_years)
         roll_policy = ContractRollPolicy(
             policy_id=f'configured_{self.pst_instr_code}',
             hold_roll_cycle=str(ib_history.metadata['hold_roll_cycle']),
@@ -787,6 +797,26 @@ class IBStitchedHistoryProvider:
                 )
             else:
                 histories.append(globex_history)
+        if len(histories) == 1:
+            reference_end = reference_history.signal.get_column('date').max()
+            ib_start = ib_history.signal.get_column('date').min()
+            if (
+                reference_end is not None
+                and ib_start is not None
+                and reference_end < ib_start
+            ):
+                ib_prior_years += 1
+                logger.info(
+                    'stitched_ib_history overlap_backfill symbol=%s '
+                    'pst_instr_code=%s reference_end=%s ib_start=%s '
+                    'prior_years=%s',
+                    instrument_code,
+                    self.pst_instr_code,
+                    reference_end,
+                    ib_start,
+                    ib_prior_years,
+                )
+                ib_history = load_ib_segment(ib_prior_years)
         histories.append(ib_history)
         history = stitch_futures_histories(
             histories,
@@ -799,6 +829,7 @@ class IBStitchedHistoryProvider:
                 'cache_hit': False,
                 'cache_directory': str(cache_directory),
                 'ib_history_db': str(Path(self.history_db_path).expanduser()),
+                'ib_prior_years': ib_prior_years,
             },
         )
         if self.save_cache:
