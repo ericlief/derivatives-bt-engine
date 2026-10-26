@@ -158,7 +158,6 @@ PUBLIC_REPORT_RENAMES = {
     "book_margin_limit_usd": "book_marg_lim",
     "book_margin_remaining_usd": "book_marg_remaining",
     "average_position": "avg_pos",
-    "volatility_scalar": "vol_scalar",
     "target_position": "tgt_pos",
     "annual_tracking_error_usd": "track_err_ann",
     "track_err_ann_usd": "track_err_ann",

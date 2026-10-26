@@ -115,7 +115,7 @@ def test_public_report_renames_buffer_parameters_at_boundary():
     """Continuous positions and buffer parameters use compact report tokens."""
     report = pl.DataFrame({
         "average_position": [2.5],
-        "volatility_scalar": [5.0],
+        "vol_scalar": [5.0],
         "target_position": [4.0],
         "buffer_width_position": [0.25],
         "buffer_size": [0.10],

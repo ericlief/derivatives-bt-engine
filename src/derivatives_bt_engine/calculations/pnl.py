@@ -851,11 +851,11 @@ def build_executable_cash_pnl_curve(
                 risk_budget_usd / pl.col("annual_dollar_vol_per_contract")
             )
             .otherwise(None)
-            .alias("volatility_scalar")
+            .alias("vol_scalar")
         )
         .with_columns(
             (
-                pl.col("volatility_scalar")
+                pl.col("vol_scalar")
                 * pl.col("combined_forecast")
                 / target_abs_forecast
             ).alias("target_position")
@@ -867,7 +867,7 @@ def build_executable_cash_pnl_curve(
     result = (
         apply_forecast_position_buffer(
             target_frame,
-            average_position_col="volatility_scalar",
+            average_position_col="vol_scalar",
             force_rebalance_col=("roll_event" if rebalance_on_roll else None),
             buffer_size=buffer_size,
             trade_to_edge=buffer_trade_to_edge,
