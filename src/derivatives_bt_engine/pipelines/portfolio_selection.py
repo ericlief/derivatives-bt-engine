@@ -92,6 +92,7 @@ from derivatives_bt_engine.calculations.pnl import (
     build_executable_cash_pnl_curve,
     build_fixed_capital_portfolio_curve,
     build_subsystem_reference_return_curve,
+    summarize_return_significance,
 )
 from derivatives_bt_engine.logging_config import setup_logger
 
@@ -945,6 +946,7 @@ def _run_complete_selection(
     # selected-book path applies final weights and IDM, rounds to executable
     # contracts, and charges actual history-policy roll dates in cash.
     cash_output_frames: list[pl.DataFrame] = []
+    historical_performance_rows: list[dict[str, object]] = []
     for symbol in selection.selected:
         candidate = candidate_by_symbol[symbol]
         detail = final_details[symbol]
@@ -968,6 +970,24 @@ def _run_complete_selection(
             if cash_frame.get_column("roll_event").any()
             else "no_history_roll_markers"
         )
+        significance = summarize_return_significance(
+            cash_frame,
+            return_col="net_pct",
+        ).row(0, named=True)
+        historical_performance_rows.append({
+            "symbol": symbol,
+            "historical_return_start": significance["start"],
+            "historical_return_end": significance["end"],
+            "historical_return_observations": significance["n_obs"],
+            "historical_years": significance["hist_years"],
+            "historical_cumulative_net_percent": (
+                significance["cum_return_pct"]
+            ),
+            "historical_annual_mean_percent": significance["ann_mean_pct"],
+            "historical_annual_vol_percent": significance["ann_vol_pct"],
+            "historical_sharpe": significance["sharpe"],
+            "historical_iid_t_stat": significance["iid_t_stat"],
+        })
         cash_output_frames.append(
             cash_frame.with_columns(
                 pl.lit(symbol).alias("symbol"),
@@ -1041,6 +1061,12 @@ def _run_complete_selection(
             )
         )
     cash_pnl_long = pl.concat(cash_output_frames, how="diagonal_relaxed")
+    final_frame = final_frame.join(
+        pl.DataFrame(historical_performance_rows, infer_schema_length=None),
+        on="symbol",
+        how="left",
+        validate="1:1",
+    )
     portfolio_curve = build_fixed_capital_portfolio_curve(
         cash_pnl_long,
         initial_capital_usd=float(run_config["init_cap_usd"]),

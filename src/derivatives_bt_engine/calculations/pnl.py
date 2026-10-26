@@ -71,6 +71,93 @@ def _group_reference_accounting_columns(frame: pl.DataFrame) -> pl.DataFrame:
     return frame.select(*other, *accounting)
 
 
+def summarize_return_significance(
+    frame: pl.DataFrame,
+    *,
+    return_col: str,
+    annualization_days: int = MIXED_VOL_ANNUALIZATION_DAYS,
+) -> pl.DataFrame:
+    """Summarize one percentage-point return series and its IID t-statistic.
+
+    Parameters
+    ----------
+    frame
+        Daily observations containing ``date`` and ``return_col``. Return
+        values are percentage-point contributions relative to a fixed capital
+        or budget denominator.
+    return_col
+        Column holding the daily percentage-point return series.
+    annualization_days
+        Trading-day count used to annualize its sample standard deviation.
+
+    Returns
+    -------
+    polars.DataFrame
+        One row with the sample dates and size, elapsed calendar years,
+        cumulative and annualized return percentages, annualized volatility,
+        Sharpe ratio, and approximate IID t-statistic.
+
+    Notes
+    -----
+    The t-statistic is the annualized Sharpe ratio times the square root of
+    elapsed years. It does not adjust for serial dependence, non-normal tails,
+    or repeated strategy comparisons.
+    """
+    required = {"date", return_col}
+    missing = sorted(required.difference(frame.columns))
+    if missing:
+        raise ValueError(
+            f"return significance input missing columns: {missing}"
+        )
+    if annualization_days <= 0:
+        raise ValueError("annualization_days must be positive")
+    sample = (
+        frame.select("date", return_col)
+        .filter(
+            pl.col(return_col).is_not_null()
+            & pl.col(return_col).is_finite()
+        )
+        .sort("date")
+    )
+    if sample.height < 2:
+        raise ValueError(
+            "return significance requires at least two observations"
+        )
+    start_date = sample.get_column("date").min()
+    end_date = sample.get_column("date").max()
+    if start_date is None or end_date is None or end_date <= start_date:
+        raise ValueError("return significance requires a positive date span")
+    hist_years = (end_date - start_date).days / 365.25
+    returns = sample.get_column(return_col)
+    cumulative_return_pct = float(returns.sum())
+    daily_vol_pct = returns.std(ddof=1)
+    if daily_vol_pct is None or not math.isfinite(daily_vol_pct):
+        raise ValueError("return volatility is not finite")
+    annual_mean_pct = cumulative_return_pct / hist_years
+    annual_vol_pct = daily_vol_pct * math.sqrt(annualization_days)
+    sharpe = (
+        annual_mean_pct / annual_vol_pct
+        if annual_vol_pct > 0
+        else None
+    )
+    iid_t_stat = (
+        sharpe * math.sqrt(hist_years)
+        if sharpe is not None
+        else None
+    )
+    return pl.DataFrame({
+        "start": [start_date],
+        "end": [end_date],
+        "n_obs": [sample.height],
+        "hist_years": [hist_years],
+        "cum_return_pct": [cumulative_return_pct],
+        "ann_mean_pct": [annual_mean_pct],
+        "ann_vol_pct": [annual_vol_pct],
+        "sharpe": [sharpe],
+        "iid_t_stat": [iid_t_stat],
+    })
+
+
 def apply_forecast_position_buffer(
     frame: pl.DataFrame,
     *,

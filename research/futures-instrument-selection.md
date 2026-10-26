@@ -1030,7 +1030,11 @@ baseline by default. The command writes:
   `score_denom`, and its weighted-net `marg_score` and denominator-scaled
   `scaled_contrib` alongside annual cost and contract-load components;
   and
-- `multi_speed_ewmac_selection_book_<timestamp>.parquet`, the last accepted book.
+- `multi_speed_ewmac_selection_book_<timestamp>.parquet`, the last accepted
+  book. Each row also reports its final-weight executable cash history through
+  `hist_cum_net_pct`, `hist_ann_mean_pct`, `hist_ann_vol_pct`, `hist_sharpe`,
+  and `hist_iid_t_stat`, with sample dates, years, and observation count. These
+  are historical diagnostics and do not enter the greedy score.
 
 Use `--max-instr-per-cluster N` to run a static breadth-cap sensitivity. The
 cluster key is the reviewed `econ_subcls`, so `--max-instr-per-cluster 4`

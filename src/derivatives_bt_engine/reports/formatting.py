@@ -195,6 +195,15 @@ PUBLIC_REPORT_RENAMES = {
     "cumulative_portfolio_trade_cost_pct": "cum_port_trade_cost_pct",
     "cumulative_portfolio_roll_cost_pct": "cum_port_roll_cost_pct",
     "cumulative_portfolio_total_cost_pct": "cum_port_total_cost_pct",
+    "historical_return_start": "hist_ret_start",
+    "historical_return_end": "hist_ret_end",
+    "historical_return_observations": "hist_ret_obs",
+    "historical_years": "hist_years",
+    "historical_cumulative_net_percent": "hist_cum_net_pct",
+    "historical_annual_mean_percent": "hist_ann_mean_pct",
+    "historical_annual_vol_percent": "hist_ann_vol_pct",
+    "historical_sharpe": "hist_sharpe",
+    "historical_iid_t_stat": "hist_iid_t_stat",
     "portfolio_gross_equity_usd": "port_gross_equity",
     "portfolio_net_equity_usd": "port_net_equity",
 }
@@ -513,6 +522,16 @@ SIX_DECIMAL_COLUMNS = {
     "cum_trade_cost_pct",
     "cum_roll_cost_pct",
     "cum_total_cost_pct",
+    "historical_cumulative_net_percent",
+    "historical_annual_mean_percent",
+    "historical_annual_vol_percent",
+    "historical_sharpe",
+    "historical_iid_t_stat",
+    "hist_cum_net_pct",
+    "hist_ann_mean_pct",
+    "hist_ann_vol_pct",
+    "hist_sharpe",
+    "hist_iid_t_stat",
 }
 
 

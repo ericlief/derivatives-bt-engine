@@ -40,6 +40,7 @@ from derivatives_bt_engine.calculations.pnl import (
     append_reference_position_turnover,
     build_executable_cash_pnl_curve,
     build_subsystem_reference_return_curve,
+    summarize_return_significance,
 )
 from derivatives_bt_engine.data.fx_history import align_fx_to_history
 from derivatives_bt_engine.data.futures_overlap import load_mappings
@@ -403,56 +404,17 @@ class EwmacNotebookView:
         """
         if self.cash is None:
             raise ValueError("cash P&L was not requested for this notebook view")
-        if annualization_days <= 0:
-            raise ValueError("annualization_days must be positive")
         sample = (
             _date_slice(self.cash, start=start, end=end)
             .select("date", "net_pct")
-            .filter(
-                pl.col("net_pct").is_not_null()
-                & pl.col("net_pct").is_finite()
-            )
-            .sort("date")
         )
-        if sample.height < 2:
-            raise ValueError(
-                "cash return significance requires at least two observations"
-            )
-        start_date = sample.get_column("date").min()
-        end_date = sample.get_column("date").max()
-        if start_date is None or end_date is None or end_date <= start_date:
-            raise ValueError(
-                "cash return significance requires a positive date span"
-            )
-        hist_years = (end_date - start_date).days / 365.25
-        net_returns = sample.get_column("net_pct")
-        cumulative_net_pct = float(net_returns.sum())
-        daily_vol_pct = net_returns.std(ddof=1)
-        if daily_vol_pct is None or not math.isfinite(daily_vol_pct):
-            raise ValueError("cash net-return volatility is not finite")
-        annual_mean_pct = cumulative_net_pct / hist_years
-        annual_vol_pct = daily_vol_pct * math.sqrt(annualization_days)
-        sharpe = (
-            annual_mean_pct / annual_vol_pct
-            if annual_vol_pct > 0
-            else None
+        return summarize_return_significance(
+            sample,
+            return_col="net_pct",
+            annualization_days=annualization_days,
+        ).rename(
+            {"cum_return_pct": "cum_net_pct"}
         )
-        iid_t_stat = (
-            sharpe * math.sqrt(hist_years)
-            if sharpe is not None
-            else None
-        )
-        return pl.DataFrame({
-            "start": [start_date],
-            "end": [end_date],
-            "n_obs": [sample.height],
-            "hist_years": [hist_years],
-            "cum_net_pct": [cumulative_net_pct],
-            "ann_mean_pct": [annual_mean_pct],
-            "ann_vol_pct": [annual_vol_pct],
-            "sharpe": [sharpe],
-            "iid_t_stat": [iid_t_stat],
-        })
 
     def annual_turnover_audit(
         self,
