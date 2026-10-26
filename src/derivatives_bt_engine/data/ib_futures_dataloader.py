@@ -74,6 +74,8 @@ from derivatives_bt_engine.logging_config import setup_logger
 
 logger = setup_logger()
 
+MAX_DIRECT_STITCH_GAP_DAYS = 31
+
 # ── Tunable defaults ────────────────────────────────────────────────────────
 DEFAULT_IB_DURATION = '3 y'
 DEFAULT_IB_BAR_SIZE = '1 day'
@@ -797,14 +799,16 @@ class IBStitchedHistoryProvider:
                 )
             else:
                 histories.append(globex_history)
-        if len(histories) == 1:
+        direct_reference_to_ib = len(histories) == 1
+        if direct_reference_to_ib:
             reference_end = reference_history.signal.get_column('date').max()
             ib_start = ib_history.signal.get_column('date').min()
-            if (
+            while (
                 reference_end is not None
                 and ib_start is not None
                 and reference_end < ib_start
             ):
+                previous_ib_start = ib_start
                 ib_prior_years += 1
                 logger.info(
                     'stitched_ib_history overlap_backfill symbol=%s '
@@ -817,10 +821,18 @@ class IBStitchedHistoryProvider:
                     ib_prior_years,
                 )
                 ib_history = load_ib_segment(ib_prior_years)
+                ib_start = ib_history.signal.get_column('date').min()
+                if ib_start is None or ib_start >= previous_ib_start:
+                    break
         histories.append(ib_history)
         history = stitch_futures_histories(
             histories,
             instrument_code=instrument_code,
+            max_source_gap_days=(
+                MAX_DIRECT_STITCH_GAP_DAYS
+                if direct_reference_to_ib
+                else 0
+            ),
         )
         history = replace(
             history,

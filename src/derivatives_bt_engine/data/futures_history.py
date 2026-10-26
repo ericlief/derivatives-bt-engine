@@ -1148,6 +1148,7 @@ def stitch_futures_histories(
     histories: Sequence[FuturesHistory],
     *,
     instrument_code: str,
+    max_source_gap_days: int = 0,
 ) -> FuturesHistory:
     """Stitch ordered history sources into one duplicate-free daily history.
 
@@ -1163,6 +1164,11 @@ def stitch_futures_histories(
         Two or more loaded histories ordered by increasing source priority.
     instrument_code
         Identifier assigned to the combined history.
+    max_source_gap_days
+        Maximum calendar gap allowed between adjacent sources. Zero requires
+        overlap. When a positive gap is allowed, the unknown return across the
+        gap is omitted rather than inferred, and the gap is recorded in
+        metadata.
 
     Returns
     -------
@@ -1173,18 +1179,43 @@ def stitch_futures_histories(
     ordered = list(histories)
     if len(ordered) < 2:
         raise ValueError("history stitching requires at least two sources")
+    if max_source_gap_days < 0:
+        raise ValueError("max_source_gap_days must be nonnegative")
 
     handoffs: list[date] = []
+    source_gaps: list[dict[str, object]] = []
     for older, newer in zip(ordered, ordered[1:]):
         older_end = older.signal.get_column("date").max()
         newer_start = newer.signal.get_column("date").min()
         if older_end is None or newer_start is None:
             raise ValueError("history stitching cannot use an empty source")
         if older_end < newer_start:
-            raise ValueError(
-                "history sources do not overlap: "
-                f"older_source={older.source} older_end={older_end} "
-                f"newer_source={newer.source} newer_start={newer_start}"
+            gap_days = (newer_start - older_end).days
+            if gap_days > max_source_gap_days:
+                raise ValueError(
+                    "history sources do not overlap: "
+                    f"older_source={older.source} older_end={older_end} "
+                    f"newer_source={newer.source} newer_start={newer_start} "
+                    f"gap_days={gap_days} "
+                    f"max_source_gap_days={max_source_gap_days}"
+                )
+            source_gaps.append({
+                "older_source": older.source,
+                "newer_source": newer.source,
+                "older_end": older_end,
+                "newer_start": newer_start,
+                "gap_days": gap_days,
+            })
+            logger.warning(
+                "stitched_history source_gap instrument=%s older_source=%s "
+                "older_end=%s newer_source=%s newer_start=%s gap_days=%s "
+                "missing_return=omitted",
+                instrument_code,
+                older.source,
+                older_end,
+                newer.source,
+                newer_start,
+                gap_days,
             )
         first_valid = (
             newer.signal.filter(pl.col("return_valid"))
@@ -1312,6 +1343,7 @@ def stitch_futures_histories(
                 history.instrument_code for history in ordered
             ],
             "source_metadata": [dict(history.metadata) for history in ordered],
+            "source_gaps": source_gaps,
         },
     )
 

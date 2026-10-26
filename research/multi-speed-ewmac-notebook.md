@@ -368,8 +368,11 @@ Globex dataset, as with YM, it stitches the long reference history directly to
 the overlapping IB dated-contract history. The executable symbol can still use
 the corresponding micro contract, such as MYM, for sizing and cash P&L. If the
 default IB contract-year window starts after the reference series ends, the
-provider retrieves one additional contract year to establish the required
-overlap before stitching; this covers quarterly boundaries such as RTY/M2K.
+provider retrieves older contract years while they extend the IB boundary;
+this covers quarterly boundaries such as RTY/M2K. If IB cannot supply a full
+overlap but the remaining source gap is at most 31 calendar days, the stitch
+records the interval in `view.history.metadata["source_gaps"]` and omits the
+unknown gap return. Larger gaps still fail rather than fabricating history.
 
 `view.reference` assigns the instrument `1 / reference_book_count`, caps the
 weight-times-IDM product, sizes continuous positions from daily dollar
