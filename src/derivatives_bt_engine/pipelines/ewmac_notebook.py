@@ -52,6 +52,7 @@ from derivatives_bt_engine.data.ib_futures_dataloader import (
     DEFAULT_BROKER_MAPPING_PATH,
     DEFAULT_IB_BAR_SIZE,
     DEFAULT_IB_DATED_CONTRACT_DURATION,
+    DEFAULT_MAX_SOURCE_GAP_DAYS,
     IBStitchedHistoryProvider,
 )
 from derivatives_bt_engine.data.ib_futures_history_store import (
@@ -971,6 +972,7 @@ def build_stitched_ewmac_notebook_view(
     signal_symbol: str | None = None,
     as_of: date | None = None,
     prior_years: int = 1,
+    max_source_gap_days: int = DEFAULT_MAX_SOURCE_GAP_DAYS,
     duration: str = DEFAULT_IB_DATED_CONTRACT_DURATION,
     bar_size: str = DEFAULT_IB_BAR_SIZE,
     what_to_show: str = "TRADES",
@@ -1020,6 +1022,11 @@ def build_stitched_ewmac_notebook_view(
         When no Globex segment is available, the provider requests older
         contract years while they extend IB history toward the end of the long
         reference series.
+    max_source_gap_days
+        Largest calendar gap permitted for a direct reference-to-IB stitch.
+        The unknown return over an allowed gap is masked and the interval is
+        recorded in ``view.history.metadata["source_gaps"]``. Zero requires
+        source overlap.
     rules
         EWMAC rules to normalize, calculate, and combine.
     fdm, combination_config
@@ -1076,6 +1083,7 @@ def build_stitched_ewmac_notebook_view(
         globex_asset=globex_asset,
         as_of=as_of,
         prior_years=prior_years,
+        max_source_gap_days=max_source_gap_days,
         duration=duration,
         bar_size=bar_size,
         what_to_show=what_to_show,

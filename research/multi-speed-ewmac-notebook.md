@@ -144,6 +144,7 @@ gold = build_stitched_ewmac_notebook_view(
         max_weight_idm=0.20,
     ),
     prior_years=1,
+    max_source_gap_days=31,
 )
 
 gold.result.frame.tail(30)
@@ -370,9 +371,10 @@ the corresponding micro contract, such as MYM, for sizing and cash P&L. If the
 default IB contract-year window starts after the reference series ends, the
 provider retrieves older contract years while they extend the IB boundary;
 this covers quarterly boundaries such as RTY/M2K. If IB cannot supply a full
-overlap but the remaining source gap is at most 31 calendar days, the stitch
+overlap but the remaining source gap is at most `max_source_gap_days`, the stitch
 records the interval in `view.history.metadata["source_gaps"]` and omits the
-unknown gap return. Larger gaps still fail rather than fabricating history.
+unknown gap return. The default is 31 calendar days. Set it to zero to require
+overlap; larger gaps still fail rather than fabricating history.
 
 `view.reference` assigns the instrument `1 / reference_book_count`, caps the
 weight-times-IDM product, sizes continuous positions from daily dollar

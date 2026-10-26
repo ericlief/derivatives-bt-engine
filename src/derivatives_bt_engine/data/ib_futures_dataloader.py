@@ -74,7 +74,7 @@ from derivatives_bt_engine.logging_config import setup_logger
 
 logger = setup_logger()
 
-MAX_DIRECT_STITCH_GAP_DAYS = 31
+DEFAULT_MAX_SOURCE_GAP_DAYS = 31
 
 # ── Tunable defaults ────────────────────────────────────────────────────────
 DEFAULT_IB_DURATION = '3 y'
@@ -670,11 +670,17 @@ class IBStitchedHistoryProvider:
     use_cache: bool = True
     save_cache: bool = True
     update_history: bool = True
+    max_source_gap_days: int = DEFAULT_MAX_SOURCE_GAP_DAYS
     contract_history: pl.DataFrame | None = field(
         init=False,
         default=None,
         repr=False,
     )
+
+    def __post_init__(self) -> None:
+        """Validate the permitted direct-source gap used during stitching."""
+        if self.max_source_gap_days < 0:
+            raise ValueError("max_source_gap_days must be nonnegative")
 
     def _cache_directory(self, symbol: str) -> Path:
         """Return a versioned cache directory for all stitched-view inputs."""
@@ -690,6 +696,7 @@ class IBStitchedHistoryProvider:
             'bar_size': self.bar_size,
             'what_to_show': self.what_to_show,
             'use_rth': self.use_rth,
+            'max_source_gap_days': self.max_source_gap_days,
             'reference_db': _history_input_fingerprint(self.reference_db_path),
             'globex_db': (
                 _history_input_fingerprint(self.globex_db_path)
@@ -829,7 +836,7 @@ class IBStitchedHistoryProvider:
             histories,
             instrument_code=instrument_code,
             max_source_gap_days=(
-                MAX_DIRECT_STITCH_GAP_DAYS
+                self.max_source_gap_days
                 if direct_reference_to_ib
                 else 0
             ),
@@ -842,6 +849,7 @@ class IBStitchedHistoryProvider:
                 'cache_directory': str(cache_directory),
                 'ib_history_db': str(Path(self.history_db_path).expanduser()),
                 'ib_prior_years': ib_prior_years,
+                'max_source_gap_days': self.max_source_gap_days,
             },
         )
         if self.save_cache:
