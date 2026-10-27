@@ -1195,7 +1195,10 @@ def _run_complete_selection(
             if live_ib is not None:
                 live_ib.disconnect()
 
-        cash_reference_frames = {}
+        # Start with the valid reference curves for every selected symbol.
+        # Successful stitched histories replace these entries below; keeping
+        # the originals here makes the per-symbol fallback usable downstream.
+        cash_reference_frames = dict(subsystem_reference_frames)
         for symbol in selection.selected:
             row = source_rows[symbol]
             history_code = stitched_history_code_by_symbol[symbol]
