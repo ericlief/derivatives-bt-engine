@@ -48,7 +48,7 @@ from derivatives_bt_engine.logging_config import setup_logger
 
 logger = setup_logger()
 
-HISTORY_SCHEMA_VERSION = 10
+HISTORY_SCHEMA_VERSION = 11
 DEFAULT_PYSYSTEMTRADE_DB_PATH = Path(
     "/home/dev/fin/db/pysystemtrade_reference.duckdb"
 )
@@ -1185,6 +1185,7 @@ def stitch_futures_histories(
     handoffs: list[date] = []
     source_gaps: list[dict[str, object]] = []
     for older, newer in zip(ordered, ordered[1:]):
+        source_gap: dict[str, object] | None = None
         older_end = older.signal.get_column("date").max()
         newer_start = newer.signal.get_column("date").min()
         if older_end is None or newer_start is None:
@@ -1199,13 +1200,13 @@ def stitch_futures_histories(
                     f"gap_days={gap_days} "
                     f"max_source_gap_days={max_source_gap_days}"
                 )
-            source_gaps.append({
+            source_gap = {
                 "older_source": older.source,
                 "newer_source": newer.source,
                 "older_end": older_end,
                 "newer_start": newer_start,
                 "gap_days": gap_days,
-            })
+            }
             logger.warning(
                 "stitched_history source_gap instrument=%s older_source=%s "
                 "older_end=%s newer_source=%s newer_start=%s gap_days=%s "
@@ -1227,6 +1228,13 @@ def stitch_futures_histories(
                 f"history source {newer.source} has no valid return"
             )
         handoffs.append(first_valid)
+        if source_gap is not None:
+            # The initial newer-source observation establishes the reference
+            # price for its first valid daily change. Attach the gap audit to
+            # that first retained valid row, which is the first row visible to
+            # downstream forecast and cash calculations.
+            source_gap["handoff_date"] = first_valid
+            source_gaps.append(source_gap)
 
     def owned_rows(frame: pl.DataFrame, index: int) -> pl.DataFrame:
         """Select the date interval owned by one priority-ordered source."""
@@ -1237,6 +1245,23 @@ def stitch_futures_histories(
             expression &= pl.col("date") < handoffs[index]
         return frame.filter(expression)
 
+    gap_events = pl.DataFrame(
+        [
+            {
+                "date": gap["handoff_date"],
+                "source_gap_before": True,
+                "source_gap_days": gap["gap_days"],
+                "gap_pnl_omitted": True,
+            }
+            for gap in source_gaps
+        ],
+        schema={
+            "date": pl.Date,
+            "source_gap_before": pl.Boolean,
+            "source_gap_days": pl.Int64,
+            "gap_pnl_omitted": pl.Boolean,
+        },
+    )
     signal = (
         pl.concat(
             [
@@ -1253,6 +1278,11 @@ def stitch_futures_histories(
                 (1.0 + pl.col("ret_1d").fill_null(0.0)).cum_prod()
                 * 100.0
             ).alias("signal_index")
+        )
+        .join(gap_events, on="date", how="left")
+        .with_columns(
+            pl.col("source_gap_before").fill_null(False),
+            pl.col("gap_pnl_omitted").fill_null(False),
         )
     )
 

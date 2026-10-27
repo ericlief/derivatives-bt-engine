@@ -33,6 +33,8 @@ PUBLIC_REPORT_RENAMES = {
     "combined_nulls": "comb_nulls",
     "combined_nonfinite": "comb_nonfinite",
     "forecast_valid": "fcst_valid",
+    "source_gap_before": "src_gap_before",
+    "source_gap_days": "src_gap_days",
     "forecast_valid_obs": "fcst_valid_obs",
     "forecast_invalid_obs": "fcst_inval_obs",
     "forecast_post_warmup_invalid_obs": "fcst_post_warmup_inval_n",

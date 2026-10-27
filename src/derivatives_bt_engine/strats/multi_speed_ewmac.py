@@ -306,6 +306,22 @@ def build_ewmac_component_frame(
         combined = combined.with_columns(pl.lit(False).alias("is_roll"))
     combined = combined.with_columns(pl.col("is_roll").fill_null(False))
 
+    gap_columns = [
+        column
+        for column in (
+            "source_gap_before",
+            "source_gap_days",
+            "gap_pnl_omitted",
+        )
+        if column in history.signal.columns
+    ]
+    if gap_columns:
+        # Gap metadata is row-level audit context rather than a signal input.
+        # Join it after rule calculation so the omitted move cannot alter the
+        # Panama price, point volatility, or EWMAC forecast.
+        gap_events = history.signal.select("date", *gap_columns)
+        combined = combined.join(gap_events, on="date", how="left")
+
     # Keep shared history and volatility fields together before the rule
     # blocks. This makes compact frames and notebook tables scan consistently.
     prefix = ["date"]
@@ -318,6 +334,7 @@ def build_ewmac_component_frame(
             "point_vol",
             "point_change",
             "is_roll",
+            *gap_columns,
             "quality_flag",
         ])
     else:
@@ -327,6 +344,7 @@ def build_ewmac_component_frame(
             "point_vol",
             "point_change",
             "is_roll",
+            *gap_columns,
         ])
     remaining = [column for column in combined.columns if column not in prefix]
     return combined.select(prefix + remaining).sort("date")

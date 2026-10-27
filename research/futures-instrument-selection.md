@@ -1006,7 +1006,10 @@ baseline by default. The command writes:
   `close` is the locally generated
   additive-Panama adjusted level used by the signal history, retained beside
   the roll-neutral `point_change` for audit; it is not the raw executable
-  dated-contract mark;
+  dated-contract mark. `src_gap_before`, `src_gap_days`, and
+  `gap_pnl_omitted` identify the first retained row after an allowed source
+  gap. The row's own one-day P&L remains valid; the fields state that the
+  unknown cross-gap move was not inferred;
 - `multi_speed_ewmac_selection_portfolio_curve_<timestamp>.parquet`, the daily
   selected-book cash flows summed across instruments, with one common initial
   capital denominator for gross, cost, realized-net, and average-roll-net daily

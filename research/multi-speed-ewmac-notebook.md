@@ -382,6 +382,9 @@ overlap but the remaining source gap is at most `max_source_gap_days`, the stitc
 records the interval in `view.history.metadata["source_gaps"]` and omits the
 unknown gap return. The default is 31 calendar days. Set it to zero to require
 overlap; larger gaps still fail rather than fabricating history.
+The first retained post-gap row is marked in `view.reference` and `view.cash`
+with `src_gap_before=True`, the missing `src_gap_days`, and
+`gap_pnl_omitted=True`. Its own within-source one-day return remains valid.
 
 `view.reference` assigns the instrument `1 / reference_book_count`, caps the
 weight-times-IDM product, sizes continuous positions from daily dollar

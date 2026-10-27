@@ -59,6 +59,16 @@ def history_to_tsmom_bars(history: FuturesHistory) -> pl.DataFrame:
     ]
     if "source_segment" in history.signal.columns:
         signal_columns.append("source_segment")
+    gap_columns = [
+        column
+        for column in (
+            "source_gap_before",
+            "source_gap_days",
+            "gap_pnl_omitted",
+        )
+        if column in history.signal.columns
+    ]
+    signal_columns.extend(gap_columns)
     signal = history.signal.select(signal_columns)
     marks = history.marks.select(
         "date",
@@ -105,6 +115,7 @@ def history_to_tsmom_bars(history: FuturesHistory) -> pl.DataFrame:
         "is_roll",
         "source_segment",
         "pnl_quality",
+        *gap_columns,
     )
 
 

@@ -32,6 +32,41 @@ from derivatives_bt_engine.calculations.volatility import (
 
 PYSYSTEMTRADE_FORECAST_BUFFER_SIZE = 0.10
 
+
+def _with_source_gap_audit(frame: pl.DataFrame) -> pl.DataFrame:
+    """Return ``frame`` with normalized source-gap audit columns.
+
+    A permitted history-source gap has no rows of its own. The first retained
+    row afterward carries the event, missing calendar-day count, and explicit
+    statement that no cross-gap market P&L was inferred. These fields do not
+    change return validity or any sizing, cost, or P&L expression.
+    """
+    expressions: list[pl.Expr] = []
+    if "source_gap_before" in frame.columns:
+        expressions.append(
+            pl.col("source_gap_before")
+            .fill_null(False)
+            .cast(pl.Boolean)
+        )
+    else:
+        expressions.append(pl.lit(False).alias("source_gap_before"))
+    if "source_gap_days" in frame.columns:
+        expressions.append(pl.col("source_gap_days").cast(pl.Int64))
+    else:
+        expressions.append(
+            pl.lit(None, dtype=pl.Int64).alias("source_gap_days")
+        )
+    if "gap_pnl_omitted" in frame.columns:
+        expressions.append(
+            pl.col("gap_pnl_omitted")
+            .fill_null(False)
+            .cast(pl.Boolean)
+        )
+    else:
+        expressions.append(pl.lit(False).alias("gap_pnl_omitted"))
+    return frame.with_columns(*expressions)
+
+
 _REFERENCE_ACCOUNTING_COLUMNS = (
     "ref_book_count",
     "ref_weight",
@@ -576,6 +611,7 @@ def build_subsystem_reference_return_curve(
     :func:`build_executable_cash_pnl_curve` represents the selected portfolio's
     final weights, IDM, buffering, discrete contracts, and cash P&L.
     """
+    frame = _with_source_gap_audit(frame)
     if point_vol_col is None:
         if "mixed_point_vol" in frame.columns:
             point_vol_col = "mixed_point_vol"
@@ -829,6 +865,7 @@ def build_executable_cash_pnl_curve(
     # sizing expressions below retain the descriptive internal column name.
     if "combined_forecast" not in frame.columns and "comb_fcst" in frame.columns:
         frame = frame.rename({"comb_fcst": "combined_forecast"})
+    frame = _with_source_gap_audit(frame)
 
     if point_vol_col is None:
         if "mixed_point_vol" in frame.columns:
