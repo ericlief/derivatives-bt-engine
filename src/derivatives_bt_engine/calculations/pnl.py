@@ -1174,6 +1174,7 @@ def build_executable_cash_pnl_curve(
             "fast_point_vol",
             "slow_point_vol",
             "point_vol",
+            "pt_vol",
             "mixed_point_vol",
         )
         if column in public.columns

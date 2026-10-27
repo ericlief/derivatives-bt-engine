@@ -14,6 +14,7 @@ from derivatives_bt_engine.data.futures_dataloader import (
 from derivatives_bt_engine.data.futures_history import (
     FuturesHistory,
     GlobexHistoryProvider,
+    HISTORY_SCHEMA_VERSION,
     PysystemtradeHistoryProvider,
 )
 from derivatives_bt_engine.calculations.roll_policy import (
@@ -360,7 +361,7 @@ def test_carver_cache_path_is_source_and_version_namespaced(tmp_path: Path) -> N
         tmp_path
         / "cache"
         / "pysystemtrade"
-        / "v10"
+        / f"v{HISTORY_SCHEMA_VERSION}"
         / SOURCE_COMMIT[:12]
         / "SP500_signal.parquet"
     )

@@ -1127,7 +1127,18 @@ def _run_complete_selection(
             ).load(history_code)
 
         try:
-            for history_code in selected_history_codes:
+            for history_index, history_code in enumerate(
+                selected_history_codes,
+                start=1,
+            ):
+                logger.info(
+                    "selection_stitched_history start hist_instr_code=%s "
+                    "history_index=%d history_count=%d ib_mode=%s",
+                    history_code,
+                    history_index,
+                    len(selected_history_codes),
+                    args.ib_history_live,
+                )
                 try:
                     if args.ib_history_live == "update":
                         stitched_history = load_stitched_history(
@@ -1170,6 +1181,15 @@ def _run_complete_selection(
                 stitched_components[history_code] = build_ewmac_component_frame(
                     stitched_history,
                     pooled_rules,
+                )
+                logger.info(
+                    "selection_stitched_history complete hist_instr_code=%s "
+                    "rows=%d start=%s end=%s sources=%s",
+                    history_code,
+                    stitched_history.signal.height,
+                    stitched_history.signal.get_column("date").min(),
+                    stitched_history.signal.get_column("date").max(),
+                    stitched_history.metadata.get("available_sources"),
                 )
         finally:
             if live_ib is not None:
@@ -1300,8 +1320,8 @@ def _run_complete_selection(
                 # not a raw executable dated-contract settlement.
                 "close",
                 "comb_fcst",
-                "point_change",
-                "point_vol",
+                "pt_change",
+                "pt_vol",
                 "fx_to_usd",
                 "fx_pair",
                 "fx_src",

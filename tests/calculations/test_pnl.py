@@ -214,13 +214,15 @@ def test_executable_cash_pnl_separates_trade_and_policy_roll_costs():
     assert result.get_column("con_px").to_list() == frame.get_column(
         "contract_close"
     ).to_list()
+    assert "pt_change" in result.columns
+    assert "point_change" not in result.columns
     assert result.columns[
         result.columns.index("fast_point_vol"):
         result.columns.index("ann_pct_vol") + 1
     ] == [
         "fast_point_vol",
         "slow_point_vol",
-        "point_vol",
+        "pt_vol",
         "daily_dvol",
         "ann_dvol",
         "ann_pct_vol",

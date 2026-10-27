@@ -918,12 +918,15 @@ class IBStitchedHistoryProvider:
         cache_hit = (
             self.use_cache
             and not self.update_history
-            and contract_path.exists()
             and futures_history_parquet_cache_exists(cache_directory)
         )
         if cache_hit:
             history = read_futures_history_parquet_cache(cache_directory)
-            self.contract_history = pl.read_parquet(contract_path)
+            self.contract_history = (
+                pl.read_parquet(contract_path)
+                if contract_path.exists()
+                else None
+            )
             logger.info(
                 'stitched_ib_history cache_hit symbol=%s pst_instr_code=%s '
                 'cache=%s',
@@ -967,12 +970,17 @@ class IBStitchedHistoryProvider:
             )
             return loaded
 
-        ib_prior_years = self.prior_years
-        ib_history = load_ib_segment(ib_prior_years)
+        # Resolve the shared calendar policy from the reference configuration,
+        # not from IB history: IB may reject an expired contract even though
+        # the same policy can still select valid Globex observations.
+        hold_roll_cycle, roll_offset_days, _, _ = _load_roll_config(
+            self.pst_instr_code,
+            self.reference_db_path,
+        )
         roll_policy = ContractRollPolicy(
             policy_id=f'configured_{self.pst_instr_code}',
-            hold_roll_cycle=str(ib_history.metadata['hold_roll_cycle']),
-            roll_offset_days=int(ib_history.metadata['roll_offset_days']),
+            hold_roll_cycle=hold_roll_cycle,
+            roll_offset_days=roll_offset_days,
             source='reference_config',
         )
         reference_history = ReferenceHistoryProvider(
@@ -1001,8 +1009,28 @@ class IBStitchedHistoryProvider:
                 )
             else:
                 histories.append(globex_history)
-        direct_reference_to_ib = len(histories) == 1
-        if direct_reference_to_ib:
+
+        ib_prior_years = self.prior_years
+        ib_history: FuturesHistory | None = None
+        try:
+            ib_history = load_ib_segment(ib_prior_years)
+        except Exception as exc:
+            # IB is the newest optional segment. Contract-definition failures
+            # (common for expired contracts) should not erase valid reference
+            # or Globex history; expose the missing source in logs/metadata.
+            logger.warning(
+                'stitched_ib_history ib_unavailable symbol=%s '
+                'pst_instr_code=%s fallback_sources=%s reason=%s',
+                instrument_code,
+                self.pst_instr_code,
+                [history.source for history in histories],
+                exc,
+            )
+
+        direct_reference_to_ib = (
+            ib_history is not None and len(histories) == 1
+        )
+        if direct_reference_to_ib and ib_history is not None:
             reference_end = reference_history.signal.get_column('date').max()
             ib_start = ib_history.signal.get_column('date').min()
             while (
@@ -1022,21 +1050,52 @@ class IBStitchedHistoryProvider:
                     ib_start,
                     ib_prior_years,
                 )
-                ib_history = load_ib_segment(ib_prior_years)
+                try:
+                    ib_history = load_ib_segment(ib_prior_years)
+                except Exception as exc:
+                    logger.warning(
+                        'stitched_ib_history ib_backfill_unavailable '
+                        'symbol=%s pst_instr_code=%s prior_years=%s reason=%s',
+                        instrument_code,
+                        self.pst_instr_code,
+                        ib_prior_years,
+                        exc,
+                    )
+                    break
                 ib_start = ib_history.signal.get_column('date').min()
                 if ib_start is None or ib_start >= previous_ib_start:
                     break
-        histories.append(ib_history)
-        history = stitch_futures_histories(
-            histories,
-            instrument_code=instrument_code,
-            max_source_gap_days=(
-                self.max_source_gap_days
-                if direct_reference_to_ib
-                else 0
-            ),
-        )
-        if self.update_history:
+        if ib_history is not None:
+            histories.append(ib_history)
+        if len(histories) == 1:
+            history = replace(
+                reference_history,
+                instrument_code=instrument_code,
+                metadata={
+                    **dict(reference_history.metadata),
+                    'available_sources': ['pysystemtrade'],
+                    'ib_unavailable': ib_history is None,
+                },
+            )
+        else:
+            history = stitch_futures_histories(
+                histories,
+                instrument_code=instrument_code,
+                max_source_gap_days=(
+                    self.max_source_gap_days
+                    if direct_reference_to_ib
+                    else 0
+                ),
+            )
+            history = replace(
+                history,
+                metadata={
+                    **dict(history.metadata),
+                    'available_sources': [item.source for item in histories],
+                    'ib_unavailable': ib_history is None,
+                },
+            )
+        if self.update_history and self.contract_history is not None:
             # Live acquisition changes the raw-database fingerprint. Save the
             # derived bundle under the post-update identity so the next
             # stored-only call can reuse it.
@@ -1055,9 +1114,12 @@ class IBStitchedHistoryProvider:
         )
         if self.save_cache:
             cache_directory.mkdir(parents=True, exist_ok=True)
-            temporary_contract_path = contract_path.with_suffix('.parquet.tmp')
-            self.contract_history.write_parquet(temporary_contract_path)
-            temporary_contract_path.replace(contract_path)
+            if self.contract_history is not None:
+                temporary_contract_path = contract_path.with_suffix(
+                    '.parquet.tmp'
+                )
+                self.contract_history.write_parquet(temporary_contract_path)
+                temporary_contract_path.replace(contract_path)
             write_futures_history_parquet_cache(history, cache_directory)
         return history
 
