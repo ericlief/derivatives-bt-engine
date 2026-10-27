@@ -8,9 +8,11 @@ ts_event/open/high/low/close/volume) so Backtester can consume either
 source interchangeably. Used by strats/naked_futures.py's --use-ib-data.
 
 The roll-cycle helper separately downloads raw dated-contract histories for
-the prior and current calendar years. Those overlapping histories retain
-contract identity and are inputs for a locally controlled continuous-futures
-stitch; they do not use IB's opaque continuous-contract adjustment.
+the prior and current calendar years plus the first configured contract in the
+next policy year. That forward contract keeps the held path defined after the
+last current-year roll. The overlapping histories retain contract identity and
+are inputs for a locally controlled continuous-futures stitch; they do not use
+IB's opaque continuous-contract adjustment.
 
 Fetches a fixed 3-year lookback (DEFAULT_IB_DURATION), the same
 durationStr live.tsmom_rebalance._compute_signal already uses for its own
@@ -244,7 +246,9 @@ def load_roll_cycle_ib_contract_history(
         Date defining the current contract year. Defaults to today.
     prior_years
         Number of complete calendar years before ``as_of.year`` to include.
-        The default requests the prior and current contract years.
+        The default requests the prior and current contract years. The first
+        configured contract month in the following year is also requested so
+        a pre-expiry roll from the final current-year contract has a successor.
     duration
         IB history duration requested separately for every resolved contract.
     bar_size, what_to_show, use_rth
@@ -288,6 +292,8 @@ def load_roll_cycle_ib_contract_history(
         pst_instr_code,
         db_path,
     )
+    if not hold_roll_cycle:
+        raise ValueError(f"{pst_instr_code}: hold-roll cycle must not be empty")
     invalid_cycle = set(hold_roll_cycle) - set(CME_MONTH_LETTERS)
     if invalid_cycle:
         raise ValueError(
@@ -301,6 +307,16 @@ def load_roll_cycle_ib_contract_history(
         for year in years
         for month_letter in hold_roll_cycle
     ]
+    # A calendar policy can roll out of its final current-year contract before
+    # year end. Annual December crude is the clearest case: with a -40 day
+    # offset, late-October observations already belong to next December. Only
+    # the first configured month of the next year is needed to close that
+    # boundary; requesting every next-year month would create avoidable IB
+    # security-definition failures for contracts not listed yet.
+    contract_months.append(
+        f"{effective_as_of.year + 1:04d}"
+        f"{CME_MONTH_LETTERS[hold_roll_cycle[0]]:02d}"
+    )
     ib_symbol = str(broker['ib_symbol'])
     exchange = str(broker['ib_exchange'])
     currency = str(broker['ib_currency'])

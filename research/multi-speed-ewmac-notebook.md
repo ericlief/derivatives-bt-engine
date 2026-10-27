@@ -377,7 +377,9 @@ the overlapping IB dated-contract history. The executable symbol can still use
 the corresponding micro contract, such as MYM, for sizing and cash P&L. If the
 default IB contract-year window starts after the reference series ends, the
 provider retrieves older contract years while they extend the IB boundary;
-this covers quarterly boundaries such as RTY/M2K. If IB cannot supply a full
+this covers quarterly boundaries such as RTY/M2K. The window also includes the
+first configured contract in the next calendar year so annual or sparse cycles
+remain defined after their final current-year roll. If IB cannot supply a full
 overlap but the remaining source gap is at most `max_source_gap_days`, the stitch
 records the interval in `view.history.metadata["source_gaps"]` and omits the
 unknown gap return. The default is 31 calendar days. Set it to zero to require
