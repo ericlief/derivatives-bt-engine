@@ -384,6 +384,9 @@ overlap but the remaining source gap is at most `max_source_gap_days`, the stitc
 records the interval in `view.history.metadata["source_gaps"]` and omits the
 unknown gap return. The default is 31 calendar days. Set it to zero to require
 overlap; larger gaps still fail rather than fabricating history.
+IB cycle membership uses the listed contract month, while the actual last
+trade date controls the roll cutoff. This keeps December contracts such as CL
+in a `Z` policy even though their actual expiry occurs in November.
 The first retained post-gap row is marked in `view.reference` and `view.cash`
 with `src_gap_before=True`, the missing `src_gap_days`, and
 `gap_pnl_omitted=True`. Its own within-source one-day return remains valid.

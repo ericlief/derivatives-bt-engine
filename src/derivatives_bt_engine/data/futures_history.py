@@ -692,7 +692,11 @@ def select_calendar_contract_observations(
     ``raw`` must contain ``date``, ``expiration``, and ``volume`` for
     every available dated contract. The contract calendar is formed before
     daily rows are selected, so a missing held-contract observation remains a
-    gap instead of silently substituting another expiry.
+    gap instead of silently substituting another expiry. When a provider
+    supplies ``contract_month`` in ``YYYYMM`` form, policy cycle membership is
+    determined from that field while the actual expiration date continues to
+    determine the roll cutoff. This distinction matters for contracts such as
+    December WTI crude, whose last trade date occurs in November.
     """
     required = {"date", "expiration", "volume"}
     missing = required - set(raw.columns)
@@ -704,10 +708,17 @@ def select_calendar_contract_observations(
         raise ValueError("calendar contract selection requires a calendar policy")
 
     all_dates = raw.get_column("date").unique().sort().to_list()
-    allowed = (
-        raw.filter(
-            pl.col("expiration").dt.month().is_in(policy.hold_month_numbers)
+    if "contract_month" in raw.columns:
+        policy_month = (
+            pl.col("contract_month")
+            .cast(pl.String)
+            .str.slice(4, 2)
+            .cast(pl.Int8, strict=False)
         )
+    else:
+        policy_month = pl.col("expiration").dt.month()
+    allowed = (
+        raw.filter(policy_month.is_in(policy.hold_month_numbers))
         .sort("date", "expiration", "volume")
         .unique(
             subset=["date", "expiration"],

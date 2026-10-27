@@ -554,8 +554,10 @@ def build_ib_contract_history(
         source="reference_config",
     )
 
-    # Preserve the within-contract close before the roll-policy selection so
-    # the first held day after a roll has a same-contract reference price.
+    # Preserve the within-contract close and IB contract month before the
+    # roll-policy selection. Contract-cycle membership comes from YYYYMM,
+    # while the actual expiry date controls the cutoff; these differ for
+    # products such as December WTI crude, which expires in November.
     raw = (
         contract_history.unique(
             subset=['ib_contract_id', 'date'],
