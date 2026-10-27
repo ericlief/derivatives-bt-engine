@@ -217,7 +217,7 @@ def _contract_expiration_date(detail, contract_month: str) -> date:
 
 
 def load_roll_cycle_ib_contract_history(
-    ib: IBPySync,
+    ib: IBPySync | None,
     *,
     pst_instr_code: str,
     as_of: date | None = None,
@@ -236,7 +236,8 @@ def load_roll_cycle_ib_contract_history(
     Parameters
     ----------
     ib
-        Connected synchronous IB client.
+        Connected synchronous IB client when ``update_history`` is true.
+        Stored-only reads may pass ``None``.
     pst_instr_code
         PST instrument code owning the IB contract mapping and roll policy.
     as_of
@@ -274,6 +275,8 @@ def load_roll_cycle_ib_contract_history(
     """
     if prior_years < 0:
         raise ValueError("prior_years must be nonnegative")
+    if update_history and ib is None:
+        raise ValueError("ib is required when update_history is true")
     effective_as_of = as_of or date.today()
     mapping = load_broker_mapping(mapping_path).filter(
         pl.col('instrument_code') == pst_instr_code
@@ -594,7 +597,7 @@ class IBHistoryProvider:
     optional broker update; no adjusted or stitched levels are persisted there.
     """
 
-    ib: IBPySync
+    ib: IBPySync | None
     as_of: date | None = None
     prior_years: int = 1
     duration: str = DEFAULT_IB_DATED_CONTRACT_DURATION
@@ -653,7 +656,7 @@ class IBStitchedHistoryProvider:
     into IB history.
     """
 
-    ib: IBPySync
+    ib: IBPySync | None
     pst_instr_code: str
     globex_asset: str | None
     as_of: date | None = None
@@ -704,6 +707,7 @@ class IBStitchedHistoryProvider:
                 else None
             ),
             'mapping': _history_input_fingerprint(self.mapping_path),
+            'ib_history_db': _history_input_fingerprint(self.history_db_path),
         }
         digest = hashlib.sha256(
             json.dumps(identity, sort_keys=True).encode('utf-8')

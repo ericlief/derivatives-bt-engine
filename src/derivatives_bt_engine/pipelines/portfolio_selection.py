@@ -59,7 +59,9 @@ from derivatives_bt_engine.data.fx_history import (
     load_fx_to_usd_history,
 )
 from derivatives_bt_engine.strats.multi_speed_ewmac import (
+    build_ewmac_component_frame,
     load_ewmac_component_frames,
+    load_pooled_ewmac_rules,
 )
 from derivatives_bt_engine.reports.formatting import (
     rename_public_report_columns,
@@ -76,7 +78,20 @@ from derivatives_bt_engine.calculations.forecast_combination import (
     median_forecast_correlation,
 )
 from derivatives_bt_engine.data.futures_history import (
+    DEFAULT_FUTURES_CACHE_ROOT,
+    DEFAULT_GLOBEX_DB_PATH,
     DEFAULT_PYSYSTEMTRADE_DB_PATH,
+)
+from derivatives_bt_engine.data.futures_overlap import (
+    resolve_reviewed_globex_asset,
+)
+from derivatives_bt_engine.data.ib_futures_dataloader import (
+    DEFAULT_BROKER_MAPPING_PATH,
+    DEFAULT_MAX_SOURCE_GAP_DAYS,
+    IBStitchedHistoryProvider,
+)
+from derivatives_bt_engine.data.pysystemtrade_ib import (
+    load_pysystemtrade_ib_instruments,
 )
 from derivatives_bt_engine.calculations.instrument_selection import (
     EqualPortfolioWeights,
@@ -130,6 +145,37 @@ def _parse_rules(eligible_rules: str | Iterable[str]) -> list[str]:
     if isinstance(eligible_rules, str):
         return [rule.strip() for rule in eligible_rules.split(",") if rule.strip()]
     return [str(rule).strip() for rule in eligible_rules if str(rule).strip()]
+
+
+def _resolve_stitched_signal_history_code(
+    source_row: dict[str, object],
+    instrument_rows: list[dict[str, object]],
+) -> str:
+    """Resolve the reference/IB history owner for an executable report row.
+
+    A micro can borrow a full-size ``signal_symbol`` while retaining its own
+    multiplier and costs. The screen's ``hist_instr_code`` remains the fallback
+    for older reports that did not persist a signal ticker.
+    """
+    signal_symbol = str(source_row.get("signal_symbol") or "").strip()
+    if not signal_symbol:
+        return str(source_row["hist_instr_code"])
+    matches = [
+        row for row in instrument_rows if row.get("symbol") == signal_symbol
+    ]
+    if not matches:
+        matches = [
+            row
+            for row in instrument_rows
+            if row.get("ib_symbol") == signal_symbol
+        ]
+    codes = {str(row["pst_instr_code"]) for row in matches}
+    if len(codes) != 1:
+        raise KeyError(
+            f"signal symbol {signal_symbol!r} does not resolve to one history "
+            f"instrument for executable {source_row.get('symbol')!r}"
+        )
+    return codes.pop()
 
 
 def parse_args(argv=None, *, complete_default: bool = False):
@@ -229,6 +275,42 @@ def parse_args(argv=None, *, complete_default: bool = False):
         type=Path,
         default=DEFAULT_PYSYSTEMTRADE_DB_PATH,
         help="Historical signal database used to construct EWMAC forecasts.",
+    )
+    parser.add_argument(
+        "--ib-history-db",
+        type=Path,
+        help=(
+            "Optional stored IB dated-contract database. When supplied, the "
+            "final book cash P&L and hist_* diagnostics use offline stitched "
+            "reference/Globex/IB history; construction inputs remain unchanged."
+        ),
+    )
+    parser.add_argument(
+        "--globex-db",
+        type=Path,
+        default=DEFAULT_GLOBEX_DB_PATH,
+        help="Globex database used as the optional middle history segment.",
+    )
+    parser.add_argument(
+        "--broker-mapping",
+        type=Path,
+        default=DEFAULT_BROKER_MAPPING_PATH,
+        help="Broker contract mapping used to read stored IB dated contracts.",
+    )
+    parser.add_argument(
+        "--history-cache-root",
+        type=Path,
+        default=DEFAULT_FUTURES_CACHE_ROOT,
+        help="Parquet cache root for final stitched history views.",
+    )
+    parser.add_argument(
+        "--max-source-gap-days",
+        type=int,
+        default=DEFAULT_MAX_SOURCE_GAP_DAYS,
+        help=(
+            "Largest calendar gap allowed for a direct reference-to-IB "
+            "stitch (default: 31); the unknown gap return is masked."
+        ),
     )
     parser.add_argument(
         "--min-forecast-obs",
@@ -942,6 +1024,93 @@ def _run_complete_selection(
         })
     final_frame = pl.DataFrame(final_rows, infer_schema_length=None)
 
+    cash_reference_frames = subsystem_reference_frames
+    historical_return_sources = {
+        symbol: "reference" for symbol in selection.selected
+    }
+    if args.ib_history_db is not None:
+        # Construction remains pinned to the long reference histories above.
+        # Only the final executable cash audit is rebuilt from the
+        # duplicate-free stitched source so reported P&L reaches stored IB data.
+        stitched_components: dict[str, pl.DataFrame] = {}
+        pooled_rules = load_pooled_ewmac_rules(
+            db_path=args.history_db.expanduser().resolve(),
+        )
+        instrument_rows = load_pysystemtrade_ib_instruments(
+            db_path=args.history_db.expanduser().resolve(),
+            mapping_path=args.broker_mapping.expanduser().resolve(),
+        )
+        stitched_history_code_by_symbol = {
+            symbol: _resolve_stitched_signal_history_code(
+                source_rows[symbol],
+                instrument_rows,
+            )
+            for symbol in selection.selected
+        }
+        selected_history_codes = sorted(
+            {
+                stitched_history_code_by_symbol[symbol]
+                for symbol in selection.selected
+            }
+        )
+        for history_code in selected_history_codes:
+            globex_asset = resolve_reviewed_globex_asset(history_code)
+            provider = IBStitchedHistoryProvider(
+                ib=None,
+                pst_instr_code=history_code,
+                globex_asset=globex_asset,
+                reference_db_path=args.history_db.expanduser().resolve(),
+                globex_db_path=args.globex_db.expanduser().resolve(),
+                mapping_path=args.broker_mapping.expanduser().resolve(),
+                history_db_path=args.ib_history_db.expanduser().resolve(),
+                cache_root=args.history_cache_root.expanduser().resolve(),
+                use_cache=True,
+                save_cache=True,
+                update_history=False,
+                max_source_gap_days=args.max_source_gap_days,
+            )
+            stitched_history = provider.load(history_code)
+            stitched_components[history_code] = build_ewmac_component_frame(
+                stitched_history,
+                pooled_rules,
+            )
+
+        cash_reference_frames = {}
+        for symbol in selection.selected:
+            row = source_rows[symbol]
+            history_code = stitched_history_code_by_symbol[symbol]
+            rules = _parse_rules(str(row["elig_ewmac_rules"] or ""))
+            stitched_result = engine.combine(
+                stitched_components[history_code],
+                rules,
+                forecast_correlation,
+                correlation_rules,
+            )
+            currency = str(row["ccy"]).upper()
+            stitched_fx_frame = align_fx_to_history(
+                stitched_result.frame,
+                currency,
+                fx_history=fx_history_by_currency[currency],
+                db_path=args.history_db.expanduser().resolve(),
+            )
+            cash_reference_frames[symbol] = build_subsystem_reference_return_curve(
+                stitched_fx_frame,
+                capital=float(run_config["init_cap_usd"]),
+                target_vol=float(run_config["target_vol"]),
+                reference_book_count=args.tie_reference_book_count,
+                reference_idm=GreedySelectionConfig.max_idm,
+                max_weight_idm=args.max_weight_idm,
+                multiplier=float(row["mult"]),
+                ann_cost_sr=0.0,
+                target_abs_forecast=engine.config.target_abs_forecast,
+            )
+            historical_return_sources[symbol] = "stitched"
+    else:
+        stitched_history_code_by_symbol = {
+            symbol: str(source_rows[symbol]["hist_instr_code"])
+            for symbol in selection.selected
+        }
+
     # Reference returns above are used only for candidate correlations. This
     # selected-book path applies final weights and IDM, rounds to executable
     # contracts, and charges actual history-policy roll dates in cash.
@@ -952,7 +1121,7 @@ def _run_complete_selection(
         detail = final_details[symbol]
         row = source_rows[symbol]
         cash_frame = build_executable_cash_pnl_curve(
-            subsystem_reference_frames[symbol],
+            cash_reference_frames[symbol],
             capital=float(run_config["init_cap_usd"]),
             target_vol=float(run_config["target_vol"]),
             weight=float(detail["limit_weight"]),
@@ -976,6 +1145,10 @@ def _run_complete_selection(
         ).row(0, named=True)
         historical_performance_rows.append({
             "symbol": symbol,
+            "historical_return_source": historical_return_sources[symbol],
+            "historical_instrument_code": (
+                stitched_history_code_by_symbol[symbol]
+            ),
             "historical_return_start": significance["start"],
             "historical_return_end": significance["end"],
             "historical_return_observations": significance["n_obs"],
@@ -991,7 +1164,12 @@ def _run_complete_selection(
         cash_output_frames.append(
             cash_frame.with_columns(
                 pl.lit(symbol).alias("symbol"),
-                pl.lit(str(row["hist_instr_code"])).alias("hist_instr_code"),
+                pl.lit(stitched_history_code_by_symbol[symbol]).alias(
+                    "hist_instr_code"
+                ),
+                pl.lit(historical_return_sources[symbol]).alias(
+                    "historical_return_source"
+                ),
                 pl.lit(str(row.get("roll_policy_id") or "")).alias(
                     "roll_policy_id"
                 ),
@@ -1009,6 +1187,7 @@ def _run_complete_selection(
                 "date",
                 "symbol",
                 "hist_instr_code",
+                "historical_return_source",
                 "roll_policy_id",
                 "roll_schedule_src",
                 "weight",
@@ -1333,6 +1512,14 @@ def run(
         raise ValueError("score tie tolerance must be in [0, 100]")
     if args.tie_reference_book_count <= 0:
         raise ValueError("tie reference book count must be positive")
+    if args.max_source_gap_days < 0:
+        raise ValueError("max source gap days must be nonnegative")
+    if args.ib_history_db is not None:
+        ib_history_db = args.ib_history_db.expanduser().resolve()
+        if not ib_history_db.is_file():
+            raise FileNotFoundError(
+                f"stored IB history database does not exist: {ib_history_db}"
+            )
     setup_logger()
     if args.output is not None and args.output.suffix.lower() != ".parquet":
         raise ValueError("--output must use a .parquet extension")

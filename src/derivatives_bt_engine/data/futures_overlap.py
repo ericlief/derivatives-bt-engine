@@ -108,6 +108,33 @@ def load_mappings(path: Optional[Path | str] = None) -> tuple[MarketMapping, ...
 DEFAULT_MAPPINGS = load_mappings()
 
 
+def resolve_reviewed_globex_asset(
+    reference_instrument_code: str,
+    *,
+    mapping_path: Optional[Path | str] = None,
+) -> str | None:
+    """Return the optional Globex asset for one reference instrument.
+
+    Rejected crosswalk rows are excluded. A missing row means callers may
+    stitch the reference source directly to a newer provider; multiple usable
+    rows are rejected because the middle history segment would be ambiguous.
+    """
+    mappings = [
+        mapping
+        for mapping in load_mappings(mapping_path)
+        if mapping.carver_instrument == reference_instrument_code
+        and mapping.mapping_status != "rejected"
+    ]
+    if not mappings:
+        return None
+    if len(mappings) != 1:
+        raise KeyError(
+            f"Reference instrument {reference_instrument_code!r} has multiple "
+            "non-rejected Globex crosswalk mappings"
+        )
+    return mappings[0].globex_asset
+
+
 @dataclass(frozen=True)
 class OverlapReport:
     summary: pl.DataFrame

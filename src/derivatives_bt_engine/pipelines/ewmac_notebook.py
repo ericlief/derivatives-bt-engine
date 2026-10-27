@@ -43,7 +43,7 @@ from derivatives_bt_engine.calculations.pnl import (
     summarize_return_significance,
 )
 from derivatives_bt_engine.data.fx_history import align_fx_to_history
-from derivatives_bt_engine.data.futures_overlap import load_mappings
+from derivatives_bt_engine.data.futures_overlap import resolve_reviewed_globex_asset
 from derivatives_bt_engine.data.futures_history import (
     DEFAULT_GLOBEX_DB_PATH,
     DEFAULT_PYSYSTEMTRADE_DB_PATH as DEFAULT_REFERENCE_DB_PATH,
@@ -994,20 +994,7 @@ def _resolve_globex_asset(pst_instr_code: str) -> str | None:
     recent IB segment. Multiple usable rows remain an error because source
     ownership would be ambiguous.
     """
-    mappings = [
-        mapping
-        for mapping in load_mappings()
-        if mapping.carver_instrument == pst_instr_code
-        and mapping.mapping_status != "rejected"
-    ]
-    if not mappings:
-        return None
-    if len(mappings) != 1:
-        raise KeyError(
-            f"PST instrument {pst_instr_code!r} has multiple non-rejected "
-            "Globex crosswalk mappings"
-        )
-    return mappings[0].globex_asset
+    return resolve_reviewed_globex_asset(pst_instr_code)
 
 
 def build_stitched_ewmac_notebook_view(

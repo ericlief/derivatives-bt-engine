@@ -198,6 +198,8 @@ PUBLIC_REPORT_RENAMES = {
     "historical_return_start": "hist_ret_start",
     "historical_return_end": "hist_ret_end",
     "historical_return_observations": "hist_ret_obs",
+    "historical_return_source": "hist_src",
+    "historical_instrument_code": "hist_instr_code",
     "historical_years": "hist_years",
     "historical_cumulative_net_percent": "hist_cum_net_pct",
     "historical_annual_mean_percent": "hist_ann_mean_pct",

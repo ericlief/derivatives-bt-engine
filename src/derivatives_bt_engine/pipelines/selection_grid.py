@@ -25,7 +25,13 @@ from zoneinfo import ZoneInfo
 import polars as pl
 
 from derivatives_bt_engine.data.futures_history import (
+    DEFAULT_FUTURES_CACHE_ROOT,
+    DEFAULT_GLOBEX_DB_PATH,
     DEFAULT_PYSYSTEMTRADE_DB_PATH,
+)
+from derivatives_bt_engine.data.ib_futures_dataloader import (
+    DEFAULT_BROKER_MAPPING_PATH,
+    DEFAULT_MAX_SOURCE_GAP_DAYS,
 )
 from derivatives_bt_engine.reports.formatting import (
     rename_public_report_columns,
@@ -226,6 +232,26 @@ def parse_args(argv=None) -> argparse.Namespace:
         help="Historical signal database used to construct EWMAC forecasts.",
     )
     parser.add_argument(
+        "--ib-history-db",
+        type=Path,
+        help=(
+            "Optional stored IB dated-contract database forwarded to every "
+            "scenario's final cash-performance report."
+        ),
+    )
+    parser.add_argument("--globex-db", type=Path, default=DEFAULT_GLOBEX_DB_PATH)
+    parser.add_argument(
+        "--broker-mapping", type=Path, default=DEFAULT_BROKER_MAPPING_PATH
+    )
+    parser.add_argument(
+        "--history-cache-root", type=Path, default=DEFAULT_FUTURES_CACHE_ROOT
+    )
+    parser.add_argument(
+        "--max-source-gap-days",
+        type=int,
+        default=DEFAULT_MAX_SOURCE_GAP_DAYS,
+    )
+    parser.add_argument(
         "--initial-capital-usd",
         type=float,
         help=(
@@ -394,6 +420,11 @@ def _selection_command(
     scenario_input: Path,
     candidates_output: Path,
     database: Path,
+    ib_history_database: Path | None,
+    globex_database: Path,
+    broker_mapping: Path,
+    history_cache_root: Path,
+    max_source_gap_days: int,
     initial_capital_usd: float | None,
 ) -> list[str]:
     """Build one auditable portfolio-selection subprocess command."""
@@ -431,6 +462,19 @@ def _selection_command(
     ]
     if initial_capital_usd is not None:
         command.extend(("--initial-capital-usd", str(initial_capital_usd)))
+    if ib_history_database is not None:
+        command.extend((
+            "--ib-history-db",
+            str(ib_history_database),
+            "--globex-db",
+            str(globex_database),
+            "--broker-mapping",
+            str(broker_mapping),
+            "--history-cache-root",
+            str(history_cache_root),
+            "--max-source-gap-days",
+            str(max_source_gap_days),
+        ))
     if scenario.maximum_instruments_per_cluster is not None:
         command.extend((
             "--max-instr-per-cluster",
@@ -642,8 +686,15 @@ def run(argv=None) -> tuple[Path, Path | None]:
     if not source.is_file() or source.suffix.lower() != ".parquet":
         raise ValueError("--input must be an exact existing Parquet report")
     database = args.history_db.expanduser().resolve()
+    ib_history_database = (
+        args.ib_history_db.expanduser().resolve()
+        if args.ib_history_db is not None
+        else None
+    )
     if args.initial_capital_usd is not None and args.initial_capital_usd <= 0:
         raise ValueError("--initial-capital-usd must be positive")
+    if args.max_source_gap_days < 0:
+        raise ValueError("--max-source-gap-days must be nonnegative")
 
     stamp = datetime.now(REPORT_TIMEZONE).strftime("%Y%m%d_%H%M%S")
     if args.run_dir is not None:
@@ -672,6 +723,11 @@ def run(argv=None) -> tuple[Path, Path | None]:
             scenario_input=scenario_input,
             candidates_output=candidates_output,
             database=database,
+            ib_history_database=ib_history_database,
+            globex_database=args.globex_db.expanduser().resolve(),
+            broker_mapping=args.broker_mapping.expanduser().resolve(),
+            history_cache_root=args.history_cache_root.expanduser().resolve(),
+            max_source_gap_days=args.max_source_gap_days,
             initial_capital_usd=args.initial_capital_usd,
         )
         planned.append((scenario, scenario_dir, command))

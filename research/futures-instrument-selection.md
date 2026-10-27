@@ -866,6 +866,9 @@ search:
 futures-build-selection \
   --report-dir results \
   --output-dir results/selection_baseline \
+  --history-db /home/dev/fin/db/pysystemtrade_reference.duckdb \
+  --ib-history-db /home/dev/fin/db/ib_futures_history.duckdb \
+  --globex-db /home/dev/fin/db/globex_mdp_3.0.duckdb \
   --initial-capital-usd 75000 \
   --target-vol 0.20 \
   --instrument-cost-limit-sr 0.01 \
@@ -1033,8 +1036,14 @@ baseline by default. The command writes:
 - `multi_speed_ewmac_selection_book_<timestamp>.parquet`, the last accepted
   book. Each row also reports its final-weight executable cash history through
   `hist_cum_net_pct`, `hist_ann_mean_pct`, `hist_ann_vol_pct`, `hist_sharpe`,
-  and `hist_iid_t_stat`, with sample dates, years, and observation count. These
-  are historical diagnostics and do not enter the greedy score.
+  and `hist_iid_t_stat`, with sample dates, years, observation count, and
+  `hist_src`. With `--ib-history-db`, these fields and the selected cash P&L
+  use stored reference/Globex/IB stitched histories; IB is not contacted and
+  the finished stitched view is cached under `--history-cache-root`. Without
+  that option they use reference history only. These historical diagnostics
+  do not enter the greedy score, whose construction history remains pinned to
+  `--history-db` in either mode. `--max-source-gap-days` controls only a direct
+  reference-to-IB handoff and masks the unknown return over an allowed gap.
 
 Use `--max-instr-per-cluster N` to run a static breadth-cap sensitivity. The
 cluster key is the reviewed `econ_subcls`, so `--max-instr-per-cluster 4`
