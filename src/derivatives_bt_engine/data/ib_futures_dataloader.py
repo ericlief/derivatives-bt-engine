@@ -7,12 +7,11 @@ duckdb-backed `daily` table -- shaped identically (same load_data() ->
 ts_event/open/high/low/close/volume) so Backtester can consume either
 source interchangeably. Used by strats/naked_futures.py's --use-ib-data.
 
-The roll-cycle helper separately downloads raw dated-contract histories for
-the prior and current calendar years plus the first configured contract in the
-next policy year. That forward contract keeps the held path defined after the
-last current-year roll. The overlapping histories retain contract identity and
-are inputs for a locally controlled continuous-futures stitch; they do not use
-IB's opaque continuous-contract adjustment.
+The roll-cycle helper separately downloads raw dated-contract histories from
+the configured priced cycle, including the contracts required by the carry
+offset. The forward horizon follows the held-contract roll offset. Those raw
+observations retain contract identity and feed locally controlled held, carry,
+and continuous streams; they do not use IB's opaque adjustment.
 
 Fetches a fixed 3-year lookback (DEFAULT_IB_DURATION), the same
 durationStr live.tsmom_rebalance._compute_signal already uses for its own
@@ -125,13 +124,17 @@ def _format_ib_multiplier(value: float) -> str:
 def _load_roll_config(
     pst_instr_code: str,
     db_path: Path | str,
-) -> tuple[str, int]:
-    """Return the held-contract cycle and roll offset for one instrument."""
+) -> tuple[str, int, int, str]:
+    """Return hold, timing, carry, and priced-cycle roll configuration."""
     con = duckdb.connect(str(db_path), read_only=True)
     try:
         row = con.execute(
             """
-            SELECT hold_roll_cycle, roll_offset_days
+            SELECT
+                hold_roll_cycle,
+                roll_offset_days,
+                carry_offset,
+                priced_roll_cycle
             FROM raw.roll_config
             WHERE instrument_code = ?
             """,
@@ -141,7 +144,7 @@ def _load_roll_config(
         con.close()
     if row is None:
         raise KeyError(f"No roll configuration for PST instrument {pst_instr_code}")
-    return str(row[0]), int(row[1])
+    return str(row[0]), int(row[1]), int(row[2]), str(row[3])
 
 
 def _is_monthly_contract_symbol(
@@ -237,6 +240,93 @@ def _roll_aware_duration(duration: str, roll_offset_days: int) -> str:
     return f"{math.ceil(required_days / 365)} Y"
 
 
+def _shift_contract_month(
+    contract_month: str,
+    priced_roll_cycle: str,
+    offset: int,
+) -> str:
+    """Shift a YYYYMM contract by positions in the configured priced cycle."""
+    year = int(contract_month[:4])
+    month = int(contract_month[4:6])
+    cycle_months = [CME_MONTH_LETTERS[letter] for letter in priced_roll_cycle]
+    try:
+        cycle_index = cycle_months.index(month)
+    except ValueError as exc:
+        raise ValueError(
+            f"contract month {contract_month} is absent from priced cycle "
+            f"{priced_roll_cycle}"
+        ) from exc
+    shifted_index = cycle_index + offset
+    shifted_year = year + shifted_index // len(cycle_months)
+    shifted_month = cycle_months[shifted_index % len(cycle_months)]
+    return f"{shifted_year:04d}{shifted_month:02d}"
+
+
+def _build_configured_carry_frame(
+    raw: pl.DataFrame,
+    selected: pl.DataFrame,
+    *,
+    priced_roll_cycle: str,
+    carry_offset: int,
+) -> pl.DataFrame:
+    """Join configured carry-contract marks to selected held-contract rows."""
+    if selected.is_empty():
+        return pl.DataFrame()
+    carry_months = [
+        _shift_contract_month(
+            str(contract_month),
+            priced_roll_cycle,
+            carry_offset,
+        )
+        for contract_month in selected.get_column("contract_month").to_list()
+    ]
+    current = selected.select(
+        "date",
+        "source_timestamp",
+        pl.col("mark_price").alias("current_price"),
+        (pl.col("contract_month").cast(pl.String) + "00").alias(
+            "current_contract"
+        ),
+    ).with_columns(
+        pl.Series("carry_contract_month", carry_months, dtype=pl.String)
+    )
+    carry_marks = raw.select(
+        "date",
+        pl.col("contract_month")
+        .cast(pl.String)
+        .alias("carry_contract_month"),
+        pl.col("mark_price").alias("carry_price"),
+    ).unique(
+        subset=["date", "carry_contract_month"],
+        keep="last",
+        maintain_order=True,
+    )
+    return (
+        current.join(
+            carry_marks,
+            on=["date", "carry_contract_month"],
+            how="left",
+        )
+        .with_columns(
+            (pl.col("carry_contract_month") + "00").alias("carry_contract"),
+            pl.when(pl.col("carry_price").is_null())
+            .then(pl.lit("missing_carry_mark"))
+            .otherwise(pl.lit(""))
+            .alias("quality_flag"),
+        )
+        .select(
+            "date",
+            "source_timestamp",
+            "current_price",
+            "current_contract",
+            "carry_price",
+            "carry_contract",
+            "quality_flag",
+        )
+        .sort("date")
+    )
+
+
 def load_roll_cycle_ib_contract_history(
     ib: IBPySync | None,
     *,
@@ -252,7 +342,7 @@ def load_roll_cycle_ib_contract_history(
     history_db_path: Path | str = DEFAULT_IB_FUTURES_HISTORY_DB_PATH,
     update_history: bool = True,
 ) -> pl.DataFrame:
-    """Download and concatenate dated IB histories on a configured roll cycle.
+    """Download priced-cycle IB histories for held and carry construction.
 
     Parameters
     ----------
@@ -265,9 +355,9 @@ def load_roll_cycle_ib_contract_history(
         Date defining the current contract year. Defaults to today.
     prior_years
         Number of complete calendar years before ``as_of.year`` to include.
-        The default requests the prior and current contract years. The first
-        configured contract month in the following year is also requested so
-        a pre-expiry roll from the final current-year contract has a successor.
+        The default starts with the prior and current priced-contract years.
+        The forward contract horizon follows the configured hold-roll offset,
+        and carry companions follow the configured priced-cycle offset.
     duration
         IB history duration requested separately for every resolved contract.
         It is expanded to whole years when the configured roll offset requires
@@ -309,7 +399,12 @@ def load_roll_cycle_ib_contract_history(
     if mapping.height != 1:
         raise KeyError(f"No unique broker mapping for PST instrument {pst_instr_code}")
     broker = mapping.row(0, named=True)
-    hold_roll_cycle, roll_offset_days = _load_roll_config(
+    (
+        hold_roll_cycle,
+        roll_offset_days,
+        carry_offset,
+        priced_roll_cycle,
+    ) = _load_roll_config(
         pst_instr_code,
         db_path,
     )
@@ -320,6 +415,17 @@ def load_roll_cycle_ib_contract_history(
         raise ValueError(
             f"{pst_instr_code}: invalid hold-roll cycle letters "
             f"{sorted(invalid_cycle)}"
+        )
+    invalid_priced_cycle = set(priced_roll_cycle) - set(CME_MONTH_LETTERS)
+    if invalid_priced_cycle:
+        raise ValueError(
+            f"{pst_instr_code}: invalid priced-roll cycle letters "
+            f"{sorted(invalid_priced_cycle)}"
+        )
+    if not set(hold_roll_cycle).issubset(set(priced_roll_cycle)):
+        raise ValueError(
+            f"{pst_instr_code}: hold-roll cycle {hold_roll_cycle} is not a "
+            f"subset of priced-roll cycle {priced_roll_cycle}"
         )
 
     effective_duration = _roll_aware_duration(duration, roll_offset_days)
@@ -333,19 +439,33 @@ def load_roll_cycle_ib_contract_history(
         effective_as_of.year - prior_years,
         forward_year + 1,
     )
-    contract_months = [
+    base_contract_months = [
         f"{year:04d}{CME_MONTH_LETTERS[month_letter]:02d}"
         for year in years
-        for month_letter in hold_roll_cycle
+        for month_letter in priced_roll_cycle
     ]
     # A calendar policy can roll out of the last contract in the requested
     # forward year. Append its first successor rather than every contract in
     # another year; the latter would create avoidable IB security-definition
     # failures for contracts not listed yet.
-    contract_months.append(
+    base_contract_months.append(
         f"{forward_year + 1:04d}"
         f"{CME_MONTH_LETTERS[hold_roll_cycle[0]]:02d}"
     )
+    # Acquire the raw priced universe independently from the held path. Add
+    # each configured carry companion, including any contract just outside the
+    # base year range, so later policy construction never invents carry data.
+    contract_months = sorted({
+        *base_contract_months,
+        *(
+            _shift_contract_month(
+                contract_month,
+                priced_roll_cycle,
+                carry_offset,
+            )
+            for contract_month in base_contract_months
+        ),
+    })
     ib_symbol = str(broker['ib_symbol'])
     exchange = str(broker['ib_exchange'])
     currency = str(broker['ib_currency'])
@@ -361,11 +481,14 @@ def load_roll_cycle_ib_contract_history(
     )
     logger.info(
         "ib_dated_history start instrument=%s ib_symbol=%s exchange=%s "
-        "hold_roll_cycle=%s contract_months=%s duration=%s requested_duration=%s",
+        "hold_roll_cycle=%s priced_roll_cycle=%s carry_offset=%s "
+        "contract_months=%s duration=%s requested_duration=%s",
         pst_instr_code,
         ib_symbol,
         exchange,
         hold_roll_cycle,
+        priced_roll_cycle,
+        carry_offset,
         contract_months,
         effective_duration,
         duration,
@@ -507,6 +630,8 @@ def load_roll_cycle_ib_contract_history(
         result.with_columns(
             pl.lit(hold_roll_cycle).alias('hold_roll_cycle'),
             pl.lit(roll_offset_days).alias('roll_offset_days'),
+            pl.lit(carry_offset).alias('carry_offset'),
+            pl.lit(priced_roll_cycle).alias('priced_roll_cycle'),
         )
         .unique(
             subset=['ib_contract_id', 'date'],
@@ -534,8 +659,9 @@ def build_ib_contract_history(
 
     The input is the dataframe returned by
     :func:`load_roll_cycle_ib_contract_history`. The configured hold cycle and
-    roll offset select one dated contract per session. Contract-consistent
-    daily changes then produce signal, mark, and additive-price streams.
+    roll offset select one dated contract per session; the priced cycle and
+    carry offset select its carry companion. Contract-consistent daily changes
+    then produce signal, mark, carry, and additive-price streams.
 
     Parameters
     ----------
@@ -552,11 +678,14 @@ def build_ib_contract_history(
         'date',
         'close',
         'volume',
+        'contract_month',
         'expiration',
         'ib_contract_id',
         'pst_instr_code',
         'hold_roll_cycle',
         'roll_offset_days',
+        'carry_offset',
+        'priced_roll_cycle',
     }
     missing = required - set(contract_history.columns)
     if missing:
@@ -570,6 +699,8 @@ def build_ib_contract_history(
         'pst_instr_code',
         'hold_roll_cycle',
         'roll_offset_days',
+        'carry_offset',
+        'priced_roll_cycle',
     )
     identities = contract_history.select(identity_columns).unique()
     if identities.height != 1:
@@ -578,6 +709,8 @@ def build_ib_contract_history(
         )
     identity = identities.row(0, named=True)
     pst_instr_code = str(identity['pst_instr_code'])
+    carry_offset = int(identity['carry_offset'])
+    priced_roll_cycle = str(identity['priced_roll_cycle'])
     policy = ContractRollPolicy(
         policy_id=f"configured_{pst_instr_code}",
         hold_roll_cycle=str(identity['hold_roll_cycle']),
@@ -615,7 +748,13 @@ def build_ib_contract_history(
         raise ValueError(
             f"roll policy selected no IB rows for PST instrument {pst_instr_code}"
         )
-    signal, marks, carry, panama = build_contract_history_streams(selected)
+    signal, marks, _, panama = build_contract_history_streams(selected)
+    carry = _build_configured_carry_frame(
+        raw,
+        selected,
+        priced_roll_cycle=priced_roll_cycle,
+        carry_offset=carry_offset,
+    )
     return FuturesHistory(
         source='ib',
         instrument_code=pst_instr_code,
@@ -627,6 +766,8 @@ def build_ib_contract_history(
         metadata={
             'hold_roll_cycle': policy.hold_roll_cycle,
             'roll_offset_days': policy.roll_offset_days,
+            'carry_offset': carry_offset,
+            'priced_roll_cycle': priced_roll_cycle,
             'contracts': contract_history.get_column(
                 'ib_contract_id'
             ).n_unique(),

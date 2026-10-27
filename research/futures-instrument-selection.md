@@ -1059,6 +1059,11 @@ baseline by default. The command writes:
   controls only a direct reference-to-IB handoff and masks the unknown return
   over an allowed gap.
 
+Raw IB history acquisition follows each instrument's `priced_roll_cycle` and
+includes its configured carry companions. The final signal remains selected
+under `hold_roll_cycle`; these raw bars can therefore support later holding
+policy comparisons without redownloading omitted contract months.
+
 Use `--max-instr-per-cluster N` to run a static breadth-cap sensitivity. The
 cluster key is the reviewed `econ_subcls`, so `--max-instr-per-cluster 4`
 prevents a fifth `grains` instrument from entering a trial book. A rejected

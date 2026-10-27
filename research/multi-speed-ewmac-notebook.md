@@ -391,6 +391,10 @@ The dated-contract request expands its forward contract years and per-contract
 bar duration for policies that roll far before expiry. A `-700` day STIR
 policy therefore requests contracts about two years forward and at least two
 years of bars; a cached one-year fetch does not count as complete coverage.
+Raw IB acquisition uses `priced_roll_cycle`, then the derived history applies
+`hold_roll_cycle` and joins the carry contract identified by `carry_offset`.
+For `CRUDE_W`, this retains monthly raw contracts while the signal holds only
+December and its carry stream uses the configured adjacent priced contract.
 The first retained post-gap row is marked in `view.reference` and `view.cash`
 with `src_gap_before=True`, the missing `src_gap_days`, and
 `gap_pnl_omitted=True`. Its own within-source one-day return remains valid.
