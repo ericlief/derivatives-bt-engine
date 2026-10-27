@@ -25,7 +25,7 @@ def test_round_public_report_formats_phase2_money_and_diagnostics():
 
     assert rounded["ann_dvol"][0] == pytest.approx(610.22)
     assert rounded["risk_traded_day"][0] == pytest.approx(56.33)
-    assert rounded["net_pnl"][0] == pytest.approx(123.46)
+    assert rounded["net_pnl"][0] == pytest.approx(123.456)
     assert rounded["weight"][0] == pytest.approx(0.0251)
     assert rounded["net_sr"][0] == pytest.approx(0.4409)
     assert rounded["rank"][0] == 9
@@ -48,6 +48,22 @@ def test_round_public_report_keeps_reproduction_rates_at_six_places():
     assert rounded["ann_pct_vol"][0] == pytest.approx(1.234568)
     assert rounded["con_px"][0] == pytest.approx(123.456789)
     assert rounded["trade_cost_pct"][0] == pytest.approx(-0.000126)
+
+
+def test_cash_report_preserves_small_point_changes_and_pnl():
+    """Small cash audit contributions remain visibly nonzero in Parquet."""
+    report = pl.DataFrame({
+        "point_change": [0.00001234567],
+        "cash_gross_pnl_usd": [0.00123456],
+        "cash_net_pnl_usd": [-0.00123456],
+        "cash_gross_pct": [0.00001234567],
+    })
+
+    public = round_public_report(rename_public_report_columns(report))
+
+    assert public.row(0) == pytest.approx(
+        (0.000012, 0.0012, -0.0012, 0.000012)
+    )
 
 
 def test_public_report_uses_percentage_points_for_portfolio_cash_curve():
@@ -108,7 +124,7 @@ def test_joined_cash_audit_columns_drop_cash_prefix():
         "net_pct",
         "cum_net_pnl",
     ]
-    assert public.row(0) == (True, 12.35, 0.123457, 20.0)
+    assert public.row(0) == (True, 12.346, 0.123457, 20.0)
 
 
 def test_public_report_renames_buffer_parameters_at_boundary():

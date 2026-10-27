@@ -280,9 +280,9 @@ PUBLIC_COLUMN_TOKEN_ABBREVIATIONS = {
 }
 
 
-# USD amounts are reported to cents. The registry includes descriptive
-# internal names and their compact public-schema equivalents because reports
-# can apply formatting immediately before or after their rename boundary.
+# USD amounts generally use cents. The registry includes descriptive internal
+# names and compact public-schema equivalents because reports can apply
+# formatting immediately before or after their rename boundary.
 TWO_DECIMAL_MONEY_COLUMNS = {
     "notional_native_per_contract",
     "notional_per_contract",
@@ -359,10 +359,8 @@ TWO_DECIMAL_MONEY_COLUMNS = {
     "min_mkt_risk_vol_usd_day",
     "mkt_risk_vol_usd_day",
     "gross_pnl_native",
-    "gross_pnl_usd",
     "cost_pnl_native",
     "cost_pnl_usd",
-    "net_pnl_usd",
     "risk_budget_usd",
     "ref_budget_usd",
     "ref_ann_risk_usd",
@@ -390,36 +388,20 @@ TWO_DECIMAL_MONEY_COLUMNS = {
     "ann_trade_cost",
     "ann_roll_cost",
     "ann_cost",
-    "cash_gross_pnl_usd",
     "cash_trade_cost_usd",
     "cash_roll_cost_usd",
-    "cash_net_pnl_usd",
-    "gross_pnl_usd",
     "trade_cost_usd",
     "roll_cost_usd",
-    "net_pnl_usd",
-    "cum_gross_pnl_usd",
-    "cum_net_pnl_usd",
-    "gross_pnl",
     "trade_cost",
     "roll_cost",
-    "net_pnl",
-    "cum_gross_pnl",
-    "cum_net_pnl",
     "portfolio_cash_gross_pnl_usd",
     "portfolio_cash_trade_cost_usd",
     "portfolio_cash_roll_cost_usd",
     "portfolio_cash_net_pnl_usd",
     "cumulative_portfolio_cash_gross_pnl_usd",
     "cumulative_portfolio_cash_net_pnl_usd",
-    "cum_cash_gross_pnl_usd",
-    "cum_cash_net_pnl_usd",
-    "gross_pnl",
     "trade_cost",
     "roll_cost",
-    "net_pnl",
-    "cum_gross_pnl",
-    "cum_net_pnl",
     "portfolio_gross_equity_usd",
     "portfolio_net_equity_usd",
     "gross_equity_usd",
@@ -440,6 +422,25 @@ TWO_DECIMAL_MONEY_COLUMNS = {
     "cum_port_net",
     "port_gross_equity",
     "port_net_equity",
+}
+
+# Daily instrument P&L can be sub-cent when marks or FX are fractional. Keep
+# extra precision for these audit series so a small nonzero contribution does
+# not display as zero; transaction costs and account-level dollar totals remain
+# at cents.
+FOUR_DECIMAL_PNL_COLUMNS = {
+    "gross_pnl_usd",
+    "net_pnl_usd",
+    "cum_gross_pnl_usd",
+    "cum_net_pnl_usd",
+    "cash_gross_pnl_usd",
+    "cash_net_pnl_usd",
+    "cum_cash_gross_pnl_usd",
+    "cum_cash_net_pnl_usd",
+    "gross_pnl",
+    "net_pnl",
+    "cum_gross_pnl",
+    "cum_net_pnl",
 }
 
 
@@ -472,6 +473,7 @@ def rename_public_report_columns(report: pl.DataFrame) -> pl.DataFrame:
 SIX_DECIMAL_COLUMNS = {
     "fx_to_usd",
     "con_px",
+    "point_change",
     "daily_return_vol",
     "annual_return_vol",
     "cur_fx_to_usd",
@@ -540,10 +542,11 @@ SIX_DECIMAL_COLUMNS = {
 def round_public_report(report: pl.DataFrame) -> pl.DataFrame:
     """Return a presentation-rounded copy of a public report dataframe.
 
-    Monetary values use two decimals, FX, return-volatility rates, and
-    percentage-point returns use six, and all other floating-point
-    diagnostics use four. Integer, boolean, temporal, and identifier columns
-    are unchanged.
+    Monetary values use two decimals except per-instrument gross/net P&L, which
+    uses four to retain sub-cent audit values. Point changes, FX,
+    return-volatility rates, and percentage-point returns use six; other
+    floating-point diagnostics use four. Integer, boolean, temporal, and
+    identifier columns are unchanged.
     The input frame is not mutated and should remain the calculation source.
 
     Parameters
@@ -563,6 +566,8 @@ def round_public_report(report: pl.DataFrame) -> pl.DataFrame:
             continue
         if name in TWO_DECIMAL_MONEY_COLUMNS:
             decimals = 2
+        elif name in FOUR_DECIMAL_PNL_COLUMNS:
+            decimals = 4
         elif name in SIX_DECIMAL_COLUMNS:
             decimals = 6
         else:
