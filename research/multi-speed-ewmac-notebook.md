@@ -387,6 +387,10 @@ overlap; larger gaps still fail rather than fabricating history.
 IB cycle membership uses the listed contract month, while the actual last
 trade date controls the roll cutoff. This keeps December contracts such as CL
 in a `Z` policy even though their actual expiry occurs in November.
+The dated-contract request expands its forward contract years and per-contract
+bar duration for policies that roll far before expiry. A `-700` day STIR
+policy therefore requests contracts about two years forward and at least two
+years of bars; a cached one-year fetch does not count as complete coverage.
 The first retained post-gap row is marked in `view.reference` and `view.cash`
 with `src_gap_before=True`, the missing `src_gap_days`, and
 `gap_pnl_omitted=True`. Its own within-source one-day return remains valid.

@@ -1049,7 +1049,11 @@ baseline by default. The command writes:
   cannot be built from stored data, or `--ib-history-live update` to refresh
   every selected signal history before reporting. Connection overrides are
   `--ib-host`, repeatable `--ib-port`, and `--ib-client-id`. Without
-  `--ib-history-db` the reports use reference history only. These historical
+  `--ib-history-db` the reports use reference history only. If one selected
+  history remains unavailable after the configured stored/live attempt, its
+  cash audit uses the long reference curve and reports
+  `hist_src=reference_fallback`; other selected histories continue normally.
+  These historical
   diagnostics do not enter the greedy score, whose construction history
   remains pinned to `--history-db` in either mode. `--max-source-gap-days`
   controls only a direct reference-to-IB handoff and masks the unknown return

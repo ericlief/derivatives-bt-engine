@@ -1128,33 +1128,45 @@ def _run_complete_selection(
 
         try:
             for history_code in selected_history_codes:
-                if args.ib_history_live == "update":
-                    stitched_history = load_stitched_history(
-                        history_code,
-                        ib=connected_ib(),
-                        update_history=True,
-                    )
-                else:
-                    try:
-                        stitched_history = load_stitched_history(
-                            history_code,
-                            ib=None,
-                            update_history=False,
-                        )
-                    except Exception as exc:
-                        if args.ib_history_live != "missing":
-                            raise
-                        logger.info(
-                            "selection_stitched_history live_retry "
-                            "hist_instr_code=%s reason=%s",
-                            history_code,
-                            exc,
-                        )
+                try:
+                    if args.ib_history_live == "update":
                         stitched_history = load_stitched_history(
                             history_code,
                             ib=connected_ib(),
                             update_history=True,
                         )
+                    else:
+                        try:
+                            stitched_history = load_stitched_history(
+                                history_code,
+                                ib=None,
+                                update_history=False,
+                            )
+                        except Exception as exc:
+                            if args.ib_history_live != "missing":
+                                raise
+                            logger.info(
+                                "selection_stitched_history live_retry "
+                                "hist_instr_code=%s reason=%s",
+                                history_code,
+                                exc,
+                            )
+                            stitched_history = load_stitched_history(
+                                history_code,
+                                ib=connected_ib(),
+                                update_history=True,
+                            )
+                except Exception as exc:
+                    # Preserve the valid long reference curve when a broker
+                    # source is unavailable, and expose that fallback in the
+                    # public historical-return source field.
+                    logger.warning(
+                        "selection_stitched_history unavailable "
+                        "hist_instr_code=%s fallback=reference reason=%s",
+                        history_code,
+                        exc,
+                    )
+                    continue
                 stitched_components[history_code] = build_ewmac_component_frame(
                     stitched_history,
                     pooled_rules,
@@ -1167,6 +1179,9 @@ def _run_complete_selection(
         for symbol in selection.selected:
             row = source_rows[symbol]
             history_code = stitched_history_code_by_symbol[symbol]
+            if history_code not in stitched_components:
+                historical_return_sources[symbol] = "reference_fallback"
+                continue
             rules = _parse_rules(str(row["elig_ewmac_rules"] or ""))
             stitched_result = engine.combine(
                 stitched_components[history_code],

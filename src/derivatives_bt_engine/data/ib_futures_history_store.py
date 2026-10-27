@@ -159,13 +159,23 @@ class IBFuturesHistoryStore:
         bar_size: str,
         what_to_show: str,
         use_rth: bool,
+        duration: str | None = None,
     ) -> set[str]:
-        """Return expired contract months already fetched to completion."""
+        """Return expired contract months already fetched to completion.
+
+        When ``duration`` is supplied, only a successful request with that
+        coverage satisfies the lookup. This permits a longer request to
+        backfill a contract previously completed with shorter coverage.
+        """
         self.initialize()
         con = duckdb.connect(str(Path(self.db_path).expanduser()), read_only=True)
         try:
+            duration_filter = "AND duration = ?" if duration is not None else ""
+            parameters = [pst_instr_code, bar_size, what_to_show, use_rth]
+            if duration is not None:
+                parameters.append(duration)
             rows = con.execute(
-                """
+                f"""
                 SELECT DISTINCT contract_month
                 FROM raw.fetch_log
                 WHERE pst_instr_code = ?
@@ -174,8 +184,9 @@ class IBFuturesHistoryStore:
                   AND use_rth = ?
                   AND status = 'success'
                   AND complete_contract
+                  {duration_filter}
                 """,
-                [pst_instr_code, bar_size, what_to_show, use_rth],
+                parameters,
             ).fetchall()
         finally:
             con.close()

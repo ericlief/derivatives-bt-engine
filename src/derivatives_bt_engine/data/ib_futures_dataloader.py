@@ -218,6 +218,25 @@ def _contract_expiration_date(detail, contract_month: str) -> date:
     return date(year, month, calendar.monthrange(year, month)[1])
 
 
+def _duration_days(duration: str) -> int | None:
+    """Return approximate calendar coverage for an IB duration string."""
+    match = re.fullmatch(r"\s*(\d+)\s*([YMWD])\s*", duration.upper())
+    if match is None:
+        return None
+    amount = int(match.group(1))
+    unit_days = {"Y": 365, "M": 30, "W": 7, "D": 1}
+    return amount * unit_days[match.group(2)]
+
+
+def _roll_aware_duration(duration: str, roll_offset_days: int) -> str:
+    """Expand dated-contract coverage enough to reach the policy roll date."""
+    required_days = max(365, abs(roll_offset_days))
+    supplied_days = _duration_days(duration)
+    if supplied_days is not None and supplied_days >= required_days:
+        return duration
+    return f"{math.ceil(required_days / 365)} Y"
+
+
 def load_roll_cycle_ib_contract_history(
     ib: IBPySync | None,
     *,
@@ -251,6 +270,8 @@ def load_roll_cycle_ib_contract_history(
         a pre-expiry roll from the final current-year contract has a successor.
     duration
         IB history duration requested separately for every resolved contract.
+        It is expanded to whole years when the configured roll offset requires
+        an earlier part of the contract's trading life.
     bar_size, what_to_show, use_rth
         Values forwarded to ``IBPySync.get_historical_bars``.
     db_path, mapping_path
@@ -301,20 +322,28 @@ def load_roll_cycle_ib_contract_history(
             f"{sorted(invalid_cycle)}"
         )
 
-    years = range(effective_as_of.year - prior_years, effective_as_of.year + 1)
+    effective_duration = _roll_aware_duration(duration, roll_offset_days)
+    # Far-deferred STIR policies can hold contracts several years before
+    # expiry. Include contract years through that forward horizon; otherwise
+    # no requested contract can be eligible on current observation dates.
+    forward_year = (
+        effective_as_of + timedelta(days=abs(roll_offset_days))
+    ).year
+    years = range(
+        effective_as_of.year - prior_years,
+        forward_year + 1,
+    )
     contract_months = [
         f"{year:04d}{CME_MONTH_LETTERS[month_letter]:02d}"
         for year in years
         for month_letter in hold_roll_cycle
     ]
-    # A calendar policy can roll out of its final current-year contract before
-    # year end. Annual December crude is the clearest case: with a -40 day
-    # offset, late-October observations already belong to next December. Only
-    # the first configured month of the next year is needed to close that
-    # boundary; requesting every next-year month would create avoidable IB
-    # security-definition failures for contracts not listed yet.
+    # A calendar policy can roll out of the last contract in the requested
+    # forward year. Append its first successor rather than every contract in
+    # another year; the latter would create avoidable IB security-definition
+    # failures for contracts not listed yet.
     contract_months.append(
-        f"{effective_as_of.year + 1:04d}"
+        f"{forward_year + 1:04d}"
         f"{CME_MONTH_LETTERS[hold_roll_cycle[0]]:02d}"
     )
     ib_symbol = str(broker['ib_symbol'])
@@ -328,15 +357,17 @@ def load_roll_cycle_ib_contract_history(
         bar_size=bar_size,
         what_to_show=what_to_show,
         use_rth=use_rth,
+        duration=effective_duration,
     )
     logger.info(
         "ib_dated_history start instrument=%s ib_symbol=%s exchange=%s "
-        "hold_roll_cycle=%s contract_months=%s duration=%s",
+        "hold_roll_cycle=%s contract_months=%s duration=%s requested_duration=%s",
         pst_instr_code,
         ib_symbol,
         exchange,
         hold_roll_cycle,
         contract_months,
+        effective_duration,
         duration,
     )
 
@@ -397,7 +428,7 @@ def load_roll_cycle_ib_contract_history(
             bars = ib.get_historical_bars(
                 contract,
                 end_date=end_date,
-                duration=duration,
+                duration=effective_duration,
                 bar_size=bar_size,
                 what_to_show=what_to_show,
                 use_rth=use_rth,
@@ -406,7 +437,7 @@ def load_roll_cycle_ib_contract_history(
             store.log_fetch_failure(
                 pst_instr_code=pst_instr_code,
                 contract_month=contract_month,
-                duration=duration,
+                duration=effective_duration,
                 bar_size=bar_size,
                 what_to_show=what_to_show,
                 use_rth=use_rth,
@@ -452,7 +483,7 @@ def load_roll_cycle_ib_contract_history(
                 'trading_class': str(contract.tradingClass),
             },
             bars=bars,
-            duration=duration,
+            duration=effective_duration,
             bar_size=bar_size,
             what_to_show=what_to_show,
             use_rth=use_rth,
