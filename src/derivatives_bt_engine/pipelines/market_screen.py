@@ -3432,6 +3432,9 @@ PUBLIC_REPORT_RENAMES = {
     "bid": "snap_bid",
     "ask": "snap_ask",
     "full_spread_points": "snap_spread_points",
+    # The persisted acquisition snapshot retains the two-sided quote; unlike
+    # the selection report's snap_spread_points this is not divided by two.
+    "snapshot_full_spread_points": "snap_full_spread_pts",
     # These fields are calculated while building the raw quote row, before the
     # account-specific what-if preview is attached.  Label the configured
     # commission explicitly so it cannot be mistaken for the selected IB fee.
@@ -3567,6 +3570,12 @@ def _public_report_schema(report: pl.DataFrame) -> pl.DataFrame:
         for column in ("carver_spread_points", "risk_daily_return_vol")
         if column in report.columns
     )
+    report = _rename_market_public_columns(report)
+    return _order_market_public_columns(report)
+
+
+def _rename_market_public_columns(report: pl.DataFrame) -> pl.DataFrame:
+    """Apply the market-screen and centralized public column vocabulary."""
     renames = {
         name: _compact_public_column_name(name)
         for name in report.columns
@@ -3622,6 +3631,11 @@ def _public_report_schema(report: pl.DataFrame) -> pl.DataFrame:
         report = report.drop(sorted(existing_targets))
     report = report.rename(renames)
 
+    return report
+
+
+def _order_market_public_columns(report: pl.DataFrame) -> pl.DataFrame:
+    """Put identity, executable inputs, and costs before audit alternatives."""
     selected_first = [
         "symbol",
         "pst_instr_code",
@@ -4116,9 +4130,10 @@ def _market_snapshot_frame(
     Account-specific IB what-if commission is the primary commission when it
     is usable.  The configured commission used by the preliminary quote-row
     calculation remains available under an explicit ``ref_`` name at the end
-    of the frame.  Keeping both values is useful for auditing, but their names
+    of the frame. Keeping both values is useful for auditing, but their names
     and order must not imply that the stale configured value drives the later
-    selection screen.
+    selection screen. The persisted columns use the shared compact public
+    vocabulary while numerical values retain acquisition precision.
     """
     snapshot = pl.DataFrame(rows, infer_schema_length=None).with_columns(
         pl.lit(generated_at).alias("market_snapshot_generated_at_ct"),
@@ -4209,57 +4224,15 @@ def _market_snapshot_frame(
         for source, target in reference_renames.items()
         if source in snapshot.columns
     })
-
-    primary_columns = [
-        "symbol",
-        "pysystemtrade_instrument_code",
-        "signal_symbol",
-        "description",
-        "asset_class",
-        "economic_subclass",
-        "region",
-        "contract_id",
-        "expiration",
-        "ib_symbol",
-        "ib_exchange",
-        "ib_availability",
-        "price",
-        "price_source",
-        "currency",
-        "multiplier",
-        "notional_per_contract",
-        "annual_dollar_vol_per_contract",
-        "selected_one_way_spread_points",
-        "selected_spread_source",
-        "commission_amount",
-        "commission_currency",
-        "commission_usd",
-        "commission_source",
-        "ib_whatif_attempted",
-        "ib_whatif_eligible",
-        "ib_whatif_initial_margin_usd",
-        "ib_whatif_maintenance_margin_usd",
-    ]
-    primary = [name for name in primary_columns if name in snapshot.columns]
-    primary_set = set(primary)
-    reference_tail = [
-        name for name in snapshot.columns
-        if name.startswith("ref_") or name.startswith("snap_ref_")
-    ]
-    reference_set = set(reference_tail)
-    middle = [
-        name for name in snapshot.columns
-        if name not in primary_set and name not in reference_set
-    ]
-    ordered = snapshot.select(*primary, *middle, *reference_tail)
-    # Snapshots retain their established full-precision field vocabulary,
-    # while identity abbreviations still come from the shared report map.
-    identity_rename = {
-        name: CENTRAL_REPORT_RENAMES[name]
-        for name in ("pysystemtrade_instrument_code",)
-        if name in ordered.columns and name in CENTRAL_REPORT_RENAMES
-    }
-    return ordered.rename(identity_rename) if identity_rename else ordered
+    # A snapshot is the full-precision acquisition artifact, but its persisted
+    # column names and ordering follow the same public schema as the screen.
+    # Preserve the raw two-sided quote under a distinct name; the screen's
+    # ``snap_spread_points`` is a one-way value derived later.
+    if "full_spread_points" in snapshot.columns:
+        snapshot = snapshot.rename({
+            "full_spread_points": "snapshot_full_spread_points"
+        })
+    return _order_market_public_columns(_rename_market_public_columns(snapshot))
 
 
 def _emit_market_snapshot(
@@ -4339,7 +4312,7 @@ def _load_market_snapshot(path: Path) -> pl.DataFrame:
     resolved = _resolve_market_snapshot_path(path)
     if resolved.suffix.lower() != ".parquet":
         raise ValueError("--snapshot-input must be a .parquet file")
-    snapshot = pl.read_parquet(resolved)
+    snapshot = _restore_market_snapshot_columns(pl.read_parquet(resolved))
     required = {
         "symbol",
         "annual_dollar_vol_per_contract",
@@ -4359,6 +4332,72 @@ def _load_market_snapshot(path: Path) -> pl.DataFrame:
     )
     print(f"Using market snapshot {resolved}")
     return snapshot
+
+
+def _restore_market_snapshot_columns(snapshot: pl.DataFrame) -> pl.DataFrame:
+    """Restore calculation names after reading the compact snapshot schema.
+
+    Snapshot Parquets expose public compact names; the downstream screen
+    calculations continue to use descriptive internal names. Older snapshots
+    with internal names pass through unchanged.
+    """
+    source_candidates = (
+        set(PUBLIC_REPORT_RENAMES)
+        | set(CENTRAL_REPORT_RENAMES)
+        | {
+            "description", "asset_class", "economic_subclass", "region",
+            "contract_id", "ib_symbol", "ib_exchange", "ib_currency",
+            "ib_multiplier", "ib_availability", "price", "price_source",
+            "currency", "multiplier", "notional_per_contract",
+            "annual_dollar_vol_per_contract", "avg_daily_volume_contracts",
+            "selected_one_way_spread_points", "selected_spread_source",
+            "commission_amount", "commission_currency", "commission_usd",
+            "commission_source", "ib_whatif_initial_margin_usd",
+            "ib_whatif_maintenance_margin_usd", "ib_whatif_commission",
+            "ib_whatif_commission_currency", "ib_whatif_commission_usd",
+            "full_spread_points", "snapshot_full_spread_points",
+            "bid", "ask", "quote_timestamp_ct", "quote_market_data_type",
+            "quote_market_data_attempts", "quote_error_codes",
+            "quote_selected_error_codes", "spread_quality",
+        }
+    )
+    sources_by_public_name: dict[str, list[str]] = {}
+    for source in source_candidates:
+        public_name = _compact_public_column_name(source)
+        if public_name != source:
+            sources_by_public_name.setdefault(public_name, []).append(source)
+
+    # A few compact names are shared by generic screen columns and account
+    # what-if fields. The acquisition snapshot owns the latter when present.
+    snapshot_preference = {
+        "comm_usd": "commission_usd",
+        "init_marg": "ib_whatif_initial_margin_usd",
+        "init_marg_native": "ib_whatif_initial_margin",
+        "maint_marg": "ib_whatif_maintenance_margin_usd",
+        "maint_marg_native": "ib_whatif_maintenance_margin",
+    }
+    renames: dict[str, str] = {}
+    for public_name in snapshot.columns:
+        candidates = sources_by_public_name.get(public_name, [])
+        if not candidates:
+            continue
+        preferred = snapshot_preference.get(public_name)
+        if preferred in candidates:
+            source = preferred
+        elif len(candidates) == 1:
+            source = candidates[0]
+        else:
+            # Ambiguous aliases not belonging to snapshot inputs are left
+            # untouched; relevant acquisition collisions are listed above.
+            continue
+        if source not in snapshot.columns:
+            renames[public_name] = source
+    restored = snapshot.rename(renames) if renames else snapshot
+    if "snapshot_full_spread_points" in restored.columns:
+        restored = restored.rename({
+            "snapshot_full_spread_points": "full_spread_points"
+        })
+    return restored
 
 
 def run(

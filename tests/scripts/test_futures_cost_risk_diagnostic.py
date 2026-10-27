@@ -1174,7 +1174,9 @@ def test_snapshot_output_filename_contains_friendly_account_name():
     )
 
 
-def test_market_snapshot_promotes_what_if_commission_and_demotes_reference():
+def test_market_snapshot_promotes_what_if_commission_and_demotes_reference(
+    tmp_path,
+):
     """The cached artifact must present the commission actually used first."""
     generated_at = datetime(2026, 10, 13, 17, 0, 0, tzinfo=timezone.utc)
     args = Namespace(
@@ -1189,7 +1191,17 @@ def test_market_snapshot_promotes_what_if_commission_and_demotes_reference():
     snapshot = futures_cost_risk._market_snapshot_frame(
         [{
             "symbol": "COPPER-micro",
+            "pysystemtrade_instrument_code": "HG",
             "signal_symbol": "MHG",
+            "ib_exchange": "COMEX",
+            "price": 5.0,
+            "multiplier": 2500,
+            "annual_dollar_vol_per_contract": 12500.0,
+            "avg_daily_volume_contracts": 500,
+            "selected_one_way_spread_points": 0.01,
+            "selected_spread_source": "ib_snapshot",
+            "full_spread_points": 0.02,
+            "ib_availability": "contract_qualified",
             "commission_per_side": 1.47,
             "one_way_spread_cash": 3.125,
             "one_way_total_cost": 4.595,
@@ -1205,16 +1217,40 @@ def test_market_snapshot_promotes_what_if_commission_and_demotes_reference():
         generated_at,
     )
 
-    assert snapshot["commission_amount"][0] == pytest.approx(0.96)
-    assert snapshot["commission_currency"][0] == "USD"
-    assert snapshot["commission_usd"][0] == pytest.approx(0.96)
-    assert snapshot["commission_source"][0] == "ib_what_if"
-    assert snapshot["ref_config_commission_usd"][0] == pytest.approx(1.47)
+    assert snapshot["comm"][0] == pytest.approx(0.96)
+    assert snapshot["comm_ccy"][0] == "USD"
+    assert snapshot["comm_usd"][0] == pytest.approx(0.96)
+    assert snapshot["comm_src"][0] == "ib_what_if"
+    assert snapshot["pst_instr_code"][0] == "HG"
+    assert snapshot["ib_exch"][0] == "COMEX"
+    assert snapshot["cur_px"][0] == pytest.approx(5.0)
+    assert snapshot["ann_dvol"][0] == pytest.approx(12500.0)
+    assert snapshot["avg_daily_volume"][0] == 500
+    assert snapshot["spread_pts"][0] == pytest.approx(0.01)
+    assert snapshot["snap_full_spread_pts"][0] == pytest.approx(0.02)
+    assert snapshot["ib_avail"][0] == "contract_qualified"
+    assert snapshot["ref_config_comm_usd"][0] == pytest.approx(1.47)
     assert snapshot["snap_ref_config_cost_usd"][0] == pytest.approx(4.595)
     assert "commission_per_side" not in snapshot.columns
-    assert snapshot.columns.index("commission_usd") < snapshot.columns.index(
-        "ref_config_commission_usd"
+    assert snapshot.columns.index("symbol") == 0
+    assert snapshot.columns.index("comm_usd") < snapshot.columns.index(
+        "ref_config_comm_usd"
     )
+    snapshot_path = tmp_path / "snapshot.parquet"
+    snapshot.write_parquet(snapshot_path)
+    restored = futures_cost_risk._load_market_snapshot(snapshot_path)
+    assert restored["commission_amount"][0] == pytest.approx(0.96)
+    assert restored["commission_currency"][0] == "USD"
+    assert restored["commission_usd"][0] == pytest.approx(0.96)
+    assert restored["commission_source"][0] == "ib_what_if"
+    assert restored["pysystemtrade_instrument_code"][0] == "HG"
+    assert restored["ib_exchange"][0] == "COMEX"
+    assert restored["price"][0] == pytest.approx(5.0)
+    assert restored["annual_dollar_vol_per_contract"][0] == pytest.approx(12500.0)
+    assert restored["avg_daily_volume_contracts"][0] == 500
+    assert restored["selected_one_way_spread_points"][0] == pytest.approx(0.01)
+    assert restored["full_spread_points"][0] == pytest.approx(0.02)
+    assert restored["ib_availability"][0] == "contract_qualified"
 
 
 def test_public_report_prefers_recalculated_commission_over_snapshot_alias():
