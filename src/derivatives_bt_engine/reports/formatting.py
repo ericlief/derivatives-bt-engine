@@ -28,6 +28,8 @@ PUBLIC_REPORT_RENAMES = {
     "number_economic_subclasses": "n_econ_subcls",
     "selected_symbols": "symbols",
     "combined_forecast": "comb_fcst",
+    "point_change": "pt_change",
+    "point_vol": "pt_vol",
     "combined_nulls": "comb_nulls",
     "combined_nonfinite": "comb_nonfinite",
     "forecast_valid": "fcst_valid",
@@ -279,6 +281,89 @@ PUBLIC_COLUMN_TOKEN_ABBREVIATIONS = {
     "years": "yrs",
 }
 
+# Time-series cash reports put fields used to read the position and its result
+# before configuration and lineage. This is applied after public-name
+# normalization, so the same compact vocabulary is used by every writer.
+CASH_PNL_REPORT_PRIORITY = (
+    "symbol",
+    "date",
+    "close",
+    "pt_change",
+    "pt_vol",
+    "comb_fcst",
+    "tgt_pos",
+    "held_con",
+    "exec_con",
+    "trade_con",
+    "gross_pnl",
+    "gross_pct",
+    "net_pnl",
+    "net_pct",
+    "cum_gross_pnl",
+    "cum_net_pnl",
+    "cum_gross_pct",
+    "cum_net_pct",
+    "trade_cost",
+    "roll_cost",
+    "trade_cost_pct",
+    "roll_cost_pct",
+    "total_cost_pct",
+    "cum_trade_cost_pct",
+    "cum_roll_cost_pct",
+    "cum_total_cost_pct",
+)
+CASH_PNL_REPORT_PARAMS = (
+    "weight",
+    "limit_weight",
+    "idm",
+    "max_weight_idm",
+    "buf_size",
+    "buf_trade_to_edge",
+    "rebalance_on_roll",
+    "trade_cost_per_con",
+    "roll_cost_per_con",
+)
+CASH_PNL_REPORT_DIAGNOSTICS = (
+    "avg_pos",
+    "vol_scalar",
+    "buf_width_pos",
+    "buffer_top_con",
+    "buffer_bot_con",
+    "roll_con",
+    "risk_budget",
+    "daily_dvol",
+    "ann_dvol",
+)
+
+
+def order_cash_pnl_report(report: pl.DataFrame) -> pl.DataFrame:
+    """Put key identity, position, P&L, and cost columns first.
+
+    Dynamic diagnostics follow costs, then immutable configuration inputs.
+    Remaining source, validity, lineage, and extension fields trail in their
+    original relative order.
+    """
+    leading = [name for name in CASH_PNL_REPORT_PRIORITY if name in report.columns]
+    leading_set = set(leading)
+    diagnostics = [
+        name for name in CASH_PNL_REPORT_DIAGNOSTICS if name in report.columns
+    ]
+    diagnostics_set = set(diagnostics)
+    params = [name for name in CASH_PNL_REPORT_PARAMS if name in report.columns]
+    params_set = set(params)
+    audit = [
+        name for name in report.columns
+        if name not in leading_set
+        and name not in diagnostics_set
+        and name not in params_set
+    ]
+    return report.select(
+        *leading,
+        *diagnostics,
+        *params,
+        *audit,
+    )
+
 
 # USD amounts generally use cents. The registry includes descriptive internal
 # names and compact public-schema equivalents because reports can apply
@@ -474,6 +559,7 @@ SIX_DECIMAL_COLUMNS = {
     "fx_to_usd",
     "con_px",
     "point_change",
+    "pt_change",
     "daily_return_vol",
     "annual_return_vol",
     "cur_fx_to_usd",

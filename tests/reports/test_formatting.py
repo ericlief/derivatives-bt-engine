@@ -4,6 +4,7 @@ import polars as pl
 import pytest
 
 from derivatives_bt_engine.reports.formatting import (
+    order_cash_pnl_report,
     rename_public_report_columns,
     round_public_report,
 )
@@ -125,6 +126,45 @@ def test_joined_cash_audit_columns_drop_cash_prefix():
         "cum_net_pnl",
     ]
     assert public.row(0) == (True, 12.346, 0.123457, 20.0)
+
+
+def test_cash_pnl_report_orders_primary_fields_before_params_and_audit():
+    """Daily reading fields lead; sizing parameters and lineage trail."""
+    report = pl.DataFrame({
+        "date": ["2026-01-02"],
+        "symbol": ["MGC"],
+        "historical_instrument_code": ["GOLD"],
+        "weight": [0.1],
+        "close": [3000.0],
+        "point_change": [1.25],
+        "point_vol": [25.0],
+        "combined_forecast": [1.0],
+        "target_position": [2.0],
+        "held_cons": [1],
+        "exec_cons": [2],
+        "signed_trade_cons": [1],
+        "cash_gross_pnl_usd": [10.0],
+        "cash_gross_pct": [0.01],
+        "cash_net_pnl_usd": [9.0],
+        "cash_net_pct": [0.009],
+        "cum_cash_gross_pnl_usd": [100.0],
+        "cum_cash_net_pnl_usd": [90.0],
+        "cum_cash_gross_pct": [0.1],
+        "cum_cash_net_pct": [0.09],
+        "cash_trade_cost_usd": [-1.0],
+        "cash_roll_cost_usd": [0.0],
+        "cash_pnl_valid": [True],
+    })
+
+    public = order_cash_pnl_report(rename_public_report_columns(report))
+
+    assert public.columns[:22] == [
+        "symbol", "date", "close", "pt_change", "pt_vol", "comb_fcst",
+        "tgt_pos", "held_con", "exec_con", "trade_con", "gross_pnl",
+        "gross_pct", "net_pnl", "net_pct", "cum_gross_pnl", "cum_net_pnl",
+        "cum_gross_pct", "cum_net_pct", "trade_cost", "roll_cost",
+        "weight", "hist_instr_code",
+    ]
 
 
 def test_public_report_renames_buffer_parameters_at_boundary():

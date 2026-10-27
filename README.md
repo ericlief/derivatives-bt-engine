@@ -55,6 +55,22 @@ key and validates the expected broker root. Unambiguous roots continue to be
 used directly. Thus execution identity is stable without overloading the PST
 history identifier or assuming signal and execution symbols are the same.
 
+## Public report column order
+
+Persisted reports put the fields needed to identify and interpret a row first,
+then the primary measurements, and finally configuration and audit detail.
+Time-series reports lead with their identity and date, followed by market data,
+signal, position/execution, and P&L fields. Cash P&L specifically orders the
+daily mark and point change/volatility before forecast and target/held/executed
+contracts, then gross/net P&L and returns, cumulative totals, and execution
+costs. Dynamic diagnostics follow; immutable sizing/cost parameters come after
+those, with source, validity, and lineage fields at the end. Other reports use
+the same priority principle with domain-appropriate primary fields (for
+example, the market screen puts the selected quote, volatility, liquidity,
+margin, and cost fields before alternate-source and audit columns). Within each
+group, report-specific order is explicit and stable; newly added audit fields
+should not displace the key reading columns.
+
 ## Futures selection: contract-size bands
 
 Phase 2 estimates each selected instrument's **continuous maximum position**
