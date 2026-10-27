@@ -15,6 +15,7 @@ from typing import Optional
 
 _PACKAGE_LOGGER_NAME = 'derivatives_bt_engine'
 _FILE_HANDLER_NAME = 'derivatives_bt_engine_file'
+_CONSOLE_HANDLER_NAME = 'derivatives_bt_engine_console'
 _IB_LOGGER_NAME = 'ib_insync'
 _IB_FILE_HANDLER_NAME = 'derivatives_bt_engine_ib_file'
 
@@ -33,10 +34,10 @@ def _default_log_path() -> Path:
 def setup_logger(log_file: Optional[str] = None) -> logging.Logger:
     """Configure and return the shared package logger.
 
-    The file handler records DEBUG and above; there is deliberately no console
-    handler. ``derivatives_bt_engine.*`` child loggers inherit this handler,
-    so options backtests, futures backtests, and the live rebalance all write
-    to the same run file. Repeated import-time calls are idempotent.
+    The file handler records DEBUG and above, while the console handler shows
+    INFO and above to keep detailed iteration diagnostics in the run log
+    without flooding the terminal. ``derivatives_bt_engine.*`` child loggers
+    inherit both handlers. Repeated import-time calls are idempotent.
 
     ``log_file`` remains available for callers that need a specific path. It
     affects the first configuration in a process, preserving the former
@@ -44,24 +45,29 @@ def setup_logger(log_file: Optional[str] = None) -> logging.Logger:
     """
     logger = logging.getLogger(_PACKAGE_LOGGER_NAME)
     logger.setLevel(logging.DEBUG)
-    # This project installs no console handler. Keep propagation enabled so
-    # embedding applications and pytest's caplog handler can observe records;
-    # in normal CLI use the sole project-installed sink is the shared file.
+    # Keep propagation enabled so embedding applications and pytest's caplog
+    # handler can observe records in addition to the shared file and console.
     logger.propagate = True
 
-    if any(handler.get_name() == _FILE_HANDLER_NAME for handler in logger.handlers):
-        return logger
-
-    path = Path(log_file) if log_file is not None else _default_log_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    file_handler = logging.FileHandler(path)
-    file_handler.set_name(_FILE_HANDLER_NAME)
-    file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(logging.Formatter(
+    formatter = logging.Formatter(
         '%(asctime)s %(name)s [%(levelname)s] %(message)s'
-    ))
-    logger.addHandler(file_handler)
+    )
+    if not any(handler.get_name() == _FILE_HANDLER_NAME for handler in logger.handlers):
+        path = Path(log_file) if log_file is not None else _default_log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        file_handler = logging.FileHandler(path)
+        file_handler.set_name(_FILE_HANDLER_NAME)
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+
+    if not any(handler.get_name() == _CONSOLE_HANDLER_NAME for handler in logger.handlers):
+        console_handler = logging.StreamHandler()
+        console_handler.set_name(_CONSOLE_HANDLER_NAME)
+        console_handler.setLevel(logging.INFO)
+        console_handler.setFormatter(formatter)
+        logger.addHandler(console_handler)
     return logger
 
 

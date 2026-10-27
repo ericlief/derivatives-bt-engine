@@ -3,8 +3,8 @@ import logging
 from derivatives_bt_engine.logging_config import setup_ib_logger, setup_logger
 
 
-def test_package_file_handler_collects_live_and_futures_child_logs(tmp_path):
-    """All package descendants must share one file sink, not sibling handlers."""
+def test_package_handlers_collect_child_logs_to_file_and_console(tmp_path, capsys):
+    """Package descendants write debug logs to file and INFO logs to console."""
     package_logger = logging.getLogger('derivatives_bt_engine')
     original_handlers = package_logger.handlers[:]
     original_level = package_logger.level
@@ -21,10 +21,16 @@ def test_package_file_handler_collects_live_and_futures_child_logs(tmp_path):
         for handler in configured.handlers:
             handler.flush()
 
-        assert len(configured.handlers) == 1
+        assert {handler.get_name() for handler in configured.handlers} == {
+            'derivatives_bt_engine_file',
+            'derivatives_bt_engine_console',
+        }
         contents = log_path.read_text()
         assert 'live decision' in contents
         assert 'futures decision' in contents
+        console = capsys.readouterr().err
+        assert 'futures decision' in console
+        assert 'live decision' not in console
     finally:
         for handler in package_logger.handlers[:]:
             package_logger.removeHandler(handler)
