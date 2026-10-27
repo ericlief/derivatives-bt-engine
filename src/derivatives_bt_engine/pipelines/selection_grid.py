@@ -239,6 +239,14 @@ def parse_args(argv=None) -> argparse.Namespace:
             "scenario's final cash-performance report."
         ),
     )
+    parser.add_argument(
+        "--ib-history-live",
+        choices=("missing", "update"),
+        help="Live IB policy forwarded to each selection scenario.",
+    )
+    parser.add_argument("--ib-host", default="127.0.0.1")
+    parser.add_argument("--ib-port", type=int, action="append")
+    parser.add_argument("--ib-client-id", type=int, default=24)
     parser.add_argument("--globex-db", type=Path, default=DEFAULT_GLOBEX_DB_PATH)
     parser.add_argument(
         "--broker-mapping", type=Path, default=DEFAULT_BROKER_MAPPING_PATH
@@ -425,6 +433,10 @@ def _selection_command(
     broker_mapping: Path,
     history_cache_root: Path,
     max_source_gap_days: int,
+    ib_history_live: str | None,
+    ib_host: str,
+    ib_ports: list[int] | None,
+    ib_client_id: int,
     initial_capital_usd: float | None,
 ) -> list[str]:
     """Build one auditable portfolio-selection subprocess command."""
@@ -475,6 +487,12 @@ def _selection_command(
             "--max-source-gap-days",
             str(max_source_gap_days),
         ))
+        if ib_history_live is not None:
+            command.extend(("--ib-history-live", ib_history_live))
+            command.extend(("--ib-host", ib_host))
+            command.extend(("--ib-client-id", str(ib_client_id)))
+            for ib_port in ib_ports or []:
+                command.extend(("--ib-port", str(ib_port)))
     if scenario.maximum_instruments_per_cluster is not None:
         command.extend((
             "--max-instr-per-cluster",
@@ -695,6 +713,8 @@ def run(argv=None) -> tuple[Path, Path | None]:
         raise ValueError("--initial-capital-usd must be positive")
     if args.max_source_gap_days < 0:
         raise ValueError("--max-source-gap-days must be nonnegative")
+    if args.ib_history_live is not None and ib_history_database is None:
+        raise ValueError("--ib-history-live requires --ib-history-db")
 
     stamp = datetime.now(REPORT_TIMEZONE).strftime("%Y%m%d_%H%M%S")
     if args.run_dir is not None:
@@ -728,6 +748,10 @@ def run(argv=None) -> tuple[Path, Path | None]:
             broker_mapping=args.broker_mapping.expanduser().resolve(),
             history_cache_root=args.history_cache_root.expanduser().resolve(),
             max_source_gap_days=args.max_source_gap_days,
+            ib_history_live=args.ib_history_live,
+            ib_host=args.ib_host,
+            ib_ports=args.ib_port,
+            ib_client_id=args.ib_client_id,
             initial_capital_usd=args.initial_capital_usd,
         )
         planned.append((scenario, scenario_dir, command))

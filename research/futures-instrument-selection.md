@@ -868,6 +868,7 @@ futures-build-selection \
   --output-dir results/selection_baseline \
   --history-db /home/dev/fin/db/pysystemtrade_reference.duckdb \
   --ib-history-db /home/dev/fin/db/ib_futures_history.duckdb \
+  --ib-history-live missing \
   --globex-db /home/dev/fin/db/globex_mdp_3.0.duckdb \
   --initial-capital-usd 75000 \
   --target-vol 0.20 \
@@ -1038,12 +1039,18 @@ baseline by default. The command writes:
   `hist_cum_net_pct`, `hist_ann_mean_pct`, `hist_ann_vol_pct`, `hist_sharpe`,
   and `hist_iid_t_stat`, with sample dates, years, observation count, and
   `hist_src`. With `--ib-history-db`, these fields and the selected cash P&L
-  use stored reference/Globex/IB stitched histories; IB is not contacted and
-  the finished stitched view is cached under `--history-cache-root`. Without
-  that option they use reference history only. These historical diagnostics
-  do not enter the greedy score, whose construction history remains pinned to
-  `--history-db` in either mode. `--max-source-gap-days` controls only a direct
-  reference-to-IB handoff and masks the unknown return over an allowed gap.
+  use stored reference/Globex/IB stitched histories, and the finished view is
+  cached under `--history-cache-root`. IB is not contacted unless a live mode
+  is explicitly selected. Add
+  `--ib-history-live missing` to connect only when a selected signal history
+  cannot be built from stored data, or `--ib-history-live update` to refresh
+  every selected signal history before reporting. Connection overrides are
+  `--ib-host`, repeatable `--ib-port`, and `--ib-client-id`. Without
+  `--ib-history-db` the reports use reference history only. These historical
+  diagnostics do not enter the greedy score, whose construction history
+  remains pinned to `--history-db` in either mode. `--max-source-gap-days`
+  controls only a direct reference-to-IB handoff and masks the unknown return
+  over an allowed gap.
 
 Use `--max-instr-per-cluster N` to run a static breadth-cap sensitivity. The
 cluster key is the reviewed `econ_subcls`, so `--max-instr-per-cluster 4`

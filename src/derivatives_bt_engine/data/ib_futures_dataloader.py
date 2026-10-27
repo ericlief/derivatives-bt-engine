@@ -727,6 +727,7 @@ class IBStitchedHistoryProvider:
         contract_path = cache_directory / 'ib_contract_history.parquet'
         cache_hit = (
             self.use_cache
+            and not self.update_history
             and contract_path.exists()
             and futures_history_parquet_cache_exists(cache_directory)
         )
@@ -845,6 +846,12 @@ class IBStitchedHistoryProvider:
                 else 0
             ),
         )
+        if self.update_history:
+            # Live acquisition changes the raw-database fingerprint. Save the
+            # derived bundle under the post-update identity so the next
+            # stored-only call can reuse it.
+            cache_directory = self._cache_directory(instrument_code)
+            contract_path = cache_directory / 'ib_contract_history.parquet'
         history = replace(
             history,
             metadata={

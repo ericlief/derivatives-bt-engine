@@ -46,6 +46,7 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 import polars as pl
+from ib_tools.ibpysync import IBPySync
 
 from derivatives_bt_engine.data.futures_cost_rankings import (
     apply_selection_filters,
@@ -82,6 +83,7 @@ from derivatives_bt_engine.data.futures_history import (
     DEFAULT_FUTURES_CACHE_ROOT,
     DEFAULT_GLOBEX_DB_PATH,
     DEFAULT_PYSYSTEMTRADE_DB_PATH,
+    FuturesHistory,
 )
 from derivatives_bt_engine.data.futures_overlap import (
     resolve_reviewed_globex_asset,
@@ -90,6 +92,10 @@ from derivatives_bt_engine.data.ib_futures_dataloader import (
     DEFAULT_BROKER_MAPPING_PATH,
     DEFAULT_MAX_SOURCE_GAP_DAYS,
     IBStitchedHistoryProvider,
+    connect_ib,
+)
+from derivatives_bt_engine.data.ib_futures_history_store import (
+    IBFuturesHistoryStore,
 )
 from derivatives_bt_engine.data.pysystemtrade_ib import (
     load_pysystemtrade_ib_instruments,
@@ -285,6 +291,35 @@ def parse_args(argv=None, *, complete_default: bool = False):
             "final book cash P&L and hist_* diagnostics use offline stitched "
             "reference/Globex/IB history; construction inputs remain unchanged."
         ),
+    )
+    parser.add_argument(
+        "--ib-history-live",
+        choices=("missing", "update"),
+        help=(
+            "Opt in to live IB history acquisition. 'missing' first uses "
+            "stored history and retries a failed stitched load from IB; "
+            "'update' refreshes every selected signal history from IB."
+        ),
+    )
+    parser.add_argument(
+        "--ib-host",
+        default="127.0.0.1",
+        help="TWS/IB Gateway host used by --ib-history-live.",
+    )
+    parser.add_argument(
+        "--ib-port",
+        type=int,
+        action="append",
+        help=(
+            "TWS/IB Gateway port attempted by --ib-history-live; repeat to "
+            "supply fallbacks (default: 7497, 4002, 7496, 4001)."
+        ),
+    )
+    parser.add_argument(
+        "--ib-client-id",
+        type=int,
+        default=24,
+        help="IB client ID used by --ib-history-live (default: 24).",
     )
     parser.add_argument(
         "--globex-db",
@@ -1054,12 +1089,32 @@ def _run_complete_selection(
                 for symbol in selection.selected
             }
         )
-        for history_code in selected_history_codes:
-            globex_asset = resolve_reviewed_globex_asset(history_code)
-            provider = IBStitchedHistoryProvider(
-                ib=None,
+        live_ib: IBPySync | None = None
+
+        def connected_ib() -> IBPySync:
+            """Return one shared live IB connection for selected histories."""
+            nonlocal live_ib
+            if live_ib is None:
+                live_ib = IBPySync()
+                connect_ib(
+                    live_ib,
+                    args.ib_host,
+                    args.ib_port or [7497, 4002, 7496, 4001],
+                    args.ib_client_id,
+                )
+            return live_ib
+
+        def load_stitched_history(
+            history_code: str,
+            *,
+            ib: IBPySync | None,
+            update_history: bool,
+        ) -> FuturesHistory:
+            """Load one stitched history with explicit broker-update policy."""
+            return IBStitchedHistoryProvider(
+                ib=ib,
                 pst_instr_code=history_code,
-                globex_asset=globex_asset,
+                globex_asset=resolve_reviewed_globex_asset(history_code),
                 reference_db_path=args.history_db.expanduser().resolve(),
                 globex_db_path=args.globex_db.expanduser().resolve(),
                 mapping_path=args.broker_mapping.expanduser().resolve(),
@@ -1067,14 +1122,46 @@ def _run_complete_selection(
                 cache_root=args.history_cache_root.expanduser().resolve(),
                 use_cache=True,
                 save_cache=True,
-                update_history=False,
+                update_history=update_history,
                 max_source_gap_days=args.max_source_gap_days,
-            )
-            stitched_history = provider.load(history_code)
-            stitched_components[history_code] = build_ewmac_component_frame(
-                stitched_history,
-                pooled_rules,
-            )
+            ).load(history_code)
+
+        try:
+            for history_code in selected_history_codes:
+                if args.ib_history_live == "update":
+                    stitched_history = load_stitched_history(
+                        history_code,
+                        ib=connected_ib(),
+                        update_history=True,
+                    )
+                else:
+                    try:
+                        stitched_history = load_stitched_history(
+                            history_code,
+                            ib=None,
+                            update_history=False,
+                        )
+                    except Exception as exc:
+                        if args.ib_history_live != "missing":
+                            raise
+                        logger.info(
+                            "selection_stitched_history live_retry "
+                            "hist_instr_code=%s reason=%s",
+                            history_code,
+                            exc,
+                        )
+                        stitched_history = load_stitched_history(
+                            history_code,
+                            ib=connected_ib(),
+                            update_history=True,
+                        )
+                stitched_components[history_code] = build_ewmac_component_frame(
+                    stitched_history,
+                    pooled_rules,
+                )
+        finally:
+            if live_ib is not None:
+                live_ib.disconnect()
 
         cash_reference_frames = {}
         for symbol in selection.selected:
@@ -1515,12 +1602,16 @@ def run(
         raise ValueError("tie reference book count must be positive")
     if args.max_source_gap_days < 0:
         raise ValueError("max source gap days must be nonnegative")
+    if args.ib_history_live is not None and args.ib_history_db is None:
+        raise ValueError("--ib-history-live requires --ib-history-db")
     if args.ib_history_db is not None:
         ib_history_db = args.ib_history_db.expanduser().resolve()
-        if not ib_history_db.is_file():
+        if not ib_history_db.is_file() and args.ib_history_live is None:
             raise FileNotFoundError(
                 f"stored IB history database does not exist: {ib_history_db}"
             )
+        if not ib_history_db.is_file():
+            IBFuturesHistoryStore(ib_history_db).initialize()
     setup_logger()
     if args.output is not None and args.output.suffix.lower() != ".parquet":
         raise ValueError("--output must use a .parquet extension")
