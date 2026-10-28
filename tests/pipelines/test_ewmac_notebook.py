@@ -287,6 +287,7 @@ def test_selected_book_cash_plot_reads_parquet_and_adds_symbol_selector(
         "date": dates * 2,
         "symbol": ["A", "A", "B", "B"],
         "comb_fcst": [0.5, 1.0, -0.5, -1.0],
+        "vol_scalar": [1.5, 1.6, 1.5, 1.6],
         "tgt_pos": [1.0, 2.0, -1.0, -2.0],
         "buffer_top_con": [1, 2, 0, -1],
         "buffer_bot_con": [0, 1, -2, -3],
@@ -319,7 +320,7 @@ def test_selected_book_cash_plot_reads_parquet_and_adds_symbol_selector(
         for curve in list(displayed[0].values())[1].values()
         if type(curve).__name__ == "Curve"
     }
-    assert position_curves == {"tgt_pos", "held_con"}
+    assert position_curves == {"vol_scalar", "tgt_pos", "held_con"}
     daily_pnl = list(displayed[0].values())[2]
     pnl_curves = {
         curve.vdims[0].name: curve
