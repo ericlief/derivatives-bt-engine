@@ -3,14 +3,15 @@
 This module is the interactive inspection boundary after forecast combination.
 It accepts the same :class:`CombinedForecastResult` used by Phase 2, adds the
 equal-weight subsystem-reference percentage and optional executable cash P&L
-paths, and exposes small Polars tables plus a lazy hvPlot dashboard. A helper
-can join a saved Phase 1 selection screen for contract and cost inputs. It does
-not reimplement forecast, sizing, buffering, or cost calculations; those
-remain owned by the calculation modules used by production selection. The
-stitched-history entry point also orchestrates dated-contract loading, history
+paths, and exposes small Polars tables plus an hvPlot dashboard. A helper can
+join a saved Phase 1 selection screen for contract and cost inputs. It does not
+reimplement forecast, sizing, buffering, or cost calculations; those remain
+owned by the calculation modules used by production selection. The stitched
+history entry point also orchestrates dated-contract loading, history
 ownership, pooled forecast construction, and this same view boundary. The
-selected-book cash-P&L plotting helper reads saved multi-symbol Parquet reports
-and lays out comparable execution diagnostics without merging their scales.
+selected-book cash-P&L plotting helper converts Polars slices to pandas at the
+hvPlot boundary and lays out comparable execution diagnostics without merging
+their scales.
 """
 
 from __future__ import annotations
@@ -140,7 +141,7 @@ def plot_selection_cash_pnl(
         the currently chosen symbol.
     """
     import holoviews as hv
-    import hvplot.polars  # noqa: F401 - registers Polars' ``hvplot`` API
+    import hvplot.pandas  # noqa: F401 - registers pandas' ``hvplot`` API
     import panel as pn
 
     if isinstance(cash_pnl, (str, Path)):
@@ -179,10 +180,12 @@ def plot_selection_cash_pnl(
             raise ValueError(
                 f"no cash-P&L observations for {symbol} in the requested date range"
             )
-        symbol_frames[symbol] = symbol_frame
+        # Use pandas only at the plotting boundary to isolate whether the
+        # nonresponsive selector is caused by hvPlot's Polars integration.
+        symbol_frames[symbol] = symbol_frame.to_pandas()
 
     def line_panel(
-        symbol_frame: pl.DataFrame,
+        symbol_frame,
         *,
         columns: list[str],
         title: str,
