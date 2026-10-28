@@ -143,9 +143,6 @@ def plot_selection_cash_pnl(
     import hvplot.polars  # noqa: F401 - registers Polars' ``hvplot`` API
     import panel as pn
 
-    hv.extension("bokeh")
-    pn.extension()
-
     if isinstance(cash_pnl, (str, Path)):
         frame = pl.read_parquet(Path(cash_pnl).expanduser())
     else:
@@ -252,12 +249,18 @@ def plot_selection_cash_pnl(
         value=selected_symbols[0],
         sizing_mode="stretch_width",
     )
-    # Bind the control's actual parameter value to the callback. This creates
-    # a live Panel dependency rather than relying on notebook rendering of a
-    # HoloViews key-dimension widget, which is backend/display-context sensitive.
+
+    # Declare the dependency directly so Panel owns and displays the reactive
+    # component. Notebook frontends must have Panel's JavaScript extension
+    # initialized once by the notebook (pn.extension()) before rendering.
+    @pn.depends(selector.param.value)
+    def dashboard(symbol: str):
+        """Rebuild the symbol plots when the Select value changes."""
+        return plot_symbol(symbol)
+
     return pn.Column(
         selector,
-        pn.bind(plot_symbol, symbol=selector.param.value),
+        pn.panel(dashboard),
         sizing_mode="stretch_width",
     )
 
