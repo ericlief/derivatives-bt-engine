@@ -252,7 +252,14 @@ def plot_selection_cash_pnl(
         options=selected_symbols,
         value=selected_symbols[0],
     )
-    plot_output = widgets.Output()
+    plot_output = widgets.Output(
+        layout=widgets.Layout(
+            width="100%",
+            height="auto",
+            max_height="none",
+            overflow="visible",
+        )
+    )
 
     def update_plot(change=None):
         """Redraw the selected symbol inside the ipywidgets output area."""
@@ -263,7 +270,10 @@ def plot_selection_cash_pnl(
 
     selector.observe(update_plot, names="value")
     update_plot()
-    return widgets.VBox([selector, plot_output])
+    return widgets.VBox(
+        [selector, plot_output],
+        layout=widgets.Layout(width="100%", overflow="visible"),
+    )
 
 
 def _attach_fx(frame: pl.DataFrame, fx_to_usd: float) -> pl.DataFrame:
