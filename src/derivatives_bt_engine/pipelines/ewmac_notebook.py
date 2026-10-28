@@ -189,17 +189,24 @@ def plot_selection_cash_pnl(
         title: str,
         ylabel: str,
     ):
-        """Build one independently scaled line panel from available fields."""
+        """Build one independently scaled overlay from available fields."""
         available = [name for name in columns if name in symbol_frame.columns]
-        return symbol_frame.hvplot.line(
-            x="date",
-            y=available,
-            title=title,
-            ylabel=ylabel,
-            width=width,
-            height=height,
-            tools=["hover", "pan", "wheel_zoom", "box_zoom", "reset", "save"],
-        )
+        tools = ["hover", "pan", "wheel_zoom", "box_zoom", "reset", "save"]
+        curves = [
+            symbol_frame.hvplot.line(
+                x="date",
+                y=column,
+                label=column,
+                title=title,
+                ylabel=ylabel,
+                width=width,
+                height=height,
+                tools=tools,
+            )
+            for column in available
+        ]
+        overlay = hv.Overlay(curves)
+        return overlay.opts(legend_position="top_left")
 
     def plot_symbol(symbol: str):
         """Build all independently scaled panels for one selected symbol."""

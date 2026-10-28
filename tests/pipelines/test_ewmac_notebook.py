@@ -314,6 +314,14 @@ def test_selected_book_cash_plot_reads_parquet_and_adds_symbol_selector(
     assert plot_output.layout.overflow == "visible"
     assert plot_output.layout.height == "auto"
     assert len(displayed) == 1
+    daily_pnl = list(displayed[0].values())[2]
+    pnl_curves = {
+        curve.vdims[0].name: curve
+        for curve in daily_pnl.values()
+        if type(curve).__name__ == "Curve"
+    }
+    assert pnl_curves["gross_pnl"].dimension_values("gross_pnl").tolist() == [3.0]
+    assert pnl_curves["net_pnl"].dimension_values("net_pnl").tolist() == [2.0]
     selector.value = "B"
     assert selector.value == "B"
     assert len(displayed) == 2
