@@ -135,13 +135,16 @@ def plot_selection_cash_pnl(
 
     Returns
     -------
-    holoviews.DynamicMap
-        A widget-selectable dashboard with five independently scaled panels
-        for the chosen symbol.
+    panel.Column
+        A symbol Select widget bound to five independently scaled plots for
+        the currently chosen symbol.
     """
     import holoviews as hv
     import hvplot.polars  # noqa: F401 - registers Polars' ``hvplot`` API
+    import panel as pn
+
     hv.extension("bokeh")
+    pn.extension()
 
     if isinstance(cash_pnl, (str, Path)):
         frame = pl.read_parquet(Path(cash_pnl).expanduser())
@@ -243,8 +246,20 @@ def plot_selection_cash_pnl(
             dashboard = dashboard + panel
         return dashboard.cols(1).opts(shared_axes=False)
 
-    symbol_dimension = hv.Dimension("symbol", values=selected_symbols)
-    return hv.DynamicMap(plot_symbol, kdims=[symbol_dimension])
+    selector = pn.widgets.Select(
+        label="Symbol",
+        options=selected_symbols,
+        value=selected_symbols[0],
+        sizing_mode="stretch_width",
+    )
+    # Bind the control's actual parameter value to the callback. This creates
+    # a live Panel dependency rather than relying on notebook rendering of a
+    # HoloViews key-dimension widget, which is backend/display-context sensitive.
+    return pn.Column(
+        selector,
+        pn.bind(plot_symbol, symbol=selector.param.value),
+        sizing_mode="stretch_width",
+    )
 
 
 def _attach_fx(frame: pl.DataFrame, fx_to_usd: float) -> pl.DataFrame:
