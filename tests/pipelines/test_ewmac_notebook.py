@@ -273,8 +273,8 @@ def test_notebook_view_hvplot_contains_cash_panels_when_requested():
     assert len(dashboard) == 7
 
 
-def test_selected_book_cash_plot_reads_parquet_and_builds_symbol_subplots(tmp_path):
-    """Selected-book reports render interactive panels for every symbol."""
+def test_selected_book_cash_plot_reads_parquet_and_adds_symbol_selector(tmp_path):
+    """Selected-book reports expose wide interactive panels by selected symbol."""
     dates = [date(2024, 1, 2), date(2024, 1, 3)]
     cash = pl.DataFrame({
         "date": dates * 2,
@@ -299,7 +299,10 @@ def test_selected_book_cash_plot_reads_parquet_and_builds_symbol_subplots(tmp_pa
 
     dashboard = plot_selection_cash_pnl(path, start="2024-01-03")
 
-    assert len(dashboard) == 10
+    assert dashboard.kdims[0].name == "symbol"
+    assert dashboard.kdims[0].values == ["A", "B"]
+    assert len(dashboard["A"]) == 5
+    assert len(dashboard["B"]) == 5
 
 
 def test_cash_curve_is_explicitly_optional():

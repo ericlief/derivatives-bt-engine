@@ -108,16 +108,16 @@ def plot_selection_cash_pnl(
     symbols: Iterable[str] | None = None,
     start: date | datetime | str | None = None,
     end: date | datetime | str | None = None,
-    width: int = 360,
-    height: int = 190,
+    width: int = 1050,
+    height: int = 220,
 ):
-    """Plot a selected-book cash-P&L report as interactive per-symbol panels.
+    """Plot selected-book cash P&L with a widget for choosing the symbol.
 
     ``cash_pnl`` may be the public Polars frame or a saved selection cash-P&L
-    Parquet path. By default, every symbol is plotted. Each symbol receives
-    separate forecast, contract-position, daily P&L/cost, cumulative P&L, and
-    cumulative-return panels, keeping their incompatible scales independent.
-    The returned HoloViews layout is Bokeh-backed and supports hover and zoom.
+    Parquet path. By default, every symbol appears in the selector. Choosing a
+    symbol updates its vertically stacked forecast, contract-position, daily
+    P&L/cost, cumulative P&L, and cumulative-return panels. The wider panels
+    have independent scales and support hover and zoom.
 
     Parameters
     ----------
@@ -131,17 +131,17 @@ def plot_selection_cash_pnl(
     start, end
         Optional inclusive date bounds shared by every symbol panel.
     width, height
-        Width and height of each subplot in pixels. The five metric panels
-        form one row per symbol.
+        Width and height of each subplot in pixels.
 
     Returns
     -------
-    holoviews.Layout
-        A layout containing five independently scaled interactive panels per
-        symbol.
+    holoviews.DynamicMap
+        A widget-selectable dashboard with five independently scaled panels
+        for the chosen symbol.
     """
     import holoviews as hv
     import hvplot.polars  # noqa: F401 - registers Polars' ``hvplot`` API
+    hv.extension("bokeh")
 
     if isinstance(cash_pnl, (str, Path)):
         frame = pl.read_parquet(Path(cash_pnl).expanduser())
@@ -168,6 +168,19 @@ def plot_selection_cash_pnl(
     if unknown:
         raise KeyError(f"symbols are not present in cash-P&L frame: {unknown}")
 
+    symbol_frames = {}
+    for symbol in selected_symbols:
+        symbol_frame = _date_slice(
+            frame.filter(pl.col("symbol") == symbol),
+            start=start,
+            end=end,
+        ).sort("date")
+        if symbol_frame.is_empty():
+            raise ValueError(
+                f"no cash-P&L observations for {symbol} in the requested date range"
+            )
+        symbol_frames[symbol] = symbol_frame
+
     def line_panel(
         symbol_frame: pl.DataFrame,
         *,
@@ -187,18 +200,9 @@ def plot_selection_cash_pnl(
             tools=["hover", "pan", "wheel_zoom", "box_zoom", "reset", "save"],
         )
 
-    all_panels = []
-    for symbol in selected_symbols:
-        symbol_frame = _date_slice(
-            frame.filter(pl.col("symbol") == symbol),
-            start=start,
-            end=end,
-        ).sort("date")
-        if symbol_frame.is_empty():
-            raise ValueError(
-                f"no cash-P&L observations for {symbol} in the requested date range"
-            )
-
+    def plot_symbol(symbol: str):
+        """Build all independently scaled panels for one selected symbol."""
+        symbol_frame = symbol_frames[symbol]
         panels = [
             line_panel(
                 symbol_frame,
@@ -234,15 +238,13 @@ def plot_selection_cash_pnl(
                 ylabel="Return contribution",
             ),
         ]
-        all_panels.extend(panels)
+        dashboard = panels[0]
+        for panel in panels[1:]:
+            dashboard = dashboard + panel
+        return dashboard.cols(1).opts(shared_axes=False)
 
-    # HoloViews flattens nested Layouts on addition. Appending exactly five
-    # panels per symbol and laying out in five columns keeps each symbol's
-    # independent-scale diagnostics together on one row.
-    dashboard = all_panels[0]
-    for panel in all_panels[1:]:
-        dashboard = dashboard + panel
-    return dashboard.cols(5).opts(shared_axes=False)
+    symbol_dimension = hv.Dimension("symbol", values=selected_symbols)
+    return hv.DynamicMap(plot_symbol, kdims=[symbol_dimension])
 
 
 def _attach_fx(frame: pl.DataFrame, fx_to_usd: float) -> pl.DataFrame:
