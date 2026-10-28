@@ -322,6 +322,12 @@ def test_selected_book_cash_plot_reads_parquet_and_adds_symbol_selector(
     }
     assert pnl_curves["gross_pnl"].dimension_values("gross_pnl").tolist() == [3.0]
     assert pnl_curves["net_pnl"].dimension_values("net_pnl").tolist() == [2.0]
+    cost_curves = {
+        curve.vdims[0].name
+        for curve in list(displayed[0].values())[3].values()
+        if type(curve).__name__ == "Curve"
+    }
+    assert cost_curves == {"trade_cost", "roll_cost"}
     selector.value = "B"
     assert selector.value == "B"
     assert len(displayed) == 2

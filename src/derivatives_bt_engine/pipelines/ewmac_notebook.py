@@ -116,7 +116,8 @@ def plot_selection_cash_pnl(
     ``cash_pnl`` may be the public Polars frame or a saved selection cash-P&L
     Parquet path. By default, every symbol appears in the selector. Choosing a
     symbol updates its vertically stacked forecast, contract-position, daily
-    P&L/cost, cumulative P&L, and cumulative-return panels. The wider panels
+    P&L, separate daily-cost, cumulative P&L, and cumulative-return panels.
+    The wider panels
     have independent scales and support hover and zoom.
 
     Parameters
@@ -229,8 +230,14 @@ def plot_selection_cash_pnl(
             ),
             line_panel(
                 symbol_frame,
-                columns=["gross_pnl", "net_pnl", "trade_cost", "roll_cost"],
-                title=f"{symbol} daily P&L and costs",
+                columns=["gross_pnl", "net_pnl"],
+                title=f"{symbol} daily P&L",
+                ylabel="USD",
+            ) * hv.HLine(0.0).opts(color="black", line_width=1),
+            line_panel(
+                symbol_frame,
+                columns=["trade_cost", "roll_cost"],
+                title=f"{symbol} daily costs",
                 ylabel="USD",
             ) * hv.HLine(0.0).opts(color="black", line_width=1),
             line_panel(
