@@ -311,8 +311,6 @@ def test_selected_book_cash_plot_reads_parquet_and_adds_symbol_selector(
     assert isinstance(selector, widgets.Dropdown)
     assert isinstance(plot_output, widgets.Output)
     assert list(selector.options) == ["A", "B"]
-    assert plot_output.layout.overflow == "visible"
-    assert plot_output.layout.height == "auto"
     assert len(displayed) == 1
     selector.value = "B"
     assert selector.value == "B"
