@@ -42,6 +42,12 @@ VOLATILITY_WINDOW_DAYS = 20
 
 @dataclass(frozen=True)
 class MarketMapping:
+    """Crosswalk Carver instruments to Globex assets and stitch policy.
+
+    ``stitch_globex`` keeps a mapping available for overlap diagnostics while
+    controlling whether Globex is inserted between Carver and newer IB data.
+    """
+
     canonical_market_id: str
     carver_instrument: str
     globex_asset: str
@@ -51,6 +57,7 @@ class MarketMapping:
     usage_status: str = "signal_research"
     carver_date_alignment: str = ""
     carver_date_alignment_through: Optional[date] = None
+    stitch_globex: bool = True
 
 
 def load_mappings(path: Optional[Path | str] = None) -> tuple[MarketMapping, ...]:
@@ -71,6 +78,7 @@ def load_mappings(path: Optional[Path | str] = None) -> tuple[MarketMapping, ...
         "usage_status",
         "carver_date_alignment",
         "carver_date_alignment_through",
+        "stitch_globex",
         "notes",
         "known_issue",
     }
@@ -100,6 +108,7 @@ def load_mappings(path: Optional[Path | str] = None) -> tuple[MarketMapping, ...
                 if row["carver_date_alignment_through"] is not None
                 else None
             ),
+            stitch_globex=bool(row["stitch_globex"]),
         )
         for row in frame.iter_rows(named=True)
     )
@@ -124,6 +133,7 @@ def resolve_reviewed_globex_asset(
         for mapping in load_mappings(mapping_path)
         if mapping.carver_instrument == reference_instrument_code
         and mapping.mapping_status != "rejected"
+        and mapping.stitch_globex
     ]
     if not mappings:
         return None

@@ -62,6 +62,37 @@ def test_candidate_mapping_requires_explicit_research_opt_in(monkeypatch) -> Non
         )
 
 
+def test_hybrid_mapping_can_exclude_globex_and_use_carver_only(monkeypatch) -> None:
+    mapping = MarketMapping(
+        'brl', 'BRE', '6L', mapping_status='candidate', stitch_globex=False
+    )
+    loaded: list[str] = []
+
+    class StubCarverProvider:
+        def __init__(self, **_kwargs):
+            pass
+
+        def load(self, instrument_code: str) -> FuturesHistory:
+            loaded.append(instrument_code)
+            return replace(_history(), instrument_code=instrument_code)
+
+    class StubGlobexProvider:
+        def __init__(self, **_kwargs):
+            raise AssertionError('Globex provider must not be constructed')
+
+    monkeypatch.setattr(th, 'load_mappings', lambda _path=None: (mapping,))
+    monkeypatch.setattr(th, 'PysystemtradeHistoryProvider', StubCarverProvider)
+    monkeypatch.setattr(th, 'GlobexHistoryProvider', StubGlobexProvider)
+
+    frames, manifest = th.load_source_neutral_histories(
+        ['BRE'], data_source='hybrid', allow_candidate_mappings=True
+    )
+
+    assert loaded == ['BRE']
+    assert frames['BRE'].height == 3
+    assert manifest['instruments']['BRE']['source'] == 'pysystemtrade'
+
+
 @pytest.mark.parametrize(
     ('traded_symbol', 'globex_symbol', 'mapped_carver', 'expected_carver'),
     [

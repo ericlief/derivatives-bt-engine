@@ -174,10 +174,6 @@ def load_source_neutral_histories(
             traded_symbol,
             globex_symbol,
         )
-        globex = GlobexHistoryProvider(
-            db_path=globex_db_path,
-            roll_policy=roll_policy,
-        )
         mapping = mappings.get(globex_symbol)
         if data_source in {"pysystemtrade", "hybrid"} and mapping is None:
             qualifier = "approved " if not allow_candidate_mappings else ""
@@ -191,10 +187,23 @@ def load_source_neutral_histories(
             or (mapping.carver_instrument if mapping is not None else None)
         )
         if data_source == "globex":
+            globex = GlobexHistoryProvider(
+                db_path=globex_db_path,
+                roll_policy=roll_policy,
+            )
             history = globex.load(globex_symbol)
         elif data_source == "pysystemtrade":
             history = carver.load(carver_instrument)
+        elif not mapping.stitch_globex:
+            # A crosswalk may retain a Globex identity for diagnostics while
+            # explicitly excluding that source from production/research
+            # stitching. In that case hybrid means Carver-only for this row.
+            history = carver.load(carver_instrument)
         else:
+            globex = GlobexHistoryProvider(
+                db_path=globex_db_path,
+                roll_policy=roll_policy,
+            )
             alignment = (
                 "previous_primary_session"
                 if mapping.carver_date_alignment == "previous_globex_session"

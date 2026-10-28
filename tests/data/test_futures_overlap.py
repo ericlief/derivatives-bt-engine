@@ -12,6 +12,7 @@ from derivatives_bt_engine.data.futures_overlap import (
     build_overlap_report,
     compare_market,
     load_mappings,
+    resolve_reviewed_globex_asset,
     write_overlap_report,
 )
 from derivatives_bt_engine.data.futures_history import FuturesHistory
@@ -124,6 +125,10 @@ def test_packaged_mapping_crosswalk_is_typed_and_unique() -> None:
     assert silver.carver_date_alignment == "previous_globex_session"
     assert silver.carver_date_alignment_through == date(2021, 6, 30)
     assert sum(bool(mapping.carver_date_alignment) for mapping in mappings) == 1
+    brl = next(mapping for mapping in mappings if mapping.carver_instrument == "BRE")
+    assert brl.stitch_globex is False
+    assert resolve_reviewed_globex_asset("BRE") is None
+    assert resolve_reviewed_globex_asset("SP500") == "ES"
 
 
 def test_compare_market_reports_returns_trends_and_nearest_roll() -> None:
