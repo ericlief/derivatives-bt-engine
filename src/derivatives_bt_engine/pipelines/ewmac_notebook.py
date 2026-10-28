@@ -221,11 +221,8 @@ def plot_selection_cash_pnl(
             ) * hv.HLine(0.0).opts(color="black", line_width=1),
             line_panel(
                 symbol_frame,
-                columns=[
-                    "tgt_pos", "buffer_top_con", "buffer_bot_con",
-                    "exec_con", "held_con",
-                ],
-                title=f"{symbol} target, buffer, and held contracts",
+                columns=["tgt_pos", "held_con"],
+                title=f"{symbol} target and held contracts",
                 ylabel="Contracts",
             ),
             line_panel(
