@@ -9,9 +9,8 @@ reimplement forecast, sizing, buffering, or cost calculations; those remain
 owned by the calculation modules used by production selection. The stitched
 history entry point also orchestrates dated-contract loading, history
 ownership, pooled forecast construction, and this same view boundary. The
-selected-book cash-P&L plotting helper converts Polars slices to pandas at the
-hvPlot boundary and lays out comparable execution diagnostics without merging
-their scales.
+selected-book cash-P&L plotting helper plots Polars slices directly and lays
+out comparable execution diagnostics without merging their scales.
 """
 
 from __future__ import annotations
@@ -141,7 +140,7 @@ def plot_selection_cash_pnl(
         independently scaled plots for that symbol.
     """
     import holoviews as hv
-    import hvplot.pandas  # noqa: F401 - registers pandas' ``hvplot`` API
+    import hvplot.polars  # noqa: F401 - registers Polars' ``hvplot`` API
     import ipywidgets as widgets
     from IPython.display import display
 
@@ -181,12 +180,10 @@ def plot_selection_cash_pnl(
             raise ValueError(
                 f"no cash-P&L observations for {symbol} in the requested date range"
             )
-        # Use pandas only at the plotting boundary to isolate whether the
-        # nonresponsive selector is caused by hvPlot's Polars integration.
-        symbol_frames[symbol] = symbol_frame.to_pandas()
+        symbol_frames[symbol] = symbol_frame
 
     def line_panel(
-        symbol_frame,
+        symbol_frame: pl.DataFrame,
         *,
         columns: list[str],
         title: str,
