@@ -25,6 +25,7 @@ dependencies = [
     "python-dotenv",
     "seaborn",
     "hvplot",
+    "ipywidgets",
     "maturin",
     "ib_insync",
     "scipy",

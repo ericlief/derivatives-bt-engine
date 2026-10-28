@@ -273,9 +273,14 @@ def test_notebook_view_hvplot_contains_cash_panels_when_requested():
     assert len(dashboard) == 7
 
 
-def test_selected_book_cash_plot_reads_parquet_and_adds_symbol_selector(tmp_path):
+def test_selected_book_cash_plot_reads_parquet_and_adds_symbol_selector(
+    tmp_path, monkeypatch
+):
     """Selected-book reports expose wide interactive panels by selected symbol."""
-    import panel as pn
+    import ipywidgets as widgets
+
+    displayed = []
+    monkeypatch.setattr("IPython.display.display", lambda plot: displayed.append(plot))
 
     dates = [date(2024, 1, 2), date(2024, 1, 3)]
     cash = pl.DataFrame({
@@ -301,12 +306,15 @@ def test_selected_book_cash_plot_reads_parquet_and_adds_symbol_selector(tmp_path
 
     dashboard = plot_selection_cash_pnl(path, start="2024-01-03")
 
-    selector = dashboard[0]
-    assert isinstance(selector, pn.widgets.Select)
-    assert selector.options == ["A", "B"]
-    assert type(dashboard[1]).__name__ == "ParamFunction"
+    selector, plot_output = dashboard.children
+    assert isinstance(dashboard, widgets.VBox)
+    assert isinstance(selector, widgets.Dropdown)
+    assert isinstance(plot_output, widgets.Output)
+    assert list(selector.options) == ["A", "B"]
+    assert len(displayed) == 1
     selector.value = "B"
     assert selector.value == "B"
+    assert len(displayed) == 2
 
 
 def test_cash_curve_is_explicitly_optional():

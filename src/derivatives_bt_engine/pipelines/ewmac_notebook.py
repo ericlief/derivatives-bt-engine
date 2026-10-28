@@ -136,13 +136,14 @@ def plot_selection_cash_pnl(
 
     Returns
     -------
-    panel.Column
-        A symbol Select widget bound to five independently scaled plots for
-        the currently chosen symbol.
+    ipywidgets.VBox
+        A symbol dropdown and output area. Selecting a symbol redraws five
+        independently scaled plots for that symbol.
     """
     import holoviews as hv
     import hvplot.pandas  # noqa: F401 - registers pandas' ``hvplot`` API
-    import panel as pn
+    import ipywidgets as widgets
+    from IPython.display import display
 
     if isinstance(cash_pnl, (str, Path)):
         frame = pl.read_parquet(Path(cash_pnl).expanduser())
@@ -246,26 +247,23 @@ def plot_selection_cash_pnl(
             dashboard = dashboard + panel
         return dashboard.cols(1).opts(shared_axes=False)
 
-    selector = pn.widgets.Select(
-        label="Symbol",
+    selector = widgets.Dropdown(
+        description="Symbol",
         options=selected_symbols,
         value=selected_symbols[0],
-        sizing_mode="stretch_width",
     )
+    plot_output = widgets.Output()
 
-    # Declare the dependency directly so Panel owns and displays the reactive
-    # component. Notebook frontends must have Panel's JavaScript extension
-    # initialized once by the notebook (pn.extension()) before rendering.
-    @pn.depends(selector.param.value)
-    def dashboard(symbol: str):
-        """Rebuild the symbol plots when the Select value changes."""
-        return plot_symbol(symbol)
+    def update_plot(change=None):
+        """Redraw the selected symbol inside the ipywidgets output area."""
+        symbol = change["new"] if change is not None else selector.value
+        with plot_output:
+            plot_output.clear_output(wait=True)
+            display(plot_symbol(symbol))
 
-    return pn.Column(
-        selector,
-        pn.panel(dashboard),
-        sizing_mode="stretch_width",
-    )
+    selector.observe(update_plot, names="value")
+    update_plot()
+    return widgets.VBox([selector, plot_output])
 
 
 def _attach_fx(frame: pl.DataFrame, fx_to_usd: float) -> pl.DataFrame:
