@@ -16,6 +16,7 @@ from derivatives_bt_engine.pipelines.ewmac_notebook import (
     _screen_row,
     build_ewmac_notebook_view,
     build_ewmac_notebook_view_from_screen,
+    plot_selection_cash_pnl,
 )
 
 
@@ -270,6 +271,35 @@ def test_notebook_view_hvplot_contains_cash_panels_when_requested():
     dashboard = view.plot(width=500, height=150)
 
     assert len(dashboard) == 7
+
+
+def test_selected_book_cash_plot_reads_parquet_and_builds_symbol_subplots(tmp_path):
+    """Selected-book reports render interactive panels for every symbol."""
+    dates = [date(2024, 1, 2), date(2024, 1, 3)]
+    cash = pl.DataFrame({
+        "date": dates * 2,
+        "symbol": ["A", "A", "B", "B"],
+        "comb_fcst": [0.5, 1.0, -0.5, -1.0],
+        "tgt_pos": [1.0, 2.0, -1.0, -2.0],
+        "buffer_top_con": [1, 2, 0, -1],
+        "buffer_bot_con": [0, 1, -2, -3],
+        "exec_con": [1, 2, -1, -2],
+        "held_con": [0, 1, 0, -1],
+        "gross_pnl": [2.0, 3.0, 1.0, 2.0],
+        "net_pnl": [1.0, 2.0, 0.5, 1.5],
+        "trade_cost": [-1.0, -1.0, -0.5, -0.5],
+        "roll_cost": [0.0, 0.0, 0.0, 0.0],
+        "cum_gross_pnl": [2.0, 5.0, 1.0, 3.0],
+        "cum_net_pnl": [1.0, 3.0, 0.5, 2.0],
+        "cum_gross_pct": [0.01, 0.025, 0.005, 0.015],
+        "cum_net_pct": [0.005, 0.015, 0.0025, 0.01],
+    })
+    path = tmp_path / "selection_cash_pnl.parquet"
+    cash.write_parquet(path)
+
+    dashboard = plot_selection_cash_pnl(path, start="2024-01-03")
+
+    assert len(dashboard) == 10
 
 
 def test_cash_curve_is_explicitly_optional():

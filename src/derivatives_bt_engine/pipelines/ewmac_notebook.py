@@ -8,7 +8,9 @@ can join a saved Phase 1 selection screen for contract and cost inputs. It does
 not reimplement forecast, sizing, buffering, or cost calculations; those
 remain owned by the calculation modules used by production selection. The
 stitched-history entry point also orchestrates dated-contract loading, history
-ownership, pooled forecast construction, and this same view boundary.
+ownership, pooled forecast construction, and this same view boundary. The
+selected-book cash-P&L plotting helper reads saved multi-symbol Parquet reports
+and lays out comparable execution diagnostics without merging their scales.
 """
 
 from __future__ import annotations
@@ -98,6 +100,149 @@ def _date_slice(
     if end_date is not None:
         result = result.filter(pl.col("date") <= end_date)
     return result
+
+
+def plot_selection_cash_pnl(
+    cash_pnl: pl.DataFrame | Path | str,
+    *,
+    symbols: Iterable[str] | None = None,
+    start: date | datetime | str | None = None,
+    end: date | datetime | str | None = None,
+    width: int = 360,
+    height: int = 190,
+):
+    """Plot a selected-book cash-P&L report as interactive per-symbol panels.
+
+    ``cash_pnl`` may be the public Polars frame or a saved selection cash-P&L
+    Parquet path. By default, every symbol is plotted. Each symbol receives
+    separate forecast, contract-position, daily P&L/cost, cumulative P&L, and
+    cumulative-return panels, keeping their incompatible scales independent.
+    The returned HoloViews layout is Bokeh-backed and supports hover and zoom.
+
+    Parameters
+    ----------
+    cash_pnl
+        Selected-book cash-P&L frame or its Parquet path. The public report
+        schema must include ``symbol``, ``date``, ``comb_fcst``, ``tgt_pos``,
+        ``gross_pnl``, and ``net_pnl``.
+    symbols
+        Optional symbols to include, in the requested order. Unknown symbols
+        raise ``KeyError`` rather than silently producing an empty dashboard.
+    start, end
+        Optional inclusive date bounds shared by every symbol panel.
+    width, height
+        Width and height of each subplot in pixels. The five metric panels
+        form one row per symbol.
+
+    Returns
+    -------
+    holoviews.Layout
+        A layout containing five independently scaled interactive panels per
+        symbol.
+    """
+    import holoviews as hv
+    import hvplot.polars  # noqa: F401 - registers Polars' ``hvplot`` API
+
+    if isinstance(cash_pnl, (str, Path)):
+        frame = pl.read_parquet(Path(cash_pnl).expanduser())
+    else:
+        frame = cash_pnl
+    if not isinstance(frame, pl.DataFrame):
+        raise TypeError("cash_pnl must be a Polars DataFrame or Parquet path")
+    required = {"symbol", "date", "comb_fcst", "tgt_pos", "gross_pnl", "net_pnl"}
+    missing = sorted(required.difference(frame.columns))
+    if missing:
+        raise ValueError(
+            "selection cash-P&L frame is missing required columns: "
+            f"{missing}"
+        )
+    available_symbols = set(frame.get_column("symbol").drop_nulls().unique().to_list())
+    selected_symbols = (
+        list(symbols)
+        if symbols is not None
+        else sorted(available_symbols)
+    )
+    if not selected_symbols:
+        raise ValueError("selection cash-P&L frame contains no symbols")
+    unknown = [symbol for symbol in selected_symbols if symbol not in available_symbols]
+    if unknown:
+        raise KeyError(f"symbols are not present in cash-P&L frame: {unknown}")
+
+    def line_panel(
+        symbol_frame: pl.DataFrame,
+        *,
+        columns: list[str],
+        title: str,
+        ylabel: str,
+    ):
+        """Build one independently scaled line panel from available fields."""
+        available = [name for name in columns if name in symbol_frame.columns]
+        return symbol_frame.hvplot.line(
+            x="date",
+            y=available,
+            title=title,
+            ylabel=ylabel,
+            width=width,
+            height=height,
+            tools=["hover", "pan", "wheel_zoom", "box_zoom", "reset", "save"],
+        )
+
+    all_panels = []
+    for symbol in selected_symbols:
+        symbol_frame = _date_slice(
+            frame.filter(pl.col("symbol") == symbol),
+            start=start,
+            end=end,
+        ).sort("date")
+        if symbol_frame.is_empty():
+            raise ValueError(
+                f"no cash-P&L observations for {symbol} in the requested date range"
+            )
+
+        panels = [
+            line_panel(
+                symbol_frame,
+                columns=["comb_fcst"],
+                title=f"{symbol} combined forecast",
+                ylabel="Forecast",
+            ) * hv.HLine(0.0).opts(color="black", line_width=1),
+            line_panel(
+                symbol_frame,
+                columns=[
+                    "tgt_pos", "buffer_top_con", "buffer_bot_con",
+                    "exec_con", "held_con",
+                ],
+                title=f"{symbol} target, buffer, and held contracts",
+                ylabel="Contracts",
+            ),
+            line_panel(
+                symbol_frame,
+                columns=["gross_pnl", "net_pnl", "trade_cost", "roll_cost"],
+                title=f"{symbol} daily P&L and costs",
+                ylabel="USD",
+            ) * hv.HLine(0.0).opts(color="black", line_width=1),
+            line_panel(
+                symbol_frame,
+                columns=["cum_gross_pnl", "cum_net_pnl"],
+                title=f"{symbol} cumulative P&L",
+                ylabel="USD",
+            ),
+            line_panel(
+                symbol_frame,
+                columns=["cum_gross_pct", "cum_net_pct"],
+                title=f"{symbol} cumulative return contribution",
+                ylabel="Return contribution",
+            ),
+        ]
+        all_panels.extend(panels)
+
+    # HoloViews flattens nested Layouts on addition. Appending exactly five
+    # panels per symbol and laying out in five columns keeps each symbol's
+    # independent-scale diagnostics together on one row.
+    dashboard = all_panels[0]
+    for panel in all_panels[1:]:
+        dashboard = dashboard + panel
+    return dashboard.cols(5).opts(shared_axes=False)
 
 
 def _attach_fx(frame: pl.DataFrame, fx_to_usd: float) -> pl.DataFrame:
