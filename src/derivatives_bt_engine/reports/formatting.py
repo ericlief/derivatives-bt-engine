@@ -297,6 +297,10 @@ CASH_PNL_REPORT_PRIORITY = (
     "held_con",
     "exec_con",
     "trade_con",
+    "vol_scalar",
+    "buf_width_pos",
+    "buffer_top_con",
+    "buffer_bot_con",
     "gross_pnl",
     "gross_pct",
     "net_pnl",
@@ -327,10 +331,6 @@ CASH_PNL_REPORT_PARAMS = (
 )
 CASH_PNL_REPORT_DIAGNOSTICS = (
     "avg_pos",
-    "vol_scalar",
-    "buf_width_pos",
-    "buffer_top_con",
-    "buffer_bot_con",
     "roll_con",
     "risk_budget",
     "daily_dvol",
@@ -341,9 +341,10 @@ CASH_PNL_REPORT_DIAGNOSTICS = (
 def order_cash_pnl_report(report: pl.DataFrame) -> pl.DataFrame:
     """Put key identity, position, P&L, and cost columns first.
 
-    Dynamic diagnostics follow costs, then immutable configuration inputs.
-    Remaining source, validity, lineage, and extension fields trail in their
-    original relative order.
+    The volatility scalar and buffer boundaries sit beside executed trade
+    quantities; other dynamic diagnostics follow costs, then immutable
+    configuration inputs. Remaining source, validity, lineage, and extension
+    fields trail in their original relative order.
     """
     leading = [name for name in CASH_PNL_REPORT_PRIORITY if name in report.columns]
     leading_set = set(leading)

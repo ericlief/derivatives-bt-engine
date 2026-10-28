@@ -143,6 +143,10 @@ def test_cash_pnl_report_orders_primary_fields_before_params_and_audit():
         "held_cons": [1],
         "exec_cons": [2],
         "signed_trade_cons": [1],
+        "vol_scalar": [3.5],
+        "buffer_width_position": [0.2],
+        "buffer_top_cons": [2],
+        "buffer_bot_cons": [1],
         "cash_gross_pnl_usd": [10.0],
         "cash_gross_pct": [0.01],
         "cash_net_pnl_usd": [9.0],
@@ -158,12 +162,13 @@ def test_cash_pnl_report_orders_primary_fields_before_params_and_audit():
 
     public = order_cash_pnl_report(rename_public_report_columns(report))
 
-    assert public.columns[:22] == [
+    assert public.columns[:26] == [
         "symbol", "date", "close", "pt_change", "pt_vol", "comb_fcst",
-        "tgt_pos", "held_con", "exec_con", "trade_con", "gross_pnl",
+        "tgt_pos", "held_con", "exec_con", "trade_con", "vol_scalar",
+        "buf_width_pos", "buffer_top_con", "buffer_bot_con", "gross_pnl",
         "gross_pct", "net_pnl", "net_pct", "cum_gross_pnl", "cum_net_pnl",
-        "cum_gross_pct", "cum_net_pct", "trade_cost", "roll_cost",
-        "weight", "hist_instr_code",
+        "cum_gross_pct", "cum_net_pct", "trade_cost", "roll_cost", "weight",
+        "hist_instr_code",
     ]
 
 
