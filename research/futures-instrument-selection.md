@@ -1239,10 +1239,38 @@ IDM(B) = min(2.5, 1 / sqrt(w' H w))
 For candidate `i`, the position at the maximum absolute forecast of 20 is:
 
 ```text
-P_i = capital * target_vol * w_i * IDM(B) / annual_dollar_vol_i * (20 / 10)
+limit_weight_i = min(w_i, max_weight_idm / IDM(B))
+P_i = capital * target_vol * limit_weight_i * IDM(B)
+     / annual_dollar_vol_i * (20 / 10)
 ```
 
-The final factor is two because the AFTS average absolute forecast is 10.
+`w_i` is the structural classification weight used to calculate the book IDM
+and portfolio score. `limit_weight_i` is the capped weight used for sizing,
+liquidity, margin, and the executable cash backtest; the cap is not
+redistributed to other instruments. Its definition ensures
+`limit_weight_i * IDM(B) <= max_weight_idm` at an average absolute forecast
+of 10. The final factor is two because the maximum absolute forecast is 20,
+so with `max_weight_idm=0.20` the maximum forecast can scale an instrument to
+40% of the portfolio target-risk budget. This is a risk-budget scalar, not a
+40% allocation of account capital or notional. Contract rounding and the
+forecast buffer can make the realized position differ from the continuous
+maximum `P_i`.
+
+For example, in the 2026-10-29 run, seven represented asset classes each
+received a structural weight of `1/7 = 14.29%`. SCI and MBT were the sole
+selected members of their respective classes. With `IDM=2.5` and
+`max_weight_idm=0.20`, each had:
+
+```text
+limit_weight = min(14.29%, 20% / 2.5) = 8%
+average-forecast risk budget = $75,000 * 20% * 8% * 2.5 = $3,000
+maximum-forecast risk budget = $3,000 * (20 / 10) = $6,000
+```
+
+Their realized cash P&L sizing uses the 8% `limit_weight`, not the 14.29%
+structural weight. Since capped weights are not renormalized, their sum can be
+less than one.
+
 Following Carver, assign an effectively infinite size penalty when `P_i < 0.5`
 contracts; otherwise:
 
