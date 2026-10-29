@@ -116,8 +116,8 @@ def plot_selection_cash_pnl(
     ``cash_pnl`` may be the public Polars frame or a saved selection cash-P&L
     Parquet path. By default, every symbol appears in the selector. Choosing a
     symbol updates its vertically stacked forecast, contract-position, daily
-    P&L, separate daily-cost, cumulative P&L, cumulative-return, and
-    contract-mark/Panama-price panels.
+    P&L, separate daily-cost, cumulative P&L, cumulative-return, mark-price,
+    and Panama-price panels.
     The wider panels
     have independent scales and support hover and zoom.
 
@@ -257,10 +257,17 @@ def plot_selection_cash_pnl(
             ),
             line_panel(
                 symbol_frame,
-                columns=["con_px", "close"],
-                title=f"{symbol} contract mark and Panama prices",
+                columns=["con_px"],
+                title=f"{symbol} contract mark price",
                 ylabel="Price points",
-                labels={"con_px": "Mark price", "close": "Panama price"},
+                labels={"con_px": "Mark price"},
+            ),
+            line_panel(
+                symbol_frame,
+                columns=["close"],
+                title=f"{symbol} Panama price",
+                ylabel="Price points",
+                labels={"close": "Panama price"},
             ),
         ]
         dashboard = panels[0]
@@ -761,8 +768,8 @@ class EwmacNotebookView:
     ):
         """Return a vertically stacked hvPlot dashboard for notebook display.
 
-        Panels show the executable contract mark beside the Panama-adjusted
-        signal price, combined forecast, sized
+        Panels show the executable contract mark and Panama-adjusted signal
+        price separately, followed by combined forecast, sized
         reference positions, normalized position, cumulative reference
         percentage, and—when configured—whole-contract positions and
         cumulative cash P&L. Each panel has an independent y-axis so the
@@ -779,34 +786,33 @@ class EwmacNotebookView:
             raise ValueError("plot date range contains no forecast observations")
 
         # The Panama series is carried as ``close`` for the signal pipeline;
-        # ``con_px`` is the actual contract mark. Overlay both when marks are
-        # available so the notebook can show Panama adjustments against the
-        # traded price without changing either series' data or ownership.
-        price_curves = []
+        # ``con_px`` is the actual contract mark. Separate panels keep either
+        # price path from flattening the other when their levels diverge.
+        price_panels = []
         if "con_px" in reference.columns:
-            price_curves.append(
+            price_panels.append(
                 reference.hvplot.line(
                     x="date",
                     y="con_px",
-                    label="Contract mark",
-                    title=f"{self.symbol} contract mark and Panama prices",
+                    title=f"{self.symbol} contract mark price",
                     ylabel="Price points",
                     width=width,
                     height=height,
                 )
             )
-        price_curves.append(
+        price_panels.append(
             reference.hvplot.line(
                 x="date",
                 y="close",
-                label="Panama price",
-                title=f"{self.symbol} contract mark and Panama prices",
+                title=f"{self.symbol} Panama price",
                 ylabel="Price points",
                 width=width,
                 height=height,
             )
         )
-        price_plot = hv.Overlay(price_curves).opts(legend_position="top_left")
+        price_plot = price_panels[0]
+        for price_panel in price_panels[1:]:
+            price_plot = price_plot + price_panel
         forecast_plot = reference.hvplot.line(
             x="date",
             y="comb_fcst",
