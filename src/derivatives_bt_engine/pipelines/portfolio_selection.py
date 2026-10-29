@@ -66,6 +66,7 @@ from derivatives_bt_engine.strats.multi_speed_ewmac import (
 )
 from derivatives_bt_engine.reports.formatting import (
     order_cash_pnl_report,
+    order_portfolio_curve_report,
     rename_public_report_columns,
     round_public_report,
 )
@@ -1596,7 +1597,9 @@ def _run_complete_selection(
     )
     public_cash_pnl.write_parquet(cash_pnl_path)
     public_portfolio_curve = round_public_report(
-        rename_public_report_columns(portfolio_curve)
+        order_portfolio_curve_report(
+            rename_public_report_columns(portfolio_curve)
+        )
     )
     public_portfolio_curve.write_parquet(portfolio_curve_path)
     print(

@@ -339,6 +339,34 @@ CASH_PNL_REPORT_DIAGNOSTICS = (
 )
 
 
+PORTFOLIO_CURVE_REPORT_PRIORITY = (
+    "date",
+    "port_gross",
+    "port_net",
+    "cum_port_gross",
+    "cum_port_net",
+    "port_gross_pct",
+    "port_net_pct",
+    "cum_port_gross_pct",
+    "cum_port_net_pct",
+    "book_n_instr",
+    "port_instr",
+    "pnl_valid_n_instr",
+    "port_trade_cost",
+    "port_roll_cost",
+    "port_trade_cost_pct",
+    "port_roll_cost_pct",
+    "port_total_cost_pct",
+    "cum_port_trade_cost_pct",
+    "cum_port_roll_cost_pct",
+    "cum_port_total_cost_pct",
+    "port_gross_equity",
+    "port_net_equity",
+    "ret_valid",
+)
+PORTFOLIO_CURVE_REPORT_PARAMS = ("init_cap",)
+
+
 def order_cash_pnl_report(report: pl.DataFrame) -> pl.DataFrame:
     """Put key identity, position, P&L, and cost columns first.
 
@@ -367,6 +395,30 @@ def order_cash_pnl_report(report: pl.DataFrame) -> pl.DataFrame:
         *params,
         *audit,
     )
+
+
+def order_portfolio_curve_report(report: pl.DataFrame) -> pl.DataFrame:
+    """Put portfolio P&L, membership, costs, and static settings in order.
+
+    Daily and cumulative P&L lead the curve, followed by book membership and
+    cost fields. Static account settings such as initial capital are placed at
+    the far right; remaining audit fields retain their relative order.
+    """
+    leading = [
+        name for name in PORTFOLIO_CURVE_REPORT_PRIORITY
+        if name in report.columns
+    ]
+    leading_set = set(leading)
+    params = [
+        name for name in PORTFOLIO_CURVE_REPORT_PARAMS
+        if name in report.columns
+    ]
+    params_set = set(params)
+    audit = [
+        name for name in report.columns
+        if name not in leading_set and name not in params_set
+    ]
+    return report.select(*leading, *audit, *params)
 
 
 # USD amounts generally use cents. The registry includes descriptive internal
