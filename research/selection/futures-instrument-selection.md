@@ -3,7 +3,7 @@
 Research date: 2026-10-04.
 
 This is the executable-universe and static-selection companion to
-[pysystemtrade-data.md](pysystemtrade-data.md). Its phases are independent of
+[pysystemtrade-data.md]../futures-data/pysystemtrade-data.md. Its phases are independent of
 the data import, hybrid-history, and carry phases in that document:
 
 1. The live snapshot resolves executable contracts and caches the IB-dependent
@@ -1106,7 +1106,7 @@ aggregate score.
 
 For interactive inspection of one instrument's history, pooled normalization,
 raw momentum, and component forecasts without running either report, use the
-[multi-speed EWMAC notebook workflow](multi-speed-ewmac-notebook.md).
+[multi-speed EWMAC notebook workflow]../strategy-research/multi-speed-ewmac-notebook.md.
 
 The market screen `liquidity_ann_trades=25` calculation is Carver's conservative
 single-instrument scenario. It is useful for coarse triage, but it is not the

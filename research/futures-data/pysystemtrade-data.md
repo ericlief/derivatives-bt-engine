@@ -468,7 +468,7 @@ rolls (ten one-way legs), not twice the diluted full-history rate.
 
 The same regime change also means a full-history `CORN_mini` EWMAC Sharpe is a
 mixed-strategy statistic. The matched-era
-[CORN roll-policy ablation](futures-instrument-selection.md#corn-roll-policy-performance-ablation)
+[CORN roll-policy ablation]../selection/futures-instrument-selection.md#corn-roll-policy-performance-ablation)
 finds that the mini's full-history advantage is concentrated before 2016; the
 short post-2016 comparison is not precise enough to select annual December
 over the configured five-month path. The imported histories contain only one
@@ -1269,7 +1269,7 @@ reported as execution-grade.
 ## Executable universe and instrument selection
 
 The executable-contract cost audit and AFTS selection research now live in
-[futures-instrument-selection.md](futures-instrument-selection.md).
+[futures-instrument-selection.md]../selection/futures-instrument-selection.md.
 That companion document has its own Phase 1 contract/cost diagnostic and Phase
 2 iterative selector. The phase numbers there are independent of this
 document's data import, hybrid-history, carry, and wider-universe phases.

@@ -81,11 +81,11 @@ execution. The present integration deliberately separates these uses:
   2026.
 
 The full source audit and EWMAC cache details remain in
-[`pysystemtrade-data.md`](pysystemtrade-data.md). The relevant implementation
+[`pysystemtrade-data.md`]../futures-data/pysystemtrade-data.md. The relevant implementation
 is in
-[`tsmom_backtester.py`](../src/derivatives_bt_engine/backtest/futures/tsmom.py)
+[`tsmom_backtester.py`](../../src/derivatives_bt_engine/backtest/futures/tsmom.py)
 and
-[`tsmom_history.py`](../src/derivatives_bt_engine/data/tsmom_history.py).
+[`tsmom_history.py`](../../src/derivatives_bt_engine/data/tsmom_history.py).
 
 ## Why small-account sizing becomes circular
 
