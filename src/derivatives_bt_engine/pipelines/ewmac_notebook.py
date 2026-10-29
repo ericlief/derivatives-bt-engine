@@ -752,7 +752,8 @@ class EwmacNotebookView:
     ):
         """Return a vertically stacked hvPlot dashboard for notebook display.
 
-        Panels show the adjusted signal price, combined forecast, sized
+        Panels show the executable contract mark beside the Panama-adjusted
+        signal price, combined forecast, sized
         reference positions, normalized position, cumulative reference
         percentage, and—when configured—whole-contract positions and
         cumulative cash P&L. Each panel has an independent y-axis so the
@@ -768,14 +769,35 @@ class EwmacNotebookView:
         if reference.is_empty():
             raise ValueError("plot date range contains no forecast observations")
 
-        price_plot = reference.hvplot.line(
-            x="date",
-            y="close",
-            title=f"{self.symbol} adjusted signal price",
-            ylabel="Price points",
-            width=width,
-            height=height,
+        # The Panama series is carried as ``close`` for the signal pipeline;
+        # ``con_px`` is the actual contract mark. Overlay both when marks are
+        # available so the notebook can show Panama adjustments against the
+        # traded price without changing either series' data or ownership.
+        price_curves = []
+        if "con_px" in reference.columns:
+            price_curves.append(
+                reference.hvplot.line(
+                    x="date",
+                    y="con_px",
+                    label="Contract mark",
+                    title=f"{self.symbol} contract mark and Panama prices",
+                    ylabel="Price points",
+                    width=width,
+                    height=height,
+                )
+            )
+        price_curves.append(
+            reference.hvplot.line(
+                x="date",
+                y="close",
+                label="Panama price",
+                title=f"{self.symbol} contract mark and Panama prices",
+                ylabel="Price points",
+                width=width,
+                height=height,
+            )
         )
+        price_plot = hv.Overlay(price_curves).opts(legend_position="top_left")
         forecast_plot = reference.hvplot.line(
             x="date",
             y="comb_fcst",
