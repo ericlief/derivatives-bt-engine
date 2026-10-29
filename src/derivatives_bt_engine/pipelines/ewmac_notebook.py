@@ -152,6 +152,14 @@ def plot_selection_cash_pnl(
         frame = cash_pnl
     if not isinstance(frame, pl.DataFrame):
         raise TypeError("cash_pnl must be a Polars DataFrame or Parquet path")
+    mark_column = next(
+        (
+            column
+            for column in ("con_px", "contract_close", "mark_price")
+            if column in frame.columns
+        ),
+        None,
+    )
     required = {"symbol", "date", "comb_fcst", "tgt_pos", "gross_pnl", "net_pnl"}
     missing = sorted(required.difference(frame.columns))
     if missing:
@@ -256,14 +264,14 @@ def plot_selection_cash_pnl(
                 ylabel="Return contribution",
             ),
         ]
-        if "con_px" in symbol_frame.columns:
+        if mark_column is not None:
             panels.append(
                 line_panel(
                     symbol_frame,
-                    columns=["con_px"],
+                    columns=[mark_column],
                     title=f"{symbol} contract mark price",
                     ylabel="Price points",
-                    labels={"con_px": "Mark price"},
+                    labels={mark_column: "Mark price"},
                 )
             )
         if "close" in symbol_frame.columns:
