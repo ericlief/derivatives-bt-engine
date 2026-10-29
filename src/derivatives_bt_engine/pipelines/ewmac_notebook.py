@@ -255,21 +255,27 @@ def plot_selection_cash_pnl(
                 title=f"{symbol} cumulative return contribution",
                 ylabel="Return contribution",
             ),
-            line_panel(
-                symbol_frame,
-                columns=["con_px"],
-                title=f"{symbol} contract mark price",
-                ylabel="Price points",
-                labels={"con_px": "Mark price"},
-            ),
-            line_panel(
-                symbol_frame,
-                columns=["close"],
-                title=f"{symbol} Panama price",
-                ylabel="Price points",
-                labels={"close": "Panama price"},
-            ),
         ]
+        if "con_px" in symbol_frame.columns:
+            panels.append(
+                line_panel(
+                    symbol_frame,
+                    columns=["con_px"],
+                    title=f"{symbol} contract mark price",
+                    ylabel="Price points",
+                    labels={"con_px": "Mark price"},
+                )
+            )
+        if "close" in symbol_frame.columns:
+            panels.append(
+                line_panel(
+                    symbol_frame,
+                    columns=["close"],
+                    title=f"{symbol} Panama price",
+                    ylabel="Price points",
+                    labels={"close": "Panama price"},
+                )
+            )
         dashboard = panels[0]
         for panel in panels[1:]:
             dashboard = dashboard + panel

@@ -1323,6 +1323,9 @@ def _run_complete_selection(
                 # This is the locally generated additive-Panama signal level,
                 # not a raw executable dated-contract settlement.
                 "close",
+                # Preserve the actual dated-contract mark for the research
+                # price panel; the public schema maps it to ``con_px``.
+                "contract_close",
                 "comb_fcst",
                 "pt_change",
                 "pt_vol",
