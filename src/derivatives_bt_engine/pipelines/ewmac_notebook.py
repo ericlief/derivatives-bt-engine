@@ -116,7 +116,8 @@ def plot_selection_cash_pnl(
     ``cash_pnl`` may be the public Polars frame or a saved selection cash-P&L
     Parquet path. By default, every symbol appears in the selector. Choosing a
     symbol updates its vertically stacked forecast, contract-position, daily
-    P&L, separate daily-cost, cumulative P&L, and cumulative-return panels.
+    P&L, separate daily-cost, cumulative P&L, cumulative-return, and
+    contract-mark/Panama-price panels.
     The wider panels
     have independent scales and support hover and zoom.
 
@@ -189,6 +190,7 @@ def plot_selection_cash_pnl(
         columns: list[str],
         title: str,
         ylabel: str,
+        labels: dict[str, str] | None = None,
     ):
         """Build one independently scaled overlay from available fields."""
         available = [name for name in columns if name in symbol_frame.columns]
@@ -197,7 +199,7 @@ def plot_selection_cash_pnl(
             symbol_frame.hvplot.line(
                 x="date",
                 y=column,
-                label=column,
+                label=(labels or {}).get(column, column),
                 title=title,
                 ylabel=ylabel,
                 width=width,
@@ -205,7 +207,7 @@ def plot_selection_cash_pnl(
                 tools=tools,
                 hover_tooltips=[
                     ("Date", "@date{%F}"),
-                    (column, f"@{column}{{0.0000}}"),
+                    ((labels or {}).get(column, column), f"@{column}{{0.0000}}"),
                 ],
             )
             for column in available
@@ -252,6 +254,13 @@ def plot_selection_cash_pnl(
                 columns=["cum_gross_pct", "cum_net_pct"],
                 title=f"{symbol} cumulative return contribution",
                 ylabel="Return contribution",
+            ),
+            line_panel(
+                symbol_frame,
+                columns=["con_px", "close"],
+                title=f"{symbol} contract mark and Panama prices",
+                ylabel="Price points",
+                labels={"con_px": "Mark price", "close": "Panama price"},
             ),
         ]
         dashboard = panels[0]
