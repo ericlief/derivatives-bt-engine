@@ -315,12 +315,17 @@ def test_selected_book_cash_plot_reads_parquet_and_adds_symbol_selector(
     assert plot_output.layout.overflow == "visible"
     assert plot_output.layout.height == "auto"
     assert len(displayed) == 1
+    position_panel = list(displayed[0].values())[1]
     position_curves = {
         curve.vdims[0].name
-        for curve in list(displayed[0].values())[1].values()
+        for curve in position_panel.values()
         if type(curve).__name__ == "Curve"
     }
     assert position_curves == {"vol_scalar", "tgt_pos", "held_con"}
+    assert any(
+        type(element).__name__ == "HLine" and element.data == 0.0
+        for element in position_panel.values()
+    )
     daily_pnl = list(displayed[0].values())[2]
     pnl_curves = {
         curve.vdims[0].name: curve

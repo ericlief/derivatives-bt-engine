@@ -224,7 +224,7 @@ def plot_selection_cash_pnl(
                 columns=["vol_scalar", "tgt_pos", "held_con"],
                 title=f"{symbol} vol scalar, target, and held contracts",
                 ylabel="Contracts",
-            ),
+            ) * hv.HLine(0.0).opts(color="black", line_width=1),
             line_panel(
                 symbol_frame,
                 columns=["gross_pnl", "net_pnl"],
