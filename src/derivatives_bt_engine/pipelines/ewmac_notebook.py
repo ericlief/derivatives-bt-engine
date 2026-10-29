@@ -203,6 +203,10 @@ def plot_selection_cash_pnl(
                 width=width,
                 height=height,
                 tools=tools,
+                hover_tooltips=[
+                    ("Date", "@date{%F}"),
+                    (column, f"@{column}{{0.0000}}"),
+                ],
             )
             for column in available
         ]
