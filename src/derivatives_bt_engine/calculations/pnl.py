@@ -1286,6 +1286,12 @@ def build_fixed_capital_portfolio_curve(
             .n_unique()
             .cast(pl.Int64)
             .alias("portfolio_instrument_count"),
+            pl.col("symbol")
+            .drop_nulls()
+            .unique()
+            .sort()
+            .str.join(",")
+            .alias("portfolio_instruments"),
             pl.col("pnl_valid")
             .fill_null(False)
             .cast(pl.Int64)

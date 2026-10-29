@@ -181,6 +181,7 @@ PUBLIC_REPORT_RENAMES = {
     "max_instr_margin_usd": "max_instr_marg",
     "book_margin_at_max_usd": "book_marg_at_max",
     "portfolio_instrument_count": "book_n_instr",
+    "portfolio_instruments": "port_instr",
     "portfolio_valid_pnl_instruments": "pnl_valid_n_instr",
     "portfolio_return_valid": "ret_valid",
     "portfolio_cash_gross_pnl_usd": "port_gross",
