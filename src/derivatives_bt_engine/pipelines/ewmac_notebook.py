@@ -323,7 +323,7 @@ def plot_selection_cash_pnl(
                 ylabel="Return contribution",
             ),
         ]
-        panels.append(
+        price_panel = (
             line_panel(
                 symbol_frame,
                 columns=[mark_column, "close"],
@@ -338,7 +338,9 @@ def plot_selection_cash_pnl(
                     "close": "#ff7f0e",
                 },
             )
+            * hv.HLine(0.0).opts(color="black", line_width=1)
         )
+        panels.append(price_panel)
         dashboard = panels[0]
         for panel in panels[1:]:
             dashboard = dashboard + panel
@@ -883,7 +885,10 @@ class EwmacNotebookView:
                 height=height,
             )
         )
-        price_plot = hv.Overlay(price_curves).opts(legend_position="top_left")
+        price_plot = (
+            hv.Overlay(price_curves).opts(legend_position="top_left")
+            * hv.HLine(0.0).opts(color="black", line_width=1)
+        )
         forecast_plot = reference.hvplot.line(
             x="date",
             y="comb_fcst",
