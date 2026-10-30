@@ -1121,7 +1121,6 @@ def _run_complete_selection(
             """Load one stitched history with explicit broker-update policy."""
             return IBStitchedHistoryProvider(
                 ib=ib,
-                signal_symbol=signal_symbol_by_history_code[history_code],
                 reference_db_path=args.history_db.expanduser().resolve(),
                 globex_db_path=args.globex_db.expanduser().resolve(),
                 mapping_path=args.broker_mapping.expanduser().resolve(),

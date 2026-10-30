@@ -851,8 +851,6 @@ class IBStitchedHistoryProvider:
     """
 
     ib: IBPySync | None
-    # Optional mapped history source for execution overlays (e.g. MGC -> GC).
-    signal_symbol: str | None = None
     as_of: date | None = None
     prior_years: int = 1
     duration: str = DEFAULT_IB_DATED_CONTRACT_DURATION
@@ -884,6 +882,7 @@ class IBStitchedHistoryProvider:
         symbol: str,
         pst_instr_code: str,
         globex_asset: str | None,
+        signal_symbol: str,
     ) -> Path:
         """Return a versioned cache directory for all stitched-view inputs."""
         effective_as_of = self.as_of or date.today()
@@ -891,7 +890,7 @@ class IBStitchedHistoryProvider:
             'history_schema_version': HISTORY_SCHEMA_VERSION,
             'symbol': symbol,
             'pst_instr_code': pst_instr_code,
-            'signal_symbol': self.signal_symbol or symbol,
+            'signal_symbol': signal_symbol,
             'globex_asset': globex_asset,
             'as_of': effective_as_of.isoformat(),
             'prior_years': self.prior_years,
@@ -921,12 +920,17 @@ class IBStitchedHistoryProvider:
             / digest
         )
 
-    def load(self, symbol: str) -> FuturesHistory:
+    def load(
+        self,
+        symbol: str,
+        *,
+        signal_symbol: str | None = None,
+    ) -> FuturesHistory:
         """Load an executable symbol and resolve its history mapping.
 
         ``symbol`` is the executable/public key. ``signal_symbol`` can select
-        a different mapped history source for execution overlays such as MGC
-        using GC signals. The resolved PST code stays internal to this loader.
+        a different mapped history source for this load, as when MGC uses GC
+        signals. The resolved PST code stays internal to this loader.
 
         Parameters
         ----------
@@ -935,13 +939,14 @@ class IBStitchedHistoryProvider:
         signal_symbol
             Optional public or IB symbol resolved through the instrument
             mapping to select the reference history and roll configuration.
+            Defaults to ``symbol``.
 
         Returns
         -------
         FuturesHistory
             Stitched history keyed by the executable symbol.
         """
-        resolved_signal_symbol = self.signal_symbol or symbol
+        resolved_signal_symbol = signal_symbol or symbol
         instrument_rows = load_pysystemtrade_ib_instruments(
             db_path=self.reference_db_path,
             mapping_path=self.mapping_path,
@@ -963,7 +968,7 @@ class IBStitchedHistoryProvider:
         pst_instr_code = str(signal_rows[0]["pst_instr_code"])
         globex_asset = resolve_reviewed_globex_asset(pst_instr_code)
         cache_directory = self._cache_directory(
-            symbol, pst_instr_code, globex_asset
+            symbol, pst_instr_code, globex_asset, resolved_signal_symbol
         )
         contract_path = cache_directory / 'ib_contract_history.parquet'
         cache_hit = (
@@ -1151,7 +1156,7 @@ class IBStitchedHistoryProvider:
             # derived bundle under the post-update identity so the next
             # stored-only call can reuse it.
             cache_directory = self._cache_directory(
-                symbol, pst_instr_code, globex_asset
+                symbol, pst_instr_code, globex_asset, resolved_signal_symbol
             )
             contract_path = cache_directory / 'ib_contract_history.parquet'
         history = replace(

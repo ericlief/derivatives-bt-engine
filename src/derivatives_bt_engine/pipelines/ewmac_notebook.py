@@ -1357,7 +1357,6 @@ def build_stitched_ewmac_notebook_view(
     pst_instr_code = signal_mapping["pst_instr_code"]
     history_provider = IBStitchedHistoryProvider(
         ib=ib,
-        signal_symbol=signal_mapping["symbol"],
         as_of=as_of,
         prior_years=prior_years,
         max_source_gap_days=max_source_gap_days,
@@ -1373,7 +1372,10 @@ def build_stitched_ewmac_notebook_view(
         save_cache=save_cache,
         update_history=update_ib_history,
     )
-    history = history_provider.load(symbol)
+    history = history_provider.load(
+        symbol,
+        signal_symbol=signal_mapping["symbol"],
+    )
     contracts = history_provider.contract_history
     if contracts is None:
         raise RuntimeError("stitched history provider did not retain IB audit rows")
