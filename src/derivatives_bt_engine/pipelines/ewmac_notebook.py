@@ -1370,8 +1370,8 @@ def build_stitched_ewmac_notebook_view(
     globex_asset = _resolve_globex_asset(pst_instr_code)
     history_provider = IBStitchedHistoryProvider(
         ib=ib,
-        pst_instr_code=pst_instr_code,
         globex_asset=globex_asset,
+        signal_symbol=signal_mapping["symbol"],
         as_of=as_of,
         prior_years=prior_years,
         max_source_gap_days=max_source_gap_days,

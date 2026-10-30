@@ -69,6 +69,7 @@ from derivatives_bt_engine.data.ib_futures_history_store import (
 )
 from derivatives_bt_engine.data.pysystemtrade_ib import (
     DEFAULT_IB_MAPPING_PATH as DEFAULT_BROKER_MAPPING_PATH,
+    load_pysystemtrade_ib_instruments,
     load_pysystemtrade_ib_mapping as load_broker_mapping,
 )
 from derivatives_bt_engine.logging_config import setup_logger
@@ -847,8 +848,9 @@ class IBStitchedHistoryProvider:
     """
 
     ib: IBPySync | None
-    pst_instr_code: str
     globex_asset: str | None
+    # Optional mapped history source for execution overlays (e.g. MGC -> GC).
+    signal_symbol: str | None = None
     as_of: date | None = None
     prior_years: int = 1
     duration: str = DEFAULT_IB_DATED_CONTRACT_DURATION
@@ -875,13 +877,14 @@ class IBStitchedHistoryProvider:
         if self.max_source_gap_days < 0:
             raise ValueError("max_source_gap_days must be nonnegative")
 
-    def _cache_directory(self, symbol: str) -> Path:
+    def _cache_directory(self, symbol: str, pst_instr_code: str) -> Path:
         """Return a versioned cache directory for all stitched-view inputs."""
         effective_as_of = self.as_of or date.today()
         identity = {
             'history_schema_version': HISTORY_SCHEMA_VERSION,
             'symbol': symbol,
-            'pst_instr_code': self.pst_instr_code,
+            'pst_instr_code': pst_instr_code,
+            'signal_symbol': self.signal_symbol or symbol,
             'globex_asset': self.globex_asset,
             'as_of': effective_as_of.isoformat(),
             'prior_years': self.prior_years,
@@ -911,9 +914,47 @@ class IBStitchedHistoryProvider:
             / digest
         )
 
-    def load(self, instrument_code: str) -> FuturesHistory:
-        """Load one symbol from cache or stitch its available sources."""
-        cache_directory = self._cache_directory(instrument_code)
+    def load(self, symbol: str) -> FuturesHistory:
+        """Load an executable symbol and resolve its history mapping.
+
+        ``symbol`` is the executable/public key. ``signal_symbol`` can select
+        a different mapped history source for execution overlays such as MGC
+        using GC signals. The resolved PST code stays internal to this loader.
+
+        Parameters
+        ----------
+        symbol
+            Executable symbol used for the returned history/cache identity.
+        signal_symbol
+            Optional public or IB symbol resolved through the instrument
+            mapping to select the reference history and roll configuration.
+
+        Returns
+        -------
+        FuturesHistory
+            Stitched history keyed by the executable symbol.
+        """
+        resolved_signal_symbol = self.signal_symbol or symbol
+        instrument_rows = load_pysystemtrade_ib_instruments(
+            db_path=self.reference_db_path,
+            mapping_path=self.mapping_path,
+        )
+        signal_rows = [
+            row for row in instrument_rows
+            if row["symbol"] == resolved_signal_symbol
+        ]
+        if not signal_rows:
+            signal_rows = [
+                row for row in instrument_rows
+                if row["ib_symbol"] == resolved_signal_symbol
+            ]
+        if len(signal_rows) != 1:
+            raise KeyError(
+                f"signal symbol {resolved_signal_symbol!r} does not resolve "
+                "to one PST/IB history mapping"
+            )
+        pst_instr_code = str(signal_rows[0]["pst_instr_code"])
+        cache_directory = self._cache_directory(symbol, pst_instr_code)
         contract_path = cache_directory / 'ib_contract_history.parquet'
         cache_hit = (
             self.use_cache
@@ -930,8 +971,8 @@ class IBStitchedHistoryProvider:
             logger.info(
                 'stitched_ib_history cache_hit symbol=%s pst_instr_code=%s '
                 'cache=%s',
-                instrument_code,
-                self.pst_instr_code,
+                symbol,
+                pst_instr_code,
                 cache_directory,
             )
             return replace(
@@ -958,14 +999,14 @@ class IBStitchedHistoryProvider:
                 history_db_path=self.history_db_path,
                 update_history=self.update_history,
             )
-            loaded = ib_provider.load(self.pst_instr_code)
+            loaded = ib_provider.load(pst_instr_code)
             if ib_provider.contract_history is None:
                 raise RuntimeError(
                     'IB history provider did not retain raw audit rows'
                 )
             self.contract_history = (
                 ib_provider.contract_history.with_columns(
-                    pl.lit(instrument_code).alias('symbol')
+                    pl.lit(symbol).alias('symbol')
                 )
             )
             return loaded
@@ -974,11 +1015,11 @@ class IBStitchedHistoryProvider:
         # not from IB history: IB may reject an expired contract even though
         # the same policy can still select valid Globex observations.
         hold_roll_cycle, roll_offset_days, _, _ = _load_roll_config(
-            self.pst_instr_code,
+            pst_instr_code,
             self.reference_db_path,
         )
         roll_policy = ContractRollPolicy(
-            policy_id=f'configured_{self.pst_instr_code}',
+            policy_id=f'configured_{pst_instr_code}',
             hold_roll_cycle=hold_roll_cycle,
             roll_offset_days=roll_offset_days,
             source='reference_config',
@@ -988,7 +1029,7 @@ class IBStitchedHistoryProvider:
             cache_root=self.cache_root,
             use_cache=self.use_cache,
             save_cache=self.save_cache,
-        ).load(self.pst_instr_code)
+        ).load(pst_instr_code)
         histories = [reference_history]
         if self.globex_asset is not None:
             try:
@@ -1003,8 +1044,8 @@ class IBStitchedHistoryProvider:
                 logger.info(
                     'stitched_ib_history globex_unavailable symbol=%s '
                     'pst_instr_code=%s globex_asset=%s fallback=reference_to_ib',
-                    instrument_code,
-                    self.pst_instr_code,
+                    symbol,
+                    pst_instr_code,
                     self.globex_asset,
                 )
             else:
@@ -1021,8 +1062,8 @@ class IBStitchedHistoryProvider:
             logger.warning(
                 'stitched_ib_history ib_unavailable symbol=%s '
                 'pst_instr_code=%s fallback_sources=%s reason=%s',
-                instrument_code,
-                self.pst_instr_code,
+                symbol,
+                pst_instr_code,
                 [history.source for history in histories],
                 exc,
             )
@@ -1044,8 +1085,8 @@ class IBStitchedHistoryProvider:
                     'stitched_ib_history overlap_backfill symbol=%s '
                     'pst_instr_code=%s reference_end=%s ib_start=%s '
                     'prior_years=%s',
-                    instrument_code,
-                    self.pst_instr_code,
+                    symbol,
+                    pst_instr_code,
                     reference_end,
                     ib_start,
                     ib_prior_years,
@@ -1056,8 +1097,8 @@ class IBStitchedHistoryProvider:
                     logger.warning(
                         'stitched_ib_history ib_backfill_unavailable '
                         'symbol=%s pst_instr_code=%s prior_years=%s reason=%s',
-                        instrument_code,
-                        self.pst_instr_code,
+                        symbol,
+                        pst_instr_code,
                         ib_prior_years,
                         exc,
                     )
@@ -1070,7 +1111,7 @@ class IBStitchedHistoryProvider:
         if len(histories) == 1:
             history = replace(
                 reference_history,
-                instrument_code=instrument_code,
+                instrument_code=symbol,
                 metadata={
                     **dict(reference_history.metadata),
                     'available_sources': ['pysystemtrade'],
@@ -1080,7 +1121,7 @@ class IBStitchedHistoryProvider:
         else:
             history = stitch_futures_histories(
                 histories,
-                instrument_code=instrument_code,
+                instrument_code=symbol,
                 max_source_gap_days=(
                     self.max_source_gap_days
                     if direct_reference_to_ib
@@ -1099,7 +1140,7 @@ class IBStitchedHistoryProvider:
             # Live acquisition changes the raw-database fingerprint. Save the
             # derived bundle under the post-update identity so the next
             # stored-only call can reuse it.
-            cache_directory = self._cache_directory(instrument_code)
+            cache_directory = self._cache_directory(symbol, pst_instr_code)
             contract_path = cache_directory / 'ib_contract_history.parquet'
         history = replace(
             history,

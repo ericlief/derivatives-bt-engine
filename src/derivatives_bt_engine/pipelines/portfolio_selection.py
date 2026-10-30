@@ -1080,6 +1080,13 @@ def _run_complete_selection(
             db_path=args.history_db.expanduser().resolve(),
             mapping_path=args.broker_mapping.expanduser().resolve(),
         )
+        signal_symbol_by_history_code: dict[str, str] = {}
+        for instrument in instrument_rows:
+            history_code = str(instrument["pst_instr_code"])
+            signal_symbol = str(instrument["signal_symbol"])
+            signal_symbol_by_history_code.setdefault(
+                history_code, signal_symbol
+            )
         stitched_history_code_by_symbol = {
             symbol: _resolve_stitched_signal_history_code(
                 source_rows[symbol],
@@ -1117,8 +1124,8 @@ def _run_complete_selection(
             """Load one stitched history with explicit broker-update policy."""
             return IBStitchedHistoryProvider(
                 ib=ib,
-                pst_instr_code=history_code,
                 globex_asset=resolve_reviewed_globex_asset(history_code),
+                signal_symbol=signal_symbol_by_history_code[history_code],
                 reference_db_path=args.history_db.expanduser().resolve(),
                 globex_db_path=args.globex_db.expanduser().resolve(),
                 mapping_path=args.broker_mapping.expanduser().resolve(),
@@ -1128,7 +1135,7 @@ def _run_complete_selection(
                 save_cache=True,
                 update_history=update_history,
                 max_source_gap_days=args.max_source_gap_days,
-            ).load(history_code)
+            ).load(signal_symbol_by_history_code[history_code])
 
         try:
             for history_index, history_code in enumerate(
