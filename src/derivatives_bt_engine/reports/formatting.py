@@ -291,6 +291,7 @@ CASH_PNL_REPORT_PRIORITY = (
     "symbol",
     "date",
     "close",
+    "con_px",
     "pt_change",
     "pt_vol",
     "comb_fcst",

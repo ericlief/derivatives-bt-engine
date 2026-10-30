@@ -146,12 +146,58 @@ def plot_selection_cash_pnl(
     import ipywidgets as widgets
     from IPython.display import display
 
+    cash_path: Path | None = None
     if isinstance(cash_pnl, (str, Path)):
-        frame = pl.read_parquet(Path(cash_pnl).expanduser())
+        cash_path = Path(cash_pnl).expanduser()
+        frame = pl.read_parquet(cash_path)
     else:
         frame = cash_pnl
     if not isinstance(frame, pl.DataFrame):
         raise TypeError("cash_pnl must be a Polars DataFrame or Parquet path")
+
+    # Selection cash reports written before ``con_px`` was retained can recover
+    # the same date-aligned mark from their sibling forecast report. Keep this
+    # compatibility at the notebook boundary; current cash reports carry the
+    # mark directly and do not need the join.
+    if cash_path is not None and not any(
+        column in frame.columns
+        for column in ("con_px", "contract_close", "mark_price")
+    ):
+        forecast_path = cash_path.with_name(
+            cash_path.name.replace(
+                "_selection_cash_pnl_",
+                "_selection_forecasts_",
+            )
+        )
+        if forecast_path != cash_path and forecast_path.exists():
+            forecast_schema = pl.read_parquet_schema(forecast_path)
+            forecast_mark = next(
+                (
+                    column
+                    for column in ("con_px", "contract_close", "mark_price")
+                    if column in forecast_schema
+                ),
+                None,
+            )
+            if forecast_mark is not None:
+                marks = (
+                    pl.read_parquet(
+                        forecast_path,
+                        columns=["symbol", "date", forecast_mark],
+                    )
+                    .rename({forecast_mark: "con_px"})
+                    .unique(
+                        subset=["symbol", "date"],
+                        keep="last",
+                        maintain_order=True,
+                    )
+                )
+                frame = frame.join(
+                    marks,
+                    on=["symbol", "date"],
+                    how="left",
+                    validate="m:1",
+                )
     mark_column = next(
         (
             column
@@ -160,6 +206,13 @@ def plot_selection_cash_pnl(
         ),
         None,
     )
+    if mark_column is None:
+        source = str(cash_path) if cash_path is not None else "the supplied frame"
+        raise ValueError(
+            f"{source} has no contract mark price. Expected 'con_px'; pass a "
+            "current selection cash-P&L report path or a dataframe that "
+            "contains con_px."
+        )
     required = {"symbol", "date", "comb_fcst", "tgt_pos", "gross_pnl", "net_pnl"}
     missing = sorted(required.difference(frame.columns))
     if missing:
