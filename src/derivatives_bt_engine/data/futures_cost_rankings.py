@@ -197,6 +197,8 @@ SELECTION_CANDIDATE_COLUMNS = (
     "whatif_attempted",
     "whatif_elig",
     "ref_ann_rolls",
+    "ref_spread_pts",
+    "ref_config_comm_usd",
     "cost_elig",
     "size_elig",
     "data_elig",
@@ -619,6 +621,60 @@ def selection_candidates(report: pl.DataFrame) -> pl.DataFrame:
     sort_columns = [
         name for name in ("asset_cls", "symbol") if name in selected.columns
     ]
+    return selected.sort(sort_columns) if sort_columns else selected
+
+
+def selection_rebalance_candidates(report: pl.DataFrame) -> pl.DataFrame:
+    """Return the capital-flexible universe for scheduled book selection.
+
+    Scheduled selection must not begin from the candidates affordable at the
+    initial account size: contracts rejected only by one-lot risk can become
+    feasible after the account grows. This helper therefore applies only the
+    saved gates that do not depend on account capital: configured cost,
+    absolute contract volume, data, rule availability, execution permission,
+    and broker qualification. The selector later applies historical dollar
+    volatility, prior equity, portfolio liquidity, and margin limits at each
+    review date.
+
+    The returned schema matches :func:`selection_candidates`, including the
+    configured Carver spread and commission fields used for historical fixed-
+    cost calibration when they are present.
+    """
+    required = {
+        "cost_elig",
+        "volume_elig",
+        "data_elig",
+        "instr_has_elig_ewmac_rule",
+        "exec_elig",
+        "ib_avail",
+        "symbol",
+        "asset_cls",
+        "econ_subcls",
+    }
+    missing = sorted(required.difference(report.columns))
+    if missing:
+        raise ValueError(
+            "market-screen report is missing scheduled-selection fields "
+            f"{missing}; rerun the current futures-cost-risk audit"
+        )
+    selection_screen_config(report)
+    gate = (
+        pl.col("cost_elig").fill_null(False)
+        & pl.col("volume_elig").fill_null(False)
+        & pl.col("data_elig").fill_null(False)
+        & pl.col("instr_has_elig_ewmac_rule").fill_null(False)
+        & pl.col("exec_elig").fill_null(False)
+        & (pl.col("ib_avail").fill_null("") == "contract_qualified")
+    )
+    selected = report.filter(gate)
+    columns = [
+        name for name in SELECTION_CANDIDATE_COLUMNS
+        if name in selected.columns
+    ]
+    sort_columns = [
+        name for name in ("asset_cls", "symbol") if name in selected.columns
+    ]
+    selected = selected.select(columns)
     return selected.sort(sort_columns) if sort_columns else selected
 
 

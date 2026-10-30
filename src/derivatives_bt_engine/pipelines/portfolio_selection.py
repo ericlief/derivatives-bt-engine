@@ -27,9 +27,10 @@ dataframe collections:
 ``portfolio_curve``
     One portfolio row per date. It sums the selected instruments' executable
     cash P&L and reports daily returns against prior gross or net equity,
-    cumulative returns, and gross and net equity paths. The final selected
-    weights and IDM stay fixed while lagged net equity scales all instruments'
-    risk budgets, targets, and forecast buffers together.
+    cumulative returns, and gross and net equity paths. Static runs keep the
+    final selected weights and IDM fixed. Scheduled runs replace the book at
+    monthly or yearly review boundaries using prior history and lagged net
+    equity, while retaining executable holdings between reviews.
 
 The command persists each intermediate form so forecast gaps, turnover, and
 greedy selection decisions remain inspectable after a run.
@@ -38,11 +39,13 @@ greedy selection decisions remain inspectable after a run.
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import logging
 import math
+import tempfile
 from collections.abc import Iterable
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -53,9 +56,10 @@ from ib_tools.ibpysync import IBPySync
 from derivatives_bt_engine.data.futures_cost_rankings import (
     apply_selection_filters,
     load_latest_market_report,
-    selection_candidates,
     read_market_report,
     resolve_selection_config,
+    selection_candidates,
+    selection_rebalance_candidates,
 )
 from derivatives_bt_engine.data.fx_history import (
     align_fx_to_history,
@@ -76,6 +80,9 @@ from derivatives_bt_engine.calculations.correlation import (
     bounded_pairwise_ewm_correlation_matrix,
 )
 from derivatives_bt_engine.calculations.costs import calculate_annual_sr_cost
+from derivatives_bt_engine.calculations.volatility import (
+    MIXED_VOL_ANNUALIZATION_DAYS,
+)
 from derivatives_bt_engine.calculations.forecast_combination import (
     CombinedForecastEngine,
     ForecastCombinationConfig,
@@ -496,6 +503,17 @@ def parse_args(argv=None, *, complete_default: bool = False):
             "holding"
         ),
     )
+    parser.add_argument(
+        "--selection-rebalance",
+        choices=("static", "yearly", "monthly"),
+        default="static",
+        help=(
+            "Cadence for rerunning instrument selection from lagged data and "
+            "prior net equity. 'static' preserves one fixed book; 'yearly' "
+            "or 'monthly' holds each selected book until the next scheduled "
+            "review. Costs remain the saved fixed calibration."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -554,7 +572,59 @@ def _selection_scenario_id(
         f"roll{int(args.include_roll_cost_in_score)}",
         args.weight_policy,
     ))
+    if args.selection_rebalance != "static":
+        tokens.append(f"sel{args.selection_rebalance}")
     return "_".join(tokens)
+
+
+def _selection_rebalance_dates(
+    dates: Iterable[date],
+    *,
+    cadence: str,
+) -> list[date]:
+    """Return the first available session in each selection-review period.
+
+    Parameters
+    ----------
+    dates
+        Available portfolio sessions. Duplicate and unsorted values are
+        accepted; timestamps are normalized to their calendar dates.
+    cadence
+        ``static`` selects only the first session, ``yearly`` selects the
+        first session of each calendar year, and ``monthly`` selects the first
+        session of each calendar month.
+
+    Returns
+    -------
+    list[date]
+        Strictly increasing effective review dates. Selection calculations on
+        each date must use observations strictly before that date.
+    """
+    if cadence not in {"static", "yearly", "monthly"}:
+        raise ValueError(
+            "selection rebalance cadence must be static, yearly, or monthly"
+        )
+    normalized = sorted({
+        value.date() if isinstance(value, datetime) else value
+        for value in dates
+    })
+    if not normalized:
+        return []
+    if cadence == "static":
+        return [normalized[0]]
+    key = (
+        (lambda value: value.year)
+        if cadence == "yearly"
+        else (lambda value: (value.year, value.month))
+    )
+    selected: list[date] = []
+    prior_key: object | None = None
+    for value in normalized:
+        value_key = key(value)
+        if value_key != prior_key:
+            selected.append(value)
+            prior_key = value_key
+    return selected
 
 
 def _selection_run_output_dir(
@@ -574,30 +644,40 @@ def _selection_run_output_dir(
 
 
 def _label_forecast_output_frame(
-    frame: pl.DataFrame,
+    frame: pl.DataFrame | pl.LazyFrame,
     *,
     symbol: str,
     hist_instr_code: str,
-) -> pl.DataFrame:
+) -> pl.DataFrame | pl.LazyFrame:
     """Attach executable identity with ``symbol`` immediately after ``date``.
 
     Selection calculations keep executable identity outside each per-symbol
     dataframe. This helper adds it only at the persisted long-frame boundary
     and gives the identifiers a stable, scan-friendly leading order.
     """
-    if "date" not in frame.columns:
+    columns = (
+        frame.columns
+        if isinstance(frame, pl.DataFrame)
+        else frame.collect_schema().names()
+    )
+    if "date" not in columns:
         raise ValueError("forecast output frame is missing date")
     labeled = frame.with_columns(
         pl.lit(symbol).alias("symbol"),
         pl.lit(hist_instr_code).alias("hist_instr_code"),
     )
     leading = ["date", "symbol", "hist_instr_code"]
-    trailing = [column for column in labeled.columns if column not in leading]
+    trailing = [column for column in columns if column not in leading]
     return labeled.select(leading + trailing)
 
 
+def _lazy_frame(frame: pl.DataFrame | pl.LazyFrame) -> pl.LazyFrame:
+    """Return ``frame`` as a lazy query without collecting its source."""
+    return frame.lazy() if isinstance(frame, pl.DataFrame) else frame
+
+
 def _subsystem_reference_correlation(
-    subsystem_reference_frames: dict[str, pl.DataFrame],
+    subsystem_reference_frames: dict[str, pl.DataFrame | pl.LazyFrame],
     symbols: list[str],
     *,
     window_years: float,
@@ -615,10 +695,10 @@ def _subsystem_reference_correlation(
     Returns the dense correlation matrix, its per-symbol coverage mask, and
     the wide return frame that was actually used.
     """
-    wide: pl.DataFrame | None = None
+    wide: pl.LazyFrame | None = None
     for symbol in symbols:
         returns = (
-            subsystem_reference_frames[symbol]
+            _lazy_frame(subsystem_reference_frames[symbol])
             .select("date", pl.col("ref_net_pct").alias(symbol))
             .drop_nulls()
         )
@@ -628,20 +708,396 @@ def _subsystem_reference_correlation(
         wide = returns if wide is None else wide.join(
             returns, on="date", how="full", coalesce=True
         )
-    if wide is None or wide.is_empty():
+    if wide is None:
         return np.eye(len(symbols)), np.zeros(len(symbols), dtype=bool), pl.DataFrame()
-    wide = wide.sort("date")
-    last = wide.get_column("date").max()
+    # Projection and predicate pushdown keep the much wider subsystem audit
+    # frames out of memory. Only the sparse date/return panel is materialized.
+    wide_frame = wide.sort("date").collect(engine="streaming")
+    if wide_frame.is_empty():
+        return np.eye(len(symbols)), np.zeros(len(symbols), dtype=bool), pl.DataFrame()
+    last = wide_frame.get_column("date").max()
     as_of = (last.date() if isinstance(last, datetime) else last) + timedelta(days=1)
     correlation, covered = bounded_pairwise_ewm_correlation_matrix(
-        wide,
+        wide_frame,
         symbols,
         as_of,
         window_years,
         halflife_days,
         min_rows=min_rows,
     )
-    return correlation, covered, wide
+    return correlation, covered, wide_frame
+
+
+def _greedy_selector(
+    *,
+    capital: float,
+    run_config: dict[str, object],
+    args: argparse.Namespace,
+) -> GreedyInstrumentSelector:
+    """Build one selector using the supplied point-in-time account capital."""
+    if args.weight_policy == "legacy_handcraft":
+        weight_policy = HandcraftedPortfolioWeights()
+    elif args.weight_policy == "equal":
+        weight_policy = EqualPortfolioWeights()
+    else:
+        weight_policy = None
+    effective_book_margin_pct = args.max_book_margin_pct
+    if effective_book_margin_pct is None and args.max_instr_margin_pct is not None:
+        effective_book_margin_pct = 100.0
+    return GreedyInstrumentSelector(
+        config=GreedySelectionConfig(
+            capital=capital,
+            target_vol=float(run_config["target_vol"]),
+            gross_sr=args.gross_sr,
+            score_threshold=args.score_threshold,
+            low_contract_penalty_scale=args.low_contract_penalty_scale,
+            high_contract_penalty_scale=args.high_contract_penalty_scale,
+            contract_band_min=args.contract_band_min,
+            contract_band_max=args.contract_band_max,
+            score_tie_tolerance_percent=args.score_tie_tolerance_percent,
+            tie_reference_book_count=args.tie_reference_book_count,
+            max_weight_idm=args.max_weight_idm,
+            max_pct_market_volume=float(run_config["max_pct_mkt_volume"]),
+            liquidity_days=int(run_config["liq_days"]),
+            include_roll_cost_in_score=args.include_roll_cost_in_score,
+            max_instruments_per_cluster=args.max_instr_per_cluster,
+            max_instrument_margin_pct=args.max_instr_margin_pct,
+            max_book_margin_pct=effective_book_margin_pct,
+        ),
+        weight_policy=weight_policy,
+    )
+
+
+class _WalkForwardSelectionProvider:
+    """Rerun greedy selection on scheduled dates using only prior history.
+
+    Market spreads and commissions are fixed calibrations. Completed segments
+    use the saved Carver configured spread and commission; the final open
+    segment uses the current live-contract calibration saved in the market
+    report. Historical dollar volatility and correlations are cut strictly
+    before each review date, while the selector receives prior net equity from
+    the executable cash loop.
+    """
+
+    def __init__(
+        self,
+        *,
+        review_dates: Iterable[date],
+        source_rows: dict[str, dict[str, object]],
+        audit_by_symbol: dict[str, dict[str, object]],
+        reference_frames: dict[str, pl.DataFrame | pl.LazyFrame],
+        run_config: dict[str, object],
+        args: argparse.Namespace,
+    ) -> None:
+        """Store immutable selection inputs and the review-date calendar."""
+        self.review_dates = set(review_dates)
+        self.latest_review_date = (
+            max(self.review_dates) if self.review_dates else None
+        )
+        self.source_rows = source_rows
+        self.audit_by_symbol = audit_by_symbol
+        self.reference_frames = reference_frames
+        self.run_config = run_config
+        self.args = args
+        self.latest_selection = None
+        self.latest_candidates: dict[str, SelectionCandidate] = {}
+        self.latest_date: date | None = None
+        self.latest_equity: float | None = None
+        self.review_rows: list[dict[str, object]] = []
+
+    @staticmethod
+    def _finite(value: object) -> float | None:
+        """Return a finite float, otherwise ``None``."""
+        if value is None:
+            return None
+        converted = float(value)
+        return converted if math.isfinite(converted) else None
+
+    def _costs(
+        self,
+        *,
+        row: dict[str, object],
+        fx_to_usd: float,
+        use_live_calibration: bool,
+    ) -> tuple[float, float]:
+        """Return fixed one-way trade and complete-roll USD costs."""
+        current_ann_dvol = self._finite(row.get("ann_dvol"))
+        current_trade_sr = self._finite(row.get("trade_sr"))
+        current_roll_sr = self._finite(row.get("roll_sr"))
+        current_trade_cost = (
+            current_ann_dvol * current_trade_sr
+            if current_ann_dvol is not None
+            and current_trade_sr is not None
+            else None
+        )
+        current_roll_cost = (
+            current_ann_dvol * current_roll_sr
+            if current_ann_dvol is not None
+            and current_roll_sr is not None
+            else None
+        )
+        if use_live_calibration:
+            if current_trade_cost is None or current_roll_cost is None:
+                raise ValueError(
+                    f"{row.get('symbol')}: live cost calibration is incomplete"
+                )
+            return current_trade_cost, current_roll_cost
+
+        spread_points = self._finite(row.get("ref_spread_pts"))
+        commission_usd = self._finite(row.get("ref_config_comm_usd"))
+        multiplier = self._finite(row.get("mult"))
+        if (
+            spread_points is not None
+            and commission_usd is not None
+            and multiplier is not None
+        ):
+            spread_cash_usd = spread_points * multiplier * fx_to_usd
+            return (
+                spread_cash_usd + commission_usd,
+                spread_cash_usd + 2.0 * commission_usd,
+            )
+        if current_trade_cost is None or current_roll_cost is None:
+            raise ValueError(
+                f"{row.get('symbol')}: historical fixed cost calibration is incomplete"
+            )
+        return current_trade_cost, current_roll_cost
+
+    def __call__(
+        self,
+        date_value: object,
+        prior_net_equity: float,
+    ) -> dict[str, dict[str, float | int]] | None:
+        """Return a replacement allocation on a review date, else ``None``."""
+        review_date = (
+            date_value.date() if isinstance(date_value, datetime) else date_value
+        )
+        if review_date not in self.review_dates:
+            return None
+
+        candidates: list[SelectionCandidate] = []
+        histories: dict[str, pl.DataFrame] = {}
+        candidate_costs: dict[str, tuple[float, float]] = {}
+        for symbol, row in self.source_rows.items():
+            frame = self.reference_frames.get(symbol)
+            audit = self.audit_by_symbol.get(symbol)
+            if frame is None or audit is None:
+                continue
+            lazy_frame = _lazy_frame(frame)
+            frame_columns = lazy_frame.collect_schema().names()
+            valid_return_column = (
+                "ref_return_valid"
+                if "ref_return_valid" in frame_columns
+                else "ref_ret_valid"
+            )
+            history = (
+                lazy_frame
+                .filter(
+                    (pl.col("date") < review_date)
+                    & pl.col(valid_return_column).fill_null(False)
+                )
+                .select("date", "ref_net_pct")
+                .collect(engine="streaming")
+            )
+            if history.height < self.args.min_forecast_obs:
+                continue
+            latest = (
+                lazy_frame
+                .filter(pl.col("date") < review_date)
+                .select("date", "daily_dvol", "fx_to_usd")
+                .sort("date")
+                .tail(1)
+                .collect(engine="streaming")
+            )
+            if latest.is_empty():
+                continue
+            daily_dollar_vol = self._finite(latest["daily_dvol"][0])
+            fx_to_usd = self._finite(latest["fx_to_usd"][0])
+            turnover = self._finite(audit.get("comb_turnover"))
+            average_volume = self._finite(row.get("avg_daily_volume"))
+            initial_margin = self._finite(row.get("init_margin_usd"))
+            ann_rolls = self._finite(row.get("ref_ann_rolls"))
+            if (
+                daily_dollar_vol is None
+                or daily_dollar_vol <= 0
+                or fx_to_usd is None
+                or fx_to_usd <= 0
+                or turnover is None
+                or average_volume is None
+                or average_volume <= 0
+                or ann_rolls is None
+            ):
+                continue
+            annual_dollar_vol = (
+                daily_dollar_vol * math.sqrt(MIXED_VOL_ANNUALIZATION_DAYS)
+            )
+            trade_cost, roll_cost = self._costs(
+                row=row,
+                fx_to_usd=fx_to_usd,
+                use_live_calibration=review_date == self.latest_review_date,
+            )
+            trade_sr = trade_cost / annual_dollar_vol
+            if trade_sr > float(self.run_config["cost_lim_sr"]):
+                continue
+            candidate = SelectionCandidate(
+                symbol=symbol,
+                ann_dvol=annual_dollar_vol,
+                trade_sr=trade_sr,
+                combined_turnover=turnover,
+                asset_class=str(row["asset_cls"]),
+                economic_subclass=str(row["econ_subcls"]),
+                econ_family=str(row.get("econ_fam_id") or ""),
+                mkt_risk_vol_day=average_volume * annual_dollar_vol,
+                initial_margin_usd=initial_margin,
+                roll_sr=roll_cost / annual_dollar_vol,
+                ann_rolls=ann_rolls,
+            )
+            candidates.append(candidate)
+            histories[symbol] = history
+            candidate_costs[symbol] = (trade_cost, roll_cost)
+
+        if not candidates:
+            logger.warning(
+                "walk_forward_selection skipped date=%s equity=%s reason=no_candidates",
+                review_date,
+                prior_net_equity,
+            )
+            return None
+        symbols = [candidate.symbol for candidate in candidates]
+        correlation, covered, _ = _subsystem_reference_correlation(
+            histories,
+            symbols,
+            window_years=self.args.corr_window_years,
+            halflife_days=self.args.corr_halflife_days,
+            min_rows=self.args.corr_min_rows,
+        )
+        keep = [index for index, is_covered in enumerate(covered) if is_covered]
+        if not keep:
+            logger.warning(
+                "walk_forward_selection skipped date=%s equity=%s "
+                "reason=no_correlation_coverage",
+                review_date,
+                prior_net_equity,
+            )
+            return None
+        candidates = [candidates[index] for index in keep]
+        symbols = [candidate.symbol for candidate in candidates]
+        correlation = correlation[np.ix_(keep, keep)]
+        selection = _greedy_selector(
+            capital=prior_net_equity,
+            run_config=self.run_config,
+            args=self.args,
+        ).select(candidates, correlation)
+        candidate_by_symbol = {
+            candidate.symbol: candidate for candidate in candidates
+        }
+        detail_by_symbol = {
+            str(detail["symbol"]): detail
+            for detail in selection.final_score.details
+        }
+        allocations: dict[str, dict[str, float | int]] = {}
+        for rank, symbol in enumerate(selection.selected, start=1):
+            detail = detail_by_symbol[symbol]
+            trade_cost, roll_cost = candidate_costs[symbol]
+            allocations[symbol] = {
+                "rank": rank,
+                "weight": float(selection.final_score.weights[symbol]),
+                "limit_weight": float(detail["limit_weight"]),
+                "idm": float(selection.final_score.idm),
+                "trade_cost_per_con": trade_cost,
+                "roll_cost_per_con": roll_cost,
+            }
+        self.latest_selection = selection
+        self.latest_candidates = candidate_by_symbol
+        self.latest_date = review_date
+        self.latest_equity = prior_net_equity
+        self.review_rows.append({
+            "selection_date": review_date,
+            "selection_equity_usd": prior_net_equity,
+            "selection_candidate_count": len(candidates),
+            "selection_instrument_count": len(selection.selected),
+            "selection_score": selection.final_score.score,
+            "selection_idm": selection.final_score.idm,
+            "selection_symbols": ",".join(selection.selected),
+        })
+        logger.info(
+            "walk_forward_selection complete date=%s equity=%s candidates=%d "
+            "selected=%d idm=%s book=%s",
+            review_date,
+            prior_net_equity,
+            len(candidates),
+            len(selection.selected),
+            selection.final_score.idm,
+            ",".join(selection.selected),
+        )
+        return allocations
+
+
+def _final_selection_frame(
+    *,
+    selection,
+    candidate_by_symbol: dict[str, SelectionCandidate],
+    source_rows: dict[str, dict[str, object]],
+    audit_by_symbol: dict[str, dict[str, object]],
+    args: argparse.Namespace,
+    selection_date: date | None = None,
+    selection_equity_usd: float | None = None,
+) -> pl.DataFrame:
+    """Build the public selected-book calculation frame for one review."""
+    effective_book_margin_pct = args.max_book_margin_pct
+    if effective_book_margin_pct is None and args.max_instr_margin_pct is not None:
+        effective_book_margin_pct = 100.0
+    final_details = {
+        str(detail["symbol"]): detail
+        for detail in selection.final_score.details
+    }
+    rows: list[dict[str, object]] = []
+    for rank, symbol in enumerate(selection.selected, start=1):
+        candidate = candidate_by_symbol[symbol]
+        rows.append({
+            "selection_date": selection_date,
+            "selection_equity_usd": selection_equity_usd,
+            "selection_rebalance": args.selection_rebalance,
+            "rank": rank,
+            "symbol": symbol,
+            "pst_instr_code": source_rows[symbol].get("pst_instr_code"),
+            "wt_policy": args.weight_policy,
+            "max_instr_per_cluster": args.max_instr_per_cluster,
+            "max_instr_margin_pct": args.max_instr_margin_pct,
+            "max_book_margin_pct": effective_book_margin_pct,
+            "low_contract_penalty_scale": args.low_contract_penalty_scale,
+            "high_contract_penalty_scale": args.high_contract_penalty_scale,
+            "contract_band_min": args.contract_band_min,
+            "contract_band_max": args.contract_band_max,
+            "score_tie_tolerance_percent": args.score_tie_tolerance_percent,
+            "tie_ref_book_count": args.tie_reference_book_count,
+            "roll_cost_in_score": args.include_roll_cost_in_score,
+            "buffer_size": args.buffer_size,
+            "buffer_trade_to_edge": args.buffer_trade_to_edge,
+            "rebalance_on_roll": args.rebalance_on_roll,
+            "weight": selection.final_score.weights[symbol],
+            "idm": selection.final_score.idm,
+            "score": selection.final_score.score,
+            "base_score": selection.final_score.base_score,
+            "low_contract_weight": selection.final_score.low_contract_weight,
+            "band_contract_weight": selection.final_score.band_contract_weight,
+            "high_contract_weight": selection.final_score.high_contract_weight,
+            "ann_dvol": candidate.ann_dvol,
+            "trade_sr": candidate.trade_sr,
+            "roll_sr": candidate.roll_sr,
+            "comb_turnover": candidate.combined_turnover,
+            "ann_trade_cost_sr": candidate.annual_trade_cost_sr,
+            "ann_roll_cost_sr": candidate.annual_roll_cost_sr,
+            "ann_cost_sr": candidate.annual_cost_sr,
+            **final_details[symbol],
+        })
+    frame = pl.DataFrame(rows, infer_schema_length=None)
+    if args.selection_rebalance == "static":
+        frame = frame.drop(
+            "selection_date",
+            "selection_equity_usd",
+            "selection_rebalance",
+        )
+    return frame
 
 
 def _run_complete_selection(
@@ -670,6 +1126,23 @@ def _run_complete_selection(
         args.buffer_trade_to_edge,
         args.rebalance_on_roll,
     )
+    stamp = generated_at.astimezone(REPORT_TIMEZONE).strftime("%Y%m%d_%H%M%S")
+    forecasts_path = (
+        output_dir / f"multi_speed_ewmac_selection_forecasts_{stamp}.parquet"
+    )
+    reference_return_path = (
+        output_dir
+        / f"multi_speed_ewmac_selection_subsystem_reference_returns_{stamp}.parquet"
+    )
+    work_parent = (
+        args.history_cache_root.expanduser().resolve() / "selection_work"
+    )
+    work_parent.mkdir(parents=True, exist_ok=True)
+    work_tempdir = tempfile.TemporaryDirectory(
+        prefix=f"run_{stamp}_",
+        dir=work_parent,
+    )
+    work_dir = Path(work_tempdir.name)
     frames_by_history = load_ewmac_component_frames(
         selected.get_column("hist_instr_code").drop_nulls().to_list(),
         db_path=args.history_db.expanduser().resolve(),
@@ -684,18 +1157,18 @@ def _run_complete_selection(
     audit_rows: list[dict[str, object]] = []
     # Long-form output copies: one symbol-labelled frame is appended here and
     # all are concatenated only when the daily forecast Parquet is written.
-    forecast_output_frames: list[pl.DataFrame] = []
+    forecast_output_frames: list[pl.LazyFrame] = []
     # Executable symbol -> combined forecast, equal-weight reference position,
     # FX, and net-return history.
     # MZC and CORN_mini can point to the same raw history but remain separate
     # because their eligible rules and transaction costs can differ.
-    subsystem_reference_frames: dict[str, pl.DataFrame] = {}
+    subsystem_reference_frames: dict[str, pl.LazyFrame] = {}
     # Historical FX is identical for every instrument in a currency. Cache it
     # at the pipeline boundary instead of reopening DuckDB for every symbol.
     fx_history_by_currency: dict[str, pl.DataFrame | None] = {}
     # Preserve each compact candidate row for later sizing and liquidity inputs.
     source_rows: dict[str, dict[str, object]] = {}
-    for row in selected.iter_rows(named=True):
+    for symbol_index, row in enumerate(selected.iter_rows(named=True), start=1):
         symbol = str(row["symbol"])
         source_rows[symbol] = row
         rules = _parse_rules(str(row["elig_ewmac_rules"] or ""))
@@ -783,8 +1256,6 @@ def _run_complete_selection(
             pl.lit(annual_cost.ann_roll_cost_sr).alias("ann_roll_cost_sr"),
             pl.lit(annual_cost.ann_cost_sr).alias("ann_cost_sr"),
         )
-        subsystem_reference_frames[symbol] = reference_frame
-
         valid_reference_returns = reference_frame.filter(
             pl.col("ref_return_valid")
         )
@@ -863,9 +1334,17 @@ def _run_complete_selection(
             **result.audit,
         }
         audit_rows.append(audit)
+        # The complete reference frames are substantially wider than the
+        # return panel used for selection. Persist each one once and retain a
+        # scan so later correlation, walk-forward, and cash stages can push
+        # their own projections into the Parquet reader.
+        reference_path = work_dir / f"reference_{symbol_index:04d}.parquet"
+        reference_frame.write_parquet(reference_path)
+        reference_scan = pl.scan_parquet(reference_path)
+        subsystem_reference_frames[symbol] = reference_scan
         forecast_output_frames.append(
             _label_forecast_output_frame(
-                reference_frame,
+                reference_scan,
                 symbol=symbol,
                 hist_instr_code=str(row["hist_instr_code"]),
             )
@@ -883,6 +1362,12 @@ def _run_complete_selection(
             combined_turnover,
             subsystem_excl,
         )
+
+    # Component forecasts have now been converted into disk-backed subsystem
+    # frames. Releasing them before the cross-instrument stages avoids holding
+    # both full representations of the 100+ instrument universe.
+    del frames_by_history
+    gc.collect()
 
     audit_frame = pl.DataFrame(audit_rows, infer_schema_length=None).sort("symbol")
     eligible_audit = audit_frame.filter(pl.col("subsystem_elig"))
@@ -924,6 +1409,20 @@ def _run_complete_selection(
             "no instrument has sufficient pairwise subsystem-reference returns"
         )
 
+    # These two large daily artifacts no longer participate in later
+    # calculations. Persist them while the rest of the pipeline is still
+    # disk-backed, then release their materialized copies before cash replay.
+    public_forecasts = round_public_report(
+        rename_public_report_columns(
+            pl.concat(forecast_output_frames, how="diagonal_relaxed")
+            .collect(engine="streaming")
+        )
+    )
+    public_forecasts.write_parquet(forecasts_path)
+    reference_return_wide.write_parquet(reference_return_path)
+    del public_forecasts, forecast_output_frames, reference_return_wide
+    gc.collect()
+
     audit_by_symbol = {
         row["symbol"]: row for row in audit_frame.iter_rows(named=True)
     }
@@ -952,36 +1451,10 @@ def _run_complete_selection(
             roll_sr=float(row["roll_sr"]),
             ann_rolls=float(row["ref_ann_rolls"]),
         ))
-    if args.weight_policy == "legacy_handcraft":
-        weight_policy = HandcraftedPortfolioWeights()
-    elif args.weight_policy == "equal":
-        weight_policy = EqualPortfolioWeights()
-    else:
-        weight_policy = None
-    effective_book_margin_pct = args.max_book_margin_pct
-    if effective_book_margin_pct is None and args.max_instr_margin_pct is not None:
-        effective_book_margin_pct = 100.0
-    selector = GreedyInstrumentSelector(
-        config=GreedySelectionConfig(
-            capital=float(run_config["init_cap_usd"]),
-            target_vol=float(run_config["target_vol"]),
-            gross_sr=args.gross_sr,
-            score_threshold=args.score_threshold,
-            low_contract_penalty_scale=args.low_contract_penalty_scale,
-            high_contract_penalty_scale=args.high_contract_penalty_scale,
-            contract_band_min=args.contract_band_min,
-            contract_band_max=args.contract_band_max,
-            score_tie_tolerance_percent=args.score_tie_tolerance_percent,
-            tie_reference_book_count=args.tie_reference_book_count,
-            max_weight_idm=args.max_weight_idm,
-            max_pct_market_volume=float(run_config["max_pct_mkt_volume"]),
-            liquidity_days=int(run_config["liq_days"]),
-            include_roll_cost_in_score=args.include_roll_cost_in_score,
-            max_instruments_per_cluster=args.max_instr_per_cluster,
-            max_instrument_margin_pct=args.max_instr_margin_pct,
-            max_book_margin_pct=effective_book_margin_pct,
-        ),
-        weight_policy=weight_policy,
+    selector = _greedy_selector(
+        capital=float(run_config["init_cap_usd"]),
+        run_config=run_config,
+        args=args,
     )
     selection = selector.select(candidate_list, correlation)
     for trial in selection.trials:
@@ -1017,53 +1490,22 @@ def _run_complete_selection(
     candidate_by_symbol = {
         candidate.symbol: candidate for candidate in candidate_list
     }
-    final_details = {
-        detail["symbol"]: detail for detail in selection.final_score.details
-    }
-    final_rows = []
-    for rank, symbol in enumerate(selection.selected, start=1):
-        candidate = candidate_by_symbol[symbol]
-        final_rows.append({
-            "rank": rank,
-            "symbol": symbol,
-            "pst_instr_code": source_rows[symbol].get("pst_instr_code"),
-            "wt_policy": args.weight_policy,
-            "max_instr_per_cluster": args.max_instr_per_cluster,
-            "max_instr_margin_pct": args.max_instr_margin_pct,
-            "max_book_margin_pct": effective_book_margin_pct,
-            "low_contract_penalty_scale": args.low_contract_penalty_scale,
-            "high_contract_penalty_scale": args.high_contract_penalty_scale,
-            "contract_band_min": args.contract_band_min,
-            "contract_band_max": args.contract_band_max,
-            "score_tie_tolerance_percent": args.score_tie_tolerance_percent,
-            "tie_ref_book_count": args.tie_reference_book_count,
-            "roll_cost_in_score": args.include_roll_cost_in_score,
-            "buffer_size": args.buffer_size,
-            "buffer_trade_to_edge": args.buffer_trade_to_edge,
-            "rebalance_on_roll": args.rebalance_on_roll,
-            "weight": selection.final_score.weights[symbol],
-            "idm": selection.final_score.idm,
-            # This is the whole-book score; repeat it on each membership row
-            # so the grid summary can read it from the selected-book Parquet.
-            "score": selection.final_score.score,
-            "base_score": selection.final_score.base_score,
-            "low_contract_weight": selection.final_score.low_contract_weight,
-            "band_contract_weight": selection.final_score.band_contract_weight,
-            "high_contract_weight": selection.final_score.high_contract_weight,
-            "ann_dvol": candidate.ann_dvol,
-            "trade_sr": candidate.trade_sr,
-            "roll_sr": candidate.roll_sr,
-            "comb_turnover": candidate.combined_turnover,
-            "ann_trade_cost_sr": audit_by_symbol[symbol]["ann_trade_cost_sr"],
-            "ann_roll_cost_sr": audit_by_symbol[symbol]["ann_roll_cost_sr"],
-            "ann_cost_sr": audit_by_symbol[symbol]["ann_cost_sr"],
-            **final_details[symbol],
-        })
-    final_frame = pl.DataFrame(final_rows, infer_schema_length=None)
+    final_frame = _final_selection_frame(
+        selection=selection,
+        candidate_by_symbol=candidate_by_symbol,
+        source_rows=source_rows,
+        audit_by_symbol=audit_by_symbol,
+        args=args,
+    )
+    cash_symbols = (
+        list(selection.selected)
+        if args.selection_rebalance == "static"
+        else eligible_symbols
+    )
 
     cash_reference_frames = subsystem_reference_frames
     historical_return_sources = {
-        symbol: "reference" for symbol in selection.selected
+        symbol: "reference" for symbol in cash_symbols
     }
     if args.ib_history_db is not None:
         # Construction remains pinned to the long reference histories above.
@@ -1089,12 +1531,12 @@ def _run_complete_selection(
                 source_rows[symbol],
                 instrument_rows,
             )
-            for symbol in selection.selected
+            for symbol in cash_symbols
         }
         selected_history_codes = sorted(
             {
                 stitched_history_code_by_symbol[symbol]
-                for symbol in selection.selected
+                for symbol in cash_symbols
             }
         )
         live_ib: IBPySync | None = None
@@ -1205,7 +1647,7 @@ def _run_complete_selection(
         # Successful stitched histories replace these entries below; keeping
         # the originals here makes the per-symbol fallback usable downstream.
         cash_reference_frames = dict(subsystem_reference_frames)
-        for symbol in selection.selected:
+        for symbol in cash_symbols:
             row = source_rows[symbol]
             history_code = stitched_history_code_by_symbol[symbol]
             if history_code not in stitched_components:
@@ -1240,24 +1682,38 @@ def _run_complete_selection(
     else:
         stitched_history_code_by_symbol = {
             symbol: str(source_rows[symbol]["hist_instr_code"])
-            for symbol in selection.selected
+            for symbol in cash_symbols
         }
 
     # Reference returns above are used only for candidate correlations. This
     # selected-book path fixes final weights and IDM, then scales every market
     # from the same lagged portfolio equity before buffering and rounding.
     # Actual history-policy roll dates are charged in cash.
-    cash_output_frames: list[pl.DataFrame] = []
-    for symbol in selection.selected:
+    cash_output_frames: list[pl.LazyFrame] = []
+    static_details = {
+        str(detail["symbol"]): detail
+        for detail in selection.final_score.details
+    }
+    for cash_index, symbol in enumerate(cash_symbols, start=1):
         candidate = candidate_by_symbol[symbol]
-        detail = final_details[symbol]
+        detail = static_details.get(symbol, {
+            "weight": 1.0,
+            "limit_weight": 1.0,
+        })
         row = source_rows[symbol]
+        cash_reference_frame = _lazy_frame(
+            cash_reference_frames[symbol]
+        ).collect(engine="streaming")
         cash_frame = build_executable_cash_pnl_curve(
-            cash_reference_frames[symbol],
+            cash_reference_frame,
             capital=float(run_config["init_cap_usd"]),
             target_vol=float(run_config["target_vol"]),
             weight=float(detail["limit_weight"]),
-            idm=selection.final_score.idm,
+            idm=(
+                selection.final_score.idm
+                if args.selection_rebalance == "static"
+                else 1.0
+            ),
             multiplier=float(row["mult"]),
             trade_cost_usd_per_con=candidate.trade_cost_usd_per_con,
             roll_cost_usd_per_con=candidate.roll_cost_usd_per_con,
@@ -1271,8 +1727,7 @@ def _run_complete_selection(
             if cash_frame.get_column("roll_event").any()
             else "no_history_roll_markers"
         )
-        cash_output_frames.append(
-            cash_frame.with_columns(
+        cash_output_frame = cash_frame.with_columns(
                 pl.lit(symbol).alias("symbol"),
                 pl.lit(stitched_history_code_by_symbol[symbol]).alias(
                     "hist_instr_code"
@@ -1286,7 +1741,11 @@ def _run_complete_selection(
                 pl.lit(roll_schedule_src).alias("roll_schedule_src"),
                 pl.lit(float(detail["weight"])).alias("weight"),
                 pl.lit(float(detail["limit_weight"])).alias("limit_weight"),
-                pl.lit(selection.final_score.idm).alias("idm"),
+                pl.lit(
+                    selection.final_score.idm
+                    if args.selection_rebalance == "static"
+                    else 1.0
+                ).alias("idm"),
                 pl.lit(candidate.trade_cost_usd_per_con).alias(
                     "trade_cost_usd_per_con"
                 ),
@@ -1354,17 +1813,70 @@ def _run_complete_selection(
                 "cum_net_pct",
                 "pnl_valid",
             )
+        cash_path = work_dir / f"cash_{cash_index:04d}.parquet"
+        cash_output_frame.write_parquet(cash_path)
+        cash_output_frames.append(pl.scan_parquet(cash_path))
+        del cash_reference_frame, cash_frame, cash_output_frame
+    unscaled_cash_pnl = (
+        pl.concat(cash_output_frames, how="diagonal_relaxed")
+        .collect(engine="streaming")
+    )
+    del cash_output_frames, cash_reference_frames
+    gc.collect()
+    allocation_provider = None
+    if args.selection_rebalance != "static":
+        review_dates = _selection_rebalance_dates(
+            unscaled_cash_pnl.get_column("date").drop_nulls().to_list(),
+            cadence=args.selection_rebalance,
         )
+        allocation_provider = _WalkForwardSelectionProvider(
+            review_dates=review_dates,
+            source_rows={symbol: source_rows[symbol] for symbol in cash_symbols},
+            audit_by_symbol={
+                symbol: audit_by_symbol[symbol] for symbol in cash_symbols
+            },
+            reference_frames={
+                symbol: _lazy_frame(subsystem_reference_frames[symbol]).select(
+                    "date",
+                    "ref_return_valid",
+                    "ref_net_pct",
+                    "daily_dvol",
+                    "fx_to_usd",
+                )
+                for symbol in cash_symbols
+            },
+            run_config=run_config,
+            args=args,
+        )
+    del subsystem_reference_frames
+    gc.collect()
     cash_pnl_long = build_equity_scaled_cash_pnl_curve(
-        pl.concat(cash_output_frames, how="diagonal_relaxed"),
+        unscaled_cash_pnl,
         initial_capital_usd=float(run_config["init_cap_usd"]),
         target_vol=float(run_config["target_vol"]),
         multiplier_by_symbol={
             symbol: float(source_rows[symbol]["mult"])
-            for symbol in selection.selected
+            for symbol in cash_symbols
         },
         target_abs_forecast=engine.config.target_abs_forecast,
+        allocation_provider=allocation_provider,
     )
+    if allocation_provider is not None:
+        if allocation_provider.latest_selection is None:
+            raise ValueError(
+                "scheduled selection never produced an eligible book"
+            )
+        selection = allocation_provider.latest_selection
+        candidate_by_symbol = allocation_provider.latest_candidates
+        final_frame = _final_selection_frame(
+            selection=selection,
+            candidate_by_symbol=candidate_by_symbol,
+            source_rows=source_rows,
+            audit_by_symbol=audit_by_symbol,
+            args=args,
+            selection_date=allocation_provider.latest_date,
+            selection_equity_usd=allocation_provider.latest_equity,
+        )
     historical_performance_rows: list[dict[str, object]] = []
     for symbol in selection.selected:
         significance = summarize_return_significance(
@@ -1399,9 +1911,7 @@ def _run_complete_selection(
         cash_pnl_long,
         initial_capital_usd=float(run_config["init_cap_usd"]),
     )
-    stamp = generated_at.astimezone(REPORT_TIMEZONE).strftime("%Y%m%d_%H%M%S")
     audit_path = output_dir / f"multi_speed_ewmac_selection_forecast_audit_{stamp}.parquet"
-    forecasts_path = output_dir / f"multi_speed_ewmac_selection_forecasts_{stamp}.parquet"
     trials_path = output_dir / f"multi_speed_ewmac_selection_trials_{stamp}.parquet"
     trial_allocations_path = (
         output_dir / f"multi_speed_ewmac_selection_trial_allocations_{stamp}.parquet"
@@ -1410,9 +1920,9 @@ def _run_complete_selection(
         output_dir / f"multi_speed_ewmac_selection_passes_{stamp}.parquet"
     )
     selection_path = output_dir / f"multi_speed_ewmac_selection_book_{stamp}.parquet"
-    reference_return_path = (
+    selection_reviews_path = (
         output_dir
-        / f"multi_speed_ewmac_selection_subsystem_reference_returns_{stamp}.parquet"
+        / f"multi_speed_ewmac_selection_reviews_{stamp}.parquet"
     )
     cash_pnl_path = (
         output_dir / f"multi_speed_ewmac_selection_cash_pnl_{stamp}.parquet"
@@ -1600,17 +2110,20 @@ def _run_complete_selection(
         rename_public_report_columns(final_frame)
     )
     public_audit.write_parquet(audit_path)
-    public_forecasts = round_public_report(
-        rename_public_report_columns(
-            pl.concat(forecast_output_frames, how="diagonal_relaxed")
-        )
-    )
-    public_forecasts.write_parquet(forecasts_path)
     public_trials.write_parquet(trials_path)
     public_trial_allocations.write_parquet(trial_allocations_path)
     public_selection_passes.write_parquet(selection_passes_path)
     public_selection.write_parquet(selection_path)
-    reference_return_wide.write_parquet(reference_return_path)
+    if allocation_provider is not None:
+        public_selection_reviews = round_public_report(
+            rename_public_report_columns(
+                pl.DataFrame(
+                    allocation_provider.review_rows,
+                    infer_schema_length=None,
+                )
+            )
+        )
+        public_selection_reviews.write_parquet(selection_reviews_path)
     public_cash_pnl = round_public_report(
         order_cash_pnl_report(rename_public_report_columns(cash_pnl_long))
     )
@@ -1621,6 +2134,7 @@ def _run_complete_selection(
         )
     )
     public_portfolio_curve.write_parquet(portfolio_curve_path)
+    work_tempdir.cleanup()
     print(
         f"Portfolio selection accepted {len(selection.selected)}/{len(candidate_list)} "
         f"forecast-eligible instruments"
@@ -1633,6 +2147,8 @@ def _run_complete_selection(
     print(f"Saved trials {trials_path}")
     print(f"Saved trial allocations {trial_allocations_path}")
     print(f"Saved accepted selection passes {selection_passes_path}")
+    if allocation_provider is not None:
+        print(f"Saved selection reviews {selection_reviews_path}")
     print(f"Saved selection {selection_path}")
     return selection_path, public_selection
 
@@ -1715,7 +2231,11 @@ def run(
         config["min_daily_volume"],
         config["max_pct_mkt_volume"],
     )
-    selected = selection_candidates(report)
+    selected = (
+        selection_candidates(report)
+        if args.selection_rebalance == "static"
+        else selection_rebalance_candidates(report)
+    )
     selected_symbols = set(selected.get_column("symbol").to_list())
     for row in report.select(
         name

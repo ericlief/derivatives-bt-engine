@@ -15,6 +15,7 @@ instrument output then aggregates into gross and net portfolio equity paths.
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 
 import polars as pl
 
@@ -1228,6 +1229,9 @@ def build_equity_scaled_cash_pnl_curve(
     target_vol: float,
     multiplier_by_symbol: dict[str, float],
     target_abs_forecast: float = EWMAC_FORECAST_TARGET_ABS,
+    allocation_provider: Callable[
+        [object, float], dict[str, dict[str, float | int]] | None
+    ] | None = None,
 ) -> pl.DataFrame:
     """Build selected-book cash P&L from lagged portfolio net equity.
 
@@ -1252,6 +1256,14 @@ def build_equity_scaled_cash_pnl_curve(
         Native-currency point-value multiplier for every selected symbol.
     target_abs_forecast
         Mean absolute forecast represented by one average position.
+    allocation_provider
+        Optional walk-forward book callback. On each portfolio date it receives
+        the date and prior net equity. Returning ``None`` retains the current
+        book; returning a symbol-to-allocation mapping replaces it. Each active
+        allocation must provide positive ``weight``, ``limit_weight``, and
+        ``idm`` values and may provide ``rank``. Symbols omitted from a new
+        mapping are closed on their next executable row. When omitted, the
+        input's fixed allocation is used exactly as before.
 
     Returns
     -------
@@ -1320,12 +1332,14 @@ def build_equity_scaled_cash_pnl_curve(
         .get_column("symbol")
         .to_list()
     )
-    if changing_sizing:
+    if changing_sizing and allocation_provider is None:
         raise ValueError(
             "selected-book weights and IDM must remain fixed for: "
             + ", ".join(sorted(str(symbol) for symbol in changing_sizing))
         )
     for sizing_row in static_sizing.iter_rows(named=True):
+        if allocation_provider is not None:
+            continue
         for column in ("weight", "limit_weight", "idm"):
             value = sizing_row[column]
             if (
@@ -1381,12 +1395,25 @@ def build_equity_scaled_cash_pnl_curve(
             "cumulative_roll_cost_pct": 0.0,
             "cumulative_total_cost_pct": 0.0,
             "cumulative_net_pct": 0.0,
+            "selection_active": False,
         }
         for symbol in symbols
     }
     gross_equity = initial_capital_usd
     net_equity = initial_capital_usd
     output_rows: list[dict[str, object]] = []
+    if allocation_provider is None:
+        current_allocations: dict[str, dict[str, float | int]] = {
+            str(row["symbol"]): {
+                "weight": float(row["weight"]),
+                "limit_weight": float(row["limit_weight"]),
+                "idm": float(row["idm"]),
+            }
+            for row in static_sizing.iter_rows(named=True)
+        }
+    else:
+        current_allocations = {}
+    selection_effective_date: object | None = None
 
     ordered = cash_pnl_long.sort("date", "symbol")
     for date_frame in ordered.partition_by("date", maintain_order=True):
@@ -1401,28 +1428,82 @@ def build_equity_scaled_cash_pnl_curve(
         capital_scalar = prior_net_equity / initial_capital_usd
         date_gross_pnl = 0.0
         date_net_pnl = 0.0
+        selection_rebalanced = False
+        if allocation_provider is not None:
+            replacement = allocation_provider(date_value, prior_net_equity)
+            if replacement is not None:
+                unknown = sorted(set(replacement).difference(symbols))
+                if unknown:
+                    raise ValueError(
+                        "walk-forward allocation contains unknown symbols: "
+                        + ", ".join(unknown)
+                    )
+                for allocation_symbol, allocation in replacement.items():
+                    for column in ("weight", "limit_weight", "idm"):
+                        value = allocation.get(column)
+                        if (
+                            value is None
+                            or not math.isfinite(float(value))
+                            or float(value) <= 0
+                        ):
+                            raise ValueError(
+                                f"walk-forward {column} must be finite and "
+                                f"positive for {allocation_symbol} on {date_value}"
+                            )
+                current_allocations = replacement
+                selection_effective_date = date_value
+                selection_rebalanced = True
 
         for source_row in date_frame.iter_rows(named=True):
             row = dict(source_row)
             symbol = str(row["symbol"])
             state = states[symbol]
+            allocation = current_allocations.get(symbol)
+            selection_active = allocation is not None
             annual_dollar_vol = finite_float(row["ann_dvol"])
-            limit_weight = finite_float(row["limit_weight"])
-            idm = finite_float(row["idm"])
+            weight = (
+                finite_float(allocation.get("weight"))
+                if allocation is not None
+                else None
+            )
+            limit_weight = (
+                finite_float(allocation.get("limit_weight"))
+                if allocation is not None
+                else None
+            )
+            idm = (
+                finite_float(allocation.get("idm"))
+                if allocation is not None
+                else None
+            )
             combined_forecast = finite_float(row["comb_fcst"])
             buffer_size = finite_float(row["buf_size"])
-            if limit_weight is None or limit_weight <= 0:
+            if selection_active and (limit_weight is None or limit_weight <= 0):
                 raise ValueError(f"invalid limit_weight for {symbol} on {date_value}")
-            if idm is None or idm <= 0:
+            if selection_active and (idm is None or idm <= 0):
                 raise ValueError(f"invalid idm for {symbol} on {date_value}")
             if buffer_size is None or buffer_size < 0:
                 raise ValueError(f"invalid buf_size for {symbol} on {date_value}")
 
             initial_risk_budget = (
                 initial_capital_usd * target_vol * limit_weight * idm
+                if selection_active
+                and limit_weight is not None
+                and idm is not None
+                else 0.0
             )
-            risk_budget = prior_net_equity * target_vol * limit_weight * idm
-            if annual_dollar_vol is not None and annual_dollar_vol > 0:
+            risk_budget = (
+                prior_net_equity * target_vol * limit_weight * idm
+                if selection_active
+                and limit_weight is not None
+                and idm is not None
+                else 0.0
+            )
+            if (
+                selection_active
+                and annual_dollar_vol is not None
+                and annual_dollar_vol > 0
+            ):
                 initial_volatility_scalar = (
                     initial_risk_budget / annual_dollar_vol
                 )
@@ -1459,7 +1540,9 @@ def build_equity_scaled_cash_pnl_curve(
             held_contracts = (
                 int(previous_exec) if previous_exec is not None else None
             )
-            if previous_exec is None:
+            if not selection_active:
+                exec_contracts = 0
+            elif previous_exec is None:
                 exec_contracts = (
                     rounded_optimal if rounded_optimal is not None else 0
                 )
@@ -1512,6 +1595,19 @@ def build_equity_scaled_cash_pnl_curve(
             )
             trade_cost_per_contract = finite_float(row["trade_cost_per_con"])
             roll_cost_per_contract = finite_float(row["roll_cost_per_con"])
+            if allocation is not None:
+                trade_cost_per_contract = finite_float(
+                    allocation.get(
+                        "trade_cost_per_con",
+                        trade_cost_per_contract,
+                    )
+                )
+                roll_cost_per_contract = finite_float(
+                    allocation.get(
+                        "roll_cost_per_con",
+                        roll_cost_per_contract,
+                    )
+                )
             if trade_cost_per_contract is None or trade_cost_per_contract < 0:
                 raise ValueError(
                     f"invalid trade cost for {symbol} on {date_value}"
@@ -1536,6 +1632,7 @@ def build_equity_scaled_cash_pnl_curve(
             net_pct = net_pnl / prior_net_equity * 100.0
 
             state["exec_contracts"] = exec_contracts
+            state["selection_active"] = selection_active
             state["cumulative_gross_pnl"] = (
                 float(state["cumulative_gross_pnl"]) + gross_pnl_or_zero
             )
@@ -1559,7 +1656,23 @@ def build_equity_scaled_cash_pnl_curve(
                 float(state["cumulative_net_pct"]) + net_pct
             )
 
+            if allocation_provider is not None:
+                row.update({
+                    "selection_active": selection_active,
+                    "selection_rebalanced": selection_rebalanced,
+                    "selection_effective_date": selection_effective_date,
+                    "selection_rank": (
+                        int(allocation["rank"])
+                        if allocation is not None and "rank" in allocation
+                        else None
+                    ),
+                })
             row.update({
+                "weight": weight,
+                "limit_weight": limit_weight,
+                "idm": idm,
+                "trade_cost_per_con": trade_cost_per_contract,
+                "roll_cost_per_con": roll_cost_per_contract,
                 "sizing_capital_usd": prior_net_equity,
                 "capital_scalar": capital_scalar,
                 "initial_capital_volatility_scalar": (
@@ -1596,7 +1709,15 @@ def build_equity_scaled_cash_pnl_curve(
                 "cum_roll_cost_pct": state["cumulative_roll_cost_pct"],
                 "cum_total_cost_pct": state["cumulative_total_cost_pct"],
                 "cum_net_pct": state["cumulative_net_pct"],
-                "pnl_valid": math.isfinite(net_pnl),
+                "pnl_valid": (
+                    math.isfinite(net_pnl)
+                    and (
+                        allocation_provider is None
+                        or selection_active
+                        or (held_contracts not in (None, 0))
+                        or signed_trade_contracts != 0
+                    )
+                ),
             })
             output_rows.append(row)
             date_gross_pnl += gross_pnl_or_zero
@@ -1667,14 +1788,29 @@ def build_portfolio_equity_curve(
             .otherwise(0.0)
         )
 
+    active_column = (
+        "sel_active" if "sel_active" in cash_pnl_long.columns else None
+    )
+    instrument_count = (
+        pl.col("symbol")
+        .filter(pl.col(active_column).fill_null(False))
+        .n_unique()
+        if active_column is not None
+        else pl.col("symbol").n_unique()
+    )
+    instrument_list = (
+        pl.col("symbol")
+        .filter(pl.col(active_column).fill_null(False))
+        if active_column is not None
+        else pl.col("symbol")
+    )
     daily = (
         cash_pnl_long.group_by("date")
         .agg(
-            pl.col("symbol")
-            .n_unique()
+            instrument_count
             .cast(pl.Int64)
             .alias("portfolio_instrument_count"),
-            pl.col("symbol")
+            instrument_list
             .drop_nulls()
             .unique()
             .sort()

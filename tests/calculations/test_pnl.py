@@ -8,6 +8,7 @@ import pytest
 from derivatives_bt_engine.calculations.pnl import (
     apply_forecast_position_buffer,
     append_reference_position_turnover,
+    build_equity_scaled_cash_pnl_curve,
     build_executable_cash_pnl_curve,
     build_fixed_capital_portfolio_curve,
     build_subsystem_reference_return_curve,
@@ -382,6 +383,71 @@ def test_fixed_capital_portfolio_curve_reports_percentage_points():
     assert result["cumulative_portfolio_total_cost_pct"][0] == pytest.approx(
         -3.0
     )
+
+
+def test_equity_scaled_cash_curve_replaces_book_at_selection_review():
+    """A walk-forward book closes removals after earning the review-day move."""
+    dates = [date(2024, 1, day) for day in range(1, 4)]
+    cash_input = pl.DataFrame({
+        "date": [value for value in dates for _ in ("A", "B")],
+        "symbol": [symbol for _ in dates for symbol in ("A", "B")],
+        "weight": [1.0] * 6,
+        "limit_weight": [1.0] * 6,
+        "idm": [1.0] * 6,
+        "comb_fcst": [1.0] * 6,
+        "pt_change": [None, None, 1.0, 1.0, 1.0, 1.0],
+        "fx_to_usd": [1.0] * 6,
+        "ann_dvol": [20.0] * 6,
+        "buf_size": [0.0] * 6,
+        "buf_trade_to_edge": [True] * 6,
+        "rebalance_on_roll": [True] * 6,
+        "roll_event": [False] * 6,
+        "trade_cost_per_con": [1.0] * 6,
+        "roll_cost_per_con": [0.0] * 6,
+    })
+
+    def allocations(review_date, prior_equity):
+        assert prior_equity > 0
+        if review_date == dates[0]:
+            return {
+                "A": {
+                    "weight": 0.5,
+                    "limit_weight": 0.5,
+                    "idm": 1.0,
+                    "rank": 1,
+                }
+            }
+        if review_date == dates[2]:
+            return {
+                "B": {
+                    "weight": 0.5,
+                    "limit_weight": 0.5,
+                    "idm": 1.0,
+                    "rank": 1,
+                }
+            }
+        return None
+
+    result = build_equity_scaled_cash_pnl_curve(
+        cash_input,
+        initial_capital_usd=1_000.0,
+        target_vol=0.20,
+        multiplier_by_symbol={"A": 10.0, "B": 10.0},
+        allocation_provider=allocations,
+    )
+
+    assert result.filter(pl.col("symbol") == "A").get_column(
+        "exec_con"
+    ).to_list() == [5, 5, 0]
+    assert result.filter(pl.col("symbol") == "B").get_column(
+        "exec_con"
+    ).to_list() == [0, 0, 5]
+    review = result.filter(pl.col("date") == dates[2])
+    assert review.get_column("sel_rebalanced").to_list() == [True, True]
+    assert review.filter(pl.col("symbol") == "A")["gross_pnl"][0] == pytest.approx(
+        50.0
+    )
+    assert review.get_column("net_pnl").sum() == pytest.approx(40.0)
 
 
 def test_forecast_buffer_matches_pysystemtrade_reference_fixture():

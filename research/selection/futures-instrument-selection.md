@@ -781,6 +781,51 @@ equity, never same-day P&L, so all instruments on a date receive the same
 causal capital state. This capital loop is the engine's selected-book
 accounting policy; it is not imported from another backtest framework.
 
+### Scheduled instrument-selection reviews
+
+The cash loop can keep one static book or rerun instrument selection at the
+first available session of each calendar year or month:
+
+```text
+--selection-rebalance static
+--selection-rebalance yearly
+--selection-rebalance monthly
+```
+
+`static` remains the default. A scheduled review is distinct from daily
+forecast resizing and `--rebalance-on-roll`. The selector receives the prior
+day's net equity, and every historical forecast, volatility, and correlation
+input is restricted to dates strictly before the review date. The resulting
+membership, weights, capped `limit_weight`, and IDM remain fixed until the next
+review; forecasts, volatility scaling, buffering, and contract rolls continue
+to update normally within that segment.
+
+Scheduled runs begin from the capital-flexible market universe rather than the
+contracts already affordable at initial capital. Saved cost, absolute-volume,
+data, rule, execution, and broker-qualification gates form that universe. A
+contract rejected only by the initial one-lot risk test can therefore enter a
+later review after equity grows. Per-review historical annual dollar
+volatility, account capital, portfolio liquidity, contract granularity, and
+margin constraints are then applied by the greedy selector.
+
+Completed historical segments use Carver's configured one-way spread and
+commission calibration. Costs are divided by the review-date annual dollar
+volatility to obtain the selection SR cost; they are deliberately a fixed-cost
+backtest convention, not a reconstructed daily spread series. The final open
+segment uses the live executable-contract cost calibration persisted in the
+input market report. Consequently, a production-current run must first build a
+fresh live market snapshot/rule cache; the selection runner does not silently
+substitute an old cached contract for the live segment.
+
+Membership changes share the existing execution state. A removed instrument
+earns the review day's move in the position held from the prior close, then is
+closed and charged ordinary trade cost. A newly selected instrument enters
+through the normal forecast buffer, so scheduled selection does not disable
+the overtrading control. Existing members also retain their buffered holdings
+when weights change. The cash report exposes `sel_active`, `sel_rebalanced`,
+`sel_date`, and `sel_rank`; the separate `selection_reviews` Parquet records
+review equity, candidate count, selected count, score, IDM, and membership.
+
 The default band on each date is `tgt_pos ± 0.10 × abs(vol_scalar)`.
 The continuous target and band edges are rounded only when forming the
 whole-contract boundaries and executable position. The previous executable

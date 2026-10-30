@@ -5,7 +5,9 @@ import pytest
 
 from derivatives_bt_engine.pipelines.portfolio_selection import (
     _label_forecast_output_frame,
+    _selection_rebalance_dates,
     _subsystem_reference_correlation,
+    _WalkForwardSelectionProvider,
     parse_args,
     run,
     slow_tilt_ewmac_weights,
@@ -83,6 +85,130 @@ def test_selection_defaults_to_reviewed_classification_weights():
     assert args.buffer_size == pytest.approx(0.10)
     assert args.buffer_trade_to_edge is True
     assert args.rebalance_on_roll is True
+    assert args.selection_rebalance == "static"
+
+
+def test_selection_rebalance_cadence_is_explicit():
+    """Book review cadence is distinct from contract-roll rebalancing."""
+    monthly = parse_args(["--selection-rebalance", "monthly"])
+    yearly = parse_args(["--selection-rebalance", "yearly"])
+
+    assert monthly.selection_rebalance == "monthly"
+    assert yearly.selection_rebalance == "yearly"
+
+
+def test_selection_rebalance_dates_use_first_available_session():
+    """Reviews occur on observed sessions and never invent calendar rows."""
+    dates = [
+        date(2025, 12, 31),
+        date(2026, 1, 2),
+        date(2026, 1, 5),
+        date(2026, 2, 2),
+        date(2027, 1, 4),
+    ]
+
+    assert _selection_rebalance_dates(dates, cadence="static") == [dates[0]]
+    assert _selection_rebalance_dates(dates, cadence="yearly") == [
+        date(2025, 12, 31),
+        date(2026, 1, 2),
+        date(2027, 1, 4),
+    ]
+    assert _selection_rebalance_dates(dates, cadence="monthly") == [
+        date(2025, 12, 31),
+        date(2026, 1, 2),
+        date(2026, 2, 2),
+        date(2027, 1, 4),
+    ]
+
+
+def test_walk_forward_selection_uses_carver_then_live_cost_calibration():
+    """Completed segments use configured cost; the open segment uses live."""
+    args = parse_args([
+        "--selection-rebalance",
+        "monthly",
+        "--min-forecast-obs",
+        "2",
+        "--corr-min-rows",
+        "2",
+        "--weight-policy",
+        "equal",
+    ])
+    history_dates = [
+        date(2024, 1, 1),
+        date(2024, 1, 2),
+        date(2024, 1, 3),
+        date(2024, 1, 31),
+    ]
+    reference_frames = {
+        symbol: pl.DataFrame({
+            "date": history_dates,
+            "ref_return_valid": [True] * 4,
+            "ref_net_pct": returns,
+            "daily_dvol": [10.0] * 4,
+            "fx_to_usd": [1.0] * 4,
+            # This intentionally wide field must be pruned by the lazy query.
+            "unused_audit_value": ["x"] * 4,
+        }).lazy()
+        for symbol, returns in {
+            "A": [0.1, 0.2, -0.1, 0.1],
+            "B": [-0.1, 0.1, 0.2, -0.2],
+        }.items()
+    }
+    source_rows = {
+        symbol: {
+            "symbol": symbol,
+            "asset_cls": "equity" if symbol == "A" else "bond",
+            "econ_subcls": symbol.lower(),
+            "econ_fam_id": symbol,
+            "ann_dvol": 160.0,
+            "trade_sr": 0.01,
+            "roll_sr": 0.02,
+            "avg_daily_volume": 1_000.0,
+            "init_margin_usd": 10.0,
+            "ref_ann_rolls": 4.0,
+            "ref_spread_pts": 0.1,
+            "ref_config_comm_usd": 0.2,
+            "mult": 5.0,
+        }
+        for symbol in ("A", "B")
+    }
+    provider = _WalkForwardSelectionProvider(
+        review_dates=[date(2024, 1, 4), date(2024, 2, 1)],
+        source_rows=source_rows,
+        audit_by_symbol={
+            symbol: {"comb_turnover": 1.0} for symbol in ("A", "B")
+        },
+        reference_frames=reference_frames,
+        run_config={
+            "target_vol": 0.20,
+            "cost_lim_sr": 0.01,
+            "max_pct_mkt_volume": 1.0,
+            "liq_days": 256,
+        },
+        args=args,
+    )
+
+    historical = provider(date(2024, 1, 4), 1_000.0)
+    live = provider(date(2024, 2, 1), 1_000.0)
+
+    assert historical
+    assert live
+    assert all(
+        row["trade_cost_per_con"] == pytest.approx(0.7)
+        for row in historical.values()
+    )
+    assert all(
+        row["roll_cost_per_con"] == pytest.approx(0.9)
+        for row in historical.values()
+    )
+    assert all(
+        row["trade_cost_per_con"] == pytest.approx(1.6)
+        for row in live.values()
+    )
+    assert all(
+        row["roll_cost_per_con"] == pytest.approx(3.2)
+        for row in live.values()
+    )
 
 
 def test_build_selection_entrypoint_defaults_to_complete_pipeline():

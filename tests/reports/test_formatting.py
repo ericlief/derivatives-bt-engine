@@ -164,8 +164,8 @@ def test_cash_pnl_report_orders_primary_fields_before_params_and_audit():
 
     assert public.columns[:26] == [
         "symbol", "date", "close", "pt_change", "pt_vol", "comb_fcst",
-        "tgt_pos", "held_con", "exec_con", "trade_con", "vol_scalar",
-        "buf_width_pos", "buffer_top_con", "buffer_bot_con", "gross_pnl",
+        "vol_scalar", "tgt_pos", "buf_width_pos", "buffer_top_con",
+        "buffer_bot_con", "held_con", "exec_con", "trade_con", "gross_pnl",
         "gross_pct", "net_pnl", "net_pct", "cum_gross_pnl", "cum_net_pnl",
         "cum_gross_pct", "cum_net_pct", "trade_cost", "roll_cost", "weight",
         "hist_instr_code",

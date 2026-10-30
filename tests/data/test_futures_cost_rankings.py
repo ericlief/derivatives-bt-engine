@@ -12,6 +12,7 @@ from derivatives_bt_engine.data.futures_cost_rankings import (
     phase2_step1_candidates,
     phase2_step1_config,
     resolve_phase2_selection_config,
+    selection_rebalance_candidates,
     top_n_by_asset_class,
 )
 
@@ -176,6 +177,7 @@ def _phase2_step1_report() -> pl.DataFrame:
         "cost_elig": [True] * 5,
         "size_elig": [True, True, False, True, True],
         "liq_elig": [True, False, True, True, False],
+        "volume_elig": [True, False, True, True, False],
         "data_elig": [True, True, True, True, False],
         "instr_has_elig_ewmac_rule": [True] * 5,
         "exec_elig": [True] * 5,
@@ -222,6 +224,15 @@ def test_phase2_step1_does_not_recalculate_phase1_metrics():
 
     assert selected.get_column("symbol").to_list() == ["PASS"]
     assert selected.get_column("pct_mkt_volume").to_list() == [99.0]
+
+
+def test_scheduled_selection_keeps_contracts_rejected_only_by_risk_size():
+    """A larger future account can reconsider currently unaffordable lots."""
+    report = _phase2_step1_report()
+
+    candidates = selection_rebalance_candidates(report)
+
+    assert candidates.get_column("symbol").to_list() == ["PASS", "BIG"]
 
 
 def test_phase2_step1_requires_current_phase1_gate_schema():
