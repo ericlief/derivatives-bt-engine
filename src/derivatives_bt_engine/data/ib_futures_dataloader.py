@@ -625,10 +625,25 @@ def load_roll_cycle_ib_contract_history(
         what_to_show=what_to_show,
         use_rth=use_rth,
     )
+    if not result.is_empty():
+        future_rows = result.filter(pl.col('date') > effective_as_of).height
+        if future_rows:
+            logger.warning(
+                "ib_dated_history future_bars_excluded pst_instr_code=%s "
+                "as_of=%s rows=%d",
+                pst_instr_code,
+                effective_as_of,
+                future_rows,
+            )
+            # Raw IB caches can outlive the run that populated them. Enforce
+            # the caller's as-of boundary after every cache read so a
+            # future-dated observation cannot leak into any derived stream.
+            result = result.filter(pl.col('date') <= effective_as_of)
     if result.is_empty():
         raise RuntimeError(
             "No raw IB dated-contract history is available for PST instrument "
-            f"{pst_instr_code} in {Path(history_db_path).expanduser()}"
+            f"{pst_instr_code} on or before {effective_as_of} in "
+            f"{Path(history_db_path).expanduser()}"
         )
     result = (
         result.with_columns(
