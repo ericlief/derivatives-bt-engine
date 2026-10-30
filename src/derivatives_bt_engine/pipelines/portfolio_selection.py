@@ -804,6 +804,8 @@ class _WalkForwardSelectionProvider:
         self.latest_date: date | None = None
         self.latest_equity: float | None = None
         self.review_rows: list[dict[str, object]] = []
+        self.review_instrument_rows: list[dict[str, object]] = []
+        self.prior_selected: set[str] = set()
 
     @staticmethod
     def _finite(value: object) -> float | None:
@@ -1010,6 +1012,9 @@ class _WalkForwardSelectionProvider:
         self.latest_candidates = candidate_by_symbol
         self.latest_date = review_date
         self.latest_equity = prior_net_equity
+        selected_symbols = set(selection.selected)
+        added_symbols = selected_symbols.difference(self.prior_selected)
+        removed_symbols = self.prior_selected.difference(selected_symbols)
         self.review_rows.append({
             "selection_date": review_date,
             "selection_equity_usd": prior_net_equity,
@@ -1018,7 +1023,60 @@ class _WalkForwardSelectionProvider:
             "selection_score": selection.final_score.score,
             "selection_idm": selection.final_score.idm,
             "selection_symbols": ",".join(selection.selected),
+            "selection_added_symbols": ",".join(sorted(added_symbols)),
+            "selection_removed_symbols": ",".join(sorted(removed_symbols)),
         })
+        for symbol in sorted(selected_symbols | removed_symbols):
+            active = symbol in selected_symbols
+            candidate = candidate_by_symbol.get(symbol)
+            allocation = allocations.get(symbol)
+            source = self.source_rows[symbol]
+            audit = self.audit_by_symbol[symbol]
+            if active and symbol in added_symbols:
+                status = "added"
+            elif active:
+                status = "retained"
+            else:
+                status = "removed"
+            self.review_instrument_rows.append({
+                "selection_date": review_date,
+                "selection_year": review_date.year,
+                "selection_equity_usd": prior_net_equity,
+                "selection_candidate_count": len(candidates),
+                "selection_instrument_count": len(selection.selected),
+                "selection_score": selection.final_score.score,
+                "selection_idm": selection.final_score.idm,
+                "selection_status": status,
+                "selection_active": active,
+                "rank": allocation.get("rank") if allocation else None,
+                "symbol": symbol,
+                "hist_instr_code": source.get("hist_instr_code"),
+                "pst_instr_code": source.get("pst_instr_code"),
+                "asset_cls": source.get("asset_cls"),
+                "econ_subcls": source.get("econ_subcls"),
+                "weight": allocation.get("weight") if allocation else None,
+                "limit_weight": (
+                    allocation.get("limit_weight") if allocation else None
+                ),
+                "ann_dvol": candidate.ann_dvol if candidate else None,
+                "trade_sr": candidate.trade_sr if candidate else None,
+                "roll_sr": candidate.roll_sr if candidate else None,
+                "comb_turnover": audit.get("comb_turnover"),
+                "ann_trade_cost_sr": (
+                    candidate.annual_trade_cost_sr if candidate else None
+                ),
+                "ann_roll_cost_sr": (
+                    candidate.annual_roll_cost_sr if candidate else None
+                ),
+                "ann_cost_sr": candidate.annual_cost_sr if candidate else None,
+                "trade_cost_per_con": (
+                    allocation.get("trade_cost_per_con") if allocation else None
+                ),
+                "roll_cost_per_con": (
+                    allocation.get("roll_cost_per_con") if allocation else None
+                ),
+            })
+        self.prior_selected = selected_symbols
         logger.info(
             "walk_forward_selection complete date=%s equity=%s candidates=%d "
             "selected=%d idm=%s book=%s",
@@ -1511,7 +1569,6 @@ def _run_complete_selection(
         # Construction remains pinned to the long reference histories above.
         # Only the final executable cash audit is rebuilt from the
         # duplicate-free stitched source so reported P&L reaches stored IB data.
-        stitched_components: dict[str, pl.DataFrame] = {}
         pooled_rules = load_pooled_ewmac_rules(
             db_path=args.history_db.expanduser().resolve(),
         )
@@ -1539,6 +1596,21 @@ def _run_complete_selection(
                 for symbol in cash_symbols
             }
         )
+        symbols_by_history_code: dict[str, list[str]] = {
+            history_code: [] for history_code in selected_history_codes
+        }
+        for symbol, history_code in stitched_history_code_by_symbol.items():
+            symbols_by_history_code[history_code].append(symbol)
+        symbol_index = {
+            symbol: index for index, symbol in enumerate(cash_symbols, start=1)
+        }
+        # Start from the valid long-reference fallback. Each successfully
+        # stitched history replaces only its own symbols with a disk-backed
+        # scan, so 100+ combined component frames never coexist in memory.
+        cash_reference_frames = dict(subsystem_reference_frames)
+        historical_return_sources.update({
+            symbol: "reference_fallback" for symbol in cash_symbols
+        })
         live_ib: IBPySync | None = None
 
         def connected_ib() -> IBPySync:
@@ -1626,69 +1698,107 @@ def _run_complete_selection(
                         exc,
                     )
                     continue
-                stitched_components[history_code] = build_ewmac_component_frame(
+                stitched_component = build_ewmac_component_frame(
                     stitched_history,
                     pooled_rules,
                 )
+                stitched_symbols: list[str] = []
+                for symbol in symbols_by_history_code[history_code]:
+                    row = source_rows[symbol]
+                    try:
+                        rules = _parse_rules(
+                            str(row["elig_ewmac_rules"] or "")
+                        )
+                        stitched_result = engine.combine(
+                            stitched_component,
+                            rules,
+                            forecast_correlation,
+                            correlation_rules,
+                        )
+                        currency = str(row["ccy"]).upper()
+                        stitched_fx_frame = align_fx_to_history(
+                            stitched_result.frame,
+                            currency,
+                            fx_history=fx_history_by_currency[currency],
+                            db_path=args.history_db.expanduser().resolve(),
+                        )
+                        stitched_reference = (
+                            build_subsystem_reference_return_curve(
+                                stitched_fx_frame,
+                                capital=float(run_config["init_cap_usd"]),
+                                target_vol=float(run_config["target_vol"]),
+                                reference_book_count=(
+                                    args.tie_reference_book_count
+                                ),
+                                reference_idm=GreedySelectionConfig.max_idm,
+                                max_weight_idm=args.max_weight_idm,
+                                multiplier=float(row["mult"]),
+                                ann_cost_sr=0.0,
+                                target_abs_forecast=(
+                                    engine.config.target_abs_forecast
+                                ),
+                            )
+                        )
+                        stitched_reference_path = work_dir / (
+                            f"stitched_reference_{symbol_index[symbol]:04d}.parquet"
+                        )
+                        stitched_reference.write_parquet(
+                            stitched_reference_path
+                        )
+                        cash_reference_frames[symbol] = pl.scan_parquet(
+                            stitched_reference_path
+                        )
+                        historical_return_sources[symbol] = "stitched"
+                        stitched_symbols.append(symbol)
+                    except Exception as exc:
+                        logger.warning(
+                            "selection_stitched_reference unavailable "
+                            "symbol=%s hist_instr_code=%s "
+                            "fallback=reference reason=%s",
+                            symbol,
+                            history_code,
+                            exc,
+                        )
                 logger.info(
                     "selection_stitched_history complete hist_instr_code=%s "
-                    "rows=%d start=%s end=%s sources=%s",
+                    "rows=%d start=%s end=%s sources=%s symbols=%s",
                     history_code,
                     stitched_history.signal.height,
                     stitched_history.signal.get_column("date").min(),
                     stitched_history.signal.get_column("date").max(),
                     stitched_history.metadata.get("available_sources"),
+                    ",".join(stitched_symbols),
                 )
+                del stitched_component, stitched_history
         finally:
             if live_ib is not None:
                 live_ib.disconnect()
-
-        # Start with the valid reference curves for every selected symbol.
-        # Successful stitched histories replace these entries below; keeping
-        # the originals here makes the per-symbol fallback usable downstream.
-        cash_reference_frames = dict(subsystem_reference_frames)
-        for symbol in cash_symbols:
-            row = source_rows[symbol]
-            history_code = stitched_history_code_by_symbol[symbol]
-            if history_code not in stitched_components:
-                historical_return_sources[symbol] = "reference_fallback"
-                continue
-            rules = _parse_rules(str(row["elig_ewmac_rules"] or ""))
-            stitched_result = engine.combine(
-                stitched_components[history_code],
-                rules,
-                forecast_correlation,
-                correlation_rules,
-            )
-            currency = str(row["ccy"]).upper()
-            stitched_fx_frame = align_fx_to_history(
-                stitched_result.frame,
-                currency,
-                fx_history=fx_history_by_currency[currency],
-                db_path=args.history_db.expanduser().resolve(),
-            )
-            cash_reference_frames[symbol] = build_subsystem_reference_return_curve(
-                stitched_fx_frame,
-                capital=float(run_config["init_cap_usd"]),
-                target_vol=float(run_config["target_vol"]),
-                reference_book_count=args.tie_reference_book_count,
-                reference_idm=GreedySelectionConfig.max_idm,
-                max_weight_idm=args.max_weight_idm,
-                multiplier=float(row["mult"]),
-                ann_cost_sr=0.0,
-                target_abs_forecast=engine.config.target_abs_forecast,
-            )
-            historical_return_sources[symbol] = "stitched"
     else:
         stitched_history_code_by_symbol = {
             symbol: str(source_rows[symbol]["hist_instr_code"])
             for symbol in cash_symbols
         }
 
-    # Reference returns above are used only for candidate correlations. This
-    # selected-book path fixes final weights and IDM, then scales every market
-    # from the same lagged portfolio equity before buffering and rounding.
-    # Actual history-policy roll dates are charged in cash.
+    walk_forward_reference_frames = (
+        {
+            symbol: _lazy_frame(cash_reference_frames[symbol]).select(
+                "date",
+                "ref_return_valid",
+                "ref_net_pct",
+                "daily_dvol",
+                "fx_to_usd",
+            )
+            for symbol in cash_symbols
+        }
+        if args.selection_rebalance != "static"
+        else {}
+    )
+
+    # The same reference or stitched subsystem histories feed the causal
+    # review cuts and executable cash replay. This selected-book path scales
+    # every active market from the same lagged portfolio equity before
+    # buffering and rounding. Actual history-policy roll dates are charged in
+    # cash.
     cash_output_frames: list[pl.LazyFrame] = []
     static_details = {
         str(detail["symbol"]): detail
@@ -1835,20 +1945,11 @@ def _run_complete_selection(
             audit_by_symbol={
                 symbol: audit_by_symbol[symbol] for symbol in cash_symbols
             },
-            reference_frames={
-                symbol: _lazy_frame(subsystem_reference_frames[symbol]).select(
-                    "date",
-                    "ref_return_valid",
-                    "ref_net_pct",
-                    "daily_dvol",
-                    "fx_to_usd",
-                )
-                for symbol in cash_symbols
-            },
+            reference_frames=walk_forward_reference_frames,
             run_config=run_config,
             args=args,
         )
-    del subsystem_reference_frames
+    del subsystem_reference_frames, walk_forward_reference_frames
     gc.collect()
     cash_pnl_long = build_equity_scaled_cash_pnl_curve(
         unscaled_cash_pnl,
@@ -1923,6 +2024,10 @@ def _run_complete_selection(
     selection_reviews_path = (
         output_dir
         / f"multi_speed_ewmac_selection_reviews_{stamp}.parquet"
+    )
+    selection_review_instruments_path = (
+        output_dir
+        / f"multi_speed_ewmac_selection_review_instruments_{stamp}.parquet"
     )
     cash_pnl_path = (
         output_dir / f"multi_speed_ewmac_selection_cash_pnl_{stamp}.parquet"
@@ -2124,6 +2229,24 @@ def _run_complete_selection(
             )
         )
         public_selection_reviews.write_parquet(selection_reviews_path)
+        public_selection_review_instruments = round_public_report(
+            rename_public_report_columns(
+                pl.DataFrame(
+                    allocation_provider.review_instrument_rows,
+                    infer_schema_length=None,
+                ).sort(
+                    "selection_date",
+                    "selection_active",
+                    "rank",
+                    "symbol",
+                    descending=[False, True, False, False],
+                    nulls_last=True,
+                )
+            )
+        )
+        public_selection_review_instruments.write_parquet(
+            selection_review_instruments_path
+        )
     public_cash_pnl = round_public_report(
         order_cash_pnl_report(rename_public_report_columns(cash_pnl_long))
     )
@@ -2149,6 +2272,10 @@ def _run_complete_selection(
     print(f"Saved accepted selection passes {selection_passes_path}")
     if allocation_provider is not None:
         print(f"Saved selection reviews {selection_reviews_path}")
+        print(
+            "Saved selection review instruments "
+            f"{selection_review_instruments_path}"
+        )
     print(f"Saved selection {selection_path}")
     return selection_path, public_selection
 

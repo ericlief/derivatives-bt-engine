@@ -825,6 +825,25 @@ the overtrading control. Existing members also retain their buffered holdings
 when weights change. The cash report exposes `sel_active`, `sel_rebalanced`,
 `sel_date`, and `sel_rank`; the separate `selection_reviews` Parquet records
 review equity, candidate count, selected count, score, IDM, and membership.
+The companion `selection_review_instruments` Parquet is the compact navigation
+report: it has one row per review and involved instrument, with `added`,
+`retained`, or `removed` status, active rank and weights, classification,
+historical dollar volatility, and the cost inputs used by that review. One
+file covers the entire monthly or yearly walk-forward run; reviews do not
+create separate result directories.
+
+When `--ib-history-db` is supplied, executable cash history is rebuilt from
+the stitched reference/Globex/IB source for every instrument that can enter a
+scheduled book. `--ib-history-live update` shares one IB connection across the
+run and updates each underlying signal history. Stitched component and
+subsystem frames spill to Parquet and are scanned lazily, rather than retaining
+the broad stitched universe in RAM. Selection decisions remain based on the
+lagged subsystem histories: reference frames before the source transition and
+stitched reference/Globex/IB frames through the stored or live tail. Every
+review still filters these frames to `date < review_date`, so fetching the
+complete history once at run start does not expose a review to later returns.
+Stitching therefore extends both the executable cash/capital path and the
+selection inputs after the reference history ends.
 
 The default band on each date is `tgt_pos ± 0.10 × abs(vol_scalar)`.
 The continuous target and band edges are rounded only when forming the

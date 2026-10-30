@@ -1,5 +1,7 @@
 """Tests for the shared public-report numeric precision contract."""
 
+from datetime import date
+
 import polars as pl
 import pytest
 
@@ -96,6 +98,27 @@ def test_public_report_renames_cash_cost_columns_at_boundary():
 
     assert public.columns == ["trade_cost_per_con", "ann_roll_cost"]
     assert public.row(0) == pytest.approx((1.23, 12.35))
+
+
+def test_public_report_compacts_selection_review_identity():
+    """Review summaries share the cash report's compact selection vocabulary."""
+    report = pl.DataFrame({
+        "selection_date": [date(2024, 1, 2)],
+        "selection_year": [2024],
+        "selection_status": ["added"],
+        "selection_added_symbols": ["A"],
+        "selection_removed_symbols": ["B"],
+    })
+
+    public = rename_public_report_columns(report)
+
+    assert public.columns == [
+        "sel_date",
+        "sel_year",
+        "sel_status",
+        "sel_added",
+        "sel_removed",
+    ]
 
 
 def test_reference_cumulative_amounts_use_consistent_report_rounding():

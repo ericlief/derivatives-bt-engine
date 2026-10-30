@@ -209,6 +209,23 @@ def test_walk_forward_selection_uses_carver_then_live_cost_calibration():
         row["roll_cost_per_con"] == pytest.approx(3.2)
         for row in live.values()
     )
+    first_review_rows = [
+        row for row in provider.review_instrument_rows
+        if row["selection_date"] == date(2024, 1, 4)
+    ]
+    second_review_rows = [
+        row for row in provider.review_instrument_rows
+        if row["selection_date"] == date(2024, 2, 1)
+    ]
+    assert sum(bool(row["selection_active"]) for row in first_review_rows) == len(
+        historical
+    )
+    assert sum(bool(row["selection_active"]) for row in second_review_rows) == len(
+        live
+    )
+    assert {row["selection_status"] for row in first_review_rows} == {"added"}
+    assert all(row["selection_year"] == 2024 for row in first_review_rows)
+    assert all(row["hist_instr_code"] is None for row in first_review_rows)
 
 
 def test_build_selection_entrypoint_defaults_to_complete_pipeline():
