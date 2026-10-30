@@ -116,8 +116,8 @@ def plot_selection_cash_pnl(
     ``cash_pnl`` may be the public Polars frame or a saved selection cash-P&L
     Parquet path. By default, every symbol appears in the selector. Choosing a
     symbol updates its vertically stacked forecast, contract-position, daily
-    P&L, separate daily-cost, cumulative P&L, cumulative-return, mark-price,
-    and Panama-price panels.
+    P&L, separate daily-cost, cumulative P&L, cumulative-return, and a shared
+    mark/Panama-price panel.
     The wider panels
     have independent scales and support hover and zoom.
 
@@ -252,6 +252,7 @@ def plot_selection_cash_pnl(
         title: str,
         ylabel: str,
         labels: dict[str, str] | None = None,
+        colors: dict[str, str] | None = None,
     ):
         """Build one independently scaled overlay from available fields."""
         available = [name for name in columns if name in symbol_frame.columns]
@@ -270,6 +271,11 @@ def plot_selection_cash_pnl(
                     ("Date", "@date{%F}"),
                     ((labels or {}).get(column, column), f"@{column}{{0.0000}}"),
                 ],
+                **(
+                    {"color": colors[column]}
+                    if colors is not None and column in colors
+                    else {}
+                ),
             )
             for column in available
         ]
@@ -317,26 +323,22 @@ def plot_selection_cash_pnl(
                 ylabel="Return contribution",
             ),
         ]
-        if mark_column is not None:
-            panels.append(
-                line_panel(
-                    symbol_frame,
-                    columns=[mark_column],
-                    title=f"{symbol} contract mark price",
-                    ylabel="Price points",
-                    labels={mark_column: "Mark price"},
-                )
+        panels.append(
+            line_panel(
+                symbol_frame,
+                columns=[mark_column, "close"],
+                title=f"{symbol} contract mark and Panama prices",
+                ylabel="Price points",
+                labels={
+                    mark_column: "Mark price",
+                    "close": "Panama price",
+                },
+                colors={
+                    mark_column: "#1f77b4",
+                    "close": "#ff7f0e",
+                },
             )
-        if "close" in symbol_frame.columns:
-            panels.append(
-                line_panel(
-                    symbol_frame,
-                    columns=["close"],
-                    title=f"{symbol} Panama price",
-                    ylabel="Price points",
-                    labels={"close": "Panama price"},
-                )
-            )
+        )
         dashboard = panels[0]
         for panel in panels[1:]:
             dashboard = dashboard + panel
@@ -836,7 +838,7 @@ class EwmacNotebookView:
         """Return a vertically stacked hvPlot dashboard for notebook display.
 
         Panels show the executable contract mark and Panama-adjusted signal
-        price separately, followed by combined forecast, sized
+        price on one shared axis, followed by combined forecast, sized
         reference positions, normalized position, cumulative reference
         percentage, and—when configured—whole-contract positions and
         cumulative cash P&L. Each panel has an independent y-axis so the
@@ -853,33 +855,35 @@ class EwmacNotebookView:
             raise ValueError("plot date range contains no forecast observations")
 
         # The Panama series is carried as ``close`` for the signal pipeline;
-        # ``con_px`` is the actual contract mark. Separate panels keep either
-        # price path from flattening the other when their levels diverge.
-        price_panels = []
+        # ``con_px`` is the actual contract mark. Use explicit colors on one
+        # shared axis so overlapping paths remain identifiable.
+        price_curves = []
         if "con_px" in reference.columns:
-            price_panels.append(
+            price_curves.append(
                 reference.hvplot.line(
                     x="date",
                     y="con_px",
-                    title=f"{self.symbol} contract mark price",
+                    label="Mark price",
+                    color="#1f77b4",
+                    title=f"{self.symbol} contract mark and Panama prices",
                     ylabel="Price points",
                     width=width,
                     height=height,
                 )
             )
-        price_panels.append(
+        price_curves.append(
             reference.hvplot.line(
                 x="date",
                 y="close",
-                title=f"{self.symbol} Panama price",
+                label="Panama price",
+                color="#ff7f0e",
+                title=f"{self.symbol} contract mark and Panama prices",
                 ylabel="Price points",
                 width=width,
                 height=height,
             )
         )
-        price_plot = price_panels[0]
-        for price_panel in price_panels[1:]:
-            price_plot = price_plot + price_panel
+        price_plot = hv.Overlay(price_curves).opts(legend_position="top_left")
         forecast_plot = reference.hvplot.line(
             x="date",
             y="comb_fcst",
