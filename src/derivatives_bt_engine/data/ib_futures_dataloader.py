@@ -63,6 +63,9 @@ from derivatives_bt_engine.data.futures_history import (
     stitch_futures_histories,
     write_futures_history_parquet_cache,
 )
+from derivatives_bt_engine.data.futures_overlap import (
+    resolve_reviewed_globex_asset,
+)
 from derivatives_bt_engine.data.ib_futures_history_store import (
     DEFAULT_IB_FUTURES_HISTORY_DB_PATH,
     IBFuturesHistoryStore,
@@ -848,7 +851,6 @@ class IBStitchedHistoryProvider:
     """
 
     ib: IBPySync | None
-    globex_asset: str | None
     # Optional mapped history source for execution overlays (e.g. MGC -> GC).
     signal_symbol: str | None = None
     as_of: date | None = None
@@ -877,7 +879,12 @@ class IBStitchedHistoryProvider:
         if self.max_source_gap_days < 0:
             raise ValueError("max_source_gap_days must be nonnegative")
 
-    def _cache_directory(self, symbol: str, pst_instr_code: str) -> Path:
+    def _cache_directory(
+        self,
+        symbol: str,
+        pst_instr_code: str,
+        globex_asset: str | None,
+    ) -> Path:
         """Return a versioned cache directory for all stitched-view inputs."""
         effective_as_of = self.as_of or date.today()
         identity = {
@@ -885,7 +892,7 @@ class IBStitchedHistoryProvider:
             'symbol': symbol,
             'pst_instr_code': pst_instr_code,
             'signal_symbol': self.signal_symbol or symbol,
-            'globex_asset': self.globex_asset,
+            'globex_asset': globex_asset,
             'as_of': effective_as_of.isoformat(),
             'prior_years': self.prior_years,
             'duration': self.duration,
@@ -896,7 +903,7 @@ class IBStitchedHistoryProvider:
             'reference_db': _history_input_fingerprint(self.reference_db_path),
             'globex_db': (
                 _history_input_fingerprint(self.globex_db_path)
-                if self.globex_asset is not None
+                if globex_asset is not None
                 else None
             ),
             'mapping': _history_input_fingerprint(self.mapping_path),
@@ -954,7 +961,10 @@ class IBStitchedHistoryProvider:
                 "to one PST/IB history mapping"
             )
         pst_instr_code = str(signal_rows[0]["pst_instr_code"])
-        cache_directory = self._cache_directory(symbol, pst_instr_code)
+        globex_asset = resolve_reviewed_globex_asset(pst_instr_code)
+        cache_directory = self._cache_directory(
+            symbol, pst_instr_code, globex_asset
+        )
         contract_path = cache_directory / 'ib_contract_history.parquet'
         cache_hit = (
             self.use_cache
@@ -1031,7 +1041,7 @@ class IBStitchedHistoryProvider:
             save_cache=self.save_cache,
         ).load(pst_instr_code)
         histories = [reference_history]
-        if self.globex_asset is not None:
+        if globex_asset is not None:
             try:
                 globex_history = GlobexHistoryProvider(
                     db_path=self.globex_db_path,
@@ -1039,14 +1049,14 @@ class IBStitchedHistoryProvider:
                     use_cache=self.use_cache,
                     save_cache=self.save_cache,
                     roll_policy=roll_policy,
-                ).load(self.globex_asset)
+                ).load(globex_asset)
             except KeyError:
                 logger.info(
                     'stitched_ib_history globex_unavailable symbol=%s '
                     'pst_instr_code=%s globex_asset=%s fallback=reference_to_ib',
                     symbol,
                     pst_instr_code,
-                    self.globex_asset,
+                    globex_asset,
                 )
             else:
                 histories.append(globex_history)
@@ -1140,7 +1150,9 @@ class IBStitchedHistoryProvider:
             # Live acquisition changes the raw-database fingerprint. Save the
             # derived bundle under the post-update identity so the next
             # stored-only call can reuse it.
-            cache_directory = self._cache_directory(symbol, pst_instr_code)
+            cache_directory = self._cache_directory(
+                symbol, pst_instr_code, globex_asset
+            )
             contract_path = cache_directory / 'ib_contract_history.parquet'
         history = replace(
             history,

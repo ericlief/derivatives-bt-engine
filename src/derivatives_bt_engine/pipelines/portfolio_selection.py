@@ -88,9 +88,6 @@ from derivatives_bt_engine.data.futures_history import (
     DEFAULT_PYSYSTEMTRADE_DB_PATH,
     FuturesHistory,
 )
-from derivatives_bt_engine.data.futures_overlap import (
-    resolve_reviewed_globex_asset,
-)
 from derivatives_bt_engine.data.ib_futures_dataloader import (
     DEFAULT_BROKER_MAPPING_PATH,
     DEFAULT_MAX_SOURCE_GAP_DAYS,
@@ -1124,7 +1121,6 @@ def _run_complete_selection(
             """Load one stitched history with explicit broker-update policy."""
             return IBStitchedHistoryProvider(
                 ib=ib,
-                globex_asset=resolve_reviewed_globex_asset(history_code),
                 signal_symbol=signal_symbol_by_history_code[history_code],
                 reference_db_path=args.history_db.expanduser().resolve(),
                 globex_db_path=args.globex_db.expanduser().resolve(),

@@ -45,7 +45,6 @@ from derivatives_bt_engine.calculations.pnl import (
     summarize_return_significance,
 )
 from derivatives_bt_engine.data.fx_history import align_fx_to_history
-from derivatives_bt_engine.data.futures_overlap import resolve_reviewed_globex_asset
 from derivatives_bt_engine.data.futures_history import (
     DEFAULT_GLOBEX_DB_PATH,
     DEFAULT_PYSYSTEMTRADE_DB_PATH as DEFAULT_REFERENCE_DB_PATH,
@@ -1244,17 +1243,6 @@ def _resolve_stitched_symbol_mappings(
     return executable, signal_rows[0]
 
 
-def _resolve_globex_asset(pst_instr_code: str) -> str | None:
-    """Resolve an optional Globex root from the reviewed crosswalk.
-
-    A missing row means that the middle Globex segment is unavailable. The
-    stitched provider can still join long reference history directly to the
-    recent IB segment. Multiple usable rows remain an error because source
-    ownership would be ambiguous.
-    """
-    return resolve_reviewed_globex_asset(pst_instr_code)
-
-
 def build_stitched_ewmac_notebook_view(
     ib: IBPySync,
     *,
@@ -1367,10 +1355,8 @@ def build_stitched_ewmac_notebook_view(
         signal_symbol=signal_symbol,
     )
     pst_instr_code = signal_mapping["pst_instr_code"]
-    globex_asset = _resolve_globex_asset(pst_instr_code)
     history_provider = IBStitchedHistoryProvider(
         ib=ib,
-        globex_asset=globex_asset,
         signal_symbol=signal_mapping["symbol"],
         as_of=as_of,
         prior_years=prior_years,
