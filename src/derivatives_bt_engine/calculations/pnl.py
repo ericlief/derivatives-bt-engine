@@ -8,9 +8,8 @@ calendar time. The subsystem-reference path uses a fixed equal-weight book
 assumption to produce comparable instrument returns for correlation estimation.
 The separate selected-book cash path applies final weights and IDM, buffers and
 rounds to executable contracts, and charges ordinary trades and contract rolls
-separately. Its long instrument output can then be aggregated into a fixed
-initial-capital portfolio return and equity curve without changing the
-positions that produced the cash P&L.
+separately. Its long instrument output can then be aggregated into gross and
+net equity returns without changing the positions that produced the cash P&L.
 """
 
 from __future__ import annotations
@@ -1227,7 +1226,7 @@ def build_fixed_capital_portfolio_curve(
     *,
     initial_capital_usd: float,
 ) -> pl.DataFrame:
-    """Aggregate selected-instrument cash P&L into one portfolio curve.
+    """Aggregate fixed-position cash P&L into gross and net equity curves.
 
     Parameters
     ----------
@@ -1243,17 +1242,19 @@ def build_fixed_capital_portfolio_curve(
     Returns
     -------
     polars.DataFrame
-        One row per date with summed daily USD cash flows, fixed-capital daily
-        and cumulative percentage-point returns/costs, gross and net equity
-        paths, and instrument coverage counts.
+        One row per date with summed daily USD cash flows, daily returns based
+        on the applicable prior equity, cumulative returns relative to initial
+        capital, cost contributions, equity paths, and coverage counts.
 
     Notes
     -----
-    This is a fixed-capital audit curve. The executable positions were sized
-    from ``initial_capital_usd`` before their cash P&L was calculated, so the
-    curve does not resize positions as equity changes. Null or non-finite cash
-    values contribute zero to the daily sum; ``portfolio_valid_pnl_instruments``
-    records how many instrument rows supplied a valid P&L observation.
+    The executable positions were sized from ``initial_capital_usd`` before
+    their cash P&L was calculated, so the curve does not resize positions as
+    equity changes. Daily gross return divides gross cash P&L by prior gross
+    equity, while daily net return and cost rates divide by prior net equity.
+    Null or non-finite cash values contribute zero to the daily sum;
+    ``portfolio_valid_pnl_instruments`` records how many instrument rows
+    supplied a valid P&L observation.
     """
     if not math.isfinite(initial_capital_usd) or initial_capital_usd <= 0:
         raise ValueError("initial_capital_usd must be finite and positive")
@@ -1312,24 +1313,6 @@ def build_fixed_capital_portfolio_curve(
             ),
         )
         .with_columns(
-            (pl.col("portfolio_cash_gross_pnl_usd") / initial_capital_usd * 100.0)
-            .alias("portfolio_gross_pct"),
-            (pl.col("portfolio_cash_net_pnl_usd") / initial_capital_usd * 100.0)
-            .alias("portfolio_net_pct"),
-            (pl.col("portfolio_cash_trade_cost_usd") / initial_capital_usd * 100.0)
-            .alias("portfolio_trade_cost_pct"),
-            (pl.col("portfolio_cash_roll_cost_usd") / initial_capital_usd * 100.0)
-            .alias("portfolio_roll_cost_pct"),
-            (
-                (
-                    pl.col("portfolio_cash_trade_cost_usd")
-                    + pl.col("portfolio_cash_roll_cost_usd")
-                )
-                / initial_capital_usd
-                * 100.0
-            ).alias("portfolio_total_cost_pct"),
-        )
-        .with_columns(
             pl.col("portfolio_cash_gross_pnl_usd")
             .cum_sum()
             .alias("cumulative_portfolio_cash_gross_pnl_usd"),
@@ -1339,13 +1322,100 @@ def build_fixed_capital_portfolio_curve(
         )
         .with_columns(
             (
-                pl.col("cumulative_portfolio_cash_gross_pnl_usd")
-                / initial_capital_usd
-                * 100.0
-            ).alias("cumulative_portfolio_gross_pct"),
+                initial_capital_usd
+                + pl.col("cumulative_portfolio_cash_gross_pnl_usd")
+            ).alias("portfolio_gross_equity_usd"),
             (
-                pl.col("cumulative_portfolio_cash_net_pnl_usd")
+                initial_capital_usd
+                + pl.col("cumulative_portfolio_cash_net_pnl_usd")
+            ).alias("portfolio_net_equity_usd"),
+        )
+        .with_columns(
+            pl.col("portfolio_gross_equity_usd")
+            .shift(1)
+            .fill_null(initial_capital_usd)
+            .alias("prior_portfolio_gross_equity_usd"),
+            pl.col("portfolio_net_equity_usd")
+            .shift(1)
+            .fill_null(initial_capital_usd)
+            .alias("prior_portfolio_net_equity_usd"),
+        )
+        .with_columns(
+            pl.when(
+                pl.col("prior_portfolio_gross_equity_usd").is_finite()
+                & (pl.col("prior_portfolio_gross_equity_usd") > 0)
+            )
+            .then(
+                pl.col("portfolio_cash_gross_pnl_usd")
+                / pl.col("prior_portfolio_gross_equity_usd")
+                * 100.0
+            )
+            .otherwise(None)
+            .alias("portfolio_gross_pct"),
+            pl.when(
+                pl.col("prior_portfolio_net_equity_usd").is_finite()
+                & (pl.col("prior_portfolio_net_equity_usd") > 0)
+            )
+            .then(
+                pl.col("portfolio_cash_net_pnl_usd")
+                / pl.col("prior_portfolio_net_equity_usd")
+                * 100.0
+            )
+            .otherwise(None)
+            .alias("portfolio_net_pct"),
+            *[
+                pl.when(
+                    pl.col("prior_portfolio_net_equity_usd").is_finite()
+                    & (pl.col("prior_portfolio_net_equity_usd") > 0)
+                )
+                .then(
+                    pl.col(source)
+                    / pl.col("prior_portfolio_net_equity_usd")
+                    * 100.0
+                )
+                .otherwise(None)
+                .alias(output)
+                for source, output in (
+                    ("portfolio_cash_trade_cost_usd", "portfolio_trade_cost_pct"),
+                    ("portfolio_cash_roll_cost_usd", "portfolio_roll_cost_pct"),
+                )
+            ],
+            pl.when(
+                pl.col("prior_portfolio_net_equity_usd").is_finite()
+                & (pl.col("prior_portfolio_net_equity_usd") > 0)
+            )
+            .then(
+                (
+                    pl.col("portfolio_cash_trade_cost_usd")
+                    + pl.col("portfolio_cash_roll_cost_usd")
+                )
+                / pl.col("prior_portfolio_net_equity_usd")
+                * 100.0
+            )
+            .otherwise(None)
+            .alias("portfolio_total_cost_pct"),
+            (
+                (pl.col("portfolio_valid_pnl_instruments") > 0)
+                & pl.col("prior_portfolio_net_equity_usd").is_finite()
+                & (pl.col("prior_portfolio_net_equity_usd") > 0)
+            ).alias("portfolio_return_valid"),
+        )
+        .with_columns(
+            (
+                pl.col("portfolio_gross_equity_usd")
                 / initial_capital_usd
+                - 1.0
+            )
+            .mul(100.0)
+            .alias("cumulative_portfolio_gross_pct"),
+        )
+        .with_columns(
+            (
+                (
+                    pl.col("portfolio_net_equity_usd")
+                    / initial_capital_usd
+                    - 1.0
+                )
                 * 100.0
             ).alias("cumulative_portfolio_net_pct"),
             (
@@ -1366,14 +1436,10 @@ def build_fixed_capital_portfolio_curve(
                 / initial_capital_usd
                 * 100.0
             ).alias("cumulative_portfolio_total_cost_pct"),
-            (
-                initial_capital_usd
-                + pl.col("cumulative_portfolio_cash_gross_pnl_usd")
-            ).alias("portfolio_gross_equity_usd"),
-            (
-                initial_capital_usd
-                + pl.col("cumulative_portfolio_cash_net_pnl_usd")
-            ).alias("portfolio_net_equity_usd"),
+        )
+        .drop(
+            "prior_portfolio_gross_equity_usd",
+            "prior_portfolio_net_equity_usd",
         )
     )
     return daily

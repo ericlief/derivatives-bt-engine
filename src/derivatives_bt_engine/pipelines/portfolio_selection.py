@@ -25,9 +25,10 @@ dataframe collections:
     from realized and interval-average policy-roll cost. The generated Panama
     ``close`` is retained beside its roll-neutral ``point_change`` for audit.
 ``portfolio_curve``
-    One fixed initial-capital row per date. It sums the selected instruments'
-    executable cash P&L and reports daily and cumulative returns plus gross,
-    realized-net and average-roll-net equity paths.
+    One portfolio row per date. It sums the selected instruments' executable
+    cash P&L and reports daily returns against prior gross or net equity,
+    cumulative returns, and gross and net equity paths. Position sizing remains
+    fixed to the run's initial capital.
 
 The command persists each intermediate form so forecast gaps, turnover, and
 greedy selection decisions remain inspectable after a run.
@@ -1613,7 +1614,7 @@ def _run_complete_selection(
     print(f"Saved daily forecasts {forecasts_path}")
     print(f"Saved synchronized subsystem reference returns {reference_return_path}")
     print(f"Saved executable cash P&L {cash_pnl_path}")
-    print(f"Saved fixed-capital portfolio curve {portfolio_curve_path}")
+    print(f"Saved portfolio equity curve {portfolio_curve_path}")
     print(f"Saved trials {trials_path}")
     print(f"Saved trial allocations {trial_allocations_path}")
     print(f"Saved accepted selection passes {selection_passes_path}")

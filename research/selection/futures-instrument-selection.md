@@ -999,8 +999,9 @@ baseline by default. The command writes:
   roll-cost, and net USD P&L paths. It also reports gross, trade-cost,
   realized/average-roll cost, total-cost, and net contributions as
   percentage points of common initial account capital (`USD / capital * 100`);
-  the per-instrument daily contributions therefore add to the portfolio
-  percentage return. Costs are negative and appear on trade/roll dates; the
+  the per-instrument daily contributions therefore reconcile the summed cash
+  P&L before the portfolio curve divides by prior equity. Costs are negative
+  and appear on trade/roll dates; the
   separate average-roll path is a policy comparison, not an additional cost
   charged on top of realized rolls. Its
   `close` is the locally generated
@@ -1011,11 +1012,11 @@ baseline by default. The command writes:
   gap. The row's own one-day P&L remains valid; the fields state that the
   unknown cross-gap move was not inferred;
 - `multi_speed_ewmac_selection_portfolio_curve_<timestamp>.parquet`, the daily
-  selected-book cash flows summed across instruments, with one common initial
-  capital denominator for gross, cost, realized-net, and average-roll-net daily
-  and cumulative percentage-point contributions and equity. This is a
-  fixed-capital audit curve: its
-  executable positions are not resized as the reported equity changes;
+  selected-book cash flows summed across instruments. Daily `port_gross_pct`
+  uses prior gross equity; daily `port_net_pct` and cost rates use prior net
+  equity. Cumulative gross and net percentages equal their respective current
+  equity divided by initial capital minus one. Executable positions remain
+  sized from initial capital and are not resized as reported equity changes;
 - `multi_speed_ewmac_selection_trials_<timestamp>.parquet`, one row per greedy trial; and
 - `multi_speed_ewmac_selection_trial_allocations_<timestamp>.parquet`, one row per member
   of every hypothetical trial book, including its economic `cluster_path`,
