@@ -755,22 +755,31 @@ instrument's gross SR during singleton ranking and every n+1 trial. Each trial
 persists `roll_cost_in_score`, `score_cost_sr`, and both cost components, so
 the sensitivity cannot be confused with the baseline.
 
-After the final book is selected, a separate executable cash audit restores
-capital, target volatility, final `limit_weight`, and IDM; converts the
-combined forecast to a continuous target; and applies pysystemtrade's forecast
-buffer before producing whole contracts. Its position scale is algebraically
-the same despite the different presentation:
+After the final book is selected, a separate executable cash audit fixes the
+selected list, structural weights, final `limit_weight`, and IDM. It then uses
+one lagged net-equity state shared by the whole book. Our sizing fields are:
 
 ```text
-our vol_scalar
-  = capital × target_vol × weight × IDM / ann_dvol
+init_vol_scalar[i,t]
+  = initial_capital × target_vol × limit_weight[i] × IDM / ann_dvol[i,t]
 
-pysystemtrade portfolio average position
-  = (daily_cash_vol_target / daily_dvol) × weight × IDM
-  = ((capital × target_vol / sqrt(256))
-     / (ann_dvol / sqrt(256))) × weight × IDM
-  = our vol_scalar
+cap_scalar[t]
+  = prior_net_equity[t] / initial_capital
+
+vol_scalar[i,t]
+  = init_vol_scalar[i,t] × cap_scalar[t]
+
+tgt_pos[i,t]
+  = vol_scalar[i,t] × comb_fcst[i,t] / target_abs_forecast
 ```
+
+`init_vol_scalar` remains a daily series because `ann_dvol` changes; it
+isolates the initial-capital position baseline. `cap_scalar` isolates only
+compounded book equity. Keeping both makes `vol_scalar` changes reproducible
+without mixing market volatility with capital growth. Sizing uses prior net
+equity, never same-day P&L, so all instruments on a date receive the same
+causal capital state. This capital loop is the engine's selected-book
+accounting policy; it is not imported from another backtest framework.
 
 The default band on each date is `tgt_pos ± 0.10 × abs(vol_scalar)`.
 The continuous target and band edges are rounded only when forming the
@@ -998,10 +1007,13 @@ baseline by default. The command writes:
   interval-average policy-roll contracts, and separate gross, trade-cost,
   roll-cost, and net USD P&L paths. It also reports gross, trade-cost,
   realized/average-roll cost, total-cost, and net contributions as
-  percentage points of common initial account capital (`USD / capital * 100`);
-  the per-instrument daily contributions therefore reconcile the summed cash
-  P&L before the portfolio curve divides by prior equity. Costs are negative
-  and appear on trade/roll dates; the
+  daily return contributions. `sizing_cap` is prior portfolio net equity,
+  `cap_scalar` is that value divided by initial capital, `init_vol_scalar` is the
+  initial-capital average-contract baseline, and `vol_scalar` is the actual
+  executable scalar after applying `cap_scalar`. The same scaled `vol_scalar`
+  drives both `tgt_pos` and `buf_width_pos`, so ordinary capital changes only
+  trade when the held position breaches its scaled no-trade band. Costs are
+  negative and appear on trade/roll dates; the
   separate average-roll path is a policy comparison, not an additional cost
   charged on top of realized rolls. Its
   `close` is the locally generated
@@ -1015,8 +1027,8 @@ baseline by default. The command writes:
   selected-book cash flows summed across instruments. Daily `port_gross_pct`
   uses prior gross equity; daily `port_net_pct` and cost rates use prior net
   equity. Cumulative gross and net percentages equal their respective current
-  equity divided by initial capital minus one. Executable positions remain
-  sized from initial capital and are not resized as reported equity changes;
+  equity divided by initial capital minus one. The selected list, weights,
+  sizing limits, and IDM stay fixed while prior net equity scales positions;
 - `multi_speed_ewmac_selection_trials_<timestamp>.parquet`, one row per greedy trial; and
 - `multi_speed_ewmac_selection_trial_allocations_<timestamp>.parquet`, one row per member
   of every hypothetical trial book, including its economic `cluster_path`,

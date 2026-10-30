@@ -6,10 +6,10 @@ positions, mark them through daily point changes, convert through the contract
 multiplier and historical FX, and accrue annual SR cost through elapsed
 calendar time. The subsystem-reference path uses a fixed equal-weight book
 assumption to produce comparable instrument returns for correlation estimation.
-The separate selected-book cash path applies final weights and IDM, buffers and
-rounds to executable contracts, and charges ordinary trades and contract rolls
-separately. Its long instrument output can then be aggregated into gross and
-net equity returns without changing the positions that produced the cash P&L.
+The separate selected-book cash path fixes final weights and IDM, scales every
+instrument from common lagged net equity, buffers and rounds to executable
+contracts, and charges ordinary trades and contract rolls separately. Its long
+instrument output then aggregates into gross and net portfolio equity paths.
 """
 
 from __future__ import annotations
@@ -117,8 +117,8 @@ def summarize_return_significance(
     ----------
     frame
         Daily observations containing ``date`` and ``return_col``. Return
-        values are percentage-point contributions relative to a fixed capital
-        or budget denominator.
+        values are percentage points measured against the series' applicable
+        prior-equity or fixed-budget denominator.
     return_col
         Column holding the daily percentage-point return series.
     annualization_days
@@ -1221,23 +1221,410 @@ def build_executable_cash_pnl_curve(
     return public
 
 
-def build_fixed_capital_portfolio_curve(
+def build_equity_scaled_cash_pnl_curve(
+    cash_pnl_long: pl.DataFrame,
+    *,
+    initial_capital_usd: float,
+    target_vol: float,
+    multiplier_by_symbol: dict[str, float],
+    target_abs_forecast: float = EWMAC_FORECAST_TARGET_ABS,
+) -> pl.DataFrame:
+    """Build selected-book cash P&L from lagged portfolio net equity.
+
+    The selected instruments, structural weights, capped sizing weights, and
+    IDM remain fixed. On each portfolio date, every instrument uses the same
+    prior net equity to calculate its risk budget, average-contract volatility
+    scalar, forecast target, and buffer width. Gross P&L comes from the
+    previously held contracts; trades and costs then update the equity used on
+    the next date.
+
+    Parameters
+    ----------
+    cash_pnl_long
+        Long selected-book cash frame in compact public-report vocabulary. It
+        must contain the forecast, contract volatility, weights, buffer policy,
+        costs, FX, and point changes needed to replay executable positions.
+    initial_capital_usd
+        Positive initial net and gross portfolio equity in USD.
+    target_vol
+        Annual portfolio volatility target as a decimal fraction.
+    multiplier_by_symbol
+        Native-currency point-value multiplier for every selected symbol.
+    target_abs_forecast
+        Mean absolute forecast represented by one average position.
+
+    Returns
+    -------
+    polars.DataFrame
+        The input with position, P&L, cost, and percentage fields replaced by
+        the equity-scaled causal replay. ``vol_scalar`` is the executable daily
+        average-contract scalar; ``init_vol_scalar`` preserves its
+        initial-capital baseline and ``cap_scalar`` reports the common equity
+        scaling factor.
+
+    Notes
+    -----
+    The state transition is intentionally explicit because each date's net
+    cash result controls every instrument's next sizing capital. The shared
+    capital state cannot be reproduced by independently vectorizing each
+    instrument. Percentage columns are daily portfolio-return contributions:
+    gross contributions use prior gross equity, while net and cost
+    contributions use prior net equity.
+    """
+    required = {
+        "date",
+        "symbol",
+        "weight",
+        "comb_fcst",
+        "pt_change",
+        "fx_to_usd",
+        "ann_dvol",
+        "limit_weight",
+        "idm",
+        "buf_size",
+        "buf_trade_to_edge",
+        "rebalance_on_roll",
+        "roll_event",
+        "trade_cost_per_con",
+        "roll_cost_per_con",
+    }
+    missing = sorted(required.difference(cash_pnl_long.columns))
+    if missing:
+        raise ValueError(f"equity-scaled cash input missing columns: {missing}")
+    if cash_pnl_long.is_empty():
+        raise ValueError("equity-scaled cash input must contain at least one row")
+    if (
+        cash_pnl_long.select("date", "symbol").unique().height
+        != cash_pnl_long.height
+    ):
+        raise ValueError(
+            "equity-scaled cash input must have one row per date and symbol"
+        )
+    if not math.isfinite(initial_capital_usd) or initial_capital_usd <= 0:
+        raise ValueError("initial_capital_usd must be finite and positive")
+    if not math.isfinite(target_vol) or target_vol <= 0:
+        raise ValueError("target_vol must be finite and positive")
+    if not math.isfinite(target_abs_forecast) or target_abs_forecast <= 0:
+        raise ValueError("target_abs_forecast must be finite and positive")
+
+    static_sizing = cash_pnl_long.select(
+        "symbol",
+        "weight",
+        "limit_weight",
+        "idm",
+    ).unique()
+    changing_sizing = (
+        static_sizing.group_by("symbol")
+        .len()
+        .filter(pl.col("len") != 1)
+        .get_column("symbol")
+        .to_list()
+    )
+    if changing_sizing:
+        raise ValueError(
+            "selected-book weights and IDM must remain fixed for: "
+            + ", ".join(sorted(str(symbol) for symbol in changing_sizing))
+        )
+    for sizing_row in static_sizing.iter_rows(named=True):
+        for column in ("weight", "limit_weight", "idm"):
+            value = sizing_row[column]
+            if (
+                value is None
+                or not math.isfinite(float(value))
+                or float(value) <= 0
+            ):
+                raise ValueError(
+                    f"{column} must be finite and positive for "
+                    f"{sizing_row['symbol']}"
+                )
+
+    symbols = sorted(
+        str(symbol)
+        for symbol in cash_pnl_long.get_column("symbol").unique().to_list()
+    )
+    missing_multipliers = sorted(set(symbols).difference(multiplier_by_symbol))
+    if missing_multipliers:
+        raise ValueError(
+            "missing point-value multipliers for: "
+            + ", ".join(missing_multipliers)
+        )
+    invalid_multipliers = sorted(
+        symbol
+        for symbol in symbols
+        if not math.isfinite(multiplier_by_symbol[symbol])
+        or multiplier_by_symbol[symbol] <= 0
+    )
+    if invalid_multipliers:
+        raise ValueError(
+            "point-value multipliers must be finite and positive for: "
+            + ", ".join(invalid_multipliers)
+        )
+
+    def finite_float(value: object) -> float | None:
+        """Return a finite float or ``None`` for an unusable row value."""
+        if value is None:
+            return None
+        converted = float(value)
+        return converted if math.isfinite(converted) else None
+
+    def rounded_contracts(value: float | None) -> int | None:
+        """Round a continuous position with the existing ties-to-even rule."""
+        return None if value is None else int(round(value))
+
+    states: dict[str, dict[str, float | int | None]] = {
+        symbol: {
+            "exec_contracts": None,
+            "cumulative_gross_pnl": 0.0,
+            "cumulative_net_pnl": 0.0,
+            "cumulative_gross_pct": 0.0,
+            "cumulative_trade_cost_pct": 0.0,
+            "cumulative_roll_cost_pct": 0.0,
+            "cumulative_total_cost_pct": 0.0,
+            "cumulative_net_pct": 0.0,
+        }
+        for symbol in symbols
+    }
+    gross_equity = initial_capital_usd
+    net_equity = initial_capital_usd
+    output_rows: list[dict[str, object]] = []
+
+    ordered = cash_pnl_long.sort("date", "symbol")
+    for date_frame in ordered.partition_by("date", maintain_order=True):
+        date_value = date_frame.get_column("date")[0]
+        prior_gross_equity = gross_equity
+        prior_net_equity = net_equity
+        if not math.isfinite(prior_net_equity) or prior_net_equity <= 0:
+            raise ValueError(
+                "portfolio net equity must remain positive before sizing; "
+                f"date={date_value} equity={prior_net_equity}"
+            )
+        capital_scalar = prior_net_equity / initial_capital_usd
+        date_gross_pnl = 0.0
+        date_net_pnl = 0.0
+
+        for source_row in date_frame.iter_rows(named=True):
+            row = dict(source_row)
+            symbol = str(row["symbol"])
+            state = states[symbol]
+            annual_dollar_vol = finite_float(row["ann_dvol"])
+            limit_weight = finite_float(row["limit_weight"])
+            idm = finite_float(row["idm"])
+            combined_forecast = finite_float(row["comb_fcst"])
+            buffer_size = finite_float(row["buf_size"])
+            if limit_weight is None or limit_weight <= 0:
+                raise ValueError(f"invalid limit_weight for {symbol} on {date_value}")
+            if idm is None or idm <= 0:
+                raise ValueError(f"invalid idm for {symbol} on {date_value}")
+            if buffer_size is None or buffer_size < 0:
+                raise ValueError(f"invalid buf_size for {symbol} on {date_value}")
+
+            initial_risk_budget = (
+                initial_capital_usd * target_vol * limit_weight * idm
+            )
+            risk_budget = prior_net_equity * target_vol * limit_weight * idm
+            if annual_dollar_vol is not None and annual_dollar_vol > 0:
+                initial_volatility_scalar = (
+                    initial_risk_budget / annual_dollar_vol
+                )
+                volatility_scalar = (
+                    initial_volatility_scalar * capital_scalar
+                )
+            else:
+                initial_volatility_scalar = None
+                volatility_scalar = None
+            target_position = (
+                volatility_scalar * combined_forecast / target_abs_forecast
+                if volatility_scalar is not None
+                and combined_forecast is not None
+                else None
+            )
+            buffer_width = (
+                abs(volatility_scalar) * buffer_size
+                if volatility_scalar is not None
+                else None
+            )
+            rounded_optimal = rounded_contracts(target_position)
+            buffer_top = rounded_contracts(
+                target_position + buffer_width
+                if target_position is not None and buffer_width is not None
+                else None
+            )
+            buffer_bottom = rounded_contracts(
+                target_position - buffer_width
+                if target_position is not None and buffer_width is not None
+                else None
+            )
+
+            previous_exec = state["exec_contracts"]
+            held_contracts = (
+                int(previous_exec) if previous_exec is not None else None
+            )
+            if previous_exec is None:
+                exec_contracts = (
+                    rounded_optimal if rounded_optimal is not None else 0
+                )
+            elif (
+                rounded_optimal is None
+                or buffer_top is None
+                or buffer_bottom is None
+            ):
+                exec_contracts = int(previous_exec)
+            elif bool(row["rebalance_on_roll"]) and bool(row["roll_event"]):
+                exec_contracts = rounded_optimal
+            elif int(previous_exec) > buffer_top:
+                exec_contracts = (
+                    buffer_top
+                    if bool(row["buf_trade_to_edge"])
+                    else rounded_optimal
+                )
+            elif int(previous_exec) < buffer_bottom:
+                exec_contracts = (
+                    buffer_bottom
+                    if bool(row["buf_trade_to_edge"])
+                    else rounded_optimal
+                )
+            else:
+                exec_contracts = int(previous_exec)
+
+            signed_trade_contracts = float(
+                exec_contracts
+                - (held_contracts if held_contracts is not None else 0)
+            )
+            roll_event = bool(row["roll_event"])
+            roll_contracts = (
+                float(min(abs(held_contracts), abs(exec_contracts)))
+                if roll_event
+                and held_contracts is not None
+                and held_contracts * exec_contracts > 0
+                else 0.0
+            )
+            point_change = finite_float(row["pt_change"])
+            fx_to_usd = finite_float(row["fx_to_usd"])
+            gross_pnl = (
+                held_contracts
+                * point_change
+                * multiplier_by_symbol[symbol]
+                * fx_to_usd
+                if held_contracts is not None
+                and point_change is not None
+                and fx_to_usd is not None
+                else None
+            )
+            trade_cost_per_contract = finite_float(row["trade_cost_per_con"])
+            roll_cost_per_contract = finite_float(row["roll_cost_per_con"])
+            if trade_cost_per_contract is None or trade_cost_per_contract < 0:
+                raise ValueError(
+                    f"invalid trade cost for {symbol} on {date_value}"
+                )
+            if roll_cost_per_contract is None or roll_cost_per_contract < 0:
+                raise ValueError(
+                    f"invalid roll cost for {symbol} on {date_value}"
+                )
+            trade_cost = -abs(signed_trade_contracts) * trade_cost_per_contract
+            roll_cost = -roll_contracts * roll_cost_per_contract
+            gross_pnl_or_zero = gross_pnl if gross_pnl is not None else 0.0
+            net_pnl = gross_pnl_or_zero + trade_cost + roll_cost
+
+            gross_pct = (
+                gross_pnl_or_zero / prior_gross_equity * 100.0
+                if prior_gross_equity > 0
+                else None
+            )
+            trade_cost_pct = trade_cost / prior_net_equity * 100.0
+            roll_cost_pct = roll_cost / prior_net_equity * 100.0
+            total_cost_pct = trade_cost_pct + roll_cost_pct
+            net_pct = net_pnl / prior_net_equity * 100.0
+
+            state["exec_contracts"] = exec_contracts
+            state["cumulative_gross_pnl"] = (
+                float(state["cumulative_gross_pnl"]) + gross_pnl_or_zero
+            )
+            state["cumulative_net_pnl"] = (
+                float(state["cumulative_net_pnl"]) + net_pnl
+            )
+            if gross_pct is not None:
+                state["cumulative_gross_pct"] = (
+                    float(state["cumulative_gross_pct"]) + gross_pct
+                )
+            state["cumulative_trade_cost_pct"] = (
+                float(state["cumulative_trade_cost_pct"]) + trade_cost_pct
+            )
+            state["cumulative_roll_cost_pct"] = (
+                float(state["cumulative_roll_cost_pct"]) + roll_cost_pct
+            )
+            state["cumulative_total_cost_pct"] = (
+                float(state["cumulative_total_cost_pct"]) + total_cost_pct
+            )
+            state["cumulative_net_pct"] = (
+                float(state["cumulative_net_pct"]) + net_pct
+            )
+
+            row.update({
+                "sizing_capital_usd": prior_net_equity,
+                "capital_scalar": capital_scalar,
+                "initial_capital_volatility_scalar": (
+                    initial_volatility_scalar
+                ),
+                "risk_budget": risk_budget,
+                "vol_scalar": volatility_scalar,
+                "tgt_pos": target_position,
+                "buf_width_pos": buffer_width,
+                "buffer_top_con": buffer_top,
+                "buffer_bot_con": buffer_bottom,
+                "exec_con": exec_contracts,
+                "held_con": held_contracts,
+                "trade_con": signed_trade_contracts,
+                "roll_con": roll_contracts,
+                "roll_rebalanced": (
+                    bool(row["rebalance_on_roll"])
+                    and roll_event
+                    and target_position is not None
+                ),
+                "gross_pnl": gross_pnl,
+                "trade_cost": trade_cost,
+                "roll_cost": roll_cost,
+                "net_pnl": net_pnl,
+                "gross_pct": gross_pct if gross_pct is not None else 0.0,
+                "trade_cost_pct": trade_cost_pct,
+                "roll_cost_pct": roll_cost_pct,
+                "total_cost_pct": total_cost_pct,
+                "net_pct": net_pct,
+                "cum_gross_pnl": state["cumulative_gross_pnl"],
+                "cum_net_pnl": state["cumulative_net_pnl"],
+                "cum_gross_pct": state["cumulative_gross_pct"],
+                "cum_trade_cost_pct": state["cumulative_trade_cost_pct"],
+                "cum_roll_cost_pct": state["cumulative_roll_cost_pct"],
+                "cum_total_cost_pct": state["cumulative_total_cost_pct"],
+                "cum_net_pct": state["cumulative_net_pct"],
+                "pnl_valid": math.isfinite(net_pnl),
+            })
+            output_rows.append(row)
+            date_gross_pnl += gross_pnl_or_zero
+            date_net_pnl += net_pnl
+
+        gross_equity += date_gross_pnl
+        net_equity += date_net_pnl
+
+    result = pl.DataFrame(output_rows, infer_schema_length=None)
+    return rename_public_report_columns(result)
+
+
+def build_portfolio_equity_curve(
     cash_pnl_long: pl.DataFrame,
     *,
     initial_capital_usd: float,
 ) -> pl.DataFrame:
-    """Aggregate fixed-position cash P&L into gross and net equity curves.
+    """Aggregate selected-book cash P&L into gross and net equity curves.
 
     Parameters
     ----------
     cash_pnl_long
         Long selected-book frame with one row per instrument and date. It must
         contain ``symbol``, ``date``, ``pnl_valid``, and compact gross, cost,
-        and net amount columns produced by
-        :func:`build_executable_cash_pnl_curve`.
+        and net amount columns produced by a selected-book cash builder.
     initial_capital_usd
-        Positive USD account capital used as the common denominator for every
-        instrument and date.
+        Positive initial USD account capital used to seed the equity paths and
+        calculate cumulative returns.
 
     Returns
     -------
@@ -1248,10 +1635,10 @@ def build_fixed_capital_portfolio_curve(
 
     Notes
     -----
-    The executable positions were sized from ``initial_capital_usd`` before
-    their cash P&L was calculated, so the curve does not resize positions as
-    equity changes. Daily gross return divides gross cash P&L by prior gross
-    equity, while daily net return and cost rates divide by prior net equity.
+    Position-sizing semantics belong to the supplied cash frame. The current
+    selected-book pipeline supplies positions sized from lagged net equity.
+    Daily gross return divides gross cash P&L by prior gross equity, while
+    daily net return and cost rates divide by prior net equity.
     Null or non-finite cash values contribute zero to the daily sum;
     ``portfolio_valid_pnl_instruments`` records how many instrument rows
     supplied a valid P&L observation.
@@ -1443,3 +1830,20 @@ def build_fixed_capital_portfolio_curve(
         )
     )
     return daily
+
+
+def build_fixed_capital_portfolio_curve(
+    cash_pnl_long: pl.DataFrame,
+    *,
+    initial_capital_usd: float,
+) -> pl.DataFrame:
+    """Return the portfolio equity curve through the legacy function name.
+
+    The name is retained for notebook and API compatibility. Position sizing
+    semantics belong to the supplied cash frame; the current selected-book
+    pipeline passes equity-scaled positions.
+    """
+    return build_portfolio_equity_curve(
+        cash_pnl_long,
+        initial_capital_usd=initial_capital_usd,
+    )

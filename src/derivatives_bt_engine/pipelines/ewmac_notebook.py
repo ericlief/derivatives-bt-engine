@@ -623,10 +623,10 @@ class EwmacNotebookView:
     ) -> pl.DataFrame:
         """Return daily and cumulative executable cash percentage returns.
 
-        Each percentage-point return divides this instrument's
-        executable cash flow by total account capital and multiplies by 100.
-        Contributions from all selected instruments therefore add to the
-        corresponding portfolio percentage return. Cost columns are negative
+        Gross return divides this instrument's executable cash flow by prior
+        portfolio gross equity. Net and cost returns divide by prior portfolio
+        net equity. Contributions from all selected instruments therefore add
+        to the corresponding daily portfolio return. Cost columns are negative
         percentage points and are nonzero only on trade or roll dates.
         """
         if self.cash is None:
@@ -655,10 +655,10 @@ class EwmacNotebookView:
     ) -> pl.DataFrame:
         """Summarize executable net-return magnitude and IID significance.
 
-        Daily ``net_pct`` values are percentage-point contributions relative
-        to fixed account capital. The annual mean is cumulative net percentage
-        divided by elapsed calendar years; annual volatility scales the daily
-        sample standard deviation by ``sqrt(annualization_days)``. The reported
+        Daily ``net_pct`` values are contributions relative to prior portfolio
+        net equity. The annual mean is cumulative net contribution divided by
+        elapsed calendar years; annual volatility scales the daily sample
+        standard deviation by ``sqrt(annualization_days)``. The reported
         t-statistic is the corresponding Sharpe ratio times ``sqrt(years)``.
         It is a simple IID diagnostic and does not adjust for serial dependence,
         non-normal tails, or repeated strategy comparisons.

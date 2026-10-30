@@ -27,8 +27,9 @@ dataframe collections:
 ``portfolio_curve``
     One portfolio row per date. It sums the selected instruments' executable
     cash P&L and reports daily returns against prior gross or net equity,
-    cumulative returns, and gross and net equity paths. Position sizing remains
-    fixed to the run's initial capital.
+    cumulative returns, and gross and net equity paths. The final selected
+    weights and IDM stay fixed while lagged net equity scales all instruments'
+    risk budgets, targets, and forecast buffers together.
 
 The command persists each intermediate form so forecast gaps, turnover, and
 greedy selection decisions remain inspectable after a run.
@@ -113,8 +114,9 @@ from derivatives_bt_engine.calculations.pnl import (
     PYSYSTEMTRADE_FORECAST_BUFFER_SIZE,
     append_reference_position_turnover,
     apply_subsystem_reference_cost,
+    build_equity_scaled_cash_pnl_curve,
     build_executable_cash_pnl_curve,
-    build_fixed_capital_portfolio_curve,
+    build_portfolio_equity_curve,
     build_subsystem_reference_return_curve,
     summarize_return_significance,
 )
@@ -1240,10 +1242,10 @@ def _run_complete_selection(
         }
 
     # Reference returns above are used only for candidate correlations. This
-    # selected-book path applies final weights and IDM, rounds to executable
-    # contracts, and charges actual history-policy roll dates in cash.
+    # selected-book path fixes final weights and IDM, then scales every market
+    # from the same lagged portfolio equity before buffering and rounding.
+    # Actual history-policy roll dates are charged in cash.
     cash_output_frames: list[pl.DataFrame] = []
-    historical_performance_rows: list[dict[str, object]] = []
     for symbol in selection.selected:
         candidate = candidate_by_symbol[symbol]
         detail = final_details[symbol]
@@ -1267,28 +1269,6 @@ def _run_complete_selection(
             if cash_frame.get_column("roll_event").any()
             else "no_history_roll_markers"
         )
-        significance = summarize_return_significance(
-            cash_frame,
-            return_col="net_pct",
-        ).row(0, named=True)
-        historical_performance_rows.append({
-            "symbol": symbol,
-            "historical_return_source": historical_return_sources[symbol],
-            "historical_instrument_code": (
-                stitched_history_code_by_symbol[symbol]
-            ),
-            "historical_return_start": significance["start"],
-            "historical_return_end": significance["end"],
-            "historical_return_observations": significance["n_obs"],
-            "historical_years": significance["hist_years"],
-            "historical_cumulative_net_percent": (
-                significance["cum_return_pct"]
-            ),
-            "historical_annual_mean_percent": significance["ann_mean_pct"],
-            "historical_annual_vol_percent": significance["ann_vol_pct"],
-            "historical_sharpe": significance["sharpe"],
-            "historical_iid_t_stat": significance["iid_t_stat"],
-        })
         cash_output_frames.append(
             cash_frame.with_columns(
                 pl.lit(symbol).alias("symbol"),
@@ -1373,14 +1353,47 @@ def _run_complete_selection(
                 "pnl_valid",
             )
         )
-    cash_pnl_long = pl.concat(cash_output_frames, how="diagonal_relaxed")
+    cash_pnl_long = build_equity_scaled_cash_pnl_curve(
+        pl.concat(cash_output_frames, how="diagonal_relaxed"),
+        initial_capital_usd=float(run_config["init_cap_usd"]),
+        target_vol=float(run_config["target_vol"]),
+        multiplier_by_symbol={
+            symbol: float(source_rows[symbol]["mult"])
+            for symbol in selection.selected
+        },
+        target_abs_forecast=engine.config.target_abs_forecast,
+    )
+    historical_performance_rows: list[dict[str, object]] = []
+    for symbol in selection.selected:
+        significance = summarize_return_significance(
+            cash_pnl_long.filter(pl.col("symbol") == symbol),
+            return_col="net_pct",
+        ).row(0, named=True)
+        historical_performance_rows.append({
+            "symbol": symbol,
+            "historical_return_source": historical_return_sources[symbol],
+            "historical_instrument_code": (
+                stitched_history_code_by_symbol[symbol]
+            ),
+            "historical_return_start": significance["start"],
+            "historical_return_end": significance["end"],
+            "historical_return_observations": significance["n_obs"],
+            "historical_years": significance["hist_years"],
+            "historical_cumulative_net_percent": (
+                significance["cum_return_pct"]
+            ),
+            "historical_annual_mean_percent": significance["ann_mean_pct"],
+            "historical_annual_vol_percent": significance["ann_vol_pct"],
+            "historical_sharpe": significance["sharpe"],
+            "historical_iid_t_stat": significance["iid_t_stat"],
+        })
     final_frame = final_frame.join(
         pl.DataFrame(historical_performance_rows, infer_schema_length=None),
         on="symbol",
         how="left",
         validate="1:1",
     )
-    portfolio_curve = build_fixed_capital_portfolio_curve(
+    portfolio_curve = build_portfolio_equity_curve(
         cash_pnl_long,
         initial_capital_usd=float(run_config["init_cap_usd"]),
     )
