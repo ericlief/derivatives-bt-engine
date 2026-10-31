@@ -157,19 +157,51 @@ EWMAC_SLOW_TILT_60_40 = {
 }
 
 
-def _selection_cache_file_fingerprint(path: Path | str) -> dict[str, object]:
-    """Return the local-file identity used by derived backtest cache keys.
+def _selection_pysystemtrade_identity(
+    provider: PysystemtradeHistoryProvider,
+) -> dict[str, object]:
+    """Return the pinned PST database identity shared by history and FX.
 
-    The absolute path distinguishes intentionally separate datasets, while
-    size and nanosecond modification time invalidate derived curves when the
-    database contents change in place.
+    The imported reference database is immutable for one source commit. Using
+    its declared schema and commit avoids invalidating frozen curves merely
+    because the DuckDB file was touched, copied, or opened from another path.
     """
-    resolved = Path(path).expanduser().resolve()
-    stat = resolved.stat()
+    sidecar_version, source_commit = provider._database_metadata()
     return {
-        "path": str(resolved),
-        "size": stat.st_size,
-        "mtime_ns": stat.st_mtime_ns,
+        "sidecar_version": sidecar_version,
+        "source_commit": source_commit,
+    }
+
+
+def _selection_history_content_identity(
+    history: FuturesHistory,
+) -> dict[str, object]:
+    """Fingerprint stitched values used by forecast and cash calculations.
+
+    The provider's cache directory includes file mtimes and the requested
+    as-of date. Those are useful acquisition identities but would invalidate a
+    derived curve even when its rows are unchanged. Hashing the ordered signal,
+    mark, and Panama streams makes the derived tail depend on actual content.
+    """
+    digest = hashlib.sha256()
+    for stream_name in ("signal", "marks", "panama"):
+        frame = getattr(history, stream_name)
+        schema = [(name, str(dtype)) for name, dtype in frame.schema.items()]
+        digest.update(stream_name.encode("utf-8"))
+        digest.update(json.dumps(schema, separators=(",", ":")).encode("utf-8"))
+        digest.update(str(frame.height).encode("ascii"))
+        if frame.height:
+            row_hashes = frame.hash_rows(
+                seed=0,
+                seed_1=1,
+                seed_2=2,
+                seed_3=3,
+            )
+            digest.update(row_hashes.to_numpy().tobytes())
+    return {
+        "history_schema_version": history.schema_version,
+        "polars_version": pl.__version__,
+        "content_sha256": digest.hexdigest(),
     }
 
 
@@ -382,6 +414,90 @@ def _resolve_stitched_signal_history_code(
     return codes.pop()
 
 
+def _direct_ib_handoff_date(
+    history: FuturesHistory,
+    *,
+    history_code: str,
+) -> date | None:
+    """Validate a direct PST-to-IB splice and return its first IB date.
+
+    ``None`` means the optional IB segment is unavailable and the caller must
+    retain its frozen PST reference curve. A present IB segment must have
+    exactly one handoff, no Globex source, and explicit PST/IB ownership on
+    every signal, mark, and Panama row around the boundary.
+    """
+    available_sources = [
+        str(value)
+        for value in (history.metadata.get("available_sources") or [])
+    ]
+    if "ib" not in available_sources:
+        return None
+    source_priority = [
+        str(value)
+        for value in (history.metadata.get("source_priority") or [])
+    ]
+    handoff_dates = list(history.metadata.get("handoff_dates") or [])
+    if source_priority != ["pysystemtrade", "ib"]:
+        raise ValueError(
+            "selection history requires direct PST-to-IB source priority, "
+            f"received {source_priority} for {history_code}"
+        )
+    if len(handoff_dates) != 1:
+        raise ValueError(
+            "selection history requires exactly one IB handoff, "
+            f"received {handoff_dates} for {history_code}"
+        )
+    live_tail_start = handoff_dates[0]
+    reference_preserved_through = history.metadata.get(
+        "reference_preserved_through"
+    )
+    if not isinstance(reference_preserved_through, date):
+        raise ValueError(
+            "selection history lacks a typed reference preservation boundary "
+            f"for {history_code}"
+        )
+    if live_tail_start <= reference_preserved_through:
+        raise ValueError(
+            "selection IB handoff must follow the frozen PST endpoint "
+            f"hist_instr_code={history_code} "
+            f"reference_end={reference_preserved_through} "
+            f"handoff={live_tail_start}"
+        )
+    for stream_name in ("signal", "marks", "panama"):
+        stream = getattr(history, stream_name)
+        if "source_segment" not in stream.columns:
+            raise ValueError(f"{history_code} {stream_name} lacks source_segment")
+        invalid_prefix_rows = stream.filter(
+            (pl.col("date") < live_tail_start)
+            & (pl.col("source_segment") != "pysystemtrade")
+        ).height
+        invalid_tail_rows = stream.filter(
+            (pl.col("date") >= live_tail_start)
+            & (pl.col("source_segment") != "ib")
+        ).height
+        if invalid_prefix_rows or invalid_tail_rows:
+            raise ValueError(
+                "selection PST-to-IB ownership violation "
+                f"hist_instr_code={history_code} stream={stream_name} "
+                f"handoff={live_tail_start} "
+                f"invalid_prefix_rows={invalid_prefix_rows} "
+                f"invalid_tail_rows={invalid_tail_rows}"
+            )
+    retained_reference_end = (
+        history.signal.filter(pl.col("source_segment") == "pysystemtrade")
+        .get_column("date")
+        .max()
+    )
+    if retained_reference_end != reference_preserved_through:
+        raise ValueError(
+            "selection stitched history did not retain the complete PST prefix "
+            f"hist_instr_code={history_code} "
+            f"expected_reference_end={reference_preserved_through} "
+            f"retained_reference_end={retained_reference_end}"
+        )
+    return live_tail_start
+
+
 def parse_args(argv=None, *, complete_default: bool = False):
     """Parse candidate-filter and optional complete-selection arguments."""
     parser = argparse.ArgumentParser(
@@ -486,7 +602,7 @@ def parse_args(argv=None, *, complete_default: bool = False):
         help=(
             "Optional stored IB dated-contract database. When supplied, the "
             "cash P&L and scheduled-selection inputs use offline stitched "
-            "reference/Globex/IB history."
+            "PST/IB history with PST retained before the IB handoff."
         ),
     )
     parser.add_argument(
@@ -531,7 +647,10 @@ def parse_args(argv=None, *, complete_default: bool = False):
         "--globex-db",
         type=Path,
         default=DEFAULT_GLOBEX_DB_PATH,
-        help="Globex database used as the optional middle history segment.",
+        help=(
+            "Accepted for command compatibility; v1 selection uses a direct "
+            "PST-to-IB splice and does not insert a Globex segment."
+        ),
     )
     parser.add_argument(
         "--broker-mapping",
@@ -1448,7 +1567,12 @@ def _run_complete_selection(
     )
     backtest_cache_root = args.history_cache_root.expanduser().resolve()
     history_db_path = args.history_db.expanduser().resolve()
-    history_db_identity = _selection_cache_file_fingerprint(history_db_path)
+    reference_history_provider = PysystemtradeHistoryProvider(
+        db_path=history_db_path
+    )
+    history_db_identity = _selection_pysystemtrade_identity(
+        reference_history_provider
+    )
     logger.info(
         "selection_backtest_cache root=%s version=%d",
         backtest_cache_root / "selection_backtest",
@@ -1459,9 +1583,6 @@ def _run_complete_selection(
     # therefore avoids materializing the full EWMAC history universe.
     frames_by_history: dict[str, pl.DataFrame] = {}
     pooled_reference_rules = None
-    reference_history_provider = PysystemtradeHistoryProvider(
-        db_path=history_db_path
-    )
     # v1.0 deliberately fixes the rule mix and FDM. Estimating one FDM from
     # the completed sample would make every historical combined forecast depend
     # on future rule correlations. The identity arguments retain the uniform
@@ -2106,6 +2227,10 @@ def _run_complete_selection(
                 prior_years=args.ib_prior_years,
                 reference_db_path=args.history_db.expanduser().resolve(),
                 globex_db_path=args.globex_db.expanduser().resolve(),
+                # v1 selection keeps every frozen PST date and hands ownership
+                # directly to the first valid IB return after the PST endpoint.
+                include_globex=False,
+                preserve_reference_overlap=True,
                 mapping_path=args.broker_mapping.expanduser().resolve(),
                 history_db_path=args.ib_history_db.expanduser().resolve(),
                 cache_root=args.history_cache_root.expanduser().resolve(),
@@ -2168,31 +2293,38 @@ def _run_complete_selection(
                     )
                     continue
                 stitched_component = None
-                handoff_dates = list(
-                    stitched_history.metadata.get("handoff_dates") or []
-                )
-                live_tail_start = (
-                    min(handoff_dates)
-                    if handoff_dates
-                    else stitched_history.signal.get_column("date").min()
+                available_sources = [
+                    str(value)
+                    for value in (
+                        stitched_history.metadata.get("available_sources") or []
+                    )
+                ]
+                live_tail_start = _direct_ib_handoff_date(
+                    stitched_history,
+                    history_code=history_code,
                 )
                 if live_tail_start is None:
                     logger.warning(
                         "selection_stitched_history unavailable "
-                        "hist_instr_code=%s fallback=reference reason=empty_history",
+                        "hist_instr_code=%s fallback=reference "
+                        "reason=no_ib_segment sources=%s",
                         history_code,
+                        available_sources,
                     )
                     continue
+                source_priority = [
+                    str(value)
+                    for value in (
+                        stitched_history.metadata.get("source_priority") or []
+                    )
+                ]
                 stitched_source_identity = {
-                    "cache_directory": str(
-                        stitched_history.metadata.get("cache_directory") or ""
+                    "content": _selection_history_content_identity(
+                        stitched_history
                     ),
                     "instrument_code": stitched_history.instrument_code,
-                    "available_sources": [
-                        str(value) for value in (
-                            stitched_history.metadata.get("available_sources") or []
-                        )
-                    ],
+                    "available_sources": available_sources,
+                    "source_priority": source_priority,
                     "signal_rows": stitched_history.signal.height,
                     "signal_start": str(
                         stitched_history.signal.get_column("date").min()

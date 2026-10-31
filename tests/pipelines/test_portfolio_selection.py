@@ -1,11 +1,15 @@
 from datetime import date
+from types import SimpleNamespace
 
 import polars as pl
 import pytest
 
 from derivatives_bt_engine.pipelines.portfolio_selection import (
     _filter_backtest_period,
+    _direct_ib_handoff_date,
     _label_forecast_output_frame,
+    _selection_history_content_identity,
+    _selection_pysystemtrade_identity,
     _selection_rebalance_dates,
     _subsystem_reference_correlation,
     _WalkForwardSelectionProvider,
@@ -13,6 +17,111 @@ from derivatives_bt_engine.pipelines.portfolio_selection import (
     run,
     slow_tilt_ewmac_weights,
 )
+
+
+def _mock_stitched_history(
+    *,
+    sources: list[str],
+    source_priority: list[str],
+) -> SimpleNamespace:
+    """Return the minimal history shape used by cache and splice tests."""
+    dates = [date(2024, 3, 28), date(2024, 4, 1)]
+    stream = pl.DataFrame({
+        "date": dates,
+        "source_segment": sources,
+        "value": [1.0, 2.0],
+    })
+    return SimpleNamespace(
+        schema_version=12,
+        signal=stream,
+        marks=stream,
+        panama=stream,
+        metadata={
+            "available_sources": source_priority,
+            "source_priority": source_priority,
+            "handoff_dates": [dates[1]],
+            "reference_preserved_through": dates[0],
+        },
+    )
+
+
+def test_direct_ib_handoff_preserves_every_pre_handoff_pst_row():
+    """Selection accepts one PST prefix followed directly by the IB tail."""
+    history = _mock_stitched_history(
+        sources=["pysystemtrade", "ib"],
+        source_priority=["pysystemtrade", "ib"],
+    )
+
+    handoff = _direct_ib_handoff_date(history, history_code="TEST")
+
+    assert handoff == date(2024, 4, 1)
+
+
+def test_direct_ib_handoff_rejects_globex_middle_segment():
+    """Selection cannot silently replace the frozen PST prefix with Globex."""
+    history = _mock_stitched_history(
+        sources=["pysystemtrade", "ib"],
+        source_priority=["pysystemtrade", "globex", "ib"],
+    )
+
+    with pytest.raises(ValueError, match="direct PST-to-IB"):
+        _direct_ib_handoff_date(history, history_code="TEST")
+
+
+def test_direct_ib_handoff_must_follow_frozen_pst_endpoint():
+    """An overlapping IB segment cannot replace any PST-covered date."""
+    history = _mock_stitched_history(
+        sources=["pysystemtrade", "ib"],
+        source_priority=["pysystemtrade", "ib"],
+    )
+    history.metadata["reference_preserved_through"] = date(2024, 4, 1)
+
+    with pytest.raises(ValueError, match="must follow the frozen PST endpoint"):
+        _direct_ib_handoff_date(history, history_code="TEST")
+
+
+def test_stitched_content_identity_ignores_cache_metadata_but_tracks_rows():
+    """Acquisition paths do not invalidate a tail whose actual rows match."""
+    first = _mock_stitched_history(
+        sources=["pysystemtrade", "ib"],
+        source_priority=["pysystemtrade", "ib"],
+    )
+    second = _mock_stitched_history(
+        sources=["pysystemtrade", "ib"],
+        source_priority=["pysystemtrade", "ib"],
+    )
+    first.metadata["cache_directory"] = "/cache/2026-10-30"
+    second.metadata["cache_directory"] = "/cache/2026-10-31"
+
+    first_identity = _selection_history_content_identity(first)
+    second_identity = _selection_history_content_identity(second)
+    changed = _mock_stitched_history(
+        sources=["pysystemtrade", "ib"],
+        source_priority=["pysystemtrade", "ib"],
+    )
+    changed.signal = changed.signal.with_columns(
+        pl.when(pl.col("date") == date(2024, 4, 1))
+        .then(pl.lit(3.0))
+        .otherwise(pl.col("value"))
+        .alias("value")
+    )
+
+    assert first_identity == second_identity
+    assert _selection_history_content_identity(changed) != first_identity
+
+
+def test_pst_identity_uses_pinned_metadata_without_file_mtime():
+    """Frozen PST/FX cache identity is its schema and source commit only."""
+    provider = SimpleNamespace(
+        _database_metadata=lambda: (5, "abc123")
+    )
+
+    identity = _selection_pysystemtrade_identity(provider)
+
+    assert identity == {
+        "sidecar_version": 5,
+        "source_commit": "abc123",
+    }
 
 
 def test_forecast_output_places_symbol_immediately_after_date():

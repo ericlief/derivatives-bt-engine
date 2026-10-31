@@ -862,7 +862,10 @@ class IBStitchedHistoryProvider:
     its overlapping IB audit rows are cached as one Parquet bundle. A cache hit
     therefore performs no IB request and no restitching. Instruments absent
     from the Globex database stitch directly from the long reference history
-    into IB history.
+    into IB history. Set ``include_globex`` false when a caller requires a
+    strict reference-to-IB handoff with no intermediate source replacement.
+    ``preserve_reference_overlap`` additionally retains every reference date
+    and admits only IB observations after the reference endpoint.
     """
 
     ib: IBPySync | None
@@ -874,6 +877,8 @@ class IBStitchedHistoryProvider:
     use_rth: bool = True
     reference_db_path: Path | str = DEFAULT_REFERENCE_DB_PATH
     globex_db_path: Path | str = DEFAULT_GLOBEX_DB_PATH
+    include_globex: bool = True
+    preserve_reference_overlap: bool = False
     mapping_path: Path | str = DEFAULT_BROKER_MAPPING_PATH
     history_db_path: Path | str = DEFAULT_IB_FUTURES_HISTORY_DB_PATH
     cache_root: Path | str = DEFAULT_FUTURES_CACHE_ROOT
@@ -907,6 +912,8 @@ class IBStitchedHistoryProvider:
             'pst_instr_code': pst_instr_code,
             'signal_symbol': signal_symbol,
             'globex_asset': globex_asset,
+            'include_globex': self.include_globex,
+            'preserve_reference_overlap': self.preserve_reference_overlap,
             'as_of': effective_as_of.isoformat(),
             'prior_years': self.prior_years,
             'duration': self.duration,
@@ -981,7 +988,11 @@ class IBStitchedHistoryProvider:
                 "to one PST/IB history mapping"
             )
         pst_instr_code = str(signal_rows[0]["pst_instr_code"])
-        globex_asset = resolve_reviewed_globex_asset(pst_instr_code)
+        globex_asset = (
+            resolve_reviewed_globex_asset(pst_instr_code)
+            if self.include_globex
+            else None
+        )
         cache_directory = self._cache_directory(
             symbol, pst_instr_code, globex_asset, resolved_signal_symbol
         )
@@ -1098,10 +1109,15 @@ class IBStitchedHistoryProvider:
                 exc,
             )
 
+        preserved_reference_end: date | None = None
         direct_reference_to_ib = (
             ib_history is not None and len(histories) == 1
         )
-        if direct_reference_to_ib and ib_history is not None:
+        if (
+            direct_reference_to_ib
+            and ib_history is not None
+            and not self.preserve_reference_overlap
+        ):
             reference_end = reference_history.signal.get_column('date').max()
             ib_start = ib_history.signal.get_column('date').min()
             while (
@@ -1136,6 +1152,56 @@ class IBStitchedHistoryProvider:
                 ib_start = ib_history.signal.get_column('date').min()
                 if ib_start is None or ib_start >= previous_ib_start:
                     break
+        if (
+            direct_reference_to_ib
+            and ib_history is not None
+            and self.preserve_reference_overlap
+        ):
+            reference_end = reference_history.signal.get_column('date').max()
+            if reference_end is None:
+                raise ValueError(
+                    f'reference history is empty for {pst_instr_code}'
+                )
+            preserved_reference_end = reference_end
+            trimmed_signal = ib_history.signal.filter(
+                pl.col('date') > reference_end
+            )
+            if trimmed_signal.is_empty():
+                logger.info(
+                    'stitched_ib_history no_post_reference_ib_rows '
+                    'symbol=%s pst_instr_code=%s reference_end=%s',
+                    symbol,
+                    pst_instr_code,
+                    reference_end,
+                )
+                ib_history = None
+                direct_reference_to_ib = False
+            else:
+                ib_history = replace(
+                    ib_history,
+                    signal=trimmed_signal,
+                    marks=ib_history.marks.filter(
+                        pl.col('date') > reference_end
+                    ),
+                    carry=ib_history.carry.filter(
+                        pl.col('date') > reference_end
+                    ),
+                    panama=ib_history.panama.filter(
+                        pl.col('date') > reference_end
+                    ),
+                    metadata={
+                        **dict(ib_history.metadata),
+                        'reference_overlap_preserved_through': reference_end,
+                    },
+                )
+                logger.info(
+                    'stitched_ib_history preserve_reference_overlap '
+                    'symbol=%s pst_instr_code=%s reference_end=%s ib_start=%s',
+                    symbol,
+                    pst_instr_code,
+                    reference_end,
+                    trimmed_signal.get_column('date').min(),
+                )
         if ib_history is not None:
             histories.append(ib_history)
         if len(histories) == 1:
@@ -1146,6 +1212,8 @@ class IBStitchedHistoryProvider:
                     **dict(reference_history.metadata),
                     'available_sources': ['pysystemtrade'],
                     'ib_unavailable': ib_history is None,
+                    'preserve_reference_overlap': self.preserve_reference_overlap,
+                    'reference_preserved_through': preserved_reference_end,
                 },
             )
         else:
@@ -1164,6 +1232,8 @@ class IBStitchedHistoryProvider:
                     **dict(history.metadata),
                     'available_sources': [item.source for item in histories],
                     'ib_unavailable': ib_history is None,
+                    'preserve_reference_overlap': self.preserve_reference_overlap,
+                    'reference_preserved_through': preserved_reference_end,
                 },
             )
         if self.update_history and self.contract_history is not None:

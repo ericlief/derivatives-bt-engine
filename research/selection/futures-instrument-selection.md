@@ -833,17 +833,33 @@ file covers the entire monthly or yearly walk-forward run; reviews do not
 create separate result directories.
 
 When `--ib-history-db` is supplied, executable cash history is rebuilt from
-the stitched reference/Globex/IB source for every instrument that can enter a
-scheduled book. `--ib-history-live update` shares one IB connection across the
-run and updates each underlying signal history. Stitched component and
-subsystem frames spill to Parquet and are scanned lazily, rather than retaining
-the broad stitched universe in RAM. Selection decisions remain based on the
-lagged subsystem histories: reference frames before the source transition and
-stitched reference/Globex/IB frames through the stored or live tail. Every
-review still filters these frames to `date < review_date`, so fetching the
-complete history once at run start does not expose a review to later returns.
-Stitching therefore extends both the executable cash/capital path and the
-selection inputs after the reference history ends.
+the direct PST/IB source for every instrument that can enter a scheduled book.
+Selection v1 deliberately does not insert Globex: `--globex-db` remains an
+accepted compatibility argument, but the selection runner passes
+`include_globex=False`. PST retains every date through that instrument's
+reference endpoint. Overlapping IB rows are discarded, and the single IB tail
+begins at the first valid IB return strictly after that endpoint. The runner
+validates source ownership in the signal, mark, and Panama streams and fails if
+a Globex segment, overlapping IB row, second handoff, or non-PST prefix appears.
+
+`--ib-history-live update` shares one IB connection across the run and updates
+each underlying signal history. Versioned content-addressed Parquet caches
+below `--history-cache-root/selection_backtest` keep four distinct artifacts:
+the frozen PST `reference_base`, its fixed-cost reference overlay, the mutable
+IB-only `stitched_reference_tail`, and selection-specific executable cash
+curves. The PST identity uses its pinned sidecar schema and source commit, which
+also owns the frozen historical FX import; file paths and mtimes do not
+invalidate it. The IB-tail identity hashes the actual ordered history rows, so
+new cache paths or as-of dates alone do not cause a miss. New or revised IB
+rows create a new tail variant without copying or replacing the PST prefix.
+
+Selection decisions remain based on lagged subsystem histories: the frozen PST
+reference frame before the source transition and the IB frame through the
+stored or live tail. Every review still filters these frames to
+`date < review_date`, so fetching the complete history once at run start does
+not expose a review to later returns. Stitching therefore extends both the
+executable cash/capital path and the selection inputs after the PST history
+ends.
 
 `--backtest-start-date` and `--backtest-end-date` bound only the executable
 cash/capital replay. Earlier reference or stitched observations remain loaded
@@ -1133,7 +1149,7 @@ baseline by default. The command writes:
   `hist_cum_net_pct`, `hist_ann_mean_pct`, `hist_ann_vol_pct`, `hist_sharpe`,
   and `hist_iid_t_stat`, with sample dates, years, observation count, and
   `hist_src`. With `--ib-history-db`, these fields and the selected cash P&L
-  use stored reference/Globex/IB stitched histories, and the finished view is
+  use the frozen PST prefix plus the stored IB tail, and the finished view is
   cached under `--history-cache-root`. IB is not contacted unless a live mode
   is explicitly selected. Add
   `--ib-history-live missing` to connect only when a selected signal history
