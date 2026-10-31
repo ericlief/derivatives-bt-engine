@@ -845,6 +845,15 @@ complete history once at run start does not expose a review to later returns.
 Stitching therefore extends both the executable cash/capital path and the
 selection inputs after the reference history ends.
 
+`--backtest-start-date` and `--backtest-end-date` bound only the executable
+cash/capital replay. Earlier reference or stitched observations remain loaded
+for causal EWMAC warm-up and for the first scheduled selection, which always
+uses `date < review_date`. Position and equity state start empty at the first
+bounded session, so a 2024 start represents a new account rather than carrying
+contracts or accumulated capital from earlier research history. Live IB
+contract discovery inspects three prior calendar years by default; change this
+with `--ib-prior-years` when testing a longer broker tail.
+
 The default band on each date is `tgt_pos ± 0.10 × abs(vol_scalar)`.
 The continuous target and band edges are rounded only when forming the
 whole-contract boundaries and executable position. The previous executable
@@ -941,8 +950,13 @@ futures-build-selection \
   --output-dir results/selection_baseline \
   --history-db /home/dev/fin/db/pysystemtrade_reference.duckdb \
   --ib-history-db /home/dev/fin/db/ib_futures_history.duckdb \
-  --ib-history-live missing \
+  --ib-history-live update \
+  --ib-prior-years 3 \
   --globex-db /home/dev/fin/db/globex_mdp_3.0.duckdb \
+  --selection-rebalance yearly \
+  --backtest-start-date 2024-01-01 \
+  --backtest-end-date 2026-10-30 \
+  --forecast-fdm 1.0 \
   --initial-capital-usd 75000 \
   --target-vol 0.20 \
   --instrument-cost-limit-sr 0.01 \
@@ -1218,10 +1232,13 @@ The initial combination policy uses the five ordinary EWMAC speeds only:
 This gives 60% to `32/128` and `64/256` and 40% to the faster three rules. A
 rule removed by the market screen cost gate receives zero weight and the remaining
 weights are renormalized; for example, `16/64,32/128,64/256` becomes
-`25%,37.5%,37.5%`. Each component is causally scaled and capped first. The
-weighted forecast then receives a correlation-estimated FDM,
-`min(2.5, 1/sqrt(w' C w))`, and is capped again. FDM is separate from the rule
-weights and is not baked into their reported percentages.
+`25%,37.5%,37.5%`. Each component is causally scaled and capped first. For the
+v1.0 walk-forward policy, cost calibration, eligible rules, and these rule
+weights are frozen from the saved rule cache. The weighted forecast receives a
+fixed FDM, `--forecast-fdm 1.0` by default, and is capped again. This avoids
+applying a correlation estimate from the completed sample to earlier dates.
+FDM remains separate from the rule weights and is recorded in the forecast
+audit.
 
 ## Iterative AFTS portfolio selection
 

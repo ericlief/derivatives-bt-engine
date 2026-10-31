@@ -4,6 +4,7 @@ import polars as pl
 import pytest
 
 from derivatives_bt_engine.pipelines.portfolio_selection import (
+    _filter_backtest_period,
     _label_forecast_output_frame,
     _selection_rebalance_dates,
     _subsystem_reference_correlation,
@@ -86,6 +87,10 @@ def test_selection_defaults_to_reviewed_classification_weights():
     assert args.buffer_trade_to_edge is True
     assert args.rebalance_on_roll is True
     assert args.selection_rebalance == "static"
+    assert args.forecast_fdm == pytest.approx(1.0)
+    assert args.ib_prior_years == 3
+    assert args.backtest_start_date is None
+    assert args.backtest_end_date is None
 
 
 def test_selection_rebalance_cadence_is_explicit():
@@ -95,6 +100,42 @@ def test_selection_rebalance_cadence_is_explicit():
 
     assert monthly.selection_rebalance == "monthly"
     assert yearly.selection_rebalance == "yearly"
+
+
+def test_backtest_period_is_typed_and_inclusive():
+    """A bounded cash replay keeps typed endpoints and resets outside rows."""
+    args = parse_args([
+        "--backtest-start-date",
+        "2024-01-01",
+        "--backtest-end-date",
+        "2026-10-30",
+        "--forecast-fdm",
+        "1.25",
+        "--ib-prior-years",
+        "4",
+    ])
+    frame = pl.DataFrame({
+        "date": [
+            date(2023, 12, 29),
+            date(2024, 1, 2),
+            date(2026, 10, 30),
+            date(2026, 11, 2),
+        ],
+        "value": [0, 1, 2, 3],
+    })
+
+    bounded = _filter_backtest_period(
+        frame,
+        start_date=args.backtest_start_date,
+        end_date=args.backtest_end_date,
+    )
+
+    assert args.forecast_fdm == pytest.approx(1.25)
+    assert args.ib_prior_years == 4
+    assert bounded.get_column("date").to_list() == [
+        date(2024, 1, 2),
+        date(2026, 10, 30),
+    ]
 
 
 def test_selection_rebalance_dates_use_first_available_session():

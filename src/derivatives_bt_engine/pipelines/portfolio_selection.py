@@ -85,9 +85,9 @@ from derivatives_bt_engine.calculations.volatility import (
 )
 from derivatives_bt_engine.calculations.forecast_combination import (
     CombinedForecastEngine,
+    FixedForecastDiversification,
     ForecastCombinationConfig,
     SlowTiltEwmacWeights,
-    median_forecast_correlation,
 )
 from derivatives_bt_engine.data.futures_history import (
     DEFAULT_FUTURES_CACHE_ROOT,
@@ -296,8 +296,8 @@ def parse_args(argv=None, *, complete_default: bool = False):
         type=Path,
         help=(
             "Optional stored IB dated-contract database. When supplied, the "
-            "final book cash P&L and hist_* diagnostics use offline stitched "
-            "reference/Globex/IB history; construction inputs remain unchanged."
+            "cash P&L and scheduled-selection inputs use offline stitched "
+            "reference/Globex/IB history."
         ),
     )
     parser.add_argument(
@@ -328,6 +328,15 @@ def parse_args(argv=None, *, complete_default: bool = False):
         type=int,
         default=24,
         help="IB client ID used by --ib-history-live (default: 24).",
+    )
+    parser.add_argument(
+        "--ib-prior-years",
+        type=int,
+        default=3,
+        help=(
+            "Complete calendar years of dated IB contracts to inspect before "
+            "the live as-of year (default: 3, sufficient for a 2024-2026 tail)."
+        ),
     )
     parser.add_argument(
         "--globex-db",
@@ -361,6 +370,28 @@ def parse_args(argv=None, *, complete_default: bool = False):
         type=int,
         default=256,
         help="Minimum valid combined-forecast observations.",
+    )
+    parser.add_argument(
+        "--forecast-fdm",
+        type=float,
+        default=1.0,
+        help=(
+            "Fixed forecast diversification multiplier applied after the "
+            "static eligible-rule weights (default: 1.0)."
+        ),
+    )
+    parser.add_argument(
+        "--backtest-start-date",
+        type=date.fromisoformat,
+        help=(
+            "First executable cash date, YYYY-MM-DD. Earlier history remains "
+            "available for causal forecast warm-up and scheduled selection."
+        ),
+    )
+    parser.add_argument(
+        "--backtest-end-date",
+        type=date.fromisoformat,
+        help="Last executable cash date, YYYY-MM-DD (inclusive).",
     )
     parser.add_argument("--score-threshold", type=float, default=0.90)
     parser.add_argument("--gross-sr", type=float, default=0.50)
@@ -554,6 +585,7 @@ def _selection_scenario_id(
         f"bm{_optional_number_token(effective_book_margin_pct)}",
         f"wi{_number_token(args.max_weight_idm)}",
         f"st{_number_token(args.score_threshold)}",
+        f"fdm{_number_token(args.forecast_fdm)}",
     ]
     if (
         args.low_contract_penalty_scale
@@ -574,7 +606,37 @@ def _selection_scenario_id(
     ))
     if args.selection_rebalance != "static":
         tokens.append(f"sel{args.selection_rebalance}")
+    if args.backtest_start_date is not None:
+        tokens.append(f"from{args.backtest_start_date:%Y%m%d}")
+    if args.backtest_end_date is not None:
+        tokens.append(f"to{args.backtest_end_date:%Y%m%d}")
     return "_".join(tokens)
+
+
+def _filter_backtest_period(
+    frame: pl.DataFrame,
+    *,
+    start_date: date | None,
+    end_date: date | None,
+) -> pl.DataFrame:
+    """Restrict executable rows without discarding earlier signal history.
+
+    This boundary is applied immediately before the stateful capital replay.
+    Forecast construction and walk-forward review inputs therefore retain all
+    observations before ``start_date``, while positions, cumulative P&L, and
+    account equity start afresh on the requested first session.
+    """
+    filtered = frame
+    if start_date is not None:
+        filtered = filtered.filter(pl.col("date") >= start_date)
+    if end_date is not None:
+        filtered = filtered.filter(pl.col("date") <= end_date)
+    if filtered.is_empty():
+        raise ValueError(
+            "backtest date range contains no executable history: "
+            f"start={start_date} end={end_date}"
+        )
+    return filtered
 
 
 def _selection_rebalance_dates(
@@ -1205,12 +1267,18 @@ def _run_complete_selection(
         selected.get_column("hist_instr_code").drop_nulls().to_list(),
         db_path=args.history_db.expanduser().resolve(),
     )
-    forecast_correlation, correlation_rules = median_forecast_correlation(
-        frames_by_history.values(), min_observations=args.min_forecast_obs
+    # v1.0 deliberately fixes the rule mix and FDM. Estimating one FDM from
+    # the completed sample would make every historical combined forecast depend
+    # on future rule correlations. The identity arguments retain the uniform
+    # engine API; FixedForecastDiversification ignores their values.
+    correlation_rules = list(EWMAC_SLOW_TILT_60_40)
+    forecast_correlation = np.eye(len(correlation_rules))
+    engine = CombinedForecastEngine(
+        diversification_policy=FixedForecastDiversification(args.forecast_fdm),
+        config=ForecastCombinationConfig(
+            min_valid_observations=args.min_forecast_obs,
+        ),
     )
-    engine = CombinedForecastEngine(config=ForecastCombinationConfig(
-        min_valid_observations=args.min_forecast_obs,
-    ))
 
     audit_rows: list[dict[str, object]] = []
     # Long-form output copies: one symbol-labelled frame is appended here and
@@ -1635,6 +1703,7 @@ def _run_complete_selection(
             """Load one stitched history with explicit broker-update policy."""
             return IBStitchedHistoryProvider(
                 ib=ib,
+                prior_years=args.ib_prior_years,
                 reference_db_path=args.history_db.expanduser().resolve(),
                 globex_db_path=args.globex_db.expanduser().resolve(),
                 mapping_path=args.broker_mapping.expanduser().resolve(),
@@ -1930,6 +1999,11 @@ def _run_complete_selection(
     unscaled_cash_pnl = (
         pl.concat(cash_output_frames, how="diagonal_relaxed")
         .collect(engine="streaming")
+    )
+    unscaled_cash_pnl = _filter_backtest_period(
+        unscaled_cash_pnl,
+        start_date=args.backtest_start_date,
+        end_date=args.backtest_end_date,
     )
     del cash_output_frames, cash_reference_frames
     gc.collect()
@@ -2308,6 +2382,18 @@ def run(
         raise ValueError("tie reference book count must be positive")
     if args.max_source_gap_days < 0:
         raise ValueError("max source gap days must be nonnegative")
+    if args.ib_prior_years <= 0:
+        raise ValueError("--ib-prior-years must be positive")
+    if not math.isfinite(args.forecast_fdm) or args.forecast_fdm <= 0:
+        raise ValueError("--forecast-fdm must be finite and positive")
+    if (
+        args.backtest_start_date is not None
+        and args.backtest_end_date is not None
+        and args.backtest_end_date < args.backtest_start_date
+    ):
+        raise ValueError(
+            "--backtest-end-date must be on or after --backtest-start-date"
+        )
     if args.ib_history_live is not None and args.ib_history_db is None:
         raise ValueError("--ib-history-live requires --ib-history-db")
     if args.ib_history_db is not None:
