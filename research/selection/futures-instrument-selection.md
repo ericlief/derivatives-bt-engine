@@ -820,9 +820,14 @@ The rule cache also freezes `init_marg_ann_dvol_ratio`, calculated as current
 IB initial margin divided by snapshot annual dollar volatility. At each dated
 review the ratio is multiplied by review-date annual dollar volatility to
 estimate one-contract historical margin. This replaces applying today's
-nominal margin dollars to every historical year. `futures-rule-cache` rejects
-an acquisition snapshot older than 30 days by default; copying an old file
-does not refresh its embedded timestamp.
+nominal margin dollars to every historical year. If an account-level what-if
+cannot preview a large route, the cache uses the median direct ratio from
+another snapshot-qualified route in the same `econ_fam_id`; it never borrows
+across economic families. The source is persisted as `marg_risk_calib_src`.
+Historical data eligibility therefore does not require current-account
+what-if eligibility. `futures-rule-cache` rejects an acquisition snapshot
+older than 30 days by default; copying an old file does not refresh its
+embedded timestamp.
 
 Membership changes share the existing execution state. A removed instrument
 earns the review day's move in the position held from the prior close, then is

@@ -1446,6 +1446,9 @@ class _WalkForwardSelectionProvider:
                 "margin_calibration_timestamp": source.get(
                     "snap_cache_ts_ct"
                 ),
+                "margin_risk_calibration_source": source.get(
+                    "margin_risk_calibration_source"
+                ),
                 "initial_margin_usd": (
                     candidate.initial_margin_usd if candidate else None
                 ),
@@ -1543,6 +1546,9 @@ def _final_selection_frame(
             ),
             "margin_calibration_timestamp": source_rows[symbol].get(
                 "snap_cache_ts_ct"
+            ),
+            "margin_risk_calibration_source": source_rows[symbol].get(
+                "margin_risk_calibration_source"
             ),
             "trade_sr": candidate.trade_sr,
             "roll_sr": candidate.roll_sr,

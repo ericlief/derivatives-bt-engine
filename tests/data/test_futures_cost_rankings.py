@@ -183,6 +183,7 @@ def _phase2_step1_report() -> pl.DataFrame:
         "liq_elig": [True, False, True, True, False],
         "volume_elig": [True, False, True, True, False],
         "data_elig": [True, True, True, True, False],
+        "hist_data_elig": [True, True, True, True, False],
         "instr_has_elig_ewmac_rule": [True] * 5,
         "exec_elig": [True] * 5,
         "selection_elig": [True, False, False, True, False],

@@ -3705,6 +3705,7 @@ def _order_market_public_columns(report: pl.DataFrame) -> pl.DataFrame:
         "init_marg_native",
         "init_marg",
         "init_marg_ann_dvol_ratio",
+        "marg_risk_calib_src",
         "maint_marg_native",
         "maint_marg",
         "margin_ccy",
@@ -3914,6 +3915,7 @@ def _emit_report(
         "comm_src",
         "init_marg",
         "init_marg_ann_dvol_ratio",
+        "marg_risk_calib_src",
         "maint_marg",
         "whatif_elig",
         "whatif_reject_reason",
@@ -4407,15 +4409,47 @@ def _attach_margin_risk_calibration(report: pl.DataFrame) -> pl.DataFrame:
         & pl.col("annual_dollar_vol_per_contract").is_finite()
         & (pl.col("annual_dollar_vol_per_contract") > 0)
     )
-    return report.with_columns(
+    report = report.with_columns(
         pl.when(valid)
         .then(
             pl.col("ib_whatif_initial_margin_usd")
             / pl.col("annual_dollar_vol_per_contract")
         )
         .otherwise(None)
-        .alias("initial_margin_to_annual_dollar_vol")
+        .alias("_direct_margin_to_ann_dvol")
     )
+    family_column = next(
+        (
+            name for name in ("economic_family_id", "econ_fam_id")
+            if name in report.columns
+        ),
+        None,
+    )
+    if family_column is not None:
+        valid_family = (
+            pl.col(family_column).is_not_null()
+            & (pl.col(family_column).str.strip_chars() != "")
+        )
+        family_ratio = (
+            pl.when(valid_family)
+            .then(pl.col("_direct_margin_to_ann_dvol"))
+            .otherwise(None)
+            .median()
+            .over(family_column)
+        )
+    else:
+        family_ratio = pl.lit(None, dtype=pl.Float64)
+    return report.with_columns(
+        pl.coalesce("_direct_margin_to_ann_dvol", family_ratio).alias(
+            "initial_margin_to_annual_dollar_vol"
+        ),
+        pl.when(pl.col("_direct_margin_to_ann_dvol").is_not_null())
+        .then(pl.lit("direct_snapshot"))
+        .when(family_ratio.is_not_null())
+        .then(pl.lit("economic_family_snapshot_proxy"))
+        .otherwise(None)
+        .alias("margin_risk_calibration_source"),
+    ).drop("_direct_margin_to_ann_dvol")
 
 
 def _restore_market_snapshot_columns(snapshot: pl.DataFrame) -> pl.DataFrame:

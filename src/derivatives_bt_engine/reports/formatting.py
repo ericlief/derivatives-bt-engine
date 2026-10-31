@@ -64,6 +64,7 @@ PUBLIC_REPORT_RENAMES = {
     "selection_cost_source": "sel_cost_src",
     "selection_margin_source": "sel_marg_src",
     "margin_calibration_timestamp": "marg_calib_ts",
+    "margin_risk_calibration_source": "marg_risk_calib_src",
     "initial_capital_volatility_scalar": "init_vol_scalar",
     "maximum_instrument_margin_usd": "max_instr_marg",
     "book_margin_at_maximum_usd": "book_marg_at_max",

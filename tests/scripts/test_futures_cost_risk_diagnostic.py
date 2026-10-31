@@ -1256,15 +1256,22 @@ def test_market_snapshot_promotes_what_if_commission_and_demotes_reference(
 def test_rule_cache_calibrates_margin_to_snapshot_annual_dollar_volatility():
     """Historical margin calibration is a cached dimensionless risk ratio."""
     report = futures_cost_risk._attach_margin_risk_calibration(pl.DataFrame({
-        "symbol": ["MES", "BAD"],
-        "ib_whatif_initial_margin_usd": [3_500.0, 1_000.0],
-        "annual_dollar_vol_per_contract": [7_000.0, 0.0],
+        "symbol": ["MES", "MNQ", "NQ", "BAD"],
+        "econ_fam_id": ["SP500", "NASDAQ100", "NASDAQ100", "BAD"],
+        "ib_whatif_initial_margin_usd": [3_500.0, 6_500.0, None, 1_000.0],
+        "annual_dollar_vol_per_contract": [7_000.0, 10_000.0, 100_000.0, 0.0],
     }))
 
     assert report["initial_margin_to_annual_dollar_vol"][0] == pytest.approx(
         0.5
     )
-    assert report["initial_margin_to_annual_dollar_vol"][1] is None
+    assert report["initial_margin_to_annual_dollar_vol"][2] == pytest.approx(
+        0.65
+    )
+    assert report["margin_risk_calibration_source"][2] == (
+        "economic_family_snapshot_proxy"
+    )
+    assert report["initial_margin_to_annual_dollar_vol"][3] is None
 
 
 def test_rule_cache_rejects_stale_margin_calibration_snapshot(tmp_path):

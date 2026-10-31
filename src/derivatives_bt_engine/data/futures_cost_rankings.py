@@ -78,6 +78,7 @@ DEFAULT_VIEW_COLUMNS = (
     "comm_src",
     "init_margin_usd",
     "initial_margin_to_ann_dvol",
+    "margin_risk_calibration_source",
     "snap_cache_ts_ct",
     "maint_margin_usd",
     "margin_ccy",
@@ -99,6 +100,7 @@ DEFAULT_VIEW_COLUMNS = (
     "cost_elig",
     "size_elig",
     "data_elig",
+    "hist_data_elig",
     "sel_bucket",
     "selection_elig",
     "selection_excl",
@@ -198,6 +200,7 @@ SELECTION_CANDIDATE_COLUMNS = (
     "comm_src",
     "init_margin_usd",
     "initial_margin_to_ann_dvol",
+    "margin_risk_calibration_source",
     "maint_margin_usd",
     "margin_ccy",
     "whatif_attempted",
@@ -208,6 +211,7 @@ SELECTION_CANDIDATE_COLUMNS = (
     "cost_elig",
     "size_elig",
     "data_elig",
+    "hist_data_elig",
     "elig_ewmac_rule_count",
     "elig_ewmac_rules",
     "instr_has_elig_ewmac_rule",
@@ -371,7 +375,7 @@ def apply_selection_filters(
 
     data_inputs = {"cur_px", "cur_fx_to_usd", "mult"}
     if data_inputs.issubset(report.columns):
-        data_eligible = (
+        historical_data_eligible = (
             pl.col("cur_px").is_not_null()
             & pl.col("cur_px").is_finite()
             & (pl.col("cur_px") > 0)
@@ -384,6 +388,9 @@ def apply_selection_filters(
             & pl.col("avg_daily_volume").is_not_null()
             & pl.col("ann_dvol").is_not_null()
             & (pl.col("ib_avail") == "contract_qualified")
+        )
+        data_eligible = (
+            historical_data_eligible
             & (
                 ~pl.col("whatif_attempted").fill_null(False)
                 | pl.col("whatif_elig").fill_null(False)
@@ -393,6 +400,7 @@ def apply_selection_filters(
         # Full current caches always take the branch above. This fallback only
         # keeps previously generated compact screens readable.
         data_eligible = pl.col("data_elig").fill_null(False)
+        historical_data_eligible = data_eligible
     else:
         missing_data_inputs = sorted(data_inputs.difference(report.columns))
         raise ValueError(
@@ -477,6 +485,7 @@ def apply_selection_filters(
             & (pl.col("avg_daily_volume") > minimum_volume)
         ).alias("volume_elig"),
         data_eligible.alias("data_elig"),
+        historical_data_eligible.alias("hist_data_elig"),
     ).with_columns(
         (
             pl.col("pct_mkt_volume").is_not_null()
@@ -747,7 +756,7 @@ def selection_rebalance_candidates(report: pl.DataFrame) -> pl.DataFrame:
         "ref_roll_sr",
         "cost_lim_sr",
         "volume_elig",
-        "data_elig",
+        "hist_data_elig",
         "ref_instr_has_elig_ewmac_rule",
         "ref_elig_ewmac_rules",
         "exec_elig",
@@ -770,7 +779,7 @@ def selection_rebalance_candidates(report: pl.DataFrame) -> pl.DataFrame:
         & pl.col("ref_roll_sr").is_not_null()
         & pl.col("ref_roll_sr").is_finite()
         & pl.col("volume_elig").fill_null(False)
-        & pl.col("data_elig").fill_null(False)
+        & pl.col("hist_data_elig").fill_null(False)
         & pl.col("ref_instr_has_elig_ewmac_rule").fill_null(False)
         & pl.col("exec_elig").fill_null(False)
         & (pl.col("ib_avail").fill_null("") == "contract_qualified")
@@ -922,6 +931,7 @@ def normalize_report_calculation_columns(report: pl.DataFrame) -> pl.DataFrame:
         "maint_marg": "maint_margin_usd",
         "marg_ccy": "margin_ccy",
         "init_marg_ann_dvol_ratio": "initial_margin_to_ann_dvol",
+        "marg_risk_calib_src": "margin_risk_calibration_source",
     }
     aliases = [
         pl.col(public).alias(internal)
