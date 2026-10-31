@@ -3585,6 +3585,20 @@ def _public_report_schema(report: pl.DataFrame) -> pl.DataFrame:
 
 def _rename_market_public_columns(report: pl.DataFrame) -> pl.DataFrame:
     """Apply the market-screen and centralized public column vocabulary."""
+    reference_spread_sources = [
+        name for name in (
+            "ref_spread_pts",
+            "carver_configured_one_way_spread_points",
+            "carver_spread_pts",
+        )
+        if name in report.columns
+    ]
+    if len(reference_spread_sources) > 1:
+        report = report.with_columns(
+            pl.coalesce(reference_spread_sources).alias("ref_spread_pts")
+        ).drop(
+            name for name in reference_spread_sources if name != "ref_spread_pts"
+        )
     renames = {
         name: _compact_public_column_name(name)
         for name in report.columns

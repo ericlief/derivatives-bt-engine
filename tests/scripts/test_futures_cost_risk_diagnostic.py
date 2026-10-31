@@ -1032,6 +1032,8 @@ def test_public_report_leads_with_primary_values_and_normalizes_spreads():
         "mixed_point_vol": [5.847],
         "vol_ref_price": [883.25],
         "carver_configured_one_way_spread_points": [2.4],
+        "carver_spread_pts": [0.13],
+        "ref_spread_pts": [None],
         "strategy_ref_configured_rolls_per_year": [12.0],
         "strategy_ref_ann_rolls": [12.0],
         "strategy_ref_roll_rate_source": ["configured_hold_cycle"],
@@ -1052,6 +1054,8 @@ def test_public_report_leads_with_primary_values_and_normalizes_spreads():
     assert report["ib_hspread_median_pts"][0] == pytest.approx(3.3)
     assert report["ib_hspread_p90_pts"][0] == pytest.approx(4.875)
     assert report["ref_spread_pts"][0] == pytest.approx(2.4)
+    assert "carver_spread_pts" not in report.columns
+    assert not any("carver_" in column for column in report.columns)
     assert report["comm"][0] == pytest.approx(2.5)
     assert report["comm_ccy"][0] == "CHF"
     assert report["comm_usd"][0] == pytest.approx(3.125)
