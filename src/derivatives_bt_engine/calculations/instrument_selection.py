@@ -988,7 +988,29 @@ class GreedyInstrumentSelector:
             )
         feasible_singletons = [score for score in singleton_scores if score.feasible]
         if not feasible_singletons:
-            raise ValueError("no candidate passed singleton granularity and liquidity")
+            reason_counts: dict[str, int] = {}
+            for score in singleton_scores:
+                for reason in score.reason.split(";"):
+                    if not reason:
+                        continue
+                    # A per-instrument reason is prefixed by its symbol. The
+                    # summary should group the actual failed policy gate.
+                    reason_name = (
+                        reason.split(":", 1)[1]
+                        if ":" in reason
+                        else reason.split(" ", 1)[0]
+                    )
+                    reason_counts[reason_name] = (
+                        reason_counts.get(reason_name, 0) + 1
+                    )
+            reason_summary = ", ".join(
+                f"{reason}={count}"
+                for reason, count in sorted(reason_counts.items())
+            )
+            raise ValueError(
+                "no candidate passed singleton granularity and liquidity; "
+                f"rejections: {reason_summary or 'unknown'}"
+            )
         singleton_trials = [
             (score.symbols[0], score) for score in feasible_singletons
         ]

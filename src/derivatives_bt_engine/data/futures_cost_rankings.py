@@ -759,13 +759,17 @@ def load_latest_market_report(
 
 
 def read_market_report(path: Path | str) -> pl.DataFrame:
-    """Read one market report and normalize legacy instrument identities.
+    """Read one market report and restore calculation-facing field names.
 
     Reports written before executable symbols were separated from history
     provider codes stored the provider code in ``symbol``. The reader upgrades
     those frames so every downstream selection output uses the current public
     contract: ``symbol`` is the executable key, ``pst_instr_code`` retains the
     provider identity, and ``signal_symbol`` identifies the signal market.
+
+    Current persisted reports use compact public margin names. Selection keeps
+    descriptive calculation names internally, so this boundary also restores
+    those aliases without changing the public Parquet schema.
     """
     report_path = Path(path)
     if report_path.suffix.lower() == ".parquet":
@@ -777,7 +781,33 @@ def read_market_report(path: Path | str) -> pl.DataFrame:
             f"Unsupported market report format {report_path.suffix!r}; "
             "expected .parquet or legacy .csv"
         )
+    report = normalize_report_calculation_columns(report)
     return normalize_report_instrument_identities(report)
+
+
+def normalize_report_calculation_columns(report: pl.DataFrame) -> pl.DataFrame:
+    """Restore descriptive internal aliases from compact public columns.
+
+    Public reports intentionally expose ``init_marg`` and ``maint_marg``.
+    Candidate construction and margin-limit calculations use their explicit
+    USD calculation names. Aliasing at the read boundary prevents a public
+    schema rename from silently dropping required sizing inputs later when the
+    compact candidate frame is projected.
+
+    Existing descriptive columns win so legacy calculation-facing reports
+    remain unchanged when both spellings are present.
+    """
+    public_to_internal = {
+        "init_marg": "init_margin_usd",
+        "maint_marg": "maint_margin_usd",
+        "marg_ccy": "margin_ccy",
+    }
+    aliases = [
+        pl.col(public).alias(internal)
+        for public, internal in public_to_internal.items()
+        if public in report.columns and internal not in report.columns
+    ]
+    return report.with_columns(aliases) if aliases else report
 
 
 def normalize_report_instrument_identities(
