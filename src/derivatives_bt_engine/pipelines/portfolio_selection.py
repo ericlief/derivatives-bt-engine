@@ -143,7 +143,7 @@ REPORT_TIMEZONE = ZoneInfo("America/Chicago")
 # Bump this when reference-curve or executable cash-curve semantics change.
 # The version is part of both the directory and content identity, allowing old
 # variants to remain on disk without being accepted by newer calculations.
-SELECTION_BACKTEST_CACHE_VERSION = 2
+SELECTION_BACKTEST_CACHE_VERSION = 1
 
 # Production-inspired ordinary-EWMAC template. The two slowest rules receive
 # 60% in total and the three faster rules receive 40%. Rules removed by the
