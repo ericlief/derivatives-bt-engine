@@ -421,19 +421,29 @@ def apply_selection_filters(
     )
 
     ref_cost_inputs = {
-        "ref_spread_pts",
         "ref_config_comm_usd",
         "mult",
         "cur_fx_to_usd",
         "ann_dvol",
     }
     if ref_cost_inputs.issubset(report.columns):
+        spread_fields = [
+            pl.col(name)
+            for name in ("ref_spread_pts", "carver_spread_pts")
+            if name in report.columns
+        ]
+        carver_spread = (
+            pl.coalesce(spread_fields)
+            if spread_fields
+            else pl.lit(None, dtype=pl.Float64)
+        )
         ref_spread_cost = (
-            pl.col("ref_spread_pts")
+            carver_spread
             * pl.col("mult")
             * pl.col("cur_fx_to_usd")
         )
         report = report.with_columns(
+            carver_spread.alias("ref_spread_pts"),
             (
                 (ref_spread_cost + pl.col("ref_config_comm_usd"))
                 / pl.col("ann_dvol")
