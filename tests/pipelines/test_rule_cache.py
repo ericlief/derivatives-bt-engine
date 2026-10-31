@@ -15,6 +15,7 @@ def test_rule_cache_parser_exposes_no_selection_scenario_parameters():
     ])
 
     assert parser.snapshot_input == Path("snapshot.parquet")
+    assert parser.max_snapshot_age_days == 30
     assert not hasattr(parser, "initial_capital_usd")
     assert not hasattr(parser, "target_vol")
     assert not hasattr(parser, "instrument_cost_limit_sr")
@@ -42,6 +43,7 @@ def test_rule_cache_forwards_only_historical_cache_inputs(monkeypatch):
     assert captured["rule_cache_only"] is True
     assert "--snapshot-input" in forwarded
     assert "--rule-cost-limit-sr" in forwarded
+    assert forwarded[forwarded.index("--max-snapshot-age-days") + 1] == "30"
     assert "--initial-capital-usd" not in forwarded
     assert "--target-vol" not in forwarded
     assert result.get_column("symbol").to_list() == ["MZC"]

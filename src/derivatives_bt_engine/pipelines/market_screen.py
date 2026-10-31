@@ -57,7 +57,7 @@ import math
 import os
 import re
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -3148,6 +3148,15 @@ def parse_args(argv=None, *, rule_cache_only: bool = False):
         ),
     )
     parser.add_argument(
+        "--max-snapshot-age-days",
+        type=int,
+        help=(
+            "Reject --snapshot-input when its embedded acquisition timestamp "
+            "is older than this many calendar days. futures-rule-cache sets "
+            "30 by default."
+        ),
+    )
+    parser.add_argument(
         "--snapshot-output",
         type=Path,
         help=(
@@ -3695,6 +3704,7 @@ def _order_market_public_columns(report: pl.DataFrame) -> pl.DataFrame:
         "comm_src",
         "init_marg_native",
         "init_marg",
+        "init_marg_ann_dvol_ratio",
         "maint_marg_native",
         "maint_marg",
         "margin_ccy",
@@ -3903,6 +3913,7 @@ def _emit_report(
         "comm_usd",
         "comm_src",
         "init_marg",
+        "init_marg_ann_dvol_ratio",
         "maint_marg",
         "whatif_elig",
         "whatif_reject_reason",
@@ -4307,8 +4318,17 @@ def _resolve_market_snapshot_path(path: Path) -> Path:
     return candidates[-1]
 
 
-def _load_market_snapshot(path: Path) -> pl.DataFrame:
-    """Load and minimally validate an exact or latest cached snapshot."""
+def _load_market_snapshot(
+    path: Path,
+    *,
+    max_age_days: int | None = None,
+) -> pl.DataFrame:
+    """Load and validate an exact or latest cached acquisition snapshot.
+
+    ``max_age_days`` is checked against the timestamp embedded in the
+    snapshot, not filesystem modification time. This keeps copied snapshots
+    from appearing fresh and makes the margin-to-risk calibration auditable.
+    """
     resolved = _resolve_market_snapshot_path(path)
     if resolved.suffix.lower() != ".parquet":
         raise ValueError("--snapshot-input must be a .parquet file")
@@ -4325,6 +4345,37 @@ def _load_market_snapshot(path: Path) -> pl.DataFrame:
         raise ValueError(
             f"market snapshot is missing required fields {missing}"
         )
+    if max_age_days is not None:
+        if max_age_days <= 0:
+            raise ValueError("--max-snapshot-age-days must be positive")
+        timestamp_column = "market_snapshot_generated_at_ct"
+        if timestamp_column not in snapshot.columns:
+            raise ValueError(
+                "market snapshot is missing its acquisition timestamp; "
+                "rebuild it before creating a rule cache"
+            )
+        timestamps = (
+            snapshot.get_column(timestamp_column).drop_nulls().unique().to_list()
+        )
+        if len(timestamps) != 1:
+            raise ValueError(
+                "market snapshot must contain one non-null acquisition timestamp"
+            )
+        acquired_at = timestamps[0]
+        if acquired_at.tzinfo is None:
+            acquired_at = acquired_at.replace(tzinfo=REPORT_TIMEZONE)
+        age = datetime.now(acquired_at.tzinfo) - acquired_at
+        if age < -timedelta(days=1):
+            raise ValueError(
+                "market snapshot acquisition timestamp is in the future: "
+                f"{acquired_at.isoformat()}"
+            )
+        if age > timedelta(days=max_age_days):
+            raise ValueError(
+                "market snapshot is stale for rule-cache calibration: "
+                f"acquired={acquired_at.isoformat()} age_days={age.days} "
+                f"max_age_days={max_age_days}"
+            )
     log.info(
         "futures_market_snapshot loaded input=%s rows=%d",
         resolved,
@@ -4332,6 +4383,39 @@ def _load_market_snapshot(path: Path) -> pl.DataFrame:
     )
     print(f"Using market snapshot {resolved}")
     return snapshot
+
+
+def _attach_margin_risk_calibration(report: pl.DataFrame) -> pl.DataFrame:
+    """Cache current initial margin per unit of annual dollar volatility.
+
+    The ratio is sourced entirely from one acquisition snapshot. Historical
+    selection later multiplies it by each review's point-in-time annual dollar
+    volatility, while live selection continues to use the snapshot's actual
+    one-contract margin dollars.
+    """
+    required = {
+        "ib_whatif_initial_margin_usd",
+        "annual_dollar_vol_per_contract",
+    }
+    if not required.issubset(report.columns):
+        return report
+    valid = (
+        pl.col("ib_whatif_initial_margin_usd").is_not_null()
+        & pl.col("ib_whatif_initial_margin_usd").is_finite()
+        & (pl.col("ib_whatif_initial_margin_usd") >= 0)
+        & pl.col("annual_dollar_vol_per_contract").is_not_null()
+        & pl.col("annual_dollar_vol_per_contract").is_finite()
+        & (pl.col("annual_dollar_vol_per_contract") > 0)
+    )
+    return report.with_columns(
+        pl.when(valid)
+        .then(
+            pl.col("ib_whatif_initial_margin_usd")
+            / pl.col("annual_dollar_vol_per_contract")
+        )
+        .otherwise(None)
+        .alias("initial_margin_to_annual_dollar_vol")
+    )
 
 
 def _restore_market_snapshot_columns(snapshot: pl.DataFrame) -> pl.DataFrame:
@@ -4452,6 +4536,11 @@ def run(
     fx_by_currency = reference_fx_by_currency
     if args.rule_cost_limit_sr <= 0:
         raise ValueError("--rule-cost-limit-sr must be positive")
+    if (
+        args.max_snapshot_age_days is not None
+        and args.max_snapshot_age_days <= 0
+    ):
+        raise ValueError("--max-snapshot-age-days must be positive")
     if args.affordability_target_vol <= 0:
         raise ValueError("--affordability-target-vol must be positive")
     if args.affordability_min_contracts <= 0:
@@ -4499,7 +4588,10 @@ def run(
         return _emit_market_snapshot(rows, args)
 
     if args.snapshot_input is not None:
-        snapshot = _load_market_snapshot(args.snapshot_input)
+        snapshot = _load_market_snapshot(
+            args.snapshot_input,
+            max_age_days=args.max_snapshot_age_days,
+        )
         rows = snapshot.to_dicts()
     elif args.offline:
         if pysystemtrade_provider is None:
@@ -4564,7 +4656,9 @@ def run(
         strategy_metrics_by_rule=strategy_metrics_by_rule,
         rule_cost_limit_sr=args.rule_cost_limit_sr,
     )
-    report = pl.DataFrame(rows, infer_schema_length=None)
+    report = _attach_margin_risk_calibration(
+        pl.DataFrame(rows, infer_schema_length=None)
+    )
     if rule_cache_only:
         report = _attach_rule_cache_ranks(report)
     else:

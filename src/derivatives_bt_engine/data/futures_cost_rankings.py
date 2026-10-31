@@ -7,6 +7,7 @@ capital, cost, size, liquidity, data, and execution gates from the cached
 market and rule inputs each time.
 """
 
+import re
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 
@@ -76,6 +77,8 @@ DEFAULT_VIEW_COLUMNS = (
     "comm_usd",
     "comm_src",
     "init_margin_usd",
+    "initial_margin_to_ann_dvol",
+    "snap_cache_ts_ct",
     "maint_margin_usd",
     "margin_ccy",
     "whatif_attempted",
@@ -187,11 +190,14 @@ SELECTION_CANDIDATE_COLUMNS = (
     "liq_elig",
     "trade_sr",
     "roll_sr",
+    "ref_trade_sr",
+    "ref_roll_sr",
     "comm",
     "comm_ccy",
     "comm_usd",
     "comm_src",
     "init_margin_usd",
+    "initial_margin_to_ann_dvol",
     "maint_margin_usd",
     "margin_ccy",
     "whatif_attempted",
@@ -205,8 +211,12 @@ SELECTION_CANDIDATE_COLUMNS = (
     "elig_ewmac_rule_count",
     "elig_ewmac_rules",
     "instr_has_elig_ewmac_rule",
+    "ref_elig_ewmac_rule_count",
+    "ref_elig_ewmac_rules",
+    "ref_instr_has_elig_ewmac_rule",
     "exec_elig",
     "selection_elig",
+    "snap_cache_ts_ct",
     "report_ts_ct",
 )
 
@@ -402,6 +412,36 @@ def apply_selection_filters(
         initial_capital * target_volatility * annual_trades / business_days
     )
 
+    ref_cost_inputs = {
+        "ref_spread_pts",
+        "ref_config_comm_usd",
+        "mult",
+        "cur_fx_to_usd",
+        "ann_dvol",
+    }
+    if ref_cost_inputs.issubset(report.columns):
+        ref_spread_cost = (
+            pl.col("ref_spread_pts")
+            * pl.col("mult")
+            * pl.col("cur_fx_to_usd")
+        )
+        report = report.with_columns(
+            (
+                (ref_spread_cost + pl.col("ref_config_comm_usd"))
+                / pl.col("ann_dvol")
+            ).alias("ref_trade_sr"),
+            (
+                (ref_spread_cost + 2.0 * pl.col("ref_config_comm_usd"))
+                / pl.col("ann_dvol")
+            ).alias("ref_roll_sr"),
+        )
+    else:
+        report = report.with_columns(
+            pl.lit(None, dtype=pl.Float64).alias("ref_trade_sr"),
+            pl.lit(None, dtype=pl.Float64).alias("ref_roll_sr"),
+        )
+    report = _attach_reference_rule_eligibility(report)
+
     filtered = report.with_columns(
         pl.lit(initial_capital).alias("init_cap_usd"),
         pl.lit(target_volatility).alias("target_vol"),
@@ -497,6 +537,65 @@ def apply_selection_filters(
         exclusions.append(",".join(reasons))
     return filtered.with_columns(
         pl.Series("selection_excl", exclusions, dtype=pl.String)
+    )
+
+
+def _attach_reference_rule_eligibility(report: pl.DataFrame) -> pl.DataFrame:
+    """Derive the frozen Carver-cost EWMAC rule subset for backtests.
+
+    The rule cache retains pooled turnover for each EWMAC speed. This function
+    recomputes affordability with Carver reference trade and roll SR rather
+    than reusing eligibility produced from current executable costs. Static
+    live selection keeps the original columns; scheduled selection aliases
+    these ``ref_*`` fields at its boundary.
+    """
+    pattern = re.compile(r"^ewmac_(\d+)_(\d+)_ann_trades$")
+    rule_columns: list[tuple[str, str]] = []
+    for column in report.columns:
+        matched = pattern.match(column)
+        if matched:
+            rule_columns.append(
+                (column, f"{int(matched.group(1))}/{int(matched.group(2))}")
+            )
+    rule_columns.sort(key=lambda item: int(item[1].split("/", 1)[0]))
+    required = {
+        "ref_trade_sr",
+        "ref_roll_sr",
+        "ref_ann_rolls",
+        "rule_cost_lim_sr",
+    }
+    if not rule_columns or not required.issubset(report.columns):
+        return report.with_columns(
+            pl.lit(None, dtype=pl.Int64).alias("ref_elig_ewmac_rule_count"),
+            pl.lit(None, dtype=pl.String).alias("ref_elig_ewmac_rules"),
+            pl.lit(None, dtype=pl.Boolean).alias(
+                "ref_instr_has_elig_ewmac_rule"
+            ),
+        )
+
+    eligibility: list[pl.Expr] = []
+    labels: list[pl.Expr] = []
+    for turnover_column, label in rule_columns:
+        annual_cost = (
+            pl.col("ref_trade_sr") * pl.col(turnover_column)
+            + pl.col("ref_roll_sr") * pl.col("ref_ann_rolls")
+        )
+        eligible = (
+            annual_cost.is_not_null()
+            & annual_cost.is_finite()
+            & (annual_cost <= pl.col("rule_cost_lim_sr"))
+        )
+        eligibility.append(eligible)
+        labels.append(pl.when(eligible).then(pl.lit(label)).otherwise(None))
+    count = pl.sum_horizontal(
+        expression.cast(pl.Int64) for expression in eligibility
+    )
+    return report.with_columns(
+        count.alias("ref_elig_ewmac_rule_count"),
+        pl.concat_str(labels, separator=",", ignore_nulls=True).alias(
+            "ref_elig_ewmac_rules"
+        ),
+        (count > 0).alias("ref_instr_has_elig_ewmac_rule"),
     )
 
 
@@ -630,21 +729,27 @@ def selection_rebalance_candidates(report: pl.DataFrame) -> pl.DataFrame:
     Scheduled selection must not begin from the candidates affordable at the
     initial account size: contracts rejected only by one-lot risk can become
     feasible after the account grows. This helper therefore applies only the
-    saved gates that do not depend on account capital: configured cost,
+    saved gates that do not depend on account capital: Carver reference cost,
     absolute contract volume, data, rule availability, execution permission,
-    and broker qualification. The selector later applies historical dollar
-    volatility, prior equity, portfolio liquidity, and margin limits at each
-    review date.
+    and broker qualification. Current live spread and commission eligibility
+    never controls a dated backtest review. The selector later applies
+    historical dollar volatility, prior equity, portfolio liquidity, and
+    margin limits at each review date.
 
     The returned schema matches :func:`selection_candidates`, including the
     configured Carver spread and commission fields used for historical fixed-
     cost calibration when they are present.
     """
+    if "ref_instr_has_elig_ewmac_rule" not in report.columns:
+        report = _attach_reference_rule_eligibility(report)
     required = {
-        "cost_elig",
+        "ref_trade_sr",
+        "ref_roll_sr",
+        "cost_lim_sr",
         "volume_elig",
         "data_elig",
-        "instr_has_elig_ewmac_rule",
+        "ref_instr_has_elig_ewmac_rule",
+        "ref_elig_ewmac_rules",
         "exec_elig",
         "ib_avail",
         "symbol",
@@ -659,14 +764,29 @@ def selection_rebalance_candidates(report: pl.DataFrame) -> pl.DataFrame:
         )
     selection_screen_config(report)
     gate = (
-        pl.col("cost_elig").fill_null(False)
+        pl.col("ref_trade_sr").is_not_null()
+        & pl.col("ref_trade_sr").is_finite()
+        & (pl.col("ref_trade_sr") <= pl.col("cost_lim_sr"))
+        & pl.col("ref_roll_sr").is_not_null()
+        & pl.col("ref_roll_sr").is_finite()
         & pl.col("volume_elig").fill_null(False)
         & pl.col("data_elig").fill_null(False)
-        & pl.col("instr_has_elig_ewmac_rule").fill_null(False)
+        & pl.col("ref_instr_has_elig_ewmac_rule").fill_null(False)
         & pl.col("exec_elig").fill_null(False)
         & (pl.col("ib_avail").fill_null("") == "contract_qualified")
     )
-    selected = report.filter(gate)
+    selected = report.filter(gate).with_columns(
+        # Complete historical selection consumes the ordinary cost columns.
+        # Replace them at this boundary so every downstream reference return,
+        # greedy score, and cash replay consistently uses Carver calibration.
+        pl.col("ref_trade_sr").alias("trade_sr"),
+        pl.col("ref_roll_sr").alias("roll_sr"),
+        pl.col("ref_elig_ewmac_rule_count").alias("elig_ewmac_rule_count"),
+        pl.col("ref_elig_ewmac_rules").alias("elig_ewmac_rules"),
+        pl.col("ref_instr_has_elig_ewmac_rule").alias(
+            "instr_has_elig_ewmac_rule"
+        ),
+    )
     columns = [
         name for name in SELECTION_CANDIDATE_COLUMNS
         if name in selected.columns
@@ -801,6 +921,7 @@ def normalize_report_calculation_columns(report: pl.DataFrame) -> pl.DataFrame:
         "init_marg": "init_margin_usd",
         "maint_marg": "maint_margin_usd",
         "marg_ccy": "margin_ccy",
+        "init_marg_ann_dvol_ratio": "initial_margin_to_ann_dvol",
     }
     aliases = [
         pl.col(public).alias(internal)

@@ -801,21 +801,28 @@ review; forecasts, volatility scaling, buffering, and contract rolls continue
 to update normally within that segment.
 
 Scheduled runs begin from the capital-flexible market universe rather than the
-contracts already affordable at initial capital. Saved cost, absolute-volume,
-data, rule, execution, and broker-qualification gates form that universe. A
+contracts already affordable at initial capital. Carver reference cost,
+absolute-volume, data, rule, execution, and broker-qualification gates form
+that universe; current live spread and commission eligibility does not. A
 contract rejected only by the initial one-lot risk test can therefore enter a
 later review after equity grows. Per-review historical annual dollar
 volatility, account capital, portfolio liquidity, contract granularity, and
 margin constraints are then applied by the greedy selector.
 
-Completed historical segments use Carver's configured one-way spread and
-commission calibration. Costs are divided by the review-date annual dollar
-volatility to obtain the selection SR cost; they are deliberately a fixed-cost
-backtest convention, not a reconstructed daily spread series. The final open
-segment uses the live executable-contract cost calibration persisted in the
-input market report. Consequently, a production-current run must first build a
-fresh live market snapshot/rule cache; the selection runner does not silently
-substitute an old cached contract for the live segment.
+Every dated backtest segment, including the final segment, uses Carver's
+configured one-way spread and commission calibration. Costs are divided by the
+review-date annual dollar volatility to obtain the selection SR cost; they are
+deliberately a fixed-cost backtest convention, not a reconstructed daily
+spread series. Current executable spread and commission remain inputs to a
+separate live/static selection and never leak backward into a scheduled run.
+
+The rule cache also freezes `init_marg_ann_dvol_ratio`, calculated as current
+IB initial margin divided by snapshot annual dollar volatility. At each dated
+review the ratio is multiplied by review-date annual dollar volatility to
+estimate one-contract historical margin. This replaces applying today's
+nominal margin dollars to every historical year. `futures-rule-cache` rejects
+an acquisition snapshot older than 30 days by default; copying an old file
+does not refresh its embedded timestamp.
 
 Membership changes share the existing execution state. A removed instrument
 earns the review day's move in the position held from the prior close, then is
@@ -937,6 +944,7 @@ Build the expensive, reusable historical rule/cost cache from that snapshot:
 ```bash
 futures-rule-cache \
   --snapshot-input results \
+  --max-snapshot-age-days 30 \
   --cost-ewmac-fast-spans 4,8,16,32,64 \
   --rule-cost-limit-sr 0.15 \
   --history-db /home/dev/fin/db/pysystemtrade_reference.duckdb \
@@ -947,7 +955,8 @@ Passing a directory to `--snapshot-input` selects its newest timestamped
 `*_market_snapshot_*.parquet`; passing a file pins exact-run reproduction. The
 result is `multi_speed_ewmac_rule_cache_<timestamp>.parquet`. It retains all market
 snapshot inputs plus pooled EWMAC turnover/cost statistics, `trade_sr`,
-`roll_sr`, `ref_ann_rolls`, and the eligible rule list. It deliberately has no
+`roll_sr`, `ref_ann_rolls`, `init_marg_ann_dvol_ratio`, and the eligible rule
+list. It deliberately has no
 `init_cap_usd`, `target_vol`, market-participation calculation, or final
 candidate flag.
 
@@ -1014,8 +1023,10 @@ more than `P%` of initial capital in margin during the complete selection.
 `--max-margin-pct` remains an alias for existing scripts. Each trial first
 calculates Carver's continuous maximum-forecast position, then rounds it to
 whole contracts with the allocator's deterministic half-up rule (`0.5` becomes
-one contract). It multiplies that `max_cons` value by IB's one-contract
-`init_margin_usd`. A position above the individual allowance is rejected as
+one contract). Static/live selection multiplies that `max_cons` value by IB's
+current one-contract `init_margin_usd`. Scheduled backtests instead multiply
+the cached `init_marg_ann_dvol_ratio` by review-date `ann_dvol` and use that
+estimated one-contract margin. A position above the individual allowance is rejected as
 `instrument_margin_limit`.
 
 The selector also tracks the sum of those rounded instrument margins as the

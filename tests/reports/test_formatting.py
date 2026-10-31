@@ -42,6 +42,7 @@ def test_round_public_report_keeps_reproduction_rates_at_six_places():
         "ann_pct_vol": [1.23456789],
         "con_px": [123.456789123],
         "trade_cost_pct": [-0.00012649],
+        "initial_margin_to_ann_dvol": [0.12345649],
     })
 
     rounded = round_public_report(report)
@@ -51,6 +52,7 @@ def test_round_public_report_keeps_reproduction_rates_at_six_places():
     assert rounded["ann_pct_vol"][0] == pytest.approx(1.234568)
     assert rounded["con_px"][0] == pytest.approx(123.456789)
     assert rounded["trade_cost_pct"][0] == pytest.approx(-0.000126)
+    assert rounded["initial_margin_to_ann_dvol"][0] == pytest.approx(0.123456)
 
 
 def test_cash_report_preserves_small_point_changes_and_pnl():

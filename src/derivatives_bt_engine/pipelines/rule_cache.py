@@ -57,6 +57,15 @@ def parse_args(argv=None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--max-snapshot-age-days",
+        type=int,
+        default=30,
+        help=(
+            "Maximum age of the acquisition snapshot used for current dollar "
+            "volatility and margin calibration (default: 30 days)."
+        ),
+    )
+    parser.add_argument(
         "--history-db",
         "--pysystemtrade-db",
         dest="history_db",
@@ -145,6 +154,8 @@ def run(argv=None) -> pl.DataFrame:
     forwarded = [
         "--snapshot-input",
         str(args.snapshot_input),
+        "--max-snapshot-age-days",
+        str(args.max_snapshot_age_days),
         "--pysystemtrade-db",
         str(args.history_db),
         "--pysystemtrade-pooling-mapping",

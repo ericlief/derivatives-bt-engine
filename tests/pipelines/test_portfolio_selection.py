@@ -271,8 +271,8 @@ def test_selection_rebalance_dates_use_first_available_session():
     ]
 
 
-def test_walk_forward_selection_uses_carver_then_live_cost_calibration():
-    """Completed segments use configured cost; the open segment uses live."""
+def test_walk_forward_selection_uses_carver_cost_and_margin_risk_calibration():
+    """Every dated review uses Carver cost and normalized historical margin."""
     args = parse_args([
         "--selection-rebalance",
         "monthly",
@@ -315,6 +315,7 @@ def test_walk_forward_selection_uses_carver_then_live_cost_calibration():
             "roll_sr": 0.02,
             "avg_daily_volume": 1_000.0,
             "init_margin_usd": 10.0,
+            "initial_margin_to_ann_dvol": 10.0 / 160.0,
             "ref_ann_rolls": 4.0,
             "ref_spread_pts": 0.1,
             "ref_config_comm_usd": 0.2,
@@ -339,10 +340,10 @@ def test_walk_forward_selection_uses_carver_then_live_cost_calibration():
     )
 
     historical = provider(date(2024, 1, 4), 1_000.0)
-    live = provider(date(2024, 2, 1), 1_000.0)
+    latest = provider(date(2024, 2, 1), 1_000.0)
 
     assert historical
-    assert live
+    assert latest
     assert all(
         row["trade_cost_per_con"] == pytest.approx(0.7)
         for row in historical.values()
@@ -352,12 +353,17 @@ def test_walk_forward_selection_uses_carver_then_live_cost_calibration():
         for row in historical.values()
     )
     assert all(
-        row["trade_cost_per_con"] == pytest.approx(1.6)
-        for row in live.values()
+        row["trade_cost_per_con"] == pytest.approx(0.7)
+        for row in latest.values()
     )
     assert all(
-        row["roll_cost_per_con"] == pytest.approx(3.2)
-        for row in live.values()
+        row["roll_cost_per_con"] == pytest.approx(0.9)
+        for row in latest.values()
+    )
+    assert all(
+        row["initial_margin_usd"] == pytest.approx(10.0)
+        for row in provider.review_instrument_rows
+        if row["selection_active"]
     )
     first_review_rows = [
         row for row in provider.review_instrument_rows
@@ -371,7 +377,7 @@ def test_walk_forward_selection_uses_carver_then_live_cost_calibration():
         historical
     )
     assert sum(bool(row["selection_active"]) for row in second_review_rows) == len(
-        live
+        latest
     )
     assert {row["selection_status"] for row in first_review_rows} == {"added"}
     assert all(row["selection_year"] == 2024 for row in first_review_rows)

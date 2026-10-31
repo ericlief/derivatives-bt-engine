@@ -143,7 +143,7 @@ REPORT_TIMEZONE = ZoneInfo("America/Chicago")
 # Bump this when reference-curve or executable cash-curve semantics change.
 # The version is part of both the directory and content identity, allowing old
 # variants to remain on disk without being accepted by newer calculations.
-SELECTION_BACKTEST_CACHE_VERSION = 1
+SELECTION_BACKTEST_CACHE_VERSION = 2
 
 # Production-inspired ordinary-EWMAC template. The two slowest rules receive
 # 60% in total and the three faster rules receive 40%. Rules removed by the
@@ -1144,12 +1144,13 @@ def _greedy_selector(
 class _WalkForwardSelectionProvider:
     """Rerun greedy selection on scheduled dates using only prior history.
 
-    Market spreads and commissions are fixed calibrations. Completed segments
-    use the saved Carver configured spread and commission; the final open
-    segment uses the current live-contract calibration saved in the market
-    report. Historical dollar volatility and correlations are cut strictly
-    before each review date, while the selector receives prior net equity from
-    the executable cash loop.
+    Every dated backtest segment uses saved Carver spread and commission
+    assumptions. Live snapshot costs never enter this provider. Historical
+    dollar volatility and correlations are cut strictly before each review
+    date, while the selector receives prior net equity from the executable
+    cash loop. One snapshot-cached margin-to-risk ratio converts each review's
+    point-in-time annual dollar volatility into an estimated margin per
+    contract; current nominal IB margin is reserved for live selection.
     """
 
     def __init__(
@@ -1164,9 +1165,6 @@ class _WalkForwardSelectionProvider:
     ) -> None:
         """Store immutable selection inputs and the review-date calendar."""
         self.review_dates = set(review_dates)
-        self.latest_review_date = (
-            max(self.review_dates) if self.review_dates else None
-        )
         self.source_rows = source_rows
         self.audit_by_symbol = audit_by_symbol
         self.reference_frames = reference_frames
@@ -1193,31 +1191,13 @@ class _WalkForwardSelectionProvider:
         *,
         row: dict[str, object],
         fx_to_usd: float,
-        use_live_calibration: bool,
-    ) -> tuple[float, float]:
-        """Return fixed one-way trade and complete-roll USD costs."""
-        current_ann_dvol = self._finite(row.get("ann_dvol"))
-        current_trade_sr = self._finite(row.get("trade_sr"))
-        current_roll_sr = self._finite(row.get("roll_sr"))
-        current_trade_cost = (
-            current_ann_dvol * current_trade_sr
-            if current_ann_dvol is not None
-            and current_trade_sr is not None
-            else None
-        )
-        current_roll_cost = (
-            current_ann_dvol * current_roll_sr
-            if current_ann_dvol is not None
-            and current_roll_sr is not None
-            else None
-        )
-        if use_live_calibration:
-            if current_trade_cost is None or current_roll_cost is None:
-                raise ValueError(
-                    f"{row.get('symbol')}: live cost calibration is incomplete"
-                )
-            return current_trade_cost, current_roll_cost
+    ) -> tuple[float, float] | None:
+        """Return Carver one-way trade and complete-roll USD costs.
 
+        Missing reference calibration excludes only that candidate from the
+        dated review. It never falls back to current snapshot spread or
+        commission, which would leak the live execution state backward.
+        """
         spread_points = self._finite(row.get("ref_spread_pts"))
         commission_usd = self._finite(row.get("ref_config_comm_usd"))
         multiplier = self._finite(row.get("mult"))
@@ -1231,11 +1211,7 @@ class _WalkForwardSelectionProvider:
                 spread_cash_usd + commission_usd,
                 spread_cash_usd + 2.0 * commission_usd,
             )
-        if current_trade_cost is None or current_roll_cost is None:
-            raise ValueError(
-                f"{row.get('symbol')}: historical fixed cost calibration is incomplete"
-            )
-        return current_trade_cost, current_roll_cost
+        return None
 
     def __call__(
         self,
@@ -1289,7 +1265,9 @@ class _WalkForwardSelectionProvider:
             fx_to_usd = self._finite(latest["fx_to_usd"][0])
             turnover = self._finite(audit.get("comb_turnover"))
             average_volume = self._finite(row.get("avg_daily_volume"))
-            initial_margin = self._finite(row.get("init_margin_usd"))
+            margin_to_ann_dvol = self._finite(
+                row.get("initial_margin_to_ann_dvol")
+            )
             ann_rolls = self._finite(row.get("ref_ann_rolls"))
             if (
                 daily_dollar_vol is None
@@ -1305,13 +1283,41 @@ class _WalkForwardSelectionProvider:
             annual_dollar_vol = (
                 daily_dollar_vol * math.sqrt(MIXED_VOL_ANNUALIZATION_DAYS)
             )
-            trade_cost, roll_cost = self._costs(
+            costs = self._costs(
                 row=row,
                 fx_to_usd=fx_to_usd,
-                use_live_calibration=review_date == self.latest_review_date,
             )
+            if costs is None:
+                logger.debug(
+                    "walk_forward_selection candidate_rejected date=%s "
+                    "symbol=%s reason=carver_cost_unavailable",
+                    review_date,
+                    symbol,
+                )
+                continue
+            trade_cost, roll_cost = costs
             trade_sr = trade_cost / annual_dollar_vol
             if trade_sr > float(self.run_config["cost_lim_sr"]):
+                continue
+            initial_margin = (
+                margin_to_ann_dvol * annual_dollar_vol
+                if margin_to_ann_dvol is not None
+                and margin_to_ann_dvol >= 0
+                else None
+            )
+            if (
+                initial_margin is None
+                and (
+                    self.args.max_instr_margin_pct is not None
+                    or self.args.max_book_margin_pct is not None
+                )
+            ):
+                logger.debug(
+                    "walk_forward_selection candidate_rejected date=%s "
+                    "symbol=%s reason=margin_risk_calibration_unavailable",
+                    review_date,
+                    symbol,
+                )
                 continue
             candidate = SelectionCandidate(
                 symbol=symbol,
@@ -1434,6 +1440,15 @@ class _WalkForwardSelectionProvider:
                 "ann_dvol": candidate.ann_dvol if candidate else None,
                 "trade_sr": candidate.trade_sr if candidate else None,
                 "roll_sr": candidate.roll_sr if candidate else None,
+                "initial_margin_to_ann_dvol": (
+                    self._finite(source.get("initial_margin_to_ann_dvol"))
+                ),
+                "margin_calibration_timestamp": source.get(
+                    "snap_cache_ts_ct"
+                ),
+                "initial_margin_usd": (
+                    candidate.initial_margin_usd if candidate else None
+                ),
                 "comb_turnover": audit.get("comb_turnover"),
                 "ann_trade_cost_sr": (
                     candidate.annual_trade_cost_sr if candidate else None
@@ -1502,6 +1517,16 @@ def _final_selection_frame(
             "score_tie_tolerance_percent": args.score_tie_tolerance_percent,
             "tie_ref_book_count": args.tie_reference_book_count,
             "roll_cost_in_score": args.include_roll_cost_in_score,
+            "selection_cost_source": (
+                "live_snapshot"
+                if args.selection_rebalance == "static"
+                else "carver_frozen"
+            ),
+            "selection_margin_source": (
+                "live_snapshot"
+                if args.selection_rebalance == "static"
+                else "snapshot_margin_to_ann_dvol"
+            ),
             "buffer_size": args.buffer_size,
             "buffer_trade_to_edge": args.buffer_trade_to_edge,
             "rebalance_on_roll": args.rebalance_on_roll,
@@ -1513,6 +1538,12 @@ def _final_selection_frame(
             "band_contract_weight": selection.final_score.band_contract_weight,
             "high_contract_weight": selection.final_score.high_contract_weight,
             "ann_dvol": candidate.ann_dvol,
+            "initial_margin_to_ann_dvol": source_rows[symbol].get(
+                "initial_margin_to_ann_dvol"
+            ),
+            "margin_calibration_timestamp": source_rows[symbol].get(
+                "snap_cache_ts_ct"
+            ),
             "trade_sr": candidate.trade_sr,
             "roll_sr": candidate.roll_sr,
             "comb_turnover": candidate.combined_turnover,
@@ -3207,6 +3238,19 @@ def run(
         if args.selection_rebalance == "static"
         else selection_rebalance_candidates(report)
     )
+    if (
+        args.selection_rebalance != "static"
+        and (
+            args.max_instr_margin_pct is not None
+            or args.max_book_margin_pct is not None
+        )
+        and "initial_margin_to_ann_dvol" not in selected.columns
+    ):
+        raise ValueError(
+            "scheduled margin limits require init_marg_ann_dvol_ratio from "
+            "a current futures-rule-cache; rebuild the cache from a market "
+            "snapshot no older than 30 days"
+        )
     selected_symbols = set(selected.get_column("symbol").to_list())
     for row in report.select(
         name

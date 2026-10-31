@@ -1253,6 +1253,41 @@ def test_market_snapshot_promotes_what_if_commission_and_demotes_reference(
     assert restored["ib_availability"][0] == "contract_qualified"
 
 
+def test_rule_cache_calibrates_margin_to_snapshot_annual_dollar_volatility():
+    """Historical margin calibration is a cached dimensionless risk ratio."""
+    report = futures_cost_risk._attach_margin_risk_calibration(pl.DataFrame({
+        "symbol": ["MES", "BAD"],
+        "ib_whatif_initial_margin_usd": [3_500.0, 1_000.0],
+        "annual_dollar_vol_per_contract": [7_000.0, 0.0],
+    }))
+
+    assert report["initial_margin_to_annual_dollar_vol"][0] == pytest.approx(
+        0.5
+    )
+    assert report["initial_margin_to_annual_dollar_vol"][1] is None
+
+
+def test_rule_cache_rejects_stale_margin_calibration_snapshot(tmp_path):
+    """Snapshot copies retain acquisition age instead of using file mtime."""
+    snapshot_path = tmp_path / "futures_market_snapshot_20200101_000000.parquet"
+    pl.DataFrame({
+        "symbol": ["MES"],
+        "annual_dollar_vol_per_contract": [7_000.0],
+        "avg_daily_volume_contracts": [100_000.0],
+        "selected_one_way_spread_points": [0.25],
+        "ib_availability": ["contract_qualified"],
+        "market_snapshot_generated_at_ct": [
+            datetime.now(timezone.utc) - timedelta(days=31)
+        ],
+    }).write_parquet(snapshot_path)
+
+    with pytest.raises(ValueError, match="snapshot is stale"):
+        futures_cost_risk._load_market_snapshot(
+            snapshot_path,
+            max_age_days=30,
+        )
+
+
 def test_public_report_prefers_recalculated_commission_over_snapshot_alias():
     """A cached display alias must not duplicate or override screen costs."""
     report = futures_cost_risk._public_report_schema(pl.DataFrame({

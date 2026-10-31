@@ -61,9 +61,14 @@ PUBLIC_REPORT_RENAMES = {
     "selection_symbols": "sel_symbols",
     "selection_added_symbols": "sel_added",
     "selection_removed_symbols": "sel_removed",
+    "selection_cost_source": "sel_cost_src",
+    "selection_margin_source": "sel_marg_src",
+    "margin_calibration_timestamp": "marg_calib_ts",
     "initial_capital_volatility_scalar": "init_vol_scalar",
     "maximum_instrument_margin_usd": "max_instr_marg",
     "book_margin_at_maximum_usd": "book_marg_at_max",
+    "initial_margin_to_annual_dollar_vol": "init_marg_ann_dvol_ratio",
+    "initial_margin_to_ann_dvol": "init_marg_ann_dvol_ratio",
     "trade_cost_usd_per_con": "trade_cost_per_con",
     "roll_cost_usd_per_con": "roll_cost_per_con",
     "ann_trade_cost_usd": "ann_trade_cost",
@@ -713,6 +718,9 @@ SIX_DECIMAL_COLUMNS = {
     "hist_ann_vol_pct",
     "hist_sharpe",
     "hist_iid_t_stat",
+    "initial_margin_to_annual_dollar_vol",
+    "initial_margin_to_ann_dvol",
+    "init_marg_ann_dvol_ratio",
 }
 
 
