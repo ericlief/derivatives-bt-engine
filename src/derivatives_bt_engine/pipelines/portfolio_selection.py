@@ -34,18 +34,28 @@ dataframe collections:
 
 The command persists each intermediate form so forecast gaps, turnover, and
 greedy selection decisions remain inspectable after a run.
+
+Large per-symbol historical reference bases, cost-applied references,
+stitched references, and executable cash curves live in a versioned
+content-addressed cache below ``--history-cache-root``. Their identities
+include the history sources and only the effective calculation and selection
+values that affect each artifact. This permits several variants to coexist
+and avoids invalidation from an otherwise equivalent newly written market
+snapshot.
 """
 
 from __future__ import annotations
 
 import argparse
 import gc
+import hashlib
 import json
 import logging
 import math
-import tempfile
+import os
+import re
 from collections.abc import Iterable
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -67,7 +77,6 @@ from derivatives_bt_engine.data.fx_history import (
 )
 from derivatives_bt_engine.strats.multi_speed_ewmac import (
     build_ewmac_component_frame,
-    load_ewmac_component_frames,
     load_pooled_ewmac_rules,
 )
 from derivatives_bt_engine.reports.formatting import (
@@ -94,6 +103,7 @@ from derivatives_bt_engine.data.futures_history import (
     DEFAULT_GLOBEX_DB_PATH,
     DEFAULT_PYSYSTEMTRADE_DB_PATH,
     FuturesHistory,
+    PysystemtradeHistoryProvider,
 )
 from derivatives_bt_engine.data.ib_futures_dataloader import (
     DEFAULT_BROKER_MAPPING_PATH,
@@ -130,6 +140,11 @@ from derivatives_bt_engine.logging_config import setup_logger
 logger = logging.getLogger(__name__)
 REPORT_TIMEZONE = ZoneInfo("America/Chicago")
 
+# Bump this when reference-curve or executable cash-curve semantics change.
+# The version is part of both the directory and content identity, allowing old
+# variants to remain on disk without being accepted by newer calculations.
+SELECTION_BACKTEST_CACHE_VERSION = 1
+
 # Production-inspired ordinary-EWMAC template. The two slowest rules receive
 # 60% in total and the three faster rules receive 40%. Rules removed by the
 # Market-screen cost ceiling are set to zero and the survivors are renormalised.
@@ -140,6 +155,180 @@ EWMAC_SLOW_TILT_60_40 = {
     "32/128": 0.30,
     "64/256": 0.30,
 }
+
+
+def _selection_cache_file_fingerprint(path: Path | str) -> dict[str, object]:
+    """Return the local-file identity used by derived backtest cache keys.
+
+    The absolute path distinguishes intentionally separate datasets, while
+    size and nanosecond modification time invalidate derived curves when the
+    database contents change in place.
+    """
+    resolved = Path(path).expanduser().resolve()
+    stat = resolved.stat()
+    return {
+        "path": str(resolved),
+        "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+    }
+
+
+def _selection_cache_json_value(value: object) -> object:
+    """Normalize cache identity values to stable JSON-compatible primitives."""
+    if isinstance(value, dict):
+        return {
+            str(key): _selection_cache_json_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_selection_cache_json_value(item) for item in value]
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    if isinstance(value, Path):
+        return str(value.expanduser().resolve())
+    if isinstance(value, np.generic):
+        return _selection_cache_json_value(value.item())
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError("selection backtest cache identity must be finite")
+    return value
+
+
+def _selection_backtest_cache_artifact(
+    cache_root: Path | str,
+    *,
+    artifact: str,
+    symbol: str,
+    identity: dict[str, object],
+) -> tuple[Path, Path, dict[str, object], str]:
+    """Resolve one versioned, content-addressed backtest curve artifact.
+
+    Parameters are serialized into a stable digest. Each digest gets its own
+    directory, so several sizing, forecast, cost, and buffer variants can
+    coexist and an identical later run can reuse the matching Parquet curve.
+
+    Returns the curve path, manifest path, complete identity, and cache key.
+    """
+    complete_identity = _selection_cache_json_value({
+        "cache_version": SELECTION_BACKTEST_CACHE_VERSION,
+        "artifact": artifact,
+        **identity,
+    })
+    if not isinstance(complete_identity, dict):
+        raise TypeError("selection backtest cache identity must be a mapping")
+    serialized = json.dumps(
+        complete_identity,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    cache_key = hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:24]
+    safe_symbol = re.sub(r"[^A-Za-z0-9_.-]+", "_", symbol)
+    directory = (
+        Path(cache_root).expanduser().resolve()
+        / "selection_backtest"
+        / f"v{SELECTION_BACKTEST_CACHE_VERSION}"
+        / artifact
+        / safe_symbol
+        / cache_key
+    )
+    return (
+        directory / "curve.parquet",
+        directory / "manifest.json",
+        complete_identity,
+        cache_key,
+    )
+
+
+def _load_selection_backtest_curve(
+    curve_path: Path,
+    manifest_path: Path,
+    *,
+    expected_identity: dict[str, object],
+    required_columns: Iterable[str],
+) -> tuple[pl.DataFrame, dict[str, object]] | None:
+    """Load a completed curve variant or reject an incomplete/corrupt entry."""
+    if not curve_path.is_file() or not manifest_path.is_file():
+        return None
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("identity") != expected_identity:
+            logger.info(
+                "selection_backtest_cache rejected reason=identity_mismatch "
+                "path=%s",
+                curve_path,
+            )
+            return None
+        curve = pl.read_parquet(curve_path)
+        missing = sorted(set(required_columns).difference(curve.columns))
+        if missing:
+            logger.info(
+                "selection_backtest_cache rejected reason=missing_columns "
+                "path=%s columns=%s",
+                curve_path,
+                ",".join(missing),
+            )
+            return None
+        return curve, manifest
+    except (
+        OSError,
+        ValueError,
+        TypeError,
+        json.JSONDecodeError,
+        pl.exceptions.PolarsError,
+    ) as exc:
+        logger.warning(
+            "selection_backtest_cache rejected reason=read_error path=%s "
+            "error=%s",
+            curve_path,
+            exc,
+        )
+        return None
+
+
+def _write_selection_backtest_curve(
+    frame: pl.DataFrame,
+    curve_path: Path,
+    manifest_path: Path,
+    *,
+    identity: dict[str, object],
+    cache_key: str,
+    metadata: dict[str, object] | None = None,
+) -> None:
+    """Atomically persist a curve and publish its manifest as completion flag."""
+    curve_path.parent.mkdir(parents=True, exist_ok=True)
+    suffix = f".{os.getpid()}.tmp"
+    temporary_curve = curve_path.with_name(curve_path.name + suffix)
+    temporary_manifest = manifest_path.with_name(manifest_path.name + suffix)
+    frame.write_parquet(temporary_curve)
+    os.replace(temporary_curve, curve_path)
+    manifest = _selection_cache_json_value({
+        "cache_key": cache_key,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "identity": identity,
+        **(metadata or {}),
+    })
+    if not isinstance(manifest, dict):
+        raise TypeError("selection backtest cache manifest must be a mapping")
+    temporary_manifest.write_text(
+        json.dumps(manifest, sort_keys=True, indent=2, allow_nan=False) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(temporary_manifest, manifest_path)
+
+
+def _cached_forecast_audit(
+    manifest: dict[str, object],
+) -> dict[str, object] | None:
+    """Restore typed forecast-audit values from a curve cache manifest."""
+    value = manifest.get("forecast_audit")
+    if not isinstance(value, dict):
+        return None
+    audit = dict(value)
+    for column in ("forecast_start", "forecast_end"):
+        cached_date = audit.get(column)
+        if isinstance(cached_date, str):
+            audit[column] = date.fromisoformat(cached_date)
+    return audit
 
 
 def slow_tilt_ewmac_weights(
@@ -354,7 +543,10 @@ def parse_args(argv=None, *, complete_default: bool = False):
         "--history-cache-root",
         type=Path,
         default=DEFAULT_FUTURES_CACHE_ROOT,
-        help="Parquet cache root for final stitched history views.",
+        help=(
+            "Parquet cache root for final stitched histories and versioned "
+            "selection backtest curves."
+        ),
     )
     parser.add_argument(
         "--max-source-gap-days",
@@ -1254,18 +1446,21 @@ def _run_complete_selection(
         output_dir
         / f"multi_speed_ewmac_selection_subsystem_reference_returns_{stamp}.parquet"
     )
-    work_parent = (
-        args.history_cache_root.expanduser().resolve() / "selection_work"
+    backtest_cache_root = args.history_cache_root.expanduser().resolve()
+    history_db_path = args.history_db.expanduser().resolve()
+    history_db_identity = _selection_cache_file_fingerprint(history_db_path)
+    logger.info(
+        "selection_backtest_cache root=%s version=%d",
+        backtest_cache_root / "selection_backtest",
+        SELECTION_BACKTEST_CACHE_VERSION,
     )
-    work_parent.mkdir(parents=True, exist_ok=True)
-    work_tempdir = tempfile.TemporaryDirectory(
-        prefix=f"run_{stamp}_",
-        dir=work_parent,
-    )
-    work_dir = Path(work_tempdir.name)
-    frames_by_history = load_ewmac_component_frames(
-        selected.get_column("hist_instr_code").drop_nulls().to_list(),
-        db_path=args.history_db.expanduser().resolve(),
+    # Load a component history only when its derived reference base misses.
+    # A daily snapshot run whose rule/history identities are already cached
+    # therefore avoids materializing the full EWMAC history universe.
+    frames_by_history: dict[str, pl.DataFrame] = {}
+    pooled_reference_rules = None
+    reference_history_provider = PysystemtradeHistoryProvider(
+        db_path=history_db_path
     )
     # v1.0 deliberately fixes the rule mix and FDM. Estimating one FDM from
     # the completed sample would make every historical combined forecast depend
@@ -1289,23 +1484,23 @@ def _run_complete_selection(
     # MZC and CORN_mini can point to the same raw history but remain separate
     # because their eligible rules and transaction costs can differ.
     subsystem_reference_frames: dict[str, pl.LazyFrame] = {}
+    reference_base_frames: dict[str, pl.LazyFrame] = {}
+    # The derived artifact key follows each frame into the stitched and cash
+    # stages. Downstream keys can therefore depend on the exact upstream curve
+    # without restating or accidentally omitting one of its inputs.
+    reference_cache_keys: dict[str, str] = {}
+    reference_base_cache_keys: dict[str, str] = {}
     # Historical FX is identical for every instrument in a currency. Cache it
     # at the pipeline boundary instead of reopening DuckDB for every symbol.
     fx_history_by_currency: dict[str, pl.DataFrame | None] = {}
     # Preserve each compact candidate row for later sizing and liquidity inputs.
     source_rows: dict[str, dict[str, object]] = {}
-    for symbol_index, row in enumerate(selected.iter_rows(named=True), start=1):
+    for row in selected.iter_rows(named=True):
         symbol = str(row["symbol"])
         source_rows[symbol] = row
         rules = _parse_rules(str(row["elig_ewmac_rules"] or ""))
-        # Convert the shared history frame into this executable symbol's
-        # subsystem by combining only the rules that passed its cost ceiling.
-        result = engine.combine(
-            frames_by_history[str(row["hist_instr_code"])],
-            rules,
-            forecast_correlation,
-            correlation_rules,
-        )
+        forecast_weights = slow_tilt_ewmac_weights(rules)
+        forecast_fdm = float(args.forecast_fdm)
         required_cost_fields = ("trade_sr", "roll_sr", "ref_ann_rolls", "mult")
         missing_cost_fields = [
             name for name in required_cost_fields if row.get(name) is None
@@ -1322,66 +1517,270 @@ def _run_complete_selection(
             )
 
         currency = str(row["ccy"]).upper()
-        fx_error = ""
-        if currency not in fx_history_by_currency:
-            try:
-                fx_history_by_currency[currency] = (
-                    None if currency == "USD" else load_fx_to_usd_history(
-                        currency,
-                        db_path=args.history_db.expanduser().resolve(),
-                    )
+        reference_base_identity = {
+            "symbol": symbol,
+            "hist_instr_code": str(row["hist_instr_code"]),
+            "history_db": history_db_identity,
+            "currency": currency,
+            "eligible_rules": rules,
+            "forecast_weights": forecast_weights,
+            "forecast_fdm": forecast_fdm,
+            "min_forecast_obs": args.min_forecast_obs,
+            "capital": float(run_config["init_cap_usd"]),
+            "target_vol": float(run_config["target_vol"]),
+            "reference_book_count": args.tie_reference_book_count,
+            "reference_idm": GreedySelectionConfig.max_idm,
+            "max_weight_idm": args.max_weight_idm,
+            "multiplier": float(row["mult"]),
+            "target_abs_forecast": engine.config.target_abs_forecast,
+        }
+        (
+            reference_base_path,
+            reference_base_manifest_path,
+            complete_reference_base_identity,
+            reference_base_cache_key,
+        ) = _selection_backtest_cache_artifact(
+            backtest_cache_root,
+            artifact="reference_base",
+            symbol=symbol,
+            identity=reference_base_identity,
+        )
+        reference_identity = {
+            "symbol": symbol,
+            "reference_base_cache_key": reference_base_cache_key,
+            "trade_sr": float(row["trade_sr"]),
+            "roll_sr": float(row["roll_sr"]),
+            "ann_rolls": float(row["ref_ann_rolls"]),
+        }
+        (
+            reference_path,
+            reference_manifest_path,
+            complete_reference_identity,
+            reference_cache_key,
+        ) = _selection_backtest_cache_artifact(
+            backtest_cache_root,
+            artifact="reference",
+            symbol=symbol,
+            identity=reference_identity,
+        )
+        cached_reference = _load_selection_backtest_curve(
+            reference_path,
+            reference_manifest_path,
+            expected_identity=complete_reference_identity,
+            required_columns=(
+                "date",
+                "comb_fcst",
+                "fcst_valid",
+                "fx_to_usd",
+                "daily_dvol",
+                "ref_return_valid",
+                "ref_net_pct",
+                "ann_cost_sr",
+            ),
+        )
+        cached_reference_audit = (
+            _cached_forecast_audit(cached_reference[1])
+            if cached_reference is not None
+            else None
+        )
+        applied_reference_cache_hit = bool(
+            cached_reference is not None
+            and "combined_turnover" in cached_reference[1]
+            and cached_reference_audit is not None
+            and reference_base_path.is_file()
+            and reference_base_manifest_path.is_file()
+        )
+        if applied_reference_cache_hit:
+            assert cached_reference is not None
+            assert cached_reference_audit is not None
+            reference_frame, reference_manifest = cached_reference
+            forecast_audit = cached_reference_audit
+            combined_turnover_value = reference_manifest["combined_turnover"]
+            combined_turnover = (
+                None
+                if combined_turnover_value is None
+                else float(combined_turnover_value)
+            )
+            fx_error = str(reference_manifest.get("fx_error") or "")
+            logger.info(
+                "selection_backtest_cache hit artifact=reference symbol=%s "
+                "key=%s path=%s",
+                symbol,
+                reference_cache_key,
+                reference_path,
+            )
+        else:
+            cached_reference_base = _load_selection_backtest_curve(
+                reference_base_path,
+                reference_base_manifest_path,
+                expected_identity=complete_reference_base_identity,
+                required_columns=(
+                    "date",
+                    "comb_fcst",
+                    "fcst_valid",
+                    "fx_to_usd",
+                    "daily_dvol",
+                    "ref_return_valid",
+                    "ref_net_pct",
+                ),
+            )
+            cached_reference_base_audit = (
+                _cached_forecast_audit(cached_reference_base[1])
+                if cached_reference_base is not None
+                else None
+            )
+            base_cache_hit = bool(
+                cached_reference_base is not None
+                and "combined_turnover" in cached_reference_base[1]
+                and cached_reference_base_audit is not None
+            )
+            if base_cache_hit:
+                assert cached_reference_base is not None
+                assert cached_reference_base_audit is not None
+                reference_base_frame, reference_base_manifest = (
+                    cached_reference_base
                 )
-            except (ValueError, OSError) as exc:
-                fx_history_by_currency[currency] = None
-                fx_error = str(exc)
-        try:
-            fx_frame = align_fx_to_history(
-                result.frame,
-                currency,
-                fx_history=fx_history_by_currency[currency],
-                db_path=args.history_db.expanduser().resolve(),
-            )
-        except (ValueError, OSError) as exc:
-            # Keep the symbol in the audit even when its FX history is absent.
-            # Null conversions make the downstream P&L gate fail explicitly.
-            fx_error = str(exc)
-            fx_frame = result.frame.with_columns(
-                pl.lit(None, dtype=pl.Float64).alias("fx_to_usd"),
-                pl.lit(f"{currency}USD").alias("fx_pair"),
-                pl.lit(None, dtype=pl.Date).alias("fx_date"),
-                pl.lit(None, dtype=pl.Datetime("us")).alias("fx_source_ts"),
-                pl.lit(None, dtype=pl.String).alias("fx_src"),
-            )
-        reference_frame = build_subsystem_reference_return_curve(
-            fx_frame,
-            capital=float(run_config["init_cap_usd"]),
-            target_vol=float(run_config["target_vol"]),
-            reference_book_count=args.tie_reference_book_count,
-            reference_idm=GreedySelectionConfig.max_idm,
-            max_weight_idm=args.max_weight_idm,
-            multiplier=float(row["mult"]),
-            # Turnover must be measured from these sized positions before its
-            # SR cost can be known. The zero placeholder is replaced below.
-            ann_cost_sr=0.0,
-            target_abs_forecast=engine.config.target_abs_forecast,
-        )
-        reference_frame, combined_turnover = (
-            append_reference_position_turnover(reference_frame)
-        )
+                forecast_audit = cached_reference_base_audit
+                combined_turnover_value = reference_base_manifest[
+                    "combined_turnover"
+                ]
+                combined_turnover = (
+                    None
+                    if combined_turnover_value is None
+                    else float(combined_turnover_value)
+                )
+                fx_error = str(reference_base_manifest.get("fx_error") or "")
+                logger.info(
+                    "selection_backtest_cache hit artifact=reference_base "
+                    "symbol=%s key=%s path=%s",
+                    symbol,
+                    reference_base_cache_key,
+                    reference_base_path,
+                )
+            else:
+                # Only a true history-base miss combines the component rules.
+                # Snapshot-only reruns reuse the cached forecast and audit.
+                history_code = str(row["hist_instr_code"])
+                if history_code not in frames_by_history:
+                    if pooled_reference_rules is None:
+                        pooled_reference_rules = load_pooled_ewmac_rules(
+                            db_path=history_db_path,
+                        )
+                    frames_by_history[history_code] = build_ewmac_component_frame(
+                        reference_history_provider.load(history_code),
+                        pooled_reference_rules,
+                    )
+                result = engine.combine(
+                    frames_by_history[history_code],
+                    rules,
+                    forecast_correlation,
+                    correlation_rules,
+                )
+                forecast_audit = result.audit
+                fx_error = ""
+                if currency not in fx_history_by_currency:
+                    try:
+                        fx_history_by_currency[currency] = (
+                            None
+                            if currency == "USD"
+                            else load_fx_to_usd_history(
+                                currency,
+                                db_path=history_db_path,
+                            )
+                        )
+                    except (ValueError, OSError) as exc:
+                        fx_history_by_currency[currency] = None
+                        fx_error = str(exc)
+                try:
+                    fx_frame = align_fx_to_history(
+                        result.frame,
+                        currency,
+                        fx_history=fx_history_by_currency[currency],
+                        db_path=history_db_path,
+                    )
+                except (ValueError, OSError) as exc:
+                    # Preserve forecast rows in the audit when FX is absent.
+                    # Null conversions make the P&L gate fail explicitly.
+                    fx_error = str(exc)
+                    fx_frame = result.frame.with_columns(
+                        pl.lit(None, dtype=pl.Float64).alias("fx_to_usd"),
+                        pl.lit(f"{currency}USD").alias("fx_pair"),
+                        pl.lit(None, dtype=pl.Date).alias("fx_date"),
+                        pl.lit(None, dtype=pl.Datetime("us")).alias(
+                            "fx_source_ts"
+                        ),
+                        pl.lit(None, dtype=pl.String).alias("fx_src"),
+                    )
+                reference_base_frame = build_subsystem_reference_return_curve(
+                    fx_frame,
+                    capital=float(run_config["init_cap_usd"]),
+                    target_vol=float(run_config["target_vol"]),
+                    reference_book_count=args.tie_reference_book_count,
+                    reference_idm=GreedySelectionConfig.max_idm,
+                    max_weight_idm=args.max_weight_idm,
+                    multiplier=float(row["mult"]),
+                    ann_cost_sr=0.0,
+                    target_abs_forecast=engine.config.target_abs_forecast,
+                )
+                reference_base_frame, combined_turnover = (
+                    append_reference_position_turnover(reference_base_frame)
+                )
+                _write_selection_backtest_curve(
+                    reference_base_frame,
+                    reference_base_path,
+                    reference_base_manifest_path,
+                    identity=complete_reference_base_identity,
+                    cache_key=reference_base_cache_key,
+                    metadata={
+                        "combined_turnover": combined_turnover,
+                        "fx_error": fx_error,
+                        "forecast_audit": forecast_audit,
+                    },
+                )
+                logger.info(
+                    "selection_backtest_cache write artifact=reference_base "
+                    "symbol=%s key=%s rows=%d path=%s",
+                    symbol,
+                    reference_base_cache_key,
+                    reference_base_frame.height,
+                    reference_base_path,
+                )
         annual_cost = calculate_annual_sr_cost(
             trade_sr=float(row["trade_sr"]),
             roll_sr=float(row["roll_sr"]),
             subsystem_turnover=float(combined_turnover or 0.0),
             ann_rolls=float(row["ref_ann_rolls"]),
         )
-        reference_frame = apply_subsystem_reference_cost(
-            reference_frame,
-            ann_cost_sr=annual_cost.ann_cost_sr,
-        ).with_columns(
-            pl.lit(annual_cost.ann_trade_cost_sr).alias("ann_trade_cost_sr"),
-            pl.lit(annual_cost.ann_roll_cost_sr).alias("ann_roll_cost_sr"),
-            pl.lit(annual_cost.ann_cost_sr).alias("ann_cost_sr"),
-        )
+        if not applied_reference_cache_hit:
+            reference_frame = apply_subsystem_reference_cost(
+                reference_base_frame,
+                ann_cost_sr=annual_cost.ann_cost_sr,
+            ).with_columns(
+                pl.lit(annual_cost.ann_trade_cost_sr).alias("ann_trade_cost_sr"),
+                pl.lit(annual_cost.ann_roll_cost_sr).alias("ann_roll_cost_sr"),
+                pl.lit(annual_cost.ann_cost_sr).alias("ann_cost_sr"),
+            )
+            _write_selection_backtest_curve(
+                reference_frame,
+                reference_path,
+                reference_manifest_path,
+                identity=complete_reference_identity,
+                cache_key=reference_cache_key,
+                metadata={
+                    "combined_turnover": combined_turnover,
+                    "fx_error": fx_error,
+                    "forecast_audit": forecast_audit,
+                },
+            )
+            logger.info(
+                "selection_backtest_cache write artifact=reference symbol=%s "
+                "key=%s rows=%d path=%s",
+                symbol,
+                reference_cache_key,
+                reference_frame.height,
+                reference_path,
+            )
+            del reference_base_frame
         valid_reference_returns = reference_frame.filter(
             pl.col("ref_return_valid")
         )
@@ -1409,14 +1808,14 @@ def _run_complete_selection(
         fx_pairs = fx_used.get_column("fx_pair").drop_nulls().unique().to_list()
         fx_sources = fx_used.get_column("fx_src").drop_nulls().unique().to_list()
         subsystem_elig = bool(
-            result.audit["forecast_elig"]
+            forecast_audit["forecast_elig"]
             and combined_turnover is not None
             and math.isfinite(combined_turnover)
             and valid_reference_returns.height >= args.min_forecast_obs
             and reference_return_post_start_invalid == 0
         )
-        if not result.audit["forecast_elig"]:
-            subsystem_excl = str(result.audit["forecast_excl"])
+        if not forecast_audit["forecast_elig"]:
+            subsystem_excl = str(forecast_audit["forecast_excl"])
         elif combined_turnover is None or not math.isfinite(combined_turnover):
             subsystem_excl = "invalid_combined_turnover"
         elif valid_reference_returns.height < args.min_forecast_obs:
@@ -1428,9 +1827,9 @@ def _run_complete_selection(
         audit = {
             "symbol": symbol,
             "hist_instr_code": row["hist_instr_code"],
-            "elig_ewmac_rules": ",".join(result.weights),
-            "forecast_weights": json.dumps(result.weights, sort_keys=True),
-            "fdm": result.fdm,
+            "elig_ewmac_rules": ",".join(forecast_weights),
+            "forecast_weights": json.dumps(forecast_weights, sort_keys=True),
+            "fdm": forecast_fdm,
             "comb_turnover": combined_turnover,
             "ann_trade_cost_sr": annual_cost.ann_trade_cost_sr,
             "ann_roll_cost_sr": annual_cost.ann_roll_cost_sr,
@@ -1457,17 +1856,18 @@ def _run_complete_selection(
             "fx_error": fx_error,
             "subsystem_elig": subsystem_elig,
             "subsystem_excl": subsystem_excl,
-            **result.audit,
+            **forecast_audit,
         }
         audit_rows.append(audit)
-        # The complete reference frames are substantially wider than the
-        # return panel used for selection. Persist each one once and retain a
-        # scan so later correlation, walk-forward, and cash stages can push
-        # their own projections into the Parquet reader.
-        reference_path = work_dir / f"reference_{symbol_index:04d}.parquet"
-        reference_frame.write_parquet(reference_path)
+        # Keep only a lazy scan after the versioned curve is present on disk.
+        # Later stages push their projections into the Parquet reader, and a
+        # matching future run can start directly from this artifact.
         reference_scan = pl.scan_parquet(reference_path)
+        reference_base_scan = pl.scan_parquet(reference_base_path)
         subsystem_reference_frames[symbol] = reference_scan
+        reference_base_frames[symbol] = reference_base_scan
+        reference_cache_keys[symbol] = reference_cache_key
+        reference_base_cache_keys[symbol] = reference_base_cache_key
         forecast_output_frames.append(
             _label_forecast_output_frame(
                 reference_scan,
@@ -1482,7 +1882,7 @@ def _run_complete_selection(
             "post_start_invalid_obs=%s comb_turnover=%s reason=%s",
             symbol,
             subsystem_elig,
-            result.audit["forecast_valid_obs"],
+            forecast_audit["forecast_valid_obs"],
             valid_reference_returns.height,
             reference_return_post_start_invalid,
             combined_turnover,
@@ -1630,6 +2030,9 @@ def _run_complete_selection(
     )
 
     cash_reference_frames = subsystem_reference_frames
+    cash_reference_cache_keys = {
+        symbol: reference_cache_keys[symbol] for symbol in cash_symbols
+    }
     historical_return_sources = {
         symbol: "reference" for symbol in cash_symbols
     }
@@ -1637,11 +2040,11 @@ def _run_complete_selection(
         # Construction remains pinned to the long reference histories above.
         # Only the final executable cash audit is rebuilt from the
         # duplicate-free stitched source so reported P&L reaches stored IB data.
-        pooled_rules = load_pooled_ewmac_rules(
-            db_path=args.history_db.expanduser().resolve(),
-        )
+        # The pooled rule objects and stitched component frames are needed only
+        # when at least one content-addressed stitched curve misses its cache.
+        pooled_rules = None
         instrument_rows = load_pysystemtrade_ib_instruments(
-            db_path=args.history_db.expanduser().resolve(),
+            db_path=history_db_path,
             mapping_path=args.broker_mapping.expanduser().resolve(),
         )
         signal_symbol_by_history_code: dict[str, str] = {}
@@ -1669,9 +2072,6 @@ def _run_complete_selection(
         }
         for symbol, history_code in stitched_history_code_by_symbol.items():
             symbols_by_history_code[history_code].append(symbol)
-        symbol_index = {
-            symbol: index for index, symbol in enumerate(cash_symbols, start=1)
-        }
         # Start from the valid long-reference fallback. Each successfully
         # stitched history replaces only its own symbols with a disk-backed
         # scan, so 100+ combined component frames never coexist in memory.
@@ -1767,10 +2167,41 @@ def _run_complete_selection(
                         exc,
                     )
                     continue
-                stitched_component = build_ewmac_component_frame(
-                    stitched_history,
-                    pooled_rules,
+                stitched_component = None
+                handoff_dates = list(
+                    stitched_history.metadata.get("handoff_dates") or []
                 )
+                live_tail_start = (
+                    min(handoff_dates)
+                    if handoff_dates
+                    else stitched_history.signal.get_column("date").min()
+                )
+                if live_tail_start is None:
+                    logger.warning(
+                        "selection_stitched_history unavailable "
+                        "hist_instr_code=%s fallback=reference reason=empty_history",
+                        history_code,
+                    )
+                    continue
+                stitched_source_identity = {
+                    "cache_directory": str(
+                        stitched_history.metadata.get("cache_directory") or ""
+                    ),
+                    "instrument_code": stitched_history.instrument_code,
+                    "available_sources": [
+                        str(value) for value in (
+                            stitched_history.metadata.get("available_sources") or []
+                        )
+                    ],
+                    "signal_rows": stitched_history.signal.height,
+                    "signal_start": str(
+                        stitched_history.signal.get_column("date").min()
+                    ),
+                    "signal_end": str(
+                        stitched_history.signal.get_column("date").max()
+                    ),
+                    "live_tail_start": live_tail_start,
+                }
                 stitched_symbols: list[str] = []
                 for symbol in symbols_by_history_code[history_code]:
                     row = source_rows[symbol]
@@ -1778,44 +2209,148 @@ def _run_complete_selection(
                         rules = _parse_rules(
                             str(row["elig_ewmac_rules"] or "")
                         )
-                        stitched_result = engine.combine(
-                            stitched_component,
-                            rules,
-                            forecast_correlation,
-                            correlation_rules,
-                        )
                         currency = str(row["ccy"]).upper()
-                        stitched_fx_frame = align_fx_to_history(
-                            stitched_result.frame,
-                            currency,
-                            fx_history=fx_history_by_currency[currency],
-                            db_path=args.history_db.expanduser().resolve(),
+                        stitched_identity = {
+                            "symbol": symbol,
+                            "hist_instr_code": history_code,
+                            "stitched_source": stitched_source_identity,
+                            "history_db": history_db_identity,
+                            "currency": currency,
+                            "eligible_rules": rules,
+                            "forecast_weights": slow_tilt_ewmac_weights(rules),
+                            "forecast_fdm": args.forecast_fdm,
+                            "min_forecast_obs": args.min_forecast_obs,
+                            "capital": float(run_config["init_cap_usd"]),
+                            "target_vol": float(run_config["target_vol"]),
+                            "reference_book_count": args.tie_reference_book_count,
+                            "reference_idm": GreedySelectionConfig.max_idm,
+                            "max_weight_idm": args.max_weight_idm,
+                            "multiplier": float(row["mult"]),
+                            "target_abs_forecast": (
+                                engine.config.target_abs_forecast
+                            ),
+                        }
+                        (
+                            stitched_reference_path,
+                            stitched_manifest_path,
+                            complete_stitched_identity,
+                            stitched_cache_key,
+                        ) = _selection_backtest_cache_artifact(
+                            backtest_cache_root,
+                            artifact="stitched_reference_tail",
+                            symbol=symbol,
+                            identity=stitched_identity,
                         )
-                        stitched_reference = (
-                            build_subsystem_reference_return_curve(
-                                stitched_fx_frame,
-                                capital=float(run_config["init_cap_usd"]),
-                                target_vol=float(run_config["target_vol"]),
-                                reference_book_count=(
-                                    args.tie_reference_book_count
-                                ),
-                                reference_idm=GreedySelectionConfig.max_idm,
-                                max_weight_idm=args.max_weight_idm,
-                                multiplier=float(row["mult"]),
-                                ann_cost_sr=0.0,
-                                target_abs_forecast=(
-                                    engine.config.target_abs_forecast
-                                ),
+                        cached_stitched = _load_selection_backtest_curve(
+                            stitched_reference_path,
+                            stitched_manifest_path,
+                            expected_identity=complete_stitched_identity,
+                            required_columns=(
+                                "date",
+                                "comb_fcst",
+                                "fcst_valid",
+                                "fx_to_usd",
+                                "daily_dvol",
+                                "ref_return_valid",
+                                "ref_net_pct",
+                            ),
+                        )
+                        if cached_stitched is None:
+                            if stitched_component is None:
+                                if pooled_rules is None:
+                                    pooled_rules = load_pooled_ewmac_rules(
+                                        db_path=history_db_path,
+                                    )
+                                stitched_component = build_ewmac_component_frame(
+                                    stitched_history,
+                                    pooled_rules,
+                                )
+                            stitched_result = engine.combine(
+                                stitched_component,
+                                rules,
+                                forecast_correlation,
+                                correlation_rules,
                             )
+                            if currency not in fx_history_by_currency:
+                                fx_history_by_currency[currency] = (
+                                    None
+                                    if currency == "USD"
+                                    else load_fx_to_usd_history(
+                                        currency,
+                                        db_path=history_db_path,
+                                    )
+                                )
+                            stitched_fx_frame = align_fx_to_history(
+                                stitched_result.frame,
+                                currency,
+                                fx_history=fx_history_by_currency[currency],
+                                db_path=history_db_path,
+                            )
+                            stitched_reference = (
+                                build_subsystem_reference_return_curve(
+                                    stitched_fx_frame,
+                                    capital=float(run_config["init_cap_usd"]),
+                                    target_vol=float(run_config["target_vol"]),
+                                    reference_book_count=(
+                                        args.tie_reference_book_count
+                                    ),
+                                    reference_idm=GreedySelectionConfig.max_idm,
+                                    max_weight_idm=args.max_weight_idm,
+                                    multiplier=float(row["mult"]),
+                                    ann_cost_sr=0.0,
+                                    target_abs_forecast=(
+                                        engine.config.target_abs_forecast
+                                    ),
+                                )
+                                .filter(pl.col("date") >= live_tail_start)
+                            )
+                            if stitched_reference.is_empty():
+                                raise ValueError(
+                                    "stitched reference live tail is empty from "
+                                    f"{live_tail_start}"
+                                )
+                            _write_selection_backtest_curve(
+                                stitched_reference,
+                                stitched_reference_path,
+                                stitched_manifest_path,
+                                identity=complete_stitched_identity,
+                                cache_key=stitched_cache_key,
+                            )
+                            logger.info(
+                                "selection_backtest_cache write "
+                                "artifact=stitched_reference_tail symbol=%s "
+                                "key=%s rows=%d start=%s path=%s",
+                                symbol,
+                                stitched_cache_key,
+                                stitched_reference.height,
+                                live_tail_start,
+                                stitched_reference_path,
+                            )
+                        else:
+                            logger.info(
+                                "selection_backtest_cache hit "
+                                "artifact=stitched_reference_tail symbol=%s "
+                                "key=%s start=%s path=%s",
+                                symbol,
+                                stitched_cache_key,
+                                live_tail_start,
+                                stitched_reference_path,
+                            )
+                        # Reuse the stable cost-free PST prefix and append only
+                        # the mutable stitched tail. Forecast calculation used
+                        # the full history above so EWMAC state is continuous.
+                        cash_reference_frames[symbol] = pl.concat(
+                            [
+                                reference_base_frames[symbol].filter(
+                                    pl.col("date") < live_tail_start
+                                ),
+                                pl.scan_parquet(stitched_reference_path),
+                            ],
+                            how="diagonal_relaxed",
                         )
-                        stitched_reference_path = work_dir / (
-                            f"stitched_reference_{symbol_index[symbol]:04d}.parquet"
-                        )
-                        stitched_reference.write_parquet(
-                            stitched_reference_path
-                        )
-                        cash_reference_frames[symbol] = pl.scan_parquet(
-                            stitched_reference_path
+                        cash_reference_cache_keys[symbol] = (
+                            f"{reference_base_cache_keys[symbol]}:"
+                            f"{stitched_cache_key}"
                         )
                         historical_return_sources[symbol] = "stitched"
                         stitched_symbols.append(symbol)
@@ -1873,40 +2408,111 @@ def _run_complete_selection(
         str(detail["symbol"]): detail
         for detail in selection.final_score.details
     }
-    for cash_index, symbol in enumerate(cash_symbols, start=1):
+    selection_policy_identity = {
+        "run_config": run_config,
+        "score_threshold": args.score_threshold,
+        "gross_sr": args.gross_sr,
+        "low_contract_penalty_scale": args.low_contract_penalty_scale,
+        "high_contract_penalty_scale": args.high_contract_penalty_scale,
+        "contract_band_min": args.contract_band_min,
+        "contract_band_max": args.contract_band_max,
+        "score_tie_tolerance_percent": args.score_tie_tolerance_percent,
+        "tie_reference_book_count": args.tie_reference_book_count,
+        "include_roll_cost_in_score": args.include_roll_cost_in_score,
+        "max_weight_idm": args.max_weight_idm,
+        "max_instr_per_cluster": args.max_instr_per_cluster,
+        "max_instr_margin_pct": args.max_instr_margin_pct,
+        "max_book_margin_pct": args.max_book_margin_pct,
+        "weight_policy": args.weight_policy,
+        "corr_window_years": args.corr_window_years,
+        "corr_halflife_days": args.corr_halflife_days,
+        "corr_min_rows": args.corr_min_rows,
+        "selection_rebalance": args.selection_rebalance,
+        "selected_book": list(selection.selected),
+    }
+    for symbol in cash_symbols:
         candidate = candidate_by_symbol[symbol]
         detail = static_details.get(symbol, {
             "weight": 1.0,
             "limit_weight": 1.0,
         })
         row = source_rows[symbol]
-        cash_reference_frame = _lazy_frame(
-            cash_reference_frames[symbol]
-        ).collect(engine="streaming")
-        cash_frame = build_executable_cash_pnl_curve(
-            cash_reference_frame,
-            capital=float(run_config["init_cap_usd"]),
-            target_vol=float(run_config["target_vol"]),
-            weight=float(detail["limit_weight"]),
-            idm=(
-                selection.final_score.idm
-                if args.selection_rebalance == "static"
-                else 1.0
+        cash_idm = float(
+            selection.final_score.idm
+            if args.selection_rebalance == "static"
+            else 1.0
+        )
+        cash_identity = {
+            "symbol": symbol,
+            "hist_instr_code": stitched_history_code_by_symbol[symbol],
+            "historical_return_source": historical_return_sources[symbol],
+            "reference_cache_key": cash_reference_cache_keys[symbol],
+            "selection_policy": selection_policy_identity,
+            "capital": float(run_config["init_cap_usd"]),
+            "target_vol": float(run_config["target_vol"]),
+            "weight": float(detail["weight"]),
+            "limit_weight": float(detail["limit_weight"]),
+            "idm": cash_idm,
+            "multiplier": float(row["mult"]),
+            "trade_cost_usd_per_con": candidate.trade_cost_usd_per_con,
+            "roll_cost_usd_per_con": candidate.roll_cost_usd_per_con,
+            "roll_policy_id": str(row.get("roll_policy_id") or ""),
+            "target_abs_forecast": engine.config.target_abs_forecast,
+            "buffer_size": args.buffer_size,
+            "buffer_trade_to_edge": args.buffer_trade_to_edge,
+            "rebalance_on_roll": args.rebalance_on_roll,
+        }
+        (
+            cash_path,
+            cash_manifest_path,
+            complete_cash_identity,
+            cash_cache_key,
+        ) = _selection_backtest_cache_artifact(
+            backtest_cache_root,
+            artifact="cash",
+            symbol=symbol,
+            identity=cash_identity,
+        )
+        cached_cash = _load_selection_backtest_curve(
+            cash_path,
+            cash_manifest_path,
+            expected_identity=complete_cash_identity,
+            required_columns=(
+                "date",
+                "symbol",
+                "comb_fcst",
+                "ann_dvol",
+                "limit_weight",
+                "idm",
+                "held_con",
+                "net_pnl",
+                "pnl_valid",
             ),
-            multiplier=float(row["mult"]),
-            trade_cost_usd_per_con=candidate.trade_cost_usd_per_con,
-            roll_cost_usd_per_con=candidate.roll_cost_usd_per_con,
-            target_abs_forecast=engine.config.target_abs_forecast,
-            buffer_size=args.buffer_size,
-            buffer_trade_to_edge=args.buffer_trade_to_edge,
-            rebalance_on_roll=args.rebalance_on_roll,
         )
-        roll_schedule_src = (
-            "history_marks"
-            if cash_frame.get_column("roll_event").any()
-            else "no_history_roll_markers"
-        )
-        cash_output_frame = cash_frame.with_columns(
+        if cached_cash is None:
+            cash_reference_frame = _lazy_frame(
+                cash_reference_frames[symbol]
+            ).collect(engine="streaming")
+            cash_frame = build_executable_cash_pnl_curve(
+                cash_reference_frame,
+                capital=float(run_config["init_cap_usd"]),
+                target_vol=float(run_config["target_vol"]),
+                weight=float(detail["limit_weight"]),
+                idm=cash_idm,
+                multiplier=float(row["mult"]),
+                trade_cost_usd_per_con=candidate.trade_cost_usd_per_con,
+                roll_cost_usd_per_con=candidate.roll_cost_usd_per_con,
+                target_abs_forecast=engine.config.target_abs_forecast,
+                buffer_size=args.buffer_size,
+                buffer_trade_to_edge=args.buffer_trade_to_edge,
+                rebalance_on_roll=args.rebalance_on_roll,
+            )
+            roll_schedule_src = (
+                "history_marks"
+                if cash_frame.get_column("roll_event").any()
+                else "no_history_roll_markers"
+            )
+            cash_output_frame = cash_frame.with_columns(
                 pl.lit(symbol).alias("symbol"),
                 pl.lit(stitched_history_code_by_symbol[symbol]).alias(
                     "hist_instr_code"
@@ -1920,11 +2526,7 @@ def _run_complete_selection(
                 pl.lit(roll_schedule_src).alias("roll_schedule_src"),
                 pl.lit(float(detail["weight"])).alias("weight"),
                 pl.lit(float(detail["limit_weight"])).alias("limit_weight"),
-                pl.lit(
-                    selection.final_score.idm
-                    if args.selection_rebalance == "static"
-                    else 1.0
-                ).alias("idm"),
+                pl.lit(cash_idm).alias("idm"),
                 pl.lit(candidate.trade_cost_usd_per_con).alias(
                     "trade_cost_usd_per_con"
                 ),
@@ -1992,10 +2594,34 @@ def _run_complete_selection(
                 "cum_net_pct",
                 "pnl_valid",
             )
-        cash_path = work_dir / f"cash_{cash_index:04d}.parquet"
-        cash_output_frame.write_parquet(cash_path)
+            _write_selection_backtest_curve(
+                cash_output_frame,
+                cash_path,
+                cash_manifest_path,
+                identity=complete_cash_identity,
+                cache_key=cash_cache_key,
+            )
+            logger.info(
+                "selection_backtest_cache write artifact=cash symbol=%s "
+                "key=%s rows=%d path=%s",
+                symbol,
+                cash_cache_key,
+                cash_output_frame.height,
+                cash_path,
+            )
+            del cash_reference_frame, cash_frame, cash_output_frame
+        else:
+            cached_cash_frame, _ = cached_cash
+            logger.info(
+                "selection_backtest_cache hit artifact=cash symbol=%s "
+                "key=%s rows=%d path=%s",
+                symbol,
+                cash_cache_key,
+                cached_cash_frame.height,
+                cash_path,
+            )
+            del cached_cash_frame
         cash_output_frames.append(pl.scan_parquet(cash_path))
-        del cash_reference_frame, cash_frame, cash_output_frame
     unscaled_cash_pnl = (
         pl.concat(cash_output_frames, how="diagonal_relaxed")
         .collect(engine="streaming")
@@ -2023,7 +2649,8 @@ def _run_complete_selection(
             run_config=run_config,
             args=args,
         )
-    del subsystem_reference_frames, walk_forward_reference_frames
+    del subsystem_reference_frames, reference_base_frames
+    del walk_forward_reference_frames
     gc.collect()
     cash_pnl_long = build_equity_scaled_cash_pnl_curve(
         unscaled_cash_pnl,
@@ -2331,7 +2958,6 @@ def _run_complete_selection(
         )
     )
     public_portfolio_curve.write_parquet(portfolio_curve_path)
-    work_tempdir.cleanup()
     print(
         f"Portfolio selection accepted {len(selection.selected)}/{len(candidate_list)} "
         f"forecast-eligible instruments"
