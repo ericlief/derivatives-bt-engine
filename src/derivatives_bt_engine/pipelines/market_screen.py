@@ -1071,6 +1071,27 @@ def _configured_cost_estimate(
         roll_cost_model="calendar_spread",
     )
 
+    # Pooled turnover and the instrument's reference-rule diagnostics come
+    # entirely from the reference database. Persist them before evaluating
+    # executable costs so a failed live quote or IB what-if cannot suppress
+    # the inputs needed to recompute historical rule eligibility downstream.
+    for fast_span, summary in sorted((pooled_summaries or {}).items()):
+        slow_span = fast_span * 4
+        prefix = f"ewmac_{fast_span}_{slow_span}"
+        metrics = (strategy_metrics_by_rule or {}).get(fast_span, {})
+        common.update({
+            f"{prefix}_ann_trades": _positive_finite(
+                summary.get("ewmac_pooled_forecast_turnover")
+            ),
+            f"{prefix}_ann_rolls": rolls_per_year,
+            f"{prefix}_median_instrument_pre_cost_sharpe": summary.get(
+                "ewmac_median_instrument_pre_cost_sharpe"
+            ),
+            f"{prefix}_ref_pre_cost_sharpe": metrics.get(
+                "ewmac_pre_cost_sharpe"
+            ),
+        })
+
     carver_spread_points = _nonnegative_finite(instr.get("carver_spread_points"))
     spread_points = _nonnegative_finite(
         report_row.get("selected_one_way_spread_points")
@@ -1191,10 +1212,7 @@ def _configured_cost_estimate(
     for fast_span, summary in sorted((pooled_summaries or {}).items()):
         slow_span = fast_span * 4
         prefix = f"ewmac_{fast_span}_{slow_span}"
-        metrics = (strategy_metrics_by_rule or {}).get(fast_span, {})
-        pooled_turnover = _positive_finite(
-            summary.get("ewmac_pooled_forecast_turnover")
-        )
+        pooled_turnover = common[f"{prefix}_ann_trades"]
         trade_ann_cost_sr = (
             trade_sr * pooled_turnover
             if pooled_turnover is not None
@@ -1218,18 +1236,10 @@ def _configured_cost_estimate(
         if eligible:
             eligible_rules.append(f"{fast_span}/{slow_span}")
         result.update({
-            f"{prefix}_ann_trades": pooled_turnover,
-            f"{prefix}_ann_rolls": rolls_per_year,
             f"{prefix}_trade_ann_cost_sr": trade_ann_cost_sr,
             f"{prefix}_roll_ann_cost_sr": roll_ann_cost_sr,
             f"{prefix}_tot_ann_cost_sr": tot_ann_cost_sr,
             f"{prefix}_cost_eligible": eligible,
-            f"{prefix}_median_instrument_pre_cost_sharpe": summary.get(
-                "ewmac_median_instrument_pre_cost_sharpe"
-            ),
-            f"{prefix}_ref_pre_cost_sharpe": metrics.get(
-                "ewmac_pre_cost_sharpe"
-            ),
         })
     baselines_available = bool(pooled_summaries)
     result.update({

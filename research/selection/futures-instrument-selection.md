@@ -533,7 +533,7 @@ The defaults are `--min-daily-volume 100`, `--max-market-volume-pct 1`,
 `--initial-capital-usd 100000`, and `--target-vol 0.20`.
 
 The rule cache retains every row without applying these scenario assumptions.
-The selection runner adds separate cost, one-contract risk-size,
+The candidate-only runner adds separate live cost, one-contract risk-size,
 contract-volume, and relative-risk-volume flags. `selection_elig` also
 requires at least one affordable EWMAC rule, an allowed execution profile, and
 a qualified IB contract. `selection_excl` records all failed gates. The
@@ -564,10 +564,11 @@ pysystemtrade histories + reviewed economic classification + local execution ove
     -> 20-day mean contract volume
     -> mixed production volatility and one-contract dollar risk
     -> reusable live market snapshot
-    -> per-rule EWMAC performance, turnover, rolls, and cost eligibility
+    -> reference per-rule EWMAC performance, turnover, and roll inputs
     -> scenario-neutral rule-cache Parquet
-    -> selection cost, size, liquidity, data, and execution gates
-    -> candidate Parquet with sel_bucket, selection_elig, and selection_excl
+    -> live candidate-only cost, size, liquidity, data, and execution gates
+    -> live candidate Parquet with sel_bucket, selection_elig, and selection_excl
+    -> reference-cost candidate universe for every complete backtest
     -> combined forecast and subsystem return for each surviving instrument
     -> trial-book correlations, top-down classification weights, and IDM
     -> portfolio-specific positions, turnover, cost, and market participation
@@ -800,8 +801,10 @@ membership, weights, capped `limit_weight`, and IDM remain fixed until the next
 review; forecasts, volatility scaling, buffering, and contract rolls continue
 to update normally within that segment.
 
-Scheduled runs begin from the capital-flexible market universe rather than the
-contracts already affordable at initial capital. Carver reference cost,
+Every complete backtest, including `--selection-rebalance static`, begins from
+the reference-cost universe. Candidate-only output remains the live executable
+screen. Scheduled runs use the capital-flexible reference universe rather than
+the contracts already affordable at initial capital. Reference cost,
 absolute-volume, data, rule, execution, and broker-qualification gates form
 that universe; current live spread and commission eligibility does not. A
 contract rejected only by the initial one-lot risk test can therefore enter a
@@ -809,12 +812,13 @@ later review after equity grows. Per-review historical annual dollar
 volatility, account capital, portfolio liquidity, contract granularity, and
 margin constraints are then applied by the greedy selector.
 
-Every dated backtest segment, including the final segment, uses Carver's
-configured one-way spread and commission calibration. Costs are divided by the
+Every dated backtest segment, including a static complete replay and the final
+scheduled segment, uses the configured reference one-way spread and commission
+calibration. Costs are divided by the
 review-date annual dollar volatility to obtain the selection SR cost; they are
 deliberately a fixed-cost backtest convention, not a reconstructed daily
-spread series. Current executable spread and commission remain inputs to a
-separate live/static selection and never leak backward into a scheduled run.
+spread series. Current executable spread, commission, what-if results, and
+their rule decisions remain inputs to the candidate-only live screen.
 
 The rule cache also freezes `init_marg_ann_dvol_ratio`, calculated as current
 IB initial margin divided by snapshot annual dollar volatility. At each dated

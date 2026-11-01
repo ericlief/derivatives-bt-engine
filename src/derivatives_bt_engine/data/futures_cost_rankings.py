@@ -743,21 +743,18 @@ def selection_candidates(report: pl.DataFrame) -> pl.DataFrame:
 
 
 def selection_rebalance_candidates(report: pl.DataFrame) -> pl.DataFrame:
-    """Return the capital-flexible universe for scheduled book selection.
+    """Return the reference-cost universe for a complete backtest.
 
-    Scheduled selection must not begin from the candidates affordable at the
-    initial account size: contracts rejected only by one-lot risk can become
-    feasible after the account grows. This helper therefore applies only the
-    saved gates that do not depend on account capital: Carver reference cost,
-    absolute contract volume, data, rule availability, execution permission,
-    and broker qualification. Current live spread and commission eligibility
-    never controls a dated backtest review. The selector later applies
-    historical dollar volatility, prior equity, portfolio liquidity, and
-    margin limits at each review date.
+    Complete static and scheduled backtests must not inherit live spread,
+    commission, what-if, or live-rule decisions from the acquisition screen.
+    This helper applies the saved gates using reference cost and rule inputs.
+    Scheduled selection also avoids the initial account-size gate because a
+    contract rejected at initial capital can become feasible as equity grows.
+    The selector later applies its sizing, liquidity, and margin constraints.
 
     The returned schema matches :func:`selection_candidates`, including the
-    configured Carver spread and commission fields used for historical fixed-
-    cost calibration when they are present.
+    configured reference spread and commission fields used for historical
+    fixed-cost calibration when they are present.
     """
     if "ref_instr_has_elig_ewmac_rule" not in report.columns:
         report = _attach_reference_rule_eligibility(report)

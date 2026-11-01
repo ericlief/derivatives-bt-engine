@@ -3239,13 +3239,17 @@ def run(
         config["min_daily_volume"],
         config["max_pct_mkt_volume"],
     )
+    # Candidate-only output is the live executable screen. Every complete
+    # backtest, including a static-book replay, receives reference costs and
+    # reference rule eligibility at this boundary.
     selected = (
-        selection_candidates(report)
-        if args.selection_rebalance == "static"
-        else selection_rebalance_candidates(report)
+        selection_rebalance_candidates(report)
+        if args.complete
+        else selection_candidates(report)
     )
     if (
-        args.selection_rebalance != "static"
+        args.complete
+        and args.selection_rebalance != "static"
         and (
             args.max_instr_margin_pct is not None
             or args.max_book_margin_pct is not None
