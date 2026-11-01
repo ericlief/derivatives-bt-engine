@@ -3492,6 +3492,7 @@ PUBLIC_REPORT_RENAMES = {
     "slow_vol_weight": "ref_slow_vol_weight",
     "zero_return_fraction": "ref_zero_return_fraction",
     "carver_slow_return_vol": "ref_slow_return_vol",
+    "carver_spread_points": "ref_spread_points",
     "carver_configured_one_way_spread_points": "ref_spread_points",
     "strategy_ref_instrument": "ref_strategy_instrument",
     "strategy_ref_history_start": "ref_strategy_history_start",
