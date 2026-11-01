@@ -198,7 +198,11 @@ for _fast, _slow in ((4, 16), (8, 32), (16, 64), (32, 128), (64, 256)):
         ].type = bool
     for _column in (
         f"pool_ewmac_{_fast}_{_slow}_ann_trades",
+        f"pool_ewmac_{_fast}_{_slow}_pool_instrs",
+        f"pool_ewmac_{_fast}_{_slow}_mean_instr_pre_cost_sr",
         f"pool_ewmac_{_fast}_{_slow}_median_instr_pre_cost_sr",
+        f"pool_ewmac_{_fast}_{_slow}_hist_weighted_mean_pre_cost_sr",
+        f"pool_ewmac_{_fast}_{_slow}_stacked_observation_pre_cost_sr",
         f"ref_ewmac_{_fast}_{_slow}_pre_cost_sr",
         f"ref_ewmac_{_fast}_{_slow}_ann_rolls",
         f"ref_ewmac_{_fast}_{_slow}_trade_ann_cost_sr",

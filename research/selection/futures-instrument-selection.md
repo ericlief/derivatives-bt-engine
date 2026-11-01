@@ -592,7 +592,7 @@ reference, and live values look interchangeable:
 
 | Section | Example fields | Meaning |
 | --- | --- | --- |
-| `pool_` | `pool_ewmac_4_16_ann_trades`, `pool_ewmac_4_16_median_instr_pre_cost_sr` | Rule statistics estimated across the reference universe. These values normally repeat for every instrument. |
+| `pool_` | `pool_ewmac_4_16_ann_trades`, `pool_ewmac_4_16_mean_instr_pre_cost_sr`, `pool_ewmac_4_16_median_instr_pre_cost_sr`, `pool_ewmac_4_16_hist_weighted_mean_pre_cost_sr`, `pool_ewmac_4_16_stacked_observation_pre_cost_sr` | Full set of shared per-speed turnover and performance summaries estimated across the reference universe. These values repeat for every instrument. |
 | `ref_` | `ref_ewmac_4_16_pre_cost_sr`, `ref_ewmac_4_16_ann_rolls`, `ref_ewmac_4_16_tot_ann_cost_sr`, `ref_ewmac_4_16_cost_elig` | Instrument-specific reference-history diagnostics and frozen-cost eligibility used by complete backtests. |
 | `live_` | `live_ewmac_4_16_tot_ann_cost_sr`, `live_ewmac_4_16_cost_elig` | Point-in-time executable-cost eligibility from the saved snapshot and IB what-if result. |
 
@@ -614,9 +614,9 @@ C^{x}_{f,s}
 Here `pool_*_ann_trades` is pooled forecast turnover and `ref_*_ann_rolls` is
 the instrument's configured or observed reference roll rate. The `ref` path
 uses the reviewed reference spread and configured commission; the `live` path
-uses the snapshot spread and executable commission. The pooled median and
-instrument reference pre-cost Sharpe fields are performance diagnostics. They
-do not themselves gate rule eligibility.
+uses the snapshot spread and executable commission. Pooled performance and
+instrument reference pre-cost Sharpe fields are diagnostics. They do not
+themselves gate rule eligibility.
 
 #### Target portfolio selection pipeline runner
 

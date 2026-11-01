@@ -1090,13 +1090,25 @@ def _configured_cost_estimate(
             f"{prefix}_ann_trades": _positive_finite(
                 summary.get("ewmac_pooled_forecast_turnover")
             ),
-            f"{prefix}_ann_rolls": rolls_per_year,
+            f"{prefix}_pool_instruments": summary.get(
+                "ewmac_pool_instruments"
+            ),
+            f"{prefix}_mean_instrument_pre_cost_sharpe": summary.get(
+                "ewmac_mean_instrument_pre_cost_sharpe"
+            ),
             f"{prefix}_median_instrument_pre_cost_sharpe": summary.get(
                 "ewmac_median_instrument_pre_cost_sharpe"
+            ),
+            f"{prefix}_history_weighted_mean_pre_cost_sharpe": summary.get(
+                "ewmac_history_weighted_mean_pre_cost_sharpe"
+            ),
+            f"{prefix}_stacked_observation_pre_cost_sharpe": summary.get(
+                "ewmac_stacked_observation_pre_cost_sharpe"
             ),
             f"{prefix}_ref_pre_cost_sharpe": metrics.get(
                 "ewmac_pre_cost_sharpe"
             ),
+            f"{prefix}_ann_rolls": rolls_per_year,
         })
 
     carver_spread_points = _nonnegative_finite(instr.get("carver_spread_points"))
@@ -3710,8 +3722,14 @@ def _ewmac_public_column_name(name: str) -> str:
     prefix = f"ewmac_{fast_span}_{slow_span}"
     if suffix == "ann_trades":
         return f"pool_{prefix}_ann_trades"
-    if suffix == "median_instrument_pre_cost_sharpe":
-        return f"pool_{prefix}_median_instrument_pre_cost_sharpe"
+    if suffix in {
+        "pool_instruments",
+        "mean_instrument_pre_cost_sharpe",
+        "median_instrument_pre_cost_sharpe",
+        "history_weighted_mean_pre_cost_sharpe",
+        "stacked_observation_pre_cost_sharpe",
+    }:
+        return f"pool_{prefix}_{suffix}"
     if suffix == "ref_pre_cost_sharpe":
         return f"ref_{prefix}_pre_cost_sharpe"
     if suffix == "ann_rolls":
@@ -3967,8 +3985,12 @@ def _order_market_public_columns(report: pl.DataFrame) -> pl.DataFrame:
         r"^(?:pool|ref|live)_ewmac_(\d+)_(\d+)_(.+)$"
     )
     detail_order = {
+        "pool_instrs": 0,
         "ann_trades": 0,
-        "median_instr_pre_cost_sr": 1,
+        "mean_instr_pre_cost_sr": 1,
+        "median_instr_pre_cost_sr": 2,
+        "hist_weighted_mean_pre_cost_sr": 3,
+        "stacked_observation_pre_cost_sr": 4,
         "pre_cost_sr": 0,
         "ann_rolls": 1,
         "trade_ann_cost_sr": 2,
