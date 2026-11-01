@@ -1189,6 +1189,8 @@ class _WalkForwardSelectionProvider:
         self.latest_equity: float | None = None
         self.review_rows: list[dict[str, object]] = []
         self.review_instrument_rows: list[dict[str, object]] = []
+        self.review_trial_rows: list[dict[str, object]] = []
+        self.review_trial_allocation_rows: list[dict[str, object]] = []
         self.prior_selected: set[str] = set()
 
     @staticmethod
@@ -1397,6 +1399,26 @@ class _WalkForwardSelectionProvider:
             run_config=self.run_config,
             args=self.args,
         ).select(candidates, correlation)
+        # Preserve the complete dated greedy decision path. The normal trial
+        # reports below describe only the initial static selection; attaching
+        # review date and lagged equity here makes later CL/MCL and margin
+        # decisions independently auditable.
+        self.review_trial_rows.extend(
+            {
+                **trial,
+                "selection_date": review_date,
+                "selection_equity_usd": prior_net_equity,
+            }
+            for trial in selection.trials
+        )
+        self.review_trial_allocation_rows.extend(
+            {
+                **allocation_row,
+                "selection_date": review_date,
+                "selection_equity_usd": prior_net_equity,
+            }
+            for allocation_row in selection.trial_allocations
+        )
         candidate_by_symbol = {
             candidate.symbol: candidate for candidate in candidates
         }
@@ -2966,6 +2988,14 @@ def _run_complete_selection(
         output_dir
         / f"multi_speed_ewmac_selection_review_instruments_{stamp}.parquet"
     )
+    selection_review_trials_path = (
+        output_dir
+        / f"multi_speed_ewmac_selection_review_trials_{stamp}.parquet"
+    )
+    selection_review_trial_allocations_path = (
+        output_dir
+        / f"multi_speed_ewmac_selection_review_trial_allocations_{stamp}.parquet"
+    )
     cash_pnl_path = (
         output_dir / f"multi_speed_ewmac_selection_cash_pnl_{stamp}.parquet"
     )
@@ -3184,6 +3214,28 @@ def _run_complete_selection(
         public_selection_review_instruments.write_parquet(
             selection_review_instruments_path
         )
+        public_selection_review_trials = round_public_report(
+            rename_public_report_columns(
+                pl.DataFrame(
+                    allocation_provider.review_trial_rows,
+                    infer_schema_length=None,
+                )
+            )
+        )
+        public_selection_review_trials.write_parquet(
+            selection_review_trials_path
+        )
+        public_selection_review_trial_allocations = round_public_report(
+            rename_public_report_columns(
+                pl.DataFrame(
+                    allocation_provider.review_trial_allocation_rows,
+                    infer_schema_length=None,
+                )
+            )
+        )
+        public_selection_review_trial_allocations.write_parquet(
+            selection_review_trial_allocations_path
+        )
     public_cash_pnl = round_public_report(
         order_cash_pnl_report(rename_public_report_columns(cash_pnl_long))
     )
@@ -3211,6 +3263,11 @@ def _run_complete_selection(
         print(
             "Saved selection review instruments "
             f"{selection_review_instruments_path}"
+        )
+        print(f"Saved selection review trials {selection_review_trials_path}")
+        print(
+            "Saved selection review trial allocations "
+            f"{selection_review_trial_allocations_path}"
         )
     print(f"Saved selection {selection_path}")
     return selection_path, public_selection

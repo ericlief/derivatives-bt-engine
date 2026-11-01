@@ -908,6 +908,13 @@ report: it has one row per review and involved instrument, with `added`,
 historical dollar volatility, and the cost inputs used by that review. One
 file covers the entire monthly or yearly walk-forward run; reviews do not
 create separate result directories.
+The `selection_review_trials` and
+`selection_review_trial_allocations` Parquet files retain every hypothetical
+greedy trial at every review, with review date and lagged equity. They expose
+the selected and rejected candidate scores, family and cluster decisions,
+instrument and book margin at the rounded maximum forecast position, each
+applicable limit, and the exact feasibility or ranking reason. These are the
+reports to compare alternatives such as CL and MCL across review dates.
 
 When `--ib-history-db` is supplied, executable cash history is rebuilt from
 the direct PST/IB source for every instrument that can enter a scheduled book.
@@ -1218,6 +1225,12 @@ baseline by default. The command writes:
   `candidate_ref_con_band_distance`, `iter_best`, `iter_best_score`,
   `iter_score_best`, `iter_score_best_score`, `tie_score_floor`, and
   `min_accept_score` make those comparisons directly auditable; and
+- `multi_speed_ewmac_selection_review_trials_<timestamp>.parquet` and
+  `multi_speed_ewmac_selection_review_trial_allocations_<timestamp>.parquet`,
+  the same decision audits for every scheduled review, with `sel_date` and
+  `sel_equity` added. The latter carries the per-instrument rounded
+  `max_cons`, `marg_at_max`, portfolio margin, instrument and book limits,
+  trial feasibility, and instrument-level rejection reason; and
 - `multi_speed_ewmac_selection_passes_<timestamp>.parquet`, the readable
   accepted path only: `selection_step` identifies the pass, `added_symbol` is
   its winner, and each `symbol` row records that accepted book member's
