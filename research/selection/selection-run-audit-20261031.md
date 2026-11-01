@@ -107,6 +107,17 @@ diversification statistics should not be interpreted as those of the reported
 selected books until this coverage mismatch is addressed and the run is
 recalculated.
 
+The selector was subsequently changed to require the latest valid candidate
+return to be within 31 calendar days of every scheduled review. The limit is
+configured by `--selection-max-history-gap-days` and uses the stitched PST/IB
+frame when available. A scheduled run with an IB history database also adds a
+single handoff review after the reference endpoint exceeds this freshness
+window, so the 2024 segment does not retain the stale January book after the
+late-March reference endpoint. It remains separate from
+`--max-source-gap-days`, which only controls the one-time reference-to-IB
+splice. A rerun is required because this saved audit run predates the
+freshness gate.
+
 ## Audit artifacts
 
 Primary audit files:

@@ -834,6 +834,7 @@ first available session of each calendar year or month:
 --selection-rebalance static
 --selection-rebalance yearly
 --selection-rebalance monthly
+--selection-max-history-gap-days 31
 ```
 
 `static` remains the default. A scheduled review is distinct from daily
@@ -843,6 +844,23 @@ input is restricted to dates strictly before the review date. The resulting
 membership, weights, capped `limit_weight`, and IDM remain fixed until the next
 review; forecasts, volatility scaling, buffering, and contract rolls continue
 to update normally within that segment.
+
+Scheduled reviews also require each candidate's latest valid return to fall
+within `--selection-max-history-gap-days` of the review date. The default is
+31 calendar days, which accommodates exchange holidays while excluding a
+reference fallback after its history stops. This check uses the stitched
+PST/IB frame when `--ib-history-db` is supplied. It is separate from
+`--max-source-gap-days`: the latter permits and masks the unknown return at
+the one-time reference-to-IB handoff, while the selection freshness limit
+controls whether that completed history can enter a later review.
+
+When an IB history database is present, the scheduled backtest also inserts
+one handoff review on the first executable session after the reference
+endpoint has exceeded that freshness limit. For the current reference database
+ending in late March 2024, the default limit places this review around the end
+of April. This replaces the January book with only the stitched histories that
+were actually available by then; the requested yearly or monthly cadence
+continues afterward.
 
 Every complete backtest, including `--selection-rebalance static`, begins from
 the reference-cost universe. Candidate-only output remains the live executable
@@ -1032,6 +1050,7 @@ futures-build-selection \
   --ib-prior-years 3 \
   --globex-db /home/dev/fin/db/globex_mdp_3.0.duckdb \
   --selection-rebalance yearly \
+  --selection-max-history-gap-days 31 \
   --backtest-start-date 2024-01-01 \
   --backtest-end-date 2026-10-30 \
   --forecast-fdm 1.0 \
@@ -1228,7 +1247,10 @@ baseline by default. The command writes:
   diagnostics do not enter the greedy score, whose construction history
   remains pinned to `--history-db` in either mode. `--max-source-gap-days`
   controls only a direct reference-to-IB handoff and masks the unknown return
-  over an allowed gap.
+  over an allowed gap. Scheduled reviews independently apply
+  `--selection-max-history-gap-days` to the most recent valid return, so a
+  stale `reference_fallback` cannot remain a review candidate after the
+  reference history ends.
 
 Raw IB history acquisition follows each instrument's `priced_roll_cycle` and
 includes its configured carry companions. The final signal remains selected

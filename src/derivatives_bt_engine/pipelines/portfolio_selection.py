@@ -139,6 +139,7 @@ from derivatives_bt_engine.logging_config import setup_logger
 
 logger = logging.getLogger(__name__)
 REPORT_TIMEZONE = ZoneInfo("America/Chicago")
+DEFAULT_SELECTION_MAX_HISTORY_GAP_DAYS = 31
 
 # Bump this when reference-curve or executable cash-curve semantics change.
 # The version is part of both the directory and content identity, allowing old
@@ -856,6 +857,17 @@ def parse_args(argv=None, *, complete_default: bool = False):
             "review. Costs remain the saved fixed calibration."
         ),
     )
+    parser.add_argument(
+        "--selection-max-history-gap-days",
+        type=int,
+        default=DEFAULT_SELECTION_MAX_HISTORY_GAP_DAYS,
+        help=(
+            "Largest calendar gap between a scheduled review and a "
+            "candidate's latest valid return (default: 31). This is "
+            "independent of --max-source-gap-days, which governs the "
+            "reference-to-IB splice."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -917,6 +929,7 @@ def _selection_scenario_id(
     ))
     if args.selection_rebalance != "static":
         tokens.append(f"sel{args.selection_rebalance}")
+        tokens.append(f"hg{args.selection_max_history_gap_days}")
     if args.backtest_start_date is not None:
         tokens.append(f"from{args.backtest_start_date:%Y%m%d}")
     if args.backtest_end_date is not None:
@@ -1250,6 +1263,22 @@ class _WalkForwardSelectionProvider:
                 .collect(engine="streaming")
             )
             if history.height < self.args.min_forecast_obs:
+                continue
+            latest_return_date = history.get_column("date").max()
+            if isinstance(latest_return_date, datetime):
+                latest_return_date = latest_return_date.date()
+            history_gap_days = (review_date - latest_return_date).days
+            if history_gap_days > self.args.selection_max_history_gap_days:
+                logger.debug(
+                    "walk_forward_selection candidate_rejected date=%s "
+                    "symbol=%s reason=stale_history latest_return_date=%s "
+                    "history_gap_days=%d max_history_gap_days=%d",
+                    review_date,
+                    symbol,
+                    latest_return_date,
+                    history_gap_days,
+                    self.args.selection_max_history_gap_days,
+                )
                 continue
             latest = (
                 lazy_frame
@@ -2597,6 +2626,9 @@ def _run_complete_selection(
         "corr_halflife_days": args.corr_halflife_days,
         "corr_min_rows": args.corr_min_rows,
         "selection_rebalance": args.selection_rebalance,
+        "selection_max_history_gap_days": (
+            args.selection_max_history_gap_days
+        ),
         "selected_book": list(selection.selected),
     }
     for symbol in cash_symbols:
@@ -2804,10 +2836,45 @@ def _run_complete_selection(
     gc.collect()
     allocation_provider = None
     if args.selection_rebalance != "static":
+        executable_dates = sorted(
+            set(unscaled_cash_pnl.get_column("date").drop_nulls().to_list())
+        )
         review_dates = _selection_rebalance_dates(
-            unscaled_cash_pnl.get_column("date").drop_nulls().to_list(),
+            executable_dates,
             cadence=args.selection_rebalance,
         )
+        if args.ib_history_db is not None:
+            ref_return_end = (
+                eligible_audit
+                .get_column("ref_return_end")
+                .drop_nulls()
+                .max()
+            )
+            if isinstance(ref_return_end, datetime):
+                ref_return_end = ref_return_end.date()
+            if ref_return_end is not None:
+                stale_after = ref_return_end + timedelta(
+                    days=args.selection_max_history_gap_days
+                )
+                handoff_review_date = next(
+                    (
+                        value
+                        for value in executable_dates
+                        if value > stale_after
+                    ),
+                    None,
+                )
+                if handoff_review_date is not None:
+                    review_dates = sorted(
+                        set(review_dates) | {handoff_review_date}
+                    )
+                    logger.info(
+                        "walk_forward_selection handoff_review date=%s "
+                        "ref_return_end=%s max_history_gap_days=%d",
+                        handoff_review_date,
+                        ref_return_end,
+                        args.selection_max_history_gap_days,
+                    )
         allocation_provider = _WalkForwardSelectionProvider(
             review_dates=review_dates,
             source_rows={symbol: source_rows[symbol] for symbol in cash_symbols},
@@ -3177,6 +3244,8 @@ def run(
         raise ValueError("tie reference book count must be positive")
     if args.max_source_gap_days < 0:
         raise ValueError("max source gap days must be nonnegative")
+    if args.selection_max_history_gap_days < 0:
+        raise ValueError("selection max history gap days must be nonnegative")
     if args.ib_prior_years <= 0:
         raise ValueError("--ib-prior-years must be positive")
     if not math.isfinite(args.forecast_fdm) or args.forecast_fdm <= 0:
