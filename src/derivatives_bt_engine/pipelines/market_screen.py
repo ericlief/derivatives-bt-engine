@@ -1996,7 +1996,11 @@ def build_cost_risk_row(
         "price_source": price_source,
         "currency": currency,
         "fx_to_usd": fx,
-        "fx_asof": fx_asof,
+        # Live IB FX timestamps are strings, while a failed IB request falls
+        # back to the reference database's native datetime.  Keep the selected
+        # as-of field textual in both cases so one fallback currency cannot
+        # make Polars infer a mixed String/Datetime snapshot column.
+        "fx_asof": _timestamp_as_iso(fx_asof),
         "multiplier": mult,
         "notional_native_per_contract": notional_native,
         "notional_per_contract": notional,
@@ -2147,6 +2151,20 @@ def _timestamp_as_central_iso(value: object) -> Optional[str]:
         else:
             value = value.astimezone(REPORT_TIMEZONE)
         return value.isoformat(timespec="seconds")
+    isoformat = getattr(value, "isoformat", None)
+    return isoformat() if callable(isoformat) else str(value)
+
+
+def _timestamp_as_iso(value: object) -> Optional[str]:
+    """Return a source timestamp as stable ISO text without changing its zone.
+
+    Snapshot acquisition can mix timestamps returned as strings by IB with
+    native ``datetime`` values loaded from DuckDB fallbacks.  This serializer
+    preserves any source timezone instead of assuming or converting one, and
+    gives Polars one consistent scalar type at the report boundary.
+    """
+    if value is None:
+        return None
     isoformat = getattr(value, "isoformat", None)
     return isoformat() if callable(isoformat) else str(value)
 
