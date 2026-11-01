@@ -979,7 +979,14 @@ def _configured_cost_estimate(
     strategy_metrics_by_rule: Optional[dict[int, dict[str, object]]],
     rule_cost_limit_sr: float,
 ) -> dict[str, object]:
-    """Calculate one-way trade and complete-roll costs in annual SR units."""
+    """Calculate pooled-rule diagnostics and reference/live annual SR costs.
+
+    Pooled turnover and performance come from the reference rule universe.
+    Reference eligibility uses the reviewed spread and configured commission;
+    live eligibility uses the selected snapshot spread and executable
+    commission. Missing live inputs leave the live decision null without
+    suppressing the reference section.
+    """
     common: dict[str, object] = {
         "strategy_ref_instrument": (
             instr.get("representative_instrument")
@@ -1120,6 +1127,111 @@ def _configured_cost_estimate(
     per_block = _nonnegative_finite(instr.get("commission"))
     per_trade = _nonnegative_finite(instr.get("per_trade_cost"))
     percentage = _nonnegative_finite(instr.get("percentage_cost"))
+
+    # Reference eligibility is independent of account-specific IB what-if.
+    # The snapshot retains the configured commission in USD even when the
+    # live preview fails, while the configured reference spread comes from
+    # the reviewed instrument database.
+    reference_commission_usd = _nonnegative_finite(
+        report_row.get("commission_per_side")
+    )
+    reference_trade_sr = None
+    reference_roll_sr = None
+    if (
+        carver_spread_points is not None
+        and reference_commission_usd is not None
+        and multiplier is not None
+        and fx_to_usd is not None
+        and annual_dollar_vol is not None
+    ):
+        reference_spread_usd = (
+            carver_spread_points * multiplier * fx_to_usd
+        )
+        reference_trade_sr = (
+            reference_spread_usd + reference_commission_usd
+        ) / annual_dollar_vol
+        reference_roll_sr = (
+            reference_spread_usd + 2.0 * reference_commission_usd
+        ) / annual_dollar_vol
+    common.update({
+        "carver_configured_one_way_spread_points": carver_spread_points,
+        "ref_trade_sr": reference_trade_sr,
+        "ref_roll_sr": reference_roll_sr,
+    })
+
+    reference_eligible_rules: list[str] = []
+    reference_rule_eligibility: list[bool | None] = []
+    for fast_span in sorted((pooled_summaries or {})):
+        slow_span = fast_span * 4
+        prefix = f"ewmac_{fast_span}_{slow_span}"
+        pooled_turnover = common[f"{prefix}_ann_trades"]
+        reference_trade_ann_cost_sr = (
+            reference_trade_sr * pooled_turnover
+            if reference_trade_sr is not None and pooled_turnover is not None
+            else None
+        )
+        reference_roll_ann_cost_sr = (
+            reference_roll_sr * rolls_per_year
+            if reference_roll_sr is not None and rolls_per_year is not None
+            else None
+        )
+        reference_total_ann_cost_sr = (
+            reference_trade_ann_cost_sr + reference_roll_ann_cost_sr
+            if reference_trade_ann_cost_sr is not None
+            and reference_roll_ann_cost_sr is not None
+            else None
+        )
+        reference_cost_eligible = (
+            reference_total_ann_cost_sr <= rule_cost_limit_sr
+            if reference_total_ann_cost_sr is not None
+            else None
+        )
+        reference_rule_eligibility.append(reference_cost_eligible)
+        if reference_cost_eligible:
+            reference_eligible_rules.append(f"{fast_span}/{slow_span}")
+        common.update({
+            f"ref_{prefix}_trade_ann_cost_sr": reference_trade_ann_cost_sr,
+            f"ref_{prefix}_roll_ann_cost_sr": reference_roll_ann_cost_sr,
+            f"ref_{prefix}_tot_ann_cost_sr": reference_total_ann_cost_sr,
+            f"ref_{prefix}_cost_eligible": reference_cost_eligible,
+        })
+    reference_baselines_available = bool(reference_rule_eligibility) and all(
+        eligible is not None for eligible in reference_rule_eligibility
+    )
+    common.update({
+        "ref_eligible_ewmac_rule_count": (
+            len(reference_eligible_rules)
+            if reference_baselines_available
+            else None
+        ),
+        "ref_eligible_ewmac_rules": (
+            ",".join(reference_eligible_rules)
+            if reference_baselines_available
+            else None
+        ),
+        "ref_instrument_has_eligible_ewmac_rule": (
+            bool(reference_eligible_rules)
+            if reference_baselines_available
+            else None
+        ),
+    })
+    # Keep the live section present even when every instrument in a snapshot
+    # lacks an executable quote or usable IB what-if. Successful rows replace
+    # these nulls after their live cost inputs have been validated.
+    for fast_span in sorted((pooled_summaries or {})):
+        slow_span = fast_span * 4
+        prefix = f"ewmac_{fast_span}_{slow_span}"
+        common.update({
+            f"{prefix}_trade_ann_cost_sr": None,
+            f"{prefix}_roll_ann_cost_sr": None,
+            f"{prefix}_tot_ann_cost_sr": None,
+            f"{prefix}_cost_eligible": None,
+        })
+    common.update({
+        "eligible_ewmac_rule_count": None,
+        "eligible_ewmac_rules": None,
+        "instrument_has_eligible_ewmac_rule": None,
+    })
     if (
         spread_points is None
         or multiplier is None
@@ -1209,6 +1321,7 @@ def _configured_cost_estimate(
         ),
     }
     eligible_rules: list[str] = []
+    live_rule_eligibility: list[bool | None] = []
     for fast_span, summary in sorted((pooled_summaries or {}).items()):
         slow_span = fast_span * 4
         prefix = f"ewmac_{fast_span}_{slow_span}"
@@ -1233,6 +1346,7 @@ def _configured_cost_estimate(
             if tot_ann_cost_sr is not None
             else None
         )
+        live_rule_eligibility.append(eligible)
         if eligible:
             eligible_rules.append(f"{fast_span}/{slow_span}")
         result.update({
@@ -1241,7 +1355,9 @@ def _configured_cost_estimate(
             f"{prefix}_tot_ann_cost_sr": tot_ann_cost_sr,
             f"{prefix}_cost_eligible": eligible,
         })
-    baselines_available = bool(pooled_summaries)
+    baselines_available = bool(live_rule_eligibility) and all(
+        eligible is not None for eligible in live_rule_eligibility
+    )
     result.update({
         "eligible_ewmac_rule_count": (
             len(eligible_rules) if baselines_available else None
@@ -3575,10 +3691,46 @@ PUBLIC_REPORT_RENAMES = {
     "report_generated_at_ct": "report_ts_ct",
 }
 
+
+def _ewmac_public_column_name(name: str) -> str:
+    """Assign pooled, reference, or live ownership to EWMAC audit fields."""
+    aggregate_names = {
+        "eligible_ewmac_rule_count": "live_elig_ewmac_rule_count",
+        "eligible_ewmac_rules": "live_elig_ewmac_rules",
+        "instrument_has_eligible_ewmac_rule": (
+            "live_instr_has_elig_ewmac_rule"
+        ),
+    }
+    if name in aggregate_names:
+        return aggregate_names[name]
+    matched = re.match(r"^ewmac_(\d+)_(\d+)_(.+)$", name)
+    if matched is None:
+        return name
+    fast_span, slow_span, suffix = matched.groups()
+    prefix = f"ewmac_{fast_span}_{slow_span}"
+    if suffix == "ann_trades":
+        return f"pool_{prefix}_ann_trades"
+    if suffix == "median_instrument_pre_cost_sharpe":
+        return f"pool_{prefix}_median_instrument_pre_cost_sharpe"
+    if suffix == "ref_pre_cost_sharpe":
+        return f"ref_{prefix}_pre_cost_sharpe"
+    if suffix == "ann_rolls":
+        return f"ref_{prefix}_ann_rolls"
+    if suffix in {
+        "trade_ann_cost_sr",
+        "roll_ann_cost_sr",
+        "tot_ann_cost_sr",
+        "cost_eligible",
+    }:
+        return f"live_{prefix}_{suffix}"
+    return name
+
+
 def _compact_public_column_name(name: str) -> str:
+    categorized = _ewmac_public_column_name(name)
     compact = PUBLIC_REPORT_RENAMES.get(
-        name,
-        CENTRAL_REPORT_RENAMES.get(name, name),
+        categorized,
+        CENTRAL_REPORT_RENAMES.get(categorized, categorized),
     )
     compact = compact.replace("one_year", "1y")
     compact = compact.replace("total", "tot").replace("annual", "ann")
@@ -3782,15 +3934,97 @@ def _order_market_public_columns(report: pl.DataFrame) -> pl.DataFrame:
     ]
     selected = [name for name in selected_first if name in report.columns]
     selected_set = set(selected)
+    pool_rule_suffix = [
+        name for name in report.columns
+        if name.startswith("pool_ewmac_") and name not in selected_set
+    ]
+    ref_rule_suffix = [
+        name for name in report.columns
+        if (
+            name.startswith("ref_ewmac_")
+            or name.startswith("ref_elig_ewmac_")
+            or name == "ref_instr_has_elig_ewmac_rule"
+            or name in {
+                "ref_spread_pts",
+                "ref_config_comm_usd",
+                "ref_trade_sr",
+                "ref_roll_sr",
+                "ref_ann_rolls",
+            }
+        )
+        and name not in selected_set
+    ]
+    live_rule_suffix = [
+        name for name in report.columns
+        if (
+            name.startswith("live_ewmac_")
+            or name.startswith("live_elig_ewmac_")
+            or name == "live_instr_has_elig_ewmac_rule"
+        )
+        and name not in selected_set
+    ]
+    speed_pattern = re.compile(
+        r"^(?:pool|ref|live)_ewmac_(\d+)_(\d+)_(.+)$"
+    )
+    detail_order = {
+        "ann_trades": 0,
+        "median_instr_pre_cost_sr": 1,
+        "pre_cost_sr": 0,
+        "ann_rolls": 1,
+        "trade_ann_cost_sr": 2,
+        "roll_ann_cost_sr": 3,
+        "tot_ann_cost_sr": 4,
+        "cost_elig": 5,
+    }
+
+    def rule_column_key(name: str) -> tuple[int, int, int, str]:
+        """Order aggregate decisions before speed-level audit details."""
+        matched = speed_pattern.match(name)
+        if matched is None:
+            aggregate_order = {
+                "ref_elig_ewmac_rule_count": 0,
+                "ref_elig_ewmac_rules": 1,
+                "ref_instr_has_elig_ewmac_rule": 2,
+                "ref_spread_pts": 3,
+                "ref_config_comm_usd": 4,
+                "ref_trade_sr": 5,
+                "ref_roll_sr": 6,
+                "ref_ann_rolls": 7,
+                "live_elig_ewmac_rule_count": 0,
+                "live_elig_ewmac_rules": 1,
+                "live_instr_has_elig_ewmac_rule": 2,
+            }
+            return (0, 0, aggregate_order.get(name, 99), name)
+        fast_span, slow_span, detail = matched.groups()
+        return (
+            1,
+            int(fast_span),
+            detail_order.get(detail, 99),
+            f"{int(slow_span):06d}_{name}",
+        )
+
+    pool_rule_suffix.sort(key=rule_column_key)
+    ref_rule_suffix.sort(key=rule_column_key)
+    live_rule_suffix.sort(key=rule_column_key)
+    rule_suffix = [
+        *pool_rule_suffix,
+        *ref_rule_suffix,
+        *live_rule_suffix,
+    ]
+    rule_set = set(rule_suffix)
     snap_suffix = [
         name for name in report.columns
-        if name.startswith("snap_") and name not in selected_set
+        if name.startswith("snap_")
+        and name not in selected_set
+        and name not in rule_set
     ]
     ref_suffix = [
         name for name in report.columns
-        if name.startswith("ref_") and name not in selected_set
+        if name.startswith("ref_")
+        and name not in selected_set
+        and name not in rule_set
     ]
-    audit_suffix = [*snap_suffix, *ref_suffix]
+    audit_suffix = [*rule_suffix, *snap_suffix, *ref_suffix]
     middle = [
         name for name in report.columns
         if name not in selected_set
@@ -3967,9 +4201,12 @@ def _emit_report(
         "whatif_retry_n",
         "trade_sr",
         "cost_rank_in_asset_cls",
-        "elig_ewmac_rule_count",
-        "elig_ewmac_rules",
-        "instr_has_elig_ewmac_rule",
+        "live_elig_ewmac_rule_count",
+        "live_elig_ewmac_rules",
+        "live_instr_has_elig_ewmac_rule",
+        "ref_elig_ewmac_rule_count",
+        "ref_elig_ewmac_rules",
+        "ref_instr_has_elig_ewmac_rule",
         "ib_avail",
         "exec_elig",
         "exec_restrict_reason",

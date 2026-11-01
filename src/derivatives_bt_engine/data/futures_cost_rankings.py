@@ -116,8 +116,12 @@ DEFAULT_VIEW_COLUMNS = (
     "main_instr_afford_for_scen",
     "min_cap_usd_full_wt_idm1",
     "min_cap_usd_equal_wt",
-    "elig_ewmac_rule_count",
-    "elig_ewmac_rules",
+    "ref_elig_ewmac_rule_count",
+    "ref_elig_ewmac_rules",
+    "ref_instr_has_elig_ewmac_rule",
+    "live_elig_ewmac_rule_count",
+    "live_elig_ewmac_rules",
+    "live_instr_has_elig_ewmac_rule",
     "pool_role",
     "incl_default_pool",
     "ib_avail",
@@ -560,10 +564,10 @@ def apply_selection_filters(
 
 
 def _attach_reference_rule_eligibility(report: pl.DataFrame) -> pl.DataFrame:
-    """Derive the frozen Carver-cost EWMAC rule subset for backtests.
+    """Derive the frozen reference-cost EWMAC rule subset for backtests.
 
     The rule cache retains pooled turnover for each EWMAC speed. This function
-    recomputes affordability with Carver reference trade and roll SR rather
+    recomputes affordability with frozen reference trade and roll SR rather
     than reusing eligibility produced from current executable costs. Static
     live selection keeps the original columns; scheduled selection aliases
     these ``ref_*`` fields at its boundary.
@@ -939,12 +943,78 @@ def normalize_report_calculation_columns(report: pl.DataFrame) -> pl.DataFrame:
         "marg_ccy": "margin_ccy",
         "init_marg_ann_dvol_ratio": "initial_margin_to_ann_dvol",
         "marg_risk_calib_src": "margin_risk_calibration_source",
+        "live_elig_ewmac_rule_count": "elig_ewmac_rule_count",
+        "live_elig_ewmac_rules": "elig_ewmac_rules",
+        "live_instr_has_elig_ewmac_rule": (
+            "instr_has_elig_ewmac_rule"
+        ),
     }
     aliases = [
         pl.col(public).alias(internal)
         for public, internal in public_to_internal.items()
         if public in report.columns and internal not in report.columns
     ]
+    legacy_live_names = {
+        "elig_ewmac_rule_count": "live_elig_ewmac_rule_count",
+        "elig_ewmac_rules": "live_elig_ewmac_rules",
+        "instr_has_elig_ewmac_rule": "live_instr_has_elig_ewmac_rule",
+    }
+    aliases.extend(
+        pl.col(legacy).alias(live)
+        for legacy, live in legacy_live_names.items()
+        if legacy in report.columns and live not in report.columns
+    )
+    speed_patterns = (
+        (
+            re.compile(
+                r"^pool_ewmac_(?P<fast>\d+)_(?P<slow>\d+)_ann_trades$"
+            ),
+            "ewmac_{fast}_{slow}_ann_trades",
+        ),
+        (
+            re.compile(
+                r"^pool_ewmac_(?P<fast>\d+)_(?P<slow>\d+)_"
+                r"median_instr_pre_cost_sr$"
+            ),
+            "ewmac_{fast}_{slow}_median_instr_pre_cost_sr",
+        ),
+        (
+            re.compile(
+                r"^ref_ewmac_(?P<fast>\d+)_(?P<slow>\d+)_ann_rolls$"
+            ),
+            "ewmac_{fast}_{slow}_ann_rolls",
+        ),
+        (
+            re.compile(
+                r"^ref_ewmac_(?P<fast>\d+)_(?P<slow>\d+)_pre_cost_sr$"
+            ),
+            "ewmac_{fast}_{slow}_ref_pre_cost_sr",
+        ),
+        (
+            re.compile(
+                r"^live_ewmac_(?P<fast>\d+)_(?P<slow>\d+)_"
+                r"(?P<kind>trade|roll|tot)_ann_cost_sr$"
+            ),
+            "ewmac_{fast}_{slow}_{kind}_ann_cost_sr",
+        ),
+        (
+            re.compile(
+                r"^live_ewmac_(?P<fast>\d+)_(?P<slow>\d+)_cost_elig$"
+            ),
+            "ewmac_{fast}_{slow}_cost_elig",
+        ),
+    )
+    existing = set(report.columns)
+    for public in report.columns:
+        for pattern, template in speed_patterns:
+            matched = pattern.match(public)
+            if matched is None:
+                continue
+            internal = template.format(**matched.groupdict())
+            if internal not in existing:
+                aliases.append(pl.col(public).alias(internal))
+                existing.add(internal)
+            break
     return report.with_columns(aliases) if aliases else report
 
 

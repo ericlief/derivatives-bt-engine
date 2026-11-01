@@ -582,9 +582,41 @@ for point-in-time quotes. Newly generated reports must not expose legacy
 `carver_*` spread columns; “Carver” may still appear in prose or a source
 description. A live IB what-if failure affects the live candidate screen, but
 does not suppress reference cost or rule-eligibility inputs used by a complete
-backtest. For example, the complete backtest recomputes the eligible EWMAC rule
-set from reference spread, commission, pooled turnover, and reference roll
-frequency, even when the account-specific live what-if failed.
+backtest. The rule cache records the eligible EWMAC rule set from reference
+spread, commission, pooled turnover, and reference roll frequency even when
+the account-specific live what-if failed. The selection reader performs the
+same calculation as a compatibility fallback for older caches.
+
+The EWMAC columns are grouped by ownership so a row does not make pooled,
+reference, and live values look interchangeable:
+
+| Section | Example fields | Meaning |
+| --- | --- | --- |
+| `pool_` | `pool_ewmac_4_16_ann_trades`, `pool_ewmac_4_16_median_instr_pre_cost_sr` | Rule statistics estimated across the reference universe. These values normally repeat for every instrument. |
+| `ref_` | `ref_ewmac_4_16_pre_cost_sr`, `ref_ewmac_4_16_ann_rolls`, `ref_ewmac_4_16_tot_ann_cost_sr`, `ref_ewmac_4_16_cost_elig` | Instrument-specific reference-history diagnostics and frozen-cost eligibility used by complete backtests. |
+| `live_` | `live_ewmac_4_16_tot_ann_cost_sr`, `live_ewmac_4_16_cost_elig` | Point-in-time executable-cost eligibility from the saved snapshot and IB what-if result. |
+
+Each cost path also has an aggregate decision: `ref_elig_ewmac_rule_count`,
+`ref_elig_ewmac_rules`, and `ref_instr_has_elig_ewmac_rule` for a complete
+backtest; the corresponding `live_...` fields are for the live screen. A null
+decision means the required inputs were unavailable. Zero means the inputs
+were available but no configured speed passed.
+
+For speed \((f,s)\), eligibility is strictly the annual cost test
+
+\[
+C^{x}_{f,s}
+= T^{\mathrm{pool}}_{f,s} c^{x}_{\mathrm{trade}}
++ R^{\mathrm{ref}} c^{x}_{\mathrm{roll}}
+\le C_{\max}, \qquad x \in \{\mathrm{ref},\mathrm{live}\}.
+\]
+
+Here `pool_*_ann_trades` is pooled forecast turnover and `ref_*_ann_rolls` is
+the instrument's configured or observed reference roll rate. The `ref` path
+uses the reviewed reference spread and configured commission; the `live` path
+uses the snapshot spread and executable commission. The pooled median and
+instrument reference pre-cost Sharpe fields are performance diagnostics. They
+do not themselves gate rule eligibility.
 
 #### Target portfolio selection pipeline runner
 
@@ -974,9 +1006,10 @@ futures-rule-cache \
 Passing a directory to `--snapshot-input` selects its newest timestamped
 `*_market_snapshot_*.parquet`; passing a file pins exact-run reproduction. The
 result is `multi_speed_ewmac_rule_cache_<timestamp>.parquet`. It retains all market
-snapshot inputs plus pooled EWMAC turnover/cost statistics, `trade_sr`,
-`roll_sr`, `ref_ann_rolls`, `init_marg_ann_dvol_ratio`, and the eligible rule
-list. It deliberately has no
+snapshot inputs plus the `pool_`, `ref_`, and `live_` EWMAC sections described
+above, `trade_sr`, `roll_sr`, `ref_ann_rolls`,
+`init_marg_ann_dvol_ratio`, and both reference and live eligible-rule lists. It
+deliberately has no
 `init_cap_usd`, `target_vol`, market-participation calculation, or final
 candidate flag.
 

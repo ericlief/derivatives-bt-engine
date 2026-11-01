@@ -723,7 +723,16 @@ SIX_DECIMAL_COLUMNS = {
     "initial_margin_to_annual_dollar_vol",
     "initial_margin_to_ann_dvol",
     "init_marg_ann_dvol_ratio",
+    "trade_sr",
+    "roll_sr",
+    "ref_trade_sr",
+    "ref_roll_sr",
 }
+
+SIX_DECIMAL_SUFFIXES = (
+    "_ann_cost_sr",
+    "_pre_cost_sr",
+)
 
 
 def round_public_report(report: pl.DataFrame) -> pl.DataFrame:
@@ -755,7 +764,9 @@ def round_public_report(report: pl.DataFrame) -> pl.DataFrame:
             decimals = 2
         elif name in FOUR_DECIMAL_PNL_COLUMNS:
             decimals = 4
-        elif name in SIX_DECIMAL_COLUMNS:
+        elif name in SIX_DECIMAL_COLUMNS or name.endswith(
+            SIX_DECIMAL_SUFFIXES
+        ):
             decimals = 6
         else:
             decimals = 4
