@@ -575,6 +575,17 @@ pysystemtrade histories + reviewed economic classification + local execution ove
     -> greedy AFTS selection with core-class coverage and score tolerance
 ```
 
+The rule-cache snapshot contains both live acquisition fields and frozen
+reference inputs. Public spread and commission names use `ref_` for the
+reference calibration (`ref_spread_pts` and `ref_config_comm_usd`) and `snap_`
+for point-in-time quotes. Newly generated reports must not expose legacy
+`carver_*` spread columns; “Carver” may still appear in prose or a source
+description. A live IB what-if failure affects the live candidate screen, but
+does not suppress reference cost or rule-eligibility inputs used by a complete
+backtest. For example, the complete backtest recomputes the eligible EWMAC rule
+set from reference spread, commission, pooled turnover, and reference roll
+frequency, even when the account-specific live what-if failed.
+
 #### Target portfolio selection pipeline runner
 
 The complete path has one explicit runner that coordinates narrow data and
