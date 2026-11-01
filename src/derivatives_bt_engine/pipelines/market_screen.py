@@ -3712,6 +3712,9 @@ def _ewmac_public_column_name(name: str) -> str:
         "instrument_has_eligible_ewmac_rule": (
             "live_instr_has_elig_ewmac_rule"
         ),
+        "elig_ewmac_rule_count": "live_elig_ewmac_rule_count",
+        "elig_ewmac_rules": "live_elig_ewmac_rules",
+        "instr_has_elig_ewmac_rule": "live_instr_has_elig_ewmac_rule",
     }
     if name in aggregate_names:
         return aggregate_names[name]
@@ -3724,13 +3727,40 @@ def _ewmac_public_column_name(name: str) -> str:
         return f"pool_{prefix}_ann_trades"
     if suffix in {
         "pool_instruments",
+        "pool_instrs",
         "mean_instrument_pre_cost_sharpe",
+        "mean_instr_pre_cost_sr",
         "median_instrument_pre_cost_sharpe",
+        "median_instr_pre_cost_sr",
         "history_weighted_mean_pre_cost_sharpe",
+        "hist_weighted_mean_pre_cost_sr",
         "stacked_observation_pre_cost_sharpe",
+        "stacked_observation_pre_cost_sr",
     }:
-        return f"pool_{prefix}_{suffix}"
-    if suffix == "ref_pre_cost_sharpe":
+        mapped_suffix = {
+            "pool_instruments": "pool_instruments",
+            "pool_instrs": "pool_instruments",
+            "mean_instrument_pre_cost_sharpe": "mean_instrument_pre_cost_sharpe",
+            "mean_instr_pre_cost_sr": "mean_instrument_pre_cost_sharpe",
+            "median_instrument_pre_cost_sharpe": "median_instrument_pre_cost_sharpe",
+            "median_instr_pre_cost_sr": "median_instrument_pre_cost_sharpe",
+            "history_weighted_mean_pre_cost_sharpe": (
+                "history_weighted_mean_pre_cost_sharpe"
+            ),
+            "hist_weighted_mean_pre_cost_sr": (
+                "history_weighted_mean_pre_cost_sharpe"
+            ),
+            "stacked_observation_pre_cost_sharpe": (
+                "stacked_observation_pre_cost_sharpe"
+            ),
+            "stacked_observation_pre_cost_sr": (
+                "stacked_observation_pre_cost_sharpe"
+            ),
+        }[suffix]
+        return f"pool_{prefix}_{mapped_suffix}"
+    if suffix in {"ref_pre_cost_sharpe", "ref_pre_cost_sr"}:
+        return f"ref_{prefix}_pre_cost_sharpe"
+    if suffix == "pre_cost_sr":
         return f"ref_{prefix}_pre_cost_sharpe"
     if suffix == "ann_rolls":
         return f"ref_{prefix}_ann_rolls"
@@ -3739,8 +3769,12 @@ def _ewmac_public_column_name(name: str) -> str:
         "roll_ann_cost_sr",
         "tot_ann_cost_sr",
         "cost_eligible",
+        "cost_elig",
     }:
-        return f"live_{prefix}_{suffix}"
+        mapped_suffix = (
+            "cost_eligible" if suffix == "cost_elig" else suffix
+        )
+        return f"live_{prefix}_{mapped_suffix}"
     return name
 
 
