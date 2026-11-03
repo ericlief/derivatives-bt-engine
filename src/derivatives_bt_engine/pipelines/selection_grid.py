@@ -55,7 +55,10 @@ class SelectionScenario:
     maximum_book_margin_percent: float
     maximum_weight_idm: float
     score_threshold: float
-    maximum_instruments_per_cluster: int | None
+    maximum_instruments_per_class: int | None
+    maximum_instruments_per_subclass: int | None
+    maximum_asset_class_weight_percent: float | None
+    maximum_economic_subclass_weight_percent: float | None
     include_roll_cost_in_score: bool
     weight_policy: str
     low_contract_penalty_scale: float = 0.0
@@ -66,10 +69,10 @@ class SelectionScenario:
     @property
     def scenario_id(self) -> str:
         """Return a stable filesystem-safe identifier for this scenario."""
-        cluster = (
+        subclass = (
             "none"
-            if self.maximum_instruments_per_cluster is None
-            else str(self.maximum_instruments_per_cluster)
+            if self.maximum_instruments_per_subclass is None
+            else str(self.maximum_instruments_per_subclass)
         )
         tokens = [
             f"tv{_number_token(self.target_volatility)}",
@@ -90,8 +93,21 @@ class SelectionScenario:
                 f"tie{_number_token(self.score_tie_tolerance_percent)}",
                 f"refn{self.tie_reference_book_count}",
             ))
+        if self.maximum_instruments_per_class is not None:
+            tokens.append(f"ic{self.maximum_instruments_per_class}")
+        if self.maximum_asset_class_weight_percent is not None:
+            tokens.append(
+                f"cw{_number_token(self.maximum_asset_class_weight_percent)}"
+            )
+        if self.maximum_economic_subclass_weight_percent is not None:
+            tokens.append(
+                "sw"
+                + _number_token(
+                    self.maximum_economic_subclass_weight_percent
+                )
+            )
         tokens.extend((
-            f"cl{cluster}",
+            f"cl{subclass}",
             f"roll{int(self.include_roll_cost_in_score)}",
             self.weight_policy,
         ))
@@ -172,6 +188,31 @@ def _cluster_limit_list(value: str) -> tuple[int | None, ...]:
             parsed.append(limit)
     if not parsed:
         raise argparse.ArgumentTypeError("at least one cluster limit is required")
+    return tuple(parsed)
+
+
+def _optional_percent_list(value: str) -> tuple[float | None, ...]:
+    """Parse percentage caps, accepting ``none`` as an inactive limit."""
+    parsed: list[float | None] = []
+    for raw in value.split(","):
+        item = raw.strip().lower()
+        if item in {"none", "unlimited"}:
+            limit = None
+        else:
+            try:
+                limit = float(item)
+            except ValueError as exc:
+                raise argparse.ArgumentTypeError(
+                    "weight caps must be percentages in (0, 100] or 'none'"
+                ) from exc
+            if not 0 < limit <= 100:
+                raise argparse.ArgumentTypeError(
+                    "weight caps must be percentages in (0, 100] or 'none'"
+                )
+        if limit not in parsed:
+            parsed.append(limit)
+    if not parsed:
+        raise argparse.ArgumentTypeError("at least one weight cap is required")
     return tuple(parsed)
 
 
@@ -335,10 +376,36 @@ def parse_args(argv=None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--max-instr-per-subclasses",
         "--max-instr-per-clusters",
+        dest="max_instr_per_subclasses",
         type=_cluster_limit_list,
         default=(None,),
-        help="Comma-separated economic-subclass caps; use none for unlimited.",
+        help=(
+            "Comma-separated economic-subclass count caps; use none for "
+            "unlimited. The cluster spelling remains a compatibility alias."
+        ),
+    )
+    parser.add_argument(
+        "--max-instr-per-classes",
+        type=_cluster_limit_list,
+        default=(None,),
+        help="Comma-separated asset-class count caps; use none for unlimited.",
+    )
+    parser.add_argument(
+        "--max-class-weight-pcts",
+        type=_optional_percent_list,
+        default=(None,),
+        help="Comma-separated asset-class weight caps; use none for unlimited.",
+    )
+    parser.add_argument(
+        "--max-subclass-weight-pcts",
+        type=_optional_percent_list,
+        default=(None,),
+        help=(
+            "Comma-separated economic-subclass weight caps; use none for "
+            "unlimited."
+        ),
     )
     parser.add_argument(
         "--roll-cost-modes",
@@ -389,7 +456,10 @@ def build_scenarios(args: argparse.Namespace) -> list[SelectionScenario]:
             high_contract_penalty_scale=high_contract_penalty_scale,
             score_tie_tolerance_percent=score_tie_tolerance_percent,
             tie_reference_book_count=tie_reference_book_count,
-            maximum_instruments_per_cluster=cluster_limit,
+            maximum_instruments_per_class=class_count_limit,
+            maximum_instruments_per_subclass=subclass_count_limit,
+            maximum_asset_class_weight_percent=class_weight_limit,
+            maximum_economic_subclass_weight_percent=subclass_weight_limit,
             include_roll_cost_in_score=include_roll_cost,
             weight_policy=args.weight_policy,
         )
@@ -403,7 +473,10 @@ def build_scenarios(args: argparse.Namespace) -> list[SelectionScenario]:
             high_contract_penalty_scale,
             score_tie_tolerance_percent,
             tie_reference_book_count,
-            cluster_limit,
+            class_count_limit,
+            subclass_count_limit,
+            class_weight_limit,
+            subclass_weight_limit,
             include_roll_cost,
         ) in product(
             args.target_vols,
@@ -414,8 +487,11 @@ def build_scenarios(args: argparse.Namespace) -> list[SelectionScenario]:
             args.low_contract_penalty_scales,
             args.high_contract_penalty_scales,
             args.score_tie_tolerance_percents,
-        args.tie_reference_book_counts,
-            args.max_instr_per_clusters,
+            args.tie_reference_book_counts,
+            args.max_instr_per_classes,
+            args.max_instr_per_subclasses,
+            args.max_class_weight_pcts,
+            args.max_subclass_weight_pcts,
             roll_modes,
         )
     ]
@@ -493,10 +569,25 @@ def _selection_command(
             command.extend(("--ib-client-id", str(ib_client_id)))
             for ib_port in ib_ports or []:
                 command.extend(("--ib-port", str(ib_port)))
-    if scenario.maximum_instruments_per_cluster is not None:
+    if scenario.maximum_instruments_per_class is not None:
         command.extend((
-            "--max-instr-per-cluster",
-            str(scenario.maximum_instruments_per_cluster),
+            "--max-instr-per-class",
+            str(scenario.maximum_instruments_per_class),
+        ))
+    if scenario.maximum_instruments_per_subclass is not None:
+        command.extend((
+            "--max-instr-per-subclass",
+            str(scenario.maximum_instruments_per_subclass),
+        ))
+    if scenario.maximum_asset_class_weight_percent is not None:
+        command.extend((
+            "--max-class-weight-pct",
+            str(scenario.maximum_asset_class_weight_percent),
+        ))
+    if scenario.maximum_economic_subclass_weight_percent is not None:
+        command.extend((
+            "--max-subclass-weight-pct",
+            str(scenario.maximum_economic_subclass_weight_percent),
         ))
     if scenario.include_roll_cost_in_score:
         command.append("--include-roll-cost-in-score")
@@ -535,8 +626,15 @@ def _summary_row(
         "high_contract_penalty_scale": scenario.high_contract_penalty_scale,
         "score_tie_tolerance_percent": scenario.score_tie_tolerance_percent,
         "tie_ref_book_count": scenario.tie_reference_book_count,
-        "maximum_instruments_per_cluster": (
-            scenario.maximum_instruments_per_cluster
+        "maximum_instruments_per_class": scenario.maximum_instruments_per_class,
+        "maximum_instruments_per_subclass": (
+            scenario.maximum_instruments_per_subclass
+        ),
+        "maximum_asset_class_weight_percent": (
+            scenario.maximum_asset_class_weight_percent
+        ),
+        "maximum_economic_subclass_weight_percent": (
+            scenario.maximum_economic_subclass_weight_percent
         ),
         "include_roll_cost_in_score": scenario.include_roll_cost_in_score,
         "weight_policy": scenario.weight_policy,
@@ -640,8 +738,8 @@ def _attach_baseline_overlap(summary: pl.DataFrame) -> pl.DataFrame:
 
     The central scenario is the successful run closest to 20% target
     volatility, 20% per-instrument margin, 75% book margin, 0.20 maximum
-    weight-times-IDM, 0.90 score threshold, unlimited subclass count, and roll
-    costs included.
+    weight-times-IDM, 0.90 score threshold, unlimited class and subclass
+    counts and weights, and roll costs included.
     This is a stability reference, not an assertion that the scenario is best.
     """
     complete = summary.filter(pl.col("status") == "complete")
@@ -660,8 +758,16 @@ def _attach_baseline_overlap(summary: pl.DataFrame) -> pl.DataFrame:
             + pl.col("low_contract_penalty_scale").abs()
             + pl.col("high_contract_penalty_scale").abs()
             + pl.col("score_tie_tolerance_percent").abs() / 100.0
-        + (pl.col("tie_ref_book_count") - 15).abs() / 15.0
-            + pl.when(pl.col("maximum_instruments_per_cluster").is_null())
+            + (pl.col("tie_ref_book_count") - 15).abs() / 15.0
+            + pl.when(pl.col("maximum_instruments_per_class").is_null())
+              .then(0.0).otherwise(1.0)
+            + pl.when(pl.col("maximum_instruments_per_subclass").is_null())
+              .then(0.0).otherwise(1.0)
+            + pl.when(pl.col("maximum_asset_class_weight_percent").is_null())
+              .then(0.0).otherwise(1.0)
+            + pl.when(
+                pl.col("maximum_economic_subclass_weight_percent").is_null()
+            )
               .then(0.0).otherwise(1.0)
             + pl.when(pl.col("include_roll_cost_in_score"))
               .then(0.0).otherwise(1.0)

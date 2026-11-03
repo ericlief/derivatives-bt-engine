@@ -21,6 +21,16 @@ PUBLIC_REPORT_RENAMES = {
     "maximum_book_margin_percent": "max_book_marg_pct",
     "maximum_weight_idm": "max_weight_idm",
     "maximum_instruments_per_cluster": "max_instr_per_cluster",
+    "maximum_instruments_per_class": "max_instr_per_cls",
+    "maximum_instruments_per_subclass": "max_instr_per_subcls",
+    "maximum_asset_class_weight_percent": "max_cls_weight_pct",
+    "maximum_economic_subclass_weight_percent": "max_subcls_weight_pct",
+    "asset_class_weight": "cls_weight",
+    "limited_asset_class_weight": "cls_lim_weight",
+    "economic_subclass_weight": "subcls_weight",
+    "limited_economic_subclass_weight": "subcls_lim_weight",
+    "group_limited_weight": "group_lim_weight",
+    "unallocated_weight": "unalloc_weight",
     "include_roll_cost_in_score": "roll_cost_in_score",
     "elapsed_seconds": "elapsed_s",
     "number_instruments": "n_instr",
@@ -411,6 +421,20 @@ SELECTION_REVIEW_ALLOCATION_REPORT_PRIORITY = (
     "accepted",
     "book",
     "book_symbol",
+    "asset_cls",
+    "econ_subcls",
+    "max_instr_per_cls",
+    "max_instr_per_subcls",
+    "max_cls_weight_pct",
+    "max_subcls_weight_pct",
+    "cls_weight",
+    "cls_lim_weight",
+    "subcls_weight",
+    "subcls_lim_weight",
+    "group_lim_weight",
+    "unalloc_weight",
+    "limit_weight",
+    "idm",
     "ann_dvol",
     "risk_budget",
 )
@@ -427,7 +451,24 @@ def order_selection_review_allocation_report(
     the two public schemas aligned rather than silently producing an
     incomplete report.
     """
-    required = {"sel_date", "sel_equity", "ann_dvol", "risk_budget"}
+    required = {
+        "sel_date",
+        "sel_equity",
+        "max_instr_per_cls",
+        "max_instr_per_subcls",
+        "max_cls_weight_pct",
+        "max_subcls_weight_pct",
+        "cls_weight",
+        "cls_lim_weight",
+        "subcls_weight",
+        "subcls_lim_weight",
+        "group_lim_weight",
+        "unalloc_weight",
+        "limit_weight",
+        "idm",
+        "ann_dvol",
+        "risk_budget",
+    }
     missing = sorted(required.difference(report.columns))
     if missing:
         raise ValueError(

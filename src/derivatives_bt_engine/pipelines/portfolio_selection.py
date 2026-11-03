@@ -781,11 +781,37 @@ def parse_args(argv=None, *, complete_default: bool = False):
         ),
     )
     parser.add_argument(
+        "--max-instr-per-subclass",
         "--max-instr-per-cluster",
+        dest="max_instr_per_subclass",
         type=int,
         help=(
             "Maximum selected instruments in one economic subclass, such as "
-            "grains; default is unlimited"
+            "grains; --max-instr-per-cluster remains a compatibility alias"
+        ),
+    )
+    parser.add_argument(
+        "--max-instr-per-class",
+        type=int,
+        help=(
+            "Maximum selected instruments in one asset class; default is "
+            "unlimited"
+        ),
+    )
+    parser.add_argument(
+        "--max-class-weight-pct",
+        type=float,
+        help=(
+            "Maximum structural allocation retained for one asset class in "
+            "percent; excess remains unallocated"
+        ),
+    )
+    parser.add_argument(
+        "--max-subclass-weight-pct",
+        type=float,
+        help=(
+            "Maximum structural allocation retained for one economic "
+            "subclass in percent; excess remains unallocated"
         ),
     )
     parser.add_argument(
@@ -898,10 +924,10 @@ def _selection_scenario_id(
     effective_book_margin_pct = args.max_book_margin_pct
     if effective_book_margin_pct is None and args.max_instr_margin_pct is not None:
         effective_book_margin_pct = 100.0
-    cluster = (
+    subclass = (
         "none"
-        if args.max_instr_per_cluster is None
-        else str(args.max_instr_per_cluster)
+        if args.max_instr_per_subclass is None
+        else str(args.max_instr_per_subclass)
     )
     tokens = [
         f"tv{_number_token(float(run_config['target_vol']))}",
@@ -923,8 +949,14 @@ def _selection_scenario_id(
             f"tie{_number_token(args.score_tie_tolerance_percent)}",
             f"refn{args.tie_reference_book_count}",
         ))
+    if args.max_instr_per_class is not None:
+        tokens.append(f"ic{args.max_instr_per_class}")
+    if args.max_class_weight_pct is not None:
+        tokens.append(f"cw{_number_token(args.max_class_weight_pct)}")
+    if args.max_subclass_weight_pct is not None:
+        tokens.append(f"sw{_number_token(args.max_subclass_weight_pct)}")
     tokens.extend((
-        f"cl{cluster}",
+        f"cl{subclass}",
         f"roll{int(args.include_roll_cost_in_score)}",
         args.weight_policy,
     ))
@@ -1147,7 +1179,16 @@ def _greedy_selector(
             max_pct_market_volume=float(run_config["max_pct_mkt_volume"]),
             liquidity_days=int(run_config["liq_days"]),
             include_roll_cost_in_score=args.include_roll_cost_in_score,
-            max_instruments_per_cluster=args.max_instr_per_cluster,
+            max_instruments_per_class=args.max_instr_per_class,
+            max_instruments_per_subclass=args.max_instr_per_subclass,
+            max_asset_class_weight=(
+                args.max_class_weight_pct / 100.0
+                if args.max_class_weight_pct is not None else None
+            ),
+            max_economic_subclass_weight=(
+                args.max_subclass_weight_pct / 100.0
+                if args.max_subclass_weight_pct is not None else None
+            ),
             max_instrument_margin_pct=args.max_instr_margin_pct,
             max_book_margin_pct=effective_book_margin_pct,
         ),
@@ -1409,6 +1450,16 @@ class _WalkForwardSelectionProvider:
                 **trial,
                 "selection_date": review_date,
                 "selection_equity_usd": prior_net_equity,
+                "maximum_instruments_per_class": self.args.max_instr_per_class,
+                "maximum_instruments_per_subclass": (
+                    self.args.max_instr_per_subclass
+                ),
+                "maximum_asset_class_weight_percent": (
+                    self.args.max_class_weight_pct
+                ),
+                "maximum_economic_subclass_weight_percent": (
+                    self.args.max_subclass_weight_pct
+                ),
             }
             for trial in selection.trials
         )
@@ -1417,6 +1468,16 @@ class _WalkForwardSelectionProvider:
                 **allocation_row,
                 "selection_date": review_date,
                 "selection_equity_usd": prior_net_equity,
+                "maximum_instruments_per_class": self.args.max_instr_per_class,
+                "maximum_instruments_per_subclass": (
+                    self.args.max_instr_per_subclass
+                ),
+                "maximum_asset_class_weight_percent": (
+                    self.args.max_class_weight_pct
+                ),
+                "maximum_economic_subclass_weight_percent": (
+                    self.args.max_subclass_weight_pct
+                ),
             }
             for allocation_row in selection.trial_allocations
         )
@@ -1434,6 +1495,18 @@ class _WalkForwardSelectionProvider:
             allocations[symbol] = {
                 "rank": rank,
                 "weight": float(selection.final_score.weights[symbol]),
+                "asset_class_weight": float(detail["asset_class_weight"]),
+                "limited_asset_class_weight": float(
+                    detail["limited_asset_class_weight"]
+                ),
+                "economic_subclass_weight": float(
+                    detail["economic_subclass_weight"]
+                ),
+                "limited_economic_subclass_weight": float(
+                    detail["limited_economic_subclass_weight"]
+                ),
+                "group_limited_weight": float(detail["group_limited_weight"]),
+                "unallocated_weight": float(detail["unallocated_weight"]),
                 "limit_weight": float(detail["limit_weight"]),
                 "idm": float(selection.final_score.idm),
                 "trade_cost_per_con": trade_cost,
@@ -1479,6 +1552,16 @@ class _WalkForwardSelectionProvider:
                 "selection_idm": selection.final_score.idm,
                 "selection_status": status,
                 "selection_active": active,
+                "maximum_instruments_per_class": self.args.max_instr_per_class,
+                "maximum_instruments_per_subclass": (
+                    self.args.max_instr_per_subclass
+                ),
+                "maximum_asset_class_weight_percent": (
+                    self.args.max_class_weight_pct
+                ),
+                "maximum_economic_subclass_weight_percent": (
+                    self.args.max_subclass_weight_pct
+                ),
                 "rank": allocation.get("rank") if allocation else None,
                 "symbol": symbol,
                 "hist_instr_code": source.get("hist_instr_code"),
@@ -1486,6 +1569,28 @@ class _WalkForwardSelectionProvider:
                 "asset_cls": source.get("asset_cls"),
                 "econ_subcls": source.get("econ_subcls"),
                 "weight": allocation.get("weight") if allocation else None,
+                "asset_class_weight": (
+                    allocation.get("asset_class_weight") if allocation else None
+                ),
+                "limited_asset_class_weight": (
+                    allocation.get("limited_asset_class_weight")
+                    if allocation else None
+                ),
+                "economic_subclass_weight": (
+                    allocation.get("economic_subclass_weight")
+                    if allocation else None
+                ),
+                "limited_economic_subclass_weight": (
+                    allocation.get("limited_economic_subclass_weight")
+                    if allocation else None
+                ),
+                "group_limited_weight": (
+                    allocation.get("group_limited_weight")
+                    if allocation else None
+                ),
+                "unallocated_weight": (
+                    allocation.get("unallocated_weight") if allocation else None
+                ),
                 "limit_weight": (
                     allocation.get("limit_weight") if allocation else None
                 ),
@@ -1522,12 +1627,13 @@ class _WalkForwardSelectionProvider:
         self.prior_selected = selected_symbols
         logger.info(
             "walk_forward_selection complete date=%s equity=%s candidates=%d "
-            "selected=%d idm=%s book=%s",
+            "selected=%d idm=%s unallocated_weight=%s book=%s",
             review_date,
             prior_net_equity,
             len(candidates),
             len(selection.selected),
             selection.final_score.idm,
+            next(iter(allocations.values())).get("unallocated_weight"),
             ",".join(selection.selected),
         )
         return allocations
@@ -1570,7 +1676,12 @@ def _final_selection_frame(
             "symbol": symbol,
             "pst_instr_code": source_rows[symbol].get("pst_instr_code"),
             "wt_policy": args.weight_policy,
-            "max_instr_per_cluster": args.max_instr_per_cluster,
+            "maximum_instruments_per_class": args.max_instr_per_class,
+            "maximum_instruments_per_subclass": args.max_instr_per_subclass,
+            "maximum_asset_class_weight_percent": args.max_class_weight_pct,
+            "maximum_economic_subclass_weight_percent": (
+                args.max_subclass_weight_pct
+            ),
             "max_instr_margin_pct": args.max_instr_margin_pct,
             "max_book_margin_pct": effective_book_margin_pct,
             "low_contract_penalty_scale": args.low_contract_penalty_scale,
@@ -2207,6 +2318,9 @@ def _run_complete_selection(
             "base_score=%s candidate_ref_max_position=%s "
             "candidate_ref_con_band_distance=%s tie_eligible=%s "
             "tie_break_applied=%s idm=%s "
+            "unallocated_weight=%s "
+            "max_instr_per_class=%s max_instr_per_subclass=%s "
+            "max_class_weight_pct=%s max_subclass_weight_pct=%s "
             "portfolio_cont_margin_at_max_usd=%s "
             "portfolio_margin_at_max_usd=%s instr_margin_limit_usd=%s "
             "book_margin_limit_usd=%s book_margin_remaining_usd=%s "
@@ -2216,7 +2330,10 @@ def _run_complete_selection(
             trial["candidate_ref_contract_band_distance"],
             trial["tie_eligible"],
             trial["tie_break_applied"],
-            trial["idm"], trial.get("portfolio_cont_margin_at_max_usd"),
+            trial["idm"], trial.get("unallocated_weight"),
+            args.max_instr_per_class, args.max_instr_per_subclass,
+            args.max_class_weight_pct, args.max_subclass_weight_pct,
+            trial.get("portfolio_cont_margin_at_max_usd"),
             trial.get("portfolio_margin_at_max_usd"),
             trial.get("instr_margin_limit_usd"),
             trial.get("book_margin_limit_usd"),
@@ -2649,7 +2766,10 @@ def _run_complete_selection(
         "tie_reference_book_count": args.tie_reference_book_count,
         "include_roll_cost_in_score": args.include_roll_cost_in_score,
         "max_weight_idm": args.max_weight_idm,
-        "max_instr_per_cluster": args.max_instr_per_cluster,
+        "max_instr_per_class": args.max_instr_per_class,
+        "max_instr_per_subclass": args.max_instr_per_subclass,
+        "max_class_weight_pct": args.max_class_weight_pct,
+        "max_subclass_weight_pct": args.max_subclass_weight_pct,
         "max_instr_margin_pct": args.max_instr_margin_pct,
         "max_book_margin_pct": args.max_book_margin_pct,
         "weight_policy": args.weight_policy,
@@ -3023,8 +3143,17 @@ def _run_complete_selection(
         rename_public_report_columns(
             pl.DataFrame(selection.trials, infer_schema_length=None).with_columns(
                 pl.lit(args.weight_policy).alias("wt_policy"),
-                pl.lit(args.max_instr_per_cluster, dtype=pl.Int64).alias(
-                    "max_instr_per_cluster"
+                pl.lit(args.max_instr_per_class, dtype=pl.Int64).alias(
+                    "maximum_instruments_per_class"
+                ),
+                pl.lit(args.max_instr_per_subclass, dtype=pl.Int64).alias(
+                    "maximum_instruments_per_subclass"
+                ),
+                pl.lit(args.max_class_weight_pct).alias(
+                    "maximum_asset_class_weight_percent"
+                ),
+                pl.lit(args.max_subclass_weight_pct).alias(
+                    "maximum_economic_subclass_weight_percent"
                 ),
                 pl.lit(args.include_roll_cost_in_score).alias(
                     "roll_cost_in_score"
@@ -3051,8 +3180,17 @@ def _run_complete_selection(
             pl.DataFrame(selection.trial_allocations, infer_schema_length=None)
             .with_columns(
                 pl.lit(args.weight_policy).alias("wt_policy"),
-                pl.lit(args.max_instr_per_cluster, dtype=pl.Int64).alias(
-                    "max_instr_per_cluster"
+                pl.lit(args.max_instr_per_class, dtype=pl.Int64).alias(
+                    "maximum_instruments_per_class"
+                ),
+                pl.lit(args.max_instr_per_subclass, dtype=pl.Int64).alias(
+                    "maximum_instruments_per_subclass"
+                ),
+                pl.lit(args.max_class_weight_pct).alias(
+                    "maximum_asset_class_weight_percent"
+                ),
+                pl.lit(args.max_subclass_weight_pct).alias(
+                    "maximum_economic_subclass_weight_percent"
                 ),
                 pl.lit(args.include_roll_cost_in_score).alias(
                     "roll_cost_in_score"
@@ -3083,8 +3221,17 @@ def _run_complete_selection(
         .filter(pl.col("accepted"))
         .with_columns(
             pl.lit(args.weight_policy).alias("wt_policy"),
-            pl.lit(args.max_instr_per_cluster, dtype=pl.Int64).alias(
-                "max_instr_per_cluster"
+            pl.lit(args.max_instr_per_class, dtype=pl.Int64).alias(
+                "maximum_instruments_per_class"
+            ),
+            pl.lit(args.max_instr_per_subclass, dtype=pl.Int64).alias(
+                "maximum_instruments_per_subclass"
+            ),
+            pl.lit(args.max_class_weight_pct).alias(
+                "maximum_asset_class_weight_percent"
+            ),
+            pl.lit(args.max_subclass_weight_pct).alias(
+                "maximum_economic_subclass_weight_percent"
             ),
             pl.lit(args.include_roll_cost_in_score).alias(
                 "roll_cost_in_score"
@@ -3108,7 +3255,10 @@ def _run_complete_selection(
             pl.col("iteration").alias("selection_step"),
             pl.col("candidate").alias("added_symbol"),
             "wt_policy",
-            "max_instr_per_cluster",
+            "maximum_instruments_per_class",
+            "maximum_instruments_per_subclass",
+            "maximum_asset_class_weight_percent",
+            "maximum_economic_subclass_weight_percent",
             "book",
             pl.col("book_symbol").alias("symbol"),
             "asset_cls",
@@ -3118,6 +3268,12 @@ def _run_complete_selection(
             "cluster_members",
             "cluster_weight",
             "weight",
+            "asset_class_weight",
+            "limited_asset_class_weight",
+            "economic_subclass_weight",
+            "limited_economic_subclass_weight",
+            "group_limited_weight",
+            "unallocated_weight",
             "limit_weight",
             "ref_weight",
             "ref_weight_idm",

@@ -888,6 +888,12 @@ def plot_selection_rebalance_weights(
             "asset_cls": None,
             "econ_subcls": None,
             "sel_equity": None,
+            "cls_weight": None,
+            "cls_lim_weight": None,
+            "subcls_weight": None,
+            "subcls_lim_weight": None,
+            "group_lim_weight": None,
+            "unalloc_weight": None,
         }
         active = (
             active.with_columns(
@@ -901,6 +907,19 @@ def plot_selection_rebalance_weights(
                     pl.col("limit_weight").cast(pl.Float64, strict=False)
                     * 100.0
                 ).alias("limit_weight_pct"),
+                *[
+                    (
+                        pl.col(column).cast(pl.Float64, strict=False) * 100.0
+                    ).alias(f"{column}_pct")
+                    for column in (
+                        "cls_weight",
+                        "cls_lim_weight",
+                        "subcls_weight",
+                        "subcls_lim_weight",
+                        "group_lim_weight",
+                        "unalloc_weight",
+                    )
+                ],
             )
         )
         added = (
@@ -935,6 +954,12 @@ def plot_selection_rebalance_weights(
                 "asset_cls",
                 "econ_subcls",
                 "sel_equity",
+                "cls_weight_pct",
+                "cls_lim_weight_pct",
+                "subcls_weight_pct",
+                "subcls_lim_weight_pct",
+                "group_lim_weight_pct",
+                "unalloc_weight_pct",
             ],
             hover_tooltips=[
                 ("Instrument", "@symbol"),
@@ -944,6 +969,15 @@ def plot_selection_rebalance_weights(
                 ("Rank", "@rank"),
                 ("Asset class", "@asset_cls"),
                 ("Economic subclass", "@econ_subcls"),
+                ("Class weight", "@cls_weight_pct{0.00}%"),
+                ("Capped class weight", "@cls_lim_weight_pct{0.00}%"),
+                ("Subclass weight", "@subcls_weight_pct{0.00}%"),
+                (
+                    "Capped subclass weight",
+                    "@subcls_lim_weight_pct{0.00}%",
+                ),
+                ("Group-limited weight", "@group_lim_weight_pct{0.00}%"),
+                ("Unallocated book weight", "@unalloc_weight_pct{0.00}%"),
                 ("Review equity", "@sel_equity{$0,0.00}"),
             ],
         )

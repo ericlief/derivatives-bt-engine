@@ -921,9 +921,13 @@ the same complete allocation diagnostics. It is the compact year-by-year or
 month-by-month book audit. Earlier accepted growth steps and every rejected
 alternative remain in the full trial reports rather than being discarded.
 Both allocation reports lead with `sel_date`, `sel_equity`, the trial identity,
-`ann_dvol`, and `risk_budget`. Report construction fails rather than silently
-dropping any of the review date, sizing capital, dollar-volatility, or budget
-fields.
+classification, configured `max_instr_per_cls`, `max_instr_per_subcls`,
+`max_cls_weight_pct`, and `max_subcls_weight_pct`, raw and capped
+class/subclass weights, `group_lim_weight`,
+`unalloc_weight`, final `limit_weight`, IDM, `ann_dvol`, and `risk_budget`.
+Report construction fails rather than silently dropping any of those group
+limits, allocation diagnostics, review date, sizing capital,
+dollar-volatility, or budget fields.
 
 The notebook helper can navigate the resulting dated books without loading a
 separate result directory for every review:
@@ -973,7 +977,8 @@ split would require a separate persisted selection-trade field.
 The year widget defaults to the latest year. A monthly run adds an exact review
 date widget for that year. The vertical bars show active selection weights;
 hover shows the corresponding limit weight, added/retained status, rank,
-classification, and prior-day equity used by the review. These are fixed book
+classification, raw and capped class/subclass weights, group-limited and
+unallocated weights, and prior-day equity used by the review. These are fixed book
 weights for the selected segment, not realized daily exposure after forecasts,
 buffering, integer contracts, and capital scaling.
 
@@ -1129,6 +1134,10 @@ futures-build-selection \
   --liquidity-business-days 256 \
   --min-daily-volume 100 \
   --max-market-volume-pct 1 \
+  --max-instr-per-class 10 \
+  --max-instr-per-subclass 5 \
+  --max-class-weight-pct 50 \
+  --max-subclass-weight-pct 25 \
   --weight-policy topdown_classif
 ```
 
@@ -1277,8 +1286,10 @@ baseline by default. The command writes:
 - `multi_speed_ewmac_selection_trials_<timestamp>.parquet`, one row per greedy trial; and
 - `multi_speed_ewmac_selection_trial_allocations_<timestamp>.parquet`, one row per member
   of every hypothetical trial book, including its economic `cluster_path`,
-  portfolio `weight`, sizing `limit_weight`, IDM, score, feasibility, and
-  accepted flag. Every rejected row has a decision `reason`: hard-constraint
+  portfolio `weight`, raw and capped class/subclass weights,
+  `group_lim_weight`, final sizing `limit_weight`, `unalloc_weight`, IDM,
+  score, feasibility, and accepted flag. Every rejected row has a decision
+  `reason`: hard-constraint
   failures retain their feasibility reason, while feasible losers distinguish
   a lower singleton rank, a lower rank than the iteration winner, or a best
   score below the acceptance threshold. Near-tie losers identify the
@@ -1339,14 +1350,26 @@ includes its configured carry companions. The final signal remains selected
 under `hold_roll_cycle`; these raw bars can therefore support later holding
 policy comparisons without redownloading omitted contract months.
 
-Use `--max-instr-per-cluster N` to run a static breadth-cap sensitivity. The
-cluster key is the reviewed `econ_subcls`, so `--max-instr-per-cluster 4`
-prevents a fifth `grains` instrument from entering a trial book. A rejected
-trial remains in both audit Parquet tables with a reason such as
-`cluster_instr_limit:grains n=5 max=4`. The default is unlimited. This static
-universe constraint is intentionally separate from the backtest/live
+Use `--max-instr-per-class N` and `--max-instr-per-subclass N` for independent
+breadth limits. The latter groups by the reviewed `asset_cls/econ_subcls`
+pair, so `--max-instr-per-subclass 4` prevents a fifth instrument from entering
+`ags/grains`. `--max-instr-per-cluster` remains a compatibility alias for the
+subclass option. Rejected trials retain reasons such as
+`class_instr_limit:ags n=11 max=10` or
+`subclass_instr_limit:ags/grains n=5 max=4`. Both defaults are unlimited.
+These static universe constraints remain separate from the backtest/live
 `max_active_per_cluster` control, which ranks dated active signals by current
 model conviction after the universe has already been selected.
+
+`--max-class-weight-pct` and `--max-subclass-weight-pct` cap structural sizing
+allocation without redistributing the excess. Class caps are applied first;
+subclass caps then act on the remaining allocation within each
+`asset_cls/econ_subcls` pair. The normalized structural `weight` still drives
+IDM and portfolio score. `group_lim_weight` is the instrument allocation after
+the two hierarchy caps, `limit_weight` applies the existing instrument cap as
+well, and `unalloc_weight` is the book share removed by hierarchy caps. Thus a
+grains-only book with a 50% class cap keeps 50% allocated and reports 50%
+unallocated instead of scaling grains back to 100%.
 
 In the final selection report, `net_sr` is an instrument-level input to the
 portfolio score: the common gross SR assumption less that instrument's annual
@@ -1514,18 +1537,32 @@ multiplier for every trial book:
 IDM(B) = min(2.5, 1 / sqrt(w' H w))
 ```
 
-For candidate `i`, the position at the maximum absolute forecast of 20 is:
+For class `c`, subclass `s`, and candidate `i`, hierarchy limits are:
 
 ```text
-limit_weight_i = min(w_i, max_weight_idm / IDM(B))
+class_scale_c = min(1, max_class_weight / sum(w_j for j in c))
+class_limited_i = w_i * class_scale_c
+subclass_scale_s = min(
+    1,
+    max_subclass_weight / sum(class_limited_j for j in s),
+)
+group_limit_weight_i = class_limited_i * subclass_scale_s
+unallocated_weight = 1 - sum(group_limit_weight_i)
+```
+
+An inactive class or subclass cap has scale one. For candidate `i`, the
+position at the maximum absolute forecast of 20 is:
+
+```text
+limit_weight_i = min(group_limit_weight_i, max_weight_idm / IDM(B))
 P_i = capital * target_vol * limit_weight_i * IDM(B)
      / annual_dollar_vol_i * (20 / 10)
 ```
 
 `w_i` is the structural classification weight used to calculate the book IDM
-and portfolio score. `limit_weight_i` is the capped weight used for sizing,
-liquidity, margin, and the executable cash backtest; the cap is not
-redistributed to other instruments. Its definition ensures
+and portfolio score. `group_limit_weight_i` retains the hierarchy-capped share
+without renormalization. `limit_weight_i` is the final capped weight used for
+sizing, liquidity, margin, and the executable cash backtest. Its definition ensures
 `limit_weight_i * IDM(B) <= max_weight_idm` at an average absolute forecast
 of 10. The final factor is two because the maximum absolute forecast is 20,
 so with `max_weight_idm=0.20` the maximum forecast can scale an instrument to
@@ -1835,8 +1872,11 @@ Then vary one structural family at a time around a stable central scenario:
 
 - `max_book_margin_pct=50,75,100` tests total account margin usage;
 - `max_weight_idm=0.15,0.20,0.25` tests the per-instrument risk cap after IDM;
-- `max_instr_per_cluster=2,3,unlimited` tests economic-subclass concentration,
-  such as the number of grains; and
+- `--max-instr-per-classes` tests total instruments per asset class;
+- `--max-instr-per-subclasses 2,3,unlimited` tests subclass breadth;
+- `--max-class-weight-pcts 40,50,60,none` tests asset-class concentration;
+- `--max-subclass-weight-pcts 20,25,33.3,none` tests subclass concentration;
+  and
 - `weight_policy=equal` is a structural benchmark for
   `topdown_classif`, not another setting to choose by in-sample score.
 
@@ -1911,7 +1951,10 @@ Run secondary constraint tests separately, for example:
   --score-thresholds 0.99,1.00 \
   --max-book-margin-pcts 50,75 \
   --max-weight-idms 0.20 \
-  --max-instr-per-clusters 2 \
+  --max-instr-per-classes none,10 \
+  --max-instr-per-subclasses 2 \
+  --max-class-weight-pcts none,50 \
+  --max-subclass-weight-pcts none,25 \
   --low-con-penalty-scales .12 \
   --high-con-penalty-scales 0 \
   --score-tie-tolerance-pcts .25,.5,1 \

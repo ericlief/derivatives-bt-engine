@@ -90,7 +90,8 @@ _vd_set_type(
 # Counts, ranks, spans, and retry/observation counts.
 _vd_set_type(
     """
-    rank selection_step iteration max_instr_per_cluster reference_book_count
+    rank selection_step iteration max_instr_per_cls max_instr_per_subcls
+    max_instr_per_cluster reference_book_count
     ref_book_n tie_ref_book_n book_n_instr pnl_valid_n_instr
     eligible_ewmac_rule_count ref_elig_ewmac_rule_count
     live_elig_ewmac_rule_count volume_n ann_days liq_days

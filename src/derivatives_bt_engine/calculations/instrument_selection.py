@@ -131,8 +131,12 @@ class GreedySelectionConfig:
     uncapped structural weights. ``forecast_cap_ratio`` is maximum forecast
     divided by average absolute forecast (20/10 = 2 in conventional Carver
     units). ``min_max_position`` enforces the half-contract granularity rule.
-    ``max_instruments_per_cluster`` optionally limits the number of selected
-    instruments sharing one economic subclass, such as ``grains``.
+    ``max_instruments_per_class`` and ``max_instruments_per_subclass``
+    optionally limit selected instrument counts at the two reviewed economic
+    hierarchy levels. ``max_asset_class_weight`` and
+    ``max_economic_subclass_weight`` cap their structural allocation shares.
+    Capped allocation is left unused rather than redistributed, while IDM and
+    portfolio score continue to use the original normalized structural weights.
     ``score_threshold`` controls the tolerated decline from the best score
     observed so far. ``low_contract_penalty_scale`` and
     ``high_contract_penalty_scale`` apply separate log-squared penalties
@@ -173,7 +177,11 @@ class GreedySelectionConfig:
     tie_reference_book_count: int = 15
     liquidity_days: int = 250
     max_pct_market_volume: float = 1.0
+    max_instruments_per_class: int | None = None
+    max_instruments_per_subclass: int | None = None
     max_instruments_per_cluster: int | None = None
+    max_asset_class_weight: float | None = None
+    max_economic_subclass_weight: float | None = None
     max_instrument_margin_pct: float | None = None
     max_book_margin_pct: float | None = None
     include_roll_cost_in_score: bool = False
@@ -206,13 +214,34 @@ class GreedySelectionConfig:
             raise ValueError("tie_reference_book_count must be positive")
         if self.liquidity_days <= 0 or self.max_pct_market_volume <= 0:
             raise ValueError("liquidity parameters must be positive")
+        for name, value in (
+            ("max_instruments_per_class", self.max_instruments_per_class),
+            (
+                "max_instruments_per_subclass",
+                self.max_instruments_per_subclass,
+            ),
+            ("max_instruments_per_cluster", self.max_instruments_per_cluster),
+        ):
+            if value is not None and value <= 0:
+                raise ValueError(f"{name} must be positive when set")
         if (
-            self.max_instruments_per_cluster is not None
-            and self.max_instruments_per_cluster <= 0
+            self.max_instruments_per_subclass is not None
+            and self.max_instruments_per_cluster is not None
+            and self.max_instruments_per_subclass
+            != self.max_instruments_per_cluster
         ):
             raise ValueError(
-                "max_instruments_per_cluster must be positive when set"
+                "subclass and compatibility cluster instrument limits disagree"
             )
+        for name, value in (
+            ("max_asset_class_weight", self.max_asset_class_weight),
+            (
+                "max_economic_subclass_weight",
+                self.max_economic_subclass_weight,
+            ),
+        ):
+            if value is not None and not 0 < value <= 1:
+                raise ValueError(f"{name} must be in (0, 1] when set")
         if (
             self.max_instrument_margin_pct is not None
             and not 0 < self.max_instrument_margin_pct <= 100
@@ -225,6 +254,15 @@ class GreedySelectionConfig:
             and not 0 < self.max_book_margin_pct <= 100
         ):
             raise ValueError("max_book_margin_pct must be in (0, 100] when set")
+
+    @property
+    def subclass_instrument_limit(self) -> int | None:
+        """Return the explicit subclass limit or its legacy cluster alias."""
+        return (
+            self.max_instruments_per_subclass
+            if self.max_instruments_per_subclass is not None
+            else self.max_instruments_per_cluster
+        )
 
 
 @dataclass(frozen=True)
@@ -481,6 +519,107 @@ class GreedyInstrumentSelector:
             for symbol, candidate in candidates.items()
         })
 
+    def _group_limited_weights(
+        self,
+        symbols: list[str],
+        candidates: dict[str, SelectionCandidate],
+        structural_weights: dict[str, float],
+    ) -> tuple[
+        dict[str, float],
+        dict[str, float],
+        dict[str, float],
+        dict[str, float],
+        dict[str, float],
+        float,
+    ]:
+        """Apply class then subclass allocation caps without redistribution.
+
+        Returns per-instrument limited weights, raw and limited asset-class
+        totals, raw and limited economic-subclass totals, and the portfolio
+        weight left unallocated. Subclass identities include their parent
+        class so similarly named groups cannot be combined accidentally.
+        """
+        class_by_symbol = {
+            symbol: candidates[symbol].asset_class for symbol in symbols
+        }
+        subclass_by_symbol = {
+            symbol: (
+                candidates[symbol].asset_class,
+                candidates[symbol].economic_subclass,
+            )
+            for symbol in symbols
+        }
+        raw_class_weights: dict[str, float] = {}
+        raw_subclass_weights: dict[tuple[str, str], float] = {}
+        for symbol in symbols:
+            weight = structural_weights[symbol]
+            asset_class = class_by_symbol[symbol]
+            subclass = subclass_by_symbol[symbol]
+            raw_class_weights[asset_class] = (
+                raw_class_weights.get(asset_class, 0.0) + weight
+            )
+            raw_subclass_weights[subclass] = (
+                raw_subclass_weights.get(subclass, 0.0) + weight
+            )
+
+        class_limited = dict(structural_weights)
+        if self.config.max_asset_class_weight is not None:
+            for symbol in symbols:
+                class_weight = raw_class_weights[class_by_symbol[symbol]]
+                class_limited[symbol] *= min(
+                    1.0,
+                    self.config.max_asset_class_weight / class_weight,
+                )
+
+        limited_class_weights: dict[str, float] = {}
+        class_limited_subclass_weights: dict[tuple[str, str], float] = {}
+        for symbol in symbols:
+            weight = class_limited[symbol]
+            asset_class = class_by_symbol[symbol]
+            subclass = subclass_by_symbol[symbol]
+            limited_class_weights[asset_class] = (
+                limited_class_weights.get(asset_class, 0.0) + weight
+            )
+            class_limited_subclass_weights[subclass] = (
+                class_limited_subclass_weights.get(subclass, 0.0) + weight
+            )
+
+        group_limited = dict(class_limited)
+        if self.config.max_economic_subclass_weight is not None:
+            for symbol in symbols:
+                subclass_weight = class_limited_subclass_weights[
+                    subclass_by_symbol[symbol]
+                ]
+                group_limited[symbol] *= min(
+                    1.0,
+                    self.config.max_economic_subclass_weight / subclass_weight,
+                )
+
+        # Recalculate both hierarchy totals after all caps so report rows show
+        # the allocation that actually reaches instrument sizing.
+        limited_class_weights = {}
+        limited_subclass_weights: dict[tuple[str, str], float] = {}
+        for symbol in symbols:
+            asset_class = class_by_symbol[symbol]
+            subclass = subclass_by_symbol[symbol]
+            limited_class_weights[asset_class] = (
+                limited_class_weights.get(asset_class, 0.0)
+                + group_limited[symbol]
+            )
+            limited_subclass_weights[subclass] = (
+                limited_subclass_weights.get(subclass, 0.0)
+                + group_limited[symbol]
+            )
+        unallocated_weight = max(0.0, 1.0 - sum(group_limited.values()))
+        return (
+            group_limited,
+            raw_class_weights,
+            limited_class_weights,
+            raw_subclass_weights,
+            limited_subclass_weights,
+            unallocated_weight,
+        )
+
     @staticmethod
     def _rounded_max_contracts(max_position: float) -> int:
         """Convert a positive continuous cap position to an executable lot count.
@@ -665,12 +804,21 @@ class GreedyInstrumentSelector:
                 weights,
                 maximum=self.config.max_idm,
             )
+        (
+            group_limited_weights,
+            raw_class_weights,
+            limited_class_weights,
+            raw_subclass_weights,
+            limited_subclass_weights,
+            unallocated_weight,
+        ) = self._group_limited_weights(symbols, candidates, weights)
         # Carver caps instrument_weight * IDM inside maximum-position sizing.
-        # Express the capped product as an equivalent pre-IDM weight so the
-        # existing position and liquidity equations retain one clear form.
+        # Group caps first remove allocation without redistribution. Express
+        # the remaining per-instrument cap as a pre-IDM weight so position,
+        # liquidity, and margin equations retain one clear form.
         weights_for_limits = {
             symbol: min(
-                weights[symbol],
+                group_limited_weights[symbol],
                 self.config.max_weight_idm / idm,
             )
             for symbol in symbols
@@ -699,21 +847,40 @@ class GreedyInstrumentSelector:
             self.config.capital * effective_book_margin_pct / 100.0
             if effective_book_margin_pct is not None else None
         )
-        if self.config.max_instruments_per_cluster is not None:
-            cluster_counts: dict[str, int] = {}
+        if self.config.max_instruments_per_class is not None:
+            class_counts: dict[str, int] = {}
             for symbol in symbols:
-                cluster = candidates[symbol].economic_subclass
-                cluster_counts[cluster] = cluster_counts.get(cluster, 0) + 1
-            for cluster, count in sorted(cluster_counts.items()):
-                if count > self.config.max_instruments_per_cluster:
+                asset_class = candidates[symbol].asset_class
+                class_counts[asset_class] = class_counts.get(asset_class, 0) + 1
+            for asset_class, count in sorted(class_counts.items()):
+                if count > self.config.max_instruments_per_class:
                     feasible = False
                     reasons.append(
-                        f"cluster_instr_limit:{cluster} n={count} "
-                        f"max={self.config.max_instruments_per_cluster}"
+                        f"class_instr_limit:{asset_class} n={count} "
+                        f"max={self.config.max_instruments_per_class}"
+                    )
+        subclass_instrument_limit = self.config.subclass_instrument_limit
+        if subclass_instrument_limit is not None:
+            subclass_counts: dict[tuple[str, str], int] = {}
+            for symbol in symbols:
+                candidate = candidates[symbol]
+                subclass = (
+                    candidate.asset_class,
+                    candidate.economic_subclass,
+                )
+                subclass_counts[subclass] = subclass_counts.get(subclass, 0) + 1
+            for subclass, count in sorted(subclass_counts.items()):
+                if count > subclass_instrument_limit:
+                    feasible = False
+                    reasons.append(
+                        f"subclass_instr_limit:{subclass[0]}/{subclass[1]} "
+                        f"n={count} "
+                        f"max={subclass_instrument_limit}"
                     )
         for symbol in symbols:
             candidate = candidates[symbol]
             allocation = weights_for_limits[symbol]
+            subclass = (candidate.asset_class, candidate.economic_subclass)
             (
                 ref_weight,
                 ref_weight_idm,
@@ -827,6 +994,16 @@ class GreedyInstrumentSelector:
                 "econ_fam_id": candidate.econ_family,
                 "cluster_path": allocation_result.cluster_paths[symbol],
                 "weight": weights[symbol],
+                "asset_class_weight": raw_class_weights[candidate.asset_class],
+                "limited_asset_class_weight": limited_class_weights[
+                    candidate.asset_class
+                ],
+                "economic_subclass_weight": raw_subclass_weights[subclass],
+                "limited_economic_subclass_weight": (
+                    limited_subclass_weights[subclass]
+                ),
+                "group_limited_weight": group_limited_weights[symbol],
+                "unallocated_weight": unallocated_weight,
                 "limit_weight": allocation,
                 "annual_dollar_vol_per_contract": candidate.ann_dvol,
                 "risk_budget_usd": risk_budget_usd,
@@ -1174,6 +1351,7 @@ class GreedyInstrumentSelector:
                 score.base_score if math.isfinite(score.base_score) else None
             ),
             "idm": score.idm,
+            "unallocated_weight": first_detail.get("unallocated_weight"),
             "low_contract_weight": score.low_contract_weight,
             "band_contract_weight": score.band_contract_weight,
             "high_contract_weight": score.high_contract_weight,
@@ -1248,6 +1426,18 @@ class GreedyInstrumentSelector:
                 "cluster_members": ",".join(members_by_cluster[cluster_path]),
                 "cluster_weight": weight_by_cluster[cluster_path],
                 "weight": detail["weight"],
+                "asset_class_weight": detail["asset_class_weight"],
+                "limited_asset_class_weight": detail[
+                    "limited_asset_class_weight"
+                ],
+                "economic_subclass_weight": detail[
+                    "economic_subclass_weight"
+                ],
+                "limited_economic_subclass_weight": detail[
+                    "limited_economic_subclass_weight"
+                ],
+                "group_limited_weight": detail["group_limited_weight"],
+                "unallocated_weight": detail["unallocated_weight"],
                 "limit_weight": detail["limit_weight"],
                 "idm": score.idm,
                 "annual_dollar_vol_per_contract": detail[
