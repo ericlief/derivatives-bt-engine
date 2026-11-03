@@ -915,6 +915,11 @@ the selected and rejected candidate scores, family and cluster decisions,
 instrument and book margin at the rounded maximum forecast position, each
 applicable limit, and the exact feasibility or ranking reason. These are the
 reports to compare alternatives such as CL and MCL across review dates.
+The companion `selection_review_final_allocations` Parquet keeps only the
+last accepted trial from each review, with one row per final book member and
+the same complete allocation diagnostics. It is the compact year-by-year or
+month-by-month book audit. Earlier accepted growth steps and every rejected
+alternative remain in the full trial reports rather than being discarded.
 
 The notebook helper can navigate the resulting dated books without loading a
 separate result directory for every review:
@@ -1284,7 +1289,13 @@ baseline by default. The command writes:
   `max_cons`, `ann_dvol`, sizing `risk_budget`, `marg_at_max`, portfolio
   margin, instrument and book limits, trial feasibility, and instrument-level
   rejection reason. `risk_budget` is review equity times target volatility
-  times `limit_weight` times IDM; and
+  times `limit_weight` times IDM;
+- `multi_speed_ewmac_selection_review_final_allocations_<timestamp>.parquet`,
+  the final accepted trial at every scheduled review. It retains the full
+  per-instrument trial-allocation schema, including `sel_date` and
+  `sel_equity`, but omits the rejected trials and intermediate accepted growth
+  steps. The all-trials report remains the forensic source for why another
+  candidate did not enter; and
 - `multi_speed_ewmac_selection_passes_<timestamp>.parquet`, the readable
   accepted path only: `selection_step` identifies the pass, `added_symbol` is
   its winner, and each `symbol` row records that accepted book member's

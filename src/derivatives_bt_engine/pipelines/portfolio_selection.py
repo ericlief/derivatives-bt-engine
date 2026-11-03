@@ -3004,6 +3004,10 @@ def _run_complete_selection(
         output_dir
         / f"multi_speed_ewmac_selection_review_trial_allocations_{stamp}.parquet"
     )
+    selection_review_final_allocations_path = (
+        output_dir
+        / f"multi_speed_ewmac_selection_review_final_allocations_{stamp}.parquet"
+    )
     cash_pnl_path = (
         output_dir / f"multi_speed_ewmac_selection_cash_pnl_{stamp}.parquet"
     )
@@ -3244,6 +3248,37 @@ def _run_complete_selection(
         public_selection_review_trial_allocations.write_parquet(
             selection_review_trial_allocations_path
         )
+        # The full allocation report preserves every hypothetical candidate
+        # book. Keep one compact, fully diagnosed final accepted book per
+        # review for navigation without duplicating every accepted growth step.
+        final_iteration_by_date: dict[date, int] = {}
+        for row in allocation_provider.review_trial_allocation_rows:
+            if not bool(row["accepted"]):
+                continue
+            selection_date = row["selection_date"]
+            iteration = int(row["iteration"])
+            final_iteration_by_date[selection_date] = max(
+                iteration,
+                final_iteration_by_date.get(selection_date, iteration),
+            )
+        final_review_allocation_rows = [
+            row
+            for row in allocation_provider.review_trial_allocation_rows
+            if bool(row["accepted"])
+            and int(row["iteration"])
+            == final_iteration_by_date[row["selection_date"]]
+        ]
+        public_selection_review_final_allocations = round_public_report(
+            rename_public_report_columns(
+                pl.DataFrame(
+                    final_review_allocation_rows,
+                    infer_schema_length=None,
+                ).sort("selection_date", "book_symbol")
+            )
+        )
+        public_selection_review_final_allocations.write_parquet(
+            selection_review_final_allocations_path
+        )
     public_cash_pnl = round_public_report(
         order_cash_pnl_report(rename_public_report_columns(cash_pnl_long))
     )
@@ -3276,6 +3311,10 @@ def _run_complete_selection(
         print(
             "Saved selection review trial allocations "
             f"{selection_review_trial_allocations_path}"
+        )
+        print(
+            "Saved selection review final allocations "
+            f"{selection_review_final_allocations_path}"
         )
     print(f"Saved selection {selection_path}")
     return selection_path, public_selection
