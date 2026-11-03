@@ -296,6 +296,11 @@ def parse_args(argv=None) -> argparse.Namespace:
         "--history-cache-root", type=Path, default=DEFAULT_FUTURES_CACHE_ROOT
     )
     parser.add_argument(
+        "--stitched-history-cache-root",
+        type=Path,
+        default=DEFAULT_FUTURES_CACHE_ROOT,
+    )
+    parser.add_argument(
         "--max-source-gap-days",
         type=int,
         default=DEFAULT_MAX_SOURCE_GAP_DAYS,
@@ -508,6 +513,7 @@ def _selection_command(
     globex_database: Path,
     broker_mapping: Path,
     history_cache_root: Path,
+    stitched_history_cache_root: Path,
     max_source_gap_days: int,
     ib_history_live: str | None,
     ib_host: str,
@@ -547,6 +553,8 @@ def _selection_command(
         str(scenario.tie_reference_book_count),
         "--weight-policy",
         scenario.weight_policy,
+        "--history-cache-root",
+        str(history_cache_root),
     ]
     if initial_capital_usd is not None:
         command.extend(("--initial-capital-usd", str(initial_capital_usd)))
@@ -558,8 +566,8 @@ def _selection_command(
             str(globex_database),
             "--broker-mapping",
             str(broker_mapping),
-            "--history-cache-root",
-            str(history_cache_root),
+            "--stitched-history-cache-root",
+            str(stitched_history_cache_root),
             "--max-source-gap-days",
             str(max_source_gap_days),
         ))
@@ -853,6 +861,9 @@ def run(argv=None) -> tuple[Path, Path | None]:
             globex_database=args.globex_db.expanduser().resolve(),
             broker_mapping=args.broker_mapping.expanduser().resolve(),
             history_cache_root=args.history_cache_root.expanduser().resolve(),
+            stitched_history_cache_root=(
+                args.stitched_history_cache_root.expanduser().resolve()
+            ),
             max_source_gap_days=args.max_source_gap_days,
             ib_history_live=args.ib_history_live,
             ib_host=args.ib_host,

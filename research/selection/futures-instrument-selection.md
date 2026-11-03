@@ -989,7 +989,10 @@ the direct PST/IB source for every instrument that can enter a scheduled book.
 With `--ib-history-live missing`, a stored reference-only bundle counts as
 missing IB history and triggers live acquisition; a valid cached PST/IB bundle
 is reused without an IB request. `--ib-history-live update` refreshes every
-eligible signal history.
+eligible signal history. Source-history bundles live under
+`--stitched-history-cache-root/stitched/v12`; this defaults to the project's
+`.cache/futures` directory and is separate from the derived backtest artifacts
+under `--history-cache-root/selection_backtest`.
 Selection v1 deliberately does not insert Globex: `--globex-db` remains an
 accepted compatibility argument, but the selection runner passes
 `include_globex=False`. PST retains every date through that instrument's
@@ -1332,8 +1335,9 @@ baseline by default. The command writes:
   and `hist_iid_t_stat`, with sample dates, years, observation count, and
   `hist_src`. With `--ib-history-db`, these fields and the selected cash P&L
   use the frozen PST prefix plus the stored IB tail, and the finished view is
-  cached under `--history-cache-root`. IB is not contacted unless a live mode
-  is explicitly selected. Add
+  cached under `--history-cache-root/selection_backtest`. Source PST/IB bundles
+  remain under `--stitched-history-cache-root/stitched/v12`. IB is not
+  contacted unless a live mode is explicitly selected. Add
   `--ib-history-live missing` to connect only when a selected signal history
   cannot be built from stored data, or `--ib-history-live update` to refresh
   every selected signal history before reporting. Connection overrides are

@@ -667,8 +667,16 @@ def parse_args(argv=None, *, complete_default: bool = False):
         type=Path,
         default=DEFAULT_FUTURES_CACHE_ROOT,
         help=(
-            "Parquet cache root for final stitched histories and versioned "
-            "selection backtest curves."
+            "Parquet cache root for versioned selection backtest artifacts."
+        ),
+    )
+    parser.add_argument(
+        "--stitched-history-cache-root",
+        type=Path,
+        default=DEFAULT_FUTURES_CACHE_ROOT,
+        help=(
+            "Cache root for source-history PST/IB stitched bundles; defaults "
+            "to the project .cache/futures directory."
         ),
     )
     parser.add_argument(
@@ -2449,7 +2457,9 @@ def _run_complete_selection(
                 preserve_reference_overlap=True,
                 mapping_path=args.broker_mapping.expanduser().resolve(),
                 history_db_path=args.ib_history_db.expanduser().resolve(),
-                cache_root=args.history_cache_root.expanduser().resolve(),
+                cache_root=(
+                    args.stitched_history_cache_root.expanduser().resolve()
+                ),
                 use_cache=True,
                 save_cache=True,
                 update_history=update_history,
