@@ -613,7 +613,8 @@ def parse_args(argv=None, *, complete_default: bool = False):
         choices=("missing", "update"),
         help=(
             "Opt in to live IB history acquisition. 'missing' first uses "
-            "stored history and retries a failed stitched load from IB; "
+            "stored history and requests IB when the load fails or returns "
+            "no IB segment; "
             "'update' refreshes every selected signal history from IB."
         ),
     )
@@ -2496,6 +2497,42 @@ def _run_complete_selection(
                                 ib=connected_ib(),
                                 update_history=True,
                             )
+                        else:
+                            # The stitched provider deliberately converts a
+                            # missing optional IB source into a valid
+                            # reference-only history. Treat that result as a
+                            # cache miss for ``missing`` mode so this path
+                            # acquires the absent broker segment rather than
+                            # silently retaining the frozen reference curve.
+                            if (
+                                args.ib_history_live == "missing"
+                                and _direct_ib_handoff_date(
+                                    stitched_history,
+                                    history_code=history_code,
+                                )
+                                is None
+                            ):
+                                available_sources = [
+                                    str(value)
+                                    for value in (
+                                        stitched_history.metadata.get(
+                                            "available_sources"
+                                        )
+                                        or []
+                                    )
+                                ]
+                                logger.info(
+                                    "selection_stitched_history live_retry "
+                                    "hist_instr_code=%s "
+                                    "reason=no_ib_segment sources=%s",
+                                    history_code,
+                                    available_sources,
+                                )
+                                stitched_history = load_stitched_history(
+                                    history_code,
+                                    ib=connected_ib(),
+                                    update_history=True,
+                                )
                 except Exception as exc:
                     # Preserve the valid long reference curve when a broker
                     # source is unavailable, and expose that fallback in the

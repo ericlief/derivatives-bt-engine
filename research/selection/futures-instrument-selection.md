@@ -986,6 +986,10 @@ scaling.
 
 When `--ib-history-db` is supplied, executable cash history is rebuilt from
 the direct PST/IB source for every instrument that can enter a scheduled book.
+With `--ib-history-live missing`, a stored reference-only bundle counts as
+missing IB history and triggers live acquisition; a valid cached PST/IB bundle
+is reused without an IB request. `--ib-history-live update` refreshes every
+eligible signal history.
 Selection v1 deliberately does not insert Globex: `--globex-db` remains an
 accepted compatibility argument, but the selection runner passes
 `include_globex=False`. PST retains every date through that instrument's
