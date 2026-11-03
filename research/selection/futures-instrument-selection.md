@@ -921,13 +921,45 @@ separate result directory for every review:
 
 ```python
 from derivatives_bt_engine.pipelines.ewmac_notebook import (
+    plot_selection_pnl_attribution,
+    plot_selection_portfolio_concentration,
+    plot_selection_portfolio_overview,
     plot_selection_rebalance_weights,
 )
 
+portfolio_curve = (
+    "multi_speed_ewmac_selection_portfolio_curve_<timestamp>.parquet"
+)
+cash_pnl = "multi_speed_ewmac_selection_cash_pnl_<timestamp>.parquet"
+
+plot_selection_portfolio_overview(portfolio_curve)
+plot_selection_portfolio_concentration(cash_pnl)
+plot_selection_pnl_attribution(cash_pnl)
 plot_selection_rebalance_weights(
     "multi_speed_ewmac_selection_review_instruments_<timestamp>.parquet"
 )
 ```
+
+`plot_selection_portfolio_overview` keeps gross and net equity on a logarithmic
+scale when both remain positive, then shows net drawdown and trailing
+256-observation net return and realized volatility. It computes rolling fields
+before applying optional display-date bounds, so a recent slice retains its
+warm-up history.
+
+`plot_selection_portfolio_concentration` measures each day's realized absolute
+contract risk as `abs(held_con) × ann_dvol`. It displays gross annual risk as a
+percentage of `sizing_cap` (the prior-day net equity used by the backtest), the
+top-one and top-three shares of gross annual risk, and the number of instruments
+with a nonzero whole-contract holding. This is the executed book after
+forecasts, integer rounding, buffering, and capital scaling; it is intentionally
+different from the fixed selection-weight chart.
+
+`plot_selection_pnl_attribution` provides a year widget, defaulting to the
+latest year, and vertical net-P&L bars by instrument. Hover preserves gross
+P&L, ordinary trade cost, and realized roll cost. It does not label costs on a
+review date as selection costs: the current `trade_con` path also contains
+forecast, volatility, capital-scaling, and buffer-driven trades, so that causal
+split would require a separate persisted selection-trade field.
 
 The year widget defaults to the latest year. A monthly run adds an exact review
 date widget for that year. The vertical bars show active selection weights;

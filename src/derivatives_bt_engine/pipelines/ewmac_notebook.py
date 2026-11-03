@@ -12,7 +12,10 @@ ownership, pooled forecast construction, and this same view boundary. The
 selected-book cash-P&L plotting helper plots Polars slices directly and lays
 out comparable execution diagnostics without merging their scales. The
 scheduled-selection plotting helper reads the compact review-instrument report
-and exposes each dated book as an instrument-weight bar chart.
+and exposes each dated book as an instrument-weight bar chart. Portfolio-level
+helpers plot compounded equity and drawdown, realized contract-risk
+concentration, and annual instrument P&L attribution from the persisted public
+reports without recreating the backtest accounting path.
 """
 
 from __future__ import annotations
@@ -101,6 +104,33 @@ def _date_slice(
     if end_date is not None:
         result = result.filter(pl.col("date") <= end_date)
     return result
+
+
+def _read_notebook_report(
+    report: pl.DataFrame | Path | str,
+    *,
+    label: str,
+) -> pl.DataFrame:
+    """Load one public notebook report without changing its persisted schema."""
+    if isinstance(report, (str, Path)):
+        frame = pl.read_parquet(Path(report).expanduser())
+    else:
+        frame = report
+    if not isinstance(frame, pl.DataFrame):
+        raise TypeError(f"{label} must be a Polars DataFrame or Parquet path")
+    return frame
+
+
+def _require_report_columns(
+    frame: pl.DataFrame,
+    required: set[str],
+    *,
+    label: str,
+) -> None:
+    """Raise a readable schema error before constructing an interactive plot."""
+    missing = sorted(required.difference(frame.columns))
+    if missing:
+        raise ValueError(f"{label} is missing required columns: {missing}")
 
 
 def plot_selection_cash_pnl(
@@ -324,6 +354,414 @@ def plot_selection_cash_pnl(
         with plot_output:
             plot_output.clear_output(wait=True)
             display(plot_symbol(symbol))
+
+    selector.observe(update_plot, names="value")
+    update_plot()
+    return widgets.VBox(
+        [selector, plot_output],
+        layout=widgets.Layout(width="100%", overflow="visible"),
+    )
+
+
+def plot_selection_portfolio_overview(
+    portfolio_curve: pl.DataFrame | Path | str,
+    *,
+    start: date | datetime | str | None = None,
+    end: date | datetime | str | None = None,
+    rolling_days: int = 256,
+    width: int = 1050,
+    height: int = 240,
+):
+    """Plot compounded selection equity, drawdown, return, and realized vol.
+
+    The equity series are read directly from the persisted portfolio curve.
+    Rolling return is the net-equity change over ``rolling_days`` report rows;
+    rolling realized volatility is the annualized standard deviation of the
+    report's prior-net-equity daily return. Invalid warm-up rows remain visible
+    in the equity panel but do not enter the rolling statistics.
+
+    Parameters
+    ----------
+    portfolio_curve
+        Public selection portfolio-curve frame or its Parquet path. It must
+        contain ``date``, gross and net equity, daily net return, and
+        ``ret_valid``.
+    start, end
+        Optional inclusive date bounds applied after rolling fields are
+        calculated, preserving their prior-history warm-up.
+    rolling_days
+        Trading observations used for trailing net return and realized
+        volatility. The default 256 matches the selection annualization.
+    width, height
+        Width and height of each vertically stacked panel in pixels.
+
+    Returns
+    -------
+    holoviews.core.layout.Layout
+        Three independently scaled panels for equity, drawdown, and trailing
+        return/volatility.
+    """
+    import holoviews as hv
+    import hvplot.polars  # noqa: F401 - registers Polars' ``hvplot`` API
+
+    if rolling_days < 2:
+        raise ValueError("rolling_days must be at least 2")
+    frame = _read_notebook_report(portfolio_curve, label="portfolio_curve")
+    _require_report_columns(
+        frame,
+        {
+            "date",
+            "port_gross_equity",
+            "port_net_equity",
+            "port_net_pct",
+            "ret_valid",
+        },
+        label="selection portfolio curve",
+    )
+    frame = frame.with_columns(pl.col("date").cast(pl.Date)).sort("date")
+    if frame.is_empty():
+        raise ValueError("selection portfolio curve is empty")
+
+    # Calculate trailing statistics before slicing so a recent view retains
+    # the observations immediately before its displayed start date.
+    frame = frame.with_columns(
+        pl.col("port_net_equity").cum_max().alias("running_net_peak"),
+        pl.when(pl.col("ret_valid").fill_null(False))
+        .then(pl.col("port_net_pct"))
+        .otherwise(None)
+        .alias("valid_net_pct"),
+    ).with_columns(
+        (
+            (pl.col("port_net_equity") / pl.col("running_net_peak") - 1.0)
+            * 100.0
+        ).alias("net_drawdown_pct"),
+        (
+            (
+                pl.col("port_net_equity")
+                / pl.col("port_net_equity").shift(rolling_days)
+                - 1.0
+            )
+            * 100.0
+        ).alias("rolling_return_pct"),
+        (
+            pl.col("valid_net_pct").rolling_std(window_size=rolling_days)
+            * math.sqrt(256.0)
+            * 100.0
+        ).alias("rolling_realized_vol_pct"),
+    )
+    frame = _date_slice(frame, start=start, end=end)
+    if frame.is_empty():
+        raise ValueError("no portfolio observations in the requested date range")
+
+    tools = ["hover", "pan", "wheel_zoom", "box_zoom", "reset", "save"]
+    positive_equity = bool(
+        frame.select(
+            (pl.min_horizontal("port_gross_equity", "port_net_equity") > 0)
+            .all()
+            .alias("positive")
+        ).item()
+    )
+    equity = frame.hvplot.line(
+        x="date",
+        y=["port_gross_equity", "port_net_equity"],
+        title="Selection portfolio gross and net equity",
+        ylabel="Equity (USD)",
+        logy=positive_equity,
+        width=width,
+        height=height,
+        tools=tools,
+        hover_cols=["port_gross_equity", "port_net_equity"],
+        hover_tooltips=[
+            ("Date", "@date{%F}"),
+            ("Gross equity", "@port_gross_equity{$0,0.00}"),
+            ("Net equity", "@port_net_equity{$0,0.00}"),
+        ],
+    ).opts(legend_position="top_left")
+    drawdown = (
+        frame.hvplot.area(
+            x="date",
+            y="net_drawdown_pct",
+            title="Net-equity drawdown from running peak",
+            ylabel="Drawdown (%)",
+            color="#d62728",
+            alpha=0.45,
+            width=width,
+            height=height,
+            tools=tools,
+            hover_tooltips=[
+                ("Date", "@date{%F}"),
+                ("Drawdown", "@net_drawdown_pct{0.00}%"),
+            ],
+        )
+        * hv.HLine(0.0).opts(color="black", line_width=1)
+    )
+    trailing = frame.hvplot.line(
+        x="date",
+        y=["rolling_return_pct", "rolling_realized_vol_pct"],
+        title=f"Trailing {rolling_days}-observation net return and realized vol",
+        ylabel="Annualized / trailing value (%)",
+        width=width,
+        height=height,
+        tools=tools,
+        hover_cols=["rolling_return_pct", "rolling_realized_vol_pct"],
+        hover_tooltips=[
+            ("Date", "@date{%F}"),
+            ("Trailing return", "@rolling_return_pct{0.00}%"),
+            ("Realized vol", "@rolling_realized_vol_pct{0.00}%"),
+        ],
+    ).opts(legend_position="top_left")
+    return (equity + drawdown + trailing).cols(1).opts(shared_axes=False)
+
+
+def plot_selection_portfolio_concentration(
+    cash_pnl: pl.DataFrame | Path | str,
+    *,
+    start: date | datetime | str | None = None,
+    end: date | datetime | str | None = None,
+    width: int = 1050,
+    height: int = 220,
+):
+    """Plot realized whole-contract risk concentration through time.
+
+    Absolute annualized risk for an instrument is ``abs(held_con) × ann_dvol``.
+    The first panel divides its cross-instrument sum by ``sizing_cap``, the
+    prior-day net equity actually used for position sizing. The second reports
+    top-one and top-three shares of that absolute contract risk, while the
+    third counts instruments with nonzero holdings. These are realized book
+    diagnostics after forecasting, integer rounding, buffering, and capital
+    scaling; they are not the fixed selection weights.
+
+    Parameters
+    ----------
+    cash_pnl
+        Public selection cash-P&L frame or its Parquet path. It must contain
+        ``date``, ``symbol``, ``held_con``, ``ann_dvol``, and ``sizing_cap``.
+    start, end
+        Optional inclusive date bounds.
+    width, height
+        Width and height of each vertically stacked panel in pixels.
+
+    Returns
+    -------
+    holoviews.core.layout.Layout
+        Three independently scaled panels for gross risk, concentration
+        shares, and the nonzero held-instrument count.
+    """
+    import holoviews as hv
+    import hvplot.polars  # noqa: F401 - registers Polars' ``hvplot`` API
+
+    frame = _read_notebook_report(cash_pnl, label="cash_pnl")
+    _require_report_columns(
+        frame,
+        {"date", "symbol", "held_con", "ann_dvol", "sizing_cap"},
+        label="selection cash-P&L frame",
+    )
+    frame = frame.with_columns(
+        pl.col("date").cast(pl.Date),
+        (
+            pl.col("held_con").fill_null(0).abs()
+            * pl.col("ann_dvol").fill_null(0.0)
+        ).alias("abs_ann_risk"),
+    )
+    frame = _date_slice(frame, start=start, end=end)
+    if frame.is_empty():
+        raise ValueError("no cash-P&L observations in the requested date range")
+
+    daily = (
+        frame.group_by("date")
+        .agg(
+            pl.col("abs_ann_risk").sum().alias("gross_ann_risk"),
+            pl.col("abs_ann_risk").max().alias("top1_ann_risk"),
+            pl.col("abs_ann_risk")
+            .sort(descending=True)
+            .head(3)
+            .sum()
+            .alias("top3_ann_risk"),
+            (pl.col("abs_ann_risk") > 0).sum().alias("held_n_instr"),
+            pl.col("sizing_cap").drop_nulls().max().alias("sizing_cap"),
+        )
+        .sort("date")
+        .with_columns(
+            pl.when(pl.col("sizing_cap") > 0)
+            .then(pl.col("gross_ann_risk") / pl.col("sizing_cap") * 100.0)
+            .otherwise(None)
+            .alias("gross_ann_risk_pct"),
+            pl.when(pl.col("gross_ann_risk") > 0)
+            .then(pl.col("top1_ann_risk") / pl.col("gross_ann_risk") * 100.0)
+            .otherwise(None)
+            .alias("top1_risk_share_pct"),
+            pl.when(pl.col("gross_ann_risk") > 0)
+            .then(pl.col("top3_ann_risk") / pl.col("gross_ann_risk") * 100.0)
+            .otherwise(None)
+            .alias("top3_risk_share_pct"),
+        )
+    )
+    tools = ["hover", "pan", "wheel_zoom", "box_zoom", "reset", "save"]
+    gross_risk = daily.hvplot.line(
+        x="date",
+        y="gross_ann_risk_pct",
+        title="Gross annualized whole-contract risk relative to sizing capital",
+        ylabel="Gross annual risk / prior net equity (%)",
+        color="#1f77b4",
+        width=width,
+        height=height,
+        tools=tools,
+        hover_cols=["gross_ann_risk", "sizing_cap"],
+        hover_tooltips=[
+            ("Date", "@date{%F}"),
+            ("Gross risk / capital", "@gross_ann_risk_pct{0.00}%"),
+            ("Gross annual risk", "@gross_ann_risk{$0,0.00}"),
+            ("Sizing capital", "@sizing_cap{$0,0.00}"),
+        ],
+    )
+    shares = daily.hvplot.line(
+        x="date",
+        y=["top1_risk_share_pct", "top3_risk_share_pct"],
+        title="Largest realized instrument-risk shares",
+        ylabel="Share of gross annual risk (%)",
+        width=width,
+        height=height,
+        tools=tools,
+        hover_cols=["top1_risk_share_pct", "top3_risk_share_pct"],
+        hover_tooltips=[
+            ("Date", "@date{%F}"),
+            ("Top one", "@top1_risk_share_pct{0.00}%"),
+            ("Top three", "@top3_risk_share_pct{0.00}%"),
+        ],
+    ).opts(legend_position="top_left")
+    held_count = daily.hvplot.step(
+        x="date",
+        y="held_n_instr",
+        where="post",
+        title="Instruments with nonzero held contracts",
+        ylabel="Held instruments",
+        color="#9467bd",
+        width=width,
+        height=height,
+        tools=tools,
+        hover_tooltips=[
+            ("Date", "@date{%F}"),
+            ("Held instruments", "@held_n_instr{0}"),
+        ],
+    )
+    return (gross_risk + shares + held_count).cols(1).opts(shared_axes=False)
+
+
+def plot_selection_pnl_attribution(
+    cash_pnl: pl.DataFrame | Path | str,
+    *,
+    width: int = 1050,
+    height: int = 440,
+):
+    """Plot annual instrument net P&L with separate gross and cost hover data.
+
+    Parameters
+    ----------
+    cash_pnl
+        Public selection cash-P&L frame or its Parquet path. The report must
+        include instrument-level gross and net P&L plus trade and roll costs.
+    width, height
+        Width and height of the vertical bar chart in pixels.
+
+    Returns
+    -------
+    ipywidgets.VBox
+        A year selector, defaulting to the latest year, and instrument net-P&L
+        bars for the selected year. Hover retains gross P&L and both realized
+        cost streams.
+    """
+    import holoviews as hv
+    import hvplot.polars  # noqa: F401 - registers Polars' ``hvplot`` API
+    import ipywidgets as widgets
+    from IPython.display import display
+
+    frame = _read_notebook_report(cash_pnl, label="cash_pnl")
+    _require_report_columns(
+        frame,
+        {
+            "date",
+            "symbol",
+            "gross_pnl",
+            "net_pnl",
+            "trade_cost",
+            "roll_cost",
+        },
+        label="selection cash-P&L frame",
+    )
+    frame = frame.with_columns(
+        pl.col("date").cast(pl.Date),
+        pl.col("date").cast(pl.Date).dt.year().alias("year"),
+    )
+    nonzero = frame.filter(
+        (pl.col("gross_pnl").fill_null(0.0) != 0)
+        | (pl.col("trade_cost").fill_null(0.0) != 0)
+        | (pl.col("roll_cost").fill_null(0.0) != 0)
+        | (pl.col("net_pnl").fill_null(0.0) != 0)
+    )
+    years = nonzero.get_column("year").drop_nulls().unique().sort().to_list()
+    if not years:
+        raise ValueError("selection cash-P&L frame contains no nonzero P&L")
+
+    selector = widgets.Dropdown(description="Year", options=years, value=years[-1])
+    plot_output = widgets.Output(
+        layout=widgets.Layout(
+            width="100%",
+            height="auto",
+            max_height="none",
+            overflow="visible",
+        )
+    )
+
+    def plot_year(year: int):
+        """Aggregate and draw one calendar year's instrument attribution."""
+        annual = (
+            frame.filter(pl.col("year") == year)
+            .group_by("symbol")
+            .agg(
+                pl.col("gross_pnl").fill_null(0.0).sum().alias("gross_pnl"),
+                pl.col("trade_cost").fill_null(0.0).sum().alias("trade_cost"),
+                pl.col("roll_cost").fill_null(0.0).sum().alias("roll_cost"),
+                pl.col("net_pnl").fill_null(0.0).sum().alias("net_pnl"),
+            )
+            .filter(
+                (pl.col("gross_pnl") != 0)
+                | (pl.col("trade_cost") != 0)
+                | (pl.col("roll_cost") != 0)
+                | (pl.col("net_pnl") != 0)
+            )
+            .sort("net_pnl", descending=True)
+        )
+        if annual.is_empty():
+            raise ValueError(f"year {year} contains no nonzero instrument P&L")
+        total_net = annual.get_column("net_pnl").sum()
+        bars = annual.hvplot.bar(
+            x="symbol",
+            y="net_pnl",
+            title=f"{year} instrument net P&L (portfolio total ${total_net:,.0f})",
+            xlabel="Instrument",
+            ylabel="Net P&L (USD)",
+            rot=70,
+            color="#1f77b4",
+            width=width,
+            height=height,
+            tools=["hover", "pan", "wheel_zoom", "box_zoom", "reset", "save"],
+            hover_cols=["gross_pnl", "trade_cost", "roll_cost"],
+            hover_tooltips=[
+                ("Instrument", "@symbol"),
+                ("Net P&L", "@net_pnl{$0,0.00}"),
+                ("Gross P&L", "@gross_pnl{$0,0.00}"),
+                ("Trade cost", "@trade_cost{$0,0.00}"),
+                ("Roll cost", "@roll_cost{$0,0.00}"),
+            ],
+        )
+        return bars * hv.HLine(0.0).opts(color="black", line_width=1)
+
+    def update_plot(change=None) -> None:
+        """Redraw the annual attribution selected by the year widget."""
+        year = change["new"] if change is not None else selector.value
+        with plot_output:
+            plot_output.clear_output(wait=True)
+            display(plot_year(year))
 
     selector.observe(update_plot, names="value")
     update_plot()
