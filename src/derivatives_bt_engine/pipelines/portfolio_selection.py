@@ -82,6 +82,7 @@ from derivatives_bt_engine.strats.multi_speed_ewmac import (
 from derivatives_bt_engine.reports.formatting import (
     order_cash_pnl_report,
     order_portfolio_curve_report,
+    order_selection_review_allocation_report,
     rename_public_report_columns,
     round_public_report,
 )
@@ -3238,10 +3239,12 @@ def _run_complete_selection(
             selection_review_trials_path
         )
         public_selection_review_trial_allocations = round_public_report(
-            rename_public_report_columns(
-                pl.DataFrame(
-                    allocation_provider.review_trial_allocation_rows,
-                    infer_schema_length=None,
+            order_selection_review_allocation_report(
+                rename_public_report_columns(
+                    pl.DataFrame(
+                        allocation_provider.review_trial_allocation_rows,
+                        infer_schema_length=None,
+                    )
                 )
             )
         )
@@ -3269,11 +3272,13 @@ def _run_complete_selection(
             == final_iteration_by_date[row["selection_date"]]
         ]
         public_selection_review_final_allocations = round_public_report(
-            rename_public_report_columns(
-                pl.DataFrame(
-                    final_review_allocation_rows,
-                    infer_schema_length=None,
-                ).sort("selection_date", "book_symbol")
+            order_selection_review_allocation_report(
+                rename_public_report_columns(
+                    pl.DataFrame(
+                        final_review_allocation_rows,
+                        infer_schema_length=None,
+                    ).sort("selection_date", "book_symbol")
+                )
             )
         )
         public_selection_review_final_allocations.write_parquet(

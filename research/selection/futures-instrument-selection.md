@@ -920,6 +920,10 @@ last accepted trial from each review, with one row per final book member and
 the same complete allocation diagnostics. It is the compact year-by-year or
 month-by-month book audit. Earlier accepted growth steps and every rejected
 alternative remain in the full trial reports rather than being discarded.
+Both allocation reports lead with `sel_date`, `sel_equity`, the trial identity,
+`ann_dvol`, and `risk_budget`. Report construction fails rather than silently
+dropping any of the review date, sizing capital, dollar-volatility, or budget
+fields.
 
 The notebook helper can navigate the resulting dated books without loading a
 separate result directory for every review:

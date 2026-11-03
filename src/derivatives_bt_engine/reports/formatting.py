@@ -403,6 +403,47 @@ PORTFOLIO_CURVE_REPORT_PRIORITY = (
 PORTFOLIO_CURVE_REPORT_PARAMS = ("init_cap",)
 
 
+SELECTION_REVIEW_ALLOCATION_REPORT_PRIORITY = (
+    "sel_date",
+    "sel_equity",
+    "iteration",
+    "candidate",
+    "accepted",
+    "book",
+    "book_symbol",
+    "ann_dvol",
+    "risk_budget",
+)
+
+
+def order_selection_review_allocation_report(
+    report: pl.DataFrame,
+) -> pl.DataFrame:
+    """Lead scheduled allocation reports with review and sizing identity.
+
+    Both the complete hypothetical-trial audit and the compact final-book
+    audit require the dated selection capital, per-contract annual dollar
+    volatility, and resulting risk budget. Failing when one disappears keeps
+    the two public schemas aligned rather than silently producing an
+    incomplete report.
+    """
+    required = {"sel_date", "sel_equity", "ann_dvol", "risk_budget"}
+    missing = sorted(required.difference(report.columns))
+    if missing:
+        raise ValueError(
+            "selection review allocation report is missing required columns: "
+            f"{missing}"
+        )
+    leading = [
+        name
+        for name in SELECTION_REVIEW_ALLOCATION_REPORT_PRIORITY
+        if name in report.columns
+    ]
+    leading_set = set(leading)
+    trailing = [name for name in report.columns if name not in leading_set]
+    return report.select(*leading, *trailing)
+
+
 def order_cash_pnl_report(report: pl.DataFrame) -> pl.DataFrame:
     """Put key identity, position, P&L, and cost columns first.
 
