@@ -955,10 +955,10 @@ plot_selection_rebalance_weights(
 ```
 
 `plot_selection_portfolio_overview` keeps gross and net equity on a logarithmic
-scale when both remain positive, then shows net drawdown and trailing
-256-observation net return and realized volatility. It computes rolling fields
-before applying optional display-date bounds, so a recent slice retains its
-warm-up history.
+scale when both remain positive, then shows net drawdown, trailing
+256-observation return, and realized volatility in separate panels with
+independent scales. It computes rolling fields before applying optional
+display-date bounds, so a recent slice retains its warm-up history.
 
 `plot_selection_portfolio_concentration` measures each day's realized absolute
 contract risk as `abs(held_con) × ann_dvol`. It displays gross annual risk as a
@@ -969,11 +969,13 @@ forecasts, integer rounding, buffering, and capital scaling; it is intentionally
 different from the fixed selection-weight chart.
 
 `plot_selection_pnl_attribution` provides a year widget, defaulting to the
-latest year, and vertical net-P&L bars by instrument. Hover preserves gross
-P&L, ordinary trade cost, and realized roll cost. It does not label costs on a
-review date as selection costs: the current `trade_con` path also contains
-forecast, volatility, capital-scaling, and buffer-driven trades, so that causal
-split would require a separate persisted selection-trade field.
+latest year, and vertical net-P&L bars by instrument. The cash axis fits each
+selected year's observed P&L range with a small margin around the extrema.
+Hover preserves gross P&L, ordinary trade cost, and realized roll cost. It does
+not label costs on a review date as selection costs: the current `trade_con`
+path also contains forecast, volatility, capital-scaling, and buffer-driven
+trades, so that causal split would require a separate persisted
+selection-trade field.
 
 The year widget defaults to the latest year. A monthly run adds an exact review
 date widget for that year. The vertical bars show active `limit_weight` values

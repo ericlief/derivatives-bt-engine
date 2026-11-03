@@ -398,8 +398,8 @@ def plot_selection_portfolio_overview(
     Returns
     -------
     holoviews.core.layout.Layout
-        Three independently scaled panels for equity, drawdown, and trailing
-        return/volatility.
+        Four independently scaled panels for equity, drawdown, trailing return,
+        and realized volatility.
     """
     import holoviews as hv
     import hvplot.polars  # noqa: F401 - registers Polars' ``hvplot`` API
@@ -488,6 +488,7 @@ def plot_selection_portfolio_overview(
             width=width,
             height=height,
             tools=tools,
+            hover_cols=["net_drawdown_pct"],
             hover_tooltips=[
                 ("Date", "@date{%F}"),
                 ("Drawdown", "@net_drawdown_pct{0.00}%"),
@@ -495,22 +496,37 @@ def plot_selection_portfolio_overview(
         )
         * hv.HLine(0.0).opts(color="black", line_width=1)
     )
-    trailing = frame.hvplot.line(
+    trailing_return = frame.hvplot.line(
         x="date",
-        y=["rolling_return_pct", "rolling_realized_vol_pct"],
-        title=f"Trailing {rolling_days}-observation net return and realized vol",
-        ylabel="Annualized / trailing value (%)",
+        y="rolling_return_pct",
+        title=f"Trailing {rolling_days}-observation net return",
+        ylabel="Return (%)",
         width=width,
         height=height,
         tools=tools,
-        hover_cols=["rolling_return_pct", "rolling_realized_vol_pct"],
+        hover_cols=["rolling_return_pct"],
         hover_tooltips=[
             ("Date", "@date{%F}"),
             ("Trailing return", "@rolling_return_pct{0.00}%"),
+        ],
+    )
+    trailing_volatility = frame.hvplot.line(
+        x="date",
+        y="rolling_realized_vol_pct",
+        title=f"Trailing {rolling_days}-observation realized volatility",
+        ylabel="Annualized volatility (%)",
+        width=width,
+        height=height,
+        tools=tools,
+        hover_cols=["rolling_realized_vol_pct"],
+        hover_tooltips=[
+            ("Date", "@date{%F}"),
             ("Realized vol", "@rolling_realized_vol_pct{0.00}%"),
         ],
-    ).opts(legend_position="top_left")
-    return (equity + drawdown + trailing).cols(1).opts(shared_axes=False)
+    )
+    return (equity + drawdown + trailing_return + trailing_volatility).cols(
+        1
+    ).opts(shared_axes=False)
 
 
 def plot_selection_portfolio_concentration(
@@ -734,6 +750,14 @@ def plot_selection_pnl_attribution(
         if annual.is_empty():
             raise ValueError(f"year {year} contains no nonzero instrument P&L")
         total_net = annual.get_column("net_pnl").sum()
+        pnl_min = min(0.0, float(annual.get_column("net_pnl").min()))
+        pnl_max = max(0.0, float(annual.get_column("net_pnl").max()))
+        pnl_span = pnl_max - pnl_min
+        scale_padding = (
+            pnl_span * 0.06
+            if pnl_span > 0
+            else max(abs(pnl_max), abs(pnl_min), 1.0) * 0.06
+        )
         bars = annual.hvplot.bar(
             x="symbol",
             y="net_pnl",
@@ -753,7 +777,7 @@ def plot_selection_pnl_attribution(
                 ("Trade cost", "@trade_cost{$0,0.00}"),
                 ("Roll cost", "@roll_cost{$0,0.00}"),
             ],
-        )
+        ).opts(ylim=(pnl_min - scale_padding, pnl_max + scale_padding))
         return bars * hv.HLine(0.0).opts(color="black", line_width=1)
 
     def update_plot(change=None) -> None:
