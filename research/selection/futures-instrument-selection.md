@@ -905,9 +905,10 @@ review equity, candidate count, selected count, score, IDM, and membership.
 The companion `selection_review_instruments` Parquet is the compact navigation
 report: it has one row per review and involved instrument, with `added`,
 `retained`, or `removed` status, active rank and weights, classification,
-historical dollar volatility, and the cost inputs used by that review. One
-file covers the entire monthly or yearly walk-forward run; reviews do not
-create separate result directories.
+historical dollar volatility, and the cost inputs used by that review. The
+`symbol` column follows `sel_instr_n` for quick row scanning. One file covers
+the entire monthly or yearly walk-forward run; reviews do not create separate
+result directories.
 The `selection_review_trials` and
 `selection_review_trial_allocations` Parquet files retain every hypothetical
 greedy trial at every review, with review date and lagged equity. They expose

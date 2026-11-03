@@ -486,6 +486,39 @@ def order_selection_review_allocation_report(
     return report.select(*leading, *trailing)
 
 
+def order_selection_review_instrument_report(
+    report: pl.DataFrame,
+) -> pl.DataFrame:
+    """Place the selected-instrument count beside its instrument rows.
+
+    The symbol identifies each row in the review-instrument report, so keep it
+    immediately after ``sel_instr_n`` for quick scanning in table viewers.
+    Remaining diagnostics retain their existing order.
+    """
+    required = {"sel_instr_n", "symbol"}
+    missing = sorted(required.difference(report.columns))
+    if missing:
+        raise ValueError(
+            "selection review instrument report is missing required columns: "
+            f"{missing}"
+        )
+    leading = [
+        name
+        for name in (
+            "sel_date",
+            "sel_year",
+            "sel_equity",
+            "sel_cand_n",
+            "sel_instr_n",
+            "symbol",
+        )
+        if name in report.columns
+    ]
+    leading_set = set(leading)
+    trailing = [name for name in report.columns if name not in leading_set]
+    return report.select(*leading, *trailing)
+
+
 def order_cash_pnl_report(report: pl.DataFrame) -> pl.DataFrame:
     """Put key identity, position, P&L, and cost columns first.
 

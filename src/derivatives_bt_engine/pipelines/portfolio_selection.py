@@ -83,6 +83,7 @@ from derivatives_bt_engine.reports.formatting import (
     order_cash_pnl_report,
     order_portfolio_curve_report,
     order_selection_review_allocation_report,
+    order_selection_review_instrument_report,
     rename_public_report_columns,
     round_public_report,
 )
@@ -3366,17 +3367,19 @@ def _run_complete_selection(
         )
         public_selection_reviews.write_parquet(selection_reviews_path)
         public_selection_review_instruments = round_public_report(
-            rename_public_report_columns(
-                pl.DataFrame(
-                    allocation_provider.review_instrument_rows,
-                    infer_schema_length=None,
-                ).sort(
-                    "selection_date",
-                    "selection_active",
-                    "rank",
-                    "symbol",
-                    descending=[False, True, False, False],
-                    nulls_last=True,
+            order_selection_review_instrument_report(
+                rename_public_report_columns(
+                    pl.DataFrame(
+                        allocation_provider.review_instrument_rows,
+                        infer_schema_length=None,
+                    ).sort(
+                        "selection_date",
+                        "selection_active",
+                        "rank",
+                        "symbol",
+                        descending=[False, True, False, False],
+                        nulls_last=True,
+                    )
                 )
             )
         )
