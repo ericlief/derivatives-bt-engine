@@ -916,6 +916,26 @@ instrument and book margin at the rounded maximum forecast position, each
 applicable limit, and the exact feasibility or ranking reason. These are the
 reports to compare alternatives such as CL and MCL across review dates.
 
+The notebook helper can navigate the resulting dated books without loading a
+separate result directory for every review:
+
+```python
+from derivatives_bt_engine.pipelines.ewmac_notebook import (
+    plot_selection_rebalance_weights,
+)
+
+plot_selection_rebalance_weights(
+    "multi_speed_ewmac_selection_review_instruments_<timestamp>.parquet"
+)
+```
+
+The year widget defaults to the latest year. A monthly run adds an exact review
+date widget for that year. The vertical bars show active selection weights;
+hover shows the corresponding limit weight, added/retained status, rank,
+classification, and prior-day equity used by the review. These are fixed book
+weights for the selected segment, not realized daily exposure after forecasts,
+buffering, integer contracts, and capital scaling.
+
 When `--ib-history-db` is supplied, executable cash history is rebuilt from
 the direct PST/IB source for every instrument that can enter a scheduled book.
 Selection v1 deliberately does not insert Globex: `--globex-db` remains an

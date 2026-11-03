@@ -10,7 +10,9 @@ owned by the calculation modules used by production selection. The stitched
 history entry point also orchestrates dated-contract loading, history
 ownership, pooled forecast construction, and this same view boundary. The
 selected-book cash-P&L plotting helper plots Polars slices directly and lays
-out comparable execution diagnostics without merging their scales.
+out comparable execution diagnostics without merging their scales. The
+scheduled-selection plotting helper reads the compact review-instrument report
+and exposes each dated book as an instrument-weight bar chart.
 """
 
 from __future__ import annotations
@@ -327,6 +329,200 @@ def plot_selection_cash_pnl(
     update_plot()
     return widgets.VBox(
         [selector, plot_output],
+        layout=widgets.Layout(width="100%", overflow="visible"),
+    )
+
+
+def plot_selection_rebalance_weights(
+    review_instruments: pl.DataFrame | Path | str,
+    *,
+    width: int = 1050,
+    height: int = 420,
+):
+    """Plot the active instrument weights at each scheduled selection review.
+
+    ``review_instruments`` may be the public Polars frame or a saved
+    ``selection_review_instruments`` Parquet path. The year selector defaults
+    to the latest review year. When a monthly run has more than one review in
+    that year, a second selector chooses the exact review date. Bars show the
+    fixed selection weight for the active segment; hover fields retain the
+    sizing limit, selection status, rank, classification, and lagged equity.
+
+    Parameters
+    ----------
+    review_instruments
+        Scheduled selection review-instrument frame or its Parquet path. The
+        public schema must include ``sel_date``, ``symbol``, ``sel_active``,
+        and ``weight``.
+    width, height
+        Width and height of the vertical bar chart in pixels.
+
+    Returns
+    -------
+    ipywidgets.VBox
+        A year selector, an exact-date selector for multi-review years, and an
+        output area containing the selected review's instrument-weight bars.
+    """
+    import hvplot.polars  # noqa: F401 - registers Polars' ``hvplot`` API
+    import ipywidgets as widgets
+    from IPython.display import display
+
+    if isinstance(review_instruments, (str, Path)):
+        frame = pl.read_parquet(Path(review_instruments).expanduser())
+    else:
+        frame = review_instruments
+    if not isinstance(frame, pl.DataFrame):
+        raise TypeError(
+            "review_instruments must be a Polars DataFrame or Parquet path"
+        )
+
+    required = {"sel_date", "symbol", "sel_active", "weight"}
+    missing = sorted(required.difference(frame.columns))
+    if missing:
+        raise ValueError(
+            "selection review-instrument frame is missing required columns: "
+            f"{missing}"
+        )
+
+    # Normalize the review key once so widget values compare cleanly even when
+    # a caller supplies a datetime rather than the persisted public Date type.
+    frame = frame.with_columns(pl.col("sel_date").cast(pl.Date))
+    review_dates = (
+        frame.get_column("sel_date").drop_nulls().unique().sort().to_list()
+    )
+    if not review_dates:
+        raise ValueError("selection review-instrument frame has no review dates")
+
+    years = sorted({review_date.year for review_date in review_dates})
+    dates_by_year = {
+        year: [
+            date_value
+            for date_value in review_dates
+            if date_value.year == year
+        ]
+        for year in years
+    }
+
+    year_selector = widgets.Dropdown(
+        description="Year",
+        options=years,
+        value=years[-1],
+    )
+    review_selector = widgets.Dropdown(description="Review")
+    plot_output = widgets.Output(
+        layout=widgets.Layout(
+            width="100%",
+            height="auto",
+            max_height="none",
+            overflow="visible",
+        )
+    )
+
+    def configure_review_selector(year: int) -> None:
+        """Expose exact review dates only when the chosen year needs them."""
+        year_dates = dates_by_year[year]
+        review_selector.options = [
+            (review_date.isoformat(), review_date) for review_date in year_dates
+        ]
+        review_selector.value = year_dates[-1]
+        review_selector.layout.display = "" if len(year_dates) > 1 else "none"
+
+    def plot_review(review_date: date):
+        """Build the vertical instrument-weight bars for one dated book."""
+        dated = frame.filter(pl.col("sel_date") == review_date)
+        active = (
+            dated.filter(
+                pl.col("sel_active").fill_null(False)
+                & pl.col("weight").is_not_null()
+            )
+            .sort("weight", "symbol", descending=[True, False])
+            .with_columns((pl.col("weight") * 100.0).alias("weight_pct"))
+        )
+        if active.is_empty():
+            raise ValueError(
+                f"review {review_date.isoformat()} has no active weights"
+            )
+
+        optional_defaults = {
+            "limit_weight": None,
+            "sel_status": None,
+            "rank": None,
+            "asset_cls": None,
+            "econ_subcls": None,
+            "sel_equity": None,
+        }
+        active = (
+            active.with_columns(
+                *[
+                    pl.lit(value).alias(column)
+                    for column, value in optional_defaults.items()
+                    if column not in active.columns
+                ]
+            ).with_columns(
+                (
+                    pl.col("limit_weight").cast(pl.Float64, strict=False)
+                    * 100.0
+                ).alias("limit_weight_pct"),
+            )
+        )
+        added = (
+            dated.filter(pl.col("sel_status") == "added").height
+            if "sel_status" in dated.columns
+            else 0
+        )
+        removed = (
+            dated.filter(pl.col("sel_status") == "removed").height
+            if "sel_status" in dated.columns
+            else 0
+        )
+        title = (
+            f"Selection weights at {review_date.isoformat()} "
+            f"({active.height} instruments, +{added} / -{removed})"
+        )
+        return active.hvplot.bar(
+            x="symbol",
+            y="weight_pct",
+            title=title,
+            xlabel="Instrument",
+            ylabel="Selection weight (%)",
+            width=width,
+            height=height,
+            rot=70,
+            color="#1f77b4",
+            tools=["hover", "pan", "wheel_zoom", "box_zoom", "reset", "save"],
+            hover_tooltips=[
+                ("Instrument", "@symbol"),
+                ("Weight", "@weight_pct{0.00}%"),
+                ("Limit weight", "@limit_weight_pct{0.00}%"),
+                ("Status", "@sel_status"),
+                ("Rank", "@rank"),
+                ("Asset class", "@asset_cls"),
+                ("Economic subclass", "@econ_subcls"),
+                ("Review equity", "@sel_equity{$0,0.00}"),
+            ],
+        )
+
+    def update_plot(change=None) -> None:
+        """Redraw the exact review selected by the widget controls."""
+        review_date = review_selector.value
+        if review_date is None:
+            return
+        with plot_output:
+            plot_output.clear_output(wait=True)
+            display(plot_review(review_date))
+
+    def update_year(change) -> None:
+        """Refresh the available review dates after a year change."""
+        configure_review_selector(change["new"])
+        update_plot()
+
+    configure_review_selector(year_selector.value)
+    year_selector.observe(update_year, names="value")
+    review_selector.observe(update_plot, names="value")
+    update_plot()
+    controls = widgets.HBox([year_selector, review_selector])
+    return widgets.VBox(
+        [controls, plot_output],
         layout=widgets.Layout(width="100%", overflow="visible"),
     )
 
