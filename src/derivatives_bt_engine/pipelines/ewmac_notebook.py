@@ -490,6 +490,14 @@ def plot_selection_rebalance_weights(
             rot=70,
             color="#1f77b4",
             tools=["hover", "pan", "wheel_zoom", "box_zoom", "reset", "save"],
+            hover_cols=[
+                "limit_weight_pct",
+                "sel_status",
+                "rank",
+                "asset_cls",
+                "econ_subcls",
+                "sel_equity",
+            ],
             hover_tooltips=[
                 ("Instrument", "@symbol"),
                 ("Weight", "@weight_pct{0.00}%"),
