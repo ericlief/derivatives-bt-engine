@@ -427,6 +427,7 @@ SELECTION_REVIEW_ALLOCATION_REPORT_PRIORITY = (
     "max_instr_per_subcls",
     "max_cls_weight_pct",
     "max_subcls_weight_pct",
+    "weight",
     "cls_weight",
     "cls_lim_weight",
     "subcls_weight",

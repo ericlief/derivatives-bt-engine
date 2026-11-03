@@ -922,8 +922,8 @@ month-by-month book audit. Earlier accepted growth steps and every rejected
 alternative remain in the full trial reports rather than being discarded.
 Both allocation reports lead with `sel_date`, `sel_equity`, the trial identity,
 classification, configured `max_instr_per_cls`, `max_instr_per_subcls`,
-`max_cls_weight_pct`, and `max_subcls_weight_pct`, raw and capped
-class/subclass weights, `group_lim_weight`,
+`max_cls_weight_pct`, and `max_subcls_weight_pct`. The instrument `weight` is
+grouped with the raw and capped class/subclass weights, `group_lim_weight`,
 `unalloc_weight`, final `limit_weight`, IDM, `ann_dvol`, and `risk_budget`.
 Report construction fails rather than silently dropping any of those group
 limits, allocation diagnostics, review date, sizing capital,
