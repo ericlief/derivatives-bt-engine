@@ -764,11 +764,14 @@ class GreedyInstrumentSelector:
             ann_roll_cost_usd = ann_roll_cons * candidate.roll_cost_usd_per_con
             # Translate trial risk allocation and measured turnover into the
             # same annualized-dollar-risk units as market volume.
-            risk_traded_day = (
+            risk_budget_usd = (
                 self.config.capital
                 * self.config.target_vol
                 * allocation
                 * idm
+            )
+            risk_traded_day = (
+                risk_budget_usd
                 * candidate.combined_turnover
                 / self.config.liquidity_days
             )
@@ -825,6 +828,8 @@ class GreedyInstrumentSelector:
                 "cluster_path": allocation_result.cluster_paths[symbol],
                 "weight": weights[symbol],
                 "limit_weight": allocation,
+                "annual_dollar_vol_per_contract": candidate.ann_dvol,
+                "risk_budget_usd": risk_budget_usd,
                 "ref_weight": ref_weight,
                 "ref_weight_idm": ref_weight_idm,
                 "ref_max_position": ref_max_position,
@@ -1245,6 +1250,10 @@ class GreedyInstrumentSelector:
                 "weight": detail["weight"],
                 "limit_weight": detail["limit_weight"],
                 "idm": score.idm,
+                "annual_dollar_vol_per_contract": detail[
+                    "annual_dollar_vol_per_contract"
+                ],
+                "risk_budget_usd": detail["risk_budget_usd"],
                 "score": score.score if math.isfinite(score.score) else None,
                 "base_score": (
                     score.base_score if math.isfinite(score.base_score) else None

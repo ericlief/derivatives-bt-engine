@@ -1249,8 +1249,10 @@ baseline by default. The command writes:
   `multi_speed_ewmac_selection_review_trial_allocations_<timestamp>.parquet`,
   the same decision audits for every scheduled review, with `sel_date` and
   `sel_equity` added. The latter carries the per-instrument rounded
-  `max_cons`, `marg_at_max`, portfolio margin, instrument and book limits,
-  trial feasibility, and instrument-level rejection reason; and
+  `max_cons`, `ann_dvol`, sizing `risk_budget`, `marg_at_max`, portfolio
+  margin, instrument and book limits, trial feasibility, and instrument-level
+  rejection reason. `risk_budget` is review equity times target volatility
+  times `limit_weight` times IDM; and
 - `multi_speed_ewmac_selection_passes_<timestamp>.parquet`, the readable
   accepted path only: `selection_step` identifies the pass, `added_symbol` is
   its winner, and each `symbol` row records that accepted book member's
