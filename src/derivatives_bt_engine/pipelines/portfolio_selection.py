@@ -1553,6 +1553,14 @@ def _final_selection_frame(
     rows: list[dict[str, object]] = []
     for rank, symbol in enumerate(selection.selected, start=1):
         candidate = candidate_by_symbol[symbol]
+        # ``ann_dvol`` is already an explicit selected-book field below. The
+        # verbose trial-detail source name would compact to that same public
+        # column and make the report boundary ambiguous.
+        final_detail = {
+            name: value
+            for name, value in final_details[symbol].items()
+            if name != "annual_dollar_vol_per_contract"
+        }
         rows.append({
             "selection_date": selection_date,
             "selection_equity_usd": selection_equity_usd,
@@ -1607,7 +1615,7 @@ def _final_selection_frame(
             "ann_trade_cost_sr": candidate.annual_trade_cost_sr,
             "ann_roll_cost_sr": candidate.annual_roll_cost_sr,
             "ann_cost_sr": candidate.annual_cost_sr,
-            **final_details[symbol],
+            **final_detail,
         })
     frame = pl.DataFrame(rows, infer_schema_length=None)
     if args.selection_rebalance == "static":
