@@ -975,12 +975,13 @@ forecast, volatility, capital-scaling, and buffer-driven trades, so that causal
 split would require a separate persisted selection-trade field.
 
 The year widget defaults to the latest year. A monthly run adds an exact review
-date widget for that year. The vertical bars show active selection weights;
-hover shows the corresponding limit weight, added/retained status, rank,
-classification, raw and capped class/subclass weights, group-limited and
-unallocated weights, and prior-day equity used by the review. These are fixed book
-weights for the selected segment, not realized daily exposure after forecasts,
-buffering, integer contracts, and capital scaling.
+date widget for that year. The vertical bars show active `limit_weight` values
+used for position sizing. Hover also shows the original structural weight,
+class and subclass, added/retained status, rank, raw and capped class/subclass
+weights, group-limited and unallocated weights, and prior-day equity used by the
+review. These are fixed book weights for the selected segment, not realized
+daily exposure after forecasts, buffering, integer contracts, and capital
+scaling.
 
 When `--ib-history-db` is supplied, executable cash history is rebuilt from
 the direct PST/IB source for every instrument that can enter a scheduled book.

@@ -783,15 +783,16 @@ def plot_selection_rebalance_weights(
     ``selection_review_instruments`` Parquet path. The year selector defaults
     to the latest review year. When a monthly run has more than one review in
     that year, a second selector chooses the exact review date. Bars show the
-    fixed selection weight for the active segment; hover fields retain the
-    sizing limit, selection status, rank, classification, and lagged equity.
+    final ``limit_weight`` used for position sizing; hover also retains the
+    original structural weight, selection status, rank, classification, and
+    lagged equity.
 
     Parameters
     ----------
     review_instruments
         Scheduled selection review-instrument frame or its Parquet path. The
         public schema must include ``sel_date``, ``symbol``, ``sel_active``,
-        and ``weight``.
+        ``weight``, and ``limit_weight``.
     width, height
         Width and height of the vertical bar chart in pixels.
 
@@ -814,7 +815,7 @@ def plot_selection_rebalance_weights(
             "review_instruments must be a Polars DataFrame or Parquet path"
         )
 
-    required = {"sel_date", "symbol", "sel_active", "weight"}
+    required = {"sel_date", "symbol", "sel_active", "weight", "limit_weight"}
     missing = sorted(required.difference(frame.columns))
     if missing:
         raise ValueError(
@@ -871,10 +872,13 @@ def plot_selection_rebalance_weights(
         active = (
             dated.filter(
                 pl.col("sel_active").fill_null(False)
-                & pl.col("weight").is_not_null()
+                & pl.col("limit_weight").is_not_null()
             )
-            .sort("weight", "symbol", descending=[True, False])
-            .with_columns((pl.col("weight") * 100.0).alias("weight_pct"))
+            .sort("limit_weight", "symbol", descending=[True, False])
+            .with_columns(
+                (pl.col("limit_weight") * 100.0).alias("limit_weight_pct"),
+                (pl.col("weight") * 100.0).alias("weight_pct"),
+            )
         )
         if active.is_empty():
             raise ValueError(
@@ -882,7 +886,6 @@ def plot_selection_rebalance_weights(
             )
 
         optional_defaults = {
-            "limit_weight": None,
             "sel_status": None,
             "rank": None,
             "asset_cls": None,
@@ -903,10 +906,6 @@ def plot_selection_rebalance_weights(
                     if column not in active.columns
                 ]
             ).with_columns(
-                (
-                    pl.col("limit_weight").cast(pl.Float64, strict=False)
-                    * 100.0
-                ).alias("limit_weight_pct"),
                 *[
                     (
                         pl.col(column).cast(pl.Float64, strict=False) * 100.0
@@ -933,21 +932,22 @@ def plot_selection_rebalance_weights(
             else 0
         )
         title = (
-            f"Selection weights at {review_date.isoformat()} "
+            f"Selection limit weights at {review_date.isoformat()} "
             f"({active.height} instruments, +{added} / -{removed})"
         )
         return active.hvplot.bar(
             x="symbol",
-            y="weight_pct",
+            y="limit_weight_pct",
             title=title,
             xlabel="Instrument",
-            ylabel="Selection weight (%)",
+            ylabel="Limit weight (%)",
             width=width,
             height=height,
             rot=70,
             color="#1f77b4",
             tools=["hover", "pan", "wheel_zoom", "box_zoom", "reset", "save"],
             hover_cols=[
+                "weight_pct",
                 "asset_cls",
                 "econ_subcls",
                 "limit_weight_pct",
@@ -963,10 +963,10 @@ def plot_selection_rebalance_weights(
             ],
             hover_tooltips=[
                 ("Instrument", "@symbol"),
-                ("Weight", "@weight_pct{0.00}%"),
+                ("Limit weight", "@limit_weight_pct{0.00}%"),
+                ("Structural weight", "@weight_pct{0.00}%"),
                 ("Class", "@asset_cls"),
                 ("Subclass", "@econ_subcls"),
-                ("Limit weight", "@limit_weight_pct{0.00}%"),
                 ("Status", "@sel_status"),
                 ("Rank", "@rank"),
                 ("Class weight", "@cls_weight_pct{0.00}%"),
