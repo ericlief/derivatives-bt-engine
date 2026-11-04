@@ -488,10 +488,9 @@ def plot_selection_portfolio_overview(
             width=width,
             height=height,
             tools=tools,
-            hover_cols=["net_drawdown_pct"],
             hover_tooltips=[
-                ("Date", "@date{%F}"),
-                ("Drawdown", "@net_drawdown_pct{0.00}%"),
+                ("Date", "@x{%F}"),
+                ("Drawdown", "@y{0.00}%"),
             ],
         )
         * hv.HLine(0.0).opts(color="black", line_width=1)

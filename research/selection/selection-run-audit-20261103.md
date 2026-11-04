@@ -36,8 +36,58 @@ database ends on October 23, which matches the last fully covered date.
 This saved run includes an extra April 30, 2024 handoff review after the
 reference-history freshness window elapsed. The selector has since been
 changed to review only on its configured schedule; the 31-day freshness check
-still filters candidates at scheduled reviews. Rerun the backtest to measure
-performance without the off-cycle book change.
+still filters candidates at scheduled reviews.
+
+## Annual-only rerun
+
+Run `20261103_185405` removes the April handoff review. The January 1 book
+therefore remains active through the end of 2024. Through the last fully
+covered date, 2026-10-23, net equity is $275.53M versus $255.47M in the
+handoff run. Return from 2024-01-01 improves from -6.97% to +0.34%, and the
+maximum drawdown improves from 26.74% to 21.11%. The partial November 3
+endpoint is $272.62M versus $253.11M, a $19.51M difference.
+
+The runs are identical through 2024-04-29. From April 30 through December 31,
+the annual-only book loses $22.02M versus $41.18M for the handoff book, a
+$19.16M improvement. The ten instruments added by the April review lose
+$19.96M in that segment. ETHUSDRR loses $7.45M, MCL loses $6.86M, HG loses
+$2.22M, IXE loses $1.65M, and M2K loses $1.07M. Keeping the January book also
+raises NQ P&L by $4.22M and CHF P&L by $2.69M, although retained RB performs
+$8.30M worse. The result is an ex-post difference in market P&L from the two
+books; the annual schedule did not use future returns to choose the January
+book.
+
+Most of the improvement remains after 2024. The equity advantage is $19.16M
+at the end of 2024, narrows to $18.03M at the end of 2025, and widens to
+$20.07M by 2026-10-23. Thus the later annual reviews and compounding preserve
+the 2024 gain rather than create it.
+
+## Cost attribution and contract size
+
+From 2024-01-01 through 2026-10-23, the annual-only run earns $6.21M gross
+and pays $5.28M in trading and roll costs, leaving $0.93M net. Trading costs
+are $3.40M, or 64.4% of total costs; roll costs are $1.88M, or 35.6%. The
+largest contributors are SCI ($757k), SONIA.N ($486k), ETHUSDRR ($297k),
+TSR20 ($269k), and RB ($177k), together accounting for 37.6% of all costs.
+Agriculture contributes $1.53M of cost, metals $1.02M, bonds $918k, and
+equities $832k.
+
+Lower costs do not explain the annual-only run's higher P&L. Its gross P&L is
+$20.24M better than the handoff run through October 23, while its cumulative
+cost is $170k higher. During the changed 2024 segment, avoiding MCL and M2K
+saves only about $94k of their realized costs; avoiding their gross losses is
+the material effect.
+
+Larger contracts are cheaper per unit of risk in the main size families. For
+example, reference trade-plus-roll cost SR is about 37% lower for ES than MES,
+46% lower for RTY than M2K, 31% lower for NQ than MNQ, and 53% lower for YM
+than MYM. In 2025, the annual-only run uses ES and pays $6.2k, while the
+handoff run uses MES and pays $8.8k. This helps at the margin, but the
+annual-only 2024-2026 books already select the larger NQ, ES, RTY, YM, GC,
+HSI, IBEX35, JGB, and ETHUSDRR contracts when those families enter. The main
+cost contributors SCI, SONIA.N, and TSR20 do not have a larger selected
+substitute in this universe. Contract-size substitution therefore cannot
+remove most of the $5.28M cost burden.
 
 The recent review equity was roughly $238M-$275M, so this run does not
 estimate what a new $75k account can trade. Its selection performance and
@@ -54,3 +104,8 @@ The main audit files are:
 - `multi_speed_ewmac_selection_portfolio_curve_20261103_122141.parquet`
 - `multi_speed_ewmac_selection_review_instruments_20261103_122141.parquet`
 - `multi_speed_ewmac_selection_cash_pnl_20261103_122141.parquet`
+
+The corrected annual-only artifacts are under
+`/home/dev/data/fin/misc/results/selection_v1/selection_run_20261103_185405/`
+in the same scenario name. The corresponding artifact filenames end in
+`20261103_185405`.
