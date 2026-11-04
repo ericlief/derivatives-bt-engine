@@ -1637,78 +1637,86 @@ class EwmacNotebookView:
         if reference.is_empty():
             raise ValueError("plot date range contains no forecast observations")
 
+        def line_panel(
+            frame: pl.DataFrame,
+            columns: list[str],
+            *,
+            title: str,
+            ylabel: str,
+            labels: dict[str, str] | None = None,
+            colors: dict[str, str] | None = None,
+        ):
+            """Overlay lines with fixed-point numeric hover values."""
+            curves = []
+            for column in columns:
+                label = (labels or {}).get(column, column)
+                curves.append(
+                    frame.hvplot.line(
+                        x="date",
+                        y=column,
+                        label=label,
+                        title=title,
+                        ylabel=ylabel,
+                        width=width,
+                        height=height,
+                        tools=["hover"],
+                        hover_tooltips=[
+                            ("Date", "@date{%F}"),
+                            (label, f"@{{{column}}}{{0,0.0000}}"),
+                        ],
+                        **(
+                            {"color": colors[column]}
+                            if colors is not None and column in colors
+                            else {}
+                        ),
+                    )
+                )
+            return hv.Overlay(curves)
+
         # The Panama series is carried as ``close`` for the signal pipeline;
         # ``con_px`` is the actual contract mark. Use explicit colors on one
         # shared axis so overlapping paths remain identifiable.
         price_curves = []
         if "con_px" in reference.columns:
-            price_curves.append(
-                reference.hvplot.line(
-                    x="date",
-                    y="con_px",
-                    label="Mark price",
-                    color="#1f77b4",
-                    title=f"{self.symbol} contract mark and Panama prices",
-                    ylabel="Price points",
-                    width=width,
-                    height=height,
-                )
-            )
-        price_curves.append(
-            reference.hvplot.line(
-                x="date",
-                y="close",
-                label="Panama price",
-                color="#ff7f0e",
-                title=f"{self.symbol} contract mark and Panama prices",
-                ylabel="Price points",
-                width=width,
-                height=height,
-            )
+            price_curves.append("con_px")
+        price_curves.append("close")
+        price_plot = line_panel(
+            reference,
+            price_curves,
+            title=f"{self.symbol} contract mark and Panama prices",
+            ylabel="Price points",
+            labels={"con_px": "Mark price", "close": "Panama price"},
+            colors={"con_px": "#1f77b4", "close": "#ff7f0e"},
+        ).opts(legend_position="top_left") * hv.HLine(0.0).opts(
+            color="black", line_width=1
         )
-        price_plot = (
-            hv.Overlay(price_curves).opts(legend_position="top_left")
-            * hv.HLine(0.0).opts(color="black", line_width=1)
-        )
-        forecast_plot = reference.hvplot.line(
-            x="date",
-            y="comb_fcst",
+        forecast_plot = line_panel(
+            reference,
+            ["comb_fcst"],
             title="Combined forecast (mean abs 1, cap 2)",
             ylabel="Average-position multiple",
-            width=width,
-            height=height,
         ) * hv.HLine(0.0).opts(color="black", line_width=1)
-        proxy_plot = reference.hvplot.line(
-            x="date",
-            y=[
-                "vol_scalar",
-                "ref_avg_pos",
-                "ref_tgt_pos",
-            ],
+        proxy_plot = line_panel(
+            reference,
+            ["vol_scalar", "ref_avg_pos", "ref_tgt_pos"],
             title="Equal-weight reference positions",
             ylabel="Continuous contracts",
-            width=width,
-            height=height,
         )
-        normalized_plot = reference.hvplot.line(
-            x="date",
-            y=["comb_fcst", "ref_norm_pos"],
+        normalized_plot = line_panel(
+            reference,
+            ["comb_fcst", "ref_norm_pos"],
             title="Forecast versus reference-normalized position",
             ylabel="Smoothed average-position units",
-            width=width,
-            height=height,
         ) * hv.HLine(0.0).opts(color="black", line_width=1)
 
         reference_curves = self.subsystem_reference_pct_curves(
             start=start, end=end
         )
-        reference_plot = reference_curves.hvplot.line(
-            x="date",
-            y=["cum_ref_gross_pct", "cum_ref_net_pct"],
+        reference_plot = line_panel(
+            reference_curves,
+            ["cum_ref_gross_pct", "cum_ref_net_pct"],
             title="Cumulative equal-weight subsystem-reference percentage",
             ylabel="Percent",
-            width=width,
-            height=height,
         )
         panels = (
             price_plot
@@ -1720,25 +1728,18 @@ class EwmacNotebookView:
 
         if self.cash is not None:
             cash = _date_slice(self.cash, start=start, end=end)
-            contract_plot = cash.hvplot.line(
-                x="date",
-                y=["tgt_pos", "exec_con", "held_con"],
+            contract_plot = line_panel(
+                cash,
+                ["tgt_pos", "exec_con", "held_con"],
                 title="Executable contract positions",
                 ylabel="Contracts",
-                width=width,
-                height=height,
             )
             cash_curves = self.cash_pnl_curves(start=start, end=end)
-            cash_plot = cash_curves.hvplot.line(
-                x="date",
-                y=[
-                    "cum_gross_pnl",
-                    "cum_net_pnl",
-                ],
+            cash_plot = line_panel(
+                cash_curves,
+                ["cum_gross_pnl", "cum_net_pnl"],
                 title="Cumulative executable cash P&L",
                 ylabel="USD",
-                width=width,
-                height=height,
             )
             panels = panels + contract_plot + cash_plot
 
