@@ -41,6 +41,7 @@ from derivatives_bt_engine.calculations.forecast_combination import (
     CombinedForecastResult,
     FixedForecastDiversification,
     ForecastCombinationConfig,
+    combine_ewmac_forecasts,
 )
 from derivatives_bt_engine.calculations.costs import calculate_annual_sr_cost
 from derivatives_bt_engine.calculations.pnl import (
@@ -59,6 +60,7 @@ from derivatives_bt_engine.data.futures_history import (
 from derivatives_bt_engine.data.ib_futures_dataloader import (
     DEFAULT_BROKER_MAPPING_PATH,
     DEFAULT_IB_BAR_SIZE,
+    DEFAULT_IB_DURATION,
     DEFAULT_IB_DATED_CONTRACT_DURATION,
     DEFAULT_MAX_SOURCE_GAP_DAYS,
     IBStitchedHistoryProvider,
@@ -2060,6 +2062,141 @@ def build_ewmac_notebook_view_from_screen(
         else None
     )
     return replace(view, reference=reference, cash=cash)
+
+
+def build_ib_ewmac_notebook_view(
+    ib: IBPySync,
+    *,
+    symbol: str,
+    reference_settings: SubsystemReferenceSettings,
+    exchange: str = "SMART",
+    currency: str = "USD",
+    duration: str = DEFAULT_IB_DURATION,
+    bar_size: str = DEFAULT_IB_BAR_SIZE,
+    what_to_show: str = "TRADES",
+    use_rth: bool = True,
+    rules: Iterable[EwmacRule] = CANONICAL_EWMAC_RULES,
+    fdm: float = 1.0,
+    combination_config: ForecastCombinationConfig | None = None,
+    multiplier: float = 1.0,
+    fx_to_usd: float | None = None,
+    ann_cost_sr: float = 0.0,
+    cash_settings: ExecutableCashSettings | None = None,
+    screen: pl.DataFrame | Path | str | None = None,
+    start_date: date | datetime | str | None = None,
+    end_date: date | datetime | str | None = None,
+) -> EwmacNotebookView:
+    """Download one IB stock history and build its unstitched EWMAC view.
+
+    The downloaded daily close is both the signal price and the executable
+    notional mark. No reference or Globex data is loaded or stitched. Forecasts
+    are calculated on the full downloaded sample before optional display
+    boundaries are applied, preserving indicator warmup before ``start_date``.
+
+    Parameters
+    ----------
+    ib
+        Connected synchronous IB client.
+    symbol
+        Stock ticker used for the IB contract and notebook label.
+    reference_settings
+        Equal-weight subsystem reference sizing assumptions.
+    exchange, currency
+        IB stock contract routing and quote currency.
+    duration, bar_size, what_to_show, use_rth
+        Historical bar request settings forwarded to IB.
+    rules, fdm, combination_config
+        EWMAC components and single-instrument combination conventions.
+    multiplier
+        Native currency value of one price point per share; normally 1.0.
+        A matched Phase 1 ``screen`` row may supply its own multiplier.
+    fx_to_usd
+        Optional constant currency conversion. Omit for USD stocks, where the
+        view uses identity FX.
+    ann_cost_sr, cash_settings, screen
+        Reference cost and optional executable cash assumptions. When
+        ``screen`` is given, its multiplier and trade/roll costs are used.
+    start_date, end_date
+        Optional inclusive output boundaries. Forecast indicators use all
+        downloaded history so rows before ``start_date`` still warm them up.
+
+    Returns
+    -------
+    EwmacNotebookView
+        Combined forecasts, reference sizing, optional cash P&L, and plotting
+        methods. ``view.contract_history`` contains the downloaded IB bars.
+    """
+    contract = IBPySync.stock(
+        symbol,
+        exchange=exchange,
+        currency=currency,
+    )
+    qualified = ib.qualify_contracts(contract)
+    if qualified:
+        contract = qualified[0]
+    bars = ib.get_historical_bars(
+        contract,
+        duration=duration,
+        bar_size=bar_size,
+        what_to_show=what_to_show,
+        use_rth=use_rth,
+    )
+    if bars is None or bars.is_empty():
+        raise ValueError(f"IB returned no historical bars for {symbol}")
+    date_column = "date" if "date" in bars.columns else "ts_event"
+    if date_column not in bars.columns or "close" not in bars.columns:
+        raise ValueError(
+            "IB stock history must contain a date/ts_event column and close"
+        )
+    history = (
+        bars.select(
+            pl.col(date_column).cast(pl.Date).alias("date"),
+            pl.col("close").cast(pl.Float64),
+        )
+        .filter(pl.col("close").is_finite() & (pl.col("close") > 0))
+        .unique(subset="date", keep="last", maintain_order=True)
+        .sort("date")
+        .with_columns(pl.col("close").alias("contract_close"))
+    )
+    if end_date is not None:
+        history = _date_slice(history, start=None, end=end_date)
+    if history.is_empty():
+        raise ValueError(f"IB history has no valid closes for {symbol}")
+
+    config = combination_config or ForecastCombinationConfig()
+    result = combine_ewmac_forecasts(
+        history,
+        rules=rules,
+        instrument_code=symbol,
+        fdm=fdm,
+        config=config,
+    )
+    if screen is not None:
+        view = build_ewmac_notebook_view_from_screen(
+            result,
+            screen=screen,
+            symbol=symbol,
+            reference_settings=reference_settings,
+            start_date=start_date,
+            end_date=end_date,
+            cash_settings=cash_settings,
+            fx_to_usd=fx_to_usd,
+            target_abs_forecast=config.target_abs_forecast,
+        )
+    else:
+        view = build_ewmac_notebook_view(
+            result,
+            symbol=symbol,
+            multiplier=multiplier,
+            reference_settings=reference_settings,
+            start_date=start_date,
+            end_date=end_date,
+            fx_to_usd=fx_to_usd,
+            ann_cost_sr=ann_cost_sr,
+            cash_settings=cash_settings,
+            target_abs_forecast=config.target_abs_forecast,
+        )
+    return replace(view, contract_history=bars)
 
 
 def _history_currency(history: FuturesHistory) -> str:
