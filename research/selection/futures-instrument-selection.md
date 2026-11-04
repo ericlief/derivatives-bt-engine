@@ -1385,6 +1385,51 @@ well, and `unalloc_weight` is the book share removed by hierarchy caps. Thus a
 grains-only book with a 50% class cap keeps 50% allocated and reports 50%
 unallocated instead of scaling grains back to 100%.
 
+Treat high hierarchy percentages as emergency ceilings, not active allocation
+targets. In the recent top-down books, six represented classes imply raw class
+weights near 16.7%, while seven classes imply weights near 14.3%. The current
+`--max-class-weight-pct 50` is therefore effectively inactive. The largest raw
+subclass weights are also about 14.3--16.7%, so
+`--max-subclass-weight-pct 25` is effectively inactive as well. This is useful
+when the intent is only to prevent a pathological concentrated book, but these
+settings should not be interpreted as causing 50% or 25% allocations.
+
+Lower global percentage caps do not transfer the removed allocation to FX,
+crypto, metals, or another underrepresented group. For example, applying a 12%
+class cap to a seven-class top-down book clips every class from about 14.3% to
+12% and leaves the difference unallocated. A low subclass cap can be still
+more counterproductive: singleton FX, crypto, and energy subclasses are clipped
+along with equity, bond, and metal subclasses. The instrument-level
+`max_weight_idm` cap can then remove additional weight from singleton classes.
+
+For the current concentration problem, first compare the existing breadth
+limits with a more restrictive research variant:
+
+```text
+--max-instr-per-class 15
+--max-instr-per-subclass 10
+--max-class-weight-pct 50
+--max-subclass-weight-pct 25
+```
+
+The lower count limits address the 20-instrument equity class and 15-instrument
+bond subclass without pretending that the high percentage ceilings actively
+balance the book. They may also keep portfolio margin available long enough for
+another liquid FX or energy candidate to compete. This must be compared as a
+separate run because fewer members can increase within-class instrument
+concentration even when the class total is unchanged.
+
+If count limits alone do not restore breadth, the next selector policy should
+be coverage-aware replacement rather than blind weight redistribution: before
+adding further members to a well-populated class, prefer a second feasible
+member of a singleton class, subject to the same score floor, liquidity, cost,
+and margin tests. When book margin is full, evaluate replacement of a marginal
+accepted member rather than only attempting to append the coverage candidate.
+Do not force an infeasible crypto or FX contract by relaxing market
+participation merely to meet a class target. Post-forecast class-risk caps are
+a separate execution control for aligned signals; selection class/subclass
+caps cannot guarantee realized daily class balance.
+
 In the final selection report, `net_sr` is an instrument-level input to the
 portfolio score: the common gross SR assumption less that instrument's annual
 combined-forecast trading cost, size penalty, and optional low/high contract
