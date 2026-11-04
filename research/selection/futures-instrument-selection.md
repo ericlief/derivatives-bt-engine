@@ -854,13 +854,11 @@ PST/IB frame when `--ib-history-db` is supplied. It is separate from
 the one-time reference-to-IB handoff, while the selection freshness limit
 controls whether that completed history can enter a later review.
 
-When an IB history database is present, the scheduled backtest also inserts
-one handoff review on the first executable session after the reference
-endpoint has exceeded that freshness limit. For the current reference database
-ending in late March 2024, the default limit places this review around the end
-of April. This replaces the January book with only the stitched histories that
-were actually available by then; the requested yearly or monthly cadence
-continues afterward.
+Reviews occur only on the selected static, yearly, or monthly schedule. The
+freshness limit filters candidates at those scheduled reviews; reaching the
+reference-to-IB handoff does not create an additional review. Under yearly
+selection, for example, the January book stays in force through the year, and
+the next candidate screen occurs at the next January review.
 
 Every complete backtest, including `--selection-rebalance static`, begins from
 the reference-cost universe. Candidate-only output remains the live executable

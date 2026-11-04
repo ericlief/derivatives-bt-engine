@@ -33,6 +33,12 @@ leaving 22.0% of planned risk weight missing. The surviving book has a 37.9%
 top-three risk share and an effective count of 16.3. The refreshed IB history
 database ends on October 23, which matches the last fully covered date.
 
+This saved run includes an extra April 30, 2024 handoff review after the
+reference-history freshness window elapsed. The selector has since been
+changed to review only on its configured schedule; the 31-day freshness check
+still filters candidates at scheduled reviews. Rerun the backtest to measure
+performance without the off-cycle book change.
+
 The recent review equity was roughly $238M-$275M, so this run does not
 estimate what a new $75k account can trade. Its selection performance and
 contract granularity are specific to the much larger dynamic account.
