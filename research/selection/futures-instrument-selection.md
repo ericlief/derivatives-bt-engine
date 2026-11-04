@@ -976,13 +976,17 @@ trades, so that causal split would require a separate persisted
 selection-trade field.
 
 The year widget defaults to the latest year. A monthly run adds an exact review
-date widget for that year. The vertical bars show active `limit_weight` values
-used for position sizing. Hover also shows the original structural weight,
-class and subclass, added/retained status, rank, raw and capped class/subclass
-weights, group-limited and unallocated weights, and prior-day equity used by the
-review. These are fixed book weights for the selected segment, not realized
-daily exposure after forecasts, buffering, integer contracts, and capital
-scaling.
+date widget for that year. The first vertical bars show active `limit_weight`
+values used for position sizing. Hover also shows the original structural
+weight, class and subclass, added/retained status, rank, raw and capped
+class/subclass weights, group-limited and unallocated weights, and prior-day
+equity used by the review. Companion class and subclass bars aggregate the same
+final instrument `limit_weight` values. Their displayed percentages are shares
+of the deployed limit-weight book and therefore total 100%; hover also shows
+the absolute summed limit weight and group members. The class title reports the
+book's total limit weight, which can be below 100% after instrument-level caps.
+These are fixed book weights for the selected segment, not realized daily
+exposure after forecasts, buffering, integer contracts, and capital scaling.
 
 When `--ib-history-db` is supplied, executable cash history is rebuilt from
 the direct PST/IB source for every instrument that can enter a scheduled book.

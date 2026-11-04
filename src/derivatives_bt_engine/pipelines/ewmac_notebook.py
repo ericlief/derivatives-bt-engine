@@ -12,10 +12,11 @@ ownership, pooled forecast construction, and this same view boundary. The
 selected-book cash-P&L plotting helper plots Polars slices directly and lays
 out comparable execution diagnostics without merging their scales. The
 scheduled-selection plotting helper reads the compact review-instrument report
-and exposes each dated book as an instrument-weight bar chart. Portfolio-level
-helpers plot compounded equity and drawdown, realized contract-risk
-concentration, and annual instrument P&L attribution from the persisted public
-reports without recreating the backtest accounting path.
+and exposes each dated book as instrument-weight bars plus class and subclass
+composition bars. Portfolio-level helpers plot compounded equity and drawdown,
+realized contract-risk concentration, and annual instrument P&L attribution
+from the persisted public reports without recreating the backtest accounting
+path.
 """
 
 from __future__ import annotations
@@ -800,15 +801,18 @@ def plot_selection_rebalance_weights(
     width: int = 1050,
     height: int = 420,
 ):
-    """Plot the active instrument weights at each scheduled selection review.
+    """Plot instrument and classification weights at each selection review.
 
     ``review_instruments`` may be the public Polars frame or a saved
     ``selection_review_instruments`` Parquet path. The year selector defaults
     to the latest review year. When a monthly run has more than one review in
-    that year, a second selector chooses the exact review date. Bars show the
-    final ``limit_weight`` used for position sizing; hover also retains the
-    original structural weight, selection status, rank, classification, and
-    lagged equity.
+    that year, a second selector chooses the exact review date. The first bars
+    show the final ``limit_weight`` used for instrument position sizing. Two
+    companion bars aggregate those final weights into asset-class and
+    economic-subclass shares of the deployed book. Group bars normalize by the
+    sum of active ``limit_weight`` values so their shares total 100%; hover
+    retains each group's absolute limit-weight total so max-weight
+    under-allocation remains visible.
 
     Parameters
     ----------
@@ -823,7 +827,8 @@ def plot_selection_rebalance_weights(
     -------
     ipywidgets.VBox
         A year selector, an exact-date selector for multi-review years, and an
-        output area containing the selected review's instrument-weight bars.
+        output area containing the selected review's instrument, class, and
+        subclass weight bars.
     """
     import hvplot.polars  # noqa: F401 - registers Polars' ``hvplot`` API
     import ipywidgets as widgets
@@ -890,7 +895,7 @@ def plot_selection_rebalance_weights(
         review_selector.layout.display = "" if len(year_dates) > 1 else "none"
 
     def plot_review(review_date: date):
-        """Build the vertical instrument-weight bars for one dated book."""
+        """Build instrument and group-weight bars for one dated book."""
         dated = frame.filter(pl.col("sel_date") == review_date)
         active = (
             dated.filter(
@@ -958,7 +963,7 @@ def plot_selection_rebalance_weights(
             f"Selection limit weights at {review_date.isoformat()} "
             f"({active.height} instruments, +{added} / -{removed})"
         )
-        return active.hvplot.bar(
+        instrument_bars = active.hvplot.bar(
             x="symbol",
             y="limit_weight_pct",
             title=title,
@@ -1004,6 +1009,125 @@ def plot_selection_rebalance_weights(
                 ("Review equity", "@sel_equity{$0,0.00}"),
             ],
         )
+
+        deployed_limit_weight = float(active.get_column("limit_weight").sum())
+        if (
+            not math.isfinite(deployed_limit_weight)
+            or deployed_limit_weight <= 0
+        ):
+            raise ValueError(
+                f"review {review_date.isoformat()} has no positive limit weight"
+            )
+
+        # Group shares describe concentration within the final deployed book.
+        # Preserve the absolute total because instrument caps can leave final
+        # limit weights summing below one even when group weights sum to one.
+        classified = active.with_columns(
+            pl.col("asset_cls").fill_null("unclassified"),
+            pl.col("econ_subcls").fill_null("unclassified"),
+        )
+        class_weights = (
+            classified.group_by("asset_cls")
+            .agg(
+                pl.col("limit_weight").sum().alias("group_limit_weight"),
+                pl.len().alias("instr_n"),
+                pl.col("symbol").sort().str.join(", ").alias("instruments"),
+            )
+            .with_columns(
+                (
+                    pl.col("group_limit_weight")
+                    / pl.lit(deployed_limit_weight)
+                    * 100.0
+                ).alias("book_share_pct"),
+                (pl.col("group_limit_weight") * 100.0).alias(
+                    "group_limit_weight_pct"
+                ),
+            )
+            .sort("book_share_pct", "asset_cls", descending=[True, False])
+        )
+        subclass_weights = (
+            classified.group_by("asset_cls", "econ_subcls")
+            .agg(
+                pl.col("limit_weight").sum().alias("group_limit_weight"),
+                pl.len().alias("instr_n"),
+                pl.col("symbol").sort().str.join(", ").alias("instruments"),
+            )
+            .with_columns(
+                pl.concat_str(
+                    "asset_cls", "econ_subcls", separator=" / "
+                ).alias("subclass_label"),
+                (
+                    pl.col("group_limit_weight")
+                    / pl.lit(deployed_limit_weight)
+                    * 100.0
+                ).alias("book_share_pct"),
+                (pl.col("group_limit_weight") * 100.0).alias(
+                    "group_limit_weight_pct"
+                ),
+            )
+            .sort(
+                "book_share_pct", "subclass_label", descending=[True, False]
+            )
+        )
+
+        allocation_pct = deployed_limit_weight * 100.0
+        class_bars = class_weights.hvplot.bar(
+            x="asset_cls",
+            y="book_share_pct",
+            title=(
+                "Asset-class share of final limit-weight book "
+                f"(limit weights total {allocation_pct:.2f}%)"
+            ),
+            xlabel="Asset class",
+            ylabel="Book share (%)",
+            width=width,
+            height=max(260, height // 2),
+            rot=45,
+            color="#2ca02c",
+            tools=["hover", "pan", "wheel_zoom", "box_zoom", "reset", "save"],
+            hover_cols=[
+                "book_share_pct",
+                "group_limit_weight_pct",
+                "instr_n",
+                "instruments",
+            ],
+            hover_tooltips=[
+                ("Class", "@asset_cls"),
+                ("Book share", "@book_share_pct{0.00}%"),
+                ("Summed limit weight", "@group_limit_weight_pct{0.00}%"),
+                ("Instruments", "@instr_n"),
+                ("Members", "@instruments"),
+            ],
+        )
+        subclass_bars = subclass_weights.hvplot.bar(
+            x="subclass_label",
+            y="book_share_pct",
+            title="Economic-subclass share of final limit-weight book",
+            xlabel="Asset class / economic subclass",
+            ylabel="Book share (%)",
+            width=width,
+            height=max(320, height),
+            rot=70,
+            color="#ff7f0e",
+            tools=["hover", "pan", "wheel_zoom", "box_zoom", "reset", "save"],
+            hover_cols=[
+                "asset_cls",
+                "econ_subcls",
+                "book_share_pct",
+                "group_limit_weight_pct",
+                "instr_n",
+                "instruments",
+            ],
+            hover_tooltips=[
+                ("Class", "@asset_cls"),
+                ("Subclass", "@econ_subcls"),
+                ("Book share", "@book_share_pct{0.00}%"),
+                ("Summed limit weight", "@group_limit_weight_pct{0.00}%"),
+                ("Instruments", "@instr_n"),
+                ("Members", "@instruments"),
+            ],
+        )
+        return (instrument_bars + class_bars + subclass_bars).cols(1)
 
     def update_plot(change=None) -> None:
         """Redraw the exact review selected by the widget controls."""
