@@ -1749,6 +1749,7 @@ def build_ewmac_notebook_view(
     symbol: str,
     multiplier: float,
     reference_settings: SubsystemReferenceSettings,
+    start_date: date | datetime | str | None = None,
     as_of: date | datetime | str | None = None,
     fx_to_usd: float | None = None,
     ann_cost_sr: float = 0.0,
@@ -1764,9 +1765,12 @@ def build_ewmac_notebook_view(
         :meth:`CombinedForecastEngine.combine`.
     symbol
         Executable instrument identity used in plot titles and view metadata.
-    as_of
-        Optional inclusive calendar-date cutoff for the forecast and all
+    start_date
+        Optional inclusive calendar-date start for the forecast and all
         derived notebook curves.
+    as_of
+        Optional inclusive calendar-date end for the forecast and all derived
+        notebook curves.
     multiplier
         Native-currency value of one price point for the actual instrument.
     fx_to_usd
@@ -1798,12 +1802,12 @@ def build_ewmac_notebook_view(
     if not math.isfinite(target_abs_forecast) or target_abs_forecast <= 0:
         raise ValueError("target_abs_forecast must be finite and positive")
 
-    if as_of is not None:
+    if start_date is not None or as_of is not None:
         # Trim the source before calculating positions so every derived path
-        # has the same inclusive point-in-time boundary.
+        # has the same inclusive date boundaries.
         result = replace(
             result,
-            frame=_date_slice(result.frame, start=None, end=as_of),
+            frame=_date_slice(result.frame, start=start_date, end=as_of),
         )
 
     forecast = _forecast_with_fx(result, fx_to_usd)
@@ -1858,6 +1862,7 @@ def build_ewmac_notebook_view_from_screen(
     screen: pl.DataFrame | Path | str,
     symbol: str,
     reference_settings: SubsystemReferenceSettings,
+    start_date: date | datetime | str | None = None,
     as_of: date | datetime | str | None = None,
     cash_settings: ExecutableCashSettings | None = None,
     fx_to_usd: float | None = None,
@@ -1880,9 +1885,12 @@ def build_ewmac_notebook_view_from_screen(
     ----------
     result
         Combined forecast history to use as the strategy signal.
-    as_of
-        Optional inclusive calendar-date cutoff for the forecast and all
+    start_date
+        Optional inclusive calendar-date start for the forecast and all
         derived notebook curves.
+    as_of
+        Optional inclusive calendar-date end for the forecast and all derived
+        notebook curves.
     screen
         Phase 1 selection-screen frame or path to its Parquet/CSV report.
     symbol
@@ -1908,6 +1916,14 @@ def build_ewmac_notebook_view_from_screen(
         Compact forecast, costed reference, optional executable cash frames,
         and plotting methods.
     """
+    if start_date is not None or as_of is not None:
+        # Screen-derived annual cost uses the same sample as the displayed
+        # curves, so estimate turnover only over the requested date range.
+        result = replace(
+            result,
+            frame=_date_slice(result.frame, start=start_date, end=as_of),
+        )
+
     screen_frame = _read_screen_frame(screen)
     screen_row = _screen_row(screen_frame, symbol)
     multiplier = _screen_number(
@@ -2015,6 +2031,7 @@ def build_ewmac_notebook_view_from_screen(
         symbol=symbol,
         multiplier=multiplier,
         reference_settings=reference_settings,
+        start_date=start_date,
         as_of=as_of,
         fx_to_usd=fx_to_usd,
         ann_cost_sr=annual_cost.ann_cost_sr,
