@@ -1749,6 +1749,7 @@ def build_ewmac_notebook_view(
     symbol: str,
     multiplier: float,
     reference_settings: SubsystemReferenceSettings,
+    as_of: date | datetime | str | None = None,
     fx_to_usd: float | None = None,
     ann_cost_sr: float = 0.0,
     cash_settings: ExecutableCashSettings | None = None,
@@ -1763,6 +1764,9 @@ def build_ewmac_notebook_view(
         :meth:`CombinedForecastEngine.combine`.
     symbol
         Executable instrument identity used in plot titles and view metadata.
+    as_of
+        Optional inclusive calendar-date cutoff for the forecast and all
+        derived notebook curves.
     multiplier
         Native-currency value of one price point for the actual instrument.
     fx_to_usd
@@ -1793,6 +1797,14 @@ def build_ewmac_notebook_view(
         raise ValueError("multiplier must be finite and positive")
     if not math.isfinite(target_abs_forecast) or target_abs_forecast <= 0:
         raise ValueError("target_abs_forecast must be finite and positive")
+
+    if as_of is not None:
+        # Trim the source before calculating positions so every derived path
+        # has the same inclusive point-in-time boundary.
+        result = replace(
+            result,
+            frame=_date_slice(result.frame, start=None, end=as_of),
+        )
 
     forecast = _forecast_with_fx(result, fx_to_usd)
     reference = build_subsystem_reference_return_curve(
@@ -1846,6 +1858,7 @@ def build_ewmac_notebook_view_from_screen(
     screen: pl.DataFrame | Path | str,
     symbol: str,
     reference_settings: SubsystemReferenceSettings,
+    as_of: date | datetime | str | None = None,
     cash_settings: ExecutableCashSettings | None = None,
     fx_to_usd: float | None = None,
     target_abs_forecast: float = EWMAC_FORECAST_TARGET_ABS,
@@ -1867,6 +1880,9 @@ def build_ewmac_notebook_view_from_screen(
     ----------
     result
         Combined forecast history to use as the strategy signal.
+    as_of
+        Optional inclusive calendar-date cutoff for the forecast and all
+        derived notebook curves.
     screen
         Phase 1 selection-screen frame or path to its Parquet/CSV report.
     symbol
@@ -1999,6 +2015,7 @@ def build_ewmac_notebook_view_from_screen(
         symbol=symbol,
         multiplier=multiplier,
         reference_settings=reference_settings,
+        as_of=as_of,
         fx_to_usd=fx_to_usd,
         ann_cost_sr=annual_cost.ann_cost_sr,
         cash_settings=cash_settings,
