@@ -1811,6 +1811,13 @@ def build_ewmac_notebook_view(
         )
 
     forecast = _forecast_with_fx(result, fx_to_usd)
+    if "contract_close" not in forecast.columns and "close" in forecast.columns:
+        # Direct, unstitched IB histories carry the executable mark as close.
+        # Stitched histories retain their separate raw mark column, because
+        # their close may be an additive-Panama signal price.
+        forecast = forecast.with_columns(
+            pl.col("close").alias("contract_close")
+        )
     reference = build_subsystem_reference_return_curve(
         forecast,
         capital=reference_settings.capital,
