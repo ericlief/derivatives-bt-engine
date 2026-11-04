@@ -1306,6 +1306,7 @@ class EwmacNotebookView:
     cash: pl.DataFrame | None = None
     history: FuturesHistory | None = None
     contract_history: pl.DataFrame | None = None
+    close_label: str = "Panama price"
 
     @property
     def forecasts(self) -> pl.DataFrame:
@@ -1673,9 +1674,8 @@ class EwmacNotebookView:
                 )
             return hv.Overlay(curves)
 
-        # The Panama series is carried as ``close`` for the signal pipeline;
-        # ``con_px`` is the actual contract mark. Use explicit colors on one
-        # shared axis so overlapping paths remain identifiable.
+        # ``close`` is Panama-adjusted for stitched futures and the downloaded
+        # close for direct IB stocks; ``con_px`` is the raw notional mark.
         price_curves = []
         if "con_px" in reference.columns:
             price_curves.append("con_px")
@@ -1683,9 +1683,9 @@ class EwmacNotebookView:
         price_plot = line_panel(
             reference,
             price_curves,
-            title=f"{self.symbol} contract mark and Panama prices",
+            title=f"{self.symbol} contract mark and {self.close_label}",
             ylabel="Price points",
-            labels={"con_px": "Mark price", "close": "Panama price"},
+            labels={"con_px": "Mark price", "close": self.close_label},
             colors={"con_px": "#1f77b4", "close": "#ff7f0e"},
         ).opts(legend_position="top_left") * hv.HLine(0.0).opts(
             color="black", line_width=1
@@ -2197,7 +2197,7 @@ def build_ib_ewmac_notebook_view(
             cash_settings=cash_settings,
             target_abs_forecast=config.target_abs_forecast,
         )
-    return replace(view, contract_history=bars)
+    return replace(view, contract_history=bars, close_label="Close")
 
 
 def _history_currency(history: FuturesHistory) -> str:
