@@ -39,7 +39,7 @@ from derivatives_bt_engine.reports.formatting import (
 )
 
 
-REPORT_TIMEZONE = ZoneInfo("America/Chicago")
+REPORT_TIMEZONE = ZoneInfo("America/New_York")
 
 
 @dataclass(frozen=True)
@@ -253,7 +253,7 @@ def parse_args(argv=None) -> argparse.Namespace:
         type=Path,
         help=(
             "Parent directory for timestamped grid-run folders; defaults to "
-            "results/. Each run creates selection_grid_<Chicago timestamp>."
+            "results/. Each run creates selection_grid_<Eastern timestamp>."
         ),
     )
     parser.add_argument(

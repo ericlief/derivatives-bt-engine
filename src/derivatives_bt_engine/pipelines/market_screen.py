@@ -118,7 +118,7 @@ log = logging.getLogger("derivatives_bt_engine.pipelines.market_screen")
 
 DEFAULT_DURATION = "1 Y"
 DEFAULT_SPREAD_DURATION = "5 D"
-REPORT_TIMEZONE = ZoneInfo("America/Chicago")
+REPORT_TIMEZONE = ZoneInfo("America/New_York")
 DEFAULT_SPREAD_BAR_SIZES = ("15 mins",)
 DEFAULT_DELAYED_SPREAD_REQUEST_PLAN = (
     ("15 mins", None),
@@ -2066,7 +2066,7 @@ def build_cost_risk_row(
     bid: Optional[float] = None,
     ask: Optional[float] = None,
     price_source: str = "dated_contract",
-    quote_timestamp_ct: Optional[str] = None,
+    quote_timestamp_et: Optional[str] = None,
     quote_quality: str = "live_snapshot",
 ) -> dict:
     """Calculate notional, dollar vol, and risk-scaled execution costs.
@@ -2165,7 +2165,7 @@ def build_cost_risk_row(
             one_way_total / notional * 10_000.0 if one_way_total is not None else None
         ),
         "spread_quality": quote_quality if spread_valid else "unknown_no_bid_ask",
-        "quote_timestamp_ct": quote_timestamp_ct,
+        "quote_timestamp_et": quote_timestamp_et,
         "annualization_days": annualization_days,
         "history_rows": history_rows,
         "history_start": history_start,
@@ -2262,11 +2262,11 @@ def _spread_stats_from_bid_ask_bars(
         "ib_historical_spread_observations": clean.height,
         # IB timestamps carry each exchange's local timezone. Report rows
         # span exchanges, and Polars cannot construct one datetime column
-        # from values such as MET and US/Eastern. Central-time ISO text is
-        # portable across report output and aligns inspection with CME
+        # from values such as MET and US/Eastern. Eastern-time ISO text is
+        # portable across report output and aligns inspection with US markets
         # hours while preserving the absolute instant and UTC offset.
-        "ib_historical_spread_start": _timestamp_as_central_iso(spread_start),
-        "ib_historical_spread_end": _timestamp_as_central_iso(spread_end),
+        "ib_historical_spread_start": _timestamp_as_eastern_iso(spread_start),
+        "ib_historical_spread_end": _timestamp_as_eastern_iso(spread_end),
         "ib_historical_spread_mean_points": clean.get_column(
             "spread_points"
         ).mean(),
@@ -2279,8 +2279,8 @@ def _spread_stats_from_bid_ask_bars(
     }
 
 
-def _timestamp_as_central_iso(value: object) -> Optional[str]:
-    """Return a report-safe Chicago timestamp for mixed exchange timezones."""
+def _timestamp_as_eastern_iso(value: object) -> Optional[str]:
+    """Return a report-safe Eastern timestamp for mixed exchange timezones."""
     if value is None:
         return None
     if isinstance(value, datetime):
@@ -3078,7 +3078,7 @@ def diagnose_instrument(
         bid=quote["bid"],
         ask=quote["ask"],
         price_source=price_source,
-        quote_timestamp_ct=datetime.now(REPORT_TIMEZONE).isoformat(
+        quote_timestamp_et=datetime.now(REPORT_TIMEZONE).isoformat(
             timespec="seconds"
         ),
         quote_quality=f"{resolved_market_data_type}_snapshot",
@@ -3544,7 +3544,7 @@ def _load_instruments(
 
 
 PUBLIC_REPORT_RENAMES = {
-    "market_snapshot_generated_at_ct": "snap_cache_ts_ct",
+    "market_snapshot_generated_at_et": "snap_cache_ts_et",
     "market_snapshot_duration": "snap_hist_duration",
     "market_snapshot_spread_duration": "snap_spread_duration",
     "market_snapshot_volume_duration": "snap_volume_duration",
@@ -3609,7 +3609,7 @@ PUBLIC_REPORT_RENAMES = {
     "one_way_cost_per_annual_dollar_vol": "snap_ref_config_sr_cost_per_trade",
     "one_way_cost_bps_notional": "snap_ref_config_cost_bps_notional",
     "spread_quality": "snap_spread_quality",
-    "quote_timestamp_ct": "snap_quote_timestamp_ct",
+    "quote_timestamp_et": "snap_quote_timestamp_et",
     "quote_market_data_type": "snap_market_data_type",
     "quote_market_data_attempts": "snap_market_data_attempts",
     "quote_error_codes": "snap_error_codes",
@@ -3700,7 +3700,7 @@ PUBLIC_REPORT_RENAMES = {
     "risk_size_eligible": "size_eligible",
     "contract_volume_eligible": "volume_eligible",
     "max_contract_ann_dvol_usd": "max_ann_dvol",
-    "report_generated_at_ct": "report_ts_ct",
+    "report_generated_at_et": "report_ts_et",
 }
 
 
@@ -4085,11 +4085,11 @@ def _order_market_public_columns(report: pl.DataFrame) -> pl.DataFrame:
         name for name in report.columns
         if name not in selected_set
         and name not in audit_suffix
-        and name != "report_ts_ct"
+        and name != "report_ts_et"
     ]
     tail = audit_suffix
-    if "report_ts_ct" in report.columns:
-        tail = [*tail, "report_ts_ct"]
+    if "report_ts_et" in report.columns:
+        tail = [*tail, "report_ts_et"]
     return report.select(*selected, *middle, *tail)
 
 
@@ -4197,7 +4197,7 @@ def _emit_report(
     """Persist a typed public rule cache or legacy cost-selection screen."""
     generated_at = datetime.now(REPORT_TIMEZONE)
     report = report.with_columns(
-        pl.lit(generated_at).alias("report_generated_at_ct")
+        pl.lit(generated_at).alias("report_generated_at_et")
     )
     output_report = round_public_report(_public_report_schema(report))
     summary_columns = [
@@ -4485,7 +4485,7 @@ def _market_snapshot_frame(
     vocabulary while numerical values retain acquisition precision.
     """
     snapshot = pl.DataFrame(rows, infer_schema_length=None).with_columns(
-        pl.lit(generated_at).alias("market_snapshot_generated_at_ct"),
+        pl.lit(generated_at).alias("market_snapshot_generated_at_et"),
         pl.lit(args.duration).alias("market_snapshot_duration"),
         pl.lit(args.spread_duration).alias(
             "market_snapshot_spread_duration"
@@ -4671,6 +4671,24 @@ def _load_market_snapshot(
     if resolved.suffix.lower() != ".parquet":
         raise ValueError("--snapshot-input must be a .parquet file")
     snapshot = _restore_market_snapshot_columns(pl.read_parquet(resolved))
+    # Older snapshots label their Chicago-local acquisition time with ``_ct``.
+    # Preserve those inputs while normalizing the public name for current runs.
+    legacy_timestamp_columns = {
+        "market_snapshot_generated_at_ct": "market_snapshot_generated_at_et",
+    }
+    for old_name, new_name in legacy_timestamp_columns.items():
+        if old_name in snapshot.columns and new_name not in snapshot.columns:
+            old_dtype = snapshot.schema[old_name]
+            snapshot = snapshot.rename({old_name: new_name})
+            if isinstance(old_dtype, pl.Datetime):
+                timestamp = pl.col(new_name)
+                if old_dtype.time_zone is None:
+                    timestamp = timestamp.dt.replace_time_zone(
+                        "America/Chicago"
+                    )
+                snapshot = snapshot.with_columns(
+                    timestamp.dt.convert_time_zone("America/New_York")
+                )
     required = {
         "symbol",
         "annual_dollar_vol_per_contract",
@@ -4686,7 +4704,7 @@ def _load_market_snapshot(
     if max_age_days is not None:
         if max_age_days <= 0:
             raise ValueError("--max-snapshot-age-days must be positive")
-        timestamp_column = "market_snapshot_generated_at_ct"
+        timestamp_column = "market_snapshot_generated_at_et"
         if timestamp_column not in snapshot.columns:
             raise ValueError(
                 "market snapshot is missing its acquisition timestamp; "
@@ -4810,7 +4828,7 @@ def _restore_market_snapshot_columns(snapshot: pl.DataFrame) -> pl.DataFrame:
             "ib_whatif_maintenance_margin_usd", "ib_whatif_commission",
             "ib_whatif_commission_currency", "ib_whatif_commission_usd",
             "full_spread_points", "snapshot_full_spread_points",
-            "bid", "ask", "quote_timestamp_ct", "quote_market_data_type",
+            "bid", "ask", "quote_timestamp_et", "quote_market_data_type",
             "quote_market_data_attempts", "quote_error_codes",
             "quote_selected_error_codes", "spread_quality",
         }

@@ -70,7 +70,7 @@ DEFAULT_VIEW_COLUMNS = (
     "init_margin_usd",
     "initial_margin_to_ann_dvol",
     "margin_risk_calibration_source",
-    "snap_cache_ts_ct",
+    "snap_cache_ts_et",
     "maint_margin_usd",
     "margin_ccy",
     "whatif_attempted",
@@ -273,8 +273,8 @@ SELECTION_CANDIDATE_COLUMNS = (
     "ref_instr_has_elig_ewmac_rule",
     "exec_elig",
     "selection_elig",
-    "snap_cache_ts_ct",
-    "report_ts_ct",
+    "snap_cache_ts_et",
+    "report_ts_et",
 )
 
 

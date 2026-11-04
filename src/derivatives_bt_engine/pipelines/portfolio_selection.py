@@ -140,7 +140,7 @@ from derivatives_bt_engine.logging_config import setup_logger
 
 
 logger = logging.getLogger(__name__)
-REPORT_TIMEZONE = ZoneInfo("America/Chicago")
+REPORT_TIMEZONE = ZoneInfo("America/New_York")
 DEFAULT_SELECTION_MAX_HISTORY_GAP_DAYS = 31
 
 # Bump this when reference-curve or executable cash-curve semantics change.
@@ -1611,7 +1611,7 @@ class _WalkForwardSelectionProvider:
                     self._finite(source.get("initial_margin_to_ann_dvol"))
                 ),
                 "margin_calibration_timestamp": source.get(
-                    "snap_cache_ts_ct"
+                    "snap_cache_ts_et"
                 ),
                 "margin_risk_calibration_source": source.get(
                     "margin_risk_calibration_source"
@@ -1726,7 +1726,7 @@ def _final_selection_frame(
                 "initial_margin_to_ann_dvol"
             ),
             "margin_calibration_timestamp": source_rows[symbol].get(
-                "snap_cache_ts_ct"
+                "snap_cache_ts_et"
             ),
             "margin_risk_calibration_source": source_rows[symbol].get(
                 "margin_risk_calibration_source"
