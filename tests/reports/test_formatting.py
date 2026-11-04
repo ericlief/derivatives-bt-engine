@@ -108,8 +108,13 @@ def test_public_report_compacts_selection_review_identity():
         "selection_date": [date(2024, 1, 2)],
         "selection_year": [2024],
         "selection_status": ["added"],
+        "selection_unbuffered_symbols": ["A,C"],
         "selection_added_symbols": ["A"],
         "selection_removed_symbols": ["B"],
+        "selection_eligibility_exit_buffer_percent": [25.0],
+        "selection_book_score_buffer_percent": [2.0],
+        "switch_cost_usd": [12.34],
+        "score_buffer_sr": [0.02],
     })
 
     public = rename_public_report_columns(report)
@@ -118,8 +123,13 @@ def test_public_report_compacts_selection_review_identity():
         "sel_date",
         "sel_year",
         "sel_status",
+        "sel_unbuf_symbols",
         "sel_added",
         "sel_removed",
+        "sel_elig_exit_buf_pct",
+        "sel_book_score_buf_pct",
+        "switch_cost",
+        "score_buf_sr",
     ]
 
 

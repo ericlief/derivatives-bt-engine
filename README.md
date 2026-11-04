@@ -122,6 +122,15 @@ configured contract band, breaking any remaining tie by score and symbol.
 The reference position does not change as the selected book grows. The
 default tolerance is zero, so this tie-break is off.
 
+Yearly and monthly selection reviews additionally retain the prior book unless
+the unbuffered challenger pays its estimated average-position transition cost
+and clears `--selection-book-score-buffer-pct` (default 2%). Incumbents receive
+a separate soft eligibility exit band through
+`--selection-eligibility-exit-buffer-pct` (default 25%); stale history, margin,
+classification, family, and book constraints remain hard failures. This
+membership hysteresis is independent of both the within-iteration score
+tie-break and the daily executable-position buffer.
+
 This candidate tie-break is separate from `--low-con-penalty-scale` and
 `--high-con-penalty-scale`. Those optional settings subtract per-instrument
 SR penalties when an instrument's continuous maximum position lies outside

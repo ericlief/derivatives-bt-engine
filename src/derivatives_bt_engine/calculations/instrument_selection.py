@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import math
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from collections.abc import Iterable
+from dataclasses import dataclass, replace
 
 import numpy as np
 from scipy.cluster import hierarchy as sch
@@ -158,6 +159,12 @@ class GreedySelectionConfig:
     for comparison. These are additive screens: they deliberately do not
     assume cross-product SPAN offsets, but remain estimates because IB's
     one-lot margin change depends on the account's positions at snapshot time.
+    ``eligibility_exit_buffer_percent`` relaxes only the minimum-position and
+    market-participation gates for symbols already in the prior book; the
+    pipeline applies the same multiplier to their cost exit gate.
+    ``book_score_buffer_percent`` is the additional prior-score hurdle a
+    challenger must clear after its expected one-time switch cost is converted
+    to SR units. Both settings are inert when no prior book is supplied.
     """
 
     capital: float = 100_000.0
@@ -185,6 +192,8 @@ class GreedySelectionConfig:
     max_instrument_margin_pct: float | None = None
     max_book_margin_pct: float | None = None
     include_roll_cost_in_score: bool = False
+    eligibility_exit_buffer_percent: float = 0.0
+    book_score_buffer_percent: float = 0.0
 
     def __post_init__(self) -> None:
         """Validate configuration ranges before any trial is evaluated."""
@@ -210,6 +219,12 @@ class GreedySelectionConfig:
             raise ValueError("contract band must have positive increasing bounds")
         if not 0 <= self.score_tie_tolerance_percent <= 100:
             raise ValueError("score_tie_tolerance_percent must be in [0, 100]")
+        if not 0 <= self.eligibility_exit_buffer_percent <= 100:
+            raise ValueError(
+                "eligibility_exit_buffer_percent must be in [0, 100]"
+            )
+        if not 0 <= self.book_score_buffer_percent <= 100:
+            raise ValueError("book_score_buffer_percent must be in [0, 100]")
         if self.tie_reference_book_count <= 0:
             raise ValueError("tie_reference_book_count must be positive")
         if self.liquidity_days <= 0 or self.max_pct_market_volume <= 0:
@@ -476,12 +491,30 @@ class PortfolioScore:
 
 @dataclass(frozen=True)
 class GreedySelectionResult:
-    """Return the accepted book plus summary and member-level trial audits."""
+    """Return the accepted book plus construction and switch diagnostics.
+
+    The trial rows retain the unconstrained greedy construction path. When a
+    prior book is supplied, the final selected book can instead remain the
+    incumbent after transition cost and the configured score hurdle are
+    applied. The optional switch fields make that final decision reproducible
+    without changing first-review or static-selection behavior.
+    """
 
     selected: tuple[str, ...]
     final_score: PortfolioScore
     trials: tuple[dict[str, object], ...]
     trial_allocations: tuple[dict[str, object], ...]
+    unbuffered_selected: tuple[str, ...] = ()
+    prior_selected: tuple[str, ...] = ()
+    prior_book_score: float | None = None
+    unbuffered_book_score: float | None = None
+    gross_score_gain: float | None = None
+    switch_cost_usd: float | None = None
+    switch_cost_sr: float | None = None
+    score_buffer_sr: float | None = None
+    net_score_gain: float | None = None
+    switch_accepted: bool | None = None
+    switch_reason: str = ""
 
 
 class GreedyInstrumentSelector:
@@ -767,6 +800,7 @@ class GreedyInstrumentSelector:
         full_correlation: np.ndarray,
         *,
         starting: bool = False,
+        incumbent_symbols: frozenset[str] = frozenset(),
     ) -> PortfolioScore:
         """Score one hypothetical book using its correlation submatrix.
 
@@ -782,6 +816,10 @@ class GreedyInstrumentSelector:
             Correlation matrix for the complete eligible universe.
         starting
             Use the configured singleton weight and IDM=1 for seed comparison.
+        incumbent_symbols
+            Prior-book members that receive the configured soft eligibility
+            exit band. Margin, hierarchy, and missing-data constraints remain
+            unchanged.
 
         Returns
         -------
@@ -879,6 +917,15 @@ class GreedyInstrumentSelector:
                     )
         for symbol in symbols:
             candidate = candidates[symbol]
+            is_incumbent = symbol in incumbent_symbols
+            exit_multiplier = (
+                1.0 + self.config.eligibility_exit_buffer_percent / 100.0
+                if is_incumbent else 1.0
+            )
+            min_max_position = self.config.min_max_position / exit_multiplier
+            max_market_volume_percent = (
+                self.config.max_pct_market_volume * exit_multiplier
+            )
             allocation = weights_for_limits[symbol]
             subclass = (candidate.asset_class, candidate.economic_subclass)
             (
@@ -901,7 +948,7 @@ class GreedyInstrumentSelector:
             )
             size_penalty = (
                 math.inf
-                if max_position < self.config.min_max_position
+                if max_position < min_max_position
                 else self.config.size_penalty_scale / max_position**2
             )
             low_contract_penalty, high_contract_penalty = self._contract_penalties(
@@ -966,7 +1013,7 @@ class GreedyInstrumentSelector:
                 reason = "max_position_below_half_contract"
             elif pct_market is None:
                 reason = "market_risk_volume_unavailable"
-            elif pct_market > self.config.max_pct_market_volume:
+            elif pct_market > max_market_volume_percent:
                 reason = "market_participation_limit"
             elif (
                 (
@@ -1005,6 +1052,9 @@ class GreedyInstrumentSelector:
                 "group_limited_weight": group_limited_weights[symbol],
                 "unallocated_weight": unallocated_weight,
                 "limit_weight": allocation,
+                "selection_incumbent": is_incumbent,
+                "min_max_position": min_max_position,
+                "max_market_volume_percent": max_market_volume_percent,
                 "annual_dollar_vol_per_contract": candidate.ann_dvol,
                 "risk_budget_usd": risk_budget_usd,
                 "ref_weight": ref_weight,
@@ -1140,6 +1190,8 @@ class GreedyInstrumentSelector:
         self,
         candidate_list: list[SelectionCandidate],
         correlation: np.ndarray,
+        *,
+        prior_selected: Iterable[str] = (),
     ) -> GreedySelectionResult:
         """Run the deterministic singleton seed and iterative addition loop.
 
@@ -1150,6 +1202,8 @@ class GreedyInstrumentSelector:
         """
         if not candidate_list:
             raise ValueError("at least one selection candidate is required")
+        prior_selected_tuple = tuple(dict.fromkeys(prior_selected))
+        incumbent_symbols = frozenset(prior_selected_tuple)
         full_symbols = [candidate.symbol for candidate in candidate_list]
         if correlation.shape != (len(full_symbols), len(full_symbols)):
             raise ValueError("candidate correlation matrix has the wrong shape")
@@ -1162,7 +1216,12 @@ class GreedyInstrumentSelector:
         singleton_scores = []
         for symbol in full_symbols:
             scored = self.score(
-                [symbol], candidates, full_symbols, correlation, starting=True
+                [symbol],
+                candidates,
+                full_symbols,
+                correlation,
+                starting=True,
+                incumbent_symbols=incumbent_symbols,
             )
             singleton_scores.append(scored)
             self._record_trial(
@@ -1243,7 +1302,11 @@ class GreedyInstrumentSelector:
             scored_trials = []
             for symbol in remaining:
                 scored = self.score(
-                    selected + [symbol], candidates, full_symbols, correlation
+                    selected + [symbol],
+                    candidates,
+                    full_symbols,
+                    correlation,
+                    incumbent_symbols=incumbent_symbols,
                 )
                 scored_trials.append((symbol, scored))
                 self._record_trial(
@@ -1306,8 +1369,125 @@ class GreedyInstrumentSelector:
             )
             iteration += 1
 
+        unbuffered = GreedySelectionResult(
+            tuple(selected),
+            current,
+            tuple(trials),
+            tuple(trial_allocations),
+            unbuffered_selected=tuple(selected),
+            prior_selected=prior_selected_tuple,
+            unbuffered_book_score=current.score,
+        )
+        return self._apply_book_hysteresis(
+            unbuffered,
+            candidates=candidates,
+            full_symbols=full_symbols,
+            correlation=correlation,
+            incumbent_symbols=incumbent_symbols,
+        )
+
+    def _apply_book_hysteresis(
+        self,
+        unbuffered: GreedySelectionResult,
+        *,
+        candidates: dict[str, SelectionCandidate],
+        full_symbols: list[str],
+        correlation: np.ndarray,
+        incumbent_symbols: frozenset[str],
+    ) -> GreedySelectionResult:
+        """Retain a feasible prior book unless a switch clears both hurdles.
+
+        Expected average positions from the two contemporaneously rescored
+        books provide a deterministic transition quantity. Multiplying the
+        absolute position change by the one-way contract cost yields the cash
+        switch estimate; division by annual target risk puts that estimate in
+        the same SR units as the construction score.
+        """
+        prior_selected = unbuffered.prior_selected
+        if not prior_selected:
+            return unbuffered
+        missing = tuple(
+            symbol for symbol in prior_selected if symbol not in candidates
+        )
+        if missing:
+            return replace(
+                unbuffered,
+                switch_accepted=True,
+                switch_reason=(
+                    "prior_book_hard_ineligible:" + ",".join(missing)
+                ),
+            )
+
+        prior_score = self.score(
+            list(prior_selected),
+            candidates,
+            full_symbols,
+            correlation,
+            incumbent_symbols=incumbent_symbols,
+        )
+        if not prior_score.feasible or not math.isfinite(prior_score.score):
+            return replace(
+                unbuffered,
+                switch_accepted=True,
+                switch_reason=(
+                    "prior_book_hard_ineligible:"
+                    + (prior_score.reason or "unknown")
+                ),
+            )
+
+        new_score = unbuffered.final_score
+        prior_positions = {
+            str(detail["symbol"]): float(detail["average_position"])
+            for detail in prior_score.details
+        }
+        new_positions = {
+            str(detail["symbol"]): float(detail["average_position"])
+            for detail in new_score.details
+        }
+        switch_cost_usd = sum(
+            abs(new_positions.get(symbol, 0.0) - prior_positions.get(symbol, 0.0))
+            * candidates[symbol].trade_cost_usd_per_con
+            for symbol in set(prior_positions) | set(new_positions)
+        )
+        annual_target_risk_usd = self.config.capital * self.config.target_vol
+        switch_cost_sr = switch_cost_usd / annual_target_risk_usd
+        gross_score_gain = new_score.score - prior_score.score
+        score_buffer_sr = (
+            abs(prior_score.score)
+            * self.config.book_score_buffer_percent
+            / 100.0
+        )
+        net_score_gain = gross_score_gain - switch_cost_sr
+        same_book = set(unbuffered.selected) == set(prior_selected)
+        switch_accepted = (
+            not same_book and net_score_gain > score_buffer_sr
+        )
+        final_score = new_score if switch_accepted else prior_score
+        final_selected = (
+            unbuffered.selected if switch_accepted else prior_selected
+        )
         return GreedySelectionResult(
-            tuple(selected), current, tuple(trials), tuple(trial_allocations)
+            selected=final_selected,
+            final_score=final_score,
+            trials=unbuffered.trials,
+            trial_allocations=unbuffered.trial_allocations,
+            unbuffered_selected=unbuffered.selected,
+            prior_selected=prior_selected,
+            prior_book_score=prior_score.score,
+            unbuffered_book_score=new_score.score,
+            gross_score_gain=gross_score_gain,
+            switch_cost_usd=switch_cost_usd,
+            switch_cost_sr=switch_cost_sr,
+            score_buffer_sr=score_buffer_sr,
+            net_score_gain=net_score_gain,
+            switch_accepted=switch_accepted,
+            switch_reason=(
+                "same_book"
+                if same_book else (
+                    "net_score_gain_above_buffer"
+                    if switch_accepted else "net_score_gain_below_buffer"
+                )
+            ),
         )
 
     @classmethod
@@ -1439,6 +1619,11 @@ class GreedyInstrumentSelector:
                 "group_limited_weight": detail["group_limited_weight"],
                 "unallocated_weight": detail["unallocated_weight"],
                 "limit_weight": detail["limit_weight"],
+                "selection_incumbent": detail["selection_incumbent"],
+                "min_max_position": detail["min_max_position"],
+                "max_market_volume_percent": detail[
+                    "max_market_volume_percent"
+                ],
                 "idm": score.idm,
                 "annual_dollar_vol_per_contract": detail[
                     "annual_dollar_vol_per_contract"

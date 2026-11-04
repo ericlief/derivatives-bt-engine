@@ -905,6 +905,26 @@ def parse_args(argv=None, *, complete_default: bool = False):
             "reference-to-IB splice."
         ),
     )
+    parser.add_argument(
+        "--selection-eligibility-exit-buffer-pct",
+        type=float,
+        default=25.0,
+        help=(
+            "Soft incumbent exit band in percent for selection cost, "
+            "participation, and minimum-position gates (default: 25). "
+            "New candidates still use the configured entry limits."
+        ),
+    )
+    parser.add_argument(
+        "--selection-book-score-buffer-pct",
+        type=float,
+        default=2.0,
+        help=(
+            "Minimum net score improvement over the prior book after "
+            "estimated transition cost, as a percent of the prior book "
+            "score (default: 2)."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -973,6 +993,13 @@ def _selection_scenario_id(
     if args.selection_rebalance != "static":
         tokens.append(f"sel{args.selection_rebalance}")
         tokens.append(f"hg{args.selection_max_history_gap_days}")
+        tokens.append(
+            "eb"
+            f"{_number_token(args.selection_eligibility_exit_buffer_pct)}"
+        )
+        tokens.append(
+            f"sb{_number_token(args.selection_book_score_buffer_pct)}"
+        )
     if args.backtest_start_date is not None:
         tokens.append(f"from{args.backtest_start_date:%Y%m%d}")
     if args.backtest_end_date is not None:
@@ -1201,6 +1228,10 @@ def _greedy_selector(
             ),
             max_instrument_margin_pct=args.max_instr_margin_pct,
             max_book_margin_pct=effective_book_margin_pct,
+            eligibility_exit_buffer_percent=(
+                args.selection_eligibility_exit_buffer_pct
+            ),
+            book_score_buffer_percent=args.selection_book_score_buffer_pct,
         ),
         weight_policy=weight_policy,
     )
@@ -1243,7 +1274,8 @@ class _WalkForwardSelectionProvider:
         self.review_instrument_rows: list[dict[str, object]] = []
         self.review_trial_rows: list[dict[str, object]] = []
         self.review_trial_allocation_rows: list[dict[str, object]] = []
-        self.prior_selected: set[str] = set()
+        self.review_final_allocation_rows: list[dict[str, object]] = []
+        self.prior_selected: tuple[str, ...] = ()
 
     @staticmethod
     def _finite(value: object) -> float | None:
@@ -1380,8 +1412,37 @@ class _WalkForwardSelectionProvider:
                 continue
             trade_cost, roll_cost = costs
             trade_sr = trade_cost / annual_dollar_vol
-            if trade_sr > float(self.run_config["cost_lim_sr"]):
+            cost_exit_multiplier = (
+                1.0
+                + self.args.selection_eligibility_exit_buffer_pct / 100.0
+                if symbol in self.prior_selected else 1.0
+            )
+            entry_cost_limit_sr = float(self.run_config["cost_lim_sr"])
+            exit_cost_limit_sr = entry_cost_limit_sr * cost_exit_multiplier
+            if trade_sr > exit_cost_limit_sr:
+                logger.debug(
+                    "walk_forward_selection candidate_rejected date=%s "
+                    "symbol=%s reason=trade_cost_limit trade_cost_sr=%s "
+                    "entry_limit_sr=%s exit_limit_sr=%s incumbent=%s",
+                    review_date,
+                    symbol,
+                    trade_sr,
+                    entry_cost_limit_sr,
+                    exit_cost_limit_sr,
+                    symbol in self.prior_selected,
+                )
                 continue
+            if trade_sr > entry_cost_limit_sr:
+                logger.debug(
+                    "walk_forward_selection incumbent_retained_by_cost_buffer "
+                    "date=%s symbol=%s trade_cost_sr=%s entry_limit_sr=%s "
+                    "exit_limit_sr=%s",
+                    review_date,
+                    symbol,
+                    trade_sr,
+                    entry_cost_limit_sr,
+                    exit_cost_limit_sr,
+                )
             initial_margin = (
                 margin_to_ann_dvol * annual_dollar_vol
                 if margin_to_ann_dvol is not None
@@ -1446,11 +1507,16 @@ class _WalkForwardSelectionProvider:
         candidates = [candidates[index] for index in keep]
         symbols = [candidate.symbol for candidate in candidates]
         correlation = correlation[np.ix_(keep, keep)]
-        selection = _greedy_selector(
+        selector = _greedy_selector(
             capital=prior_net_equity,
             run_config=self.run_config,
             args=self.args,
-        ).select(candidates, correlation)
+        )
+        selection = selector.select(
+            candidates,
+            correlation,
+            prior_selected=self.prior_selected,
+        )
         # Preserve the complete dated greedy decision path. The normal trial
         # reports below describe only the initial static selection; attaching
         # review date and lagged equity here makes later CL/MCL and margin
@@ -1470,6 +1536,21 @@ class _WalkForwardSelectionProvider:
                 "maximum_economic_subclass_weight_percent": (
                     self.args.max_subclass_weight_pct
                 ),
+                "selection_eligibility_exit_buffer_percent": (
+                    self.args.selection_eligibility_exit_buffer_pct
+                ),
+                "selection_book_score_buffer_percent": (
+                    self.args.selection_book_score_buffer_pct
+                ),
+                "prior_book_score": selection.prior_book_score,
+                "unbuffered_book_score": selection.unbuffered_book_score,
+                "gross_score_gain": selection.gross_score_gain,
+                "switch_cost_usd": selection.switch_cost_usd,
+                "switch_cost_sr": selection.switch_cost_sr,
+                "score_buffer_sr": selection.score_buffer_sr,
+                "net_score_gain": selection.net_score_gain,
+                "switch_accepted": selection.switch_accepted,
+                "switch_reason": selection.switch_reason,
             }
             for trial in selection.trials
         )
@@ -1488,8 +1569,56 @@ class _WalkForwardSelectionProvider:
                 "maximum_economic_subclass_weight_percent": (
                     self.args.max_subclass_weight_pct
                 ),
+                "selection_eligibility_exit_buffer_percent": (
+                    self.args.selection_eligibility_exit_buffer_pct
+                ),
+                "selection_book_score_buffer_percent": (
+                    self.args.selection_book_score_buffer_pct
+                ),
             }
             for allocation_row in selection.trial_allocations
+        )
+        final_iteration = (
+            max(int(row["iteration"]) for row in selection.trials) + 1
+            if selection.trials else 0
+        )
+        self.review_final_allocation_rows.extend(
+            {
+                **allocation_row,
+                "selection_date": review_date,
+                "selection_equity_usd": prior_net_equity,
+                "maximum_instruments_per_class": self.args.max_instr_per_class,
+                "maximum_instruments_per_subclass": (
+                    self.args.max_instr_per_subclass
+                ),
+                "maximum_asset_class_weight_percent": (
+                    self.args.max_class_weight_pct
+                ),
+                "maximum_economic_subclass_weight_percent": (
+                    self.args.max_subclass_weight_pct
+                ),
+                "selection_eligibility_exit_buffer_percent": (
+                    self.args.selection_eligibility_exit_buffer_pct
+                ),
+                "selection_book_score_buffer_percent": (
+                    self.args.selection_book_score_buffer_pct
+                ),
+                "prior_book_score": selection.prior_book_score,
+                "unbuffered_book_score": selection.unbuffered_book_score,
+                "gross_score_gain": selection.gross_score_gain,
+                "switch_cost_usd": selection.switch_cost_usd,
+                "switch_cost_sr": selection.switch_cost_sr,
+                "score_buffer_sr": selection.score_buffer_sr,
+                "net_score_gain": selection.net_score_gain,
+                "switch_accepted": selection.switch_accepted,
+                "switch_reason": selection.switch_reason,
+            }
+            for allocation_row in selector._trial_allocation_rows(
+                final_iteration,
+                "book_hysteresis",
+                selection.final_score,
+                accepted=True,
+            )
         )
         candidate_by_symbol = {
             candidate.symbol: candidate for candidate in candidates
@@ -1527,8 +1656,29 @@ class _WalkForwardSelectionProvider:
         self.latest_date = review_date
         self.latest_equity = prior_net_equity
         selected_symbols = set(selection.selected)
-        added_symbols = selected_symbols.difference(self.prior_selected)
-        removed_symbols = self.prior_selected.difference(selected_symbols)
+        prior_selected_symbols = set(self.prior_selected)
+        added_symbols = selected_symbols.difference(prior_selected_symbols)
+        removed_symbols = prior_selected_symbols.difference(selected_symbols)
+        logger.info(
+            "walk_forward_selection hysteresis date=%s prior_book=%s "
+            "challenger_book=%s accepted_book=%s prior_score=%s "
+            "challenger_score=%s gross_score_gain=%s switch_cost_usd=%s "
+            "switch_cost_sr=%s score_buffer_sr=%s net_score_gain=%s "
+            "switch_accepted=%s reason=%s",
+            review_date,
+            ",".join(selection.prior_selected),
+            ",".join(selection.unbuffered_selected),
+            ",".join(selection.selected),
+            selection.prior_book_score,
+            selection.unbuffered_book_score,
+            selection.gross_score_gain,
+            selection.switch_cost_usd,
+            selection.switch_cost_sr,
+            selection.score_buffer_sr,
+            selection.net_score_gain,
+            selection.switch_accepted,
+            selection.switch_reason,
+        )
         self.review_rows.append({
             "selection_date": review_date,
             "selection_equity_usd": prior_net_equity,
@@ -1537,8 +1687,26 @@ class _WalkForwardSelectionProvider:
             "selection_score": selection.final_score.score,
             "selection_idm": selection.final_score.idm,
             "selection_symbols": ",".join(selection.selected),
+            "selection_unbuffered_symbols": ",".join(
+                selection.unbuffered_selected
+            ),
             "selection_added_symbols": ",".join(sorted(added_symbols)),
             "selection_removed_symbols": ",".join(sorted(removed_symbols)),
+            "selection_eligibility_exit_buffer_percent": (
+                self.args.selection_eligibility_exit_buffer_pct
+            ),
+            "selection_book_score_buffer_percent": (
+                self.args.selection_book_score_buffer_pct
+            ),
+            "prior_book_score": selection.prior_book_score,
+            "unbuffered_book_score": selection.unbuffered_book_score,
+            "gross_score_gain": selection.gross_score_gain,
+            "switch_cost_usd": selection.switch_cost_usd,
+            "switch_cost_sr": selection.switch_cost_sr,
+            "score_buffer_sr": selection.score_buffer_sr,
+            "net_score_gain": selection.net_score_gain,
+            "switch_accepted": selection.switch_accepted,
+            "switch_reason": selection.switch_reason,
         })
         for symbol in sorted(selected_symbols | removed_symbols):
             active = symbol in selected_symbols
@@ -1571,6 +1739,12 @@ class _WalkForwardSelectionProvider:
                 ),
                 "maximum_economic_subclass_weight_percent": (
                     self.args.max_subclass_weight_pct
+                ),
+                "selection_eligibility_exit_buffer_percent": (
+                    self.args.selection_eligibility_exit_buffer_pct
+                ),
+                "selection_book_score_buffer_percent": (
+                    self.args.selection_book_score_buffer_pct
                 ),
                 "rank": allocation.get("rank") if allocation else None,
                 "symbol": symbol,
@@ -1634,7 +1808,7 @@ class _WalkForwardSelectionProvider:
                     allocation.get("roll_cost_per_con") if allocation else None
                 ),
             })
-        self.prior_selected = selected_symbols
+        self.prior_selected = selection.selected
         logger.info(
             "walk_forward_selection complete date=%s equity=%s candidates=%d "
             "selected=%d idm=%s unallocated_weight=%s book=%s",
@@ -1700,6 +1874,12 @@ def _final_selection_frame(
             "contract_band_max": args.contract_band_max,
             "score_tie_tolerance_percent": args.score_tie_tolerance_percent,
             "tie_ref_book_count": args.tie_reference_book_count,
+            "selection_eligibility_exit_buffer_percent": (
+                args.selection_eligibility_exit_buffer_pct
+            ),
+            "selection_book_score_buffer_percent": (
+                args.selection_book_score_buffer_pct
+            ),
             "roll_cost_in_score": args.include_roll_cost_in_score,
             "selection_cost_source": (
                 "live_snapshot"
@@ -2828,6 +3008,12 @@ def _run_complete_selection(
         "selection_max_history_gap_days": (
             args.selection_max_history_gap_days
         ),
+        "selection_eligibility_exit_buffer_percent": (
+            args.selection_eligibility_exit_buffer_pct
+        ),
+        "selection_book_score_buffer_percent": (
+            args.selection_book_score_buffer_pct
+        ),
         "selected_book": list(selection.selected),
     }
     for symbol in cash_symbols:
@@ -3425,26 +3611,12 @@ def _run_complete_selection(
         public_selection_review_trial_allocations.write_parquet(
             selection_review_trial_allocations_path
         )
-        # The full allocation report preserves every hypothetical candidate
-        # book. Keep one compact, fully diagnosed final accepted book per
-        # review for navigation without duplicating every accepted growth step.
-        final_iteration_by_date: dict[date, int] = {}
-        for row in allocation_provider.review_trial_allocation_rows:
-            if not bool(row["accepted"]):
-                continue
-            selection_date = row["selection_date"]
-            iteration = int(row["iteration"])
-            final_iteration_by_date[selection_date] = max(
-                iteration,
-                final_iteration_by_date.get(selection_date, iteration),
-            )
-        final_review_allocation_rows = [
-            row
-            for row in allocation_provider.review_trial_allocation_rows
-            if bool(row["accepted"])
-            and int(row["iteration"])
-            == final_iteration_by_date[row["selection_date"]]
-        ]
+        # The greedy trial report remains the unconstrained challenger audit.
+        # Persist the separately rescored, hysteresis-adjusted book here so a
+        # retained incumbent is never mislabeled as the final challenger.
+        final_review_allocation_rows = (
+            allocation_provider.review_final_allocation_rows
+        )
         public_selection_review_final_allocations = round_public_report(
             order_selection_review_allocation_report(
                 rename_public_report_columns(
@@ -3529,6 +3701,10 @@ def run(
         raise ValueError("max source gap days must be nonnegative")
     if args.selection_max_history_gap_days < 0:
         raise ValueError("selection max history gap days must be nonnegative")
+    if not 0 <= args.selection_eligibility_exit_buffer_pct <= 100:
+        raise ValueError("selection eligibility exit buffer must be in [0, 100]")
+    if not 0 <= args.selection_book_score_buffer_pct <= 100:
+        raise ValueError("selection book score buffer must be in [0, 100]")
     if args.ib_prior_years <= 0:
         raise ValueError("--ib-prior-years must be positive")
     if not math.isfinite(args.forecast_fdm) or args.forecast_fdm <= 0:

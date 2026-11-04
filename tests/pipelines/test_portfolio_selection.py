@@ -196,6 +196,8 @@ def test_selection_defaults_to_reviewed_classification_weights():
     assert args.buffer_trade_to_edge is True
     assert args.rebalance_on_roll is True
     assert args.selection_rebalance == "static"
+    assert args.selection_eligibility_exit_buffer_pct == pytest.approx(25.0)
+    assert args.selection_book_score_buffer_pct == pytest.approx(2.0)
     assert args.forecast_fdm == pytest.approx(1.0)
     assert args.ib_prior_years == 3
     assert args.backtest_start_date is None

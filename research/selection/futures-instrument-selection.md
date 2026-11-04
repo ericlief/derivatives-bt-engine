@@ -835,6 +835,8 @@ first available session of each calendar year or month:
 --selection-rebalance yearly
 --selection-rebalance monthly
 --selection-max-history-gap-days 31
+--selection-eligibility-exit-buffer-pct 25
+--selection-book-score-buffer-pct 2
 ```
 
 `static` remains the default. A scheduled review is distinct from daily
@@ -859,6 +861,34 @@ freshness limit filters candidates at those scheduled reviews; reaching the
 reference-to-IB handoff does not create an additional review. Under yearly
 selection, for example, the January book stays in force through the year, and
 the next candidate screen occurs at the next January review.
+
+Scheduled reviews apply two prior-book hysteresis layers. The eligibility
+exit buffer applies only to incumbents and only to soft gates. With the default
+25% setting, a 1% market-participation entry limit becomes a 1.25% incumbent
+exit limit, the instrument cost exit limit becomes 1.25 times its entry limit,
+and the 0.5-contract minimum becomes 0.4 contracts. Challengers always face
+the original entry limits. Stale or missing history, unavailable margin, and
+class, subclass, family, and book-margin violations remain hard failures.
+
+The selector then rescales and scores both the complete incumbent book and the
+unbuffered greedy challenger using the same review-date equity, volatility,
+correlation, costs, weights, IDM, and limits. Expected average-position changes
+provide a deterministic one-time switch-cost estimate:
+
+```text
+switch_cost = sum(abs(new_avg_pos_i - prior_avg_pos_i)
+                  * trade_cost_per_con_i)
+switch_cost_sr = switch_cost / (prior_net_equity * target_vol)
+net_score_gain = challenger_score - prior_score - switch_cost_sr
+score_buffer_sr = abs(prior_score) * book_score_buffer_pct / 100
+```
+
+The whole challenger book replaces the incumbent only when `net_score_gain`
+is strictly greater than `score_buffer_sr`. The default hurdle is 2%. The
+switch estimate is a membership-decision convention based on expected average
+positions, not a second cash charge: the executable cash replay still charges
+the actual contract changes produced at the review. The initial review has no
+prior book and therefore follows the ordinary greedy result.
 
 Every complete backtest, including `--selection-rebalance static`, begins from
 the reference-cost universe. Candidate-only output remains the live executable
@@ -900,6 +930,11 @@ the overtrading control. Existing members also retain their buffered holdings
 when weights change. The cash report exposes `sel_active`, `sel_rebalanced`,
 `sel_date`, and `sel_rank`; the separate `selection_reviews` Parquet records
 review equity, candidate count, selected count, score, IDM, and membership.
+It also records the unbuffered challenger, prior and challenger scores,
+estimated `switch_cost` and `switch_cost_sr`, gross and net score gains, score
+buffer, decision, and reason. The greedy trial files remain the complete
+unbuffered challenger audit; `selection_review_final_allocations` contains the
+actual hysteresis-adjusted book used by the cash replay.
 The companion `selection_review_instruments` Parquet is the compact navigation
 report: it has one row per review and involved instrument, with `added`,
 `retained`, or `removed` status, active rank and weights, classification,
@@ -1137,6 +1172,8 @@ futures-build-selection \
   --globex-db /home/dev/fin/db/globex_mdp_3.0.duckdb \
   --selection-rebalance yearly \
   --selection-max-history-gap-days 31 \
+  --selection-eligibility-exit-buffer-pct 25 \
+  --selection-book-score-buffer-pct 2 \
   --backtest-start-date 2024-01-01 \
   --backtest-end-date 2026-10-30 \
   --forecast-fdm 1.0 \

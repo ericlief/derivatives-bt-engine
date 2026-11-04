@@ -142,6 +142,91 @@ def test_greedy_selector_stops_when_best_addition_falls_below_threshold():
     )
 
 
+def test_incumbent_receives_soft_participation_exit_buffer():
+    """A prior member may remain inside its exit band while a new one may not."""
+    candidate = SelectionCandidate(
+        symbol="A",
+        ann_dvol=100.0,
+        trade_sr=0.0,
+        combined_turnover=1.0,
+        asset_class="equity",
+        economic_subclass="us",
+        # The singleton uses 160 risk dollars per day, or 1.1% participation.
+        mkt_risk_vol_day=160.0 / 0.011,
+    )
+    selector = GreedyInstrumentSelector(
+        config=GreedySelectionConfig(
+            capital=1_000_000.0,
+            max_pct_market_volume=1.0,
+            eligibility_exit_buffer_percent=25.0,
+        ),
+        weight_policy=EqualPortfolioWeights(),
+    )
+    candidates = {"A": candidate}
+
+    entrant = selector.score(
+        ["A"], candidates, ["A"], np.eye(1), starting=True
+    )
+    incumbent = selector.score(
+        ["A"],
+        candidates,
+        ["A"],
+        np.eye(1),
+        starting=True,
+        incumbent_symbols=frozenset({"A"}),
+    )
+
+    assert not entrant.feasible
+    assert incumbent.feasible
+    assert incumbent.details[0]["max_market_volume_percent"] == pytest.approx(
+        1.25
+    )
+
+
+@pytest.mark.parametrize(
+    ("correlation", "switch_accepted"),
+    [(0.99, False), (0.0, True)],
+)
+def test_book_hysteresis_requires_net_score_gain_above_buffer(
+    correlation,
+    switch_accepted,
+):
+    """A challenger pays transition cost and a score hurdle before replacing."""
+    candidates = [_candidate("A", 0.0), _candidate("B", 0.0)]
+    selector = GreedyInstrumentSelector(
+        config=GreedySelectionConfig(
+            capital=1_000_000.0,
+            score_threshold=0.0,
+            size_penalty_scale=0.0,
+            book_score_buffer_percent=2.0,
+        ),
+        weight_policy=EqualPortfolioWeights(),
+    )
+    correlation_matrix = np.array([
+        [1.0, correlation],
+        [correlation, 1.0],
+    ])
+
+    result = selector.select(
+        candidates,
+        correlation_matrix,
+        prior_selected=["A"],
+    )
+
+    assert result.switch_accepted is switch_accepted
+    assert result.switch_cost_usd is not None
+    assert result.switch_cost_sr is not None
+    assert result.net_score_gain == pytest.approx(
+        result.gross_score_gain - result.switch_cost_sr
+    )
+    if switch_accepted:
+        assert set(result.selected) == {"A", "B"}
+        assert result.net_score_gain > result.score_buffer_sr
+    else:
+        assert result.selected == ("A",)
+        assert result.net_score_gain <= result.score_buffer_sr
+
+
 def test_singleton_losers_record_competitive_rejection_reason():
     """Feasible iteration-zero losers identify the selected seed and score."""
     candidates = [
