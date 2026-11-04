@@ -1394,6 +1394,15 @@ subclass weights are also about 14.3--16.7%, so
 when the intent is only to prevent a pathological concentrated book, but these
 settings should not be interpreted as causing 50% or 25% allocations.
 
+They remain active and useful in sparse early-history books. For example, the
+1973 eligible universe is entirely agriculture, so its raw class weight is
+100%. The 50% class ceiling cuts the deployed hierarchy weight to just under
+50% after report rounding and deliberately leaves the balance unallocated.
+This prevents missing asset classes from being replaced by additional risk in
+the only class with available instruments. As history broadens and the raw
+class weights fall below the ceiling, the same parameter naturally becomes an
+inactive safety rail.
+
 Lower global percentage caps do not transfer the removed allocation to FX,
 crypto, metals, or another underrepresented group. For example, applying a 12%
 class cap to a seven-class top-down book clips every class from about 14.3% to
