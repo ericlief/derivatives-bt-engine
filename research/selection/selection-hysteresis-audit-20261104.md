@@ -50,64 +50,49 @@ drawdown is 42.73% versus 39.56%. The earlier $334.26M score result therefore
 cannot be attributed to score hysteresis alone: it came from the nonlinear path
 created by combining score hysteresis with 25% eligibility hysteresis.
 
-## Performance by regime
+## Performance by ten-year window
 
-Returns are compounded from daily net percentage returns. Volatility and
-Sharpe use 256 business days. Drawdown is measured on net equity. Ending equity
-is path-dependent and is shown to make the capital inheritance explicit.
+The history is divided into five non-overlapping ten-year windows ending at the
+start of 2023, followed by the 2023 through 2026-10-23 remainder. This avoids
+comparing long middle regimes with a short recent segment. `Avg ann return` is
+the arithmetic mean daily net return multiplied by 256. CAGR is the compounded
+geometric return. Sharpe equals average annualized return divided by annualized
+volatility. Drawdown is measured on net equity.
 
-| Regime | Run | CAGR | Ann vol | Sharpe | Max drawdown | Ending net equity |
-|---|---|---:|---:|---:|---:|---:|
-| 1973-1984 | No hysteresis | 33.76% | 18.10% | 1.721 | -19.75% | $2.46M |
-| 1973-1984 | Score-2 | 32.21% | 16.93% | 1.758 | -19.70% | $2.14M |
-| 1973-1984 | Rank-15 | 33.76% | 18.10% | 1.721 | -19.75% | $2.46M |
-| 1985-2003 | No hysteresis | 16.09% | 17.80% | 0.921 | -25.91% | $41.78M |
-| 1985-2003 | Score-2 | 16.09% | 18.41% | 0.897 | -32.28% | $36.35M |
-| 1985-2003 | Rank-15 | 16.09% | 17.80% | 0.921 | -25.91% | $41.78M |
-| 2004-2023 | No hysteresis | 9.88% | 16.87% | 0.624 | -33.51% | $274.60M |
-| 2004-2023 | Score-2 | 7.77% | 16.71% | 0.516 | -34.13% | $162.20M |
-| 2004-2023 | Rank-15 | 9.88% | 16.87% | 0.624 | -33.51% | $274.60M |
-| 2024-2026-10-23 | No hysteresis | +0.34% total | 11.44% | 0.066 | -21.11% | $275.53M |
-| 2024-2026-10-23 | Score-2 | -2.47% total | 11.20% | -0.010 | -20.99% | $158.20M |
-| 2024-2026-10-23 | Rank-15 | +0.34% total | 11.44% | 0.066 | -21.11% | $275.53M |
-| Full history | No hysteresis | 16.48% | 17.21% | 0.953 | -39.56% | $275.53M |
-| Full history | Score-2 | 15.29% | 17.10% | 0.899 | -42.73% | $158.20M |
-| Full history | Rank-15 | 16.48% | 17.21% | 0.953 | -39.56% | $275.53M |
+Ending net equity remains path-dependent and is included to show the inherited
+capital state; use average return, CAGR, and Sharpe for within-window performance
+comparisons.
 
-Score-2's early stasis lowers terminal capital through 1984, although its lower
-volatility leaves early Sharpe slightly higher. From 1985 through 2003 it earns
-almost exactly the baseline CAGR but starts with less capital and experiences a
-larger drawdown. The major relative loss occurs from 2004 through 2023, when
-annualized return trails by 2.11 percentage points.
+| Window | Run | Avg ann return | CAGR | Ann vol | Sharpe | Max drawdown | Ending net equity |
+|---|---|---:|---:|---:|---:|---:|---:|
+| 1973-1982 | No hysteresis | 34.42% | 38.04% | 18.48% | 1.862 | -19.75% | $1.88M |
+| 1973-1982 | Score-2 | 32.78% | 36.03% | 17.61% | 1.861 | -19.70% | $1.62M |
+| 1973-1982 | Rank-15 | 34.42% | 38.04% | 18.48% | 1.862 | -19.75% | $1.88M |
+| 1983-1992 | No hysteresis | 13.25% | 12.48% | 17.33% | 0.765 | -21.73% | $6.09M |
+| 1983-1992 | Score-2 | 13.44% | 12.75% | 17.00% | 0.791 | -25.49% | $5.39M |
+| 1983-1992 | Rank-15 | 13.25% | 12.48% | 17.33% | 0.765 | -21.73% | $6.09M |
+| 1993-2002 | No hysteresis | 18.85% | 19.09% | 17.69% | 1.065 | -25.91% | $34.85M |
+| 1993-2002 | Score-2 | 18.88% | 18.89% | 18.67% | 1.011 | -32.28% | $30.34M |
+| 1993-2002 | Rank-15 | 18.85% | 19.09% | 17.69% | 1.065 | -25.91% | $34.85M |
+| 2003-2012 | No hysteresis | 15.59% | 14.81% | 20.03% | 0.778 | -25.35% | $138.58M |
+| 2003-2012 | Score-2 | 13.39% | 12.34% | 19.74% | 0.678 | -25.63% | $97.10M |
+| 2003-2012 | Rank-15 | 15.59% | 14.81% | 20.03% | 0.778 | -25.35% | $138.58M |
+| 2013-2022 | No hysteresis | 8.73% | 8.29% | 14.29% | 0.611 | -33.51% | $307.14M |
+| 2013-2022 | Score-2 | 7.07% | 6.45% | 14.19% | 0.498 | -34.13% | $181.43M |
+| 2013-2022 | Rank-15 | 8.73% | 8.29% | 14.29% | 0.611 | -33.51% | $307.14M |
+| 2023-2026-10-23 | No hysteresis | -1.77% | -2.81% | 10.96% | -0.162 | -26.31% | $275.53M |
+| 2023-2026-10-23 | Score-2 | -2.38% | -3.54% | 11.13% | -0.213 | -29.10% | $158.20M |
+| 2023-2026-10-23 | Rank-15 | -1.77% | -2.81% | 10.96% | -0.162 | -26.31% | $275.53M |
+| Full history | No hysteresis | 16.40% | 16.48% | 17.21% | 0.953 | -39.56% | $275.53M |
+| Full history | Score-2 | 15.38% | 15.29% | 17.10% | 0.899 | -42.73% | $158.20M |
+| Full history | Rank-15 | 16.40% | 16.48% | 17.21% | 0.953 | -39.56% | $275.53M |
 
-## Equal-length performance windows
-
-The following five non-overlapping ten-year windows avoid comparing the long
-middle regimes with only the short recent segment. Ending capital is omitted
-because each window begins from a different inherited account size; CAGR,
-Sharpe, and drawdown compare the return paths within equal spans.
-
-| Window | Run | CAGR | Sharpe | Max drawdown |
-|---|---|---:|---:|---:|
-| 1973-1982 | No hysteresis | 38.04% | 1.862 | -19.75% |
-| 1973-1982 | Score-2 | 36.03% | 1.861 | -19.70% |
-| 1973-1982 | Rank-15 | 38.04% | 1.862 | -19.75% |
-| 1983-1992 | No hysteresis | 12.48% | 0.765 | -21.73% |
-| 1983-1992 | Score-2 | 12.75% | 0.791 | -25.49% |
-| 1983-1992 | Rank-15 | 12.48% | 0.765 | -21.73% |
-| 1993-2002 | No hysteresis | 19.09% | 1.065 | -25.91% |
-| 1993-2002 | Score-2 | 18.89% | 1.011 | -32.28% |
-| 1993-2002 | Rank-15 | 19.09% | 1.065 | -25.91% |
-| 2003-2012 | No hysteresis | 14.81% | 0.778 | -25.35% |
-| 2003-2012 | Score-2 | 12.34% | 0.678 | -25.63% |
-| 2003-2012 | Rank-15 | 14.81% | 0.778 | -25.35% |
-| 2013-2022 | No hysteresis | 8.29% | 0.611 | -33.51% |
-| 2013-2022 | Score-2 | 6.45% | 0.498 | -34.13% |
-| 2013-2022 | Rank-15 | 8.29% | 0.611 | -33.51% |
-
-The score policy is not uniformly inferior: it is slightly better on CAGR and
-Sharpe in 1983-1992. The consistent weakness begins in the 1993-2002 window and
-becomes economically large in both 2003-2012 and 2013-2022.
+Score-2 is slightly better on average return, CAGR, and Sharpe in 1983-1992,
+but its drawdown is worse. It is approximately tied on average return in
+1993-2002 while producing lower CAGR, lower Sharpe, and a materially deeper
+drawdown. Its economically large weakness appears in 2003-2012 and persists
+through 2013-2022. In the 2023 onward remainder, both average return and Sharpe
+are negative for every run, with Score-2 again weaker.
 
 The shorter recent calendar results are:
 
