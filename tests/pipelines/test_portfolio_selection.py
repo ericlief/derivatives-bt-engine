@@ -397,6 +397,15 @@ def test_build_selection_entrypoint_defaults_to_complete_pipeline():
     assert candidates_only.complete is False
 
 
+def test_complete_selection_requires_explicit_cache_root():
+    """Complete runs cannot silently write to the project cache directory."""
+    assert parse_args(["--cache", "/tmp/selection-cache"]).cache.as_posix() == (
+        "/tmp/selection-cache"
+    )
+    with pytest.raises(ValueError, match="--cache is required"):
+        run(["--complete"])
+
+
 def test_selection_exposes_executable_buffer_sensitivities():
     """Cash execution can disable the band or trade directly to optimum."""
     args = parse_args([

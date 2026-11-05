@@ -1092,10 +1092,9 @@ the direct PST/IB source for every instrument that can enter a scheduled book.
 With `--ib-history-live missing`, a stored reference-only bundle counts as
 missing IB history and triggers live acquisition; a valid cached PST/IB bundle
 is reused without an IB request. `--ib-history-live update` refreshes every
-eligible signal history. Source-history bundles live under
-`--stitched-history-cache-root/stitched/v12`; this defaults to the project's
-`.cache/futures` directory and is separate from the derived backtest artifacts
-under `--history-cache-root/selection_backtest`.
+eligible signal history. The required `--cache` root holds source-history
+bundles under `stitched/v12`, PySystemTrade history under `pysystemtrade`,
+and derived backtest artifacts under `selection_backtest`.
 Selection v1 deliberately does not insert Globex: `--globex-db` remains an
 accepted compatibility argument, but the selection runner passes
 `include_globex=False`. PST retains every date through that instrument's
@@ -1106,7 +1105,7 @@ a Globex segment, overlapping IB row, second handoff, or non-PST prefix appears.
 
 `--ib-history-live update` shares one IB connection across the run and updates
 each underlying signal history. Versioned content-addressed Parquet caches
-below `--history-cache-root/selection_backtest` keep four distinct artifacts:
+below `--cache/selection_backtest` keep four distinct artifacts:
 the frozen PST `reference_base`, its fixed-cost reference overlay, the mutable
 IB-only `stitched_reference_tail`, and selection-specific executable cash
 curves. The PST identity uses its pinned sidecar schema and source commit, which
@@ -1442,8 +1441,8 @@ baseline by default. The command writes:
   and `hist_iid_t_stat`, with sample dates, years, observation count, and
   `hist_src`. With `--ib-history-db`, these fields and the selected cash P&L
   use the frozen PST prefix plus the stored IB tail, and the finished view is
-  cached under `--history-cache-root/selection_backtest`. Source PST/IB bundles
-  remain under `--stitched-history-cache-root/stitched/v12`. IB is not
+  cached under `--cache/selection_backtest`. Source PST/IB bundles
+  remain under `--cache/stitched/v12`. IB is not
   contacted unless a live mode is explicitly selected. Add
   `--ib-history-live missing` to connect only when a selected signal history
   cannot be built from stored data, or `--ib-history-live update` to refresh

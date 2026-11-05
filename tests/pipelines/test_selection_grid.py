@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import polars as pl
+import pytest
 
 from derivatives_bt_engine.pipelines.selection_grid import (
     SelectionScenario,
@@ -11,6 +12,17 @@ from derivatives_bt_engine.pipelines.selection_grid import (
     parse_args,
     run,
 )
+
+
+def test_grid_requires_explicit_cache_root():
+    """Grid runs must pass one cache root to every complete scenario."""
+    assert parse_args([
+        "--input", "screen.parquet", "--cache", "/tmp/selection-cache"
+    ]).cache.as_posix() == (
+        "/tmp/selection-cache"
+    )
+    with pytest.raises(ValueError, match="--cache is required"):
+        run(["--input", "screen.parquet"])
 
 
 def test_grid_summary_recovers_score_from_accepted_passes_for_legacy_book(

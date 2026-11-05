@@ -25,7 +25,6 @@ from zoneinfo import ZoneInfo
 import polars as pl
 
 from derivatives_bt_engine.data.futures_history import (
-    DEFAULT_FUTURES_CACHE_ROOT,
     DEFAULT_GLOBEX_DB_PATH,
     DEFAULT_PYSYSTEMTRADE_DB_PATH,
 )
@@ -293,12 +292,9 @@ def parse_args(argv=None) -> argparse.Namespace:
         "--broker-mapping", type=Path, default=DEFAULT_BROKER_MAPPING_PATH
     )
     parser.add_argument(
-        "--history-cache-root", type=Path, default=DEFAULT_FUTURES_CACHE_ROOT
-    )
-    parser.add_argument(
-        "--stitched-history-cache-root",
+        "--cache",
         type=Path,
-        default=DEFAULT_FUTURES_CACHE_ROOT,
+        help="Required cache root shared by every complete selection scenario.",
     )
     parser.add_argument(
         "--max-source-gap-days",
@@ -512,8 +508,7 @@ def _selection_command(
     ib_history_database: Path | None,
     globex_database: Path,
     broker_mapping: Path,
-    history_cache_root: Path,
-    stitched_history_cache_root: Path,
+    cache: Path,
     max_source_gap_days: int,
     ib_history_live: str | None,
     ib_host: str,
@@ -553,8 +548,8 @@ def _selection_command(
         str(scenario.tie_reference_book_count),
         "--weight-policy",
         scenario.weight_policy,
-        "--history-cache-root",
-        str(history_cache_root),
+        "--cache",
+        str(cache),
     ]
     if initial_capital_usd is not None:
         command.extend(("--initial-capital-usd", str(initial_capital_usd)))
@@ -566,8 +561,6 @@ def _selection_command(
             str(globex_database),
             "--broker-mapping",
             str(broker_mapping),
-            "--stitched-history-cache-root",
-            str(stitched_history_cache_root),
             "--max-source-gap-days",
             str(max_source_gap_days),
         ))
@@ -812,6 +805,8 @@ def run(argv=None) -> tuple[Path, Path | None]:
     the selection writer naturally keeps all audit artifacts isolated.
     """
     args = parse_args(argv)
+    if args.cache is None:
+        raise ValueError("--cache is required for selection grid runs")
     if args.output_dir is not None and args.run_dir is not None:
         raise ValueError("--output-dir and --run-dir cannot be used together")
     source = args.input.expanduser().resolve()
@@ -860,10 +855,7 @@ def run(argv=None) -> tuple[Path, Path | None]:
             ib_history_database=ib_history_database,
             globex_database=args.globex_db.expanduser().resolve(),
             broker_mapping=args.broker_mapping.expanduser().resolve(),
-            history_cache_root=args.history_cache_root.expanduser().resolve(),
-            stitched_history_cache_root=(
-                args.stitched_history_cache_root.expanduser().resolve()
-            ),
+            cache=args.cache.expanduser().resolve(),
             max_source_gap_days=args.max_source_gap_days,
             ib_history_live=args.ib_history_live,
             ib_host=args.ib_host,

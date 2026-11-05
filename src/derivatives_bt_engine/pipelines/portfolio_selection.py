@@ -37,7 +37,7 @@ greedy selection decisions remain inspectable after a run.
 
 Large per-symbol historical reference bases, cost-applied references,
 stitched references, and executable cash curves live in a versioned
-content-addressed cache below ``--history-cache-root``. Their identities
+content-addressed cache below ``--cache``. Their identities
 include the history sources and only the effective calculation and selection
 values that affect each artifact. This permits several variants to coexist
 and avoids invalidation from an otherwise equivalent newly written market
@@ -101,7 +101,6 @@ from derivatives_bt_engine.calculations.forecast_combination import (
     SlowTiltEwmacWeights,
 )
 from derivatives_bt_engine.data.futures_history import (
-    DEFAULT_FUTURES_CACHE_ROOT,
     DEFAULT_GLOBEX_DB_PATH,
     DEFAULT_PYSYSTEMTRADE_DB_PATH,
     FuturesHistory,
@@ -663,20 +662,11 @@ def parse_args(argv=None, *, complete_default: bool = False):
         help="Broker contract mapping used to read stored IB dated contracts.",
     )
     parser.add_argument(
-        "--history-cache-root",
+        "--cache",
         type=Path,
-        default=DEFAULT_FUTURES_CACHE_ROOT,
         help=(
-            "Parquet cache root for versioned selection backtest artifacts."
-        ),
-    )
-    parser.add_argument(
-        "--stitched-history-cache-root",
-        type=Path,
-        default=None,
-        help=(
-            "Cache root for source-history PST/IB stitched bundles; defaults "
-            "to --history-cache-root."
+            "Required for complete selection; root for PySystemTrade, stitched "
+            "history, and versioned selection backtest caches."
         ),
     )
     parser.add_argument(
@@ -2090,7 +2080,7 @@ def _run_complete_selection(
         output_dir
         / f"multi_speed_ewmac_selection_subsystem_reference_returns_{stamp}.parquet"
     )
-    backtest_cache_root = args.history_cache_root.expanduser().resolve()
+    backtest_cache_root = args.cache.expanduser().resolve()
     history_db_path = args.history_db.expanduser().resolve()
     reference_history_provider = PysystemtradeHistoryProvider(
         db_path=history_db_path,
@@ -2771,12 +2761,7 @@ def _run_complete_selection(
                 preserve_reference_overlap=True,
                 mapping_path=args.broker_mapping.expanduser().resolve(),
                 history_db_path=args.ib_history_db.expanduser().resolve(),
-                cache_root=(
-                    (
-                        args.stitched_history_cache_root
-                        or args.history_cache_root
-                    ).expanduser().resolve()
-                ),
+                cache_root=args.cache.expanduser().resolve(),
                 use_cache=True,
                 save_cache=True,
                 update_history=update_history,
@@ -3829,6 +3814,8 @@ def run(
     supplied.
     """
     args = parse_args(argv, complete_default=complete_default)
+    if args.complete and args.cache is None:
+        raise ValueError("--cache is required for complete selection")
     if (
         args.low_contract_penalty_scale < 0
         or args.high_contract_penalty_scale < 0
