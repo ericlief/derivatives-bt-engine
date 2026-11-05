@@ -884,6 +884,7 @@ def plot_selection_rebalance_weights(
             height="auto",
             max_height="none",
             overflow="visible",
+            overflow_y="visible",
         )
     )
 
@@ -1073,6 +1074,7 @@ def plot_selection_rebalance_weights(
         )
 
         allocation_pct = deployed_limit_weight * 100.0
+        class_height = max(260, height // 2)
         class_bars = class_weights.hvplot.bar(
             x="asset_cls",
             y="book_share_pct",
@@ -1083,7 +1085,7 @@ def plot_selection_rebalance_weights(
             xlabel="Asset class",
             ylabel="Book share (%)",
             width=width,
-            height=max(260, height // 2),
+            height=class_height,
             rot=45,
             color="#2ca02c",
             tools=["hover", "pan", "wheel_zoom", "box_zoom", "reset", "save"],
@@ -1101,6 +1103,7 @@ def plot_selection_rebalance_weights(
                 ("Members", "@instruments"),
             ],
         )
+        subclass_height = max(320, height)
         subclass_bars = subclass_weights.hvplot.bar(
             x="subclass_label",
             y="book_share_pct",
@@ -1108,7 +1111,7 @@ def plot_selection_rebalance_weights(
             xlabel="Asset class / economic subclass",
             ylabel="Book share (%)",
             width=width,
-            height=max(320, height),
+            height=subclass_height,
             rot=70,
             color="#ff7f0e",
             tools=["hover", "pan", "wheel_zoom", "box_zoom", "reset", "save"],
@@ -1128,6 +1131,12 @@ def plot_selection_rebalance_weights(
                 ("Instruments", "@instr_n"),
                 ("Members", "@instruments"),
             ],
+        )
+        # The stacked Bokeh plots have fixed pixel heights. Give the widget
+        # output enough room for all three so notebook frontends don't add a
+        # nested vertical scrollbar around the weights dashboard.
+        plot_output.layout.height = (
+            f"{height + class_height + subclass_height + 120}px"
         )
         return (instrument_bars + class_bars + subclass_bars).cols(1)
 
@@ -1152,7 +1161,11 @@ def plot_selection_rebalance_weights(
     controls = widgets.HBox([year_selector, review_selector])
     return widgets.VBox(
         [controls, plot_output],
-        layout=widgets.Layout(width="100%", overflow="visible"),
+        layout=widgets.Layout(
+            width="100%",
+            overflow="visible",
+            overflow_y="visible",
+        ),
     )
 
 
