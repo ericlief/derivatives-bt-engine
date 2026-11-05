@@ -480,22 +480,38 @@ def plot_selection_portfolio_overview(
             ("Net equity", "@port_net_equity{$0,0.00}"),
         ],
     ).opts(legend_position="top_left")
+    drawdown_area = frame.hvplot.area(
+        x="date",
+        y="net_drawdown_pct",
+        title="Net-equity drawdown from running peak",
+        ylabel="Drawdown (%)",
+        color="#d62728",
+        alpha=0.45,
+        width=width,
+        height=height,
+        hover=False,
+        tools=["pan", "wheel_zoom", "box_zoom", "reset", "save"],
+    )
+    # An area is rendered as one polygon, which cannot expose the nearest
+    # dated drawdown value to Bokeh's hover tool. The line supplies one point
+    # per date while the area retains the visual drawdown fill.
+    drawdown_line = frame.hvplot.line(
+        x="date",
+        y="net_drawdown_pct",
+        color="#d62728",
+        line_width=1.5,
+        width=width,
+        height=height,
+        tools=tools,
+        hover_cols=["net_drawdown_pct"],
+        hover_tooltips=[
+            ("Date", "@date{%F}"),
+            ("Drawdown", "@net_drawdown_pct{0.00}%"),
+        ],
+    )
     drawdown = (
-        frame.hvplot.area(
-            x="date",
-            y="net_drawdown_pct",
-            title="Net-equity drawdown from running peak",
-            ylabel="Drawdown (%)",
-            color="#d62728",
-            alpha=0.45,
-            width=width,
-            height=height,
-            tools=tools,
-            hover_tooltips=[
-                ("Date", "@x{%F}"),
-                ("Drawdown", "@y{0.00}%"),
-            ],
-        )
+        drawdown_area
+        * drawdown_line
         * hv.HLine(0.0).opts(color="black", line_width=1)
     )
     trailing_return = frame.hvplot.line(
