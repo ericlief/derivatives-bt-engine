@@ -795,7 +795,11 @@ def selection_candidates(report: pl.DataFrame) -> pl.DataFrame:
     return selected.sort(sort_columns) if sort_columns else selected
 
 
-def selection_rebalance_candidates(report: pl.DataFrame) -> pl.DataFrame:
+def selection_rebalance_candidates(
+    report: pl.DataFrame,
+    *,
+    apply_live_execution_gates: bool = False,
+) -> pl.DataFrame:
     """Return the reference-cost universe for a complete backtest.
 
     Complete static and scheduled backtests must not inherit live spread,
@@ -803,7 +807,16 @@ def selection_rebalance_candidates(report: pl.DataFrame) -> pl.DataFrame:
     This helper applies the saved gates using reference cost and rule inputs.
     Scheduled selection also avoids the initial account-size gate because a
     contract rejected at initial capital can become feasible as equity grows.
-    The selector later applies its sizing, liquidity, and margin constraints.
+    Current volume, market participation, IB qualification, and execution
+    gates do not define the older reference universe because those snapshot
+    observations contain no information about historical liquidity. The
+    scheduled selector reapplies them from each instrument's IB-tail handoff
+    onward. Set ``apply_live_execution_gates`` for a complete static book,
+    whose membership is a present-day executable selection even though its
+    replay uses reference costs. Candidate-only selection also applies them
+    immediately.
+    The selector later applies its sizing, dated liquidity, and margin
+    constraints.
 
     The returned schema matches :func:`selection_candidates`, including the
     configured reference spread and commission fields used for historical
@@ -838,12 +851,15 @@ def selection_rebalance_candidates(report: pl.DataFrame) -> pl.DataFrame:
         & (pl.col("ref_trade_sr") <= pl.col("cost_lim_sr"))
         & pl.col("ref_roll_sr").is_not_null()
         & pl.col("ref_roll_sr").is_finite()
-        & pl.col("volume_elig").fill_null(False)
         & pl.col("hist_data_elig").fill_null(False)
         & pl.col("ref_instr_has_elig_ewmac_rule").fill_null(False)
-        & pl.col("exec_elig").fill_null(False)
-        & (pl.col("ib_avail").fill_null("") == "contract_qualified")
     )
+    if apply_live_execution_gates:
+        gate &= (
+            pl.col("volume_elig").fill_null(False)
+            & pl.col("exec_elig").fill_null(False)
+            & (pl.col("ib_avail").fill_null("") == "contract_qualified")
+        )
     selected = report.filter(gate).with_columns(
         # Complete historical selection consumes the ordinary cost columns.
         # Replace them at this boundary so every downstream reference return,

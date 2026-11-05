@@ -838,6 +838,7 @@ first available session of each calendar year or month:
 --selection-eligibility-hysteresis-pct 25
 --selection-membership-hysteresis score
 --selection-rank-buffer-pct 15
+--selection-rank-count-ewma-halflife-reviews 3
 --selection-book-score-buffer-pct 2
 ```
 
@@ -904,26 +905,38 @@ compatibility alias.
 
 ##### Membership rank band
 
-`rank` and `rank_score` continue the greedy marginal-addition order from the
-raw book's score stopping point through the required exit rank. This
-continuation ignores only that stopping threshold; all feasibility constraints
-remain active. If the raw target book contains `N` instruments, the symmetric
-rank band is:
+`rank` and `rank_score` maintain a causal state estimate of normal book count.
+For review `t`, the state is an EWMA of accepted book counts through review
+`t-1`; the current raw result never determines its own rank-band center. The
+default half-life is three completed reviews for yearly selection and twelve
+for monthly selection. Override it with
+`--selection-rank-count-ewma-halflife-reviews`. The first review has no prior
+state and therefore uses its own raw count only to initialize the state after
+the decision.
+
+The modes continue the greedy marginal-addition order from the raw book's
+score stopping point through the required exit rank. This continuation ignores
+only that stopping threshold; all feasibility constraints remain active. If
+the lagged, rounded EWMA count is `N_state`, the symmetric rank band is:
 
 ```text
-band = ceil(N * rank_buffer_pct / 100)
-automatic entry rank <= N - band
-incumbent retention rank <= N + band
+N_state(t) = round(EWMA(accepted_count through t - 1))
+band = ceil(N_state * rank_buffer_pct / 100)
+automatic entry rank <= N_state - band
+incumbent retention rank <= N_state + band
 ```
 
-With the default 15%, a 30-instrument target uses entry rank 25 and exit rank
-35, matching Carver's published index-style example. A 9-instrument target
+With the default 15%, a 30-instrument state uses entry rank 25 and exit rank
+35, matching Carver's published index-style example. A 9-instrument state
 uses entry rank 7 and exit rank 11. Instruments
 inside the entry cutoff take priority, incumbents inside the exit cutoff may
-remain, and remaining capacity is filled in greedy rank order until the raw
-target count is restored. The mixed book is rescored against every hard limit;
-an infeasible combination falls back to the raw greedy book. A zero rank
-buffer reproduces raw membership.
+remain, and remaining capacity is filled in greedy rank order until the
+current raw book count is restored. The EWMA is a band anchor, not a mandatory
+minimum: it never forces an addition that the raw selector rejected below its
+score threshold. The mixed book is rescored against every hard limit; an
+infeasible combination falls back to the raw greedy book. A zero rank buffer
+reproduces raw membership. Reports persist the half-life, pre-review EWMA
+state, rounded anchor, band size, and entry/exit cutoffs.
 
 ##### Complete-book score hurdle
 
@@ -955,12 +968,31 @@ Every complete backtest, including `--selection-rebalance static`, begins from
 the reference-cost universe. Candidate-only output remains the live executable
 screen. Scheduled runs use the capital-flexible reference universe rather than
 the contracts already affordable at initial capital. Reference cost,
-absolute-volume, data, rule, execution, and broker-qualification gates form
-that universe; current live spread and commission eligibility does not. A
-contract rejected only by the initial one-lot risk test can therefore enter a
-later review after equity grows. Per-review historical annual dollar
-volatility, account capital, portfolio liquidity, contract granularity, and
-margin constraints are then applied by the greedy selector.
+historical-data, and reference-rule gates form that older universe; current
+absolute volume, market participation, IB execution, broker qualification,
+live spread, and commission eligibility do not. A contract rejected only by
+today's liquidity or IB state can therefore remain available to a reference
+review, as can a contract rejected by the initial one-lot risk test that later
+becomes feasible as equity grows. Per-review historical annual dollar
+volatility, account capital, contract granularity, and margin constraints are
+then applied by the greedy selector.
+
+At each instrument's verified PST-to-IB handoff, scheduled selection activates
+the current snapshot's minimum-volume gate, IB execution and contract-
+qualification gates, and market-participation calculation. Candidate-only
+live selection and a complete static book apply the same gates immediately;
+the static replay still uses reference costs. The older PST prefix has no
+historical volume series in the reference database, so its participation
+estimate remains null and the participation gate is explicitly disabled;
+today's volume is never backfilled into 1970s-2024 reviews. The IB-tail overlay
+uses the latest snapshot volume rather than a dated as-of volume series. It is
+therefore a present-executability overlay, not a causal historical liquidity
+model, and its effect on tail performance has not been independently
+backtested. Rerun the same reference history with and without an updated
+snapshot only as an execution sensitivity, not as evidence of historical
+liquidity alpha. Trial allocation rows expose `mkt_participation_enforced`;
+review-instrument rows expose the handoff date, overlay state, volume and
+execution gates, and IB availability used at that review.
 
 Every dated backtest segment, including a static complete replay and the final
 scheduled segment, uses the configured reference one-way spread and commission
@@ -1238,6 +1270,7 @@ futures-build-selection \
   --selection-eligibility-hysteresis-pct 25 \
   --selection-membership-hysteresis rank_score \
   --selection-rank-buffer-pct 15 \
+  --selection-rank-count-ewma-halflife-reviews 3 \
   --selection-book-score-buffer-pct 2 \
   --backtest-start-date 2024-01-01 \
   --backtest-end-date 2026-10-30 \
@@ -1263,7 +1296,10 @@ optional `--output-dir` is a parent output root. Each invocation creates a
 candidate report and every complete-selection report there. The parameter
 directory uses the same compact tokens as the grid, such as
 `tv0p2_im20_bm50_wi0p2_st0p9_cl2_roll1_topdown_classif`; active contract
-penalties or tie rules append their parameter tokens. Without `--output-dir`,
+penalties or tie rules append their parameter tokens. Rank hysteresis appends
+both the rank band and effective count-state half-life, such as `rb15_rhl3`,
+so annual and monthly state assumptions cannot share a result directory.
+Without `--output-dir`,
 reports remain beside the input cache. The command first derives `max_ann_dvol`,
 daily risk traded, market-risk volume, participation percentage, and all hard
 gate flags. It saves the accepted rows as

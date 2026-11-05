@@ -231,11 +231,28 @@ def test_phase2_step1_does_not_recalculate_phase1_metrics():
     assert selected.get_column("pct_mkt_volume").to_list() == [99.0]
 
 
-def test_scheduled_selection_keeps_contracts_rejected_only_by_risk_size():
-    """A larger future account can reconsider currently unaffordable lots."""
+def test_scheduled_selection_uses_reference_gates_before_live_tail():
+    """Historical reviews ignore current size, liquidity, and IB availability."""
     report = _phase2_step1_report()
 
     candidates = selection_rebalance_candidates(report)
+
+    assert candidates.get_column("symbol").to_list() == [
+        "ILLIQ",
+        "PASS",
+        "BIG",
+        "NOIB",
+    ]
+
+
+def test_complete_static_selection_retains_live_execution_gates():
+    """A present-day static book uses ref costs but remains executable now."""
+    report = _phase2_step1_report()
+
+    candidates = selection_rebalance_candidates(
+        report,
+        apply_live_execution_gates=True,
+    )
 
     assert candidates.get_column("symbol").to_list() == ["PASS", "BIG"]
 

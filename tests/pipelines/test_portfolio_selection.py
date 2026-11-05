@@ -197,6 +197,7 @@ def test_selection_defaults_to_reviewed_classification_weights():
     assert args.rebalance_on_roll is True
     assert args.selection_rebalance == "static"
     assert args.selection_eligibility_hysteresis_pct == pytest.approx(0.0)
+    assert args.selection_rank_count_ewma_halflife_reviews is None
     assert args.selection_book_score_buffer_pct == pytest.approx(2.0)
     assert args.forecast_fdm == pytest.approx(1.0)
     assert args.ib_prior_years == 3
@@ -284,6 +285,8 @@ def test_walk_forward_selection_uses_carver_cost_and_margin_risk_calibration():
         "2",
         "--weight-policy",
         "equal",
+        "--selection-membership-hysteresis",
+        "rank",
     ])
     history_dates = [
         date(2024, 1, 1),
@@ -304,6 +307,7 @@ def test_walk_forward_selection_uses_carver_cost_and_margin_risk_calibration():
         for symbol, returns in {
             "A": [0.1, 0.2, -0.1, 0.1],
             "B": [-0.1, 0.1, 0.2, -0.2],
+            "C": [0.2, -0.1, 0.1, 0.2],
         }.items()
     }
     source_rows = {
@@ -322,16 +326,22 @@ def test_walk_forward_selection_uses_carver_cost_and_margin_risk_calibration():
             "ref_spread_pts": 0.1,
             "ref_config_comm_usd": 0.2,
             "mult": 5.0,
+            "volume_elig": symbol != "B",
+            "exec_elig": True,
+            "ib_avail": "contract_qualified",
         }
-        for symbol in ("A", "B")
+        for symbol in ("A", "B", "C")
     }
     provider = _WalkForwardSelectionProvider(
         review_dates=[date(2024, 1, 4), date(2024, 2, 1)],
         source_rows=source_rows,
         audit_by_symbol={
-            symbol: {"comb_turnover": 1.0} for symbol in ("A", "B")
+            symbol: {"comb_turnover": 1.0} for symbol in ("A", "B", "C")
         },
         reference_frames=reference_frames,
+        live_tail_start_by_symbol={
+            symbol: date(2024, 2, 1) for symbol in ("A", "B", "C")
+        },
         run_config={
             "target_vol": 0.20,
             "cost_lim_sr": 0.01,
@@ -346,6 +356,14 @@ def test_walk_forward_selection_uses_carver_cost_and_margin_risk_calibration():
 
     assert historical
     assert latest
+    assert "B" not in latest
+    assert provider.review_rows[0]["selection_candidate_count"] == 3
+    assert provider.review_rows[1]["selection_candidate_count"] == 2
+    assert provider.review_rows[0]["rank_count_ewma_state"] is None
+    assert provider.review_rows[1]["rank_count_ewma_state"] == pytest.approx(
+        len(historical)
+    )
+    assert provider.review_rows[1]["rank_count_anchor"] == len(historical)
     assert all(
         row["trade_cost_per_con"] == pytest.approx(0.7)
         for row in historical.values()

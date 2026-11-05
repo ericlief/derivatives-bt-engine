@@ -77,6 +77,10 @@ class SelectionCandidate:
     same exposure.
     ``mkt_risk_vol_day`` is daily market volume expressed in annualized USD
     risk units, matching the Phase 2 participation calculation.
+    ``enforce_market_participation`` distinguishes a dated executable segment
+    with observed tail/live liquidity from an older reference-only segment
+    whose historical volume is unknown. The latter retains a null
+    participation estimate instead of leaking the current snapshot backward.
     ``initial_margin_usd`` is the larger BUY/SELL one-contract marginal
     initial-margin change from IB and supports an optional capital-usage
     approximation.
@@ -90,6 +94,7 @@ class SelectionCandidate:
     economic_subclass: str
     econ_family: str = ""
     mkt_risk_vol_day: float | None = None
+    enforce_market_participation: bool = True
     initial_margin_usd: float | None = None
     roll_sr: float = 0.0
     ann_rolls: float = 0.0
@@ -167,7 +172,10 @@ class GreedySelectionConfig:
     ``membership_hysteresis`` selects no membership buffer, the whole-book
     score hurdle, an index-style rank band, or the rank band followed by the
     score hurdle. ``rank_buffer_percent`` scales the symmetric entry and exit
-    rank band from the unbuffered target book count.
+    rank band from ``rank_count_anchor`` when supplied, otherwise from the
+    unbuffered target book count. The pipeline supplies a causal, lagged EWMA
+    count state; it changes the band boundary but does not force the raw
+    selector to accept additional instruments below its score threshold.
     ``book_score_buffer_percent`` is the additional prior-score hurdle a
     challenger must clear after its expected one-time switch cost is converted
     to SR units. Membership controls are inert when no prior book is supplied.
@@ -201,6 +209,7 @@ class GreedySelectionConfig:
     eligibility_hysteresis_percent: float = 0.0
     membership_hysteresis: str = "none"
     rank_buffer_percent: float = 15.0
+    rank_count_anchor: int | None = None
     book_score_buffer_percent: float = 0.0
 
     def __post_init__(self) -> None:
@@ -242,6 +251,8 @@ class GreedySelectionConfig:
             )
         if not 0 <= self.rank_buffer_percent <= 100:
             raise ValueError("rank_buffer_percent must be in [0, 100]")
+        if self.rank_count_anchor is not None and self.rank_count_anchor <= 0:
+            raise ValueError("rank_count_anchor must be positive when set")
         if not 0 <= self.book_score_buffer_percent <= 100:
             raise ValueError("book_score_buffer_percent must be in [0, 100]")
         if self.tie_reference_book_count <= 0:
@@ -534,6 +545,7 @@ class GreedySelectionResult:
     rank_buffered_book_score: float | None = None
     hysteresis_candidate_book_score: float | None = None
     rank_buffer_count: int | None = None
+    rank_count_anchor: int | None = None
     rank_entry_cutoff: int | None = None
     rank_exit_cutoff: int | None = None
     rank_buffer_reason: str = ""
@@ -1044,9 +1056,12 @@ class GreedyInstrumentSelector:
             reason = ""
             if not math.isfinite(size_penalty):
                 reason = "max_position_below_half_contract"
-            elif pct_market is None:
+            elif candidate.enforce_market_participation and pct_market is None:
                 reason = "market_risk_volume_unavailable"
-            elif pct_market > max_market_volume_percent:
+            elif (
+                candidate.enforce_market_participation
+                and pct_market > max_market_volume_percent
+            ):
                 reason = "market_participation_limit"
             elif (
                 (
@@ -1120,6 +1135,9 @@ class GreedyInstrumentSelector:
                 "net_sr": net_sr,
                 "risk_traded_day": risk_traded_day,
                 "pct_mkt_volume": pct_market,
+                "market_participation_enforced": (
+                    candidate.enforce_market_participation
+                ),
                 "init_margin_usd": candidate.initial_margin_usd,
                 "cont_margin_at_max_usd": continuous_margin_at_max_usd,
                 "margin_at_max_usd": margin_at_max_usd,
@@ -1490,21 +1508,24 @@ class GreedyInstrumentSelector:
     ]:
         """Build and validate an index-style incumbent rank band.
 
-        Instruments inside the entry cutoff are mandatory. Prior members may
-        remain through the wider exit cutoff. Remaining capacity is filled in
-        greedy preference order so the target count stays equal to the raw
-        selector's count. A mixed retained/challenger book is rescored as one
-        portfolio; an infeasible combination falls back to the raw book.
+        The optional lagged count anchor centers the entry and exit cutoffs;
+        otherwise the raw count centers them. Instruments inside the entry
+        cutoff are mandatory. Prior members may remain through the wider exit
+        cutoff. Remaining capacity is filled in greedy preference order so
+        the target count stays equal to the raw selector's count. A mixed
+        retained/challenger book is rescored as one portfolio; an infeasible
+        combination falls back to the raw book.
         """
         target_count = len(unbuffered.selected)
+        rank_count_anchor = self.config.rank_count_anchor or target_count
         band_count = math.ceil(
-            target_count * self.config.rank_buffer_percent / 100.0
+            rank_count_anchor * self.config.rank_buffer_percent / 100.0
         )
-        entry_cutoff = max(0, target_count - band_count)
-        exit_cutoff = target_count + band_count
+        entry_cutoff = max(0, rank_count_anchor - band_count)
+        exit_cutoff = rank_count_anchor + band_count
         ranked = self._extended_greedy_ranking(
             unbuffered.selected,
-            maximum_count=exit_cutoff,
+            maximum_count=max(target_count, exit_cutoff),
             candidates=candidates,
             full_symbols=full_symbols,
             correlation=correlation,
@@ -1618,6 +1639,7 @@ class GreedyInstrumentSelector:
         rank_buffered_selected = unbuffered.selected
         rank_buffered_score = unbuffered.final_score
         rank_buffer_count = None
+        rank_count_anchor = None
         rank_entry_cutoff = None
         rank_exit_cutoff = None
         rank_buffer_reason = "rank_buffer_disabled"
@@ -1640,6 +1662,9 @@ class GreedyInstrumentSelector:
             )
             candidate_selected = rank_buffered_selected
             candidate_score = rank_buffered_score
+            rank_count_anchor = self.config.rank_count_anchor or len(
+                unbuffered.selected
+            )
 
         decision_base = replace(
             unbuffered,
@@ -1650,6 +1675,7 @@ class GreedyInstrumentSelector:
             rank_buffered_book_score=rank_buffered_score.score,
             hysteresis_candidate_book_score=candidate_score.score,
             rank_buffer_count=rank_buffer_count,
+            rank_count_anchor=rank_count_anchor,
             rank_entry_cutoff=rank_entry_cutoff,
             rank_exit_cutoff=rank_exit_cutoff,
             rank_buffer_reason=rank_buffer_reason,

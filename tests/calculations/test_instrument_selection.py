@@ -183,6 +183,30 @@ def test_incumbent_receives_participation_eligibility_hysteresis():
     )
 
 
+def test_reference_candidate_does_not_inherit_unknown_live_participation():
+    """A reference-prefix candidate remains feasible with no dated volume."""
+    candidate = SelectionCandidate(
+        symbol="A",
+        ann_dvol=100.0,
+        trade_sr=0.0,
+        combined_turnover=1.0,
+        asset_class="equity",
+        economic_subclass="us",
+        mkt_risk_vol_day=None,
+        enforce_market_participation=False,
+    )
+    selector = GreedyInstrumentSelector(
+        config=GreedySelectionConfig(capital=1_000_000.0),
+        weight_policy=EqualPortfolioWeights(),
+    )
+
+    score = selector.score(["A"], {"A": candidate}, ["A"], np.eye(1))
+
+    assert score.feasible
+    assert score.details[0]["pct_mkt_volume"] is None
+    assert score.details[0]["market_participation_enforced"] is False
+
+
 @pytest.mark.parametrize(
     ("correlation", "switch_accepted"),
     [(0.99, False), (0.0, True)],
@@ -225,6 +249,34 @@ def test_book_hysteresis_requires_net_score_gain_above_buffer(
     else:
         assert result.selected == ("A",)
         assert result.net_score_gain <= result.score_buffer_sr
+
+
+def test_rank_hysteresis_uses_lagged_count_anchor_without_forcing_book_size():
+    """The rank band uses its supplied state but preserves the raw book count."""
+    candidates = [_candidate(symbol, 0.0) for symbol in ("A", "B", "C")]
+    selector = GreedyInstrumentSelector(
+        config=GreedySelectionConfig(
+            capital=1_000_000.0,
+            score_threshold=0.0,
+            size_penalty_scale=0.0,
+            membership_hysteresis="rank",
+            rank_buffer_percent=20.0,
+            rank_count_anchor=10,
+        ),
+        weight_policy=EqualPortfolioWeights(),
+    )
+
+    result = selector.select(
+        candidates,
+        np.eye(3),
+        prior_selected=["A"],
+    )
+
+    assert result.rank_count_anchor == 10
+    assert result.rank_buffer_count == 2
+    assert result.rank_entry_cutoff == 8
+    assert result.rank_exit_cutoff == 12
+    assert len(result.selected) == len(result.unbuffered_selected) == 3
 
 
 def test_singleton_losers_record_competitive_rejection_reason():

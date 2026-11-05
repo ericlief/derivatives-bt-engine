@@ -923,8 +923,19 @@ def parse_args(argv=None, *, complete_default: bool = False):
         type=float,
         default=15.0,
         help=(
-            "Symmetric rank band as a percent of the raw target book count "
-            "for rank or rank_score hysteresis (default: 15)."
+            "Symmetric rank band as a percent of the lagged EWMA book-count "
+            "state for rank or rank_score hysteresis (default: 15)."
+        ),
+    )
+    parser.add_argument(
+        "--selection-rank-count-ewma-halflife-reviews",
+        type=float,
+        default=None,
+        help=(
+            "Half-life, in completed selection reviews, for the causal "
+            "accepted-book count state used by rank hysteresis. Defaults to "
+            "3 yearly reviews or 12 monthly reviews. The current review is "
+            "never included in its own rank-count anchor."
         ),
     )
     parser.add_argument(
@@ -1013,6 +1024,10 @@ def _selection_scenario_id(
         if args.selection_membership_hysteresis in {"rank", "rank_score"}:
             tokens.append(
                 f"rb{_number_token(args.selection_rank_buffer_pct)}"
+            )
+            tokens.append(
+                "rhl"
+                f"{_number_token(_active_rank_count_ewma_halflife_reviews(args))}"
             )
         if args.selection_membership_hysteresis in {"score", "rank_score"}:
             tokens.append(
@@ -1209,6 +1224,21 @@ def _active_rank_buffer_percent(args: argparse.Namespace) -> float | None:
     return None
 
 
+def _active_rank_count_ewma_halflife_reviews(
+    args: argparse.Namespace,
+) -> float | None:
+    """Return the effective causal count half-life for rank membership modes."""
+    if args.selection_membership_hysteresis not in {"rank", "rank_score"}:
+        return None
+    if args.selection_rank_count_ewma_halflife_reviews is not None:
+        return float(args.selection_rank_count_ewma_halflife_reviews)
+    if args.selection_rebalance == "yearly":
+        return 3.0
+    if args.selection_rebalance == "monthly":
+        return 12.0
+    return None
+
+
 def _active_book_score_buffer_percent(args: argparse.Namespace) -> float | None:
     """Return the score hurdle only when its membership mode uses it."""
     if args.selection_membership_hysteresis in {"score", "rank_score"}:
@@ -1221,6 +1251,7 @@ def _greedy_selector(
     capital: float,
     run_config: dict[str, object],
     args: argparse.Namespace,
+    rank_count_anchor: int | None = None,
 ) -> GreedyInstrumentSelector:
     """Build one selector using the supplied point-in-time account capital."""
     if args.weight_policy == "legacy_handcraft":
@@ -1265,6 +1296,7 @@ def _greedy_selector(
             ),
             membership_hysteresis=args.selection_membership_hysteresis,
             rank_buffer_percent=args.selection_rank_buffer_pct,
+            rank_count_anchor=rank_count_anchor,
             book_score_buffer_percent=args.selection_book_score_buffer_pct,
         ),
         weight_policy=weight_policy,
@@ -1290,6 +1322,7 @@ class _WalkForwardSelectionProvider:
         source_rows: dict[str, dict[str, object]],
         audit_by_symbol: dict[str, dict[str, object]],
         reference_frames: dict[str, pl.DataFrame | pl.LazyFrame],
+        live_tail_start_by_symbol: dict[str, date],
         run_config: dict[str, object],
         args: argparse.Namespace,
     ) -> None:
@@ -1298,6 +1331,7 @@ class _WalkForwardSelectionProvider:
         self.source_rows = source_rows
         self.audit_by_symbol = audit_by_symbol
         self.reference_frames = reference_frames
+        self.live_tail_start_by_symbol = live_tail_start_by_symbol
         self.run_config = run_config
         self.args = args
         self.latest_selection = None
@@ -1310,6 +1344,29 @@ class _WalkForwardSelectionProvider:
         self.review_trial_allocation_rows: list[dict[str, object]] = []
         self.review_final_allocation_rows: list[dict[str, object]] = []
         self.prior_selected: tuple[str, ...] = ()
+        self.rank_count_ewma: float | None = None
+
+    def _rank_count_anchor(self) -> tuple[float | None, int | None]:
+        """Return the lagged EWMA state and its rounded causal rank anchor."""
+        if self.args.selection_membership_hysteresis not in {"rank", "rank_score"}:
+            return self.rank_count_ewma, None
+        if self.rank_count_ewma is None:
+            return None, None
+        rounded_anchor = math.floor(self.rank_count_ewma + 0.5)
+        return self.rank_count_ewma, max(1, rounded_anchor)
+
+    def _update_rank_count_ewma(self, accepted_count: int) -> None:
+        """Advance the accepted-book count state after a completed review."""
+        halflife = _active_rank_count_ewma_halflife_reviews(self.args)
+        if halflife is None:
+            return
+        if self.rank_count_ewma is None:
+            self.rank_count_ewma = float(accepted_count)
+            return
+        alpha = 1.0 - math.exp(math.log(0.5) / halflife)
+        self.rank_count_ewma = (
+            alpha * accepted_count + (1.0 - alpha) * self.rank_count_ewma
+        )
 
     @staticmethod
     def _finite(value: object) -> float | None:
@@ -1357,6 +1414,8 @@ class _WalkForwardSelectionProvider:
         )
         if review_date not in self.review_dates:
             return None
+
+        rank_count_ewma_state, rank_count_anchor = self._rank_count_anchor()
 
         candidates: list[SelectionCandidate] = []
         histories: dict[str, pl.DataFrame] = {}
@@ -1413,7 +1472,33 @@ class _WalkForwardSelectionProvider:
             daily_dollar_vol = self._finite(latest["daily_dvol"][0])
             fx_to_usd = self._finite(latest["fx_to_usd"][0])
             turnover = self._finite(audit.get("comb_turnover"))
-            average_volume = self._finite(row.get("avg_daily_volume"))
+            live_tail_start = self.live_tail_start_by_symbol.get(symbol)
+            live_execution_overlay = (
+                live_tail_start is not None and review_date >= live_tail_start
+            )
+            if live_execution_overlay:
+                live_rejections = []
+                if not bool(row.get("volume_elig")):
+                    live_rejections.append("volume_ineligible")
+                if not bool(row.get("exec_elig")):
+                    live_rejections.append("execution_ineligible")
+                if row.get("ib_avail") != "contract_qualified":
+                    live_rejections.append("ib_contract_unqualified")
+                if live_rejections:
+                    logger.debug(
+                        "walk_forward_selection candidate_rejected date=%s "
+                        "symbol=%s reason=live_execution_overlay details=%s "
+                        "live_tail_start=%s",
+                        review_date,
+                        symbol,
+                        ",".join(live_rejections),
+                        live_tail_start,
+                    )
+                    continue
+            average_volume = (
+                self._finite(row.get("avg_daily_volume"))
+                if live_execution_overlay else None
+            )
             margin_to_ann_dvol = self._finite(
                 row.get("initial_margin_to_ann_dvol")
             )
@@ -1424,8 +1509,10 @@ class _WalkForwardSelectionProvider:
                 or fx_to_usd is None
                 or fx_to_usd <= 0
                 or turnover is None
-                or average_volume is None
-                or average_volume <= 0
+                or (
+                    live_execution_overlay
+                    and (average_volume is None or average_volume <= 0)
+                )
                 or ann_rolls is None
             ):
                 continue
@@ -1505,7 +1592,11 @@ class _WalkForwardSelectionProvider:
                 asset_class=str(row["asset_cls"]),
                 economic_subclass=str(row["econ_subcls"]),
                 econ_family=str(row.get("econ_fam_id") or ""),
-                mkt_risk_vol_day=average_volume * annual_dollar_vol,
+                mkt_risk_vol_day=(
+                    average_volume * annual_dollar_vol
+                    if average_volume is not None else None
+                ),
+                enforce_market_participation=live_execution_overlay,
                 initial_margin_usd=initial_margin,
                 roll_sr=roll_cost / annual_dollar_vol,
                 ann_rolls=ann_rolls,
@@ -1545,12 +1636,14 @@ class _WalkForwardSelectionProvider:
             capital=prior_net_equity,
             run_config=self.run_config,
             args=self.args,
+            rank_count_anchor=rank_count_anchor,
         )
         selection = selector.select(
             candidates,
             correlation,
             prior_selected=self.prior_selected,
         )
+        self._update_rank_count_ewma(len(selection.selected))
         # Preserve the complete dated greedy decision path. The normal trial
         # reports below describe only the initial static selection; attaching
         # review date and lagged equity here makes later CL/MCL and margin
@@ -1582,6 +1675,11 @@ class _WalkForwardSelectionProvider:
                 "selection_rank_buffer_percent": (
                     _active_rank_buffer_percent(self.args)
                 ),
+                "selection_rank_count_ewma_halflife_reviews": (
+                    _active_rank_count_ewma_halflife_reviews(self.args)
+                ),
+                "rank_count_ewma_state": rank_count_ewma_state,
+                "rank_count_anchor": selection.rank_count_anchor,
                 "selection_book_score_buffer_percent": (
                     _active_book_score_buffer_percent(self.args)
                 ),
@@ -1632,6 +1730,11 @@ class _WalkForwardSelectionProvider:
                 "selection_rank_buffer_percent": (
                     _active_rank_buffer_percent(self.args)
                 ),
+                "selection_rank_count_ewma_halflife_reviews": (
+                    _active_rank_count_ewma_halflife_reviews(self.args)
+                ),
+                "rank_count_ewma_state": rank_count_ewma_state,
+                "rank_count_anchor": selection.rank_count_anchor,
                 "selection_book_score_buffer_percent": (
                     _active_book_score_buffer_percent(self.args)
                 ),
@@ -1669,6 +1772,11 @@ class _WalkForwardSelectionProvider:
                 "selection_rank_buffer_percent": (
                     _active_rank_buffer_percent(self.args)
                 ),
+                "selection_rank_count_ewma_halflife_reviews": (
+                    _active_rank_count_ewma_halflife_reviews(self.args)
+                ),
+                "rank_count_ewma_state": rank_count_ewma_state,
+                "rank_count_anchor": selection.rank_count_anchor,
                 "selection_book_score_buffer_percent": (
                     _active_book_score_buffer_percent(self.args)
                 ),
@@ -1741,7 +1849,8 @@ class _WalkForwardSelectionProvider:
             "walk_forward_selection hysteresis date=%s mode=%s "
             "prior_book=%s raw_book=%s rank_book=%s candidate_book=%s "
             "accepted_book=%s prior_score=%s candidate_score=%s "
-            "rank_entry=%s rank_exit=%s gross_score_gain=%s switch_cost_usd=%s "
+            "rank_count_state=%s rank_count_anchor=%s rank_entry=%s "
+            "rank_exit=%s gross_score_gain=%s switch_cost_usd=%s "
             "switch_cost_sr=%s score_buffer_sr=%s net_score_gain=%s "
             "switch_accepted=%s rank_reason=%s reason=%s",
             review_date,
@@ -1753,6 +1862,8 @@ class _WalkForwardSelectionProvider:
             ",".join(selection.selected),
             selection.prior_book_score,
             selection.hysteresis_candidate_book_score,
+            rank_count_ewma_state,
+            selection.rank_count_anchor,
             selection.rank_entry_cutoff,
             selection.rank_exit_cutoff,
             selection.gross_score_gain,
@@ -1792,6 +1903,15 @@ class _WalkForwardSelectionProvider:
             ),
             "selection_rank_buffer_percent": (
                 _active_rank_buffer_percent(self.args)
+            ),
+            "selection_rank_count_ewma_halflife_reviews": (
+                _active_rank_count_ewma_halflife_reviews(self.args)
+            ),
+            "rank_count_ewma_state": rank_count_ewma_state,
+            "rank_count_anchor": selection.rank_count_anchor,
+            "selection_live_execution_overlay_count": sum(
+                candidate.enforce_market_participation
+                for candidate in candidates
             ),
             "selection_book_score_buffer_percent": (
                 _active_book_score_buffer_percent(self.args)
@@ -1855,12 +1975,26 @@ class _WalkForwardSelectionProvider:
                 "selection_rank_buffer_percent": (
                     _active_rank_buffer_percent(self.args)
                 ),
+                "selection_rank_count_ewma_halflife_reviews": (
+                    _active_rank_count_ewma_halflife_reviews(self.args)
+                ),
+                "rank_count_ewma_state": rank_count_ewma_state,
+                "rank_count_anchor": selection.rank_count_anchor,
                 "selection_book_score_buffer_percent": (
                     _active_book_score_buffer_percent(self.args)
                 ),
                 "rank": allocation.get("rank") if allocation else None,
                 "preference_rank": preference_ranks.get(symbol),
                 "symbol": symbol,
+                "live_tail_start": self.live_tail_start_by_symbol.get(symbol),
+                "live_execution_overlay_active": (
+                    self.live_tail_start_by_symbol.get(symbol) is not None
+                    and review_date
+                    >= self.live_tail_start_by_symbol[symbol]
+                ),
+                "live_volume_eligible": source.get("volume_elig"),
+                "live_execution_eligible": source.get("exec_elig"),
+                "live_ib_availability": source.get("ib_avail"),
                 "hist_instr_code": source.get("hist_instr_code"),
                 "pst_instr_code": source.get("pst_instr_code"),
                 "asset_cls": source.get("asset_cls"),
@@ -1994,14 +2128,15 @@ def _final_selection_frame(
                 args.selection_membership_hysteresis
             ),
             "selection_rank_buffer_percent": _active_rank_buffer_percent(args),
+            "selection_rank_count_ewma_halflife_reviews": (
+                _active_rank_count_ewma_halflife_reviews(args)
+            ),
             "selection_book_score_buffer_percent": (
                 _active_book_score_buffer_percent(args)
             ),
             "roll_cost_in_score": args.include_roll_cost_in_score,
             "selection_cost_source": (
-                "live_snapshot"
-                if args.selection_rebalance == "static"
-                else "carver_frozen"
+                "ref_fixed" if args.complete else "live_snapshot"
             ),
             "selection_margin_source": (
                 "live_snapshot"
@@ -2610,8 +2745,14 @@ def _run_complete_selection(
             econ_family=str(row.get("econ_fam_id") or ""),
             mkt_risk_vol_day=(
                 float(row["mkt_risk_vol_usd_day"])
-                if row.get("mkt_risk_vol_usd_day") is not None
+                if (
+                    args.selection_rebalance == "static"
+                    and row.get("mkt_risk_vol_usd_day") is not None
+                )
                 else None
+            ),
+            enforce_market_participation=(
+                args.selection_rebalance == "static"
             ),
             initial_margin_usd=(
                 float(row["init_margin_usd"])
@@ -2686,6 +2827,10 @@ def _run_complete_selection(
     historical_return_sources = {
         symbol: "reference" for symbol in cash_symbols
     }
+    # A symbol enters the live execution overlay only at its verified direct
+    # PST-to-IB handoff. Reference-only reviews intentionally have no dated
+    # volume observation and therefore do not inherit today's snapshot gates.
+    live_tail_start_by_symbol: dict[str, date] = {}
     if args.ib_history_db is not None:
         # Construction remains pinned to the long reference histories above.
         # Only the final executable cash audit is rebuilt from the
@@ -3054,6 +3199,7 @@ def _run_complete_selection(
                             f"{stitched_cache_key}"
                         )
                         historical_return_sources[symbol] = "stitched"
+                        live_tail_start_by_symbol[symbol] = live_tail_start
                         stitched_symbols.append(symbol)
                     except Exception as exc:
                         logger.warning(
@@ -3143,6 +3289,9 @@ def _run_complete_selection(
         ),
         "selection_rank_buffer_percent": (
             _active_rank_buffer_percent(args)
+        ),
+        "selection_rank_count_ewma_halflife_reviews": (
+            _active_rank_count_ewma_halflife_reviews(args)
         ),
         "selection_book_score_buffer_percent": (
             _active_book_score_buffer_percent(args)
@@ -3368,6 +3517,11 @@ def _run_complete_selection(
                 symbol: audit_by_symbol[symbol] for symbol in cash_symbols
             },
             reference_frames=walk_forward_reference_frames,
+            live_tail_start_by_symbol={
+                symbol: live_tail_start_by_symbol[symbol]
+                for symbol in cash_symbols
+                if symbol in live_tail_start_by_symbol
+            },
             run_config=run_config,
             args=args,
         )
@@ -3840,6 +3994,18 @@ def run(
         raise ValueError("selection eligibility hysteresis must be in [0, 100]")
     if not 0 <= args.selection_rank_buffer_pct <= 100:
         raise ValueError("selection rank buffer must be in [0, 100]")
+    if (
+        args.selection_rank_count_ewma_halflife_reviews is not None
+        and (
+            not math.isfinite(
+                args.selection_rank_count_ewma_halflife_reviews
+            )
+            or args.selection_rank_count_ewma_halflife_reviews <= 0
+        )
+    ):
+        raise ValueError(
+            "selection rank count EWMA half-life must be finite and positive"
+        )
     if not 0 <= args.selection_book_score_buffer_pct <= 100:
         raise ValueError("selection book score buffer must be in [0, 100]")
     if args.ib_prior_years <= 0:
@@ -3908,7 +4074,12 @@ def run(
     # backtest, including a static-book replay, receives reference costs and
     # reference rule eligibility at this boundary.
     selected = (
-        selection_rebalance_candidates(report)
+        selection_rebalance_candidates(
+            report,
+            apply_live_execution_gates=(
+                args.selection_rebalance == "static"
+            ),
+        )
         if args.complete
         else selection_candidates(report)
     )
