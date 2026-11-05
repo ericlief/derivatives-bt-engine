@@ -199,7 +199,7 @@ class GreedySelectionConfig:
     max_book_margin_pct: float | None = None
     include_roll_cost_in_score: bool = False
     eligibility_hysteresis_percent: float = 0.0
-    membership_hysteresis: str = "score"
+    membership_hysteresis: str = "none"
     rank_buffer_percent: float = 15.0
     book_score_buffer_percent: float = 0.0
 

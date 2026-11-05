@@ -921,11 +921,11 @@ def parse_args(argv=None, *, complete_default: bool = False):
     parser.add_argument(
         "--selection-membership-hysteresis",
         choices=("none", "rank", "score", "rank_score"),
-        default="score",
+        default="none",
         help=(
             "Scheduled-review membership policy: always take the raw book, "
             "apply an index-style rank band, apply the score and transition-"
-            "cost hurdle, or apply rank then score (default: score)."
+            "cost hurdle, or apply rank then score (default: none)."
         ),
     )
     parser.add_argument(

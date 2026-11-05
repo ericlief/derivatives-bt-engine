@@ -875,10 +875,12 @@ whether rank and score controls are disabled, used separately, or composed:
 --selection-membership-hysteresis rank_score
 ```
 
-`score` remains the default for compatibility with earlier scheduled runs.
-`none` always takes the raw greedy book. `rank_score` constructs the
-rank-buffered candidate first and then subjects that complete candidate to the
-score and transition-cost hurdle.
+`none` is the default, so omitting this flag always takes the raw greedy book.
+Rank or score hysteresis must be enabled explicitly; setting only
+`--selection-eligibility-hysteresis-pct 10`, for example, applies eligibility
+hysteresis without silently enabling a score hurdle. `rank_score` constructs
+the rank-buffered candidate first and then subjects that complete candidate to
+the score and transition-cost hurdle.
 
 ##### Incumbent eligibility hysteresis
 
