@@ -2,7 +2,8 @@
 
 ## Scope and comparability
 
-This update adds the requested Score-1, Rank-25, and Score-2 eligibility sweep:
+This update adds the corrected eligibility-only and rank-plus-eligibility runs
+and keeps the earlier score sweep for comparison:
 
 | Label | Run | Policy |
 |---|---|---|
@@ -13,11 +14,21 @@ This update adds the requested Score-1, Rank-25, and Score-2 eligibility sweep:
 | Score-2 | `20261105_093730` | 2% score hurdle, `eh0` |
 | Score-2 + EH10 | `20261105_102258` | 2% score hurdle, 10% eligibility hysteresis |
 | Score-2 + EH25 | `20261105_095347` | 2% score hurdle, 25% eligibility hysteresis |
+| EH10 only | `20261105_111202` | 10% eligibility hysteresis, membership mode `none` |
+| Rank-25 + EH10 | `20261105_112611` | 25% rank band, 10% eligibility hysteresis |
 
-The review artifacts resolve to the intended membership modes and parameter
-values. The new canonical EH25 run is set-for-set and curve-for-curve identical
-to the earlier `20261104_214756` `eb25` run, confirming that the CLI/report
-rename did not change behavior.
+The review artifacts, rather than command intent, are the source of truth for
+these labels. In particular, `20261105_102258` is **Score-2 + EH10**, not an
+eligibility-only run: it persisted `sel_membership_hyst=score`,
+`sel_book_score_buf_pct=2`, and `sel_elig_hyst_pct=10`. The corrected
+`20261105_111202` run persists `sel_membership_hyst=none` and
+`sel_elig_hyst_pct=10`. Its review rows also retain the CLI's inactive numeric
+defaults (`sel_rank_buf_pct=15`, `sel_book_score_buf_pct=2`), but mode `none`
+means neither is executed; the run directory correctly identifies `mhnone`.
+This reporting defect is fixed for future artifacts: inactive membership
+parameters are now persisted as null. The new canonical EH25 run remains
+set-for-set and curve-for-curve identical to the earlier `20261104_214756`
+`eb25` run, confirming that the CLI/report rename did not change behavior.
 
 All runs use target volatility 20%, instrument margin cap 20%, book margin cap
 50%, weight-IDM cap 20%, score threshold 0.85, class count cap 20, subclass
@@ -28,11 +39,12 @@ date and therefore changes the active book.
 
 ## Main result
 
-Rank hysteresis is inactive at both tested widths. Rank-15 and Rank-25 select
-the baseline set in all 54 reviews, and their portfolio curves, costs, and
-performance are identical to the no-hysteresis run. Raising the band from 15%
-to 25% does not create a marginal reduction in turnover; it produces no policy
-action at all in this sample.
+Rank hysteresis is inactive when tested alone at both widths. Rank-15 EH0 and
+Rank-25 EH0 select the baseline set in all 54 reviews, and their curves, costs,
+and performance are identical to no hysteresis. That conclusion does not carry
+over mechanically to Rank-25 + EH10: the rank buffer directly changes only the
+2005 review, but that one change alters dynamic equity and later feasibility,
+so the eventual path differs substantially.
 
 Score-1 is also not the hoped-for middle ground. It ends at $162.45M versus
 $158.20M for Score-2 and $275.53M for baseline. Its full-history CAGR and
@@ -41,12 +53,25 @@ Although Score-1 leaves 11 annual transitions unchanged, its accepted switches
 are larger: total symbol additions plus removals rise to 523, above both
 Score-2's 418 and baseline's 490.
 
-Eligibility hysteresis is the dominant lever. Adding 10% to Score-2 recovers
-most full-history performance, while 25% exceeds baseline on the full sample.
-That result is path-dependent and not robust in the recent period: from 2024
-through 2026-10-23, returns are -2.47% for Score-2 EH0, -3.58% for EH10, and
--4.60% for EH25, versus +0.34% for baseline. The higher full-history EH25
-ending capital was accumulated before 2024.
+Eligibility-only EH10 does not provide membership stasis. Its final book equals
+its unbuffered proposal in all 54 reviews, it has no unchanged annual
+transitions, and symbol churn rises slightly from 490 to 496. It ends at
+$203.15M versus $275.53M for baseline, with 15.82% CAGR and 0.922 Sharpe. From
+2024 through 2026-10-23 it returns -1.07%, versus +0.34% for baseline.
+
+Rank-25 + EH10 is numerically closest to baseline: $277.44M ending equity,
+16.50% CAGR, 0.954 Sharpe, and -39.53% maximum drawdown. It still trails from
+2024 onward at -0.18%. More importantly, this is not broad evidence for rank
+hysteresis. The rank buffer changes the final set relative to that run's raw
+proposal in only one of 54 reviews. In 2005 it retains `I` instead of adding
+`M6B`; the resulting equity path later avoids the eligibility-only run's 2017
+collapse from 55 instruments to seven. The apparent long-run benefit is
+therefore concentrated in a single path-sensitive intervention.
+
+The score interaction remains separate. Adding eligibility hysteresis to
+Score-2 recovers full-history performance, and EH25 exceeds baseline on the
+full sample, but from 2024 onward Score-2 EH0, EH10, and EH25 return -2.47%,
+-3.58%, and -4.60%. Their pre-2024 capital paths create the full-history lead.
 
 ## Parameter response summary
 
@@ -59,18 +84,28 @@ ending capital was accumulated before 2024.
 | Score-2 EH0 | 35.35 | 82.76% | 14 / 53 | 418 | 92.17% | 40 / 54 | 87.07% |
 | Score-2 EH10 | 33.35 | 82.16% | 18 / 53 | 416 | 92.31% | 36 / 54 | 87.31% |
 | Score-2 EH25 | 33.98 | 86.72% | 23 / 53 | 281 | 90.85% | 31 / 54 | 86.74% |
+| EH10 only | 35.06 | 78.53% | 0 / 53 | 496 | 100.00% | 54 / 54 | 94.26% |
+| Rank-25 EH10 | 35.67 | 80.84% | 0 / 53 | 421 | 99.92% | 53 / 54 | 95.94% |
 
 An unchanged-transition count is not a turnover measure by itself. Score-1
 freezes more complete reviews than baseline, yet the switches it accepts replace
-enough symbols to generate more total membership churn. EH10 similarly has more
-unchanged transitions than Score-2 EH0 but a slightly lower average YoY
-Jaccard, because its changed years move farther.
+enough symbols to generate more total membership churn. Score-2 EH10 similarly
+has more unchanged transitions than Score-2 EH0 but a slightly lower average
+YoY Jaccard, because its changed years move farther. By contrast, EH10-only is
+an eligibility-band policy, not a membership-retention rule: it changes the
+candidate universe but accepts every resulting raw book.
 
 Score-1 and Score-2 books are identical in 38 of 54 reviews, with 95.40% mean
 cross-policy Jaccard. Score-2 EH0 and EH10 are identical in 29 reviews and have
 91.20% mean Jaccard; EH0 and EH25 are identical in only 20 reviews and average
 90.05%. Eligibility hysteresis changes the equity path, which changes later
 position granularity and raw selection as well as incumbent survival.
+
+EH10-only and Rank-25 EH10 are identical in 34 of 54 reviews and average 95.17%
+cross-policy Jaccard. Rank-25 EH10 equals baseline in 28 reviews and averages
+95.94% Jaccard to baseline. Those similarities conceal a major 2017 divergence:
+EH10-only holds seven instruments, Rank-25 EH10 holds 57, and their Jaccard is
+only 12.3% that year.
 
 ## Performance by ten-year window
 
@@ -87,59 +122,77 @@ baseline exactly.
 | Window | Policy | Avg book n | Avg YoY J | Avg ann return | CAGR | Ann vol | Sharpe | Max drawdown | Ending net equity |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|
 | 1973-1982 | Baseline/rank | 12.70 | 75.24% | 34.42% | 38.04% | 18.48% | 1.862 | -19.75% | $1.88M |
+| 1973-1982 | EH10 only | 12.80 | 75.83% | 34.27% | 37.82% | 18.45% | 1.857 | -19.75% | $1.85M |
+| 1973-1982 | Rank-25 EH10 | 12.80 | 75.83% | 34.27% | 37.82% | 18.45% | 1.857 | -19.75% | $1.85M |
 | 1973-1982 | Score-1 EH0 | 10.80 | 86.90% | 32.78% | 36.03% | 17.61% | 1.861 | -19.70% | $1.62M |
 | 1973-1982 | Score-2 EH0/EH10/EH25 | 10.80 | 86.90% | 32.78% | 36.03% | 17.61% | 1.861 | -19.70% | $1.62M |
 | 1983-1992 | Baseline/rank | 23.00 | 84.84% | 13.25% | 12.48% | 17.33% | 0.765 | -21.73% | $6.09M |
+| 1983-1992 | EH10 only | 23.10 | 85.77% | 13.85% | 13.11% | 17.48% | 0.792 | -21.82% | $6.35M |
+| 1983-1992 | Rank-25 EH10 | 23.10 | 85.77% | 13.85% | 13.11% | 17.48% | 0.792 | -21.82% | $6.35M |
 | 1983-1992 | Score-1 EH0 | 21.80 | 87.10% | 13.98% | 13.28% | 17.45% | 0.801 | -25.29% | $5.64M |
 | 1983-1992 | Score-2 EH0 | 21.00 | 87.51% | 13.44% | 12.75% | 17.00% | 0.791 | -25.49% | $5.39M |
 | 1983-1992 | Score-2 EH10 | 21.00 | 86.88% | 13.64% | 13.07% | 16.55% | 0.825 | -19.23% | $5.54M |
 | 1983-1992 | Score-2 EH25 | 21.50 | 85.97% | 13.86% | 13.25% | 16.90% | 0.820 | -21.43% | $5.63M |
 | 1993-2002 | Baseline/rank | 28.70 | 81.58% | 18.85% | 19.09% | 17.69% | 1.065 | -25.91% | $34.85M |
+| 1993-2002 | EH10 only | 29.50 | 82.70% | 18.05% | 18.16% | 17.51% | 1.031 | -23.69% | $33.70M |
+| 1993-2002 | Rank-25 EH10 | 29.50 | 82.70% | 18.05% | 18.16% | 17.51% | 1.031 | -23.69% | $33.70M |
 | 1993-2002 | Score-1 EH0 | 28.20 | 81.08% | 18.33% | 18.33% | 18.21% | 1.006 | -32.30% | $30.32M |
 | 1993-2002 | Score-2 EH0 | 27.50 | 81.16% | 18.88% | 18.89% | 18.67% | 1.011 | -32.28% | $30.34M |
 | 1993-2002 | Score-2 EH10 | 27.50 | 81.16% | 18.86% | 18.87% | 18.67% | 1.010 | -32.32% | $31.16M |
 | 1993-2002 | Score-2 EH25 | 27.80 | 86.55% | 19.61% | 19.79% | 18.64% | 1.052 | -32.35% | $34.16M |
 | 2003-2012 | Baseline/rank | 45.90 | 79.79% | 15.59% | 14.81% | 20.03% | 0.778 | -25.35% | $138.58M |
+| 2003-2012 | EH10 only | 46.50 | 82.91% | 14.28% | 13.30% | 19.98% | 0.715 | -24.70% | $117.49M |
+| 2003-2012 | Rank-25 EH10 | 46.20 | 82.47% | 15.89% | 15.14% | 20.12% | 0.790 | -25.27% | $137.99M |
 | 2003-2012 | Score-1 EH0 | 46.70 | 82.12% | 13.92% | 12.91% | 19.86% | 0.701 | -25.56% | $102.10M |
 | 2003-2012 | Score-2 EH0 | 46.90 | 82.36% | 13.39% | 12.34% | 19.74% | 0.678 | -25.63% | $97.10M |
 | 2003-2012 | Score-2 EH10 | 44.30 | 85.28% | 16.75% | 16.06% | 20.49% | 0.817 | -25.33% | $138.08M |
 | 2003-2012 | Score-2 EH25 | 43.50 | 86.31% | 17.80% | 17.29% | 20.57% | 0.865 | -25.69% | $168.23M |
 | 2013-2022 | Baseline/rank | 53.60 | 69.10% | 8.73% | 8.29% | 14.29% | 0.611 | -33.51% | $307.14M |
+| 2013-2022 | EH10 only | 52.30 | 64.75% | 7.78% | 7.20% | 14.31% | 0.543 | -34.16% | $235.47M |
+| 2013-2022 | Rank-25 EH10 | 57.20 | 78.08% | 8.85% | 8.42% | 14.29% | 0.619 | -29.18% | $309.68M |
 | 2013-2022 | Score-1 EH0 | 53.30 | 61.20% | 6.80% | 6.22% | 13.84% | 0.492 | -34.53% | $186.67M |
 | 2013-2022 | Score-2 EH0 | 58.60 | 79.53% | 7.07% | 6.45% | 14.19% | 0.498 | -34.13% | $181.43M |
 | 2013-2022 | Score-2 EH10 | 52.00 | 71.14% | 8.39% | 7.97% | 13.88% | 0.604 | -30.03% | $297.08M |
 | 2013-2022 | Score-2 EH25 | 56.20 | 91.06% | 8.69% | 8.20% | 14.46% | 0.601 | -25.96% | $370.00M |
 | 2023-2026-10-23 | Baseline/rank | 59.75 | 69.73% | -1.77% | -2.81% | 10.96% | -0.162 | -26.31% | $275.53M |
+| 2023-2026-10-23 | EH10 only | 62.75 | 70.05% | -2.60% | -3.80% | 11.23% | -0.231 | -30.11% | $203.15M |
+| 2023-2026-10-23 | Rank-25 EH10 | 59.50 | 70.05% | -1.80% | -2.84% | 10.95% | -0.165 | -26.30% | $277.44M |
 | 2023-2026-10-23 | Score-1 EH0 | 64.00 | 65.71% | -2.42% | -3.59% | 11.11% | -0.218 | -28.02% | $162.45M |
 | 2023-2026-10-23 | Score-2 EH0 | 65.25 | 68.40% | -2.38% | -3.54% | 11.13% | -0.213 | -29.10% | $158.20M |
 | 2023-2026-10-23 | Score-2 EH10 | 61.25 | 71.29% | -2.56% | -3.72% | 10.95% | -0.234 | -29.75% | $257.13M |
 | 2023-2026-10-23 | Score-2 EH25 | 59.25 | 70.96% | -1.60% | -2.63% | 11.12% | -0.144 | -25.72% | $334.26M |
 | Full history | Baseline/rank | 34.78 | 78.25% | 16.40% | 16.48% | 17.21% | 0.953 | -39.56% | $275.53M |
+| Full history | EH10 only | 35.06 | 78.53% | 15.85% | 15.82% | 17.20% | 0.922 | -42.82% | $203.15M |
+| Full history | Rank-25 EH10 | 35.67 | 80.84% | 16.42% | 16.50% | 17.21% | 0.954 | -39.53% | $277.44M |
 | Full history | Score-1 EH0 | 34.52 | 79.42% | 15.42% | 15.34% | 17.07% | 0.904 | -41.80% | $162.45M |
 | Full history | Score-2 EH0 | 35.35 | 82.76% | 15.38% | 15.29% | 17.10% | 0.899 | -42.73% | $158.20M |
 | Full history | Score-2 EH10 | 33.35 | 82.16% | 16.27% | 16.33% | 17.12% | 0.950 | -42.37% | $257.13M |
 | Full history | Score-2 EH25 | 33.98 | 86.72% | 16.78% | 16.90% | 17.30% | 0.970 | -39.01% | $334.26M |
 
-Score-1 and Score-2 EH0 both lose most of their relative ground during
-2003-2012 and 2013-2022. EH10 largely repairs those two windows. EH25 is best
-over 2003-2012 and produces the shallowest 2013-2022 drawdown, but this is an
-in-sample path result rather than monotonic evidence that wider is better. All
-policies have negative average return and Sharpe from 2023 onward.
+EH10-only loses most of its relative ground in 2003-2012 and 2013-2022. The
+Rank-25 EH10 path is already $20.50M ahead by 2012 and then avoids the
+eligibility-only seven-instrument 2017 book, leaving it near baseline by 2022.
+This is a path result, not a stable marginal rank effect. Score-1 and Score-2
+EH0 also lose most of their relative ground during those two windows. Score-2
+EH10 repairs much of it, while EH25 is best over 2003-2012 and produces the
+shallowest 2013-2022 drawdown. All policies have negative average return and
+Sharpe from 2023 onward.
 
 ## Recent calendar performance
 
-| Year | Baseline/rank | Score-1 EH0 | Score-2 EH0 | Score-2 EH10 | Score-2 EH25 |
-|---:|---:|---:|---:|---:|---:|
-| 2023 | -10.59% | -10.46% | -10.60% | -10.24% | -5.30% |
-| 2024 | -7.82% | -12.78% | -11.37% | -12.74% | -12.21% |
-| 2025 | +0.98% | +2.26% | +1.09% | +1.33% | +1.30% |
-| 2026 through Oct 23 | +7.80% | +8.96% | +8.86% | +9.05% | +7.28% |
-| 2024 through Oct 23 compounded | +0.34% | -2.81% | -2.47% | -3.58% | -4.60% |
+| Year | Baseline/rank EH0 | EH10 only | Rank-25 EH10 | Score-1 EH0 | Score-2 EH0 | Score-2 EH10 | Score-2 EH25 |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 2023 | -10.59% | -12.79% | -10.25% | -10.46% | -10.60% | -10.24% | -5.30% |
+| 2024 | -7.82% | -10.29% | -8.18% | -12.78% | -11.37% | -12.74% | -12.21% |
+| 2025 | +0.98% | +1.11% | +0.96% | +2.26% | +1.09% | +1.33% | +1.30% |
+| 2026 through Oct 23 | +7.80% | +9.07% | +7.68% | +8.96% | +8.86% | +9.05% | +7.28% |
+| 2024 through Oct 23 compounded | +0.34% | -1.07% | -0.18% | -2.81% | -2.47% | -3.58% | -4.60% |
 
 EH25's better 2023 explains its lead within the 2023-onward window. From the
-start of 2024, every score variant trails baseline, and increasing eligibility
-hysteresis does not improve the result. Score-1 has the worst 2024 loss; its
-stronger 2025-2026 recovery is insufficient to offset it.
+start of 2024, every corrected and score variant trails baseline. Rank-25 EH10
+is closest, lagging by 0.52 percentage point over the compounded period;
+EH10-only lags by 1.41 points. Score-1 has the worst 2024 loss, and its stronger
+2025-2026 recovery is insufficient to offset it.
 
 ## Trading-cost effect
 
@@ -153,6 +206,8 @@ compounded performance attribution.
 | Score-2 EH0 | 71,257 | 1.450% | 47.713% | 25.071% | 72.784% |
 | Score-2 EH10 | 58,839 | 1.270% | 45.484% | 23.511% | 68.995% |
 | Score-2 EH25 | 45,333 | 1.150% | 45.750% | 23.903% | 69.653% |
+| EH10 only | 76,141 | 1.654% | 46.004% | 23.771% | 69.774% |
+| Rank-25 EH10 | 79,866 | 1.584% | 46.032% | 23.849% | 69.881% |
 
 Every score rule lowers review-date contracts and review-date cost. Score-1
 reduces review contracts by 9.9% despite increasing symbol churn, demonstrating
@@ -161,14 +216,21 @@ review contracts by 44.6% and review cost by 30.1%, but its all-date total cost
 is essentially baseline. The retained book still trades and rolls every day;
 review savings are not a direct forecast of total cost or net performance.
 
+The corrected combinations do not establish the intended cost benefit.
+EH10-only reduces review contracts by 7.0% but its review cost is 0.4% higher
+than baseline, and its total summed cost is 0.175 percentage point higher.
+Rank-25 EH10 reduces review contracts by only 2.4% and review cost by 3.8%,
+while total cost is 0.282 point higher. Contract count and dollar cost differ
+because the policies trade different instruments and contract sizes.
+
 ## Diversification behavior
 
 The concentrated early score book remains under every tested score and
 eligibility setting from 1978 through 1983. Score-1 releases the incumbent in
 1984 and expands to the baseline's 20-symbol book; Score-2 remains at 12 until
 1985. A narrower hurdle shortens, but does not eliminate, the early stasis.
-Eligibility hysteresis cannot repair it because the Score-2 eligibility paths
-do not begin to differ until 1985.
+Eligibility hysteresis cannot repair score stasis because the Score-2
+eligibility paths do not begin to differ until 1985.
 
 Score stasis can also preserve diversification. In 2017 Score-2 EH0 retains a
 large incumbent book instead of accepting a raw proposal that collapses to
@@ -179,19 +241,31 @@ a concrete example of capital-path amplification. Instrument count alone still
 does not explain performance: the rule alternates between blocking useful
 expansion and blocking harmful collapse, with the result dominated by path.
 
+The corrected EH10-only run demonstrates a different concentration failure.
+It follows the raw proposal at every review and still collapses from 55
+instruments in 2016 to seven in 2017 because the incumbent fails the hard book
+margin check. Rank-25 EH10 holds 57 instruments in 2017, but not because the
+rank rule directly overrides that review: its only final-versus-raw rank action
+occurred in 2005. That earlier switch changes capital enough to produce a
+different feasible raw book in 2017. This is exactly why dynamic-equity results
+cannot be interpreted as isolated local policy effects.
+
 ## Conclusions and next diagnostic
 
-1. Rank mode has no demonstrated value at 15% or 25%. Keep it off by default;
-   testing 30% is only useful as a boundary/implementation diagnostic, not as
-   evidence that 25% is nearly effective.
-2. Score-1 is not a robust compromise. It slightly improves full-history
+1. Rank mode alone has no demonstrated value at 15% or 25%. Rank-25 + EH10
+   finishes near baseline, but one direct 2005 intervention drives a different
+   capital and feasibility path. That is insufficient evidence to enable it.
+2. EH10-only is not a turnover buffer. It changes soft entry/exit eligibility,
+   follows every unbuffered proposal, slightly raises membership churn and
+   total cost, and underperforms baseline over both full and recent history.
+3. Score-1 is not a robust compromise. It slightly improves full-history
    performance over Score-2 EH0 but raises symbol churn above baseline and has
    the worst 2024 result.
-3. Score-2 EH10 is the least extreme score configuration: full-history CAGR and
+4. Score-2 EH10 is the least extreme score configuration: full-history CAGR and
    Sharpe nearly match baseline and total cost is slightly lower. It still has
    a deeper maximum drawdown and worse 2024-onward return, so the run does not
    justify enabling it.
-4. Score-2 EH25 has the best full-history result and strongest membership
+5. Score-2 EH25 has the best full-history result and strongest membership
    stability, but its advantage is pre-2024 and highly path-dependent. Treat it
    as a sensitivity result, not a selected parameter.
 
@@ -203,15 +277,83 @@ override is also preferable to lowering the score hurdle: do not retain an
 incumbent when it violates a minimum class/subclass breadth or when the
 challenger materially repairs concentration.
 
+## Corrected-combination annual similarity
+
+This table adds every annual review for the corrected runs. `EH10/base` and
+`Rank/base` compare each book with no hysteresis; `Rank/EH10` isolates the two
+corrected combinations. They are identical through 2004. Rank buffering
+directly changes only the 2005 final set, but dynamic capital makes later raw
+proposals diverge. In that review the rank candidate retains `I` and omits
+`M6B`; the prior book is only $862.59 over its $24,792,869.77 hard margin
+limit. This near-boundary event is not a robust basis for selecting Rank-25.
+
+| Year | EH10-only n | EH10/base | Rank-25 EH10 n | Rank/base | Rank/EH10 |
+|---:|---:|---:|---:|---:|---:|
+| 1973 | 6 | 100.0% | 6 | 100.0% | 100.0% |
+| 1974 | 9 | 100.0% | 9 | 100.0% | 100.0% |
+| 1975 | 10 | 100.0% | 10 | 100.0% | 100.0% |
+| 1976 | 10 | 100.0% | 10 | 100.0% | 100.0% |
+| 1977 | 14 | 100.0% | 14 | 100.0% | 100.0% |
+| 1978 | 12 | 100.0% | 12 | 100.0% | 100.0% |
+| 1979 | 14 | 100.0% | 14 | 100.0% | 100.0% |
+| 1980 | 17 | 100.0% | 17 | 100.0% | 100.0% |
+| 1981 | 18 | 100.0% | 18 | 100.0% | 100.0% |
+| 1982 | 18 | 94.4% | 18 | 94.4% | 100.0% |
+| 1983 | 18 | 100.0% | 18 | 100.0% | 100.0% |
+| 1984 | 20 | 100.0% | 20 | 100.0% | 100.0% |
+| 1985 | 21 | 100.0% | 21 | 100.0% | 100.0% |
+| 1986 | 23 | 95.7% | 23 | 95.7% | 100.0% |
+| 1987 | 23 | 100.0% | 23 | 100.0% | 100.0% |
+| 1988 | 25 | 100.0% | 25 | 100.0% | 100.0% |
+| 1989 | 27 | 100.0% | 27 | 100.0% | 100.0% |
+| 1990 | 24 | 100.0% | 24 | 100.0% | 100.0% |
+| 1991 | 25 | 100.0% | 25 | 100.0% | 100.0% |
+| 1992 | 25 | 100.0% | 25 | 100.0% | 100.0% |
+| 1993 | 27 | 100.0% | 27 | 100.0% | 100.0% |
+| 1994 | 28 | 100.0% | 28 | 100.0% | 100.0% |
+| 1995 | 28 | 100.0% | 28 | 100.0% | 100.0% |
+| 1996 | 28 | 100.0% | 28 | 100.0% | 100.0% |
+| 1997 | 29 | 96.6% | 29 | 96.6% | 100.0% |
+| 1998 | 24 | 88.0% | 24 | 88.0% | 100.0% |
+| 1999 | 31 | 93.5% | 31 | 93.5% | 100.0% |
+| 2000 | 30 | 90.0% | 30 | 90.0% | 100.0% |
+| 2001 | 31 | 96.8% | 31 | 96.8% | 100.0% |
+| 2002 | 39 | 100.0% | 39 | 100.0% | 100.0% |
+| 2003 | 38 | 94.9% | 38 | 94.9% | 100.0% |
+| 2004 | 41 | 97.6% | 41 | 97.6% | 100.0% |
+| 2005 | 45 | 97.8% | 45 | 97.8% | 95.7% |
+| 2006 | 40 | 90.5% | 39 | 92.7% | 92.7% |
+| 2007 | 45 | 91.5% | 45 | 91.5% | 95.7% |
+| 2008 | 48 | 92.0% | 48 | 95.9% | 95.9% |
+| 2009 | 53 | 100.0% | 53 | 96.3% | 96.3% |
+| 2010 | 53 | 92.6% | 53 | 92.6% | 100.0% |
+| 2011 | 52 | 90.6% | 50 | 98.0% | 92.5% |
+| 2012 | 50 | 94.1% | 50 | 98.0% | 96.1% |
+| 2013 | 54 | 92.9% | 54 | 92.9% | 100.0% |
+| 2014 | 54 | 92.9% | 54 | 100.0% | 92.9% |
+| 2015 | 48 | 90.6% | 54 | 98.1% | 88.9% |
+| 2016 | 55 | 96.4% | 55 | 100.0% | 96.4% |
+| 2017 | 7 | 22.7% | 57 | 32.8% | 12.3% |
+| 2018 | 62 | 95.2% | 60 | 95.2% | 93.7% |
+| 2019 | 62 | 92.2% | 61 | 90.6% | 86.4% |
+| 2020 | 60 | 96.7% | 60 | 100.0% | 96.7% |
+| 2021 | 59 | 85.5% | 55 | 85.0% | 78.1% |
+| 2022 | 62 | 90.8% | 62 | 100.0% | 90.8% |
+| 2023 | 61 | 89.1% | 60 | 93.5% | 86.2% |
+| 2024 | 65 | 78.3% | 58 | 93.3% | 80.9% |
+| 2025 | 63 | 90.8% | 61 | 100.0% | 90.8% |
+| 2026 | 62 | 79.4% | 59 | 88.9% | 80.6% |
+
 ## Annual books and Jaccard similarity
 
 Instrument order is the selector's reported order; Jaccard treats each book as
 an unordered set. `S/base` and `R/base` compare each hysteresis book with the
 no-hysteresis book in that year. `S/raw` and `R/raw` compare the final book with
 that run's own unbuffered proposal, isolating whether membership hysteresis
-changed the set. `S` is Score-2 EH0. `R` is Rank-15 EH0; Rank-25 is omitted
-because it is identical to Rank-15 in every year. The parameter-response table
-above summarizes Score-1, EH10, and EH25 without duplicating five long symbol
+changed the set. `S` is Score-2 EH0. `R` is Rank-15 EH0; Rank-25 EH0 is omitted
+because it is identical to Rank-15 in every year. The parameter-response and
+corrected-combination tables above summarize Score-1, both distinct EH10
+policies, EH25, and Rank-25 EH10 without duplicating additional long symbol
 lists per row.
 
 | Year | No-hysteresis instruments | Score-2 instruments | S/base | S/raw | Rank-15 instruments | R/base | R/raw |

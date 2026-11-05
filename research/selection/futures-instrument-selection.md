@@ -882,6 +882,12 @@ hysteresis without silently enabling a score hurdle. `rank_score` constructs
 the rank-buffered candidate first and then subjects that complete candidate to
 the score and transition-cost hurdle.
 
+Persisted reports record inactive membership parameters as null. For example,
+mode `none` does not report the parser defaults for either the rank band or
+score hurdle, and mode `rank` leaves the score hurdle null. This keeps a saved
+configuration from implying that a numerically populated but gated-off control
+was active.
+
 ##### Incumbent eligibility hysteresis
 
 `--selection-eligibility-hysteresis-pct` relaxes selected soft eligibility

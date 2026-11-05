@@ -1212,6 +1212,20 @@ def _subsystem_reference_correlation(
     return correlation, covered, wide_frame
 
 
+def _active_rank_buffer_percent(args: argparse.Namespace) -> float | None:
+    """Return the configured rank band only when its membership mode uses it."""
+    if args.selection_membership_hysteresis in {"rank", "rank_score"}:
+        return float(args.selection_rank_buffer_pct)
+    return None
+
+
+def _active_book_score_buffer_percent(args: argparse.Namespace) -> float | None:
+    """Return the score hurdle only when its membership mode uses it."""
+    if args.selection_membership_hysteresis in {"score", "rank_score"}:
+        return float(args.selection_book_score_buffer_pct)
+    return None
+
+
 def _greedy_selector(
     *,
     capital: float,
@@ -1576,10 +1590,10 @@ class _WalkForwardSelectionProvider:
                     self.args.selection_membership_hysteresis
                 ),
                 "selection_rank_buffer_percent": (
-                    self.args.selection_rank_buffer_pct
+                    _active_rank_buffer_percent(self.args)
                 ),
                 "selection_book_score_buffer_percent": (
-                    self.args.selection_book_score_buffer_pct
+                    _active_book_score_buffer_percent(self.args)
                 ),
                 "prior_book_score": selection.prior_book_score,
                 "unbuffered_book_score": selection.unbuffered_book_score,
@@ -1626,10 +1640,10 @@ class _WalkForwardSelectionProvider:
                     self.args.selection_membership_hysteresis
                 ),
                 "selection_rank_buffer_percent": (
-                    self.args.selection_rank_buffer_pct
+                    _active_rank_buffer_percent(self.args)
                 ),
                 "selection_book_score_buffer_percent": (
-                    self.args.selection_book_score_buffer_pct
+                    _active_book_score_buffer_percent(self.args)
                 ),
             }
             for allocation_row in selection.trial_allocations
@@ -1663,10 +1677,10 @@ class _WalkForwardSelectionProvider:
                     self.args.selection_membership_hysteresis
                 ),
                 "selection_rank_buffer_percent": (
-                    self.args.selection_rank_buffer_pct
+                    _active_rank_buffer_percent(self.args)
                 ),
                 "selection_book_score_buffer_percent": (
-                    self.args.selection_book_score_buffer_pct
+                    _active_book_score_buffer_percent(self.args)
                 ),
                 "prior_book_score": selection.prior_book_score,
                 "unbuffered_book_score": selection.unbuffered_book_score,
@@ -1787,10 +1801,10 @@ class _WalkForwardSelectionProvider:
                 self.args.selection_membership_hysteresis
             ),
             "selection_rank_buffer_percent": (
-                self.args.selection_rank_buffer_pct
+                _active_rank_buffer_percent(self.args)
             ),
             "selection_book_score_buffer_percent": (
-                self.args.selection_book_score_buffer_pct
+                _active_book_score_buffer_percent(self.args)
             ),
             "prior_book_score": selection.prior_book_score,
             "unbuffered_book_score": selection.unbuffered_book_score,
@@ -1849,10 +1863,10 @@ class _WalkForwardSelectionProvider:
                     self.args.selection_membership_hysteresis
                 ),
                 "selection_rank_buffer_percent": (
-                    self.args.selection_rank_buffer_pct
+                    _active_rank_buffer_percent(self.args)
                 ),
                 "selection_book_score_buffer_percent": (
-                    self.args.selection_book_score_buffer_pct
+                    _active_book_score_buffer_percent(self.args)
                 ),
                 "rank": allocation.get("rank") if allocation else None,
                 "preference_rank": preference_ranks.get(symbol),
@@ -1989,9 +2003,9 @@ def _final_selection_frame(
             "selection_membership_hysteresis": (
                 args.selection_membership_hysteresis
             ),
-            "selection_rank_buffer_percent": args.selection_rank_buffer_pct,
+            "selection_rank_buffer_percent": _active_rank_buffer_percent(args),
             "selection_book_score_buffer_percent": (
-                args.selection_book_score_buffer_pct
+                _active_book_score_buffer_percent(args)
             ),
             "roll_cost_in_score": args.include_roll_cost_in_score,
             "selection_cost_source": (
@@ -3128,14 +3142,10 @@ def _run_complete_selection(
             args.selection_membership_hysteresis
         ),
         "selection_rank_buffer_percent": (
-            args.selection_rank_buffer_pct
-            if args.selection_membership_hysteresis in {"rank", "rank_score"}
-            else None
+            _active_rank_buffer_percent(args)
         ),
         "selection_book_score_buffer_percent": (
-            args.selection_book_score_buffer_pct
-            if args.selection_membership_hysteresis in {"score", "rank_score"}
-            else None
+            _active_book_score_buffer_percent(args)
         ),
         "selected_book": list(selection.selected),
     }
