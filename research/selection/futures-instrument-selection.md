@@ -839,28 +839,6 @@ first available session of each calendar year or month:
 --selection-book-score-buffer-pct 2
 ```
 
-`--selection-book-score-buffer-pct` is the minimum improvement required to
-replace a feasible prior book at a scheduled review. The selector scores the
-prior book and the greedy challenger on the same review-date inputs, estimates
-the one-time cost of changing their expected average contract positions, and
-subtracts that cost from the challenger's score improvement. It switches only
-when this net improvement is strictly greater than the configured percentage
-of the absolute prior-book score:
-
-```text
-net improvement = challenger score - prior-book score - estimated switch cost (SR)
-required hurdle = abs(prior-book score) × buffer percent / 100
-switch if net improvement > required hurdle
-```
-
-For example, with the default 2% buffer and a prior-book score of `0.80`, the
-challenger must improve the score by more than `0.016 SR` after estimated
-switch cost. A 2% setting therefore does not mean a two-percentage-point
-return increase or a 2% limit on instrument weights. Set it to `0` to require
-only a positive net improvement; higher values make membership changes less
-frequent. This hurdle applies to the complete book at each scheduled review,
-not to individual instruments one at a time.
-
 `static` remains the default. A scheduled review is distinct from daily
 forecast resizing and `--rebalance-on-roll`. The selector receives the prior
 day's net equity, and every historical forecast, volatility, and correlation
@@ -876,41 +854,52 @@ reference fallback after its history stops. This check uses the stitched
 PST/IB frame when `--ib-history-db` is supplied. It is separate from
 `--max-source-gap-days`: the latter permits and masks the unknown return at
 the one-time reference-to-IB handoff, while the selection freshness limit
-controls whether that completed history can enter a later review.
+controls whether that completed history can enter a later review. The limit
+is checked only on the configured schedule; reaching the reference-to-IB
+handoff does not trigger an extra review. With yearly selection, the January
+book stays in force until the next January review.
 
-Reviews occur only on the selected static, yearly, or monthly schedule. The
-freshness limit filters candidates at those scheduled reviews; reaching the
-reference-to-IB handoff does not create an additional review. Under yearly
-selection, for example, the January book stays in force through the year, and
-the next candidate screen occurs at the next January review.
+#### Prior-book hysteresis
 
-Scheduled reviews apply two prior-book hysteresis layers. The eligibility
-exit buffer applies only to incumbents and only to soft gates. With the default
-25% setting, a 1% market-participation entry limit becomes a 1.25% incumbent
-exit limit, the instrument cost exit limit becomes 1.25 times its entry limit,
-and the 0.5-contract minimum becomes 0.4 contracts. Challengers always face
-the original entry limits. Stale or missing history, unavailable margin, and
+Scheduled reviews use two controls to reduce unnecessary membership turnover:
+an incumbent eligibility exit buffer and a complete-book score hurdle. They
+use separate parameters and operate at different stages.
+
+##### Incumbent eligibility exit buffer
+
+`--selection-eligibility-exit-buffer-pct` relaxes selected soft eligibility
+gates for instruments already in the prior book. At the default 25%, a 1%
+market-participation entry limit becomes a 1.25% incumbent exit limit, the
+instrument cost exit limit becomes 1.25 times its entry limit, and the
+0.5-contract minimum becomes 0.4 contracts. New challengers still face the
+original entry limits. Stale or missing history, unavailable margin, and
 class, subclass, family, and book-margin violations remain hard failures.
 
-The selector then rescales and scores both the complete incumbent book and the
-unbuffered greedy challenger using the same review-date equity, volatility,
-correlation, costs, weights, IDM, and limits. Expected average-position changes
-provide a deterministic one-time switch-cost estimate:
+##### Complete-book score hurdle
+
+`--selection-book-score-buffer-pct` sets how much better the greedy challenger
+must score before it replaces a feasible prior book. Both books are rescored
+using the same review-date equity and inputs. Expected average positions
+estimate the one-time cost of changing books, expressed in the same SR units
+as the scores:
 
 ```text
-switch_cost = sum(abs(new_avg_pos_i - prior_avg_pos_i)
-                  * trade_cost_per_con_i)
-switch_cost_sr = switch_cost / (prior_net_equity * target_vol)
+switch_cost_usd = sum(abs(new_avg_pos_i - prior_avg_pos_i)
+                      * trade_cost_per_con_i)
+switch_cost_sr = switch_cost_usd / (prior_net_equity * target_vol)
 net_score_gain = challenger_score - prior_score - switch_cost_sr
-score_buffer_sr = abs(prior_score) * book_score_buffer_pct / 100
+required_gain_sr = abs(prior_score) * book_score_buffer_pct / 100
+switch if net_score_gain > required_gain_sr
 ```
 
-The whole challenger book replaces the incumbent only when `net_score_gain`
-is strictly greater than `score_buffer_sr`. The default hurdle is 2%. The
-switch estimate is a membership-decision convention based on expected average
-positions, not a second cash charge: the executable cash replay still charges
-the actual contract changes produced at the review. The initial review has no
-prior book and therefore follows the ordinary greedy result.
+For example, if the prior score is `0.80`, the default 2% setting requires
+more than `0.016 SR` of improvement after estimated switch cost. This is a
+percentage of the prior score, not a return target or a weight limit. A value
+of zero requires any positive net score gain. The hurdle compares whole books;
+it does not test instrument substitutions one at a time. The switch estimate
+guides membership choice and is not an extra cash charge: the replay charges
+the actual contract changes at the review. The initial review has no prior
+book and follows the ordinary greedy result.
 
 Every complete backtest, including `--selection-rebalance static`, begins from
 the reference-cost universe. Candidate-only output remains the live executable
