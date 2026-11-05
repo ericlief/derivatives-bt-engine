@@ -871,9 +871,14 @@ use separate parameters and operate at different stages.
 gates for instruments already in the prior book. At the default 25%, a 1%
 market-participation entry limit becomes a 1.25% incumbent exit limit, the
 instrument cost exit limit becomes 1.25 times its entry limit, and the
-0.5-contract minimum becomes 0.4 contracts. New challengers still face the
-original entry limits. Stale or missing history, unavailable margin, and
-class, subclass, family, and book-margin violations remain hard failures.
+minimum viable forecast-cap position changes from 0.5 to 0.4 contracts. This
+is a minimum-size eligibility check in selection, not a maximum-contract cap:
+the selector rejects a candidate when its estimated maximum position at the
+forecast cap is below the threshold. The estimate is used in scoring and
+feasibility; the parameter does not directly clip the backtest's daily
+position. New challengers still face the original entry limits. Stale or
+missing history, unavailable margin, and class, subclass, family, and
+book-margin violations remain hard failures.
 
 ##### Complete-book score hurdle
 
