@@ -908,10 +908,10 @@ def parse_args(argv=None, *, complete_default: bool = False):
     parser.add_argument(
         "--selection-eligibility-exit-buffer-pct",
         type=float,
-        default=25.0,
+        default=0.0,
         help=(
             "Soft incumbent exit band in percent for selection cost, "
-            "and market-participation gates (default: 25). Contract "
+            "and market-participation gates (default: 0, disabled). Contract "
             "granularity and other hard gates are unchanged."
         ),
     )

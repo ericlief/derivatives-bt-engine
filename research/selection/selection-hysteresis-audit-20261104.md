@@ -18,13 +18,14 @@ count cap 20, subclass count cap 15, class weight cap 50%, subclass weight cap
 This is not a perfectly controlled one-parameter ablation. Both new runs
 resolve to a 25% incumbent soft-eligibility exit buffer (`eb25`); the legacy
 baseline does not. The rank command did not pass the flag explicitly, but the
-CLI default is 25%, the buffer is independent of membership mode, and the
-saved rank review report confirms `sel_elig_exit_buf_pct=25.0`. Disabling it
-requires `--selection-eligibility-exit-buffer-pct 0`, which would produce an
-`eb0` scenario token. Dynamic capital also feeds back into position
-granularity, margin, and later selection. Once returns diverge, later raw books
-need not match even before membership hysteresis is applied. A clean
-confirmation run should use the current code with
+CLI default at the time of the run was 25%, the buffer is independent of
+membership mode, and the saved rank review report confirms
+`sel_elig_exit_buf_pct=25.0`. The default was subsequently changed to zero so
+new runs do not enable this independent buffer implicitly. Dynamic capital
+also feeds back into position granularity, margin, and later selection. Once
+returns diverge, later raw books need not match even before membership
+hysteresis is applied. A clean confirmation run should use the current code
+with
 `--selection-membership-hysteresis none` and
 `--selection-eligibility-exit-buffer-pct 25`.
 

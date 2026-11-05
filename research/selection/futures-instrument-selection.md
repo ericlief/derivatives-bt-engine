@@ -883,8 +883,9 @@ score and transition-cost hurdle.
 ##### Incumbent eligibility exit buffer
 
 `--selection-eligibility-exit-buffer-pct` relaxes selected soft eligibility
-gates for instruments already in the prior book. At the default 25%, a 1%
-market-participation entry limit becomes a 1.25% incumbent exit limit, the
+gates for instruments already in the prior book. It defaults to zero and is
+therefore disabled unless explicitly enabled. When set to 25%, a 1%
+market-participation entry limit becomes a 1.25% incumbent exit limit, and the
 instrument cost exit limit becomes 1.25 times its entry limit. New challengers
 still face the original limits. The 0.5-contract forecast-cap minimum remains
 a hard rounding boundary for both entrants and incumbents; the exit buffer
