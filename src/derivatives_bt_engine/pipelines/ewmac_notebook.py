@@ -1280,7 +1280,7 @@ class SubsystemReferenceSettings:
     auditable continuous position. ``ref_book_count`` assigns every
     candidate the same structural weight, while ``ref_idm`` and
     ``max_weight_idm`` apply the same fixed sizing convention as the selection
-    tie rule. The resulting USD series is divided by ``ref_budget`` and
+    tie rule. The resulting USD series is divided by ``ref_cap_alloc`` and
     exposed as a normalized subsystem-reference percentage series.
     """
 
@@ -1397,7 +1397,8 @@ class EwmacNotebookView:
         frame = _date_slice(self.reference, start=start, end=end)
         return frame.select(
             "date",
-            "ref_budget",
+            "port_ann_risk_target",
+            "ref_cap_alloc",
             "ref_ann_risk",
             "ref_daily_risk",
             "ref_gross",

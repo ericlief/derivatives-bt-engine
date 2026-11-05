@@ -73,7 +73,8 @@ _REFERENCE_ACCOUNTING_COLUMNS = (
     "ref_idm",
     "max_weight_idm",
     "ref_weight_idm",
-    "ref_budget",
+    "ref_cap_alloc",
+    "port_ann_risk_target",
     "ref_ann_risk",
     "ref_daily_risk",
     "daily_dvol",
@@ -447,14 +448,14 @@ def apply_subsystem_reference_cost(
     The helper is separate from sizing so the pipeline can first measure
     turnover from the reference positions, convert that turnover to annual SR
     cost, and then apply the resulting cost without rebuilding the positions.
-    Cost percentage is normalized by ``ref_budget``, the equal-weight
-    reference budget implied by the annual risk budget and target volatility.
+    Cost percentage is normalized by ``ref_cap_alloc``, the capital-equivalent
+    allocation implied by the instrument's annual risk and target volatility.
     """
     required = {
         "ref_held_pos",
         "period_year_fraction",
         "ref_ann_risk",
-        "ref_budget",
+        "ref_cap_alloc",
         "ref_gross",
         "ref_gross_pct",
     }
@@ -469,7 +470,7 @@ def apply_subsystem_reference_cost(
             (
                 -ann_cost_sr
                 * pl.col("ref_ann_risk")
-                / pl.col("ref_budget")
+                / pl.col("ref_cap_alloc")
                 * 100.0
             ).alias("ref_ann_cost_pct")
         )
@@ -491,7 +492,7 @@ def apply_subsystem_reference_cost(
             (
                 pl.col("ref_cost_pct")
                 / 100.0
-                * pl.col("ref_budget")
+                * pl.col("ref_cap_alloc")
             ).alias("ref_cost"),
         )
         .with_columns(
@@ -503,7 +504,7 @@ def apply_subsystem_reference_cost(
         .with_columns(
             (
                 pl.col("ref_net")
-                / pl.col("ref_budget")
+                / pl.col("ref_cap_alloc")
                 * 100.0
             ).alias("ref_net_pct"),
         )
@@ -564,7 +565,7 @@ def build_subsystem_reference_return_curve(
         with legacy ``point_vol`` accepted for compact Phase 2 frames.
     capital
         Reference account capital in USD. This supplies a reproducible
-        position scale. Percentages are normalized by ``ref_budget``,
+        position scale. Percentages are normalized by ``ref_cap_alloc``,
         which is implied by the instrument risk budget and target volatility.
     target_vol
         Annual portfolio volatility target as a decimal fraction.
@@ -663,7 +664,7 @@ def build_subsystem_reference_return_curve(
     annual_risk_budget_usd = (
         capital * target_vol * ref_weight_idm
     )
-    ref_budget_usd = annual_risk_budget_usd / target_vol
+    ref_cap_alloc_usd = annual_risk_budget_usd / target_vol
     daily_risk_budget_usd = annual_risk_budget_usd / annualization_sqrt
     reference = (
         frame.sort("date")
@@ -684,9 +685,10 @@ def build_subsystem_reference_return_curve(
             pl.lit(reference_idm).alias("ref_idm"),
             pl.lit(max_weight_idm).alias("max_weight_idm"),
             pl.lit(ref_weight_idm).alias("ref_weight_idm"),
+            pl.lit(capital * target_vol).alias("port_ann_risk_target"),
             pl.lit(annual_risk_budget_usd).alias("ref_ann_risk"),
-            pl.lit(ref_budget_usd).alias(
-                "ref_budget"
+            pl.lit(ref_cap_alloc_usd).alias(
+                "ref_cap_alloc"
             ),
             pl.lit(daily_risk_budget_usd).alias("ref_daily_risk"),
             pl.when(pl.col("fx_valid"))
@@ -730,7 +732,7 @@ def build_subsystem_reference_return_curve(
         .with_columns(
             (
                 pl.col("ref_gross")
-                / pl.col("ref_budget")
+                / pl.col("ref_cap_alloc")
                 * 100.0
             ).alias("ref_gross_pct"),
         )

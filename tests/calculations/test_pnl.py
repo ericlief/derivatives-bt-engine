@@ -57,8 +57,11 @@ def test_subsystem_reference_pct_uses_equal_weight_risk_budget():
         "ref_daily_risk"
     ).to_list() == pytest.approx([5.0] * 3)
     assert result.get_column(
-        "ref_budget"
+        "ref_cap_alloc"
     ).to_list() == pytest.approx([500.0] * 3)
+    assert result.get_column(
+        "port_ann_risk_target"
+    ).to_list() == pytest.approx([160.0] * 3)
     assert result.get_column(
         "daily_dvol"
     ).to_list() == pytest.approx([40.0] * 3)
