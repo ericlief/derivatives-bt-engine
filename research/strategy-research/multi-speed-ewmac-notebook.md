@@ -159,6 +159,7 @@ gold = build_stitched_ewmac_notebook_view(
     ib,
     symbol="GC",
     signal_symbol="GC",
+    cache_root="/path/to/cache/futures",
     reference_settings=SubsystemReferenceSettings(
         capital=75_000,
         target_vol=0.20,
@@ -206,6 +207,7 @@ mgc = build_stitched_ewmac_notebook_view(
     ib,
     symbol="MGC",
     signal_symbol="GC",
+    cache_root="/path/to/cache/futures",
     reference_settings=SubsystemReferenceSettings(
         capital=75_000,
         target_vol=0.20,
@@ -230,14 +232,15 @@ rows by contract and request settings, and ``raw.fetch_log`` records coverage
 and failures. No adjusted, continuous, or forecast values are written there.
 
 The completed reference-to-Globex-to-IB history is cached as a versioned
-Parquet bundle under ``.cache/futures/stitched``. The default call reads that
-bundle when available. To rebuild the stitched view and update current IB raw
-bars, use:
+Parquet bundle under ``<cache_root>/stitched``. ``cache_root`` is required;
+the helper does not choose a project-local cache directory. To rebuild the
+stitched view and update current IB raw bars, use:
 
 ```python
 mgc = build_stitched_ewmac_notebook_view(
     ib,
     symbol="MGC",
+    cache_root="/path/to/cache/futures",
     reference_settings=reference_settings,
     use_cache=False,
     save_cache=True,

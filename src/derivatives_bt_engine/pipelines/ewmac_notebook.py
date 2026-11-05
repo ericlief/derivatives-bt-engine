@@ -2279,6 +2279,7 @@ def build_stitched_ewmac_notebook_view(
     *,
     symbol: str,
     reference_settings: SubsystemReferenceSettings,
+    cache_root: Path | str,
     signal_symbol: str | None = None,
     as_of: date | None = None,
     start: date | datetime | str | None = None,
@@ -2323,6 +2324,9 @@ def build_stitched_ewmac_notebook_view(
         multiplier, cash sizing, and view label.
     reference_settings
         Equal-weight subsystem reference sizing assumptions.
+    cache_root
+        Explicit root for cached PySystemTrade, Globex, and stitched histories.
+        No project-local cache path is selected implicitly.
     signal_symbol
         IB ticker used to download the newest signal history. Defaults to the
         mapped signal ticker for ``symbol``. For example, ``MGC`` can use
@@ -2405,6 +2409,7 @@ def build_stitched_ewmac_notebook_view(
         globex_db_path=globex_db_path,
         mapping_path=broker_mapping_path,
         history_db_path=ib_history_db_path,
+        cache_root=cache_root,
         use_cache=use_cache,
         save_cache=save_cache,
         update_history=update_ib_history,
