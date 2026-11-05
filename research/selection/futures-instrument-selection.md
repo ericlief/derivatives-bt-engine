@@ -839,6 +839,28 @@ first available session of each calendar year or month:
 --selection-book-score-buffer-pct 2
 ```
 
+`--selection-book-score-buffer-pct` is the minimum improvement required to
+replace a feasible prior book at a scheduled review. The selector scores the
+prior book and the greedy challenger on the same review-date inputs, estimates
+the one-time cost of changing their expected average contract positions, and
+subtracts that cost from the challenger's score improvement. It switches only
+when this net improvement is strictly greater than the configured percentage
+of the absolute prior-book score:
+
+```text
+net improvement = challenger score - prior-book score - estimated switch cost (SR)
+required hurdle = abs(prior-book score) × buffer percent / 100
+switch if net improvement > required hurdle
+```
+
+For example, with the default 2% buffer and a prior-book score of `0.80`, the
+challenger must improve the score by more than `0.016 SR` after estimated
+switch cost. A 2% setting therefore does not mean a two-percentage-point
+return increase or a 2% limit on instrument weights. Set it to `0` to require
+only a positive net improvement; higher values make membership changes less
+frequent. This hurdle applies to the complete book at each scheduled review,
+not to individual instruments one at a time.
+
 `static` remains the default. A scheduled review is distinct from daily
 forecast resizing and `--rebalance-on-roll`. The selector receives the prior
 day's net equity, and every historical forecast, volatility, and correlation
