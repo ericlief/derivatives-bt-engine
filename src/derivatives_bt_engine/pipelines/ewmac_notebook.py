@@ -1730,7 +1730,7 @@ class EwmacNotebookView:
             ["vol_scalar", "ref_avg_pos", "ref_tgt_pos"],
             title="Equal-weight reference positions",
             ylabel="Continuous contracts",
-        )
+        ) * hv.HLine(0.0).opts(color="black", line_width=1)
         normalized_plot = line_panel(
             reference,
             ["comb_fcst", "ref_norm_pos"],
