@@ -54,38 +54,41 @@ created by combining score hysteresis with 25% eligibility hysteresis.
 
 The history is divided into five non-overlapping ten-year windows ending at the
 start of 2023, followed by the 2023 through 2026-10-23 remainder. This avoids
-comparing long middle regimes with a short recent segment. `Avg ann return` is
-the arithmetic mean daily net return multiplied by 256. CAGR is the compounded
-geometric return. Sharpe equals average annualized return divided by annualized
-volatility. Drawdown is measured on net equity.
+comparing long middle regimes with a short recent segment. `Avg book n` is the
+mean selected instrument count across annual reviews in the window. `Avg YoY J`
+is mean Jaccard similarity between adjacent annual books whose reviews both
+fall inside the window. `Avg ann return` is the arithmetic mean daily net
+return multiplied by 256. CAGR is the compounded geometric return. Sharpe
+equals average annualized return divided by annualized volatility. Drawdown is
+measured on net equity.
 
 Ending net equity remains path-dependent and is included to show the inherited
 capital state; use average return, CAGR, and Sharpe for within-window performance
 comparisons.
 
-| Window | Run | Avg ann return | CAGR | Ann vol | Sharpe | Max drawdown | Ending net equity |
-|---|---|---:|---:|---:|---:|---:|---:|
-| 1973-1982 | No hysteresis | 34.42% | 38.04% | 18.48% | 1.862 | -19.75% | $1.88M |
-| 1973-1982 | Score-2 | 32.78% | 36.03% | 17.61% | 1.861 | -19.70% | $1.62M |
-| 1973-1982 | Rank-15 | 34.42% | 38.04% | 18.48% | 1.862 | -19.75% | $1.88M |
-| 1983-1992 | No hysteresis | 13.25% | 12.48% | 17.33% | 0.765 | -21.73% | $6.09M |
-| 1983-1992 | Score-2 | 13.44% | 12.75% | 17.00% | 0.791 | -25.49% | $5.39M |
-| 1983-1992 | Rank-15 | 13.25% | 12.48% | 17.33% | 0.765 | -21.73% | $6.09M |
-| 1993-2002 | No hysteresis | 18.85% | 19.09% | 17.69% | 1.065 | -25.91% | $34.85M |
-| 1993-2002 | Score-2 | 18.88% | 18.89% | 18.67% | 1.011 | -32.28% | $30.34M |
-| 1993-2002 | Rank-15 | 18.85% | 19.09% | 17.69% | 1.065 | -25.91% | $34.85M |
-| 2003-2012 | No hysteresis | 15.59% | 14.81% | 20.03% | 0.778 | -25.35% | $138.58M |
-| 2003-2012 | Score-2 | 13.39% | 12.34% | 19.74% | 0.678 | -25.63% | $97.10M |
-| 2003-2012 | Rank-15 | 15.59% | 14.81% | 20.03% | 0.778 | -25.35% | $138.58M |
-| 2013-2022 | No hysteresis | 8.73% | 8.29% | 14.29% | 0.611 | -33.51% | $307.14M |
-| 2013-2022 | Score-2 | 7.07% | 6.45% | 14.19% | 0.498 | -34.13% | $181.43M |
-| 2013-2022 | Rank-15 | 8.73% | 8.29% | 14.29% | 0.611 | -33.51% | $307.14M |
-| 2023-2026-10-23 | No hysteresis | -1.77% | -2.81% | 10.96% | -0.162 | -26.31% | $275.53M |
-| 2023-2026-10-23 | Score-2 | -2.38% | -3.54% | 11.13% | -0.213 | -29.10% | $158.20M |
-| 2023-2026-10-23 | Rank-15 | -1.77% | -2.81% | 10.96% | -0.162 | -26.31% | $275.53M |
-| Full history | No hysteresis | 16.40% | 16.48% | 17.21% | 0.953 | -39.56% | $275.53M |
-| Full history | Score-2 | 15.38% | 15.29% | 17.10% | 0.899 | -42.73% | $158.20M |
-| Full history | Rank-15 | 16.40% | 16.48% | 17.21% | 0.953 | -39.56% | $275.53M |
+| Window | Run | Avg book n | Avg YoY J | Avg ann return | CAGR | Ann vol | Sharpe | Max drawdown | Ending net equity |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1973-1982 | No hysteresis | 12.70 | 75.24% | 34.42% | 38.04% | 18.48% | 1.862 | -19.75% | $1.88M |
+| 1973-1982 | Score-2 | 10.80 | 86.90% | 32.78% | 36.03% | 17.61% | 1.861 | -19.70% | $1.62M |
+| 1973-1982 | Rank-15 | 12.70 | 75.24% | 34.42% | 38.04% | 18.48% | 1.862 | -19.75% | $1.88M |
+| 1983-1992 | No hysteresis | 23.00 | 84.84% | 13.25% | 12.48% | 17.33% | 0.765 | -21.73% | $6.09M |
+| 1983-1992 | Score-2 | 21.00 | 87.51% | 13.44% | 12.75% | 17.00% | 0.791 | -25.49% | $5.39M |
+| 1983-1992 | Rank-15 | 23.00 | 84.84% | 13.25% | 12.48% | 17.33% | 0.765 | -21.73% | $6.09M |
+| 1993-2002 | No hysteresis | 28.70 | 81.58% | 18.85% | 19.09% | 17.69% | 1.065 | -25.91% | $34.85M |
+| 1993-2002 | Score-2 | 27.50 | 81.16% | 18.88% | 18.89% | 18.67% | 1.011 | -32.28% | $30.34M |
+| 1993-2002 | Rank-15 | 28.70 | 81.58% | 18.85% | 19.09% | 17.69% | 1.065 | -25.91% | $34.85M |
+| 2003-2012 | No hysteresis | 45.90 | 79.79% | 15.59% | 14.81% | 20.03% | 0.778 | -25.35% | $138.58M |
+| 2003-2012 | Score-2 | 46.90 | 82.36% | 13.39% | 12.34% | 19.74% | 0.678 | -25.63% | $97.10M |
+| 2003-2012 | Rank-15 | 45.90 | 79.79% | 15.59% | 14.81% | 20.03% | 0.778 | -25.35% | $138.58M |
+| 2013-2022 | No hysteresis | 53.60 | 69.10% | 8.73% | 8.29% | 14.29% | 0.611 | -33.51% | $307.14M |
+| 2013-2022 | Score-2 | 58.60 | 79.53% | 7.07% | 6.45% | 14.19% | 0.498 | -34.13% | $181.43M |
+| 2013-2022 | Rank-15 | 53.60 | 69.10% | 8.73% | 8.29% | 14.29% | 0.611 | -33.51% | $307.14M |
+| 2023-2026-10-23 | No hysteresis | 59.75 | 69.73% | -1.77% | -2.81% | 10.96% | -0.162 | -26.31% | $275.53M |
+| 2023-2026-10-23 | Score-2 | 65.25 | 68.40% | -2.38% | -3.54% | 11.13% | -0.213 | -29.10% | $158.20M |
+| 2023-2026-10-23 | Rank-15 | 59.75 | 69.73% | -1.77% | -2.81% | 10.96% | -0.162 | -26.31% | $275.53M |
+| Full history | No hysteresis | 34.78 | 78.25% | 16.40% | 16.48% | 17.21% | 0.953 | -39.56% | $275.53M |
+| Full history | Score-2 | 35.35 | 82.76% | 15.38% | 15.29% | 17.10% | 0.899 | -42.73% | $158.20M |
+| Full history | Rank-15 | 34.78 | 78.25% | 16.40% | 16.48% | 17.21% | 0.953 | -39.56% | $275.53M |
 
 Score-2 is slightly better on average return, CAGR, and Sharpe in 1983-1992,
 but its drawdown is worse. It is approximately tied on average return in
