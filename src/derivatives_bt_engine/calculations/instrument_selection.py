@@ -159,12 +159,18 @@ class GreedySelectionConfig:
     for comparison. These are additive screens: they deliberately do not
     assume cross-product SPAN offsets, but remain estimates because IB's
     one-lot margin change depends on the account's positions at snapshot time.
-    ``eligibility_exit_buffer_percent`` relaxes only the minimum-position and
-    market-participation gates for symbols already in the prior book; the
-    pipeline applies the same multiplier to their cost exit gate.
+    ``eligibility_exit_buffer_percent`` relaxes the market-participation gate
+    for symbols already in the prior book; the pipeline applies the same
+    multiplier to their cost exit gate. The half-contract granularity floor
+    remains hard because a smaller forecast-cap position cannot reliably
+    express one rounded contract.
+    ``membership_hysteresis`` selects no membership buffer, the whole-book
+    score hurdle, an index-style rank band, or the rank band followed by the
+    score hurdle. ``rank_buffer_percent`` scales the symmetric entry and exit
+    rank band from the unbuffered target book count.
     ``book_score_buffer_percent`` is the additional prior-score hurdle a
     challenger must clear after its expected one-time switch cost is converted
-    to SR units. Both settings are inert when no prior book is supplied.
+    to SR units. Membership controls are inert when no prior book is supplied.
     """
 
     capital: float = 100_000.0
@@ -193,6 +199,8 @@ class GreedySelectionConfig:
     max_book_margin_pct: float | None = None
     include_roll_cost_in_score: bool = False
     eligibility_exit_buffer_percent: float = 0.0
+    membership_hysteresis: str = "score"
+    rank_buffer_percent: float = 15.0
     book_score_buffer_percent: float = 0.0
 
     def __post_init__(self) -> None:
@@ -223,6 +231,17 @@ class GreedySelectionConfig:
             raise ValueError(
                 "eligibility_exit_buffer_percent must be in [0, 100]"
             )
+        if self.membership_hysteresis not in {
+            "none",
+            "rank",
+            "score",
+            "rank_score",
+        }:
+            raise ValueError(
+                "membership_hysteresis must be none, rank, score, or rank_score"
+            )
+        if not 0 <= self.rank_buffer_percent <= 100:
+            raise ValueError("rank_buffer_percent must be in [0, 100]")
         if not 0 <= self.book_score_buffer_percent <= 100:
             raise ValueError("book_score_buffer_percent must be in [0, 100]")
         if self.tie_reference_book_count <= 0:
@@ -493,11 +512,11 @@ class PortfolioScore:
 class GreedySelectionResult:
     """Return the accepted book plus construction and switch diagnostics.
 
-    The trial rows retain the unconstrained greedy construction path. When a
-    prior book is supplied, the final selected book can instead remain the
-    incumbent after transition cost and the configured score hurdle are
-    applied. The optional switch fields make that final decision reproducible
-    without changing first-review or static-selection behavior.
+    The trial rows retain the raw greedy construction path. When a prior book
+    is supplied, an index-style rank band and/or the transition-cost score
+    hurdle can alter the final membership. The optional rank and switch fields
+    make that decision reproducible without changing first-review or static
+    selection behavior.
     """
 
     selected: tuple[str, ...]
@@ -505,9 +524,19 @@ class GreedySelectionResult:
     trials: tuple[dict[str, object], ...]
     trial_allocations: tuple[dict[str, object], ...]
     unbuffered_selected: tuple[str, ...] = ()
+    ranked_symbols: tuple[str, ...] = ()
+    preference_ranks: dict[str, int] | None = None
+    rank_buffered_selected: tuple[str, ...] = ()
+    hysteresis_candidate_selected: tuple[str, ...] = ()
     prior_selected: tuple[str, ...] = ()
     prior_book_score: float | None = None
     unbuffered_book_score: float | None = None
+    rank_buffered_book_score: float | None = None
+    hysteresis_candidate_book_score: float | None = None
+    rank_buffer_count: int | None = None
+    rank_entry_cutoff: int | None = None
+    rank_exit_cutoff: int | None = None
+    rank_buffer_reason: str = ""
     gross_score_gain: float | None = None
     switch_cost_usd: float | None = None
     switch_cost_sr: float | None = None
@@ -922,7 +951,11 @@ class GreedyInstrumentSelector:
                 1.0 + self.config.eligibility_exit_buffer_percent / 100.0
                 if is_incumbent else 1.0
             )
-            min_max_position = self.config.min_max_position / exit_multiplier
+            # Contract granularity is a physical rounding boundary. Unlike
+            # cost and participation, it cannot receive a softer incumbent
+            # exit threshold without retaining an instrument that may never
+            # express one contract even at the forecast cap.
+            min_max_position = self.config.min_max_position
             max_market_volume_percent = (
                 self.config.max_pct_market_volume * exit_multiplier
             )
@@ -1378,7 +1411,7 @@ class GreedyInstrumentSelector:
             prior_selected=prior_selected_tuple,
             unbuffered_book_score=current.score,
         )
-        return self._apply_book_hysteresis(
+        return self._apply_membership_hysteresis(
             unbuffered,
             candidates=candidates,
             full_symbols=full_symbols,
@@ -1386,7 +1419,162 @@ class GreedyInstrumentSelector:
             incumbent_symbols=incumbent_symbols,
         )
 
-    def _apply_book_hysteresis(
+    def _extended_greedy_ranking(
+        self,
+        selected: tuple[str, ...],
+        *,
+        maximum_count: int,
+        candidates: dict[str, SelectionCandidate],
+        full_symbols: list[str],
+        correlation: np.ndarray,
+        incumbent_symbols: frozenset[str],
+    ) -> tuple[str, ...]:
+        """Continue the accepted greedy path to form a preference ranking.
+
+        The ordinary selector stops when the best feasible addition falls
+        below its score tolerance. Rank hysteresis also needs to know which
+        instruments sit just outside that target book. This continuation
+        ignores only the stopping tolerance; every sizing, liquidity, margin,
+        family, and hierarchy constraint remains active.
+        """
+        ranked = list(selected)
+        while len(ranked) < maximum_count:
+            selected_families = {
+                candidates[symbol].econ_family for symbol in ranked
+                if candidates[symbol].econ_family
+            }
+            remaining = [
+                symbol for symbol in full_symbols
+                if symbol not in ranked
+                and (
+                    not candidates[symbol].econ_family
+                    or candidates[symbol].econ_family not in selected_families
+                )
+            ]
+            if not remaining:
+                break
+            feasible = []
+            for symbol in remaining:
+                scored = self.score(
+                    ranked + [symbol],
+                    candidates,
+                    full_symbols,
+                    correlation,
+                    incumbent_symbols=incumbent_symbols,
+                )
+                if scored.feasible:
+                    feasible.append((symbol, scored))
+            if not feasible:
+                break
+            (winner, _), _, _, _ = self._choose_near_tie(feasible)
+            ranked.append(winner)
+        return tuple(ranked)
+
+    def _rank_buffered_book(
+        self,
+        unbuffered: GreedySelectionResult,
+        *,
+        candidates: dict[str, SelectionCandidate],
+        full_symbols: list[str],
+        correlation: np.ndarray,
+        incumbent_symbols: frozenset[str],
+    ) -> tuple[
+        tuple[str, ...],
+        PortfolioScore,
+        tuple[str, ...],
+        dict[str, int],
+        int,
+        int,
+        int,
+        str,
+    ]:
+        """Build and validate an index-style incumbent rank band.
+
+        Instruments inside the entry cutoff are mandatory. Prior members may
+        remain through the wider exit cutoff. Remaining capacity is filled in
+        greedy preference order so the target count stays equal to the raw
+        selector's count. A mixed retained/challenger book is rescored as one
+        portfolio; an infeasible combination falls back to the raw book.
+        """
+        target_count = len(unbuffered.selected)
+        band_count = math.ceil(
+            target_count * self.config.rank_buffer_percent / 100.0
+        )
+        entry_cutoff = max(0, target_count - band_count)
+        exit_cutoff = target_count + band_count
+        ranked = self._extended_greedy_ranking(
+            unbuffered.selected,
+            maximum_count=exit_cutoff,
+            candidates=candidates,
+            full_symbols=full_symbols,
+            correlation=correlation,
+            incumbent_symbols=incumbent_symbols,
+        )
+        preference_ranks = {
+            symbol: rank for rank, symbol in enumerate(ranked, start=1)
+        }
+        mandatory = {
+            symbol for symbol, rank in preference_ranks.items()
+            if rank <= entry_cutoff
+        }
+        retained = {
+            symbol for symbol in unbuffered.prior_selected
+            if preference_ranks.get(symbol, math.inf) <= exit_cutoff
+        }
+        priority = sorted(
+            ranked,
+            key=lambda symbol: (
+                0 if symbol in mandatory else 1 if symbol in retained else 2,
+                preference_ranks[symbol],
+            ),
+        )
+        chosen = set(priority[:target_count])
+        proposed = tuple(
+            symbol for symbol in ranked if symbol in chosen
+        )
+        if len(proposed) != target_count:
+            return (
+                unbuffered.selected,
+                unbuffered.final_score,
+                ranked,
+                preference_ranks,
+                band_count,
+                entry_cutoff,
+                exit_cutoff,
+                "rank_universe_too_short_fallback",
+            )
+        proposed_score = self.score(
+            list(proposed),
+            candidates,
+            full_symbols,
+            correlation,
+            incumbent_symbols=incumbent_symbols,
+        )
+        if not proposed_score.feasible or not math.isfinite(proposed_score.score):
+            return (
+                unbuffered.selected,
+                unbuffered.final_score,
+                ranked,
+                preference_ranks,
+                band_count,
+                entry_cutoff,
+                exit_cutoff,
+                "rank_book_infeasible_fallback:" + (
+                    proposed_score.reason or "unknown"
+                ),
+            )
+        return (
+            proposed,
+            proposed_score,
+            ranked,
+            preference_ranks,
+            band_count,
+            entry_cutoff,
+            exit_cutoff,
+            "rank_buffer_applied",
+        )
+
+    def _apply_membership_hysteresis(
         self,
         unbuffered: GreedySelectionResult,
         *,
@@ -1395,23 +1583,110 @@ class GreedyInstrumentSelector:
         correlation: np.ndarray,
         incumbent_symbols: frozenset[str],
     ) -> GreedySelectionResult:
-        """Retain a feasible prior book unless a switch clears both hurdles.
+        """Apply the configured rank and score membership controls.
 
-        Expected average positions from the two contemporaneously rescored
-        books provide a deterministic transition quantity. Multiplying the
-        absolute position change by the one-way contract cost yields the cash
-        switch estimate; division by annual target risk puts that estimate in
-        the same SR units as the construction score.
+        Rank hysteresis first constructs a candidate book with the same count
+        as the unbuffered selector. Score hysteresis then optionally requires
+        that candidate to pay its estimated one-time transition cost and clear
+        the configured prior-score hurdle. Eligibility buffering remains an
+        independent input to both paths.
         """
         prior_selected = unbuffered.prior_selected
         if not prior_selected:
-            return unbuffered
+            return replace(
+                unbuffered,
+                ranked_symbols=unbuffered.selected,
+                preference_ranks={
+                    symbol: rank
+                    for rank, symbol in enumerate(unbuffered.selected, start=1)
+                },
+                rank_buffered_selected=unbuffered.selected,
+                hysteresis_candidate_selected=unbuffered.selected,
+                rank_buffered_book_score=unbuffered.final_score.score,
+                hysteresis_candidate_book_score=unbuffered.final_score.score,
+                switch_reason="initial_book",
+            )
+
+        mode = self.config.membership_hysteresis
+        candidate_selected = unbuffered.selected
+        candidate_score = unbuffered.final_score
+        ranked = unbuffered.selected
+        preference_ranks = {
+            symbol: rank
+            for rank, symbol in enumerate(unbuffered.selected, start=1)
+        }
+        rank_buffered_selected = unbuffered.selected
+        rank_buffered_score = unbuffered.final_score
+        rank_buffer_count = None
+        rank_entry_cutoff = None
+        rank_exit_cutoff = None
+        rank_buffer_reason = "rank_buffer_disabled"
+        if mode in {"rank", "rank_score"}:
+            (
+                rank_buffered_selected,
+                rank_buffered_score,
+                ranked,
+                preference_ranks,
+                rank_buffer_count,
+                rank_entry_cutoff,
+                rank_exit_cutoff,
+                rank_buffer_reason,
+            ) = self._rank_buffered_book(
+                unbuffered,
+                candidates=candidates,
+                full_symbols=full_symbols,
+                correlation=correlation,
+                incumbent_symbols=incumbent_symbols,
+            )
+            candidate_selected = rank_buffered_selected
+            candidate_score = rank_buffered_score
+
+        decision_base = replace(
+            unbuffered,
+            ranked_symbols=ranked,
+            preference_ranks=preference_ranks,
+            rank_buffered_selected=rank_buffered_selected,
+            hysteresis_candidate_selected=candidate_selected,
+            rank_buffered_book_score=rank_buffered_score.score,
+            hysteresis_candidate_book_score=candidate_score.score,
+            rank_buffer_count=rank_buffer_count,
+            rank_entry_cutoff=rank_entry_cutoff,
+            rank_exit_cutoff=rank_exit_cutoff,
+            rank_buffer_reason=rank_buffer_reason,
+        )
+        return self._apply_candidate_decision(
+            decision_base,
+            candidate_selected=candidate_selected,
+            candidate_score=candidate_score,
+            candidates=candidates,
+            full_symbols=full_symbols,
+            correlation=correlation,
+            incumbent_symbols=incumbent_symbols,
+            use_score_hurdle=mode in {"score", "rank_score"},
+        )
+
+    def _apply_candidate_decision(
+        self,
+        result: GreedySelectionResult,
+        *,
+        candidate_selected: tuple[str, ...],
+        candidate_score: PortfolioScore,
+        candidates: dict[str, SelectionCandidate],
+        full_symbols: list[str],
+        correlation: np.ndarray,
+        incumbent_symbols: frozenset[str],
+        use_score_hurdle: bool,
+    ) -> GreedySelectionResult:
+        """Choose the candidate or prior book and record switch diagnostics."""
+        prior_selected = result.prior_selected
         missing = tuple(
             symbol for symbol in prior_selected if symbol not in candidates
         )
         if missing:
             return replace(
-                unbuffered,
+                result,
+                selected=candidate_selected,
+                final_score=candidate_score,
                 switch_accepted=True,
                 switch_reason=(
                     "prior_book_hard_ineligible:" + ",".join(missing)
@@ -1427,7 +1702,9 @@ class GreedyInstrumentSelector:
         )
         if not prior_score.feasible or not math.isfinite(prior_score.score):
             return replace(
-                unbuffered,
+                result,
+                selected=candidate_selected,
+                final_score=candidate_score,
                 switch_accepted=True,
                 switch_reason=(
                     "prior_book_hard_ineligible:"
@@ -1435,7 +1712,7 @@ class GreedyInstrumentSelector:
                 ),
             )
 
-        new_score = unbuffered.final_score
+        new_score = candidate_score
         prior_positions = {
             str(detail["symbol"]): float(detail["average_position"])
             for detail in prior_score.details
@@ -1456,25 +1733,22 @@ class GreedyInstrumentSelector:
             abs(prior_score.score)
             * self.config.book_score_buffer_percent
             / 100.0
+            if use_score_hurdle else None
         )
         net_score_gain = gross_score_gain - switch_cost_sr
-        same_book = set(unbuffered.selected) == set(prior_selected)
-        switch_accepted = (
-            not same_book and net_score_gain > score_buffer_sr
+        same_book = set(candidate_selected) == set(prior_selected)
+        switch_accepted = not same_book and (
+            net_score_gain > score_buffer_sr
+            if use_score_hurdle and score_buffer_sr is not None else True
         )
-        final_score = new_score if switch_accepted else prior_score
-        final_selected = (
-            unbuffered.selected if switch_accepted else prior_selected
-        )
-        return GreedySelectionResult(
+        retain_prior = use_score_hurdle and not switch_accepted
+        final_score = prior_score if retain_prior else new_score
+        final_selected = prior_selected if retain_prior else candidate_selected
+        return replace(
+            result,
             selected=final_selected,
             final_score=final_score,
-            trials=unbuffered.trials,
-            trial_allocations=unbuffered.trial_allocations,
-            unbuffered_selected=unbuffered.selected,
-            prior_selected=prior_selected,
             prior_book_score=prior_score.score,
-            unbuffered_book_score=new_score.score,
             gross_score_gain=gross_score_gain,
             switch_cost_usd=switch_cost_usd,
             switch_cost_sr=switch_cost_sr,
@@ -1485,7 +1759,14 @@ class GreedyInstrumentSelector:
                 "same_book"
                 if same_book else (
                     "net_score_gain_above_buffer"
-                    if switch_accepted else "net_score_gain_below_buffer"
+                    if use_score_hurdle and switch_accepted else (
+                        "net_score_gain_below_buffer"
+                        if use_score_hurdle else (
+                            "rank_buffer_applied"
+                            if self.config.membership_hysteresis == "rank"
+                            else "membership_hysteresis_disabled"
+                        )
+                    )
                 )
             ),
         )

@@ -836,6 +836,8 @@ first available session of each calendar year or month:
 --selection-rebalance monthly
 --selection-max-history-gap-days 31
 --selection-eligibility-exit-buffer-pct 25
+--selection-membership-hysteresis score
+--selection-rank-buffer-pct 15
 --selection-book-score-buffer-pct 2
 ```
 
@@ -861,32 +863,64 @@ book stays in force until the next January review.
 
 #### Prior-book hysteresis
 
-Scheduled reviews use two controls to reduce unnecessary membership turnover:
-an incumbent eligibility exit buffer and a complete-book score hurdle. They
-use separate parameters and operate at different stages.
+Scheduled reviews expose three compatible controls: an incumbent eligibility
+exit buffer, an index-style membership rank band, and a complete-book score
+hurdle. The eligibility band is independent. The membership mode selects
+whether rank and score controls are disabled, used separately, or composed:
+
+```text
+--selection-membership-hysteresis none
+--selection-membership-hysteresis rank
+--selection-membership-hysteresis score
+--selection-membership-hysteresis rank_score
+```
+
+`score` remains the default for compatibility with earlier scheduled runs.
+`none` always takes the raw greedy book. `rank_score` constructs the
+rank-buffered candidate first and then subjects that complete candidate to the
+score and transition-cost hurdle.
 
 ##### Incumbent eligibility exit buffer
 
 `--selection-eligibility-exit-buffer-pct` relaxes selected soft eligibility
 gates for instruments already in the prior book. At the default 25%, a 1%
 market-participation entry limit becomes a 1.25% incumbent exit limit, the
-instrument cost exit limit becomes 1.25 times its entry limit, and the
-minimum viable forecast-cap position changes from 0.5 to 0.4 contracts. This
-is a minimum-size eligibility check in selection, not a maximum-contract cap:
-the selector rejects a candidate when its estimated maximum position at the
-forecast cap is below the threshold. The estimate is used in scoring and
-feasibility; the parameter does not directly clip the backtest's daily
-position. New challengers still face the original entry limits. Stale or
-missing history, unavailable margin, and class, subclass, family, and
-book-margin violations remain hard failures.
+instrument cost exit limit becomes 1.25 times its entry limit. New challengers
+still face the original limits. The 0.5-contract forecast-cap minimum remains
+a hard rounding boundary for both entrants and incumbents; the exit buffer
+does not lower it. Stale or missing history, unavailable margin, and class,
+subclass, family, and book-margin violations are also hard failures.
+
+##### Membership rank band
+
+`rank` and `rank_score` continue the greedy marginal-addition order from the
+raw book's score stopping point through the required exit rank. This
+continuation ignores only that stopping threshold; all feasibility constraints
+remain active. If the raw target book contains `N` instruments, the symmetric
+rank band is:
+
+```text
+band = ceil(N * rank_buffer_pct / 100)
+automatic entry rank <= N - band
+incumbent retention rank <= N + band
+```
+
+With the default 15%, a 30-instrument target uses entry rank 25 and exit rank
+35, matching Carver's published index-style example. A 9-instrument target
+uses entry rank 7 and exit rank 11. Instruments
+inside the entry cutoff take priority, incumbents inside the exit cutoff may
+remain, and remaining capacity is filled in greedy rank order until the raw
+target count is restored. The mixed book is rescored against every hard limit;
+an infeasible combination falls back to the raw greedy book. A zero rank
+buffer reproduces raw membership.
 
 ##### Complete-book score hurdle
 
-`--selection-book-score-buffer-pct` sets how much better the greedy challenger
-must score before it replaces a feasible prior book. Both books are rescored
-using the same review-date equity and inputs. Expected average positions
-estimate the one-time cost of changing books, expressed in the same SR units
-as the scores:
+In `score` mode, `--selection-book-score-buffer-pct` compares the raw greedy
+book with the prior book. In `rank_score` mode it compares the rank-buffered
+book with the prior book. Both books are rescored using the same review-date
+equity and inputs. Expected average positions estimate the one-time cost of
+changing books, expressed in the same SR units as the scores:
 
 ```text
 switch_cost_usd = sum(abs(new_avg_pos_i - prior_avg_pos_i)
@@ -946,14 +980,17 @@ the overtrading control. Existing members also retain their buffered holdings
 when weights change. The cash report exposes `sel_active`, `sel_rebalanced`,
 `sel_date`, and `sel_rank`; the separate `selection_reviews` Parquet records
 review equity, candidate count, selected count, score, IDM, and membership.
-It also records the unbuffered challenger, prior and challenger scores,
-estimated `switch_cost` and `switch_cost_sr`, gross and net score gains, score
-buffer, decision, and reason. The greedy trial files remain the complete
-unbuffered challenger audit; `selection_review_final_allocations` contains the
-actual hysteresis-adjusted book used by the cash replay.
+It also records the greedy order through the exit rank, rank-buffered and
+score-tested candidate books, rank band and cutoffs, prior and candidate
+scores, estimated
+`switch_cost` and `switch_cost_sr`, gross and net score gains, score buffer,
+decision, and reason. The greedy trial files remain the complete raw
+challenger audit; `selection_review_final_allocations` contains the actual
+hysteresis-adjusted book used by the cash replay.
 The companion `selection_review_instruments` Parquet is the compact navigation
 report: it has one row per review and involved instrument, with `added`,
-`retained`, or `removed` status, active rank and weights, classification,
+`retained`, or `removed` status, active and greedy preference ranks, weights,
+classification,
 historical dollar volatility, and the cost inputs used by that review. The
 `symbol` column follows `sel_instr_n` for quick row scanning. One file covers
 the entire monthly or yearly walk-forward run; reviews do not create separate
@@ -1189,6 +1226,8 @@ futures-build-selection \
   --selection-rebalance yearly \
   --selection-max-history-gap-days 31 \
   --selection-eligibility-exit-buffer-pct 25 \
+  --selection-membership-hysteresis rank_score \
+  --selection-rank-buffer-pct 15 \
   --selection-book-score-buffer-pct 2 \
   --backtest-start-date 2024-01-01 \
   --backtest-end-date 2026-10-30 \

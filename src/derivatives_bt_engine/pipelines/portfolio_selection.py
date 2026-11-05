@@ -911,8 +911,27 @@ def parse_args(argv=None, *, complete_default: bool = False):
         default=25.0,
         help=(
             "Soft incumbent exit band in percent for selection cost, "
-            "participation, and minimum-position gates (default: 25). "
-            "New candidates still use the configured entry limits."
+            "and market-participation gates (default: 25). Contract "
+            "granularity and other hard gates are unchanged."
+        ),
+    )
+    parser.add_argument(
+        "--selection-membership-hysteresis",
+        choices=("none", "rank", "score", "rank_score"),
+        default="score",
+        help=(
+            "Scheduled-review membership policy: always take the raw book, "
+            "apply an index-style rank band, apply the score and transition-"
+            "cost hurdle, or apply rank then score (default: score)."
+        ),
+    )
+    parser.add_argument(
+        "--selection-rank-buffer-pct",
+        type=float,
+        default=15.0,
+        help=(
+            "Symmetric rank band as a percent of the raw target book count "
+            "for rank or rank_score hysteresis (default: 15)."
         ),
     )
     parser.add_argument(
@@ -997,9 +1016,15 @@ def _selection_scenario_id(
             "eb"
             f"{_number_token(args.selection_eligibility_exit_buffer_pct)}"
         )
-        tokens.append(
-            f"sb{_number_token(args.selection_book_score_buffer_pct)}"
-        )
+        tokens.append(f"mh{args.selection_membership_hysteresis}")
+        if args.selection_membership_hysteresis in {"rank", "rank_score"}:
+            tokens.append(
+                f"rb{_number_token(args.selection_rank_buffer_pct)}"
+            )
+        if args.selection_membership_hysteresis in {"score", "rank_score"}:
+            tokens.append(
+                f"sb{_number_token(args.selection_book_score_buffer_pct)}"
+            )
     if args.backtest_start_date is not None:
         tokens.append(f"from{args.backtest_start_date:%Y%m%d}")
     if args.backtest_end_date is not None:
@@ -1231,6 +1256,8 @@ def _greedy_selector(
             eligibility_exit_buffer_percent=(
                 args.selection_eligibility_exit_buffer_pct
             ),
+            membership_hysteresis=args.selection_membership_hysteresis,
+            rank_buffer_percent=args.selection_rank_buffer_pct,
             book_score_buffer_percent=args.selection_book_score_buffer_pct,
         ),
         weight_policy=weight_policy,
@@ -1526,6 +1553,9 @@ class _WalkForwardSelectionProvider:
                 **trial,
                 "selection_date": review_date,
                 "selection_equity_usd": prior_net_equity,
+                "preference_rank": (selection.preference_ranks or {}).get(
+                    str(trial["candidate"])
+                ),
                 "maximum_instruments_per_class": self.args.max_instr_per_class,
                 "maximum_instruments_per_subclass": (
                     self.args.max_instr_per_subclass
@@ -1539,11 +1569,25 @@ class _WalkForwardSelectionProvider:
                 "selection_eligibility_exit_buffer_percent": (
                     self.args.selection_eligibility_exit_buffer_pct
                 ),
+                "selection_membership_hysteresis": (
+                    self.args.selection_membership_hysteresis
+                ),
+                "selection_rank_buffer_percent": (
+                    self.args.selection_rank_buffer_pct
+                ),
                 "selection_book_score_buffer_percent": (
                     self.args.selection_book_score_buffer_pct
                 ),
                 "prior_book_score": selection.prior_book_score,
                 "unbuffered_book_score": selection.unbuffered_book_score,
+                "rank_buffered_book_score": selection.rank_buffered_book_score,
+                "hysteresis_candidate_book_score": (
+                    selection.hysteresis_candidate_book_score
+                ),
+                "rank_buffer_count": selection.rank_buffer_count,
+                "rank_entry_cutoff": selection.rank_entry_cutoff,
+                "rank_exit_cutoff": selection.rank_exit_cutoff,
+                "rank_buffer_reason": selection.rank_buffer_reason,
                 "gross_score_gain": selection.gross_score_gain,
                 "switch_cost_usd": selection.switch_cost_usd,
                 "switch_cost_sr": selection.switch_cost_sr,
@@ -1559,6 +1603,9 @@ class _WalkForwardSelectionProvider:
                 **allocation_row,
                 "selection_date": review_date,
                 "selection_equity_usd": prior_net_equity,
+                "preference_rank": (selection.preference_ranks or {}).get(
+                    str(allocation_row["book_symbol"])
+                ),
                 "maximum_instruments_per_class": self.args.max_instr_per_class,
                 "maximum_instruments_per_subclass": (
                     self.args.max_instr_per_subclass
@@ -1571,6 +1618,12 @@ class _WalkForwardSelectionProvider:
                 ),
                 "selection_eligibility_exit_buffer_percent": (
                     self.args.selection_eligibility_exit_buffer_pct
+                ),
+                "selection_membership_hysteresis": (
+                    self.args.selection_membership_hysteresis
+                ),
+                "selection_rank_buffer_percent": (
+                    self.args.selection_rank_buffer_pct
                 ),
                 "selection_book_score_buffer_percent": (
                     self.args.selection_book_score_buffer_pct
@@ -1587,6 +1640,9 @@ class _WalkForwardSelectionProvider:
                 **allocation_row,
                 "selection_date": review_date,
                 "selection_equity_usd": prior_net_equity,
+                "preference_rank": (selection.preference_ranks or {}).get(
+                    str(allocation_row["book_symbol"])
+                ),
                 "maximum_instruments_per_class": self.args.max_instr_per_class,
                 "maximum_instruments_per_subclass": (
                     self.args.max_instr_per_subclass
@@ -1600,11 +1656,25 @@ class _WalkForwardSelectionProvider:
                 "selection_eligibility_exit_buffer_percent": (
                     self.args.selection_eligibility_exit_buffer_pct
                 ),
+                "selection_membership_hysteresis": (
+                    self.args.selection_membership_hysteresis
+                ),
+                "selection_rank_buffer_percent": (
+                    self.args.selection_rank_buffer_pct
+                ),
                 "selection_book_score_buffer_percent": (
                     self.args.selection_book_score_buffer_pct
                 ),
                 "prior_book_score": selection.prior_book_score,
                 "unbuffered_book_score": selection.unbuffered_book_score,
+                "rank_buffered_book_score": selection.rank_buffered_book_score,
+                "hysteresis_candidate_book_score": (
+                    selection.hysteresis_candidate_book_score
+                ),
+                "rank_buffer_count": selection.rank_buffer_count,
+                "rank_entry_cutoff": selection.rank_entry_cutoff,
+                "rank_exit_cutoff": selection.rank_exit_cutoff,
+                "rank_buffer_reason": selection.rank_buffer_reason,
                 "gross_score_gain": selection.gross_score_gain,
                 "switch_cost_usd": selection.switch_cost_usd,
                 "switch_cost_sr": selection.switch_cost_sr,
@@ -1615,7 +1685,7 @@ class _WalkForwardSelectionProvider:
             }
             for allocation_row in selector._trial_allocation_rows(
                 final_iteration,
-                "book_hysteresis",
+                "membership_hysteresis",
                 selection.final_score,
                 accepted=True,
             )
@@ -1657,26 +1727,34 @@ class _WalkForwardSelectionProvider:
         self.latest_equity = prior_net_equity
         selected_symbols = set(selection.selected)
         prior_selected_symbols = set(self.prior_selected)
+        preference_ranks = selection.preference_ranks or {}
         added_symbols = selected_symbols.difference(prior_selected_symbols)
         removed_symbols = prior_selected_symbols.difference(selected_symbols)
         logger.info(
-            "walk_forward_selection hysteresis date=%s prior_book=%s "
-            "challenger_book=%s accepted_book=%s prior_score=%s "
-            "challenger_score=%s gross_score_gain=%s switch_cost_usd=%s "
+            "walk_forward_selection hysteresis date=%s mode=%s "
+            "prior_book=%s raw_book=%s rank_book=%s candidate_book=%s "
+            "accepted_book=%s prior_score=%s candidate_score=%s "
+            "rank_entry=%s rank_exit=%s gross_score_gain=%s switch_cost_usd=%s "
             "switch_cost_sr=%s score_buffer_sr=%s net_score_gain=%s "
-            "switch_accepted=%s reason=%s",
+            "switch_accepted=%s rank_reason=%s reason=%s",
             review_date,
+            self.args.selection_membership_hysteresis,
             ",".join(selection.prior_selected),
             ",".join(selection.unbuffered_selected),
+            ",".join(selection.rank_buffered_selected),
+            ",".join(selection.hysteresis_candidate_selected),
             ",".join(selection.selected),
             selection.prior_book_score,
-            selection.unbuffered_book_score,
+            selection.hysteresis_candidate_book_score,
+            selection.rank_entry_cutoff,
+            selection.rank_exit_cutoff,
             selection.gross_score_gain,
             selection.switch_cost_usd,
             selection.switch_cost_sr,
             selection.score_buffer_sr,
             selection.net_score_gain,
             selection.switch_accepted,
+            selection.rank_buffer_reason,
             selection.switch_reason,
         )
         self.review_rows.append({
@@ -1690,16 +1768,37 @@ class _WalkForwardSelectionProvider:
             "selection_unbuffered_symbols": ",".join(
                 selection.unbuffered_selected
             ),
+            "selection_ranked_symbols": ",".join(selection.ranked_symbols),
+            "selection_rank_buffered_symbols": ",".join(
+                selection.rank_buffered_selected
+            ),
+            "selection_hysteresis_candidate_symbols": ",".join(
+                selection.hysteresis_candidate_selected
+            ),
             "selection_added_symbols": ",".join(sorted(added_symbols)),
             "selection_removed_symbols": ",".join(sorted(removed_symbols)),
             "selection_eligibility_exit_buffer_percent": (
                 self.args.selection_eligibility_exit_buffer_pct
+            ),
+            "selection_membership_hysteresis": (
+                self.args.selection_membership_hysteresis
+            ),
+            "selection_rank_buffer_percent": (
+                self.args.selection_rank_buffer_pct
             ),
             "selection_book_score_buffer_percent": (
                 self.args.selection_book_score_buffer_pct
             ),
             "prior_book_score": selection.prior_book_score,
             "unbuffered_book_score": selection.unbuffered_book_score,
+            "rank_buffered_book_score": selection.rank_buffered_book_score,
+            "hysteresis_candidate_book_score": (
+                selection.hysteresis_candidate_book_score
+            ),
+            "rank_buffer_count": selection.rank_buffer_count,
+            "rank_entry_cutoff": selection.rank_entry_cutoff,
+            "rank_exit_cutoff": selection.rank_exit_cutoff,
+            "rank_buffer_reason": selection.rank_buffer_reason,
             "gross_score_gain": selection.gross_score_gain,
             "switch_cost_usd": selection.switch_cost_usd,
             "switch_cost_sr": selection.switch_cost_sr,
@@ -1743,10 +1842,17 @@ class _WalkForwardSelectionProvider:
                 "selection_eligibility_exit_buffer_percent": (
                     self.args.selection_eligibility_exit_buffer_pct
                 ),
+                "selection_membership_hysteresis": (
+                    self.args.selection_membership_hysteresis
+                ),
+                "selection_rank_buffer_percent": (
+                    self.args.selection_rank_buffer_pct
+                ),
                 "selection_book_score_buffer_percent": (
                     self.args.selection_book_score_buffer_pct
                 ),
                 "rank": allocation.get("rank") if allocation else None,
+                "preference_rank": preference_ranks.get(symbol),
                 "symbol": symbol,
                 "hist_instr_code": source.get("hist_instr_code"),
                 "pst_instr_code": source.get("pst_instr_code"),
@@ -1877,6 +1983,10 @@ def _final_selection_frame(
             "selection_eligibility_exit_buffer_percent": (
                 args.selection_eligibility_exit_buffer_pct
             ),
+            "selection_membership_hysteresis": (
+                args.selection_membership_hysteresis
+            ),
+            "selection_rank_buffer_percent": args.selection_rank_buffer_pct,
             "selection_book_score_buffer_percent": (
                 args.selection_book_score_buffer_pct
             ),
@@ -3011,8 +3121,18 @@ def _run_complete_selection(
         "selection_eligibility_exit_buffer_percent": (
             args.selection_eligibility_exit_buffer_pct
         ),
+        "selection_membership_hysteresis": (
+            args.selection_membership_hysteresis
+        ),
+        "selection_rank_buffer_percent": (
+            args.selection_rank_buffer_pct
+            if args.selection_membership_hysteresis in {"rank", "rank_score"}
+            else None
+        ),
         "selection_book_score_buffer_percent": (
             args.selection_book_score_buffer_pct
+            if args.selection_membership_hysteresis in {"score", "rank_score"}
+            else None
         ),
         "selected_book": list(selection.selected),
     }
@@ -3703,6 +3823,8 @@ def run(
         raise ValueError("selection max history gap days must be nonnegative")
     if not 0 <= args.selection_eligibility_exit_buffer_pct <= 100:
         raise ValueError("selection eligibility exit buffer must be in [0, 100]")
+    if not 0 <= args.selection_rank_buffer_pct <= 100:
+        raise ValueError("selection rank buffer must be in [0, 100]")
     if not 0 <= args.selection_book_score_buffer_pct <= 100:
         raise ValueError("selection book score buffer must be in [0, 100]")
     if args.ib_prior_years <= 0:
