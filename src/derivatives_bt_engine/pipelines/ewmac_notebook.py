@@ -878,15 +878,17 @@ def plot_selection_rebalance_weights(
         value=years[-1],
     )
     review_selector = widgets.Dropdown(description="Review")
-    plot_output = widgets.Output(
-        layout=widgets.Layout(
-            width="100%",
-            height="auto",
-            max_height="none",
-            overflow="visible",
-            overflow_y="visible",
+    plot_outputs = [
+        widgets.Output(
+            layout=widgets.Layout(
+                width="100%",
+                height="auto",
+                max_height="none",
+                overflow="visible",
+            )
         )
-    )
+        for _ in range(3)
+    ]
 
     def configure_review_selector(year: int) -> None:
         """Expose exact review dates only when the chosen year needs them."""
@@ -1132,22 +1134,18 @@ def plot_selection_rebalance_weights(
                 ("Members", "@instruments"),
             ],
         )
-        # The stacked Bokeh plots have fixed pixel heights. Give the widget
-        # output enough room for all three so notebook frontends don't add a
-        # nested vertical scrollbar around the weights dashboard.
-        plot_output.layout.height = (
-            f"{height + class_height + subclass_height + 120}px"
-        )
-        return (instrument_bars + class_bars + subclass_bars).cols(1)
+        return instrument_bars, class_bars, subclass_bars
 
     def update_plot(change=None) -> None:
         """Redraw the exact review selected by the widget controls."""
         review_date = review_selector.value
         if review_date is None:
             return
-        with plot_output:
-            plot_output.clear_output(wait=True)
-            display(plot_review(review_date))
+        plots = plot_review(review_date)
+        for output, plot in zip(plot_outputs, plots, strict=True):
+            with output:
+                output.clear_output(wait=True)
+                display(plot)
 
     def update_year(change) -> None:
         """Refresh the available review dates after a year change."""
@@ -1160,11 +1158,12 @@ def plot_selection_rebalance_weights(
     update_plot()
     controls = widgets.HBox([year_selector, review_selector])
     return widgets.VBox(
-        [controls, plot_output],
+        [controls, *plot_outputs],
         layout=widgets.Layout(
             width="100%",
+            height="auto",
             overflow="visible",
-            overflow_y="visible",
+            align_items="stretch",
         ),
     )
 
