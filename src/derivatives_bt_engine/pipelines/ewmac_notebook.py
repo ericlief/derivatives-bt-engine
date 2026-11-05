@@ -2423,6 +2423,7 @@ def build_stitched_ewmac_notebook_view(
         raise RuntimeError("stitched history provider did not retain IB audit rows")
     pooled = load_pooled_ewmac_rules(
         db_path=reference_db_path,
+        cache_root=cache_root,
         pooling_mapping_path=pooling_mapping_path,
         rules=rule_tuple,
         target_abs_forecast=config.target_abs_forecast,

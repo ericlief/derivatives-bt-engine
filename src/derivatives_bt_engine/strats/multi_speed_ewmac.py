@@ -28,6 +28,7 @@ from derivatives_bt_engine.data.pysystemtrade_pooling import (
 )
 from derivatives_bt_engine.data.fx_history import align_fx_to_history
 from derivatives_bt_engine.data.futures_history import (
+    DEFAULT_FUTURES_CACHE_ROOT,
     DEFAULT_PYSYSTEMTRADE_DB_PATH,
     FuturesHistory,
     PysystemtradeHistoryProvider,
@@ -84,6 +85,7 @@ def load_pooled_ewmac_rule(
     rule: EwmacRule,
     *,
     db_path: Path | str = DEFAULT_PYSYSTEMTRADE_DB_PATH,
+    cache_root: Path | str = DEFAULT_FUTURES_CACHE_ROOT,
     pooling_mapping_path: Path | str = DEFAULT_POOLING_MAPPING_PATH,
     vol_span: int = MIXED_VOL_FAST_SPAN,
     vol_slow_years: int = MIXED_VOL_SLOW_YEARS,
@@ -96,9 +98,11 @@ def load_pooled_ewmac_rule(
     """Load one rule's reviewed causal global normalization from its cache.
 
     Parameters are the same EWMAC volatility, scalar, and cap settings used by
-    the backtester. The returned scalar remains pool-labelled so notebook users
-    can audit it; :meth:`PooledEwmacRuleData.global_scalar` selects the global
-    series shared by the market screen and portfolio-selection workflows.
+    the backtester. ``cache_root`` owns the source-history and derived
+    normalization artifacts. The returned scalar remains pool-labelled so
+    notebook users can audit it; :meth:`PooledEwmacRuleData.global_scalar`
+    selects the global series shared by the market screen and portfolio-selection
+    workflows.
     """
     # Keep the full backtester import off the lightweight history/plot import
     # path; normalization calls still reuse its versioned production caches.
@@ -124,7 +128,10 @@ def load_pooled_ewmac_rule(
         ewmac_forecast_cap=forecast_cap,
     )
     scalar_history, coverage, cache_metadata = (
-        load_pysystemtrade_ewmac_normalization(config)
+        load_pysystemtrade_ewmac_normalization(
+            config,
+            cache_root=cache_root,
+        )
     )
     return PooledEwmacRuleData(
         rule=rule,
@@ -143,20 +150,24 @@ def load_pooled_ewmac_rule(
 def load_pooled_ewmac_rules(
     *,
     db_path: Path | str = DEFAULT_PYSYSTEMTRADE_DB_PATH,
+    cache_root: Path | str = DEFAULT_FUTURES_CACHE_ROOT,
     pooling_mapping_path: Path | str = DEFAULT_POOLING_MAPPING_PATH,
     rules: Iterable[EwmacRule] = CANONICAL_EWMAC_RULES,
     **kwargs,
 ) -> dict[str, PooledEwmacRuleData]:
     """Load pooled normalization objects keyed by ``fast/slow`` rule name.
 
-    Extra keyword arguments are forwarded to :func:`load_pooled_ewmac_rule`,
-    allowing notebooks and reports to change volatility or scalar settings in
-    one place while retaining the same output shape.
+    ``cache_root`` is forwarded to every rule's source-history and derived
+    normalization load. Extra keyword arguments are forwarded to
+    :func:`load_pooled_ewmac_rule`, allowing notebooks and reports to change
+    volatility or scalar settings in one place while retaining the same output
+    shape.
     """
     return {
         rule.key: load_pooled_ewmac_rule(
             rule,
             db_path=db_path,
+            cache_root=cache_root,
             pooling_mapping_path=pooling_mapping_path,
             **kwargs,
         )

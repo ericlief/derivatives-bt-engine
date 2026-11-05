@@ -2308,6 +2308,7 @@ def _run_complete_selection(
                     if pooled_reference_rules is None:
                         pooled_reference_rules = load_pooled_ewmac_rules(
                             db_path=history_db_path,
+                            cache_root=backtest_cache_root,
                         )
                     frames_by_history[history_code] = build_ewmac_component_frame(
                         reference_history_provider.load(history_code),
@@ -2959,6 +2960,7 @@ def _run_complete_selection(
                                 if pooled_rules is None:
                                     pooled_rules = load_pooled_ewmac_rules(
                                         db_path=history_db_path,
+                                        cache_root=backtest_cache_root,
                                     )
                                 stitched_component = build_ewmac_component_frame(
                                     stitched_history,

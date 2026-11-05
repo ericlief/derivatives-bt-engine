@@ -666,15 +666,19 @@ def _pysystemtrade_ewmac_cache_paths(
     config: TsmomBacktestConfig,
     source_commit: str,
     source_range_key: str,
+    *,
+    cache_root: Path | str = DEFAULT_FUTURES_CACHE_ROOT,
 ) -> dict[str, Path]:
     """Return content-addressed raw-panel, coverage, and scalar cache paths.
 
-    Paths include source commit/range, history schema, EWMAC/volatility
-    parameters, target forecast, and minimum calibration observations. This
-    prevents an older normalization universe from masquerading as a cache hit.
+    ``cache_root`` owns both the underlying PySystemTrade history cache and
+    this derived normalization tree. Paths include source commit/range,
+    history schema, EWMAC/volatility parameters, target forecast, and minimum
+    calibration observations. This prevents an older normalization universe
+    from masquerading as a cache hit.
     """
     directory = (
-        Path(DEFAULT_FUTURES_CACHE_ROOT)
+        Path(cache_root).expanduser().resolve()
         / 'pysystemtrade'
         / f'v{HISTORY_SCHEMA_VERSION}'
         / source_commit[:12]
@@ -758,20 +762,26 @@ def _pysystemtrade_source_coverage(
 
 def _load_pysystemtrade_ewmac_universe(
     config: TsmomBacktestConfig,
+    *,
+    cache_root: Path | str = DEFAULT_FUTURES_CACHE_ROOT,
 ) -> tuple[pl.DataFrame, pl.DataFrame, str, str, bool]:
     """Load or build the full Carver raw-forecast panel and coverage.
 
     The underlying four-stream histories remain owned by
-    :class:`PysystemtradeHistoryProvider`.  This adds a derived cache for one
-    EWMAC speed so subsequent backtests do not reread 252 Panama files or
-    recompute their EMA and point-volatility histories.
+    :class:`PysystemtradeHistoryProvider` under ``cache_root``. This adds a
+    derived cache for one EWMAC speed under the same root so subsequent
+    backtests do not reread 252 Panama files or recompute their EMA and
+    point-volatility histories.
 
     Returns a long ``panel`` with one raw-forecast row per instrument/date, an
     instrument-level ``coverage`` audit, the source commit, a source-range and
     membership fingerprint, and whether both panel files were accepted from
     cache.
     """
-    provider = PysystemtradeHistoryProvider(db_path=config.pysystemtrade_db_path)
+    provider = PysystemtradeHistoryProvider(
+        db_path=config.pysystemtrade_db_path,
+        cache_root=cache_root,
+    )
     _, source_commit = provider._database_metadata()
     if config.pysystemtrade_pooling_mapping_path is None:
         source_coverage, source_range_key = _pysystemtrade_source_coverage(
@@ -783,7 +793,10 @@ def _load_pysystemtrade_ewmac_universe(
             config.pysystemtrade_pooling_mapping_path,
         )
     paths = _pysystemtrade_ewmac_cache_paths(
-        config, source_commit, source_range_key
+        config,
+        source_commit,
+        source_range_key,
+        cache_root=cache_root,
     )
     panel_cached = paths['raw_forecasts'].exists() and paths['coverage'].exists()
     if panel_cached:
@@ -890,6 +903,8 @@ def _load_pysystemtrade_scalar_history(
     config: TsmomBacktestConfig,
     source_commit: str,
     source_range_key: str,
+    *,
+    cache_root: Path | str = DEFAULT_FUTURES_CACHE_ROOT,
 ) -> tuple[pl.DataFrame, bool]:
     """Load or causally estimate the pooled scalar for one raw forecast panel.
 
@@ -898,7 +913,10 @@ def _load_pysystemtrade_scalar_history(
     whether the scalar came from the exact parameter-sensitive cache.
     """
     paths = _pysystemtrade_ewmac_cache_paths(
-        config, source_commit, source_range_key
+        config,
+        source_commit,
+        source_range_key,
+        cache_root=cache_root,
     )
     if paths['scalar'].exists():
         logger.info('ewmac_scalar cache_hit path=%s', paths['scalar'])
@@ -918,6 +936,8 @@ def _load_pysystemtrade_scalar_history(
 
 def load_pysystemtrade_ewmac_normalization(
     config: TsmomBacktestConfig,
+    *,
+    cache_root: Path | str = DEFAULT_FUTURES_CACHE_ROOT,
 ) -> tuple[pl.DataFrame, pl.DataFrame, dict[str, object]]:
     """Load the reviewed EWMAC scalar and coverage for other research tools.
 
@@ -925,15 +945,23 @@ def load_pysystemtrade_ewmac_normalization(
     used by the backtester.  Callers receive the same reviewed membership and
     causal scalar without duplicating the full-universe normalization logic.
 
-    Returns ``(scalar_history, coverage, metadata)``. ``scalar_history`` is a
-    pooled time series, not an instrument forecast frame; callers still join it
-    backward onto their own raw forecast histories.
+    ``cache_root`` selects the root for both source histories and derived
+    normalization artifacts. Returns ``(scalar_history, coverage, metadata)``.
+    ``scalar_history`` is a pooled time series, not an instrument forecast
+    frame; callers still join it backward onto their own raw forecast histories.
     """
     panel, coverage, source_commit, source_range_key, panel_cache_hit = (
-        _load_pysystemtrade_ewmac_universe(config)
+        _load_pysystemtrade_ewmac_universe(
+            config,
+            cache_root=cache_root,
+        )
     )
     scalar, scalar_cache_hit = _load_pysystemtrade_scalar_history(
-        panel, config, source_commit, source_range_key
+        panel,
+        config,
+        source_commit,
+        source_range_key,
+        cache_root=cache_root,
     )
     return scalar, coverage, {
         'source_commit': source_commit,
