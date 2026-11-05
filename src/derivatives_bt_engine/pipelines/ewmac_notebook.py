@@ -2281,6 +2281,8 @@ def build_stitched_ewmac_notebook_view(
     reference_settings: SubsystemReferenceSettings,
     signal_symbol: str | None = None,
     as_of: date | None = None,
+    start: date | datetime | str | None = None,
+    end: date | datetime | str | None = None,
     prior_years: int = 1,
     max_source_gap_days: int = DEFAULT_MAX_SOURCE_GAP_DAYS,
     duration: str = DEFAULT_IB_DATED_CONTRACT_DURATION,
@@ -2332,6 +2334,10 @@ def build_stitched_ewmac_notebook_view(
         When no Globex segment is available, the provider requests older
         contract years while they extend IB history toward the end of the long
         reference series.
+    start, end
+        Optional inclusive date limits for the returned forecast, reference,
+        and cash curves. History acquisition and forecast warm-up still use
+        the full stitched history.
     max_source_gap_days
         Largest calendar gap permitted for a direct reference-to-IB stitch.
         The unknown return over an allowed gap is masked and the interval is
@@ -2446,6 +2452,8 @@ def build_stitched_ewmac_notebook_view(
             reference_settings=reference_settings,
             cash_settings=cash_settings,
             target_abs_forecast=config.target_abs_forecast,
+            start_date=start,
+            end_date=end,
         )
     else:
         view = build_ewmac_notebook_view(
@@ -2458,6 +2466,8 @@ def build_stitched_ewmac_notebook_view(
             reference_settings=reference_settings,
             cash_settings=cash_settings,
             target_abs_forecast=config.target_abs_forecast,
+            start_date=start,
+            end_date=end,
         )
     return replace(
         view,
