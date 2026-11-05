@@ -142,8 +142,8 @@ def test_greedy_selector_stops_when_best_addition_falls_below_threshold():
     )
 
 
-def test_incumbent_receives_soft_participation_exit_buffer():
-    """A prior member may remain inside its exit band while a new one may not."""
+def test_incumbent_receives_participation_eligibility_hysteresis():
+    """A prior member may remain inside its hysteresis band unlike an entrant."""
     candidate = SelectionCandidate(
         symbol="A",
         ann_dvol=100.0,
@@ -158,7 +158,7 @@ def test_incumbent_receives_soft_participation_exit_buffer():
         config=GreedySelectionConfig(
             capital=1_000_000.0,
             max_pct_market_volume=1.0,
-            eligibility_exit_buffer_percent=25.0,
+            eligibility_hysteresis_percent=25.0,
         ),
         weight_policy=EqualPortfolioWeights(),
     )

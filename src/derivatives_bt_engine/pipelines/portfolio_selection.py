@@ -906,13 +906,16 @@ def parse_args(argv=None, *, complete_default: bool = False):
         ),
     )
     parser.add_argument(
+        "--selection-eligibility-hysteresis-pct",
         "--selection-eligibility-exit-buffer-pct",
+        dest="selection_eligibility_hysteresis_pct",
         type=float,
         default=0.0,
         help=(
-            "Soft incumbent exit band in percent for selection cost, "
-            "and market-participation gates (default: 0, disabled). Contract "
-            "granularity and other hard gates are unchanged."
+            "Incumbent eligibility hysteresis in percent for selection cost "
+            "and market-participation exit gates (default: 0, disabled). "
+            "The exit-buffer spelling is retained as a compatibility alias. "
+            "Contract granularity and other hard gates are unchanged."
         ),
     )
     parser.add_argument(
@@ -1013,8 +1016,8 @@ def _selection_scenario_id(
         tokens.append(f"sel{args.selection_rebalance}")
         tokens.append(f"hg{args.selection_max_history_gap_days}")
         tokens.append(
-            "eb"
-            f"{_number_token(args.selection_eligibility_exit_buffer_pct)}"
+            "eh"
+            f"{_number_token(args.selection_eligibility_hysteresis_pct)}"
         )
         tokens.append(f"mh{args.selection_membership_hysteresis}")
         if args.selection_membership_hysteresis in {"rank", "rank_score"}:
@@ -1253,8 +1256,8 @@ def _greedy_selector(
             ),
             max_instrument_margin_pct=args.max_instr_margin_pct,
             max_book_margin_pct=effective_book_margin_pct,
-            eligibility_exit_buffer_percent=(
-                args.selection_eligibility_exit_buffer_pct
+            eligibility_hysteresis_percent=(
+                args.selection_eligibility_hysteresis_pct
             ),
             membership_hysteresis=args.selection_membership_hysteresis,
             rank_buffer_percent=args.selection_rank_buffer_pct,
@@ -1441,7 +1444,7 @@ class _WalkForwardSelectionProvider:
             trade_sr = trade_cost / annual_dollar_vol
             cost_exit_multiplier = (
                 1.0
-                + self.args.selection_eligibility_exit_buffer_pct / 100.0
+                + self.args.selection_eligibility_hysteresis_pct / 100.0
                 if symbol in self.prior_selected else 1.0
             )
             entry_cost_limit_sr = float(self.run_config["cost_lim_sr"])
@@ -1566,8 +1569,8 @@ class _WalkForwardSelectionProvider:
                 "maximum_economic_subclass_weight_percent": (
                     self.args.max_subclass_weight_pct
                 ),
-                "selection_eligibility_exit_buffer_percent": (
-                    self.args.selection_eligibility_exit_buffer_pct
+                "selection_eligibility_hysteresis_percent": (
+                    self.args.selection_eligibility_hysteresis_pct
                 ),
                 "selection_membership_hysteresis": (
                     self.args.selection_membership_hysteresis
@@ -1616,8 +1619,8 @@ class _WalkForwardSelectionProvider:
                 "maximum_economic_subclass_weight_percent": (
                     self.args.max_subclass_weight_pct
                 ),
-                "selection_eligibility_exit_buffer_percent": (
-                    self.args.selection_eligibility_exit_buffer_pct
+                "selection_eligibility_hysteresis_percent": (
+                    self.args.selection_eligibility_hysteresis_pct
                 ),
                 "selection_membership_hysteresis": (
                     self.args.selection_membership_hysteresis
@@ -1653,8 +1656,8 @@ class _WalkForwardSelectionProvider:
                 "maximum_economic_subclass_weight_percent": (
                     self.args.max_subclass_weight_pct
                 ),
-                "selection_eligibility_exit_buffer_percent": (
-                    self.args.selection_eligibility_exit_buffer_pct
+                "selection_eligibility_hysteresis_percent": (
+                    self.args.selection_eligibility_hysteresis_pct
                 ),
                 "selection_membership_hysteresis": (
                     self.args.selection_membership_hysteresis
@@ -1777,8 +1780,8 @@ class _WalkForwardSelectionProvider:
             ),
             "selection_added_symbols": ",".join(sorted(added_symbols)),
             "selection_removed_symbols": ",".join(sorted(removed_symbols)),
-            "selection_eligibility_exit_buffer_percent": (
-                self.args.selection_eligibility_exit_buffer_pct
+            "selection_eligibility_hysteresis_percent": (
+                self.args.selection_eligibility_hysteresis_pct
             ),
             "selection_membership_hysteresis": (
                 self.args.selection_membership_hysteresis
@@ -1839,8 +1842,8 @@ class _WalkForwardSelectionProvider:
                 "maximum_economic_subclass_weight_percent": (
                     self.args.max_subclass_weight_pct
                 ),
-                "selection_eligibility_exit_buffer_percent": (
-                    self.args.selection_eligibility_exit_buffer_pct
+                "selection_eligibility_hysteresis_percent": (
+                    self.args.selection_eligibility_hysteresis_pct
                 ),
                 "selection_membership_hysteresis": (
                     self.args.selection_membership_hysteresis
@@ -1980,8 +1983,8 @@ def _final_selection_frame(
             "contract_band_max": args.contract_band_max,
             "score_tie_tolerance_percent": args.score_tie_tolerance_percent,
             "tie_ref_book_count": args.tie_reference_book_count,
-            "selection_eligibility_exit_buffer_percent": (
-                args.selection_eligibility_exit_buffer_pct
+            "selection_eligibility_hysteresis_percent": (
+                args.selection_eligibility_hysteresis_pct
             ),
             "selection_membership_hysteresis": (
                 args.selection_membership_hysteresis
@@ -3118,8 +3121,8 @@ def _run_complete_selection(
         "selection_max_history_gap_days": (
             args.selection_max_history_gap_days
         ),
-        "selection_eligibility_exit_buffer_percent": (
-            args.selection_eligibility_exit_buffer_pct
+        "selection_eligibility_hysteresis_percent": (
+            args.selection_eligibility_hysteresis_pct
         ),
         "selection_membership_hysteresis": (
             args.selection_membership_hysteresis
@@ -3821,8 +3824,8 @@ def run(
         raise ValueError("max source gap days must be nonnegative")
     if args.selection_max_history_gap_days < 0:
         raise ValueError("selection max history gap days must be nonnegative")
-    if not 0 <= args.selection_eligibility_exit_buffer_pct <= 100:
-        raise ValueError("selection eligibility exit buffer must be in [0, 100]")
+    if not 0 <= args.selection_eligibility_hysteresis_pct <= 100:
+        raise ValueError("selection eligibility hysteresis must be in [0, 100]")
     if not 0 <= args.selection_rank_buffer_pct <= 100:
         raise ValueError("selection rank buffer must be in [0, 100]")
     if not 0 <= args.selection_book_score_buffer_pct <= 100:

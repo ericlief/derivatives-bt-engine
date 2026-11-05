@@ -835,7 +835,7 @@ first available session of each calendar year or month:
 --selection-rebalance yearly
 --selection-rebalance monthly
 --selection-max-history-gap-days 31
---selection-eligibility-exit-buffer-pct 25
+--selection-eligibility-hysteresis-pct 25
 --selection-membership-hysteresis score
 --selection-rank-buffer-pct 15
 --selection-book-score-buffer-pct 2
@@ -863,9 +863,9 @@ book stays in force until the next January review.
 
 #### Prior-book hysteresis
 
-Scheduled reviews expose three compatible controls: an incumbent eligibility
-exit buffer, an index-style membership rank band, and a complete-book score
-hurdle. The eligibility band is independent. The membership mode selects
+Scheduled reviews expose three compatible controls: incumbent eligibility
+hysteresis, an index-style membership rank band, and a complete-book score
+hurdle. Eligibility hysteresis is independent. The membership mode selects
 whether rank and score controls are disabled, used separately, or composed:
 
 ```text
@@ -880,17 +880,19 @@ whether rank and score controls are disabled, used separately, or composed:
 rank-buffered candidate first and then subjects that complete candidate to the
 score and transition-cost hurdle.
 
-##### Incumbent eligibility exit buffer
+##### Incumbent eligibility hysteresis
 
-`--selection-eligibility-exit-buffer-pct` relaxes selected soft eligibility
+`--selection-eligibility-hysteresis-pct` relaxes selected soft eligibility
 gates for instruments already in the prior book. It defaults to zero and is
 therefore disabled unless explicitly enabled. When set to 25%, a 1%
 market-participation entry limit becomes a 1.25% incumbent exit limit, and the
 instrument cost exit limit becomes 1.25 times its entry limit. New challengers
 still face the original limits. The 0.5-contract forecast-cap minimum remains
-a hard rounding boundary for both entrants and incumbents; the exit buffer
-does not lower it. Stale or missing history, unavailable margin, and class,
-subclass, family, and book-margin violations are also hard failures.
+a hard rounding boundary for both entrants and incumbents; eligibility
+hysteresis does not lower it. Stale or missing history, unavailable margin,
+and class, subclass, family, and book-margin violations are also hard failures.
+The former `--selection-eligibility-exit-buffer-pct` spelling remains a CLI
+compatibility alias.
 
 ##### Membership rank band
 
@@ -1226,7 +1228,7 @@ futures-build-selection \
   --globex-db /home/dev/fin/db/globex_mdp_3.0.duckdb \
   --selection-rebalance yearly \
   --selection-max-history-gap-days 31 \
-  --selection-eligibility-exit-buffer-pct 25 \
+  --selection-eligibility-hysteresis-pct 25 \
   --selection-membership-hysteresis rank_score \
   --selection-rank-buffer-pct 15 \
   --selection-book-score-buffer-pct 2 \

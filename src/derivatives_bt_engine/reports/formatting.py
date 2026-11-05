@@ -76,7 +76,9 @@ PUBLIC_REPORT_RENAMES = {
     "selection_hysteresis_candidate_symbols": "sel_hyst_cand_symbols",
     "selection_added_symbols": "sel_added",
     "selection_removed_symbols": "sel_removed",
-    "selection_eligibility_exit_buffer_percent": "sel_elig_exit_buf_pct",
+    "selection_eligibility_hysteresis_percent": "sel_elig_hyst_pct",
+    # Read legacy internal frames while emitting only the canonical public name.
+    "selection_eligibility_exit_buffer_percent": "sel_elig_hyst_pct",
     "selection_membership_hysteresis": "sel_membership_hyst",
     "selection_rank_buffer_percent": "sel_rank_buf_pct",
     "selection_book_score_buffer_percent": "sel_book_score_buf_pct",

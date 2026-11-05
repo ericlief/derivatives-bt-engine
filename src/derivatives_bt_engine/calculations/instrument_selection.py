@@ -159,7 +159,7 @@ class GreedySelectionConfig:
     for comparison. These are additive screens: they deliberately do not
     assume cross-product SPAN offsets, but remain estimates because IB's
     one-lot margin change depends on the account's positions at snapshot time.
-    ``eligibility_exit_buffer_percent`` relaxes the market-participation gate
+    ``eligibility_hysteresis_percent`` relaxes the market-participation gate
     for symbols already in the prior book; the pipeline applies the same
     multiplier to their cost exit gate. The half-contract granularity floor
     remains hard because a smaller forecast-cap position cannot reliably
@@ -198,7 +198,7 @@ class GreedySelectionConfig:
     max_instrument_margin_pct: float | None = None
     max_book_margin_pct: float | None = None
     include_roll_cost_in_score: bool = False
-    eligibility_exit_buffer_percent: float = 0.0
+    eligibility_hysteresis_percent: float = 0.0
     membership_hysteresis: str = "score"
     rank_buffer_percent: float = 15.0
     book_score_buffer_percent: float = 0.0
@@ -227,9 +227,9 @@ class GreedySelectionConfig:
             raise ValueError("contract band must have positive increasing bounds")
         if not 0 <= self.score_tie_tolerance_percent <= 100:
             raise ValueError("score_tie_tolerance_percent must be in [0, 100]")
-        if not 0 <= self.eligibility_exit_buffer_percent <= 100:
+        if not 0 <= self.eligibility_hysteresis_percent <= 100:
             raise ValueError(
-                "eligibility_exit_buffer_percent must be in [0, 100]"
+                "eligibility_hysteresis_percent must be in [0, 100]"
             )
         if self.membership_hysteresis not in {
             "none",
@@ -948,7 +948,7 @@ class GreedyInstrumentSelector:
             candidate = candidates[symbol]
             is_incumbent = symbol in incumbent_symbols
             exit_multiplier = (
-                1.0 + self.config.eligibility_exit_buffer_percent / 100.0
+                1.0 + self.config.eligibility_hysteresis_percent / 100.0
                 if is_incumbent else 1.0
             )
             # Contract granularity is a physical rounding boundary. Unlike

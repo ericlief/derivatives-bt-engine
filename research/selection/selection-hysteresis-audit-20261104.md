@@ -16,18 +16,20 @@ count cap 20, subclass count cap 15, class weight cap 50%, subclass weight cap
 25%, annual reviews, and a 31-day maximum history gap.
 
 This is not a perfectly controlled one-parameter ablation. Both new runs
-resolve to a 25% incumbent soft-eligibility exit buffer (`eb25`); the legacy
-baseline does not. The rank command did not pass the flag explicitly, but the
-CLI default at the time of the run was 25%, the buffer is independent of
-membership mode, and the saved rank review report confirms
-`sel_elig_exit_buf_pct=25.0`. The default was subsequently changed to zero so
-new runs do not enable this independent buffer implicitly. Dynamic capital
+resolve to 25% incumbent eligibility hysteresis (historical token `eb25`); the
+legacy baseline does not. The rank command did not pass the flag explicitly,
+but the CLI default at the time of the run was 25%, eligibility hysteresis is
+independent of membership mode, and the saved rank review report confirms the
+historical field `sel_elig_exit_buf_pct=25.0`. The default was subsequently
+changed to zero and the canonical flag renamed
+`--selection-eligibility-hysteresis-pct`, so new runs do not enable it
+implicitly. Dynamic capital
 also feeds back into position granularity, margin, and later selection. Once
 returns diverge, later raw books need not match even before membership
 hysteresis is applied. A clean confirmation run should use the current code
 with
 `--selection-membership-hysteresis none` and
-`--selection-eligibility-exit-buffer-pct 25`.
+`--selection-eligibility-hysteresis-pct 25`.
 
 The common complete-history endpoint used for recent performance is
 2026-10-23. After that date, histories end on different days and the active
@@ -160,9 +162,9 @@ does almost nothing to the selected sets here. Before judging its performance,
 run 25% and 30% rank bands and verify final/raw Jaccard and membership churn.
 A useful controlled grid is:
 
-1. Current-code baseline: `none`, `eb25`.
-2. Rank: 15%, 25%, and 30%, all with `eb25`.
-3. Score: 0%, 1%, and 2%, all with `eb25`.
+1. Current-code baseline: `none`, `eh25`.
+2. Rank: 15%, 25%, and 30%, all with `eh25`.
+3. Score: 0%, 1%, and 2%, all with `eh25`.
 4. Rank plus score: rank 15%/25% crossed with score 0%/1%.
 5. Report early-universe class count, effective instrument count, review-day
    cost, post-2024 return, and full-history drawdown in addition to ending cap.
