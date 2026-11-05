@@ -673,10 +673,10 @@ def parse_args(argv=None, *, complete_default: bool = False):
     parser.add_argument(
         "--stitched-history-cache-root",
         type=Path,
-        default=DEFAULT_FUTURES_CACHE_ROOT,
+        default=None,
         help=(
             "Cache root for source-history PST/IB stitched bundles; defaults "
-            "to the project .cache/futures directory."
+            "to --history-cache-root."
         ),
     )
     parser.add_argument(
@@ -2093,7 +2093,8 @@ def _run_complete_selection(
     backtest_cache_root = args.history_cache_root.expanduser().resolve()
     history_db_path = args.history_db.expanduser().resolve()
     reference_history_provider = PysystemtradeHistoryProvider(
-        db_path=history_db_path
+        db_path=history_db_path,
+        cache_root=backtest_cache_root,
     )
     history_db_identity = _selection_pysystemtrade_identity(
         reference_history_provider
@@ -2771,7 +2772,10 @@ def _run_complete_selection(
                 mapping_path=args.broker_mapping.expanduser().resolve(),
                 history_db_path=args.ib_history_db.expanduser().resolve(),
                 cache_root=(
-                    args.stitched_history_cache_root.expanduser().resolve()
+                    (
+                        args.stitched_history_cache_root
+                        or args.history_cache_root
+                    ).expanduser().resolve()
                 ),
                 use_cache=True,
                 save_cache=True,
