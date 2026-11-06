@@ -2119,9 +2119,13 @@ runs every construction scenario without making an IB request. A target-vol
 override recomputes the saved capital/risk-size and relative-liquidity gates
 offline; it does not rebuild market history or the executable snapshot. Pass
 an exact file rather than a report directory so a newer screen cannot enter the
-grid midway through a run. The selection cadence and hysteresis policy are
-fixed across a grid. Rank-count EWMA half-lives may be swept as their own
-dimension; every value receives a distinct `rhl` scenario token.
+grid midway through a run. Selection cadence is fixed across a grid, while
+eligibility percentages, membership modes, rank-buffer percentages,
+rank-count EWMA half-lives, and score-buffer percentages can all be swept.
+Inactive controls do not create duplicate scenarios: `none` expands only the
+eligibility dimension, `rank` expands rank percentage and half-life, `score`
+expands score percentage, and `rank_score` expands all three membership
+controls. Every active value receives its corresponding scenario token.
 
 The recommended 18-scenario first pass is the CLI default:
 
@@ -2171,7 +2175,7 @@ Run secondary constraint tests separately, for example:
   --tie-ref-book-counts 15,18,21
 ```
 
-For a yearly rank-hysteresis comparison using the new causal count state:
+For a focused yearly hysteresis comparison using the new causal count state:
 
 ```bash
 .venv/bin/futures-selection-grid \
@@ -2184,11 +2188,16 @@ For a yearly rank-hysteresis comparison using the new causal count state:
   --max-instr-margin-pcts 20 \
   --roll-cost-modes include \
   --selection-rebalance yearly \
-  --selection-membership-hysteresis rank \
-  --selection-rank-buffer-pct 15 \
-  --selection-rank-count-ewma-halflives 1,3,5
+  --selection-eligibility-hysteresis-pcts 25 \
+  --selection-membership-hysteresis-modes none,rank,score,rank_score \
+  --selection-rank-buffer-pcts 10,15,25 \
+  --selection-rank-count-ewma-halflives 1,3,5 \
+  --selection-book-score-buffer-pcts 0,2
 ```
 
+With every construction parameter fixed, that command creates 30 scenarios:
+one `none`, nine `rank`, two `score`, and eighteen `rank_score`. Add `0` to the
+eligibility list only when you also want to double the grid and isolate EH25.
 Omitting the half-life list uses the standalone cadence default: three reviews
 for yearly selection and twelve for monthly selection. As in the standalone
 backtest, the current snapshot's liquidity and execution overlay applies from

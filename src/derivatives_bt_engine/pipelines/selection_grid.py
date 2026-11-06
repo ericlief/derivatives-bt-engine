@@ -280,6 +280,19 @@ def _score_threshold_list(value: str) -> tuple[float, ...]:
     return thresholds
 
 
+def _membership_mode_list(value: str) -> tuple[str, ...]:
+    """Parse unique scheduled-selection membership modes."""
+    allowed = {"none", "rank", "score", "rank_score"}
+    modes = tuple(dict.fromkeys(item.strip() for item in value.split(",")))
+    invalid = sorted(set(modes).difference(allowed))
+    if not modes or invalid:
+        raise argparse.ArgumentTypeError(
+            "membership modes must be comma-separated values from "
+            "none, rank, score, rank_score"
+        )
+    return modes
+
+
 def parse_args(argv=None) -> argparse.Namespace:
     """Parse the construction-grid command line."""
     parser = argparse.ArgumentParser(
@@ -373,22 +386,34 @@ def parse_args(argv=None) -> argparse.Namespace:
         help="Maximum dated-history freshness gap shared by every scenario.",
     )
     parser.add_argument(
+        "--selection-eligibility-hysteresis-pcts",
         "--selection-eligibility-hysteresis-pct",
-        type=float,
-        default=0.0,
-        help="Fixed incumbent eligibility hysteresis percent (default: 0).",
+        dest="selection_eligibility_hysteresis_pcts",
+        type=_percent_list,
+        default=(0.0,),
+        help=(
+            "Comma-separated incumbent eligibility hysteresis percentages "
+            "(default: 0)."
+        ),
     )
     parser.add_argument(
+        "--selection-membership-hysteresis-modes",
         "--selection-membership-hysteresis",
-        choices=("none", "rank", "score", "rank_score"),
-        default="none",
-        help="Fixed scheduled membership policy (default: none).",
+        dest="selection_membership_hysteresis_modes",
+        type=_membership_mode_list,
+        default=("none",),
+        help=(
+            "Comma-separated scheduled membership modes from none, rank, "
+            "score, rank_score (default: none)."
+        ),
     )
     parser.add_argument(
+        "--selection-rank-buffer-pcts",
         "--selection-rank-buffer-pct",
-        type=float,
-        default=15.0,
-        help="Fixed symmetric rank-band percent (default: 15).",
+        dest="selection_rank_buffer_pcts",
+        type=_percent_list,
+        default=(15.0,),
+        help="Comma-separated symmetric rank-band percentages (default: 15).",
     )
     parser.add_argument(
         "--selection-rank-count-ewma-halflives",
@@ -401,10 +426,15 @@ def parse_args(argv=None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--selection-book-score-buffer-pcts",
         "--selection-book-score-buffer-pct",
-        type=float,
-        default=2.0,
-        help="Fixed prior-book score hurdle percent (default: 2).",
+        dest="selection_book_score_buffer_pcts",
+        type=_percent_list,
+        default=(2.0,),
+        help=(
+            "Comma-separated prior-book score hurdle percentages "
+            "(default: 2)."
+        ),
     )
     parser.add_argument(
         "--target-vols",
@@ -543,12 +573,45 @@ def build_scenarios(args: argparse.Namespace) -> list[SelectionScenario]:
         "include": (True,),
         "exclude": (False,),
     }[args.roll_cost_modes]
-    if args.selection_membership_hysteresis in {"rank", "rank_score"}:
-        rank_count_halflives = (
-            args.selection_rank_count_ewma_halflives or (None,)
+    hysteresis_variants: list[
+        tuple[str, float, float, float | None, float]
+    ] = []
+    for membership_mode in args.selection_membership_hysteresis_modes:
+        rank_active = membership_mode in {"rank", "rank_score"}
+        score_active = membership_mode in {"score", "rank_score"}
+        rank_buffers = (
+            args.selection_rank_buffer_pcts if rank_active else (15.0,)
         )
-    else:
-        rank_count_halflives = (None,)
+        if rank_active:
+            rank_count_halflives = (
+                args.selection_rank_count_ewma_halflives or (None,)
+            )
+        else:
+            rank_count_halflives = (None,)
+        score_buffers = (
+            args.selection_book_score_buffer_pcts
+            if score_active else (2.0,)
+        )
+        hysteresis_variants.extend(
+            (
+                membership_mode,
+                eligibility_buffer,
+                rank_buffer,
+                rank_count_halflife,
+                score_buffer,
+            )
+            for (
+                eligibility_buffer,
+                rank_buffer,
+                rank_count_halflife,
+                score_buffer,
+            ) in product(
+                args.selection_eligibility_hysteresis_pcts,
+                rank_buffers,
+                rank_count_halflives,
+                score_buffers,
+            )
+        )
     scenarios = [
         SelectionScenario(
             target_volatility=target_volatility,
@@ -571,18 +634,14 @@ def build_scenarios(args: argparse.Namespace) -> list[SelectionScenario]:
                 args.selection_max_history_gap_days
             ),
             selection_eligibility_hysteresis_percent=(
-                args.selection_eligibility_hysteresis_pct
+                eligibility_buffer
             ),
-            selection_membership_hysteresis=(
-                args.selection_membership_hysteresis
-            ),
-            selection_rank_buffer_percent=args.selection_rank_buffer_pct,
+            selection_membership_hysteresis=membership_mode,
+            selection_rank_buffer_percent=rank_buffer,
             selection_rank_count_ewma_halflife_reviews=(
                 rank_count_halflife
             ),
-            selection_book_score_buffer_percent=(
-                args.selection_book_score_buffer_pct
-            ),
+            selection_book_score_buffer_percent=score_buffer,
         )
         for (
             target_volatility,
@@ -599,7 +658,7 @@ def build_scenarios(args: argparse.Namespace) -> list[SelectionScenario]:
             class_weight_limit,
             subclass_weight_limit,
             include_roll_cost,
-            rank_count_halflife,
+            hysteresis_variant,
         ) in product(
             args.target_vols,
             args.max_instr_margin_pcts,
@@ -615,8 +674,15 @@ def build_scenarios(args: argparse.Namespace) -> list[SelectionScenario]:
             args.max_class_weight_pcts,
             args.max_subclass_weight_pcts,
             roll_modes,
-            rank_count_halflives,
+            hysteresis_variants,
         )
+        for (
+            membership_mode,
+            eligibility_buffer,
+            rank_buffer,
+            rank_count_halflife,
+            score_buffer,
+        ) in (hysteresis_variant,)
     ]
     return sorted(scenarios, key=lambda scenario: scenario.scenario_id)
 
@@ -942,6 +1008,30 @@ def _attach_baseline_overlap(summary: pl.DataFrame) -> pl.DataFrame:
               .then(0.0).otherwise(1.0)
             + pl.when(pl.col("include_roll_cost_in_score"))
               .then(0.0).otherwise(1.0)
+            + pl.col("selection_eligibility_hysteresis_percent") / 100.0
+            + pl.when(pl.col("selection_membership_hysteresis") == "none")
+              .then(0.0)
+              .when(
+                  pl.col("selection_membership_hysteresis") == "rank_score"
+              )
+              .then(2.0)
+              .otherwise(1.0)
+            + pl.when(pl.col("selection_rank_buffer_percent").is_null())
+              .then(0.0)
+              .otherwise(
+                  (pl.col("selection_rank_buffer_percent") - 15.0).abs()
+                  / 15.0
+              )
+            + pl.when(
+                pl.col("selection_book_score_buffer_percent").is_null()
+            )
+              .then(0.0)
+              .otherwise(
+                  (
+                      pl.col("selection_book_score_buffer_percent") - 2.0
+                  ).abs()
+                  / 2.0
+              )
             + pl.when(
                 pl.col(
                     "selection_rank_count_ewma_halflife_reviews"
@@ -1021,33 +1111,37 @@ def run(argv=None) -> tuple[Path, Path | None]:
         raise ValueError("--max-source-gap-days must be nonnegative")
     if args.selection_max_history_gap_days < 0:
         raise ValueError("--selection-max-history-gap-days must be nonnegative")
-    for name, value in (
-        (
-            "--selection-eligibility-hysteresis-pct",
-            args.selection_eligibility_hysteresis_pct,
-        ),
-        ("--selection-rank-buffer-pct", args.selection_rank_buffer_pct),
-        (
-            "--selection-book-score-buffer-pct",
-            args.selection_book_score_buffer_pct,
-        ),
-    ):
-        if not 0 <= value <= 100:
-            raise ValueError(f"{name} must be in [0, 100]")
     if (
         args.selection_rebalance == "static"
-        and args.selection_membership_hysteresis != "none"
+        and (
+            args.selection_membership_hysteresis_modes != ("none",)
+            or args.selection_eligibility_hysteresis_pcts != (0.0,)
+        )
     ):
         raise ValueError(
-            "selection membership hysteresis requires yearly or monthly "
-            "selection rebalancing"
+            "selection hysteresis requires yearly or monthly rebalancing"
+        )
+    membership_modes = set(args.selection_membership_hysteresis_modes)
+    rank_mode_active = bool(
+        membership_modes.intersection({"rank", "rank_score"})
+    )
+    score_mode_active = bool(
+        membership_modes.intersection({"score", "rank_score"})
+    )
+    if not rank_mode_active and (
+        args.selection_rank_count_ewma_halflives is not None
+        or args.selection_rank_buffer_pcts != (15.0,)
+    ):
+        raise ValueError(
+            "rank-buffer percentages and count half-lives require rank or "
+            "rank_score membership hysteresis"
         )
     if (
-        args.selection_rank_count_ewma_halflives is not None
-        and args.selection_membership_hysteresis not in {"rank", "rank_score"}
+        not score_mode_active
+        and args.selection_book_score_buffer_pcts != (2.0,)
     ):
         raise ValueError(
-            "rank-count EWMA half-lives require rank or rank_score membership "
+            "score-buffer percentages require score or rank_score membership "
             "hysteresis"
         )
     if args.ib_history_live is not None and ib_history_database is None:

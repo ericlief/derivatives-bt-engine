@@ -154,6 +154,41 @@ def test_grid_sweeps_rank_count_ewma_halflives_for_yearly_reviews():
     )
 
 
+def test_grid_sweeps_only_active_hysteresis_dimensions():
+    """Each membership mode expands only the controls that affect that mode."""
+    args = parse_args([
+        "--input",
+        "screen.parquet",
+        "--target-vols",
+        "0.20",
+        "--max-instr-margin-pcts",
+        "20",
+        "--roll-cost-modes",
+        "include",
+        "--selection-rebalance",
+        "yearly",
+        "--selection-membership-hysteresis-modes",
+        "none,rank,score,rank_score",
+        "--selection-eligibility-hysteresis-pcts",
+        "0,25",
+        "--selection-rank-buffer-pcts",
+        "10,15",
+        "--selection-rank-count-ewma-halflives",
+        "1,3",
+        "--selection-book-score-buffer-pcts",
+        "0,2",
+    ])
+
+    scenarios = build_scenarios(args)
+
+    # none=2, rank=8, score=4, rank_score=16.
+    assert len(scenarios) == 30
+    assert len({scenario.scenario_id for scenario in scenarios}) == 30
+    assert {
+        scenario.selection_membership_hysteresis for scenario in scenarios
+    } == {"none", "rank", "score", "rank_score"}
+
+
 def test_grid_sweeps_greedy_score_acceptance_thresholds():
     """Acceptance thresholds are a first-class scenario dimension."""
     args = parse_args([
