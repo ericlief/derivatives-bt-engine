@@ -2142,7 +2142,12 @@ invocation creates a timestamped `selection_grid_<timestamp>` folder under the
 output root (the default root is `results/`). The runner creates an isolated
 directory for every scenario and can resume completed directories after
 interruption. To resume a particular run, pass its exact folder with
-`--run-dir`; `--output-dir` always means the parent output root. It writes:
+`--run-dir`; `--output-dir` always means the parent output root. Scenarios run
+serially by default. On a machine with sufficient memory, set `--max-workers`
+to the desired number of concurrent selection subprocesses. The runner first
+executes one incomplete scenario alone to warm the shared history cache, then
+starts the bounded worker pool; commands are passed as argument vectors and
+are not evaluated by a shell. It writes:
 
 - `selection_grid_commands.sh`, the reproducible command plan;
 - one normal set of typed portfolio-selection Parquet audits per scenario;

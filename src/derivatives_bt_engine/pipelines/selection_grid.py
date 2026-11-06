@@ -10,6 +10,7 @@ membership and feasibility; it does not rank scenarios by backtested returns.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
 from itertools import product
@@ -159,6 +160,21 @@ class SelectionScenario:
                     f"{_number_token(self.selection_book_score_buffer_percent)}"
                 )
         return "_".join(tokens)
+
+
+@dataclass(frozen=True)
+class ScenarioExecution:
+    """Outcome of one isolated selection CLI subprocess.
+
+    ``elapsed_seconds`` measures only this scenario's subprocess wall time.
+    A resumed scenario has zero elapsed time because the grid did not execute
+    it during the current invocation.
+    """
+
+    status: str
+    error: str
+    book_path: Path | None
+    elapsed_seconds: float
 
 
 def _number_token(value: float) -> str:
@@ -562,6 +578,16 @@ def parse_args(argv=None) -> argparse.Namespace:
         "--fail-fast",
         action="store_true",
         help="Stop at the first failed scenario instead of recording it.",
+    )
+    parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=1,
+        help=(
+            "Maximum concurrent selection subprocesses (default: 1). "
+            "Values above one run a serial cache warm-up scenario before "
+            "starting the bounded worker pool."
+        ),
     )
     return parser.parse_args(argv)
 
@@ -1084,6 +1110,135 @@ def _attach_baseline_overlap(summary: pl.DataFrame) -> pl.DataFrame:
     )
 
 
+def _execute_selection_scenario(
+    index: int,
+    total: int,
+    scenario: SelectionScenario,
+    scenario_dir: Path,
+    command: list[str],
+) -> ScenarioExecution:
+    """Run one selection command and persist its combined process output.
+
+    The command is passed directly as an argument vector, never through a
+    shell. Each worker owns a distinct scenario directory, so report and log
+    writes do not overlap across concurrent subprocesses.
+    """
+    print(f"[{index}/{total}] {scenario.scenario_id}", flush=True)
+    started = monotonic()
+    completed = subprocess.run(
+        command,
+        cwd=Path.cwd(),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    (scenario_dir / "command_output.log").write_text(
+        completed.stdout + completed.stderr,
+        encoding="utf-8",
+    )
+    book_path: Path | None = None
+    status = "complete"
+    error = ""
+    if completed.returncode:
+        status = "failed"
+        error = f"selection exited with status {completed.returncode}"
+    else:
+        book_path = _latest_book(scenario_dir)
+        if book_path is None:
+            status = "failed"
+            error = "selection completed without a book report"
+    return ScenarioExecution(
+        status=status,
+        error=error,
+        book_path=book_path,
+        elapsed_seconds=monotonic() - started,
+    )
+
+
+def _execute_planned_scenarios(
+    planned: list[tuple[SelectionScenario, Path, list[str]]],
+    *,
+    resume: bool,
+    fail_fast: bool,
+    max_workers: int,
+) -> dict[int, ScenarioExecution]:
+    """Execute planned scenarios serially or in a bounded subprocess pool.
+
+    The executor uses threads only to supervise already-isolated CLI child
+    processes. This avoids an unnecessary Python process wrapped around every
+    selection subprocess and avoids forking a parent that has initialized
+    Polars or DuckDB. When concurrency is requested, the first incomplete
+    scenario runs alone to populate shared immutable history artifacts before
+    the remaining scenarios read that cache concurrently.
+
+    Returns outcomes keyed by the zero-based position in ``planned`` so final
+    public reports remain deterministic regardless of completion order.
+    """
+    results: dict[int, ScenarioExecution] = {}
+    pending: list[tuple[int, SelectionScenario, Path, list[str]]] = []
+    total = len(planned)
+    for offset, (scenario, scenario_dir, command) in enumerate(planned):
+        existing_book = _latest_book(scenario_dir) if resume else None
+        if existing_book is not None:
+            results[offset] = ScenarioExecution(
+                status="complete",
+                error="",
+                book_path=existing_book,
+                elapsed_seconds=0.0,
+            )
+        else:
+            pending.append((offset, scenario, scenario_dir, command))
+
+    def execute(
+        item: tuple[int, SelectionScenario, Path, list[str]],
+    ) -> tuple[int, ScenarioExecution]:
+        offset, scenario, scenario_dir, command = item
+        outcome = _execute_selection_scenario(
+            offset + 1,
+            total,
+            scenario,
+            scenario_dir,
+            command,
+        )
+        return offset, outcome
+
+    def retain(offset: int, outcome: ScenarioExecution) -> None:
+        results[offset] = outcome
+        if fail_fast and outcome.status == "failed":
+            scenario = planned[offset][0]
+            raise RuntimeError(
+                f"{scenario.scenario_id}: {outcome.error}; "
+                "see command_output.log"
+            )
+
+    # One complete selection loads the common history universe and prevents
+    # simultaneous first-writer races in shared source-history cache bundles.
+    if max_workers > 1 and len(pending) > 1:
+        offset, outcome = execute(pending.pop(0))
+        retain(offset, outcome)
+
+    if max_workers == 1 or len(pending) <= 1:
+        for item in pending:
+            offset, outcome = execute(item)
+            retain(offset, outcome)
+        return results
+
+    with ThreadPoolExecutor(
+        max_workers=min(max_workers, len(pending)),
+        thread_name_prefix="selection-grid",
+    ) as executor:
+        futures = {executor.submit(execute, item): item[0] for item in pending}
+        for future in as_completed(futures):
+            try:
+                offset, outcome = future.result()
+                retain(offset, outcome)
+            except Exception:
+                for queued in futures:
+                    queued.cancel()
+                raise
+    return results
+
+
 def run(argv=None) -> tuple[Path, Path | None]:
     """Execute or print the requested grid and save typed comparison reports.
 
@@ -1107,6 +1262,8 @@ def run(argv=None) -> tuple[Path, Path | None]:
     )
     if args.initial_capital_usd is not None and args.initial_capital_usd <= 0:
         raise ValueError("--initial-capital-usd must be positive")
+    if args.max_workers < 1:
+        raise ValueError("--max-workers must be at least one")
     if args.max_source_gap_days < 0:
         raise ValueError("--max-source-gap-days must be nonnegative")
     if args.selection_max_history_gap_days < 0:
@@ -1202,47 +1359,23 @@ def run(argv=None) -> tuple[Path, Path | None]:
             print(shlex.join(command))
         return commands_path, None
 
+    executions = _execute_planned_scenarios(
+        planned,
+        resume=args.resume,
+        fail_fast=args.fail_fast,
+        max_workers=args.max_workers,
+    )
     summary_rows: list[dict[str, object]] = []
     membership_frames: list[pl.DataFrame] = []
-    for index, (scenario, scenario_dir, command) in enumerate(planned, start=1):
-        existing_book = _latest_book(scenario_dir) if args.resume else None
-        started = monotonic()
-        status = "complete"
-        error = ""
-        book_path = existing_book
-        if existing_book is None:
-            print(f"[{index}/{len(planned)}] {scenario.scenario_id}")
-            completed = subprocess.run(
-                command,
-                cwd=Path.cwd(),
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            (scenario_dir / "command_output.log").write_text(
-                completed.stdout + completed.stderr,
-                encoding="utf-8",
-            )
-            if completed.returncode:
-                status = "failed"
-                error = f"selection exited with status {completed.returncode}"
-                if args.fail_fast:
-                    raise RuntimeError(
-                        f"{scenario.scenario_id}: {error}; see command_output.log"
-                    )
-            else:
-                book_path = _latest_book(scenario_dir)
-                if book_path is None:
-                    status = "failed"
-                    error = "selection completed without a book report"
-        elapsed = monotonic() - started
+    for offset, (scenario, scenario_dir, _) in enumerate(planned):
+        outcome = executions[offset]
         row, membership = _summary_row(
             scenario,
-            status=status,
-            elapsed_seconds=elapsed,
-            book_path=book_path,
+            status=outcome.status,
+            elapsed_seconds=outcome.elapsed_seconds,
+            book_path=outcome.book_path,
             rule_cache=rule_cache,
-            error=error,
+            error=outcome.error,
         )
         summary_rows.append(row)
         if membership is not None:

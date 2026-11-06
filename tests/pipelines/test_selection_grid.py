@@ -1,17 +1,38 @@
 """Tests for the command-line Phase 2 robustness-grid coordinator."""
 
+import subprocess
 from pathlib import Path
+from threading import Lock
+from time import sleep
 
 import polars as pl
 import pytest
 
 from derivatives_bt_engine.pipelines.selection_grid import (
     SelectionScenario,
+    _execute_planned_scenarios,
     _summary_row,
     build_scenarios,
     parse_args,
     run,
 )
+
+
+def _test_scenario(score_threshold: float) -> SelectionScenario:
+    """Return a minimal distinct scenario for coordinator execution tests."""
+    return SelectionScenario(
+        target_volatility=0.20,
+        maximum_instrument_margin_percent=20.0,
+        maximum_book_margin_percent=50.0,
+        maximum_weight_idm=0.20,
+        score_threshold=score_threshold,
+        maximum_instruments_per_class=None,
+        maximum_instruments_per_subclass=None,
+        maximum_asset_class_weight_percent=None,
+        maximum_economic_subclass_weight_percent=None,
+        include_roll_cost_in_score=True,
+        weight_policy="topdown_classif",
+    )
 
 
 def test_grid_requires_explicit_cache_root():
@@ -23,6 +44,73 @@ def test_grid_requires_explicit_cache_root():
     )
     with pytest.raises(ValueError, match="--cache is required"):
         run(["--input", "screen.parquet"])
+
+
+def test_grid_rejects_nonpositive_worker_count(tmp_path: Path):
+    """A worker pool must contain at least one supervising thread."""
+    source = tmp_path / "screen.parquet"
+    pl.DataFrame({"symbol": ["MZC"]}).write_parquet(source)
+    with pytest.raises(ValueError, match="--max-workers must be at least one"):
+        run([
+            "--input",
+            str(source),
+            "--cache",
+            str(tmp_path / "cache"),
+            "--max-workers",
+            "0",
+        ])
+
+
+def test_grid_runs_subprocesses_concurrently_after_serial_cache_warmup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Worker limit supervises concurrent child CLIs after one warm-up run."""
+    active = 0
+    maximum_active = 0
+    starts = 0
+    lock = Lock()
+
+    def fake_run(command, **kwargs):
+        nonlocal active, maximum_active, starts
+        with lock:
+            starts += 1
+            active += 1
+            maximum_active = max(maximum_active, active)
+        sleep(0.04)
+        with lock:
+            active -= 1
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(
+        "derivatives_bt_engine.pipelines.selection_grid.subprocess.run",
+        fake_run,
+    )
+    monkeypatch.setattr(
+        "derivatives_bt_engine.pipelines.selection_grid._latest_book",
+        lambda scenario_dir: scenario_dir / "book.parquet",
+    )
+    planned = []
+    for index in range(5):
+        scenario_dir = tmp_path / f"scenario_{index}"
+        scenario_dir.mkdir()
+        planned.append((
+            _test_scenario(0.80 + index / 100),
+            scenario_dir,
+            ["selection", str(index)],
+        ))
+
+    outcomes = _execute_planned_scenarios(
+        planned,
+        resume=False,
+        fail_fast=False,
+        max_workers=3,
+    )
+
+    assert starts == 5
+    assert maximum_active == 3
+    assert set(outcomes) == {0, 1, 2, 3, 4}
+    assert all(outcome.status == "complete" for outcome in outcomes.values())
 
 
 def test_grid_summary_recovers_score_from_accepted_passes_for_legacy_book(
