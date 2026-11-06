@@ -476,13 +476,20 @@ def load_roll_cycle_ib_contract_history(
     multiplier = _format_ib_multiplier(float(broker['ib_multiplier']))
     ignore_weekly = bool(broker['ignore_weekly'])
     store = IBFuturesHistoryStore(history_db_path)
-    complete_months = store.complete_contract_months(
-        pst_instr_code=pst_instr_code,
-        bar_size=bar_size,
-        what_to_show=what_to_show,
-        use_rth=use_rth,
-        duration=effective_duration,
-    )
+    if update_history:
+        # Schema creation belongs exclusively to the broker-update path.
+        # Stored-only readers must remain genuinely read-only so many grid
+        # workers can safely share one frozen DuckDB input.
+        store.initialize()
+        complete_months = store.complete_contract_months(
+            pst_instr_code=pst_instr_code,
+            bar_size=bar_size,
+            what_to_show=what_to_show,
+            use_rth=use_rth,
+            duration=effective_duration,
+        )
+    else:
+        complete_months = set()
     logger.info(
         "ib_dated_history start instrument=%s ib_symbol=%s exchange=%s "
         "hold_roll_cycle=%s priced_roll_cycle=%s carry_offset=%s "

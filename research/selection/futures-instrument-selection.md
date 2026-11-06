@@ -2144,10 +2144,21 @@ directory for every scenario and can resume completed directories after
 interruption. To resume a particular run, pass its exact folder with
 `--run-dir`; `--output-dir` always means the parent output root. Scenarios run
 serially by default. On a machine with sufficient memory, set `--max-workers`
-to the desired number of concurrent selection subprocesses. The runner first
-executes one incomplete scenario alone to warm the shared history cache, then
-starts the bounded worker pool; commands are passed as argument vectors and
-are not evaluated by a shell. Grid scenarios automatically use
+to the desired number of concurrent selection subprocesses. When
+`--ib-history-live missing` or `update` is requested, the runner first performs
+one separate serial materialization pass that may contact IB and update the
+source IB database. It then atomically copies that database into the grid run
+under `.selection_grid_inputs/`, records its SHA-256 identity, and removes all
+live IB flags from measured scenario commands. The first measured scenario
+runs alone against this frozen database to warm shared derived-history caches;
+only then does the bounded worker pool start. Stored-only history access is
+read-only, so workers cannot contend for DuckDB's writer lock or silently
+observe different live fallbacks. A swallowed connection or DuckDB-lock error
+in the materialization log aborts the grid before the frozen copy is published.
+Completion markers include the pinned input
+fingerprint, and resume rejects artifacts created from another history input.
+Commands are passed as argument vectors and are not evaluated by a shell. Grid
+scenarios automatically use
 `--selection-report-mode compact`: they retain the selected books, dated final
 allocations, cash P&L, portfolio curves, and summary inputs, but omit the
 duplicated million-row daily forecast panel and exhaustive rejected

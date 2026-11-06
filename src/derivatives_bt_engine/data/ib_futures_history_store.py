@@ -167,7 +167,9 @@ class IBFuturesHistoryStore:
         coverage satisfies the lookup. This permits a longer request to
         backfill a contract previously completed with shorter coverage.
         """
-        self.initialize()
+        # Callers that update history initialize the schema before this
+        # lookup. Keeping the lookup itself read-only prevents an offline
+        # worker from taking DuckDB's single-writer lock.
         con = duckdb.connect(str(Path(self.db_path).expanduser()), read_only=True)
         try:
             duration_filter = "AND duration = ?" if duration is not None else ""
@@ -363,11 +365,15 @@ class IBFuturesHistoryStore:
         use_rth: bool,
     ) -> pl.DataFrame:
         """Load cached raw bars with contract identity for requested months."""
-        self.initialize()
         if not contract_months:
             return pl.DataFrame()
+        path = Path(self.db_path).expanduser()
+        if not path.is_file():
+            return pl.DataFrame()
         placeholders = ", ".join("?" for _ in contract_months)
-        con = duckdb.connect(str(Path(self.db_path).expanduser()), read_only=True)
+        # This is a pure source read. Schema creation is deliberately absent:
+        # a stored-only grid must never promote a reader into a writer.
+        con = duckdb.connect(str(path), read_only=True)
         try:
             return con.execute(
                 f"""

@@ -1,5 +1,17 @@
 # Selection hysteresis grid audit: November 6, 2026
 
+## Resolution
+
+The coordinator now separates history preparation from scored scenarios. A
+single serial subprocess performs any requested live IB acquisition, after
+which the finalized IB DuckDB is copied into the grid run and identified by a
+SHA-256 manifest. Every measured command is strictly offline and reads that
+frozen database; the stored-history reader no longer initializes DuckDB or
+takes a writer lock. Scenario completion markers also carry the common input
+fingerprint, so the invalid artifacts described below cannot be resumed into a
+new comparable grid. The `selection_grid_20261105_222348` outputs remain
+preserved for diagnosis, but must not be used for policy ranking.
+
 ## Scope
 
 This audit covers

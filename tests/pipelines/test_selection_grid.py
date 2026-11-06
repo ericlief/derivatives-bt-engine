@@ -12,6 +12,9 @@ from derivatives_bt_engine.pipelines.selection_grid import (
     SelectionScenario,
     _completed_book,
     _execute_planned_scenarios,
+    _freeze_ib_history_input,
+    _load_frozen_ib_history_input,
+    _run_history_materialization,
     _summary_row,
     build_scenarios,
     parse_args,
@@ -138,6 +141,70 @@ def test_resume_rejects_book_from_interrupted_complete_run(tmp_path: Path):
         / f"multi_speed_ewmac_selection_portfolio_curve_{stamp}.parquet"
     ).touch()
     assert _completed_book(tmp_path) == book
+
+
+def test_resume_requires_matching_frozen_input_fingerprint(tmp_path: Path):
+    """A successful artifact set is not reusable against different history."""
+    stamp = "20261106_120000"
+    book = tmp_path / f"multi_speed_ewmac_selection_book_{stamp}.parquet"
+    book.touch()
+    (
+        tmp_path / f"multi_speed_ewmac_selection_cash_pnl_{stamp}.parquet"
+    ).touch()
+    (
+        tmp_path
+        / f"multi_speed_ewmac_selection_portfolio_curve_{stamp}.parquet"
+    ).touch()
+    (tmp_path / ".selection_grid_complete.json").write_text(
+        '{"book": "multi_speed_ewmac_selection_book_20261106_120000.parquet", '
+        '"input_fingerprint": "history-a"}\n',
+        encoding="utf-8",
+    )
+
+    assert _completed_book(
+        tmp_path, input_fingerprint="history-a"
+    ) == book
+    assert _completed_book(
+        tmp_path, input_fingerprint="history-b"
+    ) is None
+
+
+def test_frozen_ib_history_manifest_detects_content_changes(tmp_path: Path):
+    """The run-local IB snapshot has a verified immutable identity."""
+    source = tmp_path / "source.duckdb"
+    output = tmp_path / "grid"
+    source.write_bytes(b"stable duckdb fixture")
+
+    frozen, fingerprint = _freeze_ib_history_input(source, output)
+
+    assert frozen.read_bytes() == source.read_bytes()
+    assert _load_frozen_ib_history_input(output) == (frozen, fingerprint)
+    frozen.write_bytes(b"changed")
+    with pytest.raises(ValueError, match="does not match"):
+        _load_frozen_ib_history_input(output)
+
+
+def test_history_materialization_rejects_swallowed_connection_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A zero-exit selection may not hide an unusable live acquisition."""
+    def fake_run(command, **kwargs):
+        kwargs["stdout"].write(
+            "selection_stitched_history unavailable reason=Not connected\n"
+        )
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(
+        "derivatives_bt_engine.pipelines.selection_grid.subprocess.run",
+        fake_run,
+    )
+
+    with pytest.raises(RuntimeError, match="unusable shared input"):
+        _run_history_materialization(
+            ["selection", "--ib-history-live", "missing"],
+            tmp_path,
+        )
 
 
 def test_grid_summary_recovers_score_from_accepted_passes_for_legacy_book(
@@ -369,6 +436,46 @@ def test_dry_run_writes_reproducible_commands_without_running_selection(
     assert "--selection-rank-count-ewma-halflife-reviews 3.0" in command_text
     assert "--selection-report-mode compact" in command_text
     assert not list(output.rglob("multi_speed_ewmac_selection_book_*.parquet"))
+
+
+def test_live_grid_plan_keeps_measured_commands_offline(tmp_path: Path):
+    """Only serial materialization may receive live IB connection flags."""
+    source = tmp_path / "screen.parquet"
+    ib_database = tmp_path / "ib.duckdb"
+    output = tmp_path / "grid"
+    pl.DataFrame({"symbol": ["MZC"]}).write_parquet(source)
+    ib_database.write_bytes(b"dry-run fixture")
+
+    commands_path, _ = run([
+        "--input",
+        str(source),
+        "--output-dir",
+        str(output),
+        "--target-vols",
+        "0.20",
+        "--max-instr-margin-pcts",
+        "20",
+        "--roll-cost-modes",
+        "include",
+        "--cache",
+        str(tmp_path / "cache"),
+        "--ib-history-db",
+        str(ib_database),
+        "--ib-history-live",
+        "missing",
+        "--dry-run",
+    ])
+
+    command_text = commands_path.read_text(encoding="utf-8")
+    expected_frozen = (
+        commands_path.parent
+        / ".selection_grid_inputs"
+        / "ib_futures_history.duckdb"
+    )
+    assert f"--ib-history-db {expected_frozen}" in command_text
+    assert "--ib-history-live" not in command_text
+    assert "--ib-host" not in command_text
+    assert "--ib-client-id" not in command_text
 
 
 def test_grid_can_pin_an_exact_run_directory_for_resume(tmp_path: Path):

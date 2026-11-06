@@ -13,6 +13,7 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
+import hashlib
 from itertools import product
 import json
 from pathlib import Path
@@ -359,7 +360,10 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument(
         "--ib-history-live",
         choices=("missing", "update"),
-        help="Live IB policy forwarded to each selection scenario.",
+        help=(
+            "Live IB policy used once by the serial history-materialization "
+            "phase. Measured scenarios never connect to IB."
+        ),
     )
     parser.add_argument("--ib-host", default="127.0.0.1")
     parser.add_argument("--ib-port", type=int, action="append")
@@ -585,8 +589,9 @@ def parse_args(argv=None) -> argparse.Namespace:
         default=1,
         help=(
             "Maximum concurrent selection subprocesses (default: 1). "
-            "Values above one run a serial cache warm-up scenario before "
-            "starting the bounded worker pool."
+            "The first measured scenario runs serially against the frozen "
+            "history input to warm shared derived caches before the bounded "
+            "worker pool starts."
         ),
     )
     return parser.parse_args(argv)
@@ -847,6 +852,164 @@ def _completion_marker(scenario_dir: Path) -> Path:
     return scenario_dir / ".selection_grid_complete.json"
 
 
+def _sha256_file(path: Path) -> str:
+    """Return the complete SHA-256 identity of one pinned grid input file."""
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _file_stat_identity(path: Path) -> dict[str, object]:
+    """Return a cheap stable identity for a large immutable database input."""
+    stat = path.stat()
+    return {
+        "path": str(path),
+        "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+    }
+
+
+def _input_manifest_path(output_dir: Path) -> Path:
+    """Return the run-level immutable-input manifest path."""
+    return output_dir / ".selection_grid_inputs" / "manifest.json"
+
+
+def _load_frozen_ib_history_input(
+    output_dir: Path,
+) -> tuple[Path, str] | None:
+    """Return a previously frozen IB input when its content still verifies."""
+    manifest_path = _input_manifest_path(output_dir)
+    if not manifest_path.is_file():
+        return None
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        frozen_path = Path(str(payload["frozen_ib_history_db"]))
+        if not frozen_path.is_absolute():
+            frozen_path = manifest_path.parent / frozen_path
+        expected_sha256 = str(payload["frozen_ib_history_sha256"])
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+        return None
+    if not frozen_path.is_file():
+        return None
+    actual_sha256 = _sha256_file(frozen_path)
+    if actual_sha256 != expected_sha256:
+        raise ValueError(
+            "frozen IB history input does not match its grid manifest: "
+            f"{frozen_path}"
+        )
+    return frozen_path, expected_sha256
+
+
+def _freeze_ib_history_input(
+    source_database: Path,
+    output_dir: Path,
+) -> tuple[Path, str]:
+    """Copy the finalized IB database into the run and publish its identity.
+
+    The source must have no active grid-owned writer when this function runs.
+    A temporary copy is atomically renamed before its SHA-256 identity is
+    published, so workers can never observe a partial database snapshot.
+    """
+    if not source_database.is_file():
+        raise FileNotFoundError(
+            f"IB history database does not exist: {source_database}"
+        )
+    input_dir = output_dir / ".selection_grid_inputs"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    frozen_path = input_dir / "ib_futures_history.duckdb"
+    temporary_path = frozen_path.with_suffix(".duckdb.tmp")
+    shutil.copy2(source_database, temporary_path)
+    temporary_path.replace(frozen_path)
+    frozen_sha256 = _sha256_file(frozen_path)
+    payload = {
+        "source_ib_history_db": str(source_database),
+        # Keep the run movable between the host and a mounted VM path.
+        "frozen_ib_history_db": frozen_path.name,
+        "frozen_ib_history_size": frozen_path.stat().st_size,
+        "frozen_ib_history_sha256": frozen_sha256,
+        "prepared_at": datetime.now(REPORT_TIMEZONE).isoformat(),
+    }
+    manifest_path = _input_manifest_path(output_dir)
+    temporary_manifest = manifest_path.with_suffix(".json.tmp")
+    temporary_manifest.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    temporary_manifest.replace(manifest_path)
+    return frozen_path, frozen_sha256
+
+
+def _publish_grid_input_identity(
+    output_dir: Path,
+    *,
+    identity: dict[str, object],
+    fingerprint: str,
+) -> None:
+    """Add the complete common-input identity to the run-level manifest."""
+    manifest_path = _input_manifest_path(output_dir)
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, object] = {}
+    if manifest_path.is_file():
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload.update({
+        "grid_input_fingerprint": fingerprint,
+        "grid_input_identity": identity,
+    })
+    temporary_manifest = manifest_path.with_suffix(".json.tmp")
+    temporary_manifest.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    temporary_manifest.replace(manifest_path)
+
+
+def _run_history_materialization(
+    command: list[str],
+    materialization_dir: Path,
+) -> None:
+    """Run the sole live-capable subprocess before freezing grid history.
+
+    This phase is deliberately not one of the measured scenarios. Its only
+    responsibility is to populate the source IB database and derived cache
+    serially; all comparison scenarios subsequently use the frozen copy.
+    """
+    materialization_dir.mkdir(parents=True, exist_ok=True)
+    log_path = materialization_dir / "command_output.log"
+    print("Materializing IB history serially before grid execution", flush=True)
+    with log_path.open("w", encoding="utf-8") as process_log:
+        completed = subprocess.run(
+            command,
+            cwd=Path.cwd(),
+            text=True,
+            stdout=process_log,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+    if completed.returncode:
+        raise RuntimeError(
+            "IB history materialization failed with status "
+            f"{completed.returncode}; see {log_path}"
+        )
+    log_text = log_path.read_text(encoding="utf-8", errors="replace")
+    fatal_messages = (
+        "Conflicting lock is held",
+        "Could not connect to IB on any",
+        "error=Not connected",
+        "reason=Not connected",
+    )
+    detected = next(
+        (message for message in fatal_messages if message in log_text),
+        None,
+    )
+    if detected is not None:
+        raise RuntimeError(
+            "IB history materialization reported an unusable shared input "
+            f"({detected}); see {log_path}"
+        )
+
+
 def _core_outputs_for_book(book_path: Path) -> tuple[Path, Path] | None:
     """Resolve the cash and portfolio outputs matching a modern book stamp."""
     prefix = "multi_speed_ewmac_selection_book_"
@@ -861,7 +1024,11 @@ def _core_outputs_for_book(book_path: Path) -> tuple[Path, Path] | None:
     )
 
 
-def _completed_book(scenario_dir: Path) -> Path | None:
+def _completed_book(
+    scenario_dir: Path,
+    *,
+    input_fingerprint: str | None = None,
+) -> Path | None:
     """Return a book only when its complete selection subprocess succeeded.
 
     New runs publish an explicit marker after the child exits successfully.
@@ -872,6 +1039,11 @@ def _completed_book(scenario_dir: Path) -> Path | None:
     if marker.is_file():
         try:
             payload = json.loads(marker.read_text(encoding="utf-8"))
+            if (
+                input_fingerprint is not None
+                and payload.get("input_fingerprint") != input_fingerprint
+            ):
+                return None
             book = scenario_dir / str(payload["book"])
             core_outputs = _core_outputs_for_book(book)
             if (
@@ -884,6 +1056,11 @@ def _completed_book(scenario_dir: Path) -> Path | None:
             return None
         return None
 
+    # Legacy artifact-only completion cannot prove which mutable history was
+    # observed. It remains readable for old grids, but is never resumable in a
+    # new run that pins an explicit immutable-input fingerprint.
+    if input_fingerprint is not None:
+        return None
     book = _latest_book(scenario_dir)
     if book is None or not (scenario_dir / "command_output.log").is_file():
         return None
@@ -1169,6 +1346,7 @@ def _execute_selection_scenario(
     scenario: SelectionScenario,
     scenario_dir: Path,
     command: list[str],
+    input_fingerprint: str | None = None,
 ) -> ScenarioExecution:
     """Run one selection command and persist its combined process output.
 
@@ -1222,6 +1400,7 @@ def _execute_selection_scenario(
                         "completed_at": datetime.now(
                             REPORT_TIMEZONE
                         ).isoformat(),
+                        "input_fingerprint": input_fingerprint,
                     }, sort_keys=True) + "\n",
                     encoding="utf-8",
                 )
@@ -1240,6 +1419,7 @@ def _execute_planned_scenarios(
     resume: bool,
     fail_fast: bool,
     max_workers: int,
+    input_fingerprint: str | None = None,
 ) -> dict[int, ScenarioExecution]:
     """Execute planned scenarios serially or in a bounded subprocess pool.
 
@@ -1257,7 +1437,14 @@ def _execute_planned_scenarios(
     pending: list[tuple[int, SelectionScenario, Path, list[str]]] = []
     total = len(planned)
     for offset, (scenario, scenario_dir, command) in enumerate(planned):
-        existing_book = _completed_book(scenario_dir) if resume else None
+        existing_book = (
+            _completed_book(
+                scenario_dir,
+                input_fingerprint=input_fingerprint,
+            )
+            if resume
+            else None
+        )
         if existing_book is not None:
             results[offset] = ScenarioExecution(
                 status="complete",
@@ -1278,6 +1465,7 @@ def _execute_planned_scenarios(
             scenario,
             scenario_dir,
             command,
+            input_fingerprint,
         )
         return offset, outcome
 
@@ -1396,6 +1584,114 @@ def run(argv=None) -> tuple[Path, Path | None]:
     output_dir.mkdir(parents=True, exist_ok=True)
     rule_cache = pl.read_parquet(source)
     scenarios = build_scenarios(args)
+    cache_root = args.cache.expanduser().resolve()
+    globex_database = args.globex_db.expanduser().resolve()
+    broker_mapping = args.broker_mapping.expanduser().resolve()
+
+    worker_ib_history_database = ib_history_database
+    ib_history_fingerprint = ""
+    materialization_command: list[str] | None = None
+    materialization_dir: Path | None = None
+    if ib_history_database is not None:
+        frozen_input = (
+            _load_frozen_ib_history_input(output_dir) if args.resume else None
+        )
+        frozen_path = (
+            frozen_input[0]
+            if frozen_input is not None
+            else output_dir
+            / ".selection_grid_inputs"
+            / "ib_futures_history.duckdb"
+        )
+        if args.ib_history_live is not None and frozen_input is None:
+            # The acquisition subprocess is intentionally separate from the
+            # measured Cartesian product. It may update the source DB and use
+            # IB, but no scenario whose score enters the grid may do either.
+            materialization_dir = (
+                output_dir / ".selection_grid_inputs" / "materialization"
+            )
+            materialization_dir.mkdir(parents=True, exist_ok=True)
+            materialization_input = (
+                materialization_dir / "multi_speed_ewmac_rule_cache.parquet"
+            )
+            if not materialization_input.exists():
+                shutil.copy2(source, materialization_input)
+            materialization_command = _selection_command(
+                scenarios[0],
+                scenario_input=materialization_input,
+                candidates_output=(
+                    materialization_dir
+                    / "multi_speed_ewmac_selection_candidates.parquet"
+                ),
+                database=database,
+                ib_history_database=ib_history_database,
+                globex_database=globex_database,
+                broker_mapping=broker_mapping,
+                cache=cache_root,
+                max_source_gap_days=args.max_source_gap_days,
+                ib_history_live=args.ib_history_live,
+                ib_host=args.ib_host,
+                ib_ports=args.ib_port,
+                ib_client_id=args.ib_client_id,
+                initial_capital_usd=args.initial_capital_usd,
+            )
+        if not args.dry_run:
+            if frozen_input is None:
+                if materialization_command is not None:
+                    if materialization_dir is None:
+                        raise RuntimeError(
+                            "history materialization directory was not set"
+                        )
+                    _run_history_materialization(
+                        materialization_command,
+                        materialization_dir,
+                    )
+                frozen_input = _freeze_ib_history_input(
+                    ib_history_database,
+                    output_dir,
+                )
+            worker_ib_history_database, ib_history_fingerprint = frozen_input
+        else:
+            worker_ib_history_database = frozen_path
+            if frozen_input is not None:
+                ib_history_fingerprint = frozen_input[1]
+
+    rule_cache_fingerprint = _sha256_file(source)
+    input_identity: dict[str, object] = {
+        "rule_cache": {
+            "path": str(source),
+            "sha256": rule_cache_fingerprint,
+        },
+        "reference_history_db": (
+            _file_stat_identity(database)
+            if database.is_file()
+            else {"path": str(database), "missing": True}
+        ),
+        "broker_mapping": {
+            "path": str(broker_mapping),
+            "sha256": (
+                _sha256_file(broker_mapping)
+                if broker_mapping.is_file()
+                else None
+            ),
+        },
+        "frozen_ib_history_sha256": ib_history_fingerprint or None,
+        "initial_capital_usd": args.initial_capital_usd,
+        "max_source_gap_days": args.max_source_gap_days,
+        "selection_max_history_gap_days": (
+            args.selection_max_history_gap_days
+        ),
+        "selection_rebalance": args.selection_rebalance,
+    }
+    input_fingerprint = hashlib.sha256(
+        json.dumps(input_identity, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    if not args.dry_run:
+        _publish_grid_input_identity(
+            output_dir,
+            identity=input_identity,
+            fingerprint=input_fingerprint,
+        )
 
     planned: list[tuple[SelectionScenario, Path, list[str]]] = []
     for scenario in scenarios:
@@ -1410,12 +1706,14 @@ def run(argv=None) -> tuple[Path, Path | None]:
             scenario_input=scenario_input,
             candidates_output=candidates_output,
             database=database,
-            ib_history_database=ib_history_database,
-            globex_database=args.globex_db.expanduser().resolve(),
-            broker_mapping=args.broker_mapping.expanduser().resolve(),
-            cache=args.cache.expanduser().resolve(),
+            ib_history_database=worker_ib_history_database,
+            globex_database=globex_database,
+            broker_mapping=broker_mapping,
+            cache=cache_root,
             max_source_gap_days=args.max_source_gap_days,
-            ib_history_live=args.ib_history_live,
+            # Measured workers are strictly offline. The serial preparation
+            # phase above is the only place live broker flags are legal.
+            ib_history_live=None,
             ib_host=args.ib_host,
             ib_ports=args.ib_port,
             ib_client_id=args.ib_client_id,
@@ -1434,6 +1732,13 @@ def run(argv=None) -> tuple[Path, Path | None]:
     print(f"Prepared {len(planned)} scenarios in {output_dir}")
     print(f"Saved command plan {commands_path}")
     if args.dry_run:
+        if materialization_command is not None:
+            print("Serial history-materialization command:")
+            print(shlex.join(materialization_command))
+            print(
+                "The coordinator freezes the resulting IB database before "
+                "executing the offline commands below."
+            )
         for _, _, command in planned:
             print(shlex.join(command))
         return commands_path, None
@@ -1443,6 +1748,7 @@ def run(argv=None) -> tuple[Path, Path | None]:
         resume=args.resume,
         fail_fast=args.fail_fast,
         max_workers=args.max_workers,
+        input_fingerprint=input_fingerprint,
     )
     summary_rows: list[dict[str, object]] = []
     membership_frames: list[pl.DataFrame] = []
