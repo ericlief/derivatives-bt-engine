@@ -2108,9 +2108,9 @@ Judge the construction grid using book size, Jaccard membership overlap,
 additions and removals, asset-class and subclass coverage, maximum instrument
 margin, total book margin, contract granularity, cost sensitivity, and binding
 rejection reasons. Do not rank the scenarios by the greedy construction score.
-A performance comparison requires a separate walk-forward selector that, at
-each rebalance date, uses only then-available eligibility, costs, forecasts,
-correlations, margins, and contract definitions.
+The grid can invoke the same yearly or monthly walk-forward selector as
+`futures-build-selection`, but its compact summary remains a construction and
+membership comparison rather than a performance optimizer.
 
 #### Command-line runner
 
@@ -2119,7 +2119,9 @@ runs every construction scenario without making an IB request. A target-vol
 override recomputes the saved capital/risk-size and relative-liquidity gates
 offline; it does not rebuild market history or the executable snapshot. Pass
 an exact file rather than a report directory so a newer screen cannot enter the
-grid midway through a run.
+grid midway through a run. The selection cadence and hysteresis policy are
+fixed across a grid. Rank-count EWMA half-lives may be swept as their own
+dimension; every value receives a distinct `rhl` scenario token.
 
 The recommended 18-scenario first pass is the CLI default:
 
@@ -2127,6 +2129,7 @@ The recommended 18-scenario first pass is the CLI default:
 .venv/bin/futures-selection-grid \
   --input results/multi_speed_ewmac_rule_cache_<timestamp>.parquet \
   --history-db /home/dev/fin/db/pysystemtrade_reference.duckdb \
+  --cache /home/dev/data/fin/misc/cache/futures \
   --initial-capital-usd 75000
 ```
 
@@ -2150,6 +2153,7 @@ Run secondary constraint tests separately, for example:
 .venv/bin/futures-selection-grid \
   --input results/multi_speed_ewmac_rule_cache_<timestamp>.parquet \
   --history-db /home/dev/fin/db/pysystemtrade_reference.duckdb \
+  --cache /home/dev/data/fin/misc/cache/futures \
   --initial-capital-usd 75000 \
   --target-vols 0.20 \
   --max-instr-margin-pcts 20 \
@@ -2166,3 +2170,27 @@ Run secondary constraint tests separately, for example:
   --score-tie-tolerance-pcts .25,.5,1 \
   --tie-ref-book-counts 15,18,21
 ```
+
+For a yearly rank-hysteresis comparison using the new causal count state:
+
+```bash
+.venv/bin/futures-selection-grid \
+  --input results/multi_speed_ewmac_rule_cache_<timestamp>.parquet \
+  --history-db /home/dev/fin/db/pysystemtrade_reference.duckdb \
+  --ib-history-db /home/dev/fin/db/ib_futures_history.duckdb \
+  --cache /home/dev/data/fin/misc/cache/futures \
+  --initial-capital-usd 75000 \
+  --target-vols 0.20 \
+  --max-instr-margin-pcts 20 \
+  --roll-cost-modes include \
+  --selection-rebalance yearly \
+  --selection-membership-hysteresis rank \
+  --selection-rank-buffer-pct 15 \
+  --selection-rank-count-ewma-halflives 1,3,5
+```
+
+Omitting the half-life list uses the standalone cadence default: three reviews
+for yearly selection and twelve for monthly selection. As in the standalone
+backtest, the current snapshot's liquidity and execution overlay applies from
+each IB handoff onward; that overlay is a present-executability sensitivity,
+not a causally backtested historical-volume model.

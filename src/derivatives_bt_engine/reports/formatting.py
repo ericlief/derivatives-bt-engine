@@ -64,6 +64,7 @@ PUBLIC_REPORT_RENAMES = {
     "selection_incumbent": "sel_incumbent",
     "selection_rank": "sel_rank",
     "selection_rebalance": "sel_rebalance",
+    "selection_max_history_gap_days": "sel_max_hist_gap_days",
     "selection_equity_usd": "sel_equity",
     "selection_candidate_count": "sel_cand_n",
     "selection_instrument_count": "sel_instr_n",

@@ -32,6 +32,9 @@ from derivatives_bt_engine.data.ib_futures_dataloader import (
     DEFAULT_BROKER_MAPPING_PATH,
     DEFAULT_MAX_SOURCE_GAP_DAYS,
 )
+from derivatives_bt_engine.pipelines.portfolio_selection import (
+    DEFAULT_SELECTION_MAX_HISTORY_GAP_DAYS,
+)
 from derivatives_bt_engine.reports.formatting import (
     rename_public_report_columns,
     round_public_report,
@@ -64,6 +67,28 @@ class SelectionScenario:
     high_contract_penalty_scale: float = 0.0
     score_tie_tolerance_percent: float = 0.0
     tie_reference_book_count: int = 15
+    selection_rebalance: str = "static"
+    selection_max_history_gap_days: int = (
+        DEFAULT_SELECTION_MAX_HISTORY_GAP_DAYS
+    )
+    selection_eligibility_hysteresis_percent: float = 0.0
+    selection_membership_hysteresis: str = "none"
+    selection_rank_buffer_percent: float = 15.0
+    selection_rank_count_ewma_halflife_reviews: float | None = None
+    selection_book_score_buffer_percent: float = 2.0
+
+    @property
+    def effective_rank_count_ewma_halflife_reviews(self) -> float | None:
+        """Return the explicit or cadence-default rank-count half-life."""
+        if self.selection_membership_hysteresis not in {"rank", "rank_score"}:
+            return None
+        if self.selection_rank_count_ewma_halflife_reviews is not None:
+            return self.selection_rank_count_ewma_halflife_reviews
+        if self.selection_rebalance == "yearly":
+            return 3.0
+        if self.selection_rebalance == "monthly":
+            return 12.0
+        return None
 
     @property
     def scenario_id(self) -> str:
@@ -110,6 +135,29 @@ class SelectionScenario:
             f"roll{int(self.include_roll_cost_in_score)}",
             self.weight_policy,
         ))
+        if self.selection_rebalance != "static":
+            tokens.extend((
+                f"sel{self.selection_rebalance}",
+                f"hg{self.selection_max_history_gap_days}",
+                "eh"
+                f"{_number_token(self.selection_eligibility_hysteresis_percent)}",
+                f"mh{self.selection_membership_hysteresis}",
+            ))
+            if self.selection_membership_hysteresis in {"rank", "rank_score"}:
+                rank_count_halflife = (
+                    self.effective_rank_count_ewma_halflife_reviews
+                )
+                tokens.extend((
+                    "rb"
+                    f"{_number_token(self.selection_rank_buffer_percent)}",
+                    "rhl"
+                    f"{_number_token(rank_count_halflife)}",
+                ))
+            if self.selection_membership_hysteresis in {"score", "rank_score"}:
+                tokens.append(
+                    "sb"
+                    f"{_number_token(self.selection_book_score_buffer_percent)}"
+                )
         return "_".join(tokens)
 
 
@@ -310,6 +358,55 @@ def parse_args(argv=None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--selection-rebalance",
+        choices=("static", "yearly", "monthly"),
+        default="static",
+        help=(
+            "Fixed review cadence shared by every grid scenario (default: "
+            "static)."
+        ),
+    )
+    parser.add_argument(
+        "--selection-max-history-gap-days",
+        type=int,
+        default=DEFAULT_SELECTION_MAX_HISTORY_GAP_DAYS,
+        help="Maximum dated-history freshness gap shared by every scenario.",
+    )
+    parser.add_argument(
+        "--selection-eligibility-hysteresis-pct",
+        type=float,
+        default=0.0,
+        help="Fixed incumbent eligibility hysteresis percent (default: 0).",
+    )
+    parser.add_argument(
+        "--selection-membership-hysteresis",
+        choices=("none", "rank", "score", "rank_score"),
+        default="none",
+        help="Fixed scheduled membership policy (default: none).",
+    )
+    parser.add_argument(
+        "--selection-rank-buffer-pct",
+        type=float,
+        default=15.0,
+        help="Fixed symmetric rank-band percent (default: 15).",
+    )
+    parser.add_argument(
+        "--selection-rank-count-ewma-halflives",
+        "--selection-rank-count-ewma-halflife-reviews",
+        dest="selection_rank_count_ewma_halflives",
+        type=_positive_float_list,
+        help=(
+            "Optional comma-separated rank-count EWMA half-lives, in completed "
+            "reviews. Omit for cadence defaults (3 yearly, 12 monthly)."
+        ),
+    )
+    parser.add_argument(
+        "--selection-book-score-buffer-pct",
+        type=float,
+        default=2.0,
+        help="Fixed prior-book score hurdle percent (default: 2).",
+    )
+    parser.add_argument(
         "--target-vols",
         type=_positive_float_list,
         default=(0.15, 0.20, 0.25),
@@ -446,6 +543,12 @@ def build_scenarios(args: argparse.Namespace) -> list[SelectionScenario]:
         "include": (True,),
         "exclude": (False,),
     }[args.roll_cost_modes]
+    if args.selection_membership_hysteresis in {"rank", "rank_score"}:
+        rank_count_halflives = (
+            args.selection_rank_count_ewma_halflives or (None,)
+        )
+    else:
+        rank_count_halflives = (None,)
     scenarios = [
         SelectionScenario(
             target_volatility=target_volatility,
@@ -463,6 +566,23 @@ def build_scenarios(args: argparse.Namespace) -> list[SelectionScenario]:
             maximum_economic_subclass_weight_percent=subclass_weight_limit,
             include_roll_cost_in_score=include_roll_cost,
             weight_policy=args.weight_policy,
+            selection_rebalance=args.selection_rebalance,
+            selection_max_history_gap_days=(
+                args.selection_max_history_gap_days
+            ),
+            selection_eligibility_hysteresis_percent=(
+                args.selection_eligibility_hysteresis_pct
+            ),
+            selection_membership_hysteresis=(
+                args.selection_membership_hysteresis
+            ),
+            selection_rank_buffer_percent=args.selection_rank_buffer_pct,
+            selection_rank_count_ewma_halflife_reviews=(
+                rank_count_halflife
+            ),
+            selection_book_score_buffer_percent=(
+                args.selection_book_score_buffer_pct
+            ),
         )
         for (
             target_volatility,
@@ -479,6 +599,7 @@ def build_scenarios(args: argparse.Namespace) -> list[SelectionScenario]:
             class_weight_limit,
             subclass_weight_limit,
             include_roll_cost,
+            rank_count_halflife,
         ) in product(
             args.target_vols,
             args.max_instr_margin_pcts,
@@ -494,6 +615,7 @@ def build_scenarios(args: argparse.Namespace) -> list[SelectionScenario]:
             args.max_class_weight_pcts,
             args.max_subclass_weight_pcts,
             roll_modes,
+            rank_count_halflives,
         )
     ]
     return sorted(scenarios, key=lambda scenario: scenario.scenario_id)
@@ -553,6 +675,29 @@ def _selection_command(
     ]
     if initial_capital_usd is not None:
         command.extend(("--initial-capital-usd", str(initial_capital_usd)))
+    if scenario.selection_rebalance != "static":
+        command.extend((
+            "--selection-rebalance",
+            scenario.selection_rebalance,
+            "--selection-max-history-gap-days",
+            str(scenario.selection_max_history_gap_days),
+            "--selection-eligibility-hysteresis-pct",
+            str(scenario.selection_eligibility_hysteresis_percent),
+            "--selection-membership-hysteresis",
+            scenario.selection_membership_hysteresis,
+        ))
+        if scenario.selection_membership_hysteresis in {"rank", "rank_score"}:
+            command.extend((
+                "--selection-rank-buffer-pct",
+                str(scenario.selection_rank_buffer_percent),
+                "--selection-rank-count-ewma-halflife-reviews",
+                str(scenario.effective_rank_count_ewma_halflife_reviews),
+            ))
+        if scenario.selection_membership_hysteresis in {"score", "rank_score"}:
+            command.extend((
+                "--selection-book-score-buffer-pct",
+                str(scenario.selection_book_score_buffer_percent),
+            ))
     if ib_history_database is not None:
         command.extend((
             "--ib-history-db",
@@ -639,6 +784,31 @@ def _summary_row(
         ),
         "include_roll_cost_in_score": scenario.include_roll_cost_in_score,
         "weight_policy": scenario.weight_policy,
+        "selection_rebalance": scenario.selection_rebalance,
+        "selection_max_history_gap_days": (
+            scenario.selection_max_history_gap_days
+        ),
+        "selection_eligibility_hysteresis_percent": (
+            scenario.selection_eligibility_hysteresis_percent
+        ),
+        "selection_membership_hysteresis": (
+            scenario.selection_membership_hysteresis
+        ),
+        "selection_rank_buffer_percent": (
+            scenario.selection_rank_buffer_percent
+            if scenario.selection_membership_hysteresis
+            in {"rank", "rank_score"}
+            else None
+        ),
+        "selection_rank_count_ewma_halflife_reviews": (
+            scenario.effective_rank_count_ewma_halflife_reviews
+        ),
+        "selection_book_score_buffer_percent": (
+            scenario.selection_book_score_buffer_percent
+            if scenario.selection_membership_hysteresis
+            in {"score", "rank_score"}
+            else None
+        ),
         "elapsed_seconds": elapsed_seconds,
         "book_path": str(book_path) if book_path is not None else "",
         "number_instruments": 0,
@@ -772,6 +942,33 @@ def _attach_baseline_overlap(summary: pl.DataFrame) -> pl.DataFrame:
               .then(0.0).otherwise(1.0)
             + pl.when(pl.col("include_roll_cost_in_score"))
               .then(0.0).otherwise(1.0)
+            + pl.when(
+                pl.col(
+                    "selection_rank_count_ewma_halflife_reviews"
+                ).is_null()
+            )
+              .then(0.0)
+              .when(pl.col("selection_rebalance") == "yearly")
+              .then(
+                  (
+                      pl.col(
+                          "selection_rank_count_ewma_halflife_reviews"
+                      )
+                      - 3.0
+                  ).abs()
+                  / 3.0
+              )
+              .when(pl.col("selection_rebalance") == "monthly")
+              .then(
+                  (
+                      pl.col(
+                          "selection_rank_count_ewma_halflife_reviews"
+                      )
+                      - 12.0
+                  ).abs()
+                  / 12.0
+              )
+              .otherwise(0.0)
         ).alias("baseline_distance")
     ).sort("baseline_distance", "scenario_id")
     baseline_id = str(ranked.get_column("scenario_id")[0])
@@ -822,6 +1019,37 @@ def run(argv=None) -> tuple[Path, Path | None]:
         raise ValueError("--initial-capital-usd must be positive")
     if args.max_source_gap_days < 0:
         raise ValueError("--max-source-gap-days must be nonnegative")
+    if args.selection_max_history_gap_days < 0:
+        raise ValueError("--selection-max-history-gap-days must be nonnegative")
+    for name, value in (
+        (
+            "--selection-eligibility-hysteresis-pct",
+            args.selection_eligibility_hysteresis_pct,
+        ),
+        ("--selection-rank-buffer-pct", args.selection_rank_buffer_pct),
+        (
+            "--selection-book-score-buffer-pct",
+            args.selection_book_score_buffer_pct,
+        ),
+    ):
+        if not 0 <= value <= 100:
+            raise ValueError(f"{name} must be in [0, 100]")
+    if (
+        args.selection_rebalance == "static"
+        and args.selection_membership_hysteresis != "none"
+    ):
+        raise ValueError(
+            "selection membership hysteresis requires yearly or monthly "
+            "selection rebalancing"
+        )
+    if (
+        args.selection_rank_count_ewma_halflives is not None
+        and args.selection_membership_hysteresis not in {"rank", "rank_score"}
+    ):
+        raise ValueError(
+            "rank-count EWMA half-lives require rank or rank_score membership "
+            "hysteresis"
+        )
     if args.ib_history_live is not None and ib_history_database is None:
         raise ValueError("--ib-history-live requires --ib-history-db")
 

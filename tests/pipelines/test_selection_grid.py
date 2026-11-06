@@ -48,7 +48,10 @@ def test_grid_summary_recovers_score_from_accepted_passes_for_legacy_book(
         maximum_book_margin_percent=75.0,
         maximum_weight_idm=0.20,
         score_threshold=0.90,
-        maximum_instruments_per_cluster=None,
+        maximum_instruments_per_class=None,
+        maximum_instruments_per_subclass=None,
+        maximum_asset_class_weight_percent=None,
+        maximum_economic_subclass_weight_percent=None,
         include_roll_cost_in_score=True,
         weight_policy="topdown_classif",
     )
@@ -112,9 +115,43 @@ def test_grid_accepts_secondary_constraint_lists():
     scenarios = build_scenarios(args)
 
     assert len(scenarios) == 8
-    assert {scenario.maximum_instruments_per_cluster for scenario in scenarios} == {
+    assert {
+        scenario.maximum_instruments_per_subclass for scenario in scenarios
+    } == {
         2, None
     }
+
+
+def test_grid_sweeps_rank_count_ewma_halflives_for_yearly_reviews():
+    """Rank-count smoothing is an explicit scheduled-selection dimension."""
+    args = parse_args([
+        "--input",
+        "screen.parquet",
+        "--target-vols",
+        "0.20",
+        "--max-instr-margin-pcts",
+        "20",
+        "--roll-cost-modes",
+        "include",
+        "--selection-rebalance",
+        "yearly",
+        "--selection-membership-hysteresis",
+        "rank",
+        "--selection-rank-count-ewma-halflives",
+        "1,3,5",
+    ])
+
+    scenarios = build_scenarios(args)
+
+    assert len(scenarios) == 3
+    assert {
+        scenario.effective_rank_count_ewma_halflife_reviews
+        for scenario in scenarios
+    } == {1.0, 3.0, 5.0}
+    assert all(
+        "_selyearly_hg31_eh0_mhrank_rb15_rhl" in scenario.scenario_id
+        for scenario in scenarios
+    )
 
 
 def test_grid_sweeps_greedy_score_acceptance_thresholds():
@@ -160,6 +197,12 @@ def test_dry_run_writes_reproducible_commands_without_running_selection(
         "20",
         "--roll-cost-modes",
         "include",
+        "--cache",
+        str(tmp_path / "cache"),
+        "--selection-rebalance",
+        "yearly",
+        "--selection-membership-hysteresis",
+        "rank",
         "--dry-run",
     ])
 
@@ -171,6 +214,9 @@ def test_dry_run_writes_reproducible_commands_without_running_selection(
     assert "--max-instr-margin-pct 20.0" in command_text
     assert "--score-threshold 0.9" in command_text
     assert "--include-roll-cost-in-score" in command_text
+    assert "--selection-rebalance yearly" in command_text
+    assert "--selection-rank-buffer-pct 15.0" in command_text
+    assert "--selection-rank-count-ewma-halflife-reviews 3.0" in command_text
     assert not list(output.rglob("multi_speed_ewmac_selection_book_*.parquet"))
 
 
@@ -191,6 +237,8 @@ def test_grid_can_pin_an_exact_run_directory_for_resume(tmp_path: Path):
         "20",
         "--roll-cost-modes",
         "include",
+        "--cache",
+        str(tmp_path / "cache"),
         "--dry-run",
     ])
 

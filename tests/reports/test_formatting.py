@@ -108,6 +108,7 @@ def test_public_report_compacts_selection_review_identity():
         "selection_date": [date(2024, 1, 2)],
         "selection_year": [2024],
         "selection_status": ["added"],
+        "selection_max_history_gap_days": [31],
         "selection_unbuffered_symbols": ["A,C"],
         "selection_added_symbols": ["A"],
         "selection_removed_symbols": ["B"],
@@ -126,6 +127,7 @@ def test_public_report_compacts_selection_review_identity():
         "sel_date",
         "sel_year",
         "sel_status",
+        "sel_max_hist_gap_days",
         "sel_unbuf_symbols",
         "sel_added",
         "sel_removed",
@@ -331,12 +333,13 @@ def test_public_report_renames_subsystem_reference_columns():
         "ref_net_pct",
         "ref_ret_valid",
     ]
-    assert public.row(0)[:8] == pytest.approx(
+    assert public.row(0)[:9] == pytest.approx(
         (
             15,
             2.5,
             2_500.13,
             12_500.13,
+            15_000.13,
             3.4568,
             4.5679,
             4.0,
