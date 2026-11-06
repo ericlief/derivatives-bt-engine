@@ -2147,10 +2147,18 @@ serially by default. On a machine with sufficient memory, set `--max-workers`
 to the desired number of concurrent selection subprocesses. The runner first
 executes one incomplete scenario alone to warm the shared history cache, then
 starts the bounded worker pool; commands are passed as argument vectors and
-are not evaluated by a shell. It writes:
+are not evaluated by a shell. Grid scenarios automatically use
+`--selection-report-mode compact`: they retain the selected books, dated final
+allocations, cash P&L, portfolio curves, and summary inputs, but omit the
+duplicated million-row daily forecast panel and exhaustive rejected
+review-trial allocations. A standalone `futures-build-selection` run remains
+`full` by default when those forensic reports are required. The versioned
+per-symbol cache shares invariant curves through disk-backed Parquet scans;
+mutable Polars and Python state is not shared across scenario processes. It
+writes:
 
 - `selection_grid_commands.sh`, the reproducible command plan;
-- one normal set of typed portfolio-selection Parquet audits per scenario;
+- one compact set of typed portfolio-selection Parquet audits per scenario;
 - `selection_grid_summary.parquet`, containing parameters, feasibility,
   membership, margins, the central-scenario overlap, and the explicitly named
   `construction_score`; and

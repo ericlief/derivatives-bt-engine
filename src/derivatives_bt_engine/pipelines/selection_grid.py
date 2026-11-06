@@ -740,6 +740,8 @@ def _selection_command(
         "--output",
         str(candidates_output),
         "--complete",
+        "--selection-report-mode",
+        "compact",
         "--history-db",
         str(database),
         "--target-vol",
@@ -833,11 +835,62 @@ def _selection_command(
 
 
 def _latest_book(scenario_dir: Path) -> Path | None:
-    """Return the newest completed selection book, including legacy filenames."""
+    """Return the newest selection book, including interrupted runs."""
     books = sorted(scenario_dir.glob("multi_speed_ewmac_selection_book_*.parquet"))
     if not books:
         books = sorted(scenario_dir.glob("pysystemtrade_selection_book_*.parquet"))
     return books[-1] if books else None
+
+
+def _completion_marker(scenario_dir: Path) -> Path:
+    """Return the grid-owned successful-subprocess marker path."""
+    return scenario_dir / ".selection_grid_complete.json"
+
+
+def _core_outputs_for_book(book_path: Path) -> tuple[Path, Path] | None:
+    """Resolve the cash and portfolio outputs matching a modern book stamp."""
+    prefix = "multi_speed_ewmac_selection_book_"
+    if not book_path.name.startswith(prefix):
+        return None
+    stamp = book_path.name.removeprefix(prefix).removesuffix(".parquet")
+    directory = book_path.parent
+    return (
+        directory / f"multi_speed_ewmac_selection_cash_pnl_{stamp}.parquet",
+        directory
+        / f"multi_speed_ewmac_selection_portfolio_curve_{stamp}.parquet",
+    )
+
+
+def _completed_book(scenario_dir: Path) -> Path | None:
+    """Return a book only when its complete selection subprocess succeeded.
+
+    New runs publish an explicit marker after the child exits successfully.
+    The artifact check supports grids created before that marker existed while
+    rejecting interrupted runs that happened to persist the book first.
+    """
+    marker = _completion_marker(scenario_dir)
+    if marker.is_file():
+        try:
+            payload = json.loads(marker.read_text(encoding="utf-8"))
+            book = scenario_dir / str(payload["book"])
+            core_outputs = _core_outputs_for_book(book)
+            if (
+                book.is_file()
+                and core_outputs is not None
+                and all(path.is_file() for path in core_outputs)
+            ):
+                return book
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+            return None
+        return None
+
+    book = _latest_book(scenario_dir)
+    if book is None or not (scenario_dir / "command_output.log").is_file():
+        return None
+    core_outputs = _core_outputs_for_book(book)
+    if core_outputs is None or not all(path.is_file() for path in core_outputs):
+        return None
+    return book
 
 
 def _summary_row(
@@ -1125,17 +1178,22 @@ def _execute_selection_scenario(
     """
     print(f"[{index}/{total}] {scenario.scenario_id}", flush=True)
     started = monotonic()
-    completed = subprocess.run(
-        command,
-        cwd=Path.cwd(),
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    (scenario_dir / "command_output.log").write_text(
-        completed.stdout + completed.stderr,
-        encoding="utf-8",
-    )
+    marker = _completion_marker(scenario_dir)
+    marker.unlink(missing_ok=True)
+    # Stream directly to disk so long-running children do not accumulate log
+    # text in the coordinator and a machine-level interruption leaves the last
+    # completed phase available for diagnosis.
+    with (scenario_dir / "command_output.log").open(
+        "w", encoding="utf-8"
+    ) as process_log:
+        completed = subprocess.run(
+            command,
+            cwd=Path.cwd(),
+            text=True,
+            stdout=process_log,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
     book_path: Path | None = None
     status = "complete"
     error = ""
@@ -1147,6 +1205,27 @@ def _execute_selection_scenario(
         if book_path is None:
             status = "failed"
             error = "selection completed without a book report"
+        else:
+            core_outputs = _core_outputs_for_book(book_path)
+            if (
+                core_outputs is None
+                or not all(path.is_file() for path in core_outputs)
+            ):
+                status = "failed"
+                error = "selection completed without core cash reports"
+                book_path = None
+            else:
+                temporary_marker = marker.with_suffix(".json.tmp")
+                temporary_marker.write_text(
+                    json.dumps({
+                        "book": book_path.name,
+                        "completed_at": datetime.now(
+                            REPORT_TIMEZONE
+                        ).isoformat(),
+                    }, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+                temporary_marker.replace(marker)
     return ScenarioExecution(
         status=status,
         error=error,
@@ -1178,7 +1257,7 @@ def _execute_planned_scenarios(
     pending: list[tuple[int, SelectionScenario, Path, list[str]]] = []
     total = len(planned)
     for offset, (scenario, scenario_dir, command) in enumerate(planned):
-        existing_book = _latest_book(scenario_dir) if resume else None
+        existing_book = _completed_book(scenario_dir) if resume else None
         if existing_book is not None:
             results[offset] = ScenarioExecution(
                 status="complete",

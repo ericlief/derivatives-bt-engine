@@ -199,6 +199,7 @@ def test_selection_defaults_to_reviewed_classification_weights():
     assert args.selection_eligibility_hysteresis_pct == pytest.approx(0.0)
     assert args.selection_rank_count_ewma_halflife_reviews is None
     assert args.selection_book_score_buffer_pct == pytest.approx(2.0)
+    assert args.selection_report_mode == "full"
     assert args.forecast_fdm == pytest.approx(1.0)
     assert args.ib_prior_years == 3
     assert args.backtest_start_date is None
@@ -212,6 +213,13 @@ def test_selection_rebalance_cadence_is_explicit():
 
     assert monthly.selection_rebalance == "monthly"
     assert yearly.selection_rebalance == "yearly"
+
+
+def test_selection_compact_report_mode_is_explicit():
+    """Large robustness grids can omit duplicated exhaustive audit panels."""
+    args = parse_args(["--selection-report-mode", "compact"])
+
+    assert args.selection_report_mode == "compact"
 
 
 def test_backtest_period_is_typed_and_inclusive():

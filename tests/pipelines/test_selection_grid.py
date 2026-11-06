@@ -10,6 +10,7 @@ import pytest
 
 from derivatives_bt_engine.pipelines.selection_grid import (
     SelectionScenario,
+    _completed_book,
     _execute_planned_scenarios,
     _summary_row,
     build_scenarios,
@@ -90,10 +91,15 @@ def test_grid_runs_subprocesses_concurrently_after_serial_cache_warmup(
         "derivatives_bt_engine.pipelines.selection_grid._latest_book",
         lambda scenario_dir: scenario_dir / "book.parquet",
     )
+    monkeypatch.setattr(
+        "derivatives_bt_engine.pipelines.selection_grid._core_outputs_for_book",
+        lambda book: (book, book),
+    )
     planned = []
     for index in range(5):
         scenario_dir = tmp_path / f"scenario_{index}"
         scenario_dir.mkdir()
+        (scenario_dir / "book.parquet").touch()
         planned.append((
             _test_scenario(0.80 + index / 100),
             scenario_dir,
@@ -111,6 +117,27 @@ def test_grid_runs_subprocesses_concurrently_after_serial_cache_warmup(
     assert maximum_active == 3
     assert set(outcomes) == {0, 1, 2, 3, 4}
     assert all(outcome.status == "complete" for outcome in outcomes.values())
+
+
+def test_resume_rejects_book_from_interrupted_complete_run(tmp_path: Path):
+    """A book alone must not cause an interrupted scenario to be skipped."""
+    stamp = "20261105_225003"
+    book = (
+        tmp_path / f"multi_speed_ewmac_selection_book_{stamp}.parquet"
+    )
+    book.touch()
+    (tmp_path / "command_output.log").touch()
+
+    assert _completed_book(tmp_path) is None
+
+    (
+        tmp_path / f"multi_speed_ewmac_selection_cash_pnl_{stamp}.parquet"
+    ).touch()
+    (
+        tmp_path
+        / f"multi_speed_ewmac_selection_portfolio_curve_{stamp}.parquet"
+    ).touch()
+    assert _completed_book(tmp_path) == book
 
 
 def test_grid_summary_recovers_score_from_accepted_passes_for_legacy_book(
@@ -340,6 +367,7 @@ def test_dry_run_writes_reproducible_commands_without_running_selection(
     assert "--selection-rebalance yearly" in command_text
     assert "--selection-rank-buffer-pct 15.0" in command_text
     assert "--selection-rank-count-ewma-halflife-reviews 3.0" in command_text
+    assert "--selection-report-mode compact" in command_text
     assert not list(output.rglob("multi_speed_ewmac_selection_book_*.parquet"))
 
 

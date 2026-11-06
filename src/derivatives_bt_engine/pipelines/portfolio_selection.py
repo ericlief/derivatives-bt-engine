@@ -948,6 +948,18 @@ def parse_args(argv=None, *, complete_default: bool = False):
             "score (default: 2)."
         ),
     )
+    parser.add_argument(
+        "--selection-report-mode",
+        choices=("full", "compact"),
+        default="full",
+        help=(
+            "Selection audit detail: full persists daily forecast/reference "
+            "panels and every scheduled greedy trial allocation; compact "
+            "keeps books, final review allocations, cash P&L, and portfolio "
+            "curves while omitting those duplicated high-volume reports "
+            "(default: full)."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -1644,103 +1656,108 @@ class _WalkForwardSelectionProvider:
             prior_selected=self.prior_selected,
         )
         self._update_rank_count_ewma(len(selection.selected))
-        # Preserve the complete dated greedy decision path. The normal trial
-        # reports below describe only the initial static selection; attaching
-        # review date and lagged equity here makes later CL/MCL and margin
-        # decisions independently auditable.
-        self.review_trial_rows.extend(
-            {
-                **trial,
-                "selection_date": review_date,
-                "selection_equity_usd": prior_net_equity,
-                "preference_rank": (selection.preference_ranks or {}).get(
-                    str(trial["candidate"])
-                ),
-                "maximum_instruments_per_class": self.args.max_instr_per_class,
-                "maximum_instruments_per_subclass": (
-                    self.args.max_instr_per_subclass
-                ),
-                "maximum_asset_class_weight_percent": (
-                    self.args.max_class_weight_pct
-                ),
-                "maximum_economic_subclass_weight_percent": (
-                    self.args.max_subclass_weight_pct
-                ),
-                "selection_eligibility_hysteresis_percent": (
-                    self.args.selection_eligibility_hysteresis_pct
-                ),
-                "selection_membership_hysteresis": (
-                    self.args.selection_membership_hysteresis
-                ),
-                "selection_rank_buffer_percent": (
-                    _active_rank_buffer_percent(self.args)
-                ),
-                "selection_rank_count_ewma_halflife_reviews": (
-                    _active_rank_count_ewma_halflife_reviews(self.args)
-                ),
-                "rank_count_ewma_state": rank_count_ewma_state,
-                "rank_count_anchor": selection.rank_count_anchor,
-                "selection_book_score_buffer_percent": (
-                    _active_book_score_buffer_percent(self.args)
-                ),
-                "prior_book_score": selection.prior_book_score,
-                "unbuffered_book_score": selection.unbuffered_book_score,
-                "rank_buffered_book_score": selection.rank_buffered_book_score,
-                "hysteresis_candidate_book_score": (
-                    selection.hysteresis_candidate_book_score
-                ),
-                "rank_buffer_count": selection.rank_buffer_count,
-                "rank_entry_cutoff": selection.rank_entry_cutoff,
-                "rank_exit_cutoff": selection.rank_exit_cutoff,
-                "rank_buffer_reason": selection.rank_buffer_reason,
-                "gross_score_gain": selection.gross_score_gain,
-                "switch_cost_usd": selection.switch_cost_usd,
-                "switch_cost_sr": selection.switch_cost_sr,
-                "score_buffer_sr": selection.score_buffer_sr,
-                "net_score_gain": selection.net_score_gain,
-                "switch_accepted": selection.switch_accepted,
-                "switch_reason": selection.switch_reason,
-            }
-            for trial in selection.trials
-        )
-        self.review_trial_allocation_rows.extend(
-            {
-                **allocation_row,
-                "selection_date": review_date,
-                "selection_equity_usd": prior_net_equity,
-                "preference_rank": (selection.preference_ranks or {}).get(
-                    str(allocation_row["book_symbol"])
-                ),
-                "maximum_instruments_per_class": self.args.max_instr_per_class,
-                "maximum_instruments_per_subclass": (
-                    self.args.max_instr_per_subclass
-                ),
-                "maximum_asset_class_weight_percent": (
-                    self.args.max_class_weight_pct
-                ),
-                "maximum_economic_subclass_weight_percent": (
-                    self.args.max_subclass_weight_pct
-                ),
-                "selection_eligibility_hysteresis_percent": (
-                    self.args.selection_eligibility_hysteresis_pct
-                ),
-                "selection_membership_hysteresis": (
-                    self.args.selection_membership_hysteresis
-                ),
-                "selection_rank_buffer_percent": (
-                    _active_rank_buffer_percent(self.args)
-                ),
-                "selection_rank_count_ewma_halflife_reviews": (
-                    _active_rank_count_ewma_halflife_reviews(self.args)
-                ),
-                "rank_count_ewma_state": rank_count_ewma_state,
-                "rank_count_anchor": selection.rank_count_anchor,
-                "selection_book_score_buffer_percent": (
-                    _active_book_score_buffer_percent(self.args)
-                ),
-            }
-            for allocation_row in selection.trial_allocations
-        )
+        # Full standalone audits retain every rejected dated trial. Grid runs
+        # use compact mode because accumulating millions of wide Python dicts
+        # per scenario dominates both memory and disk without affecting the
+        # accepted book, cash replay, or final review allocations.
+        if self.args.selection_report_mode == "full":
+            self.review_trial_rows.extend(
+                {
+                    **trial,
+                    "selection_date": review_date,
+                    "selection_equity_usd": prior_net_equity,
+                    "preference_rank": (selection.preference_ranks or {}).get(
+                        str(trial["candidate"])
+                    ),
+                    "maximum_instruments_per_class": self.args.max_instr_per_class,
+                    "maximum_instruments_per_subclass": (
+                        self.args.max_instr_per_subclass
+                    ),
+                    "maximum_asset_class_weight_percent": (
+                        self.args.max_class_weight_pct
+                    ),
+                    "maximum_economic_subclass_weight_percent": (
+                        self.args.max_subclass_weight_pct
+                    ),
+                    "selection_eligibility_hysteresis_percent": (
+                        self.args.selection_eligibility_hysteresis_pct
+                    ),
+                    "selection_membership_hysteresis": (
+                        self.args.selection_membership_hysteresis
+                    ),
+                    "selection_rank_buffer_percent": (
+                        _active_rank_buffer_percent(self.args)
+                    ),
+                    "selection_rank_count_ewma_halflife_reviews": (
+                        _active_rank_count_ewma_halflife_reviews(self.args)
+                    ),
+                    "rank_count_ewma_state": rank_count_ewma_state,
+                    "rank_count_anchor": selection.rank_count_anchor,
+                    "selection_book_score_buffer_percent": (
+                        _active_book_score_buffer_percent(self.args)
+                    ),
+                    "prior_book_score": selection.prior_book_score,
+                    "unbuffered_book_score": selection.unbuffered_book_score,
+                    "rank_buffered_book_score": (
+                        selection.rank_buffered_book_score
+                    ),
+                    "hysteresis_candidate_book_score": (
+                        selection.hysteresis_candidate_book_score
+                    ),
+                    "rank_buffer_count": selection.rank_buffer_count,
+                    "rank_entry_cutoff": selection.rank_entry_cutoff,
+                    "rank_exit_cutoff": selection.rank_exit_cutoff,
+                    "rank_buffer_reason": selection.rank_buffer_reason,
+                    "gross_score_gain": selection.gross_score_gain,
+                    "switch_cost_usd": selection.switch_cost_usd,
+                    "switch_cost_sr": selection.switch_cost_sr,
+                    "score_buffer_sr": selection.score_buffer_sr,
+                    "net_score_gain": selection.net_score_gain,
+                    "switch_accepted": selection.switch_accepted,
+                    "switch_reason": selection.switch_reason,
+                }
+                for trial in selection.trials
+            )
+            self.review_trial_allocation_rows.extend(
+                {
+                    **allocation_row,
+                    "selection_date": review_date,
+                    "selection_equity_usd": prior_net_equity,
+                    "preference_rank": (selection.preference_ranks or {}).get(
+                        str(allocation_row["book_symbol"])
+                    ),
+                    "maximum_instruments_per_class": (
+                        self.args.max_instr_per_class
+                    ),
+                    "maximum_instruments_per_subclass": (
+                        self.args.max_instr_per_subclass
+                    ),
+                    "maximum_asset_class_weight_percent": (
+                        self.args.max_class_weight_pct
+                    ),
+                    "maximum_economic_subclass_weight_percent": (
+                        self.args.max_subclass_weight_pct
+                    ),
+                    "selection_eligibility_hysteresis_percent": (
+                        self.args.selection_eligibility_hysteresis_pct
+                    ),
+                    "selection_membership_hysteresis": (
+                        self.args.selection_membership_hysteresis
+                    ),
+                    "selection_rank_buffer_percent": (
+                        _active_rank_buffer_percent(self.args)
+                    ),
+                    "selection_rank_count_ewma_halflife_reviews": (
+                        _active_rank_count_ewma_halflife_reviews(self.args)
+                    ),
+                    "rank_count_ewma_state": rank_count_ewma_state,
+                    "rank_count_anchor": selection.rank_count_anchor,
+                    "selection_book_score_buffer_percent": (
+                        _active_book_score_buffer_percent(self.args)
+                    ),
+                }
+                for allocation_row in selection.trial_allocations
+            )
         final_iteration = (
             max(int(row["iteration"]) for row in selection.trials) + 1
             if selection.trials else 0
@@ -2714,18 +2731,21 @@ def _run_complete_selection(
             "no instrument has sufficient pairwise subsystem-reference returns"
         )
 
-    # These two large daily artifacts no longer participate in later
-    # calculations. Persist them while the rest of the pipeline is still
-    # disk-backed, then release their materialized copies before cash replay.
-    public_forecasts = round_public_report(
-        rename_public_report_columns(
-            pl.concat(forecast_output_frames, how="diagonal_relaxed")
-            .collect(engine="streaming")
+    # These large daily artifacts do not participate in later calculations.
+    # Full standalone reports persist them for research; compact grid runs
+    # avoid materializing and duplicating the same million-row forecast panel
+    # in every scenario directory.
+    if args.selection_report_mode == "full":
+        public_forecasts = round_public_report(
+            rename_public_report_columns(
+                pl.concat(forecast_output_frames, how="diagonal_relaxed")
+                .collect(engine="streaming")
+            )
         )
-    )
-    public_forecasts.write_parquet(forecasts_path)
-    reference_return_wide.write_parquet(reference_return_path)
-    del public_forecasts, forecast_output_frames, reference_return_wide
+        public_forecasts.write_parquet(forecasts_path)
+        reference_return_wide.write_parquet(reference_return_path)
+        del public_forecasts
+    del forecast_output_frames, reference_return_wide
     gc.collect()
 
     audit_by_symbol = {
@@ -3874,30 +3894,31 @@ def _run_complete_selection(
         public_selection_review_instruments.write_parquet(
             selection_review_instruments_path
         )
-        public_selection_review_trials = round_public_report(
-            rename_public_report_columns(
-                pl.DataFrame(
-                    allocation_provider.review_trial_rows,
-                    infer_schema_length=None,
-                )
-            )
-        )
-        public_selection_review_trials.write_parquet(
-            selection_review_trials_path
-        )
-        public_selection_review_trial_allocations = round_public_report(
-            order_selection_review_allocation_report(
+        if args.selection_report_mode == "full":
+            public_selection_review_trials = round_public_report(
                 rename_public_report_columns(
                     pl.DataFrame(
-                        allocation_provider.review_trial_allocation_rows,
+                        allocation_provider.review_trial_rows,
                         infer_schema_length=None,
                     )
                 )
             )
-        )
-        public_selection_review_trial_allocations.write_parquet(
-            selection_review_trial_allocations_path
-        )
+            public_selection_review_trials.write_parquet(
+                selection_review_trials_path
+            )
+            public_selection_review_trial_allocations = round_public_report(
+                order_selection_review_allocation_report(
+                    rename_public_report_columns(
+                        pl.DataFrame(
+                            allocation_provider.review_trial_allocation_rows,
+                            infer_schema_length=None,
+                        )
+                    )
+                )
+            )
+            public_selection_review_trial_allocations.write_parquet(
+                selection_review_trial_allocations_path
+            )
         # The greedy trial report remains the unconstrained challenger audit.
         # Persist the separately rescored, hysteresis-adjusted book here so a
         # retained incumbent is never mislabeled as the final challenger.
@@ -3932,8 +3953,12 @@ def _run_complete_selection(
         f"forecast-eligible instruments"
     )
     print(f"Saved forecast audit {audit_path}")
-    print(f"Saved daily forecasts {forecasts_path}")
-    print(f"Saved synchronized subsystem reference returns {reference_return_path}")
+    if args.selection_report_mode == "full":
+        print(f"Saved daily forecasts {forecasts_path}")
+        print(
+            "Saved synchronized subsystem reference returns "
+            f"{reference_return_path}"
+        )
     print(f"Saved executable cash P&L {cash_pnl_path}")
     print(f"Saved portfolio equity curve {portfolio_curve_path}")
     print(f"Saved trials {trials_path}")
@@ -3945,11 +3970,14 @@ def _run_complete_selection(
             "Saved selection review instruments "
             f"{selection_review_instruments_path}"
         )
-        print(f"Saved selection review trials {selection_review_trials_path}")
-        print(
-            "Saved selection review trial allocations "
-            f"{selection_review_trial_allocations_path}"
-        )
+        if args.selection_report_mode == "full":
+            print(
+                f"Saved selection review trials {selection_review_trials_path}"
+            )
+            print(
+                "Saved selection review trial allocations "
+                f"{selection_review_trial_allocations_path}"
+            )
         print(
             "Saved selection review final allocations "
             f"{selection_review_final_allocations_path}"
