@@ -336,6 +336,38 @@ def test_grid_sweeps_rank_count_ewma_halflives_for_yearly_reviews():
     )
 
 
+def test_grid_sweeps_optional_hierarchy_coverage_minimums():
+    """Coverage minima are explicit dimensions and contradictory bounds skip."""
+    args = parse_args([
+        "--input",
+        "screen.parquet",
+        "--target-vols",
+        "0.20",
+        "--max-instr-margin-pcts",
+        "20",
+        "--roll-cost-modes",
+        "include",
+        "--min-instr-per-classes",
+        "none,1,2",
+        "--min-instr-per-subclasses",
+        "none,1",
+        "--max-instr-per-classes",
+        "1",
+        "--max-instr-per-subclasses",
+        "1",
+    ])
+
+    scenarios = build_scenarios(args)
+
+    assert len(scenarios) == 4
+    assert {
+        (scenario.minimum_instruments_per_class,
+         scenario.minimum_instruments_per_subclass)
+        for scenario in scenarios
+    } == {(None, None), (None, 1), (1, None), (1, 1)}
+    assert any("_minc1_mins1_" in scenario.scenario_id for scenario in scenarios)
+
+
 def test_grid_sweeps_only_active_hysteresis_dimensions():
     """Each membership mode expands only the controls that affect that mode."""
     args = parse_args([

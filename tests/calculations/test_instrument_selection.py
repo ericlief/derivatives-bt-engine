@@ -222,6 +222,7 @@ def test_book_hysteresis_requires_net_score_gain_above_buffer(
             capital=1_000_000.0,
             score_threshold=0.0,
             size_penalty_scale=0.0,
+            membership_hysteresis="score",
             book_score_buffer_percent=2.0,
         ),
         weight_policy=EqualPortfolioWeights(),
@@ -351,14 +352,154 @@ def test_greedy_selector_caps_selected_instruments_per_economic_subclass():
     assert not capped_trial["feasible"]
     assert capped_trial["score"] is None
     assert capped_trial["reason"] == (
-        "cluster_instr_limit:grains n=3 max=2"
+        "subclass_instr_limit:equity/grains n=3 max=2"
     )
+
+
+def test_class_coverage_changes_competition_without_bypassing_score():
+    """A missing class champion competes before another crowded-class name."""
+    candidates = [
+        _candidate("FX1", 0.0, asset_class="fx", economic_subclass="g10"),
+        _candidate("FX2", 0.0, asset_class="fx", economic_subclass="g10"),
+        _candidate(
+            "BOND",
+            30.0,
+            asset_class="rates",
+            economic_subclass="government",
+        ),
+    ]
+    no_coverage = GreedyInstrumentSelector(
+        config=GreedySelectionConfig(
+            capital=1_000_000.0,
+            score_threshold=0.90,
+            size_penalty_scale=0.0,
+        )
+    ).select(candidates, np.eye(3))
+    with_coverage = GreedyInstrumentSelector(
+        config=GreedySelectionConfig(
+            capital=1_000_000.0,
+            score_threshold=0.90,
+            size_penalty_scale=0.0,
+            min_instruments_per_class=1,
+        )
+    ).select(candidates, np.eye(3))
+
+    assert set(no_coverage.selected) == {"FX1", "FX2"}
+    assert set(with_coverage.selected) == {"FX1", "FX2", "BOND"}
+    bond_trial = next(
+        row for row in with_coverage.trials
+        if row["iteration"] == 1 and row["candidate"] == "BOND"
+    )
+    assert bond_trial["coverage_phase"] == "class"
+    assert bond_trial["coverage_eligible"] is True
+    assert bond_trial["accepted"] is True
+    assert bond_trial["class_rank"] == 2
+    assert bond_trial["global_trial_rank"] == 2
+
+
+def test_coverage_stops_when_missing_class_fails_ordinary_score_floor():
+    """Coverage records a deficit instead of forcing a score-invalid market."""
+    candidates = [
+        _candidate("FX", 0.0, asset_class="fx", economic_subclass="g10"),
+        _candidate(
+            "BOND", 10.0, asset_class="rates", economic_subclass="government"
+        ),
+        _candidate(
+            "CRYPTO", 200.0, asset_class="crypto", economic_subclass="crypto"
+        ),
+    ]
+    result = GreedyInstrumentSelector(
+        config=GreedySelectionConfig(
+            capital=1_000_000.0,
+            score_threshold=0.90,
+            size_penalty_scale=0.0,
+            min_instruments_per_class=1,
+        )
+    ).select(candidates, np.eye(3))
+
+    assert "CRYPTO" not in result.selected
+    assert result.unbuffered_class_coverage_deficit == 1
+    assert result.coverage_satisfied is False
+    rejected = next(
+        row for row in result.trials
+        if row["candidate"] == "CRYPTO" and row["iteration"] == 2
+    )
+    assert rejected["coverage_phase"] == "class"
+    assert rejected["accepted"] is False
+    assert rejected["reason"] == "best_score_below_acceptance_threshold"
+
+
+def test_score_hysteresis_cannot_retain_a_worse_coverage_book():
+    """A score-valid coverage improvement dominates the switch buffer."""
+    candidates = [
+        _candidate("FX1", 0.0, asset_class="fx", economic_subclass="g10"),
+        _candidate("FX2", 0.0, asset_class="fx", economic_subclass="g10"),
+        _candidate(
+            "BOND", 30.0, asset_class="rates", economic_subclass="government"
+        ),
+    ]
+    result = GreedyInstrumentSelector(
+        config=GreedySelectionConfig(
+            capital=1_000_000.0,
+            score_threshold=0.90,
+            size_penalty_scale=0.0,
+            min_instruments_per_class=1,
+            membership_hysteresis="score",
+            book_score_buffer_percent=100.0,
+        )
+    ).select(candidates, np.eye(3), prior_selected=["FX1", "FX2"])
+
+    assert "BOND" in result.selected
+    assert result.switch_accepted is True
+    assert result.switch_reason == "candidate_improves_coverage"
+    assert result.final_class_coverage_deficit == 0
+
+
+def test_rank_hysteresis_falls_back_when_retention_worsens_coverage():
+    """Rank retention cannot replace a covered class with crowded incumbents."""
+    candidates = [
+        _candidate("FX1", 0.0, asset_class="fx", economic_subclass="g10"),
+        _candidate("FX2", 50.0, asset_class="fx", economic_subclass="g10"),
+        _candidate("FX3", 60.0, asset_class="fx", economic_subclass="g10"),
+        _candidate(
+            "BOND", 30.0, asset_class="rates", economic_subclass="government"
+        ),
+    ]
+    result = GreedyInstrumentSelector(
+        config=GreedySelectionConfig(
+            capital=1_000_000.0,
+            score_threshold=0.90,
+            size_penalty_scale=0.0,
+            min_instruments_per_class=1,
+            membership_hysteresis="rank",
+            rank_buffer_percent=100.0,
+        )
+    ).select(candidates, np.eye(4), prior_selected=["FX2", "FX3"])
+
+    assert "BOND" in result.selected
+    assert result.rank_buffer_reason == "rank_book_coverage_worse_fallback"
+    assert result.switch_reason == "candidate_improves_coverage"
+    assert result.final_class_coverage_deficit == 0
 
 
 def test_cluster_instrument_limit_must_be_positive():
     """Zero cannot express a useful per-cluster instrument limit."""
     with pytest.raises(ValueError, match="max_instruments_per_cluster"):
         GreedySelectionConfig(max_instruments_per_cluster=0)
+
+
+def test_coverage_minimum_cannot_exceed_matching_maximum():
+    """Contradictory hierarchy count bounds fail before trial construction."""
+    with pytest.raises(ValueError, match="minimum instruments per class"):
+        GreedySelectionConfig(
+            min_instruments_per_class=2,
+            max_instruments_per_class=1,
+        )
+    with pytest.raises(ValueError, match="minimum instruments per subclass"):
+        GreedySelectionConfig(
+            min_instruments_per_subclass=2,
+            max_instruments_per_subclass=1,
+        )
 
 
 def test_instrument_margin_limit_rejects_one_overfunded_position():

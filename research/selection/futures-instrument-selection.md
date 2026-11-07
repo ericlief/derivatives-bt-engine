@@ -350,9 +350,10 @@ main asset classes are `equity, ags, vol, energy, fx, metals, bond`. Crypto and
 `other` are special additions: they retain affordability metrics but do not
 satisfy the minimum-15 breadth count. The US home-price future uses
 `other/housing`; EPRA-Europe and Sector instruments are classified as equity.
-Portfolio construction should
-first try to cover all seven main classes, then fill the remaining main slots;
-coverage is a preference when contract granularity makes a class infeasible.
+Portfolio construction can optionally prioritize represented-class and
+represented-subclass coverage through the explicit minimum parameters below;
+the default remains unconstrained and no coverage candidate bypasses score or
+contract granularity.
 These figures are deliberately a market screen stress scenario. Four contracts and
 15 instruments must not become simultaneous hard admission gates in portfolio selection:
 that would reject diversification before allowing its higher IDM to reduce the
@@ -572,7 +573,7 @@ pysystemtrade histories + reviewed economic classification + local execution ove
     -> combined forecast and subsystem return for each surviving instrument
     -> trial-book correlations, top-down classification weights, and IDM
     -> portfolio-specific positions, turnover, cost, and market participation
-    -> greedy AFTS selection with core-class coverage and score tolerance
+    -> greedy AFTS selection with optional hierarchical coverage and score tolerance
 ```
 
 The rule-cache snapshot contains both live acquisition fields and frozen
@@ -835,6 +836,8 @@ first available session of each calendar year or month:
 --selection-rebalance yearly
 --selection-rebalance monthly
 --selection-max-history-gap-days 31
+--min-instr-per-class 1
+--min-instr-per-subclass 1
 --selection-eligibility-hysteresis-pct 25
 --selection-membership-hysteresis score
 --selection-rank-buffer-pct 15
@@ -862,6 +865,17 @@ is checked only on the configured schedule; reaching the reference-to-IB
 handoff does not trigger an extra review. With yearly selection, the January
 book stays in force until the next January review.
 
+Optional hierarchy coverage uses `--min-instr-per-class N` and
+`--min-instr-per-subclass N`. Both default to disabled. When enabled, the
+selector first fills deficient asset classes and then deficient economic
+subclasses. At each step it fully rescores every n+1 book; only candidates in
+the active deficient groups compete, and the winning book must still be
+feasible and clear the ordinary `--score-threshold`. A minimum is therefore a
+search priority, not permission to force a poor or untradeable instrument.
+Coverage is measured only across groups represented in that review's causal
+candidate universe. Unmet slots and their score/feasibility stop are persisted
+in the review audit.
+
 #### Prior-book hysteresis
 
 Scheduled reviews expose three compatible controls: incumbent eligibility
@@ -888,6 +902,15 @@ mode `none` does not report the parser defaults for either the rank band or
 score hurdle, and mode `rank` leaves the score hurdle null. This keeps a saved
 configuration from implying that a numerically populated but gated-off control
 was active.
+
+Coverage is evaluated before membership hysteresis and remains monotone through
+the final decision. A rank-buffered proposal that worsens the raw book's
+class-first `(class deficit, subclass deficit)` pair falls back to the raw
+book. When score hysteresis compares an incumbent with a score-valid
+challenger, the book with the lower coverage deficit wins; only equal-coverage
+books proceed to the normal transition-cost and score-buffer comparison. Thus
+hysteresis cannot recreate a one-class collapse, while coverage still never
+bypasses the construction score gate.
 
 ##### Incumbent eligibility hysteresis
 
@@ -1513,6 +1536,15 @@ These static universe constraints remain separate from the backtest/live
 `max_active_per_cluster` control, which ranks dated active signals by current
 model conviction after the universe has already been selected.
 
+The matching lower-bound controls are `--min-instr-per-class N` and
+`--min-instr-per-subclass N`. They are disabled by default and are not hard
+post-selection quotas: they define the class-first candidate competition while
+the ordinary feasibility and score gates remain binding. Public trial reports
+include the active `coverage_phase`, `coverage_elig`, conditional hierarchy
+ranks, and the final class/subclass deficits. The grid spellings are
+`--min-instr-per-classes` and `--min-instr-per-subclasses`, both accepting
+comma-separated positive counts or `none`.
+
 `--max-class-weight-pct` and `--max-subclass-weight-pct` cap structural sizing
 allocation without redistributing the excess. Class caps are applied first;
 subclass caps then act on the remaining allocation within each
@@ -1912,29 +1944,34 @@ useful breadth; stopping at the first strict decline is too brittle. Record the
 last accepted book before the tolerance breach, rather than returning the
 breaching candidate.
 
-For this project, layer a transparent coverage policy onto that objective:
+This project implements coverage as two optional hierarchical minimums rather
+than a hard-coded list of preferred classes:
 
-1. **Core coverage.** The main classes are `equity`, `ags`, `vol`, `energy`,
-   `fx`, `metals`, and `bond`. Seed this constrained pass from a core candidate.
-   While a feasible class is absent, trial only candidates from currently
-   missing classes, then choose the one with the best complete-book score. A
-   class is infeasible when all its candidates fail a hard
-   data/execution/liquidity test or the `P < 0.5` threshold. If its best trial
-   breaches the 90% score boundary, report `unmet_due_to_score_tolerance`
-   rather than forcing a bad contract merely to fill a label.
-2. **Core breadth.** After coverage, resume the unrestricted greedy loop over
-   core instruments. Treat 15 as a desired lower breadth, not a hard promise:
-   continue toward it only while the book stays inside the 90% score tolerance.
-3. **Special additions.** Consider `crypto` and `other` only after the feasible
-   core pass. EPRA-Europe and Sector instruments belong to `equity/us` or
-   `equity/ex_us`. Specials do not count
-   toward the desired 15 and are
-   accepted only when their marginal diversification benefit keeps the book
-   inside the same tolerance.
+1. **Class phase.** If `--min-instr-per-class N` is active, restrict the next
+   competition to candidates whose represented class has fewer than `N`
+   selected instruments. Each class is represented by its best complete-book
+   trial.
+2. **Subclass phase.** Once the class minimum is met, apply the same process to
+   `(asset_class, economic_subclass)` pairs using
+   `--min-instr-per-subclass N`. Class-first ordering prevents subclass breadth
+   inside the current dominant class from delaying top-level coverage.
+3. **Unrestricted phase.** Once both enabled minima are met, resume the usual
+   greedy search across every remaining candidate.
 
-This constrained pass should be reported alongside the unconstrained AFTS
-baseline. A difference between them is useful evidence of the cost paid for
-cluster coverage, rather than something to conceal in the scoring function.
+Within every phase, instruments are ranked by their conditional full-book
+score, not by a frozen singleton rank. The trial audit records
+`instr_rank_in_subcls`, `subcls_rank_in_cls`, `cls_rank`, and
+`global_trial_rank`. If the best coverage-eligible book fails feasibility or
+the score floor, construction stops and reports the remaining class and
+subclass deficits. It does not fill the book from the already crowded group or
+force the missing group. Runs with both minimums disabled are the exact
+unconstrained AFTS baseline, so the cost of coverage remains measurable.
+
+A minimum of one applies equally to every class or subclass represented in the
+causal candidate set, including `vol`, `crypto`, and `other`. Use class-only
+coverage when those sparse branches should compete at the top level without
+requiring every subclass, and test the subclass minimum separately rather than
+treating it as a universal default.
 The [small-account analysis](https://qoppac.blogspot.com/2016/03/diversification-and-small-account-size.html)
 also shows why four contracts cannot be a hard gate: for the first few markets,
 diversification can dominate granularity even when maximum positions are only
@@ -1944,11 +1981,9 @@ selects materially more instruments at small capital after micro contracts are
 available. The feasible count therefore depends on the current contract
 universe, not a universal capital table.
 
-Ties and near-ties must be deterministic. Use, in order: coverage improvement,
-higher portfolio score, lower aggregate size penalty, lower aggregate annual
-cost, longer common return history, then symbol. Retained live instruments can
-later receive a small replacement buffer to avoid annual churn, but the raw
-research result should remain available without that incumbent preference.
+Ties and near-ties remain deterministic under the existing contract-band
+tie-break. Coverage first determines the eligible competition set; it does not
+alter trial scores or silently insert a second score objective.
 
 Each iteration needs an audit table with the current and candidate contract
 books, candidate class and economic family, core coverage before and after,
@@ -1960,9 +1995,9 @@ selected winner, stopping decision, and final book. This gives portfolio selecti
 evidence to explain why it advanced to the next candidate instead of merely
 publishing a final rank.
 
-Implementation should begin with the exact greedy baseline and the constrained
-coverage pass. A small beam search retaining the best few partial books is a
-useful validation check against greedy path dependence and temporary dips. A
+The exact greedy baseline and constrained coverage pass share one
+implementation. A small beam search retaining the best few partial books is a
+useful future validation check against greedy path dependence and temporary dips. A
 full mixed-integer subset optimizer is not the first choice: it adds substantial
 complexity and apparent precision around estimated correlations and costs,
 while moving away from the AFTS procedure. Integer position optimization belongs
@@ -1972,8 +2007,8 @@ positions.
 
 Validate first on a narrow synthetic and real subset. Tests should cover an
 uncorrelated candidate beating a duplicate, a micro beating its full-size
-family member through size and cost, missing-core priority, exclusion of special
-classes from the breadth count, `P < 0.5` rejection, preservation of a useful
+family member through size and cost, missing-class priority, `P < 0.5`
+rejection, preservation of a useful
 one-to-two-contract diversifier, the 90% tolerance, and deterministic ties.
 Then compare unconstrained and coverage-constrained selections at `$100,000`
 under 20% and 25% targets, reporting the evolving IDM and contract counts at
@@ -2122,6 +2157,7 @@ an exact file rather than a report directory so a newer screen cannot enter the
 grid midway through a run. Selection cadence is fixed across a grid, while
 eligibility percentages, membership modes, rank-buffer percentages,
 rank-count EWMA half-lives, and score-buffer percentages can all be swept.
+Optional class and subclass coverage minimums are independent grid dimensions.
 Inactive controls do not create duplicate scenarios: `none` expands only the
 eligibility dimension, `rank` expands rank percentage and half-life, `score`
 expands score percentage, and `rank_score` expands all three membership
@@ -2223,6 +2259,8 @@ Run secondary constraint tests separately, for example:
   --score-thresholds 0.99,1.00 \
   --max-book-margin-pcts 50,75 \
   --max-weight-idms 0.20 \
+  --min-instr-per-classes none,1 \
+  --min-instr-per-subclasses none,1 \
   --max-instr-per-classes none,10 \
   --max-instr-per-subclasses 2 \
   --max-class-weight-pcts none,50 \
@@ -2246,6 +2284,8 @@ For a focused yearly hysteresis comparison using the new causal count state:
   --max-instr-margin-pcts 20 \
   --roll-cost-modes include \
   --selection-rebalance yearly \
+  --min-instr-per-classes none,1 \
+  --min-instr-per-subclasses none,1 \
   --selection-eligibility-hysteresis-pcts 25 \
   --selection-membership-hysteresis-modes none,rank,score,rank_score \
   --selection-rank-buffer-pcts 10,15,25 \
@@ -2253,9 +2293,10 @@ For a focused yearly hysteresis comparison using the new causal count state:
   --selection-book-score-buffer-pcts 0,2
 ```
 
-With every construction parameter fixed, that command creates 30 scenarios:
-one `none`, nine `rank`, two `score`, and eighteen `rank_score`. Add `0` to the
-eligibility list only when you also want to double the grid and isolate EH25.
+With the two binary coverage dimensions, that command creates four coverage
+variants for every hysteresis combination. Remove the minimum sweeps or set
+both to `none` when isolating hysteresis alone. Add `0` to the eligibility list
+only when you also want to isolate EH25.
 Omitting the half-life list uses the standalone cadence default: three reviews
 for yearly selection and twelve for monthly selection. As in the standalone
 backtest, the current snapshot's liquidity and execution overlay applies from

@@ -65,6 +65,8 @@ class SelectionScenario:
     maximum_economic_subclass_weight_percent: float | None
     include_roll_cost_in_score: bool
     weight_policy: str
+    minimum_instruments_per_class: int | None = None
+    minimum_instruments_per_subclass: int | None = None
     low_contract_penalty_scale: float = 0.0
     high_contract_penalty_scale: float = 0.0
     score_tie_tolerance_percent: float = 0.0
@@ -78,6 +80,25 @@ class SelectionScenario:
     selection_rank_buffer_percent: float = 15.0
     selection_rank_count_ewma_halflife_reviews: float | None = None
     selection_book_score_buffer_percent: float = 2.0
+
+    def __post_init__(self) -> None:
+        """Reject internally contradictory hierarchy count bounds."""
+        for level, minimum, maximum in (
+            (
+                "class",
+                self.minimum_instruments_per_class,
+                self.maximum_instruments_per_class,
+            ),
+            (
+                "subclass",
+                self.minimum_instruments_per_subclass,
+                self.maximum_instruments_per_subclass,
+            ),
+        ):
+            if minimum is not None and maximum is not None and minimum > maximum:
+                raise ValueError(
+                    f"minimum instruments per {level} cannot exceed maximum"
+                )
 
     @property
     def effective_rank_count_ewma_halflife_reviews(self) -> float | None:
@@ -121,6 +142,10 @@ class SelectionScenario:
             ))
         if self.maximum_instruments_per_class is not None:
             tokens.append(f"ic{self.maximum_instruments_per_class}")
+        if self.minimum_instruments_per_class is not None:
+            tokens.append(f"minc{self.minimum_instruments_per_class}")
+        if self.minimum_instruments_per_subclass is not None:
+            tokens.append(f"mins{self.minimum_instruments_per_subclass}")
         if self.maximum_asset_class_weight_percent is not None:
             tokens.append(
                 f"cw{_number_token(self.maximum_asset_class_weight_percent)}"
@@ -524,6 +549,24 @@ def parse_args(argv=None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--min-instr-per-classes",
+        type=_cluster_limit_list,
+        default=(None,),
+        help=(
+            "Comma-separated score-gated asset-class coverage minimums; use "
+            "none to disable."
+        ),
+    )
+    parser.add_argument(
+        "--min-instr-per-subclasses",
+        type=_cluster_limit_list,
+        default=(None,),
+        help=(
+            "Comma-separated score-gated economic-subclass coverage minimums; "
+            "use none to disable."
+        ),
+    )
+    parser.add_argument(
         "--max-instr-per-subclasses",
         "--max-instr-per-clusters",
         dest="max_instr_per_subclasses",
@@ -654,6 +697,8 @@ def build_scenarios(args: argparse.Namespace) -> list[SelectionScenario]:
             high_contract_penalty_scale=high_contract_penalty_scale,
             score_tie_tolerance_percent=score_tie_tolerance_percent,
             tie_reference_book_count=tie_reference_book_count,
+            minimum_instruments_per_class=class_count_minimum,
+            minimum_instruments_per_subclass=subclass_count_minimum,
             maximum_instruments_per_class=class_count_limit,
             maximum_instruments_per_subclass=subclass_count_limit,
             maximum_asset_class_weight_percent=class_weight_limit,
@@ -684,6 +729,8 @@ def build_scenarios(args: argparse.Namespace) -> list[SelectionScenario]:
             high_contract_penalty_scale,
             score_tie_tolerance_percent,
             tie_reference_book_count,
+            class_count_minimum,
+            subclass_count_minimum,
             class_count_limit,
             subclass_count_limit,
             class_weight_limit,
@@ -700,6 +747,8 @@ def build_scenarios(args: argparse.Namespace) -> list[SelectionScenario]:
             args.high_contract_penalty_scales,
             args.score_tie_tolerance_percents,
             args.tie_reference_book_counts,
+            args.min_instr_per_classes,
+            args.min_instr_per_subclasses,
             args.max_instr_per_classes,
             args.max_instr_per_subclasses,
             args.max_class_weight_pcts,
@@ -714,6 +763,16 @@ def build_scenarios(args: argparse.Namespace) -> list[SelectionScenario]:
             rank_count_halflife,
             score_buffer,
         ) in (hysteresis_variant,)
+        if (
+            class_count_minimum is None
+            or class_count_limit is None
+            or class_count_minimum <= class_count_limit
+        )
+        if (
+            subclass_count_minimum is None
+            or subclass_count_limit is None
+            or subclass_count_minimum <= subclass_count_limit
+        )
     ]
     return sorted(scenarios, key=lambda scenario: scenario.scenario_id)
 
@@ -818,6 +877,16 @@ def _selection_command(
         command.extend((
             "--max-instr-per-class",
             str(scenario.maximum_instruments_per_class),
+        ))
+    if scenario.minimum_instruments_per_class is not None:
+        command.extend((
+            "--min-instr-per-class",
+            str(scenario.minimum_instruments_per_class),
+        ))
+    if scenario.minimum_instruments_per_subclass is not None:
+        command.extend((
+            "--min-instr-per-subclass",
+            str(scenario.minimum_instruments_per_subclass),
         ))
     if scenario.maximum_instruments_per_subclass is not None:
         command.extend((
@@ -1094,6 +1163,10 @@ def _summary_row(
         "high_contract_penalty_scale": scenario.high_contract_penalty_scale,
         "score_tie_tolerance_percent": scenario.score_tie_tolerance_percent,
         "tie_ref_book_count": scenario.tie_reference_book_count,
+        "minimum_instruments_per_class": scenario.minimum_instruments_per_class,
+        "minimum_instruments_per_subclass": (
+            scenario.minimum_instruments_per_subclass
+        ),
         "maximum_instruments_per_class": scenario.maximum_instruments_per_class,
         "maximum_instruments_per_subclass": (
             scenario.maximum_instruments_per_subclass
@@ -1145,6 +1218,9 @@ def _summary_row(
         "high_contract_weight": None,
         "maximum_instrument_margin_usd": None,
         "book_margin_at_maximum_usd": None,
+        "final_class_coverage_deficit": None,
+        "final_subclass_coverage_deficit": None,
+        "coverage_satisfied": None,
         "error": error,
     }
     if status != "complete" or book_path is None:
@@ -1188,6 +1264,16 @@ def _summary_row(
         ),
         "book_margin_at_maximum_usd": _column_max(
             book, "portfolio_margin_at_max_usd"
+        ),
+        "final_class_coverage_deficit": _column_max(
+            book, "final_cls_coverage_deficit"
+        ),
+        "final_subclass_coverage_deficit": _column_max(
+            book, "final_subcls_coverage_deficit"
+        ),
+        "coverage_satisfied": (
+            bool(book.get_column("coverage_satisfied")[0])
+            if "coverage_satisfied" in book.columns and book.height else None
         ),
     })
     return row, membership

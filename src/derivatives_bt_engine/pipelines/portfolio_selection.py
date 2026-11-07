@@ -781,6 +781,22 @@ def parse_args(argv=None, *, complete_default: bool = False):
         ),
     )
     parser.add_argument(
+        "--min-instr-per-class",
+        type=int,
+        help=(
+            "Optional score-gated minimum instruments in every represented "
+            "asset class; class coverage is attempted before subclass coverage"
+        ),
+    )
+    parser.add_argument(
+        "--min-instr-per-subclass",
+        type=int,
+        help=(
+            "Optional score-gated minimum instruments in every represented "
+            "economic subclass; no candidate bypasses the normal score floor"
+        ),
+    )
+    parser.add_argument(
         "--max-instr-per-subclass",
         "--max-instr-per-cluster",
         dest="max_instr_per_subclass",
@@ -1016,6 +1032,10 @@ def _selection_scenario_id(
         ))
     if args.max_instr_per_class is not None:
         tokens.append(f"ic{args.max_instr_per_class}")
+    if args.min_instr_per_class is not None:
+        tokens.append(f"minc{args.min_instr_per_class}")
+    if args.min_instr_per_subclass is not None:
+        tokens.append(f"mins{args.min_instr_per_subclass}")
     if args.max_class_weight_pct is not None:
         tokens.append(f"cw{_number_token(args.max_class_weight_pct)}")
     if args.max_subclass_weight_pct is not None:
@@ -1291,6 +1311,8 @@ def _greedy_selector(
             max_pct_market_volume=float(run_config["max_pct_mkt_volume"]),
             liquidity_days=int(run_config["liq_days"]),
             include_roll_cost_in_score=args.include_roll_cost_in_score,
+            min_instruments_per_class=args.min_instr_per_class,
+            min_instruments_per_subclass=args.min_instr_per_subclass,
             max_instruments_per_class=args.max_instr_per_class,
             max_instruments_per_subclass=args.max_instr_per_subclass,
             max_asset_class_weight=(
@@ -1669,6 +1691,10 @@ class _WalkForwardSelectionProvider:
                     "preference_rank": (selection.preference_ranks or {}).get(
                         str(trial["candidate"])
                     ),
+                    "minimum_instruments_per_class": self.args.min_instr_per_class,
+                    "minimum_instruments_per_subclass": (
+                        self.args.min_instr_per_subclass
+                    ),
                     "maximum_instruments_per_class": self.args.max_instr_per_class,
                     "maximum_instruments_per_subclass": (
                         self.args.max_instr_per_subclass
@@ -1726,6 +1752,12 @@ class _WalkForwardSelectionProvider:
                     "preference_rank": (selection.preference_ranks or {}).get(
                         str(allocation_row["book_symbol"])
                     ),
+                    "minimum_instruments_per_class": (
+                        self.args.min_instr_per_class
+                    ),
+                    "minimum_instruments_per_subclass": (
+                        self.args.min_instr_per_subclass
+                    ),
                     "maximum_instruments_per_class": (
                         self.args.max_instr_per_class
                     ),
@@ -1769,6 +1801,10 @@ class _WalkForwardSelectionProvider:
                 "selection_equity_usd": prior_net_equity,
                 "preference_rank": (selection.preference_ranks or {}).get(
                     str(allocation_row["book_symbol"])
+                ),
+                "minimum_instruments_per_class": self.args.min_instr_per_class,
+                "minimum_instruments_per_subclass": (
+                    self.args.min_instr_per_subclass
                 ),
                 "maximum_instruments_per_class": self.args.max_instr_per_class,
                 "maximum_instruments_per_subclass": (
@@ -1814,6 +1850,20 @@ class _WalkForwardSelectionProvider:
                 "net_score_gain": selection.net_score_gain,
                 "switch_accepted": selection.switch_accepted,
                 "switch_reason": selection.switch_reason,
+                "unbuffered_class_coverage_deficit": (
+                    selection.unbuffered_class_coverage_deficit
+                ),
+                "unbuffered_subclass_coverage_deficit": (
+                    selection.unbuffered_subclass_coverage_deficit
+                ),
+                "final_class_coverage_deficit": (
+                    selection.final_class_coverage_deficit
+                ),
+                "final_subclass_coverage_deficit": (
+                    selection.final_subclass_coverage_deficit
+                ),
+                "coverage_satisfied": selection.coverage_satisfied,
+                "coverage_reason": selection.coverage_reason,
             }
             for allocation_row in selector._trial_allocation_rows(
                 final_iteration,
@@ -1869,7 +1919,9 @@ class _WalkForwardSelectionProvider:
             "rank_count_state=%s rank_count_anchor=%s rank_entry=%s "
             "rank_exit=%s gross_score_gain=%s switch_cost_usd=%s "
             "switch_cost_sr=%s score_buffer_sr=%s net_score_gain=%s "
-            "switch_accepted=%s rank_reason=%s reason=%s",
+            "switch_accepted=%s class_coverage_deficit=%s "
+            "subclass_coverage_deficit=%s coverage_satisfied=%s "
+            "coverage_reason=%s rank_reason=%s reason=%s",
             review_date,
             self.args.selection_membership_hysteresis,
             ",".join(selection.prior_selected),
@@ -1889,6 +1941,10 @@ class _WalkForwardSelectionProvider:
             selection.score_buffer_sr,
             selection.net_score_gain,
             selection.switch_accepted,
+            selection.final_class_coverage_deficit,
+            selection.final_subclass_coverage_deficit,
+            selection.coverage_satisfied,
+            selection.coverage_reason,
             selection.rank_buffer_reason,
             selection.switch_reason,
         )
@@ -1950,6 +2006,20 @@ class _WalkForwardSelectionProvider:
             "net_score_gain": selection.net_score_gain,
             "switch_accepted": selection.switch_accepted,
             "switch_reason": selection.switch_reason,
+            "unbuffered_class_coverage_deficit": (
+                selection.unbuffered_class_coverage_deficit
+            ),
+            "unbuffered_subclass_coverage_deficit": (
+                selection.unbuffered_subclass_coverage_deficit
+            ),
+            "final_class_coverage_deficit": (
+                selection.final_class_coverage_deficit
+            ),
+            "final_subclass_coverage_deficit": (
+                selection.final_subclass_coverage_deficit
+            ),
+            "coverage_satisfied": selection.coverage_satisfied,
+            "coverage_reason": selection.coverage_reason,
         })
         for symbol in sorted(selected_symbols | removed_symbols):
             active = symbol in selected_symbols
@@ -1973,6 +2043,10 @@ class _WalkForwardSelectionProvider:
                 "selection_idm": selection.final_score.idm,
                 "selection_status": status,
                 "selection_active": active,
+                "minimum_instruments_per_class": self.args.min_instr_per_class,
+                "minimum_instruments_per_subclass": (
+                    self.args.min_instr_per_subclass
+                ),
                 "maximum_instruments_per_class": self.args.max_instr_per_class,
                 "maximum_instruments_per_subclass": (
                     self.args.max_instr_per_subclass
@@ -2124,6 +2198,8 @@ def _final_selection_frame(
             "symbol": symbol,
             "pst_instr_code": source_rows[symbol].get("pst_instr_code"),
             "wt_policy": args.weight_policy,
+            "minimum_instruments_per_class": args.min_instr_per_class,
+            "minimum_instruments_per_subclass": args.min_instr_per_subclass,
             "maximum_instruments_per_class": args.max_instr_per_class,
             "maximum_instruments_per_subclass": args.max_instr_per_subclass,
             "maximum_asset_class_weight_percent": args.max_class_weight_pct,
@@ -2151,6 +2227,20 @@ def _final_selection_frame(
             "selection_book_score_buffer_percent": (
                 _active_book_score_buffer_percent(args)
             ),
+            "unbuffered_class_coverage_deficit": (
+                selection.unbuffered_class_coverage_deficit
+            ),
+            "unbuffered_subclass_coverage_deficit": (
+                selection.unbuffered_subclass_coverage_deficit
+            ),
+            "final_class_coverage_deficit": (
+                selection.final_class_coverage_deficit
+            ),
+            "final_subclass_coverage_deficit": (
+                selection.final_subclass_coverage_deficit
+            ),
+            "coverage_satisfied": selection.coverage_satisfied,
+            "coverage_reason": selection.coverage_reason,
             "roll_cost_in_score": args.include_roll_cost_in_score,
             "selection_cost_source": (
                 "ref_fixed" if args.complete else "live_snapshot"
@@ -2794,7 +2884,11 @@ def _run_complete_selection(
             "base_score=%s candidate_ref_max_position=%s "
             "candidate_ref_con_band_distance=%s tie_eligible=%s "
             "tie_break_applied=%s idm=%s "
+            "coverage_phase=%s coverage_eligible=%s "
+            "instr_rank_in_subclass=%s subclass_rank_in_class=%s "
+            "class_rank=%s global_trial_rank=%s "
             "unallocated_weight=%s "
+            "min_instr_per_class=%s min_instr_per_subclass=%s "
             "max_instr_per_class=%s max_instr_per_subclass=%s "
             "max_class_weight_pct=%s max_subclass_weight_pct=%s "
             "portfolio_cont_margin_at_max_usd=%s "
@@ -2806,7 +2900,13 @@ def _run_complete_selection(
             trial["candidate_ref_contract_band_distance"],
             trial["tie_eligible"],
             trial["tie_break_applied"],
-            trial["idm"], trial.get("unallocated_weight"),
+            trial["idm"], trial.get("coverage_phase"),
+            trial.get("coverage_eligible"),
+            trial.get("instr_rank_in_subclass"),
+            trial.get("subclass_rank_in_class"),
+            trial.get("class_rank"), trial.get("global_trial_rank"),
+            trial.get("unallocated_weight"),
+            args.min_instr_per_class, args.min_instr_per_subclass,
             args.max_instr_per_class, args.max_instr_per_subclass,
             args.max_class_weight_pct, args.max_subclass_weight_pct,
             trial.get("portfolio_cont_margin_at_max_usd"),
@@ -3287,6 +3387,8 @@ def _run_complete_selection(
         "tie_reference_book_count": args.tie_reference_book_count,
         "include_roll_cost_in_score": args.include_roll_cost_in_score,
         "max_weight_idm": args.max_weight_idm,
+        "min_instr_per_class": args.min_instr_per_class,
+        "min_instr_per_subclass": args.min_instr_per_subclass,
         "max_instr_per_class": args.max_instr_per_class,
         "max_instr_per_subclass": args.max_instr_per_subclass,
         "max_class_weight_pct": args.max_class_weight_pct,
@@ -3652,6 +3754,12 @@ def _run_complete_selection(
         rename_public_report_columns(
             pl.DataFrame(selection.trials, infer_schema_length=None).with_columns(
                 pl.lit(args.weight_policy).alias("wt_policy"),
+                pl.lit(args.min_instr_per_class, dtype=pl.Int64).alias(
+                    "minimum_instruments_per_class"
+                ),
+                pl.lit(args.min_instr_per_subclass, dtype=pl.Int64).alias(
+                    "minimum_instruments_per_subclass"
+                ),
                 pl.lit(args.max_instr_per_class, dtype=pl.Int64).alias(
                     "maximum_instruments_per_class"
                 ),
@@ -3689,6 +3797,12 @@ def _run_complete_selection(
             pl.DataFrame(selection.trial_allocations, infer_schema_length=None)
             .with_columns(
                 pl.lit(args.weight_policy).alias("wt_policy"),
+                pl.lit(args.min_instr_per_class, dtype=pl.Int64).alias(
+                    "minimum_instruments_per_class"
+                ),
+                pl.lit(args.min_instr_per_subclass, dtype=pl.Int64).alias(
+                    "minimum_instruments_per_subclass"
+                ),
                 pl.lit(args.max_instr_per_class, dtype=pl.Int64).alias(
                     "maximum_instruments_per_class"
                 ),
@@ -3730,6 +3844,12 @@ def _run_complete_selection(
         .filter(pl.col("accepted"))
         .with_columns(
             pl.lit(args.weight_policy).alias("wt_policy"),
+            pl.lit(args.min_instr_per_class, dtype=pl.Int64).alias(
+                "minimum_instruments_per_class"
+            ),
+            pl.lit(args.min_instr_per_subclass, dtype=pl.Int64).alias(
+                "minimum_instruments_per_subclass"
+            ),
             pl.lit(args.max_instr_per_class, dtype=pl.Int64).alias(
                 "maximum_instruments_per_class"
             ),

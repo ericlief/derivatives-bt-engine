@@ -137,9 +137,12 @@ class GreedySelectionConfig:
     uncapped structural weights. ``forecast_cap_ratio`` is maximum forecast
     divided by average absolute forecast (20/10 = 2 in conventional Carver
     units). ``min_max_position`` enforces the half-contract granularity rule.
-    ``max_instruments_per_class`` and ``max_instruments_per_subclass``
-    optionally limit selected instrument counts at the two reviewed economic
-    hierarchy levels. ``max_asset_class_weight`` and
+    ``min_instruments_per_class`` and ``min_instruments_per_subclass``
+    optionally make the greedy search cover each represented hierarchy group,
+    class first and then subclass. They constrain which fully rescored trials
+    compete next but never bypass feasibility or the ordinary score floor.
+    The corresponding ``max_`` settings limit selected counts at the same two
+    reviewed hierarchy levels. ``max_asset_class_weight`` and
     ``max_economic_subclass_weight`` cap their structural allocation shares.
     Capped allocation is left unused rather than redistributed, while IDM and
     portfolio score continue to use the original normalized structural weights.
@@ -198,6 +201,8 @@ class GreedySelectionConfig:
     tie_reference_book_count: int = 15
     liquidity_days: int = 250
     max_pct_market_volume: float = 1.0
+    min_instruments_per_class: int | None = None
+    min_instruments_per_subclass: int | None = None
     max_instruments_per_class: int | None = None
     max_instruments_per_subclass: int | None = None
     max_instruments_per_cluster: int | None = None
@@ -260,6 +265,11 @@ class GreedySelectionConfig:
         if self.liquidity_days <= 0 or self.max_pct_market_volume <= 0:
             raise ValueError("liquidity parameters must be positive")
         for name, value in (
+            ("min_instruments_per_class", self.min_instruments_per_class),
+            (
+                "min_instruments_per_subclass",
+                self.min_instruments_per_subclass,
+            ),
             ("max_instruments_per_class", self.max_instruments_per_class),
             (
                 "max_instruments_per_subclass",
@@ -269,6 +279,22 @@ class GreedySelectionConfig:
         ):
             if value is not None and value <= 0:
                 raise ValueError(f"{name} must be positive when set")
+        for level, minimum, maximum in (
+            (
+                "class",
+                self.min_instruments_per_class,
+                self.max_instruments_per_class,
+            ),
+            (
+                "subclass",
+                self.min_instruments_per_subclass,
+                self.subclass_instrument_limit,
+            ),
+        ):
+            if minimum is not None and maximum is not None and minimum > maximum:
+                raise ValueError(
+                    f"minimum instruments per {level} cannot exceed maximum"
+                )
         if (
             self.max_instruments_per_subclass is not None
             and self.max_instruments_per_cluster is not None
@@ -556,6 +582,12 @@ class GreedySelectionResult:
     net_score_gain: float | None = None
     switch_accepted: bool | None = None
     switch_reason: str = ""
+    unbuffered_class_coverage_deficit: int = 0
+    unbuffered_subclass_coverage_deficit: int = 0
+    final_class_coverage_deficit: int = 0
+    final_subclass_coverage_deficit: int = 0
+    coverage_satisfied: bool = True
+    coverage_reason: str = "coverage_disabled"
 
 
 class GreedyInstrumentSelector:
@@ -1237,6 +1269,194 @@ class GreedyInstrumentSelector:
             details=tuple(details),
         )
 
+    def _coverage_deficits(
+        self,
+        symbols: Iterable[str],
+        candidates: dict[str, SelectionCandidate],
+    ) -> tuple[int, int]:
+        """Return missing class and subclass slots for a hypothetical book.
+
+        Only groups represented in the current point-in-time candidate
+        universe count. The rule therefore cannot demand a hierarchy branch
+        that did not yet exist or was not eligible at that review.
+        """
+        class_counts: dict[str, int] = {}
+        subclass_counts: dict[tuple[str, str], int] = {}
+        for symbol in symbols:
+            candidate = candidates[symbol]
+            class_counts[candidate.asset_class] = (
+                class_counts.get(candidate.asset_class, 0) + 1
+            )
+            subclass = (candidate.asset_class, candidate.economic_subclass)
+            subclass_counts[subclass] = subclass_counts.get(subclass, 0) + 1
+        all_classes = {candidate.asset_class for candidate in candidates.values()}
+        all_subclasses = {
+            (candidate.asset_class, candidate.economic_subclass)
+            for candidate in candidates.values()
+        }
+        class_deficit = (
+            sum(
+                max(
+                    self.config.min_instruments_per_class
+                    - class_counts.get(asset_class, 0),
+                    0,
+                )
+                for asset_class in all_classes
+            )
+            if self.config.min_instruments_per_class is not None else 0
+        )
+        subclass_deficit = (
+            sum(
+                max(
+                    self.config.min_instruments_per_subclass
+                    - subclass_counts.get(subclass, 0),
+                    0,
+                )
+                for subclass in all_subclasses
+            )
+            if self.config.min_instruments_per_subclass is not None else 0
+        )
+        return class_deficit, subclass_deficit
+
+    def _coverage_phase(
+        self,
+        symbols: Iterable[str],
+        candidates: dict[str, SelectionCandidate],
+    ) -> str:
+        """Return the active class-first coverage phase for the current book."""
+        class_deficit, subclass_deficit = self._coverage_deficits(
+            symbols, candidates
+        )
+        if class_deficit:
+            return "class"
+        if subclass_deficit:
+            return "subclass"
+        return "unrestricted"
+
+    def _coverage_reason(self, deficits: tuple[int, int]) -> str:
+        """Return the public status label for a coverage deficit pair."""
+        if (
+            self.config.min_instruments_per_class is None
+            and self.config.min_instruments_per_subclass is None
+        ):
+            return "coverage_disabled"
+        return (
+            "coverage_satisfied"
+            if deficits == (0, 0)
+            else "coverage_unmet_score_or_feasibility_gate"
+        )
+
+    def _coverage_candidate_is_eligible(
+        self,
+        symbol: str,
+        selected: Iterable[str],
+        candidates: dict[str, SelectionCandidate],
+        phase: str,
+    ) -> bool:
+        """Return whether a candidate reduces the active coverage deficit."""
+        if phase == "unrestricted":
+            return True
+        candidate = candidates[symbol]
+        selected_candidates = [candidates[item] for item in selected]
+        if phase == "class":
+            count = sum(
+                item.asset_class == candidate.asset_class
+                for item in selected_candidates
+            )
+            return count < int(self.config.min_instruments_per_class or 0)
+        subclass = (candidate.asset_class, candidate.economic_subclass)
+        count = sum(
+            (item.asset_class, item.economic_subclass) == subclass
+            for item in selected_candidates
+        )
+        return count < int(self.config.min_instruments_per_subclass or 0)
+
+    @staticmethod
+    def _competition_ranks(
+        scored_trials: list[tuple[str, PortfolioScore]],
+        candidates: dict[str, SelectionCandidate],
+    ) -> dict[str, tuple[int | None, int | None, int | None, int | None]]:
+        """Rank conditional full-book trials globally and by hierarchy."""
+        feasible = [
+            (symbol, score)
+            for symbol, score in scored_trials
+            if score.feasible and math.isfinite(score.score)
+        ]
+        ordered = sorted(feasible, key=lambda item: (-item[1].score, item[0]))
+        global_rank = {
+            symbol: rank for rank, (symbol, _) in enumerate(ordered, start=1)
+        }
+        by_subclass: dict[tuple[str, str], list[tuple[str, PortfolioScore]]] = {}
+        for symbol, score in feasible:
+            candidate = candidates[symbol]
+            key = (candidate.asset_class, candidate.economic_subclass)
+            by_subclass.setdefault(key, []).append((symbol, score))
+        instr_rank: dict[str, int] = {}
+        subclass_champions: dict[tuple[str, str], float] = {}
+        for key, members in by_subclass.items():
+            ranked = sorted(members, key=lambda item: (-item[1].score, item[0]))
+            instr_rank.update(
+                {symbol: rank for rank, (symbol, _) in enumerate(ranked, start=1)}
+            )
+            subclass_champions[key] = ranked[0][1].score
+        subclass_rank: dict[tuple[str, str], int] = {}
+        by_class: dict[str, list[tuple[tuple[str, str], float]]] = {}
+        for key, champion_score in subclass_champions.items():
+            by_class.setdefault(key[0], []).append((key, champion_score))
+        class_champions: dict[str, float] = {}
+        for asset_class, subclasses in by_class.items():
+            ranked = sorted(subclasses, key=lambda item: (-item[1], item[0]))
+            subclass_rank.update(
+                {key: rank for rank, (key, _) in enumerate(ranked, start=1)}
+            )
+            class_champions[asset_class] = ranked[0][1]
+        ranked_classes = sorted(
+            class_champions.items(), key=lambda item: (-item[1], item[0])
+        )
+        class_rank = {
+            asset_class: rank
+            for rank, (asset_class, _) in enumerate(ranked_classes, start=1)
+        }
+        return {
+            symbol: (
+                instr_rank.get(symbol),
+                subclass_rank.get(
+                    (
+                        candidates[symbol].asset_class,
+                        candidates[symbol].economic_subclass,
+                    )
+                ),
+                class_rank.get(candidates[symbol].asset_class),
+                global_rank.get(symbol),
+            )
+            for symbol, _ in scored_trials
+        }
+
+    @classmethod
+    def _annotate_coverage_competition(
+        cls,
+        trials: list[dict[str, object]],
+        trial_allocations: list[dict[str, object]],
+        *,
+        iteration: int,
+        phase: str,
+        coverage_eligible: frozenset[str],
+        ranks: dict[str, tuple[int | None, int | None, int | None, int | None]],
+    ) -> None:
+        """Attach the active coverage phase and conditional trial ranks."""
+        for rows in (trials, trial_allocations):
+            for row in rows:
+                if row["iteration"] != iteration:
+                    continue
+                symbol = str(row["candidate"])
+                instr_rank, subclass_rank, class_rank, global_rank = ranks[symbol]
+                row["coverage_phase"] = phase
+                row["coverage_eligible"] = symbol in coverage_eligible
+                row["instr_rank_in_subclass"] = instr_rank
+                row["subclass_rank_in_class"] = subclass_rank
+                row["class_rank"] = class_rank
+                row["global_trial_rank"] = global_rank
+
     def select(
         self,
         candidate_list: list[SelectionCandidate],
@@ -1306,6 +1526,26 @@ class GreedyInstrumentSelector:
         singleton_trials = [
             (score.symbols[0], score) for score in feasible_singletons
         ]
+        seed_phase = self._coverage_phase((), candidates)
+        seed_eligible = frozenset(
+            symbol for symbol, _ in singleton_trials
+            if self._coverage_candidate_is_eligible(
+                symbol, (), candidates, seed_phase
+            )
+        )
+        self._annotate_coverage_competition(
+            trials,
+            trial_allocations,
+            iteration=0,
+            phase=seed_phase,
+            coverage_eligible=seed_eligible,
+            ranks=self._competition_ranks([
+                (score.symbols[0], score) for score in singleton_scores
+            ], candidates),
+        )
+        singleton_trials = [
+            item for item in singleton_trials if item[0] in seed_eligible
+        ]
         (
             (seed_symbol, current),
             (seed_score_leader, seed_leader_score),
@@ -1348,6 +1588,13 @@ class GreedyInstrumentSelector:
             ]
             if not remaining:
                 break
+            coverage_phase = self._coverage_phase(selected, candidates)
+            coverage_eligible = frozenset(
+                symbol for symbol in remaining
+                if self._coverage_candidate_is_eligible(
+                    symbol, selected, candidates, coverage_phase
+                )
+            )
             # Recalculate weights, IDM, positions, liquidity, costs, and score
             # for the entire hypothetical book for every possible addition.
             scored_trials = []
@@ -1368,8 +1615,27 @@ class GreedyInstrumentSelector:
                     scored,
                     accepted=False,
                 )
-            feasible = [item for item in scored_trials if item[1].feasible]
+            self._annotate_coverage_competition(
+                trials,
+                trial_allocations,
+                iteration=iteration,
+                phase=coverage_phase,
+                coverage_eligible=coverage_eligible,
+                ranks=self._competition_ranks(scored_trials, candidates),
+            )
+            feasible = [
+                item for item in scored_trials
+                if item[1].feasible and item[0] in coverage_eligible
+            ]
             if not feasible:
+                for rows in (trials, trial_allocations):
+                    for row in rows:
+                        if (
+                            row["iteration"] == iteration
+                            and row["feasible"]
+                            and not row["reason"]
+                        ):
+                            row["reason"] = "outside_active_coverage_phase"
                 break
             min_accept_score = self.config.score_threshold * best_seen
             score_leader, leader_score = max(
@@ -1420,6 +1686,12 @@ class GreedyInstrumentSelector:
             )
             iteration += 1
 
+        class_deficit, subclass_deficit = self._coverage_deficits(
+            selected, candidates
+        )
+        coverage_reason = self._coverage_reason(
+            (class_deficit, subclass_deficit)
+        )
         unbuffered = GreedySelectionResult(
             tuple(selected),
             current,
@@ -1428,6 +1700,12 @@ class GreedyInstrumentSelector:
             unbuffered_selected=tuple(selected),
             prior_selected=prior_selected_tuple,
             unbuffered_book_score=current.score,
+            unbuffered_class_coverage_deficit=class_deficit,
+            unbuffered_subclass_coverage_deficit=subclass_deficit,
+            final_class_coverage_deficit=class_deficit,
+            final_subclass_coverage_deficit=subclass_deficit,
+            coverage_satisfied=not class_deficit and not subclass_deficit,
+            coverage_reason=coverage_reason,
         )
         return self._apply_membership_hysteresis(
             unbuffered,
@@ -1584,6 +1862,22 @@ class GreedyInstrumentSelector:
                     proposed_score.reason or "unknown"
                 ),
             )
+        proposed_coverage = self._coverage_deficits(proposed, candidates)
+        raw_coverage = (
+            unbuffered.unbuffered_class_coverage_deficit,
+            unbuffered.unbuffered_subclass_coverage_deficit,
+        )
+        if proposed_coverage > raw_coverage:
+            return (
+                unbuffered.selected,
+                unbuffered.final_score,
+                ranked,
+                preference_ranks,
+                band_count,
+                entry_cutoff,
+                exit_cutoff,
+                "rank_book_coverage_worse_fallback",
+            )
         return (
             proposed,
             proposed_score,
@@ -1709,6 +2003,9 @@ class GreedyInstrumentSelector:
             symbol for symbol in prior_selected if symbol not in candidates
         )
         if missing:
+            final_coverage = self._coverage_deficits(
+                candidate_selected, candidates
+            )
             return replace(
                 result,
                 selected=candidate_selected,
@@ -1717,6 +2014,10 @@ class GreedyInstrumentSelector:
                 switch_reason=(
                     "prior_book_hard_ineligible:" + ",".join(missing)
                 ),
+                final_class_coverage_deficit=final_coverage[0],
+                final_subclass_coverage_deficit=final_coverage[1],
+                coverage_satisfied=final_coverage == (0, 0),
+                coverage_reason=self._coverage_reason(final_coverage),
             )
 
         prior_score = self.score(
@@ -1727,6 +2028,9 @@ class GreedyInstrumentSelector:
             incumbent_symbols=incumbent_symbols,
         )
         if not prior_score.feasible or not math.isfinite(prior_score.score):
+            final_coverage = self._coverage_deficits(
+                candidate_selected, candidates
+            )
             return replace(
                 result,
                 selected=candidate_selected,
@@ -1736,6 +2040,10 @@ class GreedyInstrumentSelector:
                     "prior_book_hard_ineligible:"
                     + (prior_score.reason or "unknown")
                 ),
+                final_class_coverage_deficit=final_coverage[0],
+                final_subclass_coverage_deficit=final_coverage[1],
+                coverage_satisfied=final_coverage == (0, 0),
+                coverage_reason=self._coverage_reason(final_coverage),
             )
 
         new_score = candidate_score
@@ -1763,13 +2071,29 @@ class GreedyInstrumentSelector:
         )
         net_score_gain = gross_score_gain - switch_cost_sr
         same_book = set(candidate_selected) == set(prior_selected)
-        switch_accepted = not same_book and (
-            net_score_gain > score_buffer_sr
-            if use_score_hurdle and score_buffer_sr is not None else True
+        candidate_coverage = self._coverage_deficits(
+            candidate_selected, candidates
         )
-        retain_prior = use_score_hurdle and not switch_accepted
+        prior_coverage = self._coverage_deficits(prior_selected, candidates)
+        coverage_hysteresis_active = self.config.membership_hysteresis != "none"
+        if coverage_hysteresis_active and candidate_coverage < prior_coverage:
+            switch_accepted = not same_book
+            retain_prior = False
+            coverage_decision_reason = "candidate_improves_coverage"
+        elif coverage_hysteresis_active and candidate_coverage > prior_coverage:
+            switch_accepted = False
+            retain_prior = True
+            coverage_decision_reason = "prior_has_better_coverage"
+        else:
+            switch_accepted = not same_book and (
+                net_score_gain > score_buffer_sr
+                if use_score_hurdle and score_buffer_sr is not None else True
+            )
+            retain_prior = use_score_hurdle and not switch_accepted
+            coverage_decision_reason = "equal_coverage"
         final_score = prior_score if retain_prior else new_score
         final_selected = prior_selected if retain_prior else candidate_selected
+        final_coverage = prior_coverage if retain_prior else candidate_coverage
         return replace(
             result,
             selected=final_selected,
@@ -1782,8 +2106,10 @@ class GreedyInstrumentSelector:
             net_score_gain=net_score_gain,
             switch_accepted=switch_accepted,
             switch_reason=(
-                "same_book"
-                if same_book else (
+                coverage_decision_reason
+                if coverage_decision_reason != "equal_coverage" else (
+                    "same_book"
+                    if same_book else (
                     "net_score_gain_above_buffer"
                     if use_score_hurdle and switch_accepted else (
                         "net_score_gain_below_buffer"
@@ -1793,8 +2119,13 @@ class GreedyInstrumentSelector:
                             else "membership_hysteresis_disabled"
                         )
                     )
+                    )
                 )
             ),
+            final_class_coverage_deficit=final_coverage[0],
+            final_subclass_coverage_deficit=final_coverage[1],
+            coverage_satisfied=final_coverage == (0, 0),
+            coverage_reason=self._coverage_reason(final_coverage),
         )
 
     @classmethod
@@ -2080,7 +2411,9 @@ class GreedyInstrumentSelector:
             elif row["feasible"] and not row["reason"]:
                 # A feasible loser needs a competitive explanation; the hard
                 # constraint path above already populated infeasible reasons.
-                if iteration == 0:
+                if not bool(row.get("coverage_eligible", True)):
+                    row["reason"] = "outside_active_coverage_phase"
+                elif iteration == 0:
                     row["reason"] = (
                         "not_selected_by_contract_band_tie_break"
                         if candidate in tie_eligible
