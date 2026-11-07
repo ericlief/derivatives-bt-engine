@@ -16,7 +16,8 @@ and exposes each dated book as instrument-weight bars plus class and subclass
 composition bars. Portfolio-level helpers plot compounded equity and drawdown,
 realized contract-risk concentration, and annual instrument P&L attribution
 from the persisted public reports without recreating the backtest accounting
-path.
+path. The selection-grid dashboard applies those same plotters to one scenario
+at a time and adds scenario and coverage navigation.
 """
 
 from __future__ import annotations
@@ -1504,6 +1505,330 @@ def plot_selection_grid_rebalance_weights(
     return widgets.VBox(
         [
             selector,
+            widgets.HBox(list(coverage_selectors.values())),
+            metadata_output,
+            plot_output,
+        ],
+        layout=widgets.Layout(width="100%", overflow="visible"),
+    )
+
+
+def plot_selection_grid_dashboard(
+    grid_directory: Path | str,
+    *,
+    scenario_id: str | None = None,
+    view: str = "cash_pnl",
+    start: date | datetime | str | None = None,
+    end: date | datetime | str | None = None,
+    rolling_days: int = 256,
+    width: int = 1050,
+    height: int = 420,
+):
+    """Navigate the standard selection plots across grid scenarios.
+
+    The dashboard offers cash P&L and combined-forecast panels, portfolio
+    overview, realized risk concentration, annual P&L attribution, and dated
+    rebalance weights. Coverage dropdowns filter the scenario choices. Only
+    the chosen scenario's report is loaded when a view is selected.
+
+    Parameters
+    ----------
+    grid_directory
+        Completed selection-grid run directory.
+    scenario_id
+        Optional initial scenario identifier. Defaults to the baseline scenario
+        when present, otherwise the first summary row.
+    view
+        Initial view key: ``cash_pnl``, ``portfolio_overview``,
+        ``concentration``, ``pnl_attribution``, or ``rebalance_weights``.
+    start, end
+        Optional inclusive date bounds for time-series views.
+    rolling_days
+        Trailing observation count forwarded to the portfolio overview.
+    width, height
+        Plot dimensions forwarded to the standard notebook plotters.
+
+    Returns
+    -------
+    ipywidgets.VBox
+        Coverage, scenario, and view selectors with the selected plot.
+    """
+    import ipywidgets as widgets
+    from IPython.display import display
+
+    view_labels = {
+        "cash_pnl": "Cash P&L + combined forecast",
+        "portfolio_overview": "Portfolio overview",
+        "concentration": "Realized risk concentration",
+        "pnl_attribution": "Annual P&L attribution",
+        "rebalance_weights": "Rebalance weights",
+    }
+    if view not in view_labels:
+        raise ValueError(
+            f"unknown grid view {view!r}; choose one of {list(view_labels)}"
+        )
+
+    root = Path(grid_directory).expanduser()
+    summary_path = root / "selection_grid_summary.parquet"
+    if not summary_path.is_file():
+        raise FileNotFoundError(
+            f"selection grid summary does not exist: {summary_path}"
+        )
+    summary = pl.read_parquet(summary_path)
+    if "scenario_id" not in summary.columns:
+        raise ValueError("selection grid summary is missing scenario_id")
+    if summary.is_empty():
+        raise ValueError("selection grid summary has no scenarios")
+
+    rows = summary.to_dicts()
+    coverage_schema = (
+        ("minimum_instruments_per_class", "min_instr_per_cls", "Min / class"),
+        (
+            "minimum_instruments_per_subclass",
+            "min_instr_per_subcls",
+            "Min / subclass",
+        ),
+        ("minimum_book_count", "min_book_n", "Min book size"),
+    )
+    coverage_columns = []
+    for schema_row in coverage_schema:
+        aliases, label = schema_row[:-1], schema_row[-1]
+        column = next(
+            (name for name in aliases if name in summary.columns), None
+        )
+        if column is not None:
+            coverage_columns.append((column, label))
+
+    coverage_selectors = {}
+    for column, label in coverage_columns:
+        values = summary.get_column(column).unique().to_list()
+        values = sorted(
+            values,
+            key=lambda value: (value is None, value if value is not None else 0),
+        )
+        options = [("All", "__all__")]
+        options.extend(
+            ("Disabled" if value is None else str(value), value)
+            for value in values
+        )
+        coverage_selectors[column] = widgets.Dropdown(
+            description=label,
+            options=options,
+            value="__all__",
+            layout=widgets.Layout(width="32%"),
+        )
+
+    def matching_rows() -> list[dict[str, object]]:
+        """Apply the selected minimum-coverage filters to scenario rows."""
+        matching = rows
+        for column, control in coverage_selectors.items():
+            if control.value != "__all__":
+                matching = [
+                    row
+                    for row in matching
+                    if row.get(column) == control.value
+                ]
+        return matching
+
+    def label_for(row: dict[str, object]) -> str:
+        """Label scenarios with their ID and enabled coverage minimums."""
+        parts = [str(row["scenario_id"])]
+        for column, label in coverage_columns:
+            value = row.get(column)
+            short = {
+                "Min / class": "MC",
+                "Min / subclass": "MS",
+                "Min book size": "MB",
+            }[label]
+            if value is not None:
+                parts.append(f"{short}{value:g}")
+        return " · ".join(parts)
+
+    scenario_options = [
+        (label_for(row), str(row["scenario_id"])) for row in rows
+    ]
+    available_scenario_ids = {value for _, value in scenario_options}
+    if scenario_id is None:
+        baseline_rows = [
+            row for row in rows if bool(row.get("baseline_scenario"))
+        ]
+        scenario_id = str(
+            baseline_rows[0]["scenario_id"]
+            if baseline_rows
+            else rows[0]["scenario_id"]
+        )
+    if scenario_id not in available_scenario_ids:
+        raise KeyError(f"selection grid has no scenario {scenario_id!r}")
+
+    scenario_selector = widgets.Dropdown(
+        description="Scenario",
+        options=scenario_options,
+        value=scenario_id,
+        layout=widgets.Layout(width="95%"),
+    )
+    view_selector = widgets.Dropdown(
+        description="View",
+        options=[(label, key) for key, label in view_labels.items()],
+        value=view,
+        layout=widgets.Layout(width="95%"),
+    )
+    metadata_output = widgets.Output()
+    plot_output = widgets.Output(
+        layout=widgets.Layout(
+            width="100%",
+            height="auto",
+            max_height="none",
+            overflow="visible",
+        )
+    )
+
+    def scenario_cash_path(selected: str) -> tuple[Path, Path]:
+        """Resolve the latest matching cash and portfolio reports."""
+        directory = root / selected
+        cash_reports = sorted(
+            directory.glob("multi_speed_ewmac_selection_cash_pnl_*.parquet")
+        )
+        if not cash_reports:
+            raise FileNotFoundError(
+                f"no selection cash-P&L report for scenario {selected!r}"
+            )
+        cash_path = cash_reports[-1]
+        stamp = cash_path.name.removeprefix(
+            "multi_speed_ewmac_selection_cash_pnl_"
+        ).removesuffix(".parquet")
+        curve_path = directory / (
+            f"multi_speed_ewmac_selection_portfolio_curve_{stamp}.parquet"
+        )
+        if not curve_path.is_file():
+            raise FileNotFoundError(
+                f"portfolio curve matching {cash_path.name} is missing"
+            )
+        return cash_path, curve_path
+
+    def plot_selected(selected: str, selected_view: str):
+        """Load the report required by one selected scenario view."""
+        if selected_view == "rebalance_weights":
+            reviews = load_selection_grid_review_instruments(root, selected)
+            return plot_selection_rebalance_weights(
+                reviews, width=width, height=height
+            )
+        cash_path, curve_path = scenario_cash_path(selected)
+        if selected_view == "cash_pnl":
+            return plot_selection_cash_pnl(
+                cash_path,
+                start=start,
+                end=end,
+                width=width,
+                height=min(height, 240),
+            )
+        if selected_view == "portfolio_overview":
+            return plot_selection_portfolio_overview(
+                curve_path,
+                start=start,
+                end=end,
+                rolling_days=rolling_days,
+                width=width,
+                height=min(height, 260),
+            )
+        if selected_view == "concentration":
+            return plot_selection_portfolio_concentration(
+                cash_path,
+                start=start,
+                end=end,
+                width=width,
+                height=min(height, 240),
+            )
+        return plot_selection_pnl_attribution(
+            cash_path,
+            width=width,
+            height=height,
+        )
+
+    def update_plot(change=None) -> None:
+        """Redraw the chosen scenario and standard plot view."""
+        selected = scenario_selector.value
+        if selected == "__none__":
+            return
+        selected_view = view_selector.value
+        selected_row = next(
+            row for row in rows if str(row["scenario_id"]) == selected
+        )
+        metadata_columns = [
+            column
+            for column in (
+                "scenario_id",
+                "target_vol",
+                "min_instr_per_cls",
+                "min_instr_per_subcls",
+                "min_book_n",
+                "sel_elig_hyst_pct",
+                "sel_membership_hyst",
+                "sel_rank_buf_pct",
+                "sel_rank_n_ewma_hl",
+                "sel_book_score_buf_pct",
+                "n_instr",
+                "construction_score",
+                "jaccard_to_baseline",
+            )
+            if column in summary.columns
+        ]
+        selected_metadata = pl.DataFrame([selected_row]).select(metadata_columns)
+        with metadata_output:
+            metadata_output.clear_output(wait=True)
+            display(selected_metadata)
+        with plot_output:
+            plot_output.clear_output(wait=True)
+            display(plot_selected(selected, selected_view))
+
+    def update_coverage(change=None) -> None:
+        """Restrict scenario choices to the selected coverage settings."""
+        candidates = matching_rows()
+        options = [
+            (label_for(row), str(row["scenario_id"])) for row in candidates
+        ]
+        if not options:
+            scenario_selector.unobserve(update_plot, names="value")
+            scenario_selector.options = [("No matching scenarios", "__none__")]
+            scenario_selector.value = "__none__"
+            scenario_selector.observe(update_plot, names="value")
+            with metadata_output:
+                metadata_output.clear_output(wait=True)
+                display(
+                    widgets.Label(
+                        "No scenarios match these coverage settings."
+                    )
+                )
+            with plot_output:
+                plot_output.clear_output(wait=True)
+            return
+        current = scenario_selector.value
+        selected = next(
+            (value for _, value in options if value == current), None
+        )
+        if selected is None:
+            selected = next(
+                (
+                    str(row["scenario_id"])
+                    for row in candidates
+                    if bool(row.get("baseline_scenario"))
+                ),
+                options[0][1],
+            )
+        scenario_selector.unobserve(update_plot, names="value")
+        scenario_selector.options = options
+        scenario_selector.value = selected
+        scenario_selector.observe(update_plot, names="value")
+        update_plot()
+
+    scenario_selector.observe(update_plot, names="value")
+    view_selector.observe(update_plot, names="value")
+    for control in coverage_selectors.values():
+        control.observe(update_coverage, names="value")
+    update_plot()
+    return widgets.VBox(
+        [
+            view_selector,
+            scenario_selector,
             widgets.HBox(list(coverage_selectors.values())),
             metadata_output,
             plot_output,
