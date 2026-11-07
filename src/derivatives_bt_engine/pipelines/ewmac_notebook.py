@@ -1240,7 +1240,8 @@ def plot_selection_grid_rebalance_weights(
 ):
     """Navigate every scenario and dated book in one selection grid.
 
-    The outer dropdown selects a scenario. The nested widget is the standard
+    Coverage dropdowns filter the outer scenario selector by minimum class,
+    subclass, and book-size settings. The nested widget is the standard
     selection-review view, with year and optional exact-review selectors plus
     instrument, asset-class, and economic-subclass limit-weight bars. Only the
     chosen scenario's compact review report is loaded, which keeps an 80-run
@@ -1294,6 +1295,17 @@ def plot_selection_grid_rebalance_weights(
             parts.append(f"HL{rank_halflife:g}")
         if isinstance(score_buffer, (int, float)):
             parts.append(f"SB{score_buffer:g}")
+        for column, label in resolved_coverage_columns:
+            value = row.get(column)
+            if value is not None:
+                short_label = {
+                    "Min / class": "MC",
+                    "Min / subclass": "MS",
+                    "Min book size": "MB",
+                }[label]
+                parts.append(f"{short_label}{value:g}")
+            elif label != "Min book size":
+                parts.append(f"{ {'Min / class': 'MC', 'Min / subclass': 'MS'}[label] }off")
         if bool(row.get("baseline_scenario")):
             parts.append("baseline")
         return " · ".join(parts)
@@ -1306,6 +1318,60 @@ def plot_selection_grid_rebalance_weights(
         "sel_book_score_buf_pct",
         nulls_last=True,
     ).to_dicts()
+    coverage_columns = (
+        ("minimum_instruments_per_class", "min_instr_per_cls", "Min / class"),
+        (
+            "minimum_instruments_per_subclass",
+            "min_instr_per_subcls",
+            "Min / subclass",
+        ),
+        ("minimum_book_count", "min_book_n", "Min book size"),
+    )
+    resolved_coverage_columns = [
+        (next((name for name in aliases if name in summary.columns), None), label)
+        for *aliases, label in coverage_columns
+    ]
+    resolved_coverage_columns = [
+        (column, label)
+        for column, label in resolved_coverage_columns
+        if column is not None
+    ]
+
+    def coverage_options(column: str) -> list[tuple[str, object]]:
+        """Build stable filter options, including disabled and all values."""
+        values = summary.get_column(column).unique().to_list()
+        values = sorted(
+            values,
+            key=lambda value: (value is None, value if value is not None else 0),
+        )
+        options: list[tuple[str, object]] = [("All", "__all__")]
+        options.extend(
+            ("Disabled" if value is None else str(value), value)
+            for value in values
+        )
+        return options
+
+    coverage_selectors = {
+        column: widgets.Dropdown(
+            description=label,
+            options=coverage_options(column),
+            value="__all__",
+            layout=widgets.Layout(width="32%"),
+        )
+        for column, label in resolved_coverage_columns
+    }
+
+    def matching_rows() -> list[dict[str, object]]:
+        """Return scenarios matching the selected coverage filters."""
+        matching = rows
+        for column, control in coverage_selectors.items():
+            selected = control.value
+            if selected != "__all__":
+                matching = [
+                    row for row in matching if row.get(column) == selected
+                ]
+        return matching
+
     options = [(scenario_label(row), str(row["scenario_id"])) for row in rows]
     scenario_ids = {value for _, value in options}
     if scenario_id is None:
@@ -1346,6 +1412,7 @@ def plot_selection_grid_rebalance_weights(
             "sel_rank_buf_pct",
             "sel_rank_n_ewma_hl",
             "sel_book_score_buf_pct",
+            *[column for column, _ in resolved_coverage_columns],
             "n_instr",
             "construction_score",
             "jaccard_to_baseline",
@@ -1356,6 +1423,8 @@ def plot_selection_grid_rebalance_weights(
     def update_scenario(change=None) -> None:
         """Load and redraw only the newly selected scenario."""
         selected = change["new"] if change is not None else selector.value
+        if selected == "__none__":
+            return
         metadata = summary.filter(pl.col("scenario_id") == selected).select(
             metadata_columns
         )
@@ -1382,10 +1451,63 @@ def plot_selection_grid_rebalance_weights(
                 )
             )
 
+    def update_coverage(change=None) -> None:
+        """Restrict scenario choices to the chosen coverage parameters."""
+        candidates = matching_rows()
+        candidate_options = [
+            (scenario_label(row), str(row["scenario_id"]))
+            for row in candidates
+        ]
+        if not candidate_options:
+            selector.unobserve(update_scenario, names="value")
+            selector.options = [("No matching scenarios", "__none__")]
+            selector.value = "__none__"
+            selector.observe(update_scenario, names="value")
+            with metadata_output:
+                metadata_output.clear_output(wait=True)
+                display(
+                    widgets.Label(
+                        "No scenarios match these coverage settings."
+                    )
+                )
+            with plot_output:
+                plot_output.clear_output(wait=True)
+            return
+        current = selector.value
+        selected = next(
+            (
+                str(row["scenario_id"])
+                for row in candidates
+                if str(row["scenario_id"]) == current
+            ),
+            None,
+        )
+        if selected is None:
+            selected = next(
+                (
+                    str(row["scenario_id"])
+                    for row in candidates
+                    if bool(row.get("baseline_scenario"))
+                ),
+                candidate_options[0][1],
+            )
+        selector.unobserve(update_scenario, names="value")
+        selector.options = candidate_options
+        selector.value = selected
+        selector.observe(update_scenario, names="value")
+        update_scenario()
+
     selector.observe(update_scenario, names="value")
+    for control in coverage_selectors.values():
+        control.observe(update_coverage, names="value")
     update_scenario()
     return widgets.VBox(
-        [selector, metadata_output, plot_output],
+        [
+            selector,
+            widgets.HBox(list(coverage_selectors.values())),
+            metadata_output,
+            plot_output,
+        ],
         layout=widgets.Layout(width="100%", overflow="visible"),
     )
 
