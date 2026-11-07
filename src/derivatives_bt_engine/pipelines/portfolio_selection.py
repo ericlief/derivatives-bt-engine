@@ -784,16 +784,27 @@ def parse_args(argv=None, *, complete_default: bool = False):
         "--min-instr-per-class",
         type=int,
         help=(
-            "Optional score-gated minimum instruments in every represented "
-            "asset class; class coverage is attempted before subclass coverage"
+            "Optional hard-feasibility-gated minimum instruments in every "
+            "represented asset class; class coverage precedes subclass coverage"
         ),
     )
     parser.add_argument(
         "--min-instr-per-subclass",
         type=int,
         help=(
-            "Optional score-gated minimum instruments in every represented "
-            "economic subclass; no candidate bypasses the normal score floor"
+            "Optional hard-feasibility-gated minimum instruments in every "
+            "represented economic subclass; coverage additions are score-ranked"
+        ),
+    )
+    parser.add_argument(
+        "--selection-min-book-count",
+        "--min-book-count",
+        dest="selection_min_book_count",
+        type=int,
+        default=15,
+        help=(
+            "Minimum book breadth after hierarchy coverage (default: 15); "
+            "active only when a class or subclass minimum is enabled"
         ),
     )
     parser.add_argument(
@@ -1036,6 +1047,11 @@ def _selection_scenario_id(
         tokens.append(f"minc{args.min_instr_per_class}")
     if args.min_instr_per_subclass is not None:
         tokens.append(f"mins{args.min_instr_per_subclass}")
+    if (
+        args.min_instr_per_class is not None
+        or args.min_instr_per_subclass is not None
+    ):
+        tokens.append(f"mb{args.selection_min_book_count}")
     if args.max_class_weight_pct is not None:
         tokens.append(f"cw{_number_token(args.max_class_weight_pct)}")
     if args.max_subclass_weight_pct is not None:
@@ -1278,6 +1294,16 @@ def _active_book_score_buffer_percent(args: argparse.Namespace) -> float | None:
     return None
 
 
+def _active_minimum_book_count(args: argparse.Namespace) -> int | None:
+    """Return minimum breadth only when hierarchy coverage is enabled."""
+    if (
+        args.min_instr_per_class is not None
+        or args.min_instr_per_subclass is not None
+    ):
+        return int(args.selection_min_book_count)
+    return None
+
+
 def _greedy_selector(
     *,
     capital: float,
@@ -1313,6 +1339,7 @@ def _greedy_selector(
             include_roll_cost_in_score=args.include_roll_cost_in_score,
             min_instruments_per_class=args.min_instr_per_class,
             min_instruments_per_subclass=args.min_instr_per_subclass,
+            minimum_book_count=args.selection_min_book_count,
             max_instruments_per_class=args.max_instr_per_class,
             max_instruments_per_subclass=args.max_instr_per_subclass,
             max_asset_class_weight=(
@@ -1695,6 +1722,7 @@ class _WalkForwardSelectionProvider:
                     "minimum_instruments_per_subclass": (
                         self.args.min_instr_per_subclass
                     ),
+                    "minimum_book_count": _active_minimum_book_count(self.args),
                     "maximum_instruments_per_class": self.args.max_instr_per_class,
                     "maximum_instruments_per_subclass": (
                         self.args.max_instr_per_subclass
@@ -1758,6 +1786,7 @@ class _WalkForwardSelectionProvider:
                     "minimum_instruments_per_subclass": (
                         self.args.min_instr_per_subclass
                     ),
+                    "minimum_book_count": _active_minimum_book_count(self.args),
                     "maximum_instruments_per_class": (
                         self.args.max_instr_per_class
                     ),
@@ -1806,6 +1835,7 @@ class _WalkForwardSelectionProvider:
                 "minimum_instruments_per_subclass": (
                     self.args.min_instr_per_subclass
                 ),
+                "minimum_book_count": _active_minimum_book_count(self.args),
                 "maximum_instruments_per_class": self.args.max_instr_per_class,
                 "maximum_instruments_per_subclass": (
                     self.args.max_instr_per_subclass
@@ -1856,12 +1886,16 @@ class _WalkForwardSelectionProvider:
                 "unbuffered_subclass_coverage_deficit": (
                     selection.unbuffered_subclass_coverage_deficit
                 ),
+                "unbuffered_book_count_deficit": (
+                    selection.unbuffered_book_count_deficit
+                ),
                 "final_class_coverage_deficit": (
                     selection.final_class_coverage_deficit
                 ),
                 "final_subclass_coverage_deficit": (
                     selection.final_subclass_coverage_deficit
                 ),
+                "final_book_count_deficit": selection.final_book_count_deficit,
                 "coverage_satisfied": selection.coverage_satisfied,
                 "coverage_reason": selection.coverage_reason,
             }
@@ -1920,7 +1954,8 @@ class _WalkForwardSelectionProvider:
             "rank_exit=%s gross_score_gain=%s switch_cost_usd=%s "
             "switch_cost_sr=%s score_buffer_sr=%s net_score_gain=%s "
             "switch_accepted=%s class_coverage_deficit=%s "
-            "subclass_coverage_deficit=%s coverage_satisfied=%s "
+            "subclass_coverage_deficit=%s book_count_deficit=%s "
+            "coverage_satisfied=%s "
             "coverage_reason=%s rank_reason=%s reason=%s",
             review_date,
             self.args.selection_membership_hysteresis,
@@ -1943,6 +1978,7 @@ class _WalkForwardSelectionProvider:
             selection.switch_accepted,
             selection.final_class_coverage_deficit,
             selection.final_subclass_coverage_deficit,
+            selection.final_book_count_deficit,
             selection.coverage_satisfied,
             selection.coverage_reason,
             selection.rank_buffer_reason,
@@ -2012,12 +2048,16 @@ class _WalkForwardSelectionProvider:
             "unbuffered_subclass_coverage_deficit": (
                 selection.unbuffered_subclass_coverage_deficit
             ),
+            "unbuffered_book_count_deficit": (
+                selection.unbuffered_book_count_deficit
+            ),
             "final_class_coverage_deficit": (
                 selection.final_class_coverage_deficit
             ),
             "final_subclass_coverage_deficit": (
                 selection.final_subclass_coverage_deficit
             ),
+            "final_book_count_deficit": selection.final_book_count_deficit,
             "coverage_satisfied": selection.coverage_satisfied,
             "coverage_reason": selection.coverage_reason,
         })
@@ -2047,6 +2087,7 @@ class _WalkForwardSelectionProvider:
                 "minimum_instruments_per_subclass": (
                     self.args.min_instr_per_subclass
                 ),
+                "minimum_book_count": _active_minimum_book_count(self.args),
                 "maximum_instruments_per_class": self.args.max_instr_per_class,
                 "maximum_instruments_per_subclass": (
                     self.args.max_instr_per_subclass
@@ -2200,6 +2241,7 @@ def _final_selection_frame(
             "wt_policy": args.weight_policy,
             "minimum_instruments_per_class": args.min_instr_per_class,
             "minimum_instruments_per_subclass": args.min_instr_per_subclass,
+            "minimum_book_count": _active_minimum_book_count(args),
             "maximum_instruments_per_class": args.max_instr_per_class,
             "maximum_instruments_per_subclass": args.max_instr_per_subclass,
             "maximum_asset_class_weight_percent": args.max_class_weight_pct,
@@ -2233,12 +2275,16 @@ def _final_selection_frame(
             "unbuffered_subclass_coverage_deficit": (
                 selection.unbuffered_subclass_coverage_deficit
             ),
+            "unbuffered_book_count_deficit": (
+                selection.unbuffered_book_count_deficit
+            ),
             "final_class_coverage_deficit": (
                 selection.final_class_coverage_deficit
             ),
             "final_subclass_coverage_deficit": (
                 selection.final_subclass_coverage_deficit
             ),
+            "final_book_count_deficit": selection.final_book_count_deficit,
             "coverage_satisfied": selection.coverage_satisfied,
             "coverage_reason": selection.coverage_reason,
             "roll_cost_in_score": args.include_roll_cost_in_score,
@@ -2889,6 +2935,7 @@ def _run_complete_selection(
             "class_rank=%s global_trial_rank=%s "
             "unallocated_weight=%s "
             "min_instr_per_class=%s min_instr_per_subclass=%s "
+            "minimum_book_count=%s "
             "max_instr_per_class=%s max_instr_per_subclass=%s "
             "max_class_weight_pct=%s max_subclass_weight_pct=%s "
             "portfolio_cont_margin_at_max_usd=%s "
@@ -2907,6 +2954,7 @@ def _run_complete_selection(
             trial.get("class_rank"), trial.get("global_trial_rank"),
             trial.get("unallocated_weight"),
             args.min_instr_per_class, args.min_instr_per_subclass,
+            args.selection_min_book_count,
             args.max_instr_per_class, args.max_instr_per_subclass,
             args.max_class_weight_pct, args.max_subclass_weight_pct,
             trial.get("portfolio_cont_margin_at_max_usd"),
@@ -3389,6 +3437,7 @@ def _run_complete_selection(
         "max_weight_idm": args.max_weight_idm,
         "min_instr_per_class": args.min_instr_per_class,
         "min_instr_per_subclass": args.min_instr_per_subclass,
+        "selection_min_book_count": _active_minimum_book_count(args),
         "max_instr_per_class": args.max_instr_per_class,
         "max_instr_per_subclass": args.max_instr_per_subclass,
         "max_class_weight_pct": args.max_class_weight_pct,
@@ -3760,6 +3809,9 @@ def _run_complete_selection(
                 pl.lit(args.min_instr_per_subclass, dtype=pl.Int64).alias(
                     "minimum_instruments_per_subclass"
                 ),
+                pl.lit(_active_minimum_book_count(args), dtype=pl.Int64).alias(
+                    "minimum_book_count"
+                ),
                 pl.lit(args.max_instr_per_class, dtype=pl.Int64).alias(
                     "maximum_instruments_per_class"
                 ),
@@ -3802,6 +3854,9 @@ def _run_complete_selection(
                 ),
                 pl.lit(args.min_instr_per_subclass, dtype=pl.Int64).alias(
                     "minimum_instruments_per_subclass"
+                ),
+                pl.lit(_active_minimum_book_count(args), dtype=pl.Int64).alias(
+                    "minimum_book_count"
                 ),
                 pl.lit(args.max_instr_per_class, dtype=pl.Int64).alias(
                     "maximum_instruments_per_class"
@@ -3849,6 +3904,9 @@ def _run_complete_selection(
             ),
             pl.lit(args.min_instr_per_subclass, dtype=pl.Int64).alias(
                 "minimum_instruments_per_subclass"
+            ),
+            pl.lit(_active_minimum_book_count(args), dtype=pl.Int64).alias(
+                "minimum_book_count"
             ),
             pl.lit(args.max_instr_per_class, dtype=pl.Int64).alias(
                 "maximum_instruments_per_class"
@@ -4138,6 +4196,8 @@ def run(
         raise ValueError("max source gap days must be nonnegative")
     if args.selection_max_history_gap_days < 0:
         raise ValueError("selection max history gap days must be nonnegative")
+    if args.selection_min_book_count <= 0:
+        raise ValueError("selection minimum book count must be positive")
     if not 0 <= args.selection_eligibility_hysteresis_pct <= 100:
         raise ValueError("selection eligibility hysteresis must be in [0, 100]")
     if not 0 <= args.selection_rank_buffer_pct <= 100:

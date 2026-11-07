@@ -139,8 +139,11 @@ class GreedySelectionConfig:
     units). ``min_max_position`` enforces the half-contract granularity rule.
     ``min_instruments_per_class`` and ``min_instruments_per_subclass``
     optionally make the greedy search cover each represented hierarchy group,
-    class first and then subclass. They constrain which fully rescored trials
-    compete next but never bypass feasibility or the ordinary score floor.
+    class first and then subclass. Hard feasibility gates always remain
+    binding, but the normal relative score stopping floor is suspended while
+    filling attainable coverage slots. ``minimum_book_count`` then continues
+    through the least represented feasible subclasses until the requested
+    breadth is reached. It is inert when both hierarchy minimums are disabled.
     The corresponding ``max_`` settings limit selected counts at the same two
     reviewed hierarchy levels. ``max_asset_class_weight`` and
     ``max_economic_subclass_weight`` cap their structural allocation shares.
@@ -203,6 +206,7 @@ class GreedySelectionConfig:
     max_pct_market_volume: float = 1.0
     min_instruments_per_class: int | None = None
     min_instruments_per_subclass: int | None = None
+    minimum_book_count: int = 15
     max_instruments_per_class: int | None = None
     max_instruments_per_subclass: int | None = None
     max_instruments_per_cluster: int | None = None
@@ -279,6 +283,8 @@ class GreedySelectionConfig:
         ):
             if value is not None and value <= 0:
                 raise ValueError(f"{name} must be positive when set")
+        if self.minimum_book_count <= 0:
+            raise ValueError("minimum_book_count must be positive")
         for level, minimum, maximum in (
             (
                 "class",
@@ -333,6 +339,14 @@ class GreedySelectionConfig:
             self.max_instruments_per_subclass
             if self.max_instruments_per_subclass is not None
             else self.max_instruments_per_cluster
+        )
+
+    @property
+    def coverage_enabled(self) -> bool:
+        """Return whether hierarchy coverage and minimum breadth are active."""
+        return (
+            self.min_instruments_per_class is not None
+            or self.min_instruments_per_subclass is not None
         )
 
 
@@ -584,8 +598,10 @@ class GreedySelectionResult:
     switch_reason: str = ""
     unbuffered_class_coverage_deficit: int = 0
     unbuffered_subclass_coverage_deficit: int = 0
+    unbuffered_book_count_deficit: int = 0
     final_class_coverage_deficit: int = 0
     final_subclass_coverage_deficit: int = 0
+    final_book_count_deficit: int = 0
     coverage_satisfied: bool = True
     coverage_reason: str = "coverage_disabled"
 
@@ -1273,8 +1289,8 @@ class GreedyInstrumentSelector:
         self,
         symbols: Iterable[str],
         candidates: dict[str, SelectionCandidate],
-    ) -> tuple[int, int]:
-        """Return missing class and subclass slots for a hypothetical book.
+    ) -> tuple[int, int, int]:
+        """Return missing class, subclass, and total-book coverage slots.
 
         Only groups represented in the current point-in-time candidate
         universe count. The rule therefore cannot demand a hierarchy branch
@@ -1282,7 +1298,8 @@ class GreedyInstrumentSelector:
         """
         class_counts: dict[str, int] = {}
         subclass_counts: dict[tuple[str, str], int] = {}
-        for symbol in symbols:
+        symbol_tuple = tuple(symbols)
+        for symbol in symbol_tuple:
             candidate = candidates[symbol]
             class_counts[candidate.asset_class] = (
                 class_counts.get(candidate.asset_class, 0) + 1
@@ -1316,25 +1333,14 @@ class GreedyInstrumentSelector:
             )
             if self.config.min_instruments_per_subclass is not None else 0
         )
-        return class_deficit, subclass_deficit
-
-    def _coverage_phase(
-        self,
-        symbols: Iterable[str],
-        candidates: dict[str, SelectionCandidate],
-    ) -> str:
-        """Return the active class-first coverage phase for the current book."""
-        class_deficit, subclass_deficit = self._coverage_deficits(
-            symbols, candidates
+        book_count_deficit = (
+            max(self.config.minimum_book_count - len(symbol_tuple), 0)
+            if self.config.coverage_enabled else 0
         )
-        if class_deficit:
-            return "class"
-        if subclass_deficit:
-            return "subclass"
-        return "unrestricted"
+        return class_deficit, subclass_deficit, book_count_deficit
 
-    def _coverage_reason(self, deficits: tuple[int, int]) -> str:
-        """Return the public status label for a coverage deficit pair."""
+    def _coverage_reason(self, deficits: tuple[int, int, int]) -> str:
+        """Return the public status label for a coverage deficit tuple."""
         if (
             self.config.min_instruments_per_class is None
             and self.config.min_instruments_per_subclass is None
@@ -1342,8 +1348,8 @@ class GreedyInstrumentSelector:
             return "coverage_disabled"
         return (
             "coverage_satisfied"
-            if deficits == (0, 0)
-            else "coverage_unmet_score_or_feasibility_gate"
+            if deficits == (0, 0, 0)
+            else "coverage_unmet_hard_feasibility_gate"
         )
 
     def _coverage_candidate_is_eligible(
@@ -1370,6 +1376,88 @@ class GreedyInstrumentSelector:
             for item in selected_candidates
         )
         return count < int(self.config.min_instruments_per_subclass or 0)
+
+    def _coverage_competition(
+        self,
+        selected: Iterable[str],
+        candidates: dict[str, SelectionCandidate],
+        scored_trials: list[tuple[str, PortfolioScore]],
+    ) -> tuple[str, frozenset[str]]:
+        """Return the next attainable coverage phase and its competitors.
+
+        A deficient class or subclass activates only when at least one of its
+        conditional full-book trials is feasible. This prevents an unavailable
+        hierarchy branch from terminating construction and lets later breadth
+        additions make that branch feasible at a smaller structural weight.
+        After hierarchy coverage, the breadth phase rotates through the least
+        represented feasible subclasses until ``minimum_book_count`` is met.
+        """
+        selected_tuple = tuple(selected)
+        feasible_symbols = {
+            symbol
+            for symbol, score in scored_trials
+            if score.feasible and math.isfinite(score.score)
+        }
+        trial_symbols = frozenset(symbol for symbol, _ in scored_trials)
+
+        for phase in ("class", "subclass"):
+            if (
+                phase == "class"
+                and self.config.min_instruments_per_class is None
+            ):
+                continue
+            if (
+                phase == "subclass"
+                and self.config.min_instruments_per_subclass is None
+            ):
+                continue
+            eligible = frozenset(
+                symbol
+                for symbol in trial_symbols
+                if self._coverage_candidate_is_eligible(
+                    symbol, selected_tuple, candidates, phase
+                )
+            )
+            if eligible.intersection(feasible_symbols):
+                return phase, eligible
+
+        if (
+            self.config.coverage_enabled
+            and len(selected_tuple) < self.config.minimum_book_count
+            and feasible_symbols
+        ):
+            subclass_counts: dict[tuple[str, str], int] = {}
+            for symbol in selected_tuple:
+                candidate = candidates[symbol]
+                key = (candidate.asset_class, candidate.economic_subclass)
+                subclass_counts[key] = subclass_counts.get(key, 0) + 1
+            feasible_subclasses = {
+                (
+                    candidates[symbol].asset_class,
+                    candidates[symbol].economic_subclass,
+                )
+                for symbol in feasible_symbols
+            }
+            minimum_count = min(
+                subclass_counts.get(key, 0) for key in feasible_subclasses
+            )
+            least_represented = {
+                key
+                for key in feasible_subclasses
+                if subclass_counts.get(key, 0) == minimum_count
+            }
+            eligible = frozenset(
+                symbol
+                for symbol in trial_symbols
+                if (
+                    candidates[symbol].asset_class,
+                    candidates[symbol].economic_subclass,
+                )
+                in least_represented
+            )
+            return "breadth", eligible
+
+        return "unrestricted", trial_symbols
 
     @staticmethod
     def _competition_ranks(
@@ -1526,12 +1614,10 @@ class GreedyInstrumentSelector:
         singleton_trials = [
             (score.symbols[0], score) for score in feasible_singletons
         ]
-        seed_phase = self._coverage_phase((), candidates)
-        seed_eligible = frozenset(
-            symbol for symbol, _ in singleton_trials
-            if self._coverage_candidate_is_eligible(
-                symbol, (), candidates, seed_phase
-            )
+        seed_phase, seed_eligible = self._coverage_competition(
+            (),
+            candidates,
+            singleton_trials,
         )
         self._annotate_coverage_competition(
             trials,
@@ -1588,13 +1674,6 @@ class GreedyInstrumentSelector:
             ]
             if not remaining:
                 break
-            coverage_phase = self._coverage_phase(selected, candidates)
-            coverage_eligible = frozenset(
-                symbol for symbol in remaining
-                if self._coverage_candidate_is_eligible(
-                    symbol, selected, candidates, coverage_phase
-                )
-            )
             # Recalculate weights, IDM, positions, liquidity, costs, and score
             # for the entire hypothetical book for every possible addition.
             scored_trials = []
@@ -1615,6 +1694,11 @@ class GreedyInstrumentSelector:
                     scored,
                     accepted=False,
                 )
+            coverage_phase, coverage_eligible = self._coverage_competition(
+                selected,
+                candidates,
+                scored_trials,
+            )
             self._annotate_coverage_competition(
                 trials,
                 trial_allocations,
@@ -1637,11 +1721,23 @@ class GreedyInstrumentSelector:
                         ):
                             row["reason"] = "outside_active_coverage_phase"
                 break
-            min_accept_score = self.config.score_threshold * best_seen
+            mandatory_phase = coverage_phase in {
+                "class",
+                "subclass",
+                "breadth",
+            }
+            min_accept_score = (
+                None
+                if mandatory_phase
+                else self.config.score_threshold * best_seen
+            )
             score_leader, leader_score = max(
                 feasible, key=lambda item: (item[1].score, item[0])
             )
-            if leader_score.score < min_accept_score:
+            if (
+                min_accept_score is not None
+                and leader_score.score < min_accept_score
+            ):
                 self._finalize_iteration(
                     trials,
                     trial_allocations,
@@ -1686,11 +1782,13 @@ class GreedyInstrumentSelector:
             )
             iteration += 1
 
-        class_deficit, subclass_deficit = self._coverage_deficits(
-            selected, candidates
-        )
+        (
+            class_deficit,
+            subclass_deficit,
+            book_count_deficit,
+        ) = self._coverage_deficits(selected, candidates)
         coverage_reason = self._coverage_reason(
-            (class_deficit, subclass_deficit)
+            (class_deficit, subclass_deficit, book_count_deficit)
         )
         unbuffered = GreedySelectionResult(
             tuple(selected),
@@ -1702,9 +1800,15 @@ class GreedyInstrumentSelector:
             unbuffered_book_score=current.score,
             unbuffered_class_coverage_deficit=class_deficit,
             unbuffered_subclass_coverage_deficit=subclass_deficit,
+            unbuffered_book_count_deficit=book_count_deficit,
             final_class_coverage_deficit=class_deficit,
             final_subclass_coverage_deficit=subclass_deficit,
-            coverage_satisfied=not class_deficit and not subclass_deficit,
+            final_book_count_deficit=book_count_deficit,
+            coverage_satisfied=(
+                not class_deficit
+                and not subclass_deficit
+                and not book_count_deficit
+            ),
             coverage_reason=coverage_reason,
         )
         return self._apply_membership_hysteresis(
@@ -1866,6 +1970,7 @@ class GreedyInstrumentSelector:
         raw_coverage = (
             unbuffered.unbuffered_class_coverage_deficit,
             unbuffered.unbuffered_subclass_coverage_deficit,
+            unbuffered.unbuffered_book_count_deficit,
         )
         if proposed_coverage > raw_coverage:
             return (
@@ -2016,7 +2121,8 @@ class GreedyInstrumentSelector:
                 ),
                 final_class_coverage_deficit=final_coverage[0],
                 final_subclass_coverage_deficit=final_coverage[1],
-                coverage_satisfied=final_coverage == (0, 0),
+                final_book_count_deficit=final_coverage[2],
+                coverage_satisfied=final_coverage == (0, 0, 0),
                 coverage_reason=self._coverage_reason(final_coverage),
             )
 
@@ -2042,7 +2148,8 @@ class GreedyInstrumentSelector:
                 ),
                 final_class_coverage_deficit=final_coverage[0],
                 final_subclass_coverage_deficit=final_coverage[1],
-                coverage_satisfied=final_coverage == (0, 0),
+                final_book_count_deficit=final_coverage[2],
+                coverage_satisfied=final_coverage == (0, 0, 0),
                 coverage_reason=self._coverage_reason(final_coverage),
             )
 
@@ -2124,7 +2231,8 @@ class GreedyInstrumentSelector:
             ),
             final_class_coverage_deficit=final_coverage[0],
             final_subclass_coverage_deficit=final_coverage[1],
-            coverage_satisfied=final_coverage == (0, 0),
+            final_book_count_deficit=final_coverage[2],
+            coverage_satisfied=final_coverage == (0, 0, 0),
             coverage_reason=self._coverage_reason(final_coverage),
         )
 

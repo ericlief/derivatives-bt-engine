@@ -351,6 +351,8 @@ def test_grid_sweeps_optional_hierarchy_coverage_minimums():
         "none,1,2",
         "--min-instr-per-subclasses",
         "none,1",
+        "--selection-min-book-counts",
+        "10,15",
         "--max-instr-per-classes",
         "1",
         "--max-instr-per-subclasses",
@@ -359,13 +361,23 @@ def test_grid_sweeps_optional_hierarchy_coverage_minimums():
 
     scenarios = build_scenarios(args)
 
-    assert len(scenarios) == 4
+    assert len(scenarios) == 7
     assert {
         (scenario.minimum_instruments_per_class,
          scenario.minimum_instruments_per_subclass)
         for scenario in scenarios
     } == {(None, None), (None, 1), (1, None), (1, 1)}
-    assert any("_minc1_mins1_" in scenario.scenario_id for scenario in scenarios)
+    assert any(
+        "_minc1_mins1_mb10_" in scenario.scenario_id
+        for scenario in scenarios
+    )
+    assert {
+        scenario.minimum_book_count
+        for scenario in scenarios
+        if scenario.minimum_instruments_per_class is not None
+        or scenario.minimum_instruments_per_subclass is not None
+    } == {10, 15}
+    assert len({scenario.scenario_id for scenario in scenarios}) == 7
 
 
 def test_grid_sweeps_only_active_hysteresis_dimensions():

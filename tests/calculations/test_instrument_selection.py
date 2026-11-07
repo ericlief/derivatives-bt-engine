@@ -356,7 +356,7 @@ def test_greedy_selector_caps_selected_instruments_per_economic_subclass():
     )
 
 
-def test_class_coverage_changes_competition_without_bypassing_score():
+def test_class_coverage_changes_conditional_score_competition():
     """A missing class champion competes before another crowded-class name."""
     candidates = [
         _candidate("FX1", 0.0, asset_class="fx", economic_subclass="g10"),
@@ -381,6 +381,7 @@ def test_class_coverage_changes_competition_without_bypassing_score():
             score_threshold=0.90,
             size_penalty_scale=0.0,
             min_instruments_per_class=1,
+            minimum_book_count=3,
         )
     ).select(candidates, np.eye(3))
 
@@ -397,8 +398,8 @@ def test_class_coverage_changes_competition_without_bypassing_score():
     assert bond_trial["global_trial_rank"] == 2
 
 
-def test_coverage_stops_when_missing_class_fails_ordinary_score_floor():
-    """Coverage records a deficit instead of forcing a score-invalid market."""
+def test_coverage_admits_missing_class_below_ordinary_score_floor():
+    """A feasible required class is ranked by score but bypasses the stop floor."""
     candidates = [
         _candidate("FX", 0.0, asset_class="fx", economic_subclass="g10"),
         _candidate(
@@ -414,19 +415,98 @@ def test_coverage_stops_when_missing_class_fails_ordinary_score_floor():
             score_threshold=0.90,
             size_penalty_scale=0.0,
             min_instruments_per_class=1,
+            minimum_book_count=3,
         )
     ).select(candidates, np.eye(3))
 
-    assert "CRYPTO" not in result.selected
-    assert result.unbuffered_class_coverage_deficit == 1
-    assert result.coverage_satisfied is False
-    rejected = next(
+    assert "CRYPTO" in result.selected
+    assert result.unbuffered_class_coverage_deficit == 0
+    assert result.coverage_satisfied is True
+    admitted = next(
         row for row in result.trials
         if row["candidate"] == "CRYPTO" and row["iteration"] == 2
     )
-    assert rejected["coverage_phase"] == "class"
-    assert rejected["accepted"] is False
-    assert rejected["reason"] == "best_score_below_acceptance_threshold"
+    assert admitted["coverage_phase"] == "class"
+    assert admitted["accepted"] is True
+    assert admitted["reason"] == ""
+
+
+def test_infeasible_missing_class_does_not_stop_feasible_breadth():
+    """An unattainable class remains audited while other markets can enter."""
+    candidates = [
+        _candidate(
+            "FX1",
+            0.0,
+            asset_class="fx",
+            economic_subclass="g10",
+            initial_margin_usd=100.0,
+        ),
+        _candidate(
+            "FX2",
+            1.0,
+            asset_class="fx",
+            economic_subclass="g10",
+            initial_margin_usd=100.0,
+        ),
+        _candidate(
+            "BOND",
+            0.0,
+            asset_class="rates",
+            economic_subclass="government",
+            initial_margin_usd=None,
+        ),
+    ]
+    result = GreedyInstrumentSelector(
+        config=GreedySelectionConfig(
+            capital=1_000_000.0,
+            score_threshold=0.90,
+            size_penalty_scale=0.0,
+            min_instruments_per_class=1,
+            minimum_book_count=2,
+            max_instrument_margin_pct=20.0,
+        )
+    ).select(candidates, np.eye(3))
+
+    assert set(result.selected) == {"FX1", "FX2"}
+    assert result.unbuffered_class_coverage_deficit == 1
+    assert result.coverage_satisfied is False
+    assert result.coverage_reason == "coverage_unmet_hard_feasibility_gate"
+    breadth_trial = next(
+        row for row in result.trials
+        if row["candidate"] == "FX2" and row["iteration"] == 1
+    )
+    assert breadth_trial["coverage_phase"] == "breadth"
+    assert breadth_trial["accepted"] is True
+
+
+def test_coverage_minimum_book_count_extends_score_ranked_breadth():
+    """Coverage reaches 15 feasible members before restoring the score stop."""
+    candidates = [
+        _candidate(
+            f"FX{index:02d}",
+            float(index * 20),
+            asset_class="fx",
+            economic_subclass="g10",
+        )
+        for index in range(16)
+    ]
+    result = GreedyInstrumentSelector(
+        config=GreedySelectionConfig(
+            capital=1_000_000.0,
+            score_threshold=1.0,
+            size_penalty_scale=0.0,
+            min_instruments_per_class=1,
+            minimum_book_count=15,
+        )
+    ).select(candidates, np.eye(16))
+
+    assert len(result.selected) == 15
+    accepted_phases = {
+        str(row["coverage_phase"])
+        for row in result.trials
+        if row["accepted"]
+    }
+    assert accepted_phases == {"class", "breadth"}
 
 
 def test_score_hysteresis_cannot_retain_a_worse_coverage_book():
@@ -455,6 +535,31 @@ def test_score_hysteresis_cannot_retain_a_worse_coverage_book():
     assert result.final_class_coverage_deficit == 0
 
 
+def test_score_hysteresis_cannot_undo_minimum_book_breadth():
+    """The prior score hurdle cannot retain a feasible undersized book."""
+    candidates = [
+        _candidate("FX1", 0.0, asset_class="fx", economic_subclass="g10"),
+        _candidate("FX2", 1.0, asset_class="fx", economic_subclass="g10"),
+        _candidate("FX3", 2.0, asset_class="fx", economic_subclass="g10"),
+    ]
+    result = GreedyInstrumentSelector(
+        config=GreedySelectionConfig(
+            capital=1_000_000.0,
+            score_threshold=0.90,
+            size_penalty_scale=0.0,
+            min_instruments_per_class=1,
+            minimum_book_count=3,
+            membership_hysteresis="score",
+            book_score_buffer_percent=100.0,
+        )
+    ).select(candidates, np.eye(3), prior_selected=["FX1", "FX2"])
+
+    assert set(result.selected) == {"FX1", "FX2", "FX3"}
+    assert result.switch_reason == "candidate_improves_coverage"
+    assert result.final_book_count_deficit == 0
+    assert result.coverage_satisfied is True
+
+
 def test_rank_hysteresis_falls_back_when_retention_worsens_coverage():
     """Rank retention cannot replace a covered class with crowded incumbents."""
     candidates = [
@@ -471,6 +576,7 @@ def test_rank_hysteresis_falls_back_when_retention_worsens_coverage():
             score_threshold=0.90,
             size_penalty_scale=0.0,
             min_instruments_per_class=1,
+            minimum_book_count=2,
             membership_hysteresis="rank",
             rank_buffer_percent=100.0,
         )

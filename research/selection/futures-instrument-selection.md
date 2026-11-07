@@ -352,8 +352,9 @@ satisfy the minimum-15 breadth count. The US home-price future uses
 `other/housing`; EPRA-Europe and Sector instruments are classified as equity.
 Portfolio construction can optionally prioritize represented-class and
 represented-subclass coverage through the explicit minimum parameters below;
-the default remains unconstrained and no coverage candidate bypasses score or
-contract granularity.
+the default remains unconstrained. Coverage additions remain fully scored and
+must pass every hard feasibility gate, but they can bypass the ordinary
+relative score stopping floor until the configured minimum breadth is reached.
 These figures are deliberately a market screen stress scenario. Four contracts and
 15 instruments must not become simultaneous hard admission gates in portfolio selection:
 that would reject diversification before allowing its higher IDM to reduce the
@@ -868,13 +869,41 @@ book stays in force until the next January review.
 Optional hierarchy coverage uses `--min-instr-per-class N` and
 `--min-instr-per-subclass N`. Both default to disabled. When enabled, the
 selector first fills deficient asset classes and then deficient economic
-subclasses. At each step it fully rescores every n+1 book; only candidates in
-the active deficient groups compete, and the winning book must still be
-feasible and clear the ordinary `--score-threshold`. A minimum is therefore a
-search priority, not permission to force a poor or untradeable instrument.
-Coverage is measured only across groups represented in that review's causal
-candidate universe. Unmet slots and their score/feasibility stop are persisted
-in the review audit.
+subclasses. At each step it fully rescores every n+1 book and admits the best
+feasible trial in the active deficient groups. The ordinary relative
+`--score-threshold` stop is suspended during required coverage; score still
+ranks the alternatives and already deducts the configured cost SR. No hard
+granularity, margin, history, family, or live-execution gate is relaxed.
+
+After hierarchy coverage, `--selection-min-book-count` defaults to 15 and
+continues through the least represented feasible subclasses until that breadth
+is reached. This breadth target is active only when at least one hierarchy
+minimum is enabled, so runs with both minima disabled retain the exact prior
+greedy behavior. If a deficient group has no feasible conditional trial, the
+selector records its deficit, continues with another attainable group, and
+retries it after later additions reduce structural weights. The final reason
+is `coverage_unmet_hard_feasibility_gate` only when a requested group remains
+unattainable. Public allocation and trial reports persist the active target as
+`min_book_n`; it is null when hierarchy coverage is disabled.
+
+The causal gate split is:
+
+| Constraint | Reference-era reviews | IB/live-tail reviews |
+|---|:---:|:---:|
+| Causal history and freshness | Yes | Yes |
+| Forecast and correlation inputs | Yes | Yes |
+| Frozen reference cost | Yes | Yes |
+| Half-contract granularity | Yes | Yes |
+| Class, subclass, and family limits | Yes | Yes |
+| Normalized margin limits | Yes | Yes |
+| Live volume and participation | No | Yes |
+| IB qualification and execution availability | No | Yes |
+
+Thus pre-IB coverage means every causally available, reference-feasible group;
+after the handoff it means every currently executable group. A live capacity
+failure such as market participation does not retroactively remove the group
+from historical reviews and no longer stops construction of the rest of the
+current book.
 
 #### Prior-book hysteresis
 
@@ -905,12 +934,13 @@ was active.
 
 Coverage is evaluated before membership hysteresis and remains monotone through
 the final decision. A rank-buffered proposal that worsens the raw book's
-class-first `(class deficit, subclass deficit)` pair falls back to the raw
-book. When score hysteresis compares an incumbent with a score-valid
-challenger, the book with the lower coverage deficit wins; only equal-coverage
-books proceed to the normal transition-cost and score-buffer comparison. Thus
+class-first `(class deficit, subclass deficit, book-count deficit)` tuple falls
+back to the raw book. When score hysteresis compares an incumbent with a
+score-valid challenger, the book with the lower coverage deficit wins; only
+equal-coverage books proceed to the normal transition-cost and score-buffer
+comparison. Thus
 hysteresis cannot recreate a one-class collapse, while coverage still never
-bypasses the construction score gate.
+bypasses a hard construction feasibility gate.
 
 ##### Incumbent eligibility hysteresis
 
@@ -1601,9 +1631,10 @@ concentration even when the class total is unchanged.
 If count limits alone do not restore breadth, the next selector policy should
 be coverage-aware replacement rather than blind weight redistribution: before
 adding further members to a well-populated class, prefer a second feasible
-member of a singleton class, subject to the same score floor, liquidity, cost,
-and margin tests. When book margin is full, evaluate replacement of a marginal
-accepted member rather than only attempting to append the coverage candidate.
+member of a singleton class, subject to the same hard liquidity, cost,
+granularity, and margin tests. When book margin is full, evaluate replacement
+of a marginal accepted member rather than only attempting to append the
+coverage candidate.
 Do not force an infeasible crypto or FX contract by relaxing market
 participation merely to meet a class target. Post-forecast class-risk caps are
 a separate execution control for aligned signals; selection class/subclass
@@ -1955,17 +1986,23 @@ than a hard-coded list of preferred classes:
    `(asset_class, economic_subclass)` pairs using
    `--min-instr-per-subclass N`. Class-first ordering prevents subclass breadth
    inside the current dominant class from delaying top-level coverage.
-3. **Unrestricted phase.** Once both enabled minima are met, resume the usual
-   greedy search across every remaining candidate.
+3. **Breadth phase.** Rotate across the least represented feasible subclasses
+   until `--selection-min-book-count` is met (15 by default).
+4. **Unrestricted phase.** Once the hierarchy and breadth targets are met,
+   resume the usual greedy search across every remaining candidate.
+
+Class, subclass, and breadth additions are mandatory only with respect to the
+ordinary score stop: hard trial feasibility remains binding throughout.
 
 Within every phase, instruments are ranked by their conditional full-book
 score, not by a frozen singleton rank. The trial audit records
 `instr_rank_in_subcls`, `subcls_rank_in_cls`, `cls_rank`, and
-`global_trial_rank`. If the best coverage-eligible book fails feasibility or
-the score floor, construction stops and reports the remaining class and
-subclass deficits. It does not fill the book from the already crowded group or
-force the missing group. Runs with both minimums disabled are the exact
-unconstrained AFTS baseline, so the cost of coverage remains measurable.
+`global_trial_rank`. An infeasible deficient group is skipped rather than
+terminating the selector; other feasible groups and breadth additions continue,
+and the missing group is reconsidered on the next iteration. The audit retains
+the hard rejection reason and final class/subclass deficit. Runs with both
+minimums disabled are the exact unconstrained AFTS baseline, so the cost of
+coverage remains measurable.
 
 A minimum of one applies equally to every class or subclass represented in the
 causal candidate set, including `vol`, `crypto`, and `other`. Use class-only
@@ -2157,7 +2194,9 @@ an exact file rather than a report directory so a newer screen cannot enter the
 grid midway through a run. Selection cadence is fixed across a grid, while
 eligibility percentages, membership modes, rank-buffer percentages,
 rank-count EWMA half-lives, and score-buffer percentages can all be swept.
-Optional class and subclass coverage minimums are independent grid dimensions.
+Optional class and subclass coverage minimums and active minimum-book targets
+are independent grid dimensions. Sweep the latter with
+`--selection-min-book-counts`; inactive coverage does not multiply scenarios.
 Inactive controls do not create duplicate scenarios: `none` expands only the
 eligibility dimension, `rank` expands rank percentage and half-life, `score`
 expands score percentage, and `rank_score` expands all three membership
@@ -2261,6 +2300,7 @@ Run secondary constraint tests separately, for example:
   --max-weight-idms 0.20 \
   --min-instr-per-classes none,1 \
   --min-instr-per-subclasses none,1 \
+  --selection-min-book-counts 15 \
   --max-instr-per-classes none,10 \
   --max-instr-per-subclasses 2 \
   --max-class-weight-pcts none,50 \
