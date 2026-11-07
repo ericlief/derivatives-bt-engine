@@ -2175,6 +2175,40 @@ writes:
   `construction_score`; and
 - `selection_grid_membership.parquet`, the long scenario-by-symbol book panel.
 
+The grid summary and membership panel describe each scenario's latest review;
+they are not the annual history. The notebook grid navigator reads each
+scenario's compact `selection_review_instruments` report on demand and nests
+the existing year/review widget below a scenario selector:
+
+```python
+from derivatives_bt_engine.pipelines.ewmac_notebook import (
+    load_selection_grid_review_instruments,
+    plot_selection_grid_rebalance_weights,
+)
+
+grid = (
+    "/Users/liefe/data/fin_dev/misc/results/"
+    "selection_grid_20261106_162523"
+)
+
+plot_selection_grid_rebalance_weights(grid)
+```
+
+The dropdown labels expose eligibility, membership mode, rank buffer,
+rank-count half-life, and score buffer. The nested view selects a year (and an
+exact date for monthly reviews), then plots instrument `limit_weight` plus
+asset-class and economic-subclass shares. It lazy-loads only the chosen
+scenario and never reads the million-row cash-P&L report. To access the typed
+year-by-year frame directly:
+
+```python
+reviews = load_selection_grid_review_instruments(
+    grid,
+    "tv0p2_im20_bm50_wi0p2_st0p85_ic20_cw50_sw25_cl15_roll1_"
+    "topdown_classif_selyearly_hg31_eh25_mhnone",
+)
+```
+
 Run secondary constraint tests separately, for example:
 
 ```bash

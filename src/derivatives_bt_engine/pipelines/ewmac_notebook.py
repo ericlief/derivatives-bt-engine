@@ -1184,6 +1184,212 @@ def plot_selection_rebalance_weights(
     )
 
 
+def load_selection_grid_review_instruments(
+    grid_directory: Path | str,
+    scenario_id: str,
+) -> pl.DataFrame:
+    """Load the complete dated-book panel for one selection-grid scenario.
+
+    Parameters
+    ----------
+    grid_directory
+        Selection-grid run containing ``selection_grid_summary.parquet`` and
+        one subdirectory per scenario.
+    scenario_id
+        Exact scenario identifier from the grid summary.
+
+    Returns
+    -------
+    polars.DataFrame
+        The scenario's compact ``selection_review_instruments`` report across
+        every annual or monthly review. This is intentionally distinct from
+        ``selection_grid_membership.parquet``, which contains only each
+        scenario's latest selected book.
+    """
+    root = Path(grid_directory).expanduser()
+    summary_path = root / "selection_grid_summary.parquet"
+    if not summary_path.is_file():
+        raise FileNotFoundError(
+            f"selection grid summary does not exist: {summary_path}"
+        )
+    summary = pl.read_parquet(summary_path, columns=["scenario_id"])
+    if scenario_id not in set(summary.get_column("scenario_id").to_list()):
+        raise KeyError(f"selection grid has no scenario {scenario_id!r}")
+    scenario_directory = root / scenario_id
+    reports = sorted(
+        scenario_directory.glob(
+            "multi_speed_ewmac_selection_review_instruments_*.parquet"
+        )
+    )
+    if not reports:
+        raise FileNotFoundError(
+            "no selection review-instrument report exists for scenario "
+            f"{scenario_id!r} under {scenario_directory}"
+        )
+    return pl.read_parquet(reports[-1]).with_columns(
+        pl.lit(scenario_id).alias("scenario_id")
+    )
+
+
+def plot_selection_grid_rebalance_weights(
+    grid_directory: Path | str,
+    *,
+    scenario_id: str | None = None,
+    width: int = 1050,
+    height: int = 420,
+):
+    """Navigate every scenario and dated book in one selection grid.
+
+    The outer dropdown selects a scenario. The nested widget is the standard
+    selection-review view, with year and optional exact-review selectors plus
+    instrument, asset-class, and economic-subclass limit-weight bars. Only the
+    chosen scenario's compact review report is loaded, which keeps an 80-run
+    grid notebook responsive and avoids loading daily cash-P&L panels.
+
+    Parameters
+    ----------
+    grid_directory
+        Completed selection-grid run directory.
+    scenario_id
+        Optional initial scenario. Defaults to the summary's baseline scenario
+        when present, otherwise the first scenario identifier.
+    width, height
+        Dimensions forwarded to :func:`plot_selection_rebalance_weights`.
+
+    Returns
+    -------
+    ipywidgets.VBox
+        Scenario navigation, compact scenario metadata, and the nested dated
+        selection-weight dashboard.
+    """
+    import ipywidgets as widgets
+    from IPython.display import display
+
+    root = Path(grid_directory).expanduser()
+    summary_path = root / "selection_grid_summary.parquet"
+    if not summary_path.is_file():
+        raise FileNotFoundError(
+            f"selection grid summary does not exist: {summary_path}"
+        )
+    summary = pl.read_parquet(summary_path)
+    if "scenario_id" not in summary.columns:
+        raise ValueError("selection grid summary is missing scenario_id")
+    if summary.is_empty():
+        raise ValueError("selection grid summary has no scenarios")
+
+    def scenario_label(row: dict[str, object]) -> str:
+        """Return a compact unique label for one scenario dropdown option."""
+        eligibility = row.get("sel_elig_hyst_pct")
+        mode = str(row.get("sel_membership_hyst") or "none")
+        if isinstance(eligibility, (int, float)):
+            parts = [f"EH{eligibility:g}", mode]
+        else:
+            parts = [mode]
+        rank_buffer = row.get("sel_rank_buf_pct")
+        rank_halflife = row.get("sel_rank_n_ewma_hl")
+        score_buffer = row.get("sel_book_score_buf_pct")
+        if isinstance(rank_buffer, (int, float)):
+            parts.append(f"RB{rank_buffer:g}")
+        if isinstance(rank_halflife, (int, float)):
+            parts.append(f"HL{rank_halflife:g}")
+        if isinstance(score_buffer, (int, float)):
+            parts.append(f"SB{score_buffer:g}")
+        if bool(row.get("baseline_scenario")):
+            parts.append("baseline")
+        return " · ".join(parts)
+
+    rows = summary.sort(
+        "sel_elig_hyst_pct",
+        "sel_membership_hyst",
+        "sel_rank_buf_pct",
+        "sel_rank_n_ewma_hl",
+        "sel_book_score_buf_pct",
+        nulls_last=True,
+    ).to_dicts()
+    options = [(scenario_label(row), str(row["scenario_id"])) for row in rows]
+    scenario_ids = {value for _, value in options}
+    if scenario_id is None:
+        baseline = (
+            summary.filter(pl.col("baseline_scenario").fill_null(False))
+            if "baseline_scenario" in summary.columns
+            else pl.DataFrame()
+        )
+        scenario_id = (
+            str(baseline.get_column("scenario_id")[0])
+            if baseline.height
+            else options[0][1]
+        )
+    if scenario_id not in scenario_ids:
+        raise KeyError(f"selection grid has no scenario {scenario_id!r}")
+
+    selector = widgets.Dropdown(
+        description="Scenario",
+        options=options,
+        value=scenario_id,
+        layout=widgets.Layout(width="95%"),
+    )
+    metadata_output = widgets.Output()
+    plot_output = widgets.Output(
+        layout=widgets.Layout(
+            width="100%",
+            height="auto",
+            max_height="none",
+            overflow="visible",
+        )
+    )
+    metadata_columns = [
+        column
+        for column in (
+            "scenario_id",
+            "sel_elig_hyst_pct",
+            "sel_membership_hyst",
+            "sel_rank_buf_pct",
+            "sel_rank_n_ewma_hl",
+            "sel_book_score_buf_pct",
+            "n_instr",
+            "construction_score",
+            "jaccard_to_baseline",
+        )
+        if column in summary.columns
+    ]
+
+    def update_scenario(change=None) -> None:
+        """Load and redraw only the newly selected scenario."""
+        selected = change["new"] if change is not None else selector.value
+        metadata = summary.filter(pl.col("scenario_id") == selected).select(
+            metadata_columns
+        )
+        metadata = metadata.rename({
+            column: f"latest_{column}"
+            for column in (
+                "n_instr",
+                "construction_score",
+                "jaccard_to_baseline",
+            )
+            if column in metadata.columns
+        })
+        reviews = load_selection_grid_review_instruments(root, selected)
+        with metadata_output:
+            metadata_output.clear_output(wait=True)
+            display(metadata)
+        with plot_output:
+            plot_output.clear_output(wait=True)
+            display(
+                plot_selection_rebalance_weights(
+                    reviews,
+                    width=width,
+                    height=height,
+                )
+            )
+
+    selector.observe(update_scenario, names="value")
+    update_scenario()
+    return widgets.VBox(
+        [selector, metadata_output, plot_output],
+        layout=widgets.Layout(width="100%", overflow="visible"),
+    )
+
+
 def _attach_fx(frame: pl.DataFrame, fx_to_usd: float) -> pl.DataFrame:
     """Attach one constant native-currency-to-USD rate for notebook research."""
     if not math.isfinite(fx_to_usd) or fx_to_usd <= 0:
