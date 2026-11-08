@@ -1277,7 +1277,8 @@ def plot_selection_grid_rebalance_weights(
     """Navigate every scenario and dated book in one selection grid.
 
     Coverage dropdowns filter the outer scenario selector by minimum class,
-    subclass, and book-size settings. The nested widget is the standard
+    subclass, and book-size settings, plus the full-contract preference when
+    that parameter is present in the grid. The nested widget is the standard
     selection-review view, with year and optional exact-review selectors plus
     instrument, asset-class, and economic-subclass limit-weight bars. Only the
     chosen scenario's compact review report is loaded, which keeps an 80-run
@@ -1344,16 +1345,22 @@ def plot_selection_grid_rebalance_weights(
                 parts.append(f"{ {'Min / class': 'MC', 'Min / subclass': 'MS'}[label] }off")
         if bool(row.get("baseline_scenario")):
             parts.append("baseline")
+        if prefer_full_column is not None:
+            parts.append(
+                f"Full contracts {bool(row.get(prefer_full_column))}"
+            )
         return " · ".join(parts)
 
-    rows = summary.sort(
+    sort_columns = [
         "sel_elig_hyst_pct",
         "sel_membership_hyst",
         "sel_rank_buf_pct",
         "sel_rank_n_ewma_hl",
         "sel_book_score_buf_pct",
-        nulls_last=True,
-    ).to_dicts()
+    ]
+    if "sel_pref_full_cons" in summary.columns:
+        sort_columns.append("sel_pref_full_cons")
+    rows = summary.sort(sort_columns, nulls_last=True).to_dicts()
     coverage_columns = (
         ("minimum_instruments_per_class", "min_instr_per_cls", "Min / class"),
         (
@@ -1372,6 +1379,17 @@ def plot_selection_grid_rebalance_weights(
         for column, label in resolved_coverage_columns
         if column is not None
     ]
+    prefer_full_column = next(
+        (
+            column
+            for column in (
+                "sel_pref_full_cons",
+                "selection_prefer_full_contracts",
+            )
+            if column in summary.columns
+        ),
+        None,
+    )
 
     def coverage_options(column: str) -> list[tuple[str, object]]:
         """Build stable filter options, including disabled and all values."""
@@ -1392,10 +1410,22 @@ def plot_selection_grid_rebalance_weights(
             description=label,
             options=coverage_options(column),
             value="__all__",
-            layout=widgets.Layout(width="32%"),
+            layout=widgets.Layout(
+                width="24%" if prefer_full_column is not None else "32%"
+            ),
         )
         for column, label in resolved_coverage_columns
     }
+    prefer_full_selector = (
+        widgets.Dropdown(
+            description="Full contracts",
+            options=[("All", "__all__"), ("False", False), ("True", True)],
+            value="__all__",
+            layout=widgets.Layout(width="24%"),
+        )
+        if prefer_full_column is not None
+        else None
+    )
 
     def matching_rows() -> list[dict[str, object]]:
         """Return scenarios matching the selected coverage filters."""
@@ -1405,6 +1435,14 @@ def plot_selection_grid_rebalance_weights(
             if selected != "__all__":
                 matching = [
                     row for row in matching if row.get(column) == selected
+                ]
+        if prefer_full_selector is not None:
+            selected = prefer_full_selector.value
+            if selected != "__all__":
+                matching = [
+                    row
+                    for row in matching
+                    if row.get(prefer_full_column) == selected
                 ]
         return matching
 
@@ -1448,6 +1486,7 @@ def plot_selection_grid_rebalance_weights(
             "sel_rank_buf_pct",
             "sel_rank_n_ewma_hl",
             "sel_book_score_buf_pct",
+            prefer_full_column,
             *[column for column, _ in resolved_coverage_columns],
             "n_instr",
             "construction_score",
@@ -1536,11 +1575,16 @@ def plot_selection_grid_rebalance_weights(
     selector.observe(update_scenario, names="value")
     for control in coverage_selectors.values():
         control.observe(update_coverage, names="value")
+    if prefer_full_selector is not None:
+        prefer_full_selector.observe(update_coverage, names="value")
     update_scenario()
+    filter_controls = list(coverage_selectors.values())
+    if prefer_full_selector is not None:
+        filter_controls.append(prefer_full_selector)
     return widgets.VBox(
         [
             selector,
-            widgets.HBox(list(coverage_selectors.values())),
+            widgets.HBox(filter_controls),
             metadata_output,
             plot_output,
         ],
@@ -1563,8 +1607,9 @@ def plot_selection_grid_dashboard(
 
     The dashboard offers cash P&L and combined-forecast panels, portfolio
     overview, realized risk concentration, annual P&L attribution, and dated
-    rebalance weights. Coverage dropdowns filter the scenario choices. Only
-    the chosen scenario's report is loaded when a view is selected.
+    rebalance weights. Coverage and full-contract preference dropdowns filter
+    the scenario choices when those parameters are present. Only the chosen
+    scenario's report is loaded when a view is selected.
 
     Parameters
     ----------
@@ -1633,6 +1678,17 @@ def plot_selection_grid_dashboard(
         )
         if column is not None:
             coverage_columns.append((column, label))
+    prefer_full_column = next(
+        (
+            column
+            for column in (
+                "sel_pref_full_cons",
+                "selection_prefer_full_contracts",
+            )
+            if column in summary.columns
+        ),
+        None,
+    )
 
     coverage_selectors = {}
     for column, label in coverage_columns:
@@ -1650,8 +1706,20 @@ def plot_selection_grid_dashboard(
             description=label,
             options=options,
             value="__all__",
-            layout=widgets.Layout(width="32%"),
+            layout=widgets.Layout(
+                width="24%" if prefer_full_column is not None else "32%"
+            ),
         )
+    prefer_full_selector = (
+        widgets.Dropdown(
+            description="Full contracts",
+            options=[("All", "__all__"), ("False", False), ("True", True)],
+            value="__all__",
+            layout=widgets.Layout(width="24%"),
+        )
+        if prefer_full_column is not None
+        else None
+    )
 
     def matching_rows() -> list[dict[str, object]]:
         """Apply the selected minimum-coverage filters to scenario rows."""
@@ -1662,6 +1730,14 @@ def plot_selection_grid_dashboard(
                     row
                     for row in matching
                     if row.get(column) == control.value
+                ]
+        if prefer_full_selector is not None:
+            selected = prefer_full_selector.value
+            if selected != "__all__":
+                matching = [
+                    row
+                    for row in matching
+                    if row.get(prefer_full_column) == selected
                 ]
         return matching
 
@@ -1677,6 +1753,10 @@ def plot_selection_grid_dashboard(
             }[label]
             if value is not None:
                 parts.append(f"{short}{value:g}")
+        if prefer_full_column is not None:
+            parts.append(
+                f"Full contracts {bool(row.get(prefer_full_column))}"
+            )
         return " · ".join(parts)
 
     scenario_options = [
@@ -1801,6 +1881,7 @@ def plot_selection_grid_dashboard(
                 "sel_rank_buf_pct",
                 "sel_rank_n_ewma_hl",
                 "sel_book_score_buf_pct",
+                prefer_full_column,
                 "n_instr",
                 "construction_score",
                 "jaccard_to_baseline",
@@ -1859,12 +1940,17 @@ def plot_selection_grid_dashboard(
     view_selector.observe(update_plot, names="value")
     for control in coverage_selectors.values():
         control.observe(update_coverage, names="value")
+    if prefer_full_selector is not None:
+        prefer_full_selector.observe(update_coverage, names="value")
     update_plot()
+    filter_controls = list(coverage_selectors.values())
+    if prefer_full_selector is not None:
+        filter_controls.append(prefer_full_selector)
     return widgets.VBox(
         [
             view_selector,
             scenario_selector,
-            widgets.HBox(list(coverage_selectors.values())),
+            widgets.HBox(filter_controls),
             metadata_output,
             plot_output,
         ],
