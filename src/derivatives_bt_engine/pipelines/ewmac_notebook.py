@@ -380,9 +380,10 @@ def plot_selection_portfolio_overview(
 
     The equity series are read directly from the persisted portfolio curve.
     Rolling return is the net-equity change over ``rolling_days`` report rows;
-    rolling realized volatility is the annualized standard deviation of the
-    report's prior-net-equity daily return. Invalid warm-up rows remain visible
-    in the equity panel but do not enter the rolling statistics.
+    rolling percentage volatility is the annualized standard deviation of the
+    report's prior-net-equity daily return, and rolling dollar volatility is
+    the annualized standard deviation of daily net P&L. Invalid warm-up rows
+    remain visible in the equity panel but do not enter the rolling statistics.
 
     Parameters
     ----------
@@ -402,8 +403,8 @@ def plot_selection_portfolio_overview(
     Returns
     -------
     holoviews.core.layout.Layout
-        Four independently scaled panels for equity, drawdown, trailing return,
-        and realized volatility.
+        Five independently scaled panels for equity, drawdown, trailing return,
+        annualized percentage-return volatility, and annualized dollar volatility.
     """
     import holoviews as hv
     import hvplot.polars  # noqa: F401 - registers Polars' ``hvplot`` API
@@ -417,6 +418,7 @@ def plot_selection_portfolio_overview(
             "date",
             "port_gross_equity",
             "port_net_equity",
+            "port_net",
             "port_net_pct",
             "ret_valid",
         },
@@ -434,6 +436,10 @@ def plot_selection_portfolio_overview(
         .then(pl.col("port_net_pct"))
         .otherwise(None)
         .alias("valid_net_pct"),
+        pl.when(pl.col("ret_valid").fill_null(False))
+        .then(pl.col("port_net"))
+        .otherwise(None)
+        .alias("valid_net_pnl"),
     ).with_columns(
         (
             (pl.col("port_net_equity") / pl.col("running_net_peak") - 1.0)
@@ -450,8 +456,11 @@ def plot_selection_portfolio_overview(
         (
             pl.col("valid_net_pct").rolling_std(window_size=rolling_days)
             * math.sqrt(256.0)
-            * 100.0
         ).alias("rolling_realized_vol_pct"),
+        (
+            pl.col("valid_net_pnl").rolling_std(window_size=rolling_days)
+            * math.sqrt(256.0)
+        ).alias("rolling_realized_dvol"),
     )
     frame = _date_slice(frame, start=start, end=end)
     if frame.is_empty():
@@ -532,20 +541,40 @@ def plot_selection_portfolio_overview(
     trailing_volatility = frame.hvplot.line(
         x="date",
         y="rolling_realized_vol_pct",
-        title=f"Trailing {rolling_days}-observation realized volatility",
-        ylabel="Annualized volatility (%)",
+        title=(
+            f"Trailing {rolling_days}-observation annualized return volatility"
+        ),
+        ylabel="Annualized return volatility (%)",
         width=width,
         height=height,
         tools=tools,
         hover_cols=["rolling_realized_vol_pct"],
         hover_tooltips=[
             ("Date", "@date{%F}"),
-            ("Realized vol", "@rolling_realized_vol_pct{0.00}%"),
+            ("Annualized return vol", "@rolling_realized_vol_pct{0.00}%"),
         ],
     )
-    return (equity + drawdown + trailing_return + trailing_volatility).cols(
-        1
-    ).opts(shared_axes=False)
+    trailing_dollar_volatility = frame.hvplot.line(
+        x="date",
+        y="rolling_realized_dvol",
+        title=f"Trailing {rolling_days}-observation annualized dollar volatility",
+        ylabel="Annualized dollar volatility (USD)",
+        width=width,
+        height=height,
+        tools=tools,
+        hover_cols=["rolling_realized_dvol"],
+        hover_tooltips=[
+            ("Date", "@date{%F}"),
+            ("Annualized dollar vol", "@rolling_realized_dvol{$0,0.00}"),
+        ],
+    )
+    return (
+        equity
+        + drawdown
+        + trailing_return
+        + trailing_volatility
+        + trailing_dollar_volatility
+    ).cols(1).opts(shared_axes=False)
 
 
 def plot_selection_portfolio_concentration(
