@@ -385,6 +385,24 @@ def _parse_rules(eligible_rules: str | Iterable[str]) -> list[str]:
     return [str(rule).strip() for rule in eligible_rules if str(rule).strip()]
 
 
+def _is_micro_contract(source_row: dict[str, object]) -> bool:
+    """Identify a micro execution route from persisted market metadata.
+
+    Upstream instrument codes are not uniform: some contain ``_micro`` while
+    others, including MBT and M2K, expose the size only in ``desc``. Matching
+    the explicit ``micro`` token across both fields avoids symbol heuristics
+    that would misclassify full contracts with nonstandard codes.
+    """
+    identity = " ".join(
+        str(source_row.get(field) or "")
+        for field in ("pst_instr_code", "desc", "description")
+    )
+    return (
+        re.search(r"(?:^|[^a-z])micro(?:[^a-z]|$)", identity.lower())
+        is not None
+    )
+
+
 def _resolve_stitched_signal_history_code(
     source_row: dict[str, object],
     instrument_rows: list[dict[str, object]],
@@ -976,6 +994,16 @@ def parse_args(argv=None, *, complete_default: bool = False):
         ),
     )
     parser.add_argument(
+        "--selection-prefer-full-contracts",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Prefer a hard-feasible full contract over a hard-feasible micro "
+            "for the same economic family (default: disabled). A micro remains "
+            "available when its full-size sibling is infeasible."
+        ),
+    )
+    parser.add_argument(
         "--selection-report-mode",
         choices=("full", "compact"),
         default="full",
@@ -1056,6 +1084,8 @@ def _selection_scenario_id(
         tokens.append(f"cw{_number_token(args.max_class_weight_pct)}")
     if args.max_subclass_weight_pct is not None:
         tokens.append(f"sw{_number_token(args.max_subclass_weight_pct)}")
+    if args.selection_prefer_full_contracts:
+        tokens.append("full1")
     tokens.extend((
         f"cl{subclass}",
         f"roll{int(args.include_roll_cost_in_score)}",
@@ -1359,6 +1389,7 @@ def _greedy_selector(
             rank_buffer_percent=args.selection_rank_buffer_pct,
             rank_count_anchor=rank_count_anchor,
             book_score_buffer_percent=args.selection_book_score_buffer_pct,
+            prefer_full_contracts=args.selection_prefer_full_contracts,
         ),
         weight_policy=weight_policy,
     )
@@ -1653,6 +1684,7 @@ class _WalkForwardSelectionProvider:
                 asset_class=str(row["asset_cls"]),
                 economic_subclass=str(row["econ_subcls"]),
                 econ_family=str(row.get("econ_fam_id") or ""),
+                is_micro_contract=_is_micro_contract(row),
                 mkt_risk_vol_day=(
                     average_volume * annual_dollar_vol
                     if average_volume is not None else None
@@ -2238,7 +2270,11 @@ def _final_selection_frame(
             "rank": rank,
             "symbol": symbol,
             "pst_instr_code": source_rows[symbol].get("pst_instr_code"),
+            "is_micro_contract": candidate.is_micro_contract,
             "wt_policy": args.weight_policy,
+            "selection_prefer_full_contracts": (
+                args.selection_prefer_full_contracts
+            ),
             "minimum_instruments_per_class": args.min_instr_per_class,
             "minimum_instruments_per_subclass": args.min_instr_per_subclass,
             "minimum_book_count": _active_minimum_book_count(args),
@@ -2899,6 +2935,7 @@ def _run_complete_selection(
             asset_class=str(row["asset_cls"]),
             economic_subclass=str(row["econ_subcls"]),
             econ_family=str(row.get("econ_fam_id") or ""),
+            is_micro_contract=_is_micro_contract(row),
             mkt_risk_vol_day=(
                 float(row["mkt_risk_vol_usd_day"])
                 if (
@@ -3466,6 +3503,9 @@ def _run_complete_selection(
         ),
         "selection_book_score_buffer_percent": (
             _active_book_score_buffer_percent(args)
+        ),
+        "selection_prefer_full_contracts": (
+            args.selection_prefer_full_contracts
         ),
         "selected_book": list(selection.selected),
     }

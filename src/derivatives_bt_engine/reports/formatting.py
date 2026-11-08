@@ -103,6 +103,8 @@ PUBLIC_REPORT_RENAMES = {
     "selection_book_score_buffer_percent": "sel_book_score_buf_pct",
     "selection_live_execution_overlay_count": "sel_live_exec_overlay_n",
     "preference_rank": "pref_rank",
+    "selection_prefer_full_contracts": "sel_pref_full_cons",
+    "is_micro_contract": "micro_con",
     "rank_buffer_count": "rank_buf_n",
     "rank_count_ewma_state": "rank_n_ewma_state",
     "rank_count_anchor": "rank_n_anchor",

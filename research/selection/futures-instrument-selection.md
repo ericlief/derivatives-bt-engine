@@ -844,6 +844,7 @@ first available session of each calendar year or month:
 --selection-rank-buffer-pct 15
 --selection-rank-count-ewma-halflife-reviews 3
 --selection-book-score-buffer-pct 2
+--selection-prefer-full-contracts
 ```
 
 `static` remains the default. A scheduled review is distinct from daily
@@ -904,6 +905,29 @@ after the handoff it means every currently executable group. A live capacity
 failure such as market participation does not retroactively remove the group
 from historical reviews and no longer stops construction of the rest of the
 current book.
+
+#### Full-contract family preference
+
+`--selection-prefer-full-contracts` is an optional execution-route preference,
+disabled by default. For each conditional greedy trial it first applies every
+ordinary hard feasibility gate. If a full contract and a micro contract in the
+same `econ_fam_id` are both feasible, only the full route competes for that
+family. If the full route fails granularity, liquidity, margin, hierarchy, or
+another hard gate, the micro remains eligible. This is therefore not a blanket
+micro exclusion and does not force a contract the account cannot execute.
+
+The identity comes from the persisted `pst_instr_code` and `desc` metadata,
+not from guessing the broker symbol. This covers regular `_micro` codes and
+nonstandard cases such as MBT and M2K whose descriptions carry the explicit
+`micro` label. A suppressed trial remains in the full audit with
+`micro_suppressed_by_full_contract_preference:<family>` as its reason.
+
+The preference constructs the raw challenger before membership hysteresis.
+Rank hysteresis continues the same full-preferred greedy order. Score or
+`rank_score` hysteresis may nevertheless retain a feasible incumbent micro if
+the proposed full-route book does not clear transition cost and the configured
+score hurdle. This deliberate ordering lets a grid measure the execution-cost
+benefit without silently disabling turnover control.
 
 #### Prior-book hysteresis
 
@@ -1325,6 +1349,7 @@ futures-build-selection \
   --selection-rank-buffer-pct 15 \
   --selection-rank-count-ewma-halflife-reviews 3 \
   --selection-book-score-buffer-pct 2 \
+  --selection-prefer-full-contracts \
   --backtest-start-date 2024-01-01 \
   --backtest-end-date 2026-10-30 \
   --forecast-fdm 1.0 \
@@ -2197,6 +2222,11 @@ rank-count EWMA half-lives, and score-buffer percentages can all be swept.
 Optional class and subclass coverage minimums and active minimum-book targets
 are independent grid dimensions. Sweep the latter with
 `--selection-min-book-counts`; inactive coverage does not multiply scenarios.
+The full-contract family preference is another independent dimension: pass
+`--selection-prefer-full-contracts false,true` to compare it against every
+requested coverage and membership-hysteresis combination. Enabled scenarios
+append `full1` to their parameter directory; the disabled baseline keeps the
+existing identifier.
 Inactive controls do not create duplicate scenarios: `none` expands only the
 eligibility dimension, `rank` expands rank percentage and half-life, `score`
 expands score percentage, and `rank_score` expands all three membership

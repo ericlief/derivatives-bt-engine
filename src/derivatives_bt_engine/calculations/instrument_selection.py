@@ -74,7 +74,8 @@ class SelectionCandidate:
     is the reference policy frequency. ``asset_class`` and
     ``economic_subclass`` locate the instrument in the reviewed allocation
     tree, while ``econ_family`` prevents selecting duplicate routes for the
-    same exposure.
+    same exposure. ``is_micro_contract`` identifies the smaller execution
+    route within that family for the optional full-contract preference.
     ``mkt_risk_vol_day`` is daily market volume expressed in annualized USD
     risk units, matching the Phase 2 participation calculation.
     ``enforce_market_participation`` distinguishes a dated executable segment
@@ -93,6 +94,7 @@ class SelectionCandidate:
     asset_class: str
     economic_subclass: str
     econ_family: str = ""
+    is_micro_contract: bool = False
     mkt_risk_vol_day: float | None = None
     enforce_market_participation: bool = True
     initial_margin_usd: float | None = None
@@ -185,6 +187,9 @@ class GreedySelectionConfig:
     ``book_score_buffer_percent`` is the additional prior-score hurdle a
     challenger must clear after its expected one-time switch cost is converted
     to SR units. Membership controls are inert when no prior book is supplied.
+    ``prefer_full_contracts`` suppresses a feasible micro route whenever a
+    feasible non-micro route for the same economic family is available. It
+    does not make an infeasible full contract displace an executable micro.
     """
 
     capital: float = 100_000.0
@@ -220,6 +225,7 @@ class GreedySelectionConfig:
     rank_buffer_percent: float = 15.0
     rank_count_anchor: int | None = None
     book_score_buffer_percent: float = 0.0
+    prefer_full_contracts: bool = False
 
     def __post_init__(self) -> None:
         """Validate configuration ranges before any trial is evaluated."""
@@ -1545,6 +1551,65 @@ class GreedyInstrumentSelector:
                 row["class_rank"] = class_rank
                 row["global_trial_rank"] = global_rank
 
+    def _full_contract_preference_eligible(
+        self,
+        scored_trials: list[tuple[str, PortfolioScore]],
+        candidates: dict[str, SelectionCandidate],
+    ) -> frozenset[str]:
+        """Return feasible routes left after the optional family preference.
+
+        The preference operates only within a populated economic family and
+        only after hard feasibility has been evaluated for the whole trial
+        book. A micro therefore remains available when its full-size sibling
+        fails granularity, liquidity, margin, hierarchy, or another hard gate.
+        """
+        feasible_symbols = {
+            symbol for symbol, score in scored_trials if score.feasible
+        }
+        if not self.config.prefer_full_contracts:
+            return frozenset(feasible_symbols)
+        full_families = {
+            candidate.econ_family
+            for symbol, candidate in candidates.items()
+            if (
+                symbol in feasible_symbols
+                and candidate.econ_family
+                and not candidate.is_micro_contract
+            )
+        }
+        return frozenset(
+            symbol
+            for symbol in feasible_symbols
+            if not (
+                candidates[symbol].is_micro_contract
+                and candidates[symbol].econ_family in full_families
+            )
+        )
+
+    @staticmethod
+    def _annotate_full_contract_preference(
+        trials: list[dict[str, object]],
+        trial_allocations: list[dict[str, object]],
+        *,
+        iteration: int,
+        eligible: frozenset[str],
+        candidates: dict[str, SelectionCandidate],
+    ) -> None:
+        """Explain feasible micro trials suppressed by a full-size sibling."""
+        for rows in (trials, trial_allocations):
+            for row in rows:
+                if (
+                    row["iteration"] != iteration
+                    or not row["feasible"]
+                    or str(row["candidate"]) in eligible
+                ):
+                    continue
+                symbol = str(row["candidate"])
+                row["reason"] = (
+                    "micro_suppressed_by_full_contract_preference:"
+                    f"{candidates[symbol].econ_family}"
+                )
+
     def select(
         self,
         candidate_list: list[SelectionCandidate],
@@ -1613,6 +1678,20 @@ class GreedyInstrumentSelector:
             )
         singleton_trials = [
             (score.symbols[0], score) for score in feasible_singletons
+        ]
+        full_preference_eligible = self._full_contract_preference_eligible(
+            singleton_trials, candidates
+        )
+        self._annotate_full_contract_preference(
+            trials,
+            trial_allocations,
+            iteration=0,
+            eligible=full_preference_eligible,
+            candidates=candidates,
+        )
+        singleton_trials = [
+            item for item in singleton_trials
+            if item[0] in full_preference_eligible
         ]
         seed_phase, seed_eligible = self._coverage_competition(
             (),
@@ -1694,10 +1773,24 @@ class GreedyInstrumentSelector:
                     scored,
                     accepted=False,
                 )
+            full_preference_eligible = self._full_contract_preference_eligible(
+                scored_trials, candidates
+            )
+            self._annotate_full_contract_preference(
+                trials,
+                trial_allocations,
+                iteration=iteration,
+                eligible=full_preference_eligible,
+                candidates=candidates,
+            )
+            preferred_trials = [
+                item for item in scored_trials
+                if item[0] in full_preference_eligible
+            ]
             coverage_phase, coverage_eligible = self._coverage_competition(
                 selected,
                 candidates,
-                scored_trials,
+                preferred_trials,
             )
             self._annotate_coverage_competition(
                 trials,
@@ -1708,7 +1801,7 @@ class GreedyInstrumentSelector:
                 ranks=self._competition_ranks(scored_trials, candidates),
             )
             feasible = [
-                item for item in scored_trials
+                item for item in preferred_trials
                 if item[1].feasible and item[0] in coverage_eligible
             ]
             if not feasible:
@@ -1864,6 +1957,12 @@ class GreedyInstrumentSelector:
                 )
                 if scored.feasible:
                     feasible.append((symbol, scored))
+            preferred = self._full_contract_preference_eligible(
+                feasible, candidates
+            )
+            feasible = [
+                item for item in feasible if item[0] in preferred
+            ]
             if not feasible:
                 break
             (winner, _), _, _, _ = self._choose_near_tie(feasible)

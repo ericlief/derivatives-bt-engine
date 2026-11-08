@@ -6,6 +6,7 @@ import pytest
 
 from derivatives_bt_engine.pipelines.portfolio_selection import (
     _filter_backtest_period,
+    _is_micro_contract,
     _direct_ib_handoff_date,
     _label_forecast_output_frame,
     _selection_history_content_identity,
@@ -17,6 +18,21 @@ from derivatives_bt_engine.pipelines.portfolio_selection import (
     run,
     slow_tilt_ewmac_weights,
 )
+
+
+@pytest.mark.parametrize(
+    ("row", "expected"),
+    [
+        ({"pst_instr_code": "NASDAQ_micro", "desc": "NASDAQ"}, True),
+        ({"pst_instr_code": "BITCOIN", "desc": "Micro Bitcoin"}, True),
+        ({"pst_instr_code": "NASDAQ", "desc": "E-mini NASDAQ"}, False),
+    ],
+)
+def test_micro_contract_identity_uses_persisted_code_and_description(
+    row: dict[str, object], expected: bool
+):
+    """Nonstandard symbols are classified from explicit source metadata."""
+    assert _is_micro_contract(row) is expected
 
 
 def _mock_stitched_history(

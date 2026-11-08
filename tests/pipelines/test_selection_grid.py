@@ -251,6 +251,50 @@ def test_grid_summary_recovers_score_from_accepted_passes_for_legacy_book(
     )
 
     assert row["construction_score"] == 0.42
+    assert row["maximum_instrument_margin_usd"] == 1000.0
+    assert row["book_margin_at_maximum_usd"] == 1000.0
+    assert row["coverage_satisfied"] is None
+
+
+def test_grid_summary_reads_current_compact_margin_columns(tmp_path: Path):
+    """Current public book margin names populate the grid summary."""
+    book_path = tmp_path / "multi_speed_ewmac_selection_book_now.parquet"
+    pl.DataFrame({
+        "symbol": ["NQ", "ES"],
+        "marg_at_max": [1200.0, 800.0],
+        "port_marg_at_max": [2000.0, 2000.0],
+        "coverage_satisfied": [True, True],
+    }).write_parquet(book_path)
+    scenario = SelectionScenario(
+        target_volatility=0.20,
+        maximum_instrument_margin_percent=20.0,
+        maximum_book_margin_percent=50.0,
+        maximum_weight_idm=0.20,
+        score_threshold=0.90,
+        minimum_instruments_per_class=1,
+        maximum_instruments_per_class=None,
+        maximum_instruments_per_subclass=None,
+        maximum_asset_class_weight_percent=None,
+        maximum_economic_subclass_weight_percent=None,
+        include_roll_cost_in_score=True,
+        weight_policy="topdown_classif",
+    )
+
+    row, _ = _summary_row(
+        scenario,
+        status="complete",
+        elapsed_seconds=1.0,
+        book_path=book_path,
+        rule_cache=pl.DataFrame({
+            "symbol": ["NQ", "ES"],
+            "asset_cls": ["equities", "equities"],
+            "econ_subcls": ["equity_index", "equity_index"],
+        }),
+    )
+
+    assert row["maximum_instrument_margin_usd"] == 1200.0
+    assert row["book_margin_at_maximum_usd"] == 2000.0
+    assert row["coverage_satisfied"] is True
 
 
 def test_default_grid_varies_construction_scenarios_not_performance_inputs():
@@ -439,6 +483,35 @@ def test_grid_sweeps_greedy_score_acceptance_thresholds():
     assert len({scenario.scenario_id for scenario in scenarios}) == 5
 
 
+def test_grid_sweeps_full_contract_preference_with_hysteresis():
+    """The route preference crosses membership modes as an independent axis."""
+    args = parse_args([
+        "--input",
+        "screen.parquet",
+        "--target-vols",
+        "0.20",
+        "--max-instr-margin-pcts",
+        "20",
+        "--roll-cost-modes",
+        "include",
+        "--selection-rebalance",
+        "yearly",
+        "--selection-membership-hysteresis-modes",
+        "none,score",
+        "--selection-prefer-full-contracts",
+        "false,true",
+    ])
+
+    scenarios = build_scenarios(args)
+
+    assert len(scenarios) == 4
+    assert {scenario.selection_prefer_full_contracts for scenario in scenarios} == {
+        False,
+        True,
+    }
+    assert len({scenario.scenario_id for scenario in scenarios}) == 4
+
+
 def test_dry_run_writes_reproducible_commands_without_running_selection(
     tmp_path: Path,
 ):
@@ -464,6 +537,8 @@ def test_dry_run_writes_reproducible_commands_without_running_selection(
         "yearly",
         "--selection-membership-hysteresis",
         "rank",
+        "--selection-prefer-full-contracts",
+        "true",
         "--dry-run",
     ])
 
@@ -478,6 +553,7 @@ def test_dry_run_writes_reproducible_commands_without_running_selection(
     assert "--selection-rebalance yearly" in command_text
     assert "--selection-rank-buffer-pct 15.0" in command_text
     assert "--selection-rank-count-ewma-halflife-reviews 3.0" in command_text
+    assert "--selection-prefer-full-contracts" in command_text
     assert "--selection-report-mode compact" in command_text
     assert not list(output.rglob("multi_speed_ewmac_selection_book_*.parquet"))
 

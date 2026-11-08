@@ -19,6 +19,7 @@ def _candidate(
     asset_class="equity",
     economic_subclass="us",
     initial_margin_usd=None,
+    is_micro=False,
 ):
     return SelectionCandidate(
         symbol=symbol,
@@ -28,9 +29,99 @@ def _candidate(
         asset_class=asset_class,
         economic_subclass=economic_subclass,
         econ_family=family,
+        is_micro_contract=is_micro,
         mkt_risk_vol_day=1_000_000_000.0,
         initial_margin_usd=initial_margin_usd,
     )
+
+
+def test_full_contract_preference_suppresses_feasible_micro_family_route():
+    """A feasible full contract wins its family even with a lower raw score."""
+    candidates = [
+        _candidate("MICRO", 0.0, family="INDEX", is_micro=True),
+        _candidate("FULL", 20.0, family="INDEX"),
+    ]
+    result = GreedyInstrumentSelector(
+        config=GreedySelectionConfig(
+            capital=1_000_000.0,
+            size_penalty_scale=0.0,
+            prefer_full_contracts=True,
+        )
+    ).select(candidates, np.eye(2))
+
+    assert result.selected == ("FULL",)
+    micro_trial = next(
+        row for row in result.trials if row["candidate"] == "MICRO"
+    )
+    assert micro_trial["reason"] == (
+        "micro_suppressed_by_full_contract_preference:INDEX"
+    )
+
+
+def test_disabled_full_contract_preference_preserves_score_choice():
+    """The default leaves full and micro family routes to ordinary scoring."""
+    candidates = [
+        _candidate("MICRO", 0.0, family="INDEX", is_micro=True),
+        _candidate("FULL", 20.0, family="INDEX"),
+    ]
+    result = GreedyInstrumentSelector(
+        config=GreedySelectionConfig(
+            capital=1_000_000.0,
+            size_penalty_scale=0.0,
+        )
+    ).select(candidates, np.eye(2))
+
+    assert result.selected == ("MICRO",)
+
+
+def test_full_contract_preference_keeps_micro_when_full_is_infeasible():
+    """The preference never replaces an executable micro with a failed full."""
+    candidates = [
+        _candidate(
+            "MICRO",
+            0.0,
+            family="INDEX",
+            is_micro=True,
+            initial_margin_usd=100.0,
+        ),
+        _candidate(
+            "FULL",
+            0.0,
+            family="INDEX",
+            initial_margin_usd=None,
+        ),
+    ]
+    result = GreedyInstrumentSelector(
+        config=GreedySelectionConfig(
+            capital=1_000_000.0,
+            size_penalty_scale=0.0,
+            max_instrument_margin_pct=20.0,
+            prefer_full_contracts=True,
+        )
+    ).select(candidates, np.eye(2))
+
+    assert result.selected == ("MICRO",)
+
+
+def test_score_hysteresis_can_retain_incumbent_micro_after_full_preference():
+    """Full preference proposes the route; score hysteresis controls turnover."""
+    candidates = [
+        _candidate("MICRO", 0.0, family="INDEX", is_micro=True),
+        _candidate("FULL", 20.0, family="INDEX"),
+    ]
+    result = GreedyInstrumentSelector(
+        config=GreedySelectionConfig(
+            capital=1_000_000.0,
+            size_penalty_scale=0.0,
+            prefer_full_contracts=True,
+            membership_hysteresis="score",
+            book_score_buffer_percent=2.0,
+        )
+    ).select(candidates, np.eye(2), prior_selected=["MICRO"])
+
+    assert result.unbuffered_selected == ("FULL",)
+    assert result.selected == ("MICRO",)
+    assert result.switch_reason == "net_score_gain_below_buffer"
 
 
 def test_scoring_uses_combined_forecast_turnover_cost():

@@ -81,6 +81,7 @@ class SelectionScenario:
     selection_rank_buffer_percent: float = 15.0
     selection_rank_count_ewma_halflife_reviews: float | None = None
     selection_book_score_buffer_percent: float = 2.0
+    selection_prefer_full_contracts: bool = False
 
     def __post_init__(self) -> None:
         """Reject internally contradictory hierarchy count bounds."""
@@ -165,6 +166,8 @@ class SelectionScenario:
                     self.maximum_economic_subclass_weight_percent
                 )
             )
+        if self.selection_prefer_full_contracts:
+            tokens.append("full1")
         tokens.extend((
             f"cl{subclass}",
             f"roll{int(self.include_roll_cost_in_score)}",
@@ -341,6 +344,31 @@ def _membership_mode_list(value: str) -> tuple[str, ...]:
             "none, rank, score, rank_score"
         )
     return modes
+
+
+def _bool_list(value: str) -> tuple[bool, ...]:
+    """Parse unique comma-separated boolean switch values."""
+    aliases = {
+        "true": True,
+        "yes": True,
+        "1": True,
+        "false": False,
+        "no": False,
+        "0": False,
+    }
+    parsed: list[bool] = []
+    for raw in value.split(","):
+        key = raw.strip().lower()
+        if key not in aliases:
+            raise argparse.ArgumentTypeError(
+                "boolean lists accept true,false, yes,no, or 1,0"
+            )
+        item = aliases[key]
+        if item not in parsed:
+            parsed.append(item)
+    if not parsed:
+        raise argparse.ArgumentTypeError("at least one boolean value is required")
+    return tuple(parsed)
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -624,6 +652,15 @@ def parse_args(argv=None) -> argparse.Namespace:
         help="Compare roll-cost attribution modes (default: both).",
     )
     parser.add_argument(
+        "--selection-prefer-full-contracts",
+        type=_bool_list,
+        default=(False,),
+        help=(
+            "Comma-separated full-over-micro family preference states "
+            "(default: false); use false,true to compare both."
+        ),
+    )
+    parser.add_argument(
         "--weight-policy",
         choices=("topdown_classif", "legacy_handcraft", "equal"),
         default="topdown_classif",
@@ -750,6 +787,7 @@ def build_scenarios(args: argparse.Namespace) -> list[SelectionScenario]:
                 rank_count_halflife
             ),
             selection_book_score_buffer_percent=score_buffer,
+            selection_prefer_full_contracts=prefer_full_contracts,
         )
         for (
             target_volatility,
@@ -767,6 +805,7 @@ def build_scenarios(args: argparse.Namespace) -> list[SelectionScenario]:
             class_weight_limit,
             subclass_weight_limit,
             include_roll_cost,
+            prefer_full_contracts,
             hysteresis_variant,
         ) in product(
             args.target_vols,
@@ -784,6 +823,7 @@ def build_scenarios(args: argparse.Namespace) -> list[SelectionScenario]:
             args.max_class_weight_pcts,
             args.max_subclass_weight_pcts,
             roll_modes,
+            args.selection_prefer_full_contracts,
             hysteresis_variants,
         )
         for (
@@ -868,6 +908,8 @@ def _selection_command(
     ]
     if initial_capital_usd is not None:
         command.extend(("--initial-capital-usd", str(initial_capital_usd)))
+    if scenario.selection_prefer_full_contracts:
+        command.append("--selection-prefer-full-contracts")
     if scenario.selection_rebalance != "static":
         command.extend((
             "--selection-rebalance",
@@ -1253,6 +1295,9 @@ def _summary_row(
             in {"score", "rank_score"}
             else None
         ),
+        "selection_prefer_full_contracts": (
+            scenario.selection_prefer_full_contracts
+        ),
         "elapsed_seconds": elapsed_seconds,
         "book_path": str(book_path) if book_path is not None else "",
         "number_instruments": 0,
@@ -1309,11 +1354,11 @@ def _summary_row(
         "low_contract_weight": _column_max(book, "low_con_weight"),
         "band_contract_weight": _column_max(book, "band_con_weight"),
         "high_contract_weight": _column_max(book, "high_con_weight"),
-        "maximum_instrument_margin_usd": _column_max(
-            book, "margin_at_max_usd"
+        "maximum_instrument_margin_usd": _column_max_alias(
+            book, "marg_at_max", "margin_at_max_usd"
         ),
-        "book_margin_at_maximum_usd": _column_max(
-            book, "portfolio_margin_at_max_usd"
+        "book_margin_at_maximum_usd": _column_max_alias(
+            book, "port_marg_at_max", "portfolio_margin_at_max_usd"
         ),
         "final_class_coverage_deficit": _column_max(
             book, "final_cls_coverage_deficit"
@@ -1326,7 +1371,13 @@ def _summary_row(
         ),
         "coverage_satisfied": (
             bool(book.get_column("coverage_satisfied")[0])
-            if "coverage_satisfied" in book.columns and book.height else None
+            if (
+                scenario.minimum_instruments_per_class is not None
+                or scenario.minimum_instruments_per_subclass is not None
+            )
+            and "coverage_satisfied" in book.columns
+            and book.height
+            else None
         ),
     })
     return row, membership
@@ -1338,6 +1389,17 @@ def _column_max(frame: pl.DataFrame, name: str) -> float | None:
         return None
     values = frame.get_column(name).drop_nulls()
     return float(values.max()) if values.len() else None
+
+
+def _column_max_alias(
+    frame: pl.DataFrame, *names: str
+) -> float | None:
+    """Return the first available current or legacy numeric column maximum."""
+    for name in names:
+        value = _column_max(frame, name)
+        if value is not None:
+            return value
+    return None
 
 
 def _score_from_selection_passes(scenario_dir: Path) -> float | None:
