@@ -14,10 +14,10 @@ out comparable execution diagnostics without merging their scales. The
 scheduled-selection plotting helper reads the compact review-instrument report
 and exposes each dated book as instrument-weight bars plus class and subclass
 composition bars. Portfolio-level helpers plot compounded equity and drawdown,
-realized contract-risk concentration, and annual instrument P&L attribution
-from the persisted public reports without recreating the backtest accounting
-path. The selection-grid dashboard applies those same plotters to one scenario
-at a time and adds scenario and coverage navigation.
+realized contract-risk concentration, and annual instrument, class, and
+subclass P&L attribution from persisted public reports without recreating the
+backtest accounting path. The selection-grid dashboard applies those same
+plotters to one scenario at a time and adds scenario and coverage navigation.
 """
 
 from __future__ import annotations
@@ -71,6 +71,9 @@ from derivatives_bt_engine.data.ib_futures_history_store import (
 )
 from derivatives_bt_engine.data.pysystemtrade_ib import (
     load_pysystemtrade_ib_instruments,
+)
+from derivatives_bt_engine.data.pysystemtrade_classification import (
+    load_pysystemtrade_instrument_classification,
 )
 from derivatives_bt_engine.data.pysystemtrade_pooling import (
     DEFAULT_POOLING_MAPPING_PATH,
@@ -735,7 +738,7 @@ def plot_selection_pnl_attribution(
     width: int = 1050,
     height: int = 440,
 ):
-    """Plot annual instrument net P&L with separate gross and cost hover data.
+    """Plot annual net P&L by instrument, asset class, and subclass.
 
     Parameters
     ----------
@@ -748,9 +751,10 @@ def plot_selection_pnl_attribution(
     Returns
     -------
     ipywidgets.VBox
-        A year selector, defaulting to the latest year, and instrument net-P&L
-        bars for the selected year. Hover retains gross P&L and both realized
-        cost streams.
+        A year selector, defaulting to the latest year, and three stacked
+        annual net-P&L bar charts grouped by instrument, asset class, and
+        economic subclass. Hover retains gross P&L and both realized cost
+        streams.
     """
     import holoviews as hv
     import hvplot.polars  # noqa: F401 - registers Polars' ``hvplot`` API
@@ -774,6 +778,27 @@ def plot_selection_pnl_attribution(
         pl.col("date").cast(pl.Date),
         pl.col("date").cast(pl.Date).dt.year().alias("year"),
     )
+    if {"asset_class", "economic_subclass"}.issubset(frame.columns):
+        frame = frame.with_columns(
+            pl.col("asset_class").fill_null("unclassified"),
+            pl.col("economic_subclass").fill_null("unclassified"),
+        )
+    else:
+        classification_key = (
+            "hist_instr_code" if "hist_instr_code" in frame.columns else "symbol"
+        )
+        classifications = load_pysystemtrade_instrument_classification().rename(
+            {"instrument_code": "classification_key"}
+        )
+        frame = frame.join(
+            classifications,
+            left_on=classification_key,
+            right_on="classification_key",
+            how="left",
+        ).with_columns(
+            pl.col("asset_class").fill_null("unclassified"),
+            pl.col("economic_subclass").fill_null("unclassified"),
+        )
     nonzero = frame.filter(
         (pl.col("gross_pnl").fill_null(0.0) != 0)
         | (pl.col("trade_cost").fill_null(0.0) != 0)
@@ -795,7 +820,7 @@ def plot_selection_pnl_attribution(
     )
 
     def plot_year(year: int):
-        """Aggregate and draw one calendar year's instrument attribution."""
+        """Aggregate and draw one calendar year's P&L attribution."""
         annual = (
             frame.filter(pl.col("year") == year)
             .group_by("symbol")
@@ -815,36 +840,57 @@ def plot_selection_pnl_attribution(
         )
         if annual.is_empty():
             raise ValueError(f"year {year} contains no nonzero instrument P&L")
-        total_net = annual.get_column("net_pnl").sum()
-        pnl_min = min(0.0, float(annual.get_column("net_pnl").min()))
-        pnl_max = max(0.0, float(annual.get_column("net_pnl").max()))
-        pnl_span = pnl_max - pnl_min
-        scale_padding = (
-            pnl_span * 0.06
-            if pnl_span > 0
-            else max(abs(pnl_max), abs(pnl_min), 1.0) * 0.06
-        )
-        bars = annual.hvplot.bar(
-            x="symbol",
-            y="net_pnl",
-            title=f"{year} instrument net P&L (portfolio total ${total_net:,.0f})",
-            xlabel="Instrument",
-            ylabel="Net P&L (USD)",
-            rot=70,
-            color="#1f77b4",
-            width=width,
-            height=height,
-            tools=["hover", "pan", "wheel_zoom", "box_zoom", "reset", "save"],
-            hover_cols=["gross_pnl", "trade_cost", "roll_cost"],
-            hover_tooltips=[
-                ("Instrument", "@symbol"),
-                ("Net P&L", "@net_pnl{$0,0.00}"),
-                ("Gross P&L", "@gross_pnl{$0,0.00}"),
-                ("Trade cost", "@trade_cost{$0,0.00}"),
-                ("Roll cost", "@roll_cost{$0,0.00}"),
-            ],
-        ).opts(ylim=(pnl_min - scale_padding, pnl_max + scale_padding))
-        return bars * hv.HLine(0.0).opts(color="black", line_width=1)
+        tools = ["hover", "pan", "wheel_zoom", "box_zoom", "reset", "save"]
+
+        def grouped_bars(group_column: str, label: str, xlabel: str):
+            """Aggregate annual attribution at one reporting hierarchy level."""
+            grouped = (
+                frame.filter(pl.col("year") == year)
+                .group_by(group_column)
+                .agg(
+                    pl.col("gross_pnl").fill_null(0.0).sum().alias("gross_pnl"),
+                    pl.col("trade_cost").fill_null(0.0).sum().alias("trade_cost"),
+                    pl.col("roll_cost").fill_null(0.0).sum().alias("roll_cost"),
+                    pl.col("net_pnl").fill_null(0.0).sum().alias("net_pnl"),
+                )
+                .sort("net_pnl", descending=True)
+            )
+            total_net = grouped.get_column("net_pnl").sum()
+            pnl_min = min(0.0, float(grouped.get_column("net_pnl").min()))
+            pnl_max = max(0.0, float(grouped.get_column("net_pnl").max()))
+            pnl_span = pnl_max - pnl_min
+            padding = (
+                pnl_span * 0.06
+                if pnl_span
+                else max(abs(pnl_max), 1.0) * 0.06
+            )
+            bars = grouped.hvplot.bar(
+                x=group_column,
+                y="net_pnl",
+                title=f"{year} {label} net P&L (portfolio total ${total_net:,.0f})",
+                xlabel=xlabel,
+                ylabel="Net P&L (USD)",
+                rot=70,
+                color="#1f77b4",
+                width=width,
+                height=height,
+                tools=tools,
+                hover_cols=["gross_pnl", "trade_cost", "roll_cost"],
+                hover_tooltips=[
+                    (xlabel, f"@{{{group_column}}}"),
+                    ("Net P&L", "@net_pnl{$0,0.00}"),
+                    ("Gross P&L", "@gross_pnl{$0,0.00}"),
+                    ("Trade cost", "@trade_cost{$0,0.00}"),
+                    ("Roll cost", "@roll_cost{$0,0.00}"),
+                ],
+            ).opts(ylim=(pnl_min - padding, pnl_max + padding))
+            return bars * hv.HLine(0.0).opts(color="black", line_width=1)
+
+        return (
+            grouped_bars("symbol", "instrument", "Instrument")
+            + grouped_bars("asset_class", "asset class", "Asset class")
+            + grouped_bars("economic_subclass", "economic subclass", "Subclass")
+        ).cols(1).opts(shared_axes=False)
 
     def update_plot(change=None) -> None:
         """Redraw the annual attribution selected by the year widget."""
