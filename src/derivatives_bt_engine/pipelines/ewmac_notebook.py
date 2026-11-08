@@ -382,8 +382,9 @@ def plot_selection_portfolio_overview(
     Rolling return is the net-equity change over ``rolling_days`` report rows;
     rolling percentage volatility is the annualized standard deviation of the
     report's prior-net-equity daily return, and rolling dollar volatility is
-    the annualized standard deviation of daily net P&L. Invalid warm-up rows
-    remain visible in the equity panel but do not enter the rolling statistics.
+    the annualized standard deviation of daily net P&L. Rolling volatility
+    uses the most recent ``rolling_days`` valid return observations; dates
+    without a valid return carry the latest estimate forward.
 
     Parameters
     ----------
@@ -395,8 +396,9 @@ def plot_selection_portfolio_overview(
         Optional inclusive date bounds applied after rolling fields are
         calculated, preserving their prior-history warm-up.
     rolling_days
-        Trading observations used for trailing net return and realized
-        volatility. The default 256 matches the selection annualization.
+        Valid return observations used for realized volatility and report rows
+        used for trailing net return. The default 256 matches the selection
+        annualization.
     width, height
         Width and height of each vertically stacked panel in pixels.
 
@@ -432,14 +434,6 @@ def plot_selection_portfolio_overview(
     # the observations immediately before its displayed start date.
     frame = frame.with_columns(
         pl.col("port_net_equity").cum_max().alias("running_net_peak"),
-        pl.when(pl.col("ret_valid").fill_null(False))
-        .then(pl.col("port_net_pct"))
-        .otherwise(None)
-        .alias("valid_net_pct"),
-        pl.when(pl.col("ret_valid").fill_null(False))
-        .then(pl.col("port_net"))
-        .otherwise(None)
-        .alias("valid_net_pnl"),
     ).with_columns(
         (
             (pl.col("port_net_equity") / pl.col("running_net_peak") - 1.0)
@@ -453,14 +447,26 @@ def plot_selection_portfolio_overview(
             )
             * 100.0
         ).alias("rolling_return_pct"),
-        (
-            pl.col("valid_net_pct").rolling_std(window_size=rolling_days)
-            * math.sqrt(256.0)
-        ).alias("rolling_realized_vol_pct"),
-        (
-            pl.col("valid_net_pnl").rolling_std(window_size=rolling_days)
-            * math.sqrt(256.0)
-        ).alias("rolling_realized_dvol"),
+    )
+    # Roll over valid observations instead of the complete calendar frame:
+    # one unavailable portfolio return must not blank the next 255 estimates.
+    valid_volatility = (
+        frame.filter(pl.col("ret_valid").fill_null(False))
+        .select(
+            "date",
+            (
+                pl.col("port_net_pct").rolling_std(window_size=rolling_days)
+                * math.sqrt(256.0)
+            ).alias("rolling_realized_vol_pct"),
+            (
+                pl.col("port_net").rolling_std(window_size=rolling_days)
+                * math.sqrt(256.0)
+            ).alias("rolling_realized_dvol"),
+        )
+    )
+    frame = frame.join(valid_volatility, on="date", how="left").with_columns(
+        pl.col("rolling_realized_vol_pct").forward_fill(),
+        pl.col("rolling_realized_dvol").forward_fill(),
     )
     frame = _date_slice(frame, start=start, end=end)
     if frame.is_empty():
