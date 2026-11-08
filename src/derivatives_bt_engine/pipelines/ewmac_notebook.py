@@ -179,6 +179,7 @@ def plot_selection_cash_pnl(
     import holoviews as hv
     import hvplot.polars  # noqa: F401 - registers Polars' ``hvplot`` API
     import ipywidgets as widgets
+    from bokeh.models import NumeralTickFormatter
     from IPython.display import display
 
     cash_path: Path | None = None
@@ -245,10 +246,12 @@ def plot_selection_cash_pnl(
         ylabel: str,
         labels: dict[str, str] | None = None,
         colors: dict[str, str] | None = None,
+        dollar_axis: bool = False,
     ):
         """Build one independently scaled overlay from available fields."""
         available = [name for name in columns if name in symbol_frame.columns]
         tools = ["hover", "pan", "wheel_zoom", "box_zoom", "reset", "save"]
+        hover_format = "$0,0.00" if dollar_axis else "0,0.0000"
         curves = [
             symbol_frame.hvplot.line(
                 x="date",
@@ -261,7 +264,10 @@ def plot_selection_cash_pnl(
                 tools=tools,
                 hover_tooltips=[
                     ("Date", "@date{%F}"),
-                    ((labels or {}).get(column, column), f"@{column}{{0.0000}}"),
+                    (
+                        (labels or {}).get(column, column),
+                        f"@{column}{{{hover_format}}}",
+                    ),
                 ],
                 **(
                     {"color": colors[column]}
@@ -272,7 +278,10 @@ def plot_selection_cash_pnl(
             for column in available
         ]
         overlay = hv.Overlay(curves)
-        return overlay.opts(legend_position="top_left")
+        options = {"legend_position": "top_left"}
+        if dollar_axis:
+            options["yformatter"] = NumeralTickFormatter(format="$0,0")
+        return overlay.opts(**options)
 
     def plot_symbol(symbol: str):
         """Build all independently scaled panels for one selected symbol."""
@@ -295,18 +304,21 @@ def plot_selection_cash_pnl(
                 columns=["gross_pnl", "net_pnl"],
                 title=f"{symbol} daily P&L",
                 ylabel="USD",
+                dollar_axis=True,
             ) * hv.HLine(0.0).opts(color="black", line_width=1),
             line_panel(
                 symbol_frame,
                 columns=["trade_cost", "roll_cost"],
                 title=f"{symbol} daily costs",
                 ylabel="USD",
+                dollar_axis=True,
             ) * hv.HLine(0.0).opts(color="black", line_width=1),
             line_panel(
                 symbol_frame,
                 columns=["cum_gross_pnl", "cum_net_pnl"],
                 title=f"{symbol} cumulative P&L",
                 ylabel="USD",
+                dollar_axis=True,
             ),
             line_panel(
                 symbol_frame,
