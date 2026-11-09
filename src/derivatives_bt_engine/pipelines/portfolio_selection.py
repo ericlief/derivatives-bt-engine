@@ -1,16 +1,16 @@
 """Filter a cached rule universe and build the selected futures book.
 
-The persisted rule-cost cache supplies executable symbols, their borrowed
-signal-history identifiers, costs, dollar volatility, and eligible EWMAC
-rules. This command first applies the requested account, cost, risk-size,
-liquidity, data, and execution filters and saves that candidate set. It can
-then run the full greedy selection and uses three deliberately different
-dataframe collections:
+The persisted rule-cost cache supplies executable symbols, reference-history
+identifiers, costs, dollar volatility, and eligible EWMAC rules. This command
+first applies the requested account, cost, risk-size, liquidity, data, and
+execution filters and saves that candidate set. It can then run the full
+greedy selection with either multi speed EWMAC or the continuous return TSMOM
+baseline, using three deliberately different dataframe collections:
 
 ``frames_by_history``
-    One daily component-forecast frame per unique ``hist_instr_code``. Several
-    executable symbols can reuse the same history, so these expensive EWMAC
-    calculations are performed once.
+    One daily component-forecast frame or source-neutral history per unique
+    ``hist_instr_code``. Several executable symbols can reuse the same history,
+    so forecast calculations are performed once.
 ``subsystem_reference_frames``
     One daily combined-forecast, equal-weight reference position, historical
     FX, and net-return frame per executable ``symbol``. Symbols sharing history
@@ -100,6 +100,14 @@ from derivatives_bt_engine.calculations.forecast_combination import (
     ForecastCombinationConfig,
     SlowTiltEwmacWeights,
 )
+from derivatives_bt_engine.calculations.continuous_momentum import (
+    DEFAULT_FAST_WINDOW,
+    DEFAULT_SLOW_WINDOW,
+)
+from derivatives_bt_engine.calculations.return_tsmom_forecast import (
+    RETURN_TSMOM_MODEL,
+    build_return_tsmom_forecast,
+)
 from derivatives_bt_engine.data.futures_history import (
     DEFAULT_GLOBEX_DB_PATH,
     DEFAULT_PYSYSTEMTRADE_DB_PATH,
@@ -157,6 +165,7 @@ EWMAC_SLOW_TILT_60_40 = {
     "32/128": 0.30,
     "64/256": 0.30,
 }
+SIGNAL_MODELS = ("multi_ewmac", RETURN_TSMOM_MODEL)
 
 
 def _selection_pysystemtrade_identity(
@@ -610,11 +619,11 @@ def parse_args(argv=None, *, complete_default: bool = False):
     parser.set_defaults(complete=complete_default)
     parser.add_argument(
         "--history-db",
-        "--pysystemtrade-db",
+        "--reference-history-db",
         dest="history_db",
         type=Path,
         default=DEFAULT_PYSYSTEMTRADE_DB_PATH,
-        help="Historical signal database used to construct EWMAC forecasts.",
+        help="Reference signal database used to construct forecasts.",
     )
     parser.add_argument(
         "--ib-history-db",
@@ -622,7 +631,8 @@ def parse_args(argv=None, *, complete_default: bool = False):
         help=(
             "Optional stored IB dated-contract database. When supplied, the "
             "cash P&L and scheduled-selection inputs use offline stitched "
-            "PST/IB history with PST retained before the IB handoff."
+            "reference/IB history with reference data retained before the "
+            "IB handoff."
         ),
     )
     parser.add_argument(
@@ -670,7 +680,7 @@ def parse_args(argv=None, *, complete_default: bool = False):
         default=DEFAULT_GLOBEX_DB_PATH,
         help=(
             "Accepted for command compatibility; v1 selection uses a direct "
-            "PST-to-IB splice and does not insert a Globex segment."
+            "reference-to-IB splice and does not insert a Globex segment."
         ),
     )
     parser.add_argument(
@@ -683,7 +693,7 @@ def parse_args(argv=None, *, complete_default: bool = False):
         "--cache",
         type=Path,
         help=(
-            "Required for complete selection; root for PySystemTrade, stitched "
+            "Required for complete selection; root for reference, stitched "
             "history, and versioned selection backtest caches."
         ),
     )
@@ -709,6 +719,60 @@ def parse_args(argv=None, *, complete_default: bool = False):
         help=(
             "Fixed forecast diversification multiplier applied after the "
             "static eligible-rule weights (default: 1.0)."
+        ),
+    )
+    parser.add_argument(
+        "--signal-model",
+        choices=SIGNAL_MODELS,
+        default="multi_ewmac",
+        help=(
+            "Forecast used by selection and cash replay. 'multi_ewmac' keeps "
+            "the existing cost-gated rule combination; 'return_tsmom' uses "
+            "the original continuous return signal while retaining the same "
+            "selection, roll schedule, buffering, and cost path."
+        ),
+    )
+    parser.add_argument(
+        "--fast-window",
+        type=int,
+        default=DEFAULT_FAST_WINDOW,
+        help=(
+            "Fast return horizon for --signal-model return_tsmom "
+            f"(default: {DEFAULT_FAST_WINDOW} trading days)."
+        ),
+    )
+    parser.add_argument(
+        "--slow-window",
+        type=int,
+        default=DEFAULT_SLOW_WINDOW,
+        help=(
+            "Slow return horizon for --signal-model return_tsmom "
+            f"(default: {DEFAULT_SLOW_WINDOW} trading days)."
+        ),
+    )
+    parser.add_argument(
+        "--vol-fast-window",
+        type=int,
+        help=(
+            "Optional fast volatility horizon for return_tsmom; defaults to "
+            "--fast-window."
+        ),
+    )
+    parser.add_argument(
+        "--vol-slow-window",
+        type=int,
+        help=(
+            "Optional slow volatility horizon for return_tsmom; defaults to "
+            "--slow-window."
+        ),
+    )
+    parser.add_argument(
+        "--regime-discount",
+        type=float,
+        default=0.5,
+        help=(
+            "Return forecast multiplier in correction and rebound regimes "
+            "for return_tsmom (default: 0.5)."
         ),
     )
     parser.add_argument(
@@ -1018,10 +1082,50 @@ def parse_args(argv=None, *, complete_default: bool = False):
     return parser.parse_args(argv)
 
 
-def _default_output_path(output_dir: Path, generated_at: datetime) -> Path:
+def _signal_report_prefix(args: argparse.Namespace) -> str:
+    """Return the stable report prefix for the selected forecast model."""
+    return (
+        "return_tsmom"
+        if args.signal_model == RETURN_TSMOM_MODEL
+        else "multi_speed_ewmac"
+    )
+
+
+def _signal_public_provenance(
+    frame: pl.DataFrame,
+    *,
+    args: argparse.Namespace,
+) -> pl.DataFrame:
+    """Use source neutral reference naming in return TSMOM reports."""
+    if args.signal_model != RETURN_TSMOM_MODEL:
+        return frame
+    provider_column = next(
+        (
+            column
+            for column in frame.columns
+            if column.endswith("_instr_code")
+            and column not in {"hist_instr_code", "ref_instr_code"}
+        ),
+        None,
+    )
+    return (
+        frame.rename({provider_column: "ref_instr_code"})
+        if provider_column is not None
+        else frame
+    )
+
+
+def _default_output_path(
+    output_dir: Path,
+    generated_at: datetime,
+    *,
+    args: argparse.Namespace,
+) -> Path:
     """Return the timestamped candidate path in ``output_dir``."""
     stamp = generated_at.astimezone(REPORT_TIMEZONE).strftime("%Y%m%d_%H%M%S")
-    return output_dir / f"multi_speed_ewmac_selection_candidates_{stamp}.parquet"
+    return output_dir / (
+        f"{_signal_report_prefix(args)}_selection_candidates_{stamp}.parquet"
+    )
 
 
 def _number_token(value: float) -> str:
@@ -1055,8 +1159,20 @@ def _selection_scenario_id(
         f"bm{_optional_number_token(effective_book_margin_pct)}",
         f"wi{_number_token(args.max_weight_idm)}",
         f"st{_number_token(args.score_threshold)}",
-        f"fdm{_number_token(args.forecast_fdm)}",
     ]
+    if args.signal_model == RETURN_TSMOM_MODEL:
+        tokens[:0] = [RETURN_TSMOM_MODEL]
+        tokens.extend((
+            f"fw{args.fast_window}",
+            f"sw{args.slow_window}",
+            f"rd{_number_token(args.regime_discount)}",
+        ))
+        if args.vol_fast_window is not None:
+            tokens.append(f"vfw{args.vol_fast_window}")
+        if args.vol_slow_window is not None:
+            tokens.append(f"vsw{args.vol_slow_window}")
+    else:
+        tokens.append(f"fdm{_number_token(args.forecast_fdm)}")
     if (
         args.low_contract_penalty_scale
         or args.high_contract_penalty_scale
@@ -2267,6 +2383,32 @@ def _final_selection_frame(
             "selection_date": selection_date,
             "selection_equity_usd": selection_equity_usd,
             "selection_rebalance": args.selection_rebalance,
+            "signal_model": args.signal_model,
+            "fast_window": (
+                args.fast_window
+                if args.signal_model == RETURN_TSMOM_MODEL
+                else None
+            ),
+            "slow_window": (
+                args.slow_window
+                if args.signal_model == RETURN_TSMOM_MODEL
+                else None
+            ),
+            "vol_fast_window": (
+                args.vol_fast_window
+                if args.signal_model == RETURN_TSMOM_MODEL
+                else None
+            ),
+            "vol_slow_window": (
+                args.vol_slow_window
+                if args.signal_model == RETURN_TSMOM_MODEL
+                else None
+            ),
+            "regime_discount": (
+                args.regime_discount
+                if args.signal_model == RETURN_TSMOM_MODEL
+                else None
+            ),
             "rank": rank,
             "symbol": symbol,
             "pst_instr_code": source_rows[symbol].get("pst_instr_code"),
@@ -2382,27 +2524,31 @@ def _run_complete_selection(
 
     ``selected`` contains one row per executable symbol from candidate filtering. The
     function first builds reusable history-level forecasts, then creates a
-    symbol-level combined subsystem using that symbol's eligible-rule subset.
+    symbol-level subsystem using the configured signal model. Multi speed
+    EWMAC uses each symbol's eligible-rule subset; return TSMOM uses the
+    configured fast and slow return horizons.
     It persists the daily forecast panel, audit, correlation input, greedy
     trials, and final accepted book.
 
     Returns the final selection Parquet path and its in-memory dataframe.
     """
     logger.info(
-        "portfolio_selection start candidates=%d buffer_size=%s "
-        "buffer_trade_to_edge=%s rebalance_on_roll=%s",
+        "portfolio_selection start candidates=%d signal_model=%s "
+        "buffer_size=%s buffer_trade_to_edge=%s rebalance_on_roll=%s",
         selected.height,
+        args.signal_model,
         args.buffer_size,
         args.buffer_trade_to_edge,
         args.rebalance_on_roll,
     )
     stamp = generated_at.astimezone(REPORT_TIMEZONE).strftime("%Y%m%d_%H%M%S")
+    report_prefix = _signal_report_prefix(args)
     forecasts_path = (
-        output_dir / f"multi_speed_ewmac_selection_forecasts_{stamp}.parquet"
+        output_dir / f"{report_prefix}_selection_forecasts_{stamp}.parquet"
     )
     reference_return_path = (
         output_dir
-        / f"multi_speed_ewmac_selection_subsystem_reference_returns_{stamp}.parquet"
+        / f"{report_prefix}_selection_subsystem_reference_returns_{stamp}.parquet"
     )
     backtest_cache_root = args.cache.expanduser().resolve()
     history_db_path = args.history_db.expanduser().resolve()
@@ -2421,7 +2567,7 @@ def _run_complete_selection(
     # Load a component history only when its derived reference base misses.
     # A daily snapshot run whose rule/history identities are already cached
     # therefore avoids materializing the full EWMAC history universe.
-    frames_by_history: dict[str, pl.DataFrame] = {}
+    frames_by_history: dict[str, pl.DataFrame | FuturesHistory] = {}
     pooled_reference_rules = None
     # v1.0 deliberately fixes the rule mix and FDM. Estimating one FDM from
     # the completed sample would make every historical combined forecast depend
@@ -2459,9 +2605,14 @@ def _run_complete_selection(
     for row in selected.iter_rows(named=True):
         symbol = str(row["symbol"])
         source_rows[symbol] = row
-        rules = _parse_rules(str(row["elig_ewmac_rules"] or ""))
-        forecast_weights = slow_tilt_ewmac_weights(rules)
-        forecast_fdm = float(args.forecast_fdm)
+        if args.signal_model == RETURN_TSMOM_MODEL:
+            rules: list[str] = []
+            forecast_weights = {RETURN_TSMOM_MODEL: 1.0}
+            forecast_fdm = 1.0
+        else:
+            rules = _parse_rules(str(row["elig_ewmac_rules"] or ""))
+            forecast_weights = slow_tilt_ewmac_weights(rules)
+            forecast_fdm = float(args.forecast_fdm)
         required_cost_fields = ("trade_sr", "roll_sr", "ref_ann_rolls", "mult")
         missing_cost_fields = [
             name for name in required_cost_fields if row.get(name) is None
@@ -2495,6 +2646,15 @@ def _run_complete_selection(
             "multiplier": float(row["mult"]),
             "target_abs_forecast": engine.config.target_abs_forecast,
         }
+        if args.signal_model == RETURN_TSMOM_MODEL:
+            reference_base_identity["signal_model"] = args.signal_model
+            reference_base_identity["return_tsmom"] = {
+                "fast_window": args.fast_window,
+                "slow_window": args.slow_window,
+                "vol_fast_window": args.vol_fast_window,
+                "vol_slow_window": args.vol_slow_window,
+                "regime_discount": args.regime_discount,
+            }
         (
             reference_base_path,
             reference_base_manifest_path,
@@ -2625,25 +2785,40 @@ def _run_complete_selection(
                     reference_base_path,
                 )
             else:
-                # Only a true history-base miss combines the component rules.
-                # Snapshot-only reruns reuse the cached forecast and audit.
+                # Only a true history-base miss rebuilds the configured
+                # forecast. Snapshot-only reruns reuse its cached audit.
                 history_code = str(row["hist_instr_code"])
                 if history_code not in frames_by_history:
-                    if pooled_reference_rules is None:
-                        pooled_reference_rules = load_pooled_ewmac_rules(
-                            db_path=history_db_path,
-                            cache_root=backtest_cache_root,
+                    history = reference_history_provider.load(history_code)
+                    if args.signal_model == RETURN_TSMOM_MODEL:
+                        frames_by_history[history_code] = history
+                    else:
+                        if pooled_reference_rules is None:
+                            pooled_reference_rules = load_pooled_ewmac_rules(
+                                db_path=history_db_path,
+                                cache_root=backtest_cache_root,
+                            )
+                        frames_by_history[history_code] = build_ewmac_component_frame(
+                            history,
+                            pooled_reference_rules,
                         )
-                    frames_by_history[history_code] = build_ewmac_component_frame(
-                        reference_history_provider.load(history_code),
-                        pooled_reference_rules,
+                if args.signal_model == RETURN_TSMOM_MODEL:
+                    result = build_return_tsmom_forecast(
+                        frames_by_history[history_code],
+                        fast_window=args.fast_window,
+                        slow_window=args.slow_window,
+                        vol_fast_window=args.vol_fast_window,
+                        vol_slow_window=args.vol_slow_window,
+                        regime_discount=args.regime_discount,
+                        min_valid_observations=args.min_forecast_obs,
                     )
-                result = engine.combine(
-                    frames_by_history[history_code],
-                    rules,
-                    forecast_correlation,
-                    correlation_rules,
-                )
+                else:
+                    result = engine.combine(
+                        frames_by_history[history_code],
+                        rules,
+                        forecast_correlation,
+                        correlation_rules,
+                    )
                 forecast_audit = result.audit
                 fx_error = ""
                 if currency not in fx_history_by_currency:
@@ -2795,7 +2970,10 @@ def _run_complete_selection(
         audit = {
             "symbol": symbol,
             "hist_instr_code": row["hist_instr_code"],
-            "elig_ewmac_rules": ",".join(forecast_weights),
+            "signal_model": args.signal_model,
+            # Preserve the EWMAC rule-cost gate inherited from the reusable
+            # cache even when a return signal drives the actual backtest.
+            "elig_ewmac_rules": str(row.get("elig_ewmac_rules") or ""),
             "forecast_weights": json.dumps(forecast_weights, sort_keys=True),
             "fdm": forecast_fdm,
             "comb_turnover": combined_turnover,
@@ -3253,9 +3431,20 @@ def _run_complete_selection(
                 for symbol in symbols_by_history_code[history_code]:
                     row = source_rows[symbol]
                     try:
-                        rules = _parse_rules(
-                            str(row["elig_ewmac_rules"] or "")
-                        )
+                        if args.signal_model == RETURN_TSMOM_MODEL:
+                            rules = []
+                            stitched_forecast_weights = {
+                                RETURN_TSMOM_MODEL: 1.0
+                            }
+                            stitched_forecast_fdm = 1.0
+                        else:
+                            rules = _parse_rules(
+                                str(row["elig_ewmac_rules"] or "")
+                            )
+                            stitched_forecast_weights = (
+                                slow_tilt_ewmac_weights(rules)
+                            )
+                            stitched_forecast_fdm = args.forecast_fdm
                         currency = str(row["ccy"]).upper()
                         stitched_identity = {
                             "symbol": symbol,
@@ -3264,8 +3453,8 @@ def _run_complete_selection(
                             "history_db": history_db_identity,
                             "currency": currency,
                             "eligible_rules": rules,
-                            "forecast_weights": slow_tilt_ewmac_weights(rules),
-                            "forecast_fdm": args.forecast_fdm,
+                            "forecast_weights": stitched_forecast_weights,
+                            "forecast_fdm": stitched_forecast_fdm,
                             "min_forecast_obs": args.min_forecast_obs,
                             "capital": float(run_config["init_cap_usd"]),
                             "target_vol": float(run_config["target_vol"]),
@@ -3277,6 +3466,15 @@ def _run_complete_selection(
                                 engine.config.target_abs_forecast
                             ),
                         }
+                        if args.signal_model == RETURN_TSMOM_MODEL:
+                            stitched_identity["signal_model"] = args.signal_model
+                            stitched_identity["return_tsmom"] = {
+                                "fast_window": args.fast_window,
+                                "slow_window": args.slow_window,
+                                "vol_fast_window": args.vol_fast_window,
+                                "vol_slow_window": args.vol_slow_window,
+                                "regime_discount": args.regime_discount,
+                            }
                         (
                             stitched_reference_path,
                             stitched_manifest_path,
@@ -3307,21 +3505,35 @@ def _run_complete_selection(
                         )
                         if cached_stitched is None:
                             if stitched_component is None:
-                                if pooled_rules is None:
-                                    pooled_rules = load_pooled_ewmac_rules(
-                                        db_path=history_db_path,
-                                        cache_root=backtest_cache_root,
+                                if args.signal_model == RETURN_TSMOM_MODEL:
+                                    stitched_component = stitched_history
+                                else:
+                                    if pooled_rules is None:
+                                        pooled_rules = load_pooled_ewmac_rules(
+                                            db_path=history_db_path,
+                                            cache_root=backtest_cache_root,
+                                        )
+                                    stitched_component = build_ewmac_component_frame(
+                                        stitched_history,
+                                        pooled_rules,
                                     )
-                                stitched_component = build_ewmac_component_frame(
-                                    stitched_history,
-                                    pooled_rules,
+                            if args.signal_model == RETURN_TSMOM_MODEL:
+                                stitched_result = build_return_tsmom_forecast(
+                                    stitched_component,
+                                    fast_window=args.fast_window,
+                                    slow_window=args.slow_window,
+                                    vol_fast_window=args.vol_fast_window,
+                                    vol_slow_window=args.vol_slow_window,
+                                    regime_discount=args.regime_discount,
+                                    min_valid_observations=args.min_forecast_obs,
                                 )
-                            stitched_result = engine.combine(
-                                stitched_component,
-                                rules,
-                                forecast_correlation,
-                                correlation_rules,
-                            )
+                            else:
+                                stitched_result = engine.combine(
+                                    stitched_component,
+                                    rules,
+                                    forecast_correlation,
+                                    correlation_rules,
+                                )
                             if currency not in fx_history_by_currency:
                                 fx_history_by_currency[currency] = (
                                     None
@@ -3509,6 +3721,14 @@ def _run_complete_selection(
         ),
         "selected_book": list(selection.selected),
     }
+    if args.signal_model == RETURN_TSMOM_MODEL:
+        selection_policy_identity["return_tsmom"] = {
+            "fast_window": args.fast_window,
+            "slow_window": args.slow_window,
+            "vol_fast_window": args.vol_fast_window,
+            "vol_slow_window": args.vol_slow_window,
+            "regime_discount": args.regime_discount,
+        }
     for symbol in cash_symbols:
         candidate = candidate_by_symbol[symbol]
         detail = static_details.get(symbol, {
@@ -3750,6 +3970,27 @@ def _run_complete_selection(
         target_abs_forecast=engine.config.target_abs_forecast,
         allocation_provider=allocation_provider,
     )
+    cash_pnl_long = cash_pnl_long.with_columns(
+        pl.lit(args.signal_model).alias("signal_model"),
+        pl.lit(
+            args.fast_window
+            if args.signal_model == RETURN_TSMOM_MODEL
+            else None,
+            dtype=pl.Int64,
+        ).alias("fast_window"),
+        pl.lit(
+            args.slow_window
+            if args.signal_model == RETURN_TSMOM_MODEL
+            else None,
+            dtype=pl.Int64,
+        ).alias("slow_window"),
+        pl.lit(
+            args.regime_discount
+            if args.signal_model == RETURN_TSMOM_MODEL
+            else None,
+            dtype=pl.Float64,
+        ).alias("regime_discount"),
+    )
     if allocation_provider is not None:
         if allocation_provider.latest_selection is None:
             raise ValueError(
@@ -3800,41 +4041,41 @@ def _run_complete_selection(
         cash_pnl_long,
         initial_capital_usd=float(run_config["init_cap_usd"]),
     )
-    audit_path = output_dir / f"multi_speed_ewmac_selection_forecast_audit_{stamp}.parquet"
-    trials_path = output_dir / f"multi_speed_ewmac_selection_trials_{stamp}.parquet"
+    audit_path = output_dir / f"{report_prefix}_selection_forecast_audit_{stamp}.parquet"
+    trials_path = output_dir / f"{report_prefix}_selection_trials_{stamp}.parquet"
     trial_allocations_path = (
-        output_dir / f"multi_speed_ewmac_selection_trial_allocations_{stamp}.parquet"
+        output_dir / f"{report_prefix}_selection_trial_allocations_{stamp}.parquet"
     )
     selection_passes_path = (
-        output_dir / f"multi_speed_ewmac_selection_passes_{stamp}.parquet"
+        output_dir / f"{report_prefix}_selection_passes_{stamp}.parquet"
     )
-    selection_path = output_dir / f"multi_speed_ewmac_selection_book_{stamp}.parquet"
+    selection_path = output_dir / f"{report_prefix}_selection_book_{stamp}.parquet"
     selection_reviews_path = (
         output_dir
-        / f"multi_speed_ewmac_selection_reviews_{stamp}.parquet"
+        / f"{report_prefix}_selection_reviews_{stamp}.parquet"
     )
     selection_review_instruments_path = (
         output_dir
-        / f"multi_speed_ewmac_selection_review_instruments_{stamp}.parquet"
+        / f"{report_prefix}_selection_review_instruments_{stamp}.parquet"
     )
     selection_review_trials_path = (
         output_dir
-        / f"multi_speed_ewmac_selection_review_trials_{stamp}.parquet"
+        / f"{report_prefix}_selection_review_trials_{stamp}.parquet"
     )
     selection_review_trial_allocations_path = (
         output_dir
-        / f"multi_speed_ewmac_selection_review_trial_allocations_{stamp}.parquet"
+        / f"{report_prefix}_selection_review_trial_allocations_{stamp}.parquet"
     )
     selection_review_final_allocations_path = (
         output_dir
-        / f"multi_speed_ewmac_selection_review_final_allocations_{stamp}.parquet"
+        / f"{report_prefix}_selection_review_final_allocations_{stamp}.parquet"
     )
     cash_pnl_path = (
-        output_dir / f"multi_speed_ewmac_selection_cash_pnl_{stamp}.parquet"
+        output_dir / f"{report_prefix}_selection_cash_pnl_{stamp}.parquet"
     )
     portfolio_curve_path = (
         output_dir
-        / f"multi_speed_ewmac_selection_portfolio_curve_{stamp}.parquet"
+        / f"{report_prefix}_selection_portfolio_curve_{stamp}.parquet"
     )
     # Round only persisted public report copies. Full-precision daily analytical
     # frames remain available in Parquet and calculations above are untouched.
@@ -4071,11 +4312,13 @@ def _run_complete_selection(
             pass_columns.index("symbol") + 1, "pst_instr_code"
         )
         selection_passes = selection_passes.select(pass_columns)
-    public_selection_passes = round_public_report(
-        rename_public_report_columns(selection_passes)
+    public_selection_passes = _signal_public_provenance(
+        round_public_report(rename_public_report_columns(selection_passes)),
+        args=args,
     )
-    public_selection = round_public_report(
-        rename_public_report_columns(final_frame)
+    public_selection = _signal_public_provenance(
+        round_public_report(rename_public_report_columns(final_frame)),
+        args=args,
     )
     public_audit.write_parquet(audit_path)
     public_trials.write_parquet(trials_path)
@@ -4083,17 +4326,18 @@ def _run_complete_selection(
     public_selection_passes.write_parquet(selection_passes_path)
     public_selection.write_parquet(selection_path)
     if allocation_provider is not None:
-        public_selection_reviews = round_public_report(
-            rename_public_report_columns(
+        public_selection_reviews = _signal_public_provenance(
+            round_public_report(rename_public_report_columns(
                 pl.DataFrame(
                     allocation_provider.review_rows,
                     infer_schema_length=None,
                 )
-            )
+            )),
+            args=args,
         )
         public_selection_reviews.write_parquet(selection_reviews_path)
-        public_selection_review_instruments = round_public_report(
-            order_selection_review_instrument_report(
+        public_selection_review_instruments = _signal_public_provenance(
+            round_public_report(order_selection_review_instrument_report(
                 rename_public_report_columns(
                     pl.DataFrame(
                         allocation_provider.review_instrument_rows,
@@ -4107,7 +4351,8 @@ def _run_complete_selection(
                         nulls_last=True,
                     )
                 )
-            )
+            )),
+            args=args,
         )
         public_selection_review_instruments.write_parquet(
             selection_review_instruments_path
@@ -4260,6 +4505,16 @@ def run(
         raise ValueError("--ib-prior-years must be positive")
     if not math.isfinite(args.forecast_fdm) or args.forecast_fdm <= 0:
         raise ValueError("--forecast-fdm must be finite and positive")
+    if args.fast_window <= 0 or args.slow_window <= args.fast_window:
+        raise ValueError(
+            "--fast-window and --slow-window must be positive and increasing"
+        )
+    if args.vol_fast_window is not None and args.vol_fast_window < 2:
+        raise ValueError("--vol-fast-window must be at least 2")
+    if args.vol_slow_window is not None and args.vol_slow_window < 2:
+        raise ValueError("--vol-slow-window must be at least 2")
+    if not math.isfinite(args.regime_discount) or not 0 <= args.regime_discount <= 1:
+        raise ValueError("--regime-discount must be finite and in [0, 1]")
     if (
         args.backtest_start_date is not None
         and args.backtest_end_date is not None
@@ -4392,22 +4647,32 @@ def run(
     output = (
         args.output.expanduser().resolve()
         if args.output is not None
-        else _default_output_path(report_output_dir, generated_at)
+        else _default_output_path(
+            report_output_dir,
+            generated_at,
+            args=args,
+        )
     )
     output.parent.mkdir(parents=True, exist_ok=True)
     screen_path = report_output_dir / (
-        "multi_speed_ewmac_selection_screen_"
+        f"{_signal_report_prefix(args)}_selection_screen_"
         f"{generated_at.astimezone(REPORT_TIMEZONE).strftime('%Y%m%d_%H%M%S')}"
         ".parquet"
     )
     screen_path.parent.mkdir(parents=True, exist_ok=True)
     # Keep the complete instrument universe and its pass/fail reasons so the
     # embedded selection screen is auditable alongside the passing candidates.
-    public_screen = round_public_report(report)
+    public_screen = _signal_public_provenance(
+        round_public_report(report),
+        args=args,
+    )
     public_screen.write_parquet(screen_path)
     # Candidate filtering is a public report boundary. Keep ``selected`` at calculation
     # precision for the optional complete search and round only its report copy.
-    public_selected = round_public_report(selected)
+    public_selected = _signal_public_provenance(
+        round_public_report(selected),
+        args=args,
+    )
     public_selected.write_parquet(output)
     logger.info(
         "selection_candidate_filter complete source=%s screen=%s output=%s "

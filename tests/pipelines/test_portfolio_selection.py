@@ -216,6 +216,9 @@ def test_selection_defaults_to_reviewed_classification_weights():
     assert args.selection_rank_count_ewma_halflife_reviews is None
     assert args.selection_book_score_buffer_pct == pytest.approx(2.0)
     assert args.selection_report_mode == "full"
+    assert args.signal_model == "multi_ewmac"
+    assert args.fast_window == 64
+    assert args.slow_window == 256
     assert args.forecast_fdm == pytest.approx(1.0)
     assert args.ib_prior_years == 3
     assert args.backtest_start_date is None
@@ -229,6 +232,25 @@ def test_selection_rebalance_cadence_is_explicit():
 
     assert monthly.selection_rebalance == "monthly"
     assert yearly.selection_rebalance == "yearly"
+
+
+def test_return_tsmom_signal_model_exposes_parameterized_horizons():
+    """The reference baseline has explicit, reproducible signal settings."""
+    args = parse_args([
+        "--signal-model",
+        "return_tsmom",
+        "--fast-window",
+        "32",
+        "--slow-window",
+        "128",
+        "--regime-discount",
+        "0.25",
+    ])
+
+    assert args.signal_model == "return_tsmom"
+    assert args.fast_window == 32
+    assert args.slow_window == 128
+    assert args.regime_discount == pytest.approx(0.25)
 
 
 def test_selection_compact_report_mode_is_explicit():

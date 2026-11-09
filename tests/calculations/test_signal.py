@@ -43,6 +43,9 @@ from derivatives_bt_engine.calculations.signal_confidence import (
 )
 from derivatives_bt_engine.calculations.signal_config import SignalSpec
 from derivatives_bt_engine.calculations.signal_selection import resolve_trend_direction
+from derivatives_bt_engine.calculations.return_tsmom_forecast import (
+    build_return_tsmom_forecast,
+)
 
 def _price_df(n: int, drift: float, vol: float = 0.01, seed: int = 0) -> pl.DataFrame:
     rng = np.random.default_rng(seed)
@@ -67,6 +70,58 @@ def _price_df_dated(start: date, n: int, drift: float, vol: float = 0.01, seed: 
     close = 100 * np.exp(np.cumsum(rets))
     dates = _trading_dates(start, n)
     return pl.DataFrame({'ts_event': dates, 'close': close})
+
+
+def test_return_tsmom_forecast_keeps_canonical_date_and_roll_schedule():
+    """The selection adapter must not expose the legacy calculation date key."""
+    n = 400
+    dates = _trading_dates(date(2000, 1, 3), n)
+    rng = np.random.default_rng(17)
+    returns = rng.normal(0.0003, 0.01, n)
+    signal_index = 100.0 * np.cumprod(1.0 + returns)
+    point_change = rng.normal(0.02, 1.0, n)
+    panama_price = 1000.0 + np.cumsum(point_change)
+    roll_flags = [index > 0 and index % 60 == 0 for index in range(n)]
+
+    class History:
+        """Minimal source-neutral history used by the forecast adapter."""
+
+        signal = pl.DataFrame({"date": dates})
+        marks = pl.DataFrame({
+            "date": dates,
+            "mark_price": panama_price,
+            "is_roll": roll_flags,
+        })
+
+        @staticmethod
+        def signal_bars() -> pl.DataFrame:
+            return pl.DataFrame({
+                "date": dates,
+                "close": signal_index,
+                "ret_1d": [None, *returns[1:]],
+                "quality_flag": ["ok"] * n,
+            })
+
+        @staticmethod
+        def panama_bars() -> pl.DataFrame:
+            return pl.DataFrame({
+                "date": dates,
+                "close": panama_price,
+                "point_change": [None, *point_change[1:]],
+                "quality_flag": ["ok"] * n,
+            })
+
+    result = build_return_tsmom_forecast(
+        History(),
+        min_valid_observations=100,
+    )
+
+    assert "date" in result.frame.columns
+    assert "ts_event" not in result.frame.columns
+    assert result.frame.get_column("is_roll").to_list() == roll_flags
+    assert result.audit["return_tsmom_fast_window"] == 64
+    assert result.audit["return_tsmom_slow_window"] == 256
+    assert result.audit["forecast_elig"] is True
 
 
 # ── calculate_trend_strength ────────────────────────────────────────────────
