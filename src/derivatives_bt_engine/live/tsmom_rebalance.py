@@ -1106,7 +1106,7 @@ def _fetch_signal_inputs(ib: Optional[IBPySync], instr: dict, config: TsmomLiveC
     'ib': continuous front-month historical bars via IBPySync
     (config.bar_years back) -- NOT the dated/expiry-specific contract,
     which only has bars back to its own listing (well under a year),
-    silently starving the 252-day (ts_slow) momentum calc. signal_symbol
+    silently starving the 256-day (ts_slow) momentum calc. signal_symbol
     lets a recently-listed thin contract (e.g. the CBOT micro grains)
     borrow its full-size sibling's much longer history instead -- same
     quote scale, just a different multiplier -- while sizing/orders still

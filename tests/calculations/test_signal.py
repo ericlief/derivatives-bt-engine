@@ -254,8 +254,8 @@ def test_signal_confidence_defaults_to_high_vol_discount_of_half():
 
 def test_signal_spec_defaults():
     spec = SignalSpec()
-    assert spec.fast_window == 63
-    assert spec.slow_window == 252
+    assert spec.fast_window == 64
+    assert spec.slow_window == 256
     assert spec.vol_fast_window is None
     assert spec.vol_slow_window is None
     assert spec.w_fast == 0.4

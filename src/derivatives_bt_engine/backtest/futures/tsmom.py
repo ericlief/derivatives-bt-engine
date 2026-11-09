@@ -2124,7 +2124,7 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
     FuturesPosition's own roll_date handling, so 'trades' never reports a
     holding period spanning more than one actual futures contract even
     when the signal itself never triggers a close)."""
-    # `full_price_data` stays unbounded -- continuous_momentum's 252-day
+    # `full_price_data` stays unbounded -- continuous_momentum's 256-day
     # lookback needs real history before config.start_date, not just
     # whatever falls inside the requested window. Only the iterated date
     # range (and what counts as a rebalance/MTM date) is bounded.

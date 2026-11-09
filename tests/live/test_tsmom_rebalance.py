@@ -170,8 +170,8 @@ def test_tsmom_live_config_defaults_use_standard_lot_aware_policy():
     assert config.data_source == 'ib'
     assert config.notional_weighting == 'flat'
     assert config.use_idm is True
-    assert config.fast_window == 63
-    assert config.slow_window == 252
+    assert config.fast_window == 64
+    assert config.slow_window == 256
     assert config.vol_fast_window is None
     assert config.vol_slow_window is None
     assert config.discrete_allocation == 'lot-aware'

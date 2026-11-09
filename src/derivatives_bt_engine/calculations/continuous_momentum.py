@@ -14,8 +14,11 @@ from typing import Optional
 import polars as pl
 
 DEFAULT_ANNUALIZATION_DAYS = 252
-DEFAULT_FAST_WINDOW = 63
-DEFAULT_SLOW_WINDOW = 252
+# Align the production return horizons with the slowest canonical EWMAC
+# speed.  Both remain caller-configurable; these values only define the
+# common backtest/live default.
+DEFAULT_FAST_WINDOW = 64
+DEFAULT_SLOW_WINDOW = 256
 
 
 class TrendRegime(str, Enum):

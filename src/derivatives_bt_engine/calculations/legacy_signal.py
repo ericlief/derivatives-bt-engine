@@ -13,13 +13,18 @@ import polars as pl
 
 from derivatives_bt_engine.calculations.continuous_momentum import (
     DEFAULT_ANNUALIZATION_DAYS,
-    DEFAULT_FAST_WINDOW,
-    DEFAULT_SLOW_WINDOW,
 )
+
+
+# This retired compatibility path must not inherit later production-default
+# changes.  Its historical results were defined with 63/252-day horizons.
+LEGACY_FAST_WINDOW = 63
+LEGACY_SLOW_WINDOW = 252
+
 
 def calculate_trend_strength(contract, w3m=0.4, w1y=0.6, discount=0.5,
                               annualization_days=DEFAULT_ANNUALIZATION_DAYS,
-                              fast_window=DEFAULT_FAST_WINDOW, slow_window=DEFAULT_SLOW_WINDOW):
+                              fast_window=LEGACY_FAST_WINDOW, slow_window=LEGACY_SLOW_WINDOW):
     """OLD (now retired) canonical signal function, kept for
     backward-compatible callers/tests only -- calculations.continuous_momentum is
     the current canonical continuous model. Uses log returns while the

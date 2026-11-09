@@ -53,6 +53,10 @@ from derivatives_bt_engine.live.tsmom_rebalance import (
     _resolve_contract,
 )
 from derivatives_bt_engine.calculations.allocation import ALLOCATION_MODES, NOTIONAL_WEIGHTING_SCHEMES
+from derivatives_bt_engine.calculations.continuous_momentum import (
+    DEFAULT_FAST_WINDOW,
+    DEFAULT_SLOW_WINDOW,
+)
 from derivatives_bt_engine.reports.tsmom import (
     PORTFOLIO_COLUMNS,
     SIGNAL_COLUMNS,
@@ -366,10 +370,10 @@ def parse_args():
                    help="Only used with --signal-weighting goulding (default: %(default)s). 'cluster': "
                         "a_Co/a_Re estimated separately per instrument cluster. 'global': one shared "
                         "estimate pooled across every --instruments regardless of cluster")
-    p.add_argument('--fast-window', type=int, default=63,
+    p.add_argument('--fast-window', type=int, default=DEFAULT_FAST_WINDOW,
                    help="Only used with --signal-weighting continuous: continuous_momentum's fast "
                         "return-horizon window in trading days (default: %(default)s)")
-    p.add_argument('--slow-window', type=int, default=252,
+    p.add_argument('--slow-window', type=int, default=DEFAULT_SLOW_WINDOW,
                    help="Only used with --signal-weighting continuous: continuous_momentum's slow "
                         "return-horizon window in trading days (default: %(default)s)")
     p.add_argument('--vol-fast-window', type=int, default=None,

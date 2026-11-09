@@ -40,10 +40,10 @@ class SignalSpec:
     passes the result in, keeping this dataclass itself instrument-
     agnostic and easily reusable/comparable across a parameter sweep.
 
-    Defaults reproduce this project's original, long-standing continuous-
-    model behavior (63/252-day windows, 0.4/0.6 weights, 0.5 discount,
-    252-day annualization); use the goulding() factory below for Goulding
-    et al.'s own 2/12-month parameterization instead of setting
+    Defaults use EWMAC-aligned 64/256-day return horizons with the established
+    0.4/0.6 weights, 0.5 disagreement discount, and 252-day annualization.
+    Both horizons remain explicit parameters. Use the goulding() factory below
+    for Goulding et al.'s own 2/12-month parameterization instead of setting
     fast_months/slow_months by hand."""
     fast_window: int = DEFAULT_FAST_WINDOW
     slow_window: int = DEFAULT_SLOW_WINDOW

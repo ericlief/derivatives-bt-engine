@@ -695,8 +695,8 @@ def test_cluster_cap_config_rejects_invalid_limits():
 
 def test_fast_slow_window_defaults_and_validation():
     config = TsmomBacktestConfig(symbols=['X'])
-    assert config.fast_window == 63
-    assert config.slow_window == 252
+    assert config.fast_window == 64
+    assert config.slow_window == 256
     assert config.vol_fast_window is None
     assert config.vol_slow_window is None
 
