@@ -47,6 +47,33 @@ Omit `--fast-window` and `--slow-window` to use the same 64/256 defaults. For
 a controlled EWMAC comparison, reuse every other argument and change only
 `--signal-model multi_ewmac`.
 
+The Goulding variants use the same pipeline and update their signal once per
+calendar month. Binary Goulding emits full signed forecasts:
+
+```bash
+.venv/bin/futures-build-selection \
+  --input results/multi_speed_ewmac_rule_cache_<timestamp>.parquet \
+  --output-dir results/goulding_baseline \
+  --cache .cache/futures \
+  --signal-model goulding \
+  --goulding-signal-mode binary \
+  --selection-rebalance yearly \
+  --weight-policy topdown_classif \
+  --include-roll-cost-in-score \
+  --initial-capital-usd 100000 \
+  --target-vol 0.20 \
+  --selection-report-mode compact
+```
+
+Change `--goulding-signal-mode binary` to `continuous` to retain the monthly
+signal magnitude and apply the causal pooled forecast scalar. The Goulding
+mixing parameters are estimated within economic subclass using only earlier
+monthly outcomes. `--selection-rebalance` remains the book review cadence;
+the Goulding position forecast itself updates monthly in either mode.
+The selection grid accepts the same `--signal-model` and
+`--goulding-signal-mode` flags and forwards them to every scenario, so book
+constraint sweeps can be run separately for binary and continuous Goulding.
+
 Supplying `--ib-history-db` extends executable cash replay through the stored
 IB tail. Without it, both signal and P&L use the frozen reference history.
 

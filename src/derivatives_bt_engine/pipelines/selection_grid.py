@@ -16,6 +16,7 @@ from datetime import datetime
 import hashlib
 from itertools import product
 import json
+import math
 from pathlib import Path
 import shlex
 import shutil
@@ -36,7 +37,13 @@ from derivatives_bt_engine.data.ib_futures_dataloader import (
 )
 from derivatives_bt_engine.pipelines.portfolio_selection import (
     DEFAULT_SELECTION_MAX_HISTORY_GAP_DAYS,
+    SIGNAL_MODELS,
 )
+from derivatives_bt_engine.calculations.continuous_momentum import (
+    DEFAULT_FAST_WINDOW,
+    DEFAULT_SLOW_WINDOW,
+)
+from derivatives_bt_engine.calculations.goulding import GOULDING_SIGNAL_MODES
 from derivatives_bt_engine.reports.formatting import (
     rename_public_report_columns,
     round_public_report,
@@ -451,6 +458,23 @@ def parse_args(argv=None) -> argparse.Namespace:
             "value or the selection default."
         ),
     )
+    parser.add_argument(
+        "--signal-model",
+        choices=SIGNAL_MODELS,
+        default="multi_ewmac",
+        help="Signal model shared by every grid scenario.",
+    )
+    parser.add_argument(
+        "--goulding-signal-mode",
+        choices=GOULDING_SIGNAL_MODES,
+        default="binary",
+        help="Binary or continuous magnitude for the monthly Goulding model.",
+    )
+    parser.add_argument("--fast-window", type=int, default=DEFAULT_FAST_WINDOW)
+    parser.add_argument("--slow-window", type=int, default=DEFAULT_SLOW_WINDOW)
+    parser.add_argument("--vol-fast-window", type=int)
+    parser.add_argument("--vol-slow-window", type=int)
+    parser.add_argument("--regime-discount", type=float, default=0.5)
     parser.add_argument(
         "--selection-rebalance",
         choices=("static", "yearly", "monthly"),
@@ -868,6 +892,13 @@ def _selection_command(
     ib_ports: list[int] | None,
     ib_client_id: int,
     initial_capital_usd: float | None,
+    signal_model: str,
+    goulding_signal_mode: str,
+    fast_window: int,
+    slow_window: int,
+    vol_fast_window: int | None,
+    vol_slow_window: int | None,
+    regime_discount: float,
 ) -> list[str]:
     """Build one auditable portfolio-selection subprocess command."""
     command = [
@@ -883,6 +914,16 @@ def _selection_command(
         "compact",
         "--history-db",
         str(database),
+        "--signal-model",
+        signal_model,
+        "--goulding-signal-mode",
+        goulding_signal_mode,
+        "--fast-window",
+        str(fast_window),
+        "--slow-window",
+        str(slow_window),
+        "--regime-discount",
+        str(regime_discount),
         "--target-vol",
         str(scenario.target_volatility),
         "--max-instr-margin-pct",
@@ -906,6 +947,10 @@ def _selection_command(
         "--cache",
         str(cache),
     ]
+    if vol_fast_window is not None:
+        command.extend(("--vol-fast-window", str(vol_fast_window)))
+    if vol_slow_window is not None:
+        command.extend(("--vol-slow-window", str(vol_slow_window)))
     if initial_capital_usd is not None:
         command.extend(("--initial-capital-usd", str(initial_capital_usd)))
     if scenario.selection_prefer_full_contracts:
@@ -993,12 +1038,30 @@ def _selection_command(
     return command
 
 
-def _latest_book(scenario_dir: Path) -> Path | None:
-    """Return the newest selection book, including interrupted runs."""
-    books = sorted(scenario_dir.glob("multi_speed_ewmac_selection_book_*.parquet"))
-    if not books:
-        books = sorted(scenario_dir.glob("pysystemtrade_selection_book_*.parquet"))
+def _latest_book(
+    scenario_dir: Path,
+    *,
+    report_prefix: str | None = None,
+) -> Path | None:
+    """Return the newest matching selection book, including interrupted runs."""
+    pattern = (
+        f"{report_prefix}_selection_book_*.parquet"
+        if report_prefix is not None
+        else "*_selection_book_*.parquet"
+    )
+    books = sorted(scenario_dir.glob(pattern))
     return books[-1] if books else None
+
+
+def _command_report_prefix(command: list[str]) -> str:
+    """Resolve the selection artifact prefix from a child command."""
+    signal_model = command[command.index("--signal-model") + 1]
+    if signal_model == "return_tsmom":
+        return "return_tsmom"
+    if signal_model == "goulding":
+        signal_mode = command[command.index("--goulding-signal-mode") + 1]
+        return f"goulding_{signal_mode}"
+    return "multi_speed_ewmac"
 
 
 def _completion_marker(scenario_dir: Path) -> Path:
@@ -1166,15 +1229,16 @@ def _run_history_materialization(
 
 def _core_outputs_for_book(book_path: Path) -> tuple[Path, Path] | None:
     """Resolve the cash and portfolio outputs matching a modern book stamp."""
-    prefix = "multi_speed_ewmac_selection_book_"
-    if not book_path.name.startswith(prefix):
+    separator = "_selection_book_"
+    if separator not in book_path.name:
         return None
-    stamp = book_path.name.removeprefix(prefix).removesuffix(".parquet")
+    report_prefix, stamp = book_path.name.split(separator, maxsplit=1)
+    stamp = stamp.removesuffix(".parquet")
     directory = book_path.parent
     return (
-        directory / f"multi_speed_ewmac_selection_cash_pnl_{stamp}.parquet",
+        directory / f"{report_prefix}_selection_cash_pnl_{stamp}.parquet",
         directory
-        / f"multi_speed_ewmac_selection_portfolio_curve_{stamp}.parquet",
+        / f"{report_prefix}_selection_portfolio_curve_{stamp}.parquet",
     )
 
 
@@ -1580,7 +1644,10 @@ def _execute_selection_scenario(
         status = "failed"
         error = f"selection exited with status {completed.returncode}"
     else:
-        book_path = _latest_book(scenario_dir)
+        book_path = _latest_book(
+            scenario_dir,
+            report_prefix=_command_report_prefix(command),
+        )
         if book_path is None:
             status = "failed"
             error = "selection completed without a book report"
@@ -1734,6 +1801,18 @@ def run(argv=None) -> tuple[Path, Path | None]:
         raise ValueError("--max-workers must be at least one")
     if args.max_source_gap_days < 0:
         raise ValueError("--max-source-gap-days must be nonnegative")
+    if args.fast_window <= 0 or args.slow_window <= args.fast_window:
+        raise ValueError(
+            "--fast-window and --slow-window must be positive and increasing"
+        )
+    if args.vol_fast_window is not None and args.vol_fast_window < 2:
+        raise ValueError("--vol-fast-window must be at least 2")
+    if args.vol_slow_window is not None and args.vol_slow_window < 2:
+        raise ValueError("--vol-slow-window must be at least 2")
+    if not math.isfinite(args.regime_discount) or not (
+        0 <= args.regime_discount <= 1
+    ):
+        raise ValueError("--regime-discount must be finite and in [0, 1]")
     if args.selection_max_history_gap_days < 0:
         raise ValueError("--selection-max-history-gap-days must be nonnegative")
     if (
@@ -1835,6 +1914,13 @@ def run(argv=None) -> tuple[Path, Path | None]:
                 ib_ports=args.ib_port,
                 ib_client_id=args.ib_client_id,
                 initial_capital_usd=args.initial_capital_usd,
+                signal_model=args.signal_model,
+                goulding_signal_mode=args.goulding_signal_mode,
+                fast_window=args.fast_window,
+                slow_window=args.slow_window,
+                vol_fast_window=args.vol_fast_window,
+                vol_slow_window=args.vol_slow_window,
+                regime_discount=args.regime_discount,
             )
         if not args.dry_run:
             if frozen_input is None:
@@ -1883,6 +1969,13 @@ def run(argv=None) -> tuple[Path, Path | None]:
             args.selection_max_history_gap_days
         ),
         "selection_rebalance": args.selection_rebalance,
+        "signal_model": args.signal_model,
+        "goulding_signal_mode": args.goulding_signal_mode,
+        "fast_window": args.fast_window,
+        "slow_window": args.slow_window,
+        "vol_fast_window": args.vol_fast_window,
+        "vol_slow_window": args.vol_slow_window,
+        "regime_discount": args.regime_discount,
     }
     input_fingerprint = hashlib.sha256(
         json.dumps(input_identity, sort_keys=True).encode("utf-8")
@@ -1919,6 +2012,13 @@ def run(argv=None) -> tuple[Path, Path | None]:
             ib_ports=args.ib_port,
             ib_client_id=args.ib_client_id,
             initial_capital_usd=args.initial_capital_usd,
+            signal_model=args.signal_model,
+            goulding_signal_mode=args.goulding_signal_mode,
+            fast_window=args.fast_window,
+            slow_window=args.slow_window,
+            vol_fast_window=args.vol_fast_window,
+            vol_slow_window=args.vol_slow_window,
+            regime_discount=args.regime_discount,
         )
         planned.append((scenario, scenario_dir, command))
 

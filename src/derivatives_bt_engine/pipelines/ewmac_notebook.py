@@ -1326,7 +1326,7 @@ def load_selection_grid_review_instruments(
     scenario_directory = root / scenario_id
     reports = sorted(
         scenario_directory.glob(
-            "multi_speed_ewmac_selection_review_instruments_*.parquet"
+            "*_selection_review_instruments_*.parquet"
         )
     )
     if not reports:
@@ -1873,18 +1873,22 @@ def plot_selection_grid_dashboard(
         """Resolve the latest matching cash and portfolio reports."""
         directory = root / selected
         cash_reports = sorted(
-            directory.glob("multi_speed_ewmac_selection_cash_pnl_*.parquet")
+            directory.glob("*_selection_cash_pnl_*.parquet")
         )
         if not cash_reports:
             raise FileNotFoundError(
                 f"no selection cash-P&L report for scenario {selected!r}"
             )
         cash_path = cash_reports[-1]
-        stamp = cash_path.name.removeprefix(
-            "multi_speed_ewmac_selection_cash_pnl_"
-        ).removesuffix(".parquet")
+        separator = "_selection_cash_pnl_"
+        if separator not in cash_path.name:
+            raise ValueError(
+                f"unexpected selection cash-P&L name: {cash_path.name}"
+            )
+        report_prefix, stamp = cash_path.name.split(separator, maxsplit=1)
+        stamp = stamp.removesuffix(".parquet")
         curve_path = directory / (
-            f"multi_speed_ewmac_selection_portfolio_curve_{stamp}.parquet"
+            f"{report_prefix}_selection_portfolio_curve_{stamp}.parquet"
         )
         if not curve_path.is_file():
             raise FileNotFoundError(

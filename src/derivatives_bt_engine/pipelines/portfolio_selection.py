@@ -4,8 +4,9 @@ The persisted rule-cost cache supplies executable symbols, reference-history
 identifiers, costs, dollar volatility, and eligible EWMAC rules. This command
 first applies the requested account, cost, risk-size, liquidity, data, and
 execution filters and saves that candidate set. It can then run the full
-greedy selection with either multi speed EWMAC or the continuous return TSMOM
-baseline, using three deliberately different dataframe collections:
+greedy selection with multi speed EWMAC, the continuous return TSMOM baseline,
+or monthly Goulding forecasts, using three deliberately different dataframe
+collections:
 
 ``frames_by_history``
     One daily component-forecast frame or source-neutral history per unique
@@ -96,6 +97,7 @@ from derivatives_bt_engine.calculations.volatility import (
 )
 from derivatives_bt_engine.calculations.forecast_combination import (
     CombinedForecastEngine,
+    CombinedForecastResult,
     FixedForecastDiversification,
     ForecastCombinationConfig,
     SlowTiltEwmacWeights,
@@ -107,6 +109,11 @@ from derivatives_bt_engine.calculations.continuous_momentum import (
 from derivatives_bt_engine.calculations.return_tsmom_forecast import (
     RETURN_TSMOM_MODEL,
     build_return_tsmom_forecast,
+)
+from derivatives_bt_engine.calculations.goulding import GOULDING_SIGNAL_MODES
+from derivatives_bt_engine.calculations.goulding_selection_forecast import (
+    GOULDING_MODEL,
+    build_goulding_selection_forecasts,
 )
 from derivatives_bt_engine.data.futures_history import (
     DEFAULT_GLOBEX_DB_PATH,
@@ -165,7 +172,8 @@ EWMAC_SLOW_TILT_60_40 = {
     "32/128": 0.30,
     "64/256": 0.30,
 }
-SIGNAL_MODELS = ("multi_ewmac", RETURN_TSMOM_MODEL)
+SIGNAL_MODELS = ("multi_ewmac", RETURN_TSMOM_MODEL, GOULDING_MODEL)
+DIRECT_TSMOM_MODELS = (RETURN_TSMOM_MODEL, GOULDING_MODEL)
 
 
 def _selection_pysystemtrade_identity(
@@ -728,8 +736,19 @@ def parse_args(argv=None, *, complete_default: bool = False):
         help=(
             "Forecast used by selection and cash replay. 'multi_ewmac' keeps "
             "the existing cost-gated rule combination; 'return_tsmom' uses "
-            "the original continuous return signal while retaining the same "
+            "the original continuous return signal; 'goulding' uses the "
+            "monthly pooled Goulding signal. All models retain the same "
             "selection, roll schedule, buffering, and cost path."
+        ),
+    )
+    parser.add_argument(
+        "--goulding-signal-mode",
+        choices=GOULDING_SIGNAL_MODES,
+        default="binary",
+        help=(
+            "Forecast magnitude for --signal-model goulding: 'binary' emits "
+            "+/-1 directions and 'continuous' retains causally normalized "
+            "monthly magnitude (default: binary)."
         ),
     )
     parser.add_argument(
@@ -1084,11 +1103,11 @@ def parse_args(argv=None, *, complete_default: bool = False):
 
 def _signal_report_prefix(args: argparse.Namespace) -> str:
     """Return the stable report prefix for the selected forecast model."""
-    return (
-        "return_tsmom"
-        if args.signal_model == RETURN_TSMOM_MODEL
-        else "multi_speed_ewmac"
-    )
+    if args.signal_model == RETURN_TSMOM_MODEL:
+        return "return_tsmom"
+    if args.signal_model == GOULDING_MODEL:
+        return f"goulding_{args.goulding_signal_mode}"
+    return "multi_speed_ewmac"
 
 
 def _signal_public_provenance(
@@ -1096,8 +1115,8 @@ def _signal_public_provenance(
     *,
     args: argparse.Namespace,
 ) -> pl.DataFrame:
-    """Use source neutral reference naming in return TSMOM reports."""
-    if args.signal_model != RETURN_TSMOM_MODEL:
+    """Use source neutral reference naming in direct TSMOM reports."""
+    if args.signal_model not in DIRECT_TSMOM_MODELS:
         return frame
     provider_column = next(
         (
@@ -1171,6 +1190,8 @@ def _selection_scenario_id(
             tokens.append(f"vfw{args.vol_fast_window}")
         if args.vol_slow_window is not None:
             tokens.append(f"vsw{args.vol_slow_window}")
+    elif args.signal_model == GOULDING_MODEL:
+        tokens[:0] = [GOULDING_MODEL, args.goulding_signal_mode]
     else:
         tokens.append(f"fdm{_number_token(args.forecast_fdm)}")
     if (
@@ -2409,6 +2430,11 @@ def _final_selection_frame(
                 if args.signal_model == RETURN_TSMOM_MODEL
                 else None
             ),
+            "goulding_signal_mode": (
+                args.goulding_signal_mode
+                if args.signal_model == GOULDING_MODEL
+                else None
+            ),
             "rank": rank,
             "symbol": symbol,
             "pst_instr_code": source_rows[symbol].get("pst_instr_code"),
@@ -2526,7 +2552,8 @@ def _run_complete_selection(
     function first builds reusable history-level forecasts, then creates a
     symbol-level subsystem using the configured signal model. Multi speed
     EWMAC uses each symbol's eligible-rule subset; return TSMOM uses the
-    configured fast and slow return horizons.
+    configured fast and slow return horizons; Goulding uses monthly forecasts
+    with economic-subclass pooled, expanding calibration.
     It persists the daily forecast panel, audit, correlation input, greedy
     trials, and final accepted book.
 
@@ -2601,13 +2628,40 @@ def _run_complete_selection(
     # at the pipeline boundary instead of reopening DuckDB for every symbol.
     fx_history_by_currency: dict[str, pl.DataFrame | None] = {}
     # Preserve each compact candidate row for later sizing and liquidity inputs.
-    source_rows: dict[str, dict[str, object]] = {}
+    source_rows = {
+        str(row["symbol"]): row
+        for row in selected.iter_rows(named=True)
+    }
+    goulding_cluster_by_history: dict[str, str] = {}
+    goulding_reference_histories: dict[str, FuturesHistory] = {}
+    goulding_reference_results: dict[str, CombinedForecastResult] = {}
+    if args.signal_model == GOULDING_MODEL:
+        for row in source_rows.values():
+            history_code = str(row["hist_instr_code"])
+            cluster = str(row["econ_subcls"])
+            prior_cluster = goulding_cluster_by_history.get(history_code)
+            if prior_cluster is not None and prior_cluster != cluster:
+                raise ValueError(
+                    f"{history_code}: inconsistent Goulding economic subclass "
+                    f"{prior_cluster!r} versus {cluster!r}"
+                )
+            goulding_cluster_by_history[history_code] = cluster
+        goulding_reference_histories = {
+            history_code: reference_history_provider.load(history_code)
+            for history_code in sorted(goulding_cluster_by_history)
+        }
+        frames_by_history.update(goulding_reference_histories)
+        goulding_reference_results = build_goulding_selection_forecasts(
+            goulding_reference_histories,
+            goulding_cluster_by_history,
+            signal_mode=args.goulding_signal_mode,
+            min_valid_observations=args.min_forecast_obs,
+        )
     for row in selected.iter_rows(named=True):
         symbol = str(row["symbol"])
-        source_rows[symbol] = row
-        if args.signal_model == RETURN_TSMOM_MODEL:
+        if args.signal_model in DIRECT_TSMOM_MODELS:
             rules: list[str] = []
-            forecast_weights = {RETURN_TSMOM_MODEL: 1.0}
+            forecast_weights = {args.signal_model: 1.0}
             forecast_fdm = 1.0
         else:
             rules = _parse_rules(str(row["elig_ewmac_rules"] or ""))
@@ -2654,6 +2708,17 @@ def _run_complete_selection(
                 "vol_fast_window": args.vol_fast_window,
                 "vol_slow_window": args.vol_slow_window,
                 "regime_discount": args.regime_discount,
+            }
+        elif args.signal_model == GOULDING_MODEL:
+            reference_base_identity["signal_model"] = args.signal_model
+            reference_base_identity["goulding"] = {
+                "signal_mode": args.goulding_signal_mode,
+                "cluster": goulding_cluster_by_history[
+                    str(row["hist_instr_code"])
+                ],
+                "calibration_universe": sorted(
+                    goulding_cluster_by_history.items()
+                ),
             }
         (
             reference_base_path,
@@ -2790,7 +2855,7 @@ def _run_complete_selection(
                 history_code = str(row["hist_instr_code"])
                 if history_code not in frames_by_history:
                     history = reference_history_provider.load(history_code)
-                    if args.signal_model == RETURN_TSMOM_MODEL:
+                    if args.signal_model in DIRECT_TSMOM_MODELS:
                         frames_by_history[history_code] = history
                     else:
                         if pooled_reference_rules is None:
@@ -2812,6 +2877,8 @@ def _run_complete_selection(
                         regime_discount=args.regime_discount,
                         min_valid_observations=args.min_forecast_obs,
                     )
+                elif args.signal_model == GOULDING_MODEL:
+                    result = goulding_reference_results[history_code]
                 else:
                     result = engine.combine(
                         frames_by_history[history_code],
@@ -3038,7 +3105,7 @@ def _run_complete_selection(
     # Component forecasts have now been converted into disk-backed subsystem
     # frames. Releasing them before the cross-instrument stages avoids holding
     # both full representations of the 100+ instrument universe.
-    del frames_by_history
+    del frames_by_history, goulding_reference_results
     gc.collect()
 
     audit_frame = pl.DataFrame(audit_rows, infer_schema_length=None).sort("symbol")
@@ -3250,6 +3317,30 @@ def _run_complete_selection(
         }
         for symbol, history_code in stitched_history_code_by_symbol.items():
             symbols_by_history_code[history_code].append(symbol)
+        if args.signal_model == GOULDING_MODEL:
+            for history_code, symbols in symbols_by_history_code.items():
+                clusters = {
+                    str(source_rows[symbol]["econ_subcls"])
+                    for symbol in symbols
+                }
+                if len(clusters) != 1:
+                    raise ValueError(
+                        f"{history_code}: stitched Goulding history maps to "
+                        f"multiple economic subclasses {sorted(clusters)}"
+                    )
+                cluster = clusters.pop()
+                prior_cluster = goulding_cluster_by_history.get(history_code)
+                if prior_cluster is not None and prior_cluster != cluster:
+                    raise ValueError(
+                        f"{history_code}: inconsistent stitched Goulding "
+                        f"economic subclass {prior_cluster!r} versus "
+                        f"{cluster!r}"
+                    )
+                goulding_cluster_by_history[history_code] = cluster
+                if history_code not in goulding_reference_histories:
+                    goulding_reference_histories[history_code] = (
+                        reference_history_provider.load(history_code)
+                    )
         # Start from the valid long-reference fallback. Each successfully
         # stitched history replaces only its own symbols with a disk-backed
         # scan, so 100+ combined component frames never coexist in memory.
@@ -3427,14 +3518,27 @@ def _run_complete_selection(
                     ),
                     "live_tail_start": live_tail_start,
                 }
+                stitched_goulding_result = None
+                if args.signal_model == GOULDING_MODEL:
+                    stitched_goulding_result = (
+                        build_goulding_selection_forecasts(
+                            {history_code: stitched_history},
+                            goulding_cluster_by_history,
+                            calibration_histories=(
+                                goulding_reference_histories
+                            ),
+                            signal_mode=args.goulding_signal_mode,
+                            min_valid_observations=args.min_forecast_obs,
+                        )[history_code]
+                    )
                 stitched_symbols: list[str] = []
                 for symbol in symbols_by_history_code[history_code]:
                     row = source_rows[symbol]
                     try:
-                        if args.signal_model == RETURN_TSMOM_MODEL:
+                        if args.signal_model in DIRECT_TSMOM_MODELS:
                             rules = []
                             stitched_forecast_weights = {
-                                RETURN_TSMOM_MODEL: 1.0
+                                args.signal_model: 1.0
                             }
                             stitched_forecast_fdm = 1.0
                         else:
@@ -3475,6 +3579,17 @@ def _run_complete_selection(
                                 "vol_slow_window": args.vol_slow_window,
                                 "regime_discount": args.regime_discount,
                             }
+                        elif args.signal_model == GOULDING_MODEL:
+                            stitched_identity["signal_model"] = args.signal_model
+                            stitched_identity["goulding"] = {
+                                "signal_mode": args.goulding_signal_mode,
+                                "cluster": goulding_cluster_by_history[
+                                    history_code
+                                ],
+                                "calibration_universe": sorted(
+                                    goulding_cluster_by_history.items()
+                                ),
+                            }
                         (
                             stitched_reference_path,
                             stitched_manifest_path,
@@ -3505,7 +3620,7 @@ def _run_complete_selection(
                         )
                         if cached_stitched is None:
                             if stitched_component is None:
-                                if args.signal_model == RETURN_TSMOM_MODEL:
+                                if args.signal_model in DIRECT_TSMOM_MODELS:
                                     stitched_component = stitched_history
                                 else:
                                     if pooled_rules is None:
@@ -3527,6 +3642,9 @@ def _run_complete_selection(
                                     regime_discount=args.regime_discount,
                                     min_valid_observations=args.min_forecast_obs,
                                 )
+                            elif args.signal_model == GOULDING_MODEL:
+                                assert stitched_goulding_result is not None
+                                stitched_result = stitched_goulding_result
                             else:
                                 stitched_result = engine.combine(
                                     stitched_component,
@@ -3728,6 +3846,13 @@ def _run_complete_selection(
             "vol_fast_window": args.vol_fast_window,
             "vol_slow_window": args.vol_slow_window,
             "regime_discount": args.regime_discount,
+        }
+    elif args.signal_model == GOULDING_MODEL:
+        selection_policy_identity["goulding"] = {
+            "signal_mode": args.goulding_signal_mode,
+            "calibration_universe": sorted(
+                goulding_cluster_by_history.items()
+            ),
         }
     for symbol in cash_symbols:
         candidate = candidate_by_symbol[symbol]
@@ -3990,6 +4115,12 @@ def _run_complete_selection(
             else None,
             dtype=pl.Float64,
         ).alias("regime_discount"),
+        pl.lit(
+            args.goulding_signal_mode
+            if args.signal_model == GOULDING_MODEL
+            else None,
+            dtype=pl.Utf8,
+        ).alias("goulding_signal_mode"),
     )
     if allocation_provider is not None:
         if allocation_provider.latest_selection is None:

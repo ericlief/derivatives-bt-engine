@@ -41,6 +41,11 @@ PUBLIC_REPORT_RENAMES = {
     "number_economic_subclasses": "n_econ_subcls",
     "selected_symbols": "symbols",
     "combined_forecast": "comb_fcst",
+    "forecast_month": "fcst_month",
+    "goulding_signal_mode": "g_mode",
+    "goulding_fast_months": "g_fast_months",
+    "goulding_slow_months": "g_slow_months",
+    "goulding_cluster": "g_cluster",
     "point_change": "pt_change",
     "point_vol": "pt_vol",
     "combined_nulls": "comb_nulls",
@@ -422,6 +427,11 @@ CASH_PNL_REPORT_PRIORITY = (
     "cum_total_cost_pct",
 )
 CASH_PNL_REPORT_PARAMS = (
+    "signal_model",
+    "g_mode",
+    "fast_window",
+    "slow_window",
+    "regime_discount",
     "weight",
     "limit_weight",
     "idm",
