@@ -783,9 +783,23 @@ def plot_selection_pnl_attribution(
             pl.col("asset_class").fill_null("unclassified"),
             pl.col("economic_subclass").fill_null("unclassified"),
         )
+    elif {"asset_cls", "econ_subcls"}.issubset(frame.columns):
+        # Public reports use the centralized compact schema; normalize those
+        # names here so all three attribution panels use the same grouping API.
+        frame = frame.with_columns(
+            pl.col("asset_cls").fill_null("unclassified").alias("asset_class"),
+            pl.col("econ_subcls")
+            .fill_null("unclassified")
+            .alias("economic_subclass"),
+        )
     else:
-        classification_key = (
-            "hist_instr_code" if "hist_instr_code" in frame.columns else "symbol"
+        classification_key = next(
+            (
+                column
+                for column in ("ref_instr_code", "hist_instr_code", "symbol")
+                if column in frame.columns
+            ),
+            "symbol",
         )
         classifications = load_pysystemtrade_instrument_classification().rename(
             {"instrument_code": "classification_key"}
