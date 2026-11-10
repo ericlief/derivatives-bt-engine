@@ -845,7 +845,9 @@ def build_executable_cash_pnl_curve(
         The first row has no prior target and is null. It is exposed as
         ``track_err_ann`` and ``track_err_ann_pct_cap``. Returned dataframe
         columns use the centralized compact report vocabulary (for example,
-        ``avg_pos``, ``ref_norm_pos``, and ``exec_con``).
+        ``avg_pos``, ``ref_norm_pos``, and ``exec_con``). ``pnl_valid`` is
+        false whenever a nonzero held position lacks its market P&L, even
+        though separately known trade or roll costs remain in ``net_pnl``.
 
     Notes
     -----
@@ -1111,6 +1113,17 @@ def build_executable_cash_pnl_curve(
             (
                 pl.col("cash_net_pnl_usd").is_not_null()
                 & pl.col("cash_net_pnl_usd").is_finite()
+                & (
+                    # A flat opening row has no market P&L to observe, so its
+                    # known entry cost is complete. Once contracts are held,
+                    # however, costs alone cannot make a row valid when the
+                    # same-contract point move or FX conversion is missing.
+                    (pl.col("held_cons").fill_null(0) == 0)
+                    | (
+                        pl.col("cash_gross_pnl_usd").is_not_null()
+                        & pl.col("cash_gross_pnl_usd").is_finite()
+                    )
+                )
             ).alias("cash_pnl_valid"),
             # Cash and subsystem return columns both use percentage points:
             # USD contribution divided by the relevant capital base, then ×100.
@@ -1274,7 +1287,8 @@ def build_equity_scaled_cash_pnl_curve(
         the equity-scaled causal replay. ``vol_scalar`` is the executable daily
         average-contract scalar; ``init_vol_scalar`` preserves its
         initial-capital baseline and ``cap_scalar`` reports the common equity
-        scaling factor.
+        scaling factor. ``pnl_valid`` requires a finite gross observation when
+        contracts were held; known costs remain recorded on an invalid row.
 
     Notes
     -----
@@ -1622,6 +1636,9 @@ def build_equity_scaled_cash_pnl_curve(
             roll_cost = -roll_contracts * roll_cost_per_contract
             gross_pnl_or_zero = gross_pnl if gross_pnl is not None else 0.0
             net_pnl = gross_pnl_or_zero + trade_cost + roll_cost
+            gross_pnl_complete = (
+                held_contracts in (None, 0) or gross_pnl is not None
+            )
 
             gross_pct = (
                 gross_pnl_or_zero / prior_gross_equity * 100.0
@@ -1713,6 +1730,7 @@ def build_equity_scaled_cash_pnl_curve(
                 "cum_net_pct": state["cumulative_net_pct"],
                 "pnl_valid": (
                     math.isfinite(net_pnl)
+                    and gross_pnl_complete
                     and (
                         allocation_provider is None
                         or selection_active

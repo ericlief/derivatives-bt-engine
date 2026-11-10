@@ -361,6 +361,88 @@ def test_ann_pct_vol_is_null_without_raw_contract_close():
     assert result.get_column("track_err_ann_pct_cap").null_count() == 1
 
 
+def test_roll_cost_does_not_validate_missing_held_contract_pnl():
+    """A known roll cost cannot complete an unknown held-contract return."""
+    frame = pl.DataFrame({
+        "date": [date(2024, 1, day) for day in range(1, 4)],
+        "close": [100.0, 101.0, 101.0],
+        "contract_close": [100.0, 101.0, 110.0],
+        "point_change": [None, 1.0, None],
+        "point_vol": [1.0] * 3,
+        "combined_forecast": [1.0] * 3,
+        "fx_to_usd": [1.0] * 3,
+        "is_roll": [False, False, True],
+        "quality_flag": ["initial_observation", "", "missing_ref"],
+    })
+
+    result = build_executable_cash_pnl_curve(
+        frame,
+        capital=1_000.0,
+        target_vol=0.20,
+        weight=0.50,
+        idm=1.0,
+        multiplier=10.0,
+        trade_cost_usd_per_con=2.0,
+        roll_cost_usd_per_con=3.0,
+        annualization_days=4,
+        buffer_size=0.0,
+    )
+
+    # The initial entry is complete because no contracts were held during its
+    # missing first move. The roll row retains its known cost but is invalid
+    # because five held contracts have no same-contract point change.
+    assert result.get_column("held_con").to_list() == [None, 5, 5]
+    assert result.get_column("roll_con").to_list() == pytest.approx(
+        [0.0, 0.0, 5.0]
+    )
+    assert result.get_column("roll_cost").to_list() == pytest.approx(
+        [0.0, 0.0, -15.0]
+    )
+    assert result.get_column("gross_pnl").to_list() == [None, 50.0, None]
+    assert result.get_column("net_pnl").to_list() == pytest.approx(
+        [-10.0, 50.0, -15.0]
+    )
+    assert result.get_column("pnl_valid").to_list() == [True, True, False]
+    assert result.get_column("hist_quality").to_list()[-1] == "missing_ref"
+
+
+def test_equity_scaled_roll_cost_does_not_validate_missing_gross_pnl():
+    """The stateful replay applies the same held-return validity rule."""
+    dates = [date(2024, 1, day) for day in range(1, 4)]
+    cash_input = pl.DataFrame({
+        "date": dates,
+        "symbol": ["A"] * 3,
+        "weight": [1.0] * 3,
+        "limit_weight": [1.0] * 3,
+        "idm": [1.0] * 3,
+        "comb_fcst": [1.0] * 3,
+        "pt_change": [None, 1.0, None],
+        "hist_quality": ["initial_observation", "", "missing_ref"],
+        "fx_to_usd": [1.0] * 3,
+        "ann_dvol": [20.0] * 3,
+        "buf_size": [0.0] * 3,
+        "buf_trade_to_edge": [True] * 3,
+        "rebalance_on_roll": [True] * 3,
+        "roll_event": [False, False, True],
+        "trade_cost_per_con": [2.0] * 3,
+        "roll_cost_per_con": [3.0] * 3,
+    })
+
+    result = build_equity_scaled_cash_pnl_curve(
+        cash_input,
+        initial_capital_usd=1_000.0,
+        target_vol=0.20,
+        multiplier_by_symbol={"A": 10.0},
+    )
+
+    assert result.get_column("held_con").to_list()[2] != 0
+    assert result.get_column("roll_con").to_list()[2] > 0
+    assert result.get_column("gross_pnl").to_list()[2] is None
+    assert result.get_column("roll_cost").to_list()[2] < 0
+    assert result.get_column("pnl_valid").to_list() == [True, True, False]
+    assert result.get_column("hist_quality").to_list()[2] == "missing_ref"
+
+
 def test_fixed_capital_portfolio_curve_reports_percentage_points():
     """Portfolio USD flows and instrument contributions share account capital."""
     cash = pl.DataFrame({

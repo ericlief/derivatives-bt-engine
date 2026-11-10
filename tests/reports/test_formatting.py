@@ -201,6 +201,7 @@ def test_cash_pnl_report_orders_primary_fields_before_params_and_audit():
         "cash_trade_cost_usd": [-1.0],
         "cash_roll_cost_usd": [0.0],
         "cash_pnl_valid": [True],
+        "quality_flag": ["missing_ref"],
     })
 
     public = order_cash_pnl_report(rename_public_report_columns(report))
@@ -213,6 +214,8 @@ def test_cash_pnl_report_orders_primary_fields_before_params_and_audit():
         "cum_gross_pct", "cum_net_pct", "trade_cost", "roll_cost", "weight",
         "hist_instr_code",
     ]
+    assert public.get_column("hist_quality").to_list() == ["missing_ref"]
+    assert "quality_flag" not in public.columns
 
 
 def test_public_report_renames_buffer_parameters_at_boundary():

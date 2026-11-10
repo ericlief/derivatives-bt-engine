@@ -170,10 +170,12 @@ logger = logging.getLogger(__name__)
 REPORT_TIMEZONE = ZoneInfo("America/New_York")
 DEFAULT_SELECTION_MAX_HISTORY_GAP_DAYS = 31
 
-# Bump this when reference-curve or executable cash-curve semantics change.
-# The version is part of both the directory and content identity, allowing old
-# variants to remain on disk without being accepted by newer calculations.
+# Bump the base version for changes shared by every selection artifact. Use an
+# artifact-specific identity version for narrower changes so stable expensive
+# inputs remain reusable. The base version is part of the directory and content
+# identity, allowing old variants to remain without being accepted as current.
 SELECTION_BACKTEST_CACHE_VERSION = 1
+CASH_PNL_CACHE_VERSION = 2
 GOULDING_FORECAST_CACHE_VERSION = 2
 RETURN_TSMOM_SCALAR_CACHE_VERSION = 1
 
@@ -4339,6 +4341,9 @@ def _run_complete_selection(
             "buffer_size": args.buffer_size,
             "buffer_trade_to_edge": args.buffer_trade_to_edge,
             "rebalance_on_roll": args.rebalance_on_roll,
+            # Keep cash-only accounting changes from invalidating the much
+            # more expensive reference and forecast artifacts.
+            "cash_pnl_version": CASH_PNL_CACHE_VERSION,
         }
         (
             cash_path,
@@ -4365,6 +4370,7 @@ def _run_complete_selection(
                 "held_con",
                 "net_pnl",
                 "pnl_valid",
+                "hist_quality",
             ),
         )
         if cached_cash is None:
@@ -4429,6 +4435,9 @@ def _run_complete_selection(
                 "con_px",
                 "comb_fcst",
                 "pt_change",
+                # In particular, retain ``missing_ref`` on contract switches
+                # whose new dated contract has no prior same-contract mark.
+                "hist_quality",
                 "pt_vol",
                 "fx_to_usd",
                 "fx_pair",
