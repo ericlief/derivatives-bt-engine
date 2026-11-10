@@ -110,7 +110,11 @@ from derivatives_bt_engine.calculations.return_tsmom_forecast import (
     RETURN_TSMOM_MODEL,
     build_return_tsmom_forecast,
 )
-from derivatives_bt_engine.calculations.goulding import GOULDING_SIGNAL_MODES
+from derivatives_bt_engine.calculations.goulding import (
+    GOULDING_FAST_MONTHS,
+    GOULDING_SIGNAL_MODES,
+    GOULDING_SLOW_MONTHS,
+)
 from derivatives_bt_engine.calculations.goulding_selection_forecast import (
     GOULDING_MODEL,
     build_goulding_selection_forecasts,
@@ -161,6 +165,7 @@ DEFAULT_SELECTION_MAX_HISTORY_GAP_DAYS = 31
 # The version is part of both the directory and content identity, allowing old
 # variants to remain on disk without being accepted by newer calculations.
 SELECTION_BACKTEST_CACHE_VERSION = 1
+GOULDING_FORECAST_CACHE_VERSION = 1
 
 # Production-inspired ordinary-EWMAC template. The two slowest rules receive
 # 60% in total and the three faster rules receive 40%. Rules removed by the
@@ -380,6 +385,186 @@ def _cached_forecast_audit(
         if isinstance(cached_date, str):
             audit[column] = date.fromisoformat(cached_date)
     return audit
+
+
+def _goulding_forecast_cache_spec(
+    cache_root: Path,
+    *,
+    artifact: str,
+    history_code: str,
+    history_db_identity: dict[str, object],
+    cluster_by_history: dict[str, str],
+    signal_mode: str,
+    min_valid_observations: int,
+    source_identity: dict[str, object] | None = None,
+) -> tuple[Path, Path, dict[str, object], str]:
+    """Resolve one pooled Goulding forecast cache entry.
+
+    The complete calibration universe is part of the identity because a
+    change to any member can change pooled mixing parameters and continuous
+    forecast normalization for every target history.
+    """
+    identity: dict[str, object] = {
+        "forecast_cache_version": GOULDING_FORECAST_CACHE_VERSION,
+        "signal_model": GOULDING_MODEL,
+        "signal_mode": signal_mode,
+        "fast_months": GOULDING_FAST_MONTHS,
+        "slow_months": GOULDING_SLOW_MONTHS,
+        "min_valid_observations": min_valid_observations,
+        "history_db": history_db_identity,
+        "hist_instr_code": history_code,
+        "cluster": cluster_by_history[history_code],
+        "calibration_universe": sorted(cluster_by_history.items()),
+    }
+    if source_identity is not None:
+        identity["source"] = source_identity
+    return _selection_backtest_cache_artifact(
+        cache_root,
+        artifact=artifact,
+        symbol=history_code,
+        identity=identity,
+    )
+
+
+def _goulding_forecast_cache_complete(
+    curve_path: Path,
+    manifest_path: Path,
+    expected_identity: dict[str, object],
+) -> bool:
+    """Check the atomic completion marker without loading the forecast frame."""
+    if not curve_path.is_file() or not manifest_path.is_file():
+        return False
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
+    if not isinstance(manifest, dict):
+        return False
+    if (
+        manifest.get("identity") != expected_identity
+        or not isinstance(manifest.get("forecast_audit"), dict)
+    ):
+        return False
+    try:
+        columns = set(pl.scan_parquet(curve_path).collect_schema().names())
+    except (OSError, ValueError, pl.exceptions.PolarsError):
+        return False
+    return {
+        "date",
+        "combined_forecast",
+        "forecast_valid",
+        "point_vol",
+        "point_change",
+    } <= columns
+
+
+def _load_goulding_forecast_result(
+    cache_spec: tuple[Path, Path, dict[str, object], str],
+) -> CombinedForecastResult:
+    """Load a cached forecast frame and its typed eligibility audit."""
+    curve_path, manifest_path, identity, _ = cache_spec
+    cached = _load_selection_backtest_curve(
+        curve_path,
+        manifest_path,
+        expected_identity=identity,
+        required_columns=(
+            "date",
+            "combined_forecast",
+            "forecast_valid",
+            "point_vol",
+            "point_change",
+        ),
+    )
+    if cached is None:
+        raise RuntimeError(
+            f"Goulding forecast cache entry is missing or invalid: {curve_path}"
+        )
+    frame, manifest = cached
+    audit = _cached_forecast_audit(manifest)
+    if audit is None:
+        raise RuntimeError(
+            f"Goulding forecast cache has no audit metadata: {manifest_path}"
+        )
+    return CombinedForecastResult(
+        frame=frame,
+        weights={GOULDING_MODEL: 1.0},
+        fdm=1.0,
+        audit=audit,
+    )
+
+
+def _ensure_goulding_reference_forecast_cache(
+    cache_root: Path,
+    *,
+    history_provider: PysystemtradeHistoryProvider,
+    history_db_identity: dict[str, object],
+    cluster_by_history: dict[str, str],
+    signal_mode: str,
+    min_valid_observations: int,
+) -> dict[str, tuple[Path, Path, dict[str, object], str]]:
+    """Reuse pooled reference forecasts, building the universe only on misses."""
+    cache_specs = {
+        history_code: _goulding_forecast_cache_spec(
+            cache_root,
+            artifact="goulding_reference_forecast",
+            history_code=history_code,
+            history_db_identity=history_db_identity,
+            cluster_by_history=cluster_by_history,
+            signal_mode=signal_mode,
+            min_valid_observations=min_valid_observations,
+        )
+        for history_code in sorted(cluster_by_history)
+    }
+    missing = [
+        history_code
+        for history_code, (curve_path, manifest_path, identity, _) in (
+            cache_specs.items()
+        )
+        if not _goulding_forecast_cache_complete(
+            curve_path,
+            manifest_path,
+            identity,
+        )
+    ]
+    if not missing:
+        logger.info(
+            "goulding_forecast_cache hit artifact=reference histories=%d",
+            len(cache_specs),
+        )
+        return cache_specs
+
+    logger.info(
+        "goulding_forecast_cache build artifact=reference histories=%d "
+        "missing=%d",
+        len(cache_specs),
+        len(missing),
+    )
+    histories = {
+        history_code: history_provider.load(history_code)
+        for history_code in sorted(cluster_by_history)
+    }
+    results = build_goulding_selection_forecasts(
+        histories,
+        cluster_by_history,
+        signal_mode=signal_mode,
+        min_valid_observations=min_valid_observations,
+    )
+    for history_code in missing:
+        curve_path, manifest_path, identity, cache_key = cache_specs[
+            history_code
+        ]
+        result = results[history_code]
+        _write_selection_backtest_curve(
+            result.frame,
+            curve_path,
+            manifest_path,
+            identity=identity,
+            cache_key=cache_key,
+            metadata={"forecast_audit": result.audit},
+        )
+    del results, histories
+    gc.collect()
+    return cache_specs
 
 
 def slow_tilt_ewmac_weights(
@@ -2634,8 +2819,9 @@ def _run_complete_selection(
         for row in selected.iter_rows(named=True)
     }
     goulding_cluster_by_history: dict[str, str] = {}
-    goulding_reference_histories: dict[str, FuturesHistory] = {}
-    goulding_reference_results: dict[str, CombinedForecastResult] = {}
+    goulding_reference_forecast_specs: dict[
+        str, tuple[Path, Path, dict[str, object], str]
+    ] = {}
     if args.signal_model == GOULDING_MODEL:
         for row in source_rows.values():
             history_code = str(row["hist_instr_code"])
@@ -2647,17 +2833,28 @@ def _run_complete_selection(
                     f"{prior_cluster!r} versus {cluster!r}"
                 )
             goulding_cluster_by_history[history_code] = cluster
-        goulding_reference_histories = {
-            history_code: reference_history_provider.load(history_code)
-            for history_code in sorted(goulding_cluster_by_history)
-        }
-        frames_by_history.update(goulding_reference_histories)
-        goulding_reference_results = build_goulding_selection_forecasts(
-            goulding_reference_histories,
-            goulding_cluster_by_history,
-            signal_mode=args.goulding_signal_mode,
-            min_valid_observations=args.min_forecast_obs,
+        goulding_reference_forecast_specs = (
+            _ensure_goulding_reference_forecast_cache(
+                backtest_cache_root,
+                history_provider=reference_history_provider,
+                history_db_identity=history_db_identity,
+                cluster_by_history=goulding_cluster_by_history,
+                signal_mode=args.goulding_signal_mode,
+                min_valid_observations=args.min_forecast_obs,
+            )
         )
+
+        def load_goulding_reference_histories() -> dict[str, FuturesHistory]:
+            """Load the frozen calibration universe only for stitched misses."""
+            return {
+                history_code: reference_history_provider.load(history_code)
+                for history_code in sorted(goulding_cluster_by_history)
+            }
+
+    else:
+        def load_goulding_reference_histories() -> dict[str, FuturesHistory]:
+            """Return no histories when Goulding calibration is not active."""
+            return {}
     for row in selected.iter_rows(named=True):
         symbol = str(row["symbol"])
         if args.signal_model in DIRECT_TSMOM_MODELS:
@@ -2879,7 +3076,9 @@ def _run_complete_selection(
                         min_valid_observations=args.min_forecast_obs,
                     )
                 elif args.signal_model == GOULDING_MODEL:
-                    result = goulding_reference_results[history_code]
+                    result = _load_goulding_forecast_result(
+                        goulding_reference_forecast_specs[history_code]
+                    )
                 else:
                     result = engine.combine(
                         frames_by_history[history_code],
@@ -3106,7 +3305,7 @@ def _run_complete_selection(
     # Component forecasts have now been converted into disk-backed subsystem
     # frames. Releasing them before the cross-instrument stages avoids holding
     # both full representations of the 100+ instrument universe.
-    del frames_by_history, goulding_reference_results
+    del frames_by_history
     gc.collect()
 
     audit_frame = pl.DataFrame(audit_rows, infer_schema_length=None).sort("symbol")
@@ -3289,6 +3488,9 @@ def _run_complete_selection(
         # The pooled rule objects and stitched component frames are needed only
         # when at least one content-addressed stitched curve misses its cache.
         pooled_rules = None
+        goulding_calibration_histories_for_stitching: (
+            dict[str, FuturesHistory] | None
+        ) = None
         instrument_rows = load_pysystemtrade_ib_instruments(
             db_path=history_db_path,
             mapping_path=args.broker_mapping.expanduser().resolve(),
@@ -3338,10 +3540,6 @@ def _run_complete_selection(
                         f"{cluster!r}"
                     )
                 goulding_cluster_by_history[history_code] = cluster
-                if history_code not in goulding_reference_histories:
-                    goulding_reference_histories[history_code] = (
-                        reference_history_provider.load(history_code)
-                    )
         # Start from the valid long-reference fallback. Each successfully
         # stitched history replaces only its own symbols with a disk-backed
         # scan, so 100+ combined component frames never coexist in memory.
@@ -3521,17 +3719,70 @@ def _run_complete_selection(
                 }
                 stitched_goulding_result = None
                 if args.signal_model == GOULDING_MODEL:
-                    stitched_goulding_result = (
-                        build_goulding_selection_forecasts(
-                            {history_code: stitched_history},
-                            goulding_cluster_by_history,
-                            calibration_histories=(
-                                goulding_reference_histories
-                            ),
-                            signal_mode=args.goulding_signal_mode,
-                            min_valid_observations=args.min_forecast_obs,
-                        )[history_code]
+                    stitched_forecast_spec = _goulding_forecast_cache_spec(
+                        backtest_cache_root,
+                        artifact="goulding_stitched_forecast",
+                        history_code=history_code,
+                        history_db_identity=history_db_identity,
+                        cluster_by_history=goulding_cluster_by_history,
+                        signal_mode=args.goulding_signal_mode,
+                        min_valid_observations=args.min_forecast_obs,
+                        source_identity=stitched_source_identity,
                     )
+                    (
+                        stitched_forecast_path,
+                        stitched_forecast_manifest_path,
+                        stitched_forecast_identity,
+                        stitched_forecast_cache_key,
+                    ) = stitched_forecast_spec
+                    if _goulding_forecast_cache_complete(
+                        stitched_forecast_path,
+                        stitched_forecast_manifest_path,
+                        stitched_forecast_identity,
+                    ):
+                        stitched_goulding_result = (
+                            _load_goulding_forecast_result(
+                                stitched_forecast_spec
+                            )
+                        )
+                        logger.info(
+                            "goulding_forecast_cache hit artifact=stitched "
+                            "hist_instr_code=%s key=%s",
+                            history_code,
+                            stitched_forecast_cache_key,
+                        )
+                    else:
+                        if goulding_calibration_histories_for_stitching is None:
+                            goulding_calibration_histories_for_stitching = (
+                                load_goulding_reference_histories()
+                            )
+                        stitched_goulding_result = (
+                            build_goulding_selection_forecasts(
+                                {history_code: stitched_history},
+                                goulding_cluster_by_history,
+                                calibration_histories=(
+                                    goulding_calibration_histories_for_stitching
+                                ),
+                                signal_mode=args.goulding_signal_mode,
+                                min_valid_observations=args.min_forecast_obs,
+                            )[history_code]
+                        )
+                        _write_selection_backtest_curve(
+                            stitched_goulding_result.frame,
+                            stitched_forecast_path,
+                            stitched_forecast_manifest_path,
+                            identity=stitched_forecast_identity,
+                            cache_key=stitched_forecast_cache_key,
+                            metadata={
+                                "forecast_audit": stitched_goulding_result.audit
+                            },
+                        )
+                        logger.info(
+                            "goulding_forecast_cache write artifact=stitched "
+                            "hist_instr_code=%s key=%s",
+                            history_code,
+                            stitched_forecast_cache_key,
+                        )
                 stitched_symbols: list[str] = []
                 for symbol in symbols_by_history_code[history_code]:
                     row = source_rows[symbol]

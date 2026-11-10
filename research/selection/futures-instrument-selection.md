@@ -1217,7 +1217,11 @@ each underlying signal history. Versioned content-addressed Parquet caches
 below `--cache/selection_backtest` keep four distinct artifacts:
 the frozen PST `reference_base`, its fixed-cost reference overlay, the mutable
 IB-only `stitched_reference_tail`, and selection-specific executable cash
-curves. The PST identity uses its pinned sidecar schema and source commit, which
+curves. Goulding runs additionally cache the pooled reference and stitched
+forecast frames. Those forecast keys include the complete calibration universe,
+signal mode, and frozen reference database identity; a repeat run with the same
+universe can load the forecasts without recalibrating every history. The PST
+identity uses its pinned sidecar schema and source commit, which
 also owns the frozen historical FX import; file paths and mtimes do not
 invalidate it. The IB-tail identity hashes the actual ordered history rows, so
 new cache paths or as-of dates alone do not cause a miss. New or revised IB
