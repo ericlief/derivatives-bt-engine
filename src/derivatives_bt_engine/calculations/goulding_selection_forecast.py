@@ -37,6 +37,12 @@ if TYPE_CHECKING:
 
 
 GOULDING_MODEL = "goulding"
+# The selection pipeline consumes forecasts directly as multiples of its
+# average risk-sized position. Use the same normalized scale as EWMAC here.
+# The standalone TSMOM engine retains its own half-scale directional input
+# because it applies an additional downstream risk scalar.
+GOULDING_SELECTION_FORECAST_TARGET_ABS = 1.0
+GOULDING_SELECTION_FORECAST_CAP = 2.0
 
 
 def _monthly_signal_frame(
@@ -134,6 +140,8 @@ def _forecast_rows(
     cluster_by_history: dict[str, str],
     *,
     signal_mode: str,
+    target_abs_forecast: float,
+    forecast_cap: float,
     calibration_monthly_by_history: dict[str, pl.DataFrame] | None = None,
 ) -> dict[str, pl.DataFrame]:
     """Calculate monthly binary or continuous forecasts for every history.
@@ -188,7 +196,10 @@ def _forecast_rows(
                             prior.get("g_slow"),
                         )
                     )
-            scalar = estimate_goulding_forecast_scalar(raw_history)
+            scalar = estimate_goulding_forecast_scalar(
+                raw_history,
+                target_abs=target_abs_forecast,
+            )
 
         for history_code, monthly in monthly_by_history.items():
             current = monthly.filter(
@@ -209,6 +220,7 @@ def _forecast_rows(
                 combined_forecast = normalize_goulding_forecast(
                     raw_forecast,
                     scalar,
+                    cap=forecast_cap,
                 )
             else:
                 resolved = _goulding_direction(
@@ -252,6 +264,8 @@ def build_goulding_selection_forecasts(
     signal_mode: str = "binary",
     fast_months: int = GOULDING_FAST_MONTHS,
     slow_months: int = GOULDING_SLOW_MONTHS,
+    target_abs_forecast: float = GOULDING_SELECTION_FORECAST_TARGET_ABS,
+    forecast_cap: float = GOULDING_SELECTION_FORECAST_CAP,
     min_valid_observations: int = 256,
 ) -> dict[str, CombinedForecastResult]:
     """Return selection-compatible Goulding forecasts for a history universe.
@@ -271,6 +285,9 @@ def build_goulding_selection_forecasts(
         magnitude and applies the pooled expanding forecast scalar.
     fast_months, slow_months
         Calendar-month momentum horizons.
+    target_abs_forecast, forecast_cap
+        Continuous-mode pooled normalization. Selection defaults match the
+        EWMAC mean-absolute-one, cap-two position-factor convention.
     min_valid_observations
         Minimum daily observations required for selection eligibility.
 
@@ -290,6 +307,8 @@ def build_goulding_selection_forecasts(
         )
     if min_valid_observations < 2:
         raise ValueError("min_valid_observations must be at least 2")
+    if target_abs_forecast <= 0 or forecast_cap <= 0:
+        raise ValueError("forecast target and cap must be positive")
     calibration_sources = calibration_histories or histories
     required_cluster_keys = set(histories) | set(calibration_sources)
     if not required_cluster_keys <= set(cluster_by_history):
@@ -321,6 +340,8 @@ def build_goulding_selection_forecasts(
         monthly_by_history,
         cluster_by_history,
         signal_mode=signal_mode,
+        target_abs_forecast=target_abs_forecast,
+        forecast_cap=forecast_cap,
         calibration_monthly_by_history=calibration_monthly_by_history,
     )
     results: dict[str, CombinedForecastResult] = {}
@@ -387,6 +408,8 @@ def build_goulding_selection_forecasts(
             "goulding_signal_mode": signal_mode,
             "goulding_fast_months": fast_months,
             "goulding_slow_months": slow_months,
+            "goulding_target_abs_forecast": target_abs_forecast,
+            "goulding_forecast_cap": forecast_cap,
             "goulding_cluster": cluster_by_history[history_code],
         }
         audit["forecast_elig"] = bool(

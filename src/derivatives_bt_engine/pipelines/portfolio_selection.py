@@ -109,6 +109,13 @@ from derivatives_bt_engine.calculations.continuous_momentum import (
 from derivatives_bt_engine.calculations.return_tsmom_forecast import (
     RETURN_TSMOM_MODEL,
     build_return_tsmom_forecast,
+    estimate_return_tsmom_scalar_history,
+    scale_return_tsmom_forecast,
+)
+from derivatives_bt_engine.calculations.ewmac import (
+    EWMAC_FORECAST_CAP,
+    EWMAC_FORECAST_TARGET_ABS,
+    EWMAC_SCALAR_MIN_PERIODS,
 )
 from derivatives_bt_engine.calculations.goulding import (
     GOULDING_FAST_MONTHS,
@@ -117,6 +124,8 @@ from derivatives_bt_engine.calculations.goulding import (
 )
 from derivatives_bt_engine.calculations.goulding_selection_forecast import (
     GOULDING_MODEL,
+    GOULDING_SELECTION_FORECAST_CAP,
+    GOULDING_SELECTION_FORECAST_TARGET_ABS,
     build_goulding_selection_forecasts,
 )
 from derivatives_bt_engine.data.futures_history import (
@@ -165,7 +174,8 @@ DEFAULT_SELECTION_MAX_HISTORY_GAP_DAYS = 31
 # The version is part of both the directory and content identity, allowing old
 # variants to remain on disk without being accepted by newer calculations.
 SELECTION_BACKTEST_CACHE_VERSION = 1
-GOULDING_FORECAST_CACHE_VERSION = 1
+GOULDING_FORECAST_CACHE_VERSION = 2
+RETURN_TSMOM_SCALAR_CACHE_VERSION = 1
 
 # Production-inspired ordinary-EWMAC template. The two slowest rules receive
 # 60% in total and the three faster rules receive 40%. Rules removed by the
@@ -410,6 +420,8 @@ def _goulding_forecast_cache_spec(
         "signal_mode": signal_mode,
         "fast_months": GOULDING_FAST_MONTHS,
         "slow_months": GOULDING_SLOW_MONTHS,
+        "target_abs_forecast": GOULDING_SELECTION_FORECAST_TARGET_ABS,
+        "forecast_cap": GOULDING_SELECTION_FORECAST_CAP,
         "min_valid_observations": min_valid_observations,
         "history_db": history_db_identity,
         "hist_instr_code": history_code,
@@ -565,6 +577,123 @@ def _ensure_goulding_reference_forecast_cache(
     del results, histories
     gc.collect()
     return cache_specs
+
+
+def _return_tsmom_scalar_cache_spec(
+    cache_root: Path,
+    *,
+    history_db_identity: dict[str, object],
+    calibration_universe: list[str],
+    fast_window: int,
+    slow_window: int,
+    vol_fast_window: int | None,
+    vol_slow_window: int | None,
+    regime_discount: float,
+) -> tuple[Path, Path, dict[str, object], str]:
+    """Resolve the causal pooled return-TSMOM scalar cache artifact."""
+    return _selection_backtest_cache_artifact(
+        cache_root,
+        artifact="return_tsmom_scalar",
+        symbol="pooled",
+        identity={
+            "scalar_cache_version": RETURN_TSMOM_SCALAR_CACHE_VERSION,
+            "signal_model": RETURN_TSMOM_MODEL,
+            "history_db": history_db_identity,
+            "calibration_universe": calibration_universe,
+            "fast_window": fast_window,
+            "slow_window": slow_window,
+            "vol_fast_window": vol_fast_window,
+            "vol_slow_window": vol_slow_window,
+            "regime_discount": regime_discount,
+            "target_abs_forecast": EWMAC_FORECAST_TARGET_ABS,
+            "forecast_cap": EWMAC_FORECAST_CAP,
+            "scalar_min_periods": EWMAC_SCALAR_MIN_PERIODS,
+        },
+    )
+
+
+def _ensure_return_tsmom_scalar_cache(
+    cache_root: Path,
+    *,
+    history_provider: PysystemtradeHistoryProvider,
+    history_db_identity: dict[str, object],
+    calibration_universe: list[str],
+    fast_window: int,
+    slow_window: int,
+    vol_fast_window: int | None,
+    vol_slow_window: int | None,
+    regime_discount: float,
+    min_valid_observations: int,
+) -> tuple[pl.DataFrame, dict[str, CombinedForecastResult]]:
+    """Load the pooled scalar or build it once from reference histories.
+
+    The raw results are returned only on a cache miss so the current run can
+    reuse the work while constructing per-symbol reference bases. A cache hit
+    avoids materializing the full reference universe.
+    """
+    spec = _return_tsmom_scalar_cache_spec(
+        cache_root,
+        history_db_identity=history_db_identity,
+        calibration_universe=calibration_universe,
+        fast_window=fast_window,
+        slow_window=slow_window,
+        vol_fast_window=vol_fast_window,
+        vol_slow_window=vol_slow_window,
+        regime_discount=regime_discount,
+    )
+    curve_path, manifest_path, identity, cache_key = spec
+    cached = _load_selection_backtest_curve(
+        curve_path,
+        manifest_path,
+        expected_identity=identity,
+        required_columns=(
+            "date",
+            "forecast_scalar",
+            "scalar_valid",
+            "historical_mean_abs_forecast",
+        ),
+    )
+    if cached is not None:
+        logger.info(
+            "return_tsmom_scalar_cache hit histories=%d key=%s path=%s",
+            len(calibration_universe),
+            cache_key,
+            curve_path,
+        )
+        return cached[0], {}
+
+    logger.info(
+        "return_tsmom_scalar_cache build histories=%d key=%s",
+        len(calibration_universe),
+        cache_key,
+    )
+    raw_results: dict[str, CombinedForecastResult] = {}
+    for history_code in calibration_universe:
+        raw_results[history_code] = build_return_tsmom_forecast(
+            history_provider.load(history_code),
+            fast_window=fast_window,
+            slow_window=slow_window,
+            vol_fast_window=vol_fast_window,
+            vol_slow_window=vol_slow_window,
+            regime_discount=regime_discount,
+            min_valid_observations=min_valid_observations,
+        )
+    scalar_history = estimate_return_tsmom_scalar_history(raw_results)
+    _write_selection_backtest_curve(
+        scalar_history,
+        curve_path,
+        manifest_path,
+        identity=identity,
+        cache_key=cache_key,
+    )
+    logger.info(
+        "return_tsmom_scalar_cache write histories=%d rows=%d key=%s path=%s",
+        len(calibration_universe),
+        scalar_history.height,
+        cache_key,
+        curve_path,
+    )
+    return scalar_history, raw_results
 
 
 def slow_tilt_ewmac_weights(
@@ -2818,6 +2947,28 @@ def _run_complete_selection(
         str(row["symbol"]): row
         for row in selected.iter_rows(named=True)
     }
+    return_tsmom_calibration_universe = sorted({
+        str(row["hist_instr_code"])
+        for row in source_rows.values()
+    })
+    return_tsmom_scalar_history: pl.DataFrame | None = None
+    return_tsmom_raw_results: dict[str, CombinedForecastResult] = {}
+    if args.signal_model == RETURN_TSMOM_MODEL:
+        (
+            return_tsmom_scalar_history,
+            return_tsmom_raw_results,
+        ) = _ensure_return_tsmom_scalar_cache(
+            backtest_cache_root,
+            history_provider=reference_history_provider,
+            history_db_identity=history_db_identity,
+            calibration_universe=return_tsmom_calibration_universe,
+            fast_window=args.fast_window,
+            slow_window=args.slow_window,
+            vol_fast_window=args.vol_fast_window,
+            vol_slow_window=args.vol_slow_window,
+            regime_discount=args.regime_discount,
+            min_valid_observations=args.min_forecast_obs,
+        )
     goulding_cluster_by_history: dict[str, str] = {}
     goulding_reference_forecast_specs: dict[
         str, tuple[Path, Path, dict[str, object], str]
@@ -2906,11 +3057,21 @@ def _run_complete_selection(
                 "vol_fast_window": args.vol_fast_window,
                 "vol_slow_window": args.vol_slow_window,
                 "regime_discount": args.regime_discount,
+                "target_abs_forecast": EWMAC_FORECAST_TARGET_ABS,
+                "forecast_cap": EWMAC_FORECAST_CAP,
+                "scalar_min_periods": EWMAC_SCALAR_MIN_PERIODS,
+                "calibration_universe": (
+                    return_tsmom_calibration_universe
+                ),
             }
         elif args.signal_model == GOULDING_MODEL:
             reference_base_identity["signal_model"] = args.signal_model
             reference_base_identity["goulding"] = {
                 "signal_mode": args.goulding_signal_mode,
+                "target_abs_forecast": (
+                    GOULDING_SELECTION_FORECAST_TARGET_ABS
+                ),
+                "forecast_cap": GOULDING_SELECTION_FORECAST_CAP,
                 "cluster": goulding_cluster_by_history[
                     str(row["hist_instr_code"])
                 ],
@@ -3051,7 +3212,10 @@ def _run_complete_selection(
                 # Only a true history-base miss rebuilds the configured
                 # forecast. Snapshot-only reruns reuse its cached audit.
                 history_code = str(row["hist_instr_code"])
-                if history_code not in frames_by_history:
+                if (
+                    args.signal_model != RETURN_TSMOM_MODEL
+                    and history_code not in frames_by_history
+                ):
                     history = reference_history_provider.load(history_code)
                     if args.signal_model in DIRECT_TSMOM_MODELS:
                         frames_by_history[history_code] = history
@@ -3066,13 +3230,21 @@ def _run_complete_selection(
                             pooled_reference_rules,
                         )
                 if args.signal_model == RETURN_TSMOM_MODEL:
-                    result = build_return_tsmom_forecast(
-                        frames_by_history[history_code],
-                        fast_window=args.fast_window,
-                        slow_window=args.slow_window,
-                        vol_fast_window=args.vol_fast_window,
-                        vol_slow_window=args.vol_slow_window,
-                        regime_discount=args.regime_discount,
+                    assert return_tsmom_scalar_history is not None
+                    raw_result = return_tsmom_raw_results.get(history_code)
+                    if raw_result is None:
+                        raw_result = build_return_tsmom_forecast(
+                            reference_history_provider.load(history_code),
+                            fast_window=args.fast_window,
+                            slow_window=args.slow_window,
+                            vol_fast_window=args.vol_fast_window,
+                            vol_slow_window=args.vol_slow_window,
+                            regime_discount=args.regime_discount,
+                            min_valid_observations=args.min_forecast_obs,
+                        )
+                    result = scale_return_tsmom_forecast(
+                        raw_result,
+                        return_tsmom_scalar_history,
                         min_valid_observations=args.min_forecast_obs,
                     )
                 elif args.signal_model == GOULDING_MODEL:
@@ -3305,7 +3477,7 @@ def _run_complete_selection(
     # Component forecasts have now been converted into disk-backed subsystem
     # frames. Releasing them before the cross-instrument stages avoids holding
     # both full representations of the 100+ instrument universe.
-    del frames_by_history
+    del frames_by_history, return_tsmom_raw_results
     gc.collect()
 
     audit_frame = pl.DataFrame(audit_rows, infer_schema_length=None).sort("symbol")
@@ -3830,11 +4002,25 @@ def _run_complete_selection(
                                 "vol_fast_window": args.vol_fast_window,
                                 "vol_slow_window": args.vol_slow_window,
                                 "regime_discount": args.regime_discount,
+                                "target_abs_forecast": (
+                                    EWMAC_FORECAST_TARGET_ABS
+                                ),
+                                "forecast_cap": EWMAC_FORECAST_CAP,
+                                "scalar_min_periods": EWMAC_SCALAR_MIN_PERIODS,
+                                "calibration_universe": (
+                                    return_tsmom_calibration_universe
+                                ),
                             }
                         elif args.signal_model == GOULDING_MODEL:
                             stitched_identity["signal_model"] = args.signal_model
                             stitched_identity["goulding"] = {
                                 "signal_mode": args.goulding_signal_mode,
+                                "target_abs_forecast": (
+                                    GOULDING_SELECTION_FORECAST_TARGET_ABS
+                                ),
+                                "forecast_cap": (
+                                    GOULDING_SELECTION_FORECAST_CAP
+                                ),
                                 "cluster": goulding_cluster_by_history[
                                     history_code
                                 ],
@@ -3885,7 +4071,8 @@ def _run_complete_selection(
                                         pooled_rules,
                                     )
                             if args.signal_model == RETURN_TSMOM_MODEL:
-                                stitched_result = build_return_tsmom_forecast(
+                                assert return_tsmom_scalar_history is not None
+                                raw_stitched_result = build_return_tsmom_forecast(
                                     stitched_component,
                                     fast_window=args.fast_window,
                                     slow_window=args.slow_window,
@@ -3893,6 +4080,13 @@ def _run_complete_selection(
                                     vol_slow_window=args.vol_slow_window,
                                     regime_discount=args.regime_discount,
                                     min_valid_observations=args.min_forecast_obs,
+                                )
+                                stitched_result = scale_return_tsmom_forecast(
+                                    raw_stitched_result,
+                                    return_tsmom_scalar_history,
+                                    min_valid_observations=(
+                                        args.min_forecast_obs
+                                    ),
                                 )
                             elif args.signal_model == GOULDING_MODEL:
                                 assert stitched_goulding_result is not None
@@ -4098,10 +4292,18 @@ def _run_complete_selection(
             "vol_fast_window": args.vol_fast_window,
             "vol_slow_window": args.vol_slow_window,
             "regime_discount": args.regime_discount,
+            "target_abs_forecast": EWMAC_FORECAST_TARGET_ABS,
+            "forecast_cap": EWMAC_FORECAST_CAP,
+            "scalar_min_periods": EWMAC_SCALAR_MIN_PERIODS,
+            "calibration_universe": return_tsmom_calibration_universe,
         }
     elif args.signal_model == GOULDING_MODEL:
         selection_policy_identity["goulding"] = {
             "signal_mode": args.goulding_signal_mode,
+            "target_abs_forecast": (
+                GOULDING_SELECTION_FORECAST_TARGET_ABS
+            ),
+            "forecast_cap": GOULDING_SELECTION_FORECAST_CAP,
             "calibration_universe": sorted(
                 goulding_cluster_by_history.items()
             ),

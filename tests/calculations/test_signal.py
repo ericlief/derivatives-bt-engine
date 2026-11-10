@@ -17,6 +17,9 @@ from derivatives_bt_engine.calculations.signal_confidence import (
     SignalConfidenceRegime,
 )
 from derivatives_bt_engine.calculations.ewmac import ewmac, estimate_ewmac_scalar_history
+from derivatives_bt_engine.calculations.forecast_combination import (
+    CombinedForecastResult,
+)
 from derivatives_bt_engine.calculations.continuous_momentum import (
     DEFAULT_FAST_WINDOW,
     DEFAULT_SLOW_WINDOW,
@@ -35,6 +38,10 @@ from derivatives_bt_engine.calculations.goulding import (
     goulding_monthly,
     normalize_goulding_forecast,
 )
+from derivatives_bt_engine.calculations.goulding_selection_forecast import (
+    GOULDING_SELECTION_FORECAST_CAP,
+    GOULDING_SELECTION_FORECAST_TARGET_ABS,
+)
 from derivatives_bt_engine.calculations.legacy_signal import calculate_trend_strength
 from derivatives_bt_engine.calculations.signal_confidence import (
     classify_signal_confidence,
@@ -45,6 +52,8 @@ from derivatives_bt_engine.calculations.signal_config import SignalSpec
 from derivatives_bt_engine.calculations.signal_selection import resolve_trend_direction
 from derivatives_bt_engine.calculations.return_tsmom_forecast import (
     build_return_tsmom_forecast,
+    estimate_return_tsmom_scalar_history,
+    scale_return_tsmom_forecast,
 )
 
 def _price_df(n: int, drift: float, vol: float = 0.01, seed: int = 0) -> pl.DataFrame:
@@ -122,6 +131,54 @@ def test_return_tsmom_forecast_keeps_canonical_date_and_roll_schedule():
     assert result.audit["return_tsmom_fast_window"] == 64
     assert result.audit["return_tsmom_slow_window"] == 256
     assert result.audit["forecast_elig"] is True
+
+
+def test_return_tsmom_uses_causal_pooled_mean_one_cap_two_scaling():
+    """Return TSMOM must use the same normalized position scale as EWMAC."""
+    dates = [date(2020, 1, day) for day in range(1, 5)]
+
+    def raw_result(values: list[float]) -> CombinedForecastResult:
+        """Build the minimal unscaled adapter result for one history."""
+        return CombinedForecastResult(
+            frame=pl.DataFrame({
+                "date": dates,
+                "raw_forecast": values,
+                "combined_forecast": values,
+                "point_vol": [1.0] * 4,
+                "point_change": [1.0] * 4,
+            }),
+            weights={"return_tsmom": 1.0},
+            fdm=1.0,
+            audit={},
+        )
+
+    first = raw_result([0.5, 0.5, 0.5, 3.0])
+    second = raw_result([1.5, 1.5, 1.5, 1.5])
+    scalar = estimate_return_tsmom_scalar_history(
+        {"FIRST": first, "SECOND": second},
+        min_periods=2,
+    )
+    scaled = scale_return_tsmom_forecast(
+        first,
+        scalar,
+        scalar_min_periods=2,
+        min_valid_observations=2,
+    )
+
+    assert scalar.get_column("forecast_scalar").to_list() == [
+        None,
+        None,
+        pytest.approx(1.0),
+        pytest.approx(1.0),
+    ]
+    assert scaled.frame.get_column("combined_forecast").to_list() == [
+        None,
+        None,
+        pytest.approx(0.5),
+        pytest.approx(2.0),
+    ]
+    assert scaled.audit["return_tsmom_target_abs_forecast"] == 1.0
+    assert scaled.audit["return_tsmom_forecast_cap"] == 2.0
 
 
 # ── calculate_trend_strength ────────────────────────────────────────────────
@@ -924,13 +981,32 @@ def test_goulding_continuous_raw_uses_mean_or_equation_7(regime, fast, slow, exp
     assert goulding_continuous_raw(regime, 0.25, 0.5, fast, slow) == pytest.approx(expected)
 
 
-def test_goulding_forecast_scalar_targets_mean_absolute_half_and_caps_at_one():
+def test_goulding_forecast_scalar_targets_standalone_half_and_caps_at_one():
     scalar = estimate_goulding_forecast_scalar([0.25, -0.25] * 6)
     assert scalar == pytest.approx(2.0)
     assert normalize_goulding_forecast(0.25, scalar) == pytest.approx(0.5)
     assert normalize_goulding_forecast(0.75, scalar) == 1.0
     assert normalize_goulding_forecast(-0.75, scalar) == -1.0
     assert estimate_goulding_forecast_scalar([0.25] * 11) is None
+
+
+def test_goulding_selection_scale_matches_ewmac_mean_one_cap_two():
+    scalar = estimate_goulding_forecast_scalar(
+        [0.25, -0.25] * 6,
+        target_abs=GOULDING_SELECTION_FORECAST_TARGET_ABS,
+    )
+
+    assert scalar == pytest.approx(4.0)
+    assert normalize_goulding_forecast(
+        0.25,
+        scalar,
+        cap=GOULDING_SELECTION_FORECAST_CAP,
+    ) == pytest.approx(1.0)
+    assert normalize_goulding_forecast(
+        0.75,
+        scalar,
+        cap=GOULDING_SELECTION_FORECAST_CAP,
+    ) == 2.0
 
 
 def test_resolve_trend_direction_continuous_goulding_preserves_normalized_magnitude():

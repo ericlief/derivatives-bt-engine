@@ -1220,8 +1220,15 @@ IB-only `stitched_reference_tail`, and selection-specific executable cash
 curves. Goulding runs additionally cache the pooled reference and stitched
 forecast frames. Those forecast keys include the complete calibration universe,
 signal mode, and frozen reference database identity; a repeat run with the same
-universe can load the forecasts without recalibrating every history. The PST
-identity uses its pinned sidecar schema and source commit, which
+universe can load the forecasts without recalibrating every history. The
+derived identity also includes the continuous forecast convention: EWMAC and
+continuous Goulding target mean absolute forecast 1 and cap forecasts at
+`+/-2`. Binary Goulding remains `+/-1`. Return TSMOM uses that same continuous
+scale through a separate cached causal pooled daily scalar; its reference
+universe and return/volatility horizons are part of the scalar key. A cache hit
+therefore avoids reloading and recalculating the full reference universe, while
+the last frozen reference scalar is carried into a later stitched IB tail. The
+PST identity uses its pinned sidecar schema and source commit, which
 also owns the frozen historical FX import; file paths and mtimes do not
 invalidate it. The IB-tail identity hashes the actual ordered history rows, so
 new cache paths or as-of dates alone do not cause a miss. New or revised IB
