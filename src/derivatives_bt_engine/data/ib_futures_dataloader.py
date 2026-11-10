@@ -86,6 +86,12 @@ DEFAULT_IB_DURATION = '3 y'
 DEFAULT_IB_BAR_SIZE = '1 day'
 DEFAULT_IB_DATED_CONTRACT_DURATION = '1 Y'
 
+# Increment when stitched-cache eligibility gains a stronger raw acquisition
+# requirement.  The value belongs in the derived cache identity so a bundle
+# built from older, shorter raw requests cannot masquerade as newly validated
+# history merely because the requested duration changed.
+IB_DATED_COVERAGE_VERSION = 1
+
 _LME_MONTHLY_INSTRUMENTS = {
     'ALUMINIUM_LME',
     'COPPER_LME',
@@ -524,7 +530,18 @@ def load_roll_cycle_ib_contract_history(
             duration=effective_duration,
         )
     else:
-        complete_months = set()
+        history_path = Path(history_db_path).expanduser()
+        complete_months = (
+            store.complete_contract_months(
+                pst_instr_code=pst_instr_code,
+                bar_size=bar_size,
+                what_to_show=what_to_show,
+                use_rth=use_rth,
+                duration=effective_duration,
+            )
+            if history_path.is_file()
+            else set()
+        )
     logger.info(
         "ib_dated_history start instrument=%s ib_symbol=%s exchange=%s "
         "hold_roll_cycle=%s priced_roll_cycle=%s carry_offset=%s "
@@ -687,6 +704,28 @@ def load_roll_cycle_ib_contract_history(
             f"{pst_instr_code} on or before {effective_as_of} in "
             f"{Path(history_db_path).expanduser()}"
         )
+    if not update_history:
+        # A derived cache identity can request a longer roll-aware duration
+        # while the durable raw database still contains rows acquired by an
+        # older, shorter request.  Presence of an IB segment is therefore not
+        # proof that the requested coverage exists.  Reject expired contracts
+        # without a matching successful fetch so ``ib-history-live=missing``
+        # retries through the broker instead of publishing stale rows under a
+        # longer-duration cache key.
+        expired_months = set(
+            result.filter(pl.col('expiration') < effective_as_of)
+            .get_column('contract_month')
+            .unique()
+            .to_list()
+        )
+        incomplete_months = sorted(expired_months - complete_months)
+        if incomplete_months:
+            raise RuntimeError(
+                "Raw IB dated-contract history lacks successful "
+                f"{effective_duration} coverage for expired PST instrument "
+                f"{pst_instr_code} contracts {incomplete_months} in "
+                f"{Path(history_db_path).expanduser()}"
+            )
     result = (
         result.with_columns(
             pl.lit(hold_roll_cycle).alias('hold_roll_cycle'),
@@ -959,6 +998,7 @@ class IBStitchedHistoryProvider:
         )
         identity = {
             'history_schema_version': HISTORY_SCHEMA_VERSION,
+            'ib_dated_coverage_version': IB_DATED_COVERAGE_VERSION,
             'symbol': symbol,
             'pst_instr_code': pst_instr_code,
             'signal_symbol': signal_symbol,
