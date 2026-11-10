@@ -235,9 +235,39 @@ def _duration_days(duration: str) -> int | None:
     return amount * unit_days[match.group(2)]
 
 
-def _roll_aware_duration(duration: str, roll_offset_days: int) -> str:
-    """Expand dated-contract coverage enough to reach the policy roll date."""
-    required_days = max(365, abs(roll_offset_days))
+def _maximum_hold_cycle_gap_months(hold_roll_cycle: str) -> int:
+    """Return the largest month spacing between consecutive held contracts.
+
+    The final month wraps into the first held month of the following year. A
+    one-month cycle therefore has a twelve-month gap, while ``HMUZ`` has a
+    three-month gap. The roll-policy object validates ordering elsewhere, but
+    this low-level acquisition helper validates its own direct inputs.
+    """
+    months = sorted({CME_MONTH_LETTERS[letter] for letter in hold_roll_cycle})
+    if not months:
+        raise ValueError("hold-roll cycle must not be empty")
+    gaps = [
+        (following - current) % 12 or 12
+        for current, following in zip(months, months[1:] + [months[0]])
+    ]
+    return max(gaps)
+
+
+def _roll_aware_duration(
+    duration: str,
+    roll_offset_days: int,
+    hold_roll_cycle: str,
+) -> str:
+    """Expand history through the prior held contract's policy roll date.
+
+    A successor contract must be observed before the prior held contract's
+    roll cutoff. Coverage must therefore span both the roll lead and the
+    largest gap between held expiries. Thirty-one days per calendar month is
+    intentionally conservative because IB accepts whole-year duration strings
+    and exact expiries vary by contract.
+    """
+    held_gap_days = _maximum_hold_cycle_gap_months(hold_roll_cycle) * 31
+    required_days = max(365, abs(roll_offset_days) + held_gap_days)
     supplied_days = _duration_days(duration)
     if supplied_days is not None and supplied_days >= required_days:
         return duration
@@ -364,8 +394,9 @@ def load_roll_cycle_ib_contract_history(
         and carry companions follow the configured priced-cycle offset.
     duration
         IB history duration requested separately for every resolved contract.
-        It is expanded to whole years when the configured roll offset requires
-        an earlier part of the contract's trading life.
+        It is expanded to whole years when the configured roll offset plus the
+        spacing between held contracts requires an earlier part of the next
+        contract's trading life.
     bar_size, what_to_show, use_rth
         Values forwarded to ``IBPySync.get_historical_bars``.
     db_path, mapping_path
@@ -432,7 +463,11 @@ def load_roll_cycle_ib_contract_history(
             f"subset of priced-roll cycle {priced_roll_cycle}"
         )
 
-    effective_duration = _roll_aware_duration(duration, roll_offset_days)
+    effective_duration = _roll_aware_duration(
+        duration,
+        roll_offset_days,
+        hold_roll_cycle,
+    )
     # Far-deferred STIR policies can hold contracts several years before
     # expiry. Include contract years through that forward horizon; otherwise
     # no requested contract can be eligible on current observation dates.
@@ -913,6 +948,15 @@ class IBStitchedHistoryProvider:
     ) -> Path:
         """Return a versioned cache directory for all stitched-view inputs."""
         effective_as_of = self.as_of or date.today()
+        hold_roll_cycle, roll_offset_days, _, _ = _load_roll_config(
+            pst_instr_code,
+            self.reference_db_path,
+        )
+        effective_duration = _roll_aware_duration(
+            self.duration,
+            roll_offset_days,
+            hold_roll_cycle,
+        )
         identity = {
             'history_schema_version': HISTORY_SCHEMA_VERSION,
             'symbol': symbol,
@@ -923,7 +967,10 @@ class IBStitchedHistoryProvider:
             'preserve_reference_overlap': self.preserve_reference_overlap,
             'as_of': effective_as_of.isoformat(),
             'prior_years': self.prior_years,
-            'duration': self.duration,
+            # Use the duration that determines raw observations. Unaffected
+            # one-year markets retain their existing cache identity, while
+            # annual and far-deferred policies cannot reuse truncated bundles.
+            'duration': effective_duration,
             'bar_size': self.bar_size,
             'what_to_show': self.what_to_show,
             'use_rth': self.use_rth,
