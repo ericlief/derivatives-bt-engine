@@ -470,6 +470,35 @@ def test_fixed_capital_portfolio_curve_reports_percentage_points():
     )
 
 
+def test_portfolio_return_is_invalid_when_one_active_instrument_is_invalid():
+    """One complete sibling cannot validate another active missing return."""
+    cash = pl.DataFrame({
+        "date": [date(2024, 1, 2)] * 2,
+        "symbol": ["A", "B"],
+        "sel_active": [True, True],
+        "held_con": [1, 1],
+        "trade_con": [0.0, 0.0],
+        "roll_con": [0.0, 1.0],
+        "pnl_valid": [True, False],
+        "gross_pnl": [10.0, None],
+        "trade_cost": [0.0, 0.0],
+        "roll_cost": [0.0, -2.0],
+        "net_pnl": [10.0, -2.0],
+    })
+
+    result = build_fixed_capital_portfolio_curve(
+        cash,
+        initial_capital_usd=1_000.0,
+    )
+
+    assert result["portfolio_instrument_count"][0] == 2
+    assert result["portfolio_valid_pnl_instruments"][0] == 1
+    assert result["portfolio_invalid_pnl_instruments"][0] == 1
+    assert result["portfolio_return_valid"][0] is False
+    # Preserve the known cost even though the market move is unavailable.
+    assert result["portfolio_cash_roll_cost_usd"][0] == pytest.approx(-2.0)
+
+
 def test_equity_scaled_cash_curve_replaces_book_at_selection_review():
     """A walk-forward book closes removals after earning the review-day move."""
     dates = [date(2024, 1, day) for day in range(1, 4)]

@@ -1772,7 +1772,9 @@ def build_portfolio_equity_curve(
     polars.DataFrame
         One row per date with summed daily USD cash flows, daily returns based
         on the applicable prior equity, cumulative returns relative to initial
-        capital, cost contributions, equity paths, and coverage counts.
+        capital, cost contributions, equity paths, and coverage counts. A
+        portfolio return is valid only when every economically active row has
+        complete instrument P&L.
 
     Notes
     -----
@@ -1782,7 +1784,8 @@ def build_portfolio_equity_curve(
     daily net return and cost rates divide by prior net equity.
     Null or non-finite cash values contribute zero to the daily sum;
     ``portfolio_valid_pnl_instruments`` records how many instrument rows
-    supplied a valid P&L observation.
+    supplied a valid P&L observation. An economically active row is selected,
+    holds a position, trades, or rolls on that date.
     """
     if not math.isfinite(initial_capital_usd) or initial_capital_usd <= 0:
         raise ValueError("initial_capital_usd must be finite and positive")
@@ -1824,6 +1827,16 @@ def build_portfolio_equity_curve(
         if active_column is not None
         else pl.col("symbol")
     )
+    economically_active = (
+        pl.col(active_column).fill_null(False)
+        if active_column is not None
+        else pl.lit(True)
+    )
+    for position_column in ("held_con", "trade_con", "roll_con"):
+        if position_column in cash_pnl_long.columns:
+            economically_active |= (
+                pl.col(position_column).fill_null(0) != 0
+            )
     daily = (
         cash_pnl_long.group_by("date")
         .agg(
@@ -1841,6 +1854,11 @@ def build_portfolio_equity_curve(
             .cast(pl.Int64)
             .sum()
             .alias("portfolio_valid_pnl_instruments"),
+            (~pl.col("pnl_valid").fill_null(False))
+            .filter(economically_active)
+            .cast(pl.Int64)
+            .sum()
+            .alias("portfolio_invalid_pnl_instruments"),
             *[
                 finite_or_zero(source)
                 .sum()
@@ -1851,9 +1869,10 @@ def build_portfolio_equity_curve(
         .sort("date")
         .with_columns(
             pl.lit(initial_capital_usd).alias("initial_capital_usd"),
-            (pl.col("portfolio_valid_pnl_instruments") > 0).alias(
-                "portfolio_return_valid"
-            ),
+            (
+                (pl.col("portfolio_instrument_count") > 0)
+                & (pl.col("portfolio_invalid_pnl_instruments") == 0)
+            ).alias("portfolio_return_valid"),
         )
         .with_columns(
             pl.col("portfolio_cash_gross_pnl_usd")
@@ -1938,7 +1957,8 @@ def build_portfolio_equity_curve(
             .otherwise(None)
             .alias("portfolio_total_cost_pct"),
             (
-                (pl.col("portfolio_valid_pnl_instruments") > 0)
+                (pl.col("portfolio_instrument_count") > 0)
+                & (pl.col("portfolio_invalid_pnl_instruments") == 0)
                 & pl.col("prior_portfolio_net_equity_usd").is_finite()
                 & (pl.col("prior_portfolio_net_equity_usd") > 0)
             ).alias("portfolio_return_valid"),
