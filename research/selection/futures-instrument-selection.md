@@ -1337,6 +1337,7 @@ search:
 futures-build-selection \
   --report-dir results \
   --output-dir results/selection_baseline \
+  --signal-model multi_ewmac \
   --history-db /home/dev/fin/db/pysystemtrade_reference.duckdb \
   --ib-history-db /home/dev/fin/db/ib_futures_history.duckdb \
   --ib-history-live update \
@@ -1463,6 +1464,7 @@ or historical-rule rerun:
 ```bash
 futures-build-selection \
   --input results/multi_speed_ewmac_rule_cache_<timestamp>.parquet \
+  --signal-model multi_ewmac \
   --initial-capital-usd 75000
 ```
 
@@ -2237,6 +2239,7 @@ The recommended 18-scenario first pass is the CLI default:
 ```bash
 .venv/bin/futures-selection-grid \
   --input results/multi_speed_ewmac_rule_cache_<timestamp>.parquet \
+  --signal-model multi_ewmac \
   --history-db /home/dev/fin/db/pysystemtrade_reference.duckdb \
   --cache /home/dev/data/fin/misc/cache/futures \
   --initial-capital-usd 75000
@@ -2319,6 +2322,7 @@ Run secondary constraint tests separately, for example:
 ```bash
 .venv/bin/futures-selection-grid \
   --input results/multi_speed_ewmac_rule_cache_<timestamp>.parquet \
+  --signal-model multi_ewmac \
   --history-db /home/dev/fin/db/pysystemtrade_reference.duckdb \
   --cache /home/dev/data/fin/misc/cache/futures \
   --initial-capital-usd 75000 \
@@ -2346,6 +2350,7 @@ For a focused yearly hysteresis comparison using the new causal count state:
 ```bash
 .venv/bin/futures-selection-grid \
   --input results/multi_speed_ewmac_rule_cache_<timestamp>.parquet \
+  --signal-model multi_ewmac \
   --history-db /home/dev/fin/db/pysystemtrade_reference.duckdb \
   --ib-history-db /home/dev/fin/db/ib_futures_history.duckdb \
   --cache /home/dev/data/fin/misc/cache/futures \

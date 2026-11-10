@@ -732,9 +732,10 @@ def parse_args(argv=None, *, complete_default: bool = False):
     parser.add_argument(
         "--signal-model",
         choices=SIGNAL_MODELS,
-        default="multi_ewmac",
+        required=True,
         help=(
-            "Forecast used by selection and cash replay. 'multi_ewmac' keeps "
+            "Required forecast used by selection and cash replay. "
+            "'multi_ewmac' keeps "
             "the existing cost-gated rule combination; 'return_tsmom' uses "
             "the original continuous return signal; 'goulding' uses the "
             "monthly pooled Goulding signal. All models retain the same "

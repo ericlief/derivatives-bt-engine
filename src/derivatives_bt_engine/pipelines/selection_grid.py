@@ -461,8 +461,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument(
         "--signal-model",
         choices=SIGNAL_MODELS,
-        default="multi_ewmac",
-        help="Signal model shared by every grid scenario.",
+        required=True,
+        help="Required signal model shared by every grid scenario.",
     )
     parser.add_argument(
         "--goulding-signal-mode",
