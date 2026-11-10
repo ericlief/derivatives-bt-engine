@@ -49,6 +49,7 @@ from derivatives_bt_engine.calculations.instruments import (
 )
 from derivatives_bt_engine.calculations.roll_policy import ContractRollPolicy
 from derivatives_bt_engine.data.futures_history import (
+    CALENDAR_CONTRACT_SELECTION_VERSION,
     DEFAULT_FUTURES_CACHE_ROOT,
     DEFAULT_GLOBEX_DB_PATH,
     DEFAULT_PYSYSTEMTRADE_DB_PATH as DEFAULT_REFERENCE_DB_PATH,
@@ -754,6 +755,8 @@ def load_roll_cycle_ib_contract_history(
 
 def build_ib_contract_history(
     contract_history: pl.DataFrame,
+    *,
+    minimum_contract_id: str | None = None,
 ) -> FuturesHistory:
     """Build canonical daily history from overlapping IB contract bars.
 
@@ -767,6 +770,10 @@ def build_ib_contract_history(
     ----------
     contract_history
         Overlapping daily rows for every downloaded dated contract.
+    minimum_contract_id
+        Optional incumbent ``YYYYMM00`` contract from an older history source.
+        The IB held path cannot select an earlier contract at or after the
+        source handoff.
 
     Returns
     -------
@@ -843,7 +850,11 @@ def build_ib_contract_history(
         )
         .sort('date', 'expiration')
     )
-    selected = select_calendar_contract_observations(raw, policy)
+    selected = select_calendar_contract_observations(
+        raw,
+        policy,
+        minimum_contract_id=minimum_contract_id,
+    )
     if selected.is_empty():
         raise ValueError(
             f"roll policy selected no IB rows for PST instrument {pst_instr_code}"
@@ -873,6 +884,7 @@ def build_ib_contract_history(
             ).n_unique(),
             'raw_rows': contract_history.height,
             'selected_rows': selected.height,
+            'minimum_contract_id': minimum_contract_id,
         },
     )
 
@@ -898,6 +910,7 @@ class IBHistoryProvider:
     mapping_path: Path | str = DEFAULT_BROKER_MAPPING_PATH
     history_db_path: Path | str = DEFAULT_IB_FUTURES_HISTORY_DB_PATH
     update_history: bool = True
+    minimum_contract_id: str | None = None
     contract_history: pl.DataFrame | None = field(
         init=False,
         default=None,
@@ -920,7 +933,10 @@ class IBHistoryProvider:
             history_db_path=self.history_db_path,
             update_history=self.update_history,
         )
-        return build_ib_contract_history(self.contract_history)
+        return build_ib_contract_history(
+            self.contract_history,
+            minimum_contract_id=self.minimum_contract_id,
+        )
 
 
 def _history_input_fingerprint(path: Path | str) -> dict[str, object]:
@@ -999,6 +1015,9 @@ class IBStitchedHistoryProvider:
         identity = {
             'history_schema_version': HISTORY_SCHEMA_VERSION,
             'ib_dated_coverage_version': IB_DATED_COVERAGE_VERSION,
+            'calendar_contract_selection_version': (
+                CALENDAR_CONTRACT_SELECTION_VERSION
+            ),
             'symbol': symbol,
             'pst_instr_code': pst_instr_code,
             'signal_symbol': signal_symbol,
@@ -1119,7 +1138,11 @@ class IBStitchedHistoryProvider:
                 },
             )
 
-        def load_ib_segment(prior_years: int) -> FuturesHistory:
+        def load_ib_segment(
+            prior_years: int,
+            *,
+            minimum_contract_id: str | None = None,
+        ) -> FuturesHistory:
             """Load IB history and retain its dated-contract audit rows."""
             ib_provider = IBHistoryProvider(
                 ib=self.ib,
@@ -1133,6 +1156,7 @@ class IBStitchedHistoryProvider:
                 mapping_path=self.mapping_path,
                 history_db_path=self.history_db_path,
                 update_history=self.update_history,
+                minimum_contract_id=minimum_contract_id,
             )
             loaded = ib_provider.load(pst_instr_code)
             if ib_provider.contract_history is None:
@@ -1186,10 +1210,25 @@ class IBStitchedHistoryProvider:
             else:
                 histories.append(globex_history)
 
+        handoff_contract_id: str | None = None
+        if self.preserve_reference_overlap and len(histories) == 1:
+            reference_end = reference_history.signal.get_column('date').max()
+            if reference_end is not None:
+                handoff_marks = reference_history.marks.filter(
+                    pl.col('date') <= reference_end
+                ).sort('date')
+                if not handoff_marks.is_empty():
+                    handoff_contract_id = str(
+                        handoff_marks.get_column('contract_id')[-1]
+                    )
+
         ib_prior_years = self.prior_years
         ib_history: FuturesHistory | None = None
         try:
-            ib_history = load_ib_segment(ib_prior_years)
+            ib_history = load_ib_segment(
+                ib_prior_years,
+                minimum_contract_id=handoff_contract_id,
+            )
         except Exception as exc:
             # IB is the newest optional segment. Contract-definition failures
             # (common for expired contracts) should not erase valid reference
@@ -1308,6 +1347,7 @@ class IBStitchedHistoryProvider:
                     'ib_unavailable': ib_history is None,
                     'preserve_reference_overlap': self.preserve_reference_overlap,
                     'reference_preserved_through': preserved_reference_end,
+                    'handoff_contract_id': handoff_contract_id,
                 },
             )
         else:
@@ -1328,6 +1368,7 @@ class IBStitchedHistoryProvider:
                     'ib_unavailable': ib_history is None,
                     'preserve_reference_overlap': self.preserve_reference_overlap,
                     'reference_preserved_through': preserved_reference_end,
+                    'handoff_contract_id': handoff_contract_id,
                 },
             )
         if self.update_history and self.contract_history is not None:

@@ -16,6 +16,7 @@ from derivatives_bt_engine.data.futures_history import (
     GlobexHistoryProvider,
     HISTORY_SCHEMA_VERSION,
     PysystemtradeHistoryProvider,
+    select_calendar_contract_observations,
 )
 from derivatives_bt_engine.calculations.roll_policy import (
     ContractRollPolicy,
@@ -568,6 +569,63 @@ def test_globex_calendar_policy_reports_empty_schedule(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="selected no contract observations"):
         provider.load("ZC")
+
+
+def test_calendar_selection_does_not_regress_when_earlier_contract_appears() -> None:
+    """A late-arriving earlier expiry cannot create a backward pseudo-roll."""
+    raw = pl.DataFrame(
+        {
+            "date": [
+                date(2024, 4, 1),
+                date(2024, 6, 3),
+                date(2024, 6, 3),
+            ],
+            "expiration": [
+                date(2024, 12, 27),
+                date(2024, 11, 29),
+                date(2024, 12, 27),
+            ],
+            "contract_month": ["202412", "202411", "202412"],
+            "volume": [10.0, 20.0, 30.0],
+        }
+    )
+    policy = ContractRollPolicy(
+        policy_id="monthly",
+        hold_roll_cycle="FGHJKMNQUVXZ",
+        roll_offset_days=-10,
+    )
+
+    selected = select_calendar_contract_observations(raw, policy)
+
+    assert selected.get_column("contract_month").to_list() == [
+        "202412",
+        "202412",
+    ]
+
+
+def test_calendar_selection_respects_handoff_incumbent_contract() -> None:
+    """The first newer-source row cannot regress behind the old incumbent."""
+    raw = pl.DataFrame(
+        {
+            "date": [date(2024, 4, 2), date(2024, 4, 2)],
+            "expiration": [date(2026, 3, 16), date(2026, 6, 15)],
+            "contract_month": ["202603", "202606"],
+            "volume": [100.0, 80.0],
+        }
+    )
+    policy = ContractRollPolicy(
+        policy_id="far_quarterly",
+        hold_roll_cycle="HMUZ",
+        roll_offset_days=-700,
+    )
+
+    selected = select_calendar_contract_observations(
+        raw,
+        policy,
+        minimum_contract_id="20260600",
+    )
+
+    assert selected.get_column("contract_month").to_list() == ["202606"]
 
 
 def test_history_rejects_nonpositive_signal_index() -> None:

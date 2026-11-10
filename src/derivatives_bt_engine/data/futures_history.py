@@ -49,6 +49,10 @@ from derivatives_bt_engine.logging_config import setup_logger
 logger = setup_logger()
 
 HISTORY_SCHEMA_VERSION = 12
+# Increment when calendar selection semantics change. This is intentionally
+# narrower than the public history schema version: it invalidates derived
+# calendar-selected caches without claiming that report columns changed.
+CALENDAR_CONTRACT_SELECTION_VERSION = 2
 DEFAULT_PYSYSTEMTRADE_DB_PATH = Path(
     "/home/dev/fin/db/pysystemtrade_reference.duckdb"
 )
@@ -686,6 +690,8 @@ ORDER BY b.ts_event
 def select_calendar_contract_observations(
     raw: pl.DataFrame,
     policy: ContractRollPolicy,
+    *,
+    minimum_contract_id: str | None = None,
 ) -> pl.DataFrame:
     """Select one held contract per session under a calendar roll policy.
 
@@ -697,6 +703,12 @@ def select_calendar_contract_observations(
     determined from that field while the actual expiration date continues to
     determine the roll cutoff. This distinction matters for contracts such as
     December WTI crude, whose last trade date occurs in November.
+
+    Contract selection is monotonic by contract month. Once a later contract
+    has been selected, a newly appearing earlier contract cannot move the held
+    path backward. ``minimum_contract_id`` seeds that constraint from an
+    incumbent contract owned by an older source at a history handoff. It may
+    be a public ``YYYYMM00`` contract identifier or a ``YYYYMM`` month.
     """
     required = {"date", "expiration", "volume"}
     missing = required - set(raw.columns)
@@ -706,6 +718,15 @@ def select_calendar_contract_observations(
         )
     if policy.mode != "calendar":
         raise ValueError("calendar contract selection requires a calendar policy")
+
+    minimum_contract_month: int | None = None
+    if minimum_contract_id is not None:
+        contract_text = str(minimum_contract_id)
+        if len(contract_text) < 6 or not contract_text[:6].isdigit():
+            raise ValueError(
+                "minimum_contract_id must begin with a YYYYMM contract month"
+            )
+        minimum_contract_month = int(contract_text[:6])
 
     all_dates = raw.get_column("date").unique().sort().to_list()
     if "contract_month" in raw.columns:
@@ -728,28 +749,48 @@ def select_calendar_contract_observations(
     )
     if allowed.is_empty():
         return allowed
+    contract_month = (
+        pl.col("contract_month")
+        .cast(pl.String)
+        .str.slice(0, 6)
+        .cast(pl.Int32, strict=False)
+        if "contract_month" in allowed.columns
+        else (
+            pl.col("expiration").dt.year() * 100
+            + pl.col("expiration").dt.month()
+        ).cast(pl.Int32)
+    )
     contracts = (
         allowed.group_by("expiration")
-        .agg(pl.col("date").min().alias("first_date"))
+        .agg(
+            pl.col("date").min().alias("first_date"),
+            contract_month.first().alias("contract_month_order"),
+        )
         .sort("expiration")
         .to_dicts()
     )
     schedule_dates: list[date] = []
     schedule_expirations: list[date] = []
+    contract_floor = minimum_contract_month
     for session_date in all_dates:
-        held_expiration = next(
+        held_contract = next(
             (
-                row["expiration"]
+                row
                 for row in contracts
                 if row["first_date"] <= session_date
                 and session_date
                 < row["expiration"] + timedelta(days=policy.roll_offset_days)
+                and (
+                    contract_floor is None
+                    or row["contract_month_order"] >= contract_floor
+                )
             ),
             None,
         )
-        if held_expiration is not None:
+        if held_contract is not None:
             schedule_dates.append(session_date)
-            schedule_expirations.append(held_expiration)
+            schedule_expirations.append(held_contract["expiration"])
+            contract_floor = held_contract["contract_month_order"]
     schedule = pl.DataFrame({
         "date": pl.Series(schedule_dates, dtype=pl.Date),
         "expiration": pl.Series(schedule_expirations, dtype=pl.Date),
@@ -856,6 +897,7 @@ class GlobexHistoryProvider:
             Path(self.cache_root)
             / "globex"
             / f"v{HISTORY_SCHEMA_VERSION}"
+            / f"calendar_v{CALENDAR_CONTRACT_SELECTION_VERSION}"
             / self._dataset_fingerprint()
             / policy.cache_key
         )

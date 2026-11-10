@@ -10,6 +10,7 @@ from derivatives_bt_engine.data.ib_futures_dataloader import (
     IBStitchedHistoryProvider,
     _maximum_hold_cycle_gap_months,
     _roll_aware_duration,
+    build_ib_contract_history,
     load_roll_cycle_ib_contract_history,
 )
 from derivatives_bt_engine.data.ib_futures_history_store import (
@@ -85,6 +86,65 @@ def test_stitched_cache_identity_includes_coverage_policy(monkeypatch) -> None:
     prior_path = provider._cache_directory("ZW", "WHEAT", None, "ZW")
 
     assert current_path != prior_path
+
+
+def test_stitched_cache_identity_includes_contract_selection_policy(
+    monkeypatch,
+) -> None:
+    """A derived bundle cannot reuse pre-continuity contract selection."""
+    monkeypatch.setattr(
+        ib_loader,
+        "_load_roll_config",
+        lambda *_args, **_kwargs: ("HMUZ", -700, -1, "HMUZ"),
+    )
+    monkeypatch.setattr(
+        ib_loader,
+        "_history_input_fingerprint",
+        lambda path: {"path": str(path), "size": 0, "mtime_ns": 0},
+    )
+    provider = IBStitchedHistoryProvider(ib=None, duration="3 Y")
+    current_path = provider._cache_directory("I", "IRON_ORE", None, "I")
+
+    monkeypatch.setattr(ib_loader, "CALENDAR_CONTRACT_SELECTION_VERSION", 1)
+    prior_path = provider._cache_directory("I", "IRON_ORE", None, "I")
+
+    assert current_path != prior_path
+
+
+def test_ib_history_keeps_handoff_incumbent_until_next_real_roll() -> None:
+    """A reference incumbent suppresses the backward and redundant IB rolls."""
+    dates = [date(2024, 4, 2), date(2024, 4, 15)]
+    contract_history = pl.DataFrame(
+        {
+            "date": dates + dates,
+            "close": [100.0, 101.0, 110.0, 111.0],
+            "volume": [100.0, 90.0, 80.0, 70.0],
+            "contract_month": ["202603", "202603", "202606", "202606"],
+            "expiration": [
+                date(2026, 3, 16),
+                date(2026, 3, 16),
+                date(2026, 6, 15),
+                date(2026, 6, 15),
+            ],
+            "ib_contract_id": [603, 603, 606, 606],
+            "pst_instr_code": ["IRON_ORE"] * 4,
+            "hold_roll_cycle": ["HMUZ"] * 4,
+            "roll_offset_days": [-700] * 4,
+            "carry_offset": [0] * 4,
+            "priced_roll_cycle": ["HMUZ"] * 4,
+        }
+    )
+
+    history = build_ib_contract_history(
+        contract_history,
+        minimum_contract_id="20260600",
+    )
+
+    assert history.marks.get_column("contract_id").to_list() == [
+        "20260600",
+        "20260600",
+    ]
+    assert history.marks.get_column("is_roll").to_list() == [False, False]
 
 
 def test_stored_history_rejects_shorter_expired_contract_fetch(
