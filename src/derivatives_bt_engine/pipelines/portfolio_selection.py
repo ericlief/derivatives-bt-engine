@@ -2625,6 +2625,11 @@ class _WalkForwardSelectionProvider:
                 "selection_eligibility_hysteresis_reason": ",".join(
                     eligibility_buffer_reasons
                 ),
+                "selection_note": (
+                    "retained_by_eligibility_hysteresis"
+                    if active and eligibility_buffer_reasons
+                    else ""
+                ),
                 "minimum_instruments_per_class": self.args.min_instr_per_class,
                 "minimum_instruments_per_subclass": (
                     self.args.min_instr_per_subclass
