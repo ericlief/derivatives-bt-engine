@@ -1144,9 +1144,8 @@ review details. Run-wide selection parameters are grouped at the right edge.
 The instrument-level `sel_elig_hyst_applied` and
 `sel_elig_hyst_reason` fields identify incumbent rows retained by the relaxed
 trade-cost or market-participation exit gate; the configured percentage alone
-does not imply that a buffer changed eligibility. `sel_note` says
-`retained_by_eligibility_hysteresis` on active rows where the buffer changed
-the eligibility outcome.
+does not imply that a buffer changed eligibility. `sel_note` is `retained_eh`
+on active rows where the buffer changed the eligibility outcome.
 The rebalance-weight notebook view includes a per-instrument annual
 contract-load panel, with estimated trade and roll contract quantities
 available on hover.

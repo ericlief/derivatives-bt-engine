@@ -2626,7 +2626,7 @@ class _WalkForwardSelectionProvider:
                     eligibility_buffer_reasons
                 ),
                 "selection_note": (
-                    "retained_by_eligibility_hysteresis"
+                    "retained_eh"
                     if active and eligibility_buffer_reasons
                     else ""
                 ),
