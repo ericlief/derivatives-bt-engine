@@ -1146,9 +1146,9 @@ The instrument-level `sel_elig_hyst_applied` and
 trade-cost or market-participation exit gate; the configured percentage alone
 does not imply that a buffer changed eligibility. `sel_note` is `retained_eh`
 on active rows where the buffer changed the eligibility outcome.
-The rebalance-weight notebook view includes a per-instrument annual
-contract-load panel, with estimated trade and roll contract quantities
-available on hover.
+The rebalance-weight notebook view includes a yearly bar chart of the active
+market count. Each bar uses the latest review in that year, showing the
+year-by-year size of the selected market universe.
 One file covers the entire monthly or yearly walk-forward run; reviews do not
 create separate result directories.
 The `selection_review_trials` and
@@ -2369,8 +2369,8 @@ plot_selection_grid_rebalance_weights(grid)
 The dropdown labels expose eligibility, membership mode, rank buffer,
 rank-count half-life, and score buffer. The nested view selects a year (and an
 exact date for monthly reviews), then plots instrument `limit_weight` plus
-asset-class and economic-subclass shares, alongside annual contract-load
-estimates by instrument. It lazy-loads only the chosen
+asset-class and economic-subclass shares, alongside the year-by-year active
+market count. It lazy-loads only the chosen
 scenario and never reads the million-row cash-P&L report. To access the typed
 year-by-year frame directly:
 

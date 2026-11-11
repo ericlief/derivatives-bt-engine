@@ -938,10 +938,9 @@ def plot_selection_rebalance_weights(
     economic-subclass shares of the deployed book. Group bars normalize by the
     sum of active ``limit_weight`` values so their shares total 100%; hover
     retains each group's absolute limit-weight total so max-weight
-    under-allocation remains visible. A fourth panel shows estimated annual
-    contract-side load per instrument, split into trade and roll quantities in
-    the hover details. Older review files without those diagnostics display a
-    note in that panel.
+    under-allocation remains visible. A fourth panel shows the selected book's
+    market count by year, using the latest review in each year as that year's
+    market universe.
 
     Parameters
     ----------
@@ -957,7 +956,7 @@ def plot_selection_rebalance_weights(
     ipywidgets.VBox
         A year selector, an exact-date selector for multi-review years, and an
         output area containing instrument, class, and subclass weight bars
-        plus annual contract-load estimates.
+        plus a yearly market-universe book-count chart.
     """
     import holoviews as hv
     import hvplot.polars  # noqa: F401 - registers Polars' ``hvplot`` API
@@ -999,6 +998,22 @@ def plot_selection_rebalance_weights(
         ]
         for year in years
     }
+    # Use the latest review of each year to summarize that year's selected
+    # market universe, including monthly runs with multiple reviews per year.
+    annual_book_counts = pl.DataFrame(
+        [
+            {
+                "year": year,
+                "review_date": review_date.isoformat(),
+                "market_n": frame.filter(
+                    (pl.col("sel_date") == review_date)
+                    & pl.col("sel_active").fill_null(False)
+                ).height,
+            }
+            for year, year_dates in dates_by_year.items()
+            for review_date in [max(year_dates)]
+        ]
+    ).sort("year")
 
     year_selector = widgets.Dropdown(
         description="Year",
@@ -1058,9 +1073,6 @@ def plot_selection_rebalance_weights(
             "subcls_lim_weight": None,
             "group_lim_weight": None,
             "unalloc_weight": None,
-            "ann_trade_con": None,
-            "ann_roll_con": None,
-            "ann_con_load": None,
         }
         active = (
             active.with_columns(
@@ -1265,42 +1277,24 @@ def plot_selection_rebalance_weights(
                 ("Members", "@instruments"),
             ],
         )
-        contract_load = active.filter(pl.col("ann_con_load").is_not_null())
-        if contract_load.is_empty():
-            contract_load_bars = hv.Text(
-                0.5,
-                0.5,
-                "Annual contract-load estimates are not in this saved report",
-            ).opts(
-                width=width,
-                height=height,
-                xaxis=None,
-                yaxis=None,
-                title="Estimated annual contract load at forecast cap",
-            )
-        else:
-            contract_load_bars = contract_load.hvplot.bar(
-                x="symbol",
-                y="ann_con_load",
-                title="Estimated annual contract load at forecast cap",
-                xlabel="Instrument",
-                ylabel="Contract sides per year",
-                width=width,
-                height=height,
-                rot=70,
-                color="#9467bd",
-                tools=[
-                    "hover", "pan", "wheel_zoom", "box_zoom", "reset", "save"
-                ],
-                hover_cols=["ann_trade_con", "ann_roll_con", "ann_con_load"],
-                hover_tooltips=[
-                    ("Instrument", "@symbol"),
-                    ("Annual trade contracts", "@ann_trade_con{0.00}"),
-                    ("Annual roll contracts", "@ann_roll_con{0.00}"),
-                    ("Annual contract load", "@ann_con_load{0.00}"),
-                ],
-            )
-        return instrument_bars, class_bars, subclass_bars, contract_load_bars
+        market_count_bars = annual_book_counts.hvplot.bar(
+            x="year",
+            y="market_n",
+            title="Selected market universe by year",
+            xlabel="Year",
+            ylabel="Active markets in book",
+            width=width,
+            height=height,
+            color="#9467bd",
+            tools=["hover", "pan", "wheel_zoom", "box_zoom", "reset", "save"],
+            hover_cols=["review_date", "market_n"],
+            hover_tooltips=[
+                ("Year", "@year"),
+                ("Latest review", "@review_date"),
+                ("Active markets", "@market_n{0}"),
+            ],
+        )
+        return instrument_bars, class_bars, subclass_bars, market_count_bars
 
     def update_plot(change=None) -> None:
         """Redraw the exact review selected by the widget controls."""
