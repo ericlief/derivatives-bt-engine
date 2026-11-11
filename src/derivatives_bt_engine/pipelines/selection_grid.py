@@ -427,10 +427,12 @@ def parse_args(argv=None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--ib-history-live",
-        choices=("missing", "update"),
+        choices=("missing", "snapshot", "update"),
         help=(
             "Live IB policy used once by the serial history-materialization "
-            "phase. Measured scenarios never connect to IB."
+            "phase. 'snapshot' refreshes only histories ending before the "
+            "input snapshot's ib_fast_end. Measured scenarios never connect "
+            "to IB."
         ),
     )
     parser.add_argument("--ib-host", default="127.0.0.1")

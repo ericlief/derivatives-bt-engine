@@ -1200,10 +1200,16 @@ When `--ib-history-db` is supplied, executable cash history is rebuilt from
 the direct PST/IB source for every instrument that can enter a scheduled book.
 With `--ib-history-live missing`, a stored reference-only bundle counts as
 missing IB history and triggers live acquisition; a valid cached PST/IB bundle
-is reused without an IB request. `--ib-history-live update` refreshes every
-eligible signal history. The required `--cache` root holds source-history
-bundles under `stitched/v12`, PySystemTrade history under `pysystemtrade`,
-and derived backtest artifacts under `selection_backtest`.
+is reused without an IB request, even if it ends before the latest snapshot.
+`--ib-history-live snapshot` compares each cached IB signal endpoint with that
+instrument's `ib_fast_end` in the input snapshot/rule cache and refreshes only
+tails that are absent or end earlier. This matches snapshot-observed history
+freshness; it does not guarantee bars beyond that endpoint.
+If the input has no `ib_fast_end` for a signal, snapshot mode only acquires a
+missing IB segment and otherwise reuses its cache. `--ib-history-live update`
+refreshes every eligible signal history. The required `--cache` root holds
+source-history bundles under `stitched/v12`, PySystemTrade history under
+`pysystemtrade`, and derived backtest artifacts under `selection_backtest`.
 Selection v1 deliberately does not insert Globex: `--globex-db` remains an
 accepted compatibility argument, but the selection runner passes
 `include_globex=False`. PST retains every date through that instrument's

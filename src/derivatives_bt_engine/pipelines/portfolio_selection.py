@@ -961,11 +961,11 @@ def parse_args(argv=None, *, complete_default: bool = False):
     )
     parser.add_argument(
         "--ib-history-live",
-        choices=("missing", "update"),
+        choices=("missing", "snapshot", "update"),
         help=(
-            "Opt in to live IB history acquisition. 'missing' first uses "
-            "stored history and requests IB when the load fails or returns "
-            "no IB segment; "
+            "IB history refresh policy. 'missing' requests IB only when no "
+            "usable IB segment is cached; 'snapshot' refreshes only when the "
+            "cached tail ends before the input snapshot's ib_fast_end; "
             "'update' refreshes every selected signal history from IB."
         ),
     )
@@ -2864,6 +2864,7 @@ def _run_complete_selection(
     generated_at: datetime,
     run_config: dict[str, object],
     args: argparse.Namespace,
+    snapshot_ib_end_by_signal: dict[str, date],
 ) -> tuple[Path, pl.DataFrame]:
     """Audit forecasts, exclude invalid instruments, and run greedy selection.
 
@@ -3763,6 +3764,16 @@ def _run_complete_selection(
                 max_source_gap_days=args.max_source_gap_days,
             ).load(signal_symbol_by_history_code[history_code])
 
+        def latest_ib_signal_date(history: FuturesHistory) -> date | None:
+            """Return the last daily signal date owned by IB, if present."""
+            signal = history.signal
+            if "source_segment" not in signal.columns:
+                return None
+            ib_rows = signal.filter(pl.col("source_segment") == "ib")
+            if ib_rows.is_empty():
+                return None
+            return ib_rows.get_column("date").max()
+
         try:
             for history_index, history_code in enumerate(
                 selected_history_codes,
@@ -3791,7 +3802,7 @@ def _run_complete_selection(
                                 update_history=False,
                             )
                         except Exception as exc:
-                            if args.ib_history_live != "missing":
+                            if args.ib_history_live not in {"missing", "snapshot"}:
                                 raise
                             logger.info(
                                 "selection_stitched_history live_retry "
@@ -3808,11 +3819,11 @@ def _run_complete_selection(
                             # The stitched provider deliberately converts a
                             # missing optional IB source into a valid
                             # reference-only history. Treat that result as a
-                            # cache miss for ``missing`` mode so this path
-                            # acquires the absent broker segment rather than
-                            # silently retaining the frozen reference curve.
+                            # cache miss for ``missing`` and ``snapshot`` so
+                            # this path acquires the absent broker segment
+                            # rather than retaining the reference-only curve.
                             if (
-                                args.ib_history_live == "missing"
+                                args.ib_history_live in {"missing", "snapshot"}
                                 and _direct_ib_handoff_date(
                                     stitched_history,
                                     history_code=history_code,
@@ -3840,6 +3851,33 @@ def _run_complete_selection(
                                     ib=connected_ib(),
                                     update_history=True,
                                 )
+                            elif args.ib_history_live == "snapshot":
+                                signal_symbol = signal_symbol_by_history_code[
+                                    history_code
+                                ]
+                                snapshot_end = snapshot_ib_end_by_signal.get(
+                                    signal_symbol
+                                )
+                                cached_end = latest_ib_signal_date(
+                                    stitched_history
+                                )
+                                if (
+                                    snapshot_end is not None
+                                    and (cached_end is None or cached_end < snapshot_end)
+                                ):
+                                    logger.info(
+                                        "selection_stitched_history live_retry "
+                                        "hist_instr_code=%s reason=snapshot_tail_stale "
+                                        "cached_ib_end=%s snapshot_ib_end=%s",
+                                        history_code,
+                                        cached_end,
+                                        snapshot_end,
+                                    )
+                                    stitched_history = load_stitched_history(
+                                        history_code,
+                                        ib=connected_ib(),
+                                        update_history=True,
+                                    )
                 except Exception as exc:
                     # Preserve the valid long reference curve when a broker
                     # source is unavailable, and expose that fallback in the
@@ -5311,6 +5349,12 @@ def run(
             generated_at=generated_at,
             run_config=config,
             args=args,
+            snapshot_ib_end_by_signal={
+                str(row["signal_symbol"]): row["ib_fast_end"]
+                for row in report.iter_rows(named=True)
+                if row.get("signal_symbol")
+                and isinstance(row.get("ib_fast_end"), date)
+            },
         )
     return output, public_selected
 
