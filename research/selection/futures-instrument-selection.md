@@ -1140,6 +1140,9 @@ report leads with review identity and `sel_active`, followed by `symbol`,
 asset class, and economic subclass. Allocation weights and their class and
 subclass limits follow the identity fields, then score diagnostics and other
 review details. Run-wide selection parameters are grouped at the right edge.
+The rebalance-weight notebook view includes a per-instrument annual
+contract-load panel, with estimated trade and roll contract quantities
+available on hover.
 One file covers the entire monthly or yearly walk-forward run; reviews do not
 create separate result directories.
 The `selection_review_trials` and
@@ -2360,7 +2363,8 @@ plot_selection_grid_rebalance_weights(grid)
 The dropdown labels expose eligibility, membership mode, rank buffer,
 rank-count half-life, and score buffer. The nested view selects a year (and an
 exact date for monthly reviews), then plots instrument `limit_weight` plus
-asset-class and economic-subclass shares. It lazy-loads only the chosen
+asset-class and economic-subclass shares, alongside annual contract-load
+estimates by instrument. It lazy-loads only the chosen
 scenario and never reads the million-row cash-P&L report. To access the typed
 year-by-year frame directly:
 

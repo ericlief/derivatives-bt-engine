@@ -55,7 +55,7 @@ def test_selection_review_instrument_report_orders_identity_scores_and_params():
 
     ordered = order_selection_review_instrument_report(report)
 
-    assert ordered.columns[:9] == [
+    assert ordered.columns[:10] == [
         "sel_date",
         "sel_instr_n",
         "sel_active",
@@ -64,6 +64,7 @@ def test_selection_review_instrument_report_orders_identity_scores_and_params():
         "econ_subcls",
         "weight",
         "cls_lim_weight",
+        "ann_dvol",
         "sel_score",
     ]
     assert ordered.columns[-1] == "min_instr_per_cls"

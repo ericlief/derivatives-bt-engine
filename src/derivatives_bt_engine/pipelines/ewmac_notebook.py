@@ -938,7 +938,10 @@ def plot_selection_rebalance_weights(
     economic-subclass shares of the deployed book. Group bars normalize by the
     sum of active ``limit_weight`` values so their shares total 100%; hover
     retains each group's absolute limit-weight total so max-weight
-    under-allocation remains visible.
+    under-allocation remains visible. A fourth panel shows estimated annual
+    contract-side load per instrument, split into trade and roll quantities in
+    the hover details. Older review files without those diagnostics display a
+    note in that panel.
 
     Parameters
     ----------
@@ -953,9 +956,10 @@ def plot_selection_rebalance_weights(
     -------
     ipywidgets.VBox
         A year selector, an exact-date selector for multi-review years, and an
-        output area containing the selected review's instrument, class, and
-        subclass weight bars.
+        output area containing instrument, class, and subclass weight bars
+        plus annual contract-load estimates.
     """
+    import holoviews as hv
     import hvplot.polars  # noqa: F401 - registers Polars' ``hvplot`` API
     import ipywidgets as widgets
     from IPython.display import display
@@ -1011,7 +1015,7 @@ def plot_selection_rebalance_weights(
                 overflow="visible",
             )
         )
-        for _ in range(3)
+        for _ in range(4)
     ]
 
     def configure_review_selector(year: int) -> None:
@@ -1054,6 +1058,9 @@ def plot_selection_rebalance_weights(
             "subcls_lim_weight": None,
             "group_lim_weight": None,
             "unalloc_weight": None,
+            "ann_trade_con": None,
+            "ann_roll_con": None,
+            "ann_con_load": None,
         }
         active = (
             active.with_columns(
@@ -1258,7 +1265,42 @@ def plot_selection_rebalance_weights(
                 ("Members", "@instruments"),
             ],
         )
-        return instrument_bars, class_bars, subclass_bars
+        contract_load = active.filter(pl.col("ann_con_load").is_not_null())
+        if contract_load.is_empty():
+            contract_load_bars = hv.Text(
+                0.5,
+                0.5,
+                "Annual contract-load estimates are not in this saved report",
+            ).opts(
+                width=width,
+                height=height,
+                xaxis=None,
+                yaxis=None,
+                title="Estimated annual contract load at forecast cap",
+            )
+        else:
+            contract_load_bars = contract_load.hvplot.bar(
+                x="symbol",
+                y="ann_con_load",
+                title="Estimated annual contract load at forecast cap",
+                xlabel="Instrument",
+                ylabel="Contract sides per year",
+                width=width,
+                height=height,
+                rot=70,
+                color="#9467bd",
+                tools=[
+                    "hover", "pan", "wheel_zoom", "box_zoom", "reset", "save"
+                ],
+                hover_cols=["ann_trade_con", "ann_roll_con", "ann_con_load"],
+                hover_tooltips=[
+                    ("Instrument", "@symbol"),
+                    ("Annual trade contracts", "@ann_trade_con{0.00}"),
+                    ("Annual roll contracts", "@ann_roll_con{0.00}"),
+                    ("Annual contract load", "@ann_con_load{0.00}"),
+                ],
+            )
+        return instrument_bars, class_bars, subclass_bars, contract_load_bars
 
     def update_plot(change=None) -> None:
         """Redraw the exact review selected by the widget controls."""

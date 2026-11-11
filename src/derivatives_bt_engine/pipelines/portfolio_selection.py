@@ -2666,6 +2666,16 @@ class _WalkForwardSelectionProvider:
                 "limit_weight": (
                     allocation.get("limit_weight") if allocation else None
                 ),
+                "ann_trade_cons": (
+                    allocation.get("ann_trade_cons") if allocation else None
+                ),
+                "ann_roll_cons": (
+                    allocation.get("ann_roll_cons") if allocation else None
+                ),
+                "annual_contract_load": (
+                    allocation.get("annual_contract_load")
+                    if allocation else None
+                ),
                 "ann_dvol": candidate.ann_dvol if candidate else None,
                 "trade_sr": candidate.trade_sr if candidate else None,
                 "roll_sr": candidate.roll_sr if candidate else None,

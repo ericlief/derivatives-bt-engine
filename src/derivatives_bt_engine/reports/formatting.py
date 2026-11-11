@@ -676,6 +676,11 @@ def order_selection_review_instrument_report(
             "subcls_lim_weight",
             "group_lim_weight",
             "unalloc_weight",
+            "ann_trade_con",
+            "ann_roll_con",
+            "ann_con_load",
+            "ann_dvol",
+            "risk_budget",
         )
         if name in report.columns
     ]
