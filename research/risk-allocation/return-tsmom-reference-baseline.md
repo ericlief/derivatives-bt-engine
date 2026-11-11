@@ -70,9 +70,39 @@ signal magnitude and apply the causal pooled forecast scalar. The Goulding
 mixing parameters are estimated within economic subclass using only earlier
 monthly outcomes. `--selection-rebalance` remains the book review cadence;
 the Goulding position forecast itself updates monthly in either mode.
+
+Use `--goulding-signal-mode sharpe` for the volatility-normalized continuous
+challenger. This is deliberately not labeled as the paper's exact signal. Raw
+fast and slow arithmetic returns still classify Bull, Correction, Bear, and
+Rebound and still drive the state-outcome history used to estimate `a_co` and
+`a_re`. Only the magnitude legs supplied to the continuous blend change:
+
+$$
+\sigma^F_{i,t} =
+\sqrt{\frac{1}{2}\sum_{k=1}^{2} v_{i,t-k}},
+\qquad
+\sigma^S_{i,t} =
+\sqrt{\frac{1}{12}\sum_{k=1}^{12} v_{i,t-k}},
+$$
+
+$$
+F^*_{i,t}=\frac{F_{i,t}}{\sigma^F_{i,t}},
+\qquad
+S^*_{i,t}=\frac{S_{i,t}}{\sigma^S_{i,t}},
+$$
+
+where $v_{i,t-k}$ is the realized variance (sum of squared daily simple
+returns) in completed month $t-k$. The square root of the mean monthly
+variance is the RMS monthly volatility; it is not the standard error of the
+fast or slow average. Both numerator and denominator exclude the forecast
+month. Bull/Bear use the mean of $F^*$ and $S^*$; Correction/Rebound apply the
+same `a_co`/`a_re` equation-7 blend to $F^*$ and $S^*$. The result then uses
+the same causal pooled scalar and cap as `continuous`.
+
 The selection grid accepts the same `--signal-model` and
 `--goulding-signal-mode` flags and forwards them to every scenario, so book
-constraint sweeps can be run separately for binary and continuous Goulding.
+constraint sweeps can be run separately for binary, continuous, and Sharpe-like
+Goulding.
 
 Supplying `--ib-history-db` extends executable cash replay through the stored
 IB tail. Without it, both signal and P&L use the frozen reference history.

@@ -745,11 +745,62 @@ def test_goulding_monthly_needs_only_ts_event_and_close():
     assert out.height > 0
 
 
-def test_goulding_monthly_has_no_volatility_normalization_columns():
+def test_goulding_monthly_keeps_raw_signal_and_adds_separate_sharpe_columns():
     df = _price_df_dated(date(2018, 1, 1), 400, drift=0.001, seed=9)
     out = goulding_monthly(build_features(df))
-    # Pure arithmetic-average signal -- no std/ts_fast/ts_slow/hv anywhere.
+    # Raw arithmetic-return signals remain distinct from the optional
+    # Goulding-specific monthly RMS-vol normalization.
     assert not ({'std', 'std_fast', 'std_slow', 'ts_fast', 'ts_slow', 'hv'} & set(out.columns))
+    assert {
+        'monthly_variance', 'fast_rms_vol', 'slow_rms_vol',
+        'fast_sharpe', 'slow_sharpe',
+    } <= set(out.columns)
+
+
+def test_goulding_monthly_sharpe_legs_use_only_completed_month_variances():
+    df = _price_df_dated(
+        date(2018, 1, 1), 500, drift=0.0005, vol=0.015, seed=91
+    )
+    out = goulding_monthly(df, fast_months=2, slow_months=3).sort('ts_event')
+    complete = out.drop_nulls([
+        'fast', 'slow', 'fast_rms_vol', 'slow_rms_vol',
+        'fast_sharpe', 'slow_sharpe',
+    ])
+    row_index = out.get_column('ts_event').to_list().index(
+        complete.get_column('ts_event')[0]
+    )
+    monthly_variance = out.get_column('monthly_variance').to_list()
+    expected_fast_vol = math.sqrt(
+        sum(monthly_variance[row_index - 2:row_index]) / 2
+    )
+    expected_slow_vol = math.sqrt(
+        sum(monthly_variance[row_index - 3:row_index]) / 3
+    )
+    row = out.row(row_index, named=True)
+
+    assert row['fast_rms_vol'] == pytest.approx(expected_fast_vol)
+    assert row['slow_rms_vol'] == pytest.approx(expected_slow_vol)
+    assert row['fast_sharpe'] == pytest.approx(row['fast'] / expected_fast_vol)
+    assert row['slow_sharpe'] == pytest.approx(row['slow'] / expected_slow_vol)
+
+    # Changing dates after this forecast month cannot alter its numerator,
+    # denominator, or raw regime classification.
+    cutoff = row['ts_event']
+    truncated = goulding_monthly(
+        df.filter(pl.col('ts_event') < cutoff),
+        fast_months=2,
+        slow_months=3,
+    ).sort('ts_event')
+    prior_full = out.filter(pl.col('ts_event') < cutoff).tail(1).row(0, named=True)
+    prior_truncated = truncated.tail(1).row(0, named=True)
+    for column in (
+        'fast', 'slow', 'fast_rms_vol', 'slow_rms_vol',
+        'fast_sharpe', 'slow_sharpe', 'regime',
+    ):
+        if isinstance(prior_full[column], float):
+            assert prior_truncated[column] == pytest.approx(prior_full[column])
+        else:
+            assert prior_truncated[column] == prior_full[column]
 
 
 def test_goulding_monthly_uses_month_end_close_not_first_day():
@@ -1028,6 +1079,28 @@ def test_resolve_trend_direction_continuous_goulding_requires_causal_scalar():
         g_regime_val='bull', g_fast_val=0.06, g_slow_val=0.02,
         goulding_signal_mode='continuous', goulding_forecast_scalar=None,
     ) is None
+
+
+def test_resolve_trend_direction_sharpe_uses_normalized_legs_but_raw_regime():
+    trend, regime, discount, blend = resolve_trend_direction(
+        'goulding', None, None, None, 0.5,
+        g_regime_val='correction',
+        g_fast_val=-0.01,
+        g_slow_val=0.10,
+        a_co=0.25,
+        a_re=0.5,
+        goulding_signal_mode='sharpe',
+        goulding_forecast_scalar=2.0,
+        g_fast_sharpe_val=-2.0,
+        g_slow_sharpe_val=0.5,
+    )
+
+    # Raw returns classify Correction, but the normalized blend is
+    # 0.75 * 0.5 + 0.25 * -2 = -0.125 before the causal scalar.
+    assert regime == TrendRegime.CORRECTION
+    assert blend == pytest.approx(-0.125)
+    assert trend == pytest.approx(-0.25)
+    assert discount == 1.0
 
 # ── Proposition 9 dynamic mixing estimator ──────────────────────────────────
 

@@ -1221,9 +1221,13 @@ curves. Goulding runs additionally cache the pooled reference and stitched
 forecast frames. Those forecast keys include the complete calibration universe,
 signal mode, and frozen reference database identity; a repeat run with the same
 universe can load the forecasts without recalibrating every history. The
-derived identity also includes the continuous forecast convention: EWMAC and
-continuous Goulding target mean absolute forecast 1 and cap forecasts at
-`+/-2`. Binary Goulding remains `+/-1`. Return TSMOM uses that same continuous
+derived identity also includes the forecast convention: EWMAC, continuous
+Goulding, and Sharpe-like Goulding target mean absolute forecast 1 and cap
+forecasts at `+/-2`. Binary Goulding remains `+/-1`. Sharpe-like Goulding keeps
+the original raw monthly fast/slow returns for regime classification and
+mixing-weight estimation, but divides each magnitude leg by its own lagged RMS
+monthly volatility before blending. The cached frame carries both raw and
+normalized legs for audit. Return TSMOM uses that same continuous
 scale through a separate cached causal pooled daily scalar; its reference
 universe and return/volatility horizons are part of the scalar key. A cache hit
 therefore avoids reloading and recalculating the full reference universe, while

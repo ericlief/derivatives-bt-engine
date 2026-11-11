@@ -365,7 +365,9 @@ def parse_args():
     p.add_argument('--goulding-signal-mode', choices=GOULDING_SIGNAL_MODES, default='binary',
                    help="Only used with --signal-weighting goulding. 'binary' preserves the +/-1 "
                         "direction baseline. 'continuous' retains fast/slow or equation-7 magnitude, "
-                        "causally scales pooled prior forecasts to mean absolute 0.5, and caps at +/-1.")
+                        "causally scales pooled prior forecasts to mean absolute 0.5, and caps at +/-1. "
+                        "'sharpe' keeps the raw-return regime while normalizing each horizon by its "
+                        "lagged RMS monthly volatility before blending and pooled scaling.")
     p.add_argument('--mixing-pool', choices=MIXING_POOLS, default='cluster',
                    help="Only used with --signal-weighting goulding (default: %(default)s). 'cluster': "
                         "a_Co/a_Re estimated separately per instrument cluster. 'global': one shared "

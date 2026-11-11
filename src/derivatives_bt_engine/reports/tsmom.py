@@ -15,7 +15,9 @@ from typing import Iterable, Mapping, Optional
 
 SIGNAL_COLUMNS = (
     'run_id', 'as_of', 'symbol', 'cluster', 'close', 'mult',
-    'g_regime', 'g_fast', 'g_slow', 'a_co', 'a_re', 'g_blend',
+    'g_regime', 'g_fast', 'g_slow',
+    'g_fast_rms_vol', 'g_slow_rms_vol', 'g_fast_sharpe', 'g_slow_sharpe',
+    'a_co', 'a_re', 'g_blend',
     'g_mode', 'g_raw', 'g_scale', 'g_sig',
     'ts_fast', 'ts_slow', 'ts', 'contin_sig', 'ts_reg',
     'day_std', 'hv', 'dd_pct', 'risk_sc', 'reg_disc', 'vx_sc', 'comb_sc',
@@ -112,6 +114,10 @@ def clean_signal_rows(rows: Iterable[Mapping], run_id: str, *, as_of=None) -> li
             'g_regime': _value(source, 'g_regime'),
             'g_fast': _report_float(_value(source, 'g_fast')),
             'g_slow': _report_float(_value(source, 'g_slow')),
+            'g_fast_rms_vol': _report_float(_value(source, 'g_fast_rms_vol')),
+            'g_slow_rms_vol': _report_float(_value(source, 'g_slow_rms_vol')),
+            'g_fast_sharpe': _report_float(_value(source, 'g_fast_sharpe')),
+            'g_slow_sharpe': _report_float(_value(source, 'g_slow_sharpe')),
             'a_co': _report_float(_value(source, 'a_co')),
             'a_re': _report_float(_value(source, 'a_re')),
             'g_blend': _report_float(_value(source, 'g_blend')),

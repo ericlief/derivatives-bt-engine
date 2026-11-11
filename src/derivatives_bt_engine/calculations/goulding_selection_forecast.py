@@ -25,6 +25,7 @@ from derivatives_bt_engine.calculations.goulding import (
     estimate_goulding_forecast_scalar,
     estimate_mixing_params,
     goulding_continuous_raw,
+    goulding_forecast_legs,
     goulding_monthly,
     normalize_goulding_forecast,
 )
@@ -69,6 +70,10 @@ def _monthly_signal_frame(
             "ts_event": "forecast_month",
             "fast": "g_fast",
             "slow": "g_slow",
+            "fast_rms_vol": "g_fast_rms_vol",
+            "slow_rms_vol": "g_slow_rms_vol",
+            "fast_sharpe": "g_fast_sharpe",
+            "slow_sharpe": "g_slow_sharpe",
             "regime": "g_regime",
         })
         .sort("forecast_month")
@@ -95,6 +100,10 @@ def _monthly_signal_frame(
             "ret",
             "g_fast",
             "g_slow",
+            "g_fast_rms_vol",
+            "g_slow_rms_vol",
+            "g_fast_sharpe",
+            "g_slow_sharpe",
             "g_regime",
         )
     )
@@ -144,13 +153,27 @@ def _forecast_rows(
     forecast_cap: float,
     calibration_monthly_by_history: dict[str, pl.DataFrame] | None = None,
 ) -> dict[str, pl.DataFrame]:
-    """Calculate monthly binary or continuous forecasts for every history.
+    """Calculate monthly binary, continuous, or Sharpe-like forecasts.
 
     Mixing weights are estimated in an expanding window within economic
     subclass.  Continuous forecasts share one causal scalar across the
     universe, matching the standalone Goulding implementation's pooled
-    normalization convention.
+    normalization convention. Sharpe mode keeps raw-return regime labels but
+    supplies horizon-normalized fast/slow legs to the continuous blend.
     """
+    def raw_forecast(row: dict[str, object], a_co: float, a_re: float):
+        """Calculate one mode-specific continuous forecast from a monthly row."""
+        fast, slow = goulding_forecast_legs(
+            signal_mode,
+            row.get("g_fast"),
+            row.get("g_slow"),
+            row.get("g_fast_sharpe"),
+            row.get("g_slow_sharpe"),
+        )
+        return goulding_continuous_raw(
+            row.get("g_regime"), a_co, a_re, fast, slow
+        )
+
     calibration_monthly = (
         calibration_monthly_by_history or monthly_by_history
     )
@@ -178,7 +201,7 @@ def _forecast_rows(
             for cluster in clusters
         }
         scalar = None
-        if signal_mode == "continuous":
+        if signal_mode in {"continuous", "sharpe"}:
             raw_history: list[float | None] = []
             for history_code, monthly in calibration_monthly.items():
                 a_co, a_re = mixing_by_cluster[
@@ -187,15 +210,7 @@ def _forecast_rows(
                 for prior in monthly.filter(
                     pl.col("forecast_month") < forecast_month
                 ).iter_rows(named=True):
-                    raw_history.append(
-                        goulding_continuous_raw(
-                            prior.get("g_regime"),
-                            a_co,
-                            a_re,
-                            prior.get("g_fast"),
-                            prior.get("g_slow"),
-                        )
-                    )
+                    raw_history.append(raw_forecast(prior, a_co, a_re))
             scalar = estimate_goulding_forecast_scalar(
                 raw_history,
                 target_abs=target_abs_forecast,
@@ -209,16 +224,10 @@ def _forecast_rows(
                 continue
             source = current.row(0, named=True)
             a_co, a_re = mixing_by_cluster[cluster_by_history[history_code]]
-            raw_forecast = goulding_continuous_raw(
-                source.get("g_regime"),
-                a_co,
-                a_re,
-                source.get("g_fast"),
-                source.get("g_slow"),
-            )
-            if signal_mode == "continuous":
+            current_raw_forecast = raw_forecast(source, a_co, a_re)
+            if signal_mode in {"continuous", "sharpe"}:
                 combined_forecast = normalize_goulding_forecast(
-                    raw_forecast,
+                    current_raw_forecast,
                     scalar,
                     cap=forecast_cap,
                 )
@@ -235,7 +244,7 @@ def _forecast_rows(
                 **source,
                 "a_co": a_co,
                 "a_re": a_re,
-                "g_raw_forecast": raw_forecast,
+                "g_raw_forecast": current_raw_forecast,
                 "g_forecast_scalar": scalar,
                 "combined_forecast": combined_forecast,
             })
@@ -281,8 +290,10 @@ def build_goulding_selection_forecasts(
         scaling. This lets a stitched target extend past the shared reference
         endpoint without giving each market a different pooled calibration.
     signal_mode
-        ``binary`` emits full signed forecasts; ``continuous`` retains
-        magnitude and applies the pooled expanding forecast scalar.
+        ``binary`` emits full signed forecasts; ``continuous`` retains raw
+        return magnitude; ``sharpe`` retains magnitude after dividing each
+        horizon by its own lagged RMS monthly volatility. Both continuous
+        modes apply the pooled expanding forecast scalar.
     fast_months, slow_months
         Calendar-month momentum horizons.
     target_abs_forecast, forecast_cap

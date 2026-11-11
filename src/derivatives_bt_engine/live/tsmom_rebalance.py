@@ -87,6 +87,7 @@ from derivatives_bt_engine.calculations.goulding import (
     estimate_goulding_forecast_scalar,
     estimate_mixing_params_diagnostics,
     goulding_continuous_raw,
+    goulding_forecast_legs,
     goulding_monthly,
 )
 from derivatives_bt_engine.calculations.signal_confidence import (
@@ -209,8 +210,10 @@ class TsmomLiveConfig:
     # this mode (a_Co/a_Re IS the discount mechanism).
     signal_weighting: str = 'continuous'
     # Goulding forecast shape: the established binary direction remains the
-    # default; continuous preserves raw monthly magnitude, causally scales
-    # pooled history to mean absolute 0.5, and caps at +/-1.
+    # default; continuous preserves raw monthly magnitude; sharpe preserves
+    # the raw regime while RMS-vol-normalizing the magnitude legs. Both
+    # continuous variants causally scale pooled history to mean absolute 0.5
+    # and cap at +/-1.
     goulding_signal_mode: str = 'binary'
     # Only used when signal_weighting == 'goulding'. 'cluster' (default):
     # a_Co/a_Re estimated separately per instrument cluster (pooled across
@@ -1244,6 +1247,8 @@ def _finalize_signal(instr: dict, raw: dict, config: TsmomLiveConfig, vix_scalar
     dd_pct = dd_raw * 100 if dd_raw is not None else None
 
     g_regime_val = g_fast_val = g_slow_val = None
+    g_fast_rms_vol_val = g_slow_rms_vol_val = None
+    g_fast_sharpe_val = g_slow_sharpe_val = None
     cluster = instr.get('cluster', 'other')
     a_co, a_re = mixing_params_by_cluster.get(cluster, (0.5, 0.5))
     if config.signal_weighting == 'goulding' and raw['g_df'] is not None and raw['g_df'].height > 0:
@@ -1251,15 +1256,29 @@ def _finalize_signal(instr: dict, raw: dict, config: TsmomLiveConfig, vix_scalar
         g_regime_val = g_last['regime'][0]
         g_fast_val = g_last['fast'][0]
         g_slow_val = g_last['slow'][0]
+        g_fast_rms_vol_val = g_last['fast_rms_vol'][0]
+        g_slow_rms_vol_val = g_last['slow_rms_vol'][0]
+        g_fast_sharpe_val = g_last['fast_sharpe'][0]
+        g_slow_sharpe_val = g_last['slow_sharpe'][0]
 
+    forecast_fast, forecast_slow = goulding_forecast_legs(
+        config.goulding_signal_mode,
+        g_fast_val,
+        g_slow_val,
+        g_fast_sharpe_val,
+        g_slow_sharpe_val,
+    )
     g_raw_forecast = (
-        goulding_continuous_raw(g_regime_val, a_co, a_re, g_fast_val, g_slow_val)
+        goulding_continuous_raw(
+            g_regime_val, a_co, a_re, forecast_fast, forecast_slow
+        )
         if config.signal_weighting == 'goulding' else None
     )
     resolved = resolve_trend_direction(
         config.signal_weighting, contin_signal, ts_fast, ts_slow,
         config.regime_discount, g_regime_val, g_fast_val, g_slow_val,
         a_co, a_re, config.goulding_signal_mode, goulding_forecast_scalar,
+        g_fast_sharpe_val, g_slow_sharpe_val,
     )
     if resolved is not None:
         trend_strength, regime, regime_discount, g_blend = resolved
@@ -1327,7 +1346,12 @@ def _finalize_signal(instr: dict, raw: dict, config: TsmomLiveConfig, vix_scalar
         # g_regime inputs resolve_trend_direction blended, and g_blend
         # itself (the raw pre-sign eq. 7 value -- None in Bull/Bear, where
         # eq. 7 doesn't apply, even though trend_strength still resolves).
-        'g_regime': g_regime_val, 'g_fast': g_fast_val, 'g_slow': g_slow_val, 'g_blend': g_blend,
+        'g_regime': g_regime_val, 'g_fast': g_fast_val, 'g_slow': g_slow_val,
+        'g_fast_rms_vol': g_fast_rms_vol_val,
+        'g_slow_rms_vol': g_slow_rms_vol_val,
+        'g_fast_sharpe': g_fast_sharpe_val,
+        'g_slow_sharpe': g_slow_sharpe_val,
+        'g_blend': g_blend,
         'a_co': a_co if config.signal_weighting == 'goulding' else None,
         'a_re': a_re if config.signal_weighting == 'goulding' else None,
         'g_signal_mode': config.goulding_signal_mode if config.signal_weighting == 'goulding' else None,
@@ -1400,13 +1424,14 @@ def _goulding_forecast_scalar_for_instruments(
     instruments: list[dict],
     mixing_params_by_cluster: dict[str, tuple[float, float]],
 ) -> Optional[float]:
-    """Causal pooled scalar for the optional continuous Goulding forecast.
+    """Causal pooled scalar for a continuous Goulding forecast mode.
 
     Each instrument's final monthly row is the forecast being acted on now,
     so it is excluded. Earlier raw forecasts are pooled across the supplied
     universe, matching Carver's cross-instrument scalar convention.
     """
-    if config.signal_weighting != 'goulding' or config.goulding_signal_mode != 'continuous':
+    if (config.signal_weighting != 'goulding'
+            or config.goulding_signal_mode not in {'continuous', 'sharpe'}):
         return None
     instr_by_symbol = {instr['symbol']: instr for instr in instruments}
     raw_forecasts = []
@@ -1417,8 +1442,15 @@ def _goulding_forecast_scalar_for_instruments(
         cluster = instr_by_symbol[symbol].get('cluster', 'other')
         a_co, a_re = mixing_params_by_cluster.get(cluster, (0.5, 0.5))
         for row in g_df[:-1].iter_rows(named=True):
+            fast, slow = goulding_forecast_legs(
+                config.goulding_signal_mode,
+                row.get('fast'),
+                row.get('slow'),
+                row.get('fast_sharpe'),
+                row.get('slow_sharpe'),
+            )
             raw_forecasts.append(goulding_continuous_raw(
-                row.get('regime'), a_co, a_re, row.get('fast'), row.get('slow'),
+                row.get('regime'), a_co, a_re, fast, slow,
             ))
     return estimate_goulding_forecast_scalar(raw_forecasts)
 
@@ -1797,6 +1829,10 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
                     'cluster': s['cluster'], 'dd_pct': s['dd_pct'],
                     'vx_current': vx_current, 'vx_ma': vx_ma, 'vx_ratio': vx_ratio, 'vol_regime': vol_regime,
                     'g_regime': s['g_regime'], 'g_fast': s['g_fast'], 'g_slow': s['g_slow'],
+                    'g_fast_rms_vol': s['g_fast_rms_vol'],
+                    'g_slow_rms_vol': s['g_slow_rms_vol'],
+                    'g_fast_sharpe': s['g_fast_sharpe'],
+                    'g_slow_sharpe': s['g_slow_sharpe'],
                     'g_blend': s['g_blend'], 'a_co': s['a_co'], 'a_re': s['a_re'],
                     'g_signal_mode': s['g_signal_mode'], 'g_raw_forecast': s['g_raw_forecast'],
                     'g_forecast_scalar': s['g_forecast_scalar'],
@@ -1907,6 +1943,10 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
                 'vol_regime': vol_regime,
                 # Goulding audit fields -- None in 'continuous' mode.
                 'g_regime': s['g_regime'], 'g_fast': s['g_fast'], 'g_slow': s['g_slow'],
+                'g_fast_rms_vol': s['g_fast_rms_vol'],
+                'g_slow_rms_vol': s['g_slow_rms_vol'],
+                'g_fast_sharpe': s['g_fast_sharpe'],
+                'g_slow_sharpe': s['g_slow_sharpe'],
                 'g_blend': s['g_blend'], 'a_co': s['a_co'], 'a_re': s['a_re'],
                 'g_signal_mode': s['g_signal_mode'], 'g_raw_forecast': s['g_raw_forecast'],
                 'g_forecast_scalar': s['g_forecast_scalar'],

@@ -468,7 +468,10 @@ def parse_args(argv=None) -> argparse.Namespace:
         "--goulding-signal-mode",
         choices=GOULDING_SIGNAL_MODES,
         default="binary",
-        help="Binary or continuous magnitude for the monthly Goulding model.",
+        help=(
+            "Binary direction, raw-return continuous magnitude, or Sharpe-like "
+            "RMS-vol-normalized magnitude for the monthly Goulding model."
+        ),
     )
     parser.add_argument("--fast-window", type=int, default=DEFAULT_FAST_WINDOW)
     parser.add_argument("--slow-window", type=int, default=DEFAULT_SLOW_WINDOW)

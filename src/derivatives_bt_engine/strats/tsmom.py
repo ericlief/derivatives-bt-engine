@@ -242,7 +242,9 @@ def parse_args():
                    help="Only used with --signal-weighting goulding. 'binary' preserves the +/-1 "
                         "direction baseline. 'continuous' uses mean(fast, slow) in Bull/Bear and "
                         "the equation-7 blend in Correction/Rebound, causally normalizes pooled "
-                        "prior forecasts to mean absolute 0.5, and caps at +/-1.")
+                        "prior forecasts to mean absolute 0.5, and caps at +/-1. 'sharpe' keeps "
+                        "the raw-return regime but divides each horizon by its lagged RMS monthly "
+                        "volatility before the same blend and pooled scaling.")
     p.add_argument('--mixing-pool', choices=['cluster', 'global'], default='cluster',
                    help="Only used with --signal-weighting goulding. 'cluster' (default): a_Co/a_Re "
                         "estimated separately per instruments.py cluster. 'global': one shared "

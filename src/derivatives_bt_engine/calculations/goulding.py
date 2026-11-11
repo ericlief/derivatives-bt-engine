@@ -17,7 +17,7 @@ import polars as pl
 
 GOULDING_FAST_MONTHS = 2
 GOULDING_SLOW_MONTHS = 12
-GOULDING_SIGNAL_MODES = ("binary", "continuous")
+GOULDING_SIGNAL_MODES = ("binary", "continuous", "sharpe")
 GOULDING_FORECAST_TARGET_ABS = 0.5
 GOULDING_FORECAST_CAP = 1.0
 GOULDING_FORECAST_MIN_OBS = 12
@@ -30,10 +30,12 @@ def goulding_monthly(df: pl.DataFrame, fast_months: int = GOULDING_FAST_MONTHS,
     """Goulding, Harvey & Mazzoleni's own monthly momentum construction --
     independent of continuous_momentum; takes only build_features' output
     and uses only 'ts_event'/'close' from it (ignores r1d/dd/peak
-    entirely). NO volatility normalization anywhere in this function
-    (contrast continuous_momentum's ts_fast/ts_slow, which are vol-scaled)
-    -- ret/fast/slow are pure arithmetic returns and their trailing
-    averages.
+    entirely). ``ret``/``fast``/``slow`` remain the paper-like pure
+    arithmetic returns used to classify the regime and estimate the mixing
+    weights. The additional ``fast_rms_vol``/``slow_rms_vol`` and
+    ``fast_sharpe``/``slow_sharpe`` columns support an explicitly separate
+    Sharpe-like forecast mode; they never feed back into regime
+    classification.
 
     Monthly return is a SIMPLE return between consecutive month-END closes
     (this month's last close / prior month's last close - 1) -- the
@@ -48,12 +50,25 @@ def goulding_monthly(df: pl.DataFrame, fast_months: int = GOULDING_FAST_MONTHS,
     m's own (still-forming) return never leaks into its own signal; no
     lookahead.
 
+    Each completed calendar month's realized volatility is the square root
+    of the sum of squared daily simple returns in that month. Horizon
+    volatility is the root mean square of those completed-month volatility
+    estimates. Thus ``fast_sharpe = fast / fast_rms_vol`` and likewise for
+    slow. Both numerator and denominator are shifted one month before their
+    rolling windows, so the month being forecast cannot enter its own signal.
+
     Defensively sorts by ts_event first -- group_by_dynamic requires a
     sorted temporal column, and this function is documented as
     independently callable on bare OHLCV (not required to go through
     build_features first), so it can't rely on a caller having sorted."""
-    monthly = df.sort('ts_event').group_by_dynamic('ts_event', every='1mo', closed='left').agg(
+    daily = df.sort('ts_event').with_columns(
+        (pl.col('close') / pl.col('close').shift(1) - 1).alias('_daily_return')
+    )
+    monthly = daily.group_by_dynamic(
+        'ts_event', every='1mo', closed='left'
+    ).agg(
         pl.col('close').last(),
+        pl.col('_daily_return').pow(2).sum().alias('monthly_variance'),
     )
     monthly = monthly.with_columns(
         ret=pl.col('close') / pl.col('close').shift(1) - 1,
@@ -61,6 +76,20 @@ def goulding_monthly(df: pl.DataFrame, fast_months: int = GOULDING_FAST_MONTHS,
     monthly = monthly.with_columns(
         fast=pl.col('ret').shift(1).rolling_mean(fast_months),
         slow=pl.col('ret').shift(1).rolling_mean(slow_months),
+        fast_rms_vol=pl.col('monthly_variance').shift(1)
+        .rolling_mean(fast_months).sqrt(),
+        slow_rms_vol=pl.col('monthly_variance').shift(1)
+        .rolling_mean(slow_months).sqrt(),
+    )
+    monthly = monthly.with_columns(
+        fast_sharpe=(
+            pl.when(pl.col('fast_rms_vol') > _DEGENERATE_EPS)
+            .then(pl.col('fast') / pl.col('fast_rms_vol'))
+        ),
+        slow_sharpe=(
+            pl.when(pl.col('slow_rms_vol') > _DEGENERATE_EPS)
+            .then(pl.col('slow') / pl.col('slow_rms_vol'))
+        ),
     )
     monthly = monthly.with_columns(
         regime=(
@@ -71,6 +100,35 @@ def goulding_monthly(df: pl.DataFrame, fast_months: int = GOULDING_FAST_MONTHS,
         ),
     )
     return monthly
+
+
+def goulding_forecast_legs(
+    signal_mode: str,
+    r_fast: Optional[float],
+    r_slow: Optional[float],
+    fast_sharpe: Optional[float] = None,
+    slow_sharpe: Optional[float] = None,
+) -> tuple[Optional[float], Optional[float]]:
+    """Return the fast/slow values used for one Goulding forecast mode.
+
+    Binary and legacy continuous modes use the original arithmetic-return
+    legs. ``sharpe`` uses the horizon-specific return-over-RMS-volatility
+    legs while the caller continues to classify the regime from the raw
+    returns. Keeping this selection in one helper prevents calibration,
+    current forecasts, live targets, and historical backtests from silently
+    using different inputs.
+
+    Parameters are optional because warm-up rows legitimately lack either a
+    return horizon or its volatility denominator. No imputation is performed.
+    """
+    if signal_mode not in GOULDING_SIGNAL_MODES:
+        raise ValueError(
+            f"signal_mode must be one of {GOULDING_SIGNAL_MODES}, "
+            f"got {signal_mode!r}"
+        )
+    if signal_mode == "sharpe":
+        return fast_sharpe, slow_sharpe
+    return r_fast, r_slow
 
 
 def _goulding_blend(regime_val: Optional[str], a_co: float, a_re: float,

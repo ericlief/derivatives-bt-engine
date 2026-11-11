@@ -96,6 +96,7 @@ from derivatives_bt_engine.calculations.goulding import (
     estimate_goulding_forecast_scalar,
     estimate_mixing_params,
     goulding_continuous_raw,
+    goulding_forecast_legs,
     goulding_monthly,
 )
 from derivatives_bt_engine.calculations.signal_config import SignalSpec
@@ -351,9 +352,11 @@ class TsmomBacktestConfig:
     # implementation.
     signal_weighting: str = 'continuous'
     # Goulding forecast shape. 'binary' preserves the original paper-like
-    # +/-1 direction. 'continuous' retains the fast/slow or equation-7
-    # magnitude, causally rescales pooled prior forecasts to mean absolute
-    # 0.5, and caps them at +/-1 before any risk/sizing overlays.
+    # +/-1 direction. 'continuous' retains the raw fast/slow or equation-7
+    # magnitude. 'sharpe' preserves the raw-return regime but normalizes each
+    # magnitude leg by its own lagged RMS monthly volatility. Both continuous
+    # variants causally rescale pooled prior forecasts to mean absolute 0.5
+    # and cap them at +/-1 before any risk/sizing overlays.
     goulding_signal_mode: str = 'binary'
     # Only matters when signal_weighting == 'goulding'. 'cluster' (default):
     # a_Co/a_Re re-estimated separately per instruments.py cluster (each
@@ -1483,6 +1486,10 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
                          g_regime_val: Optional[str] = None, g_fast_val: Optional[float] = None,
                          g_slow_val: Optional[float] = None, a_co: Optional[float] = None,
                          a_re: Optional[float] = None,
+                         g_fast_rms_vol_val: Optional[float] = None,
+                         g_slow_rms_vol_val: Optional[float] = None,
+                         g_fast_sharpe_val: Optional[float] = None,
+                         g_slow_sharpe_val: Optional[float] = None,
                          goulding_forecast_scalar: Optional[float] = None) -> Optional[dict]:
     """Signal + vol-targeted (or fixed-quantity) sizing for one symbol as of
     date `d`, reading from `precomputed` -- each symbol's full
@@ -1561,8 +1568,17 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
     # resolve_trend_direction (calculations.signal) -- shared with
     # live.tsmom_rebalance's own per-instrument signal computation, so both
     # modules implement this continuous-vs-goulding branch exactly once.
+    forecast_fast, forecast_slow = goulding_forecast_legs(
+        config.goulding_signal_mode,
+        g_fast_val,
+        g_slow_val,
+        g_fast_sharpe_val,
+        g_slow_sharpe_val,
+    )
     g_raw_forecast = (
-        goulding_continuous_raw(g_regime_val, a_co, a_re, g_fast_val, g_slow_val)
+        goulding_continuous_raw(
+            g_regime_val, a_co, a_re, forecast_fast, forecast_slow
+        )
         if config.signal_weighting == 'goulding' and a_co is not None and a_re is not None
         else None
     )
@@ -1575,6 +1591,7 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
         config.regime_discount, g_regime_val, g_fast_val, g_slow_val,
         a_co if a_co is not None else 0.5, a_re if a_re is not None else 0.5,
         config.goulding_signal_mode, goulding_forecast_scalar,
+        g_fast_sharpe_val, g_slow_sharpe_val,
     )
     if resolved is None:
         return None
@@ -1693,6 +1710,10 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
         # Bull/Bear (eq. 7 doesn't apply there) even though trend_strength
         # still resolves in that case.
         'g_regime': g_regime_val, 'g_fast': g_fast_val, 'g_slow': g_slow_val,
+        'g_fast_rms_vol': g_fast_rms_vol_val,
+        'g_slow_rms_vol': g_slow_rms_vol_val,
+        'g_fast_sharpe': g_fast_sharpe_val,
+        'g_slow_sharpe': g_slow_sharpe_val,
         'g_blend': g_blend, 'a_co': a_co, 'a_re': a_re,
         'g_signal_mode': config.goulding_signal_mode if config.signal_weighting == 'goulding' else None,
         'g_raw_forecast': g_raw_forecast,
@@ -1738,8 +1759,16 @@ def _goulding_kwargs_for(config: TsmomBacktestConfig, rebal_monthly: dict[str, p
     g_regime_val = g_row['g_regime'][0] if g_row.height else None
     g_fast_val = g_row['g_fast'][0] if g_row.height else None
     g_slow_val = g_row['g_slow'][0] if g_row.height else None
+    g_fast_rms_vol_val = g_row['fast_rms_vol'][0] if g_row.height else None
+    g_slow_rms_vol_val = g_row['slow_rms_vol'][0] if g_row.height else None
+    g_fast_sharpe_val = g_row['fast_sharpe'][0] if g_row.height else None
+    g_slow_sharpe_val = g_row['slow_sharpe'][0] if g_row.height else None
     a_co, a_re = mixing_params_by_cluster.get(get_spec(symbol)['cluster'], (0.5, 0.5))
     return {'g_regime_val': g_regime_val, 'g_fast_val': g_fast_val, 'g_slow_val': g_slow_val,
+            'g_fast_rms_vol_val': g_fast_rms_vol_val,
+            'g_slow_rms_vol_val': g_slow_rms_vol_val,
+            'g_fast_sharpe_val': g_fast_sharpe_val,
+            'g_slow_sharpe_val': g_slow_sharpe_val,
             'a_co': a_co, 'a_re': a_re,
             'goulding_forecast_scalar': goulding_forecast_scalar}
 
@@ -1758,15 +1787,23 @@ def _goulding_forecast_scalar_for_date(
     a model calibration applies its currently estimated rule to training
     observations. The current forecast itself never enters its own scale.
     """
-    if config.signal_weighting != 'goulding' or config.goulding_signal_mode != 'continuous':
+    if (config.signal_weighting != 'goulding'
+            or config.goulding_signal_mode not in {'continuous', 'sharpe'}):
         return None
     raw_forecasts = []
     for symbol, monthly in monthly_by_symbol.items():
         a_co, a_re = mixing_params_by_cluster.get(get_spec(symbol)['cluster'], (0.5, 0.5))
         history = monthly.filter(pl.col('ts_event') <= d)
         for row in history.iter_rows(named=True):
+            fast, slow = goulding_forecast_legs(
+                config.goulding_signal_mode,
+                row.get('fast'),
+                row.get('slow'),
+                row.get('fast_sharpe'),
+                row.get('slow_sharpe'),
+            )
             raw_forecasts.append(goulding_continuous_raw(
-                row.get('regime'), a_co, a_re, row.get('fast'), row.get('slow'),
+                row.get('regime'), a_co, a_re, fast, slow,
             ))
     return estimate_goulding_forecast_scalar(raw_forecasts)
 
@@ -2011,6 +2048,10 @@ class _PortfolioLedger:
             # docstring promising exactly that.
             'g_regime': s.get('g_regime'), 'g_fast': _round(s.get('g_fast'), 4),
             'g_slow': _round(s.get('g_slow'), 4),
+            'g_fast_rms_vol': _round(s.get('g_fast_rms_vol'), 6),
+            'g_slow_rms_vol': _round(s.get('g_slow_rms_vol'), 6),
+            'g_fast_sharpe': _round(s.get('g_fast_sharpe'), 4),
+            'g_slow_sharpe': _round(s.get('g_slow_sharpe'), 4),
             'a_co': _round(s.get('a_co'), 4), 'a_re': _round(s.get('a_re'), 4),
             'g_blend': _round(s.get('g_blend'), 4),
             'g_signal_mode': s.get('g_signal_mode'),
@@ -2227,8 +2268,15 @@ def run_tsmom_backtest(config: TsmomBacktestConfig) -> dict:
             feat = build_features(_return_signal_bars(full_price_data[s]))
             monthly = goulding_monthly(feat, **SignalSpec.goulding().goulding_kwargs())
             monthly_by_symbol[s] = monthly
-            monthly = monthly.rename({'fast': 'g_fast', 'slow': 'g_slow', 'regime': 'g_regime'})
-            monthly = monthly.select(['ts_event', 'ret', 'g_fast', 'g_slow', 'g_regime']).sort('ts_event')
+            monthly = monthly.rename({
+                'fast': 'g_fast',
+                'slow': 'g_slow',
+                'regime': 'g_regime',
+            })
+            monthly = monthly.select([
+                'ts_event', 'ret', 'g_fast', 'g_slow', 'g_regime',
+                'fast_rms_vol', 'slow_rms_vol', 'fast_sharpe', 'slow_sharpe',
+            ]).sort('ts_event')
             rebal_monthly[s] = rebal_dates_df.join_asof(monthly, on='ts_event', strategy='forward')
         cluster_by_symbol = {s: get_spec(s)['cluster'] for s in config.symbols}
         monthly_history = build_monthly_state_return_history(rebal_monthly, rebal_dates_sorted, cluster_by_symbol)

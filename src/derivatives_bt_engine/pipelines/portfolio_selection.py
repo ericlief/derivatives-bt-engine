@@ -176,7 +176,7 @@ DEFAULT_SELECTION_MAX_HISTORY_GAP_DAYS = 31
 # identity, allowing old variants to remain without being accepted as current.
 SELECTION_BACKTEST_CACHE_VERSION = 1
 CASH_PNL_CACHE_VERSION = 2
-GOULDING_FORECAST_CACHE_VERSION = 2
+GOULDING_FORECAST_CACHE_VERSION = 3
 RETURN_TSMOM_SCALAR_CACHE_VERSION = 1
 
 # Production-inspired ordinary-EWMAC template. The two slowest rules receive
@@ -1064,8 +1064,10 @@ def parse_args(argv=None, *, complete_default: bool = False):
         default="binary",
         help=(
             "Forecast magnitude for --signal-model goulding: 'binary' emits "
-            "+/-1 directions and 'continuous' retains causally normalized "
-            "monthly magnitude (default: binary)."
+            "+/-1 directions; 'continuous' retains causally normalized raw "
+            "monthly-return magnitude; 'sharpe' normalizes the raw fast and "
+            "slow legs by their own lagged RMS monthly volatility before "
+            "the same causal pooled scaling (default: binary)."
         ),
     )
     parser.add_argument(
