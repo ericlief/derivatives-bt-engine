@@ -104,6 +104,12 @@ The selection grid accepts the same `--signal-model` and
 constraint sweeps can be run separately for binary, continuous, and Sharpe-like
 Goulding.
 
+The saved November 2026 Sharpe-like Goulding selection run and comparison
+with continuous Goulding, EWMAC, and return TSMOM are documented in
+[`goulding-sharpe-run-audit-20261111.md`](../selection/goulding-sharpe-run-audit-20261111.md).
+That audit records the partial IB tail in the latest dates and distinguishes
+the full-history improvement from the weaker post-2024 result.
+
 Supplying `--ib-history-db` extends executable cash replay through the stored
 IB tail. Without it, both signal and P&L use the frozen reference history.
 
