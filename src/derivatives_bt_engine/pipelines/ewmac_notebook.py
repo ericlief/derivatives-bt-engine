@@ -1005,6 +1005,15 @@ def plot_selection_rebalance_weights(
             {
                 "year": year,
                 "review_date": review_date.isoformat(),
+                "symbols": ", ".join(
+                    frame.filter(
+                        (pl.col("sel_date") == review_date)
+                        & pl.col("sel_active").fill_null(False)
+                    )
+                    .get_column("symbol")
+                    .sort()
+                    .to_list()
+                ),
                 "market_n": frame.filter(
                     (pl.col("sel_date") == review_date)
                     & pl.col("sel_active").fill_null(False)
@@ -1287,11 +1296,12 @@ def plot_selection_rebalance_weights(
             height=height,
             color="#9467bd",
             tools=["hover", "pan", "wheel_zoom", "box_zoom", "reset", "save"],
-            hover_cols=["review_date", "market_n"],
+            hover_cols=["review_date", "market_n", "symbols"],
             hover_tooltips=[
                 ("Year", "@year"),
                 ("Latest review", "@review_date"),
                 ("Active markets", "@market_n{0}"),
+                ("Symbols", "@symbols"),
             ],
         )
         return instrument_bars, class_bars, subclass_bars, market_count_bars
