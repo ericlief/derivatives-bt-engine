@@ -35,6 +35,111 @@ class IBFuturesHistoryStore:
 
     db_path: Path | str = DEFAULT_IB_FUTURES_HISTORY_DB_PATH
 
+    def instrument_fingerprint(
+        self,
+        *,
+        instrument_code: str,
+    ) -> dict[str, object]:
+        """Return stable raw-history identity for one instrument.
+
+        The raw database is shared by every market, so its file modification
+        time cannot identify whether a particular instrument changed. This
+        fingerprint instead follows that instrument's contracts and successful
+        acquisition generations. Each successful bar upsert appends its fetch
+        row in the same transaction, so the generation identifies bar changes
+        without rescanning the much larger daily-bar table. It invalidates a
+        derived history after a relevant upsert while remaining stable as other
+        instruments are refreshed.
+
+        Parameters
+        ----------
+        instrument_code
+            Internal instrument identifier stored on raw contract and fetch
+            rows.
+
+        Returns
+        -------
+        dict[str, object]
+            JSON-serializable identity suitable for a derived-cache key.
+        """
+        path = Path(self.db_path).expanduser().resolve()
+        con = duckdb.connect(str(path), read_only=True)
+        try:
+            row = con.execute(
+                """
+                WITH instrument_contracts AS (
+                    SELECT con_id, contract_month, last_seen_at
+                    FROM raw.contracts
+                    WHERE pst_instr_code = ?
+                ),
+                contract_state AS (
+                    SELECT
+                        count(*) AS con_n,
+                        min(contract_month) AS first_con_month,
+                        max(contract_month) AS last_con_month,
+                        max(last_seen_at) AS last_con_update
+                    FROM instrument_contracts
+                ),
+                fetch_state AS (
+                    SELECT
+                        count(*) AS fetch_n,
+                        max(fetch_id) AS last_fetch_id,
+                        max(requested_at) AS last_fetch_at
+                    FROM raw.fetch_log
+                    WHERE pst_instr_code = ?
+                      AND status = 'success'
+                )
+                SELECT
+                    con_n,
+                    first_con_month,
+                    last_con_month,
+                    last_con_update,
+                    fetch_n,
+                    last_fetch_id,
+                    last_fetch_at
+                FROM contract_state, fetch_state
+                """,
+                [instrument_code, instrument_code],
+            ).fetchone()
+            version_rows = con.execute(
+                """
+                SELECT version
+                FROM meta.schema_version
+                ORDER BY version
+                """
+            ).fetchall()
+        finally:
+            con.close()
+
+        if row is None:
+            raise RuntimeError(
+                f"Could not fingerprint raw history for {instrument_code}"
+            )
+
+        names = (
+            "con_n",
+            "first_con_month",
+            "last_con_month",
+            "last_con_update",
+            "fetch_n",
+            "last_fetch_id",
+            "last_fetch_at",
+        )
+        state = {
+            name: (
+                value.isoformat()
+                if isinstance(value, (date, datetime))
+                else value
+            )
+            for name, value in zip(names, row, strict=True)
+        }
+        return {
+            "path": str(path),
+            "schema_versions": [int(item[0]) for item in version_rows],
+            "instrument_code": instrument_code,
+            **state,
+        }
+
     def initialize(self) -> None:
         """Create the versioned raw-contract schema when it does not exist."""
         path = Path(self.db_path).expanduser()

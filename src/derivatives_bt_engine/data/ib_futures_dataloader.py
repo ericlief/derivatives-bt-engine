@@ -950,6 +950,20 @@ def _history_input_fingerprint(path: Path | str) -> dict[str, object]:
     }
 
 
+def _instrument_history_input_fingerprint(
+    path: Path | str,
+    instrument_code: str,
+) -> dict[str, object]:
+    """Return one instrument's identity within the shared raw-history DB."""
+    resolved = Path(path).expanduser().resolve()
+    if not resolved.is_file():
+        # Preserve the previous missing-input failure and its path context.
+        return _history_input_fingerprint(resolved)
+    return IBFuturesHistoryStore(resolved).instrument_fingerprint(
+        instrument_code=instrument_code,
+    )
+
+
 @dataclass
 class IBStitchedHistoryProvider:
     """Load reference and IB history, using Globex when it is available.
@@ -1041,7 +1055,13 @@ class IBStitchedHistoryProvider:
                 else None
             ),
             'mapping': _history_input_fingerprint(self.mapping_path),
-            'ib_history_db': _history_input_fingerprint(self.history_db_path),
+            # Raw broker history shares one DuckDB across all markets. A
+            # whole-file mtime would invalidate every market whenever one is
+            # refreshed, so derived cache ownership follows this instrument.
+            'ib_history_db': _instrument_history_input_fingerprint(
+                self.history_db_path,
+                pst_instr_code,
+            ),
         }
         digest = hashlib.sha256(
             json.dumps(identity, sort_keys=True).encode('utf-8')
