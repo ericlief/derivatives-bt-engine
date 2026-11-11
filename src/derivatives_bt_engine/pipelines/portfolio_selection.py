@@ -4397,6 +4397,15 @@ def _run_complete_selection(
                 else "no_history_roll_markers"
             )
             cash_output_frame = cash_frame.with_columns(
+                (
+                    pl.col("hist_quality")
+                    if "hist_quality" in cash_frame.columns
+                    else (
+                        pl.col("quality_flag")
+                        if "quality_flag" in cash_frame.columns
+                        else pl.lit("")
+                    )
+                ).alias("hist_quality"),
                 pl.lit(symbol).alias("symbol"),
                 pl.lit(stitched_history_code_by_symbol[symbol]).alias(
                     "hist_instr_code"
