@@ -7,6 +7,9 @@ import pytest
 
 from derivatives_bt_engine.reports.formatting import (
     order_cash_pnl_report,
+    order_selection_review_allocation_report,
+    order_selection_review_instrument_report,
+    order_selection_review_summary_report,
     rename_public_report_columns,
     round_public_report,
 )
@@ -32,6 +35,107 @@ def test_round_public_report_formats_phase2_money_and_diagnostics():
     assert rounded["weight"][0] == pytest.approx(0.0251)
     assert rounded["net_sr"][0] == pytest.approx(0.4409)
     assert rounded["rank"][0] == 9
+
+
+def test_selection_review_instrument_report_orders_identity_scores_and_params():
+    """Instrument identity and allocation lead while run parameters trail."""
+    report = pl.DataFrame({
+        "min_instr_per_cls": [1],
+        "ann_dvol": [10.0],
+        "sel_score": [0.5],
+        "weight": [0.125],
+        "sel_active": [True],
+        "econ_subcls": ["grains"],
+        "symbol": ["ZC"],
+        "sel_instr_n": [3],
+        "cls_lim_weight": [0.25],
+        "asset_cls": ["ags"],
+        "sel_date": [date(2026, 1, 1)],
+    })
+
+    ordered = order_selection_review_instrument_report(report)
+
+    assert ordered.columns[:9] == [
+        "sel_date",
+        "sel_instr_n",
+        "sel_active",
+        "symbol",
+        "asset_cls",
+        "econ_subcls",
+        "weight",
+        "cls_lim_weight",
+        "sel_score",
+    ]
+    assert ordered.columns[-1] == "min_instr_per_cls"
+
+
+def test_selection_review_allocation_report_puts_run_params_at_right():
+    """Allocation details precede score diagnostics and run-wide settings."""
+    report = pl.DataFrame({
+        "max_instr_per_cls": [20],
+        "max_instr_per_subcls": [3],
+        "min_instr_per_cls": [1],
+        "min_instr_per_subcls": [1],
+        "min_book_n": [15],
+        "sel_date": [date(2026, 1, 1)],
+        "weight": [0.125],
+        "sel_equity": [75_000.0],
+        "symbol": ["ZC"],
+        "asset_cls": ["ags"],
+        "econ_subcls": ["grains"],
+        "cls_weight": [0.25],
+        "cls_lim_weight": [0.5],
+        "subcls_weight": [0.25],
+        "subcls_lim_weight": [0.25],
+        "group_lim_weight": [0.125],
+        "unalloc_weight": [0.0],
+        "limit_weight": [0.111],
+        "idm": [1.8],
+        "ann_dvol": [100.0],
+        "risk_budget": [1_000.0],
+        "net_sr": [0.4],
+        "max_cls_weight_pct": [50.0],
+        "max_subcls_weight_pct": [25.0],
+    })
+
+    ordered = order_selection_review_allocation_report(report)
+
+    assert ordered.columns.index("weight") < ordered.columns.index("net_sr")
+    assert ordered.columns.index("net_sr") < ordered.columns.index(
+        "max_instr_per_cls"
+    )
+    assert ordered.columns[-2:] == [
+        "max_cls_weight_pct",
+        "max_subcls_weight_pct",
+    ]
+
+
+def test_selection_review_summary_report_puts_parameters_after_diagnostics():
+    """Review outcomes and score diagnostics precede run-wide settings."""
+    report = pl.DataFrame({
+        "max_instr_per_cls": [20],
+        "sel_score": [0.5],
+        "switch_reason": ["score_gain"],
+        "sel_date": [date(2026, 1, 1)],
+        "sel_equity": [75_000.0],
+        "sel_cand_n": [100],
+        "sel_instr_n": [20],
+        "min_instr_per_cls": [1],
+    })
+
+    ordered = order_selection_review_summary_report(report)
+
+    assert ordered.columns[:5] == [
+        "sel_date",
+        "sel_equity",
+        "sel_cand_n",
+        "sel_instr_n",
+        "sel_score",
+    ]
+    assert ordered.columns[-2:] == [
+        "min_instr_per_cls",
+        "max_instr_per_cls",
+    ]
 
 
 def test_round_public_report_keeps_reproduction_rates_at_six_places():

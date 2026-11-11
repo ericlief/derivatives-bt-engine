@@ -86,6 +86,7 @@ from derivatives_bt_engine.reports.formatting import (
     order_portfolio_curve_report,
     order_selection_review_allocation_report,
     order_selection_review_instrument_report,
+    order_selection_review_summary_report,
     rename_public_report_columns,
     round_public_report,
 )
@@ -4993,10 +4994,12 @@ def _run_complete_selection(
     public_selection.write_parquet(selection_path)
     if allocation_provider is not None:
         public_selection_reviews = _signal_public_provenance(
-            round_public_report(rename_public_report_columns(
-                pl.DataFrame(
-                    allocation_provider.review_rows,
-                    infer_schema_length=None,
+            round_public_report(order_selection_review_summary_report(
+                rename_public_report_columns(
+                    pl.DataFrame(
+                        allocation_provider.review_rows,
+                        infer_schema_length=None,
+                    )
                 )
             )),
             args=args,

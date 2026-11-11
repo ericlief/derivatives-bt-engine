@@ -1136,9 +1136,12 @@ report: it has one row per review and involved instrument, with `added`,
 `retained`, or `removed` status, active and greedy preference ranks, weights,
 classification,
 historical dollar volatility, and the cost inputs used by that review. The
-`symbol` column follows `sel_instr_n` for quick row scanning. One file covers
-the entire monthly or yearly walk-forward run; reviews do not create separate
-result directories.
+report leads with review identity and `sel_active`, followed by `symbol`,
+asset class, and economic subclass. Allocation weights and their class and
+subclass limits follow the identity fields, then score diagnostics and other
+review details. Run-wide selection parameters are grouped at the right edge.
+One file covers the entire monthly or yearly walk-forward run; reviews do not
+create separate result directories.
 The `selection_review_trials` and
 `selection_review_trial_allocations` Parquet files retain every hypothetical
 greedy trial at every review, with review date and lagged equity. They expose
@@ -1151,14 +1154,14 @@ last accepted trial from each review, with one row per final book member and
 the same complete allocation diagnostics. It is the compact year-by-year or
 month-by-month book audit. Earlier accepted growth steps and every rejected
 alternative remain in the full trial reports rather than being discarded.
-Both allocation reports lead with `sel_date`, `sel_equity`, the trial identity,
-classification, configured `max_instr_per_cls`, `max_instr_per_subcls`,
-`max_cls_weight_pct`, and `max_subcls_weight_pct`. The instrument `weight` is
-grouped with the raw and capped class/subclass weights, `group_lim_weight`,
-`unalloc_weight`, final `limit_weight`, IDM, `ann_dvol`, and `risk_budget`.
-Report construction fails rather than silently dropping any of those group
-limits, allocation diagnostics, review date, sizing capital,
-dollar-volatility, or budget fields.
+Both allocation reports lead with `sel_date`, `sel_equity`, trial identity,
+and classification. The instrument `weight` is grouped with the raw and
+capped class/subclass weights, `group_lim_weight`, `unalloc_weight`, final
+`limit_weight`, IDM, `ann_dvol`, and `risk_budget`; review scores and other
+trial diagnostics follow. Run-wide class/subclass limits and selection
+parameters are grouped at the right edge. Report construction fails rather
+than silently dropping required group limits, allocation diagnostics, review
+date, sizing capital, dollar-volatility, or budget fields.
 
 The notebook helper can navigate the resulting dated books without loading a
 separate result directory for every review:

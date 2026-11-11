@@ -494,13 +494,6 @@ SELECTION_REVIEW_ALLOCATION_REPORT_PRIORITY = (
     "book_symbol",
     "asset_cls",
     "econ_subcls",
-    "min_instr_per_cls",
-    "min_instr_per_subcls",
-    "min_book_n",
-    "max_instr_per_cls",
-    "max_instr_per_subcls",
-    "max_cls_weight_pct",
-    "max_subcls_weight_pct",
     "weight",
     "cls_weight",
     "cls_lim_weight",
@@ -512,6 +505,26 @@ SELECTION_REVIEW_ALLOCATION_REPORT_PRIORITY = (
     "idm",
     "ann_dvol",
     "risk_budget",
+)
+SELECTION_REVIEW_ALLOCATION_REPORT_PARAMS = (
+    "min_instr_per_cls",
+    "min_instr_per_subcls",
+    "min_book_n",
+    "max_instr_per_cls",
+    "max_instr_per_subcls",
+    "max_cls_weight_pct",
+    "max_subcls_weight_pct",
+    "low_con_penalty_scale",
+    "high_con_penalty_scale",
+    "con_band_min",
+    "con_band_max",
+    "score_tie_tol_pct",
+    "tie_ref_book_n",
+    "sel_elig_hyst_pct",
+    "sel_membership_hyst",
+    "sel_rank_buf_pct",
+    "sel_rank_n_ewma_hl",
+    "sel_book_score_buf_pct",
 )
 
 
@@ -559,18 +572,73 @@ def order_selection_review_allocation_report(
         if name in report.columns
     ]
     leading_set = set(leading)
-    trailing = [name for name in report.columns if name not in leading_set]
-    return report.select(*leading, *trailing)
+    params = [
+        name
+        for name in SELECTION_REVIEW_ALLOCATION_REPORT_PARAMS
+        if name in report.columns
+    ]
+    params_set = set(params)
+    diagnostics = [
+        name
+        for name in report.columns
+        if name not in leading_set and name not in params_set
+    ]
+    return report.select(*leading, *diagnostics, *params)
+
+
+def order_selection_review_summary_report(report: pl.DataFrame) -> pl.DataFrame:
+    """Keep review outcomes first and selection settings at the right edge."""
+    priority = (
+        "sel_date",
+        "sel_equity",
+        "sel_cand_n",
+        "sel_instr_n",
+        "sel_score",
+        "sel_idm",
+        "sel_symbols",
+        "sel_unbuf_symbols",
+        "sel_ranked_symbols",
+        "sel_rank_buf_symbols",
+        "sel_hyst_cand_symbols",
+        "sel_added",
+        "sel_removed",
+    )
+    params = (
+        "cap_mode",
+        "min_instr_per_cls",
+        "min_instr_per_subcls",
+        "min_book_n",
+        "max_instr_per_cls",
+        "max_instr_per_subcls",
+        "max_cls_weight_pct",
+        "max_subcls_weight_pct",
+        "sel_elig_hyst_pct",
+        "sel_membership_hyst",
+        "sel_rank_buf_pct",
+        "sel_rank_n_ewma_hl",
+        "sel_book_score_buf_pct",
+    )
+    leading = [name for name in priority if name in report.columns]
+    leading_set = set(leading)
+    trailing_params = [name for name in params if name in report.columns]
+    param_set = set(trailing_params)
+    diagnostics = [
+        name
+        for name in report.columns
+        if name not in leading_set and name not in param_set
+    ]
+    return report.select(*leading, *diagnostics, *trailing_params)
 
 
 def order_selection_review_instrument_report(
     report: pl.DataFrame,
 ) -> pl.DataFrame:
-    """Place the selected-instrument count beside its instrument rows.
+    """Order the review instrument report from book identity through inputs.
 
-    The symbol identifies each row in the review-instrument report, so keep it
-    immediately after ``sel_instr_n`` for quick scanning in table viewers.
-    Remaining diagnostics retain their existing order.
+    Review status and instrument identity lead, allocation weights and their
+    limits follow, then score diagnostics. Remaining review diagnostics stay
+    ahead of the run-wide parameters, which are kept together at the right edge
+    for scanning and comparison across reports.
     """
     required = {"sel_instr_n", "symbol"}
     missing = sorted(required.difference(report.columns))
@@ -579,7 +647,7 @@ def order_selection_review_instrument_report(
             "selection review instrument report is missing required columns: "
             f"{missing}"
         )
-    leading = [
+    identity = [
         name
         for name in (
             "sel_date",
@@ -587,13 +655,70 @@ def order_selection_review_instrument_report(
             "sel_equity",
             "sel_cand_n",
             "sel_instr_n",
+            "sel_active",
             "symbol",
+            "asset_cls",
+            "econ_subcls",
+            "sel_status",
+            "rank",
+            "pref_rank",
         )
         if name in report.columns
     ]
-    leading_set = set(leading)
-    trailing = [name for name in report.columns if name not in leading_set]
-    return report.select(*leading, *trailing)
+    allocation = [
+        name
+        for name in (
+            "weight",
+            "limit_weight",
+            "cls_weight",
+            "cls_lim_weight",
+            "subcls_weight",
+            "subcls_lim_weight",
+            "group_lim_weight",
+            "unalloc_weight",
+        )
+        if name in report.columns
+    ]
+    scores = [
+        name
+        for name in (
+            "sel_score",
+            "sel_idm",
+            "trade_sr",
+            "roll_sr",
+            "ann_trade_cost_sr",
+            "ann_roll_cost_sr",
+            "ann_cost_sr",
+        )
+        if name in report.columns
+    ]
+    params = [
+        name
+        for name in (
+            "min_instr_per_cls",
+            "min_instr_per_subcls",
+            "min_book_n",
+            "max_instr_per_cls",
+            "max_instr_per_subcls",
+            "max_cls_weight_pct",
+            "max_subcls_weight_pct",
+            "sel_elig_hyst_pct",
+            "sel_membership_hyst",
+            "sel_rank_buf_pct",
+            "sel_rank_n_ewma_hl",
+            "sel_book_score_buf_pct",
+        )
+        if name in report.columns
+    ]
+    priority = identity + allocation + scores
+    priority_set = set(priority)
+    params_set = set(params)
+    diagnostics = [
+        name
+        for name in report.columns
+        if name not in priority_set and name not in params_set
+    ]
+    return report.select(*priority, *diagnostics, *params)
 
 
 def order_cash_pnl_report(report: pl.DataFrame) -> pl.DataFrame:
