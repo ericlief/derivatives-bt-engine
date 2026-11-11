@@ -4266,13 +4266,15 @@ def _run_complete_selection(
                                 stitched_reference_path,
                             )
                         else:
+                            cached_stitched_curve, _ = cached_stitched
                             logger.info(
                                 "selection_backtest_cache hit "
                                 "artifact=stitched_reference_tail symbol=%s "
-                                "key=%s start=%s path=%s",
+                                "key=%s start=%s end=%s path=%s",
                                 symbol,
                                 stitched_cache_key,
                                 live_tail_start,
+                                cached_stitched_curve.get_column("date").max(),
                                 stitched_reference_path,
                             )
                         # Reuse the stable cost-free PST prefix and append only
