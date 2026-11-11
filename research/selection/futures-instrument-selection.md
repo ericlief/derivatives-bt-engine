@@ -1140,6 +1140,11 @@ report leads with review identity and `sel_active`, followed by `symbol`,
 asset class, and economic subclass. Allocation weights and their class and
 subclass limits follow the identity fields, then score diagnostics and other
 review details. Run-wide selection parameters are grouped at the right edge.
+`sel_rank_buf_symbols` is null when rank membership hysteresis is disabled.
+The instrument-level `sel_elig_hyst_applied` and
+`sel_elig_hyst_reason` fields identify incumbent rows retained by the relaxed
+trade-cost or market-participation exit gate; the configured percentage alone
+does not imply that a buffer changed eligibility.
 The rebalance-weight notebook view includes a per-instrument annual
 contract-load panel, with estimated trade and roll contract quantities
 available on hover.

@@ -2504,8 +2504,11 @@ class _WalkForwardSelectionProvider:
                 selection.unbuffered_selected
             ),
             "selection_ranked_symbols": ",".join(selection.ranked_symbols),
-            "selection_rank_buffered_symbols": ",".join(
-                selection.rank_buffered_selected
+            "selection_rank_buffered_symbols": (
+                ",".join(selection.rank_buffered_selected)
+                if self.args.selection_membership_hysteresis
+                in {"rank", "rank_score"}
+                else None
             ),
             "selection_hysteresis_candidate_symbols": ",".join(
                 selection.hysteresis_candidate_selected
@@ -2575,6 +2578,30 @@ class _WalkForwardSelectionProvider:
             allocation = allocations.get(symbol)
             source = self.source_rows[symbol]
             audit = self.audit_by_symbol[symbol]
+            eligibility_buffer_reasons = []
+            if (
+                symbol in self.prior_selected
+                and self.args.selection_eligibility_hysteresis_pct > 0
+            ):
+                entry_cost_limit = float(self.run_config["cost_lim_sr"])
+                if candidate is not None and candidate.trade_sr > entry_cost_limit:
+                    eligibility_buffer_reasons.append("trade_cost")
+                max_market_pct = float(
+                    self.run_config["max_pct_mkt_volume"]
+                )
+                pct_market = (
+                    allocation.get("pct_mkt_volume")
+                    if allocation else None
+                )
+                if (
+                    candidate is not None
+                    and candidate.enforce_market_participation
+                    and pct_market is not None
+                    and pct_market > max_market_pct
+                ):
+                    eligibility_buffer_reasons.append(
+                        "market_participation"
+                    )
             if active and symbol in added_symbols:
                 status = "added"
             elif active:
@@ -2592,6 +2619,12 @@ class _WalkForwardSelectionProvider:
                 "selection_idm": selection.final_score.idm,
                 "selection_status": status,
                 "selection_active": active,
+                "selection_eligibility_hysteresis_applied": bool(
+                    eligibility_buffer_reasons
+                ),
+                "selection_eligibility_hysteresis_reason": ",".join(
+                    eligibility_buffer_reasons
+                ),
                 "minimum_instruments_per_class": self.args.min_instr_per_class,
                 "minimum_instruments_per_subclass": (
                     self.args.min_instr_per_subclass
