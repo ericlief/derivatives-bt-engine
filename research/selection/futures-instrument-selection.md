@@ -803,14 +803,31 @@ the sensitivity cannot be confused with the baseline.
 
 After the final book is selected, a separate executable cash audit fixes the
 selected list, structural weights, final `limit_weight`, and IDM. It then uses
-one lagged net-equity state shared by the whole book. Our sizing fields are:
+one capital policy shared by the whole book. Choose it explicitly with:
+
+```text
+--backtest-capital-mode fixed
+--backtest-capital-mode compounded
+```
+
+`compounded` remains the default for compatibility with existing selection
+runs. It uses lagged net equity and therefore lets prior P&L change later
+positions, buffer widths, costs, and scheduled-selection feasibility. `fixed`
+always uses `--initial-capital-usd` for position sizing, scheduled-selection
+reviews, and daily percentage denominators. Gross and net equity still equal
+initial capital plus cumulative cash P&L, but those displayed equity paths do
+not feed back into the fixed run. This matches pysystemtrade's default
+`syscore.capital.fixed_capital` backtest convention; its optional
+`full_compounding` path corresponds to the compounded policy.
+
+The sizing fields are:
 
 ```text
 init_vol_scalar[i,t]
   = initial_capital × target_vol × limit_weight[i] × IDM / ann_dvol[i,t]
 
 cap_scalar[t]
-  = prior_net_equity[t] / initial_capital
+  = sizing_capital[t] / initial_capital
 
 vol_scalar[i,t]
   = init_vol_scalar[i,t] × cap_scalar[t]
@@ -821,11 +838,18 @@ tgt_pos[i,t]
 
 `init_vol_scalar` remains a daily series because `ann_dvol` changes; it
 isolates the initial-capital position baseline. `cap_scalar` isolates only
-compounded book equity. Keeping both makes `vol_scalar` changes reproducible
-without mixing market volatility with capital growth. Sizing uses prior net
-equity, never same-day P&L, so all instruments on a date receive the same
-causal capital state. This capital loop is the engine's selected-book
-accounting policy; it is not imported from another backtest framework.
+the capital policy: it is always `1` in fixed mode and equals prior net equity
+divided by initial capital in compounded mode. Keeping both makes
+`vol_scalar` changes reproducible without mixing market volatility with
+capital growth. Compounded sizing uses prior net equity, never same-day P&L,
+so all instruments on a date receive the same causal capital state.
+
+The daily cash-return denominators follow the same policy. Fixed mode divides
+gross P&L, net P&L, and costs by initial capital, producing an additive return
+curve that isolates the forecast and portfolio algorithm. Compounded mode
+divides gross P&L by prior gross equity and net P&L and costs by prior net
+equity. The cash and portfolio reports persist `cap_mode`; fixed-run output
+directories also include `capfixed` in their scenario identifier.
 
 ### Scheduled instrument-selection reviews
 
@@ -1513,9 +1537,11 @@ baseline by default. The command writes:
   interval-average policy-roll contracts, and separate gross, trade-cost,
   roll-cost, and net USD P&L paths. It also reports gross, trade-cost,
   realized/average-roll cost, total-cost, and net contributions as
-  daily return contributions. `sizing_cap` is prior portfolio net equity,
-  `cap_scalar` is that value divided by initial capital, `init_vol_scalar` is the
-  initial-capital average-contract baseline, and `vol_scalar` is the actual
+  daily return contributions. `cap_mode` identifies the fixed or compounded
+  policy. `sizing_cap` is initial capital in fixed mode and prior portfolio net
+  equity in compounded mode. `cap_scalar` is that value divided by initial
+  capital, `init_vol_scalar` is the initial-capital average-contract baseline,
+  and `vol_scalar` is the actual
   executable scalar after applying `cap_scalar`. The same scaled `vol_scalar`
   drives both `tgt_pos` and `buf_width_pos`, so ordinary capital changes only
   trade when the held position breaches its scaled no-trade band. Costs are
@@ -1531,10 +1557,11 @@ baseline by default. The command writes:
   unknown cross-gap move was not inferred;
 - `multi_speed_ewmac_selection_portfolio_curve_<timestamp>.parquet`, the daily
   selected-book cash flows summed across instruments. Daily `port_gross_pct`
-  uses prior gross equity; daily `port_net_pct` and cost rates use prior net
-  equity. Cumulative gross and net percentages equal their respective current
-  equity divided by initial capital minus one. The selected list, weights,
-  sizing limits, and IDM stay fixed while prior net equity scales positions;
+  uses prior gross equity in compounded mode; daily `port_net_pct` and cost
+  rates use prior net equity. Fixed mode uses initial capital for all of these
+  daily rates. Cumulative gross and net percentages equal their respective
+  current equity divided by initial capital minus one. The selected list,
+  weights, sizing limits, and IDM follow the selected capital policy;
 - `multi_speed_ewmac_selection_trials_<timestamp>.parquet`, one row per greedy trial; and
 - `multi_speed_ewmac_selection_trial_allocations_<timestamp>.parquet`, one row per member
   of every hypothetical trial book, including its economic `cluster_path`,
@@ -2239,8 +2266,12 @@ runs every construction scenario without making an IB request. A target-vol
 override recomputes the saved capital/risk-size and relative-liquidity gates
 offline; it does not rebuild market history or the executable snapshot. Pass
 an exact file rather than a report directory so a newer screen cannot enter the
-grid midway through a run. Selection cadence is fixed across a grid, while
-eligibility percentages, membership modes, rank-buffer percentages,
+grid midway through a run. Pass `--backtest-capital-mode fixed` to compare the
+construction variants without path-dependent capital growth. The grid forwards
+the policy to every worker, records it in the summary and input fingerprint,
+and appends `capfixed` to fixed-run scenario directories. Omission preserves
+the existing compounded behavior. Selection cadence is fixed across a grid,
+while eligibility percentages, membership modes, rank-buffer percentages,
 rank-count EWMA half-lives, and score-buffer percentages can all be swept.
 Optional class and subclass coverage minimums and active minimum-book targets
 are independent grid dimensions. Sweep the latter with

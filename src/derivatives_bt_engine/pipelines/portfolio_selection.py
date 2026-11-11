@@ -21,17 +21,18 @@ collections:
     One synchronized frame with dates in rows and executable symbols in
     columns. This is the input to the instrument-correlation estimator.
 ``cash_pnl_long``
-    One long account-scaled frame for the final selected book. It applies the
-    forecast buffer, rounds to contracts, and separates ordinary trade cost
-    from realized and interval-average policy-roll cost. The generated Panama
+    One long cash frame for the final selected book. It applies the configured
+    fixed or compounded capital policy, forecast buffer, contract rounding,
+    and separate ordinary-trade and policy-roll costs. The generated Panama
     ``close`` is retained beside its roll-neutral ``point_change`` for audit.
 ``portfolio_curve``
     One portfolio row per date. It sums the selected instruments' executable
-    cash P&L and reports daily returns against prior gross or net equity,
+    cash P&L and reports daily returns under the same capital policy,
     cumulative returns, and gross and net equity paths. Static runs keep the
     final selected weights and IDM fixed. Scheduled runs replace the book at
-    monthly or yearly review boundaries using prior history and lagged net
-    equity, while retaining executable holdings between reviews.
+    monthly or yearly review boundaries using prior history and the applicable
+    fixed or compounded sizing capital, while retaining holdings between
+    reviews.
 
 The command persists each intermediate form so forecast gaps, turnover, and
 greedy selection decisions remain inspectable after a run.
@@ -154,6 +155,7 @@ from derivatives_bt_engine.calculations.instrument_selection import (
     SelectionCandidate,
 )
 from derivatives_bt_engine.calculations.pnl import (
+    BACKTEST_CAPITAL_MODES,
     PYSYSTEMTRADE_FORECAST_BUFFER_SIZE,
     append_reference_position_turnover,
     apply_subsystem_reference_cost,
@@ -1321,12 +1323,23 @@ def parse_args(argv=None, *, complete_default: bool = False):
         ),
     )
     parser.add_argument(
+        "--backtest-capital-mode",
+        choices=BACKTEST_CAPITAL_MODES,
+        default="compounded",
+        help=(
+            "Capital policy for executable cash P&L. 'fixed' always sizes, "
+            "reviews selection, and normalizes returns with initial capital; "
+            "'compounded' uses lagged portfolio equity (default)."
+        ),
+    )
+    parser.add_argument(
         "--selection-rebalance",
         choices=("static", "yearly", "monthly"),
         default="static",
         help=(
             "Cadence for rerunning instrument selection from lagged data and "
-            "prior net equity. 'static' preserves one fixed book; 'yearly' "
+            "the configured backtest capital. 'static' preserves one fixed "
+            "book; 'yearly' "
             "or 'monthly' holds each selected book until the next scheduled "
             "review. Costs remain the saved fixed calibration."
         ),
@@ -1547,6 +1560,8 @@ def _selection_scenario_id(
         f"roll{int(args.include_roll_cost_in_score)}",
         args.weight_policy,
     ))
+    if args.backtest_capital_mode == "fixed":
+        tokens.append("capfixed")
     if args.selection_rebalance != "static":
         tokens.append(f"sel{args.selection_rebalance}")
         tokens.append(f"hg{args.selection_max_history_gap_days}")
@@ -2203,6 +2218,7 @@ class _WalkForwardSelectionProvider:
                     **trial,
                     "selection_date": review_date,
                     "selection_equity_usd": prior_net_equity,
+                    "backtest_capital_mode": self.args.backtest_capital_mode,
                     "preference_rank": (selection.preference_ranks or {}).get(
                         str(trial["candidate"])
                     ),
@@ -2265,6 +2281,7 @@ class _WalkForwardSelectionProvider:
                     **allocation_row,
                     "selection_date": review_date,
                     "selection_equity_usd": prior_net_equity,
+                    "backtest_capital_mode": self.args.backtest_capital_mode,
                     "preference_rank": (selection.preference_ranks or {}).get(
                         str(allocation_row["book_symbol"])
                     ),
@@ -2316,6 +2333,7 @@ class _WalkForwardSelectionProvider:
                 **allocation_row,
                 "selection_date": review_date,
                 "selection_equity_usd": prior_net_equity,
+                "backtest_capital_mode": self.args.backtest_capital_mode,
                 "preference_rank": (selection.preference_ranks or {}).get(
                     str(allocation_row["book_symbol"])
                 ),
@@ -2475,6 +2493,7 @@ class _WalkForwardSelectionProvider:
         self.review_rows.append({
             "selection_date": review_date,
             "selection_equity_usd": prior_net_equity,
+            "backtest_capital_mode": self.args.backtest_capital_mode,
             "selection_candidate_count": len(candidates),
             "selection_instrument_count": len(selection.selected),
             "selection_score": selection.final_score.score,
@@ -2565,6 +2584,7 @@ class _WalkForwardSelectionProvider:
                 "selection_date": review_date,
                 "selection_year": review_date.year,
                 "selection_equity_usd": prior_net_equity,
+                "backtest_capital_mode": self.args.backtest_capital_mode,
                 "selection_candidate_count": len(candidates),
                 "selection_instrument_count": len(selection.selected),
                 "selection_score": selection.final_score.score,
@@ -2723,6 +2743,7 @@ def _final_selection_frame(
             "selection_date": selection_date,
             "selection_equity_usd": selection_equity_usd,
             "selection_rebalance": args.selection_rebalance,
+            "backtest_capital_mode": args.backtest_capital_mode,
             "signal_model": args.signal_model,
             "fast_window": (
                 args.fast_window
@@ -4605,6 +4626,7 @@ def _run_complete_selection(
             for symbol in cash_symbols
         },
         target_abs_forecast=engine.config.target_abs_forecast,
+        capital_mode=args.backtest_capital_mode,
         allocation_provider=allocation_provider,
     )
     cash_pnl_long = cash_pnl_long.with_columns(
@@ -4683,6 +4705,7 @@ def _run_complete_selection(
     portfolio_curve = build_portfolio_equity_curve(
         cash_pnl_long,
         initial_capital_usd=float(run_config["init_cap_usd"]),
+        capital_mode=args.backtest_capital_mode,
     )
     audit_path = output_dir / f"{report_prefix}_selection_forecast_audit_{stamp}.parquet"
     trials_path = output_dir / f"{report_prefix}_selection_trials_{stamp}.parquet"

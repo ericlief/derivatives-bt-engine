@@ -43,6 +43,7 @@ from derivatives_bt_engine.calculations.continuous_momentum import (
     DEFAULT_FAST_WINDOW,
     DEFAULT_SLOW_WINDOW,
 )
+from derivatives_bt_engine.calculations.pnl import BACKTEST_CAPITAL_MODES
 from derivatives_bt_engine.calculations.goulding import GOULDING_SIGNAL_MODES
 from derivatives_bt_engine.reports.formatting import (
     rename_public_report_columns,
@@ -89,11 +90,17 @@ class SelectionScenario:
     selection_rank_count_ewma_halflife_reviews: float | None = None
     selection_book_score_buffer_percent: float = 2.0
     selection_prefer_full_contracts: bool = False
+    backtest_capital_mode: str = "compounded"
 
     def __post_init__(self) -> None:
         """Reject internally contradictory hierarchy count bounds."""
         if self.minimum_book_count <= 0:
             raise ValueError("minimum book count must be positive")
+        if self.backtest_capital_mode not in BACKTEST_CAPITAL_MODES:
+            raise ValueError(
+                "backtest capital mode must be one of: "
+                + ", ".join(BACKTEST_CAPITAL_MODES)
+            )
         for level, minimum, maximum in (
             (
                 "class",
@@ -180,6 +187,8 @@ class SelectionScenario:
             f"roll{int(self.include_roll_cost_in_score)}",
             self.weight_policy,
         ))
+        if self.backtest_capital_mode == "fixed":
+            tokens.append("capfixed")
         if self.selection_rebalance != "static":
             tokens.extend((
                 f"sel{self.selection_rebalance}",
@@ -458,6 +467,15 @@ def parse_args(argv=None) -> argparse.Namespace:
         help=(
             "Optional fixed capital override; otherwise use a legacy cached "
             "value or the selection default."
+        ),
+    )
+    parser.add_argument(
+        "--backtest-capital-mode",
+        choices=BACKTEST_CAPITAL_MODES,
+        default="compounded",
+        help=(
+            "Capital policy forwarded to every selection scenario: fixed "
+            "initial capital or lagged-equity compounding (default)."
         ),
     )
     parser.add_argument(
@@ -817,6 +835,7 @@ def build_scenarios(args: argparse.Namespace) -> list[SelectionScenario]:
             ),
             selection_book_score_buffer_percent=score_buffer,
             selection_prefer_full_contracts=prefer_full_contracts,
+            backtest_capital_mode=args.backtest_capital_mode,
         )
         for (
             target_volatility,
@@ -958,6 +977,10 @@ def _selection_command(
         command.extend(("--vol-slow-window", str(vol_slow_window)))
     if initial_capital_usd is not None:
         command.extend(("--initial-capital-usd", str(initial_capital_usd)))
+    command.extend((
+        "--backtest-capital-mode",
+        scenario.backtest_capital_mode,
+    ))
     if scenario.selection_prefer_full_contracts:
         command.append("--selection-prefer-full-contracts")
     if scenario.selection_rebalance != "static":
@@ -1367,6 +1390,7 @@ def _summary_row(
         "selection_prefer_full_contracts": (
             scenario.selection_prefer_full_contracts
         ),
+        "backtest_capital_mode": scenario.backtest_capital_mode,
         "elapsed_seconds": elapsed_seconds,
         "book_path": str(book_path) if book_path is not None else "",
         "number_instruments": 0,
@@ -1969,6 +1993,7 @@ def run(argv=None) -> tuple[Path, Path | None]:
         },
         "frozen_ib_history_sha256": ib_history_fingerprint or None,
         "initial_capital_usd": args.initial_capital_usd,
+        "backtest_capital_mode": args.backtest_capital_mode,
         "max_source_gap_days": args.max_source_gap_days,
         "selection_max_history_gap_days": (
             args.selection_max_history_gap_days

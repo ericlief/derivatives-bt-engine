@@ -64,6 +64,7 @@ PUBLIC_REPORT_RENAMES = {
     "period_year_fraction": "yr_frac",
     "sizing_capital_usd": "sizing_cap",
     "capital_scalar": "cap_scalar",
+    "backtest_capital_mode": "cap_mode",
     "selection_active": "sel_active",
     "selection_rebalanced": "sel_rebalanced",
     "selection_date": "sel_date",
@@ -429,6 +430,7 @@ CASH_PNL_REPORT_PRIORITY = (
     "cum_total_cost_pct",
 )
 CASH_PNL_REPORT_PARAMS = (
+    "cap_mode",
     "signal_model",
     "g_mode",
     "fast_window",
@@ -479,7 +481,7 @@ PORTFOLIO_CURVE_REPORT_PRIORITY = (
     "port_net_equity",
     "ret_valid",
 )
-PORTFOLIO_CURVE_REPORT_PARAMS = ("init_cap",)
+PORTFOLIO_CURVE_REPORT_PARAMS = ("cap_mode", "init_cap")
 
 
 SELECTION_REVIEW_ALLOCATION_REPORT_PRIORITY = (
