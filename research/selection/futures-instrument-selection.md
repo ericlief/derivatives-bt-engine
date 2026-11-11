@@ -1196,6 +1196,11 @@ plot_selection_rebalance_weights(
 )
 ```
 
+Goulding stitched forecasts reuse one in-memory pooled calibration context
+across all target histories in a run. Sharp and continuous modes retain
+separate forecast caches, while each mode calculates the frozen reference
+universe's monthly mixing parameters and normalization only once.
+
 `plot_selection_portfolio_overview` keeps gross and net equity on a logarithmic
 scale when both remain positive, then shows net drawdown, trailing
 256-observation return, and realized volatility in separate panels with

@@ -128,6 +128,8 @@ from derivatives_bt_engine.calculations.goulding_selection_forecast import (
     GOULDING_MODEL,
     GOULDING_SELECTION_FORECAST_CAP,
     GOULDING_SELECTION_FORECAST_TARGET_ABS,
+    GouldingCalibrationContext,
+    build_goulding_calibration_context,
     build_goulding_selection_forecasts,
 )
 from derivatives_bt_engine.data.futures_history import (
@@ -3735,8 +3737,8 @@ def _run_complete_selection(
         # The pooled rule objects and stitched component frames are needed only
         # when at least one content-addressed stitched curve misses its cache.
         pooled_rules = None
-        goulding_calibration_histories_for_stitching: (
-            dict[str, FuturesHistory] | None
+        goulding_calibration_context_for_stitching: (
+            GouldingCalibrationContext | None
         ) = None
         instrument_rows = load_pysystemtrade_ib_instruments(
             db_path=history_db_path,
@@ -3795,6 +3797,9 @@ def _run_complete_selection(
             symbol: "reference_fallback" for symbol in cash_symbols
         })
         live_ib: IBPySync | None = None
+        raw_history_store = IBFuturesHistoryStore(
+            args.ib_history_db.expanduser().resolve()
+        )
 
         def connected_ib() -> IBPySync:
             """Return one shared live IB connection for selected histories."""
@@ -3843,6 +3848,32 @@ def _run_complete_selection(
             if ib_rows.is_empty():
                 return None
             return ib_rows.get_column("date").max()
+
+        def ib_refresh_as_of(
+            history: FuturesHistory,
+            history_code: str,
+        ) -> date | None:
+            """Return when live acquisition last checked this raw history."""
+            value = history.metadata.get("ib_refresh_as_of")
+            if value is None:
+                # Caches written before the explicit refresh marker can still
+                # reuse the per-instrument successful fetch generation.
+                value = raw_history_store.instrument_fingerprint(
+                    instrument_code=history_code,
+                ).get("last_fetch_at")
+            if isinstance(value, datetime):
+                return value.date()
+            if isinstance(value, date):
+                return value
+            if isinstance(value, str):
+                try:
+                    return datetime.fromisoformat(value).date()
+                except ValueError:
+                    try:
+                        return date.fromisoformat(value)
+                    except ValueError:
+                        return None
+            return None
 
         try:
             for history_index, history_code in enumerate(
@@ -3931,22 +3962,49 @@ def _run_complete_selection(
                                 cached_end = latest_ib_signal_date(
                                     stitched_history
                                 )
+                                refresh_as_of = ib_refresh_as_of(
+                                    stitched_history,
+                                    history_code,
+                                )
                                 if (
                                     snapshot_end is not None
                                     and (cached_end is None or cached_end < snapshot_end)
+                                    and (
+                                        refresh_as_of is None
+                                        or refresh_as_of < snapshot_end
+                                    )
                                 ):
                                     logger.info(
                                         "selection_stitched_history live_retry "
                                         "hist_instr_code=%s reason=snapshot_tail_stale "
-                                        "cached_ib_end=%s snapshot_ib_end=%s",
+                                        "cached_ib_end=%s snapshot_ib_end=%s "
+                                        "ib_refresh_as_of=%s",
                                         history_code,
                                         cached_end,
                                         snapshot_end,
+                                        refresh_as_of,
                                     )
                                     stitched_history = load_stitched_history(
                                         history_code,
                                         ib=connected_ib(),
                                         update_history=True,
+                                    )
+                                elif (
+                                    snapshot_end is not None
+                                    and cached_end is not None
+                                    and cached_end < snapshot_end
+                                    and refresh_as_of is not None
+                                    and refresh_as_of >= snapshot_end
+                                ):
+                                    logger.info(
+                                        "selection_stitched_history "
+                                        "snapshot_tail_checked "
+                                        "hist_instr_code=%s cached_ib_end=%s "
+                                        "snapshot_ib_end=%s ib_refresh_as_of=%s",
+                                        history_code,
+                                        cached_end,
+                                        snapshot_end,
+                                        refresh_as_of,
                                     )
                 except Exception as exc:
                     # Preserve the valid long reference curve when a broker
@@ -4036,16 +4094,37 @@ def _run_complete_selection(
                             stitched_forecast_cache_key,
                         )
                     else:
-                        if goulding_calibration_histories_for_stitching is None:
-                            goulding_calibration_histories_for_stitching = (
+                        if goulding_calibration_context_for_stitching is None:
+                            logger.info(
+                                "goulding_calibration_context build "
+                                "signal_mode=%s histories=%d",
+                                args.goulding_signal_mode,
+                                len(goulding_cluster_by_history),
+                            )
+                            calibration_histories = (
                                 load_goulding_reference_histories()
+                            )
+                            goulding_calibration_context_for_stitching = (
+                                build_goulding_calibration_context(
+                                    calibration_histories,
+                                    goulding_cluster_by_history,
+                                    signal_mode=args.goulding_signal_mode,
+                                )
+                            )
+                            del calibration_histories
+                            gc.collect()
+                            logger.info(
+                                "goulding_calibration_context complete "
+                                "signal_mode=%s histories=%d",
+                                args.goulding_signal_mode,
+                                len(goulding_cluster_by_history),
                             )
                         stitched_goulding_result = (
                             build_goulding_selection_forecasts(
                                 {history_code: stitched_history},
                                 goulding_cluster_by_history,
-                                calibration_histories=(
-                                    goulding_calibration_histories_for_stitching
+                                calibration_context=(
+                                    goulding_calibration_context_for_stitching
                                 ),
                                 signal_mode=args.goulding_signal_mode,
                                 min_valid_observations=args.min_forecast_obs,

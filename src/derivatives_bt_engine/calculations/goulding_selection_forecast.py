@@ -10,6 +10,8 @@ contract-mark frame used by the other selection signal models.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+from datetime import date
 from typing import TYPE_CHECKING
 
 import polars as pl
@@ -44,6 +46,29 @@ GOULDING_MODEL = "goulding"
 # because it applies an additional downstream risk scalar.
 GOULDING_SELECTION_FORECAST_TARGET_ABS = 1.0
 GOULDING_SELECTION_FORECAST_CAP = 2.0
+
+
+@dataclass
+class GouldingCalibrationContext:
+    """Reusable pooled calibration state for stitched Goulding histories.
+
+    The frozen reference universe determines monthly cluster mixing parameters
+    and continuous forecast scaling. Stitched targets share that calibration,
+    so retaining its monthly inputs and memoized parameters avoids rebuilding
+    the full universe once for every target market.
+    """
+
+    monthly_by_history: dict[str, pl.DataFrame]
+    cluster_by_history: dict[str, str]
+    outcome_history: pl.DataFrame
+    signal_mode: str
+    fast_months: int
+    slow_months: int
+    target_abs_forecast: float
+    parameters_by_month: dict[
+        date,
+        tuple[dict[str, tuple[float, float]], float | None],
+    ] = field(default_factory=dict)
 
 
 def _monthly_signal_frame(
@@ -144,14 +169,137 @@ def _monthly_outcome_history(
     return pl.concat(frames, how="vertical")
 
 
+def _raw_goulding_forecast(
+    row: dict[str, object],
+    a_co: float,
+    a_re: float,
+    signal_mode: str,
+) -> float | None:
+    """Calculate one mode-specific continuous forecast from a monthly row."""
+    fast, slow = goulding_forecast_legs(
+        signal_mode,
+        row.get("g_fast"),
+        row.get("g_slow"),
+        row.get("g_fast_sharpe"),
+        row.get("g_slow_sharpe"),
+    )
+    return goulding_continuous_raw(
+        row.get("g_regime"), a_co, a_re, fast, slow
+    )
+
+
+def _build_calibration_context_from_monthly(
+    monthly_by_history: dict[str, pl.DataFrame],
+    cluster_by_history: dict[str, str],
+    *,
+    signal_mode: str,
+    fast_months: int,
+    slow_months: int,
+    target_abs_forecast: float,
+) -> GouldingCalibrationContext:
+    """Build reusable pooled state from precomputed monthly histories."""
+    return GouldingCalibrationContext(
+        monthly_by_history=monthly_by_history,
+        cluster_by_history=dict(cluster_by_history),
+        outcome_history=_monthly_outcome_history(
+            monthly_by_history,
+            cluster_by_history,
+        ),
+        signal_mode=signal_mode,
+        fast_months=fast_months,
+        slow_months=slow_months,
+        target_abs_forecast=target_abs_forecast,
+    )
+
+
+def build_goulding_calibration_context(
+    calibration_histories: dict[str, FuturesHistory],
+    cluster_by_history: dict[str, str],
+    *,
+    signal_mode: str,
+    fast_months: int = GOULDING_FAST_MONTHS,
+    slow_months: int = GOULDING_SLOW_MONTHS,
+    target_abs_forecast: float = GOULDING_SELECTION_FORECAST_TARGET_ABS,
+) -> GouldingCalibrationContext:
+    """Build pooled monthly calibration once for many stitched targets."""
+    missing = set(calibration_histories).difference(cluster_by_history)
+    if missing:
+        raise ValueError(
+            "cluster_by_history is missing calibration histories: "
+            f"{sorted(missing)}"
+        )
+    monthly_by_history = {
+        history_code: _monthly_signal_frame(
+            history,
+            fast_months=fast_months,
+            slow_months=slow_months,
+        )
+        for history_code, history in calibration_histories.items()
+    }
+    return _build_calibration_context_from_monthly(
+        monthly_by_history,
+        cluster_by_history,
+        signal_mode=signal_mode,
+        fast_months=fast_months,
+        slow_months=slow_months,
+        target_abs_forecast=target_abs_forecast,
+    )
+
+
+def _calibration_parameters(
+    context: GouldingCalibrationContext,
+    forecast_month: date,
+) -> tuple[dict[str, tuple[float, float]], float | None]:
+    """Return memoized cluster mixing and pooled scale for one month."""
+    cached = context.parameters_by_month.get(forecast_month)
+    if cached is not None:
+        return cached
+    clusters = sorted(set(context.cluster_by_history.values()))
+    mixing_by_cluster = {
+        cluster: estimate_mixing_params(
+            context.outcome_history,
+            forecast_month,
+            cluster,
+        )
+        for cluster in clusters
+    }
+    scalar = None
+    if context.signal_mode in {"continuous", "sharpe"}:
+        raw_history: list[float | None] = []
+        for history_code, monthly in context.monthly_by_history.items():
+            a_co, a_re = mixing_by_cluster[
+                context.cluster_by_history[history_code]
+            ]
+            for prior in monthly.filter(
+                pl.col("forecast_month") < forecast_month
+            ).iter_rows(named=True):
+                raw_history.append(
+                    _raw_goulding_forecast(
+                        prior,
+                        a_co,
+                        a_re,
+                        context.signal_mode,
+                    )
+                )
+        scalar = estimate_goulding_forecast_scalar(
+            raw_history,
+            target_abs=context.target_abs_forecast,
+        )
+    resolved = (mixing_by_cluster, scalar)
+    context.parameters_by_month[forecast_month] = resolved
+    return resolved
+
+
 def _forecast_rows(
     monthly_by_history: dict[str, pl.DataFrame],
     cluster_by_history: dict[str, str],
     *,
     signal_mode: str,
+    fast_months: int,
+    slow_months: int,
     target_abs_forecast: float,
     forecast_cap: float,
-    calibration_monthly_by_history: dict[str, pl.DataFrame] | None = None,
+    calibration_context: GouldingCalibrationContext | None = None,
 ) -> dict[str, pl.DataFrame]:
     """Calculate monthly binary, continuous, or Sharpe-like forecasts.
 
@@ -161,60 +309,28 @@ def _forecast_rows(
     normalization convention. Sharpe mode keeps raw-return regime labels but
     supplies horizon-normalized fast/slow legs to the continuous blend.
     """
-    def raw_forecast(row: dict[str, object], a_co: float, a_re: float):
-        """Calculate one mode-specific continuous forecast from a monthly row."""
-        fast, slow = goulding_forecast_legs(
-            signal_mode,
-            row.get("g_fast"),
-            row.get("g_slow"),
-            row.get("g_fast_sharpe"),
-            row.get("g_slow_sharpe"),
-        )
-        return goulding_continuous_raw(
-            row.get("g_regime"), a_co, a_re, fast, slow
-        )
-
-    calibration_monthly = (
-        calibration_monthly_by_history or monthly_by_history
-    )
-    outcome_history = _monthly_outcome_history(
-        calibration_monthly,
+    context = calibration_context or _build_calibration_context_from_monthly(
+        monthly_by_history,
         cluster_by_history,
+        signal_mode=signal_mode,
+        fast_months=fast_months,
+        slow_months=slow_months,
+        target_abs_forecast=target_abs_forecast,
     )
     forecast_months = sorted({
         value
         for monthly in monthly_by_history.values()
         for value in monthly.get_column("forecast_month").drop_nulls().to_list()
     })
-    clusters = sorted(set(cluster_by_history.values()))
     rows_by_history: dict[str, list[dict[str, object]]] = {
         history_code: [] for history_code in monthly_by_history
     }
 
     for forecast_month in forecast_months:
-        mixing_by_cluster = {
-            cluster: estimate_mixing_params(
-                outcome_history,
-                forecast_month,
-                cluster,
-            )
-            for cluster in clusters
-        }
-        scalar = None
-        if signal_mode in {"continuous", "sharpe"}:
-            raw_history: list[float | None] = []
-            for history_code, monthly in calibration_monthly.items():
-                a_co, a_re = mixing_by_cluster[
-                    cluster_by_history[history_code]
-                ]
-                for prior in monthly.filter(
-                    pl.col("forecast_month") < forecast_month
-                ).iter_rows(named=True):
-                    raw_history.append(raw_forecast(prior, a_co, a_re))
-            scalar = estimate_goulding_forecast_scalar(
-                raw_history,
-                target_abs=target_abs_forecast,
-            )
+        mixing_by_cluster, scalar = _calibration_parameters(
+            context,
+            forecast_month,
+        )
 
         for history_code, monthly in monthly_by_history.items():
             current = monthly.filter(
@@ -224,7 +340,12 @@ def _forecast_rows(
                 continue
             source = current.row(0, named=True)
             a_co, a_re = mixing_by_cluster[cluster_by_history[history_code]]
-            current_raw_forecast = raw_forecast(source, a_co, a_re)
+            current_raw_forecast = _raw_goulding_forecast(
+                source,
+                a_co,
+                a_re,
+                signal_mode,
+            )
             if signal_mode in {"continuous", "sharpe"}:
                 combined_forecast = normalize_goulding_forecast(
                     current_raw_forecast,
@@ -270,6 +391,7 @@ def build_goulding_selection_forecasts(
     cluster_by_history: dict[str, str],
     *,
     calibration_histories: dict[str, FuturesHistory] | None = None,
+    calibration_context: GouldingCalibrationContext | None = None,
     signal_mode: str = "binary",
     fast_months: int = GOULDING_FAST_MONTHS,
     slow_months: int = GOULDING_SLOW_MONTHS,
@@ -289,6 +411,9 @@ def build_goulding_selection_forecasts(
         Optional frozen universe used for mixing weights and continuous
         scaling. This lets a stitched target extend past the shared reference
         endpoint without giving each market a different pooled calibration.
+    calibration_context
+        Optional reusable pooled state built from ``calibration_histories``.
+        Supply this when calculating several stitched targets sequentially.
     signal_mode
         ``binary`` emits full signed forecasts; ``continuous`` retains raw
         return magnitude; ``sharpe`` retains magnitude after dividing each
@@ -320,7 +445,25 @@ def build_goulding_selection_forecasts(
         raise ValueError("min_valid_observations must be at least 2")
     if target_abs_forecast <= 0 or forecast_cap <= 0:
         raise ValueError("forecast target and cap must be positive")
-    calibration_sources = calibration_histories or histories
+    if calibration_context is not None:
+        if calibration_context.signal_mode != signal_mode:
+            raise ValueError(
+                "calibration context signal mode does not match request"
+            )
+        if calibration_context.target_abs_forecast != target_abs_forecast:
+            raise ValueError(
+                "calibration context forecast target does not match request"
+            )
+        if (
+            calibration_context.fast_months != fast_months
+            or calibration_context.slow_months != slow_months
+        ):
+            raise ValueError(
+                "calibration context momentum horizons do not match request"
+            )
+        calibration_sources = calibration_context.monthly_by_history
+    else:
+        calibration_sources = calibration_histories or histories
     required_cluster_keys = set(histories) | set(calibration_sources)
     if not required_cluster_keys <= set(cluster_by_history):
         raise ValueError(
@@ -335,10 +478,19 @@ def build_goulding_selection_forecasts(
         )
         for history_code, history in histories.items()
     }
-    calibration_monthly_by_history = (
-        monthly_by_history
-        if calibration_sources is histories
-        else {
+    if calibration_context is not None:
+        resolved_calibration_context = calibration_context
+    elif calibration_sources is histories:
+        resolved_calibration_context = _build_calibration_context_from_monthly(
+            monthly_by_history,
+            cluster_by_history,
+            signal_mode=signal_mode,
+            fast_months=fast_months,
+            slow_months=slow_months,
+            target_abs_forecast=target_abs_forecast,
+        )
+    else:
+        calibration_monthly_by_history = {
             history_code: _monthly_signal_frame(
                 history,
                 fast_months=fast_months,
@@ -346,14 +498,23 @@ def build_goulding_selection_forecasts(
             )
             for history_code, history in calibration_sources.items()
         }
-    )
+        resolved_calibration_context = _build_calibration_context_from_monthly(
+            calibration_monthly_by_history,
+            cluster_by_history,
+            signal_mode=signal_mode,
+            fast_months=fast_months,
+            slow_months=slow_months,
+            target_abs_forecast=target_abs_forecast,
+        )
     forecast_by_history = _forecast_rows(
         monthly_by_history,
         cluster_by_history,
         signal_mode=signal_mode,
+        fast_months=fast_months,
+        slow_months=slow_months,
         target_abs_forecast=target_abs_forecast,
         forecast_cap=forecast_cap,
-        calibration_monthly_by_history=calibration_monthly_by_history,
+        calibration_context=resolved_calibration_context,
     )
     results: dict[str, CombinedForecastResult] = {}
     for history_code, history in histories.items():

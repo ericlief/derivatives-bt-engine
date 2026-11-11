@@ -1407,6 +1407,15 @@ class IBStitchedHistoryProvider:
                 'cache_directory': str(cache_directory),
                 'ib_history_db': str(Path(self.history_db_path).expanduser()),
                 'ib_prior_years': ib_prior_years,
+                # A current contract can legitimately have no trade on the
+                # snapshot date. Record that live acquisition checked this
+                # history through the run date so another signal variant does
+                # not refresh and restitch the same unchanged tail.
+                'ib_refresh_as_of': (
+                    self.as_of or date.today()
+                    if self.update_history
+                    else history.metadata.get('ib_refresh_as_of')
+                ),
                 'max_source_gap_days': self.max_source_gap_days,
             },
         )
