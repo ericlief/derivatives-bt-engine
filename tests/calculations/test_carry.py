@@ -69,19 +69,19 @@ def test_carry_com_smoothing_matches_pandas_and_uses_normalized_scalar() -> None
     )
 
     result = build_carry_components(raw)
-    expected = pd.Series(values).ewm(10).mean() * CARRY_FORECAST_SCALAR
+    expected = pd.Series(values).ewm(5).mean() * CARRY_FORECAST_SCALAR
 
-    assert result.frame["smooth_carry_10"].to_list() == pytest.approx(
+    assert result.frame["smooth_carry_5"].to_list() == pytest.approx(
         (expected / CARRY_FORECAST_SCALAR).to_list()
     )
-    assert result.frame["fcst_carry_10"].to_list() == pytest.approx(
+    assert result.frame["fcst_carry_5"].to_list() == pytest.approx(
         expected.to_list()
     )
     assert result.weights == {
-        "carry10": 0.25,
-        "carry30": 0.25,
+        "carry5": 0.25,
+        "carry20": 0.25,
         "carry60": 0.25,
-        "carry125": 0.25,
+        "carry120": 0.25,
     }
     assert result.fdm == pytest.approx(1.23)
 
@@ -96,10 +96,10 @@ def test_carry_smoothing_restarts_at_source_handoff() -> None:
         }
     )
 
-    result = build_carry_components(raw, smooth_coms=(10,))
+    result = build_carry_components(raw, smooth_coms=(5,))
 
     assert result.frame["carry_segment"].to_list() == [1, 1, 2, 2]
-    assert result.frame["smooth_carry_10"][2] == pytest.approx(-1.0)
+    assert result.frame["smooth_carry_5"][2] == pytest.approx(-1.0)
 
 
 @pytest.mark.parametrize(
@@ -146,12 +146,12 @@ def test_trend_carry_blend_uses_60_40_and_nine_rule_fdm() -> None:
         pl.DataFrame(
             {
                 "date": dates,
-                **{f"fcst_carry_{span}": [-1.0] * 3 for span in (10, 30, 60, 125)},
+                **{f"fcst_carry_{span}": [-1.0] * 3 for span in (5, 20, 60, 120)},
                 "forecast_valid": [True] * 3,
                 "combined_forecast": [-1.23] * 3,
             }
         ),
-        {f"carry{span}": 0.25 for span in (10, 30, 60, 125)},
+        {f"carry{span}": 0.25 for span in (5, 20, 60, 120)},
         1.23,
         {},
     )

@@ -13,6 +13,10 @@ from pathlib import Path
 
 import polars as pl
 
+from derivatives_bt_engine.calculations.carry import (
+    AFT_CARRY_ANNUAL_TRADES,
+    CARRY_MODEL,
+)
 from derivatives_bt_engine.calculations.instruments import INSTRUMENTS
 from derivatives_bt_engine.data.pysystemtrade_ib import (
     load_executable_symbol_mapping,
@@ -145,6 +149,12 @@ DEFAULT_VIEW_COLUMNS = (
     "ref_elig_ewmac_rule_count",
     "ref_elig_ewmac_rules",
     "ref_instr_has_elig_ewmac_rule",
+    "elig_carry_rule_count",
+    "elig_carry_rules",
+    "instr_has_elig_carry_rule",
+    "ref_elig_carry_rule_count",
+    "ref_elig_carry_rules",
+    "ref_instr_has_elig_carry_rule",
     "ref_ewmac_4_16_pre_cost_sr",
     "ref_ewmac_8_32_pre_cost_sr",
     "ref_ewmac_16_64_pre_cost_sr",
@@ -271,6 +281,12 @@ SELECTION_CANDIDATE_COLUMNS = (
     "ref_elig_ewmac_rule_count",
     "ref_elig_ewmac_rules",
     "ref_instr_has_elig_ewmac_rule",
+    "elig_carry_rule_count",
+    "elig_carry_rules",
+    "instr_has_elig_carry_rule",
+    "ref_elig_carry_rule_count",
+    "ref_elig_carry_rules",
+    "ref_instr_has_elig_carry_rule",
     "exec_elig",
     "selection_elig",
     "snap_cache_ts_et",
@@ -384,6 +400,7 @@ def apply_selection_filters(
     report: pl.DataFrame,
     *,
     config: dict[str, object],
+    signal_model: str = "multi_ewmac",
 ) -> pl.DataFrame:
     """Attach scenario-dependent hard gates to a cached rule-cost report.
 
@@ -512,6 +529,12 @@ def apply_selection_filters(
             pl.lit(None, dtype=pl.Float64).alias("ref_roll_sr"),
         )
     report = _attach_reference_rule_eligibility(report)
+    report = _attach_carry_rule_eligibility(report)
+    rule_eligible_column = (
+        "instr_has_elig_carry_rule"
+        if signal_model == CARRY_MODEL
+        else "instr_has_elig_ewmac_rule"
+    )
 
     filtered = report.with_columns(
         pl.lit(initial_capital).alias("init_cap_usd"),
@@ -566,7 +589,7 @@ def apply_selection_filters(
             & pl.col("size_elig").fill_null(False)
             & pl.col("liq_elig").fill_null(False)
             & pl.col("data_elig").fill_null(False)
-            & pl.col("instr_has_elig_ewmac_rule").fill_null(False)
+            & pl.col(rule_eligible_column).fill_null(False)
             & pl.col("exec_elig").fill_null(False)
             & (pl.col("ib_avail") == "contract_qualified")
         ).alias("selection_elig"),
@@ -600,7 +623,7 @@ def apply_selection_filters(
                 reasons.append("contract_volume")
             if not row.get("risk_volume_elig"):
                 reasons.append("risk_volume")
-        if not row.get("instr_has_elig_ewmac_rule"):
+        if not row.get(rule_eligible_column):
             reasons.append("no_eligible_rule")
         if not row.get("exec_elig"):
             reasons.append("execution")
@@ -669,6 +692,78 @@ def _attach_reference_rule_eligibility(report: pl.DataFrame) -> pl.DataFrame:
         ),
         (count > 0).alias("ref_instr_has_elig_ewmac_rule"),
     )
+
+
+def _attach_carry_rule_eligibility(report: pl.DataFrame) -> pl.DataFrame:
+    """Attach AFTS carry-rule cost gates for live and reference costs.
+
+    Each Carry5/20/60/120 variation uses the fixed annual turnover estimate
+    from AFTS table 40.  Instrument-specific trade and roll SR inputs then
+    decide the surviving equal-weight rule subset.  This deliberately avoids
+    borrowing the cached EWMAC turnover or its eligibility decision.
+    """
+    required = {"rule_cost_lim_sr", "ref_ann_rolls"}
+    if not required.issubset(report.columns):
+        return report
+
+    expressions: list[pl.Expr] = [
+        pl.lit(float(annual_trades)).alias(f"carry_{smooth}_ann_trades")
+        for smooth, annual_trades in AFT_CARRY_ANNUAL_TRADES.items()
+    ]
+    summary_inputs: dict[str, list[tuple[int, pl.Expr]]] = {
+        "live": [],
+        "ref": [],
+    }
+    for source, trade_column, roll_column in (
+        ("live", "trade_sr", "roll_sr"),
+        ("ref", "ref_trade_sr", "ref_roll_sr"),
+    ):
+        if trade_column not in report.columns or roll_column not in report.columns:
+            continue
+        for smooth, annual_trades in AFT_CARRY_ANNUAL_TRADES.items():
+            annual_cost = (
+                pl.col(trade_column) * float(annual_trades)
+                + pl.col(roll_column) * pl.col("ref_ann_rolls")
+            )
+            eligible = (
+                annual_cost.is_not_null()
+                & annual_cost.is_finite()
+                & (annual_cost <= pl.col("rule_cost_lim_sr"))
+            )
+            expressions.extend(
+                (
+                    annual_cost.alias(f"{source}_carry_{smooth}_ann_cost_sr"),
+                    eligible.alias(f"{source}_carry_{smooth}_cost_elig"),
+                )
+            )
+            summary_inputs[source].append((smooth, eligible))
+
+    if expressions:
+        report = report.with_columns(expressions)
+    summaries: list[pl.Expr] = []
+    for source, inputs in summary_inputs.items():
+        if not inputs:
+            continue
+        count = pl.sum_horizontal(
+            eligible.cast(pl.Int64) for _, eligible in inputs
+        )
+        prefix = "" if source == "live" else "ref_"
+        labels = [
+            pl.when(eligible)
+            .then(pl.lit(f"carry{smooth}"))
+            .otherwise(None)
+            for smooth, eligible in inputs
+        ]
+        summaries.extend(
+            (
+                count.alias(f"{prefix}elig_carry_rule_count"),
+                pl.concat_str(labels, separator=",", ignore_nulls=True).alias(
+                    f"{prefix}elig_carry_rules"
+                ),
+                (count > 0).alias(f"{prefix}instr_has_elig_carry_rule"),
+            )
+        )
+    return report.with_columns(summaries) if summaries else report
 
 
 def override_selection_scenario(
@@ -799,6 +894,7 @@ def selection_rebalance_candidates(
     report: pl.DataFrame,
     *,
     apply_live_execution_gates: bool = False,
+    signal_model: str = "multi_ewmac",
 ) -> pl.DataFrame:
     """Return the reference-cost universe for a complete backtest.
 
@@ -824,14 +920,31 @@ def selection_rebalance_candidates(
     """
     if "ref_instr_has_elig_ewmac_rule" not in report.columns:
         report = _attach_reference_rule_eligibility(report)
+    if "ref_instr_has_elig_carry_rule" not in report.columns:
+        report = _attach_carry_rule_eligibility(report)
+    rule_flag = (
+        "ref_instr_has_elig_carry_rule"
+        if signal_model == CARRY_MODEL
+        else "ref_instr_has_elig_ewmac_rule"
+    )
+    rule_list = (
+        "ref_elig_carry_rules"
+        if signal_model == CARRY_MODEL
+        else "ref_elig_ewmac_rules"
+    )
+    rule_count = (
+        "ref_elig_carry_rule_count"
+        if signal_model == CARRY_MODEL
+        else "ref_elig_ewmac_rule_count"
+    )
     required = {
         "ref_trade_sr",
         "ref_roll_sr",
         "cost_lim_sr",
         "volume_elig",
         "hist_data_elig",
-        "ref_instr_has_elig_ewmac_rule",
-        "ref_elig_ewmac_rules",
+        rule_flag,
+        rule_list,
         "exec_elig",
         "ib_avail",
         "symbol",
@@ -852,7 +965,7 @@ def selection_rebalance_candidates(
         & pl.col("ref_roll_sr").is_not_null()
         & pl.col("ref_roll_sr").is_finite()
         & pl.col("hist_data_elig").fill_null(False)
-        & pl.col("ref_instr_has_elig_ewmac_rule").fill_null(False)
+        & pl.col(rule_flag).fill_null(False)
     )
     if apply_live_execution_gates:
         gate &= (
@@ -872,6 +985,12 @@ def selection_rebalance_candidates(
             "instr_has_elig_ewmac_rule"
         ),
     )
+    if signal_model == CARRY_MODEL:
+        selected = selected.with_columns(
+            pl.col(rule_count).alias("elig_carry_rule_count"),
+            pl.col(rule_list).alias("elig_carry_rules"),
+            pl.col(rule_flag).alias("instr_has_elig_carry_rule"),
+        )
     columns = [
         name for name in SELECTION_CANDIDATE_COLUMNS
         if name in selected.columns

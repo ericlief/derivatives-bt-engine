@@ -7,10 +7,10 @@ and combines the resulting forecasts on the repository's divided-by-ten
 Carver scale.  It also provides the AFTS final-rule-count diversification
 table and the default 60/40 trend/carry combination used by strategy eleven.
 
-No function fills a missing carry observation or joins legs from different
-dates.  Smoothing restarts at source changes, invalid observations, and long
-calendar gaps so an unexplained stitch gap cannot silently become history for
-the next provider segment.
+No function joins carry legs from different dates or fills beyond the bounded
+staleness policy. Smoothing restarts at source changes, invalid observations,
+and long calendar gaps so an unexplained stitch gap cannot silently become
+history for the next provider segment.
 """
 
 from __future__ import annotations
@@ -38,13 +38,29 @@ if TYPE_CHECKING:
 
 CALENDAR_DAYS_IN_YEAR = 365.25
 CARRY_MODEL = "carry"
-CARRY_SMOOTH_COMS = (10, 30, 60, 125)
+# AFTS strategy ten names these variants Carry5/20/60/120.  The upstream
+# pysystemtrade rule passes ``smooth_days`` positionally to pandas ``ewm``, so
+# the values remain centre-of-mass arguments here for source parity rather
+# than being silently reinterpreted as Polars spans.
+CARRY_SMOOTH_COMS = (5, 20, 60, 120)
 CARRY_FORECAST_SCALAR = 3.0
 CARRY_FORECAST_CAP = 2.0
 CARRY_MAX_SMOOTHING_GAP_DAYS = 7
 CARRY_MAX_STALE_DAYS = 7
+CARRY_MIN_POST_WARMUP_COVERAGE = 0.90
 DEFAULT_TREND_FAMILY_WEIGHT = 0.60
 DEFAULT_CARRY_FAMILY_WEIGHT = 0.40
+
+# AFTS table 40 annual forecast turnovers.  These fixed, pre-sample estimates
+# decide which carry variants are cheap enough for an instrument; realised
+# combined subsystem turnover is still measured from the built forecast for
+# P&L costs and greedy selection.
+AFT_CARRY_ANNUAL_TRADES: dict[int, float] = {
+    5: 5.75,
+    20: 3.12,
+    60: 1.82,
+    120: 1.22,
+}
 
 # Table 52 in Advanced Futures Trading Strategies.  Counts omitted by the
 # printed table are linearly interpolated by ``aft_final_rule_fdm``.
@@ -401,6 +417,7 @@ def build_carry_forecast(
     forecast_cap: float = CARRY_FORECAST_CAP,
     max_gap_days: int = CARRY_MAX_SMOOTHING_GAP_DAYS,
     max_stale_days: int = CARRY_MAX_STALE_DAYS,
+    min_post_warmup_coverage: float = CARRY_MIN_POST_WARMUP_COVERAGE,
     min_valid_observations: int = 256,
 ) -> CombinedForecastResult:
     """Return a selection-compatible carry forecast for one futures history.
@@ -415,6 +432,8 @@ def build_carry_forecast(
         raise ValueError("min_valid_observations must be at least 2")
     if max_stale_days < 0:
         raise ValueError("max_stale_days must not be negative")
+    if not 0 < min_post_warmup_coverage <= 1:
+        raise ValueError("min_post_warmup_coverage must be in (0, 1]")
     execution = _history_execution_frame(history)
     mark_contracts = history.marks.select(
         "date",
@@ -476,6 +495,12 @@ def build_carry_forecast(
         if first_valid is not None
         else frame
     )
+    post_warmup_valid_obs = after_warmup.filter(pl.col("forecast_valid")).height
+    post_warmup_coverage = (
+        post_warmup_valid_obs / after_warmup.height
+        if after_warmup.height
+        else 0.0
+    )
     audit = dict(components.audit)
     audit.update(
         {
@@ -485,6 +510,8 @@ def build_carry_forecast(
             "forecast_post_warmup_invalid_obs": after_warmup.filter(
                 ~pl.col("forecast_valid")
             ).height,
+            "forecast_post_warmup_coverage": post_warmup_coverage,
+            "forecast_min_post_warmup_coverage": min_post_warmup_coverage,
             "forecast_start": first_valid,
             "forecast_end": (
                 valid.get_column("date").max() if valid.height else None
@@ -502,13 +529,13 @@ def build_carry_forecast(
     )
     audit["forecast_elig"] = bool(
         valid.height >= min_valid_observations
-        and audit["forecast_post_warmup_invalid_obs"] == 0
+        and post_warmup_coverage >= min_post_warmup_coverage
         and audit["combined_nonfinite"] == 0
     )
     if valid.height < min_valid_observations:
         audit["forecast_excl"] = "insufficient_valid_forecast_obs"
-    elif audit["forecast_post_warmup_invalid_obs"]:
-        audit["forecast_excl"] = "carry_gaps_after_warmup"
+    elif post_warmup_coverage < min_post_warmup_coverage:
+        audit["forecast_excl"] = "insufficient_carry_coverage"
     elif audit["combined_nonfinite"]:
         audit["forecast_excl"] = "nonfinite_combined_forecast"
     else:

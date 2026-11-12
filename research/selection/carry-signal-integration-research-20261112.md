@@ -2,8 +2,8 @@
 
 **Date:** 2026-11-12
 
-**Status:** implementation research, experiment recommendation, and post-copy
-data re-audit
+**Status:** carry-only selector implemented and audited against the copied IB
+history database
 
 **Trigger:** the [November 11 fixed-cap signal audit](selection-capfixed-signal-audit-20261111.md)
 
@@ -12,15 +12,20 @@ data re-audit
 ## Implementation update
 
 The first raw-carry implementation now lives in
-`calculations/carry.py`. It follows the current pysystemtrade robust-system
-rules rather than the older AFTS example spans:
+`calculations/carry.py` and is wired end to end through the selection CLI. The
+first pass follows the explicit AFTS strategy-ten specification while keeping
+the current pysystemtrade calculation semantics:
 
-- carry smoothing uses pandas-COM-equivalent EWMAs at 10, 30, 60, and 125
-  sessions;
+- carry smoothing uses pandas-COM-equivalent EWMAs for Carry5, Carry20,
+  Carry60, and Carry120;
 - every smoothed rule uses a fixed scalar of 3 on this repository's
   divided-by-ten forecast scale, equivalent to Carver's scalar of 30 and
   +/-20 cap;
-- the four carry rules have equal pre-FDM weights and a +/-2 final cap;
+- the cost-eligible carry rules have equal pre-FDM weights and a +/-2 final
+  cap;
+- rule eligibility uses AFTS Table 40 annual turnover estimates of 5.75,
+  3.12, 1.82, and 1.22 respectively, combined with each instrument's trade
+  and roll SR costs; it does not reuse EWMAC turnover;
 - the final-rule-count FDM table from AFTS Table 52 is the selected policy,
   giving 1.23 for four carry rules and 1.34 for five EWMAC plus four carry
   rules;
@@ -42,11 +47,38 @@ calendar gap longer than seven days. A forecast may persist for at most seven
 calendar days only when the executable current contract is unchanged; the
 source observation date and staleness remain visible for audit.
 
+Static reference and stitched carry forecasts are content-addressed cache
+artifacts. The mutable IB tail is built from the cached forecast, capped at
+each signal's exchange-local market-snapshot endpoint, and then passed through
+the existing executable cash-P&L and annual selection path.
+
+### Carry-only full-selection audit
+
+The first complete fixed-$75,000 run used the November 11 market snapshot and
+the copied `/home/dev/fin/db/ib_futures_history.duckdb`. The live candidate
+screen retained 113 executable instruments; the historical annual-rebalance
+universe retained 173 reference-cost candidates. Of those, 132 passed the
+carry forecast and reference-return coverage audit. Thirty-nine failed the
+declared 90% carry-coverage floor and two lacked the minimum 256 valid forecast
+observations.
+
+The cost gate retained all four rules for 170 candidates, Carry20/60/120 for
+one, and Carry60/120 for two. The resulting FDM values are therefore 1.23,
+1.03, and 1.02 from the selected final-rule-count table. The final 2026 review
+selected 11 instruments at the account's integer-contract and 50% book-margin
+limits. The stitched cash panel has unique `(symbol, date)` identities, no
+invalid P&L rows while an instrument is active, and reconciles to the public
+portfolio curve within the shared report-rounding tolerance.
+
+This is an implementation and integrity result, not evidence that carry will
+put food on the table. The maximal-history fixed-cap run is useful as a smoke
+test, but promotion still requires the pre-registered common-sample,
+era-by-era, drawdown, and trend/carry comparison below.
+
 ## Recommendation
 
-Add absolute futures carry as a normalized forecast family beside trend, then
-test it on the existing fixed-$75,000 book before allowing it to change market
-selection. The first decision-grade comparison should be:
+Use the completed carry-only full-selection run as an engineering smoke test,
+then make the first decision-grade comparison:
 
 1. the saved EWMAC fixed-cap baseline;
 2. carry alone;
@@ -57,8 +89,9 @@ selection. The first decision-grade comparison should be:
 Use the fixed carry scalar and final-rule-count FDM described above, cap at
 +/-2, and keep target volatility, fixed capital, selected book, contract
 accounting, and costs unchanged. This isolates whether carry adds information.
-Only after that comparison passes should the selector be rerun with
-carry-aware eligibility and turnover costs.
+The selector plumbing and carry-aware cost eligibility are now available, but
+the full-selection result should not be promoted unless those frozen-book and
+common-sample comparisons pass.
 
 Carry is a plausible diversifier, not a remedy for the account constraint.
 The fixed-cap audit still shows that a $75,000 account supports a smaller book
@@ -306,7 +339,7 @@ cap hits, agreement with trend, and forecast turnover.
 
 ### 4. Selection integration
 
-Implement carry in two passes:
+Evaluate carry along two complementary paths:
 
 1. **Frozen-book signal test.** Replay the same dated EWMAC fixed-cap books
    with carry variants. This keeps market membership and the fixed-$75,000
@@ -315,9 +348,10 @@ Implement carry in two passes:
    turnover/cost fields, then allow annual selection to change. Do not reuse
    EWMAC turnover or its cost gate as a proxy for carry.
 
-The second pass is necessary for the final strategy result, but it should not
-be the first result: changing the signal and selected book simultaneously
-would make an improvement impossible to attribute.
+The full-selection path has now supplied the requested first engineering pass.
+The frozen-book path remains necessary for attribution because changing the
+signal and selected book simultaneously cannot identify where an improvement
+came from.
 
 ## Pre-registered experiment
 
@@ -376,16 +410,15 @@ book's results.
 5. **Pure-rule study:** score carry horizons and the carry family on reference
    history with lagged normalized returns.
 6. **Frozen-book replay:** run the nine pre-registered fixed-cap variants.
-7. **Full selector:** add carry-specific cost eligibility and rerun annual
-   selection only if the frozen-book result is broad and cost-effective.
+7. **Full selector:** use the implemented carry-specific cost eligibility to
+   rerun annual selection after the frozen-book result is broad and
+   cost-effective; treat the current run as a plumbing audit.
 
-The smallest next coding task is therefore the pure Polars carry module plus
-the parity report. The existing data model, reference carry stream, selection
-forecast result type, direct reference-to-IB tail, and stitch ownership rules
-can be reused. There is no remaining acquisition blocker for the 17-market
-frozen-book experiment. The material missing pieces are the carry calculation,
-explicit sparse-gap policy, and parity evidence; the Globex carry builder is
-still required before relying on the generic three-source path.
+The smallest next research task is therefore the parity report followed by the
+frozen-book comparison. The carry calculation, explicit sparse-gap policy,
+static forecast cache, direct PST-to-IB tail, cost eligibility, and full
+selector are implemented. The Globex carry builder is still required before
+relying on the generic three-source path.
 
 ## Evidence inspected
 

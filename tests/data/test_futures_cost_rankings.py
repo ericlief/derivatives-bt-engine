@@ -257,6 +257,25 @@ def test_complete_static_selection_retains_live_execution_gates():
     assert candidates.get_column("symbol").to_list() == ["PASS", "BIG"]
 
 
+def test_carry_selection_uses_afts_turnover_instead_of_ewmac_rules():
+    """The fast carry rule can fail while slower AFTS variants remain."""
+    report = _phase2_step1_report().filter(pl.col("symbol") == "PASS").with_columns(
+        pl.lit(0.009).alias("ref_trade_sr"),
+        pl.lit(0.026).alias("ref_roll_sr"),
+    )
+
+    candidates = selection_rebalance_candidates(
+        report,
+        signal_model="carry",
+    )
+
+    assert candidates.select("elig_carry_rules").item() == (
+        "carry20,carry60,carry120"
+    )
+    assert candidates.select("elig_carry_rule_count").item() == 3
+    assert candidates.select("instr_has_elig_carry_rule").item() is True
+
+
 def test_phase2_step1_requires_current_phase1_gate_schema():
     with pytest.raises(ValueError, match="missing Step 1 selection fields"):
         phase2_step1_candidates(_report())

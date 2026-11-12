@@ -108,6 +108,18 @@ from derivatives_bt_engine.calculations.continuous_momentum import (
     DEFAULT_FAST_WINDOW,
     DEFAULT_SLOW_WINDOW,
 )
+from derivatives_bt_engine.calculations.carry import (
+    AFT_CARRY_ANNUAL_TRADES,
+    CARRY_FORECAST_CAP,
+    CARRY_FORECAST_SCALAR,
+    CARRY_MAX_SMOOTHING_GAP_DAYS,
+    CARRY_MAX_STALE_DAYS,
+    CARRY_MIN_POST_WARMUP_COVERAGE,
+    CARRY_MODEL,
+    CARRY_SMOOTH_COMS,
+    aft_final_rule_fdm,
+    build_carry_forecast,
+)
 from derivatives_bt_engine.calculations.return_tsmom_forecast import (
     RETURN_TSMOM_MODEL,
     build_return_tsmom_forecast,
@@ -183,6 +195,7 @@ SELECTION_BACKTEST_CACHE_VERSION = 1
 CASH_PNL_CACHE_VERSION = 2
 GOULDING_FORECAST_CACHE_VERSION = 3
 RETURN_TSMOM_SCALAR_CACHE_VERSION = 1
+CARRY_FORECAST_CACHE_VERSION = 1
 
 # Production-inspired ordinary-EWMAC template. The two slowest rules receive
 # 60% in total and the three faster rules receive 40%. Rules removed by the
@@ -194,8 +207,8 @@ EWMAC_SLOW_TILT_60_40 = {
     "32/128": 0.30,
     "64/256": 0.30,
 }
-SIGNAL_MODELS = ("multi_ewmac", RETURN_TSMOM_MODEL, GOULDING_MODEL)
-DIRECT_TSMOM_MODELS = (RETURN_TSMOM_MODEL, GOULDING_MODEL)
+SIGNAL_MODELS = ("multi_ewmac", RETURN_TSMOM_MODEL, GOULDING_MODEL, CARRY_MODEL)
+DIRECT_SIGNAL_MODELS = (RETURN_TSMOM_MODEL, GOULDING_MODEL, CARRY_MODEL)
 
 
 def _selection_pysystemtrade_identity(
@@ -222,11 +235,15 @@ def _selection_history_content_identity(
     The provider's cache directory includes file mtimes and the requested
     as-of date. Those are useful acquisition identities but would invalidate a
     derived curve even when its rows are unchanged. Hashing the ordered signal,
-    mark, and Panama streams makes the derived tail depend on actual content.
+    mark, carry, and Panama streams makes the derived tail depend on actual
+    content for both directional and curve-based forecasts.
     """
     digest = hashlib.sha256()
-    for stream_name in ("signal", "marks", "panama"):
-        frame = getattr(history, stream_name)
+    for stream_name in ("signal", "marks", "carry", "panama"):
+        # Lightweight test/research fixtures created before carry was added to
+        # the canonical bundle may omit the stream.  Hash a typed-empty
+        # placeholder; production ``FuturesHistory`` always supplies it.
+        frame = getattr(history, stream_name, pl.DataFrame())
         schema = [(name, str(dtype)) for name, dtype in frame.schema.items()]
         digest.update(stream_name.encode("utf-8"))
         digest.update(json.dumps(schema, separators=(",", ":")).encode("utf-8"))
@@ -584,6 +601,132 @@ def _ensure_goulding_reference_forecast_cache(
     del results, histories
     gc.collect()
     return cache_specs
+
+
+def _carry_rule_smooths(eligible_rules: str | Iterable[str]) -> tuple[int, ...]:
+    """Parse cost-eligible AFTS carry labels into ordered smoothing values."""
+    smooths: list[int] = []
+    for rule in _parse_rules(eligible_rules):
+        normalized = rule.lower().removeprefix("carry")
+        if not normalized.isdigit():
+            raise ValueError(f"invalid carry rule label: {rule!r}")
+        smooth = int(normalized)
+        if smooth not in AFT_CARRY_ANNUAL_TRADES:
+            raise ValueError(f"unsupported AFTS carry rule: {rule!r}")
+        smooths.append(smooth)
+    if not smooths:
+        raise ValueError("carry forecast requires at least one eligible rule")
+    return tuple(sorted(set(smooths)))
+
+
+def _carry_forecast_cache_spec(
+    cache_root: Path,
+    *,
+    artifact: str,
+    history_code: str,
+    history_db_identity: dict[str, object],
+    smooth_coms: Iterable[int],
+    min_valid_observations: int,
+    source_identity: dict[str, object] | None = None,
+) -> tuple[Path, Path, dict[str, object], str]:
+    """Resolve one static carry-forecast artifact by rules and source data."""
+    rules = tuple(int(value) for value in smooth_coms)
+    identity: dict[str, object] = {
+        "forecast_cache_version": CARRY_FORECAST_CACHE_VERSION,
+        "signal_model": CARRY_MODEL,
+        "hist_instr_code": history_code,
+        "history_db": history_db_identity,
+        "carry_smooth_coms": rules,
+        "forecast_scalar": CARRY_FORECAST_SCALAR,
+        "forecast_cap": CARRY_FORECAST_CAP,
+        "max_smoothing_gap_days": CARRY_MAX_SMOOTHING_GAP_DAYS,
+        "max_stale_days": CARRY_MAX_STALE_DAYS,
+        "min_post_warmup_coverage": CARRY_MIN_POST_WARMUP_COVERAGE,
+        "min_valid_observations": min_valid_observations,
+        "fdm": aft_final_rule_fdm(len(rules)),
+    }
+    if source_identity is not None:
+        identity["source"] = source_identity
+    return _selection_backtest_cache_artifact(
+        cache_root,
+        artifact=artifact,
+        symbol=history_code,
+        identity=identity,
+    )
+
+
+def _load_carry_forecast_result(
+    cache_spec: tuple[Path, Path, dict[str, object], str],
+) -> CombinedForecastResult | None:
+    """Load a complete carry forecast cache entry, returning ``None`` on miss."""
+    curve_path, manifest_path, identity, _ = cache_spec
+    cached = _load_selection_backtest_curve(
+        curve_path,
+        manifest_path,
+        expected_identity=identity,
+        required_columns=(
+            "date",
+            "combined_forecast",
+            "forecast_valid",
+            "point_vol",
+            "point_change",
+        ),
+    )
+    if cached is None:
+        return None
+    frame, manifest = cached
+    audit = _cached_forecast_audit(manifest)
+    if audit is None:
+        return None
+    smooths = tuple(int(value) for value in identity["carry_smooth_coms"])
+    weights = {f"carry{smooth}": 1.0 / len(smooths) for smooth in smooths}
+    return CombinedForecastResult(
+        frame=frame,
+        weights=weights,
+        fdm=float(identity["fdm"]),
+        audit=audit,
+    )
+
+
+def _load_or_build_carry_forecast(
+    cache_spec: tuple[Path, Path, dict[str, object], str],
+    *,
+    history: FuturesHistory,
+    min_valid_observations: int,
+) -> CombinedForecastResult:
+    """Reuse or atomically build one static reference or stitched carry forecast."""
+    cached = _load_carry_forecast_result(cache_spec)
+    curve_path, manifest_path, identity, cache_key = cache_spec
+    if cached is not None:
+        logger.info(
+            "carry_forecast_cache hit artifact=%s hist_instr_code=%s key=%s",
+            identity["artifact"],
+            identity["hist_instr_code"],
+            cache_key,
+        )
+        return cached
+    smooths = tuple(int(value) for value in identity["carry_smooth_coms"])
+    result = build_carry_forecast(
+        history,
+        smooth_coms=smooths,
+        min_valid_observations=min_valid_observations,
+    )
+    _write_selection_backtest_curve(
+        result.frame,
+        curve_path,
+        manifest_path,
+        identity=identity,
+        cache_key=cache_key,
+        metadata={"forecast_audit": result.audit},
+    )
+    logger.info(
+        "carry_forecast_cache write artifact=%s hist_instr_code=%s key=%s rows=%d",
+        identity["artifact"],
+        identity["hist_instr_code"],
+        cache_key,
+        result.frame.height,
+    )
+    return result
 
 
 def _return_tsmom_scalar_cache_spec(
@@ -1059,7 +1202,8 @@ def parse_args(argv=None, *, complete_default: bool = False):
             "'multi_ewmac' keeps "
             "the existing cost-gated rule combination; 'return_tsmom' uses "
             "the original continuous return signal; 'goulding' uses the "
-            "monthly pooled Goulding signal. All models retain the same "
+            "monthly pooled Goulding signal; 'carry' uses the cost-gated "
+            "AFTS Carry5/20/60/120 family. All models retain the same "
             "selection, roll schedule, buffering, and cost path."
         ),
     )
@@ -1442,6 +1586,8 @@ def _signal_report_prefix(args: argparse.Namespace) -> str:
         return "return_tsmom"
     if args.signal_model == GOULDING_MODEL:
         return f"goulding_{args.goulding_signal_mode}"
+    if args.signal_model == CARRY_MODEL:
+        return CARRY_MODEL
     return "multi_speed_ewmac"
 
 
@@ -1451,7 +1597,7 @@ def _signal_public_provenance(
     args: argparse.Namespace,
 ) -> pl.DataFrame:
     """Use source neutral reference naming in direct TSMOM reports."""
-    if args.signal_model not in DIRECT_TSMOM_MODELS:
+    if args.signal_model not in DIRECT_SIGNAL_MODELS:
         return frame
     provider_column = next(
         (
@@ -1527,6 +1673,8 @@ def _selection_scenario_id(
             tokens.append(f"vsw{args.vol_slow_window}")
     elif args.signal_model == GOULDING_MODEL:
         tokens[:0] = [GOULDING_MODEL, args.goulding_signal_mode]
+    elif args.signal_model == CARRY_MODEL:
+        tokens[:0] = [CARRY_MODEL]
     else:
         tokens.append(f"fdm{_number_token(args.forecast_fdm)}")
     if (
@@ -1616,6 +1764,41 @@ def _filter_backtest_period(
             f"start={start_date} end={end_date}"
         )
     return filtered
+
+
+def _cap_stitched_reference_to_snapshot(
+    frame: pl.DataFrame,
+    snapshot_end: date | None,
+) -> pl.DataFrame:
+    """Keep a stitched executable tail no later than its market snapshot.
+
+    Daily futures dates are exchange-local, so this uses each signal's stored
+    ``ib_fast_end`` rather than one report-timezone date for the whole book.
+    """
+    if snapshot_end is None:
+        return frame
+    return frame.filter(pl.col("date") <= snapshot_end)
+
+
+def _reference_return_coverage(
+    frame: pl.DataFrame,
+    first_valid_date: date | None,
+) -> tuple[int, int, int, float]:
+    """Measure usable reference returns only where a forecast was valid.
+
+    Returns valid, invalid, and total considered observations followed by the
+    valid fraction. Rows without a usable forecast are outside the denominator.
+    """
+    after_start = (
+        frame.filter(pl.col("date") >= first_valid_date)
+        if first_valid_date is not None
+        else frame
+    )
+    considered = after_start.filter(pl.col("fcst_valid"))
+    valid = considered.filter(pl.col("ref_return_valid")).height
+    invalid = considered.height - valid
+    coverage = valid / considered.height if considered.height else 0.0
+    return valid, invalid, considered.height, coverage
 
 
 def _selection_rebalance_dates(
@@ -3085,7 +3268,16 @@ def _run_complete_selection(
             return {}
     for row in selected.iter_rows(named=True):
         symbol = str(row["symbol"])
-        if args.signal_model in DIRECT_TSMOM_MODELS:
+        history_code = str(row["hist_instr_code"])
+        if args.signal_model == CARRY_MODEL:
+            rules = _parse_rules(str(row.get("elig_carry_rules") or ""))
+            carry_smooths = _carry_rule_smooths(rules)
+            forecast_weights = {
+                f"carry{smooth}": 1.0 / len(carry_smooths)
+                for smooth in carry_smooths
+            }
+            forecast_fdm = aft_final_rule_fdm(len(carry_smooths))
+        elif args.signal_model in DIRECT_SIGNAL_MODELS:
             rules: list[str] = []
             forecast_weights = {args.signal_model: 1.0}
             forecast_fdm = 1.0
@@ -3155,6 +3347,22 @@ def _run_complete_selection(
                 "calibration_universe": sorted(
                     goulding_cluster_by_history.items()
                 ),
+            }
+        elif args.signal_model == CARRY_MODEL:
+            reference_base_identity["signal_model"] = args.signal_model
+            reference_base_identity["carry"] = {
+                "smooth_coms": carry_smooths,
+                "forecast_scalar": CARRY_FORECAST_SCALAR,
+                "forecast_cap": CARRY_FORECAST_CAP,
+                "max_smoothing_gap_days": CARRY_MAX_SMOOTHING_GAP_DAYS,
+                "max_stale_days": CARRY_MAX_STALE_DAYS,
+                "min_post_warmup_coverage": (
+                    CARRY_MIN_POST_WARMUP_COVERAGE
+                ),
+                "turnover_estimates": {
+                    str(smooth): AFT_CARRY_ANNUAL_TRADES[smooth]
+                    for smooth in carry_smooths
+                },
             }
         (
             reference_base_path,
@@ -3288,13 +3496,12 @@ def _run_complete_selection(
             else:
                 # Only a true history-base miss rebuilds the configured
                 # forecast. Snapshot-only reruns reuse its cached audit.
-                history_code = str(row["hist_instr_code"])
                 if (
                     args.signal_model != RETURN_TSMOM_MODEL
                     and history_code not in frames_by_history
                 ):
                     history = reference_history_provider.load(history_code)
-                    if args.signal_model in DIRECT_TSMOM_MODELS:
+                    if args.signal_model in DIRECT_SIGNAL_MODELS:
                         frames_by_history[history_code] = history
                     else:
                         if pooled_reference_rules is None:
@@ -3327,6 +3534,20 @@ def _run_complete_selection(
                 elif args.signal_model == GOULDING_MODEL:
                     result = _load_goulding_forecast_result(
                         goulding_reference_forecast_specs[history_code]
+                    )
+                elif args.signal_model == CARRY_MODEL:
+                    carry_cache_spec = _carry_forecast_cache_spec(
+                        backtest_cache_root,
+                        artifact="carry_reference_forecast",
+                        history_code=history_code,
+                        history_db_identity=history_db_identity,
+                        smooth_coms=carry_smooths,
+                        min_valid_observations=args.min_forecast_obs,
+                    )
+                    result = _load_or_build_carry_forecast(
+                        carry_cache_spec,
+                        history=frames_by_history[history_code],
+                        min_valid_observations=args.min_forecast_obs,
                     )
                 else:
                     result = engine.combine(
@@ -3448,17 +3669,25 @@ def _run_complete_selection(
             if valid_reference_returns.height
             else None
         )
-        reference_returns_after_start = (
-            reference_frame.filter(
-                pl.col("date") >= first_reference_return_date
-            )
-            if first_reference_return_date is not None
-            else reference_frame
+        (
+            reference_return_post_start_valid,
+            reference_return_post_start_invalid,
+            reference_return_considered,
+            reference_return_coverage,
+        ) = _reference_return_coverage(
+            reference_frame,
+            first_reference_return_date,
         )
-        reference_return_post_start_invalid = (
-            reference_returns_after_start.filter(
-                pl.col("fcst_valid") & ~pl.col("ref_return_valid")
-            ).height
+        # Carry observations are legitimately intermittent.  The first valid
+        # forecast after a bounded gap cannot produce a lagged reference
+        # return, so require the same explicit coverage floor as the carry
+        # forecast instead of rejecting an otherwise long history for one
+        # isolated invalid row.  Other signal models retain their strict
+        # historical no-gap policy.
+        reference_return_coverage_eligible = (
+            reference_return_coverage >= CARRY_MIN_POST_WARMUP_COVERAGE
+            if args.signal_model == CARRY_MODEL
+            else reference_return_post_start_invalid == 0
         )
         fx_missing_obs = reference_frame.filter(
             pl.col("fcst_valid") & pl.col("fx_to_usd").is_null()
@@ -3471,7 +3700,7 @@ def _run_complete_selection(
             and combined_turnover is not None
             and math.isfinite(combined_turnover)
             and valid_reference_returns.height >= args.min_forecast_obs
-            and reference_return_post_start_invalid == 0
+            and reference_return_coverage_eligible
         )
         if not forecast_audit["forecast_elig"]:
             subsystem_excl = str(forecast_audit["forecast_excl"])
@@ -3479,8 +3708,12 @@ def _run_complete_selection(
             subsystem_excl = "invalid_combined_turnover"
         elif valid_reference_returns.height < args.min_forecast_obs:
             subsystem_excl = "insufficient_valid_ref_return_obs"
-        elif reference_return_post_start_invalid:
-            subsystem_excl = "ref_return_gaps_after_start"
+        elif not reference_return_coverage_eligible:
+            subsystem_excl = (
+                "insufficient_ref_return_coverage"
+                if args.signal_model == CARRY_MODEL
+                else "ref_return_gaps_after_start"
+            )
         else:
             subsystem_excl = ""
         audit = {
@@ -3490,6 +3723,7 @@ def _run_complete_selection(
             # Preserve the EWMAC rule-cost gate inherited from the reusable
             # cache even when a return signal drives the actual backtest.
             "elig_ewmac_rules": str(row.get("elig_ewmac_rules") or ""),
+            "elig_carry_rules": str(row.get("elig_carry_rules") or ""),
             "forecast_weights": json.dumps(forecast_weights, sort_keys=True),
             "fdm": forecast_fdm,
             "comb_turnover": combined_turnover,
@@ -3499,6 +3733,16 @@ def _run_complete_selection(
             "ref_return_valid_obs": valid_reference_returns.height,
             "ref_return_post_start_invalid_obs": (
                 reference_return_post_start_invalid
+            ),
+            "ref_return_post_start_obs": reference_return_considered,
+            "ref_return_post_start_valid_obs": (
+                reference_return_post_start_valid
+            ),
+            "ref_return_post_start_coverage": reference_return_coverage,
+            "ref_return_min_coverage": (
+                CARRY_MIN_POST_WARMUP_COVERAGE
+                if args.signal_model == CARRY_MODEL
+                else 1.0
             ),
             "ref_return_start": first_reference_return_date,
             "ref_return_end": (
@@ -3537,6 +3781,12 @@ def _run_complete_selection(
                 hist_instr_code=str(row["hist_instr_code"]),
             )
         )
+        if args.signal_model == CARRY_MODEL:
+            # The static forecast now owns the expensive calculation state on
+            # disk. Carry does not use a pooled in-memory calibration object,
+            # so retaining every full history until the universe loop ends
+            # only creates avoidable memory pressure.
+            frames_by_history.pop(history_code, None)
         logger.log(
             logging.INFO if subsystem_elig else logging.DEBUG,
             "selection_subsystem_reference_audit symbol=%s eligible=%s "
@@ -4037,6 +4287,8 @@ def _run_complete_selection(
                         available_sources,
                     )
                     continue
+                signal_symbol = signal_symbol_by_history_code[history_code]
+                snapshot_end = snapshot_ib_end_by_signal.get(signal_symbol)
                 source_priority = [
                     str(value)
                     for value in (
@@ -4150,7 +4402,19 @@ def _run_complete_selection(
                 for symbol in symbols_by_history_code[history_code]:
                     row = source_rows[symbol]
                     try:
-                        if args.signal_model in DIRECT_TSMOM_MODELS:
+                        if args.signal_model == CARRY_MODEL:
+                            rules = _parse_rules(
+                                str(row.get("elig_carry_rules") or "")
+                            )
+                            carry_smooths = _carry_rule_smooths(rules)
+                            stitched_forecast_weights = {
+                                f"carry{smooth}": 1.0 / len(carry_smooths)
+                                for smooth in carry_smooths
+                            }
+                            stitched_forecast_fdm = aft_final_rule_fdm(
+                                len(carry_smooths)
+                            )
+                        elif args.signal_model in DIRECT_SIGNAL_MODELS:
                             rules = []
                             stitched_forecast_weights = {
                                 args.signal_model: 1.0
@@ -4169,6 +4433,11 @@ def _run_complete_selection(
                             "symbol": symbol,
                             "hist_instr_code": history_code,
                             "stitched_source": stitched_source_identity,
+                            # The stored IB database may already contain a
+                            # later exchange-local session than the market
+                            # snapshot being replayed.  This boundary prevents
+                            # those later rows from leaking into the result.
+                            "snapshot_end": snapshot_end,
                             "history_db": history_db_identity,
                             "currency": currency,
                             "eligible_rules": rules,
@@ -4219,6 +4488,24 @@ def _run_complete_selection(
                                     goulding_cluster_by_history.items()
                                 ),
                             }
+                        elif args.signal_model == CARRY_MODEL:
+                            stitched_identity["signal_model"] = args.signal_model
+                            stitched_identity["carry"] = {
+                                "smooth_coms": carry_smooths,
+                                "forecast_scalar": CARRY_FORECAST_SCALAR,
+                                "forecast_cap": CARRY_FORECAST_CAP,
+                                "max_smoothing_gap_days": (
+                                    CARRY_MAX_SMOOTHING_GAP_DAYS
+                                ),
+                                "max_stale_days": CARRY_MAX_STALE_DAYS,
+                                "min_post_warmup_coverage": (
+                                    CARRY_MIN_POST_WARMUP_COVERAGE
+                                ),
+                                "turnover_estimates": {
+                                    str(smooth): AFT_CARRY_ANNUAL_TRADES[smooth]
+                                    for smooth in carry_smooths
+                                },
+                            }
                         (
                             stitched_reference_path,
                             stitched_manifest_path,
@@ -4249,7 +4536,7 @@ def _run_complete_selection(
                         )
                         if cached_stitched is None:
                             if stitched_component is None:
-                                if args.signal_model in DIRECT_TSMOM_MODELS:
+                                if args.signal_model in DIRECT_SIGNAL_MODELS:
                                     stitched_component = stitched_history
                                 else:
                                     if pooled_rules is None:
@@ -4282,6 +4569,21 @@ def _run_complete_selection(
                             elif args.signal_model == GOULDING_MODEL:
                                 assert stitched_goulding_result is not None
                                 stitched_result = stitched_goulding_result
+                            elif args.signal_model == CARRY_MODEL:
+                                carry_cache_spec = _carry_forecast_cache_spec(
+                                    backtest_cache_root,
+                                    artifact="carry_stitched_forecast",
+                                    history_code=history_code,
+                                    history_db_identity=history_db_identity,
+                                    smooth_coms=carry_smooths,
+                                    min_valid_observations=args.min_forecast_obs,
+                                    source_identity=stitched_source_identity,
+                                )
+                                stitched_result = _load_or_build_carry_forecast(
+                                    carry_cache_spec,
+                                    history=stitched_history,
+                                    min_valid_observations=args.min_forecast_obs,
+                                )
                             else:
                                 stitched_result = engine.combine(
                                     stitched_component,
@@ -4321,6 +4623,12 @@ def _run_complete_selection(
                                     ),
                                 )
                                 .filter(pl.col("date") >= live_tail_start)
+                            )
+                            stitched_reference = (
+                                _cap_stitched_reference_to_snapshot(
+                                    stitched_reference,
+                                    snapshot_end,
+                                )
                             )
                             if stitched_reference.is_empty():
                                 raise ValueError(
@@ -4500,6 +4808,16 @@ def _run_complete_selection(
             "calibration_universe": sorted(
                 goulding_cluster_by_history.items()
             ),
+        }
+    elif args.signal_model == CARRY_MODEL:
+        selection_policy_identity["carry"] = {
+            "available_smooth_coms": CARRY_SMOOTH_COMS,
+            "forecast_scalar": CARRY_FORECAST_SCALAR,
+            "forecast_cap": CARRY_FORECAST_CAP,
+            "max_smoothing_gap_days": CARRY_MAX_SMOOTHING_GAP_DAYS,
+            "max_stale_days": CARRY_MAX_STALE_DAYS,
+            "min_post_warmup_coverage": CARRY_MIN_POST_WARMUP_COVERAGE,
+            "turnover_estimates": AFT_CARRY_ANNUAL_TRADES,
         }
     for symbol in cash_symbols:
         candidate = candidate_by_symbol[symbol]
@@ -5356,7 +5674,11 @@ def run(
         min_daily_volume=args.min_daily_volume,
         max_market_volume_pct=args.max_market_volume_pct,
     )
-    report = apply_selection_filters(report, config=config)
+    report = apply_selection_filters(
+        report,
+        config=config,
+        signal_model=args.signal_model,
+    )
     logger.info(
         "selection_candidate_filter config init_cap_usd=%s target_vol=%s "
         "cost_lim_sr=%s "
@@ -5380,6 +5702,7 @@ def run(
             apply_live_execution_gates=(
                 args.selection_rebalance == "static"
             ),
+            signal_model=args.signal_model,
         )
         if args.complete
         else selection_candidates(report)

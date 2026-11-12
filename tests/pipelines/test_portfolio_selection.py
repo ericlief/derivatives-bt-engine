@@ -5,6 +5,8 @@ import polars as pl
 import pytest
 
 from derivatives_bt_engine.pipelines.portfolio_selection import (
+    _cap_stitched_reference_to_snapshot,
+    _carry_rule_smooths,
     _filter_backtest_period,
     _is_micro_contract,
     _direct_ib_handoff_date,
@@ -12,12 +14,52 @@ from derivatives_bt_engine.pipelines.portfolio_selection import (
     _selection_history_content_identity,
     _selection_pysystemtrade_identity,
     _selection_rebalance_dates,
+    _reference_return_coverage,
     _subsystem_reference_correlation,
     _WalkForwardSelectionProvider,
     parse_args,
     run,
     slow_tilt_ewmac_weights,
 )
+
+
+def test_carry_rule_smooths_parse_afts_family_in_stable_order():
+    """Carry selection accepts only the named AFTS smoothing variants."""
+    assert _carry_rule_smooths("carry120,carry5,carry60") == (5, 60, 120)
+    with pytest.raises(ValueError, match="unsupported AFTS carry rule"):
+        _carry_rule_smooths("carry10")
+
+
+def test_reference_return_coverage_uses_only_valid_forecast_rows():
+    """Sparse carry gaps do not inflate the usable-return denominator."""
+    frame = pl.DataFrame({
+        "date": [date(2024, 1, day) for day in range(1, 6)],
+        "fcst_valid": [False, True, True, False, True],
+        "ref_return_valid": [True, True, False, True, True],
+    })
+
+    valid, invalid, considered, coverage = _reference_return_coverage(
+        frame,
+        date(2024, 1, 2),
+    )
+
+    assert (valid, invalid, considered) == (2, 1, 3)
+    assert coverage == pytest.approx(2 / 3)
+
+
+def test_stitched_reference_is_capped_at_each_signal_snapshot_end():
+    """A newer local DB cannot leak beyond the replayed market snapshot."""
+    frame = pl.DataFrame({
+        "date": [date(2026, 11, 10), date(2026, 11, 11), date(2026, 11, 12)],
+        "comb_fcst": [0.1, 0.2, 0.3],
+    })
+
+    capped = _cap_stitched_reference_to_snapshot(frame, date(2026, 11, 11))
+
+    assert capped.get_column("date").to_list() == [
+        date(2026, 11, 10),
+        date(2026, 11, 11),
+    ]
 
 
 @pytest.mark.parametrize(
