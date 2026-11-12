@@ -197,18 +197,22 @@ EWMAC `20261110_203706`, TSMOM 32/256 `20261110_205549`, TSMOM 64/256
 `20261110_211651`, Goulding Sharpe `20261110_230706`, and Goulding continuous
 `20261110_151448`.
 
-| Signal | Fixed-cap ending equity | Compounding ending equity | Fixed-cap max DD | Compounding max DD | Fixed-cap adjusted Calmar | Compounding Calmar (standard) | Fixed-cap active book max / avg |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| EWMAC | $0.94M | $1.85B | −11.5% | −29.9% | 1.82 | 0.67 | 23 / 17.0 |
-| TSMOM 32/256 | $0.92M | $2.07B | −12.7% | −38.9% | 1.68 | 0.55 | 23 / 16.9 |
-| TSMOM 64/256 | $0.94M | $1.52B | −13.8% | −37.5% | 1.59 | 0.55 | 24 / 17.0 |
-| Goulding Sharpe | $0.67M | $199.1M | −14.9% | −43.2% | 0.97 | 0.36 | 24 / 17.1 |
-| Goulding continuous | $0.53M | $52.2M | −12.1% | −38.0% | 0.91 | 0.33 | 25 / 16.8 |
+| Signal | Fixed-cap ending equity | Compounding ending equity | Fixed ann. mean | Compounding CAGR | Fixed-cap max DD | Compounding max DD | Fixed-cap adjusted Calmar | Compounding Calmar (standard) | Fixed-cap active book max / avg |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| EWMAC | $0.94M | $1.85B | 21.0% | 20.2% | −11.5% | −29.9% | 1.82 | 0.67 | 23 / 17.0 |
+| TSMOM 32/256 | $0.92M | $2.07B | 21.4% | 21.3% | −12.7% | −38.9% | 1.68 | 0.55 | 23 / 16.9 |
+| TSMOM 64/256 | $0.94M | $1.52B | 21.9% | 20.7% | −13.8% | −37.5% | 1.59 | 0.55 | 24 / 17.0 |
+| Goulding Sharpe | $0.67M | $199.1M | 14.5% | 15.5% | −14.9% | −43.2% | 0.97 | 0.36 | 24 / 17.1 |
+| Goulding continuous | $0.53M | $52.2M | 11.0% | 12.6% | −12.1% | −38.0% | 0.91 | 0.33 | 25 / 16.8 |
 
-Compounding Calmar is CAGR divided by absolute maximum drawdown, with CAGR
-annualized over 256 valid trading days per year. Fixed-cap adjusted Calmar uses
-the arithmetic annualized return definition above; these ratios have different
-return conventions and should not be compared as if they were identical.
+Fixed annualized mean is the arithmetic mean of daily fixed-cap return
+contributions times 256; it is not CAGR. Compounding CAGR is the geometric
+growth from initial to ending net equity, annualized over 256 valid trading
+days per year. Compounding Calmar divides that CAGR by absolute maximum
+drawdown. Fixed-cap adjusted Calmar instead divides fixed annualized mean by
+absolute maximum drawdown. The return and Calmar columns therefore use
+different conventions across cap modes and should not be treated as identical
+measures.
 
 The compounding runs grow into accounts far beyond $75,000, so terminal equity
 and drawdown dollars are not directly comparable to the fixed-cap runs. The
