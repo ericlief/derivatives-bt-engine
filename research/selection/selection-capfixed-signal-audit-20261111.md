@@ -114,6 +114,7 @@ Fixed-cap cells show **OOS return / OOS max DD / OOS Sharpe / OOS Calmar / OOS g
 | 2024 (to 2023) | 11.5% / -0.8% / 0.76 / 14.06 / $9.98k / $1.35k | 6.7% / -1.2% / 0.41 / 5.47 / $7.71k / $2.68k | 12.7% / -1.3% / 0.71 / 9.66 / $11.57k / $2.04k | 5.4% / -1.7% / 0.31 / 2.66 / $5.45k / $1.38k | 7.0% / -2.1% / 0.44 / 2.71 / $6.21k / $951 |
 | 2025 (to 2024) | 9.1% / -0.9% / 0.58 / 7.95 / $7.91k / $1.09k | -13.2% / -1.4% / -0.82 / -7.70 / -$7.34k / $2.59k | 4.1% / -0.8% / 0.25 / 4.38 / $4.78k / $1.70k | 18.7% / -0.9% / 1.12 / 16.78 / $15.00k / $984 | 21.4% / -1.3% / 1.08 / 13.87 / $17.33k / $1.26k |
 | 2026 (to 2025) | -18.6% / -1.7% / -1.59 / -12.24 / -$12.88k / $1.05k | -20.7% / -1.8% / -1.70 / -13.08 / -$13.47k / $2.05k | -16.8% / -1.5% / -1.36 / -11.48 / -$11.17k / $1.43k | -22.0% / -2.9% / -1.68 / -8.80 / -$15.32k / $1.19k | -30.1% / -4.3% / -2.32 / -7.24 / -$20.94k / $1.63k |
+| 2027 (to partial 2026) | — | — | — | — | — |
 
 Compounding-cap cells show **cumulative return / OOS return / OOS max DD / OOS Sharpe / OOS Calmar / OOS gross P&L / OOS fees / cumulative ending capital**. Cumulative return uses the initial $75,000 denominator: `(year-end capital / $75,000) - 1`. OOS return uses the different, rolling denominator: `(year-end capital / prior year-end capital) - 1`. Fees are trade plus roll costs shown as positive amounts, and Calmar uses the OOS year’s geometric annualized return.
 
@@ -173,8 +174,10 @@ Compounding-cap cells show **cumulative return / OOS return / OOS max DD / OOS S
 | 2024 (to 2023) | 2331804.5% / -8.4% / -12.6% / -0.74 / -0.56 / -$142.05M / $18.44M / cap $1.75B | 2326933.8% / 2.1% / -12.7% / 0.21 / 0.15 / $84.11M / $48.90M / cap $1.75B | 1812937.9% / -6.0% / -16.5% / -0.34 / -0.30 / -$62.88M / $23.35M / cap $1.36B | 260820.2% / -11.6% / -20.3% / -0.96 / -0.56 / -$22.71M / $3.08M / cap $195.69M | 61332.6% / -5.8% / -18.9% / -0.35 / -0.26 / -$2.26M / $591.38k / cap $46.07M |
 | 2025 (to 2024) | 2358113.6% / 1.1% / -17.2% / 0.14 / 0.05 / $30.29M / $10.56M / cap $1.77B | 2854344.9% / 22.7% / -8.4% / 1.30 / 2.16 / $410.56M / $15.00M / cap $2.14B | 1819651.5% / 0.4% / -19.4% / 0.10 / 0.02 / $15.73M / $10.69M / cap $1.36B | 295561.2% / 13.3% / -8.7% / 0.83 / 1.24 / $27.97M / $1.91M / cap $221.75M | 75644.2% / 23.3% / -12.3% / 1.26 / 1.52 / $11.17M / $432.44k / cap $56.81M |
 | 2026 (to 2025) | 2460529.7% / 4.3% / -12.5% / 0.35 / 0.36 / $85.25M / $8.44M / cap $1.85B | 2755276.6% / -3.5% / -16.5% / -0.10 / -0.24 / -$62.01M / $12.15M / cap $2.07B | 2032127.3% / 11.7% / -10.5% / 0.70 / 1.15 / $166.62M / $7.26M / cap $1.52B | 265372.4% / -10.2% / -20.4% / -0.73 / -0.51 / -$20.72M / $1.93M / cap $199.10M | 69457.7% / -8.2% / -20.8% / -0.49 / -0.40 / -$3.72M / $915.14k / cap $52.17M |
+| 2027 (to partial 2026) | 2460529.7% / — / — / — / — / — / — / cap $1.85B | 2755276.6% / — / — / — / — / — / — / cap $2.07B | 2032127.3% / — / — / — / — / — / — / cap $1.52B | 265372.4% / — / — / — / — / — / — / cap $199.10M | 69457.7% / — / — / — / — / — / — / cap $52.17M |
 
 For both tables, within-year max drawdown is measured from the prior year-end equity baseline. Sharpe annualizes valid daily `port_net_pct` observations using 256 trading days. A dash means the signal has no valid returns that year.
+The `2027 (to partial 2026)` frontier row has no OOS metrics because the saved curves end on November 10–11, 2026. The compounding row carries forward cumulative return and ending capital through that partial 2026 endpoint; it does not treat 2026 returns as 2027 OOS returns.
 ![Recent fixed-cap annual returns by signal](assets/selection-capfixed-signal-audit-20261111.svg)
 
 | Signal | Forecast-eligible markets / 170 | Active markets at reviews 2022, 2023, 2024, 2025, 2026 |
