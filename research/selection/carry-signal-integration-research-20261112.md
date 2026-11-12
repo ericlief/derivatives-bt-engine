@@ -9,6 +9,39 @@ data re-audit
 
 **Prior design:** [carry and long-history plan](../futures-data/pysystemtrade-carry-and-long-history-plan.md)
 
+## Implementation update
+
+The first raw-carry implementation now lives in
+`calculations/carry.py`. It follows the current pysystemtrade robust-system
+rules rather than the older AFTS example spans:
+
+- carry smoothing uses pandas-COM-equivalent EWMAs at 10, 30, 60, and 125
+  sessions;
+- every smoothed rule uses a fixed scalar of 3 on this repository's
+  divided-by-ten forecast scale, equivalent to Carver's scalar of 30 and
+  +/-20 cap;
+- the four carry rules have equal pre-FDM weights and a +/-2 final cap;
+- the final-rule-count FDM table from AFTS Table 52 is the selected policy,
+  giving 1.23 for four carry rules and 1.34 for five EWMAC plus four carry
+  rules;
+- the default mixed forecast allocates 60% to the existing EWMAC trend family
+  and 40% equally across carry, then applies one nine-rule FDM. Family-only
+  FDMs are not applied again inside the mixed forecast.
+
+This FDM choice is intentionally distinct from AFTS Table 45, which gives a
+carry-specific 1.04 multiplier for four extremely correlated carry smooths.
+The requested implementation uses the later generic final-rule-count table.
+Carver has also stated that applying a moving-average smooth does not change
+the intended carry scalar except at the extremes, confirming that the same
+30 (3 here) scalar applies to all four smoothed variants.
+
+The module keeps same-date legs, raw roll, contract-year fraction, annualized
+roll, annualized point volatility, and exclusion reasons in the calculation
+frame. It restarts EWMA state at a provider change, invalid observation, or a
+calendar gap longer than seven days. A forecast may persist for at most seven
+calendar days only when the executable current contract is unchanged; the
+source observation date and staleness remain visible for audit.
+
 ## Recommendation
 
 Add absolute futures carry as a normalized forecast family beside trend, then
@@ -17,15 +50,15 @@ selection. The first decision-grade comparison should be:
 
 1. the saved EWMAC fixed-cap baseline;
 2. carry alone;
-3. EWMAC/carry at 75/25 family weights;
-4. EWMAC/carry at 50/50 family weights;
-5. TSMOM 64/256/carry at the same two weights.
+3. EWMAC/carry at the AFTS 60/40 default family weights;
+4. EWMAC/carry at 75/25 and 50/50 sensitivity weights;
+5. TSMOM 64/256/carry with 60/40 as the default and the same sensitivities.
 
-Use one causal pooled scale after each family is formed, target mean absolute
-forecast 1, cap at +/-2, and keep target volatility, fixed capital, selected
-book, contract accounting, and costs unchanged. This isolates whether carry
-adds information. Only after that comparison passes should the selector be
-rerun with carry-aware eligibility and turnover costs.
+Use the fixed carry scalar and final-rule-count FDM described above, cap at
++/-2, and keep target volatility, fixed capital, selected book, contract
+accounting, and costs unchanged. This isolates whether carry adds information.
+Only after that comparison passes should the selector be rerun with
+carry-aware eligibility and turnover costs.
 
 Carry is a plausible diversifier, not a remedy for the account constraint.
 The fixed-cap audit still shows that a $75,000 account supports a smaller book
@@ -51,9 +84,9 @@ concentrating the improvement in one era or asset class.
 The comparison must be risk-normalized. Simply averaging an additional
 forecast into the current signal can reduce its magnitude and apparent return.
 Conversely, applying an untested forecast-diversification multiplier can
-manufacture more exposure. A causal pooled post-combination scale makes the
-forecast variants comparable on the repository's existing mean-absolute-one,
-cap-two convention.
+manufacture more exposure. The fixed divided-by-ten carry scalar plus the
+pre-registered final-rule-count FDM keeps variants on the repository's
+mean-absolute-one, cap-two convention without fitting scale to this book.
 
 ## Current pysystemtrade implementation
 
@@ -88,11 +121,12 @@ the number as `span`. The robust configuration defines 10, 30, 60, and
 125-session variants, fixed forecast scalars of approximately 27.82, 28.38,
 28.40, and 29.37, and a +/-20 forecast cap.
 
-Those fixed scalars are useful parity fixtures, not the recommended research
-normalization. The selection engine already estimates causal pooled scales and
-uses the divided-by-ten convention. The production-style pysystemtrade config
-also contains instrument-specific weights across many rule families; copying
-those weights would not answer the incremental carry question for this book.
+On the repository's divided-by-ten forecast convention those values are
+2.782, 2.838, 2.840, and 2.937. The implementation uses the requested common
+default of 3.0, close to every upstream value. The production-style
+pysystemtrade config also contains instrument-specific weights across many
+rule families; copying those weights would not answer the incremental carry
+question for this book.
 
 Two upstream details require explicit choices:
 
@@ -234,7 +268,7 @@ Add `calculations/carry.py` with pure Polars functions for:
 - same-date and same-pair validation;
 - causal point-volatility normalization;
 - pandas-`com`-equivalent EWMA smoothing;
-- pooled causal scaling and +/-2 capping;
+- fixed scalar-3 scaling, final-rule-count FDM, and +/-2 capping;
 - staleness and rejection reasons.
 
 The public daily result should use `date` and include enough audit columns to
@@ -260,15 +294,15 @@ source gap as if it were observed data.
 
 Add a selection-compatible carry builder that returns
 `CombinedForecastResult`, using the same execution frame as return TSMOM and
-Goulding. Build the four upstream horizons, scale each variant causally, form
-one equal-weight carry-family forecast, and then scale the family once to the
-common unit convention.
+Goulding. Build the four upstream horizons, scale each variant by 3, form one
+equal-weight carry-family forecast, and apply the AFTS FDM for the final rule
+count once before the final cap.
 
 Add a family-level combination policy rather than treating four correlated
 carry horizons as four independent votes against five EWMAC speeds. The first
 weights are fixed experiment parameters, not estimated expected-return
-weights. Save family forecasts, weights, pooled scale history, cap hits,
-agreement with trend, and forecast turnover.
+weights. Save family forecasts, component weights, final-rule count and FDM,
+cap hits, agreement with trend, and forecast turnover.
 
 ### 4. Selection integration
 
@@ -295,11 +329,13 @@ November 11 audit.
 |---|---:|---:|---|
 | EWMAC baseline | 100% | 0% | Saved benchmark |
 | Carry only | 0% | 100% | Standalone information and cost check |
-| EWMAC/carry conservative | 75% | 25% | Lower-risk first integration |
-| EWMAC/carry equal family | 50% | 50% | Hierarchical `1/N` baseline |
+| EWMAC/carry default | 60% | 40% | AFTS top-down family allocation |
+| EWMAC/carry trend tilt | 75% | 25% | Higher-trend sensitivity |
+| EWMAC/carry equal family | 50% | 50% | Equal-family sensitivity |
 | TSMOM 64/256 baseline | 100% | 0% | Strongest audited mean return |
-| TSMOM/carry conservative | 75% | 25% | Incremental carry to slow trend |
-| TSMOM/carry equal family | 50% | 50% | Family diversification bound |
+| TSMOM/carry default | 60% | 40% | Default incremental carry to slow trend |
+| TSMOM/carry trend tilt | 75% | 25% | Higher-trend sensitivity |
+| TSMOM/carry equal family | 50% | 50% | Equal-family sensitivity |
 
 Report both maximal available history and a common valid sample. Break results
 out by decade, asset class, and calendar year, with special attention to
@@ -321,9 +357,9 @@ For each fixed-book and full-selection run report:
 Do not promote carry because full-history Sharpe rises by a small amount. The
 case is credible only if the improvement survives the common sample, costs,
 multiple eras, and the fixed-$75,000 integer-contract replay without a worse
-drawdown profile. The 75/25 variant should be the default challenger if it
-captures most of the diversification with materially less forecast turnover
-or cancellation than 50/50.
+drawdown profile. The 60/40 variant is the default challenger; 75/25 and 50/50
+remain named robustness checks rather than weights selected after seeing this
+book's results.
 
 ## Implementation order and acceptance gates
 
@@ -339,7 +375,7 @@ or cancellation than 50/50.
    no leg or EWMA state crosses an invalid contract/source gap.
 5. **Pure-rule study:** score carry horizons and the carry family on reference
    history with lagged normalized returns.
-6. **Frozen-book replay:** run the seven pre-registered fixed-cap variants.
+6. **Frozen-book replay:** run the nine pre-registered fixed-cap variants.
 7. **Full selector:** add carry-specific cost eligibility and rerun annual
    selection only if the frozen-book result is broad and cost-effective.
 
