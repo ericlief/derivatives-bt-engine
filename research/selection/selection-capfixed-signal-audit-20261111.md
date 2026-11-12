@@ -223,23 +223,40 @@ difference.
 
 ## Integrity and cost checks
 
-All five portfolio curves have zero dates with an active book and invalid
-instrument P&L. The latest daily outputs are valid through November 11. These
-checks support using the endpoint, subject to source-gap omissions and
-instrument-level roll/handoff checks.
+The checks below cover all five fixed-cap runs and their five matched
+compounding runs. All ten have zero duplicate portfolio dates, zero duplicate
+cash `(symbol, date)` keys, and zero active instrument rows with invalid P&L.
+All ten also have zero invalid portfolio returns on dates with an active book.
+Fixed-cap outputs run through November 11. The compounding outputs run through
+November 10, except Goulding Sharpe, which runs through November 11.
 
-| Signal | Trade costs | Roll costs | Total costs | Costs / net P&L |
-|---|---:|---:|---:|---:|
-| EWMAC | $42.5k | $21.9k | $64.4k | 7.5% |
-| TSMOM 32/256 | $104.5k | $22.5k | $127.0k | 15.0% |
-| TSMOM 64/256 | $66.7k | $21.7k | $88.5k | 10.2% |
-| Goulding Sharpe | $44.8k | $21.2k | $66.0k | 11.1% |
-| Goulding continuous | $34.0k | $20.6k | $54.6k | 12.1% |
+| Signal | Cap mode | Gross P&L | Trade fees | Roll fees | Total fees | Net P&L | Fees / net P&L | Recon. residual* | Integrity exceptions† |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| EWMAC | Fixed | $924.6k | $42.5k | $21.9k | $64.4k | $860.2k | 7.5% | $2.11 | 0 / 0 / 0 |
+| EWMAC | Compounding | $2.191B | $192.28M | $153.22M | $345.50M | $1.845B | 18.7% | $0.19 | 0 / 0 / 0 |
+| TSMOM 32/256 | Fixed | $972.5k | $104.5k | $22.5k | $127.0k | $845.5k | 15.0% | $3.01 | 0 / 0 / 0 |
+| TSMOM 32/256 | Compounding | $2.589B | $402.14M | $120.38M | $522.52M | $2.066B | 25.3% | −$0.45 | 0 / 0 / 0 |
+| TSMOM 64/256 | Fixed | $953.9k | $66.7k | $21.7k | $88.5k | $865.4k | 10.2% | $2.77 | 0 / 0 / 0 |
+| TSMOM 64/256 | Compounding | $1.834B | $210.21M | $99.29M | $309.50M | $1.524B | 20.3% | −$1.67 | 0 / 0 / 0 |
+| Goulding Sharpe | Fixed | $661.9k | $44.8k | $21.2k | $66.0k | $595.9k | 11.1% | $0.97 | 0 / 0 / 0 |
+| Goulding Sharpe | Compounding | $238.55M | $22.87M | $16.66M | $39.52M | $199.03M | 19.9% | −$0.38 | 0 / 0 / 0 |
+| Goulding continuous | Fixed | $506.4k | $34.0k | $20.6k | $54.6k | $451.8k | 12.1% | $0.84 | 0 / 0 / 0 |
+| Goulding continuous | Compounding | $61.92M | $5.20M | $4.63M | $9.83M | $52.09M | 18.9% | $0.09 | 0 / 0 / 0 |
 
-Trade/roll amounts are reconstructed as positive costs from the negative cost
-columns in the portfolio curve. TSMOM 32/256 has notably higher trade costs;
-its weaker Sharpe versus 64/256 is not explained by roll costs, which are
-similar across all five books.
+*Reconciliation residual is gross P&L less positive trade and roll fees less
+net P&L. The largest portfolio-curve residual is $3.01, consistent with saved
+report rounding. Instrument cash P&L also reconciles: its largest residual is
+$6.63, and its net total differs from the portfolio curve by at most $0.65.
+
+†Integrity exceptions are portfolio-date duplicates / cash `(symbol, date)`
+duplicates / active-invalid cash observations.
+
+Trade and roll fees are reconstructed as positive amounts from the negative
+cost columns. Compounding fees are much larger in dollars because positions
+scale with the growing account; they also consume a larger share of net P&L
+than in the fixed runs. Within both cap modes, TSMOM 32/256 has the highest
+trade-fee burden. Its weaker Sharpe versus 64/256 is therefore not explained by
+roll fees alone.
 
 ## Conclusion
 
