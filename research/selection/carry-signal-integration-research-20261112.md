@@ -2,7 +2,8 @@
 
 **Date:** 2026-11-12
 
-**Status:** implementation research and experiment recommendation
+**Status:** implementation research, experiment recommendation, and post-copy
+data re-audit
 
 **Trigger:** the [November 11 fixed-cap signal audit](selection-capfixed-signal-audit-20261111.md)
 
@@ -113,6 +114,46 @@ The reference sidecar already contains the required four-field carry rows and
 the source-neutral `FuturesHistory.carry` stream. No source market data needs
 to be changed.
 
+### Re-audit after the staged IB database copy
+
+The copied `/home/dev/fin/db/ib_futures_history.duckdb` materially changes the
+tail-readiness conclusion from the initial audit. It contains 579,483 daily
+bars for 2,693 contracts and 163 reference instruments, spanning 2021-12-20
+through 2026-11-12. All 4,803 recorded fetches have `success` status, and all
+163 configured instruments build through `IBHistoryProvider` without an
+exception.
+
+The raw store has no duplicate instrument/contract/date keys, future-dated
+rows, invalid closes, invalid volumes, or missing contract months. It does
+contain 478 rows on or after the recorded contract expiration date. The
+configured roll rules exclude all of those rows from the selected marks for
+the 17 current-book histories, so this is a source-metadata diagnostic rather
+than contamination of the audited stitch.
+
+The selection-v1 history path deliberately uses `include_globex=False` and
+`preserve_reference_overlap=True`. Replaying that exact policy, including its
+three-prior-year IB request, stitches all 17 current-book histories directly
+from pysystemtrade to IB and extends carry through 2026-11-12. From 2024-04-01
+onward it has 10,282 valid carry observations for 11,238 signal dates: 91.5%
+observation-weighted coverage and 94.0% median market coverage. Source gaps at
+the handoff are one to five calendar days except US2/ZT at 26 days; all are
+within the stitcher's 31-day limit and their unknown cross-gap return is
+omitted rather than invented.
+
+The remaining fixed-book quality issue is concentrated rather than systemic.
+After their first valid IB carry row, CANOLA/RS has 84.9% coverage with 81
+missing dates and SUGAR_WHITE/W has 85.4% with 80 missing dates. The other 15
+markets are at least 99.2% complete after their first valid row. Carry must
+therefore expose validity and staleness and reject an unexplained gap; it must
+not silently turn missing observations into a zero forecast.
+
+PST and IB have little usable same-contract overlap because most IB histories
+begin as the reference history ends. SONIA3 is the one current-book market
+with a substantial same-pair comparison: 203 dates, 0.994 correlation in
+annualized roll, 100% sign agreement, and zero median absolute difference.
+That is encouraging but not enough to replace the proposed multi-market parity
+report.
+
 ### Audited selection universe
 
 The November 11 EWMAC screen has 208 distinct reference histories after
@@ -169,12 +210,12 @@ market coverage, through 2026-06-18.
 | No Globex futures rows under mapped asset | TN, UB |
 
 BRL/`6L` remains excluded from Globex stitching by the reviewed mapping. The
-persisted `/home/dev/fin/db/ib_futures_history.duckdb` currently contains no
-contract bars, so IB cannot yet reproduce the carry tail after the stored
-Globex endpoint. The data are sufficient for the long-history experiment and
-a 2010-2026 Globex bridge on the mapped subset, but not for a complete carry
-replay through the November 11 audit endpoint without refreshing and
-persisting IB dated-contract history.
+copied IB store now supplies the recent tail. The exact fixed-selection path
+does not use Globex, so the empty Globex carry frame no longer blocks the
+frozen-book experiment. The Globex bridge remains necessary for generic
+three-source histories and for extending IB-limited instruments across the
+middle segment, but it should be treated as a separate expansion gate rather
+than a prerequisite for the first fixed-book carry result.
 
 This bridge prototype is feasibility evidence, not an approved mapping change.
 Globex contract month must be decoded from the contract symbol, not inferred
@@ -288,21 +329,27 @@ or cancellation than 50/50.
 
 1. **Parity report:** reproduce upstream raw and smoothed carry for at least 10
    representative instruments and explain daily-snapshot differences.
-2. **Globex bridge:** populate and cache carry for mapped assets; require
-   same-date contract legs and publish coverage/rejection counts.
-3. **Stitch audit:** verify source handoffs and demonstrate that no leg or EWMA
-   state crosses an invalid contract/source gap.
-4. **Pure-rule study:** score carry horizons and the carry family on reference
+2. **Fixed-book stitch audit:** verify the direct reference-to-IB handoffs and
+   demonstrate that no leg or EWMA state crosses an invalid contract/source
+   gap.
+3. **Globex bridge:** populate and cache carry for mapped assets when expanding
+   beyond the fixed-selection path; require same-date contract legs and
+   publish coverage/rejection counts.
+4. **Generic stitch audit:** verify three-source handoffs and demonstrate that
+   no leg or EWMA state crosses an invalid contract/source gap.
+5. **Pure-rule study:** score carry horizons and the carry family on reference
    history with lagged normalized returns.
-5. **Frozen-book replay:** run the seven pre-registered fixed-cap variants.
-6. **Full selector:** add carry-specific cost eligibility and rerun annual
+6. **Frozen-book replay:** run the seven pre-registered fixed-cap variants.
+7. **Full selector:** add carry-specific cost eligibility and rerun annual
    selection only if the frozen-book result is broad and cost-effective.
 
 The smallest next coding task is therefore the pure Polars carry module plus
 the parity report. The existing data model, reference carry stream, selection
-forecast result type, and stitch ownership rules can be reused. The material
-missing piece is the Globex carry builder and a persisted recent IB tail, not a
-new database or a rewrite of the backtester.
+forecast result type, direct reference-to-IB tail, and stitch ownership rules
+can be reused. There is no remaining acquisition blocker for the 17-market
+frozen-book experiment. The material missing pieces are the carry calculation,
+explicit sparse-gap policy, and parity evidence; the Globex carry builder is
+still required before relying on the generic three-source path.
 
 ## Evidence inspected
 
