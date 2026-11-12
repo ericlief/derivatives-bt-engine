@@ -16,13 +16,18 @@ arithmetic returns and volatility below use the saved daily `port_net_pct`
 with 256 trading days; Sharpe is their ratio. Fixed-cap returns are measured
 against the fixed sizing capital and are not reinvested CAGR.
 
-| Signal | Net equity at end | Net P&L | Ann. mean | Ann. vol. | Sharpe | Max DD (pct of prior peak) | Max DD ($) |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| EWMAC | $935,169 | $860,169 | 21.0% | 18.9% | 1.11 | −11.5% | −$20,339 |
-| TSMOM 32/256 | $920,525 | $845,525 | 21.4% | 21.0% | 1.02 | −12.7% | −$11,164 |
-| TSMOM 64/256 | $940,408 | $865,408 | 21.9% | 19.5% | 1.12 | −13.8% | −$11,749 |
-| Goulding Sharpe | $670,869 | $595,869 | 14.5% | 19.0% | 0.77 | −14.9% | −$44,005 |
-| Goulding continuous | $526,845 | $451,845 | 11.0% | 17.2% | 0.64 | −12.1% | −$23,017 |
+| Signal | Net equity at end | Net P&L | Ann. mean | Ann. vol. | Sharpe | Fixed-cap adjusted Calmar* | Max DD (pct of prior peak) | Max DD ($) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| EWMAC | $935,169 | $860,169 | 21.0% | 18.9% | 1.11 | 1.82 | −11.5% | −$20,339 |
+| TSMOM 32/256 | $920,525 | $845,525 | 21.4% | 21.0% | 1.02 | 1.68 | −12.7% | −$11,164 |
+| TSMOM 64/256 | $940,408 | $865,408 | 21.9% | 19.5% | 1.12 | 1.59 | −13.8% | −$11,749 |
+| Goulding Sharpe | $670,869 | $595,869 | 14.5% | 19.0% | 0.77 | 0.97 | −14.9% | −$44,005 |
+| Goulding continuous | $526,845 | $451,845 | 11.0% | 17.2% | 0.64 | 0.91 | −12.1% | −$23,017 |
+
+*Fixed-cap adjusted Calmar is annualized arithmetic mean return divided by
+absolute maximum drawdown. It is a fixed-cap risk/return ratio, not standard
+Calmar, because daily returns are contributions against fixed sizing capital
+and are not reinvested.
 
 On these fixed-cap outputs, TSMOM 64/256 has the highest annualized mean and
 EWMAC nearly matches its Sharpe with lower realized volatility. Both Goulding
@@ -69,13 +74,18 @@ EWMAC `20261110_203706`, TSMOM 32/256 `20261110_205549`, TSMOM 64/256
 `20261110_211651`, Goulding Sharpe `20261110_230706`, and Goulding continuous
 `20261110_151448`.
 
-| Signal | Fixed-cap ending equity | Compounding ending equity | Fixed-cap max DD | Compounding max DD | Fixed-cap active book max / avg |
-|---|---:|---:|---:|---:|---:|
-| EWMAC | $0.94M | $1.85B | −11.5% | −29.9% | 23 / 17.0 |
-| TSMOM 32/256 | $0.92M | $2.07B | −12.7% | −38.9% | 23 / 16.9 |
-| TSMOM 64/256 | $0.94M | $1.52B | −13.8% | −37.5% | 24 / 17.0 |
-| Goulding Sharpe | $0.67M | $199.1M | −14.9% | −43.2% | 24 / 17.1 |
-| Goulding continuous | $0.53M | $52.2M | −12.1% | −38.0% | 25 / 16.8 |
+| Signal | Fixed-cap ending equity | Compounding ending equity | Fixed-cap max DD | Compounding max DD | Fixed-cap adjusted Calmar | Compounding Calmar (standard) | Fixed-cap active book max / avg |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| EWMAC | $0.94M | $1.85B | −11.5% | −29.9% | 1.82 | 0.67 | 23 / 17.0 |
+| TSMOM 32/256 | $0.92M | $2.07B | −12.7% | −38.9% | 1.68 | 0.55 | 23 / 16.9 |
+| TSMOM 64/256 | $0.94M | $1.52B | −13.8% | −37.5% | 1.59 | 0.55 | 24 / 17.0 |
+| Goulding Sharpe | $0.67M | $199.1M | −14.9% | −43.2% | 0.97 | 0.36 | 24 / 17.1 |
+| Goulding continuous | $0.53M | $52.2M | −12.1% | −38.0% | 0.91 | 0.33 | 25 / 16.8 |
+
+Compounding Calmar is CAGR divided by absolute maximum drawdown, with CAGR
+annualized over 256 valid trading days per year. Fixed-cap adjusted Calmar uses
+the arithmetic annualized return definition above; these ratios have different
+return conventions and should not be compared as if they were identical.
 
 The compounding runs grow into accounts far beyond $75,000, so terminal equity
 and drawdown dollars are not directly comparable to the fixed-cap runs. The
