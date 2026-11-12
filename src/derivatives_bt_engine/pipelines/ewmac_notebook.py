@@ -813,6 +813,50 @@ def plot_selection_portfolio_concentration(
     return (gross_risk + shares + held_count).cols(1).opts(shared_axes=False)
 
 
+def _prepare_selection_pnl_attribution_year(
+    frame: pl.DataFrame,
+    *,
+    year: int,
+) -> pl.DataFrame:
+    """Return one year's cash rows for instruments chosen in that year's book.
+
+    Book membership is the union of symbols with ``sel_active=True`` during
+    the requested calendar year. Once a symbol belongs to that union, all of
+    its rows in the year are retained so entry or exit cash flows are not lost
+    merely because the row itself is a handoff observation. Instruments that
+    only carry liquidation P&L from a prior-year book are excluded.
+
+    Parameters
+    ----------
+    frame
+        Normalized selection cash-P&L frame containing ``year``, ``symbol``,
+        and ``sel_active``.
+    year
+        Calendar year to prepare.
+
+    Returns
+    -------
+    polars.DataFrame
+        The requested year's rows restricted to its selected-book symbols.
+    """
+    _require_report_columns(
+        frame,
+        {"year", "symbol", "sel_active"},
+        label="selection cash-P&L frame",
+    )
+    year_frame = frame.filter(pl.col("year") == year)
+    selected_symbols = (
+        year_frame.filter(pl.col("sel_active").fill_null(False))
+        .select("symbol")
+        .unique()
+    )
+    if selected_symbols.is_empty():
+        raise ValueError(f"year {year} contains no selected-book instruments")
+    # A semi join preserves every cash row for selected symbols without
+    # duplicating rows or leaking prior-book instruments into the chart axis.
+    return year_frame.join(selected_symbols, on="symbol", how="semi")
+
+
 def plot_selection_pnl_attribution(
     cash_pnl: pl.DataFrame | Path | str,
     *,
@@ -825,7 +869,8 @@ def plot_selection_pnl_attribution(
     ----------
     cash_pnl
         Public selection cash-P&L frame or its Parquet path. The report must
-        include instrument-level gross and net P&L plus trade and roll costs.
+        include instrument-level gross and net P&L plus trade and roll costs,
+        together with ``sel_active`` book membership.
     width, height
         Width and height of the vertical bar chart in pixels.
 
@@ -848,6 +893,7 @@ def plot_selection_pnl_attribution(
         {
             "date",
             "symbol",
+            "sel_active",
             "gross_pnl",
             "net_pnl",
             "trade_cost",
@@ -894,15 +940,16 @@ def plot_selection_pnl_attribution(
             pl.col("asset_class").fill_null("unclassified"),
             pl.col("economic_subclass").fill_null("unclassified"),
         )
-    nonzero = frame.filter(
-        (pl.col("gross_pnl").fill_null(0.0) != 0)
-        | (pl.col("trade_cost").fill_null(0.0) != 0)
-        | (pl.col("roll_cost").fill_null(0.0) != 0)
-        | (pl.col("net_pnl").fill_null(0.0) != 0)
+    years = (
+        frame.filter(pl.col("sel_active").fill_null(False))
+        .get_column("year")
+        .drop_nulls()
+        .unique()
+        .sort()
+        .to_list()
     )
-    years = nonzero.get_column("year").drop_nulls().unique().sort().to_list()
     if not years:
-        raise ValueError("selection cash-P&L frame contains no nonzero P&L")
+        raise ValueError("selection cash-P&L frame contains no selected book")
 
     selector = widgets.Dropdown(description="Year", options=years, value=years[-1])
     plot_output = widgets.Output(
@@ -916,32 +963,24 @@ def plot_selection_pnl_attribution(
 
     def plot_year(year: int):
         """Aggregate and draw one calendar year's P&L attribution."""
+        book_frame = _prepare_selection_pnl_attribution_year(frame, year=year)
         annual = (
-            frame.filter(pl.col("year") == year)
-            .group_by("symbol")
+            book_frame.group_by("symbol")
             .agg(
                 pl.col("gross_pnl").fill_null(0.0).sum().alias("gross_pnl"),
                 pl.col("trade_cost").fill_null(0.0).sum().alias("trade_cost"),
                 pl.col("roll_cost").fill_null(0.0).sum().alias("roll_cost"),
                 pl.col("net_pnl").fill_null(0.0).sum().alias("net_pnl"),
             )
-            .filter(
-                (pl.col("gross_pnl") != 0)
-                | (pl.col("trade_cost") != 0)
-                | (pl.col("roll_cost") != 0)
-                | (pl.col("net_pnl") != 0)
-            )
             .sort("net_pnl", descending=True)
         )
-        if annual.is_empty():
-            raise ValueError(f"year {year} contains no nonzero instrument P&L")
+        book_n = annual.height
         tools = ["hover", "pan", "wheel_zoom", "box_zoom", "reset", "save"]
 
         def grouped_bars(group_column: str, label: str, xlabel: str):
             """Aggregate annual attribution at one reporting hierarchy level."""
             grouped = (
-                frame.filter(pl.col("year") == year)
-                .group_by(group_column)
+                book_frame.group_by(group_column)
                 .agg(
                     pl.col("gross_pnl").fill_null(0.0).sum().alias("gross_pnl"),
                     pl.col("trade_cost").fill_null(0.0).sum().alias("trade_cost"),
@@ -962,7 +1001,10 @@ def plot_selection_pnl_attribution(
             bars = grouped.hvplot.bar(
                 x=group_column,
                 y="net_pnl",
-                title=f"{year} {label} net P&L (portfolio total ${total_net:,.0f})",
+                title=(
+                    f"{year} selected-book {label} net P&L "
+                    f"({book_n} markets; total ${total_net:,.0f})"
+                ),
                 xlabel=xlabel,
                 ylabel="Net P&L (USD)",
                 rot=70,

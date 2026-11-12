@@ -1223,13 +1223,17 @@ forecasts, integer rounding, buffering, and capital scaling; it is intentionally
 different from the fixed selection-weight chart.
 
 `plot_selection_pnl_attribution` provides a year widget, defaulting to the
-latest year, and vertical net-P&L bars by instrument. The cash axis fits each
-selected year's observed P&L range with a small margin around the extrema.
-Hover preserves gross P&L, ordinary trade cost, and realized roll cost. It does
-not label costs on a review date as selection costs: the current `trade_con`
-path also contains forecast, volatility, capital-scaling, and buffer-driven
-trades, so that causal split would require a separate persisted
-selection-trade field.
+latest year, and vertical net-P&L bars by instrument. Each year uses only the
+union of markets with `sel_active=True` in that year's selected book, so the
+instrument axis and class/subclass groups do not include the full screened
+universe or instruments carried only from the prior year's book. All rows for
+a chosen symbol remain in its annual total so an in-year entry or exit cash
+flow is retained. The cash axis fits each selected year's observed P&L range
+with a small margin around the extrema. Hover preserves gross P&L, ordinary
+trade cost, and realized roll cost. It does not label costs on a review date as
+selection costs: the current `trade_con` path also contains forecast,
+volatility, capital-scaling, and buffer-driven trades, so that causal split
+would require a separate persisted selection-trade field.
 
 The year widget defaults to the latest year. A monthly run adds an exact review
 date widget for that year. The first vertical bars show active `limit_weight`
