@@ -17,6 +17,9 @@ from derivatives_bt_engine.calculations.signal_confidence import (
     SignalConfidenceRegime,
 )
 from derivatives_bt_engine.calculations.ewmac import ewmac, estimate_ewmac_scalar_history
+from derivatives_bt_engine.calculations.forecast_combination import (
+    CombinedForecastResult,
+)
 from derivatives_bt_engine.calculations.continuous_momentum import (
     DEFAULT_FAST_WINDOW,
     DEFAULT_SLOW_WINDOW,
@@ -35,6 +38,10 @@ from derivatives_bt_engine.calculations.goulding import (
     goulding_monthly,
     normalize_goulding_forecast,
 )
+from derivatives_bt_engine.calculations.goulding_selection_forecast import (
+    GOULDING_SELECTION_FORECAST_CAP,
+    GOULDING_SELECTION_FORECAST_TARGET_ABS,
+)
 from derivatives_bt_engine.calculations.legacy_signal import calculate_trend_strength
 from derivatives_bt_engine.calculations.signal_confidence import (
     classify_signal_confidence,
@@ -43,6 +50,11 @@ from derivatives_bt_engine.calculations.signal_confidence import (
 )
 from derivatives_bt_engine.calculations.signal_config import SignalSpec
 from derivatives_bt_engine.calculations.signal_selection import resolve_trend_direction
+from derivatives_bt_engine.calculations.return_tsmom_forecast import (
+    build_return_tsmom_forecast,
+    estimate_return_tsmom_scalar_history,
+    scale_return_tsmom_forecast,
+)
 
 def _price_df(n: int, drift: float, vol: float = 0.01, seed: int = 0) -> pl.DataFrame:
     rng = np.random.default_rng(seed)
@@ -67,6 +79,106 @@ def _price_df_dated(start: date, n: int, drift: float, vol: float = 0.01, seed: 
     close = 100 * np.exp(np.cumsum(rets))
     dates = _trading_dates(start, n)
     return pl.DataFrame({'ts_event': dates, 'close': close})
+
+
+def test_return_tsmom_forecast_keeps_canonical_date_and_roll_schedule():
+    """The selection adapter must not expose the legacy calculation date key."""
+    n = 400
+    dates = _trading_dates(date(2000, 1, 3), n)
+    rng = np.random.default_rng(17)
+    returns = rng.normal(0.0003, 0.01, n)
+    signal_index = 100.0 * np.cumprod(1.0 + returns)
+    point_change = rng.normal(0.02, 1.0, n)
+    panama_price = 1000.0 + np.cumsum(point_change)
+    roll_flags = [index > 0 and index % 60 == 0 for index in range(n)]
+
+    class History:
+        """Minimal source-neutral history used by the forecast adapter."""
+
+        signal = pl.DataFrame({"date": dates})
+        marks = pl.DataFrame({
+            "date": dates,
+            "mark_price": panama_price,
+            "is_roll": roll_flags,
+        })
+
+        @staticmethod
+        def signal_bars() -> pl.DataFrame:
+            return pl.DataFrame({
+                "date": dates,
+                "close": signal_index,
+                "ret_1d": [None, *returns[1:]],
+                "quality_flag": ["ok"] * n,
+            })
+
+        @staticmethod
+        def panama_bars() -> pl.DataFrame:
+            return pl.DataFrame({
+                "date": dates,
+                "close": panama_price,
+                "point_change": [None, *point_change[1:]],
+                "quality_flag": ["ok"] * n,
+            })
+
+    result = build_return_tsmom_forecast(
+        History(),
+        min_valid_observations=100,
+    )
+
+    assert "date" in result.frame.columns
+    assert "ts_event" not in result.frame.columns
+    assert result.frame.get_column("is_roll").to_list() == roll_flags
+    assert result.audit["return_tsmom_fast_window"] == 64
+    assert result.audit["return_tsmom_slow_window"] == 256
+    assert result.audit["forecast_elig"] is True
+
+
+def test_return_tsmom_uses_causal_pooled_mean_one_cap_two_scaling():
+    """Return TSMOM must use the same normalized position scale as EWMAC."""
+    dates = [date(2020, 1, day) for day in range(1, 5)]
+
+    def raw_result(values: list[float]) -> CombinedForecastResult:
+        """Build the minimal unscaled adapter result for one history."""
+        return CombinedForecastResult(
+            frame=pl.DataFrame({
+                "date": dates,
+                "raw_forecast": values,
+                "combined_forecast": values,
+                "point_vol": [1.0] * 4,
+                "point_change": [1.0] * 4,
+            }),
+            weights={"return_tsmom": 1.0},
+            fdm=1.0,
+            audit={},
+        )
+
+    first = raw_result([0.5, 0.5, 0.5, 3.0])
+    second = raw_result([1.5, 1.5, 1.5, 1.5])
+    scalar = estimate_return_tsmom_scalar_history(
+        {"FIRST": first, "SECOND": second},
+        min_periods=2,
+    )
+    scaled = scale_return_tsmom_forecast(
+        first,
+        scalar,
+        scalar_min_periods=2,
+        min_valid_observations=2,
+    )
+
+    assert scalar.get_column("forecast_scalar").to_list() == [
+        None,
+        None,
+        pytest.approx(1.0),
+        pytest.approx(1.0),
+    ]
+    assert scaled.frame.get_column("combined_forecast").to_list() == [
+        None,
+        None,
+        pytest.approx(0.5),
+        pytest.approx(2.0),
+    ]
+    assert scaled.audit["return_tsmom_target_abs_forecast"] == 1.0
+    assert scaled.audit["return_tsmom_forecast_cap"] == 2.0
 
 
 # ── calculate_trend_strength ────────────────────────────────────────────────
@@ -254,8 +366,8 @@ def test_signal_confidence_defaults_to_high_vol_discount_of_half():
 
 def test_signal_spec_defaults():
     spec = SignalSpec()
-    assert spec.fast_window == 63
-    assert spec.slow_window == 252
+    assert spec.fast_window == 64
+    assert spec.slow_window == 256
     assert spec.vol_fast_window is None
     assert spec.vol_slow_window is None
     assert spec.w_fast == 0.4
@@ -633,11 +745,62 @@ def test_goulding_monthly_needs_only_ts_event_and_close():
     assert out.height > 0
 
 
-def test_goulding_monthly_has_no_volatility_normalization_columns():
+def test_goulding_monthly_keeps_raw_signal_and_adds_separate_sharpe_columns():
     df = _price_df_dated(date(2018, 1, 1), 400, drift=0.001, seed=9)
     out = goulding_monthly(build_features(df))
-    # Pure arithmetic-average signal -- no std/ts_fast/ts_slow/hv anywhere.
+    # Raw arithmetic-return signals remain distinct from the optional
+    # Goulding-specific monthly RMS-vol normalization.
     assert not ({'std', 'std_fast', 'std_slow', 'ts_fast', 'ts_slow', 'hv'} & set(out.columns))
+    assert {
+        'monthly_variance', 'fast_rms_vol', 'slow_rms_vol',
+        'fast_sharpe', 'slow_sharpe',
+    } <= set(out.columns)
+
+
+def test_goulding_monthly_sharpe_legs_use_only_completed_month_variances():
+    df = _price_df_dated(
+        date(2018, 1, 1), 500, drift=0.0005, vol=0.015, seed=91
+    )
+    out = goulding_monthly(df, fast_months=2, slow_months=3).sort('ts_event')
+    complete = out.drop_nulls([
+        'fast', 'slow', 'fast_rms_vol', 'slow_rms_vol',
+        'fast_sharpe', 'slow_sharpe',
+    ])
+    row_index = out.get_column('ts_event').to_list().index(
+        complete.get_column('ts_event')[0]
+    )
+    monthly_variance = out.get_column('monthly_variance').to_list()
+    expected_fast_vol = math.sqrt(
+        sum(monthly_variance[row_index - 2:row_index]) / 2
+    )
+    expected_slow_vol = math.sqrt(
+        sum(monthly_variance[row_index - 3:row_index]) / 3
+    )
+    row = out.row(row_index, named=True)
+
+    assert row['fast_rms_vol'] == pytest.approx(expected_fast_vol)
+    assert row['slow_rms_vol'] == pytest.approx(expected_slow_vol)
+    assert row['fast_sharpe'] == pytest.approx(row['fast'] / expected_fast_vol)
+    assert row['slow_sharpe'] == pytest.approx(row['slow'] / expected_slow_vol)
+
+    # Changing dates after this forecast month cannot alter its numerator,
+    # denominator, or raw regime classification.
+    cutoff = row['ts_event']
+    truncated = goulding_monthly(
+        df.filter(pl.col('ts_event') < cutoff),
+        fast_months=2,
+        slow_months=3,
+    ).sort('ts_event')
+    prior_full = out.filter(pl.col('ts_event') < cutoff).tail(1).row(0, named=True)
+    prior_truncated = truncated.tail(1).row(0, named=True)
+    for column in (
+        'fast', 'slow', 'fast_rms_vol', 'slow_rms_vol',
+        'fast_sharpe', 'slow_sharpe', 'regime',
+    ):
+        if isinstance(prior_full[column], float):
+            assert prior_truncated[column] == pytest.approx(prior_full[column])
+        else:
+            assert prior_truncated[column] == prior_full[column]
 
 
 def test_goulding_monthly_uses_month_end_close_not_first_day():
@@ -869,13 +1032,32 @@ def test_goulding_continuous_raw_uses_mean_or_equation_7(regime, fast, slow, exp
     assert goulding_continuous_raw(regime, 0.25, 0.5, fast, slow) == pytest.approx(expected)
 
 
-def test_goulding_forecast_scalar_targets_mean_absolute_half_and_caps_at_one():
+def test_goulding_forecast_scalar_targets_standalone_half_and_caps_at_one():
     scalar = estimate_goulding_forecast_scalar([0.25, -0.25] * 6)
     assert scalar == pytest.approx(2.0)
     assert normalize_goulding_forecast(0.25, scalar) == pytest.approx(0.5)
     assert normalize_goulding_forecast(0.75, scalar) == 1.0
     assert normalize_goulding_forecast(-0.75, scalar) == -1.0
     assert estimate_goulding_forecast_scalar([0.25] * 11) is None
+
+
+def test_goulding_selection_scale_matches_ewmac_mean_one_cap_two():
+    scalar = estimate_goulding_forecast_scalar(
+        [0.25, -0.25] * 6,
+        target_abs=GOULDING_SELECTION_FORECAST_TARGET_ABS,
+    )
+
+    assert scalar == pytest.approx(4.0)
+    assert normalize_goulding_forecast(
+        0.25,
+        scalar,
+        cap=GOULDING_SELECTION_FORECAST_CAP,
+    ) == pytest.approx(1.0)
+    assert normalize_goulding_forecast(
+        0.75,
+        scalar,
+        cap=GOULDING_SELECTION_FORECAST_CAP,
+    ) == 2.0
 
 
 def test_resolve_trend_direction_continuous_goulding_preserves_normalized_magnitude():
@@ -897,6 +1079,28 @@ def test_resolve_trend_direction_continuous_goulding_requires_causal_scalar():
         g_regime_val='bull', g_fast_val=0.06, g_slow_val=0.02,
         goulding_signal_mode='continuous', goulding_forecast_scalar=None,
     ) is None
+
+
+def test_resolve_trend_direction_sharpe_uses_normalized_legs_but_raw_regime():
+    trend, regime, discount, blend = resolve_trend_direction(
+        'goulding', None, None, None, 0.5,
+        g_regime_val='correction',
+        g_fast_val=-0.01,
+        g_slow_val=0.10,
+        a_co=0.25,
+        a_re=0.5,
+        goulding_signal_mode='sharpe',
+        goulding_forecast_scalar=2.0,
+        g_fast_sharpe_val=-2.0,
+        g_slow_sharpe_val=0.5,
+    )
+
+    # Raw returns classify Correction, but the normalized blend is
+    # 0.75 * 0.5 + 0.25 * -2 = -0.125 before the causal scalar.
+    assert regime == TrendRegime.CORRECTION
+    assert blend == pytest.approx(-0.125)
+    assert trend == pytest.approx(-0.25)
+    assert discount == 1.0
 
 # ── Proposition 9 dynamic mixing estimator ──────────────────────────────────
 

@@ -23,6 +23,9 @@ PUBLIC_REPORT_RENAMES = {
     "maximum_instruments_per_cluster": "max_instr_per_cluster",
     "maximum_instruments_per_class": "max_instr_per_cls",
     "maximum_instruments_per_subclass": "max_instr_per_subcls",
+    "minimum_instruments_per_class": "min_instr_per_cls",
+    "minimum_instruments_per_subclass": "min_instr_per_subcls",
+    "minimum_book_count": "min_book_n",
     "maximum_asset_class_weight_percent": "max_cls_weight_pct",
     "maximum_economic_subclass_weight_percent": "max_subcls_weight_pct",
     "asset_class_weight": "cls_weight",
@@ -38,12 +41,18 @@ PUBLIC_REPORT_RENAMES = {
     "number_economic_subclasses": "n_econ_subcls",
     "selected_symbols": "symbols",
     "combined_forecast": "comb_fcst",
+    "forecast_month": "fcst_month",
+    "goulding_signal_mode": "g_mode",
+    "goulding_fast_months": "g_fast_months",
+    "goulding_slow_months": "g_slow_months",
+    "goulding_cluster": "g_cluster",
     "point_change": "pt_change",
     "point_vol": "pt_vol",
     "combined_nulls": "comb_nulls",
     "combined_nonfinite": "comb_nonfinite",
     "forecast_valid": "fcst_valid",
     "source_gap_before": "src_gap_before",
+    "quality_flag": "hist_quality",
     "source_gap_days": "src_gap_days",
     "forecast_valid_obs": "fcst_valid_obs",
     "forecast_invalid_obs": "fcst_inval_obs",
@@ -55,24 +64,78 @@ PUBLIC_REPORT_RENAMES = {
     "period_year_fraction": "yr_frac",
     "sizing_capital_usd": "sizing_cap",
     "capital_scalar": "cap_scalar",
+    "backtest_capital_mode": "cap_mode",
     "selection_active": "sel_active",
+    "selection_eligibility_hysteresis_applied": "sel_elig_hyst_applied",
+    "selection_eligibility_hysteresis_reason": "sel_elig_hyst_reason",
+    "selection_note": "sel_note",
     "selection_rebalanced": "sel_rebalanced",
     "selection_date": "sel_date",
     "selection_effective_date": "sel_date",
     "selection_year": "sel_year",
     "selection_status": "sel_status",
+    "selection_incumbent": "sel_incumbent",
     "selection_rank": "sel_rank",
     "selection_rebalance": "sel_rebalance",
+    "selection_max_history_gap_days": "sel_max_hist_gap_days",
     "selection_equity_usd": "sel_equity",
     "selection_candidate_count": "sel_cand_n",
     "selection_instrument_count": "sel_instr_n",
     "selection_score": "sel_score",
     "selection_idm": "sel_idm",
     "selection_symbols": "sel_symbols",
+    "selection_unbuffered_symbols": "sel_unbuf_symbols",
+    "selection_ranked_symbols": "sel_ranked_symbols",
+    "selection_rank_buffered_symbols": "sel_rank_buf_symbols",
+    "selection_hysteresis_candidate_symbols": "sel_hyst_cand_symbols",
     "selection_added_symbols": "sel_added",
     "selection_removed_symbols": "sel_removed",
+    "unbuffered_class_coverage_deficit": "unbuf_cls_coverage_deficit",
+    "unbuffered_subclass_coverage_deficit": "unbuf_subcls_coverage_deficit",
+    "unbuffered_book_count_deficit": "unbuf_book_n_deficit",
+    "final_class_coverage_deficit": "final_cls_coverage_deficit",
+    "final_subclass_coverage_deficit": "final_subcls_coverage_deficit",
+    "final_book_count_deficit": "final_book_n_deficit",
+    "coverage_satisfied": "coverage_satisfied",
+    "coverage_reason": "coverage_reason",
+    "coverage_phase": "coverage_phase",
+    "coverage_eligible": "coverage_elig",
+    "instr_rank_in_subclass": "instr_rank_in_subcls",
+    "subclass_rank_in_class": "subcls_rank_in_cls",
+    "class_rank": "cls_rank",
+    "global_trial_rank": "global_trial_rank",
+    "selection_eligibility_hysteresis_percent": "sel_elig_hyst_pct",
+    # Read legacy internal frames while emitting only the canonical public name.
+    "selection_eligibility_exit_buffer_percent": "sel_elig_hyst_pct",
+    "selection_membership_hysteresis": "sel_membership_hyst",
+    "selection_rank_buffer_percent": "sel_rank_buf_pct",
+    "selection_rank_count_ewma_halflife_reviews": "sel_rank_n_ewma_hl",
+    "selection_book_score_buffer_percent": "sel_book_score_buf_pct",
+    "selection_live_execution_overlay_count": "sel_live_exec_overlay_n",
+    "preference_rank": "pref_rank",
+    "selection_prefer_full_contracts": "sel_pref_full_cons",
+    "is_micro_contract": "micro_con",
+    "rank_buffer_count": "rank_buf_n",
+    "rank_count_ewma_state": "rank_n_ewma_state",
+    "rank_count_anchor": "rank_n_anchor",
+    "rank_entry_cutoff": "rank_entry",
+    "rank_exit_cutoff": "rank_exit",
+    "rank_buffer_reason": "rank_buf_reason",
+    "min_max_position": "min_max_pos",
+    "max_market_volume_percent": "max_mkt_volume_pct",
+    "market_participation_enforced": "mkt_participation_enforced",
+    "unbuffered_book_score": "unbuf_book_score",
+    "rank_buffered_book_score": "rank_buf_book_score",
+    "hysteresis_candidate_book_score": "hyst_cand_book_score",
+    "switch_cost_usd": "switch_cost",
+    "score_buffer_sr": "score_buf_sr",
     "selection_cost_source": "sel_cost_src",
     "selection_margin_source": "sel_marg_src",
+    "live_tail_start": "live_tail_start",
+    "live_execution_overlay_active": "live_exec_overlay_active",
+    "live_volume_eligible": "live_volume_elig",
+    "live_execution_eligible": "live_exec_elig",
+    "live_ib_availability": "live_ib_avail",
     "margin_calibration_timestamp": "marg_calib_ts",
     "margin_risk_calibration_source": "marg_risk_calib_src",
     "initial_capital_volatility_scalar": "init_vol_scalar",
@@ -104,7 +167,8 @@ PUBLIC_REPORT_RENAMES = {
     "ref_book_count": "ref_book_n",
     "ref_idm": "ref_idm",
     "ref_weight_idm": "ref_weight_idm",
-    "ref_budget_usd": "ref_budget",
+    "ref_cap_alloc_usd": "ref_cap_alloc",
+    "port_ann_risk_target_usd": "port_ann_risk_target",
     "ref_ann_risk_usd": "ref_ann_risk",
     "ref_daily_risk_usd": "ref_daily_risk",
     "ref_gross_usd": "ref_gross",
@@ -219,6 +283,7 @@ PUBLIC_REPORT_RENAMES = {
     "portfolio_instrument_count": "book_n_instr",
     "portfolio_instruments": "port_instr",
     "portfolio_valid_pnl_instruments": "pnl_valid_n_instr",
+    "portfolio_invalid_pnl_instruments": "pnl_inval_n_instr",
     "portfolio_return_valid": "ret_valid",
     "portfolio_cash_gross_pnl_usd": "port_gross",
     "portfolio_cash_trade_cost_usd": "port_trade_cost",
@@ -280,6 +345,7 @@ PUBLIC_COLUMN_TOKEN_ABBREVIATIONS = {
     "expiration": "expiry",
     "historical": "hist",
     "history": "hist",
+    "hysteresis": "hyst",
     "include": "incl",
     "invalid": "inval",
     "initial": "init",
@@ -301,6 +367,7 @@ PUBLIC_COLUMN_TOKEN_ABBREVIATIONS = {
     "pooling": "pool",
     "points": "pts",
     "position": "pos",
+    "preference": "pref",
     "price": "px",
     "quality": "qual",
     "representative": "rep",
@@ -366,6 +433,12 @@ CASH_PNL_REPORT_PRIORITY = (
     "cum_total_cost_pct",
 )
 CASH_PNL_REPORT_PARAMS = (
+    "cap_mode",
+    "signal_model",
+    "g_mode",
+    "fast_window",
+    "slow_window",
+    "regime_discount",
     "weight",
     "limit_weight",
     "idm",
@@ -398,6 +471,7 @@ PORTFOLIO_CURVE_REPORT_PRIORITY = (
     "book_n_instr",
     "port_instr",
     "pnl_valid_n_instr",
+    "pnl_inval_n_instr",
     "port_trade_cost",
     "port_roll_cost",
     "port_trade_cost_pct",
@@ -410,7 +484,7 @@ PORTFOLIO_CURVE_REPORT_PRIORITY = (
     "port_net_equity",
     "ret_valid",
 )
-PORTFOLIO_CURVE_REPORT_PARAMS = ("init_cap",)
+PORTFOLIO_CURVE_REPORT_PARAMS = ("cap_mode", "init_cap")
 
 
 SELECTION_REVIEW_ALLOCATION_REPORT_PRIORITY = (
@@ -423,10 +497,6 @@ SELECTION_REVIEW_ALLOCATION_REPORT_PRIORITY = (
     "book_symbol",
     "asset_cls",
     "econ_subcls",
-    "max_instr_per_cls",
-    "max_instr_per_subcls",
-    "max_cls_weight_pct",
-    "max_subcls_weight_pct",
     "weight",
     "cls_weight",
     "cls_lim_weight",
@@ -438,6 +508,26 @@ SELECTION_REVIEW_ALLOCATION_REPORT_PRIORITY = (
     "idm",
     "ann_dvol",
     "risk_budget",
+)
+SELECTION_REVIEW_ALLOCATION_REPORT_PARAMS = (
+    "min_instr_per_cls",
+    "min_instr_per_subcls",
+    "min_book_n",
+    "max_instr_per_cls",
+    "max_instr_per_subcls",
+    "max_cls_weight_pct",
+    "max_subcls_weight_pct",
+    "low_con_penalty_scale",
+    "high_con_penalty_scale",
+    "con_band_min",
+    "con_band_max",
+    "score_tie_tol_pct",
+    "tie_ref_book_n",
+    "sel_elig_hyst_pct",
+    "sel_membership_hyst",
+    "sel_rank_buf_pct",
+    "sel_rank_n_ewma_hl",
+    "sel_book_score_buf_pct",
 )
 
 
@@ -455,6 +545,9 @@ def order_selection_review_allocation_report(
     required = {
         "sel_date",
         "sel_equity",
+        "min_instr_per_cls",
+        "min_instr_per_subcls",
+        "min_book_n",
         "max_instr_per_cls",
         "max_instr_per_subcls",
         "max_cls_weight_pct",
@@ -482,18 +575,73 @@ def order_selection_review_allocation_report(
         if name in report.columns
     ]
     leading_set = set(leading)
-    trailing = [name for name in report.columns if name not in leading_set]
-    return report.select(*leading, *trailing)
+    params = [
+        name
+        for name in SELECTION_REVIEW_ALLOCATION_REPORT_PARAMS
+        if name in report.columns
+    ]
+    params_set = set(params)
+    diagnostics = [
+        name
+        for name in report.columns
+        if name not in leading_set and name not in params_set
+    ]
+    return report.select(*leading, *diagnostics, *params)
+
+
+def order_selection_review_summary_report(report: pl.DataFrame) -> pl.DataFrame:
+    """Keep review outcomes first and selection settings at the right edge."""
+    priority = (
+        "sel_date",
+        "sel_equity",
+        "sel_cand_n",
+        "sel_instr_n",
+        "sel_score",
+        "sel_idm",
+        "sel_symbols",
+        "sel_unbuf_symbols",
+        "sel_ranked_symbols",
+        "sel_rank_buf_symbols",
+        "sel_hyst_cand_symbols",
+        "sel_added",
+        "sel_removed",
+    )
+    params = (
+        "cap_mode",
+        "min_instr_per_cls",
+        "min_instr_per_subcls",
+        "min_book_n",
+        "max_instr_per_cls",
+        "max_instr_per_subcls",
+        "max_cls_weight_pct",
+        "max_subcls_weight_pct",
+        "sel_elig_hyst_pct",
+        "sel_membership_hyst",
+        "sel_rank_buf_pct",
+        "sel_rank_n_ewma_hl",
+        "sel_book_score_buf_pct",
+    )
+    leading = [name for name in priority if name in report.columns]
+    leading_set = set(leading)
+    trailing_params = [name for name in params if name in report.columns]
+    param_set = set(trailing_params)
+    diagnostics = [
+        name
+        for name in report.columns
+        if name not in leading_set and name not in param_set
+    ]
+    return report.select(*leading, *diagnostics, *trailing_params)
 
 
 def order_selection_review_instrument_report(
     report: pl.DataFrame,
 ) -> pl.DataFrame:
-    """Place the selected-instrument count beside its instrument rows.
+    """Order the review instrument report from book identity through inputs.
 
-    The symbol identifies each row in the review-instrument report, so keep it
-    immediately after ``sel_instr_n`` for quick scanning in table viewers.
-    Remaining diagnostics retain their existing order.
+    Review status and instrument identity lead, allocation weights and their
+    limits follow, then score diagnostics. Remaining review diagnostics stay
+    ahead of the run-wide parameters, which are kept together at the right edge
+    for scanning and comparison across reports.
     """
     required = {"sel_instr_n", "symbol"}
     missing = sorted(required.difference(report.columns))
@@ -502,7 +650,7 @@ def order_selection_review_instrument_report(
             "selection review instrument report is missing required columns: "
             f"{missing}"
         )
-    leading = [
+    identity = [
         name
         for name in (
             "sel_date",
@@ -510,13 +658,78 @@ def order_selection_review_instrument_report(
             "sel_equity",
             "sel_cand_n",
             "sel_instr_n",
+            "sel_active",
+            "sel_elig_hyst_applied",
+            "sel_elig_hyst_reason",
+            "sel_note",
             "symbol",
+            "asset_cls",
+            "econ_subcls",
+            "sel_status",
+            "rank",
+            "pref_rank",
         )
         if name in report.columns
     ]
-    leading_set = set(leading)
-    trailing = [name for name in report.columns if name not in leading_set]
-    return report.select(*leading, *trailing)
+    allocation = [
+        name
+        for name in (
+            "weight",
+            "limit_weight",
+            "cls_weight",
+            "cls_lim_weight",
+            "subcls_weight",
+            "subcls_lim_weight",
+            "group_lim_weight",
+            "unalloc_weight",
+            "ann_trade_con",
+            "ann_roll_con",
+            "ann_con_load",
+            "ann_dvol",
+            "risk_budget",
+        )
+        if name in report.columns
+    ]
+    scores = [
+        name
+        for name in (
+            "sel_score",
+            "sel_idm",
+            "trade_sr",
+            "roll_sr",
+            "ann_trade_cost_sr",
+            "ann_roll_cost_sr",
+            "ann_cost_sr",
+        )
+        if name in report.columns
+    ]
+    params = [
+        name
+        for name in (
+            "min_instr_per_cls",
+            "min_instr_per_subcls",
+            "min_book_n",
+            "max_instr_per_cls",
+            "max_instr_per_subcls",
+            "max_cls_weight_pct",
+            "max_subcls_weight_pct",
+            "sel_elig_hyst_pct",
+            "sel_membership_hyst",
+            "sel_rank_buf_pct",
+            "sel_rank_n_ewma_hl",
+            "sel_book_score_buf_pct",
+        )
+        if name in report.columns
+    ]
+    priority = identity + allocation + scores
+    priority_set = set(priority)
+    params_set = set(params)
+    diagnostics = [
+        name
+        for name in report.columns
+        if name not in priority_set and name not in params_set
+    ]
+    return report.select(*priority, *diagnostics, *params)
 
 
 def order_cash_pnl_report(report: pl.DataFrame) -> pl.DataFrame:
@@ -651,6 +864,8 @@ TWO_DECIMAL_MONEY_COLUMNS = {
     "sizing_cap",
     "selection_equity_usd",
     "sel_equity",
+    "switch_cost_usd",
+    "switch_cost",
     "risk_traded_usd_day",
     "risk_traded_day",
     "min_mkt_risk_vol_usd_day",
@@ -659,7 +874,8 @@ TWO_DECIMAL_MONEY_COLUMNS = {
     "cost_pnl_native",
     "cost_pnl_usd",
     "risk_budget_usd",
-    "ref_budget_usd",
+    "ref_cap_alloc_usd",
+    "port_ann_risk_target_usd",
     "ref_ann_risk_usd",
     "ref_daily_risk_usd",
     "ref_gross_usd",
@@ -667,7 +883,8 @@ TWO_DECIMAL_MONEY_COLUMNS = {
     "ref_net_usd",
     "cum_ref_gross_usd",
     "cum_ref_net_usd",
-    "ref_budget",
+    "ref_cap_alloc",
+    "port_ann_risk_target",
     "ref_ann_risk",
     "ref_daily_risk",
     "ref_gross",
@@ -780,6 +997,10 @@ SIX_DECIMAL_COLUMNS = {
     "daily_ret_vol",
     "ann_ret_vol",
     "ann_pct_vol",
+    "g_fast_rms_vol",
+    "g_slow_rms_vol",
+    "g_fast_sharpe",
+    "g_slow_sharpe",
     "capital_scalar",
     "cap_scalar",
     "yr_frac",
@@ -843,6 +1064,18 @@ SIX_DECIMAL_COLUMNS = {
     "roll_sr",
     "ref_trade_sr",
     "ref_roll_sr",
+    "prior_book_score",
+    "unbuffered_book_score",
+    "unbuf_book_score",
+    "rank_buffered_book_score",
+    "rank_buf_book_score",
+    "hysteresis_candidate_book_score",
+    "hyst_cand_book_score",
+    "gross_score_gain",
+    "switch_cost_sr",
+    "score_buffer_sr",
+    "score_buf_sr",
+    "net_score_gain",
 }
 
 SIX_DECIMAL_SUFFIXES = (

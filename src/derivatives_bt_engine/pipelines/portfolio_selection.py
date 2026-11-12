@@ -1,16 +1,17 @@
 """Filter a cached rule universe and build the selected futures book.
 
-The persisted rule-cost cache supplies executable symbols, their borrowed
-signal-history identifiers, costs, dollar volatility, and eligible EWMAC
-rules. This command first applies the requested account, cost, risk-size,
-liquidity, data, and execution filters and saves that candidate set. It can
-then run the full greedy selection and uses three deliberately different
-dataframe collections:
+The persisted rule-cost cache supplies executable symbols, reference-history
+identifiers, costs, dollar volatility, and eligible EWMAC rules. This command
+first applies the requested account, cost, risk-size, liquidity, data, and
+execution filters and saves that candidate set. It can then run the full
+greedy selection with multi speed EWMAC, the continuous return TSMOM baseline,
+or monthly Goulding forecasts, using three deliberately different dataframe
+collections:
 
 ``frames_by_history``
-    One daily component-forecast frame per unique ``hist_instr_code``. Several
-    executable symbols can reuse the same history, so these expensive EWMAC
-    calculations are performed once.
+    One daily component-forecast frame or source-neutral history per unique
+    ``hist_instr_code``. Several executable symbols can reuse the same history,
+    so forecast calculations are performed once.
 ``subsystem_reference_frames``
     One daily combined-forecast, equal-weight reference position, historical
     FX, and net-return frame per executable ``symbol``. Symbols sharing history
@@ -20,24 +21,25 @@ dataframe collections:
     One synchronized frame with dates in rows and executable symbols in
     columns. This is the input to the instrument-correlation estimator.
 ``cash_pnl_long``
-    One long account-scaled frame for the final selected book. It applies the
-    forecast buffer, rounds to contracts, and separates ordinary trade cost
-    from realized and interval-average policy-roll cost. The generated Panama
+    One long cash frame for the final selected book. It applies the configured
+    fixed or compounded capital policy, forecast buffer, contract rounding,
+    and separate ordinary-trade and policy-roll costs. The generated Panama
     ``close`` is retained beside its roll-neutral ``point_change`` for audit.
 ``portfolio_curve``
     One portfolio row per date. It sums the selected instruments' executable
-    cash P&L and reports daily returns against prior gross or net equity,
+    cash P&L and reports daily returns under the same capital policy,
     cumulative returns, and gross and net equity paths. Static runs keep the
     final selected weights and IDM fixed. Scheduled runs replace the book at
-    monthly or yearly review boundaries using prior history and lagged net
-    equity, while retaining executable holdings between reviews.
+    monthly or yearly review boundaries using prior history and the applicable
+    fixed or compounded sizing capital, while retaining holdings between
+    reviews.
 
 The command persists each intermediate form so forecast gaps, turnover, and
 greedy selection decisions remain inspectable after a run.
 
 Large per-symbol historical reference bases, cost-applied references,
 stitched references, and executable cash curves live in a versioned
-content-addressed cache below ``--history-cache-root``. Their identities
+content-addressed cache below ``--cache``. Their identities
 include the history sources and only the effective calculation and selection
 values that affect each artifact. This permits several variants to coexist
 and avoids invalidation from an otherwise equivalent newly written market
@@ -84,6 +86,7 @@ from derivatives_bt_engine.reports.formatting import (
     order_portfolio_curve_report,
     order_selection_review_allocation_report,
     order_selection_review_instrument_report,
+    order_selection_review_summary_report,
     rename_public_report_columns,
     round_public_report,
 )
@@ -96,12 +99,40 @@ from derivatives_bt_engine.calculations.volatility import (
 )
 from derivatives_bt_engine.calculations.forecast_combination import (
     CombinedForecastEngine,
+    CombinedForecastResult,
     FixedForecastDiversification,
     ForecastCombinationConfig,
     SlowTiltEwmacWeights,
 )
+from derivatives_bt_engine.calculations.continuous_momentum import (
+    DEFAULT_FAST_WINDOW,
+    DEFAULT_SLOW_WINDOW,
+)
+from derivatives_bt_engine.calculations.return_tsmom_forecast import (
+    RETURN_TSMOM_MODEL,
+    build_return_tsmom_forecast,
+    estimate_return_tsmom_scalar_history,
+    scale_return_tsmom_forecast,
+)
+from derivatives_bt_engine.calculations.ewmac import (
+    EWMAC_FORECAST_CAP,
+    EWMAC_FORECAST_TARGET_ABS,
+    EWMAC_SCALAR_MIN_PERIODS,
+)
+from derivatives_bt_engine.calculations.goulding import (
+    GOULDING_FAST_MONTHS,
+    GOULDING_SIGNAL_MODES,
+    GOULDING_SLOW_MONTHS,
+)
+from derivatives_bt_engine.calculations.goulding_selection_forecast import (
+    GOULDING_MODEL,
+    GOULDING_SELECTION_FORECAST_CAP,
+    GOULDING_SELECTION_FORECAST_TARGET_ABS,
+    GouldingCalibrationContext,
+    build_goulding_calibration_context,
+    build_goulding_selection_forecasts,
+)
 from derivatives_bt_engine.data.futures_history import (
-    DEFAULT_FUTURES_CACHE_ROOT,
     DEFAULT_GLOBEX_DB_PATH,
     DEFAULT_PYSYSTEMTRADE_DB_PATH,
     FuturesHistory,
@@ -127,6 +158,7 @@ from derivatives_bt_engine.calculations.instrument_selection import (
     SelectionCandidate,
 )
 from derivatives_bt_engine.calculations.pnl import (
+    BACKTEST_CAPITAL_MODES,
     PYSYSTEMTRADE_FORECAST_BUFFER_SIZE,
     append_reference_position_turnover,
     apply_subsystem_reference_cost,
@@ -143,10 +175,14 @@ logger = logging.getLogger(__name__)
 REPORT_TIMEZONE = ZoneInfo("America/New_York")
 DEFAULT_SELECTION_MAX_HISTORY_GAP_DAYS = 31
 
-# Bump this when reference-curve or executable cash-curve semantics change.
-# The version is part of both the directory and content identity, allowing old
-# variants to remain on disk without being accepted by newer calculations.
+# Bump the base version for changes shared by every selection artifact. Use an
+# artifact-specific identity version for narrower changes so stable expensive
+# inputs remain reusable. The base version is part of the directory and content
+# identity, allowing old variants to remain without being accepted as current.
 SELECTION_BACKTEST_CACHE_VERSION = 1
+CASH_PNL_CACHE_VERSION = 2
+GOULDING_FORECAST_CACHE_VERSION = 3
+RETURN_TSMOM_SCALAR_CACHE_VERSION = 1
 
 # Production-inspired ordinary-EWMAC template. The two slowest rules receive
 # 60% in total and the three faster rules receive 40%. Rules removed by the
@@ -158,6 +194,8 @@ EWMAC_SLOW_TILT_60_40 = {
     "32/128": 0.30,
     "64/256": 0.30,
 }
+SIGNAL_MODELS = ("multi_ewmac", RETURN_TSMOM_MODEL, GOULDING_MODEL)
+DIRECT_TSMOM_MODELS = (RETURN_TSMOM_MODEL, GOULDING_MODEL)
 
 
 def _selection_pysystemtrade_identity(
@@ -366,6 +404,305 @@ def _cached_forecast_audit(
     return audit
 
 
+def _goulding_forecast_cache_spec(
+    cache_root: Path,
+    *,
+    artifact: str,
+    history_code: str,
+    history_db_identity: dict[str, object],
+    cluster_by_history: dict[str, str],
+    signal_mode: str,
+    min_valid_observations: int,
+    source_identity: dict[str, object] | None = None,
+) -> tuple[Path, Path, dict[str, object], str]:
+    """Resolve one pooled Goulding forecast cache entry.
+
+    The complete calibration universe is part of the identity because a
+    change to any member can change pooled mixing parameters and continuous
+    forecast normalization for every target history.
+    """
+    identity: dict[str, object] = {
+        "forecast_cache_version": GOULDING_FORECAST_CACHE_VERSION,
+        "signal_model": GOULDING_MODEL,
+        "signal_mode": signal_mode,
+        "fast_months": GOULDING_FAST_MONTHS,
+        "slow_months": GOULDING_SLOW_MONTHS,
+        "target_abs_forecast": GOULDING_SELECTION_FORECAST_TARGET_ABS,
+        "forecast_cap": GOULDING_SELECTION_FORECAST_CAP,
+        "min_valid_observations": min_valid_observations,
+        "history_db": history_db_identity,
+        "hist_instr_code": history_code,
+        "cluster": cluster_by_history[history_code],
+        "calibration_universe": sorted(cluster_by_history.items()),
+    }
+    if source_identity is not None:
+        identity["source"] = source_identity
+    return _selection_backtest_cache_artifact(
+        cache_root,
+        artifact=artifact,
+        symbol=history_code,
+        identity=identity,
+    )
+
+
+def _goulding_forecast_cache_complete(
+    curve_path: Path,
+    manifest_path: Path,
+    expected_identity: dict[str, object],
+) -> bool:
+    """Check the atomic completion marker without loading the forecast frame."""
+    if not curve_path.is_file() or not manifest_path.is_file():
+        return False
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
+    if not isinstance(manifest, dict):
+        return False
+    if (
+        manifest.get("identity") != expected_identity
+        or not isinstance(manifest.get("forecast_audit"), dict)
+    ):
+        return False
+    try:
+        columns = set(pl.scan_parquet(curve_path).collect_schema().names())
+    except (OSError, ValueError, pl.exceptions.PolarsError):
+        return False
+    return {
+        "date",
+        "combined_forecast",
+        "forecast_valid",
+        "point_vol",
+        "point_change",
+    } <= columns
+
+
+def _load_goulding_forecast_result(
+    cache_spec: tuple[Path, Path, dict[str, object], str],
+) -> CombinedForecastResult:
+    """Load a cached forecast frame and its typed eligibility audit."""
+    curve_path, manifest_path, identity, _ = cache_spec
+    cached = _load_selection_backtest_curve(
+        curve_path,
+        manifest_path,
+        expected_identity=identity,
+        required_columns=(
+            "date",
+            "combined_forecast",
+            "forecast_valid",
+            "point_vol",
+            "point_change",
+        ),
+    )
+    if cached is None:
+        raise RuntimeError(
+            f"Goulding forecast cache entry is missing or invalid: {curve_path}"
+        )
+    frame, manifest = cached
+    audit = _cached_forecast_audit(manifest)
+    if audit is None:
+        raise RuntimeError(
+            f"Goulding forecast cache has no audit metadata: {manifest_path}"
+        )
+    return CombinedForecastResult(
+        frame=frame,
+        weights={GOULDING_MODEL: 1.0},
+        fdm=1.0,
+        audit=audit,
+    )
+
+
+def _ensure_goulding_reference_forecast_cache(
+    cache_root: Path,
+    *,
+    history_provider: PysystemtradeHistoryProvider,
+    history_db_identity: dict[str, object],
+    cluster_by_history: dict[str, str],
+    signal_mode: str,
+    min_valid_observations: int,
+) -> dict[str, tuple[Path, Path, dict[str, object], str]]:
+    """Reuse pooled reference forecasts, building the universe only on misses."""
+    cache_specs = {
+        history_code: _goulding_forecast_cache_spec(
+            cache_root,
+            artifact="goulding_reference_forecast",
+            history_code=history_code,
+            history_db_identity=history_db_identity,
+            cluster_by_history=cluster_by_history,
+            signal_mode=signal_mode,
+            min_valid_observations=min_valid_observations,
+        )
+        for history_code in sorted(cluster_by_history)
+    }
+    missing = [
+        history_code
+        for history_code, (curve_path, manifest_path, identity, _) in (
+            cache_specs.items()
+        )
+        if not _goulding_forecast_cache_complete(
+            curve_path,
+            manifest_path,
+            identity,
+        )
+    ]
+    if not missing:
+        logger.info(
+            "goulding_forecast_cache hit artifact=reference histories=%d",
+            len(cache_specs),
+        )
+        return cache_specs
+
+    logger.info(
+        "goulding_forecast_cache build artifact=reference histories=%d "
+        "missing=%d",
+        len(cache_specs),
+        len(missing),
+    )
+    histories = {
+        history_code: history_provider.load(history_code)
+        for history_code in sorted(cluster_by_history)
+    }
+    results = build_goulding_selection_forecasts(
+        histories,
+        cluster_by_history,
+        signal_mode=signal_mode,
+        min_valid_observations=min_valid_observations,
+    )
+    for history_code in missing:
+        curve_path, manifest_path, identity, cache_key = cache_specs[
+            history_code
+        ]
+        result = results[history_code]
+        _write_selection_backtest_curve(
+            result.frame,
+            curve_path,
+            manifest_path,
+            identity=identity,
+            cache_key=cache_key,
+            metadata={"forecast_audit": result.audit},
+        )
+    del results, histories
+    gc.collect()
+    return cache_specs
+
+
+def _return_tsmom_scalar_cache_spec(
+    cache_root: Path,
+    *,
+    history_db_identity: dict[str, object],
+    calibration_universe: list[str],
+    fast_window: int,
+    slow_window: int,
+    vol_fast_window: int | None,
+    vol_slow_window: int | None,
+    regime_discount: float,
+) -> tuple[Path, Path, dict[str, object], str]:
+    """Resolve the causal pooled return-TSMOM scalar cache artifact."""
+    return _selection_backtest_cache_artifact(
+        cache_root,
+        artifact="return_tsmom_scalar",
+        symbol="pooled",
+        identity={
+            "scalar_cache_version": RETURN_TSMOM_SCALAR_CACHE_VERSION,
+            "signal_model": RETURN_TSMOM_MODEL,
+            "history_db": history_db_identity,
+            "calibration_universe": calibration_universe,
+            "fast_window": fast_window,
+            "slow_window": slow_window,
+            "vol_fast_window": vol_fast_window,
+            "vol_slow_window": vol_slow_window,
+            "regime_discount": regime_discount,
+            "target_abs_forecast": EWMAC_FORECAST_TARGET_ABS,
+            "forecast_cap": EWMAC_FORECAST_CAP,
+            "scalar_min_periods": EWMAC_SCALAR_MIN_PERIODS,
+        },
+    )
+
+
+def _ensure_return_tsmom_scalar_cache(
+    cache_root: Path,
+    *,
+    history_provider: PysystemtradeHistoryProvider,
+    history_db_identity: dict[str, object],
+    calibration_universe: list[str],
+    fast_window: int,
+    slow_window: int,
+    vol_fast_window: int | None,
+    vol_slow_window: int | None,
+    regime_discount: float,
+    min_valid_observations: int,
+) -> tuple[pl.DataFrame, dict[str, CombinedForecastResult]]:
+    """Load the pooled scalar or build it once from reference histories.
+
+    The raw results are returned only on a cache miss so the current run can
+    reuse the work while constructing per-symbol reference bases. A cache hit
+    avoids materializing the full reference universe.
+    """
+    spec = _return_tsmom_scalar_cache_spec(
+        cache_root,
+        history_db_identity=history_db_identity,
+        calibration_universe=calibration_universe,
+        fast_window=fast_window,
+        slow_window=slow_window,
+        vol_fast_window=vol_fast_window,
+        vol_slow_window=vol_slow_window,
+        regime_discount=regime_discount,
+    )
+    curve_path, manifest_path, identity, cache_key = spec
+    cached = _load_selection_backtest_curve(
+        curve_path,
+        manifest_path,
+        expected_identity=identity,
+        required_columns=(
+            "date",
+            "forecast_scalar",
+            "scalar_valid",
+            "historical_mean_abs_forecast",
+        ),
+    )
+    if cached is not None:
+        logger.info(
+            "return_tsmom_scalar_cache hit histories=%d key=%s path=%s",
+            len(calibration_universe),
+            cache_key,
+            curve_path,
+        )
+        return cached[0], {}
+
+    logger.info(
+        "return_tsmom_scalar_cache build histories=%d key=%s",
+        len(calibration_universe),
+        cache_key,
+    )
+    raw_results: dict[str, CombinedForecastResult] = {}
+    for history_code in calibration_universe:
+        raw_results[history_code] = build_return_tsmom_forecast(
+            history_provider.load(history_code),
+            fast_window=fast_window,
+            slow_window=slow_window,
+            vol_fast_window=vol_fast_window,
+            vol_slow_window=vol_slow_window,
+            regime_discount=regime_discount,
+            min_valid_observations=min_valid_observations,
+        )
+    scalar_history = estimate_return_tsmom_scalar_history(raw_results)
+    _write_selection_backtest_curve(
+        scalar_history,
+        curve_path,
+        manifest_path,
+        identity=identity,
+        cache_key=cache_key,
+    )
+    logger.info(
+        "return_tsmom_scalar_cache write histories=%d rows=%d key=%s path=%s",
+        len(calibration_universe),
+        scalar_history.height,
+        cache_key,
+        curve_path,
+    )
+    return scalar_history, raw_results
+
+
 def slow_tilt_ewmac_weights(
     eligible_rules: str | Iterable[str],
 ) -> dict[str, float]:
@@ -384,6 +721,24 @@ def _parse_rules(eligible_rules: str | Iterable[str]) -> list[str]:
     if isinstance(eligible_rules, str):
         return [rule.strip() for rule in eligible_rules.split(",") if rule.strip()]
     return [str(rule).strip() for rule in eligible_rules if str(rule).strip()]
+
+
+def _is_micro_contract(source_row: dict[str, object]) -> bool:
+    """Identify a micro execution route from persisted market metadata.
+
+    Upstream instrument codes are not uniform: some contain ``_micro`` while
+    others, including MBT and M2K, expose the size only in ``desc``. Matching
+    the explicit ``micro`` token across both fields avoids symbol heuristics
+    that would misclassify full contracts with nonstandard codes.
+    """
+    identity = " ".join(
+        str(source_row.get(field) or "")
+        for field in ("pst_instr_code", "desc", "description")
+    )
+    return (
+        re.search(r"(?:^|[^a-z])micro(?:[^a-z]|$)", identity.lower())
+        is not None
+    )
 
 
 def _resolve_stitched_signal_history_code(
@@ -593,11 +948,11 @@ def parse_args(argv=None, *, complete_default: bool = False):
     parser.set_defaults(complete=complete_default)
     parser.add_argument(
         "--history-db",
-        "--pysystemtrade-db",
+        "--reference-history-db",
         dest="history_db",
         type=Path,
         default=DEFAULT_PYSYSTEMTRADE_DB_PATH,
-        help="Historical signal database used to construct EWMAC forecasts.",
+        help="Reference signal database used to construct forecasts.",
     )
     parser.add_argument(
         "--ib-history-db",
@@ -605,16 +960,17 @@ def parse_args(argv=None, *, complete_default: bool = False):
         help=(
             "Optional stored IB dated-contract database. When supplied, the "
             "cash P&L and scheduled-selection inputs use offline stitched "
-            "PST/IB history with PST retained before the IB handoff."
+            "reference/IB history with reference data retained before the "
+            "IB handoff."
         ),
     )
     parser.add_argument(
         "--ib-history-live",
-        choices=("missing", "update"),
+        choices=("missing", "snapshot", "update"),
         help=(
-            "Opt in to live IB history acquisition. 'missing' first uses "
-            "stored history and requests IB when the load fails or returns "
-            "no IB segment; "
+            "IB history refresh policy. 'missing' requests IB only when no "
+            "usable IB segment is cached; 'snapshot' refreshes only when the "
+            "cached tail ends before the input snapshot's ib_fast_end; "
             "'update' refreshes every selected signal history from IB."
         ),
     )
@@ -653,7 +1009,7 @@ def parse_args(argv=None, *, complete_default: bool = False):
         default=DEFAULT_GLOBEX_DB_PATH,
         help=(
             "Accepted for command compatibility; v1 selection uses a direct "
-            "PST-to-IB splice and does not insert a Globex segment."
+            "reference-to-IB splice and does not insert a Globex segment."
         ),
     )
     parser.add_argument(
@@ -663,20 +1019,11 @@ def parse_args(argv=None, *, complete_default: bool = False):
         help="Broker contract mapping used to read stored IB dated contracts.",
     )
     parser.add_argument(
-        "--history-cache-root",
+        "--cache",
         type=Path,
-        default=DEFAULT_FUTURES_CACHE_ROOT,
         help=(
-            "Parquet cache root for versioned selection backtest artifacts."
-        ),
-    )
-    parser.add_argument(
-        "--stitched-history-cache-root",
-        type=Path,
-        default=DEFAULT_FUTURES_CACHE_ROOT,
-        help=(
-            "Cache root for source-history PST/IB stitched bundles; defaults "
-            "to the project .cache/futures directory."
+            "Required for complete selection; root for reference, stitched "
+            "history, and versioned selection backtest caches."
         ),
     )
     parser.add_argument(
@@ -701,6 +1048,74 @@ def parse_args(argv=None, *, complete_default: bool = False):
         help=(
             "Fixed forecast diversification multiplier applied after the "
             "static eligible-rule weights (default: 1.0)."
+        ),
+    )
+    parser.add_argument(
+        "--signal-model",
+        choices=SIGNAL_MODELS,
+        required=True,
+        help=(
+            "Required forecast used by selection and cash replay. "
+            "'multi_ewmac' keeps "
+            "the existing cost-gated rule combination; 'return_tsmom' uses "
+            "the original continuous return signal; 'goulding' uses the "
+            "monthly pooled Goulding signal. All models retain the same "
+            "selection, roll schedule, buffering, and cost path."
+        ),
+    )
+    parser.add_argument(
+        "--goulding-signal-mode",
+        choices=GOULDING_SIGNAL_MODES,
+        default="binary",
+        help=(
+            "Forecast magnitude for --signal-model goulding: 'binary' emits "
+            "+/-1 directions; 'continuous' retains causally normalized raw "
+            "monthly-return magnitude; 'sharpe' normalizes the raw fast and "
+            "slow legs by their own lagged RMS monthly volatility before "
+            "the same causal pooled scaling (default: binary)."
+        ),
+    )
+    parser.add_argument(
+        "--fast-window",
+        type=int,
+        default=DEFAULT_FAST_WINDOW,
+        help=(
+            "Fast return horizon for --signal-model return_tsmom "
+            f"(default: {DEFAULT_FAST_WINDOW} trading days)."
+        ),
+    )
+    parser.add_argument(
+        "--slow-window",
+        type=int,
+        default=DEFAULT_SLOW_WINDOW,
+        help=(
+            "Slow return horizon for --signal-model return_tsmom "
+            f"(default: {DEFAULT_SLOW_WINDOW} trading days)."
+        ),
+    )
+    parser.add_argument(
+        "--vol-fast-window",
+        type=int,
+        help=(
+            "Optional fast volatility horizon for return_tsmom; defaults to "
+            "--fast-window."
+        ),
+    )
+    parser.add_argument(
+        "--vol-slow-window",
+        type=int,
+        help=(
+            "Optional slow volatility horizon for return_tsmom; defaults to "
+            "--slow-window."
+        ),
+    )
+    parser.add_argument(
+        "--regime-discount",
+        type=float,
+        default=0.5,
+        help=(
+            "Return forecast multiplier in correction and rebound regimes "
+            "for return_tsmom (default: 0.5)."
         ),
     )
     parser.add_argument(
@@ -788,6 +1203,33 @@ def parse_args(argv=None, *, complete_default: bool = False):
             "Maximum instrument weight multiplied by trial IDM for position, "
             "liquidity, and margin calculations; --starting-weight remains "
             "a backward-compatible alias"
+        ),
+    )
+    parser.add_argument(
+        "--min-instr-per-class",
+        type=int,
+        help=(
+            "Optional hard-feasibility-gated minimum instruments in every "
+            "represented asset class; class coverage precedes subclass coverage"
+        ),
+    )
+    parser.add_argument(
+        "--min-instr-per-subclass",
+        type=int,
+        help=(
+            "Optional hard-feasibility-gated minimum instruments in every "
+            "represented economic subclass; coverage additions are score-ranked"
+        ),
+    )
+    parser.add_argument(
+        "--selection-min-book-count",
+        "--min-book-count",
+        dest="selection_min_book_count",
+        type=int,
+        default=15,
+        help=(
+            "Minimum book breadth after hierarchy coverage (default: 15); "
+            "active only when a class or subclass minimum is enabled"
         ),
     )
     parser.add_argument(
@@ -884,12 +1326,23 @@ def parse_args(argv=None, *, complete_default: bool = False):
         ),
     )
     parser.add_argument(
+        "--backtest-capital-mode",
+        choices=BACKTEST_CAPITAL_MODES,
+        default="compounded",
+        help=(
+            "Capital policy for executable cash P&L. 'fixed' always sizes, "
+            "reviews selection, and normalizes returns with initial capital; "
+            "'compounded' uses lagged portfolio equity (default)."
+        ),
+    )
+    parser.add_argument(
         "--selection-rebalance",
         choices=("static", "yearly", "monthly"),
         default="static",
         help=(
             "Cadence for rerunning instrument selection from lagged data and "
-            "prior net equity. 'static' preserves one fixed book; 'yearly' "
+            "the configured backtest capital. 'static' preserves one fixed "
+            "book; 'yearly' "
             "or 'monthly' holds each selected book until the next scheduled "
             "review. Costs remain the saved fixed calibration."
         ),
@@ -905,13 +1358,128 @@ def parse_args(argv=None, *, complete_default: bool = False):
             "reference-to-IB splice."
         ),
     )
+    parser.add_argument(
+        "--selection-eligibility-hysteresis-pct",
+        "--selection-eligibility-exit-buffer-pct",
+        dest="selection_eligibility_hysteresis_pct",
+        type=float,
+        default=0.0,
+        help=(
+            "Incumbent eligibility hysteresis in percent for selection cost "
+            "and market-participation exit gates (default: 0, disabled). "
+            "The exit-buffer spelling is retained as a compatibility alias. "
+            "Contract granularity and other hard gates are unchanged."
+        ),
+    )
+    parser.add_argument(
+        "--selection-membership-hysteresis",
+        choices=("none", "rank", "score", "rank_score"),
+        default="none",
+        help=(
+            "Scheduled-review membership policy: always take the raw book, "
+            "apply an index-style rank band, apply the score and transition-"
+            "cost hurdle, or apply rank then score (default: none)."
+        ),
+    )
+    parser.add_argument(
+        "--selection-rank-buffer-pct",
+        type=float,
+        default=15.0,
+        help=(
+            "Symmetric rank band as a percent of the lagged EWMA book-count "
+            "state for rank or rank_score hysteresis (default: 15)."
+        ),
+    )
+    parser.add_argument(
+        "--selection-rank-count-ewma-halflife-reviews",
+        type=float,
+        default=None,
+        help=(
+            "Half-life, in completed selection reviews, for the causal "
+            "accepted-book count state used by rank hysteresis. Defaults to "
+            "3 yearly reviews or 12 monthly reviews. The current review is "
+            "never included in its own rank-count anchor."
+        ),
+    )
+    parser.add_argument(
+        "--selection-book-score-buffer-pct",
+        type=float,
+        default=2.0,
+        help=(
+            "Minimum net score improvement over the prior book after "
+            "estimated transition cost, as a percent of the prior book "
+            "score (default: 2)."
+        ),
+    )
+    parser.add_argument(
+        "--selection-prefer-full-contracts",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Prefer a hard-feasible full contract over a hard-feasible micro "
+            "for the same economic family (default: disabled). A micro remains "
+            "available when its full-size sibling is infeasible."
+        ),
+    )
+    parser.add_argument(
+        "--selection-report-mode",
+        choices=("full", "compact"),
+        default="full",
+        help=(
+            "Selection audit detail: full persists daily forecast/reference "
+            "panels and every scheduled greedy trial allocation; compact "
+            "keeps books, final review allocations, cash P&L, and portfolio "
+            "curves while omitting those duplicated high-volume reports "
+            "(default: full)."
+        ),
+    )
     return parser.parse_args(argv)
 
 
-def _default_output_path(output_dir: Path, generated_at: datetime) -> Path:
+def _signal_report_prefix(args: argparse.Namespace) -> str:
+    """Return the stable report prefix for the selected forecast model."""
+    if args.signal_model == RETURN_TSMOM_MODEL:
+        return "return_tsmom"
+    if args.signal_model == GOULDING_MODEL:
+        return f"goulding_{args.goulding_signal_mode}"
+    return "multi_speed_ewmac"
+
+
+def _signal_public_provenance(
+    frame: pl.DataFrame,
+    *,
+    args: argparse.Namespace,
+) -> pl.DataFrame:
+    """Use source neutral reference naming in direct TSMOM reports."""
+    if args.signal_model not in DIRECT_TSMOM_MODELS:
+        return frame
+    provider_column = next(
+        (
+            column
+            for column in frame.columns
+            if column.endswith("_instr_code")
+            and column not in {"hist_instr_code", "ref_instr_code"}
+        ),
+        None,
+    )
+    return (
+        frame.rename({provider_column: "ref_instr_code"})
+        if provider_column is not None
+        else frame
+    )
+
+
+def _default_output_path(
+    output_dir: Path,
+    generated_at: datetime,
+    *,
+    args: argparse.Namespace,
+) -> Path:
     """Return the timestamped candidate path in ``output_dir``."""
     stamp = generated_at.astimezone(REPORT_TIMEZONE).strftime("%Y%m%d_%H%M%S")
-    return output_dir / f"multi_speed_ewmac_selection_candidates_{stamp}.parquet"
+    return output_dir / (
+        f"{_signal_report_prefix(args)}_selection_candidates_{stamp}.parquet"
+    )
 
 
 def _number_token(value: float) -> str:
@@ -945,8 +1513,22 @@ def _selection_scenario_id(
         f"bm{_optional_number_token(effective_book_margin_pct)}",
         f"wi{_number_token(args.max_weight_idm)}",
         f"st{_number_token(args.score_threshold)}",
-        f"fdm{_number_token(args.forecast_fdm)}",
     ]
+    if args.signal_model == RETURN_TSMOM_MODEL:
+        tokens[:0] = [RETURN_TSMOM_MODEL]
+        tokens.extend((
+            f"fw{args.fast_window}",
+            f"sw{args.slow_window}",
+            f"rd{_number_token(args.regime_discount)}",
+        ))
+        if args.vol_fast_window is not None:
+            tokens.append(f"vfw{args.vol_fast_window}")
+        if args.vol_slow_window is not None:
+            tokens.append(f"vsw{args.vol_slow_window}")
+    elif args.signal_model == GOULDING_MODEL:
+        tokens[:0] = [GOULDING_MODEL, args.goulding_signal_mode]
+    else:
+        tokens.append(f"fdm{_number_token(args.forecast_fdm)}")
     if (
         args.low_contract_penalty_scale
         or args.high_contract_penalty_scale
@@ -961,18 +1543,48 @@ def _selection_scenario_id(
         ))
     if args.max_instr_per_class is not None:
         tokens.append(f"ic{args.max_instr_per_class}")
+    if args.min_instr_per_class is not None:
+        tokens.append(f"minc{args.min_instr_per_class}")
+    if args.min_instr_per_subclass is not None:
+        tokens.append(f"mins{args.min_instr_per_subclass}")
+    if (
+        args.min_instr_per_class is not None
+        or args.min_instr_per_subclass is not None
+    ):
+        tokens.append(f"mb{args.selection_min_book_count}")
     if args.max_class_weight_pct is not None:
         tokens.append(f"cw{_number_token(args.max_class_weight_pct)}")
     if args.max_subclass_weight_pct is not None:
         tokens.append(f"sw{_number_token(args.max_subclass_weight_pct)}")
+    if args.selection_prefer_full_contracts:
+        tokens.append("full1")
     tokens.extend((
         f"cl{subclass}",
         f"roll{int(args.include_roll_cost_in_score)}",
         args.weight_policy,
     ))
+    if args.backtest_capital_mode == "fixed":
+        tokens.append("capfixed")
     if args.selection_rebalance != "static":
         tokens.append(f"sel{args.selection_rebalance}")
         tokens.append(f"hg{args.selection_max_history_gap_days}")
+        tokens.append(
+            "eh"
+            f"{_number_token(args.selection_eligibility_hysteresis_pct)}"
+        )
+        tokens.append(f"mh{args.selection_membership_hysteresis}")
+        if args.selection_membership_hysteresis in {"rank", "rank_score"}:
+            tokens.append(
+                f"rb{_number_token(args.selection_rank_buffer_pct)}"
+            )
+            tokens.append(
+                "rhl"
+                f"{_number_token(_active_rank_count_ewma_halflife_reviews(args))}"
+            )
+        if args.selection_membership_hysteresis in {"score", "rank_score"}:
+            tokens.append(
+                f"sb{_number_token(args.selection_book_score_buffer_pct)}"
+            )
     if args.backtest_start_date is not None:
         tokens.append(f"from{args.backtest_start_date:%Y%m%d}")
     if args.backtest_end_date is not None:
@@ -1157,11 +1769,51 @@ def _subsystem_reference_correlation(
     return correlation, covered, wide_frame
 
 
+def _active_rank_buffer_percent(args: argparse.Namespace) -> float | None:
+    """Return the configured rank band only when its membership mode uses it."""
+    if args.selection_membership_hysteresis in {"rank", "rank_score"}:
+        return float(args.selection_rank_buffer_pct)
+    return None
+
+
+def _active_rank_count_ewma_halflife_reviews(
+    args: argparse.Namespace,
+) -> float | None:
+    """Return the effective causal count half-life for rank membership modes."""
+    if args.selection_membership_hysteresis not in {"rank", "rank_score"}:
+        return None
+    if args.selection_rank_count_ewma_halflife_reviews is not None:
+        return float(args.selection_rank_count_ewma_halflife_reviews)
+    if args.selection_rebalance == "yearly":
+        return 3.0
+    if args.selection_rebalance == "monthly":
+        return 12.0
+    return None
+
+
+def _active_book_score_buffer_percent(args: argparse.Namespace) -> float | None:
+    """Return the score hurdle only when its membership mode uses it."""
+    if args.selection_membership_hysteresis in {"score", "rank_score"}:
+        return float(args.selection_book_score_buffer_pct)
+    return None
+
+
+def _active_minimum_book_count(args: argparse.Namespace) -> int | None:
+    """Return minimum breadth only when hierarchy coverage is enabled."""
+    if (
+        args.min_instr_per_class is not None
+        or args.min_instr_per_subclass is not None
+    ):
+        return int(args.selection_min_book_count)
+    return None
+
+
 def _greedy_selector(
     *,
     capital: float,
     run_config: dict[str, object],
     args: argparse.Namespace,
+    rank_count_anchor: int | None = None,
 ) -> GreedyInstrumentSelector:
     """Build one selector using the supplied point-in-time account capital."""
     if args.weight_policy == "legacy_handcraft":
@@ -1189,6 +1841,9 @@ def _greedy_selector(
             max_pct_market_volume=float(run_config["max_pct_mkt_volume"]),
             liquidity_days=int(run_config["liq_days"]),
             include_roll_cost_in_score=args.include_roll_cost_in_score,
+            min_instruments_per_class=args.min_instr_per_class,
+            min_instruments_per_subclass=args.min_instr_per_subclass,
+            minimum_book_count=args.selection_min_book_count,
             max_instruments_per_class=args.max_instr_per_class,
             max_instruments_per_subclass=args.max_instr_per_subclass,
             max_asset_class_weight=(
@@ -1201,6 +1856,14 @@ def _greedy_selector(
             ),
             max_instrument_margin_pct=args.max_instr_margin_pct,
             max_book_margin_pct=effective_book_margin_pct,
+            eligibility_hysteresis_percent=(
+                args.selection_eligibility_hysteresis_pct
+            ),
+            membership_hysteresis=args.selection_membership_hysteresis,
+            rank_buffer_percent=args.selection_rank_buffer_pct,
+            rank_count_anchor=rank_count_anchor,
+            book_score_buffer_percent=args.selection_book_score_buffer_pct,
+            prefer_full_contracts=args.selection_prefer_full_contracts,
         ),
         weight_policy=weight_policy,
     )
@@ -1225,6 +1888,7 @@ class _WalkForwardSelectionProvider:
         source_rows: dict[str, dict[str, object]],
         audit_by_symbol: dict[str, dict[str, object]],
         reference_frames: dict[str, pl.DataFrame | pl.LazyFrame],
+        live_tail_start_by_symbol: dict[str, date],
         run_config: dict[str, object],
         args: argparse.Namespace,
     ) -> None:
@@ -1233,6 +1897,7 @@ class _WalkForwardSelectionProvider:
         self.source_rows = source_rows
         self.audit_by_symbol = audit_by_symbol
         self.reference_frames = reference_frames
+        self.live_tail_start_by_symbol = live_tail_start_by_symbol
         self.run_config = run_config
         self.args = args
         self.latest_selection = None
@@ -1243,7 +1908,31 @@ class _WalkForwardSelectionProvider:
         self.review_instrument_rows: list[dict[str, object]] = []
         self.review_trial_rows: list[dict[str, object]] = []
         self.review_trial_allocation_rows: list[dict[str, object]] = []
-        self.prior_selected: set[str] = set()
+        self.review_final_allocation_rows: list[dict[str, object]] = []
+        self.prior_selected: tuple[str, ...] = ()
+        self.rank_count_ewma: float | None = None
+
+    def _rank_count_anchor(self) -> tuple[float | None, int | None]:
+        """Return the lagged EWMA state and its rounded causal rank anchor."""
+        if self.args.selection_membership_hysteresis not in {"rank", "rank_score"}:
+            return self.rank_count_ewma, None
+        if self.rank_count_ewma is None:
+            return None, None
+        rounded_anchor = math.floor(self.rank_count_ewma + 0.5)
+        return self.rank_count_ewma, max(1, rounded_anchor)
+
+    def _update_rank_count_ewma(self, accepted_count: int) -> None:
+        """Advance the accepted-book count state after a completed review."""
+        halflife = _active_rank_count_ewma_halflife_reviews(self.args)
+        if halflife is None:
+            return
+        if self.rank_count_ewma is None:
+            self.rank_count_ewma = float(accepted_count)
+            return
+        alpha = 1.0 - math.exp(math.log(0.5) / halflife)
+        self.rank_count_ewma = (
+            alpha * accepted_count + (1.0 - alpha) * self.rank_count_ewma
+        )
 
     @staticmethod
     def _finite(value: object) -> float | None:
@@ -1291,6 +1980,8 @@ class _WalkForwardSelectionProvider:
         )
         if review_date not in self.review_dates:
             return None
+
+        rank_count_ewma_state, rank_count_anchor = self._rank_count_anchor()
 
         candidates: list[SelectionCandidate] = []
         histories: dict[str, pl.DataFrame] = {}
@@ -1347,7 +2038,33 @@ class _WalkForwardSelectionProvider:
             daily_dollar_vol = self._finite(latest["daily_dvol"][0])
             fx_to_usd = self._finite(latest["fx_to_usd"][0])
             turnover = self._finite(audit.get("comb_turnover"))
-            average_volume = self._finite(row.get("avg_daily_volume"))
+            live_tail_start = self.live_tail_start_by_symbol.get(symbol)
+            live_execution_overlay = (
+                live_tail_start is not None and review_date >= live_tail_start
+            )
+            if live_execution_overlay:
+                live_rejections = []
+                if not bool(row.get("volume_elig")):
+                    live_rejections.append("volume_ineligible")
+                if not bool(row.get("exec_elig")):
+                    live_rejections.append("execution_ineligible")
+                if row.get("ib_avail") != "contract_qualified":
+                    live_rejections.append("ib_contract_unqualified")
+                if live_rejections:
+                    logger.debug(
+                        "walk_forward_selection candidate_rejected date=%s "
+                        "symbol=%s reason=live_execution_overlay details=%s "
+                        "live_tail_start=%s",
+                        review_date,
+                        symbol,
+                        ",".join(live_rejections),
+                        live_tail_start,
+                    )
+                    continue
+            average_volume = (
+                self._finite(row.get("avg_daily_volume"))
+                if live_execution_overlay else None
+            )
             margin_to_ann_dvol = self._finite(
                 row.get("initial_margin_to_ann_dvol")
             )
@@ -1358,8 +2075,10 @@ class _WalkForwardSelectionProvider:
                 or fx_to_usd is None
                 or fx_to_usd <= 0
                 or turnover is None
-                or average_volume is None
-                or average_volume <= 0
+                or (
+                    live_execution_overlay
+                    and (average_volume is None or average_volume <= 0)
+                )
                 or ann_rolls is None
             ):
                 continue
@@ -1380,8 +2099,37 @@ class _WalkForwardSelectionProvider:
                 continue
             trade_cost, roll_cost = costs
             trade_sr = trade_cost / annual_dollar_vol
-            if trade_sr > float(self.run_config["cost_lim_sr"]):
+            cost_exit_multiplier = (
+                1.0
+                + self.args.selection_eligibility_hysteresis_pct / 100.0
+                if symbol in self.prior_selected else 1.0
+            )
+            entry_cost_limit_sr = float(self.run_config["cost_lim_sr"])
+            exit_cost_limit_sr = entry_cost_limit_sr * cost_exit_multiplier
+            if trade_sr > exit_cost_limit_sr:
+                logger.debug(
+                    "walk_forward_selection candidate_rejected date=%s "
+                    "symbol=%s reason=trade_cost_limit trade_cost_sr=%s "
+                    "entry_limit_sr=%s exit_limit_sr=%s incumbent=%s",
+                    review_date,
+                    symbol,
+                    trade_sr,
+                    entry_cost_limit_sr,
+                    exit_cost_limit_sr,
+                    symbol in self.prior_selected,
+                )
                 continue
+            if trade_sr > entry_cost_limit_sr:
+                logger.debug(
+                    "walk_forward_selection incumbent_retained_by_cost_buffer "
+                    "date=%s symbol=%s trade_cost_sr=%s entry_limit_sr=%s "
+                    "exit_limit_sr=%s",
+                    review_date,
+                    symbol,
+                    trade_sr,
+                    entry_cost_limit_sr,
+                    exit_cost_limit_sr,
+                )
             initial_margin = (
                 margin_to_ann_dvol * annual_dollar_vol
                 if margin_to_ann_dvol is not None
@@ -1410,7 +2158,12 @@ class _WalkForwardSelectionProvider:
                 asset_class=str(row["asset_cls"]),
                 economic_subclass=str(row["econ_subcls"]),
                 econ_family=str(row.get("econ_fam_id") or ""),
-                mkt_risk_vol_day=average_volume * annual_dollar_vol,
+                is_micro_contract=_is_micro_contract(row),
+                mkt_risk_vol_day=(
+                    average_volume * annual_dollar_vol
+                    if average_volume is not None else None
+                ),
+                enforce_market_participation=live_execution_overlay,
                 initial_margin_usd=initial_margin,
                 roll_sr=roll_cost / annual_dollar_vol,
                 ann_rolls=ann_rolls,
@@ -1446,38 +2199,152 @@ class _WalkForwardSelectionProvider:
         candidates = [candidates[index] for index in keep]
         symbols = [candidate.symbol for candidate in candidates]
         correlation = correlation[np.ix_(keep, keep)]
-        selection = _greedy_selector(
+        selector = _greedy_selector(
             capital=prior_net_equity,
             run_config=self.run_config,
             args=self.args,
-        ).select(candidates, correlation)
-        # Preserve the complete dated greedy decision path. The normal trial
-        # reports below describe only the initial static selection; attaching
-        # review date and lagged equity here makes later CL/MCL and margin
-        # decisions independently auditable.
-        self.review_trial_rows.extend(
-            {
-                **trial,
-                "selection_date": review_date,
-                "selection_equity_usd": prior_net_equity,
-                "maximum_instruments_per_class": self.args.max_instr_per_class,
-                "maximum_instruments_per_subclass": (
-                    self.args.max_instr_per_subclass
-                ),
-                "maximum_asset_class_weight_percent": (
-                    self.args.max_class_weight_pct
-                ),
-                "maximum_economic_subclass_weight_percent": (
-                    self.args.max_subclass_weight_pct
-                ),
-            }
-            for trial in selection.trials
+            rank_count_anchor=rank_count_anchor,
         )
-        self.review_trial_allocation_rows.extend(
+        selection = selector.select(
+            candidates,
+            correlation,
+            prior_selected=self.prior_selected,
+        )
+        self._update_rank_count_ewma(len(selection.selected))
+        # Full standalone audits retain every rejected dated trial. Grid runs
+        # use compact mode because accumulating millions of wide Python dicts
+        # per scenario dominates both memory and disk without affecting the
+        # accepted book, cash replay, or final review allocations.
+        if self.args.selection_report_mode == "full":
+            self.review_trial_rows.extend(
+                {
+                    **trial,
+                    "selection_date": review_date,
+                    "selection_equity_usd": prior_net_equity,
+                    "backtest_capital_mode": self.args.backtest_capital_mode,
+                    "preference_rank": (selection.preference_ranks or {}).get(
+                        str(trial["candidate"])
+                    ),
+                    "minimum_instruments_per_class": self.args.min_instr_per_class,
+                    "minimum_instruments_per_subclass": (
+                        self.args.min_instr_per_subclass
+                    ),
+                    "minimum_book_count": _active_minimum_book_count(self.args),
+                    "maximum_instruments_per_class": self.args.max_instr_per_class,
+                    "maximum_instruments_per_subclass": (
+                        self.args.max_instr_per_subclass
+                    ),
+                    "maximum_asset_class_weight_percent": (
+                        self.args.max_class_weight_pct
+                    ),
+                    "maximum_economic_subclass_weight_percent": (
+                        self.args.max_subclass_weight_pct
+                    ),
+                    "selection_eligibility_hysteresis_percent": (
+                        self.args.selection_eligibility_hysteresis_pct
+                    ),
+                    "selection_membership_hysteresis": (
+                        self.args.selection_membership_hysteresis
+                    ),
+                    "selection_rank_buffer_percent": (
+                        _active_rank_buffer_percent(self.args)
+                    ),
+                    "selection_rank_count_ewma_halflife_reviews": (
+                        _active_rank_count_ewma_halflife_reviews(self.args)
+                    ),
+                    "rank_count_ewma_state": rank_count_ewma_state,
+                    "rank_count_anchor": selection.rank_count_anchor,
+                    "selection_book_score_buffer_percent": (
+                        _active_book_score_buffer_percent(self.args)
+                    ),
+                    "prior_book_score": selection.prior_book_score,
+                    "unbuffered_book_score": selection.unbuffered_book_score,
+                    "rank_buffered_book_score": (
+                        selection.rank_buffered_book_score
+                    ),
+                    "hysteresis_candidate_book_score": (
+                        selection.hysteresis_candidate_book_score
+                    ),
+                    "rank_buffer_count": selection.rank_buffer_count,
+                    "rank_entry_cutoff": selection.rank_entry_cutoff,
+                    "rank_exit_cutoff": selection.rank_exit_cutoff,
+                    "rank_buffer_reason": selection.rank_buffer_reason,
+                    "gross_score_gain": selection.gross_score_gain,
+                    "switch_cost_usd": selection.switch_cost_usd,
+                    "switch_cost_sr": selection.switch_cost_sr,
+                    "score_buffer_sr": selection.score_buffer_sr,
+                    "net_score_gain": selection.net_score_gain,
+                    "switch_accepted": selection.switch_accepted,
+                    "switch_reason": selection.switch_reason,
+                }
+                for trial in selection.trials
+            )
+            self.review_trial_allocation_rows.extend(
+                {
+                    **allocation_row,
+                    "selection_date": review_date,
+                    "selection_equity_usd": prior_net_equity,
+                    "backtest_capital_mode": self.args.backtest_capital_mode,
+                    "preference_rank": (selection.preference_ranks or {}).get(
+                        str(allocation_row["book_symbol"])
+                    ),
+                    "minimum_instruments_per_class": (
+                        self.args.min_instr_per_class
+                    ),
+                    "minimum_instruments_per_subclass": (
+                        self.args.min_instr_per_subclass
+                    ),
+                    "minimum_book_count": _active_minimum_book_count(self.args),
+                    "maximum_instruments_per_class": (
+                        self.args.max_instr_per_class
+                    ),
+                    "maximum_instruments_per_subclass": (
+                        self.args.max_instr_per_subclass
+                    ),
+                    "maximum_asset_class_weight_percent": (
+                        self.args.max_class_weight_pct
+                    ),
+                    "maximum_economic_subclass_weight_percent": (
+                        self.args.max_subclass_weight_pct
+                    ),
+                    "selection_eligibility_hysteresis_percent": (
+                        self.args.selection_eligibility_hysteresis_pct
+                    ),
+                    "selection_membership_hysteresis": (
+                        self.args.selection_membership_hysteresis
+                    ),
+                    "selection_rank_buffer_percent": (
+                        _active_rank_buffer_percent(self.args)
+                    ),
+                    "selection_rank_count_ewma_halflife_reviews": (
+                        _active_rank_count_ewma_halflife_reviews(self.args)
+                    ),
+                    "rank_count_ewma_state": rank_count_ewma_state,
+                    "rank_count_anchor": selection.rank_count_anchor,
+                    "selection_book_score_buffer_percent": (
+                        _active_book_score_buffer_percent(self.args)
+                    ),
+                }
+                for allocation_row in selection.trial_allocations
+            )
+        final_iteration = (
+            max(int(row["iteration"]) for row in selection.trials) + 1
+            if selection.trials else 0
+        )
+        self.review_final_allocation_rows.extend(
             {
                 **allocation_row,
                 "selection_date": review_date,
                 "selection_equity_usd": prior_net_equity,
+                "backtest_capital_mode": self.args.backtest_capital_mode,
+                "preference_rank": (selection.preference_ranks or {}).get(
+                    str(allocation_row["book_symbol"])
+                ),
+                "minimum_instruments_per_class": self.args.min_instr_per_class,
+                "minimum_instruments_per_subclass": (
+                    self.args.min_instr_per_subclass
+                ),
+                "minimum_book_count": _active_minimum_book_count(self.args),
                 "maximum_instruments_per_class": self.args.max_instr_per_class,
                 "maximum_instruments_per_subclass": (
                     self.args.max_instr_per_subclass
@@ -1488,8 +2355,65 @@ class _WalkForwardSelectionProvider:
                 "maximum_economic_subclass_weight_percent": (
                     self.args.max_subclass_weight_pct
                 ),
+                "selection_eligibility_hysteresis_percent": (
+                    self.args.selection_eligibility_hysteresis_pct
+                ),
+                "selection_membership_hysteresis": (
+                    self.args.selection_membership_hysteresis
+                ),
+                "selection_rank_buffer_percent": (
+                    _active_rank_buffer_percent(self.args)
+                ),
+                "selection_rank_count_ewma_halflife_reviews": (
+                    _active_rank_count_ewma_halflife_reviews(self.args)
+                ),
+                "rank_count_ewma_state": rank_count_ewma_state,
+                "rank_count_anchor": selection.rank_count_anchor,
+                "selection_book_score_buffer_percent": (
+                    _active_book_score_buffer_percent(self.args)
+                ),
+                "prior_book_score": selection.prior_book_score,
+                "unbuffered_book_score": selection.unbuffered_book_score,
+                "rank_buffered_book_score": selection.rank_buffered_book_score,
+                "hysteresis_candidate_book_score": (
+                    selection.hysteresis_candidate_book_score
+                ),
+                "rank_buffer_count": selection.rank_buffer_count,
+                "rank_entry_cutoff": selection.rank_entry_cutoff,
+                "rank_exit_cutoff": selection.rank_exit_cutoff,
+                "rank_buffer_reason": selection.rank_buffer_reason,
+                "gross_score_gain": selection.gross_score_gain,
+                "switch_cost_usd": selection.switch_cost_usd,
+                "switch_cost_sr": selection.switch_cost_sr,
+                "score_buffer_sr": selection.score_buffer_sr,
+                "net_score_gain": selection.net_score_gain,
+                "switch_accepted": selection.switch_accepted,
+                "switch_reason": selection.switch_reason,
+                "unbuffered_class_coverage_deficit": (
+                    selection.unbuffered_class_coverage_deficit
+                ),
+                "unbuffered_subclass_coverage_deficit": (
+                    selection.unbuffered_subclass_coverage_deficit
+                ),
+                "unbuffered_book_count_deficit": (
+                    selection.unbuffered_book_count_deficit
+                ),
+                "final_class_coverage_deficit": (
+                    selection.final_class_coverage_deficit
+                ),
+                "final_subclass_coverage_deficit": (
+                    selection.final_subclass_coverage_deficit
+                ),
+                "final_book_count_deficit": selection.final_book_count_deficit,
+                "coverage_satisfied": selection.coverage_satisfied,
+                "coverage_reason": selection.coverage_reason,
             }
-            for allocation_row in selection.trial_allocations
+            for allocation_row in selector._trial_allocation_rows(
+                final_iteration,
+                "membership_hysteresis",
+                selection.final_score,
+                accepted=True,
+            )
         )
         candidate_by_symbol = {
             candidate.symbol: candidate for candidate in candidates
@@ -1527,18 +2451,128 @@ class _WalkForwardSelectionProvider:
         self.latest_date = review_date
         self.latest_equity = prior_net_equity
         selected_symbols = set(selection.selected)
-        added_symbols = selected_symbols.difference(self.prior_selected)
-        removed_symbols = self.prior_selected.difference(selected_symbols)
+        prior_selected_symbols = set(self.prior_selected)
+        preference_ranks = selection.preference_ranks or {}
+        added_symbols = selected_symbols.difference(prior_selected_symbols)
+        removed_symbols = prior_selected_symbols.difference(selected_symbols)
+        logger.info(
+            "walk_forward_selection hysteresis date=%s mode=%s "
+            "prior_book=%s raw_book=%s rank_book=%s candidate_book=%s "
+            "accepted_book=%s prior_score=%s candidate_score=%s "
+            "rank_count_state=%s rank_count_anchor=%s rank_entry=%s "
+            "rank_exit=%s gross_score_gain=%s switch_cost_usd=%s "
+            "switch_cost_sr=%s score_buffer_sr=%s net_score_gain=%s "
+            "switch_accepted=%s class_coverage_deficit=%s "
+            "subclass_coverage_deficit=%s book_count_deficit=%s "
+            "coverage_satisfied=%s "
+            "coverage_reason=%s rank_reason=%s reason=%s",
+            review_date,
+            self.args.selection_membership_hysteresis,
+            ",".join(selection.prior_selected),
+            ",".join(selection.unbuffered_selected),
+            ",".join(selection.rank_buffered_selected),
+            ",".join(selection.hysteresis_candidate_selected),
+            ",".join(selection.selected),
+            selection.prior_book_score,
+            selection.hysteresis_candidate_book_score,
+            rank_count_ewma_state,
+            selection.rank_count_anchor,
+            selection.rank_entry_cutoff,
+            selection.rank_exit_cutoff,
+            selection.gross_score_gain,
+            selection.switch_cost_usd,
+            selection.switch_cost_sr,
+            selection.score_buffer_sr,
+            selection.net_score_gain,
+            selection.switch_accepted,
+            selection.final_class_coverage_deficit,
+            selection.final_subclass_coverage_deficit,
+            selection.final_book_count_deficit,
+            selection.coverage_satisfied,
+            selection.coverage_reason,
+            selection.rank_buffer_reason,
+            selection.switch_reason,
+        )
         self.review_rows.append({
             "selection_date": review_date,
             "selection_equity_usd": prior_net_equity,
+            "backtest_capital_mode": self.args.backtest_capital_mode,
             "selection_candidate_count": len(candidates),
             "selection_instrument_count": len(selection.selected),
             "selection_score": selection.final_score.score,
             "selection_idm": selection.final_score.idm,
             "selection_symbols": ",".join(selection.selected),
+            "selection_unbuffered_symbols": ",".join(
+                selection.unbuffered_selected
+            ),
+            "selection_ranked_symbols": ",".join(selection.ranked_symbols),
+            "selection_rank_buffered_symbols": (
+                ",".join(selection.rank_buffered_selected)
+                if self.args.selection_membership_hysteresis
+                in {"rank", "rank_score"}
+                else None
+            ),
+            "selection_hysteresis_candidate_symbols": ",".join(
+                selection.hysteresis_candidate_selected
+            ),
             "selection_added_symbols": ",".join(sorted(added_symbols)),
             "selection_removed_symbols": ",".join(sorted(removed_symbols)),
+            "selection_eligibility_hysteresis_percent": (
+                self.args.selection_eligibility_hysteresis_pct
+            ),
+            "selection_membership_hysteresis": (
+                self.args.selection_membership_hysteresis
+            ),
+            "selection_rank_buffer_percent": (
+                _active_rank_buffer_percent(self.args)
+            ),
+            "selection_rank_count_ewma_halflife_reviews": (
+                _active_rank_count_ewma_halflife_reviews(self.args)
+            ),
+            "rank_count_ewma_state": rank_count_ewma_state,
+            "rank_count_anchor": selection.rank_count_anchor,
+            "selection_live_execution_overlay_count": sum(
+                candidate.enforce_market_participation
+                for candidate in candidates
+            ),
+            "selection_book_score_buffer_percent": (
+                _active_book_score_buffer_percent(self.args)
+            ),
+            "prior_book_score": selection.prior_book_score,
+            "unbuffered_book_score": selection.unbuffered_book_score,
+            "rank_buffered_book_score": selection.rank_buffered_book_score,
+            "hysteresis_candidate_book_score": (
+                selection.hysteresis_candidate_book_score
+            ),
+            "rank_buffer_count": selection.rank_buffer_count,
+            "rank_entry_cutoff": selection.rank_entry_cutoff,
+            "rank_exit_cutoff": selection.rank_exit_cutoff,
+            "rank_buffer_reason": selection.rank_buffer_reason,
+            "gross_score_gain": selection.gross_score_gain,
+            "switch_cost_usd": selection.switch_cost_usd,
+            "switch_cost_sr": selection.switch_cost_sr,
+            "score_buffer_sr": selection.score_buffer_sr,
+            "net_score_gain": selection.net_score_gain,
+            "switch_accepted": selection.switch_accepted,
+            "switch_reason": selection.switch_reason,
+            "unbuffered_class_coverage_deficit": (
+                selection.unbuffered_class_coverage_deficit
+            ),
+            "unbuffered_subclass_coverage_deficit": (
+                selection.unbuffered_subclass_coverage_deficit
+            ),
+            "unbuffered_book_count_deficit": (
+                selection.unbuffered_book_count_deficit
+            ),
+            "final_class_coverage_deficit": (
+                selection.final_class_coverage_deficit
+            ),
+            "final_subclass_coverage_deficit": (
+                selection.final_subclass_coverage_deficit
+            ),
+            "final_book_count_deficit": selection.final_book_count_deficit,
+            "coverage_satisfied": selection.coverage_satisfied,
+            "coverage_reason": selection.coverage_reason,
         })
         for symbol in sorted(selected_symbols | removed_symbols):
             active = symbol in selected_symbols
@@ -1546,6 +2580,30 @@ class _WalkForwardSelectionProvider:
             allocation = allocations.get(symbol)
             source = self.source_rows[symbol]
             audit = self.audit_by_symbol[symbol]
+            eligibility_buffer_reasons = []
+            if (
+                symbol in self.prior_selected
+                and self.args.selection_eligibility_hysteresis_pct > 0
+            ):
+                entry_cost_limit = float(self.run_config["cost_lim_sr"])
+                if candidate is not None and candidate.trade_sr > entry_cost_limit:
+                    eligibility_buffer_reasons.append("trade_cost")
+                max_market_pct = float(
+                    self.run_config["max_pct_mkt_volume"]
+                )
+                pct_market = (
+                    allocation.get("pct_mkt_volume")
+                    if allocation else None
+                )
+                if (
+                    candidate is not None
+                    and candidate.enforce_market_participation
+                    and pct_market is not None
+                    and pct_market > max_market_pct
+                ):
+                    eligibility_buffer_reasons.append(
+                        "market_participation"
+                    )
             if active and symbol in added_symbols:
                 status = "added"
             elif active:
@@ -1556,12 +2614,29 @@ class _WalkForwardSelectionProvider:
                 "selection_date": review_date,
                 "selection_year": review_date.year,
                 "selection_equity_usd": prior_net_equity,
+                "backtest_capital_mode": self.args.backtest_capital_mode,
                 "selection_candidate_count": len(candidates),
                 "selection_instrument_count": len(selection.selected),
                 "selection_score": selection.final_score.score,
                 "selection_idm": selection.final_score.idm,
                 "selection_status": status,
                 "selection_active": active,
+                "selection_eligibility_hysteresis_applied": bool(
+                    eligibility_buffer_reasons
+                ),
+                "selection_eligibility_hysteresis_reason": ",".join(
+                    eligibility_buffer_reasons
+                ),
+                "selection_note": (
+                    "retained_eh"
+                    if active and eligibility_buffer_reasons
+                    else ""
+                ),
+                "minimum_instruments_per_class": self.args.min_instr_per_class,
+                "minimum_instruments_per_subclass": (
+                    self.args.min_instr_per_subclass
+                ),
+                "minimum_book_count": _active_minimum_book_count(self.args),
                 "maximum_instruments_per_class": self.args.max_instr_per_class,
                 "maximum_instruments_per_subclass": (
                     self.args.max_instr_per_subclass
@@ -1572,8 +2647,35 @@ class _WalkForwardSelectionProvider:
                 "maximum_economic_subclass_weight_percent": (
                     self.args.max_subclass_weight_pct
                 ),
+                "selection_eligibility_hysteresis_percent": (
+                    self.args.selection_eligibility_hysteresis_pct
+                ),
+                "selection_membership_hysteresis": (
+                    self.args.selection_membership_hysteresis
+                ),
+                "selection_rank_buffer_percent": (
+                    _active_rank_buffer_percent(self.args)
+                ),
+                "selection_rank_count_ewma_halflife_reviews": (
+                    _active_rank_count_ewma_halflife_reviews(self.args)
+                ),
+                "rank_count_ewma_state": rank_count_ewma_state,
+                "rank_count_anchor": selection.rank_count_anchor,
+                "selection_book_score_buffer_percent": (
+                    _active_book_score_buffer_percent(self.args)
+                ),
                 "rank": allocation.get("rank") if allocation else None,
+                "preference_rank": preference_ranks.get(symbol),
                 "symbol": symbol,
+                "live_tail_start": self.live_tail_start_by_symbol.get(symbol),
+                "live_execution_overlay_active": (
+                    self.live_tail_start_by_symbol.get(symbol) is not None
+                    and review_date
+                    >= self.live_tail_start_by_symbol[symbol]
+                ),
+                "live_volume_eligible": source.get("volume_elig"),
+                "live_execution_eligible": source.get("exec_elig"),
+                "live_ib_availability": source.get("ib_avail"),
                 "hist_instr_code": source.get("hist_instr_code"),
                 "pst_instr_code": source.get("pst_instr_code"),
                 "asset_cls": source.get("asset_cls"),
@@ -1603,6 +2705,16 @@ class _WalkForwardSelectionProvider:
                 ),
                 "limit_weight": (
                     allocation.get("limit_weight") if allocation else None
+                ),
+                "ann_trade_cons": (
+                    allocation.get("ann_trade_cons") if allocation else None
+                ),
+                "ann_roll_cons": (
+                    allocation.get("ann_roll_cons") if allocation else None
+                ),
+                "annual_contract_load": (
+                    allocation.get("annual_contract_load")
+                    if allocation else None
                 ),
                 "ann_dvol": candidate.ann_dvol if candidate else None,
                 "trade_sr": candidate.trade_sr if candidate else None,
@@ -1634,7 +2746,7 @@ class _WalkForwardSelectionProvider:
                     allocation.get("roll_cost_per_con") if allocation else None
                 ),
             })
-        self.prior_selected = selected_symbols
+        self.prior_selected = selection.selected
         logger.info(
             "walk_forward_selection complete date=%s equity=%s candidates=%d "
             "selected=%d idm=%s unallocated_weight=%s book=%s",
@@ -1682,10 +2794,49 @@ def _final_selection_frame(
             "selection_date": selection_date,
             "selection_equity_usd": selection_equity_usd,
             "selection_rebalance": args.selection_rebalance,
+            "backtest_capital_mode": args.backtest_capital_mode,
+            "signal_model": args.signal_model,
+            "fast_window": (
+                args.fast_window
+                if args.signal_model == RETURN_TSMOM_MODEL
+                else None
+            ),
+            "slow_window": (
+                args.slow_window
+                if args.signal_model == RETURN_TSMOM_MODEL
+                else None
+            ),
+            "vol_fast_window": (
+                args.vol_fast_window
+                if args.signal_model == RETURN_TSMOM_MODEL
+                else None
+            ),
+            "vol_slow_window": (
+                args.vol_slow_window
+                if args.signal_model == RETURN_TSMOM_MODEL
+                else None
+            ),
+            "regime_discount": (
+                args.regime_discount
+                if args.signal_model == RETURN_TSMOM_MODEL
+                else None
+            ),
+            "goulding_signal_mode": (
+                args.goulding_signal_mode
+                if args.signal_model == GOULDING_MODEL
+                else None
+            ),
             "rank": rank,
             "symbol": symbol,
             "pst_instr_code": source_rows[symbol].get("pst_instr_code"),
+            "is_micro_contract": candidate.is_micro_contract,
             "wt_policy": args.weight_policy,
+            "selection_prefer_full_contracts": (
+                args.selection_prefer_full_contracts
+            ),
+            "minimum_instruments_per_class": args.min_instr_per_class,
+            "minimum_instruments_per_subclass": args.min_instr_per_subclass,
+            "minimum_book_count": _active_minimum_book_count(args),
             "maximum_instruments_per_class": args.max_instr_per_class,
             "maximum_instruments_per_subclass": args.max_instr_per_subclass,
             "maximum_asset_class_weight_percent": args.max_class_weight_pct,
@@ -1700,11 +2851,40 @@ def _final_selection_frame(
             "contract_band_max": args.contract_band_max,
             "score_tie_tolerance_percent": args.score_tie_tolerance_percent,
             "tie_ref_book_count": args.tie_reference_book_count,
+            "selection_eligibility_hysteresis_percent": (
+                args.selection_eligibility_hysteresis_pct
+            ),
+            "selection_membership_hysteresis": (
+                args.selection_membership_hysteresis
+            ),
+            "selection_rank_buffer_percent": _active_rank_buffer_percent(args),
+            "selection_rank_count_ewma_halflife_reviews": (
+                _active_rank_count_ewma_halflife_reviews(args)
+            ),
+            "selection_book_score_buffer_percent": (
+                _active_book_score_buffer_percent(args)
+            ),
+            "unbuffered_class_coverage_deficit": (
+                selection.unbuffered_class_coverage_deficit
+            ),
+            "unbuffered_subclass_coverage_deficit": (
+                selection.unbuffered_subclass_coverage_deficit
+            ),
+            "unbuffered_book_count_deficit": (
+                selection.unbuffered_book_count_deficit
+            ),
+            "final_class_coverage_deficit": (
+                selection.final_class_coverage_deficit
+            ),
+            "final_subclass_coverage_deficit": (
+                selection.final_subclass_coverage_deficit
+            ),
+            "final_book_count_deficit": selection.final_book_count_deficit,
+            "coverage_satisfied": selection.coverage_satisfied,
+            "coverage_reason": selection.coverage_reason,
             "roll_cost_in_score": args.include_roll_cost_in_score,
             "selection_cost_source": (
-                "live_snapshot"
-                if args.selection_rebalance == "static"
-                else "carver_frozen"
+                "ref_fixed" if args.complete else "live_snapshot"
             ),
             "selection_margin_source": (
                 "live_snapshot"
@@ -1756,37 +2936,44 @@ def _run_complete_selection(
     generated_at: datetime,
     run_config: dict[str, object],
     args: argparse.Namespace,
+    snapshot_ib_end_by_signal: dict[str, date],
 ) -> tuple[Path, pl.DataFrame]:
     """Audit forecasts, exclude invalid instruments, and run greedy selection.
 
     ``selected`` contains one row per executable symbol from candidate filtering. The
     function first builds reusable history-level forecasts, then creates a
-    symbol-level combined subsystem using that symbol's eligible-rule subset.
+    symbol-level subsystem using the configured signal model. Multi speed
+    EWMAC uses each symbol's eligible-rule subset; return TSMOM uses the
+    configured fast and slow return horizons; Goulding uses monthly forecasts
+    with economic-subclass pooled, expanding calibration.
     It persists the daily forecast panel, audit, correlation input, greedy
     trials, and final accepted book.
 
     Returns the final selection Parquet path and its in-memory dataframe.
     """
     logger.info(
-        "portfolio_selection start candidates=%d buffer_size=%s "
-        "buffer_trade_to_edge=%s rebalance_on_roll=%s",
+        "portfolio_selection start candidates=%d signal_model=%s "
+        "buffer_size=%s buffer_trade_to_edge=%s rebalance_on_roll=%s",
         selected.height,
+        args.signal_model,
         args.buffer_size,
         args.buffer_trade_to_edge,
         args.rebalance_on_roll,
     )
     stamp = generated_at.astimezone(REPORT_TIMEZONE).strftime("%Y%m%d_%H%M%S")
+    report_prefix = _signal_report_prefix(args)
     forecasts_path = (
-        output_dir / f"multi_speed_ewmac_selection_forecasts_{stamp}.parquet"
+        output_dir / f"{report_prefix}_selection_forecasts_{stamp}.parquet"
     )
     reference_return_path = (
         output_dir
-        / f"multi_speed_ewmac_selection_subsystem_reference_returns_{stamp}.parquet"
+        / f"{report_prefix}_selection_subsystem_reference_returns_{stamp}.parquet"
     )
-    backtest_cache_root = args.history_cache_root.expanduser().resolve()
+    backtest_cache_root = args.cache.expanduser().resolve()
     history_db_path = args.history_db.expanduser().resolve()
     reference_history_provider = PysystemtradeHistoryProvider(
-        db_path=history_db_path
+        db_path=history_db_path,
+        cache_root=backtest_cache_root,
     )
     history_db_identity = _selection_pysystemtrade_identity(
         reference_history_provider
@@ -1799,7 +2986,7 @@ def _run_complete_selection(
     # Load a component history only when its derived reference base misses.
     # A daily snapshot run whose rule/history identities are already cached
     # therefore avoids materializing the full EWMAC history universe.
-    frames_by_history: dict[str, pl.DataFrame] = {}
+    frames_by_history: dict[str, pl.DataFrame | FuturesHistory] = {}
     pooled_reference_rules = None
     # v1.0 deliberately fixes the rule mix and FDM. Estimating one FDM from
     # the completed sample would make every historical combined forecast depend
@@ -1833,13 +3020,79 @@ def _run_complete_selection(
     # at the pipeline boundary instead of reopening DuckDB for every symbol.
     fx_history_by_currency: dict[str, pl.DataFrame | None] = {}
     # Preserve each compact candidate row for later sizing and liquidity inputs.
-    source_rows: dict[str, dict[str, object]] = {}
+    source_rows = {
+        str(row["symbol"]): row
+        for row in selected.iter_rows(named=True)
+    }
+    return_tsmom_calibration_universe = sorted({
+        str(row["hist_instr_code"])
+        for row in source_rows.values()
+    })
+    return_tsmom_scalar_history: pl.DataFrame | None = None
+    return_tsmom_raw_results: dict[str, CombinedForecastResult] = {}
+    if args.signal_model == RETURN_TSMOM_MODEL:
+        (
+            return_tsmom_scalar_history,
+            return_tsmom_raw_results,
+        ) = _ensure_return_tsmom_scalar_cache(
+            backtest_cache_root,
+            history_provider=reference_history_provider,
+            history_db_identity=history_db_identity,
+            calibration_universe=return_tsmom_calibration_universe,
+            fast_window=args.fast_window,
+            slow_window=args.slow_window,
+            vol_fast_window=args.vol_fast_window,
+            vol_slow_window=args.vol_slow_window,
+            regime_discount=args.regime_discount,
+            min_valid_observations=args.min_forecast_obs,
+        )
+    goulding_cluster_by_history: dict[str, str] = {}
+    goulding_reference_forecast_specs: dict[
+        str, tuple[Path, Path, dict[str, object], str]
+    ] = {}
+    if args.signal_model == GOULDING_MODEL:
+        for row in source_rows.values():
+            history_code = str(row["hist_instr_code"])
+            cluster = str(row["econ_subcls"])
+            prior_cluster = goulding_cluster_by_history.get(history_code)
+            if prior_cluster is not None and prior_cluster != cluster:
+                raise ValueError(
+                    f"{history_code}: inconsistent Goulding economic subclass "
+                    f"{prior_cluster!r} versus {cluster!r}"
+                )
+            goulding_cluster_by_history[history_code] = cluster
+        goulding_reference_forecast_specs = (
+            _ensure_goulding_reference_forecast_cache(
+                backtest_cache_root,
+                history_provider=reference_history_provider,
+                history_db_identity=history_db_identity,
+                cluster_by_history=goulding_cluster_by_history,
+                signal_mode=args.goulding_signal_mode,
+                min_valid_observations=args.min_forecast_obs,
+            )
+        )
+
+        def load_goulding_reference_histories() -> dict[str, FuturesHistory]:
+            """Load the frozen calibration universe only for stitched misses."""
+            return {
+                history_code: reference_history_provider.load(history_code)
+                for history_code in sorted(goulding_cluster_by_history)
+            }
+
+    else:
+        def load_goulding_reference_histories() -> dict[str, FuturesHistory]:
+            """Return no histories when Goulding calibration is not active."""
+            return {}
     for row in selected.iter_rows(named=True):
         symbol = str(row["symbol"])
-        source_rows[symbol] = row
-        rules = _parse_rules(str(row["elig_ewmac_rules"] or ""))
-        forecast_weights = slow_tilt_ewmac_weights(rules)
-        forecast_fdm = float(args.forecast_fdm)
+        if args.signal_model in DIRECT_TSMOM_MODELS:
+            rules: list[str] = []
+            forecast_weights = {args.signal_model: 1.0}
+            forecast_fdm = 1.0
+        else:
+            rules = _parse_rules(str(row["elig_ewmac_rules"] or ""))
+            forecast_weights = slow_tilt_ewmac_weights(rules)
+            forecast_fdm = float(args.forecast_fdm)
         required_cost_fields = ("trade_sr", "roll_sr", "ref_ann_rolls", "mult")
         missing_cost_fields = [
             name for name in required_cost_fields if row.get(name) is None
@@ -1873,6 +3126,36 @@ def _run_complete_selection(
             "multiplier": float(row["mult"]),
             "target_abs_forecast": engine.config.target_abs_forecast,
         }
+        if args.signal_model == RETURN_TSMOM_MODEL:
+            reference_base_identity["signal_model"] = args.signal_model
+            reference_base_identity["return_tsmom"] = {
+                "fast_window": args.fast_window,
+                "slow_window": args.slow_window,
+                "vol_fast_window": args.vol_fast_window,
+                "vol_slow_window": args.vol_slow_window,
+                "regime_discount": args.regime_discount,
+                "target_abs_forecast": EWMAC_FORECAST_TARGET_ABS,
+                "forecast_cap": EWMAC_FORECAST_CAP,
+                "scalar_min_periods": EWMAC_SCALAR_MIN_PERIODS,
+                "calibration_universe": (
+                    return_tsmom_calibration_universe
+                ),
+            }
+        elif args.signal_model == GOULDING_MODEL:
+            reference_base_identity["signal_model"] = args.signal_model
+            reference_base_identity["goulding"] = {
+                "signal_mode": args.goulding_signal_mode,
+                "target_abs_forecast": (
+                    GOULDING_SELECTION_FORECAST_TARGET_ABS
+                ),
+                "forecast_cap": GOULDING_SELECTION_FORECAST_CAP,
+                "cluster": goulding_cluster_by_history[
+                    str(row["hist_instr_code"])
+                ],
+                "calibration_universe": sorted(
+                    goulding_cluster_by_history.items()
+                ),
+            }
         (
             reference_base_path,
             reference_base_manifest_path,
@@ -1912,6 +3195,9 @@ def _run_complete_selection(
                 "fcst_valid",
                 "fx_to_usd",
                 "daily_dvol",
+                "port_ann_risk_target",
+                "ref_cap_alloc",
+                "ref_ann_risk",
                 "ref_return_valid",
                 "ref_net_pct",
                 "ann_cost_sr",
@@ -1959,6 +3245,9 @@ def _run_complete_selection(
                     "fcst_valid",
                     "fx_to_usd",
                     "daily_dvol",
+                    "port_ann_risk_target",
+                    "ref_cap_alloc",
+                    "ref_ann_risk",
                     "ref_return_valid",
                     "ref_net_pct",
                 ),
@@ -1997,24 +3286,55 @@ def _run_complete_selection(
                     reference_base_path,
                 )
             else:
-                # Only a true history-base miss combines the component rules.
-                # Snapshot-only reruns reuse the cached forecast and audit.
+                # Only a true history-base miss rebuilds the configured
+                # forecast. Snapshot-only reruns reuse its cached audit.
                 history_code = str(row["hist_instr_code"])
-                if history_code not in frames_by_history:
-                    if pooled_reference_rules is None:
-                        pooled_reference_rules = load_pooled_ewmac_rules(
-                            db_path=history_db_path,
+                if (
+                    args.signal_model != RETURN_TSMOM_MODEL
+                    and history_code not in frames_by_history
+                ):
+                    history = reference_history_provider.load(history_code)
+                    if args.signal_model in DIRECT_TSMOM_MODELS:
+                        frames_by_history[history_code] = history
+                    else:
+                        if pooled_reference_rules is None:
+                            pooled_reference_rules = load_pooled_ewmac_rules(
+                                db_path=history_db_path,
+                                cache_root=backtest_cache_root,
+                            )
+                        frames_by_history[history_code] = build_ewmac_component_frame(
+                            history,
+                            pooled_reference_rules,
                         )
-                    frames_by_history[history_code] = build_ewmac_component_frame(
-                        reference_history_provider.load(history_code),
-                        pooled_reference_rules,
+                if args.signal_model == RETURN_TSMOM_MODEL:
+                    assert return_tsmom_scalar_history is not None
+                    raw_result = return_tsmom_raw_results.get(history_code)
+                    if raw_result is None:
+                        raw_result = build_return_tsmom_forecast(
+                            reference_history_provider.load(history_code),
+                            fast_window=args.fast_window,
+                            slow_window=args.slow_window,
+                            vol_fast_window=args.vol_fast_window,
+                            vol_slow_window=args.vol_slow_window,
+                            regime_discount=args.regime_discount,
+                            min_valid_observations=args.min_forecast_obs,
+                        )
+                    result = scale_return_tsmom_forecast(
+                        raw_result,
+                        return_tsmom_scalar_history,
+                        min_valid_observations=args.min_forecast_obs,
                     )
-                result = engine.combine(
-                    frames_by_history[history_code],
-                    rules,
-                    forecast_correlation,
-                    correlation_rules,
-                )
+                elif args.signal_model == GOULDING_MODEL:
+                    result = _load_goulding_forecast_result(
+                        goulding_reference_forecast_specs[history_code]
+                    )
+                else:
+                    result = engine.combine(
+                        frames_by_history[history_code],
+                        rules,
+                        forecast_correlation,
+                        correlation_rules,
+                    )
                 forecast_audit = result.audit
                 fx_error = ""
                 if currency not in fx_history_by_currency:
@@ -2166,7 +3486,10 @@ def _run_complete_selection(
         audit = {
             "symbol": symbol,
             "hist_instr_code": row["hist_instr_code"],
-            "elig_ewmac_rules": ",".join(forecast_weights),
+            "signal_model": args.signal_model,
+            # Preserve the EWMAC rule-cost gate inherited from the reusable
+            # cache even when a return signal drives the actual backtest.
+            "elig_ewmac_rules": str(row.get("elig_ewmac_rules") or ""),
             "forecast_weights": json.dumps(forecast_weights, sort_keys=True),
             "fdm": forecast_fdm,
             "comb_turnover": combined_turnover,
@@ -2231,7 +3554,7 @@ def _run_complete_selection(
     # Component forecasts have now been converted into disk-backed subsystem
     # frames. Releasing them before the cross-instrument stages avoids holding
     # both full representations of the 100+ instrument universe.
-    del frames_by_history
+    del frames_by_history, return_tsmom_raw_results
     gc.collect()
 
     audit_frame = pl.DataFrame(audit_rows, infer_schema_length=None).sort("symbol")
@@ -2274,18 +3597,21 @@ def _run_complete_selection(
             "no instrument has sufficient pairwise subsystem-reference returns"
         )
 
-    # These two large daily artifacts no longer participate in later
-    # calculations. Persist them while the rest of the pipeline is still
-    # disk-backed, then release their materialized copies before cash replay.
-    public_forecasts = round_public_report(
-        rename_public_report_columns(
-            pl.concat(forecast_output_frames, how="diagonal_relaxed")
-            .collect(engine="streaming")
+    # These large daily artifacts do not participate in later calculations.
+    # Full standalone reports persist them for research; compact grid runs
+    # avoid materializing and duplicating the same million-row forecast panel
+    # in every scenario directory.
+    if args.selection_report_mode == "full":
+        public_forecasts = round_public_report(
+            rename_public_report_columns(
+                pl.concat(forecast_output_frames, how="diagonal_relaxed")
+                .collect(engine="streaming")
+            )
         )
-    )
-    public_forecasts.write_parquet(forecasts_path)
-    reference_return_wide.write_parquet(reference_return_path)
-    del public_forecasts, forecast_output_frames, reference_return_wide
+        public_forecasts.write_parquet(forecasts_path)
+        reference_return_wide.write_parquet(reference_return_path)
+        del public_forecasts
+    del forecast_output_frames, reference_return_wide
     gc.collect()
 
     audit_by_symbol = {
@@ -2303,10 +3629,17 @@ def _run_complete_selection(
             asset_class=str(row["asset_cls"]),
             economic_subclass=str(row["econ_subcls"]),
             econ_family=str(row.get("econ_fam_id") or ""),
+            is_micro_contract=_is_micro_contract(row),
             mkt_risk_vol_day=(
                 float(row["mkt_risk_vol_usd_day"])
-                if row.get("mkt_risk_vol_usd_day") is not None
+                if (
+                    args.selection_rebalance == "static"
+                    and row.get("mkt_risk_vol_usd_day") is not None
+                )
                 else None
+            ),
+            enforce_market_participation=(
+                args.selection_rebalance == "static"
             ),
             initial_margin_usd=(
                 float(row["init_margin_usd"])
@@ -2328,7 +3661,12 @@ def _run_complete_selection(
             "base_score=%s candidate_ref_max_position=%s "
             "candidate_ref_con_band_distance=%s tie_eligible=%s "
             "tie_break_applied=%s idm=%s "
+            "coverage_phase=%s coverage_eligible=%s "
+            "instr_rank_in_subclass=%s subclass_rank_in_class=%s "
+            "class_rank=%s global_trial_rank=%s "
             "unallocated_weight=%s "
+            "min_instr_per_class=%s min_instr_per_subclass=%s "
+            "minimum_book_count=%s "
             "max_instr_per_class=%s max_instr_per_subclass=%s "
             "max_class_weight_pct=%s max_subclass_weight_pct=%s "
             "portfolio_cont_margin_at_max_usd=%s "
@@ -2340,7 +3678,14 @@ def _run_complete_selection(
             trial["candidate_ref_contract_band_distance"],
             trial["tie_eligible"],
             trial["tie_break_applied"],
-            trial["idm"], trial.get("unallocated_weight"),
+            trial["idm"], trial.get("coverage_phase"),
+            trial.get("coverage_eligible"),
+            trial.get("instr_rank_in_subclass"),
+            trial.get("subclass_rank_in_class"),
+            trial.get("class_rank"), trial.get("global_trial_rank"),
+            trial.get("unallocated_weight"),
+            args.min_instr_per_class, args.min_instr_per_subclass,
+            args.selection_min_book_count,
             args.max_instr_per_class, args.max_instr_per_subclass,
             args.max_class_weight_pct, args.max_subclass_weight_pct,
             trial.get("portfolio_cont_margin_at_max_usd"),
@@ -2381,6 +3726,10 @@ def _run_complete_selection(
     historical_return_sources = {
         symbol: "reference" for symbol in cash_symbols
     }
+    # A symbol enters the live execution overlay only at its verified direct
+    # PST-to-IB handoff. Reference-only reviews intentionally have no dated
+    # volume observation and therefore do not inherit today's snapshot gates.
+    live_tail_start_by_symbol: dict[str, date] = {}
     if args.ib_history_db is not None:
         # Construction remains pinned to the long reference histories above.
         # Only the final executable cash audit is rebuilt from the
@@ -2388,6 +3737,9 @@ def _run_complete_selection(
         # The pooled rule objects and stitched component frames are needed only
         # when at least one content-addressed stitched curve misses its cache.
         pooled_rules = None
+        goulding_calibration_context_for_stitching: (
+            GouldingCalibrationContext | None
+        ) = None
         instrument_rows = load_pysystemtrade_ib_instruments(
             db_path=history_db_path,
             mapping_path=args.broker_mapping.expanduser().resolve(),
@@ -2417,6 +3769,26 @@ def _run_complete_selection(
         }
         for symbol, history_code in stitched_history_code_by_symbol.items():
             symbols_by_history_code[history_code].append(symbol)
+        if args.signal_model == GOULDING_MODEL:
+            for history_code, symbols in symbols_by_history_code.items():
+                clusters = {
+                    str(source_rows[symbol]["econ_subcls"])
+                    for symbol in symbols
+                }
+                if len(clusters) != 1:
+                    raise ValueError(
+                        f"{history_code}: stitched Goulding history maps to "
+                        f"multiple economic subclasses {sorted(clusters)}"
+                    )
+                cluster = clusters.pop()
+                prior_cluster = goulding_cluster_by_history.get(history_code)
+                if prior_cluster is not None and prior_cluster != cluster:
+                    raise ValueError(
+                        f"{history_code}: inconsistent stitched Goulding "
+                        f"economic subclass {prior_cluster!r} versus "
+                        f"{cluster!r}"
+                    )
+                goulding_cluster_by_history[history_code] = cluster
         # Start from the valid long-reference fallback. Each successfully
         # stitched history replaces only its own symbols with a disk-backed
         # scan, so 100+ combined component frames never coexist in memory.
@@ -2425,6 +3797,9 @@ def _run_complete_selection(
             symbol: "reference_fallback" for symbol in cash_symbols
         })
         live_ib: IBPySync | None = None
+        raw_history_store = IBFuturesHistoryStore(
+            args.ib_history_db.expanduser().resolve()
+        )
 
         def connected_ib() -> IBPySync:
             """Return one shared live IB connection for selected histories."""
@@ -2457,14 +3832,48 @@ def _run_complete_selection(
                 preserve_reference_overlap=True,
                 mapping_path=args.broker_mapping.expanduser().resolve(),
                 history_db_path=args.ib_history_db.expanduser().resolve(),
-                cache_root=(
-                    args.stitched_history_cache_root.expanduser().resolve()
-                ),
+                cache_root=args.cache.expanduser().resolve(),
                 use_cache=True,
                 save_cache=True,
                 update_history=update_history,
                 max_source_gap_days=args.max_source_gap_days,
             ).load(signal_symbol_by_history_code[history_code])
+
+        def latest_ib_signal_date(history: FuturesHistory) -> date | None:
+            """Return the last daily signal date owned by IB, if present."""
+            signal = history.signal
+            if "source_segment" not in signal.columns:
+                return None
+            ib_rows = signal.filter(pl.col("source_segment") == "ib")
+            if ib_rows.is_empty():
+                return None
+            return ib_rows.get_column("date").max()
+
+        def ib_refresh_as_of(
+            history: FuturesHistory,
+            history_code: str,
+        ) -> date | None:
+            """Return when live acquisition last checked this raw history."""
+            value = history.metadata.get("ib_refresh_as_of")
+            if value is None:
+                # Caches written before the explicit refresh marker can still
+                # reuse the per-instrument successful fetch generation.
+                value = raw_history_store.instrument_fingerprint(
+                    instrument_code=history_code,
+                ).get("last_fetch_at")
+            if isinstance(value, datetime):
+                return value.date()
+            if isinstance(value, date):
+                return value
+            if isinstance(value, str):
+                try:
+                    return datetime.fromisoformat(value).date()
+                except ValueError:
+                    try:
+                        return date.fromisoformat(value)
+                    except ValueError:
+                        return None
+            return None
 
         try:
             for history_index, history_code in enumerate(
@@ -2494,7 +3903,7 @@ def _run_complete_selection(
                                 update_history=False,
                             )
                         except Exception as exc:
-                            if args.ib_history_live != "missing":
+                            if args.ib_history_live not in {"missing", "snapshot"}:
                                 raise
                             logger.info(
                                 "selection_stitched_history live_retry "
@@ -2511,11 +3920,11 @@ def _run_complete_selection(
                             # The stitched provider deliberately converts a
                             # missing optional IB source into a valid
                             # reference-only history. Treat that result as a
-                            # cache miss for ``missing`` mode so this path
-                            # acquires the absent broker segment rather than
-                            # silently retaining the frozen reference curve.
+                            # cache miss for ``missing`` and ``snapshot`` so
+                            # this path acquires the absent broker segment
+                            # rather than retaining the reference-only curve.
                             if (
-                                args.ib_history_live == "missing"
+                                args.ib_history_live in {"missing", "snapshot"}
                                 and _direct_ib_handoff_date(
                                     stitched_history,
                                     history_code=history_code,
@@ -2543,6 +3952,60 @@ def _run_complete_selection(
                                     ib=connected_ib(),
                                     update_history=True,
                                 )
+                            elif args.ib_history_live == "snapshot":
+                                signal_symbol = signal_symbol_by_history_code[
+                                    history_code
+                                ]
+                                snapshot_end = snapshot_ib_end_by_signal.get(
+                                    signal_symbol
+                                )
+                                cached_end = latest_ib_signal_date(
+                                    stitched_history
+                                )
+                                refresh_as_of = ib_refresh_as_of(
+                                    stitched_history,
+                                    history_code,
+                                )
+                                if (
+                                    snapshot_end is not None
+                                    and (cached_end is None or cached_end < snapshot_end)
+                                    and (
+                                        refresh_as_of is None
+                                        or refresh_as_of < snapshot_end
+                                    )
+                                ):
+                                    logger.info(
+                                        "selection_stitched_history live_retry "
+                                        "hist_instr_code=%s reason=snapshot_tail_stale "
+                                        "cached_ib_end=%s snapshot_ib_end=%s "
+                                        "ib_refresh_as_of=%s",
+                                        history_code,
+                                        cached_end,
+                                        snapshot_end,
+                                        refresh_as_of,
+                                    )
+                                    stitched_history = load_stitched_history(
+                                        history_code,
+                                        ib=connected_ib(),
+                                        update_history=True,
+                                    )
+                                elif (
+                                    snapshot_end is not None
+                                    and cached_end is not None
+                                    and cached_end < snapshot_end
+                                    and refresh_as_of is not None
+                                    and refresh_as_of >= snapshot_end
+                                ):
+                                    logger.info(
+                                        "selection_stitched_history "
+                                        "snapshot_tail_checked "
+                                        "hist_instr_code=%s cached_ib_end=%s "
+                                        "snapshot_ib_end=%s ib_refresh_as_of=%s",
+                                        history_code,
+                                        cached_end,
+                                        snapshot_end,
+                                        refresh_as_of,
+                                    )
                 except Exception as exc:
                     # Preserve the valid long reference curve when a broker
                     # source is unavailable, and expose that fallback in the
@@ -2596,13 +4059,111 @@ def _run_complete_selection(
                     ),
                     "live_tail_start": live_tail_start,
                 }
+                stitched_goulding_result = None
+                if args.signal_model == GOULDING_MODEL:
+                    stitched_forecast_spec = _goulding_forecast_cache_spec(
+                        backtest_cache_root,
+                        artifact="goulding_stitched_forecast",
+                        history_code=history_code,
+                        history_db_identity=history_db_identity,
+                        cluster_by_history=goulding_cluster_by_history,
+                        signal_mode=args.goulding_signal_mode,
+                        min_valid_observations=args.min_forecast_obs,
+                        source_identity=stitched_source_identity,
+                    )
+                    (
+                        stitched_forecast_path,
+                        stitched_forecast_manifest_path,
+                        stitched_forecast_identity,
+                        stitched_forecast_cache_key,
+                    ) = stitched_forecast_spec
+                    if _goulding_forecast_cache_complete(
+                        stitched_forecast_path,
+                        stitched_forecast_manifest_path,
+                        stitched_forecast_identity,
+                    ):
+                        stitched_goulding_result = (
+                            _load_goulding_forecast_result(
+                                stitched_forecast_spec
+                            )
+                        )
+                        logger.info(
+                            "goulding_forecast_cache hit artifact=stitched "
+                            "hist_instr_code=%s key=%s",
+                            history_code,
+                            stitched_forecast_cache_key,
+                        )
+                    else:
+                        if goulding_calibration_context_for_stitching is None:
+                            logger.info(
+                                "goulding_calibration_context build "
+                                "signal_mode=%s histories=%d",
+                                args.goulding_signal_mode,
+                                len(goulding_cluster_by_history),
+                            )
+                            calibration_histories = (
+                                load_goulding_reference_histories()
+                            )
+                            goulding_calibration_context_for_stitching = (
+                                build_goulding_calibration_context(
+                                    calibration_histories,
+                                    goulding_cluster_by_history,
+                                    signal_mode=args.goulding_signal_mode,
+                                )
+                            )
+                            del calibration_histories
+                            gc.collect()
+                            logger.info(
+                                "goulding_calibration_context complete "
+                                "signal_mode=%s histories=%d",
+                                args.goulding_signal_mode,
+                                len(goulding_cluster_by_history),
+                            )
+                        stitched_goulding_result = (
+                            build_goulding_selection_forecasts(
+                                {history_code: stitched_history},
+                                goulding_cluster_by_history,
+                                calibration_context=(
+                                    goulding_calibration_context_for_stitching
+                                ),
+                                signal_mode=args.goulding_signal_mode,
+                                min_valid_observations=args.min_forecast_obs,
+                            )[history_code]
+                        )
+                        _write_selection_backtest_curve(
+                            stitched_goulding_result.frame,
+                            stitched_forecast_path,
+                            stitched_forecast_manifest_path,
+                            identity=stitched_forecast_identity,
+                            cache_key=stitched_forecast_cache_key,
+                            metadata={
+                                "forecast_audit": stitched_goulding_result.audit
+                            },
+                        )
+                        logger.info(
+                            "goulding_forecast_cache write artifact=stitched "
+                            "hist_instr_code=%s key=%s",
+                            history_code,
+                            stitched_forecast_cache_key,
+                        )
                 stitched_symbols: list[str] = []
                 for symbol in symbols_by_history_code[history_code]:
                     row = source_rows[symbol]
                     try:
-                        rules = _parse_rules(
-                            str(row["elig_ewmac_rules"] or "")
-                        )
+                        if args.signal_model in DIRECT_TSMOM_MODELS:
+                            rules = []
+                            stitched_forecast_weights = {
+                                args.signal_model: 1.0
+                            }
+                            stitched_forecast_fdm = 1.0
+                        else:
+                            rules = _parse_rules(
+                                str(row["elig_ewmac_rules"] or "")
+                            )
+                            stitched_forecast_weights = (
+                                slow_tilt_ewmac_weights(rules)
+                            )
+                            stitched_forecast_fdm = args.forecast_fdm
                         currency = str(row["ccy"]).upper()
                         stitched_identity = {
                             "symbol": symbol,
@@ -2611,8 +4172,8 @@ def _run_complete_selection(
                             "history_db": history_db_identity,
                             "currency": currency,
                             "eligible_rules": rules,
-                            "forecast_weights": slow_tilt_ewmac_weights(rules),
-                            "forecast_fdm": args.forecast_fdm,
+                            "forecast_weights": stitched_forecast_weights,
+                            "forecast_fdm": stitched_forecast_fdm,
                             "min_forecast_obs": args.min_forecast_obs,
                             "capital": float(run_config["init_cap_usd"]),
                             "target_vol": float(run_config["target_vol"]),
@@ -2624,6 +4185,40 @@ def _run_complete_selection(
                                 engine.config.target_abs_forecast
                             ),
                         }
+                        if args.signal_model == RETURN_TSMOM_MODEL:
+                            stitched_identity["signal_model"] = args.signal_model
+                            stitched_identity["return_tsmom"] = {
+                                "fast_window": args.fast_window,
+                                "slow_window": args.slow_window,
+                                "vol_fast_window": args.vol_fast_window,
+                                "vol_slow_window": args.vol_slow_window,
+                                "regime_discount": args.regime_discount,
+                                "target_abs_forecast": (
+                                    EWMAC_FORECAST_TARGET_ABS
+                                ),
+                                "forecast_cap": EWMAC_FORECAST_CAP,
+                                "scalar_min_periods": EWMAC_SCALAR_MIN_PERIODS,
+                                "calibration_universe": (
+                                    return_tsmom_calibration_universe
+                                ),
+                            }
+                        elif args.signal_model == GOULDING_MODEL:
+                            stitched_identity["signal_model"] = args.signal_model
+                            stitched_identity["goulding"] = {
+                                "signal_mode": args.goulding_signal_mode,
+                                "target_abs_forecast": (
+                                    GOULDING_SELECTION_FORECAST_TARGET_ABS
+                                ),
+                                "forecast_cap": (
+                                    GOULDING_SELECTION_FORECAST_CAP
+                                ),
+                                "cluster": goulding_cluster_by_history[
+                                    history_code
+                                ],
+                                "calibration_universe": sorted(
+                                    goulding_cluster_by_history.items()
+                                ),
+                            }
                         (
                             stitched_reference_path,
                             stitched_manifest_path,
@@ -2645,26 +4240,55 @@ def _run_complete_selection(
                                 "fcst_valid",
                                 "fx_to_usd",
                                 "daily_dvol",
+                                "port_ann_risk_target",
+                                "ref_cap_alloc",
+                                "ref_ann_risk",
                                 "ref_return_valid",
                                 "ref_net_pct",
                             ),
                         )
                         if cached_stitched is None:
                             if stitched_component is None:
-                                if pooled_rules is None:
-                                    pooled_rules = load_pooled_ewmac_rules(
-                                        db_path=history_db_path,
+                                if args.signal_model in DIRECT_TSMOM_MODELS:
+                                    stitched_component = stitched_history
+                                else:
+                                    if pooled_rules is None:
+                                        pooled_rules = load_pooled_ewmac_rules(
+                                            db_path=history_db_path,
+                                            cache_root=backtest_cache_root,
+                                        )
+                                    stitched_component = build_ewmac_component_frame(
+                                        stitched_history,
+                                        pooled_rules,
                                     )
-                                stitched_component = build_ewmac_component_frame(
-                                    stitched_history,
-                                    pooled_rules,
+                            if args.signal_model == RETURN_TSMOM_MODEL:
+                                assert return_tsmom_scalar_history is not None
+                                raw_stitched_result = build_return_tsmom_forecast(
+                                    stitched_component,
+                                    fast_window=args.fast_window,
+                                    slow_window=args.slow_window,
+                                    vol_fast_window=args.vol_fast_window,
+                                    vol_slow_window=args.vol_slow_window,
+                                    regime_discount=args.regime_discount,
+                                    min_valid_observations=args.min_forecast_obs,
                                 )
-                            stitched_result = engine.combine(
-                                stitched_component,
-                                rules,
-                                forecast_correlation,
-                                correlation_rules,
-                            )
+                                stitched_result = scale_return_tsmom_forecast(
+                                    raw_stitched_result,
+                                    return_tsmom_scalar_history,
+                                    min_valid_observations=(
+                                        args.min_forecast_obs
+                                    ),
+                                )
+                            elif args.signal_model == GOULDING_MODEL:
+                                assert stitched_goulding_result is not None
+                                stitched_result = stitched_goulding_result
+                            else:
+                                stitched_result = engine.combine(
+                                    stitched_component,
+                                    rules,
+                                    forecast_correlation,
+                                    correlation_rules,
+                                )
                             if currency not in fx_history_by_currency:
                                 fx_history_by_currency[currency] = (
                                     None
@@ -2721,13 +4345,15 @@ def _run_complete_selection(
                                 stitched_reference_path,
                             )
                         else:
+                            cached_stitched_curve, _ = cached_stitched
                             logger.info(
                                 "selection_backtest_cache hit "
                                 "artifact=stitched_reference_tail symbol=%s "
-                                "key=%s start=%s path=%s",
+                                "key=%s start=%s end=%s path=%s",
                                 symbol,
                                 stitched_cache_key,
                                 live_tail_start,
+                                cached_stitched_curve.get_column("date").max(),
                                 stitched_reference_path,
                             )
                         # Reuse the stable cost-free PST prefix and append only
@@ -2747,6 +4373,7 @@ def _run_complete_selection(
                             f"{stitched_cache_key}"
                         )
                         historical_return_sources[symbol] = "stitched"
+                        live_tail_start_by_symbol[symbol] = live_tail_start
                         stitched_symbols.append(symbol)
                     except Exception as exc:
                         logger.warning(
@@ -2814,6 +4441,9 @@ def _run_complete_selection(
         "tie_reference_book_count": args.tie_reference_book_count,
         "include_roll_cost_in_score": args.include_roll_cost_in_score,
         "max_weight_idm": args.max_weight_idm,
+        "min_instr_per_class": args.min_instr_per_class,
+        "min_instr_per_subclass": args.min_instr_per_subclass,
+        "selection_min_book_count": _active_minimum_book_count(args),
         "max_instr_per_class": args.max_instr_per_class,
         "max_instr_per_subclass": args.max_instr_per_subclass,
         "max_class_weight_pct": args.max_class_weight_pct,
@@ -2828,8 +4458,49 @@ def _run_complete_selection(
         "selection_max_history_gap_days": (
             args.selection_max_history_gap_days
         ),
+        "selection_eligibility_hysteresis_percent": (
+            args.selection_eligibility_hysteresis_pct
+        ),
+        "selection_membership_hysteresis": (
+            args.selection_membership_hysteresis
+        ),
+        "selection_rank_buffer_percent": (
+            _active_rank_buffer_percent(args)
+        ),
+        "selection_rank_count_ewma_halflife_reviews": (
+            _active_rank_count_ewma_halflife_reviews(args)
+        ),
+        "selection_book_score_buffer_percent": (
+            _active_book_score_buffer_percent(args)
+        ),
+        "selection_prefer_full_contracts": (
+            args.selection_prefer_full_contracts
+        ),
         "selected_book": list(selection.selected),
     }
+    if args.signal_model == RETURN_TSMOM_MODEL:
+        selection_policy_identity["return_tsmom"] = {
+            "fast_window": args.fast_window,
+            "slow_window": args.slow_window,
+            "vol_fast_window": args.vol_fast_window,
+            "vol_slow_window": args.vol_slow_window,
+            "regime_discount": args.regime_discount,
+            "target_abs_forecast": EWMAC_FORECAST_TARGET_ABS,
+            "forecast_cap": EWMAC_FORECAST_CAP,
+            "scalar_min_periods": EWMAC_SCALAR_MIN_PERIODS,
+            "calibration_universe": return_tsmom_calibration_universe,
+        }
+    elif args.signal_model == GOULDING_MODEL:
+        selection_policy_identity["goulding"] = {
+            "signal_mode": args.goulding_signal_mode,
+            "target_abs_forecast": (
+                GOULDING_SELECTION_FORECAST_TARGET_ABS
+            ),
+            "forecast_cap": GOULDING_SELECTION_FORECAST_CAP,
+            "calibration_universe": sorted(
+                goulding_cluster_by_history.items()
+            ),
+        }
     for symbol in cash_symbols:
         candidate = candidate_by_symbol[symbol]
         detail = static_details.get(symbol, {
@@ -2861,6 +4532,9 @@ def _run_complete_selection(
             "buffer_size": args.buffer_size,
             "buffer_trade_to_edge": args.buffer_trade_to_edge,
             "rebalance_on_roll": args.rebalance_on_roll,
+            # Keep cash-only accounting changes from invalidating the much
+            # more expensive reference and forecast artifacts.
+            "cash_pnl_version": CASH_PNL_CACHE_VERSION,
         }
         (
             cash_path,
@@ -2887,6 +4561,7 @@ def _run_complete_selection(
                 "held_con",
                 "net_pnl",
                 "pnl_valid",
+                "hist_quality",
             ),
         )
         if cached_cash is None:
@@ -2913,6 +4588,15 @@ def _run_complete_selection(
                 else "no_history_roll_markers"
             )
             cash_output_frame = cash_frame.with_columns(
+                (
+                    pl.col("hist_quality")
+                    if "hist_quality" in cash_frame.columns
+                    else (
+                        pl.col("quality_flag")
+                        if "quality_flag" in cash_frame.columns
+                        else pl.lit("")
+                    )
+                ).alias("hist_quality"),
                 pl.lit(symbol).alias("symbol"),
                 pl.lit(stitched_history_code_by_symbol[symbol]).alias(
                     "hist_instr_code"
@@ -2951,6 +4635,9 @@ def _run_complete_selection(
                 "con_px",
                 "comb_fcst",
                 "pt_change",
+                # In particular, retain ``missing_ref`` on contract switches
+                # whose new dated contract has no prior same-contract mark.
+                "hist_quality",
                 "pt_vol",
                 "fx_to_usd",
                 "fx_pair",
@@ -3049,6 +4736,11 @@ def _run_complete_selection(
                 symbol: audit_by_symbol[symbol] for symbol in cash_symbols
             },
             reference_frames=walk_forward_reference_frames,
+            live_tail_start_by_symbol={
+                symbol: live_tail_start_by_symbol[symbol]
+                for symbol in cash_symbols
+                if symbol in live_tail_start_by_symbol
+            },
             run_config=run_config,
             args=args,
         )
@@ -3064,7 +4756,35 @@ def _run_complete_selection(
             for symbol in cash_symbols
         },
         target_abs_forecast=engine.config.target_abs_forecast,
+        capital_mode=args.backtest_capital_mode,
         allocation_provider=allocation_provider,
+    )
+    cash_pnl_long = cash_pnl_long.with_columns(
+        pl.lit(args.signal_model).alias("signal_model"),
+        pl.lit(
+            args.fast_window
+            if args.signal_model == RETURN_TSMOM_MODEL
+            else None,
+            dtype=pl.Int64,
+        ).alias("fast_window"),
+        pl.lit(
+            args.slow_window
+            if args.signal_model == RETURN_TSMOM_MODEL
+            else None,
+            dtype=pl.Int64,
+        ).alias("slow_window"),
+        pl.lit(
+            args.regime_discount
+            if args.signal_model == RETURN_TSMOM_MODEL
+            else None,
+            dtype=pl.Float64,
+        ).alias("regime_discount"),
+        pl.lit(
+            args.goulding_signal_mode
+            if args.signal_model == GOULDING_MODEL
+            else None,
+            dtype=pl.Utf8,
+        ).alias("goulding_signal_mode"),
     )
     if allocation_provider is not None:
         if allocation_provider.latest_selection is None:
@@ -3115,42 +4835,43 @@ def _run_complete_selection(
     portfolio_curve = build_portfolio_equity_curve(
         cash_pnl_long,
         initial_capital_usd=float(run_config["init_cap_usd"]),
+        capital_mode=args.backtest_capital_mode,
     )
-    audit_path = output_dir / f"multi_speed_ewmac_selection_forecast_audit_{stamp}.parquet"
-    trials_path = output_dir / f"multi_speed_ewmac_selection_trials_{stamp}.parquet"
+    audit_path = output_dir / f"{report_prefix}_selection_forecast_audit_{stamp}.parquet"
+    trials_path = output_dir / f"{report_prefix}_selection_trials_{stamp}.parquet"
     trial_allocations_path = (
-        output_dir / f"multi_speed_ewmac_selection_trial_allocations_{stamp}.parquet"
+        output_dir / f"{report_prefix}_selection_trial_allocations_{stamp}.parquet"
     )
     selection_passes_path = (
-        output_dir / f"multi_speed_ewmac_selection_passes_{stamp}.parquet"
+        output_dir / f"{report_prefix}_selection_passes_{stamp}.parquet"
     )
-    selection_path = output_dir / f"multi_speed_ewmac_selection_book_{stamp}.parquet"
+    selection_path = output_dir / f"{report_prefix}_selection_book_{stamp}.parquet"
     selection_reviews_path = (
         output_dir
-        / f"multi_speed_ewmac_selection_reviews_{stamp}.parquet"
+        / f"{report_prefix}_selection_reviews_{stamp}.parquet"
     )
     selection_review_instruments_path = (
         output_dir
-        / f"multi_speed_ewmac_selection_review_instruments_{stamp}.parquet"
+        / f"{report_prefix}_selection_review_instruments_{stamp}.parquet"
     )
     selection_review_trials_path = (
         output_dir
-        / f"multi_speed_ewmac_selection_review_trials_{stamp}.parquet"
+        / f"{report_prefix}_selection_review_trials_{stamp}.parquet"
     )
     selection_review_trial_allocations_path = (
         output_dir
-        / f"multi_speed_ewmac_selection_review_trial_allocations_{stamp}.parquet"
+        / f"{report_prefix}_selection_review_trial_allocations_{stamp}.parquet"
     )
     selection_review_final_allocations_path = (
         output_dir
-        / f"multi_speed_ewmac_selection_review_final_allocations_{stamp}.parquet"
+        / f"{report_prefix}_selection_review_final_allocations_{stamp}.parquet"
     )
     cash_pnl_path = (
-        output_dir / f"multi_speed_ewmac_selection_cash_pnl_{stamp}.parquet"
+        output_dir / f"{report_prefix}_selection_cash_pnl_{stamp}.parquet"
     )
     portfolio_curve_path = (
         output_dir
-        / f"multi_speed_ewmac_selection_portfolio_curve_{stamp}.parquet"
+        / f"{report_prefix}_selection_portfolio_curve_{stamp}.parquet"
     )
     # Round only persisted public report copies. Full-precision daily analytical
     # frames remain available in Parquet and calculations above are untouched.
@@ -3159,6 +4880,15 @@ def _run_complete_selection(
         rename_public_report_columns(
             pl.DataFrame(selection.trials, infer_schema_length=None).with_columns(
                 pl.lit(args.weight_policy).alias("wt_policy"),
+                pl.lit(args.min_instr_per_class, dtype=pl.Int64).alias(
+                    "minimum_instruments_per_class"
+                ),
+                pl.lit(args.min_instr_per_subclass, dtype=pl.Int64).alias(
+                    "minimum_instruments_per_subclass"
+                ),
+                pl.lit(_active_minimum_book_count(args), dtype=pl.Int64).alias(
+                    "minimum_book_count"
+                ),
                 pl.lit(args.max_instr_per_class, dtype=pl.Int64).alias(
                     "maximum_instruments_per_class"
                 ),
@@ -3196,6 +4926,15 @@ def _run_complete_selection(
             pl.DataFrame(selection.trial_allocations, infer_schema_length=None)
             .with_columns(
                 pl.lit(args.weight_policy).alias("wt_policy"),
+                pl.lit(args.min_instr_per_class, dtype=pl.Int64).alias(
+                    "minimum_instruments_per_class"
+                ),
+                pl.lit(args.min_instr_per_subclass, dtype=pl.Int64).alias(
+                    "minimum_instruments_per_subclass"
+                ),
+                pl.lit(_active_minimum_book_count(args), dtype=pl.Int64).alias(
+                    "minimum_book_count"
+                ),
                 pl.lit(args.max_instr_per_class, dtype=pl.Int64).alias(
                     "maximum_instruments_per_class"
                 ),
@@ -3237,6 +4976,15 @@ def _run_complete_selection(
         .filter(pl.col("accepted"))
         .with_columns(
             pl.lit(args.weight_policy).alias("wt_policy"),
+            pl.lit(args.min_instr_per_class, dtype=pl.Int64).alias(
+                "minimum_instruments_per_class"
+            ),
+            pl.lit(args.min_instr_per_subclass, dtype=pl.Int64).alias(
+                "minimum_instruments_per_subclass"
+            ),
+            pl.lit(_active_minimum_book_count(args), dtype=pl.Int64).alias(
+                "minimum_book_count"
+            ),
             pl.lit(args.max_instr_per_class, dtype=pl.Int64).alias(
                 "maximum_instruments_per_class"
             ),
@@ -3360,11 +5108,13 @@ def _run_complete_selection(
             pass_columns.index("symbol") + 1, "pst_instr_code"
         )
         selection_passes = selection_passes.select(pass_columns)
-    public_selection_passes = round_public_report(
-        rename_public_report_columns(selection_passes)
+    public_selection_passes = _signal_public_provenance(
+        round_public_report(rename_public_report_columns(selection_passes)),
+        args=args,
     )
-    public_selection = round_public_report(
-        rename_public_report_columns(final_frame)
+    public_selection = _signal_public_provenance(
+        round_public_report(rename_public_report_columns(final_frame)),
+        args=args,
     )
     public_audit.write_parquet(audit_path)
     public_trials.write_parquet(trials_path)
@@ -3372,17 +5122,20 @@ def _run_complete_selection(
     public_selection_passes.write_parquet(selection_passes_path)
     public_selection.write_parquet(selection_path)
     if allocation_provider is not None:
-        public_selection_reviews = round_public_report(
-            rename_public_report_columns(
-                pl.DataFrame(
-                    allocation_provider.review_rows,
-                    infer_schema_length=None,
+        public_selection_reviews = _signal_public_provenance(
+            round_public_report(order_selection_review_summary_report(
+                rename_public_report_columns(
+                    pl.DataFrame(
+                        allocation_provider.review_rows,
+                        infer_schema_length=None,
+                    )
                 )
-            )
+            )),
+            args=args,
         )
         public_selection_reviews.write_parquet(selection_reviews_path)
-        public_selection_review_instruments = round_public_report(
-            order_selection_review_instrument_report(
+        public_selection_review_instruments = _signal_public_provenance(
+            round_public_report(order_selection_review_instrument_report(
                 rename_public_report_columns(
                     pl.DataFrame(
                         allocation_provider.review_instrument_rows,
@@ -3396,55 +5149,43 @@ def _run_complete_selection(
                         nulls_last=True,
                     )
                 )
-            )
+            )),
+            args=args,
         )
         public_selection_review_instruments.write_parquet(
             selection_review_instruments_path
         )
-        public_selection_review_trials = round_public_report(
-            rename_public_report_columns(
-                pl.DataFrame(
-                    allocation_provider.review_trial_rows,
-                    infer_schema_length=None,
-                )
-            )
-        )
-        public_selection_review_trials.write_parquet(
-            selection_review_trials_path
-        )
-        public_selection_review_trial_allocations = round_public_report(
-            order_selection_review_allocation_report(
+        if args.selection_report_mode == "full":
+            public_selection_review_trials = round_public_report(
                 rename_public_report_columns(
                     pl.DataFrame(
-                        allocation_provider.review_trial_allocation_rows,
+                        allocation_provider.review_trial_rows,
                         infer_schema_length=None,
                     )
                 )
             )
-        )
-        public_selection_review_trial_allocations.write_parquet(
-            selection_review_trial_allocations_path
-        )
-        # The full allocation report preserves every hypothetical candidate
-        # book. Keep one compact, fully diagnosed final accepted book per
-        # review for navigation without duplicating every accepted growth step.
-        final_iteration_by_date: dict[date, int] = {}
-        for row in allocation_provider.review_trial_allocation_rows:
-            if not bool(row["accepted"]):
-                continue
-            selection_date = row["selection_date"]
-            iteration = int(row["iteration"])
-            final_iteration_by_date[selection_date] = max(
-                iteration,
-                final_iteration_by_date.get(selection_date, iteration),
+            public_selection_review_trials.write_parquet(
+                selection_review_trials_path
             )
-        final_review_allocation_rows = [
-            row
-            for row in allocation_provider.review_trial_allocation_rows
-            if bool(row["accepted"])
-            and int(row["iteration"])
-            == final_iteration_by_date[row["selection_date"]]
-        ]
+            public_selection_review_trial_allocations = round_public_report(
+                order_selection_review_allocation_report(
+                    rename_public_report_columns(
+                        pl.DataFrame(
+                            allocation_provider.review_trial_allocation_rows,
+                            infer_schema_length=None,
+                        )
+                    )
+                )
+            )
+            public_selection_review_trial_allocations.write_parquet(
+                selection_review_trial_allocations_path
+            )
+        # The greedy trial report remains the unconstrained challenger audit.
+        # Persist the separately rescored, hysteresis-adjusted book here so a
+        # retained incumbent is never mislabeled as the final challenger.
+        final_review_allocation_rows = (
+            allocation_provider.review_final_allocation_rows
+        )
         public_selection_review_final_allocations = round_public_report(
             order_selection_review_allocation_report(
                 rename_public_report_columns(
@@ -3473,8 +5214,12 @@ def _run_complete_selection(
         f"forecast-eligible instruments"
     )
     print(f"Saved forecast audit {audit_path}")
-    print(f"Saved daily forecasts {forecasts_path}")
-    print(f"Saved synchronized subsystem reference returns {reference_return_path}")
+    if args.selection_report_mode == "full":
+        print(f"Saved daily forecasts {forecasts_path}")
+        print(
+            "Saved synchronized subsystem reference returns "
+            f"{reference_return_path}"
+        )
     print(f"Saved executable cash P&L {cash_pnl_path}")
     print(f"Saved portfolio equity curve {portfolio_curve_path}")
     print(f"Saved trials {trials_path}")
@@ -3486,11 +5231,14 @@ def _run_complete_selection(
             "Saved selection review instruments "
             f"{selection_review_instruments_path}"
         )
-        print(f"Saved selection review trials {selection_review_trials_path}")
-        print(
-            "Saved selection review trial allocations "
-            f"{selection_review_trial_allocations_path}"
-        )
+        if args.selection_report_mode == "full":
+            print(
+                f"Saved selection review trials {selection_review_trials_path}"
+            )
+            print(
+                "Saved selection review trial allocations "
+                f"{selection_review_trial_allocations_path}"
+            )
         print(
             "Saved selection review final allocations "
             f"{selection_review_final_allocations_path}"
@@ -3511,6 +5259,8 @@ def run(
     supplied.
     """
     args = parse_args(argv, complete_default=complete_default)
+    if args.complete and args.cache is None:
+        raise ValueError("--cache is required for complete selection")
     if (
         args.low_contract_penalty_scale < 0
         or args.high_contract_penalty_scale < 0
@@ -3529,10 +5279,40 @@ def run(
         raise ValueError("max source gap days must be nonnegative")
     if args.selection_max_history_gap_days < 0:
         raise ValueError("selection max history gap days must be nonnegative")
+    if args.selection_min_book_count <= 0:
+        raise ValueError("selection minimum book count must be positive")
+    if not 0 <= args.selection_eligibility_hysteresis_pct <= 100:
+        raise ValueError("selection eligibility hysteresis must be in [0, 100]")
+    if not 0 <= args.selection_rank_buffer_pct <= 100:
+        raise ValueError("selection rank buffer must be in [0, 100]")
+    if (
+        args.selection_rank_count_ewma_halflife_reviews is not None
+        and (
+            not math.isfinite(
+                args.selection_rank_count_ewma_halflife_reviews
+            )
+            or args.selection_rank_count_ewma_halflife_reviews <= 0
+        )
+    ):
+        raise ValueError(
+            "selection rank count EWMA half-life must be finite and positive"
+        )
+    if not 0 <= args.selection_book_score_buffer_pct <= 100:
+        raise ValueError("selection book score buffer must be in [0, 100]")
     if args.ib_prior_years <= 0:
         raise ValueError("--ib-prior-years must be positive")
     if not math.isfinite(args.forecast_fdm) or args.forecast_fdm <= 0:
         raise ValueError("--forecast-fdm must be finite and positive")
+    if args.fast_window <= 0 or args.slow_window <= args.fast_window:
+        raise ValueError(
+            "--fast-window and --slow-window must be positive and increasing"
+        )
+    if args.vol_fast_window is not None and args.vol_fast_window < 2:
+        raise ValueError("--vol-fast-window must be at least 2")
+    if args.vol_slow_window is not None and args.vol_slow_window < 2:
+        raise ValueError("--vol-slow-window must be at least 2")
+    if not math.isfinite(args.regime_discount) or not 0 <= args.regime_discount <= 1:
+        raise ValueError("--regime-discount must be finite and in [0, 1]")
     if (
         args.backtest_start_date is not None
         and args.backtest_end_date is not None
@@ -3595,7 +5375,12 @@ def run(
     # backtest, including a static-book replay, receives reference costs and
     # reference rule eligibility at this boundary.
     selected = (
-        selection_rebalance_candidates(report)
+        selection_rebalance_candidates(
+            report,
+            apply_live_execution_gates=(
+                args.selection_rebalance == "static"
+            ),
+        )
         if args.complete
         else selection_candidates(report)
     )
@@ -3660,22 +5445,32 @@ def run(
     output = (
         args.output.expanduser().resolve()
         if args.output is not None
-        else _default_output_path(report_output_dir, generated_at)
+        else _default_output_path(
+            report_output_dir,
+            generated_at,
+            args=args,
+        )
     )
     output.parent.mkdir(parents=True, exist_ok=True)
     screen_path = report_output_dir / (
-        "multi_speed_ewmac_selection_screen_"
+        f"{_signal_report_prefix(args)}_selection_screen_"
         f"{generated_at.astimezone(REPORT_TIMEZONE).strftime('%Y%m%d_%H%M%S')}"
         ".parquet"
     )
     screen_path.parent.mkdir(parents=True, exist_ok=True)
     # Keep the complete instrument universe and its pass/fail reasons so the
     # embedded selection screen is auditable alongside the passing candidates.
-    public_screen = round_public_report(report)
+    public_screen = _signal_public_provenance(
+        round_public_report(report),
+        args=args,
+    )
     public_screen.write_parquet(screen_path)
     # Candidate filtering is a public report boundary. Keep ``selected`` at calculation
     # precision for the optional complete search and round only its report copy.
-    public_selected = round_public_report(selected)
+    public_selected = _signal_public_provenance(
+        round_public_report(selected),
+        args=args,
+    )
     public_selected.write_parquet(output)
     logger.info(
         "selection_candidate_filter complete source=%s screen=%s output=%s "
@@ -3709,6 +5504,12 @@ def run(
             generated_at=generated_at,
             run_config=config,
             args=args,
+            snapshot_ib_end_by_signal={
+                str(row["signal_symbol"]): row["ib_fast_end"]
+                for row in report.iter_rows(named=True)
+                if row.get("signal_symbol")
+                and isinstance(row.get("ib_fast_end"), date)
+            },
         )
     return output, public_selected
 

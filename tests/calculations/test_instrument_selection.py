@@ -19,6 +19,7 @@ def _candidate(
     asset_class="equity",
     economic_subclass="us",
     initial_margin_usd=None,
+    is_micro=False,
 ):
     return SelectionCandidate(
         symbol=symbol,
@@ -28,9 +29,99 @@ def _candidate(
         asset_class=asset_class,
         economic_subclass=economic_subclass,
         econ_family=family,
+        is_micro_contract=is_micro,
         mkt_risk_vol_day=1_000_000_000.0,
         initial_margin_usd=initial_margin_usd,
     )
+
+
+def test_full_contract_preference_suppresses_feasible_micro_family_route():
+    """A feasible full contract wins its family even with a lower raw score."""
+    candidates = [
+        _candidate("MICRO", 0.0, family="INDEX", is_micro=True),
+        _candidate("FULL", 20.0, family="INDEX"),
+    ]
+    result = GreedyInstrumentSelector(
+        config=GreedySelectionConfig(
+            capital=1_000_000.0,
+            size_penalty_scale=0.0,
+            prefer_full_contracts=True,
+        )
+    ).select(candidates, np.eye(2))
+
+    assert result.selected == ("FULL",)
+    micro_trial = next(
+        row for row in result.trials if row["candidate"] == "MICRO"
+    )
+    assert micro_trial["reason"] == (
+        "micro_suppressed_by_full_contract_preference:INDEX"
+    )
+
+
+def test_disabled_full_contract_preference_preserves_score_choice():
+    """The default leaves full and micro family routes to ordinary scoring."""
+    candidates = [
+        _candidate("MICRO", 0.0, family="INDEX", is_micro=True),
+        _candidate("FULL", 20.0, family="INDEX"),
+    ]
+    result = GreedyInstrumentSelector(
+        config=GreedySelectionConfig(
+            capital=1_000_000.0,
+            size_penalty_scale=0.0,
+        )
+    ).select(candidates, np.eye(2))
+
+    assert result.selected == ("MICRO",)
+
+
+def test_full_contract_preference_keeps_micro_when_full_is_infeasible():
+    """The preference never replaces an executable micro with a failed full."""
+    candidates = [
+        _candidate(
+            "MICRO",
+            0.0,
+            family="INDEX",
+            is_micro=True,
+            initial_margin_usd=100.0,
+        ),
+        _candidate(
+            "FULL",
+            0.0,
+            family="INDEX",
+            initial_margin_usd=None,
+        ),
+    ]
+    result = GreedyInstrumentSelector(
+        config=GreedySelectionConfig(
+            capital=1_000_000.0,
+            size_penalty_scale=0.0,
+            max_instrument_margin_pct=20.0,
+            prefer_full_contracts=True,
+        )
+    ).select(candidates, np.eye(2))
+
+    assert result.selected == ("MICRO",)
+
+
+def test_score_hysteresis_can_retain_incumbent_micro_after_full_preference():
+    """Full preference proposes the route; score hysteresis controls turnover."""
+    candidates = [
+        _candidate("MICRO", 0.0, family="INDEX", is_micro=True),
+        _candidate("FULL", 20.0, family="INDEX"),
+    ]
+    result = GreedyInstrumentSelector(
+        config=GreedySelectionConfig(
+            capital=1_000_000.0,
+            size_penalty_scale=0.0,
+            prefer_full_contracts=True,
+            membership_hysteresis="score",
+            book_score_buffer_percent=2.0,
+        )
+    ).select(candidates, np.eye(2), prior_selected=["MICRO"])
+
+    assert result.unbuffered_selected == ("FULL",)
+    assert result.selected == ("MICRO",)
+    assert result.switch_reason == "net_score_gain_below_buffer"
 
 
 def test_scoring_uses_combined_forecast_turnover_cost():
@@ -142,6 +233,144 @@ def test_greedy_selector_stops_when_best_addition_falls_below_threshold():
     )
 
 
+def test_incumbent_receives_participation_eligibility_hysteresis():
+    """A prior member may remain inside its hysteresis band unlike an entrant."""
+    candidate = SelectionCandidate(
+        symbol="A",
+        ann_dvol=100.0,
+        trade_sr=0.0,
+        combined_turnover=1.0,
+        asset_class="equity",
+        economic_subclass="us",
+        # The singleton uses 160 risk dollars per day, or 1.1% participation.
+        mkt_risk_vol_day=160.0 / 0.011,
+    )
+    selector = GreedyInstrumentSelector(
+        config=GreedySelectionConfig(
+            capital=1_000_000.0,
+            max_pct_market_volume=1.0,
+            eligibility_hysteresis_percent=25.0,
+        ),
+        weight_policy=EqualPortfolioWeights(),
+    )
+    candidates = {"A": candidate}
+
+    entrant = selector.score(
+        ["A"], candidates, ["A"], np.eye(1), starting=True
+    )
+    incumbent = selector.score(
+        ["A"],
+        candidates,
+        ["A"],
+        np.eye(1),
+        starting=True,
+        incumbent_symbols=frozenset({"A"}),
+    )
+
+    assert not entrant.feasible
+    assert incumbent.feasible
+    assert incumbent.details[0]["max_market_volume_percent"] == pytest.approx(
+        1.25
+    )
+
+
+def test_reference_candidate_does_not_inherit_unknown_live_participation():
+    """A reference-prefix candidate remains feasible with no dated volume."""
+    candidate = SelectionCandidate(
+        symbol="A",
+        ann_dvol=100.0,
+        trade_sr=0.0,
+        combined_turnover=1.0,
+        asset_class="equity",
+        economic_subclass="us",
+        mkt_risk_vol_day=None,
+        enforce_market_participation=False,
+    )
+    selector = GreedyInstrumentSelector(
+        config=GreedySelectionConfig(capital=1_000_000.0),
+        weight_policy=EqualPortfolioWeights(),
+    )
+
+    score = selector.score(["A"], {"A": candidate}, ["A"], np.eye(1))
+
+    assert score.feasible
+    assert score.details[0]["pct_mkt_volume"] is None
+    assert score.details[0]["market_participation_enforced"] is False
+
+
+@pytest.mark.parametrize(
+    ("correlation", "switch_accepted"),
+    [(0.99, False), (0.0, True)],
+)
+def test_book_hysteresis_requires_net_score_gain_above_buffer(
+    correlation,
+    switch_accepted,
+):
+    """A challenger pays transition cost and a score hurdle before replacing."""
+    candidates = [_candidate("A", 0.0), _candidate("B", 0.0)]
+    selector = GreedyInstrumentSelector(
+        config=GreedySelectionConfig(
+            capital=1_000_000.0,
+            score_threshold=0.0,
+            size_penalty_scale=0.0,
+            membership_hysteresis="score",
+            book_score_buffer_percent=2.0,
+        ),
+        weight_policy=EqualPortfolioWeights(),
+    )
+    correlation_matrix = np.array([
+        [1.0, correlation],
+        [correlation, 1.0],
+    ])
+
+    result = selector.select(
+        candidates,
+        correlation_matrix,
+        prior_selected=["A"],
+    )
+
+    assert result.switch_accepted is switch_accepted
+    assert result.switch_cost_usd is not None
+    assert result.switch_cost_sr is not None
+    assert result.net_score_gain == pytest.approx(
+        result.gross_score_gain - result.switch_cost_sr
+    )
+    if switch_accepted:
+        assert set(result.selected) == {"A", "B"}
+        assert result.net_score_gain > result.score_buffer_sr
+    else:
+        assert result.selected == ("A",)
+        assert result.net_score_gain <= result.score_buffer_sr
+
+
+def test_rank_hysteresis_uses_lagged_count_anchor_without_forcing_book_size():
+    """The rank band uses its supplied state but preserves the raw book count."""
+    candidates = [_candidate(symbol, 0.0) for symbol in ("A", "B", "C")]
+    selector = GreedyInstrumentSelector(
+        config=GreedySelectionConfig(
+            capital=1_000_000.0,
+            score_threshold=0.0,
+            size_penalty_scale=0.0,
+            membership_hysteresis="rank",
+            rank_buffer_percent=20.0,
+            rank_count_anchor=10,
+        ),
+        weight_policy=EqualPortfolioWeights(),
+    )
+
+    result = selector.select(
+        candidates,
+        np.eye(3),
+        prior_selected=["A"],
+    )
+
+    assert result.rank_count_anchor == 10
+    assert result.rank_buffer_count == 2
+    assert result.rank_entry_cutoff == 8
+    assert result.rank_exit_cutoff == 12
+    assert len(result.selected) == len(result.unbuffered_selected) == 3
+
+
 def test_singleton_losers_record_competitive_rejection_reason():
     """Feasible iteration-zero losers identify the selected seed and score."""
     candidates = [
@@ -214,14 +443,260 @@ def test_greedy_selector_caps_selected_instruments_per_economic_subclass():
     assert not capped_trial["feasible"]
     assert capped_trial["score"] is None
     assert capped_trial["reason"] == (
-        "cluster_instr_limit:grains n=3 max=2"
+        "subclass_instr_limit:equity/grains n=3 max=2"
     )
+
+
+def test_class_coverage_changes_conditional_score_competition():
+    """A missing class champion competes before another crowded-class name."""
+    candidates = [
+        _candidate("FX1", 0.0, asset_class="fx", economic_subclass="g10"),
+        _candidate("FX2", 0.0, asset_class="fx", economic_subclass="g10"),
+        _candidate(
+            "BOND",
+            30.0,
+            asset_class="rates",
+            economic_subclass="government",
+        ),
+    ]
+    no_coverage = GreedyInstrumentSelector(
+        config=GreedySelectionConfig(
+            capital=1_000_000.0,
+            score_threshold=0.90,
+            size_penalty_scale=0.0,
+        )
+    ).select(candidates, np.eye(3))
+    with_coverage = GreedyInstrumentSelector(
+        config=GreedySelectionConfig(
+            capital=1_000_000.0,
+            score_threshold=0.90,
+            size_penalty_scale=0.0,
+            min_instruments_per_class=1,
+            minimum_book_count=3,
+        )
+    ).select(candidates, np.eye(3))
+
+    assert set(no_coverage.selected) == {"FX1", "FX2"}
+    assert set(with_coverage.selected) == {"FX1", "FX2", "BOND"}
+    bond_trial = next(
+        row for row in with_coverage.trials
+        if row["iteration"] == 1 and row["candidate"] == "BOND"
+    )
+    assert bond_trial["coverage_phase"] == "class"
+    assert bond_trial["coverage_eligible"] is True
+    assert bond_trial["accepted"] is True
+    assert bond_trial["class_rank"] == 2
+    assert bond_trial["global_trial_rank"] == 2
+
+
+def test_coverage_admits_missing_class_below_ordinary_score_floor():
+    """A feasible required class is ranked by score but bypasses the stop floor."""
+    candidates = [
+        _candidate("FX", 0.0, asset_class="fx", economic_subclass="g10"),
+        _candidate(
+            "BOND", 10.0, asset_class="rates", economic_subclass="government"
+        ),
+        _candidate(
+            "CRYPTO", 200.0, asset_class="crypto", economic_subclass="crypto"
+        ),
+    ]
+    result = GreedyInstrumentSelector(
+        config=GreedySelectionConfig(
+            capital=1_000_000.0,
+            score_threshold=0.90,
+            size_penalty_scale=0.0,
+            min_instruments_per_class=1,
+            minimum_book_count=3,
+        )
+    ).select(candidates, np.eye(3))
+
+    assert "CRYPTO" in result.selected
+    assert result.unbuffered_class_coverage_deficit == 0
+    assert result.coverage_satisfied is True
+    admitted = next(
+        row for row in result.trials
+        if row["candidate"] == "CRYPTO" and row["iteration"] == 2
+    )
+    assert admitted["coverage_phase"] == "class"
+    assert admitted["accepted"] is True
+    assert admitted["reason"] == ""
+
+
+def test_infeasible_missing_class_does_not_stop_feasible_breadth():
+    """An unattainable class remains audited while other markets can enter."""
+    candidates = [
+        _candidate(
+            "FX1",
+            0.0,
+            asset_class="fx",
+            economic_subclass="g10",
+            initial_margin_usd=100.0,
+        ),
+        _candidate(
+            "FX2",
+            1.0,
+            asset_class="fx",
+            economic_subclass="g10",
+            initial_margin_usd=100.0,
+        ),
+        _candidate(
+            "BOND",
+            0.0,
+            asset_class="rates",
+            economic_subclass="government",
+            initial_margin_usd=None,
+        ),
+    ]
+    result = GreedyInstrumentSelector(
+        config=GreedySelectionConfig(
+            capital=1_000_000.0,
+            score_threshold=0.90,
+            size_penalty_scale=0.0,
+            min_instruments_per_class=1,
+            minimum_book_count=2,
+            max_instrument_margin_pct=20.0,
+        )
+    ).select(candidates, np.eye(3))
+
+    assert set(result.selected) == {"FX1", "FX2"}
+    assert result.unbuffered_class_coverage_deficit == 1
+    assert result.coverage_satisfied is False
+    assert result.coverage_reason == "coverage_unmet_hard_feasibility_gate"
+    breadth_trial = next(
+        row for row in result.trials
+        if row["candidate"] == "FX2" and row["iteration"] == 1
+    )
+    assert breadth_trial["coverage_phase"] == "breadth"
+    assert breadth_trial["accepted"] is True
+
+
+def test_coverage_minimum_book_count_extends_score_ranked_breadth():
+    """Coverage reaches 15 feasible members before restoring the score stop."""
+    candidates = [
+        _candidate(
+            f"FX{index:02d}",
+            float(index * 20),
+            asset_class="fx",
+            economic_subclass="g10",
+        )
+        for index in range(16)
+    ]
+    result = GreedyInstrumentSelector(
+        config=GreedySelectionConfig(
+            capital=1_000_000.0,
+            score_threshold=1.0,
+            size_penalty_scale=0.0,
+            min_instruments_per_class=1,
+            minimum_book_count=15,
+        )
+    ).select(candidates, np.eye(16))
+
+    assert len(result.selected) == 15
+    accepted_phases = {
+        str(row["coverage_phase"])
+        for row in result.trials
+        if row["accepted"]
+    }
+    assert accepted_phases == {"class", "breadth"}
+
+
+def test_score_hysteresis_cannot_retain_a_worse_coverage_book():
+    """A score-valid coverage improvement dominates the switch buffer."""
+    candidates = [
+        _candidate("FX1", 0.0, asset_class="fx", economic_subclass="g10"),
+        _candidate("FX2", 0.0, asset_class="fx", economic_subclass="g10"),
+        _candidate(
+            "BOND", 30.0, asset_class="rates", economic_subclass="government"
+        ),
+    ]
+    result = GreedyInstrumentSelector(
+        config=GreedySelectionConfig(
+            capital=1_000_000.0,
+            score_threshold=0.90,
+            size_penalty_scale=0.0,
+            min_instruments_per_class=1,
+            membership_hysteresis="score",
+            book_score_buffer_percent=100.0,
+        )
+    ).select(candidates, np.eye(3), prior_selected=["FX1", "FX2"])
+
+    assert "BOND" in result.selected
+    assert result.switch_accepted is True
+    assert result.switch_reason == "candidate_improves_coverage"
+    assert result.final_class_coverage_deficit == 0
+
+
+def test_score_hysteresis_cannot_undo_minimum_book_breadth():
+    """The prior score hurdle cannot retain a feasible undersized book."""
+    candidates = [
+        _candidate("FX1", 0.0, asset_class="fx", economic_subclass="g10"),
+        _candidate("FX2", 1.0, asset_class="fx", economic_subclass="g10"),
+        _candidate("FX3", 2.0, asset_class="fx", economic_subclass="g10"),
+    ]
+    result = GreedyInstrumentSelector(
+        config=GreedySelectionConfig(
+            capital=1_000_000.0,
+            score_threshold=0.90,
+            size_penalty_scale=0.0,
+            min_instruments_per_class=1,
+            minimum_book_count=3,
+            membership_hysteresis="score",
+            book_score_buffer_percent=100.0,
+        )
+    ).select(candidates, np.eye(3), prior_selected=["FX1", "FX2"])
+
+    assert set(result.selected) == {"FX1", "FX2", "FX3"}
+    assert result.switch_reason == "candidate_improves_coverage"
+    assert result.final_book_count_deficit == 0
+    assert result.coverage_satisfied is True
+
+
+def test_rank_hysteresis_falls_back_when_retention_worsens_coverage():
+    """Rank retention cannot replace a covered class with crowded incumbents."""
+    candidates = [
+        _candidate("FX1", 0.0, asset_class="fx", economic_subclass="g10"),
+        _candidate("FX2", 50.0, asset_class="fx", economic_subclass="g10"),
+        _candidate("FX3", 60.0, asset_class="fx", economic_subclass="g10"),
+        _candidate(
+            "BOND", 30.0, asset_class="rates", economic_subclass="government"
+        ),
+    ]
+    result = GreedyInstrumentSelector(
+        config=GreedySelectionConfig(
+            capital=1_000_000.0,
+            score_threshold=0.90,
+            size_penalty_scale=0.0,
+            min_instruments_per_class=1,
+            minimum_book_count=2,
+            membership_hysteresis="rank",
+            rank_buffer_percent=100.0,
+        )
+    ).select(candidates, np.eye(4), prior_selected=["FX2", "FX3"])
+
+    assert "BOND" in result.selected
+    assert result.rank_buffer_reason == "rank_book_coverage_worse_fallback"
+    assert result.switch_reason == "candidate_improves_coverage"
+    assert result.final_class_coverage_deficit == 0
 
 
 def test_cluster_instrument_limit_must_be_positive():
     """Zero cannot express a useful per-cluster instrument limit."""
     with pytest.raises(ValueError, match="max_instruments_per_cluster"):
         GreedySelectionConfig(max_instruments_per_cluster=0)
+
+
+def test_coverage_minimum_cannot_exceed_matching_maximum():
+    """Contradictory hierarchy count bounds fail before trial construction."""
+    with pytest.raises(ValueError, match="minimum instruments per class"):
+        GreedySelectionConfig(
+            min_instruments_per_class=2,
+            max_instruments_per_class=1,
+        )
+    with pytest.raises(ValueError, match="minimum instruments per subclass"):
+        GreedySelectionConfig(
+            min_instruments_per_subclass=2,
+            max_instruments_per_subclass=1,
+        )
 
 
 def test_instrument_margin_limit_rejects_one_overfunded_position():

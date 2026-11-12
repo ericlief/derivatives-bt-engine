@@ -170,8 +170,8 @@ def test_tsmom_live_config_defaults_use_standard_lot_aware_policy():
     assert config.data_source == 'ib'
     assert config.notional_weighting == 'flat'
     assert config.use_idm is True
-    assert config.fast_window == 63
-    assert config.slow_window == 252
+    assert config.fast_window == 64
+    assert config.slow_window == 256
     assert config.vol_fast_window is None
     assert config.vol_slow_window is None
     assert config.discrete_allocation == 'lot-aware'
@@ -600,21 +600,29 @@ def test_signal_weighting_goulding_populates_audit_fields(monkeypatch):
     assert targets[0]['a_re'] is not None
 
 
-def test_continuous_goulding_is_causally_scaled_and_bounded(monkeypatch):
+@pytest.mark.parametrize('signal_mode', ['continuous', 'sharpe'])
+def test_continuous_goulding_modes_are_causally_scaled_and_bounded(
+    monkeypatch, signal_mode,
+):
     price_data = {'X': _price_df(date(2016, 1, 1), 900, drift=0.0008, vol=0.01, seed=7)}
     _patch_db(monkeypatch, price_data)
     config = TsmomLiveConfig(
         account_equity=100_000, data_source='database', vix_gating=False,
-        signal_weighting='goulding', goulding_signal_mode='continuous',
+        signal_weighting='goulding', goulding_signal_mode=signal_mode,
     )
 
     target = compute_rebalance_targets([_instrument('X')], config, ib=None)[0]
 
     assert target.get('error') is None
-    assert target['g_signal_mode'] == 'continuous'
+    assert target['g_signal_mode'] == signal_mode
     assert target['g_raw_forecast'] is not None
     assert target['g_forecast_scalar'] is not None
     assert abs(target['signal']) <= 1.0
+    if signal_mode == 'sharpe':
+        assert target['g_fast_rms_vol'] is not None
+        assert target['g_slow_rms_vol'] is not None
+        assert target['g_fast_sharpe'] is not None
+        assert target['g_slow_sharpe'] is not None
 
 
 def test_signal_weighting_continuous_leaves_audit_fields_none(monkeypatch):

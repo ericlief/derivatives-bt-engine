@@ -54,7 +54,7 @@ Each `INSTRUMENTS` entry carries:
                     tsmom_signal.py's genuine annual-scaling terms (`hv`,
                     `avg_r_fast`/`avg_r_slow`, compute_position_scalar's
                     current_realized_vol) -- deliberately NOT used to derive
-                    ts_fast/ts_slow's own window lengths (63/252 trading days,
+                    ts_fast/ts_slow's own window lengths (64/256 trading days,
                     e.g. "3 months"/"1 year" at ~21 trading days/month),
                     which stay fixed, literal day-counts independent of this
                     field: window length (how much history to look back
@@ -326,7 +326,7 @@ INSTRUMENTS: dict[str, dict] = {
             'price_magnifier': 1, 'active_months': ['H', 'M', 'U', 'Z']},
     # ── Grains ──────────────────────────────────────────────────────────────
     # CBOT micro grains (MZL/MZC/MZS/MZW) launched ~Feb 2025 -- too short a
-    # history for the 252-day TSMOM lookback. signal_symbol borrows the
+    # history for the 256-day TSMOM lookback. signal_symbol borrows the
     # full-size contract's continuous IB bars; db_symbol falls back to
     # signal_symbol so the duckdb path uses the same full-size asset.
     # active_months confirmed empirically for all four grains -- research
@@ -404,7 +404,7 @@ INSTRUMENTS: dict[str, dict] = {
     #   6M        → Globex '6M'  (Mexican Peso; name matches, no mapping)
     # signal_symbol on J7: borrows full-size JPY continuous IB history for
     # signal/covariance (same MZC→ZC pattern -- mini listed ~2019, too thin
-    # for a reliable 252-day signal on its own).
+    # for a reliable 256-day signal on its own).
     # active_months on JPY/6M confirmed empirically as the standard financial
     # quarterly cycle -- research doc §2.2 (checked via db_symbol '6J'/'6M').
     'JPY': {'exchange': 'CME',   'multiplier': 12_500_000, 'cluster': 'fx', 'db_symbol': '6J',

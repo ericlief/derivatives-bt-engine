@@ -537,22 +537,30 @@ def test_goulding_signal_weighting_produces_long_position_with_audit_fields(monk
         assert e['a_re'] is not None
 
 
-def test_continuous_goulding_is_causally_scaled_and_bounded(monkeypatch):
+@pytest.mark.parametrize('signal_mode', ['continuous', 'sharpe'])
+def test_continuous_goulding_modes_are_causally_scaled_and_bounded(
+    monkeypatch, signal_mode,
+):
     price_data = {'X': _price_df(date(2016, 1, 1), 900, drift=0.0008, vol=0.01, seed=7)}
     _patch_data(monkeypatch, price_data, _vix_df(date(2016, 1, 1), 900, level=15.0))
     monkeypatch.setattr(tb, 'get_spec', lambda s: get_spec('ES'))
 
     result = run_tsmom_backtest(TsmomBacktestConfig(
         symbols=['X'], max_notional=50_000, max_contracts=20,
-        signal_weighting='goulding', goulding_signal_mode='continuous',
+        signal_weighting='goulding', goulding_signal_mode=signal_mode,
         vix_gating=False,
     ))
 
     scaled = [event for event in result['trend_signals'] if event['g_forecast_scalar'] is not None]
     assert scaled
-    assert all(event['g_signal_mode'] == 'continuous' for event in scaled)
+    assert all(event['g_signal_mode'] == signal_mode for event in scaled)
     assert all(event['g_raw_forecast'] is not None for event in scaled)
     assert all(abs(event['signal']) <= 1.0 for event in scaled)
+    if signal_mode == 'sharpe':
+        assert all(event['g_fast_rms_vol'] is not None for event in scaled)
+        assert all(event['g_slow_rms_vol'] is not None for event in scaled)
+        assert all(event['g_fast_sharpe'] is not None for event in scaled)
+        assert all(event['g_slow_sharpe'] is not None for event in scaled)
 
 
 def test_portfolio_capital_aggregates_across_symbols(monkeypatch):
@@ -695,8 +703,8 @@ def test_cluster_cap_config_rejects_invalid_limits():
 
 def test_fast_slow_window_defaults_and_validation():
     config = TsmomBacktestConfig(symbols=['X'])
-    assert config.fast_window == 63
-    assert config.slow_window == 252
+    assert config.fast_window == 64
+    assert config.slow_window == 256
     assert config.vol_fast_window is None
     assert config.vol_slow_window is None
 

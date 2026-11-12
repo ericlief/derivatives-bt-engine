@@ -49,6 +49,7 @@ from derivatives_bt_engine.calculations.instruments import (
 )
 from derivatives_bt_engine.calculations.roll_policy import ContractRollPolicy
 from derivatives_bt_engine.data.futures_history import (
+    CALENDAR_CONTRACT_SELECTION_VERSION,
     DEFAULT_FUTURES_CACHE_ROOT,
     DEFAULT_GLOBEX_DB_PATH,
     DEFAULT_PYSYSTEMTRADE_DB_PATH as DEFAULT_REFERENCE_DB_PATH,
@@ -85,6 +86,12 @@ DEFAULT_MAX_SOURCE_GAP_DAYS = 31
 DEFAULT_IB_DURATION = '3 y'
 DEFAULT_IB_BAR_SIZE = '1 day'
 DEFAULT_IB_DATED_CONTRACT_DURATION = '1 Y'
+
+# Increment when stitched-cache eligibility gains a stronger raw acquisition
+# requirement.  The value belongs in the derived cache identity so a bundle
+# built from older, shorter raw requests cannot masquerade as newly validated
+# history merely because the requested duration changed.
+IB_DATED_COVERAGE_VERSION = 1
 
 _LME_MONTHLY_INSTRUMENTS = {
     'ALUMINIUM_LME',
@@ -235,9 +242,39 @@ def _duration_days(duration: str) -> int | None:
     return amount * unit_days[match.group(2)]
 
 
-def _roll_aware_duration(duration: str, roll_offset_days: int) -> str:
-    """Expand dated-contract coverage enough to reach the policy roll date."""
-    required_days = max(365, abs(roll_offset_days))
+def _maximum_hold_cycle_gap_months(hold_roll_cycle: str) -> int:
+    """Return the largest month spacing between consecutive held contracts.
+
+    The final month wraps into the first held month of the following year. A
+    one-month cycle therefore has a twelve-month gap, while ``HMUZ`` has a
+    three-month gap. The roll-policy object validates ordering elsewhere, but
+    this low-level acquisition helper validates its own direct inputs.
+    """
+    months = sorted({CME_MONTH_LETTERS[letter] for letter in hold_roll_cycle})
+    if not months:
+        raise ValueError("hold-roll cycle must not be empty")
+    gaps = [
+        (following - current) % 12 or 12
+        for current, following in zip(months, months[1:] + [months[0]])
+    ]
+    return max(gaps)
+
+
+def _roll_aware_duration(
+    duration: str,
+    roll_offset_days: int,
+    hold_roll_cycle: str,
+) -> str:
+    """Expand history through the prior held contract's policy roll date.
+
+    A successor contract must be observed before the prior held contract's
+    roll cutoff. Coverage must therefore span both the roll lead and the
+    largest gap between held expiries. Thirty-one days per calendar month is
+    intentionally conservative because IB accepts whole-year duration strings
+    and exact expiries vary by contract.
+    """
+    held_gap_days = _maximum_hold_cycle_gap_months(hold_roll_cycle) * 31
+    required_days = max(365, abs(roll_offset_days) + held_gap_days)
     supplied_days = _duration_days(duration)
     if supplied_days is not None and supplied_days >= required_days:
         return duration
@@ -364,8 +401,9 @@ def load_roll_cycle_ib_contract_history(
         and carry companions follow the configured priced-cycle offset.
     duration
         IB history duration requested separately for every resolved contract.
-        It is expanded to whole years when the configured roll offset requires
-        an earlier part of the contract's trading life.
+        It is expanded to whole years when the configured roll offset plus the
+        spacing between held contracts requires an earlier part of the next
+        contract's trading life.
     bar_size, what_to_show, use_rth
         Values forwarded to ``IBPySync.get_historical_bars``.
     db_path, mapping_path
@@ -432,7 +470,11 @@ def load_roll_cycle_ib_contract_history(
             f"subset of priced-roll cycle {priced_roll_cycle}"
         )
 
-    effective_duration = _roll_aware_duration(duration, roll_offset_days)
+    effective_duration = _roll_aware_duration(
+        duration,
+        roll_offset_days,
+        hold_roll_cycle,
+    )
     # Far-deferred STIR policies can hold contracts several years before
     # expiry. Include contract years through that forward horizon; otherwise
     # no requested contract can be eligible on current observation dates.
@@ -476,13 +518,31 @@ def load_roll_cycle_ib_contract_history(
     multiplier = _format_ib_multiplier(float(broker['ib_multiplier']))
     ignore_weekly = bool(broker['ignore_weekly'])
     store = IBFuturesHistoryStore(history_db_path)
-    complete_months = store.complete_contract_months(
-        pst_instr_code=pst_instr_code,
-        bar_size=bar_size,
-        what_to_show=what_to_show,
-        use_rth=use_rth,
-        duration=effective_duration,
-    )
+    if update_history:
+        # Schema creation belongs exclusively to the broker-update path.
+        # Stored-only readers must remain genuinely read-only so many grid
+        # workers can safely share one frozen DuckDB input.
+        store.initialize()
+        complete_months = store.complete_contract_months(
+            pst_instr_code=pst_instr_code,
+            bar_size=bar_size,
+            what_to_show=what_to_show,
+            use_rth=use_rth,
+            duration=effective_duration,
+        )
+    else:
+        history_path = Path(history_db_path).expanduser()
+        complete_months = (
+            store.complete_contract_months(
+                pst_instr_code=pst_instr_code,
+                bar_size=bar_size,
+                what_to_show=what_to_show,
+                use_rth=use_rth,
+                duration=effective_duration,
+            )
+            if history_path.is_file()
+            else set()
+        )
     logger.info(
         "ib_dated_history start instrument=%s ib_symbol=%s exchange=%s "
         "hold_roll_cycle=%s priced_roll_cycle=%s carry_offset=%s "
@@ -645,6 +705,28 @@ def load_roll_cycle_ib_contract_history(
             f"{pst_instr_code} on or before {effective_as_of} in "
             f"{Path(history_db_path).expanduser()}"
         )
+    if not update_history:
+        # A derived cache identity can request a longer roll-aware duration
+        # while the durable raw database still contains rows acquired by an
+        # older, shorter request.  Presence of an IB segment is therefore not
+        # proof that the requested coverage exists.  Reject expired contracts
+        # without a matching successful fetch so ``ib-history-live=missing``
+        # retries through the broker instead of publishing stale rows under a
+        # longer-duration cache key.
+        expired_months = set(
+            result.filter(pl.col('expiration') < effective_as_of)
+            .get_column('contract_month')
+            .unique()
+            .to_list()
+        )
+        incomplete_months = sorted(expired_months - complete_months)
+        if incomplete_months:
+            raise RuntimeError(
+                "Raw IB dated-contract history lacks successful "
+                f"{effective_duration} coverage for expired PST instrument "
+                f"{pst_instr_code} contracts {incomplete_months} in "
+                f"{Path(history_db_path).expanduser()}"
+            )
     result = (
         result.with_columns(
             pl.lit(hold_roll_cycle).alias('hold_roll_cycle'),
@@ -673,6 +755,8 @@ def load_roll_cycle_ib_contract_history(
 
 def build_ib_contract_history(
     contract_history: pl.DataFrame,
+    *,
+    minimum_contract_id: str | None = None,
 ) -> FuturesHistory:
     """Build canonical daily history from overlapping IB contract bars.
 
@@ -686,6 +770,10 @@ def build_ib_contract_history(
     ----------
     contract_history
         Overlapping daily rows for every downloaded dated contract.
+    minimum_contract_id
+        Optional incumbent ``YYYYMM00`` contract from an older history source.
+        The IB held path cannot select an earlier contract at or after the
+        source handoff.
 
     Returns
     -------
@@ -762,7 +850,11 @@ def build_ib_contract_history(
         )
         .sort('date', 'expiration')
     )
-    selected = select_calendar_contract_observations(raw, policy)
+    selected = select_calendar_contract_observations(
+        raw,
+        policy,
+        minimum_contract_id=minimum_contract_id,
+    )
     if selected.is_empty():
         raise ValueError(
             f"roll policy selected no IB rows for PST instrument {pst_instr_code}"
@@ -792,6 +884,7 @@ def build_ib_contract_history(
             ).n_unique(),
             'raw_rows': contract_history.height,
             'selected_rows': selected.height,
+            'minimum_contract_id': minimum_contract_id,
         },
     )
 
@@ -817,6 +910,7 @@ class IBHistoryProvider:
     mapping_path: Path | str = DEFAULT_BROKER_MAPPING_PATH
     history_db_path: Path | str = DEFAULT_IB_FUTURES_HISTORY_DB_PATH
     update_history: bool = True
+    minimum_contract_id: str | None = None
     contract_history: pl.DataFrame | None = field(
         init=False,
         default=None,
@@ -839,7 +933,10 @@ class IBHistoryProvider:
             history_db_path=self.history_db_path,
             update_history=self.update_history,
         )
-        return build_ib_contract_history(self.contract_history)
+        return build_ib_contract_history(
+            self.contract_history,
+            minimum_contract_id=self.minimum_contract_id,
+        )
 
 
 def _history_input_fingerprint(path: Path | str) -> dict[str, object]:
@@ -851,6 +948,20 @@ def _history_input_fingerprint(path: Path | str) -> dict[str, object]:
         'size': stat.st_size,
         'mtime_ns': stat.st_mtime_ns,
     }
+
+
+def _instrument_history_input_fingerprint(
+    path: Path | str,
+    instrument_code: str,
+) -> dict[str, object]:
+    """Return one instrument's identity within the shared raw-history DB."""
+    resolved = Path(path).expanduser().resolve()
+    if not resolved.is_file():
+        # Preserve the previous missing-input failure and its path context.
+        return _history_input_fingerprint(resolved)
+    return IBFuturesHistoryStore(resolved).instrument_fingerprint(
+        instrument_code=instrument_code,
+    )
 
 
 @dataclass
@@ -906,8 +1017,21 @@ class IBStitchedHistoryProvider:
     ) -> Path:
         """Return a versioned cache directory for all stitched-view inputs."""
         effective_as_of = self.as_of or date.today()
+        hold_roll_cycle, roll_offset_days, _, _ = _load_roll_config(
+            pst_instr_code,
+            self.reference_db_path,
+        )
+        effective_duration = _roll_aware_duration(
+            self.duration,
+            roll_offset_days,
+            hold_roll_cycle,
+        )
         identity = {
             'history_schema_version': HISTORY_SCHEMA_VERSION,
+            'ib_dated_coverage_version': IB_DATED_COVERAGE_VERSION,
+            'calendar_contract_selection_version': (
+                CALENDAR_CONTRACT_SELECTION_VERSION
+            ),
             'symbol': symbol,
             'pst_instr_code': pst_instr_code,
             'signal_symbol': signal_symbol,
@@ -916,7 +1040,10 @@ class IBStitchedHistoryProvider:
             'preserve_reference_overlap': self.preserve_reference_overlap,
             'as_of': effective_as_of.isoformat(),
             'prior_years': self.prior_years,
-            'duration': self.duration,
+            # Use the duration that determines raw observations. Unaffected
+            # one-year markets retain their existing cache identity, while
+            # annual and far-deferred policies cannot reuse truncated bundles.
+            'duration': effective_duration,
             'bar_size': self.bar_size,
             'what_to_show': self.what_to_show,
             'use_rth': self.use_rth,
@@ -928,7 +1055,13 @@ class IBStitchedHistoryProvider:
                 else None
             ),
             'mapping': _history_input_fingerprint(self.mapping_path),
-            'ib_history_db': _history_input_fingerprint(self.history_db_path),
+            # Raw broker history shares one DuckDB across all markets. A
+            # whole-file mtime would invalidate every market whenever one is
+            # refreshed, so derived cache ownership follows this instrument.
+            'ib_history_db': _instrument_history_input_fingerprint(
+                self.history_db_path,
+                pst_instr_code,
+            ),
         }
         digest = hashlib.sha256(
             json.dumps(identity, sort_keys=True).encode('utf-8')
@@ -1025,7 +1158,11 @@ class IBStitchedHistoryProvider:
                 },
             )
 
-        def load_ib_segment(prior_years: int) -> FuturesHistory:
+        def load_ib_segment(
+            prior_years: int,
+            *,
+            minimum_contract_id: str | None = None,
+        ) -> FuturesHistory:
             """Load IB history and retain its dated-contract audit rows."""
             ib_provider = IBHistoryProvider(
                 ib=self.ib,
@@ -1039,6 +1176,7 @@ class IBStitchedHistoryProvider:
                 mapping_path=self.mapping_path,
                 history_db_path=self.history_db_path,
                 update_history=self.update_history,
+                minimum_contract_id=minimum_contract_id,
             )
             loaded = ib_provider.load(pst_instr_code)
             if ib_provider.contract_history is None:
@@ -1092,10 +1230,25 @@ class IBStitchedHistoryProvider:
             else:
                 histories.append(globex_history)
 
+        handoff_contract_id: str | None = None
+        if self.preserve_reference_overlap and len(histories) == 1:
+            reference_end = reference_history.signal.get_column('date').max()
+            if reference_end is not None:
+                handoff_marks = reference_history.marks.filter(
+                    pl.col('date') <= reference_end
+                ).sort('date')
+                if not handoff_marks.is_empty():
+                    handoff_contract_id = str(
+                        handoff_marks.get_column('contract_id')[-1]
+                    )
+
         ib_prior_years = self.prior_years
         ib_history: FuturesHistory | None = None
         try:
-            ib_history = load_ib_segment(ib_prior_years)
+            ib_history = load_ib_segment(
+                ib_prior_years,
+                minimum_contract_id=handoff_contract_id,
+            )
         except Exception as exc:
             # IB is the newest optional segment. Contract-definition failures
             # (common for expired contracts) should not erase valid reference
@@ -1214,6 +1367,7 @@ class IBStitchedHistoryProvider:
                     'ib_unavailable': ib_history is None,
                     'preserve_reference_overlap': self.preserve_reference_overlap,
                     'reference_preserved_through': preserved_reference_end,
+                    'handoff_contract_id': handoff_contract_id,
                 },
             )
         else:
@@ -1234,6 +1388,7 @@ class IBStitchedHistoryProvider:
                     'ib_unavailable': ib_history is None,
                     'preserve_reference_overlap': self.preserve_reference_overlap,
                     'reference_preserved_through': preserved_reference_end,
+                    'handoff_contract_id': handoff_contract_id,
                 },
             )
         if self.update_history and self.contract_history is not None:
@@ -1252,6 +1407,15 @@ class IBStitchedHistoryProvider:
                 'cache_directory': str(cache_directory),
                 'ib_history_db': str(Path(self.history_db_path).expanduser()),
                 'ib_prior_years': ib_prior_years,
+                # A current contract can legitimately have no trade on the
+                # snapshot date. Record that live acquisition checked this
+                # history through the run date so another signal variant does
+                # not refresh and restitch the same unchanged tail.
+                'ib_refresh_as_of': (
+                    self.as_of or date.today()
+                    if self.update_history
+                    else history.metadata.get('ib_refresh_as_of')
+                ),
                 'max_source_gap_days': self.max_source_gap_days,
             },
         )

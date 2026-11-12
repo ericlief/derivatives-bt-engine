@@ -1,0 +1,119 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="660" viewBox="0 0 1200 660" role="img" aria-labelledby="title desc">
+  <title id="title">Selection hysteresis performance and recent book similarity</title>
+  <desc id="desc">The left panel compares portfolio returns and grain return contribution for no hysteresis, rank hysteresis, and score hysteresis. The right panel shows annual Jaccard similarity of the rank and score books to the no-hysteresis book from 2024 through 2026.</desc>
+  <style>
+    .bg { fill: #ffffff; }
+    .title { fill: #111827; font: 600 24px system-ui, sans-serif; }
+    .subtitle { fill: #4b5563; font: 14px system-ui, sans-serif; }
+    .axis { fill: #374151; font: 13px system-ui, sans-serif; }
+    .label { fill: #111827; font: 600 13px system-ui, sans-serif; }
+    .value { fill: #111827; font: 600 12px system-ui, sans-serif; }
+    .grid { stroke: #d1d5db; stroke-width: 1; }
+    .zero { stroke: #6b7280; stroke-width: 1.5; }
+    .frame { fill: none; stroke: #9ca3af; stroke-width: 1; }
+    .recent { fill: #4c78a8; }
+    .tail { fill: #59a14f; }
+    .grain { fill: #e15759; }
+    .rank-line { fill: none; stroke: #f28e2b; stroke-width: 3; }
+    .score-line { fill: none; stroke: #b07aa1; stroke-width: 3; }
+    .rank-point { fill: #f28e2b; }
+    .score-point { fill: #b07aa1; }
+    @media (prefers-color-scheme: dark) {
+      .bg { fill: #111827; }
+      .title, .label, .value { fill: #f3f4f6; }
+      .subtitle, .axis { fill: #d1d5db; }
+      .grid { stroke: #374151; }
+      .zero { stroke: #9ca3af; }
+      .frame { stroke: #6b7280; }
+    }
+  </style>
+  <rect class="bg" width="1200" height="660"/>
+  <text class="title" x="50" y="40">Hysteresis reduced the grain drag but not the portfolio loss</text>
+  <text class="subtitle" x="50" y="66">November 7 grid; representative no-subclass-minimum paths; net results through 2026-11-06</text>
+
+  <text class="label" x="50" y="105">Portfolio performance and grain contribution</text>
+  <text class="axis" x="50" y="126">Percentage points</text>
+  <rect class="frame" x="50" y="145" width="650" height="390"/>
+  <line class="grid" x1="50" y1="188" x2="700" y2="188"/>
+  <line class="grid" x1="50" y1="275" x2="700" y2="275"/>
+  <line class="zero" x1="50" y1="362" x2="700" y2="362"/>
+  <line class="grid" x1="50" y1="449" x2="700" y2="449"/>
+  <text class="axis" x="42" y="192" text-anchor="end">20</text>
+  <text class="axis" x="42" y="279" text-anchor="end">10</text>
+  <text class="axis" x="42" y="366" text-anchor="end">0</text>
+  <text class="axis" x="42" y="453" text-anchor="end">−10</text>
+
+  <!-- No membership hysteresis -->
+  <rect class="recent" x="108" y="225" width="42" height="137"/>
+  <rect class="tail" x="154" y="285" width="42" height="77"/>
+  <rect class="grain" x="200" y="362" width="42" height="23"/>
+  <text class="value" x="129" y="217" text-anchor="middle">15.78</text>
+  <text class="value" x="175" y="277" text-anchor="middle">8.82</text>
+  <text class="value" x="221" y="401" text-anchor="middle">−2.70</text>
+  <text class="label" x="175" y="563" text-anchor="middle">None</text>
+
+  <!-- Rank hysteresis -->
+  <rect class="recent" x="309" y="362" width="42" height="37"/>
+  <rect class="tail" x="355" y="326" width="42" height="36"/>
+  <rect class="grain" x="401" y="362" width="42" height="13"/>
+  <text class="value" x="330" y="415" text-anchor="middle">−4.24</text>
+  <text class="value" x="376" y="318" text-anchor="middle">4.11</text>
+  <text class="value" x="422" y="391" text-anchor="middle">−1.55</text>
+  <text class="label" x="376" y="563" text-anchor="middle">Rank 15 / HL 5</text>
+
+  <!-- Score and rank+score hysteresis -->
+  <rect class="recent" x="510" y="362" width="42" height="88"/>
+  <rect class="tail" x="556" y="349" width="42" height="13"/>
+  <rect class="grain" x="602" y="362" width="42" height="13"/>
+  <text class="value" x="531" y="466" text-anchor="middle">−10.07</text>
+  <text class="value" x="577" y="341" text-anchor="middle">1.46</text>
+  <text class="value" x="623" y="391" text-anchor="middle">−1.52</text>
+  <text class="label" x="577" y="563" text-anchor="middle">Score 1 / rank+score</text>
+
+  <rect class="recent" x="76" y="593" width="14" height="14"/>
+  <text class="axis" x="97" y="605">Portfolio return, 2024–26</text>
+  <rect class="tail" x="286" y="593" width="14" height="14"/>
+  <text class="axis" x="307" y="605">Portfolio return, 2025–26</text>
+  <rect class="grain" x="496" y="593" width="14" height="14"/>
+  <text class="axis" x="517" y="605">Grain net contribution, 2025–26</text>
+
+  <text class="label" x="760" y="105">Book similarity to no hysteresis</text>
+  <text class="axis" x="760" y="126">Jaccard similarity (%)</text>
+  <rect class="frame" x="760" y="145" width="390" height="390"/>
+  <line class="grid" x1="760" y1="188" x2="1150" y2="188"/>
+  <line class="grid" x1="760" y1="275" x2="1150" y2="275"/>
+  <line class="grid" x1="760" y1="362" x2="1150" y2="362"/>
+  <line class="grid" x1="760" y1="449" x2="1150" y2="449"/>
+  <line class="grid" x1="760" y1="535" x2="1150" y2="535"/>
+  <text class="axis" x="752" y="192" text-anchor="end">100</text>
+  <text class="axis" x="752" y="279" text-anchor="end">75</text>
+  <text class="axis" x="752" y="366" text-anchor="end">50</text>
+  <text class="axis" x="752" y="453" text-anchor="end">25</text>
+  <text class="axis" x="752" y="539" text-anchor="end">0</text>
+  <text class="axis" x="825" y="563" text-anchor="middle">2024</text>
+  <text class="axis" x="955" y="563" text-anchor="middle">2025</text>
+  <text class="axis" x="1085" y="563" text-anchor="middle">2026</text>
+
+  <polyline class="rank-line" points="825,437 955,227 1085,222"/>
+  <circle class="rank-point" cx="825" cy="437" r="6"/>
+  <circle class="rank-point" cx="955" cy="227" r="6"/>
+  <circle class="rank-point" cx="1085" cy="222" r="6"/>
+  <text class="value" x="825" y="425" text-anchor="middle">28.3</text>
+  <text class="value" x="955" y="215" text-anchor="middle">88.5</text>
+  <text class="value" x="1085" y="210" text-anchor="middle">90.2</text>
+
+  <polyline class="score-line" points="825,418 955,227 1085,233"/>
+  <circle class="score-point" cx="825" cy="418" r="6"/>
+  <circle class="score-point" cx="955" cy="227" r="6"/>
+  <circle class="score-point" cx="1085" cy="233" r="6"/>
+  <text class="value" x="825" y="406" text-anchor="middle">33.7</text>
+  <text class="value" x="955" y="250" text-anchor="middle">88.5</text>
+  <text class="value" x="1085" y="256" text-anchor="middle">87.1</text>
+
+  <line class="rank-line" x1="790" y1="594" x2="820" y2="594"/>
+  <circle class="rank-point" cx="805" cy="594" r="5"/>
+  <text class="axis" x="828" y="599">Rank 15 / HL 5</text>
+  <line class="score-line" x1="965" y1="594" x2="995" y2="594"/>
+  <circle class="score-point" cx="980" cy="594" r="5"/>
+  <text class="axis" x="1003" y="599">Score 1 / rank+score</text>
+</svg>

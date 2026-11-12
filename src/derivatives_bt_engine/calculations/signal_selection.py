@@ -19,6 +19,7 @@ from derivatives_bt_engine.calculations.goulding import (
     GOULDING_SIGNAL_MODES,
     _goulding_direction,
     goulding_continuous_raw,
+    goulding_forecast_legs,
     normalize_goulding_forecast,
 )
 
@@ -47,6 +48,9 @@ def cluster_conviction_score(signal_weighting: str, signal: Mapping[str, object]
               else str(regime_value or '')).lower()
     fast = finite(signal.get('g_fast'))
     slow = finite(signal.get('g_slow'))
+    if signal.get('g_signal_mode') == 'sharpe':
+        fast = finite(signal.get('g_fast_sharpe'))
+        slow = finite(signal.get('g_slow_sharpe'))
     if fast is None or slow is None:
         return 0.0
     if regime in ('bull', 'bear'):
@@ -70,6 +74,8 @@ def resolve_trend_direction(signal_weighting: str, continuous_signal: Optional[f
                              a_co: float = 0.5, a_re: float = 0.5,
                              goulding_signal_mode: str = 'binary',
                              goulding_forecast_scalar: Optional[float] = None,
+                             g_fast_sharpe_val: Optional[float] = None,
+                             g_slow_sharpe_val: Optional[float] = None,
                              ) -> Optional[tuple[float, TrendRegime, float, Optional[float]]]:
     """(trend_strength, regime, regime_discount, blend) for either
     signal_weighting mode -- "Goulding decides direction, vol-parity
@@ -99,7 +105,10 @@ def resolve_trend_direction(signal_weighting: str, continuous_signal: Optional[f
     fast/slow mean in Bull/Bear or the equation-7 blend in disagreement
     states, then a caller-supplied causal forecast scalar targets average
     absolute 0.5 and caps at +/-1. Returns None when the required inputs or
-    continuous-mode scalar are unavailable.
+    continuous-mode scalar are unavailable. In ``sharpe`` mode the raw
+    fast/slow values still determine ``g_regime_val`` upstream, while the
+    corresponding Sharpe-like legs determine forecast magnitude and the
+    Correction/Rebound blend.
 
     'continuous': continuous_signal is continuous_momentum's own `signal`
     column value; regime is classify_regime(ts_fast, ts_slow);
@@ -122,8 +131,15 @@ def resolve_trend_direction(signal_weighting: str, continuous_signal: Optional[f
                 return None
             trend_strength, blend = resolved
         else:
+            forecast_fast, forecast_slow = goulding_forecast_legs(
+                goulding_signal_mode,
+                g_fast_val,
+                g_slow_val,
+                g_fast_sharpe_val,
+                g_slow_sharpe_val,
+            )
             raw_forecast = goulding_continuous_raw(
-                g_regime_val, a_co, a_re, g_fast_val, g_slow_val,
+                g_regime_val, a_co, a_re, forecast_fast, forecast_slow,
             )
             trend_strength = normalize_goulding_forecast(raw_forecast, goulding_forecast_scalar)
             if trend_strength is None:

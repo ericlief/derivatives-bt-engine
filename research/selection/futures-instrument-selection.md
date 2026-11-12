@@ -350,9 +350,11 @@ main asset classes are `equity, ags, vol, energy, fx, metals, bond`. Crypto and
 `other` are special additions: they retain affordability metrics but do not
 satisfy the minimum-15 breadth count. The US home-price future uses
 `other/housing`; EPRA-Europe and Sector instruments are classified as equity.
-Portfolio construction should
-first try to cover all seven main classes, then fill the remaining main slots;
-coverage is a preference when contract granularity makes a class infeasible.
+Portfolio construction can optionally prioritize represented-class and
+represented-subclass coverage through the explicit minimum parameters below;
+the default remains unconstrained. Coverage additions remain fully scored and
+must pass every hard feasibility gate, but they can bypass the ordinary
+relative score stopping floor until the configured minimum breadth is reached.
 These figures are deliberately a market screen stress scenario. Four contracts and
 15 instruments must not become simultaneous hard admission gates in portfolio selection:
 that would reject diversification before allowing its higher IDM to reduce the
@@ -572,7 +574,7 @@ pysystemtrade histories + reviewed economic classification + local execution ove
     -> combined forecast and subsystem return for each surviving instrument
     -> trial-book correlations, top-down classification weights, and IDM
     -> portfolio-specific positions, turnover, cost, and market participation
-    -> greedy AFTS selection with core-class coverage and score tolerance
+    -> greedy AFTS selection with optional hierarchical coverage and score tolerance
 ```
 
 The rule-cache snapshot contains both live acquisition fields and frozen
@@ -801,14 +803,31 @@ the sensitivity cannot be confused with the baseline.
 
 After the final book is selected, a separate executable cash audit fixes the
 selected list, structural weights, final `limit_weight`, and IDM. It then uses
-one lagged net-equity state shared by the whole book. Our sizing fields are:
+one capital policy shared by the whole book. Choose it explicitly with:
+
+```text
+--backtest-capital-mode fixed
+--backtest-capital-mode compounded
+```
+
+`compounded` remains the default for compatibility with existing selection
+runs. It uses lagged net equity and therefore lets prior P&L change later
+positions, buffer widths, costs, and scheduled-selection feasibility. `fixed`
+always uses `--initial-capital-usd` for position sizing, scheduled-selection
+reviews, and daily percentage denominators. Gross and net equity still equal
+initial capital plus cumulative cash P&L, but those displayed equity paths do
+not feed back into the fixed run. This matches pysystemtrade's default
+`syscore.capital.fixed_capital` backtest convention; its optional
+`full_compounding` path corresponds to the compounded policy.
+
+The sizing fields are:
 
 ```text
 init_vol_scalar[i,t]
   = initial_capital × target_vol × limit_weight[i] × IDM / ann_dvol[i,t]
 
 cap_scalar[t]
-  = prior_net_equity[t] / initial_capital
+  = sizing_capital[t] / initial_capital
 
 vol_scalar[i,t]
   = init_vol_scalar[i,t] × cap_scalar[t]
@@ -819,11 +838,18 @@ tgt_pos[i,t]
 
 `init_vol_scalar` remains a daily series because `ann_dvol` changes; it
 isolates the initial-capital position baseline. `cap_scalar` isolates only
-compounded book equity. Keeping both makes `vol_scalar` changes reproducible
-without mixing market volatility with capital growth. Sizing uses prior net
-equity, never same-day P&L, so all instruments on a date receive the same
-causal capital state. This capital loop is the engine's selected-book
-accounting policy; it is not imported from another backtest framework.
+the capital policy: it is always `1` in fixed mode and equals prior net equity
+divided by initial capital in compounded mode. Keeping both makes
+`vol_scalar` changes reproducible without mixing market volatility with
+capital growth. Compounded sizing uses prior net equity, never same-day P&L,
+so all instruments on a date receive the same causal capital state.
+
+The daily cash-return denominators follow the same policy. Fixed mode divides
+gross P&L, net P&L, and costs by initial capital, producing an additive return
+curve that isolates the forecast and portfolio algorithm. Compounded mode
+divides gross P&L by prior gross equity and net P&L and costs by prior net
+equity. The cash and portfolio reports persist `cap_mode`; fixed-run output
+directories also include `capfixed` in their scenario identifier.
 
 ### Scheduled instrument-selection reviews
 
@@ -835,6 +861,14 @@ first available session of each calendar year or month:
 --selection-rebalance yearly
 --selection-rebalance monthly
 --selection-max-history-gap-days 31
+--min-instr-per-class 1
+--min-instr-per-subclass 1
+--selection-eligibility-hysteresis-pct 25
+--selection-membership-hysteresis score
+--selection-rank-buffer-pct 15
+--selection-rank-count-ewma-halflife-reviews 3
+--selection-book-score-buffer-pct 2
+--selection-prefer-full-contracts
 ```
 
 `static` remains the default. A scheduled review is distinct from daily
@@ -852,24 +886,214 @@ reference fallback after its history stops. This check uses the stitched
 PST/IB frame when `--ib-history-db` is supplied. It is separate from
 `--max-source-gap-days`: the latter permits and masks the unknown return at
 the one-time reference-to-IB handoff, while the selection freshness limit
-controls whether that completed history can enter a later review.
+controls whether that completed history can enter a later review. The limit
+is checked only on the configured schedule; reaching the reference-to-IB
+handoff does not trigger an extra review. With yearly selection, the January
+book stays in force until the next January review.
 
-Reviews occur only on the selected static, yearly, or monthly schedule. The
-freshness limit filters candidates at those scheduled reviews; reaching the
-reference-to-IB handoff does not create an additional review. Under yearly
-selection, for example, the January book stays in force through the year, and
-the next candidate screen occurs at the next January review.
+Optional hierarchy coverage uses `--min-instr-per-class N` and
+`--min-instr-per-subclass N`. Both default to disabled. When enabled, the
+selector first fills deficient asset classes and then deficient economic
+subclasses. At each step it fully rescores every n+1 book and admits the best
+feasible trial in the active deficient groups. The ordinary relative
+`--score-threshold` stop is suspended during required coverage; score still
+ranks the alternatives and already deducts the configured cost SR. No hard
+granularity, margin, history, family, or live-execution gate is relaxed.
+
+After hierarchy coverage, `--selection-min-book-count` defaults to 15 and
+continues through the least represented feasible subclasses until that breadth
+is reached. This breadth target is active only when at least one hierarchy
+minimum is enabled, so runs with both minima disabled retain the exact prior
+greedy behavior. If a deficient group has no feasible conditional trial, the
+selector records its deficit, continues with another attainable group, and
+retries it after later additions reduce structural weights. The final reason
+is `coverage_unmet_hard_feasibility_gate` only when a requested group remains
+unattainable. Public allocation and trial reports persist the active target as
+`min_book_n`; it is null when hierarchy coverage is disabled.
+
+The causal gate split is:
+
+| Constraint | Reference-era reviews | IB/live-tail reviews |
+|---|:---:|:---:|
+| Causal history and freshness | Yes | Yes |
+| Forecast and correlation inputs | Yes | Yes |
+| Frozen reference cost | Yes | Yes |
+| Half-contract granularity | Yes | Yes |
+| Class, subclass, and family limits | Yes | Yes |
+| Normalized margin limits | Yes | Yes |
+| Live volume and participation | No | Yes |
+| IB qualification and execution availability | No | Yes |
+
+Thus pre-IB coverage means every causally available, reference-feasible group;
+after the handoff it means every currently executable group. A live capacity
+failure such as market participation does not retroactively remove the group
+from historical reviews and no longer stops construction of the rest of the
+current book.
+
+#### Full-contract family preference
+
+`--selection-prefer-full-contracts` is an optional execution-route preference,
+disabled by default. For each conditional greedy trial it first applies every
+ordinary hard feasibility gate. If a full contract and a micro contract in the
+same `econ_fam_id` are both feasible, only the full route competes for that
+family. If the full route fails granularity, liquidity, margin, hierarchy, or
+another hard gate, the micro remains eligible. This is therefore not a blanket
+micro exclusion and does not force a contract the account cannot execute.
+
+The identity comes from the persisted `pst_instr_code` and `desc` metadata,
+not from guessing the broker symbol. This covers regular `_micro` codes and
+nonstandard cases such as MBT and M2K whose descriptions carry the explicit
+`micro` label. A suppressed trial remains in the full audit with
+`micro_suppressed_by_full_contract_preference:<family>` as its reason.
+
+The preference constructs the raw challenger before membership hysteresis.
+Rank hysteresis continues the same full-preferred greedy order. Score or
+`rank_score` hysteresis may nevertheless retain a feasible incumbent micro if
+the proposed full-route book does not clear transition cost and the configured
+score hurdle. This deliberate ordering lets a grid measure the execution-cost
+benefit without silently disabling turnover control.
+
+#### Prior-book hysteresis
+
+Scheduled reviews expose three compatible controls: incumbent eligibility
+hysteresis, an index-style membership rank band, and a complete-book score
+hurdle. Eligibility hysteresis is independent. The membership mode selects
+whether rank and score controls are disabled, used separately, or composed:
+
+```text
+--selection-membership-hysteresis none
+--selection-membership-hysteresis rank
+--selection-membership-hysteresis score
+--selection-membership-hysteresis rank_score
+```
+
+`none` is the default, so omitting this flag always takes the raw greedy book.
+Rank or score hysteresis must be enabled explicitly; setting only
+`--selection-eligibility-hysteresis-pct 10`, for example, applies eligibility
+hysteresis without silently enabling a score hurdle. `rank_score` constructs
+the rank-buffered candidate first and then subjects that complete candidate to
+the score and transition-cost hurdle.
+
+Persisted reports record inactive membership parameters as null. For example,
+mode `none` does not report the parser defaults for either the rank band or
+score hurdle, and mode `rank` leaves the score hurdle null. This keeps a saved
+configuration from implying that a numerically populated but gated-off control
+was active.
+
+Coverage is evaluated before membership hysteresis and remains monotone through
+the final decision. A rank-buffered proposal that worsens the raw book's
+class-first `(class deficit, subclass deficit, book-count deficit)` tuple falls
+back to the raw book. When score hysteresis compares an incumbent with a
+score-valid challenger, the book with the lower coverage deficit wins; only
+equal-coverage books proceed to the normal transition-cost and score-buffer
+comparison. Thus
+hysteresis cannot recreate a one-class collapse, while coverage still never
+bypasses a hard construction feasibility gate.
+
+##### Incumbent eligibility hysteresis
+
+`--selection-eligibility-hysteresis-pct` relaxes selected soft eligibility
+gates for instruments already in the prior book. It defaults to zero and is
+therefore disabled unless explicitly enabled. When set to 25%, a 1%
+market-participation entry limit becomes a 1.25% incumbent exit limit, and the
+instrument cost exit limit becomes 1.25 times its entry limit. New challengers
+still face the original limits. The 0.5-contract forecast-cap minimum remains
+a hard rounding boundary for both entrants and incumbents; eligibility
+hysteresis does not lower it. Stale or missing history, unavailable margin,
+and class, subclass, family, and book-margin violations are also hard failures.
+The former `--selection-eligibility-exit-buffer-pct` spelling remains a CLI
+compatibility alias.
+
+##### Membership rank band
+
+`rank` and `rank_score` maintain a causal state estimate of normal book count.
+For review `t`, the state is an EWMA of accepted book counts through review
+`t-1`; the current raw result never determines its own rank-band center. The
+default half-life is three completed reviews for yearly selection and twelve
+for monthly selection. Override it with
+`--selection-rank-count-ewma-halflife-reviews`. The first review has no prior
+state and therefore uses its own raw count only to initialize the state after
+the decision.
+
+The modes continue the greedy marginal-addition order from the raw book's
+score stopping point through the required exit rank. This continuation ignores
+only that stopping threshold; all feasibility constraints remain active. If
+the lagged, rounded EWMA count is `N_state`, the symmetric rank band is:
+
+```text
+N_state(t) = round(EWMA(accepted_count through t - 1))
+band = ceil(N_state * rank_buffer_pct / 100)
+automatic entry rank <= N_state - band
+incumbent retention rank <= N_state + band
+```
+
+With the default 15%, a 30-instrument state uses entry rank 25 and exit rank
+35, matching Carver's published index-style example. A 9-instrument state
+uses entry rank 7 and exit rank 11. Instruments
+inside the entry cutoff take priority, incumbents inside the exit cutoff may
+remain, and remaining capacity is filled in greedy rank order until the
+current raw book count is restored. The EWMA is a band anchor, not a mandatory
+minimum: it never forces an addition that the raw selector rejected below its
+score threshold. The mixed book is rescored against every hard limit; an
+infeasible combination falls back to the raw greedy book. A zero rank buffer
+reproduces raw membership. Reports persist the half-life, pre-review EWMA
+state, rounded anchor, band size, and entry/exit cutoffs.
+
+##### Complete-book score hurdle
+
+In `score` mode, `--selection-book-score-buffer-pct` compares the raw greedy
+book with the prior book. In `rank_score` mode it compares the rank-buffered
+book with the prior book. Both books are rescored using the same review-date
+equity and inputs. Expected average positions estimate the one-time cost of
+changing books, expressed in the same SR units as the scores:
+
+```text
+switch_cost_usd = sum(abs(new_avg_pos_i - prior_avg_pos_i)
+                      * trade_cost_per_con_i)
+switch_cost_sr = switch_cost_usd / (prior_net_equity * target_vol)
+net_score_gain = challenger_score - prior_score - switch_cost_sr
+required_gain_sr = abs(prior_score) * book_score_buffer_pct / 100
+switch if net_score_gain > required_gain_sr
+```
+
+For example, if the prior score is `0.80`, the default 2% setting requires
+more than `0.016 SR` of improvement after estimated switch cost. This is a
+percentage of the prior score, not a return target or a weight limit. A value
+of zero requires any positive net score gain. The hurdle compares whole books;
+it does not test instrument substitutions one at a time. The switch estimate
+guides membership choice and is not an extra cash charge: the replay charges
+the actual contract changes at the review. The initial review has no prior
+book and follows the ordinary greedy result.
 
 Every complete backtest, including `--selection-rebalance static`, begins from
 the reference-cost universe. Candidate-only output remains the live executable
 screen. Scheduled runs use the capital-flexible reference universe rather than
 the contracts already affordable at initial capital. Reference cost,
-absolute-volume, data, rule, execution, and broker-qualification gates form
-that universe; current live spread and commission eligibility does not. A
-contract rejected only by the initial one-lot risk test can therefore enter a
-later review after equity grows. Per-review historical annual dollar
-volatility, account capital, portfolio liquidity, contract granularity, and
-margin constraints are then applied by the greedy selector.
+historical-data, and reference-rule gates form that older universe; current
+absolute volume, market participation, IB execution, broker qualification,
+live spread, and commission eligibility do not. A contract rejected only by
+today's liquidity or IB state can therefore remain available to a reference
+review, as can a contract rejected by the initial one-lot risk test that later
+becomes feasible as equity grows. Per-review historical annual dollar
+volatility, account capital, contract granularity, and margin constraints are
+then applied by the greedy selector.
+
+At each instrument's verified PST-to-IB handoff, scheduled selection activates
+the current snapshot's minimum-volume gate, IB execution and contract-
+qualification gates, and market-participation calculation. Candidate-only
+live selection and a complete static book apply the same gates immediately;
+the static replay still uses reference costs. The older PST prefix has no
+historical volume series in the reference database, so its participation
+estimate remains null and the participation gate is explicitly disabled;
+today's volume is never backfilled into 1970s-2024 reviews. The IB-tail overlay
+uses the latest snapshot volume rather than a dated as-of volume series. It is
+therefore a present-executability overlay, not a causal historical liquidity
+model, and its effect on tail performance has not been independently
+backtested. Rerun the same reference history with and without an updated
+snapshot only as an execution sensitivity, not as evidence of historical
+liquidity alpha. Trial allocation rows expose `mkt_participation_enforced`;
+review-instrument rows expose the handoff date, overlay state, volume and
+execution gates, and IB availability used at that review.
 
 Every dated backtest segment, including a static complete replay and the final
 scheduled segment, uses the configured reference one-way spread and commission
@@ -900,13 +1124,33 @@ the overtrading control. Existing members also retain their buffered holdings
 when weights change. The cash report exposes `sel_active`, `sel_rebalanced`,
 `sel_date`, and `sel_rank`; the separate `selection_reviews` Parquet records
 review equity, candidate count, selected count, score, IDM, and membership.
+It also records the greedy order through the exit rank, rank-buffered and
+score-tested candidate books, rank band and cutoffs, prior and candidate
+scores, estimated
+`switch_cost` and `switch_cost_sr`, gross and net score gains, score buffer,
+decision, and reason. The greedy trial files remain the complete raw
+challenger audit; `selection_review_final_allocations` contains the actual
+hysteresis-adjusted book used by the cash replay.
 The companion `selection_review_instruments` Parquet is the compact navigation
 report: it has one row per review and involved instrument, with `added`,
-`retained`, or `removed` status, active rank and weights, classification,
+`retained`, or `removed` status, active and greedy preference ranks, weights,
+classification,
 historical dollar volatility, and the cost inputs used by that review. The
-`symbol` column follows `sel_instr_n` for quick row scanning. One file covers
-the entire monthly or yearly walk-forward run; reviews do not create separate
-result directories.
+report leads with review identity and `sel_active`, followed by `symbol`,
+asset class, and economic subclass. Allocation weights and their class and
+subclass limits follow the identity fields, then score diagnostics and other
+review details. Run-wide selection parameters are grouped at the right edge.
+`sel_rank_buf_symbols` is null when rank membership hysteresis is disabled.
+The instrument-level `sel_elig_hyst_applied` and
+`sel_elig_hyst_reason` fields identify incumbent rows retained by the relaxed
+trade-cost or market-participation exit gate; the configured percentage alone
+does not imply that a buffer changed eligibility. `sel_note` is `retained_eh`
+on active rows where the buffer changed the eligibility outcome.
+The rebalance-weight notebook view includes a yearly bar chart of the active
+market count. Each bar uses the latest review in that year, showing the
+year-by-year size of the selected market universe.
+One file covers the entire monthly or yearly walk-forward run; reviews do not
+create separate result directories.
 The `selection_review_trials` and
 `selection_review_trial_allocations` Parquet files retain every hypothetical
 greedy trial at every review, with review date and lagged equity. They expose
@@ -919,14 +1163,14 @@ last accepted trial from each review, with one row per final book member and
 the same complete allocation diagnostics. It is the compact year-by-year or
 month-by-month book audit. Earlier accepted growth steps and every rejected
 alternative remain in the full trial reports rather than being discarded.
-Both allocation reports lead with `sel_date`, `sel_equity`, the trial identity,
-classification, configured `max_instr_per_cls`, `max_instr_per_subcls`,
-`max_cls_weight_pct`, and `max_subcls_weight_pct`. The instrument `weight` is
-grouped with the raw and capped class/subclass weights, `group_lim_weight`,
-`unalloc_weight`, final `limit_weight`, IDM, `ann_dvol`, and `risk_budget`.
-Report construction fails rather than silently dropping any of those group
-limits, allocation diagnostics, review date, sizing capital,
-dollar-volatility, or budget fields.
+Both allocation reports lead with `sel_date`, `sel_equity`, trial identity,
+and classification. The instrument `weight` is grouped with the raw and
+capped class/subclass weights, `group_lim_weight`, `unalloc_weight`, final
+`limit_weight`, IDM, `ann_dvol`, and `risk_budget`; review scores and other
+trial diagnostics follow. Run-wide class/subclass limits and selection
+parameters are grouped at the right edge. Report construction fails rather
+than silently dropping required group limits, allocation diagnostics, review
+date, sizing capital, dollar-volatility, or budget fields.
 
 The notebook helper can navigate the resulting dated books without loading a
 separate result directory for every review:
@@ -952,11 +1196,23 @@ plot_selection_rebalance_weights(
 )
 ```
 
+Goulding stitched forecasts reuse one in-memory pooled calibration context
+across all target histories in a run. Sharp and continuous modes retain
+separate forecast caches, while each mode calculates the frozen reference
+universe's monthly mixing parameters and normalization only once.
+
 `plot_selection_portfolio_overview` keeps gross and net equity on a logarithmic
-scale when both remain positive, then shows net drawdown, trailing
-256-observation return, and realized volatility in separate panels with
-independent scales. It computes rolling fields before applying optional
-display-date bounds, so a recent slice retains its warm-up history.
+scale when both remain positive, then shows net drawdown, trailing return, and
+realized volatility in separate panels with independent scales. Return and
+volatility panels identify the persisted capital mode and use the last 256
+valid return observations by default. Fixed-cap trailing return is the
+additive sum of `port_net_pct` contributions against fixed sizing capital;
+compounded trailing return is the geometric product of lagged-equity returns.
+Percentage volatility is the annualized standard deviation of the
+corresponding daily return series, so its denominator also differs by capital
+mode. Legacy curves created before `cap_mode` was persisted retain their
+historical compounded interpretation. Rolling fields are computed before
+optional display-date bounds so a recent slice retains its warm-up history.
 
 `plot_selection_portfolio_concentration` measures each day's realized absolute
 contract risk as `abs(held_con) × ann_dvol`. It displays gross annual risk as a
@@ -967,13 +1223,17 @@ forecasts, integer rounding, buffering, and capital scaling; it is intentionally
 different from the fixed selection-weight chart.
 
 `plot_selection_pnl_attribution` provides a year widget, defaulting to the
-latest year, and vertical net-P&L bars by instrument. The cash axis fits each
-selected year's observed P&L range with a small margin around the extrema.
-Hover preserves gross P&L, ordinary trade cost, and realized roll cost. It does
-not label costs on a review date as selection costs: the current `trade_con`
-path also contains forecast, volatility, capital-scaling, and buffer-driven
-trades, so that causal split would require a separate persisted
-selection-trade field.
+latest year, and vertical net-P&L bars by instrument. Each year uses only the
+union of markets with `sel_active=True` in that year's selected book, so the
+instrument axis and class/subclass groups do not include the full screened
+universe or instruments carried only from the prior year's book. All rows for
+a chosen symbol remain in its annual total so an in-year entry or exit cash
+flow is retained. The cash axis fits each selected year's observed P&L range
+with a small margin around the extrema. Hover preserves gross P&L, ordinary
+trade cost, and realized roll cost. It does not label costs on a review date as
+selection costs: the current `trade_con` path also contains forecast,
+volatility, capital-scaling, and buffer-driven trades, so that causal split
+would require a separate persisted selection-trade field.
 
 The year widget defaults to the latest year. A monthly run adds an exact review
 date widget for that year. The first vertical bars show active `limit_weight`
@@ -992,11 +1252,16 @@ When `--ib-history-db` is supplied, executable cash history is rebuilt from
 the direct PST/IB source for every instrument that can enter a scheduled book.
 With `--ib-history-live missing`, a stored reference-only bundle counts as
 missing IB history and triggers live acquisition; a valid cached PST/IB bundle
-is reused without an IB request. `--ib-history-live update` refreshes every
-eligible signal history. Source-history bundles live under
-`--stitched-history-cache-root/stitched/v12`; this defaults to the project's
-`.cache/futures` directory and is separate from the derived backtest artifacts
-under `--history-cache-root/selection_backtest`.
+is reused without an IB request, even if it ends before the latest snapshot.
+`--ib-history-live snapshot` compares each cached IB signal endpoint with that
+instrument's `ib_fast_end` in the input snapshot/rule cache and refreshes only
+tails that are absent or end earlier. This matches snapshot-observed history
+freshness; it does not guarantee bars beyond that endpoint.
+If the input has no `ib_fast_end` for a signal, snapshot mode only acquires a
+missing IB segment and otherwise reuses its cache. `--ib-history-live update`
+refreshes every eligible signal history. The required `--cache` root holds
+source-history bundles under `stitched/v12`, PySystemTrade history under
+`pysystemtrade`, and derived backtest artifacts under `selection_backtest`.
 Selection v1 deliberately does not insert Globex: `--globex-db` remains an
 accepted compatibility argument, but the selection runner passes
 `include_globex=False`. PST retains every date through that instrument's
@@ -1007,10 +1272,25 @@ a Globex segment, overlapping IB row, second handoff, or non-PST prefix appears.
 
 `--ib-history-live update` shares one IB connection across the run and updates
 each underlying signal history. Versioned content-addressed Parquet caches
-below `--history-cache-root/selection_backtest` keep four distinct artifacts:
+below `--cache/selection_backtest` keep four distinct artifacts:
 the frozen PST `reference_base`, its fixed-cost reference overlay, the mutable
 IB-only `stitched_reference_tail`, and selection-specific executable cash
-curves. The PST identity uses its pinned sidecar schema and source commit, which
+curves. Goulding runs additionally cache the pooled reference and stitched
+forecast frames. Those forecast keys include the complete calibration universe,
+signal mode, and frozen reference database identity; a repeat run with the same
+universe can load the forecasts without recalibrating every history. The
+derived identity also includes the forecast convention: EWMAC, continuous
+Goulding, and Sharpe-like Goulding target mean absolute forecast 1 and cap
+forecasts at `+/-2`. Binary Goulding remains `+/-1`. Sharpe-like Goulding keeps
+the original raw monthly fast/slow returns for regime classification and
+mixing-weight estimation, but divides each magnitude leg by its own lagged RMS
+monthly volatility before blending. The cached frame carries both raw and
+normalized legs for audit. Return TSMOM uses that same continuous
+scale through a separate cached causal pooled daily scalar; its reference
+universe and return/volatility horizons are part of the scalar key. A cache hit
+therefore avoids reloading and recalculating the full reference universe, while
+the last frozen reference scalar is carried into a later stitched IB tail. The
+PST identity uses its pinned sidecar schema and source commit, which
 also owns the frozen historical FX import; file paths and mtimes do not
 invalidate it. The IB-tail identity hashes the actual ordered history rows, so
 new cache paths or as-of dates alone do not cause a miss. New or revised IB
@@ -1130,6 +1410,7 @@ search:
 futures-build-selection \
   --report-dir results \
   --output-dir results/selection_baseline \
+  --signal-model multi_ewmac \
   --history-db /home/dev/fin/db/pysystemtrade_reference.duckdb \
   --ib-history-db /home/dev/fin/db/ib_futures_history.duckdb \
   --ib-history-live update \
@@ -1137,6 +1418,12 @@ futures-build-selection \
   --globex-db /home/dev/fin/db/globex_mdp_3.0.duckdb \
   --selection-rebalance yearly \
   --selection-max-history-gap-days 31 \
+  --selection-eligibility-hysteresis-pct 25 \
+  --selection-membership-hysteresis rank_score \
+  --selection-rank-buffer-pct 15 \
+  --selection-rank-count-ewma-halflife-reviews 3 \
+  --selection-book-score-buffer-pct 2 \
+  --selection-prefer-full-contracts \
   --backtest-start-date 2024-01-01 \
   --backtest-end-date 2026-10-30 \
   --forecast-fdm 1.0 \
@@ -1161,7 +1448,10 @@ optional `--output-dir` is a parent output root. Each invocation creates a
 candidate report and every complete-selection report there. The parameter
 directory uses the same compact tokens as the grid, such as
 `tv0p2_im20_bm50_wi0p2_st0p9_cl2_roll1_topdown_classif`; active contract
-penalties or tie rules append their parameter tokens. Without `--output-dir`,
+penalties or tie rules append their parameter tokens. Rank hysteresis appends
+both the rank band and effective count-state half-life, such as `rb15_rhl3`,
+so annual and monthly state assumptions cannot share a result directory.
+Without `--output-dir`,
 reports remain beside the input cache. The command first derives `max_ann_dvol`,
 daily risk traded, market-risk volume, participation percentage, and all hard
 gate flags. It saves the accepted rows as
@@ -1247,6 +1537,7 @@ or historical-rule rerun:
 ```bash
 futures-build-selection \
   --input results/multi_speed_ewmac_rule_cache_<timestamp>.parquet \
+  --signal-model multi_ewmac \
   --initial-capital-usd 75000
 ```
 
@@ -1274,9 +1565,11 @@ baseline by default. The command writes:
   interval-average policy-roll contracts, and separate gross, trade-cost,
   roll-cost, and net USD P&L paths. It also reports gross, trade-cost,
   realized/average-roll cost, total-cost, and net contributions as
-  daily return contributions. `sizing_cap` is prior portfolio net equity,
-  `cap_scalar` is that value divided by initial capital, `init_vol_scalar` is the
-  initial-capital average-contract baseline, and `vol_scalar` is the actual
+  daily return contributions. `cap_mode` identifies the fixed or compounded
+  policy. `sizing_cap` is initial capital in fixed mode and prior portfolio net
+  equity in compounded mode. `cap_scalar` is that value divided by initial
+  capital, `init_vol_scalar` is the initial-capital average-contract baseline,
+  and `vol_scalar` is the actual
   executable scalar after applying `cap_scalar`. The same scaled `vol_scalar`
   drives both `tgt_pos` and `buf_width_pos`, so ordinary capital changes only
   trade when the held position breaches its scaled no-trade band. Costs are
@@ -1292,10 +1585,11 @@ baseline by default. The command writes:
   unknown cross-gap move was not inferred;
 - `multi_speed_ewmac_selection_portfolio_curve_<timestamp>.parquet`, the daily
   selected-book cash flows summed across instruments. Daily `port_gross_pct`
-  uses prior gross equity; daily `port_net_pct` and cost rates use prior net
-  equity. Cumulative gross and net percentages equal their respective current
-  equity divided by initial capital minus one. The selected list, weights,
-  sizing limits, and IDM stay fixed while prior net equity scales positions;
+  uses prior gross equity in compounded mode; daily `port_net_pct` and cost
+  rates use prior net equity. Fixed mode uses initial capital for all of these
+  daily rates. Cumulative gross and net percentages equal their respective
+  current equity divided by initial capital minus one. The selected list,
+  weights, sizing limits, and IDM follow the selected capital policy;
 - `multi_speed_ewmac_selection_trials_<timestamp>.parquet`, one row per greedy trial; and
 - `multi_speed_ewmac_selection_trial_allocations_<timestamp>.parquet`, one row per member
   of every hypothetical trial book, including its economic `cluster_path`,
@@ -1339,8 +1633,8 @@ baseline by default. The command writes:
   and `hist_iid_t_stat`, with sample dates, years, observation count, and
   `hist_src`. With `--ib-history-db`, these fields and the selected cash P&L
   use the frozen PST prefix plus the stored IB tail, and the finished view is
-  cached under `--history-cache-root/selection_backtest`. Source PST/IB bundles
-  remain under `--stitched-history-cache-root/stitched/v12`. IB is not
+  cached under `--cache/selection_backtest`. Source PST/IB bundles
+  remain under `--cache/stitched/v12`. IB is not
   contacted unless a live mode is explicitly selected. Add
   `--ib-history-live missing` to connect only when a selected signal history
   cannot be built from stored data, or `--ib-history-live update` to refresh
@@ -1374,6 +1668,15 @@ subclass option. Rejected trials retain reasons such as
 These static universe constraints remain separate from the backtest/live
 `max_active_per_cluster` control, which ranks dated active signals by current
 model conviction after the universe has already been selected.
+
+The matching lower-bound controls are `--min-instr-per-class N` and
+`--min-instr-per-subclass N`. They are disabled by default and are not hard
+post-selection quotas: they define the class-first candidate competition while
+the ordinary feasibility and score gates remain binding. Public trial reports
+include the active `coverage_phase`, `coverage_elig`, conditional hierarchy
+ranks, and the final class/subclass deficits. The grid spellings are
+`--min-instr-per-classes` and `--min-instr-per-subclasses`, both accepting
+comma-separated positive counts or `none`.
 
 `--max-class-weight-pct` and `--max-subclass-weight-pct` cap structural sizing
 allocation without redistributing the excess. Class caps are applied first;
@@ -1431,9 +1734,10 @@ concentration even when the class total is unchanged.
 If count limits alone do not restore breadth, the next selector policy should
 be coverage-aware replacement rather than blind weight redistribution: before
 adding further members to a well-populated class, prefer a second feasible
-member of a singleton class, subject to the same score floor, liquidity, cost,
-and margin tests. When book margin is full, evaluate replacement of a marginal
-accepted member rather than only attempting to append the coverage candidate.
+member of a singleton class, subject to the same hard liquidity, cost,
+granularity, and margin tests. When book margin is full, evaluate replacement
+of a marginal accepted member rather than only attempting to append the
+coverage candidate.
 Do not force an infeasible crypto or FX contract by relaxing market
 participation merely to meet a class target. Post-forecast class-risk caps are
 a separate execution control for aligned signals; selection class/subclass
@@ -1774,29 +2078,40 @@ useful breadth; stopping at the first strict decline is too brittle. Record the
 last accepted book before the tolerance breach, rather than returning the
 breaching candidate.
 
-For this project, layer a transparent coverage policy onto that objective:
+This project implements coverage as two optional hierarchical minimums rather
+than a hard-coded list of preferred classes:
 
-1. **Core coverage.** The main classes are `equity`, `ags`, `vol`, `energy`,
-   `fx`, `metals`, and `bond`. Seed this constrained pass from a core candidate.
-   While a feasible class is absent, trial only candidates from currently
-   missing classes, then choose the one with the best complete-book score. A
-   class is infeasible when all its candidates fail a hard
-   data/execution/liquidity test or the `P < 0.5` threshold. If its best trial
-   breaches the 90% score boundary, report `unmet_due_to_score_tolerance`
-   rather than forcing a bad contract merely to fill a label.
-2. **Core breadth.** After coverage, resume the unrestricted greedy loop over
-   core instruments. Treat 15 as a desired lower breadth, not a hard promise:
-   continue toward it only while the book stays inside the 90% score tolerance.
-3. **Special additions.** Consider `crypto` and `other` only after the feasible
-   core pass. EPRA-Europe and Sector instruments belong to `equity/us` or
-   `equity/ex_us`. Specials do not count
-   toward the desired 15 and are
-   accepted only when their marginal diversification benefit keeps the book
-   inside the same tolerance.
+1. **Class phase.** If `--min-instr-per-class N` is active, restrict the next
+   competition to candidates whose represented class has fewer than `N`
+   selected instruments. Each class is represented by its best complete-book
+   trial.
+2. **Subclass phase.** Once the class minimum is met, apply the same process to
+   `(asset_class, economic_subclass)` pairs using
+   `--min-instr-per-subclass N`. Class-first ordering prevents subclass breadth
+   inside the current dominant class from delaying top-level coverage.
+3. **Breadth phase.** Rotate across the least represented feasible subclasses
+   until `--selection-min-book-count` is met (15 by default).
+4. **Unrestricted phase.** Once the hierarchy and breadth targets are met,
+   resume the usual greedy search across every remaining candidate.
 
-This constrained pass should be reported alongside the unconstrained AFTS
-baseline. A difference between them is useful evidence of the cost paid for
-cluster coverage, rather than something to conceal in the scoring function.
+Class, subclass, and breadth additions are mandatory only with respect to the
+ordinary score stop: hard trial feasibility remains binding throughout.
+
+Within every phase, instruments are ranked by their conditional full-book
+score, not by a frozen singleton rank. The trial audit records
+`instr_rank_in_subcls`, `subcls_rank_in_cls`, `cls_rank`, and
+`global_trial_rank`. An infeasible deficient group is skipped rather than
+terminating the selector; other feasible groups and breadth additions continue,
+and the missing group is reconsidered on the next iteration. The audit retains
+the hard rejection reason and final class/subclass deficit. Runs with both
+minimums disabled are the exact unconstrained AFTS baseline, so the cost of
+coverage remains measurable.
+
+A minimum of one applies equally to every class or subclass represented in the
+causal candidate set, including `vol`, `crypto`, and `other`. Use class-only
+coverage when those sparse branches should compete at the top level without
+requiring every subclass, and test the subclass minimum separately rather than
+treating it as a universal default.
 The [small-account analysis](https://qoppac.blogspot.com/2016/03/diversification-and-small-account-size.html)
 also shows why four contracts cannot be a hard gate: for the first few markets,
 diversification can dominate granularity even when maximum positions are only
@@ -1806,11 +2121,9 @@ selects materially more instruments at small capital after micro contracts are
 available. The feasible count therefore depends on the current contract
 universe, not a universal capital table.
 
-Ties and near-ties must be deterministic. Use, in order: coverage improvement,
-higher portfolio score, lower aggregate size penalty, lower aggregate annual
-cost, longer common return history, then symbol. Retained live instruments can
-later receive a small replacement buffer to avoid annual churn, but the raw
-research result should remain available without that incumbent preference.
+Ties and near-ties remain deterministic under the existing contract-band
+tie-break. Coverage first determines the eligible competition set; it does not
+alter trial scores or silently insert a second score objective.
 
 Each iteration needs an audit table with the current and candidate contract
 books, candidate class and economic family, core coverage before and after,
@@ -1822,9 +2135,9 @@ selected winner, stopping decision, and final book. This gives portfolio selecti
 evidence to explain why it advanced to the next candidate instead of merely
 publishing a final rank.
 
-Implementation should begin with the exact greedy baseline and the constrained
-coverage pass. A small beam search retaining the best few partial books is a
-useful validation check against greedy path dependence and temporary dips. A
+The exact greedy baseline and constrained coverage pass share one
+implementation. A small beam search retaining the best few partial books is a
+useful future validation check against greedy path dependence and temporary dips. A
 full mixed-integer subset optimizer is not the first choice: it adds substantial
 complexity and apparent precision around estimated correlations and costs,
 while moving away from the AFTS procedure. Integer position optimization belongs
@@ -1834,8 +2147,8 @@ positions.
 
 Validate first on a narrow synthetic and real subset. Tests should cover an
 uncorrelated candidate beating a duplicate, a micro beating its full-size
-family member through size and cost, missing-core priority, exclusion of special
-classes from the breadth count, `P < 0.5` rejection, preservation of a useful
+family member through size and cost, missing-class priority, `P < 0.5`
+rejection, preservation of a useful
 one-to-two-contract diversifier, the 90% tolerance, and deterministic ties.
 Then compare unconstrained and coverage-constrained selections at `$100,000`
 under 20% and 25% targets, reporting the evolving IDM and contract counts at
@@ -1970,9 +2283,9 @@ Judge the construction grid using book size, Jaccard membership overlap,
 additions and removals, asset-class and subclass coverage, maximum instrument
 margin, total book margin, contract granularity, cost sensitivity, and binding
 rejection reasons. Do not rank the scenarios by the greedy construction score.
-A performance comparison requires a separate walk-forward selector that, at
-each rebalance date, uses only then-available eligibility, costs, forecasts,
-correlations, margins, and contract definitions.
+The grid can invoke the same yearly or monthly walk-forward selector as
+`futures-build-selection`, but its compact summary remains a construction and
+membership comparison rather than a performance optimizer.
 
 #### Command-line runner
 
@@ -1981,14 +2294,34 @@ runs every construction scenario without making an IB request. A target-vol
 override recomputes the saved capital/risk-size and relative-liquidity gates
 offline; it does not rebuild market history or the executable snapshot. Pass
 an exact file rather than a report directory so a newer screen cannot enter the
-grid midway through a run.
+grid midway through a run. Pass `--backtest-capital-mode fixed` to compare the
+construction variants without path-dependent capital growth. The grid forwards
+the policy to every worker, records it in the summary and input fingerprint,
+and appends `capfixed` to fixed-run scenario directories. Omission preserves
+the existing compounded behavior. Selection cadence is fixed across a grid,
+while eligibility percentages, membership modes, rank-buffer percentages,
+rank-count EWMA half-lives, and score-buffer percentages can all be swept.
+Optional class and subclass coverage minimums and active minimum-book targets
+are independent grid dimensions. Sweep the latter with
+`--selection-min-book-counts`; inactive coverage does not multiply scenarios.
+The full-contract family preference is another independent dimension: pass
+`--selection-prefer-full-contracts false,true` to compare it against every
+requested coverage and membership-hysteresis combination. Enabled scenarios
+append `full1` to their parameter directory; the disabled baseline keeps the
+existing identifier.
+Inactive controls do not create duplicate scenarios: `none` expands only the
+eligibility dimension, `rank` expands rank percentage and half-life, `score`
+expands score percentage, and `rank_score` expands all three membership
+controls. Every active value receives its corresponding scenario token.
 
 The recommended 18-scenario first pass is the CLI default:
 
 ```bash
 .venv/bin/futures-selection-grid \
   --input results/multi_speed_ewmac_rule_cache_<timestamp>.parquet \
+  --signal-model multi_ewmac \
   --history-db /home/dev/fin/db/pysystemtrade_reference.duckdb \
+  --cache /home/dev/data/fin/misc/cache/futures \
   --initial-capital-usd 75000
 ```
 
@@ -1997,21 +2330,82 @@ invocation creates a timestamped `selection_grid_<timestamp>` folder under the
 output root (the default root is `results/`). The runner creates an isolated
 directory for every scenario and can resume completed directories after
 interruption. To resume a particular run, pass its exact folder with
-`--run-dir`; `--output-dir` always means the parent output root. It writes:
+`--run-dir`; `--output-dir` always means the parent output root. Scenarios run
+serially by default. On a machine with sufficient memory, set `--max-workers`
+to the desired number of concurrent selection subprocesses. When
+`--ib-history-live missing` or `update` is requested, the runner first performs
+one separate serial materialization pass that may contact IB and update the
+source IB database. It then atomically copies that database into the grid run
+under `.selection_grid_inputs/`, records its SHA-256 identity, and removes all
+live IB flags from measured scenario commands. The first measured scenario
+runs alone against this frozen database to warm shared derived-history caches;
+only then does the bounded worker pool start. Stored-only history access is
+read-only, so workers cannot contend for DuckDB's writer lock or silently
+observe different live fallbacks. A swallowed connection or DuckDB-lock error
+in the materialization log aborts the grid before the frozen copy is published.
+Completion markers include the pinned input
+fingerprint, and resume rejects artifacts created from another history input.
+Commands are passed as argument vectors and are not evaluated by a shell. Grid
+scenarios automatically use
+`--selection-report-mode compact`: they retain the selected books, dated final
+allocations, cash P&L, portfolio curves, and summary inputs, but omit the
+duplicated million-row daily forecast panel and exhaustive rejected
+review-trial allocations. A standalone `futures-build-selection` run remains
+`full` by default when those forensic reports are required. The versioned
+per-symbol cache shares invariant curves through disk-backed Parquet scans;
+mutable Polars and Python state is not shared across scenario processes. It
+writes:
 
 - `selection_grid_commands.sh`, the reproducible command plan;
-- one normal set of typed portfolio-selection Parquet audits per scenario;
+- one compact set of typed portfolio-selection Parquet audits per scenario;
 - `selection_grid_summary.parquet`, containing parameters, feasibility,
   membership, margins, the central-scenario overlap, and the explicitly named
   `construction_score`; and
 - `selection_grid_membership.parquet`, the long scenario-by-symbol book panel.
+
+The grid summary and membership panel describe each scenario's latest review;
+they are not the annual history. The notebook grid navigator reads each
+scenario's compact `selection_review_instruments` report on demand and nests
+the existing year/review widget below a scenario selector:
+
+```python
+from derivatives_bt_engine.pipelines.ewmac_notebook import (
+    load_selection_grid_review_instruments,
+    plot_selection_grid_rebalance_weights,
+)
+
+grid = (
+    "/Users/liefe/data/fin_dev/misc/results/"
+    "selection_grid_20261106_162523"
+)
+
+plot_selection_grid_rebalance_weights(grid)
+```
+
+The dropdown labels expose eligibility, membership mode, rank buffer,
+rank-count half-life, and score buffer. The nested view selects a year (and an
+exact date for monthly reviews), then plots instrument `limit_weight` plus
+asset-class and economic-subclass shares, alongside the year-by-year active
+market count. It lazy-loads only the chosen
+scenario and never reads the million-row cash-P&L report. To access the typed
+year-by-year frame directly:
+
+```python
+reviews = load_selection_grid_review_instruments(
+    grid,
+    "tv0p2_im20_bm50_wi0p2_st0p85_ic20_cw50_sw25_cl15_roll1_"
+    "topdown_classif_selyearly_hg31_eh25_mhnone",
+)
+```
 
 Run secondary constraint tests separately, for example:
 
 ```bash
 .venv/bin/futures-selection-grid \
   --input results/multi_speed_ewmac_rule_cache_<timestamp>.parquet \
+  --signal-model multi_ewmac \
   --history-db /home/dev/fin/db/pysystemtrade_reference.duckdb \
+  --cache /home/dev/data/fin/misc/cache/futures \
   --initial-capital-usd 75000 \
   --target-vols 0.20 \
   --max-instr-margin-pcts 20 \
@@ -2019,6 +2413,9 @@ Run secondary constraint tests separately, for example:
   --score-thresholds 0.99,1.00 \
   --max-book-margin-pcts 50,75 \
   --max-weight-idms 0.20 \
+  --min-instr-per-classes none,1 \
+  --min-instr-per-subclasses none,1 \
+  --selection-min-book-counts 15 \
   --max-instr-per-classes none,10 \
   --max-instr-per-subclasses 2 \
   --max-class-weight-pcts none,50 \
@@ -2028,3 +2425,36 @@ Run secondary constraint tests separately, for example:
   --score-tie-tolerance-pcts .25,.5,1 \
   --tie-ref-book-counts 15,18,21
 ```
+
+For a focused yearly hysteresis comparison using the new causal count state:
+
+```bash
+.venv/bin/futures-selection-grid \
+  --input results/multi_speed_ewmac_rule_cache_<timestamp>.parquet \
+  --signal-model multi_ewmac \
+  --history-db /home/dev/fin/db/pysystemtrade_reference.duckdb \
+  --ib-history-db /home/dev/fin/db/ib_futures_history.duckdb \
+  --cache /home/dev/data/fin/misc/cache/futures \
+  --initial-capital-usd 75000 \
+  --target-vols 0.20 \
+  --max-instr-margin-pcts 20 \
+  --roll-cost-modes include \
+  --selection-rebalance yearly \
+  --min-instr-per-classes none,1 \
+  --min-instr-per-subclasses none,1 \
+  --selection-eligibility-hysteresis-pcts 25 \
+  --selection-membership-hysteresis-modes none,rank,score,rank_score \
+  --selection-rank-buffer-pcts 10,15,25 \
+  --selection-rank-count-ewma-halflives 1,3,5 \
+  --selection-book-score-buffer-pcts 0,2
+```
+
+With the two binary coverage dimensions, that command creates four coverage
+variants for every hysteresis combination. Remove the minimum sweeps or set
+both to `none` when isolating hysteresis alone. Add `0` to the eligibility list
+only when you also want to isolate EH25.
+Omitting the half-life list uses the standalone cadence default: three reviews
+for yearly selection and twelve for monthly selection. As in the standalone
+backtest, the current snapshot's liquidity and execution overlay applies from
+each IB handoff onward; that overlay is a present-executability sensitivity,
+not a causally backtested historical-volume model.

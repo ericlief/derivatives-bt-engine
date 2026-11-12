@@ -13,10 +13,11 @@ selected-book cash-P&L plotting helper plots Polars slices directly and lays
 out comparable execution diagnostics without merging their scales. The
 scheduled-selection plotting helper reads the compact review-instrument report
 and exposes each dated book as instrument-weight bars plus class and subclass
-composition bars. Portfolio-level helpers plot compounded equity and drawdown,
-realized contract-risk concentration, and annual instrument P&L attribution
-from the persisted public reports without recreating the backtest accounting
-path.
+composition bars. Portfolio-level helpers plot cap-aware equity, return and
+drawdown, realized contract-risk concentration, and annual instrument, class,
+and subclass P&L attribution from persisted public reports without recreating
+the backtest accounting path. The selection-grid dashboard applies those same
+plotters to one scenario at a time and adds scenario and coverage navigation.
 """
 
 from __future__ import annotations
@@ -41,6 +42,7 @@ from derivatives_bt_engine.calculations.forecast_combination import (
     CombinedForecastResult,
     FixedForecastDiversification,
     ForecastCombinationConfig,
+    combine_ewmac_forecasts,
 )
 from derivatives_bt_engine.calculations.costs import calculate_annual_sr_cost
 from derivatives_bt_engine.calculations.pnl import (
@@ -59,6 +61,7 @@ from derivatives_bt_engine.data.futures_history import (
 from derivatives_bt_engine.data.ib_futures_dataloader import (
     DEFAULT_BROKER_MAPPING_PATH,
     DEFAULT_IB_BAR_SIZE,
+    DEFAULT_IB_DURATION,
     DEFAULT_IB_DATED_CONTRACT_DURATION,
     DEFAULT_MAX_SOURCE_GAP_DAYS,
     IBStitchedHistoryProvider,
@@ -68,6 +71,9 @@ from derivatives_bt_engine.data.ib_futures_history_store import (
 )
 from derivatives_bt_engine.data.pysystemtrade_ib import (
     load_pysystemtrade_ib_instruments,
+)
+from derivatives_bt_engine.data.pysystemtrade_classification import (
+    load_pysystemtrade_instrument_classification,
 )
 from derivatives_bt_engine.data.pysystemtrade_pooling import (
     DEFAULT_POOLING_MAPPING_PATH,
@@ -176,6 +182,7 @@ def plot_selection_cash_pnl(
     import holoviews as hv
     import hvplot.polars  # noqa: F401 - registers Polars' ``hvplot`` API
     import ipywidgets as widgets
+    from bokeh.models import NumeralTickFormatter
     from IPython.display import display
 
     cash_path: Path | None = None
@@ -242,10 +249,12 @@ def plot_selection_cash_pnl(
         ylabel: str,
         labels: dict[str, str] | None = None,
         colors: dict[str, str] | None = None,
+        dollar_axis: bool = False,
     ):
         """Build one independently scaled overlay from available fields."""
         available = [name for name in columns if name in symbol_frame.columns]
         tools = ["hover", "pan", "wheel_zoom", "box_zoom", "reset", "save"]
+        hover_format = "$0,0.00" if dollar_axis else "0,0.0000"
         curves = [
             symbol_frame.hvplot.line(
                 x="date",
@@ -258,7 +267,10 @@ def plot_selection_cash_pnl(
                 tools=tools,
                 hover_tooltips=[
                     ("Date", "@date{%F}"),
-                    ((labels or {}).get(column, column), f"@{column}{{0.0000}}"),
+                    (
+                        (labels or {}).get(column, column),
+                        f"@{column}{{{hover_format}}}",
+                    ),
                 ],
                 **(
                     {"color": colors[column]}
@@ -269,7 +281,10 @@ def plot_selection_cash_pnl(
             for column in available
         ]
         overlay = hv.Overlay(curves)
-        return overlay.opts(legend_position="top_left")
+        options = {"legend_position": "top_left"}
+        if dollar_axis:
+            options["yformatter"] = NumeralTickFormatter(format="$0,0")
+        return overlay.opts(**options)
 
     def plot_symbol(symbol: str):
         """Build all independently scaled panels for one selected symbol."""
@@ -292,18 +307,21 @@ def plot_selection_cash_pnl(
                 columns=["gross_pnl", "net_pnl"],
                 title=f"{symbol} daily P&L",
                 ylabel="USD",
+                dollar_axis=True,
             ) * hv.HLine(0.0).opts(color="black", line_width=1),
             line_panel(
                 symbol_frame,
                 columns=["trade_cost", "roll_cost"],
                 title=f"{symbol} daily costs",
                 ylabel="USD",
+                dollar_axis=True,
             ) * hv.HLine(0.0).opts(color="black", line_width=1),
             line_panel(
                 symbol_frame,
                 columns=["cum_gross_pnl", "cum_net_pnl"],
                 title=f"{symbol} cumulative P&L",
                 ylabel="USD",
+                dollar_axis=True,
             ),
             line_panel(
                 symbol_frame,
@@ -373,25 +391,30 @@ def plot_selection_portfolio_overview(
     width: int = 1050,
     height: int = 240,
 ):
-    """Plot compounded selection equity, drawdown, return, and realized vol.
+    """Plot selection equity, drawdown, return, and realized volatility.
 
     The equity series are read directly from the persisted portfolio curve.
-    Rolling return is the net-equity change over ``rolling_days`` report rows;
-    rolling realized volatility is the annualized standard deviation of the
-    report's prior-net-equity daily return. Invalid warm-up rows remain visible
-    in the equity panel but do not enter the rolling statistics.
+    Fixed-cap rolling return is the additive sum of daily fixed-cap return
+    contributions, while compounded rolling return geometrically compounds
+    daily lagged-equity returns. Rolling percentage volatility is the
+    annualized standard deviation of those same mode-specific daily returns,
+    and rolling dollar volatility is the annualized standard deviation of
+    daily net P&L. All rolling statistics use the most recent
+    ``rolling_days`` valid return observations; dates without a valid return
+    carry the latest estimate forward.
 
     Parameters
     ----------
     portfolio_curve
         Public selection portfolio-curve frame or its Parquet path. It must
         contain ``date``, gross and net equity, daily net return, and
-        ``ret_valid``.
+        ``ret_valid``. Current reports also contain one constant ``cap_mode``
+        value; legacy reports without it use the historical compounded mode.
     start, end
         Optional inclusive date bounds applied after rolling fields are
         calculated, preserving their prior-history warm-up.
     rolling_days
-        Trading observations used for trailing net return and realized
+        Valid return observations used for trailing return and realized
         volatility. The default 256 matches the selection annualization.
     width, height
         Width and height of each vertically stacked panel in pixels.
@@ -399,60 +422,30 @@ def plot_selection_portfolio_overview(
     Returns
     -------
     holoviews.core.layout.Layout
-        Four independently scaled panels for equity, drawdown, trailing return,
-        and realized volatility.
+        Five independently scaled panels for equity, drawdown, mode-specific
+        trailing return, annualized percentage-return volatility, and
+        annualized dollar volatility.
     """
     import holoviews as hv
     import hvplot.polars  # noqa: F401 - registers Polars' ``hvplot`` API
 
-    if rolling_days < 2:
-        raise ValueError("rolling_days must be at least 2")
-    frame = _read_notebook_report(portfolio_curve, label="portfolio_curve")
-    _require_report_columns(
-        frame,
-        {
-            "date",
-            "port_gross_equity",
-            "port_net_equity",
-            "port_net_pct",
-            "ret_valid",
-        },
-        label="selection portfolio curve",
+    frame, cap_mode = _prepare_selection_portfolio_overview_frame(
+        portfolio_curve,
+        start=start,
+        end=end,
+        rolling_days=rolling_days,
     )
-    frame = frame.with_columns(pl.col("date").cast(pl.Date)).sort("date")
-    if frame.is_empty():
-        raise ValueError("selection portfolio curve is empty")
-
-    # Calculate trailing statistics before slicing so a recent view retains
-    # the observations immediately before its displayed start date.
-    frame = frame.with_columns(
-        pl.col("port_net_equity").cum_max().alias("running_net_peak"),
-        pl.when(pl.col("ret_valid").fill_null(False))
-        .then(pl.col("port_net_pct"))
-        .otherwise(None)
-        .alias("valid_net_pct"),
-    ).with_columns(
-        (
-            (pl.col("port_net_equity") / pl.col("running_net_peak") - 1.0)
-            * 100.0
-        ).alias("net_drawdown_pct"),
-        (
-            (
-                pl.col("port_net_equity")
-                / pl.col("port_net_equity").shift(rolling_days)
-                - 1.0
-            )
-            * 100.0
-        ).alias("rolling_return_pct"),
-        (
-            pl.col("valid_net_pct").rolling_std(window_size=rolling_days)
-            * math.sqrt(256.0)
-            * 100.0
-        ).alias("rolling_realized_vol_pct"),
+    cap_label = "Fixed-cap" if cap_mode == "fixed" else "Compounded"
+    return_label = (
+        "additive net return contribution"
+        if cap_mode == "fixed"
+        else "compounded net return"
     )
-    frame = _date_slice(frame, start=start, end=end)
-    if frame.is_empty():
-        raise ValueError("no portfolio observations in the requested date range")
+    volatility_label = (
+        "return-contribution volatility"
+        if cap_mode == "fixed"
+        else "lagged-equity return volatility"
+    )
 
     tools = ["hover", "pan", "wheel_zoom", "box_zoom", "reset", "save"]
     positive_equity = bool(
@@ -465,7 +458,7 @@ def plot_selection_portfolio_overview(
     equity = frame.hvplot.line(
         x="date",
         y=["port_gross_equity", "port_net_equity"],
-        title="Selection portfolio gross and net equity",
+        title=f"{cap_label} selection portfolio gross and net equity",
         ylabel="Equity (USD)",
         logy=positive_equity,
         width=width,
@@ -478,28 +471,47 @@ def plot_selection_portfolio_overview(
             ("Net equity", "@port_net_equity{$0,0.00}"),
         ],
     ).opts(legend_position="top_left")
+    drawdown_area = frame.hvplot.area(
+        x="date",
+        y="net_drawdown_pct",
+        title=f"{cap_label} net-equity drawdown from running peak",
+        ylabel="Drawdown (%)",
+        color="#d62728",
+        alpha=0.45,
+        width=width,
+        height=height,
+        hover=False,
+        tools=["pan", "wheel_zoom", "box_zoom", "reset", "save"],
+    )
+    # An area is rendered as one polygon, which cannot expose the nearest
+    # dated drawdown value to Bokeh's hover tool. The line supplies one point
+    # per date while the area retains the visual drawdown fill.
+    drawdown_line = frame.hvplot.line(
+        x="date",
+        y="net_drawdown_pct",
+        color="#d62728",
+        line_width=1.5,
+        width=width,
+        height=height,
+        tools=tools,
+        hover_cols=["net_drawdown_pct"],
+        hover_tooltips=[
+            ("Date", "@date{%F}"),
+            ("Drawdown", "@net_drawdown_pct{0.00}%"),
+        ],
+    )
     drawdown = (
-        frame.hvplot.area(
-            x="date",
-            y="net_drawdown_pct",
-            title="Net-equity drawdown from running peak",
-            ylabel="Drawdown (%)",
-            color="#d62728",
-            alpha=0.45,
-            width=width,
-            height=height,
-            tools=tools,
-            hover_tooltips=[
-                ("Date", "@x{%F}"),
-                ("Drawdown", "@y{0.00}%"),
-            ],
-        )
+        drawdown_area
+        * drawdown_line
         * hv.HLine(0.0).opts(color="black", line_width=1)
     )
     trailing_return = frame.hvplot.line(
         x="date",
         y="rolling_return_pct",
-        title=f"Trailing {rolling_days}-observation net return",
+        title=(
+            f"{cap_label} trailing {rolling_days}-valid-observation "
+            f"{return_label}"
+        ),
         ylabel="Return (%)",
         width=width,
         height=height,
@@ -507,13 +519,16 @@ def plot_selection_portfolio_overview(
         hover_cols=["rolling_return_pct"],
         hover_tooltips=[
             ("Date", "@date{%F}"),
-            ("Trailing return", "@rolling_return_pct{0.00}%"),
+            (f"{cap_label} trailing return", "@rolling_return_pct{0.00}%"),
         ],
     )
     trailing_volatility = frame.hvplot.line(
         x="date",
         y="rolling_realized_vol_pct",
-        title=f"Trailing {rolling_days}-observation realized volatility",
+        title=(
+            f"{cap_label} trailing {rolling_days}-valid-observation "
+            f"annualized {volatility_label}"
+        ),
         ylabel="Annualized volatility (%)",
         width=width,
         height=height,
@@ -521,12 +536,147 @@ def plot_selection_portfolio_overview(
         hover_cols=["rolling_realized_vol_pct"],
         hover_tooltips=[
             ("Date", "@date{%F}"),
-            ("Realized vol", "@rolling_realized_vol_pct{0.00}%"),
+            (
+                f"{cap_label} annualized volatility",
+                "@rolling_realized_vol_pct{0.00}%",
+            ),
         ],
     )
-    return (equity + drawdown + trailing_return + trailing_volatility).cols(
-        1
-    ).opts(shared_axes=False)
+    trailing_dollar_volatility = frame.hvplot.line(
+        x="date",
+        y="rolling_realized_dvol",
+        title=(
+            f"{cap_label} trailing {rolling_days}-valid-observation "
+            "annualized dollar volatility"
+        ),
+        ylabel="Annualized dollar volatility (USD)",
+        width=width,
+        height=height,
+        tools=tools,
+        hover_cols=["rolling_realized_dvol"],
+        hover_tooltips=[
+            ("Date", "@date{%F}"),
+            ("Annualized dollar vol", "@rolling_realized_dvol{$0,0.00}"),
+        ],
+    )
+    return (
+        equity
+        + drawdown
+        + trailing_return
+        + trailing_volatility
+        + trailing_dollar_volatility
+    ).cols(1).opts(shared_axes=False)
+
+
+def _prepare_selection_portfolio_overview_frame(
+    portfolio_curve: pl.DataFrame | Path | str,
+    *,
+    start: date | datetime | str | None = None,
+    end: date | datetime | str | None = None,
+    rolling_days: int = 256,
+) -> tuple[pl.DataFrame, str]:
+    """Return cap-aware rolling fields for the portfolio overview plot.
+
+    Fixed-cap returns are additive contributions against initial sizing
+    capital. Compounded returns are geometric returns against lagged equity.
+    Both return paths and both percentage-volatility paths use exactly the
+    latest ``rolling_days`` valid return observations. The returned cap mode
+    is the single persisted mode represented by the input curve. Legacy
+    curves written before ``cap_mode`` was persisted are compounded because
+    that was the only capital policy available to those reports.
+    """
+    if rolling_days < 2:
+        raise ValueError("rolling_days must be at least 2")
+    frame = _read_notebook_report(portfolio_curve, label="portfolio_curve")
+    _require_report_columns(
+        frame,
+        {
+            "date",
+            "port_gross_equity",
+            "port_net_equity",
+            "port_net",
+            "port_net_pct",
+            "ret_valid",
+        },
+        label="selection portfolio curve",
+    )
+    frame = frame.with_columns(pl.col("date").cast(pl.Date)).sort("date")
+    if frame.is_empty():
+        raise ValueError("selection portfolio curve is empty")
+
+    if "cap_mode" in frame.columns:
+        cap_modes = (
+            frame.get_column("cap_mode").drop_nulls().unique().to_list()
+        )
+        if len(cap_modes) != 1 or cap_modes[0] not in {"fixed", "compounded"}:
+            raise ValueError(
+                "selection portfolio curve must contain exactly one cap_mode: "
+                "fixed or compounded"
+            )
+        cap_mode = str(cap_modes[0])
+    else:
+        cap_mode = "compounded"
+
+    # Calculate trailing statistics before slicing so a recent view retains
+    # the observations immediately before its displayed start date.
+    frame = frame.with_columns(
+        pl.col("port_net_equity").cum_max().alias("running_net_peak"),
+    ).with_columns(
+        (
+            (pl.col("port_net_equity") / pl.col("running_net_peak") - 1.0)
+            * 100.0
+        ).alias("net_drawdown_pct"),
+        (
+            pl.col("ret_valid").fill_null(False)
+            & pl.col("port_net_pct").is_not_null()
+            & pl.col("port_net_pct").is_finite()
+        ).alias("valid_return_obs"),
+    )
+
+    valid_returns = frame.filter("valid_return_obs")
+    if cap_mode == "compounded" and not valid_returns.filter(
+        pl.col("port_net_pct") <= -100.0
+    ).is_empty():
+        raise ValueError(
+            "compounded portfolio curve contains a valid return at or below -100%"
+        )
+    rolling_return = (
+        pl.col("port_net_pct").rolling_sum(window_size=rolling_days)
+        if cap_mode == "fixed"
+        else (
+            (
+                (pl.col("port_net_pct") / 100.0 + 1.0)
+                .log()
+                .rolling_sum(window_size=rolling_days)
+                .exp()
+                - 1.0
+            )
+            * 100.0
+        )
+    )
+    # The calculation frame contains only valid observations. Joining it back
+    # prevents unavailable report dates from consuming a rolling-window slot.
+    rolling_fields = valid_returns.select(
+        "date",
+        rolling_return.alias("rolling_return_pct"),
+        (
+            pl.col("port_net_pct").rolling_std(window_size=rolling_days)
+            * math.sqrt(256.0)
+        ).alias("rolling_realized_vol_pct"),
+        (
+            pl.col("port_net").rolling_std(window_size=rolling_days)
+            * math.sqrt(256.0)
+        ).alias("rolling_realized_dvol"),
+    )
+    frame = frame.join(rolling_fields, on="date", how="left").with_columns(
+        pl.col("rolling_return_pct").forward_fill(),
+        pl.col("rolling_realized_vol_pct").forward_fill(),
+        pl.col("rolling_realized_dvol").forward_fill(),
+    )
+    frame = _date_slice(frame, start=start, end=end)
+    if frame.is_empty():
+        raise ValueError("no portfolio observations in the requested date range")
+    return frame, cap_mode
 
 
 def plot_selection_portfolio_concentration(
@@ -663,28 +813,74 @@ def plot_selection_portfolio_concentration(
     return (gross_risk + shares + held_count).cols(1).opts(shared_axes=False)
 
 
+def _prepare_selection_pnl_attribution_year(
+    frame: pl.DataFrame,
+    *,
+    year: int,
+) -> pl.DataFrame:
+    """Return one year's cash rows for instruments chosen in that year's book.
+
+    Book membership is the union of symbols with ``sel_active=True`` during
+    the requested calendar year. Once a symbol belongs to that union, all of
+    its rows in the year are retained so entry or exit cash flows are not lost
+    merely because the row itself is a handoff observation. Instruments that
+    only carry liquidation P&L from a prior-year book are excluded.
+
+    Parameters
+    ----------
+    frame
+        Normalized selection cash-P&L frame containing ``year``, ``symbol``,
+        and ``sel_active``.
+    year
+        Calendar year to prepare.
+
+    Returns
+    -------
+    polars.DataFrame
+        The requested year's rows restricted to its selected-book symbols.
+    """
+    _require_report_columns(
+        frame,
+        {"year", "symbol", "sel_active"},
+        label="selection cash-P&L frame",
+    )
+    year_frame = frame.filter(pl.col("year") == year)
+    selected_symbols = (
+        year_frame.filter(pl.col("sel_active").fill_null(False))
+        .select("symbol")
+        .unique()
+    )
+    if selected_symbols.is_empty():
+        raise ValueError(f"year {year} contains no selected-book instruments")
+    # A semi join preserves every cash row for selected symbols without
+    # duplicating rows or leaking prior-book instruments into the chart axis.
+    return year_frame.join(selected_symbols, on="symbol", how="semi")
+
+
 def plot_selection_pnl_attribution(
     cash_pnl: pl.DataFrame | Path | str,
     *,
     width: int = 1050,
     height: int = 440,
 ):
-    """Plot annual instrument net P&L with separate gross and cost hover data.
+    """Plot annual net P&L by instrument, asset class, and subclass.
 
     Parameters
     ----------
     cash_pnl
         Public selection cash-P&L frame or its Parquet path. The report must
-        include instrument-level gross and net P&L plus trade and roll costs.
+        include instrument-level gross and net P&L plus trade and roll costs,
+        together with ``sel_active`` book membership.
     width, height
         Width and height of the vertical bar chart in pixels.
 
     Returns
     -------
     ipywidgets.VBox
-        A year selector, defaulting to the latest year, and instrument net-P&L
-        bars for the selected year. Hover retains gross P&L and both realized
-        cost streams.
+        A year selector, defaulting to the latest year, and three stacked
+        annual net-P&L bar charts grouped by instrument, asset class, and
+        economic subclass. Hover retains gross P&L and both realized cost
+        streams.
     """
     import holoviews as hv
     import hvplot.polars  # noqa: F401 - registers Polars' ``hvplot`` API
@@ -697,6 +893,7 @@ def plot_selection_pnl_attribution(
         {
             "date",
             "symbol",
+            "sel_active",
             "gross_pnl",
             "net_pnl",
             "trade_cost",
@@ -708,15 +905,51 @@ def plot_selection_pnl_attribution(
         pl.col("date").cast(pl.Date),
         pl.col("date").cast(pl.Date).dt.year().alias("year"),
     )
-    nonzero = frame.filter(
-        (pl.col("gross_pnl").fill_null(0.0) != 0)
-        | (pl.col("trade_cost").fill_null(0.0) != 0)
-        | (pl.col("roll_cost").fill_null(0.0) != 0)
-        | (pl.col("net_pnl").fill_null(0.0) != 0)
+    if {"asset_class", "economic_subclass"}.issubset(frame.columns):
+        frame = frame.with_columns(
+            pl.col("asset_class").fill_null("unclassified"),
+            pl.col("economic_subclass").fill_null("unclassified"),
+        )
+    elif {"asset_cls", "econ_subcls"}.issubset(frame.columns):
+        # Public reports use the centralized compact schema; normalize those
+        # names here so all three attribution panels use the same grouping API.
+        frame = frame.with_columns(
+            pl.col("asset_cls").fill_null("unclassified").alias("asset_class"),
+            pl.col("econ_subcls")
+            .fill_null("unclassified")
+            .alias("economic_subclass"),
+        )
+    else:
+        classification_key = next(
+            (
+                column
+                for column in ("ref_instr_code", "hist_instr_code", "symbol")
+                if column in frame.columns
+            ),
+            "symbol",
+        )
+        classifications = load_pysystemtrade_instrument_classification().rename(
+            {"instrument_code": "classification_key"}
+        )
+        frame = frame.join(
+            classifications,
+            left_on=classification_key,
+            right_on="classification_key",
+            how="left",
+        ).with_columns(
+            pl.col("asset_class").fill_null("unclassified"),
+            pl.col("economic_subclass").fill_null("unclassified"),
+        )
+    years = (
+        frame.filter(pl.col("sel_active").fill_null(False))
+        .get_column("year")
+        .drop_nulls()
+        .unique()
+        .sort()
+        .to_list()
     )
-    years = nonzero.get_column("year").drop_nulls().unique().sort().to_list()
     if not years:
-        raise ValueError("selection cash-P&L frame contains no nonzero P&L")
+        raise ValueError("selection cash-P&L frame contains no selected book")
 
     selector = widgets.Dropdown(description="Year", options=years, value=years[-1])
     plot_output = widgets.Output(
@@ -729,56 +962,72 @@ def plot_selection_pnl_attribution(
     )
 
     def plot_year(year: int):
-        """Aggregate and draw one calendar year's instrument attribution."""
+        """Aggregate and draw one calendar year's P&L attribution."""
+        book_frame = _prepare_selection_pnl_attribution_year(frame, year=year)
         annual = (
-            frame.filter(pl.col("year") == year)
-            .group_by("symbol")
+            book_frame.group_by("symbol")
             .agg(
                 pl.col("gross_pnl").fill_null(0.0).sum().alias("gross_pnl"),
                 pl.col("trade_cost").fill_null(0.0).sum().alias("trade_cost"),
                 pl.col("roll_cost").fill_null(0.0).sum().alias("roll_cost"),
                 pl.col("net_pnl").fill_null(0.0).sum().alias("net_pnl"),
             )
-            .filter(
-                (pl.col("gross_pnl") != 0)
-                | (pl.col("trade_cost") != 0)
-                | (pl.col("roll_cost") != 0)
-                | (pl.col("net_pnl") != 0)
-            )
             .sort("net_pnl", descending=True)
         )
-        if annual.is_empty():
-            raise ValueError(f"year {year} contains no nonzero instrument P&L")
-        total_net = annual.get_column("net_pnl").sum()
-        pnl_min = min(0.0, float(annual.get_column("net_pnl").min()))
-        pnl_max = max(0.0, float(annual.get_column("net_pnl").max()))
-        pnl_span = pnl_max - pnl_min
-        scale_padding = (
-            pnl_span * 0.06
-            if pnl_span > 0
-            else max(abs(pnl_max), abs(pnl_min), 1.0) * 0.06
-        )
-        bars = annual.hvplot.bar(
-            x="symbol",
-            y="net_pnl",
-            title=f"{year} instrument net P&L (portfolio total ${total_net:,.0f})",
-            xlabel="Instrument",
-            ylabel="Net P&L (USD)",
-            rot=70,
-            color="#1f77b4",
-            width=width,
-            height=height,
-            tools=["hover", "pan", "wheel_zoom", "box_zoom", "reset", "save"],
-            hover_cols=["gross_pnl", "trade_cost", "roll_cost"],
-            hover_tooltips=[
-                ("Instrument", "@symbol"),
-                ("Net P&L", "@net_pnl{$0,0.00}"),
-                ("Gross P&L", "@gross_pnl{$0,0.00}"),
-                ("Trade cost", "@trade_cost{$0,0.00}"),
-                ("Roll cost", "@roll_cost{$0,0.00}"),
-            ],
-        ).opts(ylim=(pnl_min - scale_padding, pnl_max + scale_padding))
-        return bars * hv.HLine(0.0).opts(color="black", line_width=1)
+        book_n = annual.height
+        tools = ["hover", "pan", "wheel_zoom", "box_zoom", "reset", "save"]
+
+        def grouped_bars(group_column: str, label: str, xlabel: str):
+            """Aggregate annual attribution at one reporting hierarchy level."""
+            grouped = (
+                book_frame.group_by(group_column)
+                .agg(
+                    pl.col("gross_pnl").fill_null(0.0).sum().alias("gross_pnl"),
+                    pl.col("trade_cost").fill_null(0.0).sum().alias("trade_cost"),
+                    pl.col("roll_cost").fill_null(0.0).sum().alias("roll_cost"),
+                    pl.col("net_pnl").fill_null(0.0).sum().alias("net_pnl"),
+                )
+                .sort("net_pnl", descending=True)
+            )
+            total_net = grouped.get_column("net_pnl").sum()
+            pnl_min = min(0.0, float(grouped.get_column("net_pnl").min()))
+            pnl_max = max(0.0, float(grouped.get_column("net_pnl").max()))
+            pnl_span = pnl_max - pnl_min
+            padding = (
+                pnl_span * 0.06
+                if pnl_span
+                else max(abs(pnl_max), 1.0) * 0.06
+            )
+            bars = grouped.hvplot.bar(
+                x=group_column,
+                y="net_pnl",
+                title=(
+                    f"{year} selected-book {label} net P&L "
+                    f"({book_n} markets; total ${total_net:,.0f})"
+                ),
+                xlabel=xlabel,
+                ylabel="Net P&L (USD)",
+                rot=70,
+                color="#1f77b4",
+                width=width,
+                height=height,
+                tools=tools,
+                hover_cols=["gross_pnl", "trade_cost", "roll_cost"],
+                hover_tooltips=[
+                    (xlabel, f"@{{{group_column}}}"),
+                    ("Net P&L", "@net_pnl{$0,0.00}"),
+                    ("Gross P&L", "@gross_pnl{$0,0.00}"),
+                    ("Trade cost", "@trade_cost{$0,0.00}"),
+                    ("Roll cost", "@roll_cost{$0,0.00}"),
+                ],
+            ).opts(ylim=(pnl_min - padding, pnl_max + padding))
+            return bars * hv.HLine(0.0).opts(color="black", line_width=1)
+
+        return (
+            grouped_bars("symbol", "instrument", "Instrument")
+            + grouped_bars("asset_class", "asset class", "Asset class")
+            + grouped_bars("economic_subclass", "economic subclass", "Subclass")
+        ).cols(1).opts(shared_axes=False)
 
     def update_plot(change=None) -> None:
         """Redraw the annual attribution selected by the year widget."""
@@ -812,7 +1061,9 @@ def plot_selection_rebalance_weights(
     economic-subclass shares of the deployed book. Group bars normalize by the
     sum of active ``limit_weight`` values so their shares total 100%; hover
     retains each group's absolute limit-weight total so max-weight
-    under-allocation remains visible.
+    under-allocation remains visible. A fourth panel shows the selected book's
+    market count by year, using the latest review in each year as that year's
+    market universe.
 
     Parameters
     ----------
@@ -827,9 +1078,10 @@ def plot_selection_rebalance_weights(
     -------
     ipywidgets.VBox
         A year selector, an exact-date selector for multi-review years, and an
-        output area containing the selected review's instrument, class, and
-        subclass weight bars.
+        output area containing instrument, class, and subclass weight bars
+        plus a yearly market-universe book-count chart.
     """
+    import holoviews as hv
     import hvplot.polars  # noqa: F401 - registers Polars' ``hvplot`` API
     import ipywidgets as widgets
     from IPython.display import display
@@ -869,6 +1121,31 @@ def plot_selection_rebalance_weights(
         ]
         for year in years
     }
+    # Use the latest review of each year to summarize that year's selected
+    # market universe, including monthly runs with multiple reviews per year.
+    annual_book_counts = pl.DataFrame(
+        [
+            {
+                "year": year,
+                "review_date": review_date.isoformat(),
+                "symbols": ", ".join(
+                    frame.filter(
+                        (pl.col("sel_date") == review_date)
+                        & pl.col("sel_active").fill_null(False)
+                    )
+                    .get_column("symbol")
+                    .sort()
+                    .to_list()
+                ),
+                "market_n": frame.filter(
+                    (pl.col("sel_date") == review_date)
+                    & pl.col("sel_active").fill_null(False)
+                ).height,
+            }
+            for year, year_dates in dates_by_year.items()
+            for review_date in [max(year_dates)]
+        ]
+    ).sort("year")
 
     year_selector = widgets.Dropdown(
         description="Year",
@@ -876,14 +1153,17 @@ def plot_selection_rebalance_weights(
         value=years[-1],
     )
     review_selector = widgets.Dropdown(description="Review")
-    plot_output = widgets.Output(
-        layout=widgets.Layout(
-            width="100%",
-            height="auto",
-            max_height="none",
-            overflow="visible",
+    plot_outputs = [
+        widgets.Output(
+            layout=widgets.Layout(
+                width="100%",
+                height="auto",
+                max_height="none",
+                overflow="visible",
+            )
         )
-    )
+        for _ in range(4)
+    ]
 
     def configure_review_selector(year: int) -> None:
         """Expose exact review dates only when the chosen year needs them."""
@@ -1071,6 +1351,7 @@ def plot_selection_rebalance_weights(
         )
 
         allocation_pct = deployed_limit_weight * 100.0
+        class_height = max(260, height // 2)
         class_bars = class_weights.hvplot.bar(
             x="asset_cls",
             y="book_share_pct",
@@ -1081,7 +1362,7 @@ def plot_selection_rebalance_weights(
             xlabel="Asset class",
             ylabel="Book share (%)",
             width=width,
-            height=max(260, height // 2),
+            height=class_height,
             rot=45,
             color="#2ca02c",
             tools=["hover", "pan", "wheel_zoom", "box_zoom", "reset", "save"],
@@ -1099,6 +1380,7 @@ def plot_selection_rebalance_weights(
                 ("Members", "@instruments"),
             ],
         )
+        subclass_height = max(320, height)
         subclass_bars = subclass_weights.hvplot.bar(
             x="subclass_label",
             y="book_share_pct",
@@ -1106,7 +1388,7 @@ def plot_selection_rebalance_weights(
             xlabel="Asset class / economic subclass",
             ylabel="Book share (%)",
             width=width,
-            height=max(320, height),
+            height=subclass_height,
             rot=70,
             color="#ff7f0e",
             tools=["hover", "pan", "wheel_zoom", "box_zoom", "reset", "save"],
@@ -1127,16 +1409,36 @@ def plot_selection_rebalance_weights(
                 ("Members", "@instruments"),
             ],
         )
-        return (instrument_bars + class_bars + subclass_bars).cols(1)
+        market_count_bars = annual_book_counts.hvplot.bar(
+            x="year",
+            y="market_n",
+            title="Selected market universe by year",
+            xlabel="Year",
+            ylabel="Active markets in book",
+            width=width,
+            height=height,
+            color="#9467bd",
+            tools=["hover", "pan", "wheel_zoom", "box_zoom", "reset", "save"],
+            hover_cols=["review_date", "market_n", "symbols"],
+            hover_tooltips=[
+                ("Year", "@year"),
+                ("Latest review", "@review_date"),
+                ("Active markets", "@market_n{0}"),
+                ("Symbols", "@symbols"),
+            ],
+        )
+        return instrument_bars, class_bars, subclass_bars, market_count_bars
 
     def update_plot(change=None) -> None:
         """Redraw the exact review selected by the widget controls."""
         review_date = review_selector.value
         if review_date is None:
             return
-        with plot_output:
-            plot_output.clear_output(wait=True)
-            display(plot_review(review_date))
+        plots = plot_review(review_date)
+        for output, plot in zip(plot_outputs, plots, strict=True):
+            with output:
+                output.clear_output(wait=True)
+                display(plot)
 
     def update_year(change) -> None:
         """Refresh the available review dates after a year change."""
@@ -1149,7 +1451,754 @@ def plot_selection_rebalance_weights(
     update_plot()
     controls = widgets.HBox([year_selector, review_selector])
     return widgets.VBox(
-        [controls, plot_output],
+        [controls, *plot_outputs],
+        layout=widgets.Layout(
+            width="100%",
+            height="auto",
+            overflow="visible",
+            align_items="stretch",
+        ),
+    )
+
+
+def load_selection_grid_review_instruments(
+    grid_directory: Path | str,
+    scenario_id: str,
+) -> pl.DataFrame:
+    """Load the complete dated-book panel for one selection-grid scenario.
+
+    Parameters
+    ----------
+    grid_directory
+        Selection-grid run containing ``selection_grid_summary.parquet`` and
+        one subdirectory per scenario.
+    scenario_id
+        Exact scenario identifier from the grid summary.
+
+    Returns
+    -------
+    polars.DataFrame
+        The scenario's compact ``selection_review_instruments`` report across
+        every annual or monthly review. This is intentionally distinct from
+        ``selection_grid_membership.parquet``, which contains only each
+        scenario's latest selected book.
+    """
+    root = Path(grid_directory).expanduser()
+    summary_path = root / "selection_grid_summary.parquet"
+    if not summary_path.is_file():
+        raise FileNotFoundError(
+            f"selection grid summary does not exist: {summary_path}"
+        )
+    summary = pl.read_parquet(summary_path, columns=["scenario_id"])
+    if scenario_id not in set(summary.get_column("scenario_id").to_list()):
+        raise KeyError(f"selection grid has no scenario {scenario_id!r}")
+    scenario_directory = root / scenario_id
+    reports = sorted(
+        scenario_directory.glob(
+            "*_selection_review_instruments_*.parquet"
+        )
+    )
+    if not reports:
+        raise FileNotFoundError(
+            "no selection review-instrument report exists for scenario "
+            f"{scenario_id!r} under {scenario_directory}"
+        )
+    return pl.read_parquet(reports[-1]).with_columns(
+        pl.lit(scenario_id).alias("scenario_id")
+    )
+
+
+def plot_selection_grid_rebalance_weights(
+    grid_directory: Path | str,
+    *,
+    scenario_id: str | None = None,
+    width: int = 1050,
+    height: int = 420,
+):
+    """Navigate every scenario and dated book in one selection grid.
+
+    Coverage dropdowns filter the outer scenario selector by minimum class,
+    subclass, and book-size settings, plus the full-contract preference when
+    that parameter is present in the grid. The nested widget is the standard
+    selection-review view, with year and optional exact-review selectors plus
+    instrument, asset-class, and economic-subclass limit-weight bars. Only the
+    chosen scenario's compact review report is loaded, which keeps an 80-run
+    grid notebook responsive and avoids loading daily cash-P&L panels.
+
+    Parameters
+    ----------
+    grid_directory
+        Completed selection-grid run directory.
+    scenario_id
+        Optional initial scenario. Defaults to the summary's baseline scenario
+        when present, otherwise the first scenario identifier.
+    width, height
+        Dimensions forwarded to :func:`plot_selection_rebalance_weights`.
+
+    Returns
+    -------
+    ipywidgets.VBox
+        Scenario navigation, compact scenario metadata, and the nested dated
+        selection-weight dashboard.
+    """
+    import ipywidgets as widgets
+    from IPython.display import display
+
+    root = Path(grid_directory).expanduser()
+    summary_path = root / "selection_grid_summary.parquet"
+    if not summary_path.is_file():
+        raise FileNotFoundError(
+            f"selection grid summary does not exist: {summary_path}"
+        )
+    summary = pl.read_parquet(summary_path)
+    if "scenario_id" not in summary.columns:
+        raise ValueError("selection grid summary is missing scenario_id")
+    if summary.is_empty():
+        raise ValueError("selection grid summary has no scenarios")
+
+    def scenario_label(row: dict[str, object]) -> str:
+        """Return a compact unique label for one scenario dropdown option."""
+        eligibility = row.get("sel_elig_hyst_pct")
+        mode = str(row.get("sel_membership_hyst") or "none")
+        if isinstance(eligibility, (int, float)):
+            parts = [f"EH{eligibility:g}", mode]
+        else:
+            parts = [mode]
+        rank_buffer = row.get("sel_rank_buf_pct")
+        rank_halflife = row.get("sel_rank_n_ewma_hl")
+        score_buffer = row.get("sel_book_score_buf_pct")
+        if isinstance(rank_buffer, (int, float)):
+            parts.append(f"RB{rank_buffer:g}")
+        if isinstance(rank_halflife, (int, float)):
+            parts.append(f"HL{rank_halflife:g}")
+        if isinstance(score_buffer, (int, float)):
+            parts.append(f"SB{score_buffer:g}")
+        for column, label in resolved_coverage_columns:
+            value = row.get(column)
+            if value is not None:
+                short_label = {
+                    "Min / class": "MC",
+                    "Min / subclass": "MS",
+                    "Min book size": "MB",
+                }[label]
+                parts.append(f"{short_label}{value:g}")
+            elif label != "Min book size":
+                parts.append(f"{ {'Min / class': 'MC', 'Min / subclass': 'MS'}[label] }off")
+        if bool(row.get("baseline_scenario")):
+            parts.append("baseline")
+        if prefer_full_column is not None:
+            parts.append(
+                f"Full contracts {bool(row.get(prefer_full_column))}"
+            )
+        return " · ".join(parts)
+
+    sort_columns = [
+        "sel_elig_hyst_pct",
+        "sel_membership_hyst",
+        "sel_rank_buf_pct",
+        "sel_rank_n_ewma_hl",
+        "sel_book_score_buf_pct",
+    ]
+    if "sel_pref_full_cons" in summary.columns:
+        sort_columns.append("sel_pref_full_cons")
+    rows = summary.sort(sort_columns, nulls_last=True).to_dicts()
+    coverage_columns = (
+        ("minimum_instruments_per_class", "min_instr_per_cls", "Min / class"),
+        (
+            "minimum_instruments_per_subclass",
+            "min_instr_per_subcls",
+            "Min / subclass",
+        ),
+        ("minimum_book_count", "min_book_n", "Min book size"),
+    )
+    resolved_coverage_columns = [
+        (next((name for name in aliases if name in summary.columns), None), label)
+        for *aliases, label in coverage_columns
+    ]
+    resolved_coverage_columns = [
+        (column, label)
+        for column, label in resolved_coverage_columns
+        if column is not None
+    ]
+    prefer_full_column = next(
+        (
+            column
+            for column in (
+                "sel_pref_full_cons",
+                "selection_prefer_full_contracts",
+            )
+            if column in summary.columns
+        ),
+        None,
+    )
+
+    def coverage_options(column: str) -> list[tuple[str, object]]:
+        """Build stable filter options, including disabled and all values."""
+        values = summary.get_column(column).unique().to_list()
+        values = sorted(
+            values,
+            key=lambda value: (value is None, value if value is not None else 0),
+        )
+        options: list[tuple[str, object]] = [("All", "__all__")]
+        options.extend(
+            ("Disabled" if value is None else str(value), value)
+            for value in values
+        )
+        return options
+
+    coverage_selectors = {
+        column: widgets.Dropdown(
+            description=label,
+            options=coverage_options(column),
+            value="__all__",
+            layout=widgets.Layout(
+                width="24%" if prefer_full_column is not None else "32%"
+            ),
+        )
+        for column, label in resolved_coverage_columns
+    }
+    prefer_full_selector = (
+        widgets.Dropdown(
+            description="Full contracts",
+            options=[("All", "__all__"), ("False", False), ("True", True)],
+            value="__all__",
+            layout=widgets.Layout(width="24%"),
+        )
+        if prefer_full_column is not None
+        else None
+    )
+
+    def matching_rows() -> list[dict[str, object]]:
+        """Return scenarios matching the selected coverage filters."""
+        matching = rows
+        for column, control in coverage_selectors.items():
+            selected = control.value
+            if selected != "__all__":
+                matching = [
+                    row for row in matching if row.get(column) == selected
+                ]
+        if prefer_full_selector is not None:
+            selected = prefer_full_selector.value
+            if selected != "__all__":
+                matching = [
+                    row
+                    for row in matching
+                    if row.get(prefer_full_column) == selected
+                ]
+        return matching
+
+    options = [(scenario_label(row), str(row["scenario_id"])) for row in rows]
+    scenario_ids = {value for _, value in options}
+    if scenario_id is None:
+        baseline = (
+            summary.filter(pl.col("baseline_scenario").fill_null(False))
+            if "baseline_scenario" in summary.columns
+            else pl.DataFrame()
+        )
+        scenario_id = (
+            str(baseline.get_column("scenario_id")[0])
+            if baseline.height
+            else options[0][1]
+        )
+    if scenario_id not in scenario_ids:
+        raise KeyError(f"selection grid has no scenario {scenario_id!r}")
+
+    selector = widgets.Dropdown(
+        description="Scenario",
+        options=options,
+        value=scenario_id,
+        layout=widgets.Layout(width="95%"),
+    )
+    metadata_output = widgets.Output()
+    plot_output = widgets.Output(
+        layout=widgets.Layout(
+            width="100%",
+            height="auto",
+            max_height="none",
+            overflow="visible",
+        )
+    )
+    metadata_columns = [
+        column
+        for column in (
+            "scenario_id",
+            "sel_elig_hyst_pct",
+            "sel_membership_hyst",
+            "sel_rank_buf_pct",
+            "sel_rank_n_ewma_hl",
+            "sel_book_score_buf_pct",
+            prefer_full_column,
+            *[column for column, _ in resolved_coverage_columns],
+            "n_instr",
+            "construction_score",
+            "jaccard_to_baseline",
+        )
+        if column in summary.columns
+    ]
+
+    def update_scenario(change=None) -> None:
+        """Load and redraw only the newly selected scenario."""
+        selected = change["new"] if change is not None else selector.value
+        if selected == "__none__":
+            return
+        metadata = summary.filter(pl.col("scenario_id") == selected).select(
+            metadata_columns
+        )
+        metadata = metadata.rename({
+            column: f"latest_{column}"
+            for column in (
+                "n_instr",
+                "construction_score",
+                "jaccard_to_baseline",
+            )
+            if column in metadata.columns
+        })
+        reviews = load_selection_grid_review_instruments(root, selected)
+        with metadata_output:
+            metadata_output.clear_output(wait=True)
+            display(metadata)
+        with plot_output:
+            plot_output.clear_output(wait=True)
+            display(
+                plot_selection_rebalance_weights(
+                    reviews,
+                    width=width,
+                    height=height,
+                )
+            )
+
+    def update_coverage(change=None) -> None:
+        """Restrict scenario choices to the chosen coverage parameters."""
+        candidates = matching_rows()
+        candidate_options = [
+            (scenario_label(row), str(row["scenario_id"]))
+            for row in candidates
+        ]
+        if not candidate_options:
+            selector.unobserve(update_scenario, names="value")
+            selector.options = [("No matching scenarios", "__none__")]
+            selector.value = "__none__"
+            selector.observe(update_scenario, names="value")
+            with metadata_output:
+                metadata_output.clear_output(wait=True)
+                display(
+                    widgets.Label(
+                        "No scenarios match these coverage settings."
+                    )
+                )
+            with plot_output:
+                plot_output.clear_output(wait=True)
+            return
+        current = selector.value
+        selected = next(
+            (
+                str(row["scenario_id"])
+                for row in candidates
+                if str(row["scenario_id"]) == current
+            ),
+            None,
+        )
+        if selected is None:
+            selected = next(
+                (
+                    str(row["scenario_id"])
+                    for row in candidates
+                    if bool(row.get("baseline_scenario"))
+                ),
+                candidate_options[0][1],
+            )
+        selector.unobserve(update_scenario, names="value")
+        selector.options = candidate_options
+        selector.value = selected
+        selector.observe(update_scenario, names="value")
+        update_scenario()
+
+    selector.observe(update_scenario, names="value")
+    for control in coverage_selectors.values():
+        control.observe(update_coverage, names="value")
+    if prefer_full_selector is not None:
+        prefer_full_selector.observe(update_coverage, names="value")
+    update_scenario()
+    filter_controls = list(coverage_selectors.values())
+    if prefer_full_selector is not None:
+        filter_controls.append(prefer_full_selector)
+    return widgets.VBox(
+        [
+            selector,
+            widgets.HBox(filter_controls),
+            metadata_output,
+            plot_output,
+        ],
+        layout=widgets.Layout(width="100%", overflow="visible"),
+    )
+
+
+def plot_selection_grid_dashboard(
+    grid_directory: Path | str,
+    *,
+    scenario_id: str | None = None,
+    view: str = "cash_pnl",
+    start: date | datetime | str | None = None,
+    end: date | datetime | str | None = None,
+    rolling_days: int = 256,
+    width: int = 1050,
+    height: int = 420,
+):
+    """Navigate the standard selection plots across grid scenarios.
+
+    The dashboard offers cash P&L and combined-forecast panels, portfolio
+    overview, realized risk concentration, annual P&L attribution, and dated
+    rebalance weights. Coverage and full-contract preference dropdowns filter
+    the scenario choices when those parameters are present. Only the chosen
+    scenario's report is loaded when a view is selected.
+
+    Parameters
+    ----------
+    grid_directory
+        Completed selection-grid run directory.
+    scenario_id
+        Optional initial scenario identifier. Defaults to the baseline scenario
+        when present, otherwise the first summary row.
+    view
+        Initial view key: ``cash_pnl``, ``portfolio_overview``,
+        ``concentration``, ``pnl_attribution``, or ``rebalance_weights``.
+    start, end
+        Optional inclusive date bounds for time-series views.
+    rolling_days
+        Trailing observation count forwarded to the portfolio overview.
+    width, height
+        Plot dimensions forwarded to the standard notebook plotters.
+
+    Returns
+    -------
+    ipywidgets.VBox
+        Coverage, scenario, and view selectors with the selected plot.
+    """
+    import ipywidgets as widgets
+    from IPython.display import display
+
+    view_labels = {
+        "cash_pnl": "Cash P&L + combined forecast",
+        "portfolio_overview": "Portfolio overview",
+        "concentration": "Realized risk concentration",
+        "pnl_attribution": "Annual P&L attribution",
+        "rebalance_weights": "Rebalance weights",
+    }
+    if view not in view_labels:
+        raise ValueError(
+            f"unknown grid view {view!r}; choose one of {list(view_labels)}"
+        )
+
+    root = Path(grid_directory).expanduser()
+    summary_path = root / "selection_grid_summary.parquet"
+    if not summary_path.is_file():
+        raise FileNotFoundError(
+            f"selection grid summary does not exist: {summary_path}"
+        )
+    summary = pl.read_parquet(summary_path)
+    if "scenario_id" not in summary.columns:
+        raise ValueError("selection grid summary is missing scenario_id")
+    if summary.is_empty():
+        raise ValueError("selection grid summary has no scenarios")
+
+    rows = summary.to_dicts()
+    coverage_schema = (
+        ("minimum_instruments_per_class", "min_instr_per_cls", "Min / class"),
+        (
+            "minimum_instruments_per_subclass",
+            "min_instr_per_subcls",
+            "Min / subclass",
+        ),
+        ("minimum_book_count", "min_book_n", "Min book size"),
+    )
+    coverage_columns = []
+    for schema_row in coverage_schema:
+        aliases, label = schema_row[:-1], schema_row[-1]
+        column = next(
+            (name for name in aliases if name in summary.columns), None
+        )
+        if column is not None:
+            coverage_columns.append((column, label))
+    prefer_full_column = next(
+        (
+            column
+            for column in (
+                "sel_pref_full_cons",
+                "selection_prefer_full_contracts",
+            )
+            if column in summary.columns
+        ),
+        None,
+    )
+
+    coverage_selectors = {}
+    for column, label in coverage_columns:
+        values = summary.get_column(column).unique().to_list()
+        values = sorted(
+            values,
+            key=lambda value: (value is None, value if value is not None else 0),
+        )
+        options = [("All", "__all__")]
+        options.extend(
+            ("Disabled" if value is None else str(value), value)
+            for value in values
+        )
+        coverage_selectors[column] = widgets.Dropdown(
+            description=label,
+            options=options,
+            value="__all__",
+            layout=widgets.Layout(
+                width="24%" if prefer_full_column is not None else "32%"
+            ),
+        )
+    prefer_full_selector = (
+        widgets.Dropdown(
+            description="Full contracts",
+            options=[("All", "__all__"), ("False", False), ("True", True)],
+            value="__all__",
+            layout=widgets.Layout(width="24%"),
+        )
+        if prefer_full_column is not None
+        else None
+    )
+
+    def matching_rows() -> list[dict[str, object]]:
+        """Apply the selected minimum-coverage filters to scenario rows."""
+        matching = rows
+        for column, control in coverage_selectors.items():
+            if control.value != "__all__":
+                matching = [
+                    row
+                    for row in matching
+                    if row.get(column) == control.value
+                ]
+        if prefer_full_selector is not None:
+            selected = prefer_full_selector.value
+            if selected != "__all__":
+                matching = [
+                    row
+                    for row in matching
+                    if row.get(prefer_full_column) == selected
+                ]
+        return matching
+
+    def label_for(row: dict[str, object]) -> str:
+        """Label scenarios with their ID and enabled coverage minimums."""
+        parts = [str(row["scenario_id"])]
+        for column, label in coverage_columns:
+            value = row.get(column)
+            short = {
+                "Min / class": "MC",
+                "Min / subclass": "MS",
+                "Min book size": "MB",
+            }[label]
+            if value is not None:
+                parts.append(f"{short}{value:g}")
+        if prefer_full_column is not None:
+            parts.append(
+                f"Full contracts {bool(row.get(prefer_full_column))}"
+            )
+        return " · ".join(parts)
+
+    scenario_options = [
+        (label_for(row), str(row["scenario_id"])) for row in rows
+    ]
+    available_scenario_ids = {value for _, value in scenario_options}
+    if scenario_id is None:
+        baseline_rows = [
+            row for row in rows if bool(row.get("baseline_scenario"))
+        ]
+        scenario_id = str(
+            baseline_rows[0]["scenario_id"]
+            if baseline_rows
+            else rows[0]["scenario_id"]
+        )
+    if scenario_id not in available_scenario_ids:
+        raise KeyError(f"selection grid has no scenario {scenario_id!r}")
+
+    scenario_selector = widgets.Dropdown(
+        description="Scenario",
+        options=scenario_options,
+        value=scenario_id,
+        layout=widgets.Layout(width="95%"),
+    )
+    view_selector = widgets.Dropdown(
+        description="View",
+        options=[(label, key) for key, label in view_labels.items()],
+        value=view,
+        layout=widgets.Layout(width="95%"),
+    )
+    metadata_output = widgets.Output()
+    plot_output = widgets.Output(
+        layout=widgets.Layout(
+            width="100%",
+            height="auto",
+            max_height="none",
+            overflow="visible",
+        )
+    )
+
+    def scenario_cash_path(selected: str) -> tuple[Path, Path]:
+        """Resolve the latest matching cash and portfolio reports."""
+        directory = root / selected
+        cash_reports = sorted(
+            directory.glob("*_selection_cash_pnl_*.parquet")
+        )
+        if not cash_reports:
+            raise FileNotFoundError(
+                f"no selection cash-P&L report for scenario {selected!r}"
+            )
+        cash_path = cash_reports[-1]
+        separator = "_selection_cash_pnl_"
+        if separator not in cash_path.name:
+            raise ValueError(
+                f"unexpected selection cash-P&L name: {cash_path.name}"
+            )
+        report_prefix, stamp = cash_path.name.split(separator, maxsplit=1)
+        stamp = stamp.removesuffix(".parquet")
+        curve_path = directory / (
+            f"{report_prefix}_selection_portfolio_curve_{stamp}.parquet"
+        )
+        if not curve_path.is_file():
+            raise FileNotFoundError(
+                f"portfolio curve matching {cash_path.name} is missing"
+            )
+        return cash_path, curve_path
+
+    def plot_selected(selected: str, selected_view: str):
+        """Load the report required by one selected scenario view."""
+        if selected_view == "rebalance_weights":
+            reviews = load_selection_grid_review_instruments(root, selected)
+            return plot_selection_rebalance_weights(
+                reviews, width=width, height=height
+            )
+        cash_path, curve_path = scenario_cash_path(selected)
+        if selected_view == "cash_pnl":
+            return plot_selection_cash_pnl(
+                cash_path,
+                start=start,
+                end=end,
+                width=width,
+                height=min(height, 240),
+            )
+        if selected_view == "portfolio_overview":
+            return plot_selection_portfolio_overview(
+                curve_path,
+                start=start,
+                end=end,
+                rolling_days=rolling_days,
+                width=width,
+                height=min(height, 260),
+            )
+        if selected_view == "concentration":
+            return plot_selection_portfolio_concentration(
+                cash_path,
+                start=start,
+                end=end,
+                width=width,
+                height=min(height, 240),
+            )
+        return plot_selection_pnl_attribution(
+            cash_path,
+            width=width,
+            height=height,
+        )
+
+    def update_plot(change=None) -> None:
+        """Redraw the chosen scenario and standard plot view."""
+        selected = scenario_selector.value
+        if selected == "__none__":
+            return
+        selected_view = view_selector.value
+        selected_row = next(
+            row for row in rows if str(row["scenario_id"]) == selected
+        )
+        metadata_columns = [
+            column
+            for column in (
+                "scenario_id",
+                "target_vol",
+                "min_instr_per_cls",
+                "min_instr_per_subcls",
+                "min_book_n",
+                "sel_elig_hyst_pct",
+                "sel_membership_hyst",
+                "sel_rank_buf_pct",
+                "sel_rank_n_ewma_hl",
+                "sel_book_score_buf_pct",
+                prefer_full_column,
+                "n_instr",
+                "construction_score",
+                "jaccard_to_baseline",
+            )
+            if column in summary.columns
+        ]
+        selected_metadata = pl.DataFrame([selected_row]).select(metadata_columns)
+        with metadata_output:
+            metadata_output.clear_output(wait=True)
+            display(selected_metadata)
+        with plot_output:
+            plot_output.clear_output(wait=True)
+            display(plot_selected(selected, selected_view))
+
+    def update_coverage(change=None) -> None:
+        """Restrict scenario choices to the selected coverage settings."""
+        candidates = matching_rows()
+        options = [
+            (label_for(row), str(row["scenario_id"])) for row in candidates
+        ]
+        if not options:
+            scenario_selector.unobserve(update_plot, names="value")
+            scenario_selector.options = [("No matching scenarios", "__none__")]
+            scenario_selector.value = "__none__"
+            scenario_selector.observe(update_plot, names="value")
+            with metadata_output:
+                metadata_output.clear_output(wait=True)
+                display(
+                    widgets.Label(
+                        "No scenarios match these coverage settings."
+                    )
+                )
+            with plot_output:
+                plot_output.clear_output(wait=True)
+            return
+        current = scenario_selector.value
+        selected = next(
+            (value for _, value in options if value == current), None
+        )
+        if selected is None:
+            selected = next(
+                (
+                    str(row["scenario_id"])
+                    for row in candidates
+                    if bool(row.get("baseline_scenario"))
+                ),
+                options[0][1],
+            )
+        scenario_selector.unobserve(update_plot, names="value")
+        scenario_selector.options = options
+        scenario_selector.value = selected
+        scenario_selector.observe(update_plot, names="value")
+        update_plot()
+
+    scenario_selector.observe(update_plot, names="value")
+    view_selector.observe(update_plot, names="value")
+    for control in coverage_selectors.values():
+        control.observe(update_coverage, names="value")
+    if prefer_full_selector is not None:
+        prefer_full_selector.observe(update_coverage, names="value")
+    update_plot()
+    filter_controls = list(coverage_selectors.values())
+    if prefer_full_selector is not None:
+        filter_controls.append(prefer_full_selector)
+    return widgets.VBox(
+        [
+            view_selector,
+            scenario_selector,
+            widgets.HBox(filter_controls),
+            metadata_output,
+            plot_output,
+        ],
         layout=widgets.Layout(width="100%", overflow="visible"),
     )
 
@@ -1250,7 +2299,7 @@ class SubsystemReferenceSettings:
     auditable continuous position. ``ref_book_count`` assigns every
     candidate the same structural weight, while ``ref_idm`` and
     ``max_weight_idm`` apply the same fixed sizing convention as the selection
-    tie rule. The resulting USD series is divided by ``ref_budget`` and
+    tie rule. The resulting USD series is divided by ``ref_cap_alloc`` and
     exposed as a normalized subsystem-reference percentage series.
     """
 
@@ -1304,6 +2353,7 @@ class EwmacNotebookView:
     cash: pl.DataFrame | None = None
     history: FuturesHistory | None = None
     contract_history: pl.DataFrame | None = None
+    close_label: str = "Panama price"
 
     @property
     def forecasts(self) -> pl.DataFrame:
@@ -1366,7 +2416,8 @@ class EwmacNotebookView:
         frame = _date_slice(self.reference, start=start, end=end)
         return frame.select(
             "date",
-            "ref_budget",
+            "port_ann_risk_target",
+            "ref_cap_alloc",
             "ref_ann_risk",
             "ref_daily_risk",
             "ref_gross",
@@ -1635,78 +2686,85 @@ class EwmacNotebookView:
         if reference.is_empty():
             raise ValueError("plot date range contains no forecast observations")
 
-        # The Panama series is carried as ``close`` for the signal pipeline;
-        # ``con_px`` is the actual contract mark. Use explicit colors on one
-        # shared axis so overlapping paths remain identifiable.
+        def line_panel(
+            frame: pl.DataFrame,
+            columns: list[str],
+            *,
+            title: str,
+            ylabel: str,
+            labels: dict[str, str] | None = None,
+            colors: dict[str, str] | None = None,
+        ):
+            """Overlay lines with fixed-point numeric hover values."""
+            curves = []
+            for column in columns:
+                label = (labels or {}).get(column, column)
+                curves.append(
+                    frame.hvplot.line(
+                        x="date",
+                        y=column,
+                        label=label,
+                        title=title,
+                        ylabel=ylabel,
+                        width=width,
+                        height=height,
+                        tools=["hover"],
+                        hover_tooltips=[
+                            ("Date", "@date{%F}"),
+                            (label, f"@{{{column}}}{{0,0.0000}}"),
+                        ],
+                        **(
+                            {"color": colors[column]}
+                            if colors is not None and column in colors
+                            else {}
+                        ),
+                    )
+                )
+            return hv.Overlay(curves)
+
+        # ``close`` is Panama-adjusted for stitched futures and the downloaded
+        # close for direct IB stocks; ``con_px`` is the raw notional mark.
         price_curves = []
         if "con_px" in reference.columns:
-            price_curves.append(
-                reference.hvplot.line(
-                    x="date",
-                    y="con_px",
-                    label="Mark price",
-                    color="#1f77b4",
-                    title=f"{self.symbol} contract mark and Panama prices",
-                    ylabel="Price points",
-                    width=width,
-                    height=height,
-                )
-            )
-        price_curves.append(
-            reference.hvplot.line(
-                x="date",
-                y="close",
-                label="Panama price",
-                color="#ff7f0e",
-                title=f"{self.symbol} contract mark and Panama prices",
-                ylabel="Price points",
-                width=width,
-                height=height,
-            )
+            price_curves.append("con_px")
+        price_curves.append("close")
+        price_plot = line_panel(
+            reference,
+            price_curves,
+            title=f"{self.symbol} contract mark and {self.close_label}",
+            ylabel="Price points",
+            labels={"con_px": "Mark price", "close": self.close_label},
+            colors={"con_px": "#1f77b4", "close": "#ff7f0e"},
+        ).opts(legend_position="top_left") * hv.HLine(0.0).opts(
+            color="black", line_width=1
         )
-        price_plot = (
-            hv.Overlay(price_curves).opts(legend_position="top_left")
-            * hv.HLine(0.0).opts(color="black", line_width=1)
-        )
-        forecast_plot = reference.hvplot.line(
-            x="date",
-            y="comb_fcst",
+        forecast_plot = line_panel(
+            reference,
+            ["comb_fcst"],
             title="Combined forecast (mean abs 1, cap 2)",
             ylabel="Average-position multiple",
-            width=width,
-            height=height,
         ) * hv.HLine(0.0).opts(color="black", line_width=1)
-        proxy_plot = reference.hvplot.line(
-            x="date",
-            y=[
-                "vol_scalar",
-                "ref_avg_pos",
-                "ref_tgt_pos",
-            ],
+        proxy_plot = line_panel(
+            reference,
+            ["vol_scalar", "ref_avg_pos", "ref_tgt_pos"],
             title="Equal-weight reference positions",
             ylabel="Continuous contracts",
-            width=width,
-            height=height,
-        )
-        normalized_plot = reference.hvplot.line(
-            x="date",
-            y=["comb_fcst", "ref_norm_pos"],
+        ) * hv.HLine(0.0).opts(color="black", line_width=1)
+        normalized_plot = line_panel(
+            reference,
+            ["comb_fcst", "ref_norm_pos"],
             title="Forecast versus reference-normalized position",
             ylabel="Smoothed average-position units",
-            width=width,
-            height=height,
         ) * hv.HLine(0.0).opts(color="black", line_width=1)
 
         reference_curves = self.subsystem_reference_pct_curves(
             start=start, end=end
         )
-        reference_plot = reference_curves.hvplot.line(
-            x="date",
-            y=["cum_ref_gross_pct", "cum_ref_net_pct"],
+        reference_plot = line_panel(
+            reference_curves,
+            ["cum_ref_gross_pct", "cum_ref_net_pct"],
             title="Cumulative equal-weight subsystem-reference percentage",
             ylabel="Percent",
-            width=width,
-            height=height,
         )
         panels = (
             price_plot
@@ -1718,25 +2776,18 @@ class EwmacNotebookView:
 
         if self.cash is not None:
             cash = _date_slice(self.cash, start=start, end=end)
-            contract_plot = cash.hvplot.line(
-                x="date",
-                y=["tgt_pos", "exec_con", "held_con"],
+            contract_plot = line_panel(
+                cash,
+                ["tgt_pos", "exec_con", "held_con"],
                 title="Executable contract positions",
                 ylabel="Contracts",
-                width=width,
-                height=height,
             )
             cash_curves = self.cash_pnl_curves(start=start, end=end)
-            cash_plot = cash_curves.hvplot.line(
-                x="date",
-                y=[
-                    "cum_gross_pnl",
-                    "cum_net_pnl",
-                ],
+            cash_plot = line_panel(
+                cash_curves,
+                ["cum_gross_pnl", "cum_net_pnl"],
                 title="Cumulative executable cash P&L",
                 ylabel="USD",
-                width=width,
-                height=height,
             )
             panels = panels + contract_plot + cash_plot
 
@@ -1749,6 +2800,8 @@ def build_ewmac_notebook_view(
     symbol: str,
     multiplier: float,
     reference_settings: SubsystemReferenceSettings,
+    start_date: date | datetime | str | None = None,
+    end_date: date | datetime | str | None = None,
     fx_to_usd: float | None = None,
     ann_cost_sr: float = 0.0,
     cash_settings: ExecutableCashSettings | None = None,
@@ -1763,6 +2816,12 @@ def build_ewmac_notebook_view(
         :meth:`CombinedForecastEngine.combine`.
     symbol
         Executable instrument identity used in plot titles and view metadata.
+    start_date
+        Optional inclusive calendar-date start for the forecast and all
+        derived notebook curves.
+    end_date
+        Optional inclusive calendar-date end for the forecast and all derived
+        notebook curves.
     multiplier
         Native-currency value of one price point for the actual instrument.
     fx_to_usd
@@ -1794,7 +2853,22 @@ def build_ewmac_notebook_view(
     if not math.isfinite(target_abs_forecast) or target_abs_forecast <= 0:
         raise ValueError("target_abs_forecast must be finite and positive")
 
+    if start_date is not None or end_date is not None:
+        # Trim the source before calculating positions so every derived path
+        # has the same inclusive date boundaries.
+        result = replace(
+            result,
+            frame=_date_slice(result.frame, start=start_date, end=end_date),
+        )
+
     forecast = _forecast_with_fx(result, fx_to_usd)
+    if "contract_close" not in forecast.columns and "close" in forecast.columns:
+        # Direct, unstitched IB histories carry the executable mark as close.
+        # Stitched histories retain their separate raw mark column, because
+        # their close may be an additive-Panama signal price.
+        forecast = forecast.with_columns(
+            pl.col("close").alias("contract_close")
+        )
     reference = build_subsystem_reference_return_curve(
         forecast,
         capital=reference_settings.capital,
@@ -1846,6 +2920,8 @@ def build_ewmac_notebook_view_from_screen(
     screen: pl.DataFrame | Path | str,
     symbol: str,
     reference_settings: SubsystemReferenceSettings,
+    start_date: date | datetime | str | None = None,
+    end_date: date | datetime | str | None = None,
     cash_settings: ExecutableCashSettings | None = None,
     fx_to_usd: float | None = None,
     target_abs_forecast: float = EWMAC_FORECAST_TARGET_ABS,
@@ -1867,6 +2943,12 @@ def build_ewmac_notebook_view_from_screen(
     ----------
     result
         Combined forecast history to use as the strategy signal.
+    start_date
+        Optional inclusive calendar-date start for the forecast and all
+        derived notebook curves.
+    end_date
+        Optional inclusive calendar-date end for the forecast and all derived
+        notebook curves.
     screen
         Phase 1 selection-screen frame or path to its Parquet/CSV report.
     symbol
@@ -1892,6 +2974,14 @@ def build_ewmac_notebook_view_from_screen(
         Compact forecast, costed reference, optional executable cash frames,
         and plotting methods.
     """
+    if start_date is not None or end_date is not None:
+        # Screen-derived annual cost uses the same sample as the displayed
+        # curves, so estimate turnover only over the requested date range.
+        result = replace(
+            result,
+            frame=_date_slice(result.frame, start=start_date, end=end_date),
+        )
+
     screen_frame = _read_screen_frame(screen)
     screen_row = _screen_row(screen_frame, symbol)
     multiplier = _screen_number(
@@ -1999,6 +3089,8 @@ def build_ewmac_notebook_view_from_screen(
         symbol=symbol,
         multiplier=multiplier,
         reference_settings=reference_settings,
+        start_date=start_date,
+        end_date=end_date,
         fx_to_usd=fx_to_usd,
         ann_cost_sr=annual_cost.ann_cost_sr,
         cash_settings=cash_settings,
@@ -2019,6 +3111,141 @@ def build_ewmac_notebook_view_from_screen(
         else None
     )
     return replace(view, reference=reference, cash=cash)
+
+
+def build_ib_ewmac_notebook_view(
+    ib: IBPySync,
+    *,
+    symbol: str,
+    reference_settings: SubsystemReferenceSettings,
+    exchange: str = "SMART",
+    currency: str = "USD",
+    duration: str = DEFAULT_IB_DURATION,
+    bar_size: str = DEFAULT_IB_BAR_SIZE,
+    what_to_show: str = "TRADES",
+    use_rth: bool = True,
+    rules: Iterable[EwmacRule] = CANONICAL_EWMAC_RULES,
+    fdm: float = 1.0,
+    combination_config: ForecastCombinationConfig | None = None,
+    multiplier: float = 1.0,
+    fx_to_usd: float | None = None,
+    ann_cost_sr: float = 0.0,
+    cash_settings: ExecutableCashSettings | None = None,
+    screen: pl.DataFrame | Path | str | None = None,
+    start_date: date | datetime | str | None = None,
+    end_date: date | datetime | str | None = None,
+) -> EwmacNotebookView:
+    """Download one IB stock history and build its unstitched EWMAC view.
+
+    The downloaded daily close is both the signal price and the executable
+    notional mark. No reference or Globex data is loaded or stitched. Forecasts
+    are calculated on the full downloaded sample before optional display
+    boundaries are applied, preserving indicator warmup before ``start_date``.
+
+    Parameters
+    ----------
+    ib
+        Connected synchronous IB client.
+    symbol
+        Stock ticker used for the IB contract and notebook label.
+    reference_settings
+        Equal-weight subsystem reference sizing assumptions.
+    exchange, currency
+        IB stock contract routing and quote currency.
+    duration, bar_size, what_to_show, use_rth
+        Historical bar request settings forwarded to IB.
+    rules, fdm, combination_config
+        EWMAC components and single-instrument combination conventions.
+    multiplier
+        Native currency value of one price point per share; normally 1.0.
+        A matched Phase 1 ``screen`` row may supply its own multiplier.
+    fx_to_usd
+        Optional constant currency conversion. Omit for USD stocks, where the
+        view uses identity FX.
+    ann_cost_sr, cash_settings, screen
+        Reference cost and optional executable cash assumptions. When
+        ``screen`` is given, its multiplier and trade/roll costs are used.
+    start_date, end_date
+        Optional inclusive output boundaries. Forecast indicators use all
+        downloaded history so rows before ``start_date`` still warm them up.
+
+    Returns
+    -------
+    EwmacNotebookView
+        Combined forecasts, reference sizing, optional cash P&L, and plotting
+        methods. ``view.contract_history`` contains the downloaded IB bars.
+    """
+    contract = IBPySync.stock(
+        symbol,
+        exchange=exchange,
+        currency=currency,
+    )
+    qualified = ib.qualify_contracts(contract)
+    if qualified:
+        contract = qualified[0]
+    bars = ib.get_historical_bars(
+        contract,
+        duration=duration,
+        bar_size=bar_size,
+        what_to_show=what_to_show,
+        use_rth=use_rth,
+    )
+    if bars is None or bars.is_empty():
+        raise ValueError(f"IB returned no historical bars for {symbol}")
+    date_column = "date" if "date" in bars.columns else "ts_event"
+    if date_column not in bars.columns or "close" not in bars.columns:
+        raise ValueError(
+            "IB stock history must contain a date/ts_event column and close"
+        )
+    history = (
+        bars.select(
+            pl.col(date_column).cast(pl.Date).alias("date"),
+            pl.col("close").cast(pl.Float64),
+        )
+        .filter(pl.col("close").is_finite() & (pl.col("close") > 0))
+        .unique(subset="date", keep="last", maintain_order=True)
+        .sort("date")
+        .with_columns(pl.col("close").alias("contract_close"))
+    )
+    if end_date is not None:
+        history = _date_slice(history, start=None, end=end_date)
+    if history.is_empty():
+        raise ValueError(f"IB history has no valid closes for {symbol}")
+
+    config = combination_config or ForecastCombinationConfig()
+    result = combine_ewmac_forecasts(
+        history,
+        rules=rules,
+        instrument_code=symbol,
+        fdm=fdm,
+        config=config,
+    )
+    if screen is not None:
+        view = build_ewmac_notebook_view_from_screen(
+            result,
+            screen=screen,
+            symbol=symbol,
+            reference_settings=reference_settings,
+            start_date=start_date,
+            end_date=end_date,
+            cash_settings=cash_settings,
+            fx_to_usd=fx_to_usd,
+            target_abs_forecast=config.target_abs_forecast,
+        )
+    else:
+        view = build_ewmac_notebook_view(
+            result,
+            symbol=symbol,
+            multiplier=multiplier,
+            reference_settings=reference_settings,
+            start_date=start_date,
+            end_date=end_date,
+            fx_to_usd=fx_to_usd,
+            ann_cost_sr=ann_cost_sr,
+            cash_settings=cash_settings,
+            target_abs_forecast=config.target_abs_forecast,
+        )
+    return replace(view, contract_history=bars, close_label="Close")
 
 
 def _history_currency(history: FuturesHistory) -> str:
@@ -2071,8 +3298,11 @@ def build_stitched_ewmac_notebook_view(
     *,
     symbol: str,
     reference_settings: SubsystemReferenceSettings,
+    cache_root: Path | str,
     signal_symbol: str | None = None,
     as_of: date | None = None,
+    start: date | datetime | str | None = None,
+    end: date | datetime | str | None = None,
     prior_years: int = 1,
     max_source_gap_days: int = DEFAULT_MAX_SOURCE_GAP_DAYS,
     duration: str = DEFAULT_IB_DATED_CONTRACT_DURATION,
@@ -2113,6 +3343,9 @@ def build_stitched_ewmac_notebook_view(
         multiplier, cash sizing, and view label.
     reference_settings
         Equal-weight subsystem reference sizing assumptions.
+    cache_root
+        Explicit root for cached PySystemTrade, Globex, and stitched histories.
+        No project-local cache path is selected implicitly.
     signal_symbol
         IB ticker used to download the newest signal history. Defaults to the
         mapped signal ticker for ``symbol``. For example, ``MGC`` can use
@@ -2124,6 +3357,10 @@ def build_stitched_ewmac_notebook_view(
         When no Globex segment is available, the provider requests older
         contract years while they extend IB history toward the end of the long
         reference series.
+    start, end
+        Optional inclusive date limits for the returned forecast, reference,
+        and cash curves. History acquisition and forecast warm-up still use
+        the full stitched history.
     max_source_gap_days
         Largest calendar gap permitted for a direct reference-to-IB stitch.
         The unknown return over an allowed gap is masked and the interval is
@@ -2191,6 +3428,7 @@ def build_stitched_ewmac_notebook_view(
         globex_db_path=globex_db_path,
         mapping_path=broker_mapping_path,
         history_db_path=ib_history_db_path,
+        cache_root=cache_root,
         use_cache=use_cache,
         save_cache=save_cache,
         update_history=update_ib_history,
@@ -2204,6 +3442,7 @@ def build_stitched_ewmac_notebook_view(
         raise RuntimeError("stitched history provider did not retain IB audit rows")
     pooled = load_pooled_ewmac_rules(
         db_path=reference_db_path,
+        cache_root=cache_root,
         pooling_mapping_path=pooling_mapping_path,
         rules=rule_tuple,
         target_abs_forecast=config.target_abs_forecast,
@@ -2238,6 +3477,8 @@ def build_stitched_ewmac_notebook_view(
             reference_settings=reference_settings,
             cash_settings=cash_settings,
             target_abs_forecast=config.target_abs_forecast,
+            start_date=start,
+            end_date=end,
         )
     else:
         view = build_ewmac_notebook_view(
@@ -2250,6 +3491,8 @@ def build_stitched_ewmac_notebook_view(
             reference_settings=reference_settings,
             cash_settings=cash_settings,
             target_abs_forecast=config.target_abs_forecast,
+            start_date=start,
+            end_date=end,
         )
     return replace(
         view,

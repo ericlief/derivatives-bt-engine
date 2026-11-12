@@ -13,9 +13,12 @@ from typing import Optional
 
 import polars as pl
 
-DEFAULT_ANNUALIZATION_DAYS = 252
-DEFAULT_FAST_WINDOW = 63
-DEFAULT_SLOW_WINDOW = 252
+DEFAULT_ANNUALIZATION_DAYS = 256
+# Align the production return horizons with the slowest canonical EWMAC
+# speed.  Both remain caller-configurable; these values only define the
+# common backtest/live default.
+DEFAULT_FAST_WINDOW = 64
+DEFAULT_SLOW_WINDOW = 256
 
 
 class TrendRegime(str, Enum):
@@ -75,11 +78,16 @@ def build_features(df: pl.DataFrame) -> pl.DataFrame:
     retired ``legacy_signal.calculate_trend_strength`` function retains its
     separate ``r1d`` log-return convention.
 
-    Sorts by ts_event first -- shift()/cum_max() are order-dependent, and
+    Sorts by the canonical ``date`` column, or by the legacy ``ts_event``
+    calculation key when that is the input boundary. shift()/cum_max() are
+    order-dependent, and
     every downstream function (continuous_momentum, the monthly Goulding model)
     inherits whatever order this leaves the frame in, so this is the one
     place that guarantee needs to be established."""
-    df = df.sort('ts_event')
+    date_column = 'date' if 'date' in df.columns else 'ts_event'
+    if date_column not in df.columns:
+        raise ValueError("continuous momentum input requires 'date'")
+    df = df.sort(date_column)
     return_expression = (
         pl.col('ret_1d')
         if 'ret_1d' in df.columns

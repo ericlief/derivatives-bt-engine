@@ -29,6 +29,10 @@ from derivatives_bt_engine.calculations.ewmac import (
     EWMAC_SCALAR_POOLS,
 )
 from derivatives_bt_engine.calculations.goulding import GOULDING_SIGNAL_MODES
+from derivatives_bt_engine.calculations.continuous_momentum import (
+    DEFAULT_FAST_WINDOW,
+    DEFAULT_SLOW_WINDOW,
+)
 from derivatives_bt_engine.calculations.roll_policy import parse_roll_policy_overrides
 from derivatives_bt_engine.calculations.volatility import (
     MIXED_VOL_FAST_SPAN,
@@ -238,15 +242,17 @@ def parse_args():
                    help="Only used with --signal-weighting goulding. 'binary' preserves the +/-1 "
                         "direction baseline. 'continuous' uses mean(fast, slow) in Bull/Bear and "
                         "the equation-7 blend in Correction/Rebound, causally normalizes pooled "
-                        "prior forecasts to mean absolute 0.5, and caps at +/-1.")
+                        "prior forecasts to mean absolute 0.5, and caps at +/-1. 'sharpe' keeps "
+                        "the raw-return regime but divides each horizon by its lagged RMS monthly "
+                        "volatility before the same blend and pooled scaling.")
     p.add_argument('--mixing-pool', choices=['cluster', 'global'], default='cluster',
                    help="Only used with --signal-weighting goulding. 'cluster' (default): a_Co/a_Re "
                         "estimated separately per instruments.py cluster. 'global': one shared "
                         "estimate pooled across every --symbols regardless of cluster")
-    p.add_argument('--fast-window', type=int, default=63,
+    p.add_argument('--fast-window', type=int, default=DEFAULT_FAST_WINDOW,
                    help="Only used with --signal-weighting continuous: continuous_momentum's fast "
                         "return-horizon window in trading days (default: %(default)s)")
-    p.add_argument('--slow-window', type=int, default=252,
+    p.add_argument('--slow-window', type=int, default=DEFAULT_SLOW_WINDOW,
                    help="Only used with --signal-weighting continuous: continuous_momentum's slow "
                         "return-horizon window in trading days (default: %(default)s)")
     p.add_argument('--vol-fast-window', type=int, default=None,

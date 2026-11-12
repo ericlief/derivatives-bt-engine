@@ -1,0 +1,144 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="700" viewBox="0 0 1200 700" role="img" aria-labelledby="title desc">
+  <title id="title">Subclass concentration limits, recent performance, and book similarity</title>
+  <desc id="desc">The first panel compares average portfolio return since 2024 by subclass cap and membership hysteresis. The second compares grain contribution since 2025. The third shows average annual Jaccard similarity of hysteresis books to their matched no-membership-hysteresis controls.</desc>
+  <style>
+    .bg { fill: #ffffff; }
+    .title { fill: #111827; font: 600 24px system-ui, sans-serif; }
+    .subtitle { fill: #4b5563; font: 14px system-ui, sans-serif; }
+    .axis { fill: #374151; font: 13px system-ui, sans-serif; }
+    .label { fill: #111827; font: 600 13px system-ui, sans-serif; }
+    .value { fill: #111827; font: 600 12px system-ui, sans-serif; }
+    .grid { stroke: #d1d5db; stroke-width: 1; }
+    .zero { stroke: #6b7280; stroke-width: 1.5; }
+    .frame { fill: none; stroke: #9ca3af; stroke-width: 1; }
+    .none { fill: #4c78a8; }
+    .rank { fill: #f28e2b; }
+    .score0 { fill: #59a14f; }
+    .score1 { fill: #b07aa1; }
+    .rank-line { fill: none; stroke: #f28e2b; stroke-width: 3; }
+    .score0-line { fill: none; stroke: #59a14f; stroke-width: 3; }
+    .score1-line { fill: none; stroke: #b07aa1; stroke-width: 3; }
+    @media (prefers-color-scheme: dark) {
+      .bg { fill: #111827; }
+      .title, .label, .value { fill: #f3f4f6; }
+      .subtitle, .axis { fill: #d1d5db; }
+      .grid { stroke: #374151; }
+      .zero { stroke: #9ca3af; }
+      .frame { stroke: #6b7280; }
+    }
+  </style>
+  <rect class="bg" width="1200" height="700"/>
+  <text class="title" x="45" y="40">The 10% cap reduces grain drag without the 7.5% collapse</text>
+  <text class="subtitle" x="45" y="66">November 8 grid; means across count caps, subclass coverage, and contract preference; EH25 in every scenario</text>
+
+  <text class="label" x="45" y="105">Portfolio return, 2024–26</text>
+  <text class="axis" x="45" y="126">Compounded return (%)</text>
+  <rect class="frame" x="45" y="140" width="455" height="330"/>
+  <line class="grid" x1="45" y1="140" x2="500" y2="140"/>
+  <line class="grid" x1="45" y1="234" x2="500" y2="234"/>
+  <line class="zero" x1="45" y1="329" x2="500" y2="329"/>
+  <line class="grid" x1="45" y1="423" x2="500" y2="423"/>
+  <text class="axis" x="37" y="144" text-anchor="end">20</text>
+  <text class="axis" x="37" y="238" text-anchor="end">10</text>
+  <text class="axis" x="37" y="333" text-anchor="end">0</text>
+  <text class="axis" x="37" y="427" text-anchor="end">−10</text>
+
+  <rect class="none" x="88" y="329" width="19" height="103"/>
+  <rect class="rank" x="110" y="329" width="19" height="105"/>
+  <rect class="score0" x="132" y="329" width="19" height="80"/>
+  <rect class="score1" x="154" y="329" width="19" height="89"/>
+  <text class="label" x="130" y="495" text-anchor="middle">7.5% cap</text>
+
+  <rect class="none" x="228" y="213" width="19" height="116"/>
+  <rect class="rank" x="250" y="319" width="19" height="10"/>
+  <rect class="score0" x="272" y="307" width="19" height="22"/>
+  <rect class="score1" x="294" y="329" width="19" height="9"/>
+  <text class="label" x="270" y="495" text-anchor="middle">10% cap</text>
+
+  <rect class="none" x="368" y="197" width="19" height="132"/>
+  <rect class="rank" x="390" y="329" width="19" height="38"/>
+  <rect class="score0" x="412" y="329" width="19" height="32"/>
+  <rect class="score1" x="434" y="329" width="19" height="29"/>
+  <text class="label" x="410" y="495" text-anchor="middle">25% cap</text>
+
+  <text class="value" x="98" y="450" text-anchor="middle">−10.9</text>
+  <text class="value" x="237" y="205" text-anchor="middle">12.3</text>
+  <text class="value" x="377" y="189" text-anchor="middle">13.9</text>
+
+  <text class="label" x="550" y="105">Grain contribution, 2025–26</text>
+  <text class="axis" x="550" y="126">Portfolio percentage points</text>
+  <rect class="frame" x="550" y="140" width="300" height="330"/>
+  <line class="zero" x1="550" y1="140" x2="850" y2="140"/>
+  <line class="grid" x1="550" y1="219" x2="850" y2="219"/>
+  <line class="grid" x1="550" y1="297" x2="850" y2="297"/>
+  <line class="grid" x1="550" y1="376" x2="850" y2="376"/>
+  <line class="grid" x1="550" y1="454" x2="850" y2="454"/>
+  <text class="axis" x="542" y="144" text-anchor="end">0</text>
+  <text class="axis" x="542" y="223" text-anchor="end">−1</text>
+  <text class="axis" x="542" y="301" text-anchor="end">−2</text>
+  <text class="axis" x="542" y="380" text-anchor="end">−3</text>
+  <text class="axis" x="542" y="458" text-anchor="end">−4</text>
+
+  <rect class="none" x="579" y="140" width="16" height="99"/>
+  <rect class="rank" x="598" y="140" width="16" height="112"/>
+  <rect class="score0" x="617" y="140" width="16" height="113"/>
+  <rect class="score1" x="636" y="140" width="16" height="98"/>
+  <text class="label" x="616" y="495" text-anchor="middle">7.5%</text>
+
+  <rect class="none" x="674" y="140" width="16" height="133"/>
+  <rect class="rank" x="693" y="140" width="16" height="113"/>
+  <rect class="score0" x="712" y="140" width="16" height="88"/>
+  <rect class="score1" x="731" y="140" width="16" height="110"/>
+  <text class="label" x="711" y="495" text-anchor="middle">10%</text>
+
+  <rect class="none" x="769" y="140" width="16" height="299"/>
+  <rect class="rank" x="788" y="140" width="16" height="213"/>
+  <rect class="score0" x="807" y="140" width="16" height="215"/>
+  <rect class="score1" x="826" y="140" width="16" height="196"/>
+  <text class="label" x="806" y="495" text-anchor="middle">25%</text>
+
+  <text class="label" x="910" y="105">Matched book similarity</text>
+  <text class="axis" x="910" y="126">Jaccard to membership-none control (%)</text>
+  <rect class="frame" x="910" y="140" width="245" height="330"/>
+  <line class="grid" x1="910" y1="140" x2="1155" y2="140"/>
+  <line class="grid" x1="910" y1="223" x2="1155" y2="223"/>
+  <line class="grid" x1="910" y1="305" x2="1155" y2="305"/>
+  <line class="grid" x1="910" y1="388" x2="1155" y2="388"/>
+  <line class="grid" x1="910" y1="470" x2="1155" y2="470"/>
+  <text class="axis" x="902" y="144" text-anchor="end">100</text>
+  <text class="axis" x="902" y="227" text-anchor="end">75</text>
+  <text class="axis" x="902" y="309" text-anchor="end">50</text>
+  <text class="axis" x="902" y="392" text-anchor="end">25</text>
+  <text class="axis" x="902" y="474" text-anchor="end">0</text>
+  <text class="axis" x="945" y="495" text-anchor="middle">2024</text>
+  <text class="axis" x="1032" y="495" text-anchor="middle">2025</text>
+  <text class="axis" x="1119" y="495" text-anchor="middle">2026</text>
+
+  <polyline class="rank-line" points="945,297 1032,180 1119,183"/>
+  <circle class="rank" cx="945" cy="297" r="5"/>
+  <circle class="rank" cx="1032" cy="180" r="5"/>
+  <circle class="rank" cx="1119" cy="183" r="5"/>
+  <polyline class="score0-line" points="945,302 1032,203 1119,188"/>
+  <circle class="score0" cx="945" cy="302" r="5"/>
+  <circle class="score0" cx="1032" cy="203" r="5"/>
+  <circle class="score0" cx="1119" cy="188" r="5"/>
+  <polyline class="score1-line" points="945,316 1032,214 1119,205"/>
+  <circle class="score1" cx="945" cy="316" r="5"/>
+  <circle class="score1" cx="1032" cy="214" r="5"/>
+  <circle class="score1" cx="1119" cy="205" r="5"/>
+  <text class="value" x="945" y="287" text-anchor="middle">52.5</text>
+  <text class="value" x="1032" y="170" text-anchor="middle">88.0</text>
+  <text class="value" x="1119" y="173" text-anchor="middle">87.1</text>
+
+  <rect class="none" x="235" y="555" width="14" height="14"/>
+  <text class="axis" x="256" y="567">Membership none</text>
+  <rect class="rank" x="390" y="555" width="14" height="14"/>
+  <text class="axis" x="411" y="567">Rank 15 / HL 3</text>
+  <rect class="score0" x="548" y="555" width="14" height="14"/>
+  <text class="axis" x="569" y="567">Score buffer 0</text>
+  <rect class="score1" x="707" y="555" width="14" height="14"/>
+  <text class="axis" x="728" y="567">Score buffer 1</text>
+
+  <text class="subtitle" x="45" y="620">Current effective allocation under membership none: 80.0% at 7.5%, 86.9% at 10%, and 91.4% at 25%.</text>
+  <text class="subtitle" x="45" y="646">The cap is not renormalized: unused structural weight remains undeployed, and max-weight-times-IDM can remove additional weight.</text>
+</svg>

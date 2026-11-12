@@ -119,6 +119,29 @@ Reference sizing and turnover are added after multiplier and FX are known. Use
 ``build_ewmac_components`` when only the wide component frame is needed, or
 ``build_ewmac_rule_component`` to inspect a single speed.
 
+For an unstitched IB stock history, the notebook builder downloads daily bars,
+uses the downloaded close for both forecasts and executable notional, and
+builds the same view directly:
+
+```python
+from datetime import date
+
+from derivatives_bt_engine.pipelines.ewmac_notebook import (
+    SubsystemReferenceSettings,
+    build_ib_ewmac_notebook_view,
+)
+
+xar = build_ib_ewmac_notebook_view(
+    ib,
+    symbol="XAR",
+    reference_settings=SubsystemReferenceSettings(
+        capital=75_000,
+        target_vol=0.20,
+    ),
+    start_date=date(2026, 8, 1),
+)
+```
+
 ## Build a stitched EWMAC notebook view
 
 Given a connected ``IBPySync`` client, one helper downloads the dated
@@ -136,6 +159,7 @@ gold = build_stitched_ewmac_notebook_view(
     ib,
     symbol="GC",
     signal_symbol="GC",
+    cache_root="/path/to/cache/futures",
     reference_settings=SubsystemReferenceSettings(
         capital=75_000,
         target_vol=0.20,
@@ -183,6 +207,7 @@ mgc = build_stitched_ewmac_notebook_view(
     ib,
     symbol="MGC",
     signal_symbol="GC",
+    cache_root="/path/to/cache/futures",
     reference_settings=SubsystemReferenceSettings(
         capital=75_000,
         target_vol=0.20,
@@ -207,14 +232,15 @@ rows by contract and request settings, and ``raw.fetch_log`` records coverage
 and failures. No adjusted, continuous, or forecast values are written there.
 
 The completed reference-to-Globex-to-IB history is cached as a versioned
-Parquet bundle under ``.cache/futures/stitched``. The default call reads that
-bundle when available. To rebuild the stitched view and update current IB raw
-bars, use:
+Parquet bundle under ``<cache_root>/stitched``. ``cache_root`` is required;
+the helper does not choose a project-local cache directory. To rebuild the
+stitched view and update current IB raw bars, use:
 
 ```python
 mgc = build_stitched_ewmac_notebook_view(
     ib,
     symbol="MGC",
+    cache_root="/path/to/cache/futures",
     reference_settings=reference_settings,
     use_cache=False,
     save_cache=True,

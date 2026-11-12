@@ -6,6 +6,7 @@ import pytest
 
 from derivatives_bt_engine.pipelines.portfolio_selection import (
     _filter_backtest_period,
+    _is_micro_contract,
     _direct_ib_handoff_date,
     _label_forecast_output_frame,
     _selection_history_content_identity,
@@ -17,6 +18,21 @@ from derivatives_bt_engine.pipelines.portfolio_selection import (
     run,
     slow_tilt_ewmac_weights,
 )
+
+
+@pytest.mark.parametrize(
+    ("row", "expected"),
+    [
+        ({"pst_instr_code": "NASDAQ_micro", "desc": "NASDAQ"}, True),
+        ({"pst_instr_code": "BITCOIN", "desc": "Micro Bitcoin"}, True),
+        ({"pst_instr_code": "NASDAQ", "desc": "E-mini NASDAQ"}, False),
+    ],
+)
+def test_micro_contract_identity_uses_persisted_code_and_description(
+    row: dict[str, object], expected: bool
+):
+    """Nonstandard symbols are classified from explicit source metadata."""
+    assert _is_micro_contract(row) is expected
 
 
 def _mock_stitched_history(
@@ -196,6 +212,13 @@ def test_selection_defaults_to_reviewed_classification_weights():
     assert args.buffer_trade_to_edge is True
     assert args.rebalance_on_roll is True
     assert args.selection_rebalance == "static"
+    assert args.selection_eligibility_hysteresis_pct == pytest.approx(0.0)
+    assert args.selection_rank_count_ewma_halflife_reviews is None
+    assert args.selection_book_score_buffer_pct == pytest.approx(2.0)
+    assert args.selection_report_mode == "full"
+    assert args.signal_model == "multi_ewmac"
+    assert args.fast_window == 64
+    assert args.slow_window == 256
     assert args.forecast_fdm == pytest.approx(1.0)
     assert args.ib_prior_years == 3
     assert args.backtest_start_date is None
@@ -209,6 +232,32 @@ def test_selection_rebalance_cadence_is_explicit():
 
     assert monthly.selection_rebalance == "monthly"
     assert yearly.selection_rebalance == "yearly"
+
+
+def test_return_tsmom_signal_model_exposes_parameterized_horizons():
+    """The reference baseline has explicit, reproducible signal settings."""
+    args = parse_args([
+        "--signal-model",
+        "return_tsmom",
+        "--fast-window",
+        "32",
+        "--slow-window",
+        "128",
+        "--regime-discount",
+        "0.25",
+    ])
+
+    assert args.signal_model == "return_tsmom"
+    assert args.fast_window == 32
+    assert args.slow_window == 128
+    assert args.regime_discount == pytest.approx(0.25)
+
+
+def test_selection_compact_report_mode_is_explicit():
+    """Large robustness grids can omit duplicated exhaustive audit panels."""
+    args = parse_args(["--selection-report-mode", "compact"])
+
+    assert args.selection_report_mode == "compact"
 
 
 def test_backtest_period_is_typed_and_inclusive():
@@ -282,6 +331,8 @@ def test_walk_forward_selection_uses_carver_cost_and_margin_risk_calibration():
         "2",
         "--weight-policy",
         "equal",
+        "--selection-membership-hysteresis",
+        "rank",
     ])
     history_dates = [
         date(2024, 1, 1),
@@ -302,6 +353,7 @@ def test_walk_forward_selection_uses_carver_cost_and_margin_risk_calibration():
         for symbol, returns in {
             "A": [0.1, 0.2, -0.1, 0.1],
             "B": [-0.1, 0.1, 0.2, -0.2],
+            "C": [0.2, -0.1, 0.1, 0.2],
         }.items()
     }
     source_rows = {
@@ -320,16 +372,22 @@ def test_walk_forward_selection_uses_carver_cost_and_margin_risk_calibration():
             "ref_spread_pts": 0.1,
             "ref_config_comm_usd": 0.2,
             "mult": 5.0,
+            "volume_elig": symbol != "B",
+            "exec_elig": True,
+            "ib_avail": "contract_qualified",
         }
-        for symbol in ("A", "B")
+        for symbol in ("A", "B", "C")
     }
     provider = _WalkForwardSelectionProvider(
         review_dates=[date(2024, 1, 4), date(2024, 2, 1)],
         source_rows=source_rows,
         audit_by_symbol={
-            symbol: {"comb_turnover": 1.0} for symbol in ("A", "B")
+            symbol: {"comb_turnover": 1.0} for symbol in ("A", "B", "C")
         },
         reference_frames=reference_frames,
+        live_tail_start_by_symbol={
+            symbol: date(2024, 2, 1) for symbol in ("A", "B", "C")
+        },
         run_config={
             "target_vol": 0.20,
             "cost_lim_sr": 0.01,
@@ -344,6 +402,14 @@ def test_walk_forward_selection_uses_carver_cost_and_margin_risk_calibration():
 
     assert historical
     assert latest
+    assert "B" not in latest
+    assert provider.review_rows[0]["selection_candidate_count"] == 3
+    assert provider.review_rows[1]["selection_candidate_count"] == 2
+    assert provider.review_rows[0]["rank_count_ewma_state"] is None
+    assert provider.review_rows[1]["rank_count_ewma_state"] == pytest.approx(
+        len(historical)
+    )
+    assert provider.review_rows[1]["rank_count_anchor"] == len(historical)
     assert all(
         row["trade_cost_per_con"] == pytest.approx(0.7)
         for row in historical.values()
@@ -393,6 +459,15 @@ def test_build_selection_entrypoint_defaults_to_complete_pipeline():
 
     assert args.complete is True
     assert candidates_only.complete is False
+
+
+def test_complete_selection_requires_explicit_cache_root():
+    """Complete runs cannot silently write to the project cache directory."""
+    assert parse_args(["--cache", "/tmp/selection-cache"]).cache.as_posix() == (
+        "/tmp/selection-cache"
+    )
+    with pytest.raises(ValueError, match="--cache is required"):
+        run(["--complete"])
 
 
 def test_selection_exposes_executable_buffer_sensitivities():

@@ -10,10 +10,13 @@ membership and feasibility; it does not rank scenarios by backtested returns.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
+import hashlib
 from itertools import product
 import json
+import math
 from pathlib import Path
 import shlex
 import shutil
@@ -25,7 +28,6 @@ from zoneinfo import ZoneInfo
 import polars as pl
 
 from derivatives_bt_engine.data.futures_history import (
-    DEFAULT_FUTURES_CACHE_ROOT,
     DEFAULT_GLOBEX_DB_PATH,
     DEFAULT_PYSYSTEMTRADE_DB_PATH,
 )
@@ -33,6 +35,16 @@ from derivatives_bt_engine.data.ib_futures_dataloader import (
     DEFAULT_BROKER_MAPPING_PATH,
     DEFAULT_MAX_SOURCE_GAP_DAYS,
 )
+from derivatives_bt_engine.pipelines.portfolio_selection import (
+    DEFAULT_SELECTION_MAX_HISTORY_GAP_DAYS,
+    SIGNAL_MODELS,
+)
+from derivatives_bt_engine.calculations.continuous_momentum import (
+    DEFAULT_FAST_WINDOW,
+    DEFAULT_SLOW_WINDOW,
+)
+from derivatives_bt_engine.calculations.pnl import BACKTEST_CAPITAL_MODES
+from derivatives_bt_engine.calculations.goulding import GOULDING_SIGNAL_MODES
 from derivatives_bt_engine.reports.formatting import (
     rename_public_report_columns,
     round_public_report,
@@ -61,10 +73,63 @@ class SelectionScenario:
     maximum_economic_subclass_weight_percent: float | None
     include_roll_cost_in_score: bool
     weight_policy: str
+    minimum_instruments_per_class: int | None = None
+    minimum_instruments_per_subclass: int | None = None
+    minimum_book_count: int = 15
     low_contract_penalty_scale: float = 0.0
     high_contract_penalty_scale: float = 0.0
     score_tie_tolerance_percent: float = 0.0
     tie_reference_book_count: int = 15
+    selection_rebalance: str = "static"
+    selection_max_history_gap_days: int = (
+        DEFAULT_SELECTION_MAX_HISTORY_GAP_DAYS
+    )
+    selection_eligibility_hysteresis_percent: float = 0.0
+    selection_membership_hysteresis: str = "none"
+    selection_rank_buffer_percent: float = 15.0
+    selection_rank_count_ewma_halflife_reviews: float | None = None
+    selection_book_score_buffer_percent: float = 2.0
+    selection_prefer_full_contracts: bool = False
+    backtest_capital_mode: str = "compounded"
+
+    def __post_init__(self) -> None:
+        """Reject internally contradictory hierarchy count bounds."""
+        if self.minimum_book_count <= 0:
+            raise ValueError("minimum book count must be positive")
+        if self.backtest_capital_mode not in BACKTEST_CAPITAL_MODES:
+            raise ValueError(
+                "backtest capital mode must be one of: "
+                + ", ".join(BACKTEST_CAPITAL_MODES)
+            )
+        for level, minimum, maximum in (
+            (
+                "class",
+                self.minimum_instruments_per_class,
+                self.maximum_instruments_per_class,
+            ),
+            (
+                "subclass",
+                self.minimum_instruments_per_subclass,
+                self.maximum_instruments_per_subclass,
+            ),
+        ):
+            if minimum is not None and maximum is not None and minimum > maximum:
+                raise ValueError(
+                    f"minimum instruments per {level} cannot exceed maximum"
+                )
+
+    @property
+    def effective_rank_count_ewma_halflife_reviews(self) -> float | None:
+        """Return the explicit or cadence-default rank-count half-life."""
+        if self.selection_membership_hysteresis not in {"rank", "rank_score"}:
+            return None
+        if self.selection_rank_count_ewma_halflife_reviews is not None:
+            return self.selection_rank_count_ewma_halflife_reviews
+        if self.selection_rebalance == "yearly":
+            return 3.0
+        if self.selection_rebalance == "monthly":
+            return 12.0
+        return None
 
     @property
     def scenario_id(self) -> str:
@@ -95,6 +160,15 @@ class SelectionScenario:
             ))
         if self.maximum_instruments_per_class is not None:
             tokens.append(f"ic{self.maximum_instruments_per_class}")
+        if self.minimum_instruments_per_class is not None:
+            tokens.append(f"minc{self.minimum_instruments_per_class}")
+        if self.minimum_instruments_per_subclass is not None:
+            tokens.append(f"mins{self.minimum_instruments_per_subclass}")
+        if (
+            self.minimum_instruments_per_class is not None
+            or self.minimum_instruments_per_subclass is not None
+        ):
+            tokens.append(f"mb{self.minimum_book_count}")
         if self.maximum_asset_class_weight_percent is not None:
             tokens.append(
                 f"cw{_number_token(self.maximum_asset_class_weight_percent)}"
@@ -106,12 +180,54 @@ class SelectionScenario:
                     self.maximum_economic_subclass_weight_percent
                 )
             )
+        if self.selection_prefer_full_contracts:
+            tokens.append("full1")
         tokens.extend((
             f"cl{subclass}",
             f"roll{int(self.include_roll_cost_in_score)}",
             self.weight_policy,
         ))
+        if self.backtest_capital_mode == "fixed":
+            tokens.append("capfixed")
+        if self.selection_rebalance != "static":
+            tokens.extend((
+                f"sel{self.selection_rebalance}",
+                f"hg{self.selection_max_history_gap_days}",
+                "eh"
+                f"{_number_token(self.selection_eligibility_hysteresis_percent)}",
+                f"mh{self.selection_membership_hysteresis}",
+            ))
+            if self.selection_membership_hysteresis in {"rank", "rank_score"}:
+                rank_count_halflife = (
+                    self.effective_rank_count_ewma_halflife_reviews
+                )
+                tokens.extend((
+                    "rb"
+                    f"{_number_token(self.selection_rank_buffer_percent)}",
+                    "rhl"
+                    f"{_number_token(rank_count_halflife)}",
+                ))
+            if self.selection_membership_hysteresis in {"score", "rank_score"}:
+                tokens.append(
+                    "sb"
+                    f"{_number_token(self.selection_book_score_buffer_percent)}"
+                )
         return "_".join(tokens)
+
+
+@dataclass(frozen=True)
+class ScenarioExecution:
+    """Outcome of one isolated selection CLI subprocess.
+
+    ``elapsed_seconds`` measures only this scenario's subprocess wall time.
+    A resumed scenario has zero elapsed time because the grid did not execute
+    it during the current invocation.
+    """
+
+    status: str
+    error: str
+    book_path: Path | None
+    elapsed_seconds: float
 
 
 def _number_token(value: float) -> str:
@@ -233,6 +349,44 @@ def _score_threshold_list(value: str) -> tuple[float, ...]:
     return thresholds
 
 
+def _membership_mode_list(value: str) -> tuple[str, ...]:
+    """Parse unique scheduled-selection membership modes."""
+    allowed = {"none", "rank", "score", "rank_score"}
+    modes = tuple(dict.fromkeys(item.strip() for item in value.split(",")))
+    invalid = sorted(set(modes).difference(allowed))
+    if not modes or invalid:
+        raise argparse.ArgumentTypeError(
+            "membership modes must be comma-separated values from "
+            "none, rank, score, rank_score"
+        )
+    return modes
+
+
+def _bool_list(value: str) -> tuple[bool, ...]:
+    """Parse unique comma-separated boolean switch values."""
+    aliases = {
+        "true": True,
+        "yes": True,
+        "1": True,
+        "false": False,
+        "no": False,
+        "0": False,
+    }
+    parsed: list[bool] = []
+    for raw in value.split(","):
+        key = raw.strip().lower()
+        if key not in aliases:
+            raise argparse.ArgumentTypeError(
+                "boolean lists accept true,false, yes,no, or 1,0"
+            )
+        item = aliases[key]
+        if item not in parsed:
+            parsed.append(item)
+    if not parsed:
+        raise argparse.ArgumentTypeError("at least one boolean value is required")
+    return tuple(parsed)
+
+
 def parse_args(argv=None) -> argparse.Namespace:
     """Parse the construction-grid command line."""
     parser = argparse.ArgumentParser(
@@ -282,8 +436,13 @@ def parse_args(argv=None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--ib-history-live",
-        choices=("missing", "update"),
-        help="Live IB policy forwarded to each selection scenario.",
+        choices=("missing", "snapshot", "update"),
+        help=(
+            "Live IB policy used once by the serial history-materialization "
+            "phase. 'snapshot' refreshes only histories ending before the "
+            "input snapshot's ib_fast_end. Measured scenarios never connect "
+            "to IB."
+        ),
     )
     parser.add_argument("--ib-host", default="127.0.0.1")
     parser.add_argument("--ib-port", type=int, action="append")
@@ -293,12 +452,9 @@ def parse_args(argv=None) -> argparse.Namespace:
         "--broker-mapping", type=Path, default=DEFAULT_BROKER_MAPPING_PATH
     )
     parser.add_argument(
-        "--history-cache-root", type=Path, default=DEFAULT_FUTURES_CACHE_ROOT
-    )
-    parser.add_argument(
-        "--stitched-history-cache-root",
+        "--cache",
         type=Path,
-        default=DEFAULT_FUTURES_CACHE_ROOT,
+        help="Required cache root shared by every complete selection scenario.",
     )
     parser.add_argument(
         "--max-source-gap-days",
@@ -311,6 +467,101 @@ def parse_args(argv=None) -> argparse.Namespace:
         help=(
             "Optional fixed capital override; otherwise use a legacy cached "
             "value or the selection default."
+        ),
+    )
+    parser.add_argument(
+        "--backtest-capital-mode",
+        choices=BACKTEST_CAPITAL_MODES,
+        default="compounded",
+        help=(
+            "Capital policy forwarded to every selection scenario: fixed "
+            "initial capital or lagged-equity compounding (default)."
+        ),
+    )
+    parser.add_argument(
+        "--signal-model",
+        choices=SIGNAL_MODELS,
+        required=True,
+        help="Required signal model shared by every grid scenario.",
+    )
+    parser.add_argument(
+        "--goulding-signal-mode",
+        choices=GOULDING_SIGNAL_MODES,
+        default="binary",
+        help=(
+            "Binary direction, raw-return continuous magnitude, or Sharpe-like "
+            "RMS-vol-normalized magnitude for the monthly Goulding model."
+        ),
+    )
+    parser.add_argument("--fast-window", type=int, default=DEFAULT_FAST_WINDOW)
+    parser.add_argument("--slow-window", type=int, default=DEFAULT_SLOW_WINDOW)
+    parser.add_argument("--vol-fast-window", type=int)
+    parser.add_argument("--vol-slow-window", type=int)
+    parser.add_argument("--regime-discount", type=float, default=0.5)
+    parser.add_argument(
+        "--selection-rebalance",
+        choices=("static", "yearly", "monthly"),
+        default="static",
+        help=(
+            "Fixed review cadence shared by every grid scenario (default: "
+            "static)."
+        ),
+    )
+    parser.add_argument(
+        "--selection-max-history-gap-days",
+        type=int,
+        default=DEFAULT_SELECTION_MAX_HISTORY_GAP_DAYS,
+        help="Maximum dated-history freshness gap shared by every scenario.",
+    )
+    parser.add_argument(
+        "--selection-eligibility-hysteresis-pcts",
+        "--selection-eligibility-hysteresis-pct",
+        dest="selection_eligibility_hysteresis_pcts",
+        type=_percent_list,
+        default=(0.0,),
+        help=(
+            "Comma-separated incumbent eligibility hysteresis percentages "
+            "(default: 0)."
+        ),
+    )
+    parser.add_argument(
+        "--selection-membership-hysteresis-modes",
+        "--selection-membership-hysteresis",
+        dest="selection_membership_hysteresis_modes",
+        type=_membership_mode_list,
+        default=("none",),
+        help=(
+            "Comma-separated scheduled membership modes from none, rank, "
+            "score, rank_score (default: none)."
+        ),
+    )
+    parser.add_argument(
+        "--selection-rank-buffer-pcts",
+        "--selection-rank-buffer-pct",
+        dest="selection_rank_buffer_pcts",
+        type=_percent_list,
+        default=(15.0,),
+        help="Comma-separated symmetric rank-band percentages (default: 15).",
+    )
+    parser.add_argument(
+        "--selection-rank-count-ewma-halflives",
+        "--selection-rank-count-ewma-halflife-reviews",
+        dest="selection_rank_count_ewma_halflives",
+        type=_positive_float_list,
+        help=(
+            "Optional comma-separated rank-count EWMA half-lives, in completed "
+            "reviews. Omit for cadence defaults (3 yearly, 12 monthly)."
+        ),
+    )
+    parser.add_argument(
+        "--selection-book-score-buffer-pcts",
+        "--selection-book-score-buffer-pct",
+        dest="selection_book_score_buffer_pcts",
+        type=_percent_list,
+        default=(2.0,),
+        help=(
+            "Comma-separated prior-book score hurdle percentages "
+            "(default: 2)."
         ),
     )
     parser.add_argument(
@@ -381,6 +632,35 @@ def parse_args(argv=None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--min-instr-per-classes",
+        type=_cluster_limit_list,
+        default=(None,),
+        help=(
+            "Comma-separated hard-feasibility-gated asset-class coverage "
+            "minimums; use none to disable."
+        ),
+    )
+    parser.add_argument(
+        "--min-instr-per-subclasses",
+        type=_cluster_limit_list,
+        default=(None,),
+        help=(
+            "Comma-separated hard-feasibility-gated economic-subclass coverage "
+            "minimums; use none to disable."
+        ),
+    )
+    parser.add_argument(
+        "--selection-min-book-counts",
+        "--selection-min-book-count",
+        dest="selection_min_book_counts",
+        type=_positive_int_list,
+        default=(15,),
+        help=(
+            "Comma-separated minimum book breadth targets after hierarchy "
+            "coverage (default: 15)."
+        ),
+    )
+    parser.add_argument(
         "--max-instr-per-subclasses",
         "--max-instr-per-clusters",
         dest="max_instr_per_subclasses",
@@ -419,6 +699,15 @@ def parse_args(argv=None) -> argparse.Namespace:
         help="Compare roll-cost attribution modes (default: both).",
     )
     parser.add_argument(
+        "--selection-prefer-full-contracts",
+        type=_bool_list,
+        default=(False,),
+        help=(
+            "Comma-separated full-over-micro family preference states "
+            "(default: false); use false,true to compare both."
+        ),
+    )
+    parser.add_argument(
         "--weight-policy",
         choices=("topdown_classif", "legacy_handcraft", "equal"),
         default="topdown_classif",
@@ -440,6 +729,17 @@ def parse_args(argv=None) -> argparse.Namespace:
         action="store_true",
         help="Stop at the first failed scenario instead of recording it.",
     )
+    parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=1,
+        help=(
+            "Maximum concurrent selection subprocesses (default: 1). "
+            "The first measured scenario runs serially against the frozen "
+            "history input to warm shared derived caches before the bounded "
+            "worker pool starts."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -450,6 +750,57 @@ def build_scenarios(args: argparse.Namespace) -> list[SelectionScenario]:
         "include": (True,),
         "exclude": (False,),
     }[args.roll_cost_modes]
+    hysteresis_variants: list[
+        tuple[str, float, float, float | None, float]
+    ] = []
+    for membership_mode in args.selection_membership_hysteresis_modes:
+        rank_active = membership_mode in {"rank", "rank_score"}
+        score_active = membership_mode in {"score", "rank_score"}
+        rank_buffers = (
+            args.selection_rank_buffer_pcts if rank_active else (15.0,)
+        )
+        if rank_active:
+            rank_count_halflives = (
+                args.selection_rank_count_ewma_halflives or (None,)
+            )
+        else:
+            rank_count_halflives = (None,)
+        score_buffers = (
+            args.selection_book_score_buffer_pcts
+            if score_active else (2.0,)
+        )
+        hysteresis_variants.extend(
+            (
+                membership_mode,
+                eligibility_buffer,
+                rank_buffer,
+                rank_count_halflife,
+                score_buffer,
+            )
+            for (
+                eligibility_buffer,
+                rank_buffer,
+                rank_count_halflife,
+                score_buffer,
+            ) in product(
+                args.selection_eligibility_hysteresis_pcts,
+                rank_buffers,
+                rank_count_halflives,
+                score_buffers,
+            )
+        )
+    coverage_variants = [
+        (class_minimum, subclass_minimum, minimum_book_count)
+        for class_minimum, subclass_minimum in product(
+            args.min_instr_per_classes,
+            args.min_instr_per_subclasses,
+        )
+        for minimum_book_count in (
+            args.selection_min_book_counts
+            if class_minimum is not None or subclass_minimum is not None
+            else (15,)
+        )
+    ]
     scenarios = [
         SelectionScenario(
             target_volatility=target_volatility,
@@ -461,12 +812,30 @@ def build_scenarios(args: argparse.Namespace) -> list[SelectionScenario]:
             high_contract_penalty_scale=high_contract_penalty_scale,
             score_tie_tolerance_percent=score_tie_tolerance_percent,
             tie_reference_book_count=tie_reference_book_count,
+            minimum_instruments_per_class=class_count_minimum,
+            minimum_instruments_per_subclass=subclass_count_minimum,
+            minimum_book_count=minimum_book_count,
             maximum_instruments_per_class=class_count_limit,
             maximum_instruments_per_subclass=subclass_count_limit,
             maximum_asset_class_weight_percent=class_weight_limit,
             maximum_economic_subclass_weight_percent=subclass_weight_limit,
             include_roll_cost_in_score=include_roll_cost,
             weight_policy=args.weight_policy,
+            selection_rebalance=args.selection_rebalance,
+            selection_max_history_gap_days=(
+                args.selection_max_history_gap_days
+            ),
+            selection_eligibility_hysteresis_percent=(
+                eligibility_buffer
+            ),
+            selection_membership_hysteresis=membership_mode,
+            selection_rank_buffer_percent=rank_buffer,
+            selection_rank_count_ewma_halflife_reviews=(
+                rank_count_halflife
+            ),
+            selection_book_score_buffer_percent=score_buffer,
+            selection_prefer_full_contracts=prefer_full_contracts,
+            backtest_capital_mode=args.backtest_capital_mode,
         )
         for (
             target_volatility,
@@ -478,11 +847,14 @@ def build_scenarios(args: argparse.Namespace) -> list[SelectionScenario]:
             high_contract_penalty_scale,
             score_tie_tolerance_percent,
             tie_reference_book_count,
+            coverage_variant,
             class_count_limit,
             subclass_count_limit,
             class_weight_limit,
             subclass_weight_limit,
             include_roll_cost,
+            prefer_full_contracts,
+            hysteresis_variant,
         ) in product(
             args.target_vols,
             args.max_instr_margin_pcts,
@@ -493,11 +865,36 @@ def build_scenarios(args: argparse.Namespace) -> list[SelectionScenario]:
             args.high_contract_penalty_scales,
             args.score_tie_tolerance_percents,
             args.tie_reference_book_counts,
+            coverage_variants,
             args.max_instr_per_classes,
             args.max_instr_per_subclasses,
             args.max_class_weight_pcts,
             args.max_subclass_weight_pcts,
             roll_modes,
+            args.selection_prefer_full_contracts,
+            hysteresis_variants,
+        )
+        for (
+            membership_mode,
+            eligibility_buffer,
+            rank_buffer,
+            rank_count_halflife,
+            score_buffer,
+        ) in (hysteresis_variant,)
+        for (
+            class_count_minimum,
+            subclass_count_minimum,
+            minimum_book_count,
+        ) in (coverage_variant,)
+        if (
+            class_count_minimum is None
+            or class_count_limit is None
+            or class_count_minimum <= class_count_limit
+        )
+        if (
+            subclass_count_minimum is None
+            or subclass_count_limit is None
+            or subclass_count_minimum <= subclass_count_limit
         )
     ]
     return sorted(scenarios, key=lambda scenario: scenario.scenario_id)
@@ -512,14 +909,20 @@ def _selection_command(
     ib_history_database: Path | None,
     globex_database: Path,
     broker_mapping: Path,
-    history_cache_root: Path,
-    stitched_history_cache_root: Path,
+    cache: Path,
     max_source_gap_days: int,
     ib_history_live: str | None,
     ib_host: str,
     ib_ports: list[int] | None,
     ib_client_id: int,
     initial_capital_usd: float | None,
+    signal_model: str,
+    goulding_signal_mode: str,
+    fast_window: int,
+    slow_window: int,
+    vol_fast_window: int | None,
+    vol_slow_window: int | None,
+    regime_discount: float,
 ) -> list[str]:
     """Build one auditable portfolio-selection subprocess command."""
     command = [
@@ -531,8 +934,20 @@ def _selection_command(
         "--output",
         str(candidates_output),
         "--complete",
+        "--selection-report-mode",
+        "compact",
         "--history-db",
         str(database),
+        "--signal-model",
+        signal_model,
+        "--goulding-signal-mode",
+        goulding_signal_mode,
+        "--fast-window",
+        str(fast_window),
+        "--slow-window",
+        str(slow_window),
+        "--regime-discount",
+        str(regime_discount),
         "--target-vol",
         str(scenario.target_volatility),
         "--max-instr-margin-pct",
@@ -553,11 +968,44 @@ def _selection_command(
         str(scenario.tie_reference_book_count),
         "--weight-policy",
         scenario.weight_policy,
-        "--history-cache-root",
-        str(history_cache_root),
+        "--cache",
+        str(cache),
     ]
+    if vol_fast_window is not None:
+        command.extend(("--vol-fast-window", str(vol_fast_window)))
+    if vol_slow_window is not None:
+        command.extend(("--vol-slow-window", str(vol_slow_window)))
     if initial_capital_usd is not None:
         command.extend(("--initial-capital-usd", str(initial_capital_usd)))
+    command.extend((
+        "--backtest-capital-mode",
+        scenario.backtest_capital_mode,
+    ))
+    if scenario.selection_prefer_full_contracts:
+        command.append("--selection-prefer-full-contracts")
+    if scenario.selection_rebalance != "static":
+        command.extend((
+            "--selection-rebalance",
+            scenario.selection_rebalance,
+            "--selection-max-history-gap-days",
+            str(scenario.selection_max_history_gap_days),
+            "--selection-eligibility-hysteresis-pct",
+            str(scenario.selection_eligibility_hysteresis_percent),
+            "--selection-membership-hysteresis",
+            scenario.selection_membership_hysteresis,
+        ))
+        if scenario.selection_membership_hysteresis in {"rank", "rank_score"}:
+            command.extend((
+                "--selection-rank-buffer-pct",
+                str(scenario.selection_rank_buffer_percent),
+                "--selection-rank-count-ewma-halflife-reviews",
+                str(scenario.effective_rank_count_ewma_halflife_reviews),
+            ))
+        if scenario.selection_membership_hysteresis in {"score", "rank_score"}:
+            command.extend((
+                "--selection-book-score-buffer-pct",
+                str(scenario.selection_book_score_buffer_percent),
+            ))
     if ib_history_database is not None:
         command.extend((
             "--ib-history-db",
@@ -566,8 +1014,6 @@ def _selection_command(
             str(globex_database),
             "--broker-mapping",
             str(broker_mapping),
-            "--stitched-history-cache-root",
-            str(stitched_history_cache_root),
             "--max-source-gap-days",
             str(max_source_gap_days),
         ))
@@ -581,6 +1027,24 @@ def _selection_command(
         command.extend((
             "--max-instr-per-class",
             str(scenario.maximum_instruments_per_class),
+        ))
+    if scenario.minimum_instruments_per_class is not None:
+        command.extend((
+            "--min-instr-per-class",
+            str(scenario.minimum_instruments_per_class),
+        ))
+    if scenario.minimum_instruments_per_subclass is not None:
+        command.extend((
+            "--min-instr-per-subclass",
+            str(scenario.minimum_instruments_per_subclass),
+        ))
+    if (
+        scenario.minimum_instruments_per_class is not None
+        or scenario.minimum_instruments_per_subclass is not None
+    ):
+        command.extend((
+            "--selection-min-book-count",
+            str(scenario.minimum_book_count),
         ))
     if scenario.maximum_instruments_per_subclass is not None:
         command.extend((
@@ -602,12 +1066,254 @@ def _selection_command(
     return command
 
 
-def _latest_book(scenario_dir: Path) -> Path | None:
-    """Return the newest completed selection book, including legacy filenames."""
-    books = sorted(scenario_dir.glob("multi_speed_ewmac_selection_book_*.parquet"))
-    if not books:
-        books = sorted(scenario_dir.glob("pysystemtrade_selection_book_*.parquet"))
+def _latest_book(
+    scenario_dir: Path,
+    *,
+    report_prefix: str | None = None,
+) -> Path | None:
+    """Return the newest matching selection book, including interrupted runs."""
+    pattern = (
+        f"{report_prefix}_selection_book_*.parquet"
+        if report_prefix is not None
+        else "*_selection_book_*.parquet"
+    )
+    books = sorted(scenario_dir.glob(pattern))
     return books[-1] if books else None
+
+
+def _command_report_prefix(command: list[str]) -> str:
+    """Resolve the selection artifact prefix from a child command."""
+    signal_model = command[command.index("--signal-model") + 1]
+    if signal_model == "return_tsmom":
+        return "return_tsmom"
+    if signal_model == "goulding":
+        signal_mode = command[command.index("--goulding-signal-mode") + 1]
+        return f"goulding_{signal_mode}"
+    return "multi_speed_ewmac"
+
+
+def _completion_marker(scenario_dir: Path) -> Path:
+    """Return the grid-owned successful-subprocess marker path."""
+    return scenario_dir / ".selection_grid_complete.json"
+
+
+def _sha256_file(path: Path) -> str:
+    """Return the complete SHA-256 identity of one pinned grid input file."""
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _file_stat_identity(path: Path) -> dict[str, object]:
+    """Return a cheap stable identity for a large immutable database input."""
+    stat = path.stat()
+    return {
+        "path": str(path),
+        "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+    }
+
+
+def _input_manifest_path(output_dir: Path) -> Path:
+    """Return the run-level immutable-input manifest path."""
+    return output_dir / ".selection_grid_inputs" / "manifest.json"
+
+
+def _load_frozen_ib_history_input(
+    output_dir: Path,
+) -> tuple[Path, str] | None:
+    """Return a previously frozen IB input when its content still verifies."""
+    manifest_path = _input_manifest_path(output_dir)
+    if not manifest_path.is_file():
+        return None
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        frozen_path = Path(str(payload["frozen_ib_history_db"]))
+        if not frozen_path.is_absolute():
+            frozen_path = manifest_path.parent / frozen_path
+        expected_sha256 = str(payload["frozen_ib_history_sha256"])
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+        return None
+    if not frozen_path.is_file():
+        return None
+    actual_sha256 = _sha256_file(frozen_path)
+    if actual_sha256 != expected_sha256:
+        raise ValueError(
+            "frozen IB history input does not match its grid manifest: "
+            f"{frozen_path}"
+        )
+    return frozen_path, expected_sha256
+
+
+def _freeze_ib_history_input(
+    source_database: Path,
+    output_dir: Path,
+) -> tuple[Path, str]:
+    """Copy the finalized IB database into the run and publish its identity.
+
+    The source must have no active grid-owned writer when this function runs.
+    A temporary copy is atomically renamed before its SHA-256 identity is
+    published, so workers can never observe a partial database snapshot.
+    """
+    if not source_database.is_file():
+        raise FileNotFoundError(
+            f"IB history database does not exist: {source_database}"
+        )
+    input_dir = output_dir / ".selection_grid_inputs"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    frozen_path = input_dir / "ib_futures_history.duckdb"
+    temporary_path = frozen_path.with_suffix(".duckdb.tmp")
+    shutil.copy2(source_database, temporary_path)
+    temporary_path.replace(frozen_path)
+    frozen_sha256 = _sha256_file(frozen_path)
+    payload = {
+        "source_ib_history_db": str(source_database),
+        # Keep the run movable between the host and a mounted VM path.
+        "frozen_ib_history_db": frozen_path.name,
+        "frozen_ib_history_size": frozen_path.stat().st_size,
+        "frozen_ib_history_sha256": frozen_sha256,
+        "prepared_at": datetime.now(REPORT_TIMEZONE).isoformat(),
+    }
+    manifest_path = _input_manifest_path(output_dir)
+    temporary_manifest = manifest_path.with_suffix(".json.tmp")
+    temporary_manifest.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    temporary_manifest.replace(manifest_path)
+    return frozen_path, frozen_sha256
+
+
+def _publish_grid_input_identity(
+    output_dir: Path,
+    *,
+    identity: dict[str, object],
+    fingerprint: str,
+) -> None:
+    """Add the complete common-input identity to the run-level manifest."""
+    manifest_path = _input_manifest_path(output_dir)
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, object] = {}
+    if manifest_path.is_file():
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload.update({
+        "grid_input_fingerprint": fingerprint,
+        "grid_input_identity": identity,
+    })
+    temporary_manifest = manifest_path.with_suffix(".json.tmp")
+    temporary_manifest.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    temporary_manifest.replace(manifest_path)
+
+
+def _run_history_materialization(
+    command: list[str],
+    materialization_dir: Path,
+) -> None:
+    """Run the sole live-capable subprocess before freezing grid history.
+
+    This phase is deliberately not one of the measured scenarios. Its only
+    responsibility is to populate the source IB database and derived cache
+    serially; all comparison scenarios subsequently use the frozen copy.
+    """
+    materialization_dir.mkdir(parents=True, exist_ok=True)
+    log_path = materialization_dir / "command_output.log"
+    print("Materializing IB history serially before grid execution", flush=True)
+    with log_path.open("w", encoding="utf-8") as process_log:
+        completed = subprocess.run(
+            command,
+            cwd=Path.cwd(),
+            text=True,
+            stdout=process_log,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+    if completed.returncode:
+        raise RuntimeError(
+            "IB history materialization failed with status "
+            f"{completed.returncode}; see {log_path}"
+        )
+    log_text = log_path.read_text(encoding="utf-8", errors="replace")
+    fatal_messages = (
+        "Conflicting lock is held",
+        "Could not connect to IB on any",
+        "error=Not connected",
+        "reason=Not connected",
+    )
+    detected = next(
+        (message for message in fatal_messages if message in log_text),
+        None,
+    )
+    if detected is not None:
+        raise RuntimeError(
+            "IB history materialization reported an unusable shared input "
+            f"({detected}); see {log_path}"
+        )
+
+
+def _core_outputs_for_book(book_path: Path) -> tuple[Path, Path] | None:
+    """Resolve the cash and portfolio outputs matching a modern book stamp."""
+    separator = "_selection_book_"
+    if separator not in book_path.name:
+        return None
+    report_prefix, stamp = book_path.name.split(separator, maxsplit=1)
+    stamp = stamp.removesuffix(".parquet")
+    directory = book_path.parent
+    return (
+        directory / f"{report_prefix}_selection_cash_pnl_{stamp}.parquet",
+        directory
+        / f"{report_prefix}_selection_portfolio_curve_{stamp}.parquet",
+    )
+
+
+def _completed_book(
+    scenario_dir: Path,
+    *,
+    input_fingerprint: str | None = None,
+) -> Path | None:
+    """Return a book only when its complete selection subprocess succeeded.
+
+    New runs publish an explicit marker after the child exits successfully.
+    The artifact check supports grids created before that marker existed while
+    rejecting interrupted runs that happened to persist the book first.
+    """
+    marker = _completion_marker(scenario_dir)
+    if marker.is_file():
+        try:
+            payload = json.loads(marker.read_text(encoding="utf-8"))
+            if (
+                input_fingerprint is not None
+                and payload.get("input_fingerprint") != input_fingerprint
+            ):
+                return None
+            book = scenario_dir / str(payload["book"])
+            core_outputs = _core_outputs_for_book(book)
+            if (
+                book.is_file()
+                and core_outputs is not None
+                and all(path.is_file() for path in core_outputs)
+            ):
+                return book
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+            return None
+        return None
+
+    # Legacy artifact-only completion cannot prove which mutable history was
+    # observed. It remains readable for old grids, but is never resumable in a
+    # new run that pins an explicit immutable-input fingerprint.
+    if input_fingerprint is not None:
+        return None
+    book = _latest_book(scenario_dir)
+    if book is None or not (scenario_dir / "command_output.log").is_file():
+        return None
+    core_outputs = _core_outputs_for_book(book)
+    if core_outputs is None or not all(path.is_file() for path in core_outputs):
+        return None
+    return book
 
 
 def _summary_row(
@@ -634,6 +1340,16 @@ def _summary_row(
         "high_contract_penalty_scale": scenario.high_contract_penalty_scale,
         "score_tie_tolerance_percent": scenario.score_tie_tolerance_percent,
         "tie_ref_book_count": scenario.tie_reference_book_count,
+        "minimum_instruments_per_class": scenario.minimum_instruments_per_class,
+        "minimum_instruments_per_subclass": (
+            scenario.minimum_instruments_per_subclass
+        ),
+        "minimum_book_count": (
+            scenario.minimum_book_count
+            if scenario.minimum_instruments_per_class is not None
+            or scenario.minimum_instruments_per_subclass is not None
+            else None
+        ),
         "maximum_instruments_per_class": scenario.maximum_instruments_per_class,
         "maximum_instruments_per_subclass": (
             scenario.maximum_instruments_per_subclass
@@ -646,6 +1362,35 @@ def _summary_row(
         ),
         "include_roll_cost_in_score": scenario.include_roll_cost_in_score,
         "weight_policy": scenario.weight_policy,
+        "selection_rebalance": scenario.selection_rebalance,
+        "selection_max_history_gap_days": (
+            scenario.selection_max_history_gap_days
+        ),
+        "selection_eligibility_hysteresis_percent": (
+            scenario.selection_eligibility_hysteresis_percent
+        ),
+        "selection_membership_hysteresis": (
+            scenario.selection_membership_hysteresis
+        ),
+        "selection_rank_buffer_percent": (
+            scenario.selection_rank_buffer_percent
+            if scenario.selection_membership_hysteresis
+            in {"rank", "rank_score"}
+            else None
+        ),
+        "selection_rank_count_ewma_halflife_reviews": (
+            scenario.effective_rank_count_ewma_halflife_reviews
+        ),
+        "selection_book_score_buffer_percent": (
+            scenario.selection_book_score_buffer_percent
+            if scenario.selection_membership_hysteresis
+            in {"score", "rank_score"}
+            else None
+        ),
+        "selection_prefer_full_contracts": (
+            scenario.selection_prefer_full_contracts
+        ),
+        "backtest_capital_mode": scenario.backtest_capital_mode,
         "elapsed_seconds": elapsed_seconds,
         "book_path": str(book_path) if book_path is not None else "",
         "number_instruments": 0,
@@ -660,6 +1405,10 @@ def _summary_row(
         "high_contract_weight": None,
         "maximum_instrument_margin_usd": None,
         "book_margin_at_maximum_usd": None,
+        "final_class_coverage_deficit": None,
+        "final_subclass_coverage_deficit": None,
+        "final_book_count_deficit": None,
+        "coverage_satisfied": None,
         "error": error,
     }
     if status != "complete" or book_path is None:
@@ -698,11 +1447,30 @@ def _summary_row(
         "low_contract_weight": _column_max(book, "low_con_weight"),
         "band_contract_weight": _column_max(book, "band_con_weight"),
         "high_contract_weight": _column_max(book, "high_con_weight"),
-        "maximum_instrument_margin_usd": _column_max(
-            book, "margin_at_max_usd"
+        "maximum_instrument_margin_usd": _column_max_alias(
+            book, "marg_at_max", "margin_at_max_usd"
         ),
-        "book_margin_at_maximum_usd": _column_max(
-            book, "portfolio_margin_at_max_usd"
+        "book_margin_at_maximum_usd": _column_max_alias(
+            book, "port_marg_at_max", "portfolio_margin_at_max_usd"
+        ),
+        "final_class_coverage_deficit": _column_max(
+            book, "final_cls_coverage_deficit"
+        ),
+        "final_subclass_coverage_deficit": _column_max(
+            book, "final_subcls_coverage_deficit"
+        ),
+        "final_book_count_deficit": _column_max(
+            book, "final_book_n_deficit"
+        ),
+        "coverage_satisfied": (
+            bool(book.get_column("coverage_satisfied")[0])
+            if (
+                scenario.minimum_instruments_per_class is not None
+                or scenario.minimum_instruments_per_subclass is not None
+            )
+            and "coverage_satisfied" in book.columns
+            and book.height
+            else None
         ),
     })
     return row, membership
@@ -714,6 +1482,17 @@ def _column_max(frame: pl.DataFrame, name: str) -> float | None:
         return None
     values = frame.get_column(name).drop_nulls()
     return float(values.max()) if values.len() else None
+
+
+def _column_max_alias(
+    frame: pl.DataFrame, *names: str
+) -> float | None:
+    """Return the first available current or legacy numeric column maximum."""
+    for name in names:
+        value = _column_max(frame, name)
+        if value is not None:
+            return value
+    return None
 
 
 def _score_from_selection_passes(scenario_dir: Path) -> float | None:
@@ -779,6 +1558,57 @@ def _attach_baseline_overlap(summary: pl.DataFrame) -> pl.DataFrame:
               .then(0.0).otherwise(1.0)
             + pl.when(pl.col("include_roll_cost_in_score"))
               .then(0.0).otherwise(1.0)
+            + pl.col("selection_eligibility_hysteresis_percent") / 100.0
+            + pl.when(pl.col("selection_membership_hysteresis") == "none")
+              .then(0.0)
+              .when(
+                  pl.col("selection_membership_hysteresis") == "rank_score"
+              )
+              .then(2.0)
+              .otherwise(1.0)
+            + pl.when(pl.col("selection_rank_buffer_percent").is_null())
+              .then(0.0)
+              .otherwise(
+                  (pl.col("selection_rank_buffer_percent") - 15.0).abs()
+                  / 15.0
+              )
+            + pl.when(
+                pl.col("selection_book_score_buffer_percent").is_null()
+            )
+              .then(0.0)
+              .otherwise(
+                  (
+                      pl.col("selection_book_score_buffer_percent") - 2.0
+                  ).abs()
+                  / 2.0
+              )
+            + pl.when(
+                pl.col(
+                    "selection_rank_count_ewma_halflife_reviews"
+                ).is_null()
+            )
+              .then(0.0)
+              .when(pl.col("selection_rebalance") == "yearly")
+              .then(
+                  (
+                      pl.col(
+                          "selection_rank_count_ewma_halflife_reviews"
+                      )
+                      - 3.0
+                  ).abs()
+                  / 3.0
+              )
+              .when(pl.col("selection_rebalance") == "monthly")
+              .then(
+                  (
+                      pl.col(
+                          "selection_rank_count_ewma_halflife_reviews"
+                      )
+                      - 12.0
+                  ).abs()
+                  / 12.0
+              )
+              .otherwise(0.0)
         ).alias("baseline_distance")
     ).sort("baseline_distance", "scenario_id")
     baseline_id = str(ranked.get_column("scenario_id")[0])
@@ -804,6 +1634,175 @@ def _attach_baseline_overlap(summary: pl.DataFrame) -> pl.DataFrame:
     )
 
 
+def _execute_selection_scenario(
+    index: int,
+    total: int,
+    scenario: SelectionScenario,
+    scenario_dir: Path,
+    command: list[str],
+    input_fingerprint: str | None = None,
+) -> ScenarioExecution:
+    """Run one selection command and persist its combined process output.
+
+    The command is passed directly as an argument vector, never through a
+    shell. Each worker owns a distinct scenario directory, so report and log
+    writes do not overlap across concurrent subprocesses.
+    """
+    print(f"[{index}/{total}] {scenario.scenario_id}", flush=True)
+    started = monotonic()
+    marker = _completion_marker(scenario_dir)
+    marker.unlink(missing_ok=True)
+    # Stream directly to disk so long-running children do not accumulate log
+    # text in the coordinator and a machine-level interruption leaves the last
+    # completed phase available for diagnosis.
+    with (scenario_dir / "command_output.log").open(
+        "w", encoding="utf-8"
+    ) as process_log:
+        completed = subprocess.run(
+            command,
+            cwd=Path.cwd(),
+            text=True,
+            stdout=process_log,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+    book_path: Path | None = None
+    status = "complete"
+    error = ""
+    if completed.returncode:
+        status = "failed"
+        error = f"selection exited with status {completed.returncode}"
+    else:
+        book_path = _latest_book(
+            scenario_dir,
+            report_prefix=_command_report_prefix(command),
+        )
+        if book_path is None:
+            status = "failed"
+            error = "selection completed without a book report"
+        else:
+            core_outputs = _core_outputs_for_book(book_path)
+            if (
+                core_outputs is None
+                or not all(path.is_file() for path in core_outputs)
+            ):
+                status = "failed"
+                error = "selection completed without core cash reports"
+                book_path = None
+            else:
+                temporary_marker = marker.with_suffix(".json.tmp")
+                temporary_marker.write_text(
+                    json.dumps({
+                        "book": book_path.name,
+                        "completed_at": datetime.now(
+                            REPORT_TIMEZONE
+                        ).isoformat(),
+                        "input_fingerprint": input_fingerprint,
+                    }, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+                temporary_marker.replace(marker)
+    return ScenarioExecution(
+        status=status,
+        error=error,
+        book_path=book_path,
+        elapsed_seconds=monotonic() - started,
+    )
+
+
+def _execute_planned_scenarios(
+    planned: list[tuple[SelectionScenario, Path, list[str]]],
+    *,
+    resume: bool,
+    fail_fast: bool,
+    max_workers: int,
+    input_fingerprint: str | None = None,
+) -> dict[int, ScenarioExecution]:
+    """Execute planned scenarios serially or in a bounded subprocess pool.
+
+    The executor uses threads only to supervise already-isolated CLI child
+    processes. This avoids an unnecessary Python process wrapped around every
+    selection subprocess and avoids forking a parent that has initialized
+    Polars or DuckDB. When concurrency is requested, the first incomplete
+    scenario runs alone to populate shared immutable history artifacts before
+    the remaining scenarios read that cache concurrently.
+
+    Returns outcomes keyed by the zero-based position in ``planned`` so final
+    public reports remain deterministic regardless of completion order.
+    """
+    results: dict[int, ScenarioExecution] = {}
+    pending: list[tuple[int, SelectionScenario, Path, list[str]]] = []
+    total = len(planned)
+    for offset, (scenario, scenario_dir, command) in enumerate(planned):
+        existing_book = (
+            _completed_book(
+                scenario_dir,
+                input_fingerprint=input_fingerprint,
+            )
+            if resume
+            else None
+        )
+        if existing_book is not None:
+            results[offset] = ScenarioExecution(
+                status="complete",
+                error="",
+                book_path=existing_book,
+                elapsed_seconds=0.0,
+            )
+        else:
+            pending.append((offset, scenario, scenario_dir, command))
+
+    def execute(
+        item: tuple[int, SelectionScenario, Path, list[str]],
+    ) -> tuple[int, ScenarioExecution]:
+        offset, scenario, scenario_dir, command = item
+        outcome = _execute_selection_scenario(
+            offset + 1,
+            total,
+            scenario,
+            scenario_dir,
+            command,
+            input_fingerprint,
+        )
+        return offset, outcome
+
+    def retain(offset: int, outcome: ScenarioExecution) -> None:
+        results[offset] = outcome
+        if fail_fast and outcome.status == "failed":
+            scenario = planned[offset][0]
+            raise RuntimeError(
+                f"{scenario.scenario_id}: {outcome.error}; "
+                "see command_output.log"
+            )
+
+    # One complete selection loads the common history universe and prevents
+    # simultaneous first-writer races in shared source-history cache bundles.
+    if max_workers > 1 and len(pending) > 1:
+        offset, outcome = execute(pending.pop(0))
+        retain(offset, outcome)
+
+    if max_workers == 1 or len(pending) <= 1:
+        for item in pending:
+            offset, outcome = execute(item)
+            retain(offset, outcome)
+        return results
+
+    with ThreadPoolExecutor(
+        max_workers=min(max_workers, len(pending)),
+        thread_name_prefix="selection-grid",
+    ) as executor:
+        futures = {executor.submit(execute, item): item[0] for item in pending}
+        for future in as_completed(futures):
+            try:
+                offset, outcome = future.result()
+                retain(offset, outcome)
+            except Exception:
+                for queued in futures:
+                    queued.cancel()
+                raise
+    return results
+
+
 def run(argv=None) -> tuple[Path, Path | None]:
     """Execute or print the requested grid and save typed comparison reports.
 
@@ -812,6 +1811,8 @@ def run(argv=None) -> tuple[Path, Path | None]:
     the selection writer naturally keeps all audit artifacts isolated.
     """
     args = parse_args(argv)
+    if args.cache is None:
+        raise ValueError("--cache is required for selection grid runs")
     if args.output_dir is not None and args.run_dir is not None:
         raise ValueError("--output-dir and --run-dir cannot be used together")
     source = args.input.expanduser().resolve()
@@ -825,8 +1826,57 @@ def run(argv=None) -> tuple[Path, Path | None]:
     )
     if args.initial_capital_usd is not None and args.initial_capital_usd <= 0:
         raise ValueError("--initial-capital-usd must be positive")
+    if args.max_workers < 1:
+        raise ValueError("--max-workers must be at least one")
     if args.max_source_gap_days < 0:
         raise ValueError("--max-source-gap-days must be nonnegative")
+    if args.fast_window <= 0 or args.slow_window <= args.fast_window:
+        raise ValueError(
+            "--fast-window and --slow-window must be positive and increasing"
+        )
+    if args.vol_fast_window is not None and args.vol_fast_window < 2:
+        raise ValueError("--vol-fast-window must be at least 2")
+    if args.vol_slow_window is not None and args.vol_slow_window < 2:
+        raise ValueError("--vol-slow-window must be at least 2")
+    if not math.isfinite(args.regime_discount) or not (
+        0 <= args.regime_discount <= 1
+    ):
+        raise ValueError("--regime-discount must be finite and in [0, 1]")
+    if args.selection_max_history_gap_days < 0:
+        raise ValueError("--selection-max-history-gap-days must be nonnegative")
+    if (
+        args.selection_rebalance == "static"
+        and (
+            args.selection_membership_hysteresis_modes != ("none",)
+            or args.selection_eligibility_hysteresis_pcts != (0.0,)
+        )
+    ):
+        raise ValueError(
+            "selection hysteresis requires yearly or monthly rebalancing"
+        )
+    membership_modes = set(args.selection_membership_hysteresis_modes)
+    rank_mode_active = bool(
+        membership_modes.intersection({"rank", "rank_score"})
+    )
+    score_mode_active = bool(
+        membership_modes.intersection({"score", "rank_score"})
+    )
+    if not rank_mode_active and (
+        args.selection_rank_count_ewma_halflives is not None
+        or args.selection_rank_buffer_pcts != (15.0,)
+    ):
+        raise ValueError(
+            "rank-buffer percentages and count half-lives require rank or "
+            "rank_score membership hysteresis"
+        )
+    if (
+        not score_mode_active
+        and args.selection_book_score_buffer_pcts != (2.0,)
+    ):
+        raise ValueError(
+            "score-buffer percentages require score or rank_score membership "
+            "hysteresis"
+        )
     if args.ib_history_live is not None and ib_history_database is None:
         raise ValueError("--ib-history-live requires --ib-history-db")
 
@@ -843,6 +1893,129 @@ def run(argv=None) -> tuple[Path, Path | None]:
     output_dir.mkdir(parents=True, exist_ok=True)
     rule_cache = pl.read_parquet(source)
     scenarios = build_scenarios(args)
+    cache_root = args.cache.expanduser().resolve()
+    globex_database = args.globex_db.expanduser().resolve()
+    broker_mapping = args.broker_mapping.expanduser().resolve()
+
+    worker_ib_history_database = ib_history_database
+    ib_history_fingerprint = ""
+    materialization_command: list[str] | None = None
+    materialization_dir: Path | None = None
+    if ib_history_database is not None:
+        frozen_input = (
+            _load_frozen_ib_history_input(output_dir) if args.resume else None
+        )
+        frozen_path = (
+            frozen_input[0]
+            if frozen_input is not None
+            else output_dir
+            / ".selection_grid_inputs"
+            / "ib_futures_history.duckdb"
+        )
+        if args.ib_history_live is not None and frozen_input is None:
+            # The acquisition subprocess is intentionally separate from the
+            # measured Cartesian product. It may update the source DB and use
+            # IB, but no scenario whose score enters the grid may do either.
+            materialization_dir = (
+                output_dir / ".selection_grid_inputs" / "materialization"
+            )
+            materialization_dir.mkdir(parents=True, exist_ok=True)
+            materialization_input = (
+                materialization_dir / "multi_speed_ewmac_rule_cache.parquet"
+            )
+            if not materialization_input.exists():
+                shutil.copy2(source, materialization_input)
+            materialization_command = _selection_command(
+                scenarios[0],
+                scenario_input=materialization_input,
+                candidates_output=(
+                    materialization_dir
+                    / "multi_speed_ewmac_selection_candidates.parquet"
+                ),
+                database=database,
+                ib_history_database=ib_history_database,
+                globex_database=globex_database,
+                broker_mapping=broker_mapping,
+                cache=cache_root,
+                max_source_gap_days=args.max_source_gap_days,
+                ib_history_live=args.ib_history_live,
+                ib_host=args.ib_host,
+                ib_ports=args.ib_port,
+                ib_client_id=args.ib_client_id,
+                initial_capital_usd=args.initial_capital_usd,
+                signal_model=args.signal_model,
+                goulding_signal_mode=args.goulding_signal_mode,
+                fast_window=args.fast_window,
+                slow_window=args.slow_window,
+                vol_fast_window=args.vol_fast_window,
+                vol_slow_window=args.vol_slow_window,
+                regime_discount=args.regime_discount,
+            )
+        if not args.dry_run:
+            if frozen_input is None:
+                if materialization_command is not None:
+                    if materialization_dir is None:
+                        raise RuntimeError(
+                            "history materialization directory was not set"
+                        )
+                    _run_history_materialization(
+                        materialization_command,
+                        materialization_dir,
+                    )
+                frozen_input = _freeze_ib_history_input(
+                    ib_history_database,
+                    output_dir,
+                )
+            worker_ib_history_database, ib_history_fingerprint = frozen_input
+        else:
+            worker_ib_history_database = frozen_path
+            if frozen_input is not None:
+                ib_history_fingerprint = frozen_input[1]
+
+    rule_cache_fingerprint = _sha256_file(source)
+    input_identity: dict[str, object] = {
+        "rule_cache": {
+            "path": str(source),
+            "sha256": rule_cache_fingerprint,
+        },
+        "reference_history_db": (
+            _file_stat_identity(database)
+            if database.is_file()
+            else {"path": str(database), "missing": True}
+        ),
+        "broker_mapping": {
+            "path": str(broker_mapping),
+            "sha256": (
+                _sha256_file(broker_mapping)
+                if broker_mapping.is_file()
+                else None
+            ),
+        },
+        "frozen_ib_history_sha256": ib_history_fingerprint or None,
+        "initial_capital_usd": args.initial_capital_usd,
+        "backtest_capital_mode": args.backtest_capital_mode,
+        "max_source_gap_days": args.max_source_gap_days,
+        "selection_max_history_gap_days": (
+            args.selection_max_history_gap_days
+        ),
+        "selection_rebalance": args.selection_rebalance,
+        "signal_model": args.signal_model,
+        "goulding_signal_mode": args.goulding_signal_mode,
+        "fast_window": args.fast_window,
+        "slow_window": args.slow_window,
+        "vol_fast_window": args.vol_fast_window,
+        "vol_slow_window": args.vol_slow_window,
+        "regime_discount": args.regime_discount,
+    }
+    input_fingerprint = hashlib.sha256(
+        json.dumps(input_identity, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    if not args.dry_run:
+        _publish_grid_input_identity(
+            output_dir,
+            identity=input_identity,
+            fingerprint=input_fingerprint,
+        )
 
     planned: list[tuple[SelectionScenario, Path, list[str]]] = []
     for scenario in scenarios:
@@ -857,19 +2030,25 @@ def run(argv=None) -> tuple[Path, Path | None]:
             scenario_input=scenario_input,
             candidates_output=candidates_output,
             database=database,
-            ib_history_database=ib_history_database,
-            globex_database=args.globex_db.expanduser().resolve(),
-            broker_mapping=args.broker_mapping.expanduser().resolve(),
-            history_cache_root=args.history_cache_root.expanduser().resolve(),
-            stitched_history_cache_root=(
-                args.stitched_history_cache_root.expanduser().resolve()
-            ),
+            ib_history_database=worker_ib_history_database,
+            globex_database=globex_database,
+            broker_mapping=broker_mapping,
+            cache=cache_root,
             max_source_gap_days=args.max_source_gap_days,
-            ib_history_live=args.ib_history_live,
+            # Measured workers are strictly offline. The serial preparation
+            # phase above is the only place live broker flags are legal.
+            ib_history_live=None,
             ib_host=args.ib_host,
             ib_ports=args.ib_port,
             ib_client_id=args.ib_client_id,
             initial_capital_usd=args.initial_capital_usd,
+            signal_model=args.signal_model,
+            goulding_signal_mode=args.goulding_signal_mode,
+            fast_window=args.fast_window,
+            slow_window=args.slow_window,
+            vol_fast_window=args.vol_fast_window,
+            vol_slow_window=args.vol_slow_window,
+            regime_discount=args.regime_discount,
         )
         planned.append((scenario, scenario_dir, command))
 
@@ -884,51 +2063,35 @@ def run(argv=None) -> tuple[Path, Path | None]:
     print(f"Prepared {len(planned)} scenarios in {output_dir}")
     print(f"Saved command plan {commands_path}")
     if args.dry_run:
+        if materialization_command is not None:
+            print("Serial history-materialization command:")
+            print(shlex.join(materialization_command))
+            print(
+                "The coordinator freezes the resulting IB database before "
+                "executing the offline commands below."
+            )
         for _, _, command in planned:
             print(shlex.join(command))
         return commands_path, None
 
+    executions = _execute_planned_scenarios(
+        planned,
+        resume=args.resume,
+        fail_fast=args.fail_fast,
+        max_workers=args.max_workers,
+        input_fingerprint=input_fingerprint,
+    )
     summary_rows: list[dict[str, object]] = []
     membership_frames: list[pl.DataFrame] = []
-    for index, (scenario, scenario_dir, command) in enumerate(planned, start=1):
-        existing_book = _latest_book(scenario_dir) if args.resume else None
-        started = monotonic()
-        status = "complete"
-        error = ""
-        book_path = existing_book
-        if existing_book is None:
-            print(f"[{index}/{len(planned)}] {scenario.scenario_id}")
-            completed = subprocess.run(
-                command,
-                cwd=Path.cwd(),
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            (scenario_dir / "command_output.log").write_text(
-                completed.stdout + completed.stderr,
-                encoding="utf-8",
-            )
-            if completed.returncode:
-                status = "failed"
-                error = f"selection exited with status {completed.returncode}"
-                if args.fail_fast:
-                    raise RuntimeError(
-                        f"{scenario.scenario_id}: {error}; see command_output.log"
-                    )
-            else:
-                book_path = _latest_book(scenario_dir)
-                if book_path is None:
-                    status = "failed"
-                    error = "selection completed without a book report"
-        elapsed = monotonic() - started
+    for offset, (scenario, scenario_dir, _) in enumerate(planned):
+        outcome = executions[offset]
         row, membership = _summary_row(
             scenario,
-            status=status,
-            elapsed_seconds=elapsed,
-            book_path=book_path,
+            status=outcome.status,
+            elapsed_seconds=outcome.elapsed_seconds,
+            book_path=outcome.book_path,
             rule_cache=rule_cache,
-            error=error,
+            error=outcome.error,
         )
         summary_rows.append(row)
         if membership is not None:

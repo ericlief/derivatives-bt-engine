@@ -7,6 +7,9 @@ import pytest
 
 from derivatives_bt_engine.reports.formatting import (
     order_cash_pnl_report,
+    order_selection_review_allocation_report,
+    order_selection_review_instrument_report,
+    order_selection_review_summary_report,
     rename_public_report_columns,
     round_public_report,
 )
@@ -34,6 +37,108 @@ def test_round_public_report_formats_phase2_money_and_diagnostics():
     assert rounded["rank"][0] == 9
 
 
+def test_selection_review_instrument_report_orders_identity_scores_and_params():
+    """Instrument identity and allocation lead while run parameters trail."""
+    report = pl.DataFrame({
+        "min_instr_per_cls": [1],
+        "ann_dvol": [10.0],
+        "sel_score": [0.5],
+        "weight": [0.125],
+        "sel_active": [True],
+        "econ_subcls": ["grains"],
+        "symbol": ["ZC"],
+        "sel_instr_n": [3],
+        "cls_lim_weight": [0.25],
+        "asset_cls": ["ags"],
+        "sel_date": [date(2026, 1, 1)],
+    })
+
+    ordered = order_selection_review_instrument_report(report)
+
+    assert ordered.columns[:10] == [
+        "sel_date",
+        "sel_instr_n",
+        "sel_active",
+        "symbol",
+        "asset_cls",
+        "econ_subcls",
+        "weight",
+        "cls_lim_weight",
+        "ann_dvol",
+        "sel_score",
+    ]
+    assert ordered.columns[-1] == "min_instr_per_cls"
+
+
+def test_selection_review_allocation_report_puts_run_params_at_right():
+    """Allocation details precede score diagnostics and run-wide settings."""
+    report = pl.DataFrame({
+        "max_instr_per_cls": [20],
+        "max_instr_per_subcls": [3],
+        "min_instr_per_cls": [1],
+        "min_instr_per_subcls": [1],
+        "min_book_n": [15],
+        "sel_date": [date(2026, 1, 1)],
+        "weight": [0.125],
+        "sel_equity": [75_000.0],
+        "symbol": ["ZC"],
+        "asset_cls": ["ags"],
+        "econ_subcls": ["grains"],
+        "cls_weight": [0.25],
+        "cls_lim_weight": [0.5],
+        "subcls_weight": [0.25],
+        "subcls_lim_weight": [0.25],
+        "group_lim_weight": [0.125],
+        "unalloc_weight": [0.0],
+        "limit_weight": [0.111],
+        "idm": [1.8],
+        "ann_dvol": [100.0],
+        "risk_budget": [1_000.0],
+        "net_sr": [0.4],
+        "max_cls_weight_pct": [50.0],
+        "max_subcls_weight_pct": [25.0],
+    })
+
+    ordered = order_selection_review_allocation_report(report)
+
+    assert ordered.columns.index("weight") < ordered.columns.index("net_sr")
+    assert ordered.columns.index("net_sr") < ordered.columns.index(
+        "max_instr_per_cls"
+    )
+    assert ordered.columns[-2:] == [
+        "max_cls_weight_pct",
+        "max_subcls_weight_pct",
+    ]
+
+
+def test_selection_review_summary_report_puts_parameters_after_diagnostics():
+    """Review outcomes and score diagnostics precede run-wide settings."""
+    report = pl.DataFrame({
+        "max_instr_per_cls": [20],
+        "sel_score": [0.5],
+        "switch_reason": ["score_gain"],
+        "sel_date": [date(2026, 1, 1)],
+        "sel_equity": [75_000.0],
+        "sel_cand_n": [100],
+        "sel_instr_n": [20],
+        "min_instr_per_cls": [1],
+    })
+
+    ordered = order_selection_review_summary_report(report)
+
+    assert ordered.columns[:5] == [
+        "sel_date",
+        "sel_equity",
+        "sel_cand_n",
+        "sel_instr_n",
+        "sel_score",
+    ]
+    assert ordered.columns[-2:] == [
+        "min_instr_per_cls",
+        "max_instr_per_cls",
+    ]
+
+
 def test_round_public_report_keeps_reproduction_rates_at_six_places():
     """FX and percentage-point returns retain audit precision."""
     report = pl.DataFrame({
@@ -43,6 +148,8 @@ def test_round_public_report_keeps_reproduction_rates_at_six_places():
         "con_px": [123.456789123],
         "trade_cost_pct": [-0.00012649],
         "initial_margin_to_ann_dvol": [0.12345649],
+        "g_fast_rms_vol": [0.012345649],
+        "g_fast_sharpe": [0.98765449],
     })
 
     rounded = round_public_report(report)
@@ -53,6 +160,8 @@ def test_round_public_report_keeps_reproduction_rates_at_six_places():
     assert rounded["con_px"][0] == pytest.approx(123.456789)
     assert rounded["trade_cost_pct"][0] == pytest.approx(-0.000126)
     assert rounded["initial_margin_to_ann_dvol"][0] == pytest.approx(0.123456)
+    assert rounded["g_fast_rms_vol"][0] == pytest.approx(0.012346)
+    assert rounded["g_fast_sharpe"][0] == pytest.approx(0.987654)
 
 
 def test_cash_report_preserves_small_point_changes_and_pnl():
@@ -108,8 +217,17 @@ def test_public_report_compacts_selection_review_identity():
         "selection_date": [date(2024, 1, 2)],
         "selection_year": [2024],
         "selection_status": ["added"],
+        "selection_max_history_gap_days": [31],
+        "selection_unbuffered_symbols": ["A,C"],
         "selection_added_symbols": ["A"],
         "selection_removed_symbols": ["B"],
+        "selection_eligibility_hysteresis_percent": [25.0],
+        "selection_rank_count_ewma_halflife_reviews": [3.0],
+        "rank_count_ewma_state": [14.5],
+        "rank_count_anchor": [14],
+        "selection_book_score_buffer_percent": [2.0],
+        "switch_cost_usd": [12.34],
+        "score_buffer_sr": [0.02],
     })
 
     public = rename_public_report_columns(report)
@@ -118,8 +236,17 @@ def test_public_report_compacts_selection_review_identity():
         "sel_date",
         "sel_year",
         "sel_status",
+        "sel_max_hist_gap_days",
+        "sel_unbuf_symbols",
         "sel_added",
         "sel_removed",
+        "sel_elig_hyst_pct",
+        "sel_rank_n_ewma_hl",
+        "rank_n_ewma_state",
+        "rank_n_anchor",
+        "sel_book_score_buf_pct",
+        "switch_cost",
+        "score_buf_sr",
     ]
 
 
@@ -183,6 +310,7 @@ def test_cash_pnl_report_orders_primary_fields_before_params_and_audit():
         "cash_trade_cost_usd": [-1.0],
         "cash_roll_cost_usd": [0.0],
         "cash_pnl_valid": [True],
+        "quality_flag": ["missing_ref"],
     })
 
     public = order_cash_pnl_report(rename_public_report_columns(report))
@@ -195,6 +323,8 @@ def test_cash_pnl_report_orders_primary_fields_before_params_and_audit():
         "cum_gross_pct", "cum_net_pct", "trade_cost", "roll_cost", "weight",
         "hist_instr_code",
     ]
+    assert public.get_column("hist_quality").to_list() == ["missing_ref"]
+    assert "quality_flag" not in public.columns
 
 
 def test_public_report_renames_buffer_parameters_at_boundary():
@@ -292,7 +422,8 @@ def test_public_report_renames_subsystem_reference_columns():
         "ref_book_count": [15],
         "ref_idm": [2.5],
         "ref_ann_risk_usd": [2_500.126],
-        "ref_budget_usd": [12_500.126],
+        "ref_cap_alloc_usd": [12_500.126],
+        "port_ann_risk_target_usd": [15_000.126],
         "ref_average_position": [3.45678],
         "ref_target_position": [4.56789],
         "held_ref_position": [4.0],
@@ -306,19 +437,21 @@ def test_public_report_renames_subsystem_reference_columns():
         "ref_book_n",
         "ref_idm",
         "ref_ann_risk",
-        "ref_budget",
+        "ref_cap_alloc",
+        "port_ann_risk_target",
         "vol_scalar",
         "ref_tgt_pos",
         "ref_held_pos",
         "ref_net_pct",
         "ref_ret_valid",
     ]
-    assert public.row(0)[:8] == pytest.approx(
+    assert public.row(0)[:9] == pytest.approx(
         (
             15,
             2.5,
             2_500.13,
             12_500.13,
+            15_000.13,
             3.4568,
             4.5679,
             4.0,

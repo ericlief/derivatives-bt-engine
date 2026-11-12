@@ -6,8 +6,8 @@ positions, mark them through daily point changes, convert through the contract
 multiplier and historical FX, and accrue annual SR cost through elapsed
 calendar time. The subsystem-reference path uses a fixed equal-weight book
 assumption to produce comparable instrument returns for correlation estimation.
-The separate selected-book cash path fixes final weights and IDM, scales every
-instrument from common lagged net equity, buffers and rounds to executable
+The separate selected-book cash path fixes final weights and IDM, applies the
+configured fixed or compounded capital policy, buffers and rounds to executable
 contracts, and charges ordinary trades and contract rolls separately. Its long
 instrument output then aggregates into gross and net portfolio equity paths.
 """
@@ -31,6 +31,7 @@ from derivatives_bt_engine.calculations.volatility import (
 
 
 PYSYSTEMTRADE_FORECAST_BUFFER_SIZE = 0.10
+BACKTEST_CAPITAL_MODES = ("fixed", "compounded")
 
 
 def _with_source_gap_audit(frame: pl.DataFrame) -> pl.DataFrame:
@@ -73,7 +74,8 @@ _REFERENCE_ACCOUNTING_COLUMNS = (
     "ref_idm",
     "max_weight_idm",
     "ref_weight_idm",
-    "ref_budget",
+    "ref_cap_alloc",
+    "port_ann_risk_target",
     "ref_ann_risk",
     "ref_daily_risk",
     "daily_dvol",
@@ -447,14 +449,14 @@ def apply_subsystem_reference_cost(
     The helper is separate from sizing so the pipeline can first measure
     turnover from the reference positions, convert that turnover to annual SR
     cost, and then apply the resulting cost without rebuilding the positions.
-    Cost percentage is normalized by ``ref_budget``, the equal-weight
-    reference budget implied by the annual risk budget and target volatility.
+    Cost percentage is normalized by ``ref_cap_alloc``, the capital-equivalent
+    allocation implied by the instrument's annual risk and target volatility.
     """
     required = {
         "ref_held_pos",
         "period_year_fraction",
         "ref_ann_risk",
-        "ref_budget",
+        "ref_cap_alloc",
         "ref_gross",
         "ref_gross_pct",
     }
@@ -469,7 +471,7 @@ def apply_subsystem_reference_cost(
             (
                 -ann_cost_sr
                 * pl.col("ref_ann_risk")
-                / pl.col("ref_budget")
+                / pl.col("ref_cap_alloc")
                 * 100.0
             ).alias("ref_ann_cost_pct")
         )
@@ -491,7 +493,7 @@ def apply_subsystem_reference_cost(
             (
                 pl.col("ref_cost_pct")
                 / 100.0
-                * pl.col("ref_budget")
+                * pl.col("ref_cap_alloc")
             ).alias("ref_cost"),
         )
         .with_columns(
@@ -503,7 +505,7 @@ def apply_subsystem_reference_cost(
         .with_columns(
             (
                 pl.col("ref_net")
-                / pl.col("ref_budget")
+                / pl.col("ref_cap_alloc")
                 * 100.0
             ).alias("ref_net_pct"),
         )
@@ -564,7 +566,7 @@ def build_subsystem_reference_return_curve(
         with legacy ``point_vol`` accepted for compact Phase 2 frames.
     capital
         Reference account capital in USD. This supplies a reproducible
-        position scale. Percentages are normalized by ``ref_budget``,
+        position scale. Percentages are normalized by ``ref_cap_alloc``,
         which is implied by the instrument risk budget and target volatility.
     target_vol
         Annual portfolio volatility target as a decimal fraction.
@@ -663,7 +665,7 @@ def build_subsystem_reference_return_curve(
     annual_risk_budget_usd = (
         capital * target_vol * ref_weight_idm
     )
-    ref_budget_usd = annual_risk_budget_usd / target_vol
+    ref_cap_alloc_usd = annual_risk_budget_usd / target_vol
     daily_risk_budget_usd = annual_risk_budget_usd / annualization_sqrt
     reference = (
         frame.sort("date")
@@ -684,9 +686,10 @@ def build_subsystem_reference_return_curve(
             pl.lit(reference_idm).alias("ref_idm"),
             pl.lit(max_weight_idm).alias("max_weight_idm"),
             pl.lit(ref_weight_idm).alias("ref_weight_idm"),
+            pl.lit(capital * target_vol).alias("port_ann_risk_target"),
             pl.lit(annual_risk_budget_usd).alias("ref_ann_risk"),
-            pl.lit(ref_budget_usd).alias(
-                "ref_budget"
+            pl.lit(ref_cap_alloc_usd).alias(
+                "ref_cap_alloc"
             ),
             pl.lit(daily_risk_budget_usd).alias("ref_daily_risk"),
             pl.when(pl.col("fx_valid"))
@@ -730,7 +733,7 @@ def build_subsystem_reference_return_curve(
         .with_columns(
             (
                 pl.col("ref_gross")
-                / pl.col("ref_budget")
+                / pl.col("ref_cap_alloc")
                 * 100.0
             ).alias("ref_gross_pct"),
         )
@@ -843,7 +846,9 @@ def build_executable_cash_pnl_curve(
         The first row has no prior target and is null. It is exposed as
         ``track_err_ann`` and ``track_err_ann_pct_cap``. Returned dataframe
         columns use the centralized compact report vocabulary (for example,
-        ``avg_pos``, ``ref_norm_pos``, and ``exec_con``).
+        ``avg_pos``, ``ref_norm_pos``, and ``exec_con``). ``pnl_valid`` is
+        false whenever a nonzero held position lacks its market P&L, even
+        though separately known trade or roll costs remain in ``net_pnl``.
 
     Notes
     -----
@@ -1109,6 +1114,17 @@ def build_executable_cash_pnl_curve(
             (
                 pl.col("cash_net_pnl_usd").is_not_null()
                 & pl.col("cash_net_pnl_usd").is_finite()
+                & (
+                    # A flat opening row has no market P&L to observe, so its
+                    # known entry cost is complete. Once contracts are held,
+                    # however, costs alone cannot make a row valid when the
+                    # same-contract point move or FX conversion is missing.
+                    (pl.col("held_cons").fill_null(0) == 0)
+                    | (
+                        pl.col("cash_gross_pnl_usd").is_not_null()
+                        & pl.col("cash_gross_pnl_usd").is_finite()
+                    )
+                )
             ).alias("cash_pnl_valid"),
             # Cash and subsystem return columns both use percentage points:
             # USD contribution divided by the relevant capital base, then ×100.
@@ -1229,18 +1245,19 @@ def build_equity_scaled_cash_pnl_curve(
     target_vol: float,
     multiplier_by_symbol: dict[str, float],
     target_abs_forecast: float = EWMAC_FORECAST_TARGET_ABS,
+    capital_mode: str = "compounded",
     allocation_provider: Callable[
         [object, float], dict[str, dict[str, float | int]] | None
     ] | None = None,
 ) -> pl.DataFrame:
-    """Build selected-book cash P&L from lagged portfolio net equity.
+    """Build selected-book cash P&L under one explicit capital policy.
 
     The selected instruments, structural weights, capped sizing weights, and
-    IDM remain fixed. On each portfolio date, every instrument uses the same
+    IDM remain fixed. In ``compounded`` mode, every instrument uses the same
     prior net equity to calculate its risk budget, average-contract volatility
-    scalar, forecast target, and buffer width. Gross P&L comes from the
-    previously held contracts; trades and costs then update the equity used on
-    the next date.
+    scalar, forecast target, and buffer width. In ``fixed`` mode, those values
+    always use initial capital. Gross P&L comes from the previously held
+    contracts; trades and costs update the displayed equity path in both modes.
 
     Parameters
     ----------
@@ -1256,32 +1273,39 @@ def build_equity_scaled_cash_pnl_curve(
         Native-currency point-value multiplier for every selected symbol.
     target_abs_forecast
         Mean absolute forecast represented by one average position.
+    capital_mode
+        ``"compounded"`` sizes positions and normalizes daily returns with
+        lagged portfolio equity. ``"fixed"`` always uses initial capital for
+        position sizing, scheduled-selection reviews, and return denominators.
     allocation_provider
         Optional walk-forward book callback. On each portfolio date it receives
-        the date and prior net equity. Returning ``None`` retains the current
-        book; returning a symbol-to-allocation mapping replaces it. Each active
-        allocation must provide positive ``weight``, ``limit_weight``, and
-        ``idm`` values and may provide ``rank``. Symbols omitted from a new
-        mapping are closed on their next executable row. When omitted, the
-        input's fixed allocation is used exactly as before.
+        the date and applicable sizing capital. Returning ``None`` retains the
+        current book; returning a symbol-to-allocation mapping replaces it.
+        Each active allocation must provide positive ``weight``,
+        ``limit_weight``, and ``idm`` values and may provide ``rank``. Symbols
+        omitted from a new mapping are closed on their next executable row.
+        When omitted, the input's fixed allocation is used exactly as before.
 
     Returns
     -------
     polars.DataFrame
         The input with position, P&L, cost, and percentage fields replaced by
-        the equity-scaled causal replay. ``vol_scalar`` is the executable daily
+        the causal cash replay. ``vol_scalar`` is the executable daily
         average-contract scalar; ``init_vol_scalar`` preserves its
         initial-capital baseline and ``cap_scalar`` reports the common equity
-        scaling factor.
+        scaling factor, which remains one in fixed mode. ``pnl_valid`` requires
+        a finite gross observation when contracts were held; known costs remain
+        recorded on an invalid row.
 
     Notes
     -----
-    The state transition is intentionally explicit because each date's net
-    cash result controls every instrument's next sizing capital. The shared
-    capital state cannot be reproduced by independently vectorizing each
-    instrument. Percentage columns are daily portfolio-return contributions:
-    gross contributions use prior gross equity, while net and cost
-    contributions use prior net equity.
+    The state transition is intentionally explicit because buffering, integer
+    contracts, and costs depend on prior holdings. In compounded mode, each
+    date's net cash result also controls every instrument's next sizing capital.
+    Percentage columns are daily portfolio-return contributions. Compounded
+    gross contributions use prior gross equity while compounded net and cost
+    contributions use prior net equity; fixed mode uses initial capital for all
+    of them, matching pysystemtrade's default fixed-capital account curve.
     """
     required = {
         "date",
@@ -1318,6 +1342,10 @@ def build_equity_scaled_cash_pnl_curve(
         raise ValueError("target_vol must be finite and positive")
     if not math.isfinite(target_abs_forecast) or target_abs_forecast <= 0:
         raise ValueError("target_abs_forecast must be finite and positive")
+    if capital_mode not in BACKTEST_CAPITAL_MODES:
+        raise ValueError(
+            "capital_mode must be one of: " + ", ".join(BACKTEST_CAPITAL_MODES)
+        )
 
     static_sizing = cash_pnl_long.select(
         "symbol",
@@ -1420,17 +1448,25 @@ def build_equity_scaled_cash_pnl_curve(
         date_value = date_frame.get_column("date")[0]
         prior_gross_equity = gross_equity
         prior_net_equity = net_equity
-        if not math.isfinite(prior_net_equity) or prior_net_equity <= 0:
+        if (
+            capital_mode == "compounded"
+            and (not math.isfinite(prior_net_equity) or prior_net_equity <= 0)
+        ):
             raise ValueError(
                 "portfolio net equity must remain positive before sizing; "
                 f"date={date_value} equity={prior_net_equity}"
             )
-        capital_scalar = prior_net_equity / initial_capital_usd
+        sizing_capital = (
+            initial_capital_usd
+            if capital_mode == "fixed"
+            else prior_net_equity
+        )
+        capital_scalar = sizing_capital / initial_capital_usd
         date_gross_pnl = 0.0
         date_net_pnl = 0.0
         selection_rebalanced = False
         if allocation_provider is not None:
-            replacement = allocation_provider(date_value, prior_net_equity)
+            replacement = allocation_provider(date_value, sizing_capital)
             if replacement is not None:
                 unknown = sorted(set(replacement).difference(symbols))
                 if unknown:
@@ -1493,7 +1529,7 @@ def build_equity_scaled_cash_pnl_curve(
                 else 0.0
             )
             risk_budget = (
-                prior_net_equity * target_vol * limit_weight * idm
+                sizing_capital * target_vol * limit_weight * idm
                 if selection_active
                 and limit_weight is not None
                 and idm is not None
@@ -1620,16 +1656,29 @@ def build_equity_scaled_cash_pnl_curve(
             roll_cost = -roll_contracts * roll_cost_per_contract
             gross_pnl_or_zero = gross_pnl if gross_pnl is not None else 0.0
             net_pnl = gross_pnl_or_zero + trade_cost + roll_cost
+            gross_pnl_complete = (
+                held_contracts in (None, 0) or gross_pnl is not None
+            )
 
+            gross_return_capital = (
+                initial_capital_usd
+                if capital_mode == "fixed"
+                else prior_gross_equity
+            )
+            net_return_capital = (
+                initial_capital_usd
+                if capital_mode == "fixed"
+                else prior_net_equity
+            )
             gross_pct = (
-                gross_pnl_or_zero / prior_gross_equity * 100.0
-                if prior_gross_equity > 0
+                gross_pnl_or_zero / gross_return_capital * 100.0
+                if gross_return_capital > 0
                 else None
             )
-            trade_cost_pct = trade_cost / prior_net_equity * 100.0
-            roll_cost_pct = roll_cost / prior_net_equity * 100.0
+            trade_cost_pct = trade_cost / net_return_capital * 100.0
+            roll_cost_pct = roll_cost / net_return_capital * 100.0
             total_cost_pct = trade_cost_pct + roll_cost_pct
-            net_pct = net_pnl / prior_net_equity * 100.0
+            net_pct = net_pnl / net_return_capital * 100.0
 
             state["exec_contracts"] = exec_contracts
             state["selection_active"] = selection_active
@@ -1673,7 +1722,8 @@ def build_equity_scaled_cash_pnl_curve(
                 "idm": idm,
                 "trade_cost_per_con": trade_cost_per_contract,
                 "roll_cost_per_con": roll_cost_per_contract,
-                "sizing_capital_usd": prior_net_equity,
+                "backtest_capital_mode": capital_mode,
+                "sizing_capital_usd": sizing_capital,
                 "capital_scalar": capital_scalar,
                 "initial_capital_volatility_scalar": (
                     initial_volatility_scalar
@@ -1711,6 +1761,7 @@ def build_equity_scaled_cash_pnl_curve(
                 "cum_net_pct": state["cumulative_net_pct"],
                 "pnl_valid": (
                     math.isfinite(net_pnl)
+                    and gross_pnl_complete
                     and (
                         allocation_provider is None
                         or selection_active
@@ -1734,6 +1785,7 @@ def build_portfolio_equity_curve(
     cash_pnl_long: pl.DataFrame,
     *,
     initial_capital_usd: float,
+    capital_mode: str = "compounded",
 ) -> pl.DataFrame:
     """Aggregate selected-book cash P&L into gross and net equity curves.
 
@@ -1746,26 +1798,36 @@ def build_portfolio_equity_curve(
     initial_capital_usd
         Positive initial USD account capital used to seed the equity paths and
         calculate cumulative returns.
+    capital_mode
+        ``"compounded"`` divides daily cash flows by lagged portfolio equity.
+        ``"fixed"`` divides every daily cash flow by initial capital. Equity is
+        still reported as initial capital plus cumulative cash P&L.
 
     Returns
     -------
     polars.DataFrame
         One row per date with summed daily USD cash flows, daily returns based
-        on the applicable prior equity, cumulative returns relative to initial
-        capital, cost contributions, equity paths, and coverage counts.
+        on the configured capital policy, cumulative returns relative to initial
+        capital, cost contributions, equity paths, and coverage counts. A
+        portfolio return is valid only when every economically active row has
+        complete instrument P&L.
 
     Notes
     -----
-    Position-sizing semantics belong to the supplied cash frame. The current
-    selected-book pipeline supplies positions sized from lagged net equity.
-    Daily gross return divides gross cash P&L by prior gross equity, while
-    daily net return and cost rates divide by prior net equity.
+    Position-sizing semantics belong to the supplied cash frame. Daily returns
+    use the same capital mode so fixed-capital cash P&L remains an additive
+    return series and compounded cash P&L remains a lagged-equity return series.
     Null or non-finite cash values contribute zero to the daily sum;
     ``portfolio_valid_pnl_instruments`` records how many instrument rows
-    supplied a valid P&L observation.
+    supplied a valid P&L observation. An economically active row is selected,
+    holds a position, trades, or rolls on that date.
     """
     if not math.isfinite(initial_capital_usd) or initial_capital_usd <= 0:
         raise ValueError("initial_capital_usd must be finite and positive")
+    if capital_mode not in BACKTEST_CAPITAL_MODES:
+        raise ValueError(
+            "capital_mode must be one of: " + ", ".join(BACKTEST_CAPITAL_MODES)
+        )
 
     cash_columns = (
         ("gross_pnl", "portfolio_cash_gross_pnl_usd"),
@@ -1804,6 +1866,16 @@ def build_portfolio_equity_curve(
         if active_column is not None
         else pl.col("symbol")
     )
+    economically_active = (
+        pl.col(active_column).fill_null(False)
+        if active_column is not None
+        else pl.lit(True)
+    )
+    for position_column in ("held_con", "trade_con", "roll_con"):
+        if position_column in cash_pnl_long.columns:
+            economically_active |= (
+                pl.col(position_column).fill_null(0) != 0
+            )
     daily = (
         cash_pnl_long.group_by("date")
         .agg(
@@ -1821,6 +1893,11 @@ def build_portfolio_equity_curve(
             .cast(pl.Int64)
             .sum()
             .alias("portfolio_valid_pnl_instruments"),
+            (~pl.col("pnl_valid").fill_null(False))
+            .filter(economically_active)
+            .cast(pl.Int64)
+            .sum()
+            .alias("portfolio_invalid_pnl_instruments"),
             *[
                 finite_or_zero(source)
                 .sum()
@@ -1831,9 +1908,11 @@ def build_portfolio_equity_curve(
         .sort("date")
         .with_columns(
             pl.lit(initial_capital_usd).alias("initial_capital_usd"),
-            (pl.col("portfolio_valid_pnl_instruments") > 0).alias(
-                "portfolio_return_valid"
-            ),
+            pl.lit(capital_mode).alias("backtest_capital_mode"),
+            (
+                (pl.col("portfolio_instrument_count") > 0)
+                & (pl.col("portfolio_invalid_pnl_instruments") == 0)
+            ).alias("portfolio_return_valid"),
         )
         .with_columns(
             pl.col("portfolio_cash_gross_pnl_usd")
@@ -1854,14 +1933,20 @@ def build_portfolio_equity_curve(
             ).alias("portfolio_net_equity_usd"),
         )
         .with_columns(
-            pl.col("portfolio_gross_equity_usd")
-            .shift(1)
-            .fill_null(initial_capital_usd)
-            .alias("prior_portfolio_gross_equity_usd"),
-            pl.col("portfolio_net_equity_usd")
-            .shift(1)
-            .fill_null(initial_capital_usd)
-            .alias("prior_portfolio_net_equity_usd"),
+            (
+                pl.lit(initial_capital_usd)
+                if capital_mode == "fixed"
+                else pl.col("portfolio_gross_equity_usd")
+                .shift(1)
+                .fill_null(initial_capital_usd)
+            ).alias("prior_portfolio_gross_equity_usd"),
+            (
+                pl.lit(initial_capital_usd)
+                if capital_mode == "fixed"
+                else pl.col("portfolio_net_equity_usd")
+                .shift(1)
+                .fill_null(initial_capital_usd)
+            ).alias("prior_portfolio_net_equity_usd"),
         )
         .with_columns(
             pl.when(
@@ -1918,7 +2003,8 @@ def build_portfolio_equity_curve(
             .otherwise(None)
             .alias("portfolio_total_cost_pct"),
             (
-                (pl.col("portfolio_valid_pnl_instruments") > 0)
+                (pl.col("portfolio_instrument_count") > 0)
+                & (pl.col("portfolio_invalid_pnl_instruments") == 0)
                 & pl.col("prior_portfolio_net_equity_usd").is_finite()
                 & (pl.col("prior_portfolio_net_equity_usd") > 0)
             ).alias("portfolio_return_valid"),
@@ -1973,13 +2059,9 @@ def build_fixed_capital_portfolio_curve(
     *,
     initial_capital_usd: float,
 ) -> pl.DataFrame:
-    """Return the portfolio equity curve through the legacy function name.
-
-    The name is retained for notebook and API compatibility. Position sizing
-    semantics belong to the supplied cash frame; the current selected-book
-    pipeline passes equity-scaled positions.
-    """
+    """Return a fixed-denominator portfolio curve for compatibility callers."""
     return build_portfolio_equity_curve(
         cash_pnl_long,
         initial_capital_usd=initial_capital_usd,
+        capital_mode="fixed",
     )
