@@ -1202,10 +1202,17 @@ separate forecast caches, while each mode calculates the frozen reference
 universe's monthly mixing parameters and normalization only once.
 
 `plot_selection_portfolio_overview` keeps gross and net equity on a logarithmic
-scale when both remain positive, then shows net drawdown, trailing
-256-observation return, and realized volatility in separate panels with
-independent scales. It computes rolling fields before applying optional
-display-date bounds, so a recent slice retains its warm-up history.
+scale when both remain positive, then shows net drawdown, trailing return, and
+realized volatility in separate panels with independent scales. Return and
+volatility panels identify the persisted capital mode and use the last 256
+valid return observations by default. Fixed-cap trailing return is the
+additive sum of `port_net_pct` contributions against fixed sizing capital;
+compounded trailing return is the geometric product of lagged-equity returns.
+Percentage volatility is the annualized standard deviation of the
+corresponding daily return series, so its denominator also differs by capital
+mode. Legacy curves created before `cap_mode` was persisted retain their
+historical compounded interpretation. Rolling fields are computed before
+optional display-date bounds so a recent slice retains its warm-up history.
 
 `plot_selection_portfolio_concentration` measures each day's realized absolute
 contract risk as `abs(held_con) × ann_dvol`. It displays gross annual risk as a

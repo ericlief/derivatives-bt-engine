@@ -13,10 +13,10 @@ selected-book cash-P&L plotting helper plots Polars slices directly and lays
 out comparable execution diagnostics without merging their scales. The
 scheduled-selection plotting helper reads the compact review-instrument report
 and exposes each dated book as instrument-weight bars plus class and subclass
-composition bars. Portfolio-level helpers plot compounded equity and drawdown,
-realized contract-risk concentration, and annual instrument, class, and
-subclass P&L attribution from persisted public reports without recreating the
-backtest accounting path. The selection-grid dashboard applies those same
+composition bars. Portfolio-level helpers plot cap-aware equity, return and
+drawdown, realized contract-risk concentration, and annual instrument, class,
+and subclass P&L attribution from persisted public reports without recreating
+the backtest accounting path. The selection-grid dashboard applies those same
 plotters to one scenario at a time and adds scenario and coverage navigation.
 """
 
@@ -391,101 +391,61 @@ def plot_selection_portfolio_overview(
     width: int = 1050,
     height: int = 240,
 ):
-    """Plot compounded selection equity, drawdown, return, and realized vol.
+    """Plot selection equity, drawdown, return, and realized volatility.
 
     The equity series are read directly from the persisted portfolio curve.
-    Rolling return is the net-equity change over ``rolling_days`` report rows;
-    rolling percentage volatility is the annualized standard deviation of the
-    report's prior-net-equity daily return, and rolling dollar volatility is
-    the annualized standard deviation of daily net P&L. Rolling volatility
-    uses the most recent ``rolling_days`` valid return observations; dates
-    without a valid return carry the latest estimate forward.
+    Fixed-cap rolling return is the additive sum of daily fixed-cap return
+    contributions, while compounded rolling return geometrically compounds
+    daily lagged-equity returns. Rolling percentage volatility is the
+    annualized standard deviation of those same mode-specific daily returns,
+    and rolling dollar volatility is the annualized standard deviation of
+    daily net P&L. All rolling statistics use the most recent
+    ``rolling_days`` valid return observations; dates without a valid return
+    carry the latest estimate forward.
 
     Parameters
     ----------
     portfolio_curve
         Public selection portfolio-curve frame or its Parquet path. It must
         contain ``date``, gross and net equity, daily net return, and
-        ``ret_valid``.
+        ``ret_valid``. Current reports also contain one constant ``cap_mode``
+        value; legacy reports without it use the historical compounded mode.
     start, end
         Optional inclusive date bounds applied after rolling fields are
         calculated, preserving their prior-history warm-up.
     rolling_days
-        Valid return observations used for realized volatility and report rows
-        used for trailing net return. The default 256 matches the selection
-        annualization.
+        Valid return observations used for trailing return and realized
+        volatility. The default 256 matches the selection annualization.
     width, height
         Width and height of each vertically stacked panel in pixels.
 
     Returns
     -------
     holoviews.core.layout.Layout
-        Five independently scaled panels for equity, drawdown, trailing return,
-        annualized percentage-return volatility, and annualized dollar volatility.
+        Five independently scaled panels for equity, drawdown, mode-specific
+        trailing return, annualized percentage-return volatility, and
+        annualized dollar volatility.
     """
     import holoviews as hv
     import hvplot.polars  # noqa: F401 - registers Polars' ``hvplot`` API
 
-    if rolling_days < 2:
-        raise ValueError("rolling_days must be at least 2")
-    frame = _read_notebook_report(portfolio_curve, label="portfolio_curve")
-    _require_report_columns(
-        frame,
-        {
-            "date",
-            "port_gross_equity",
-            "port_net_equity",
-            "port_net",
-            "port_net_pct",
-            "ret_valid",
-        },
-        label="selection portfolio curve",
+    frame, cap_mode = _prepare_selection_portfolio_overview_frame(
+        portfolio_curve,
+        start=start,
+        end=end,
+        rolling_days=rolling_days,
     )
-    frame = frame.with_columns(pl.col("date").cast(pl.Date)).sort("date")
-    if frame.is_empty():
-        raise ValueError("selection portfolio curve is empty")
-
-    # Calculate trailing statistics before slicing so a recent view retains
-    # the observations immediately before its displayed start date.
-    frame = frame.with_columns(
-        pl.col("port_net_equity").cum_max().alias("running_net_peak"),
-    ).with_columns(
-        (
-            (pl.col("port_net_equity") / pl.col("running_net_peak") - 1.0)
-            * 100.0
-        ).alias("net_drawdown_pct"),
-        (
-            (
-                pl.col("port_net_equity")
-                / pl.col("port_net_equity").shift(rolling_days)
-                - 1.0
-            )
-            * 100.0
-        ).alias("rolling_return_pct"),
+    cap_label = "Fixed-cap" if cap_mode == "fixed" else "Compounded"
+    return_label = (
+        "additive net return contribution"
+        if cap_mode == "fixed"
+        else "compounded net return"
     )
-    # Roll over valid observations instead of the complete calendar frame:
-    # one unavailable portfolio return must not blank the next 255 estimates.
-    valid_volatility = (
-        frame.filter(pl.col("ret_valid").fill_null(False))
-        .select(
-            "date",
-            (
-                pl.col("port_net_pct").rolling_std(window_size=rolling_days)
-                * math.sqrt(256.0)
-            ).alias("rolling_realized_vol_pct"),
-            (
-                pl.col("port_net").rolling_std(window_size=rolling_days)
-                * math.sqrt(256.0)
-            ).alias("rolling_realized_dvol"),
-        )
+    volatility_label = (
+        "return-contribution volatility"
+        if cap_mode == "fixed"
+        else "lagged-equity return volatility"
     )
-    frame = frame.join(valid_volatility, on="date", how="left").with_columns(
-        pl.col("rolling_realized_vol_pct").forward_fill(),
-        pl.col("rolling_realized_dvol").forward_fill(),
-    )
-    frame = _date_slice(frame, start=start, end=end)
-    if frame.is_empty():
-        raise ValueError("no portfolio observations in the requested date range")
 
     tools = ["hover", "pan", "wheel_zoom", "box_zoom", "reset", "save"]
     positive_equity = bool(
@@ -498,7 +458,7 @@ def plot_selection_portfolio_overview(
     equity = frame.hvplot.line(
         x="date",
         y=["port_gross_equity", "port_net_equity"],
-        title="Selection portfolio gross and net equity",
+        title=f"{cap_label} selection portfolio gross and net equity",
         ylabel="Equity (USD)",
         logy=positive_equity,
         width=width,
@@ -514,7 +474,7 @@ def plot_selection_portfolio_overview(
     drawdown_area = frame.hvplot.area(
         x="date",
         y="net_drawdown_pct",
-        title="Net-equity drawdown from running peak",
+        title=f"{cap_label} net-equity drawdown from running peak",
         ylabel="Drawdown (%)",
         color="#d62728",
         alpha=0.45,
@@ -548,7 +508,10 @@ def plot_selection_portfolio_overview(
     trailing_return = frame.hvplot.line(
         x="date",
         y="rolling_return_pct",
-        title=f"Trailing {rolling_days}-observation net return",
+        title=(
+            f"{cap_label} trailing {rolling_days}-valid-observation "
+            f"{return_label}"
+        ),
         ylabel="Return (%)",
         width=width,
         height=height,
@@ -556,29 +519,36 @@ def plot_selection_portfolio_overview(
         hover_cols=["rolling_return_pct"],
         hover_tooltips=[
             ("Date", "@date{%F}"),
-            ("Trailing return", "@rolling_return_pct{0.00}%"),
+            (f"{cap_label} trailing return", "@rolling_return_pct{0.00}%"),
         ],
     )
     trailing_volatility = frame.hvplot.line(
         x="date",
         y="rolling_realized_vol_pct",
         title=(
-            f"Trailing {rolling_days}-observation annualized return volatility"
+            f"{cap_label} trailing {rolling_days}-valid-observation "
+            f"annualized {volatility_label}"
         ),
-        ylabel="Annualized return volatility (%)",
+        ylabel="Annualized volatility (%)",
         width=width,
         height=height,
         tools=tools,
         hover_cols=["rolling_realized_vol_pct"],
         hover_tooltips=[
             ("Date", "@date{%F}"),
-            ("Annualized return vol", "@rolling_realized_vol_pct{0.00}%"),
+            (
+                f"{cap_label} annualized volatility",
+                "@rolling_realized_vol_pct{0.00}%",
+            ),
         ],
     )
     trailing_dollar_volatility = frame.hvplot.line(
         x="date",
         y="rolling_realized_dvol",
-        title=f"Trailing {rolling_days}-observation annualized dollar volatility",
+        title=(
+            f"{cap_label} trailing {rolling_days}-valid-observation "
+            "annualized dollar volatility"
+        ),
         ylabel="Annualized dollar volatility (USD)",
         width=width,
         height=height,
@@ -596,6 +566,117 @@ def plot_selection_portfolio_overview(
         + trailing_volatility
         + trailing_dollar_volatility
     ).cols(1).opts(shared_axes=False)
+
+
+def _prepare_selection_portfolio_overview_frame(
+    portfolio_curve: pl.DataFrame | Path | str,
+    *,
+    start: date | datetime | str | None = None,
+    end: date | datetime | str | None = None,
+    rolling_days: int = 256,
+) -> tuple[pl.DataFrame, str]:
+    """Return cap-aware rolling fields for the portfolio overview plot.
+
+    Fixed-cap returns are additive contributions against initial sizing
+    capital. Compounded returns are geometric returns against lagged equity.
+    Both return paths and both percentage-volatility paths use exactly the
+    latest ``rolling_days`` valid return observations. The returned cap mode
+    is the single persisted mode represented by the input curve. Legacy
+    curves written before ``cap_mode`` was persisted are compounded because
+    that was the only capital policy available to those reports.
+    """
+    if rolling_days < 2:
+        raise ValueError("rolling_days must be at least 2")
+    frame = _read_notebook_report(portfolio_curve, label="portfolio_curve")
+    _require_report_columns(
+        frame,
+        {
+            "date",
+            "port_gross_equity",
+            "port_net_equity",
+            "port_net",
+            "port_net_pct",
+            "ret_valid",
+        },
+        label="selection portfolio curve",
+    )
+    frame = frame.with_columns(pl.col("date").cast(pl.Date)).sort("date")
+    if frame.is_empty():
+        raise ValueError("selection portfolio curve is empty")
+
+    if "cap_mode" in frame.columns:
+        cap_modes = (
+            frame.get_column("cap_mode").drop_nulls().unique().to_list()
+        )
+        if len(cap_modes) != 1 or cap_modes[0] not in {"fixed", "compounded"}:
+            raise ValueError(
+                "selection portfolio curve must contain exactly one cap_mode: "
+                "fixed or compounded"
+            )
+        cap_mode = str(cap_modes[0])
+    else:
+        cap_mode = "compounded"
+
+    # Calculate trailing statistics before slicing so a recent view retains
+    # the observations immediately before its displayed start date.
+    frame = frame.with_columns(
+        pl.col("port_net_equity").cum_max().alias("running_net_peak"),
+    ).with_columns(
+        (
+            (pl.col("port_net_equity") / pl.col("running_net_peak") - 1.0)
+            * 100.0
+        ).alias("net_drawdown_pct"),
+        (
+            pl.col("ret_valid").fill_null(False)
+            & pl.col("port_net_pct").is_not_null()
+            & pl.col("port_net_pct").is_finite()
+        ).alias("valid_return_obs"),
+    )
+
+    valid_returns = frame.filter("valid_return_obs")
+    if cap_mode == "compounded" and not valid_returns.filter(
+        pl.col("port_net_pct") <= -100.0
+    ).is_empty():
+        raise ValueError(
+            "compounded portfolio curve contains a valid return at or below -100%"
+        )
+    rolling_return = (
+        pl.col("port_net_pct").rolling_sum(window_size=rolling_days)
+        if cap_mode == "fixed"
+        else (
+            (
+                (pl.col("port_net_pct") / 100.0 + 1.0)
+                .log()
+                .rolling_sum(window_size=rolling_days)
+                .exp()
+                - 1.0
+            )
+            * 100.0
+        )
+    )
+    # The calculation frame contains only valid observations. Joining it back
+    # prevents unavailable report dates from consuming a rolling-window slot.
+    rolling_fields = valid_returns.select(
+        "date",
+        rolling_return.alias("rolling_return_pct"),
+        (
+            pl.col("port_net_pct").rolling_std(window_size=rolling_days)
+            * math.sqrt(256.0)
+        ).alias("rolling_realized_vol_pct"),
+        (
+            pl.col("port_net").rolling_std(window_size=rolling_days)
+            * math.sqrt(256.0)
+        ).alias("rolling_realized_dvol"),
+    )
+    frame = frame.join(rolling_fields, on="date", how="left").with_columns(
+        pl.col("rolling_return_pct").forward_fill(),
+        pl.col("rolling_realized_vol_pct").forward_fill(),
+        pl.col("rolling_realized_dvol").forward_fill(),
+    )
+    frame = _date_slice(frame, start=start, end=end)
+    if frame.is_empty():
+        raise ValueError("no portfolio observations in the requested date range")
+    return frame, cap_mode
 
 
 def plot_selection_portfolio_concentration(
