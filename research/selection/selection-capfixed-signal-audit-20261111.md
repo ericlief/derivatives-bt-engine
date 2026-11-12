@@ -174,7 +174,7 @@ Compounding-cap cells show **cumulative return / OOS return / OOS max DD / OOS S
 | 2025 | 2358113.6% / 1.1% / -17.2% / 0.14 / 0.05 / $30.29M / $10.56M / cap $1.77B | 2854344.9% / 22.7% / -8.4% / 1.30 / 2.16 / $410.56M / $15.00M / cap $2.14B | 1819651.5% / 0.4% / -19.4% / 0.10 / 0.02 / $15.73M / $10.69M / cap $1.36B | 295561.2% / 13.3% / -8.7% / 0.83 / 1.24 / $27.97M / $1.91M / cap $221.75M | 75644.2% / 23.3% / -12.3% / 1.26 / 1.52 / $11.17M / $432.44k / cap $56.81M |
 | 2026 | 2460529.7% / 4.3% / -12.5% / 0.35 / 0.36 / $85.25M / $8.44M / cap $1.85B | 2755276.6% / -3.5% / -16.5% / -0.10 / -0.24 / -$62.01M / $12.15M / cap $2.07B | 2032127.3% / 11.7% / -10.5% / 0.70 / 1.15 / $166.62M / $7.26M / cap $1.52B | 265372.4% / -10.2% / -20.4% / -0.73 / -0.51 / -$20.72M / $1.93M / cap $199.10M | 69457.7% / -8.2% / -20.8% / -0.49 / -0.40 / -$3.72M / $915.14k / cap $52.17M |
 
-For both tables, within-year max drawdown is measured from the prior year-end equity baseline. Sharpe annualizes valid daily `port_net_pct` observations using 256 trading days. A dash means the signal has no valid returns that year.
+For both tables, within-year max drawdown is measured from the prior year-end equity baseline. Sharpe annualizes valid daily `port_net_pct` observations using 256 trading days. A dash means the signal has no valid returns that year. The chart below repeats the 2024–2026 fixed-cap OOS return field from the first annual table on the same percentage scale.
 ![Recent fixed-cap annual returns by signal](assets/selection-capfixed-signal-audit-20261111.svg)
 
 | Signal | Forecast-eligible markets / 170 | Active markets at reviews 2022, 2023, 2024, 2025, 2026 |
