@@ -23,6 +23,8 @@ Examples:
   turnover estimate.
 - `ewmac_416_pool_turn`: pooled 16/64 turnover across reviewed reference
   histories, used to estimate rule costs.
+- `ewmac_416_pool_instrs`: number of reference histories contributing to
+  that speed's pooled estimates.
 - `carry_5_ref_turn`: that instrument's reference-history Carry5 turnover.
 - `carry_5_pool_turn`: pooled Carry5 turnover across reviewed reference
   histories.
@@ -37,9 +39,10 @@ annual unit needs to be explicit. Do not label a published AFTS constant as
 ## Shared values and ordering
 
 Persist shared instrument-level reference inputs once, outside the speed
-groups. For example, emit `ref_ann_rolls` once before rule-specific fields;
-roll frequency is common to all speeds and must not be repeated under every
-rule.
+groups. Emit `ref_ann_rolls`, `ref_trade_sr`, and `ref_roll_sr` once before
+rule-specific fields. Roll frequency and reference cost rates are common to
+all speeds and must not be repeated under every rule. The primary selected or
+live `trade_sr` and `roll_sr` inputs also appear once in the main cost section.
 
 Group rule fields together in increasing numeric speed. Within each speed,
 place instrument reference measurements, pooled estimates, published

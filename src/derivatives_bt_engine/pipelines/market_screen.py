@@ -4037,6 +4037,8 @@ def _ewmac_public_column_name(name: str) -> str:
                 "stacked_observation_pre_cost_sharpe"
             ),
         }[suffix]
+        if mapped_suffix == "pool_instruments":
+            mapped_suffix = "instrs"
         return f"{prefix}_pool_{mapped_suffix}"
     if suffix in {"ref_pre_cost_sharpe", "ref_pre_cost_sr"}:
         return f"{prefix}_ref_pre_cost_sr"
@@ -4379,11 +4381,19 @@ def _order_market_public_columns(report: pl.DataFrame) -> pl.DataFrame:
         and name not in selected_set
         and name not in rule_set
     ]
+    shared_ref = [
+        name for name in (
+            "ref_ann_rolls",
+            "ref_trade_sr",
+            "ref_roll_sr",
+        )
+        if name in ref_suffix
+    ]
     audit_suffix = [
-        *( ["ref_ann_rolls"] if "ref_ann_rolls" in ref_suffix else [] ),
+        *shared_ref,
         *rule_suffix,
         *snap_suffix,
-        *(name for name in ref_suffix if name != "ref_ann_rolls"),
+        *(name for name in ref_suffix if name not in shared_ref),
     ]
     middle = [
         name for name in report.columns
