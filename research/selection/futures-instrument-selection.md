@@ -929,7 +929,7 @@ unattainable. Public allocation and trial reports persist the active target as
 
 The causal gate split is:
 
-| Constraint | Reference-era reviews | IB/live-tail reviews |
+| Constraint | Historical PST segment | Historical IB segment |
 |---|:---:|:---:|
 | Causal history and freshness | Yes | Yes |
 | Forecast and correlation inputs | Yes | Yes |
@@ -937,30 +937,47 @@ The causal gate split is:
 | Half-contract granularity | Yes | Yes |
 | Class, subclass, and family limits | Yes | Yes |
 | Normalized margin limits | Yes | Yes |
-| Live volume and participation | No | Yes |
-| IB qualification and execution availability | No | Yes |
+| Live volume and participation | No | No |
+| IB qualification and execution availability | No | No |
 
-Thus pre-IB coverage means every causally available, reference-feasible group;
-after the handoff it means every currently executable group. A live capacity
-failure such as market participation does not retroactively remove the group
-from historical reviews and no longer stops construction of the rest of the
-current book.
+Thus both historical segments use every causally available, reference-feasible
+group. The PST-to-IB handoff changes data ownership only. Live capacity and IB
+execution checks are applied only by candidate-only execution selection, never
+by a complete stitched historical backtest.
 
 #### Full-contract family preference
 
 `--selection-prefer-full-contracts` is an optional execution-route preference,
 disabled by default. For each conditional greedy trial it first applies every
 ordinary hard feasibility gate. If a full contract and a micro contract in the
-same `econ_fam_id` are both feasible, only the full route competes for that
-family. If the full route fails granularity, liquidity, margin, hierarchy, or
-another hard gate, the micro remains eligible. This is therefore not a blanket
-micro exclusion and does not force a contract the account cannot execute.
+same `econ_fam_id` are both feasible, the full route suppresses the micro only
+when its continuous forecast-cap position also reaches `con_band_min`. A full
+route that merely rounds to one executable lot is too coarse to receive the
+preference: when a feasible micro sibling exists, that coarse full route is
+suppressed instead. The selector also normalizes the completed greedy book,
+because later additions can reduce an already-selected full contract below the
+band by changing weights or IDM. Such a route is replaced by a feasible micro
+sibling. If no micro sibling is causally eligible, the full route remains; the
+preference does not manufacture unavailable history or bypass the cost gate.
 
 The identity comes from the persisted `pst_instr_code` and `desc` metadata,
 not from guessing the broker symbol. This covers regular `_micro` codes and
 nonstandard cases such as MBT and M2K whose descriptions carry the explicit
 `micro` label. A suppressed trial remains in the full audit with
-`micro_suppressed_by_full_contract_preference:<family>` as its reason.
+`micro_suppressed_by_full_contract_preference:family=<family>,full=<symbol>,full_max_con=<lots>`
+as its reason. In the allocation report, `cand_row` identifies the one row
+whose `book_symbol` is the candidate being tested. `trial_reason` is populated
+only on that row; other rows are incumbent members of the hypothetical book
+and retain only their own `instr_reason`. This prevents one candidate rejection
+from appearing as repeated removals of every member in that trial. Coarse full
+routes use `full_suppressed_for_micro_granularity:...`; completed-book swaps use
+`full_replaced_by_micro_below_contract_band:...`.
+
+Scheduled instrument reviews use `sel_status=replaced` with
+`sel_note=family_route_replaced_by:<symbol>` for a family-route change and
+`sel_status=ineligible` with the hard-gate reason when an incumbent is no
+longer feasible. The generic `removed` status is reserved for an eligible
+incumbent that simply did not enter the new target book.
 
 The preference constructs the raw challenger before membership hysteresis.
 Rank hysteresis continues the same full-preferred greedy order. Score or

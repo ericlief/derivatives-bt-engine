@@ -317,6 +317,38 @@ MCL, and MSF. Other micro trials lose on rank, coverage phase, margin, or the
 half-contract feasibility threshold. This is a downstream allocation policy,
 not evidence that micros were globally ineligible.
 
+### Full-contract preference follow-up
+
+The November 13 post-liquidity-fix EWMAC rerun exposed a separate family-route
+bug. The full-contract preference treated any hard-feasible full route as
+sufficient to suppress its micro, even when the full route rounded to only one
+maximum contract and never entered the completed target book. It also did not
+recheck a selected full route after later greedy additions reduced its weight
+and IDM allocation.
+
+The corrected policy now prefers a full route only while its continuous
+forecast-cap position reaches `con_band_min` (2.5 in the audited scenario). A
+feasible micro suppresses a coarser full route, and a completed book is
+normalized if later additions push an admitted full route below the band. The
+allocation audit identifies the tested row with `cand_row`; `trial_reason` is
+populated only on that row instead of being repeated on every incumbent member
+of the hypothetical book. Scheduled review removals are also classified as
+`replaced`, `ineligible`, or the residual `removed`, with a specific
+`sel_note`.
+
+A narrow 1973–1974 replay of the corrected 177-market EWMAC universe confirms
+that MZM is selected in 1973 and retained in 1974 instead of selecting ZM and
+then replacing it. ZL remains in the 1973 book for a different, causal reason:
+MZL is not yet cost-eligible. On December 29, 1972 its one-way reference cost
+is approximately 0.011476 SR, above the 0.01 entry limit, while ZL is about
+0.006800 SR. By the 1974 review MZL is eligible, and the report correctly marks
+ZL as `replaced` with `sel_note=family_route_replaced_by:MZL`. Thus the 1973
+ZL-to-1974 MZL transition is not a remaining full-preference leak.
+
+The validation artifacts are under
+`/tmp/selection_micro_preference_validation_status/selection_run_20261113_152356/`.
+They are narrow diagnostic outputs, not replacements for the saved full run.
+
 ## Conclusion
 
 With sizing fixed at $75,000, EWMAC and TSMOM 64/256 are the strongest by

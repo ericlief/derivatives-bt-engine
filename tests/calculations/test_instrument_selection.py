@@ -15,6 +15,7 @@ def _candidate(
     symbol,
     turnover,
     *,
+    ann_dvol=100.0,
     family="",
     asset_class="equity",
     economic_subclass="us",
@@ -23,7 +24,7 @@ def _candidate(
 ):
     return SelectionCandidate(
         symbol=symbol,
-        ann_dvol=100.0,
+        ann_dvol=ann_dvol,
         trade_sr=0.01,
         combined_turnover=turnover,
         asset_class=asset_class,
@@ -54,8 +55,84 @@ def test_full_contract_preference_suppresses_feasible_micro_family_route():
         row for row in result.trials if row["candidate"] == "MICRO"
     )
     assert micro_trial["reason"] == (
-        "micro_suppressed_by_full_contract_preference:INDEX"
+        "micro_suppressed_by_full_contract_preference:"
+        "family=INDEX,full=FULL,full_max_con=800"
     )
+
+
+def test_full_contract_preference_keeps_micro_for_one_lot_full_route():
+    """A technically feasible one-lot full route cannot suppress a micro."""
+    candidates = [
+        _candidate(
+            "MICRO",
+            0.0,
+            ann_dvol=1.0,
+            family="INDEX",
+            is_micro=True,
+        ),
+        _candidate("FULL", 20.0, ann_dvol=10.0, family="INDEX"),
+    ]
+    result = GreedyInstrumentSelector(
+        config=GreedySelectionConfig(
+            capital=100.0,
+            size_penalty_scale=0.0,
+            prefer_full_contracts=True,
+        )
+    ).select(candidates, np.eye(2))
+
+    assert result.selected == ("MICRO",)
+    full_allocation = next(
+        row
+        for row in result.trial_allocations
+        if row["candidate"] == "FULL" and row["candidate_row"]
+    )
+    assert full_allocation["max_cons"] == 1
+    assert full_allocation["trial_reason"] == (
+        "full_suppressed_for_micro_granularity:"
+        "family=INDEX,full=FULL,full_max_con=1,"
+        "micro=MICRO,con_band_min=2.5"
+    )
+
+
+def test_full_contract_preference_normalizes_route_after_book_growth():
+    """Later weight dilution replaces a now-coarse full with its micro."""
+    candidates = [
+        _candidate(
+            "MICRO",
+            0.0,
+            ann_dvol=1.333333,
+            family="INDEX",
+            is_micro=True,
+        ),
+        _candidate(
+            "FULL",
+            0.0,
+            ann_dvol=13.333333,
+            family="INDEX",
+        ),
+        _candidate("OTHER", 1.0, ann_dvol=10.0, family="OTHER"),
+    ]
+    result = GreedyInstrumentSelector(
+        config=GreedySelectionConfig(
+            capital=100.0,
+            max_weight_idm=1.0,
+            size_penalty_scale=0.0,
+            prefer_full_contracts=True,
+        ),
+        weight_policy=EqualPortfolioWeights(),
+    ).select(candidates, np.eye(3))
+
+    assert "MICRO" in result.selected
+    assert "FULL" not in result.selected
+    route_action = next(
+        row
+        for row in result.trials
+        if row["reason"].startswith(
+            "full_replaced_by_micro_below_contract_band:"
+        )
+    )
+    assert route_action["candidate"] == "MICRO"
+    assert route_action["accepted"]
 
 
 def test_disabled_full_contract_preference_preserves_score_choice():
@@ -397,9 +474,15 @@ def test_singleton_losers_record_competitive_rejection_reason():
         row for row in result.trial_allocations
         if row["iteration"] == 0 and row["candidate"] == "COSTLY"
     ]
-    assert {row["reason"] for row in rejected_allocations} == {
-        "lower_rank_than_selected_seed"
-    }
+    candidate_row = next(
+        row for row in rejected_allocations if row["candidate_row"]
+    )
+    assert candidate_row["trial_reason"] == "lower_rank_than_selected_seed"
+    assert all(
+        row["trial_reason"] == ""
+        for row in rejected_allocations
+        if not row["candidate_row"]
+    )
 
 
 def test_greedy_selector_allows_only_one_instrument_per_economic_family():

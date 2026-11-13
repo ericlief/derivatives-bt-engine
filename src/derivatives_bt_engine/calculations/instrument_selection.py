@@ -188,8 +188,9 @@ class GreedySelectionConfig:
     challenger must clear after its expected one-time switch cost is converted
     to SR units. Membership controls are inert when no prior book is supplied.
     ``prefer_full_contracts`` suppresses a feasible micro route whenever a
-    feasible non-micro route for the same economic family is available. It
-    does not make an infeasible full contract displace an executable micro.
+    feasible non-micro route for the same economic family reaches the lower
+    edge of the configured contract band. It does not make an infeasible or
+    poorly granular full contract displace an executable micro.
     """
 
     capital: float = 100_000.0
@@ -1555,36 +1556,79 @@ class GreedyInstrumentSelector:
         self,
         scored_trials: list[tuple[str, PortfolioScore]],
         candidates: dict[str, SelectionCandidate],
-    ) -> frozenset[str]:
-        """Return feasible routes left after the optional family preference.
+    ) -> tuple[frozenset[str], dict[str, str]]:
+        """Return eligible routes and explicit micro-suppression reasons.
 
         The preference operates only within a populated economic family and
         only after hard feasibility has been evaluated for the whole trial
-        book. A micro therefore remains available when its full-size sibling
-        fails granularity, liquidity, margin, hierarchy, or another hard gate.
+        book. A full route must also reach the configured lower contract band;
+        merely rounding to one executable lot is not enough to suppress the
+        better-granular micro. A micro therefore remains available when its
+        full-size sibling fails granularity, liquidity, margin, hierarchy, or
+        another hard gate.
         """
         feasible_symbols = {
             symbol for symbol, score in scored_trials if score.feasible
         }
         if not self.config.prefer_full_contracts:
-            return frozenset(feasible_symbols)
-        full_families = {
-            candidate.econ_family
-            for symbol, candidate in candidates.items()
+            return frozenset(feasible_symbols), {}
+        full_routes: dict[str, tuple[str, int]] = {}
+        band_capable_full_symbols: set[str] = set()
+        coarse_full_max_cons: dict[str, int] = {}
+        micro_routes: dict[str, str] = {}
+        for symbol, score in scored_trials:
+            candidate = candidates[symbol]
             if (
-                symbol in feasible_symbols
-                and candidate.econ_family
-                and not candidate.is_micro_contract
+                not score.feasible
+                or not candidate.econ_family
+            ):
+                continue
+            if candidate.is_micro_contract:
+                micro_routes.setdefault(candidate.econ_family, symbol)
+                continue
+            detail = self._candidate_detail(symbol, score)
+            max_position = float(detail["max_position"])
+            if max_position < self.config.contract_band_min:
+                coarse_full_max_cons[symbol] = int(detail["max_cons"])
+                continue
+            band_capable_full_symbols.add(symbol)
+            full_routes.setdefault(
+                candidate.econ_family,
+                (symbol, int(detail["max_cons"])),
             )
-        }
-        return frozenset(
+        eligible = frozenset(
             symbol
             for symbol in feasible_symbols
             if not (
-                candidates[symbol].is_micro_contract
-                and candidates[symbol].econ_family in full_families
+                (
+                    candidates[symbol].is_micro_contract
+                    and candidates[symbol].econ_family in full_routes
+                )
+                or (
+                    not candidates[symbol].is_micro_contract
+                    and candidates[symbol].econ_family in micro_routes
+                    and symbol not in band_capable_full_symbols
+                )
             )
         )
+        suppression_reasons: dict[str, str] = {}
+        for symbol in feasible_symbols.difference(eligible):
+            family = candidates[symbol].econ_family
+            if candidates[symbol].is_micro_contract:
+                suppression_reasons[symbol] = (
+                    "micro_suppressed_by_full_contract_preference:"
+                    f"family={family},full={full_routes[family][0]},"
+                    f"full_max_con={full_routes[family][1]}"
+                )
+            else:
+                suppression_reasons[symbol] = (
+                    "full_suppressed_for_micro_granularity:"
+                    f"family={family},full={symbol},"
+                    f"full_max_con={coarse_full_max_cons[symbol]},"
+                    f"micro={micro_routes[family]},"
+                    f"con_band_min={self.config.contract_band_min:g}"
+                )
+        return eligible, suppression_reasons
 
     @staticmethod
     def _annotate_full_contract_preference(
@@ -1593,9 +1637,9 @@ class GreedyInstrumentSelector:
         *,
         iteration: int,
         eligible: frozenset[str],
-        candidates: dict[str, SelectionCandidate],
+        suppression_reasons: dict[str, str],
     ) -> None:
-        """Explain feasible micro trials suppressed by a full-size sibling."""
+        """Explain the family route removed by the full-contract policy."""
         for rows in (trials, trial_allocations):
             for row in rows:
                 if (
@@ -1605,10 +1649,144 @@ class GreedyInstrumentSelector:
                 ):
                     continue
                 symbol = str(row["candidate"])
-                row["reason"] = (
-                    "micro_suppressed_by_full_contract_preference:"
-                    f"{candidates[symbol].econ_family}"
+                # A trial-allocation frame repeats the hypothetical book's
+                # members. Attach its portfolio decision only to the candidate
+                # row so a sibling's removal is not falsely repeated for every
+                # incumbent allocation row.
+                if row.get("candidate_row") is False:
+                    continue
+                reason_key = (
+                    "trial_reason" if "trial_reason" in row else "reason"
                 )
+                row[reason_key] = suppression_reasons[symbol]
+
+    def _normalize_full_contract_routes(
+        self,
+        selected: list[str],
+        current: PortfolioScore,
+        *,
+        candidates: dict[str, SelectionCandidate],
+        full_symbols: list[str],
+        correlation: np.ndarray,
+        incumbent_symbols: frozenset[str],
+        trials: list[dict[str, object]],
+        trial_allocations: list[dict[str, object]],
+        iteration: int,
+    ) -> tuple[list[str], PortfolioScore, int]:
+        """Replace full routes that became too coarse as the book grew.
+
+        Greedy additions recalculate every existing member's allocation and
+        IDM. A full contract can therefore reach the lower contract band when
+        first admitted but fall below it after later markets enter the book.
+        When a feasible micro sibling exists, replace that route and record a
+        dedicated accepted audit trial. Repeat because one replacement can
+        slightly change the allocations of the remaining families.
+        """
+        # A rejected terminal greedy pass already occupies the current
+        # iteration number, so route-normalization trials start after every
+        # construction row that has been persisted.
+        if trials:
+            iteration = max(int(row["iteration"]) for row in trials) + 1
+        while self.config.prefer_full_contracts:
+            detail_by_symbol = {
+                str(detail["symbol"]): detail for detail in current.details
+            }
+            replacements: list[
+                tuple[float, str, str, int, PortfolioScore]
+            ] = []
+            for full_symbol in selected:
+                full_candidate = candidates[full_symbol]
+                if (
+                    full_candidate.is_micro_contract
+                    or not full_candidate.econ_family
+                ):
+                    continue
+                full_detail = detail_by_symbol[full_symbol]
+                if (
+                    float(full_detail["max_position"])
+                    >= self.config.contract_band_min
+                ):
+                    continue
+                for micro_symbol, micro_candidate in candidates.items():
+                    if (
+                        not micro_candidate.is_micro_contract
+                        or micro_candidate.econ_family
+                        != full_candidate.econ_family
+                        or micro_symbol in selected
+                    ):
+                        continue
+                    replacement = list(selected)
+                    replacement[replacement.index(full_symbol)] = micro_symbol
+                    replacement_score = self.score(
+                        replacement,
+                        candidates,
+                        full_symbols,
+                        correlation,
+                        incumbent_symbols=incumbent_symbols,
+                    )
+                    if replacement_score.feasible:
+                        replacements.append((
+                            replacement_score.score,
+                            micro_symbol,
+                            full_symbol,
+                            int(full_detail["max_cons"]),
+                            replacement_score,
+                        ))
+            if not replacements:
+                break
+            (
+                _,
+                micro_symbol,
+                full_symbol,
+                full_max_cons,
+                replacement_score,
+            ) = max(replacements, key=lambda item: (item[0], item[1]))
+            selected[selected.index(full_symbol)] = micro_symbol
+            current = replacement_score
+            self._record_trial(
+                trials,
+                trial_allocations,
+                iteration,
+                micro_symbol,
+                replacement_score,
+                accepted=True,
+            )
+            self._annotate_coverage_competition(
+                trials,
+                trial_allocations,
+                iteration=iteration,
+                phase="family_route_normalization",
+                coverage_eligible=frozenset((micro_symbol,)),
+                ranks={micro_symbol: (None, None, None, None)},
+            )
+            self._finalize_iteration(
+                trials,
+                trial_allocations,
+                iteration=iteration,
+                best_candidate=micro_symbol,
+                best_score=replacement_score.score,
+                score_best_candidate=micro_symbol,
+                score_best_score=replacement_score.score,
+                tie_score_floor=replacement_score.score,
+                tie_eligible=frozenset((micro_symbol,)),
+                min_accept_score=None,
+                accepted=True,
+            )
+            action_reason = (
+                "full_replaced_by_micro_below_contract_band:"
+                f"family={candidates[micro_symbol].econ_family},"
+                f"full={full_symbol},full_max_con={full_max_cons},"
+                f"micro={micro_symbol},"
+                f"con_band_min={self.config.contract_band_min:g}"
+            )
+            trials[-1]["reason"] = action_reason
+            for row in reversed(trial_allocations):
+                if row["iteration"] != iteration:
+                    break
+                if row.get("candidate_row"):
+                    row["trial_reason"] = action_reason
+            iteration += 1
+        return selected, current, iteration
 
     def select(
         self,
@@ -1679,15 +1857,16 @@ class GreedyInstrumentSelector:
         singleton_trials = [
             (score.symbols[0], score) for score in feasible_singletons
         ]
-        full_preference_eligible = self._full_contract_preference_eligible(
-            singleton_trials, candidates
-        )
+        (
+            full_preference_eligible,
+            full_preference_reasons,
+        ) = self._full_contract_preference_eligible(singleton_trials, candidates)
         self._annotate_full_contract_preference(
             trials,
             trial_allocations,
             iteration=0,
             eligible=full_preference_eligible,
-            candidates=candidates,
+            suppression_reasons=full_preference_reasons,
         )
         singleton_trials = [
             item for item in singleton_trials
@@ -1773,7 +1952,10 @@ class GreedyInstrumentSelector:
                     scored,
                     accepted=False,
                 )
-            full_preference_eligible = self._full_contract_preference_eligible(
+            (
+                full_preference_eligible,
+                full_preference_reasons,
+            ) = self._full_contract_preference_eligible(
                 scored_trials, candidates
             )
             self._annotate_full_contract_preference(
@@ -1781,7 +1963,7 @@ class GreedyInstrumentSelector:
                 trial_allocations,
                 iteration=iteration,
                 eligible=full_preference_eligible,
-                candidates=candidates,
+                suppression_reasons=full_preference_reasons,
             )
             preferred_trials = [
                 item for item in scored_trials
@@ -1807,12 +1989,18 @@ class GreedyInstrumentSelector:
             if not feasible:
                 for rows in (trials, trial_allocations):
                     for row in rows:
+                        reason_key = (
+                            "trial_reason"
+                            if "trial_reason" in row
+                            else "reason"
+                        )
                         if (
                             row["iteration"] == iteration
                             and row["feasible"]
-                            and not row["reason"]
+                            and bool(row.get("candidate_row", True))
+                            and not row[reason_key]
                         ):
-                            row["reason"] = "outside_active_coverage_phase"
+                            row[reason_key] = "outside_active_coverage_phase"
                 break
             mandatory_phase = coverage_phase in {
                 "class",
@@ -1874,6 +2062,18 @@ class GreedyInstrumentSelector:
                 accepted=True,
             )
             iteration += 1
+
+        selected, current, iteration = self._normalize_full_contract_routes(
+            selected,
+            current,
+            candidates=candidates,
+            full_symbols=full_symbols,
+            correlation=correlation,
+            incumbent_symbols=incumbent_symbols,
+            trials=trials,
+            trial_allocations=trial_allocations,
+            iteration=iteration,
+        )
 
         (
             class_deficit,
@@ -1957,7 +2157,7 @@ class GreedyInstrumentSelector:
                 )
                 if scored.feasible:
                     feasible.append((symbol, scored))
-            preferred = self._full_contract_preference_eligible(
+            preferred, _ = self._full_contract_preference_eligible(
                 feasible, candidates
             )
             feasible = [
@@ -2441,6 +2641,7 @@ class GreedyInstrumentSelector:
             rows.append({
                 "iteration": iteration,
                 "candidate": candidate,
+                "candidate_row": detail["symbol"] == candidate,
                 "accepted": accepted,
                 "book": book,
                 "book_symbol": detail["symbol"],
@@ -2515,7 +2716,9 @@ class GreedyInstrumentSelector:
                 "ann_roll_cost_usd": detail["ann_roll_cost_usd"],
                 "ann_cost_usd": detail["ann_cost_usd"],
                 "feasible": score.feasible,
-                "reason": score.reason,
+                "trial_reason": (
+                    score.reason if detail["symbol"] == candidate else ""
+                ),
                 "instr_reason": detail["reason"],
                 "max_position": detail["max_position"],
                 "max_cons": detail["max_cons"],
@@ -2567,22 +2770,28 @@ class GreedyInstrumentSelector:
         Feasibility reasons are calculated while scoring a hypothetical book.
         This second step explains why each *feasible* book was or was not
         chosen relative to the other books attempted in the same iteration.
-        Member-level allocation rows receive the identical decision metadata
-        so they remain interpretable without joining back to the trial CSV.
+        Member-level allocation rows receive the shared comparison metadata,
+        while the trial decision reason is attached only to the candidate row.
+        That keeps an incumbent book member from appearing to be rejected once
+        for every hypothetical candidate tested in the same iteration.
         """
-        for rows in (trials, trial_allocations):
-            cls._finalize_iteration_rows(
-                rows,
-                iteration=iteration,
-                best_candidate=best_candidate,
-                best_score=best_score,
-                score_best_candidate=score_best_candidate,
-                score_best_score=score_best_score,
-                tie_score_floor=tie_score_floor,
-                tie_eligible=tie_eligible,
-                min_accept_score=min_accept_score,
-                accepted=accepted,
-            )
+        shared = {
+            "iteration": iteration,
+            "best_candidate": best_candidate,
+            "best_score": best_score,
+            "score_best_candidate": score_best_candidate,
+            "score_best_score": score_best_score,
+            "tie_score_floor": tie_score_floor,
+            "tie_eligible": tie_eligible,
+            "min_accept_score": min_accept_score,
+            "accepted": accepted,
+        }
+        cls._finalize_iteration_rows(trials, reason_key="reason", **shared)
+        cls._finalize_iteration_rows(
+            trial_allocations,
+            reason_key="trial_reason",
+            **shared,
+        )
 
     @staticmethod
     def _finalize_iteration_rows(
@@ -2597,6 +2806,7 @@ class GreedyInstrumentSelector:
         tie_eligible: frozenset[str],
         min_accept_score: float | None,
         accepted: bool,
+        reason_key: str,
     ) -> None:
         """Finalize winner metadata and rejection reasons for one row set."""
         for row in rows:
@@ -2611,26 +2821,27 @@ class GreedyInstrumentSelector:
             candidate = str(row["candidate"])
             row["tie_eligible"] = candidate in tie_eligible
             row["tie_break_applied"] = best_candidate != score_best_candidate
+            candidate_row = bool(row.get("candidate_row", True))
             if candidate == best_candidate:
                 row["accepted"] = accepted
-                if not accepted and not row["reason"]:
-                    row["reason"] = "best_score_below_acceptance_threshold"
-            elif row["feasible"] and not row["reason"]:
+                if candidate_row and not accepted and not row[reason_key]:
+                    row[reason_key] = "best_score_below_acceptance_threshold"
+            elif candidate_row and row["feasible"] and not row[reason_key]:
                 # A feasible loser needs a competitive explanation; the hard
                 # constraint path above already populated infeasible reasons.
                 if not bool(row.get("coverage_eligible", True)):
-                    row["reason"] = "outside_active_coverage_phase"
+                    row[reason_key] = "outside_active_coverage_phase"
                 elif iteration == 0:
-                    row["reason"] = (
+                    row[reason_key] = (
                         "not_selected_by_contract_band_tie_break"
                         if candidate in tie_eligible
                         else "lower_rank_than_selected_seed"
                     )
                 elif accepted:
-                    row["reason"] = (
+                    row[reason_key] = (
                         "not_selected_by_contract_band_tie_break"
                         if candidate in tie_eligible
                         else "lower_rank_than_iteration_winner"
                     )
                 else:
-                    row["reason"] = "lower_rank_than_iteration_best"
+                    row[reason_key] = "lower_rank_than_iteration_best"

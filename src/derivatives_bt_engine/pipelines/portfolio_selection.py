@@ -2638,6 +2638,19 @@ class _WalkForwardSelectionProvider:
         preference_ranks = selection.preference_ranks or {}
         added_symbols = selected_symbols.difference(prior_selected_symbols)
         removed_symbols = prior_selected_symbols.difference(selected_symbols)
+        selected_route_by_family = {
+            candidate_by_symbol[symbol].econ_family: symbol
+            for symbol in selected_symbols
+            if candidate_by_symbol[symbol].econ_family
+        }
+        hard_ineligible_by_symbol: dict[str, str] = {}
+        hard_prefix = "prior_book_hard_ineligible:"
+        if selection.switch_reason.startswith(hard_prefix):
+            for item in selection.switch_reason.removeprefix(hard_prefix).split(";"):
+                symbol, separator, reason = item.partition(":")
+                hard_ineligible_by_symbol[symbol] = (
+                    reason if separator else "not_in_candidate_universe"
+                )
         logger.info(
             "walk_forward_selection hysteresis date=%s mode=%s "
             "prior_book=%s raw_book=%s rank_book=%s candidate_book=%s "
@@ -2789,10 +2802,32 @@ class _WalkForwardSelectionProvider:
                     )
             if active and symbol in added_symbols:
                 status = "added"
+                change_reason = "added_to_book"
             elif active:
                 status = "retained"
+                change_reason = "retained_in_book"
             else:
-                status = "removed"
+                family = (
+                    candidate.econ_family
+                    if candidate is not None
+                    else str(source.get("econ_fam_id") or "")
+                )
+                replacement = selected_route_by_family.get(family)
+                if replacement is not None:
+                    status = "replaced"
+                    change_reason = f"family_route_replaced_by:{replacement}"
+                elif symbol in hard_ineligible_by_symbol:
+                    status = "ineligible"
+                    change_reason = (
+                        "hard_ineligible:"
+                        f"{hard_ineligible_by_symbol[symbol]}"
+                    )
+                elif candidate is None:
+                    status = "ineligible"
+                    change_reason = "not_in_candidate_universe"
+                else:
+                    status = "removed"
+                    change_reason = "not_selected_in_target_book"
             self.review_instrument_rows.append({
                 "selection_date": review_date,
                 "selection_year": review_date.year,
@@ -2813,7 +2848,7 @@ class _WalkForwardSelectionProvider:
                 "selection_note": (
                     "retained_eh"
                     if active and eligibility_buffer_reasons
-                    else ""
+                    else change_reason
                 ),
                 "minimum_instruments_per_class": self.args.min_instr_per_class,
                 "minimum_instruments_per_subclass": (
