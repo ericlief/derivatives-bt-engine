@@ -4446,19 +4446,17 @@ def _order_market_public_columns(report: pl.DataFrame) -> pl.DataFrame:
         r"(ref|pool|afts|live)_(.+)$"
     )
     detail_order = {
-        "pool_instrs": 0,
+        "instrs": 0,
         "mean_instr_pre_cost_sr": 1,
         "median_instr_pre_cost_sr": 2,
         "hist_weighted_mean_pre_cost_sr": 3,
         "stacked_observation_pre_cost_sr": 4,
-        "pool_minus_afts_turn": 5,
-        "pool_to_afts_turn_ratio": 6,
-        "pool_reviewed_instrs": 7,
-        "pool_history_start": 8,
-        "pool_history_end": 9,
-        "pool_turn_src": 10,
-        "afts_turn_src": 11,
-        "pre_cost_sr": 12,
+        "minus_afts_turn": 5,
+        "to_afts_turn_ratio": 6,
+        "reviewed_instrs": 7,
+        "hist_start": 8,
+        "hist_end": 9,
+        "turn_src": 10,
         "trade_ann_cost_sr": 0,
         "roll_ann_cost_sr": 1,
         "tot_ann_cost_sr": 2,
@@ -4474,7 +4472,7 @@ def _order_market_public_columns(report: pl.DataFrame) -> pl.DataFrame:
     }
 
     def rule_column_key(name: str) -> tuple[int, int, int, int, int, int, str]:
-        """Keep reference, pooled, AFTS, and live rule sections together."""
+        """Keep each rule speed's turnover, diagnostics, and costs together."""
         matched = speed_pattern.match(name)
         if matched is None:
             aggregate_order = {
@@ -4508,19 +4506,30 @@ def _order_market_public_columns(report: pl.DataFrame) -> pl.DataFrame:
             detail_group = 0
             value_order = mode_order[mode]
         elif detail in cost_details:
-            detail_group = 2
+            detail_group = 3
             cost_mode_order = {"ref": 0, "live": 1, "pool": 2, "afts": 3}
             value_order = cost_mode_order[mode] * 10 + detail_order[detail]
+        elif mode == "ref" and detail == "pre_cost_sr":
+            detail_group = 2
+            value_order = 0
         else:
             detail_group = 1
-            value_order = mode_order[mode] * 100 + detail_order.get(detail, 99)
+            value_order = detail_order.get(detail, 99)
+            if mode == "afts":
+                # Carry's AFTS turnover source follows the pooled turnover
+                # provenance without separating the speed group.
+                value_order += 1
+        # Family and speed precede mode so a speed's ref/pool/AFTS turnover
+        # columns remain adjacent instead of being split into global mode
+        # sections. Within the speed, turnover is followed by diagnostics and
+        # then reference/live costs.
         return (
-            mode_order[mode],
             family,
             speed,
             int(ewmac_slow or 0),
             detail_group,
             value_order,
+            mode_order[mode],
             name,
         )
 

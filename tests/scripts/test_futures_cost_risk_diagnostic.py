@@ -1198,9 +1198,13 @@ def test_public_report_exposes_reference_spread_provenance():
         ],
         "ref_trade_sr": [0.003795],
         "ref_roll_sr": [0.004879],
+        "carry_5_ref_turn": [18.75],
         "carry_5_ref_trade_ann_cost_sr": [0.07246],
+        "carry_5_afts_forecast_turnover": [5.75],
+        "carry_20_ref_turn": [10.25],
         "carry_20_ref_trade_ann_cost_sr": [0.03572],
         "carry_5_pooled_forecast_turnover": [19.0933],
+        "carry_20_pooled_forecast_turnover": [9.4132],
         "carry_5_live_trade_ann_cost_sr": [0.07246],
     }))
 
@@ -1211,11 +1215,49 @@ def test_public_report_exposes_reference_spread_provenance():
     assert report.columns.index("ref_roll_sr") < report.columns.index(
         "carry_5_ref_trade_ann_cost_sr"
     )
+    carry_5_ref_turn = report.columns.index("carry_5_ref_turn")
+    assert report.columns[carry_5_ref_turn:carry_5_ref_turn + 3] == [
+        "carry_5_ref_turn",
+        "carry_5_pool_turn",
+        "carry_5_afts_turn",
+    ]
     assert report.columns.index(
-        "carry_20_ref_trade_ann_cost_sr"
-    ) < report.columns.index("carry_5_pool_turn")
-    assert report.columns.index("carry_5_pool_turn") < report.columns.index(
         "carry_5_live_trade_ann_cost_sr"
+    ) < report.columns.index("carry_20_ref_turn")
+    assert report.columns.index("carry_20_ref_turn") + 1 == (
+        report.columns.index("carry_20_pool_turn")
+    )
+
+
+def test_public_report_keeps_ewmac_reference_and_pool_turnover_adjacent():
+    """Each EWMAC speed is a contiguous rule group in the public cache."""
+    report = futures_cost_risk._public_report_schema(pl.DataFrame({
+        "symbol": ["CORN"],
+        "ewmac_4_16_ref_turn": [61.0],
+        "ewmac_4_16_ann_trades": [56.0],
+        "ewmac_4_16_pool_instrs": [40],
+        "ewmac_4_16_ref_pre_cost_sr": [0.30],
+        "ewmac_4_16_ref_trade_ann_cost_sr": [0.03],
+        "ewmac_4_16_live_trade_ann_cost_sr": [0.04],
+        "ewmac_8_32_ref_turn": [31.0],
+        "ewmac_8_32_ann_trades": [28.0],
+        "ewmac_8_32_ref_trade_ann_cost_sr": [0.02],
+    }))
+
+    assert report.columns.index("ewmac_4_16_ref_turn") + 1 == (
+        report.columns.index("ewmac_4_16_pool_turn")
+    )
+    assert report.columns.index("ewmac_4_16_pool_instrs") < (
+        report.columns.index("ewmac_4_16_ref_pre_cost_sr")
+    )
+    assert report.columns.index("ewmac_4_16_ref_pre_cost_sr") < (
+        report.columns.index("ewmac_4_16_ref_trade_ann_cost_sr")
+    )
+    assert report.columns.index(
+        "ewmac_4_16_live_trade_ann_cost_sr"
+    ) < report.columns.index("ewmac_8_32_ref_turn")
+    assert report.columns.index("ewmac_8_32_ref_turn") + 1 == (
+        report.columns.index("ewmac_8_32_pool_turn")
     )
 
 
