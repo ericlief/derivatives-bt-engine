@@ -596,7 +596,7 @@ reference, and live values look interchangeable:
 | --- | --- | --- |
 | `RULE_SPEED_MODE_VAR` | `ewmac_416_ref_turn`, `ewmac_416_pool_turn`, `ewmac_416_pool_instrs`, `ewmac_416_pool_mean_instr_pre_cost_sr`, `carry_5_ref_turn`, `carry_5_pool_turn`, `carry_5_afts_turn` | Per-instrument reference turnover, shared pooled turnover and pooled diagnostics, and the separately labeled published AFTS comparison. Pooled values repeat for every instrument. |
 | Shared reference inputs | `ref_ann_rolls`, `ref_trade_sr`, `ref_roll_sr` | Instrument-level reference inputs emitted once before the speed-specific rule fields. Roll frequency and cost rates are common across speeds and must not be repeated per rule. |
-| Rule cost results | `ewmac_416_live_tot_ann_cost_sr`, `ewmac_416_live_cost_elig` | Point-in-time executable-cost calculations from the saved snapshot and IB what-if result, grouped with the corresponding rule speed. |
+| Rule cost results | `ewmac_416_ref_tot_ann_cost_sr`, `ewmac_416_ref_cost_eligible`, `ewmac_416_live_tot_ann_cost_sr`, `ewmac_416_live_cost_eligible` | Reference and point-in-time executable-cost calculations, grouped with the corresponding rule speed. |
 
 Each cost path also has an aggregate decision: `ref_elig_ewmac_rule_count`,
 `ref_elig_ewmac_rules`, and `ref_instr_has_elig_ewmac_rule` for a complete

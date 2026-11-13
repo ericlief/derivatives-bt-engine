@@ -3996,6 +3996,11 @@ def _ewmac_public_column_name(name: str) -> str:
     }
     if name in aggregate_names:
         return aggregate_names[name]
+    matched = re.match(r"^ref_ewmac_(\d+)_(\d+)_(.+)$", name)
+    if matched is not None:
+        fast_span, slow_span, suffix = matched.groups()
+        prefix = f"ewmac_{fast_span}{slow_span}"
+        return f"{prefix}_ref_{suffix}"
     matched = re.match(r"^ewmac_(\d+)_(\d+)_(.+)$", name)
     if matched is None:
         return name
@@ -4325,6 +4330,10 @@ def _order_market_public_columns(report: pl.DataFrame) -> pl.DataFrame:
         "live_roll_ann_cost_sr": 6,
         "live_tot_ann_cost_sr": 7,
         "live_cost_elig": 8,
+        "ref_trade_ann_cost_sr": 5,
+        "ref_roll_ann_cost_sr": 6,
+        "ref_tot_ann_cost_sr": 7,
+        "ref_cost_eligible": 8,
         "pool_instrs": 0,
         "ann_trades": 0,
         "mean_instr_pre_cost_sr": 1,

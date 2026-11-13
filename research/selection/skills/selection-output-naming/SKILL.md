@@ -25,6 +25,10 @@ Examples:
   histories, used to estimate rule costs.
 - `ewmac_416_pool_instrs`: number of reference histories contributing to
   that speed's pooled estimates.
+- `ewmac_416_ref_tot_ann_cost_sr`: that instrument's annualized reference
+  trading plus roll cost in SR units for that speed.
+- `ewmac_416_live_tot_ann_cost_sr`: the equivalent point-in-time executable
+  cost result.
 - `carry_5_ref_turn`: that instrument's reference-history Carry5 turnover.
 - `carry_5_pool_turn`: pooled Carry5 turnover across reviewed reference
   histories.
