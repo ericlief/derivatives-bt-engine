@@ -93,7 +93,8 @@ from derivatives_bt_engine.calculations.ewmac import (
 )
 from derivatives_bt_engine.calculations.carry import (
     AFT_CARRY_ANNUAL_TRADES,
-    CARRY_SMOOTH_COMS,
+    CARRY_SMOOTH_SPANS,
+    CARRY_TURNOVER_SOURCE,
     build_carry_forecast,
 )
 from derivatives_bt_engine.data.futures_history import (
@@ -982,7 +983,7 @@ def estimate_pooled_ewmac_cost_baselines(
 def _carry_rule_turnover(
     frame: pl.DataFrame,
     *,
-    smooth_com: int,
+    smooth_span: int,
     annualization_days: int = MIXED_VOL_ANNUALIZATION_DAYS,
 ) -> float | None:
     """Return annual forecast turnover for one normalized carry component.
@@ -992,23 +993,35 @@ def _carry_rule_turnover(
     absolute daily forecast change annualized by 256, matching the EWMAC
     cache calculation after accounting for the different forecast scale.
     """
-    forecast_column = f"fcst_carry_{smooth_com}"
-    required = {"date", "forecast_valid", forecast_column}
+    forecast_column = f"fcst_carry_{smooth_span}"
+    required = {"date", "carry_segment", "forecast_valid", forecast_column}
     missing = required.difference(frame.columns)
     if missing:
         raise ValueError(
             f"carry turnover input missing columns: {sorted(missing)}"
         )
-    usable = (
-        frame.filter(
-            pl.col("forecast_valid")
-            & pl.col(forecast_column).is_not_null()
-            & pl.col(forecast_column).is_finite()
-        )
-        .sort("date")
-        .get_column(forecast_column)
+    ordered = frame.sort("date")
+    forecast_valid = (
+        pl.col("forecast_valid")
+        & pl.col(forecast_column).is_not_null()
+        & pl.col(forecast_column).is_finite()
     )
-    changes = usable.diff().abs().drop_nulls()
+    # Only adjacent valid observations owned by the same smoothing segment
+    # represent a daily forecast change. Filtering first would bridge source
+    # handoffs, invalid rows, or long gaps and overstate turnover.
+    changes = ordered.select(
+        pl.when(
+            forecast_valid
+            & forecast_valid.shift(1).fill_null(False)
+            & (
+                pl.col("carry_segment")
+                == pl.col("carry_segment").shift(1)
+            ).fill_null(False)
+        )
+        .then(pl.col(forecast_column).diff().abs())
+        .otherwise(None)
+        .alias("forecast_change")
+    ).get_column("forecast_change").drop_nulls()
     return (
         float(changes.mean() * annualization_days)
         if changes.len()
@@ -1021,7 +1034,7 @@ def estimate_pooled_carry_cost_baselines(
     *,
     db_path: Path | str,
     pooling_mapping_path: Path | str = DEFAULT_POOLING_MAPPING_PATH,
-    smooth_coms: tuple[int, ...] = CARRY_SMOOTH_COMS,
+    smooth_spans: tuple[int, ...] = CARRY_SMOOTH_SPANS,
 ) -> tuple[dict[int, dict[str, object]], dict[int, pl.DataFrame]]:
     """Estimate carry-rule turnover over the reviewed full PST histories.
 
@@ -1032,11 +1045,11 @@ def estimate_pooled_carry_cost_baselines(
     cache. Histories failing the declared carry coverage policy remain in the
     audit but do not contribute to the pooled turnover estimate.
     """
-    smooths = tuple(int(value) for value in smooth_coms)
+    smooths = tuple(int(value) for value in smooth_spans)
     if not smooths or any(value <= 0 for value in smooths):
-        raise ValueError("carry smoothing COMs must contain positive values")
+        raise ValueError("carry smoothing spans must contain positive values")
     if len(set(smooths)) != len(smooths):
-        raise ValueError("carry smoothing COMs must not contain duplicates")
+        raise ValueError("carry smoothing spans must not contain duplicates")
 
     universe = default_pysystemtrade_pooling_universe(
         db_path,
@@ -1048,7 +1061,7 @@ def estimate_pooled_carry_cost_baselines(
     }
     for position, instrument_code in enumerate(instrument_codes, start=1):
         history = provider.load(instrument_code)
-        result = build_carry_forecast(history, smooth_coms=smooths)
+        result = build_carry_forecast(history, smooth_spans=smooths)
         roll_audit = _roll_rate_audit(
             history.marks,
             hold_roll_cycle=history.metadata.get("hold_roll_cycle"),
@@ -1074,7 +1087,7 @@ def estimate_pooled_carry_cost_baselines(
                     "carry_forecast_exclusion": result.audit["forecast_excl"],
                     "carry_forecast_turnover": _carry_rule_turnover(
                         result.frame,
-                        smooth_com=smooth,
+                        smooth_span=smooth,
                     ),
                     **roll_audit,
                 }
@@ -1132,11 +1145,11 @@ def estimate_pooled_carry_cost_baselines(
             "carry_afts_forecast_turnover": afts_turnover,
             "carry_pool_minus_afts_forecast_turnover": difference,
             "carry_pool_to_afts_turnover_ratio": ratio,
-            "carry_turnover_source": "pooled_pst_history",
+            "carry_turnover_source": CARRY_TURNOVER_SOURCE,
             "carry_turnover_reference_source": "afts_table_40",
         }
         log.info(
-            "cost_carry_baseline complete smooth_com=%d reviewed=%d "
+            "cost_carry_baseline complete smooth_span=%d reviewed=%d "
             "eligible=%d pooled_turnover=%s afts_turnover=%s "
             "pool_to_afts_ratio=%s",
             smooth,

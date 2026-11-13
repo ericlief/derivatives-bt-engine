@@ -5,7 +5,9 @@ import polars as pl
 import pytest
 
 from derivatives_bt_engine.pipelines.portfolio_selection import (
+    CARRY_FORECAST_CACHE_VERSION,
     _cap_stitched_reference_to_snapshot,
+    _carry_forecast_cache_spec,
     _carry_rule_smooths,
     _filter_backtest_period,
     _is_micro_contract,
@@ -28,6 +30,22 @@ def test_carry_rule_smooths_parse_afts_family_in_stable_order():
     assert _carry_rule_smooths("carry120,carry5,carry60") == (5, 60, 120)
     with pytest.raises(ValueError, match="unsupported AFTS carry rule"):
         _carry_rule_smooths("carry10")
+
+
+def test_carry_forecast_cache_identity_uses_span_semantics(tmp_path):
+    """The v2 identity cannot match an old COM-based forecast artifact."""
+    _, _, identity, _ = _carry_forecast_cache_spec(
+        tmp_path,
+        artifact="carry_reference_forecast",
+        history_code="TEST",
+        history_db_identity={"path": "reference.duckdb"},
+        smooth_spans=(5, 20, 60, 120),
+        min_valid_observations=256,
+    )
+
+    assert CARRY_FORECAST_CACHE_VERSION == 2
+    assert identity["carry_smooth_spans"] == [5, 20, 60, 120]
+    assert "carry_smooth_coms" not in identity
 
 
 def test_reference_return_coverage_uses_only_valid_forecast_rows():

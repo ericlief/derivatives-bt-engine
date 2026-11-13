@@ -13,11 +13,11 @@ history database
 
 The first raw-carry implementation now lives in
 `calculations/carry.py` and is wired end to end through the selection CLI. The
-first pass follows the explicit AFTS strategy-ten specification while keeping
-the current pysystemtrade calculation semantics:
+corrected first pass follows the explicit AFTS strategy-ten specification
+while using pysystemtrade only as the curve-data boundary:
 
-- carry smoothing uses pandas-COM-equivalent EWMAs for Carry5, Carry20,
-  Carry60, and Carry120;
+- carry smoothing uses pandas/Polars span-equivalent EWMAs for Carry5,
+  Carry20, Carry60, and Carry120;
 - every smoothed rule uses a fixed scalar of 3 on this repository's
   divided-by-ten forecast scale, equivalent to Carver's scalar of 30 and
   +/-20 cap;
@@ -150,12 +150,13 @@ floored in absolute value to one calendar day, and a zero price differential
 is treated as missing. The implementation resamples intraday annualized roll
 to business days with a mean before dividing by annualized point volatility.
 
-The rule then applies pandas `raw_carry.ewm(smooth_days).mean()`. Because the
-argument is positional, `smooth_days` is pandas' `com`, not its `span`; a
-Polars port must use equivalent alpha semantics rather than silently passing
-the number as `span`. The robust configuration defines 10, 30, 60, and
-125-session variants, fixed forecast scalars of approximately 27.82, 28.38,
-28.40, and 29.37, and a +/-20 forecast cap.
+The PST rule applies pandas `raw_carry.ewm(smooth_days).mean()`. Because the
+argument is positional, `smooth_days` is pandas' `com`, not its `span`. The
+robust PST configuration defines COM 10, 30, 60, and 125 variants, with
+effective spans 21, 61, 121, and 251, plus scalars of approximately 27.82,
+28.38, 28.40, and 29.37 and a +/-20 forecast cap. This is a separate rule set:
+it is retained as a parity reference and is not used to reinterpret the AFTS
+Carry5/20/60/120 span labels.
 
 On the repository's divided-by-ten forecast convention those values are
 2.782, 2.838, 2.840, and 2.937. The implementation uses the requested common

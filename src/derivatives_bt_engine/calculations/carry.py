@@ -1,4 +1,4 @@
-"""Build pysystemtrade-compatible futures carry forecasts in Polars.
+"""Build AFTS futures carry forecasts from pysystemtrade curve data.
 
 The source-neutral history layer supplies same-session prices for a currently
 held contract and a second dated contract.  This module annualises that curve
@@ -38,16 +38,17 @@ if TYPE_CHECKING:
 
 CALENDAR_DAYS_IN_YEAR = 365.25
 CARRY_MODEL = "carry"
-# AFTS strategy ten names these variants Carry5/20/60/120.  The upstream
-# pysystemtrade rule passes ``smooth_days`` positionally to pandas ``ewm``, so
-# the values remain centre-of-mass arguments here for source parity rather
-# than being silently reinterpreted as Polars spans.
-CARRY_SMOOTH_COMS = (5, 20, 60, 120)
+# AFTS strategy ten defines Carry5/20/60/120 as pandas EWMA spans. The pinned
+# pysystemtrade implementation instead passes its own 10/30/60/125 values as
+# positional pandas ``com`` arguments; that separate convention is useful for
+# parity research but is not the final AFTS rule set implemented here.
+CARRY_SMOOTH_SPANS = (5, 20, 60, 120)
 CARRY_FORECAST_SCALAR = 3.0
 CARRY_FORECAST_CAP = 2.0
 CARRY_MAX_SMOOTHING_GAP_DAYS = 7
 CARRY_MAX_STALE_DAYS = 7
 CARRY_MIN_POST_WARMUP_COVERAGE = 0.90
+CARRY_TURNOVER_SOURCE = "pooled_pst_history_afts_span_segment_safe_v2"
 DEFAULT_TREND_FAMILY_WEIGHT = 0.60
 DEFAULT_CARRY_FAMILY_WEIGHT = 0.40
 
@@ -311,29 +312,28 @@ def _carry_segment_expression(max_gap_days: int, has_source: bool) -> pl.Expr:
 def build_carry_components(
     raw_carry_frame: pl.DataFrame,
     *,
-    smooth_coms: Iterable[int] = CARRY_SMOOTH_COMS,
+    smooth_spans: Iterable[int] = CARRY_SMOOTH_SPANS,
     forecast_scalar: float = CARRY_FORECAST_SCALAR,
     forecast_cap: float = CARRY_FORECAST_CAP,
     max_gap_days: int = CARRY_MAX_SMOOTHING_GAP_DAYS,
 ) -> CombinedForecastResult:
     """Smooth, scale, equally weight, and diversify carry forecasts.
 
-    Smoothing uses ``com=N, adjust=True``, exactly matching PST's positional
-    ``Series.ewm(N).mean()`` call rather than interpreting ``N`` as a span.
-    Every component uses the same fixed scalar; on this project's normalized
-    forecast convention PST's approximately 30 scalar is ``3.0``.  The final
-    FDM comes from the AFTS final-rule-count table.
+    Smoothing uses ``span=N, adjust=True`` for the AFTS Carry5/20/60/120
+    business-day variants. Every component uses the same fixed scalar; on
+    this project's normalized forecast convention Carver's scalar 30 is
+    ``3.0``. The final FDM comes from the AFTS final-rule-count table.
     """
     _validate_daily_frame(
         raw_carry_frame,
         {"date", "raw_carry", "carry_valid"},
         "raw carry frame",
     )
-    rules = tuple(int(value) for value in smooth_coms)
+    rules = tuple(int(value) for value in smooth_spans)
     if not rules or any(value <= 0 for value in rules):
-        raise ValueError("carry smoothing COMs must be positive")
+        raise ValueError("carry smoothing spans must be positive")
     if len(set(rules)) != len(rules):
-        raise ValueError("carry smoothing COMs must not contain duplicates")
+        raise ValueError("carry smoothing spans must not contain duplicates")
     if not math.isfinite(forecast_scalar) or forecast_scalar <= 0:
         raise ValueError("forecast_scalar must be finite and positive")
     if not math.isfinite(forecast_cap) or forecast_cap <= 0:
@@ -348,12 +348,12 @@ def build_carry_components(
         ).alias("carry_segment")
     )
     component_columns: list[str] = []
-    for smooth_com in rules:
-        smooth_column = f"smooth_carry_{smooth_com}"
-        forecast_column = f"fcst_carry_{smooth_com}"
+    for smooth_span in rules:
+        smooth_column = f"smooth_carry_{smooth_span}"
+        forecast_column = f"fcst_carry_{smooth_span}"
         frame = frame.with_columns(
             pl.col("raw_carry")
-            .ewm_mean(com=smooth_com, adjust=True, min_samples=1)
+            .ewm_mean(span=smooth_span, adjust=True, min_samples=1)
             .over("carry_segment")
             .alias(smooth_column)
         ).with_columns(
@@ -394,7 +394,7 @@ def build_carry_components(
         "forecast_invalid_obs": frame.height - valid.height,
         "forecast_start": valid.get_column("date").min() if valid.height else None,
         "forecast_end": valid.get_column("date").max() if valid.height else None,
-        "carry_smooth_coms": rules,
+        "carry_smooth_spans": rules,
         "carry_forecast_scalar": forecast_scalar,
         "carry_forecast_cap": forecast_cap,
         "carry_max_gap_days": max_gap_days,
@@ -411,7 +411,7 @@ def build_carry_components(
 def build_carry_forecast(
     history: FuturesHistory,
     *,
-    smooth_coms: Iterable[int] = CARRY_SMOOTH_COMS,
+    smooth_spans: Iterable[int] = CARRY_SMOOTH_SPANS,
     forecast_scalar: float = CARRY_FORECAST_SCALAR,
     forecast_cap: float = CARRY_FORECAST_CAP,
     max_gap_days: int = CARRY_MAX_SMOOTHING_GAP_DAYS,
@@ -445,7 +445,7 @@ def build_carry_forecast(
     )
     components = build_carry_components(
         raw,
-        smooth_coms=smooth_coms,
+        smooth_spans=smooth_spans,
         forecast_scalar=forecast_scalar,
         forecast_cap=forecast_cap,
         max_gap_days=max_gap_days,

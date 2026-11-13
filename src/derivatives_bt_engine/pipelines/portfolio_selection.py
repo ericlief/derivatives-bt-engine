@@ -116,7 +116,8 @@ from derivatives_bt_engine.calculations.carry import (
     CARRY_MAX_STALE_DAYS,
     CARRY_MIN_POST_WARMUP_COVERAGE,
     CARRY_MODEL,
-    CARRY_SMOOTH_COMS,
+    CARRY_SMOOTH_SPANS,
+    CARRY_TURNOVER_SOURCE,
     aft_final_rule_fdm,
     build_carry_forecast,
 )
@@ -195,7 +196,7 @@ SELECTION_BACKTEST_CACHE_VERSION = 1
 CASH_PNL_CACHE_VERSION = 2
 GOULDING_FORECAST_CACHE_VERSION = 3
 RETURN_TSMOM_SCALAR_CACHE_VERSION = 1
-CARRY_FORECAST_CACHE_VERSION = 1
+CARRY_FORECAST_CACHE_VERSION = 2
 
 # Production-inspired ordinary-EWMAC template. The two slowest rules receive
 # 60% in total and the three faster rules receive 40%. Rules removed by the
@@ -611,7 +612,7 @@ def _carry_rule_smooths(eligible_rules: str | Iterable[str]) -> tuple[int, ...]:
         if not normalized.isdigit():
             raise ValueError(f"invalid carry rule label: {rule!r}")
         smooth = int(normalized)
-        if smooth not in CARRY_SMOOTH_COMS:
+        if smooth not in CARRY_SMOOTH_SPANS:
             raise ValueError(f"unsupported AFTS carry rule: {rule!r}")
         smooths.append(smooth)
     if not smooths:
@@ -621,11 +622,11 @@ def _carry_rule_smooths(eligible_rules: str | Iterable[str]) -> tuple[int, ...]:
 
 def _carry_turnover_estimates(
     row: Mapping[str, object],
-    smooth_coms: Iterable[int],
+    smooth_spans: Iterable[int],
 ) -> dict[str, float]:
     """Return validated pooled PST turnover estimates for selected rules."""
     estimates: dict[str, float] = {}
-    for smooth in smooth_coms:
+    for smooth in smooth_spans:
         column = f"pool_carry_{smooth}_ann_trades"
         value = row.get(column)
         if value is None or not math.isfinite(float(value)) or float(value) <= 0:
@@ -642,18 +643,18 @@ def _carry_forecast_cache_spec(
     artifact: str,
     history_code: str,
     history_db_identity: dict[str, object],
-    smooth_coms: Iterable[int],
+    smooth_spans: Iterable[int],
     min_valid_observations: int,
     source_identity: dict[str, object] | None = None,
 ) -> tuple[Path, Path, dict[str, object], str]:
     """Resolve one static carry-forecast artifact by rules and source data."""
-    rules = tuple(int(value) for value in smooth_coms)
+    rules = tuple(int(value) for value in smooth_spans)
     identity: dict[str, object] = {
         "forecast_cache_version": CARRY_FORECAST_CACHE_VERSION,
         "signal_model": CARRY_MODEL,
         "hist_instr_code": history_code,
         "history_db": history_db_identity,
-        "carry_smooth_coms": rules,
+        "carry_smooth_spans": rules,
         "forecast_scalar": CARRY_FORECAST_SCALAR,
         "forecast_cap": CARRY_FORECAST_CAP,
         "max_smoothing_gap_days": CARRY_MAX_SMOOTHING_GAP_DAYS,
@@ -695,7 +696,7 @@ def _load_carry_forecast_result(
     audit = _cached_forecast_audit(manifest)
     if audit is None:
         return None
-    smooths = tuple(int(value) for value in identity["carry_smooth_coms"])
+    smooths = tuple(int(value) for value in identity["carry_smooth_spans"])
     weights = {f"carry{smooth}": 1.0 / len(smooths) for smooth in smooths}
     return CombinedForecastResult(
         frame=frame,
@@ -722,10 +723,10 @@ def _load_or_build_carry_forecast(
             cache_key,
         )
         return cached
-    smooths = tuple(int(value) for value in identity["carry_smooth_coms"])
+    smooths = tuple(int(value) for value in identity["carry_smooth_spans"])
     result = build_carry_forecast(
         history,
-        smooth_coms=smooths,
+        smooth_spans=smooths,
         min_valid_observations=min_valid_observations,
     )
     _write_selection_backtest_curve(
@@ -3375,7 +3376,7 @@ def _run_complete_selection(
         elif args.signal_model == CARRY_MODEL:
             reference_base_identity["signal_model"] = args.signal_model
             reference_base_identity["carry"] = {
-                "smooth_coms": carry_smooths,
+                "smooth_spans": carry_smooths,
                 "forecast_scalar": CARRY_FORECAST_SCALAR,
                 "forecast_cap": CARRY_FORECAST_CAP,
                 "max_smoothing_gap_days": CARRY_MAX_SMOOTHING_GAP_DAYS,
@@ -3386,7 +3387,7 @@ def _run_complete_selection(
                 "turnover_estimates": {
                     **carry_turnover_estimates,
                 },
-                "turnover_source": "pooled_pst_history",
+                "turnover_source": CARRY_TURNOVER_SOURCE,
                 "afts_turnover_reference": {
                     str(smooth): AFT_CARRY_ANNUAL_TRADES[smooth]
                     for smooth in carry_smooths
@@ -3569,7 +3570,7 @@ def _run_complete_selection(
                         artifact="carry_reference_forecast",
                         history_code=history_code,
                         history_db_identity=history_db_identity,
-                        smooth_coms=carry_smooths,
+                        smooth_spans=carry_smooths,
                         min_valid_observations=args.min_forecast_obs,
                     )
                     result = _load_or_build_carry_forecast(
@@ -4541,7 +4542,7 @@ def _run_complete_selection(
                         elif args.signal_model == CARRY_MODEL:
                             stitched_identity["signal_model"] = args.signal_model
                             stitched_identity["carry"] = {
-                                "smooth_coms": carry_smooths,
+                                "smooth_spans": carry_smooths,
                                 "forecast_scalar": CARRY_FORECAST_SCALAR,
                                 "forecast_cap": CARRY_FORECAST_CAP,
                                 "max_smoothing_gap_days": (
@@ -4554,7 +4555,7 @@ def _run_complete_selection(
                                 "turnover_estimates": {
                                     **carry_turnover_estimates,
                                 },
-                                "turnover_source": "pooled_pst_history",
+                                "turnover_source": CARRY_TURNOVER_SOURCE,
                                 "afts_turnover_reference": {
                                     str(smooth): AFT_CARRY_ANNUAL_TRADES[smooth]
                                     for smooth in carry_smooths
@@ -4629,7 +4630,7 @@ def _run_complete_selection(
                                     artifact="carry_stitched_forecast",
                                     history_code=history_code,
                                     history_db_identity=history_db_identity,
-                                    smooth_coms=carry_smooths,
+                                    smooth_spans=carry_smooths,
                                     min_valid_observations=args.min_forecast_obs,
                                     source_identity=stitched_source_identity,
                                 )
@@ -4865,13 +4866,13 @@ def _run_complete_selection(
         }
     elif args.signal_model == CARRY_MODEL:
         selection_policy_identity["carry"] = {
-            "available_smooth_coms": CARRY_SMOOTH_COMS,
+            "available_smooth_spans": CARRY_SMOOTH_SPANS,
             "forecast_scalar": CARRY_FORECAST_SCALAR,
             "forecast_cap": CARRY_FORECAST_CAP,
             "max_smoothing_gap_days": CARRY_MAX_SMOOTHING_GAP_DAYS,
             "max_stale_days": CARRY_MAX_STALE_DAYS,
             "min_post_warmup_coverage": CARRY_MIN_POST_WARMUP_COVERAGE,
-            "turnover_source": "pooled_pst_history",
+            "turnover_source": CARRY_TURNOVER_SOURCE,
             "afts_turnover_reference": AFT_CARRY_ANNUAL_TRADES,
         }
     for symbol in cash_symbols:

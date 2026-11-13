@@ -3,7 +3,6 @@
 from datetime import date, timedelta
 
 import numpy as np
-import pandas as pd
 import polars as pl
 import pytest
 
@@ -58,7 +57,8 @@ def test_raw_carry_annualises_curve_slope_and_point_volatility() -> None:
     assert result["carry_excl"].to_list() == ["", "zero_raw_roll"]
 
 
-def test_carry_com_smoothing_matches_pandas_and_uses_normalized_scalar() -> None:
+def test_carry_span_smoothing_matches_polars_and_uses_normalized_scalar() -> None:
+    """A Carry5 label means a five-day EWMA span, not COM five."""
     values = [0.05 + 0.01 * np.sin(index / 3.0) for index in range(40)]
     raw = pl.DataFrame(
         {
@@ -69,14 +69,25 @@ def test_carry_com_smoothing_matches_pandas_and_uses_normalized_scalar() -> None
     )
 
     result = build_carry_components(raw)
-    expected = pd.Series(values).ewm(5).mean() * CARRY_FORECAST_SCALAR
+    expected_smooth = pl.Series(values).ewm_mean(
+        span=5,
+        adjust=True,
+        min_samples=1,
+    )
+    com_smooth = pl.Series(values).ewm_mean(
+        com=5,
+        adjust=True,
+        min_samples=1,
+    )
+    expected_forecast = expected_smooth * CARRY_FORECAST_SCALAR
 
     assert result.frame["smooth_carry_5"].to_list() == pytest.approx(
-        (expected / CARRY_FORECAST_SCALAR).to_list()
+        expected_smooth.to_list()
     )
     assert result.frame["fcst_carry_5"].to_list() == pytest.approx(
-        expected.to_list()
+        expected_forecast.to_list()
     )
+    assert result.frame["smooth_carry_5"][-1] != pytest.approx(com_smooth[-1])
     assert result.weights == {
         "carry5": 0.25,
         "carry20": 0.25,
@@ -96,7 +107,7 @@ def test_carry_smoothing_restarts_at_source_handoff() -> None:
         }
     )
 
-    result = build_carry_components(raw, smooth_coms=(5,))
+    result = build_carry_components(raw, smooth_spans=(5,))
 
     assert result.frame["carry_segment"].to_list() == [1, 1, 2, 2]
     assert result.frame["smooth_carry_5"][2] == pytest.approx(-1.0)

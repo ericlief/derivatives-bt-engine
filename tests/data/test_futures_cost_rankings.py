@@ -3,6 +3,7 @@ import os
 import polars as pl
 import pytest
 
+from derivatives_bt_engine.calculations.carry import CARRY_TURNOVER_SOURCE
 from derivatives_bt_engine.data.futures_cost_rankings import (
     apply_phase2_selection_filters,
     find_latest_phase1_cost_report,
@@ -179,6 +180,12 @@ def _phase2_step1_report() -> pl.DataFrame:
         "pool_carry_20_ann_trades": [8.3281763926] * 5,
         "pool_carry_60_ann_trades": [6.3280660120] * 5,
         "pool_carry_120_ann_trades": [5.6150674825] * 5,
+        **{
+            f"pool_carry_{smooth}_turn_src": [
+                CARRY_TURNOVER_SOURCE
+            ] * 5
+            for smooth in (5, 20, 60, 120)
+        },
         "ref_trade_sr": [0.0015] * 5,
         "ref_roll_sr": [0.0025] * 5,
         "initial_margin_to_ann_dvol": [1.0] * 5,
@@ -278,6 +285,21 @@ def test_carry_selection_uses_pooled_turnover_instead_of_ewmac_rules():
     )
     assert candidates.select("elig_carry_rule_count").item() == 3
     assert candidates.select("instr_has_elig_carry_rule").item() is True
+
+
+def test_carry_selection_rejects_old_turnover_estimator_cache():
+    """COM-based turnover caches cannot silently feed the span rules."""
+    report = _phase2_step1_report().with_columns(
+        [
+            pl.lit("pooled_pst_history").alias(
+                f"pool_carry_{smooth}_turn_src"
+            )
+            for smooth in (5, 20, 60, 120)
+        ]
+    )
+
+    with pytest.raises(ValueError, match="AFTS-span, segment-safe"):
+        selection_rebalance_candidates(report, signal_model="carry")
 
 
 def test_phase2_step1_requires_current_phase1_gate_schema():

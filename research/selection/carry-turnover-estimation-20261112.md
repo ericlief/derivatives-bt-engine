@@ -2,13 +2,19 @@
 
 **Date:** 2026-11-12
 
-**Status:** implemented for the futures rule cache
+**Status:** re-audited and corrected in code; rule-cache rebuild required
 
 ## Decision
 
 Carry-rule affordability now uses turnover estimated from the reviewed
 pysystemtrade reference-history pool. The AFTS Table 40 values remain in the
 cache as comparison inputs but do not decide eligibility.
+
+The smoothing audit found that the first implementation incorrectly passed
+the AFTS labels 5/20/60/120 as pandas center-of-mass values. AFTS defines
+those numbers as EWMA spans. The implementation now uses explicit spans, and
+carry forecast cache version 2 prevents old COM-based artifacts from being
+accepted as current.
 
 This matches the existing trend-rule ownership boundary: the expensive,
 history-derived turnover estimate belongs to `futures-rule-cache`, while
@@ -59,19 +65,30 @@ than only the number of non-null forecast rows. Carry5/20/60/120 are built in
 one pass per instrument using scalar 3, component cap 2, bounded seven-day
 staleness, and the declared gap/contract validity rules.
 
+The daily difference is included only when the current and previous rows are
+valid and belong to the same carry smoothing segment. This prevents an
+invalid row, a provider handoff, or a long data gap from being counted as a
+forecast trade. The first implementation filtered invalid rows before taking
+the difference, which bridged those boundaries and inflated turnover.
+
 ## Result versus AFTS
 
-| Rule | Pooled PST | AFTS Table 40 | Difference | PST / AFTS |
+| Rule | Corrected pooled PST audit | AFTS Table 40 | Difference | PST / AFTS |
 |---|---:|---:|---:|---:|
-| Carry5 | 13.7745 | 5.75 | +8.0245 | 2.3956 |
-| Carry20 | 8.3282 | 3.12 | +5.2082 | 2.6693 |
-| Carry60 | 6.3281 | 1.82 | +4.5081 | 3.4770 |
-| Carry120 | 5.6151 | 1.22 | +4.3951 | 4.6025 |
+| Carry5 | 19.0933 | 5.75 | +13.3433 | 3.3206 |
+| Carry20 | 9.4135 | 3.12 | +6.2935 | 3.0172 |
+| Carry60 | 6.0745 | 1.82 | +4.2545 | 3.3376 |
+| Carry120 | 4.9044 | 1.22 | +3.6844 | 4.0200 |
 
-The local pooled estimates are substantially higher at every speed. The
-largest proportional difference is Carry120, whose estimate is about 4.6
-times the AFTS benchmark. Carry selection will therefore apply a stricter and
-locally reproducible cost gate than the first fixed-AFTS implementation.
+These figures reproduce the existing 171-instrument eligible pool with the
+correct span semantics and segment-safe differences. They are an audit result,
+not a replacement for the persisted rule cache: rebuild the cache before the
+next selection run. The local estimates remain above the AFTS benchmark at
+every speed, with the largest proportional difference at Carry120.
+
+For comparison, applying the correct spans but retaining the old filtered-row
+difference produced 20.1514, 10.6875, 7.4733, and 6.3388 annual trades. The
+gap to the corrected figures isolates the segment-bridging defect.
 
 ## Rule-cache and selection fields
 
@@ -84,26 +101,24 @@ The public rule cache persists, for each speed:
 - pool instrument counts, reviewed counts, history dates, and source labels.
 
 `futures-build-selection --signal-model carry` now requires all four pooled
-turnover fields. An older rule cache fails with an instruction to rebuild it;
-there is no fallback to the AFTS constants. The selection forecast audit also
-records the pooled values and the AFTS references used for that run.
+turnover fields and the source marker
+`pooled_pst_history_afts_span_segment_safe_v2`. An older rule cache fails with
+an instruction to rebuild it; there is no fallback to the AFTS constants. The
+selection forecast audit also records the pooled values and the AFTS
+references used for that run.
 
 ## Runtime and isolated selection check
 
 With all 228 PST histories already in the local history cache, rebuilding the
-four carry forecasts and pooling turnover took about six minutes on the local
-VM. The subsequent cached `futures-build-selection --candidates-only` pass
-took under one second and made no IB request. Static per-instrument forecast
-artifacts used by complete selection remain versioned under the selection
-cache; this pooled rule-cost calibration is the slower offline cache boundary.
+four carry forecasts and pooling turnover takes about six minutes on the local
+VM. Static per-instrument forecast artifacts used by complete selection are
+now versioned separately under carry forecast cache version 2; this pooled
+rule-cost calibration is the slower offline cache boundary.
 
-At the fixed $75,000 capital and 20% target-volatility screen, 187 of 215
-execution instruments retained at least one live carry rule under the pooled
-turnovers, compared with 190 under the original fixed AFTS turnovers. The
-remaining liquidity, size, data, cost, and execution gates accepted 113 of
-215 instruments in the isolated candidate pass. The pooled rule distribution
-was 181 instruments with all four rules, four without Carry5, two with only
-Carry60/120, and 28 with no live carry rule.
+The earlier fixed-$75,000 candidate counts were produced from the invalid
+COM-based rule cache and are superseded. They must not be used to assess the
+corrected carry universe; record new counts only after rebuilding the rule
+cache and rerunning selection from that frozen input.
 
 ## Reproduction
 

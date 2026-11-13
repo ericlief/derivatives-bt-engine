@@ -15,7 +15,8 @@ import polars as pl
 
 from derivatives_bt_engine.calculations.carry import (
     CARRY_MODEL,
-    CARRY_SMOOTH_COMS,
+    CARRY_SMOOTH_SPANS,
+    CARRY_TURNOVER_SOURCE,
 )
 from derivatives_bt_engine.calculations.instruments import INSTRUMENTS
 from derivatives_bt_engine.data.pysystemtrade_ib import (
@@ -47,7 +48,7 @@ DEFAULT_SELECTION_MAX_MARKET_VOLUME_PCT = 1.0
 
 CARRY_TURNOVER_AUDIT_COLUMNS = tuple(
     column
-    for smooth in CARRY_SMOOTH_COMS
+    for smooth in CARRY_SMOOTH_SPANS
     for column in (
         f"pool_carry_{smooth}_ann_trades",
         f"ref_carry_{smooth}_ann_trades",
@@ -415,6 +416,36 @@ def resolve_selection_config(
     return config
 
 
+def _validate_carry_turnover_cache(report: pl.DataFrame) -> None:
+    """Reject missing or pre-v2 carry turnover calibration inputs."""
+    required_turnover = {
+        f"pool_carry_{smooth}_ann_trades" for smooth in CARRY_SMOOTH_SPANS
+    }
+    missing_turnover = sorted(required_turnover.difference(report.columns))
+    if missing_turnover:
+        raise ValueError(
+            "carry selection requires pooled PST turnover fields "
+            f"{missing_turnover}; rebuild the input with futures-rule-cache"
+        )
+    sources_by_column = {
+        f"pool_carry_{smooth}_turn_src": report.get_column(
+            f"pool_carry_{smooth}_turn_src"
+        ).drop_nulls().unique().to_list()
+        if f"pool_carry_{smooth}_turn_src" in report.columns
+        else []
+        for smooth in CARRY_SMOOTH_SPANS
+    }
+    if any(
+        sources != [CARRY_TURNOVER_SOURCE]
+        for sources in sources_by_column.values()
+    ):
+        raise ValueError(
+            "carry selection requires AFTS-span, segment-safe pooled "
+            f"turnover source {CARRY_TURNOVER_SOURCE!r}; found "
+            f"{sources_by_column}. Rebuild the input with futures-rule-cache"
+        )
+
+
 def apply_selection_filters(
     report: pl.DataFrame,
     *,
@@ -549,19 +580,7 @@ def apply_selection_filters(
         )
     report = _attach_reference_rule_eligibility(report)
     if signal_model == CARRY_MODEL:
-        required_carry_turnover = {
-            f"pool_carry_{smooth}_ann_trades"
-            for smooth in CARRY_SMOOTH_COMS
-        }
-        missing_carry_turnover = sorted(
-            required_carry_turnover.difference(report.columns)
-        )
-        if missing_carry_turnover:
-            raise ValueError(
-                "carry selection requires pooled PST turnover fields "
-                f"{missing_carry_turnover}; rebuild the input with "
-                "futures-rule-cache"
-            )
+        _validate_carry_turnover_cache(report)
     report = _attach_carry_rule_eligibility(report)
     rule_eligible_column = (
         "instr_has_elig_carry_rule"
@@ -738,7 +757,7 @@ def _attach_carry_rule_eligibility(report: pl.DataFrame) -> pl.DataFrame:
     """
     turnover_columns = {
         smooth: f"pool_carry_{smooth}_ann_trades"
-        for smooth in CARRY_SMOOTH_COMS
+        for smooth in CARRY_SMOOTH_SPANS
     }
     required = {
         "rule_cost_lim_sr",
@@ -957,6 +976,8 @@ def selection_rebalance_candidates(
     configured reference spread and commission fields used for historical
     fixed-cost calibration when they are present.
     """
+    if signal_model == CARRY_MODEL:
+        _validate_carry_turnover_cache(report)
     if "ref_instr_has_elig_ewmac_rule" not in report.columns:
         report = _attach_reference_rule_eligibility(report)
     if "ref_instr_has_elig_carry_rule" not in report.columns:
