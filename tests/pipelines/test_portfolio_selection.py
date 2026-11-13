@@ -380,9 +380,11 @@ def test_selection_rebalance_dates_use_first_available_session():
     ]
 
 
-def test_walk_forward_selection_uses_carver_cost_and_margin_risk_calibration():
-    """Every dated review uses Carver cost and normalized historical margin."""
+def test_walk_forward_selection_uses_uniform_reference_eligibility():
+    """Stitched reviews use reference gates on both sides of the handoff."""
     args = parse_args([
+        "--signal-model",
+        "multi_ewmac",
         "--selection-rebalance",
         "monthly",
         "--min-forecast-obs",
@@ -462,9 +464,16 @@ def test_walk_forward_selection_uses_carver_cost_and_margin_risk_calibration():
 
     assert historical
     assert latest
-    assert "B" not in latest
     assert provider.review_rows[0]["selection_candidate_count"] == 3
-    assert provider.review_rows[1]["selection_candidate_count"] == 2
+    assert provider.review_rows[1]["selection_candidate_count"] == 3
+    assert all(
+        row["selection_live_execution_overlay_count"] == 0
+        for row in provider.review_rows
+    )
+    assert all(
+        not row["live_execution_overlay_active"]
+        for row in provider.review_instrument_rows
+    )
     assert provider.review_rows[0]["rank_count_ewma_state"] is None
     assert provider.review_rows[1]["rank_count_ewma_state"] == pytest.approx(
         len(historical)

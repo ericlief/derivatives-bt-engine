@@ -283,10 +283,10 @@ and MZW all had null `ref_trade_sr` and `ref_roll_sr` in the November 11
 screen. A complete yearly backtest builds its reference candidate universe by
 requiring finite reference trade and roll costs, historical data, and an
 eligible reference rule. It deliberately does not apply the current snapshot
-volume gates at this initial boundary; the stitched selector activates them
-from each instrument's verified PST-to-IB handoff. The null costs were
-therefore the direct reason all seven overlays were absent from the 170-row
-saved candidate reports, including MZC and MZM.
+volume gates. The same reference universe applies uniformly across the PST and
+IB portions of a complete stitched backtest. The null costs were therefore the
+direct reason all seven overlays were absent from the 170-row saved candidate
+reports, including MZC and MZM.
 
 Replaying that same reference candidate filter against the corrected November
 13 screen produces 177 candidates: the only additions are those seven
@@ -303,14 +303,12 @@ overlays, with no removals.
 | MZW | 0.004395 | 0.005482 | 0.5802% | eligible |
 
 This distinction matters for MZM and MZC: both now belong to the stitched
-backtest's reference candidate universe and can be evaluated over the PST
-segment. At their IB-tail handoff, however, the scheduled selector begins
-enforcing current volume and market-participation constraints. Their minimum
-executable positions breach the configured 1% market-risk-volume limit, so
-they are infeasible in that live tail as well as in candidate-only live
-selection. MRB is the only other named micro route still absent from the
-corrected reference universe; it has finite reference costs but no eligible
-reference rule.
+backtest's reference candidate universe across both its PST and IB segments.
+Their minimum executable positions breach the configured 1%
+market-risk-volume limit only in the separate candidate-only live execution
+screen. MRB is the only other named micro route still absent from the corrected
+reference universe; it has finite reference costs but no eligible reference
+rule.
 
 Selection after the candidate gate also explains why every candidate micro is
 not in the final book. These scenarios use `full1`, and the saved EWMAC trials

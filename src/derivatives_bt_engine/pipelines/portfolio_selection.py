@@ -2,11 +2,12 @@
 
 The persisted rule-cost cache supplies executable symbols, reference-history
 identifiers, costs, dollar volatility, and eligible EWMAC rules. This command
-first applies the requested account, cost, risk-size, liquidity, data, and
-execution filters and saves that candidate set. It can then run the full
-greedy selection with multi speed EWMAC, the continuous return TSMOM baseline,
-or monthly Goulding forecasts, using three deliberately different dataframe
-collections:
+calculates the requested live cost, size, liquidity, data, and execution
+screen. Candidate-only mode saves that executable universe; complete mode
+instead uses uniform reference-cost eligibility for its full historical
+replay. It can run the greedy selection with multi speed EWMAC, the continuous
+return TSMOM baseline, monthly Goulding forecasts, or Carry, using deliberately
+different dataframe collections:
 
 ``frames_by_history``
     One daily component-forecast frame or source-neutral history per unique
@@ -1076,22 +1077,34 @@ def parse_args(argv=None, *, complete_default: bool = False):
     parser.add_argument(
         "--liquidity-ann-trades",
         type=float,
-        help="Annual trades used by the market-participation screen (default: 25.6).",
+        help=(
+            "Annual trades used by the live candidate-only market-"
+            "participation screen (default: 25.6)."
+        ),
     )
     parser.add_argument(
         "--liquidity-business-days",
         type=int,
-        help="Business days used to convert annual trades to daily risk (default: 256).",
+        help=(
+            "Business days used by the live candidate-only liquidity screen "
+            "to convert annual trades to daily risk (default: 256)."
+        ),
     )
     parser.add_argument(
         "--max-market-volume-pct",
         type=float,
-        help="Maximum strategy share of daily market risk volume (default: 1).",
+        help=(
+            "Maximum strategy share of daily market risk volume for live "
+            "candidate-only selection (default: 1)."
+        ),
     )
     parser.add_argument(
         "--min-daily-volume",
         type=float,
-        help="Minimum mean executable-contract volume (default: 100).",
+        help=(
+            "Minimum mean executable-contract volume for live candidate-only "
+            "selection (default: 100)."
+        ),
     )
     completion = parser.add_mutually_exclusive_group()
     completion.add_argument(
@@ -2242,33 +2255,6 @@ class _WalkForwardSelectionProvider:
             daily_dollar_vol = self._finite(latest["daily_dvol"][0])
             fx_to_usd = self._finite(latest["fx_to_usd"][0])
             turnover = self._finite(audit.get("comb_turnover"))
-            live_tail_start = self.live_tail_start_by_symbol.get(symbol)
-            live_execution_overlay = (
-                live_tail_start is not None and review_date >= live_tail_start
-            )
-            if live_execution_overlay:
-                live_rejections = []
-                if not bool(row.get("volume_elig")):
-                    live_rejections.append("volume_ineligible")
-                if not bool(row.get("exec_elig")):
-                    live_rejections.append("execution_ineligible")
-                if row.get("ib_avail") != "contract_qualified":
-                    live_rejections.append("ib_contract_unqualified")
-                if live_rejections:
-                    logger.debug(
-                        "walk_forward_selection candidate_rejected date=%s "
-                        "symbol=%s reason=live_execution_overlay details=%s "
-                        "live_tail_start=%s",
-                        review_date,
-                        symbol,
-                        ",".join(live_rejections),
-                        live_tail_start,
-                    )
-                    continue
-            average_volume = (
-                self._finite(row.get("avg_daily_volume"))
-                if live_execution_overlay else None
-            )
             margin_to_ann_dvol = self._finite(
                 row.get("initial_margin_to_ann_dvol")
             )
@@ -2279,10 +2265,6 @@ class _WalkForwardSelectionProvider:
                 or fx_to_usd is None
                 or fx_to_usd <= 0
                 or turnover is None
-                or (
-                    live_execution_overlay
-                    and (average_volume is None or average_volume <= 0)
-                )
                 or ann_rolls is None
             ):
                 continue
@@ -2363,11 +2345,8 @@ class _WalkForwardSelectionProvider:
                 economic_subclass=str(row["econ_subcls"]),
                 econ_family=str(row.get("econ_fam_id") or ""),
                 is_micro_contract=_is_micro_contract(row),
-                mkt_risk_vol_day=(
-                    average_volume * annual_dollar_vol
-                    if average_volume is not None else None
-                ),
-                enforce_market_participation=live_execution_overlay,
+                mkt_risk_vol_day=None,
+                enforce_market_participation=False,
                 initial_margin_usd=initial_margin,
                 roll_sr=roll_cost / annual_dollar_vol,
                 ann_rolls=ann_rolls,
@@ -2872,11 +2851,10 @@ class _WalkForwardSelectionProvider:
                 "preference_rank": preference_ranks.get(symbol),
                 "symbol": symbol,
                 "live_tail_start": self.live_tail_start_by_symbol.get(symbol),
-                "live_execution_overlay_active": (
-                    self.live_tail_start_by_symbol.get(symbol) is not None
-                    and review_date
-                    >= self.live_tail_start_by_symbol[symbol]
-                ),
+                # The handoff is data lineage only. Present-day execution
+                # gates belong to candidate-only live selection and never
+                # alter a complete historical backtest.
+                "live_execution_overlay_active": False,
                 "live_volume_eligible": source.get("volume_elig"),
                 "live_execution_eligible": source.get("exec_elig"),
                 "live_ib_availability": source.get("ib_avail"),
@@ -4021,9 +3999,8 @@ def _run_complete_selection(
     historical_return_sources = {
         symbol: "reference" for symbol in cash_symbols
     }
-    # A symbol enters the live execution overlay only at its verified direct
-    # PST-to-IB handoff. Reference-only reviews intentionally have no dated
-    # volume observation and therefore do not inherit today's snapshot gates.
+    # Preserve each verified direct PST-to-IB handoff as data-lineage metadata.
+    # It changes cash-history ownership but never historical eligibility.
     live_tail_start_by_symbol: dict[str, date] = {}
     if args.ib_history_db is not None:
         # Construction remains pinned to the long reference histories above.
@@ -5755,9 +5732,6 @@ def run(
     selected = (
         selection_rebalance_candidates(
             report,
-            apply_live_execution_gates=(
-                args.selection_rebalance == "static"
-            ),
             signal_model=args.signal_model,
         )
         if args.complete

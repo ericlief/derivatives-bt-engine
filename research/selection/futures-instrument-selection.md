@@ -1094,22 +1094,15 @@ becomes feasible as equity grows. Per-review historical annual dollar
 volatility, account capital, contract granularity, and margin constraints are
 then applied by the greedy selector.
 
-At each instrument's verified PST-to-IB handoff, scheduled selection activates
-the current snapshot's minimum-volume gate, IB execution and contract-
-qualification gates, and market-participation calculation. Candidate-only
-live selection and a complete static book apply the same gates immediately;
-the static replay still uses reference costs. The older PST prefix has no
-historical volume series in the reference database, so its participation
-estimate remains null and the participation gate is explicitly disabled;
-today's volume is never backfilled into 1970s-2024 reviews. The IB-tail overlay
-uses the latest snapshot volume rather than a dated as-of volume series. It is
-therefore a present-executability overlay, not a causal historical liquidity
-model, and its effect on tail performance has not been independently
-backtested. Rerun the same reference history with and without an updated
-snapshot only as an execution sensitivity, not as evidence of historical
-liquidity alpha. Trial allocation rows expose `mkt_participation_enforced`;
-review-instrument rows expose the handoff date, overlay state, volume and
-execution gates, and IB availability used at that review.
+The verified PST-to-IB handoff changes only the source that owns returns,
+contract marks, and cash P&L. It does not change the eligible universe or turn
+on the current snapshot's volume, market-participation, IB qualification, or
+execution gates. Static and scheduled complete backtests therefore apply one
+uniform reference eligibility policy across the full stitched history. Their
+trial rows report `mkt_participation_enforced=false`, while the handoff date and
+current live fields remain available as diagnostics. Candidate-only live
+selection is the separate present-day execution screen and applies those live
+gates immediately.
 
 Every dated backtest segment, including a static complete replay and the final
 scheduled segment, uses the configured reference one-way spread and commission

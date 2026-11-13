@@ -275,9 +275,13 @@ def test_phase2_step1_does_not_recalculate_phase1_metrics():
     assert selected.get_column("pct_mkt_volume").to_list() == [99.0]
 
 
-def test_scheduled_selection_uses_reference_gates_before_live_tail():
-    """Historical reviews ignore current size, liquidity, and IB availability."""
-    report = _phase2_step1_report()
+def test_complete_selection_uses_reference_gates_across_stitched_history():
+    """Historical selection never depends on current execution fields."""
+    report = _phase2_step1_report().drop(
+        "volume_elig",
+        "exec_elig",
+        "ib_avail",
+    )
 
     candidates = selection_rebalance_candidates(report)
 
@@ -287,18 +291,6 @@ def test_scheduled_selection_uses_reference_gates_before_live_tail():
         "BIG",
         "NOIB",
     ]
-
-
-def test_complete_static_selection_retains_live_execution_gates():
-    """A present-day static book uses ref costs but remains executable now."""
-    report = _phase2_step1_report()
-
-    candidates = selection_rebalance_candidates(
-        report,
-        apply_live_execution_gates=True,
-    )
-
-    assert candidates.get_column("symbol").to_list() == ["PASS", "BIG"]
 
 
 def test_carry_selection_uses_pooled_turnover_instead_of_ewmac_rules():

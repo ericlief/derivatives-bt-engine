@@ -3,8 +3,9 @@
 The rule-cost cache is the durable boundary between expensive historical
 EWMAC calibration and cheap portfolio-scenario filtering. This module keeps
 legacy report readers working, but new selection runs derive their
-capital, cost, size, liquidity, data, and execution gates from the cached
-market and rule inputs each time.
+capital, cost, size, liquidity, data, and execution diagnostics from the
+cached market and rule inputs each time. Candidate-only live selection applies
+the executable gates; complete backtests use the reference-cost universe.
 """
 
 import re
@@ -952,7 +953,6 @@ def selection_candidates(report: pl.DataFrame) -> pl.DataFrame:
 def selection_rebalance_candidates(
     report: pl.DataFrame,
     *,
-    apply_live_execution_gates: bool = False,
     signal_model: str = "multi_ewmac",
 ) -> pl.DataFrame:
     """Return the reference-cost universe for a complete backtest.
@@ -963,15 +963,12 @@ def selection_rebalance_candidates(
     Scheduled selection also avoids the initial account-size gate because a
     contract rejected at initial capital can become feasible as equity grows.
     Current volume, market participation, IB qualification, and execution
-    gates do not define the older reference universe because those snapshot
-    observations contain no information about historical liquidity. The
-    scheduled selector reapplies them from each instrument's IB-tail handoff
-    onward. Set ``apply_live_execution_gates`` for a complete static book,
-    whose membership is a present-day executable selection even though its
-    replay uses reference costs. Candidate-only selection also applies them
-    immediately.
-    The selector later applies its sizing, dated liquidity, and margin
-    constraints.
+    gates do not define a historical reference universe because point-in-time
+    snapshot observations contain no information about historical liquidity.
+    This remains true across the PST-to-IB data handoff: stitching changes data
+    ownership, not selection eligibility. Candidate-only live selection applies
+    the executable gates separately. The historical selector later applies its
+    sizing and margin constraints.
 
     The returned schema matches :func:`selection_candidates`, including the
     configured reference spread and commission fields used for historical
@@ -1002,12 +999,9 @@ def selection_rebalance_candidates(
         "ref_trade_sr",
         "ref_roll_sr",
         "cost_lim_sr",
-        "volume_elig",
         "hist_data_elig",
         rule_flag,
         rule_list,
-        "exec_elig",
-        "ib_avail",
         "symbol",
         "asset_cls",
         "econ_subcls",
@@ -1028,12 +1022,6 @@ def selection_rebalance_candidates(
         & pl.col("hist_data_elig").fill_null(False)
         & pl.col(rule_flag).fill_null(False)
     )
-    if apply_live_execution_gates:
-        gate &= (
-            pl.col("volume_elig").fill_null(False)
-            & pl.col("exec_elig").fill_null(False)
-            & (pl.col("ib_avail").fill_null("") == "contract_qualified")
-        )
     selected = report.filter(gate).with_columns(
         # Complete historical selection consumes the ordinary cost columns.
         # Replace them at this boundary so every downstream reference return,
