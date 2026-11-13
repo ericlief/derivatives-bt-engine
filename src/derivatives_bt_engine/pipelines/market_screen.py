@@ -4312,7 +4312,8 @@ def _order_market_public_columns(report: pl.DataFrame) -> pl.DataFrame:
         and name not in selected_set
     ]
     speed_pattern = re.compile(
-        r"^(?:ewmac_(\d+)_\d+|carry_(\d+))_(ref|pool|afts|live)_(.+)$"
+        r"^(?:ewmac_(4|8|16|32|64)(?:16|32|64|128|256)|carry_(\d+))_"
+        r"(ref|pool|afts|live)_(.+)$"
     )
     detail_order = {
         "ref_turn": 0,
