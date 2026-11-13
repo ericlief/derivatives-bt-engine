@@ -23,9 +23,10 @@ the current pysystemtrade calculation semantics:
   +/-20 cap;
 - the cost-eligible carry rules have equal pre-FDM weights and a +/-2 final
   cap;
-- rule eligibility uses AFTS Table 40 annual turnover estimates of 5.75,
-  3.12, 1.82, and 1.22 respectively, combined with each instrument's trade
-  and roll SR costs; it does not reuse EWMAC turnover;
+- rule eligibility uses Carry5/20/60/120 turnover estimated over the same
+  reviewed full PST histories used by the trend rule cache, combined with
+  each instrument's trade and roll SR costs; the AFTS Table 40 values remain
+  adjacent reference fields rather than eligibility inputs;
 - the final-rule-count FDM table from AFTS Table 52 is the selected policy,
   giving 1.23 for four carry rules and 1.34 for five EWMAC plus four carry
   rules;
@@ -62,13 +63,15 @@ carry forecast and reference-return coverage audit. Thirty-nine failed the
 declared 90% carry-coverage floor and two lacked the minimum 256 valid forecast
 observations.
 
-The cost gate retained all four rules for 170 candidates, Carry20/60/120 for
-one, and Carry60/120 for two. The resulting FDM values are therefore 1.23,
-1.03, and 1.02 from the selected final-rule-count table. The final 2026 review
-selected 11 instruments at the account's integer-contract and 50% book-margin
-limits. The stitched cash panel has unique `(symbol, date)` identities, no
-invalid P&L rows while an instrument is active, and reconciles to the public
-portfolio curve within the shared report-rounding tolerance.
+This audit used the first fixed-AFTS turnover gate. It retained all four rules
+for 170 candidates, Carry20/60/120 for one, and Carry60/120 for two. The final
+2026 review selected 11 instruments at the account's integer-contract and 50%
+book-margin limits. Its stitching and cash-P&L integrity results remain valid,
+but its eligible rule sets and portfolio result are superseded by the pooled
+turnover policy and must be rerun from a rebuilt rule cache.
+
+The implemented pooled estimates and their AFTS comparison are documented in
+[carry-turnover-estimation-20261112.md](carry-turnover-estimation-20261112.md).
 
 This is an implementation and integrity result, not evidence that carry will
 put food on the table. The maximal-history fixed-cap run is useful as a smoke

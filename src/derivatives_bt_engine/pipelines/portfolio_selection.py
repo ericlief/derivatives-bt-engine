@@ -611,12 +611,29 @@ def _carry_rule_smooths(eligible_rules: str | Iterable[str]) -> tuple[int, ...]:
         if not normalized.isdigit():
             raise ValueError(f"invalid carry rule label: {rule!r}")
         smooth = int(normalized)
-        if smooth not in AFT_CARRY_ANNUAL_TRADES:
+        if smooth not in CARRY_SMOOTH_COMS:
             raise ValueError(f"unsupported AFTS carry rule: {rule!r}")
         smooths.append(smooth)
     if not smooths:
         raise ValueError("carry forecast requires at least one eligible rule")
     return tuple(sorted(set(smooths)))
+
+
+def _carry_turnover_estimates(
+    row: Mapping[str, object],
+    smooth_coms: Iterable[int],
+) -> dict[str, float]:
+    """Return validated pooled PST turnover estimates for selected rules."""
+    estimates: dict[str, float] = {}
+    for smooth in smooth_coms:
+        column = f"pool_carry_{smooth}_ann_trades"
+        value = row.get(column)
+        if value is None or not math.isfinite(float(value)) or float(value) <= 0:
+            raise ValueError(
+                f"carry selection missing positive pooled turnover {column}"
+            )
+        estimates[str(smooth)] = float(value)
+    return estimates
 
 
 def _carry_forecast_cache_spec(
@@ -1608,11 +1625,14 @@ def _signal_public_provenance(
         ),
         None,
     )
-    return (
-        frame.rename({provider_column: "ref_instr_code"})
-        if provider_column is not None
-        else frame
-    )
+    if provider_column is None:
+        return frame
+    # Replayed full screens can already contain the normalized target beside
+    # the provider-specific source. The source is authoritative here; remove
+    # the stale target before renaming so report normalization is idempotent.
+    if "ref_instr_code" in frame.columns:
+        frame = frame.drop("ref_instr_code")
+    return frame.rename({provider_column: "ref_instr_code"})
 
 
 def _default_output_path(
@@ -3277,6 +3297,10 @@ def _run_complete_selection(
                 for smooth in carry_smooths
             }
             forecast_fdm = aft_final_rule_fdm(len(carry_smooths))
+            carry_turnover_estimates = _carry_turnover_estimates(
+                row,
+                carry_smooths,
+            )
         elif args.signal_model in DIRECT_SIGNAL_MODELS:
             rules: list[str] = []
             forecast_weights = {args.signal_model: 1.0}
@@ -3360,6 +3384,10 @@ def _run_complete_selection(
                     CARRY_MIN_POST_WARMUP_COVERAGE
                 ),
                 "turnover_estimates": {
+                    **carry_turnover_estimates,
+                },
+                "turnover_source": "pooled_pst_history",
+                "afts_turnover_reference": {
                     str(smooth): AFT_CARRY_ANNUAL_TRADES[smooth]
                     for smooth in carry_smooths
                 },
@@ -3726,6 +3754,22 @@ def _run_complete_selection(
             "elig_carry_rules": str(row.get("elig_carry_rules") or ""),
             "forecast_weights": json.dumps(forecast_weights, sort_keys=True),
             "fdm": forecast_fdm,
+            "carry_turnover_estimates": (
+                json.dumps(carry_turnover_estimates, sort_keys=True)
+                if args.signal_model == CARRY_MODEL
+                else ""
+            ),
+            "carry_turnover_reference": (
+                json.dumps(
+                    {
+                        str(smooth): AFT_CARRY_ANNUAL_TRADES[smooth]
+                        for smooth in carry_smooths
+                    },
+                    sort_keys=True,
+                )
+                if args.signal_model == CARRY_MODEL
+                else ""
+            ),
             "comb_turnover": combined_turnover,
             "ann_trade_cost_sr": annual_cost.ann_trade_cost_sr,
             "ann_roll_cost_sr": annual_cost.ann_roll_cost_sr,
@@ -4414,6 +4458,12 @@ def _run_complete_selection(
                             stitched_forecast_fdm = aft_final_rule_fdm(
                                 len(carry_smooths)
                             )
+                            carry_turnover_estimates = (
+                                _carry_turnover_estimates(
+                                    row,
+                                    carry_smooths,
+                                )
+                            )
                         elif args.signal_model in DIRECT_SIGNAL_MODELS:
                             rules = []
                             stitched_forecast_weights = {
@@ -4502,6 +4552,10 @@ def _run_complete_selection(
                                     CARRY_MIN_POST_WARMUP_COVERAGE
                                 ),
                                 "turnover_estimates": {
+                                    **carry_turnover_estimates,
+                                },
+                                "turnover_source": "pooled_pst_history",
+                                "afts_turnover_reference": {
                                     str(smooth): AFT_CARRY_ANNUAL_TRADES[smooth]
                                     for smooth in carry_smooths
                                 },
@@ -4817,7 +4871,8 @@ def _run_complete_selection(
             "max_smoothing_gap_days": CARRY_MAX_SMOOTHING_GAP_DAYS,
             "max_stale_days": CARRY_MAX_STALE_DAYS,
             "min_post_warmup_coverage": CARRY_MIN_POST_WARMUP_COVERAGE,
-            "turnover_estimates": AFT_CARRY_ANNUAL_TRADES,
+            "turnover_source": "pooled_pst_history",
+            "afts_turnover_reference": AFT_CARRY_ANNUAL_TRADES,
         }
     for symbol in cash_symbols:
         candidate = candidate_by_symbol[symbol]

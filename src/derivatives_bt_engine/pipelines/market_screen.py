@@ -10,7 +10,8 @@ The diagnostic deliberately separates research history from execution data:
   order supplies current commission and margin; point value, currencies, and
   FX conversion remain explicit report inputs.
 * the reviewed normalization pool supplies causal EWMAC baselines for the
-  4/16, 8/32, 16/64, 32/128, and 64/256 rules; and
+  4/16, 8/32, 16/64, 32/128, and 64/256 rules plus full-history turnover for
+  Carry5, Carry20, Carry60, and Carry120; and
 * each execution row combines its own one-way costs and current dollar risk
   with pooled rule turnover and its representative roll policy.
 
@@ -73,6 +74,7 @@ from derivatives_bt_engine.data.pysystemtrade_ib import (
 )
 from derivatives_bt_engine.data.pysystemtrade_pooling import (
     DEFAULT_POOLING_MAPPING_PATH,
+    default_pysystemtrade_pooling_universe,
 )
 from derivatives_bt_engine.strats.multi_speed_ewmac import (
     build_ewmac_rule_forecast,
@@ -88,6 +90,11 @@ from derivatives_bt_engine.calculations.ewmac import (
     EWMAC_FORECAST_TARGET_ABS,
     EWMAC_SCALAR_MIN_PERIODS,
     EwmacRule,
+)
+from derivatives_bt_engine.calculations.carry import (
+    AFT_CARRY_ANNUAL_TRADES,
+    CARRY_SMOOTH_COMS,
+    build_carry_forecast,
 )
 from derivatives_bt_engine.data.futures_history import (
     DEFAULT_PYSYSTEMTRADE_DB_PATH,
@@ -971,6 +978,176 @@ def estimate_pooled_ewmac_cost_baselines(
     return summaries, metrics
 
 
+def _carry_rule_turnover(
+    frame: pl.DataFrame,
+    *,
+    smooth_com: int,
+    annualization_days: int = MIXED_VOL_ANNUALIZATION_DAYS,
+) -> float | None:
+    """Return annual forecast turnover for one normalized carry component.
+
+    Carry forecasts use this repository's divided-by-ten Carver scale, whose
+    target average absolute forecast is one. Turnover is therefore the mean
+    absolute daily forecast change annualized by 256, matching the EWMAC
+    cache calculation after accounting for the different forecast scale.
+    """
+    forecast_column = f"fcst_carry_{smooth_com}"
+    required = {"date", "forecast_valid", forecast_column}
+    missing = required.difference(frame.columns)
+    if missing:
+        raise ValueError(
+            f"carry turnover input missing columns: {sorted(missing)}"
+        )
+    usable = (
+        frame.filter(
+            pl.col("forecast_valid")
+            & pl.col(forecast_column).is_not_null()
+            & pl.col(forecast_column).is_finite()
+        )
+        .sort("date")
+        .get_column(forecast_column)
+    )
+    changes = usable.diff().abs().drop_nulls()
+    return (
+        float(changes.mean() * annualization_days)
+        if changes.len()
+        else None
+    )
+
+
+def estimate_pooled_carry_cost_baselines(
+    provider: PysystemtradeHistoryProvider,
+    *,
+    db_path: Path | str,
+    pooling_mapping_path: Path | str = DEFAULT_POOLING_MAPPING_PATH,
+    smooth_coms: tuple[int, ...] = CARRY_SMOOTH_COMS,
+) -> tuple[dict[int, dict[str, object]], dict[int, pl.DataFrame]]:
+    """Estimate carry-rule turnover over the reviewed full PST histories.
+
+    Each reviewed pooling member contributes its complete reference history.
+    Instrument turnover uses the same annualized forecast-change convention
+    as EWMAC. The pool then weights instrument estimates by history rows, so
+    the carry cache has the same sample and weighting policy as the trend
+    cache. Histories failing the declared carry coverage policy remain in the
+    audit but do not contribute to the pooled turnover estimate.
+    """
+    smooths = tuple(int(value) for value in smooth_coms)
+    if not smooths or any(value <= 0 for value in smooths):
+        raise ValueError("carry smoothing COMs must contain positive values")
+    if len(set(smooths)) != len(smooths):
+        raise ValueError("carry smoothing COMs must not contain duplicates")
+
+    universe = default_pysystemtrade_pooling_universe(
+        db_path,
+        mapping_path=pooling_mapping_path,
+    )
+    instrument_codes = universe.get_column("instrument_code").to_list()
+    metric_rows: dict[int, list[dict[str, object]]] = {
+        smooth: [] for smooth in smooths
+    }
+    for position, instrument_code in enumerate(instrument_codes, start=1):
+        history = provider.load(instrument_code)
+        result = build_carry_forecast(history, smooth_coms=smooths)
+        roll_audit = _roll_rate_audit(
+            history.marks,
+            hold_roll_cycle=history.metadata.get("hold_roll_cycle"),
+        )
+        for smooth in smooths:
+            metric_rows[smooth].append(
+                {
+                    "instrument_code": instrument_code,
+                    "strategy_history_start": result.frame.get_column(
+                        "date"
+                    ).min(),
+                    "strategy_history_end": result.frame.get_column(
+                        "date"
+                    ).max(),
+                    "strategy_history_observations": result.frame.height,
+                    "strategy_forecast_observations": result.audit[
+                        "forecast_valid_obs"
+                    ],
+                    "strategy_forecast_coverage": result.audit[
+                        "forecast_post_warmup_coverage"
+                    ],
+                    "carry_forecast_eligible": result.audit["forecast_elig"],
+                    "carry_forecast_exclusion": result.audit["forecast_excl"],
+                    "carry_forecast_turnover": _carry_rule_turnover(
+                        result.frame,
+                        smooth_com=smooth,
+                    ),
+                    **roll_audit,
+                }
+            )
+        if position % 25 == 0 or position == len(instrument_codes):
+            log.info(
+                "cost_carry_baseline progress completed=%d total=%d",
+                position,
+                len(instrument_codes),
+            )
+
+    summaries: dict[int, dict[str, object]] = {}
+    metrics_by_rule: dict[int, pl.DataFrame] = {}
+    for smooth in smooths:
+        metrics = pl.DataFrame(
+            metric_rows[smooth], infer_schema_length=None
+        ).sort("instrument_code")
+        metrics_by_rule[smooth] = metrics
+        valid = metrics.filter(
+            pl.col("carry_forecast_eligible")
+            & pl.col("carry_forecast_turnover").is_not_null()
+            & pl.col("carry_forecast_turnover").is_finite()
+        )
+        weight = pl.col("strategy_history_observations").cast(pl.Float64)
+        weight_total = valid.select(weight.sum()).item()
+        pooled_turnover = (
+            valid.select(
+                (pl.col("carry_forecast_turnover") * weight).sum()
+                / weight.sum()
+            ).item()
+            if weight_total
+            else None
+        )
+        afts_turnover = float(AFT_CARRY_ANNUAL_TRADES[smooth])
+        difference = (
+            float(pooled_turnover) - afts_turnover
+            if pooled_turnover is not None
+            else None
+        )
+        ratio = (
+            float(pooled_turnover) / afts_turnover
+            if pooled_turnover is not None
+            else None
+        )
+        summaries[smooth] = {
+            "carry_pool_reviewed_instruments": metrics.height,
+            "carry_pool_instruments": valid.height,
+            "carry_pool_history_start": metrics.get_column(
+                "strategy_history_start"
+            ).min(),
+            "carry_pool_history_end": metrics.get_column(
+                "strategy_history_end"
+            ).max(),
+            "carry_pooled_forecast_turnover": pooled_turnover,
+            "carry_afts_forecast_turnover": afts_turnover,
+            "carry_pool_minus_afts_forecast_turnover": difference,
+            "carry_pool_to_afts_turnover_ratio": ratio,
+            "carry_turnover_source": "pooled_pst_history",
+            "carry_turnover_reference_source": "afts_table_40",
+        }
+        log.info(
+            "cost_carry_baseline complete smooth_com=%d reviewed=%d "
+            "eligible=%d pooled_turnover=%s afts_turnover=%s "
+            "pool_to_afts_ratio=%s",
+            smooth,
+            metrics.height,
+            valid.height,
+            pooled_turnover,
+            afts_turnover,
+            ratio,
+        )
+    return summaries, metrics_by_rule
+
+
 def _configured_cost_estimate(
     instr: dict,
     report_row: dict,
@@ -978,6 +1155,7 @@ def _configured_cost_estimate(
     pooled_summaries: Optional[dict[int, dict[str, object]]],
     strategy_metrics_by_rule: Optional[dict[int, dict[str, object]]],
     rule_cost_limit_sr: float,
+    carry_summaries: Optional[dict[int, dict[str, object]]] = None,
 ) -> dict[str, object]:
     """Calculate pooled-rule diagnostics and reference/live annual SR costs.
 
@@ -1066,12 +1244,19 @@ def _configured_cost_estimate(
         rolls_per_year = recent_rolls_per_year
         roll_rate_source = "recent_observed_fallback"
     else:
-        rolls_per_year = observed_rolls_per_year
-        roll_rate_source = (
-            "full_history_observed_fallback"
-            if rolls_per_year is not None
-            else "unavailable"
+        cached_rolls_per_year = _nonnegative_finite(
+            report_row.get("strategy_ref_ann_rolls")
         )
+        rolls_per_year = observed_rolls_per_year or cached_rolls_per_year
+        if observed_rolls_per_year is not None:
+            roll_rate_source = "full_history_observed_fallback"
+        elif cached_rolls_per_year is not None:
+            roll_rate_source = str(
+                report_row.get("strategy_ref_roll_rate_source")
+                or "cached_snapshot"
+            )
+        else:
+            roll_rate_source = "unavailable"
     common.update(
         strategy_ref_ann_rolls=rolls_per_year,
         strategy_ref_roll_rate_source=roll_rate_source,
@@ -1109,6 +1294,41 @@ def _configured_cost_estimate(
                 "ewmac_pre_cost_sharpe"
             ),
             f"{prefix}_ann_rolls": rolls_per_year,
+        })
+
+    for smooth, summary in sorted((carry_summaries or {}).items()):
+        prefix = f"carry_{smooth}"
+        common.update({
+            f"{prefix}_pooled_forecast_turnover": _positive_finite(
+                summary.get("carry_pooled_forecast_turnover")
+            ),
+            f"{prefix}_afts_forecast_turnover": _positive_finite(
+                summary.get("carry_afts_forecast_turnover")
+            ),
+            f"{prefix}_pool_minus_afts_forecast_turnover": summary.get(
+                "carry_pool_minus_afts_forecast_turnover"
+            ),
+            f"{prefix}_pool_to_afts_turnover_ratio": summary.get(
+                "carry_pool_to_afts_turnover_ratio"
+            ),
+            f"{prefix}_pool_instruments": summary.get(
+                "carry_pool_instruments"
+            ),
+            f"{prefix}_pool_reviewed_instruments": summary.get(
+                "carry_pool_reviewed_instruments"
+            ),
+            f"{prefix}_pool_history_start": summary.get(
+                "carry_pool_history_start"
+            ),
+            f"{prefix}_pool_history_end": summary.get(
+                "carry_pool_history_end"
+            ),
+            f"{prefix}_turnover_source": summary.get(
+                "carry_turnover_source"
+            ),
+            f"{prefix}_turnover_reference_source": summary.get(
+                "carry_turnover_reference_source"
+            ),
         })
 
     carver_spread_points = _nonnegative_finite(instr.get("carver_spread_points"))
@@ -1210,23 +1430,24 @@ def _configured_cost_estimate(
     reference_baselines_available = bool(reference_rule_eligibility) and all(
         eligible is not None for eligible in reference_rule_eligibility
     )
-    common.update({
-        "ref_eligible_ewmac_rule_count": (
-            len(reference_eligible_rules)
-            if reference_baselines_available
-            else None
-        ),
-        "ref_eligible_ewmac_rules": (
-            ",".join(reference_eligible_rules)
-            if reference_baselines_available
-            else None
-        ),
-        "ref_instrument_has_eligible_ewmac_rule": (
-            bool(reference_eligible_rules)
-            if reference_baselines_available
-            else None
-        ),
-    })
+    if pooled_summaries:
+        common.update({
+            "ref_eligible_ewmac_rule_count": (
+                len(reference_eligible_rules)
+                if reference_baselines_available
+                else None
+            ),
+            "ref_eligible_ewmac_rules": (
+                ",".join(reference_eligible_rules)
+                if reference_baselines_available
+                else None
+            ),
+            "ref_instrument_has_eligible_ewmac_rule": (
+                bool(reference_eligible_rules)
+                if reference_baselines_available
+                else None
+            ),
+        })
     # Keep the live section present even when every instrument in a snapshot
     # lacks an executable quote or usable IB what-if. Successful rows replace
     # these nulls after their live cost inputs have been validated.
@@ -1239,11 +1460,12 @@ def _configured_cost_estimate(
             f"{prefix}_tot_ann_cost_sr": None,
             f"{prefix}_cost_eligible": None,
         })
-    common.update({
-        "eligible_ewmac_rule_count": None,
-        "eligible_ewmac_rules": None,
-        "instrument_has_eligible_ewmac_rule": None,
-    })
+    if pooled_summaries:
+        common.update({
+            "eligible_ewmac_rule_count": None,
+            "eligible_ewmac_rules": None,
+            "instrument_has_eligible_ewmac_rule": None,
+        })
     if (
         spread_points is None
         or multiplier is None
@@ -1370,17 +1592,18 @@ def _configured_cost_estimate(
     baselines_available = bool(live_rule_eligibility) and all(
         eligible is not None for eligible in live_rule_eligibility
     )
-    result.update({
-        "eligible_ewmac_rule_count": (
-            len(eligible_rules) if baselines_available else None
-        ),
-        "eligible_ewmac_rules": (
-            ",".join(eligible_rules) if baselines_available else None
-        ),
-        "instrument_has_eligible_ewmac_rule": (
-            bool(eligible_rules) if baselines_available else None
-        ),
-    })
+    if pooled_summaries:
+        result.update({
+            "eligible_ewmac_rule_count": (
+                len(eligible_rules) if baselines_available else None
+            ),
+            "eligible_ewmac_rules": (
+                ",".join(eligible_rules) if baselines_available else None
+            ),
+            "instrument_has_eligible_ewmac_rule": (
+                bool(eligible_rules) if baselines_available else None
+            ),
+        })
     return result
 
 
@@ -1391,6 +1614,7 @@ def _attach_pooled_cost_estimates(
     pooled_summaries: Optional[dict[int, dict[str, object]]],
     strategy_metrics_by_rule: Optional[dict[int, pl.DataFrame]],
     rule_cost_limit_sr: float,
+    carry_summaries: Optional[dict[int, dict[str, object]]] = None,
 ) -> list[dict]:
     instrument_by_symbol = {instr["symbol"]: instr for instr in instruments}
     metrics_by_rule = {
@@ -1419,6 +1643,7 @@ def _attach_pooled_cost_estimates(
                 row,
                 pooled_summaries=pooled_summaries,
                 strategy_metrics_by_rule=reference_metrics_by_rule,
+                carry_summaries=carry_summaries,
                 rule_cost_limit_sr=rule_cost_limit_sr,
             )
         )
@@ -3195,7 +3420,10 @@ def parse_args(argv=None, *, rule_cache_only: bool = False):
     parser.add_argument(
         "--skip-ewmac-cost-baseline",
         action="store_true",
-        help="Skip the reviewed-pool EWMAC Sharpe and turnover calculation",
+        help=(
+            "Skip the reviewed-pool EWMAC calculation for diagnostics; "
+            "carry turnover is still estimated"
+        ),
     )
     parser.add_argument(
         "--vol-source",
@@ -3780,6 +4008,28 @@ def _ewmac_public_column_name(name: str) -> str:
 
 def _compact_public_column_name(name: str) -> str:
     categorized = _ewmac_public_column_name(name)
+    carry_match = re.match(r"^carry_(\d+)_(.+)$", categorized)
+    if carry_match is not None:
+        smooth, suffix = carry_match.groups()
+        carry_suffixes = {
+            "pooled_forecast_turnover": f"pool_carry_{smooth}_ann_trades",
+            "afts_forecast_turnover": f"ref_carry_{smooth}_ann_trades",
+            "pool_minus_afts_forecast_turnover": (
+                f"pool_carry_{smooth}_minus_ref_ann_trades"
+            ),
+            "pool_to_afts_turnover_ratio": (
+                f"pool_carry_{smooth}_to_ref_turn_ratio"
+            ),
+            "pool_instruments": f"pool_carry_{smooth}_pool_instrs",
+            "pool_reviewed_instruments": (
+                f"pool_carry_{smooth}_reviewed_instrs"
+            ),
+            "pool_history_start": f"pool_carry_{smooth}_hist_start",
+            "pool_history_end": f"pool_carry_{smooth}_hist_end",
+            "turnover_source": f"pool_carry_{smooth}_turn_src",
+            "turnover_reference_source": f"ref_carry_{smooth}_turn_src",
+        }
+        categorized = carry_suffixes.get(suffix, categorized)
     compact = PUBLIC_REPORT_RENAMES.get(
         categorized,
         CENTRAL_REPORT_RENAMES.get(categorized, categorized),
@@ -3845,6 +4095,11 @@ def _rename_market_public_columns(report: pl.DataFrame) -> pl.DataFrame:
     sources_by_target: dict[str, list[str]] = {}
     for source, target in renames.items():
         sources_by_target.setdefault(target, []).append(source)
+    canonical_sources = {
+        "init_marg_ann_dvol_ratio": (
+            "initial_margin_to_annual_dollar_vol"
+        ),
+    }
     duplicate_sources_to_drop: set[str] = set()
     for target, sources in sources_by_target.items():
         if len(sources) < 2:
@@ -3852,6 +4107,7 @@ def _rename_market_public_columns(report: pl.DataFrame) -> pl.DataFrame:
         explicit_sources = [
             source for source in sources
             if source in PUBLIC_REPORT_RENAMES
+            or source in CENTRAL_REPORT_RENAMES
         ]
         # Fresh account what-if margin supersedes the margin cached in the
         # snapshot, but both compact to the same public field.
@@ -3859,7 +4115,10 @@ def _rename_market_public_columns(report: pl.DataFrame) -> pl.DataFrame:
             source for source in explicit_sources
             if source.startswith("ib_whatif_")
         ]
-        if len(whatif_sources) == 1:
+        canonical = canonical_sources.get(target)
+        if canonical in sources:
+            preferred = canonical
+        elif len(whatif_sources) == 1:
             preferred = whatif_sources[0]
         elif len(explicit_sources) == 1:
             preferred = explicit_sources[0]
@@ -4015,6 +4274,14 @@ def _order_market_public_columns(report: pl.DataFrame) -> pl.DataFrame:
         )
         and name not in selected_set
     ]
+    carry_rule_suffix = [
+        name for name in report.columns
+        if (
+            name.startswith("pool_carry_")
+            or name.startswith("ref_carry_")
+        )
+        and name not in selected_set
+    ]
     speed_pattern = re.compile(
         r"^(?:pool|ref|live)_ewmac_(\d+)_(\d+)_(.+)$"
     )
@@ -4062,7 +4329,15 @@ def _order_market_public_columns(report: pl.DataFrame) -> pl.DataFrame:
     pool_rule_suffix.sort(key=rule_column_key)
     ref_rule_suffix.sort(key=rule_column_key)
     live_rule_suffix.sort(key=rule_column_key)
+    carry_rule_suffix.sort(
+        key=lambda name: (
+            int(re.match(r"^(?:pool|ref)_carry_(\d+)_", name).group(1)),
+            0 if name.startswith("pool_carry_") else 1,
+            name,
+        )
+    )
     rule_suffix = [
+        *carry_rule_suffix,
         *pool_rule_suffix,
         *ref_rule_suffix,
         *live_rule_suffix,
@@ -4845,6 +5120,9 @@ def _restore_market_snapshot_columns(snapshot: pl.DataFrame) -> pl.DataFrame:
         "comm_usd": "commission_usd",
         "init_marg": "ib_whatif_initial_margin_usd",
         "init_marg_native": "ib_whatif_initial_margin",
+        "init_marg_ann_dvol_ratio": (
+            "initial_margin_to_annual_dollar_vol"
+        ),
         "maint_marg": "ib_whatif_maintenance_margin_usd",
         "maint_marg_native": "ib_whatif_maintenance_margin",
     }
@@ -5019,10 +5297,10 @@ def run(
     # rows plus the local research database. No IB connection is required.
     pooled_summaries = None
     strategy_metrics_by_rule = None
+    strategy_provider = pysystemtrade_provider or PysystemtradeHistoryProvider(
+        db_path=args.history_db
+    )
     if not args.skip_ewmac_cost_baseline:
-        strategy_provider = pysystemtrade_provider or PysystemtradeHistoryProvider(
-            db_path=args.history_db
-        )
         pooled_summaries, strategy_metrics_by_rule = (
             estimate_pooled_ewmac_cost_baselines(
                 strategy_provider,
@@ -5036,13 +5314,25 @@ def run(
                 scalar_min_periods=args.cost_ewmac_scalar_min_periods,
             )
         )
+    carry_summaries, carry_metrics_by_rule = (
+        estimate_pooled_carry_cost_baselines(
+            strategy_provider,
+            db_path=args.history_db,
+            pooling_mapping_path=args.pysystemtrade_pooling_mapping,
+        )
+    )
+    # Carry's own PST histories supply the same roll-policy audit when the
+    # optional EWMAC calibration is skipped, keeping carry costs independent
+    # of whether trend rules are rebuilt in this invocation.
+    cost_metrics_by_rule = strategy_metrics_by_rule or carry_metrics_by_rule
 
     rows = _attach_pooled_cost_estimates(
         rows,
         instruments,
         pooled_summaries=pooled_summaries,
-        strategy_metrics_by_rule=strategy_metrics_by_rule,
+        strategy_metrics_by_rule=cost_metrics_by_rule,
         rule_cost_limit_sr=args.rule_cost_limit_sr,
+        carry_summaries=carry_summaries,
     )
     report = _attach_margin_risk_calibration(
         pl.DataFrame(rows, infer_schema_length=None)

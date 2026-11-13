@@ -1,8 +1,8 @@
-"""Build the reusable futures EWMAC rule/cost cache from a live snapshot.
+"""Build the reusable futures trend/carry rule-cost cache from a snapshot.
 
 This command is the narrow offline boundary between IB-dependent market-data
 acquisition and parameterized instrument selection. It delegates pooled EWMAC
-calibration to :mod:`market_screen`, but deliberately exposes no
+and carry-turnover calibration to :mod:`market_screen`, but exposes no
 capital, target-volatility, liquidity, margin, or portfolio-weight options.
 """
 
@@ -126,7 +126,10 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument(
         "--skip-ewmac-cost-baseline",
         action="store_true",
-        help="Skip historical pooled EWMAC calibration for diagnostics only.",
+        help=(
+            "Skip historical pooled EWMAC calibration for diagnostics; "
+            "carry turnover is still estimated."
+        ),
     )
     parser.add_argument(
         "--output",

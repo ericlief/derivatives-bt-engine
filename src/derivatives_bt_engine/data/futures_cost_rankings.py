@@ -14,8 +14,8 @@ from pathlib import Path
 import polars as pl
 
 from derivatives_bt_engine.calculations.carry import (
-    AFT_CARRY_ANNUAL_TRADES,
     CARRY_MODEL,
+    CARRY_SMOOTH_COMS,
 )
 from derivatives_bt_engine.calculations.instruments import INSTRUMENTS
 from derivatives_bt_engine.data.pysystemtrade_ib import (
@@ -44,6 +44,23 @@ DEFAULT_SELECTION_LIQUIDITY_ANNUAL_TRADES = 25.6
 DEFAULT_SELECTION_LIQUIDITY_BUSINESS_DAYS = 256
 DEFAULT_SELECTION_MIN_DAILY_VOLUME = 100.0
 DEFAULT_SELECTION_MAX_MARKET_VOLUME_PCT = 1.0
+
+CARRY_TURNOVER_AUDIT_COLUMNS = tuple(
+    column
+    for smooth in CARRY_SMOOTH_COMS
+    for column in (
+        f"pool_carry_{smooth}_ann_trades",
+        f"ref_carry_{smooth}_ann_trades",
+        f"pool_carry_{smooth}_minus_ref_ann_trades",
+        f"pool_carry_{smooth}_to_ref_turn_ratio",
+        f"pool_carry_{smooth}_pool_instrs",
+        f"pool_carry_{smooth}_reviewed_instrs",
+        f"pool_carry_{smooth}_hist_start",
+        f"pool_carry_{smooth}_hist_end",
+        f"pool_carry_{smooth}_turn_src",
+        f"ref_carry_{smooth}_turn_src",
+    )
+)
 
 RANK_COLUMNS = {
     "cost": "cost_rank_in_asset_cls",
@@ -141,6 +158,7 @@ DEFAULT_VIEW_COLUMNS = (
     "pool_ewmac_64_256_median_instr_pre_cost_sr",
     "pool_ewmac_64_256_hist_weighted_mean_pre_cost_sr",
     "pool_ewmac_64_256_stacked_observation_pre_cost_sr",
+    *CARRY_TURNOVER_AUDIT_COLUMNS,
     "ref_spread_pts",
     "ref_config_comm_usd",
     "ref_trade_sr",
@@ -271,6 +289,7 @@ SELECTION_CANDIDATE_COLUMNS = (
     "ref_ann_rolls",
     "ref_spread_pts",
     "ref_config_comm_usd",
+    *CARRY_TURNOVER_AUDIT_COLUMNS,
     "cost_elig",
     "size_elig",
     "data_elig",
@@ -529,6 +548,20 @@ def apply_selection_filters(
             pl.lit(None, dtype=pl.Float64).alias("ref_roll_sr"),
         )
     report = _attach_reference_rule_eligibility(report)
+    if signal_model == CARRY_MODEL:
+        required_carry_turnover = {
+            f"pool_carry_{smooth}_ann_trades"
+            for smooth in CARRY_SMOOTH_COMS
+        }
+        missing_carry_turnover = sorted(
+            required_carry_turnover.difference(report.columns)
+        )
+        if missing_carry_turnover:
+            raise ValueError(
+                "carry selection requires pooled PST turnover fields "
+                f"{missing_carry_turnover}; rebuild the input with "
+                "futures-rule-cache"
+            )
     report = _attach_carry_rule_eligibility(report)
     rule_eligible_column = (
         "instr_has_elig_carry_rule"
@@ -695,21 +728,27 @@ def _attach_reference_rule_eligibility(report: pl.DataFrame) -> pl.DataFrame:
 
 
 def _attach_carry_rule_eligibility(report: pl.DataFrame) -> pl.DataFrame:
-    """Attach AFTS carry-rule cost gates for live and reference costs.
+    """Attach pooled-history carry-rule cost gates for live and ref costs.
 
-    Each Carry5/20/60/120 variation uses the fixed annual turnover estimate
-    from AFTS table 40.  Instrument-specific trade and roll SR inputs then
-    decide the surviving equal-weight rule subset.  This deliberately avoids
-    borrowing the cached EWMAC turnover or its eligibility decision.
+    Each Carry5/20/60/120 variation uses the annual turnover estimated over
+    the reviewed full PST histories and persisted by ``futures-rule-cache``.
+    Instrument-specific trade and roll SR inputs then decide the surviving
+    equal-weight rule subset. The adjacent AFTS values remain audit references
+    and never drive eligibility.
     """
-    required = {"rule_cost_lim_sr", "ref_ann_rolls"}
+    turnover_columns = {
+        smooth: f"pool_carry_{smooth}_ann_trades"
+        for smooth in CARRY_SMOOTH_COMS
+    }
+    required = {
+        "rule_cost_lim_sr",
+        "ref_ann_rolls",
+        *turnover_columns.values(),
+    }
     if not required.issubset(report.columns):
         return report
 
-    expressions: list[pl.Expr] = [
-        pl.lit(float(annual_trades)).alias(f"carry_{smooth}_ann_trades")
-        for smooth, annual_trades in AFT_CARRY_ANNUAL_TRADES.items()
-    ]
+    expressions: list[pl.Expr] = []
     summary_inputs: dict[str, list[tuple[int, pl.Expr]]] = {
         "live": [],
         "ref": [],
@@ -720,9 +759,9 @@ def _attach_carry_rule_eligibility(report: pl.DataFrame) -> pl.DataFrame:
     ):
         if trade_column not in report.columns or roll_column not in report.columns:
             continue
-        for smooth, annual_trades in AFT_CARRY_ANNUAL_TRADES.items():
+        for smooth, turnover_column in turnover_columns.items():
             annual_cost = (
-                pl.col(trade_column) * float(annual_trades)
+                pl.col(trade_column) * pl.col(turnover_column)
                 + pl.col(roll_column) * pl.col("ref_ann_rolls")
             )
             eligible = (

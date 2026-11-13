@@ -175,6 +175,10 @@ def _phase2_step1_report() -> pl.DataFrame:
         "whatif_elig": [True] * 5,
         "ref_ann_rolls": [4.0] * 5,
         "ewmac_4_16_ann_trades": [1.0] * 5,
+        "pool_carry_5_ann_trades": [13.7745200533] * 5,
+        "pool_carry_20_ann_trades": [8.3281763926] * 5,
+        "pool_carry_60_ann_trades": [6.3280660120] * 5,
+        "pool_carry_120_ann_trades": [5.6150674825] * 5,
         "ref_trade_sr": [0.0015] * 5,
         "ref_roll_sr": [0.0025] * 5,
         "initial_margin_to_ann_dvol": [1.0] * 5,
@@ -257,11 +261,11 @@ def test_complete_static_selection_retains_live_execution_gates():
     assert candidates.get_column("symbol").to_list() == ["PASS", "BIG"]
 
 
-def test_carry_selection_uses_afts_turnover_instead_of_ewmac_rules():
-    """The fast carry rule can fail while slower AFTS variants remain."""
+def test_carry_selection_uses_pooled_turnover_instead_of_ewmac_rules():
+    """The fast carry rule can fail while slower pooled variants remain."""
     report = _phase2_step1_report().filter(pl.col("symbol") == "PASS").with_columns(
-        pl.lit(0.009).alias("ref_trade_sr"),
-        pl.lit(0.026).alias("ref_roll_sr"),
+        pl.lit(0.006).alias("ref_trade_sr"),
+        pl.lit(0.020).alias("ref_roll_sr"),
     )
 
     candidates = selection_rebalance_candidates(

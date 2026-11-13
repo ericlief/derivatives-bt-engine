@@ -51,10 +51,9 @@ CARRY_MIN_POST_WARMUP_COVERAGE = 0.90
 DEFAULT_TREND_FAMILY_WEIGHT = 0.60
 DEFAULT_CARRY_FAMILY_WEIGHT = 0.40
 
-# AFTS table 40 annual forecast turnovers.  These fixed, pre-sample estimates
-# decide which carry variants are cheap enough for an instrument; realised
-# combined subsystem turnover is still measured from the built forecast for
-# P&L costs and greedy selection.
+# AFTS table 40 annual forecast turnovers. These published values are retained
+# as an external benchmark for the pooled PST estimates persisted in the rule
+# cache; production rule eligibility uses the pooled estimates.
 AFT_CARRY_ANNUAL_TRADES: dict[int, float] = {
     5: 5.75,
     20: 3.12,
