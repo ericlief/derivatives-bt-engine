@@ -262,6 +262,58 @@ than in the fixed runs. Within both cap modes, TSMOM 32/256 has the highest
 trade-fee burden. Its weaker Sharpe versus 64/256 is therefore not explained by
 roll fees alone.
 
+## Micro-contract and reference-cost post-audit
+
+The fixed-cap runs did use micro contracts. All five saved candidate reports
+contain the same 14 PST-native micros, and three or four micros remain in each
+final 2026 book. The annual review histories show that 11–14 micros received a
+positive allocation at least once, depending on the signal.
+
+| Signal | Micro candidates | Micros in final book | Micros allocated at any review |
+|---|---:|---|---:|
+| EWMAC | 14 | M2K, MBT, MHG, MYM | 14 |
+| TSMOM 32/256 | 14 | M2K, MBT, MHG, MYM | 13 |
+| TSMOM 64/256 | 14 | M2K, MBT, MHG, MYM | 13 |
+| Goulding Sharpe | 14 | M2K, MBT, MHG, MYM | 13 |
+| Goulding continuous | 14 | M2K, MBT, MYM | 11 |
+
+The missing-reference-cost defect nevertheless biased every saved fixed-cap
+run against the seven local execution overlays. MTN, MWN, MZC, MZL, MZM, MZS,
+and MZW all had null `ref_trade_sr` and `ref_roll_sr` in the November 11
+screen. A complete yearly backtest builds its reference candidate universe by
+requiring finite reference trade and roll costs, historical data, and an
+eligible reference rule. It deliberately does not apply the current snapshot
+volume gates at this boundary; those gates apply from the live IB-tail handoff.
+The null costs were therefore the direct reason all seven overlays were absent
+from the 170-row saved candidate reports, including MZC and MZM.
+
+Replaying that same reference candidate filter against the corrected November
+13 screen produces 177 candidates: the only additions are those seven
+overlays, with no removals.
+
+| Overlay | Corrected `ref_trade_sr` | Corrected `ref_roll_sr` | Current market participation | Current live screen |
+|---|---:|---:|---:|---|
+| MTN | 0.002505 | 0.003167 | 0.6384% | eligible |
+| MWN | 0.002417 | 0.002785 | 0.1595% | eligible |
+| MZC | 0.005698 | 0.007342 | 1.1300% | ineligible: risk volume |
+| MZL | 0.002464 | 0.003391 | 0.5059% | eligible |
+| MZM | 0.003795 | 0.004879 | 1.3900% | ineligible: risk volume |
+| MZS | 0.002234 | 0.002911 | 0.5681% | eligible |
+| MZW | 0.004395 | 0.005482 | 0.5802% | eligible |
+
+This distinction matters for MZM and MZC: both now belong to the historical
+reference candidate universe, but both remain unavailable for a candidate-only
+live selection at the configured 1% market-risk-volume limit. MRB is the only
+other named micro route still absent from the corrected reference universe; it
+has finite reference costs but no eligible reference rule.
+
+Selection after the candidate gate also explains why every candidate micro is
+not in the final book. These scenarios use `full1`, and the saved EWMAC trials
+contain 55 full-contract-preference suppressions across M6A, M6B, M6E, MCD,
+MCL, and MSF. Other micro trials lose on rank, coverage phase, margin, or the
+half-contract feasibility threshold. This is a downstream allocation policy,
+not evidence that micros were globally ineligible.
+
 ## Conclusion
 
 With sizing fixed at $75,000, EWMAC and TSMOM 64/256 are the strongest by
@@ -271,7 +323,10 @@ costs without improving Sharpe. Goulding Sharpe beats Goulding continuous on
 mean return and Sharpe but carries a larger maximum drawdown. The apparent
 multi-order-of-magnitude spread in compounding terminal equity is dominated by
 the capital path and changing feasible books; use the fixed-cap comparison to
-compare signal behavior at approximately comparable risk and size.
+compare signal behavior at approximately comparable risk and size. The saved
+performance results remain an audit of their actual 170-market candidate
+universe, but they should not be treated as post-fix results: rerunning would
+admit seven additional local micro overlays to the historical candidate stage.
 
 Primary artifacts are each run's `portfolio_curve`, `cash_pnl`,
 `review_instruments`, `forecast_audit`, `reviews`, and
