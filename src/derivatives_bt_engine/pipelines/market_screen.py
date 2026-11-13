@@ -1175,6 +1175,7 @@ def _configured_cost_estimate(
     strategy_metrics_by_rule: Optional[dict[int, dict[str, object]]],
     rule_cost_limit_sr: float,
     carry_summaries: Optional[dict[int, dict[str, object]]] = None,
+    carry_metrics_by_rule: Optional[dict[int, dict[str, object]]] = None,
 ) -> dict[str, object]:
     """Calculate pooled-rule diagnostics and reference/live annual SR costs.
 
@@ -1294,6 +1295,9 @@ def _configured_cost_estimate(
             f"{prefix}_ann_trades": _positive_finite(
                 summary.get("ewmac_pooled_forecast_turnover")
             ),
+            f"{prefix}_ref_turn": _positive_finite(
+                metrics.get("ewmac_forecast_turnover")
+            ),
             f"{prefix}_pool_instruments": summary.get(
                 "ewmac_pool_instruments"
             ),
@@ -1312,7 +1316,6 @@ def _configured_cost_estimate(
             f"{prefix}_ref_pre_cost_sharpe": metrics.get(
                 "ewmac_pre_cost_sharpe"
             ),
-            f"{prefix}_ann_rolls": rolls_per_year,
         })
 
     for smooth, summary in sorted((carry_summaries or {}).items()):
@@ -1320,6 +1323,11 @@ def _configured_cost_estimate(
         common.update({
             f"{prefix}_pooled_forecast_turnover": _positive_finite(
                 summary.get("carry_pooled_forecast_turnover")
+            ),
+            f"{prefix}_ref_turn": _positive_finite(
+                (carry_metrics_by_rule or {}).get(smooth, {}).get(
+                    "carry_forecast_turnover"
+                )
             ),
             f"{prefix}_afts_forecast_turnover": _positive_finite(
                 summary.get("carry_afts_forecast_turnover")
@@ -1634,6 +1642,7 @@ def _attach_pooled_cost_estimates(
     strategy_metrics_by_rule: Optional[dict[int, pl.DataFrame]],
     rule_cost_limit_sr: float,
     carry_summaries: Optional[dict[int, dict[str, object]]] = None,
+    carry_metrics_by_rule: Optional[dict[int, pl.DataFrame]] = None,
 ) -> list[dict]:
     instrument_by_symbol = {instr["symbol"]: instr for instr in instruments}
     metrics_by_rule = {
@@ -1642,6 +1651,13 @@ def _attach_pooled_cost_estimates(
             for row in metrics.iter_rows(named=True)
         }
         for fast_span, metrics in (strategy_metrics_by_rule or {}).items()
+    }
+    carry_metrics_by_rule = {
+        smooth: {
+            row["instrument_code"]: row
+            for row in metrics.iter_rows(named=True)
+        }
+        for smooth, metrics in (carry_metrics_by_rule or {}).items()
     }
     enriched = []
     for row in rows:
@@ -1656,6 +1672,11 @@ def _attach_pooled_cost_estimates(
             reference_metrics = metrics.get(reference)
             if reference_metrics is not None:
                 reference_metrics_by_rule[fast_span] = reference_metrics
+        reference_carry_metrics_by_rule = {
+            smooth: metrics[reference]
+            for smooth, metrics in carry_metrics_by_rule.items()
+            if reference in metrics
+        }
         row.update(
             _configured_cost_estimate(
                 instr,
@@ -1663,6 +1684,7 @@ def _attach_pooled_cost_estimates(
                 pooled_summaries=pooled_summaries,
                 strategy_metrics_by_rule=reference_metrics_by_rule,
                 carry_summaries=carry_summaries,
+                carry_metrics_by_rule=reference_carry_metrics_by_rule,
                 rule_cost_limit_sr=rule_cost_limit_sr,
             )
         )
@@ -3978,9 +4000,11 @@ def _ewmac_public_column_name(name: str) -> str:
     if matched is None:
         return name
     fast_span, slow_span, suffix = matched.groups()
-    prefix = f"ewmac_{fast_span}_{slow_span}"
+    prefix = f"ewmac_{fast_span}{slow_span}"
     if suffix == "ann_trades":
-        return f"pool_{prefix}_ann_trades"
+        return f"{prefix}_pool_turn"
+    if suffix == "ref_turn":
+        return f"{prefix}_ref_turn"
     if suffix in {
         "pool_instruments",
         "pool_instrs",
@@ -4013,13 +4037,13 @@ def _ewmac_public_column_name(name: str) -> str:
                 "stacked_observation_pre_cost_sharpe"
             ),
         }[suffix]
-        return f"pool_{prefix}_{mapped_suffix}"
+        return f"{prefix}_pool_{mapped_suffix}"
     if suffix in {"ref_pre_cost_sharpe", "ref_pre_cost_sr"}:
-        return f"ref_{prefix}_pre_cost_sharpe"
+        return f"{prefix}_ref_pre_cost_sr"
     if suffix == "pre_cost_sr":
         return f"ref_{prefix}_pre_cost_sharpe"
     if suffix == "ann_rolls":
-        return f"ref_{prefix}_ann_rolls"
+        return "ref_ann_rolls"
     if suffix in {
         "trade_ann_cost_sr",
         "roll_ann_cost_sr",
@@ -4030,7 +4054,7 @@ def _ewmac_public_column_name(name: str) -> str:
         mapped_suffix = (
             "cost_eligible" if suffix == "cost_elig" else suffix
         )
-        return f"live_{prefix}_{mapped_suffix}"
+        return f"{prefix}_live_{mapped_suffix}"
     return name
 
 
@@ -4040,22 +4064,23 @@ def _compact_public_column_name(name: str) -> str:
     if carry_match is not None:
         smooth, suffix = carry_match.groups()
         carry_suffixes = {
-            "pooled_forecast_turnover": f"pool_carry_{smooth}_ann_trades",
-            "afts_forecast_turnover": f"ref_carry_{smooth}_ann_trades",
+            "pooled_forecast_turnover": f"carry_{smooth}_pool_turn",
+            "ref_turn": f"carry_{smooth}_ref_turn",
+            "afts_forecast_turnover": f"carry_{smooth}_afts_turn",
             "pool_minus_afts_forecast_turnover": (
-                f"pool_carry_{smooth}_minus_ref_ann_trades"
+                f"carry_{smooth}_pool_minus_afts_turn"
             ),
             "pool_to_afts_turnover_ratio": (
-                f"pool_carry_{smooth}_to_ref_turn_ratio"
+                f"carry_{smooth}_pool_to_afts_turn_ratio"
             ),
-            "pool_instruments": f"pool_carry_{smooth}_pool_instrs",
+            "pool_instruments": f"carry_{smooth}_pool_instrs",
             "pool_reviewed_instruments": (
-                f"pool_carry_{smooth}_reviewed_instrs"
+                f"carry_{smooth}_pool_reviewed_instrs"
             ),
-            "pool_history_start": f"pool_carry_{smooth}_hist_start",
-            "pool_history_end": f"pool_carry_{smooth}_hist_end",
-            "turnover_source": f"pool_carry_{smooth}_turn_src",
-            "turnover_reference_source": f"ref_carry_{smooth}_turn_src",
+            "pool_history_start": f"carry_{smooth}_pool_hist_start",
+            "pool_history_end": f"carry_{smooth}_pool_hist_end",
+            "turnover_source": f"carry_{smooth}_pool_turn_src",
+            "turnover_reference_source": f"carry_{smooth}_afts_turn_src",
         }
         categorized = carry_suffixes.get(suffix, categorized)
     compact = PUBLIC_REPORT_RENAMES.get(
@@ -4273,47 +4298,30 @@ def _order_market_public_columns(report: pl.DataFrame) -> pl.DataFrame:
     ]
     selected = [name for name in selected_first if name in report.columns]
     selected_set = set(selected)
-    pool_rule_suffix = [
-        name for name in report.columns
-        if name.startswith("pool_ewmac_") and name not in selected_set
-    ]
-    ref_rule_suffix = [
+    rule_suffix = [
         name for name in report.columns
         if (
-            name.startswith("ref_ewmac_")
+            re.match(r"^(?:ewmac_\d+|carry_\d+)_(?:ref|pool|afts|live)_", name)
             or name.startswith("ref_elig_ewmac_")
-            or name == "ref_instr_has_elig_ewmac_rule"
-            or name in {
-                "ref_spread_pts",
-                "ref_config_comm_usd",
-                "ref_trade_sr",
-                "ref_roll_sr",
-                "ref_ann_rolls",
-            }
-        )
-        and name not in selected_set
-    ]
-    live_rule_suffix = [
-        name for name in report.columns
-        if (
-            name.startswith("live_ewmac_")
             or name.startswith("live_elig_ewmac_")
+            or name == "ref_instr_has_elig_ewmac_rule"
             or name == "live_instr_has_elig_ewmac_rule"
         )
         and name not in selected_set
     ]
-    carry_rule_suffix = [
-        name for name in report.columns
-        if (
-            name.startswith("pool_carry_")
-            or name.startswith("ref_carry_")
-        )
-        and name not in selected_set
-    ]
     speed_pattern = re.compile(
-        r"^(?:pool|ref|live)_ewmac_(\d+)_(\d+)_(.+)$"
+        r"^(?:ewmac_(\d+)_\d+|carry_(\d+))_(ref|pool|afts|live)_(.+)$"
     )
     detail_order = {
+        "ref_turn": 0,
+        "pool_turn": 1,
+        "afts_turn": 2,
+        "pool_pre_cost_sr": 3,
+        "ref_pre_cost_sr": 4,
+        "live_trade_ann_cost_sr": 5,
+        "live_roll_ann_cost_sr": 6,
+        "live_tot_ann_cost_sr": 7,
+        "live_cost_elig": 8,
         "pool_instrs": 0,
         "ann_trades": 0,
         "mean_instr_pre_cost_sr": 1,
@@ -4328,8 +4336,8 @@ def _order_market_public_columns(report: pl.DataFrame) -> pl.DataFrame:
         "cost_elig": 5,
     }
 
-    def rule_column_key(name: str) -> tuple[int, int, int, str]:
-        """Order aggregate decisions before speed-level audit details."""
+    def rule_column_key(name: str) -> tuple[int, int, str, int, str]:
+        """Order rules by speed, with shared reference inputs first."""
         matched = speed_pattern.match(name)
         if matched is None:
             aggregate_order = {
@@ -4340,36 +4348,24 @@ def _order_market_public_columns(report: pl.DataFrame) -> pl.DataFrame:
                 "ref_config_comm_usd": 4,
                 "ref_trade_sr": 5,
                 "ref_roll_sr": 6,
-                "ref_ann_rolls": 7,
                 "live_elig_ewmac_rule_count": 0,
                 "live_elig_ewmac_rules": 1,
                 "live_instr_has_elig_ewmac_rule": 2,
             }
-            return (0, 0, aggregate_order.get(name, 99), name)
-        fast_span, slow_span, detail = matched.groups()
+            if name == "ref_ann_rolls":
+                return (-1, 0, "", 0, name)
+            return (0, 0, "", aggregate_order.get(name, 99), name)
+        ewmac_speed, carry_speed, mode, detail = matched.groups()
+        speed = int(ewmac_speed or carry_speed)
         return (
             1,
-            int(fast_span),
+            speed,
+            {"ref": 0, "pool": 1, "afts": 2, "live": 3}[mode],
             detail_order.get(detail, 99),
-            f"{int(slow_span):06d}_{name}",
-        )
-
-    pool_rule_suffix.sort(key=rule_column_key)
-    ref_rule_suffix.sort(key=rule_column_key)
-    live_rule_suffix.sort(key=rule_column_key)
-    carry_rule_suffix.sort(
-        key=lambda name: (
-            int(re.match(r"^(?:pool|ref)_carry_(\d+)_", name).group(1)),
-            0 if name.startswith("pool_carry_") else 1,
             name,
         )
-    )
-    rule_suffix = [
-        *carry_rule_suffix,
-        *pool_rule_suffix,
-        *ref_rule_suffix,
-        *live_rule_suffix,
-    ]
+
+    rule_suffix.sort(key=rule_column_key)
     rule_set = set(rule_suffix)
     snap_suffix = [
         name for name in report.columns
@@ -4383,7 +4379,12 @@ def _order_market_public_columns(report: pl.DataFrame) -> pl.DataFrame:
         and name not in selected_set
         and name not in rule_set
     ]
-    audit_suffix = [*rule_suffix, *snap_suffix, *ref_suffix]
+    audit_suffix = [
+        *( ["ref_ann_rolls"] if "ref_ann_rolls" in ref_suffix else [] ),
+        *rule_suffix,
+        *snap_suffix,
+        *(name for name in ref_suffix if name != "ref_ann_rolls"),
+    ]
     middle = [
         name for name in report.columns
         if name not in selected_set
@@ -5361,6 +5362,7 @@ def run(
         strategy_metrics_by_rule=cost_metrics_by_rule,
         rule_cost_limit_sr=args.rule_cost_limit_sr,
         carry_summaries=carry_summaries,
+        carry_metrics_by_rule=carry_metrics_by_rule,
     )
     report = _attach_margin_risk_calibration(
         pl.DataFrame(rows, infer_schema_length=None)

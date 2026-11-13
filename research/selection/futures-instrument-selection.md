@@ -594,9 +594,9 @@ reference, and live values look interchangeable:
 
 | Section | Example fields | Meaning |
 | --- | --- | --- |
-| `pool_` | `pool_ewmac_4_16_ann_trades`, `pool_ewmac_4_16_mean_instr_pre_cost_sr`, `pool_ewmac_4_16_median_instr_pre_cost_sr`, `pool_ewmac_4_16_hist_weighted_mean_pre_cost_sr`, `pool_ewmac_4_16_stacked_observation_pre_cost_sr` | Full set of shared per-speed turnover and performance summaries estimated across the reference universe. These values repeat for every instrument. |
-| `ref_` | `ref_ewmac_4_16_pre_cost_sr`, `ref_ewmac_4_16_ann_rolls`, `ref_ewmac_4_16_tot_ann_cost_sr`, `ref_ewmac_4_16_cost_elig` | Instrument-specific reference-history diagnostics and frozen-cost eligibility used by complete backtests. |
-| `live_` | `live_ewmac_4_16_tot_ann_cost_sr`, `live_ewmac_4_16_cost_elig` | Point-in-time executable-cost eligibility from the saved snapshot and IB what-if result. |
+| `RULE_SPEED_MODE_VAR` | `ewmac_416_ref_turn`, `ewmac_416_pool_turn`, `ewmac_416_pool_mean_instr_pre_cost_sr`, `carry_5_ref_turn`, `carry_5_pool_turn`, `carry_5_afts_turn` | Per-instrument reference turnover, shared pooled turnover and pooled diagnostics, and the separately labeled published AFTS comparison. Pooled values repeat for every instrument. |
+| Shared reference inputs | `ref_ann_rolls`, `ref_trade_sr`, `ref_roll_sr` | Instrument-level reference inputs emitted once before the speed-specific rule fields. Roll frequency is common across speeds and must not be repeated per rule. |
+| Rule cost results | `ewmac_416_live_tot_ann_cost_sr`, `ewmac_416_live_cost_elig` | Point-in-time executable-cost calculations from the saved snapshot and IB what-if result, grouped with the corresponding rule speed. |
 
 Each cost path also has an aggregate decision: `ref_elig_ewmac_rule_count`,
 `ref_elig_ewmac_rules`, and `ref_instr_has_elig_ewmac_rule` for a complete
@@ -613,7 +613,7 @@ C^{x}_{f,s}
 \le C_{\max}, \qquad x \in \{\mathrm{ref},\mathrm{live}\}.
 \]
 
-Here `pool_*_ann_trades` is pooled forecast turnover and `ref_*_ann_rolls` is
+Here `*_pool_turn` is pooled forecast turnover and `ref_ann_rolls` is
 the instrument's configured or observed reference roll rate. The `ref` path
 uses the reviewed reference spread and configured commission; the `live` path
 uses the snapshot spread and executable commission. Pooled performance and
