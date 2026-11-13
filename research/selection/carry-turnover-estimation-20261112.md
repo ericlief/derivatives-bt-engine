@@ -120,6 +120,32 @@ COM-based rule cache and are superseded. They must not be used to assess the
 corrected carry universe; record new counts only after rebuilding the rule
 cache and rerunning selection from that frozen input.
 
+## Implementation and verification result
+
+The correction was committed on `feat/carry-signal` as `fd91651` and pushed
+to the configured remote on 2026-11-13. The production path now has four
+explicit safeguards:
+
+- `Carry5/20/60/120` are passed to Polars as EWMA `span` values;
+- turnover differences require two consecutive valid rows in the same
+  `carry_segment`;
+- static and stitched carry forecasts use cache version 2 and identify their
+  smoothing inputs as `carry_smooth_spans`;
+- candidate and complete selection reject rule caches without the v2
+  segment-safe source marker.
+
+Focused verification completed with 37 passing tests across carry
+calculation, turnover estimation, selection-cache identity, rule-cache
+schema, and carry eligibility. A carry-filtered repository run completed with
+16 passing tests and 711 deselected tests. Both `futures-rule-cache --help`
+and `futures-build-selection --help` loaded successfully from the project
+virtual environment.
+
+The repository-wide suite remains blocked during collection by the unrelated
+missing `_resolve_globex_asset` import in `test_ewmac_notebook.py`. No saved
+market screen, rule cache, selection result, or backtest result was
+regenerated or overwritten as part of this correction.
+
 ## Reproduction
 
 Rebuild the rule cache after acquiring or copying a current market snapshot:
@@ -133,8 +159,8 @@ Rebuild the rule cache after acquiring or copying a current market snapshot:
 ```
 
 Then pass the resulting timestamped Parquet to
-`futures-build-selection --signal-model carry`. For the isolated eligibility
-pass used above:
+`futures-build-selection --signal-model carry`. For a new isolated
+eligibility pass:
 
 ```bash
 .venv/bin/futures-build-selection \
