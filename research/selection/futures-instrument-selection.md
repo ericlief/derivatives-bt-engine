@@ -1347,7 +1347,7 @@ futures-market-snapshot \
   --instruments all-pysystemtrade \
   --vol-source pysystemtrade \
   --ib-account-name taxable \
-  --snapshot-output results/futures_market_snapshot.parquet
+  --snapshot-output /home/dev/data/fin/misc/results/futures_market_snapshot.parquet
 ```
 
 Omitting both account options selects `managedAccounts[0]`. Pass an account
@@ -1379,12 +1379,12 @@ Build the expensive, reusable historical rule/cost cache from that snapshot:
 
 ```bash
 futures-rule-cache \
-  --snapshot-input results \
+  --snapshot-input /home/dev/data/fin/misc/results \
   --max-snapshot-age-days 30 \
   --cost-ewmac-fast-spans 4,8,16,32,64 \
   --rule-cost-limit-sr 0.15 \
   --history-db /home/dev/fin/db/pysystemtrade_reference.duckdb \
-  --output results/multi_speed_ewmac_rule_cache.parquet
+  --output /home/dev/data/fin/misc/results/multi_speed_ewmac_rule_cache.parquet
 ```
 
 Passing a directory to `--snapshot-input` selects its newest timestamped
@@ -1408,8 +1408,8 @@ search:
 
 ```bash
 futures-build-selection \
-  --report-dir results \
-  --output-dir results/selection_baseline \
+  --report-dir /home/dev/data/fin/misc/results \
+  --output-dir /home/dev/data/fin/misc/results/selection_baseline \
   --signal-model multi_ewmac \
   --history-db /home/dev/fin/db/pysystemtrade_reference.duckdb \
   --ib-history-db /home/dev/fin/db/ib_futures_history.duckdb \
@@ -1536,7 +1536,7 @@ or historical-rule rerun:
 
 ```bash
 futures-build-selection \
-  --input results/multi_speed_ewmac_rule_cache_<timestamp>.parquet \
+  --input /home/dev/data/fin/misc/results/multi_speed_ewmac_rule_cache_<timestamp>.parquet \
   --signal-model multi_ewmac \
   --initial-capital-usd 75000
 ```
@@ -2318,7 +2318,7 @@ The recommended 18-scenario first pass is the CLI default:
 
 ```bash
 .venv/bin/futures-selection-grid \
-  --input results/multi_speed_ewmac_rule_cache_<timestamp>.parquet \
+  --input /home/dev/data/fin/misc/results/multi_speed_ewmac_rule_cache_<timestamp>.parquet \
   --signal-model multi_ewmac \
   --history-db /home/dev/fin/db/pysystemtrade_reference.duckdb \
   --cache /home/dev/data/fin/misc/cache/futures \
@@ -2327,7 +2327,7 @@ The recommended 18-scenario first pass is the CLI default:
 
 Preview the exact commands without running selection with `--dry-run`. Each
 invocation creates a timestamped `selection_grid_<timestamp>` folder under the
-output root (the default root is `results/`). The runner creates an isolated
+output root (the default root is `/home/dev/data/fin/misc/results/`). The runner creates an isolated
 directory for every scenario and can resume completed directories after
 interruption. To resume a particular run, pass its exact folder with
 `--run-dir`; `--output-dir` always means the parent output root. Scenarios run
@@ -2402,7 +2402,7 @@ Run secondary constraint tests separately, for example:
 
 ```bash
 .venv/bin/futures-selection-grid \
-  --input results/multi_speed_ewmac_rule_cache_<timestamp>.parquet \
+  --input /home/dev/data/fin/misc/results/multi_speed_ewmac_rule_cache_<timestamp>.parquet \
   --signal-model multi_ewmac \
   --history-db /home/dev/fin/db/pysystemtrade_reference.duckdb \
   --cache /home/dev/data/fin/misc/cache/futures \
@@ -2430,7 +2430,7 @@ For a focused yearly hysteresis comparison using the new causal count state:
 
 ```bash
 .venv/bin/futures-selection-grid \
-  --input results/multi_speed_ewmac_rule_cache_<timestamp>.parquet \
+  --input /home/dev/data/fin/misc/results/multi_speed_ewmac_rule_cache_<timestamp>.parquet \
   --signal-model multi_ewmac \
   --history-db /home/dev/fin/db/pysystemtrade_reference.duckdb \
   --ib-history-db /home/dev/fin/db/ib_futures_history.duckdb \

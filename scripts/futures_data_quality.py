@@ -26,6 +26,8 @@ from typing import Optional
 import numpy as np
 import polars as pl
 
+from derivatives_bt_engine.data.futures_history import DEFAULT_FUTURES_CACHE_ROOT
+
 log = logging.getLogger(__name__)
 
 # ── Tunable defaults (all overridable via function args or CLI flags) ──────────
@@ -769,7 +771,8 @@ def load_db_prices(
 
     Args:
         symbols:   instrument tickers to load.
-        cache_dir: directory for per-symbol parquet caches (default: ../.cache/futures/).
+        cache_dir: directory for per-symbol parquet caches (default:
+            ``/home/dev/data/fin/misc/cache/futures``).
         db_path:   path to the local DuckDB file (default: _DEFAULT_DB_PATH).
 
     Returns a wide polars DataFrame (date + one col per symbol), or None if nothing loaded.
@@ -777,8 +780,7 @@ def load_db_prices(
     import os
     import duckdb
 
-    cache_dir = cache_dir or os.path.normpath(
-        os.path.join(os.path.dirname(__file__), '..', '.cache', 'futures'))
+    cache_dir = cache_dir or str(DEFAULT_FUTURES_CACHE_ROOT)
     os.makedirs(cache_dir, exist_ok=True)
 
     db_path = db_path or _DEFAULT_DB_PATH

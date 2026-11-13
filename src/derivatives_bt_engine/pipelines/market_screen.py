@@ -31,14 +31,14 @@ Run with TWS/IB Gateway available::
 Then rebuild the cost and eligibility report without another IB request::
 
     futures-cost-risk \
-      --snapshot-input results/futures_market_snapshot_<timestamp>.parquet \
+      --snapshot-input /home/dev/data/fin/misc/results/futures_market_snapshot_<timestamp>.parquet \
       --initial-capital-usd 100000
 
 For the normal split pipeline, cache only the expensive historical rule and
 cost inputs::
 
     futures-rule-cache \
-      --snapshot-input results/futures_market_snapshot_<timestamp>.parquet
+      --snapshot-input /home/dev/data/fin/misc/results/futures_market_snapshot_<timestamp>.parquet
 
 ``futures-build-selection`` then owns capital, target-volatility, liquidity,
 and final candidate gates.  The older one-shot cost/screen commands remain as
@@ -97,6 +97,7 @@ from derivatives_bt_engine.calculations.carry import (
     build_carry_forecast,
 )
 from derivatives_bt_engine.data.futures_history import (
+    DEFAULT_FUTURES_RESULTS_ROOT,
     DEFAULT_PYSYSTEMTRADE_DB_PATH,
     PysystemtradeHistoryProvider,
 )
@@ -3653,10 +3654,12 @@ def parse_args(argv=None, *, rule_cache_only: bool = False):
         default=None,
         help=(
             "Parquet output base path; a Chicago-time run timestamp is appended "
-            "to the filename (default base: results/multi_speed_ewmac_rule_cache.parquet)"
+            "to the filename (default base: "
+            "/home/dev/data/fin/misc/results/multi_speed_ewmac_rule_cache.parquet)"
             if rule_cache_only
             else "Parquet output base path; a Chicago-time run timestamp is appended "
-            "to the filename (default base: results/futures_market_screen.parquet)"
+            "to the filename (default base: "
+            "/home/dev/data/fin/misc/results/futures_market_screen.parquet)"
         ),
     )
     parser.add_argument("--no-save", action="store_true")
@@ -4421,9 +4424,7 @@ def _ib_log_output_path(
         artifact = args.snapshot_output
         if artifact is None:
             artifact = (
-                Path(__file__).resolve().parents[3]
-                / "results"
-                / "futures_market_snapshot.parquet"
+                DEFAULT_FUTURES_RESULTS_ROOT / "futures_market_snapshot.parquet"
             )
         artifact = _account_infixed_output_path(
             artifact,
@@ -4434,9 +4435,7 @@ def _ib_log_output_path(
         artifact = args.output
         if artifact is None:
             artifact = (
-                Path(__file__).resolve().parents[3]
-                / "results"
-                / "futures_market_screen.parquet"
+                DEFAULT_FUTURES_RESULTS_ROOT / "futures_market_screen.parquet"
             )
         artifact = _account_infixed_output_path(
             artifact,
@@ -4551,8 +4550,7 @@ def _emit_report(
         output_base = args.output
         if output_base is None:
             output_base = (
-                Path(__file__).resolve().parents[3]
-                / "results"
+                DEFAULT_FUTURES_RESULTS_ROOT
                 / (
                     "multi_speed_ewmac_rule_cache.parquet"
                     if rule_cache_only

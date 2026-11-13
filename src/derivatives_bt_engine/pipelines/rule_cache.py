@@ -136,7 +136,8 @@ def parse_args(argv=None) -> argparse.Namespace:
         type=Path,
         help=(
             "Parquet output base; defaults to "
-            "results/multi_speed_ewmac_rule_cache.parquet."
+            "/home/dev/data/fin/misc/results/"
+            "multi_speed_ewmac_rule_cache.parquet."
         ),
     )
     parser.add_argument(

@@ -57,7 +57,9 @@ DEFAULT_PYSYSTEMTRADE_DB_PATH = Path(
     "/home/dev/fin/db/pysystemtrade_reference.duckdb"
 )
 DEFAULT_GLOBEX_DB_PATH = Path("/home/dev/fin/db/globex_mdp_3.0.duckdb")
-DEFAULT_FUTURES_CACHE_ROOT = Path(__file__).resolve().parents[3] / ".cache" / "futures"
+DEFAULT_FINANCIAL_MISC_ROOT = Path("/home/dev/data/fin/misc")
+DEFAULT_FUTURES_CACHE_ROOT = DEFAULT_FINANCIAL_MISC_ROOT / "cache" / "futures"
+DEFAULT_FUTURES_RESULTS_ROOT = DEFAULT_FINANCIAL_MISC_ROOT / "results"
 FUTURES_HISTORY_CACHE_SCHEMA_VERSION = 1
 
 _SIGNAL_COLUMNS = {

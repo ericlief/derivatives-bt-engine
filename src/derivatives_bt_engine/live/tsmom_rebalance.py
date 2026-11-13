@@ -106,6 +106,7 @@ from derivatives_bt_engine.calculations.signal_selection import (
 # (not duplicated) so data_source='database' stays byte-for-byte consistent
 # with what the backtest itself would compute for the same date.
 from derivatives_bt_engine.backtest.futures.tsmom import VIX_FILE_PATH
+from derivatives_bt_engine.data.futures_history import DEFAULT_FUTURES_CACHE_ROOT
 
 log = logging.getLogger(__name__)
 
@@ -139,7 +140,7 @@ DATA_SOURCES = ('ib', 'database')
 # Same futures-bar parquet cache the backtest uses (backtest.futures.tsmom's
 # own load_portfolio_data) -- sharing it means a symbol already cached by a
 # backtest run doesn't need re-fetching here, and vice versa.
-_DB_CACHE_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', '..', '..', '.cache', 'futures'))
+_DB_CACHE_DIR = str(DEFAULT_FUTURES_CACHE_ROOT)
 
 
 @dataclass

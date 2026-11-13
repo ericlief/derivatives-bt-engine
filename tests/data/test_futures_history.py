@@ -12,6 +12,8 @@ from derivatives_bt_engine.data.futures_dataloader import (
     globex_daily_cache_path,
 )
 from derivatives_bt_engine.data.futures_history import (
+    DEFAULT_FUTURES_CACHE_ROOT,
+    DEFAULT_FUTURES_RESULTS_ROOT,
     FuturesHistory,
     GlobexHistoryProvider,
     HISTORY_SCHEMA_VERSION,
@@ -26,6 +28,16 @@ from derivatives_bt_engine.calculations.roll_policy import (
 
 CARVER_CODES = ["SP500", "GOLD", "CRUDE_W", "US10", "JPY"]
 SOURCE_COMMIT = "b" * 40
+
+
+def test_default_futures_cache_is_outside_the_repository() -> None:
+    """Persistent futures artifacts belong under the shared misc data root."""
+    assert DEFAULT_FUTURES_CACHE_ROOT == Path(
+        "/home/dev/data/fin/misc/cache/futures"
+    )
+    assert DEFAULT_FUTURES_RESULTS_ROOT == Path(
+        "/home/dev/data/fin/misc/results"
+    )
 
 
 def _build_carver_sidecar(path: Path) -> None:

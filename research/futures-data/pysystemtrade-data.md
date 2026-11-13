@@ -712,9 +712,9 @@ the legacy volume-front path implicitly.
 Cache paths must include source and schema version, for example:
 
 ```text
-.cache/futures/globex/v1/ES_daily.parquet
-.cache/futures/globex/v8/<database-fingerprint>/<policy-key>/ES_signal.parquet
-.cache/futures/pysystemtrade/v8/<source-commit>/SP500_signal.parquet
+/home/dev/data/fin/misc/cache/futures/globex/v1/ES_daily.parquet
+/home/dev/data/fin/misc/cache/futures/globex/v8/<database-fingerprint>/<policy-key>/ES_signal.parquet
+/home/dev/data/fin/misc/cache/futures/pysystemtrade/v8/<source-commit>/SP500_signal.parquet
 ```
 
 The first path is the unchanged legacy `FuturesDataLoader` cache. The v8 paths

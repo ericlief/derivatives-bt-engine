@@ -28,9 +28,9 @@ Run the full reference-history baseline with:
 
 ```bash
 .venv/bin/futures-build-selection \
-  --input results/multi_speed_ewmac_rule_cache_<timestamp>.parquet \
-  --output-dir results/return_tsmom_baseline \
-  --cache .cache/futures \
+  --input /home/dev/data/fin/misc/results/multi_speed_ewmac_rule_cache_<timestamp>.parquet \
+  --output-dir /home/dev/data/fin/misc/results/return_tsmom_baseline \
+  --cache /home/dev/data/fin/misc/cache/futures \
   --signal-model return_tsmom \
   --fast-window 64 \
   --slow-window 256 \
@@ -52,9 +52,9 @@ calendar month. Binary Goulding emits full signed forecasts:
 
 ```bash
 .venv/bin/futures-build-selection \
-  --input results/multi_speed_ewmac_rule_cache_<timestamp>.parquet \
-  --output-dir results/goulding_baseline \
-  --cache .cache/futures \
+  --input /home/dev/data/fin/misc/results/multi_speed_ewmac_rule_cache_<timestamp>.parquet \
+  --output-dir /home/dev/data/fin/misc/results/goulding_baseline \
+  --cache /home/dev/data/fin/misc/cache/futures \
   --signal-model goulding \
   --goulding-signal-mode binary \
   --selection-rebalance yearly \

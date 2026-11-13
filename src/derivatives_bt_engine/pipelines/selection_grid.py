@@ -28,6 +28,7 @@ from zoneinfo import ZoneInfo
 import polars as pl
 
 from derivatives_bt_engine.data.futures_history import (
+    DEFAULT_FUTURES_RESULTS_ROOT,
     DEFAULT_GLOBEX_DB_PATH,
     DEFAULT_PYSYSTEMTRADE_DB_PATH,
 )
@@ -407,7 +408,8 @@ def parse_args(argv=None) -> argparse.Namespace:
         type=Path,
         help=(
             "Parent directory for timestamped grid-run folders; defaults to "
-            "results/. Each run creates selection_grid_<Eastern timestamp>."
+            "/home/dev/data/fin/misc/results/. Each run creates "
+            "selection_grid_<Eastern timestamp>."
         ),
     )
     parser.add_argument(
@@ -1887,7 +1889,7 @@ def run(argv=None) -> tuple[Path, Path | None]:
         output_root = (
             args.output_dir.expanduser().resolve()
             if args.output_dir is not None
-            else Path("results").resolve()
+            else DEFAULT_FUTURES_RESULTS_ROOT.resolve()
         )
         output_dir = output_root / f"selection_grid_{stamp}"
     output_dir.mkdir(parents=True, exist_ok=True)

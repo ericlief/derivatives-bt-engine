@@ -114,7 +114,7 @@ Rebuild the rule cache after acquiring or copying a current market snapshot:
   --snapshot-input /path/to/futures_market_snapshot_<timestamp>.parquet \
   --history-db /home/dev/fin/db/pysystemtrade_reference.duckdb \
   --rule-cost-limit-sr 0.15 \
-  --output results/multi_speed_ewmac_rule_cache.parquet
+  --output /home/dev/data/fin/misc/results/multi_speed_ewmac_rule_cache.parquet
 ```
 
 Then pass the resulting timestamped Parquet to
@@ -123,8 +123,8 @@ pass used above:
 
 ```bash
 .venv/bin/futures-build-selection \
-  --input results/multi_speed_ewmac_rule_cache_<timestamp>.parquet \
-  --output-dir results/carry_pooled_turnover \
+  --input /home/dev/data/fin/misc/results/multi_speed_ewmac_rule_cache_<timestamp>.parquet \
+  --output-dir /home/dev/data/fin/misc/results/carry_pooled_turnover \
   --initial-capital-usd 75000 \
   --target-vol 0.20 \
   --signal-model carry \

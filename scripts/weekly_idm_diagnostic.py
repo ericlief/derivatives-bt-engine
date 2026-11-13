@@ -42,13 +42,14 @@ from derivatives_bt_engine.calculations.correlation import (
 )
 from derivatives_bt_engine.data.futures_dataloader import FuturesDataLoader
 from derivatives_bt_engine.calculations.instruments import resolve_price_symbol
+from derivatives_bt_engine.data.futures_history import DEFAULT_FUTURES_CACHE_ROOT
 from derivatives_bt_engine.strats.tsmom_binary_vol_parity_backtest import DEFAULT_SYMBOLS
 from derivatives_bt_engine.logging_config import setup_logger
 
 
 logger = setup_logger()
 
-DEFAULT_CACHE_DIR = Path(__file__).resolve().parents[1] / ".cache" / "futures"
+DEFAULT_CACHE_DIR = DEFAULT_FUTURES_CACHE_ROOT
 DEFAULT_WINDOW_YEARS = 3.0
 DEFAULT_DAILY_HALFLIFE = 63.0
 DEFAULT_WEEKLY_SPAN = 25.0

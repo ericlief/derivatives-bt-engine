@@ -10,7 +10,7 @@ Run from the repository root::
 
     .venv/bin/python scripts/pysystemtrade_corn_roll_ablation.py
     .venv/bin/python scripts/pysystemtrade_corn_roll_ablation.py \
-      --output-dir results/corn_roll_ablation
+      --output-dir /home/dev/data/fin/misc/results/corn_roll_ablation
 """
 
 from __future__ import annotations
