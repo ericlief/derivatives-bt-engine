@@ -11,23 +11,23 @@ variable.
 
 ## Rule fields
 
-Name per-rule values as `RULE_SPEED_MODE_VARIABLE`. Use compact EWMAC speeds
-such as `ewmac_416` and carry smoothing spans such as `carry_5`. Use `ref` for
+Name per-rule values as `RULE_SPEED_MODE_VARIABLE`. Use hyphenated EWMAC speeds
+such as `ewmac_4-16` and carry smoothing spans such as `carry_5`. Use `ref` for
 an instrument's pysystemtrade reference-history measurement, `pool` for a
 universe estimate, `afts` for a published AFTS comparison, and `live` for
 point-in-time executable cost calculations.
 
 Examples:
 
-- `ewmac_416_ref_turn`: that instrument's reference-history 16/64 forecast
+- `ewmac_4-16_ref_turn`: that instrument's reference-history 4/16 forecast
   turnover estimate.
-- `ewmac_416_pool_turn`: pooled 16/64 turnover across reviewed reference
+- `ewmac_4-16_pool_turn`: pooled 4/16 turnover across reviewed reference
   histories, used to estimate rule costs.
-- `ewmac_416_pool_instrs`: number of reference histories contributing to
+- `ewmac_4-16_pool_instrs`: number of reference histories contributing to
   that speed's pooled estimates.
-- `ewmac_416_ref_tot_ann_cost_sr`: that instrument's annualized reference
+- `ewmac_4-16_ref_tot_ann_cost_sr`: that instrument's annualized reference
   trading plus roll cost in SR units for that speed.
-- `ewmac_416_live_tot_ann_cost_sr`: the equivalent point-in-time executable
+- `ewmac_4-16_live_tot_ann_cost_sr`: the equivalent point-in-time executable
   cost result.
 - `carry_5_ref_turn`: that instrument's reference-history Carry5 turnover.
 - `carry_5_pool_turn`: pooled Carry5 turnover across reviewed reference

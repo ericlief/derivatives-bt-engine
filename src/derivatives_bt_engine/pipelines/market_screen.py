@@ -3999,13 +3999,13 @@ def _ewmac_public_column_name(name: str) -> str:
     matched = re.match(r"^ref_ewmac_(\d+)_(\d+)_(.+)$", name)
     if matched is not None:
         fast_span, slow_span, suffix = matched.groups()
-        prefix = f"ewmac_{fast_span}{slow_span}"
+        prefix = f"ewmac_{fast_span}-{slow_span}"
         return f"{prefix}_ref_{suffix}"
     matched = re.match(r"^ewmac_(\d+)_(\d+)_(.+)$", name)
     if matched is None:
         return name
     fast_span, slow_span, suffix = matched.groups()
-    prefix = f"ewmac_{fast_span}{slow_span}"
+    prefix = f"ewmac_{fast_span}-{slow_span}"
     if suffix == "ann_trades":
         return f"{prefix}_pool_turn"
     if suffix == "ref_turn":
@@ -4308,7 +4308,7 @@ def _order_market_public_columns(report: pl.DataFrame) -> pl.DataFrame:
     rule_suffix = [
         name for name in report.columns
         if (
-            re.match(r"^(?:ewmac_\d+|carry_\d+)_(?:ref|pool|afts|live)_", name)
+            re.match(r"^(?:ewmac_\d+-\d+|carry_\d+)_(?:ref|pool|afts|live)_", name)
             or name.startswith("ref_elig_ewmac_")
             or name.startswith("live_elig_ewmac_")
             or name == "ref_instr_has_elig_ewmac_rule"
@@ -4317,7 +4317,7 @@ def _order_market_public_columns(report: pl.DataFrame) -> pl.DataFrame:
         and name not in selected_set
     ]
     speed_pattern = re.compile(
-        r"^(?:ewmac_(4|8|16|32|64)(?:16|32|64|128|256)|carry_(\d+))_"
+        r"^(?:ewmac_(\d+)-(\d+)|carry_(\d+))_"
         r"(ref|pool|afts|live)_(.+)$"
     )
     detail_order = {
@@ -4348,7 +4348,7 @@ def _order_market_public_columns(report: pl.DataFrame) -> pl.DataFrame:
         "cost_elig": 5,
     }
 
-    def rule_column_key(name: str) -> tuple[int, int, str, int, str]:
+    def rule_column_key(name: str) -> tuple[int, int, int, int, int, str]:
         """Order rules by speed, with shared reference inputs first."""
         matched = speed_pattern.match(name)
         if matched is None:
@@ -4365,16 +4365,18 @@ def _order_market_public_columns(report: pl.DataFrame) -> pl.DataFrame:
                 "live_instr_has_elig_ewmac_rule": 2,
             }
             if name == "ref_ann_rolls":
-                return (-1, 0, "", 0, name)
-            return (0, 0, "", aggregate_order.get(name, 99), name)
-        ewmac_speed, carry_speed, mode, detail = matched.groups()
-        speed = int(ewmac_speed or carry_speed)
+                return (-1, 0, 0, 0, 0, name)
+            return (0, 0, 0, 0, aggregate_order.get(name, 99), name)
+        ewmac_fast, ewmac_slow, carry_speed, mode, detail = matched.groups()
+        family = 0 if ewmac_fast is not None else 1
+        speed = int(ewmac_fast or carry_speed)
         return (
             1,
+            family,
             speed,
             {"ref": 0, "pool": 1, "afts": 2, "live": 3}[mode],
             detail_order.get(detail, 99),
-            name,
+            f"{int(ewmac_slow or 0):06d}_{name}",
         )
 
     rule_suffix.sort(key=rule_column_key)
