@@ -98,6 +98,7 @@ from derivatives_bt_engine.calculations.carry import (
     build_carry_forecast,
 )
 from derivatives_bt_engine.data.futures_history import (
+    DEFAULT_FUTURES_CACHE_ROOT,
     DEFAULT_FUTURES_RESULTS_ROOT,
     DEFAULT_PYSYSTEMTRADE_DB_PATH,
     PysystemtradeHistoryProvider,
@@ -784,6 +785,7 @@ def estimate_pooled_ewmac_cost_baseline(
     provider: PysystemtradeHistoryProvider,
     *,
     db_path: Path | str,
+    cache_root: Path | str | None = None,
     pooling_mapping_path: Path | str = DEFAULT_POOLING_MAPPING_PATH,
     fast_span: int = DEFAULT_COST_EWMAC_FAST_SPAN,
     slow_span: int = DEFAULT_COST_EWMAC_SLOW_SPAN,
@@ -799,6 +801,7 @@ def estimate_pooled_ewmac_cost_baseline(
     pooled = load_pooled_ewmac_rule(
         EwmacRule(fast_span, slow_span),
         db_path=db_path,
+        cache_root=(provider.cache_root if cache_root is None else cache_root),
         pooling_mapping_path=pooling_mapping_path,
         vol_span=vol_span,
         vol_slow_years=vol_slow_years,
@@ -951,6 +954,7 @@ def estimate_pooled_ewmac_cost_baselines(
     provider: PysystemtradeHistoryProvider,
     *,
     db_path: Path | str,
+    cache_root: Path | str | None = None,
     pooling_mapping_path: Path | str = DEFAULT_POOLING_MAPPING_PATH,
     fast_spans: tuple[int, ...] = DEFAULT_COST_EWMAC_FAST_SPANS,
     **kwargs,
@@ -970,6 +974,7 @@ def estimate_pooled_ewmac_cost_baselines(
         summary, rule_metrics = estimate_pooled_ewmac_cost_baseline(
             provider,
             db_path=db_path,
+            cache_root=cache_root,
             pooling_mapping_path=pooling_mapping_path,
             fast_span=fast_span,
             slow_span=fast_span * 4,
@@ -3454,6 +3459,12 @@ def parse_args(argv=None, *, rule_cache_only: bool = False):
         help="Historical signal database used for volatility and EWMAC calibration.",
     )
     parser.add_argument(
+        "--cache",
+        type=Path,
+        default=DEFAULT_FUTURES_CACHE_ROOT,
+        help="Root directory for source-history and derived rule caches.",
+    )
+    parser.add_argument(
         "--pysystemtrade-pooling-mapping",
         type=Path,
         default=DEFAULT_POOLING_MAPPING_PATH,
@@ -5206,7 +5217,10 @@ def run(
         args.pysystemtrade_pooling_mapping,
     )
     pysystemtrade_provider = (
-        PysystemtradeHistoryProvider(db_path=args.history_db)
+        PysystemtradeHistoryProvider(
+            db_path=args.history_db,
+            cache_root=args.cache,
+        )
         if args.vol_source == "pysystemtrade" else None
     )
     reference_fx_by_currency = load_latest_fx_to_usd(args.history_db)
@@ -5309,13 +5323,15 @@ def run(
     pooled_summaries = None
     strategy_metrics_by_rule = None
     strategy_provider = pysystemtrade_provider or PysystemtradeHistoryProvider(
-        db_path=args.history_db
+        db_path=args.history_db,
+        cache_root=args.cache,
     )
     if not args.skip_ewmac_cost_baseline:
         pooled_summaries, strategy_metrics_by_rule = (
             estimate_pooled_ewmac_cost_baselines(
                 strategy_provider,
                 db_path=args.history_db,
+                cache_root=args.cache,
                 pooling_mapping_path=args.pysystemtrade_pooling_mapping,
                 fast_spans=args.cost_ewmac_fast_spans,
                 vol_span=args.cost_ewmac_vol_span,

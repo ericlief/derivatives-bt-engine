@@ -21,6 +21,7 @@ from derivatives_bt_engine.calculations.volatility import (
     MIXED_VOL_SLOW_YEARS,
 )
 from derivatives_bt_engine.data.futures_history import (
+    DEFAULT_FUTURES_CACHE_ROOT,
     DEFAULT_PYSYSTEMTRADE_DB_PATH,
 )
 from derivatives_bt_engine.data.pysystemtrade_pooling import (
@@ -72,6 +73,12 @@ def parse_args(argv=None) -> argparse.Namespace:
         type=Path,
         default=DEFAULT_PYSYSTEMTRADE_DB_PATH,
         help="Historical signal database used to calibrate EWMAC rules.",
+    )
+    parser.add_argument(
+        "--cache",
+        type=Path,
+        default=DEFAULT_FUTURES_CACHE_ROOT,
+        help="Root directory for source-history and derived rule caches.",
     )
     parser.add_argument(
         "--pooling-map",
@@ -162,6 +169,8 @@ def run(argv=None) -> pl.DataFrame:
         str(args.max_snapshot_age_days),
         "--pysystemtrade-db",
         str(args.history_db),
+        "--cache",
+        str(args.cache),
         "--pysystemtrade-pooling-mapping",
         str(args.pysystemtrade_pooling_mapping),
         "--cost-ewmac-fast-spans",
