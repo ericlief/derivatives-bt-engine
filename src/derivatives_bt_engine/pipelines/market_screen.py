@@ -1180,9 +1180,11 @@ def _configured_cost_estimate(
     """Calculate pooled-rule diagnostics and reference/live annual SR costs.
 
     Pooled turnover and performance come from the reference rule universe.
-    Reference eligibility uses the reviewed spread and configured commission;
-    live eligibility uses the selected snapshot spread and executable
-    commission. Missing live inputs leave the live decision null without
+    Per-instrument ``ref_turn`` is retained for audit; both reference and live
+    rule costs use pooled turnover. Reference eligibility uses the reviewed
+    spread and configured commission; live eligibility uses the selected
+    snapshot spread and executable commission. Missing live inputs leave the
+    live decision null without
     suppressing the reference section.
     """
     common: dict[str, object] = {
@@ -1454,6 +1456,40 @@ def _configured_cost_estimate(
             f"ref_{prefix}_tot_ann_cost_sr": reference_total_ann_cost_sr,
             f"ref_{prefix}_cost_eligible": reference_cost_eligible,
         })
+    # Costs use the same pooled Carry turnover as the selection gate. The
+    # instrument's ref_turn above is a diagnostic and must not drive costs.
+    for smooth in sorted((carry_summaries or {})):
+        prefix = f"carry_{smooth}"
+        pooled_turnover = common.get(
+            f"{prefix}_pooled_forecast_turnover"
+        )
+        reference_trade_ann_cost_sr = (
+            reference_trade_sr * pooled_turnover
+            if reference_trade_sr is not None and pooled_turnover is not None
+            else None
+        )
+        reference_roll_ann_cost_sr = (
+            reference_roll_sr * rolls_per_year
+            if reference_roll_sr is not None and rolls_per_year is not None
+            else None
+        )
+        reference_total_ann_cost_sr = (
+            reference_trade_ann_cost_sr + reference_roll_ann_cost_sr
+            if reference_trade_ann_cost_sr is not None
+            and reference_roll_ann_cost_sr is not None
+            else None
+        )
+        reference_cost_eligible = (
+            reference_total_ann_cost_sr <= rule_cost_limit_sr
+            if reference_total_ann_cost_sr is not None
+            else None
+        )
+        common.update({
+            f"{prefix}_ref_trade_ann_cost_sr": reference_trade_ann_cost_sr,
+            f"{prefix}_ref_roll_ann_cost_sr": reference_roll_ann_cost_sr,
+            f"{prefix}_ref_tot_ann_cost_sr": reference_total_ann_cost_sr,
+            f"{prefix}_ref_cost_eligible": reference_cost_eligible,
+        })
     reference_baselines_available = bool(reference_rule_eligibility) and all(
         eligible is not None for eligible in reference_rule_eligibility
     )
@@ -1492,6 +1528,14 @@ def _configured_cost_estimate(
             "eligible_ewmac_rule_count": None,
             "eligible_ewmac_rules": None,
             "instrument_has_eligible_ewmac_rule": None,
+        })
+    for smooth in sorted((carry_summaries or {})):
+        prefix = f"carry_{smooth}"
+        common.update({
+            f"{prefix}_live_trade_ann_cost_sr": None,
+            f"{prefix}_live_roll_ann_cost_sr": None,
+            f"{prefix}_live_tot_ann_cost_sr": None,
+            f"{prefix}_live_cost_eligible": None,
         })
     if (
         spread_points is None
@@ -1630,6 +1674,37 @@ def _configured_cost_estimate(
             "instrument_has_eligible_ewmac_rule": (
                 bool(eligible_rules) if baselines_available else None
             ),
+        })
+    for smooth in sorted((carry_summaries or {})):
+        prefix = f"carry_{smooth}"
+        pooled_turnover = common.get(
+            f"{prefix}_pooled_forecast_turnover"
+        )
+        trade_ann_cost_sr = (
+            trade_sr * pooled_turnover
+            if pooled_turnover is not None
+            else None
+        )
+        roll_ann_cost_sr = (
+            roll_sr * rolls_per_year
+            if rolls_per_year is not None
+            else None
+        )
+        total_ann_cost_sr = (
+            trade_ann_cost_sr + roll_ann_cost_sr
+            if trade_ann_cost_sr is not None and roll_ann_cost_sr is not None
+            else None
+        )
+        cost_eligible = (
+            total_ann_cost_sr <= rule_cost_limit_sr
+            if total_ann_cost_sr is not None
+            else None
+        )
+        result.update({
+            f"{prefix}_live_trade_ann_cost_sr": trade_ann_cost_sr,
+            f"{prefix}_live_roll_ann_cost_sr": roll_ann_cost_sr,
+            f"{prefix}_live_tot_ann_cost_sr": total_ann_cost_sr,
+            f"{prefix}_live_cost_eligible": cost_eligible,
         })
     return result
 
@@ -3878,10 +3953,7 @@ PUBLIC_REPORT_RENAMES = {
     # The persisted acquisition snapshot retains the two-sided quote; unlike
     # the selection report's snap_spread_points this is not divided by two.
     "snapshot_full_spread_points": "snap_full_spread_pts",
-    # These fields are calculated while building the raw quote row, before the
-    # account-specific what-if preview is attached.  Label the configured
-    # commission explicitly so it cannot be mistaken for the selected IB fee.
-    "commission_per_side": "ref_config_commission_usd",
+    # The reference commission and spread are separate from account what-if costs.
     "one_way_spread_cash": "snap_spread_cash_usd",
     "one_way_total_cost": "snap_ref_config_cost_usd",
     "one_way_cost_per_annual_dollar_vol": "snap_ref_config_sr_cost_per_trade",
@@ -4117,6 +4189,37 @@ def _public_report_schema(report: pl.DataFrame) -> pl.DataFrame:
         for name in half_spread_columns
         if name in report.columns
     )
+    # Preserve the existing verbose reference commission field while exposing
+    # its concise public alias. Legacy snapshots may only contain the verbose
+    # field, while fresh quote rows still carry the internal source name.
+    if (
+        "commission_per_side" in report.columns
+        and not {
+            "ref_config_commission_usd",
+            "ref_config_comm_usd",
+        }.intersection(report.columns)
+    ):
+        report = report.with_columns(
+            pl.col("commission_per_side").alias("ref_config_commission_usd")
+        )
+    elif (
+        "commission_per_side" not in report.columns
+        and "ref_comm" not in report.columns
+    ):
+        legacy_commission_column = next(
+            (
+                name for name in (
+                    "ref_config_commission_usd",
+                    "ref_config_comm_usd",
+                )
+                if name in report.columns
+            ),
+            None,
+        )
+        if legacy_commission_column is not None:
+            report = report.with_columns(
+                pl.col(legacy_commission_column).alias("ref_comm")
+            )
     report = report.drop(
         column
         for column in ("carver_spread_points", "risk_daily_return_vol")
@@ -4323,35 +4426,35 @@ def _order_market_public_columns(report: pl.DataFrame) -> pl.DataFrame:
         r"(ref|pool|afts|live)_(.+)$"
     )
     detail_order = {
-        "ref_turn": 0,
-        "pool_turn": 1,
-        "afts_turn": 2,
-        "pool_pre_cost_sr": 3,
-        "ref_pre_cost_sr": 4,
-        "live_trade_ann_cost_sr": 5,
-        "live_roll_ann_cost_sr": 6,
-        "live_tot_ann_cost_sr": 7,
-        "live_cost_elig": 8,
-        "ref_trade_ann_cost_sr": 5,
-        "ref_roll_ann_cost_sr": 6,
-        "ref_tot_ann_cost_sr": 7,
-        "ref_cost_eligible": 8,
         "pool_instrs": 0,
-        "ann_trades": 0,
         "mean_instr_pre_cost_sr": 1,
         "median_instr_pre_cost_sr": 2,
         "hist_weighted_mean_pre_cost_sr": 3,
         "stacked_observation_pre_cost_sr": 4,
-        "pre_cost_sr": 0,
-        "ann_rolls": 1,
-        "trade_ann_cost_sr": 2,
-        "roll_ann_cost_sr": 3,
-        "tot_ann_cost_sr": 4,
-        "cost_elig": 5,
+        "pool_minus_afts_turn": 5,
+        "pool_to_afts_turn_ratio": 6,
+        "pool_reviewed_instrs": 7,
+        "pool_history_start": 8,
+        "pool_history_end": 9,
+        "pool_turn_src": 10,
+        "afts_turn_src": 11,
+        "pre_cost_sr": 12,
+        "trade_ann_cost_sr": 0,
+        "roll_ann_cost_sr": 1,
+        "tot_ann_cost_sr": 2,
+        "cost_eligible": 3,
+        "cost_elig": 3,
+    }
+    cost_details = {
+        "trade_ann_cost_sr",
+        "roll_ann_cost_sr",
+        "tot_ann_cost_sr",
+        "cost_eligible",
+        "cost_elig",
     }
 
-    def rule_column_key(name: str) -> tuple[int, int, int, int, int, str]:
-        """Order rules by speed, with shared reference inputs first."""
+    def rule_column_key(name: str) -> tuple[int, int, int, int, int, int, str]:
+        """Order turnovers together, then diagnostics and per-rule costs."""
         matched = speed_pattern.match(name)
         if matched is None:
             aggregate_order = {
@@ -4367,18 +4470,30 @@ def _order_market_public_columns(report: pl.DataFrame) -> pl.DataFrame:
                 "live_instr_has_elig_ewmac_rule": 2,
             }
             if name == "ref_ann_rolls":
-                return (-1, 0, 0, 0, 0, name)
-            return (0, 0, 0, 0, aggregate_order.get(name, 99), name)
+                return (-1, 0, 0, 0, 0, 0, name)
+            return (0, 0, 0, 0, 0, aggregate_order.get(name, 99), name)
         ewmac_fast, ewmac_slow, carry_speed, mode, detail = matched.groups()
         family = 0 if ewmac_fast is not None else 1
         speed = int(ewmac_fast or carry_speed)
+        mode_order = {"ref": 0, "pool": 1, "afts": 2, "live": 3}
+        if detail == "turn":
+            detail_group = 0
+            value_order = mode_order[mode]
+        elif detail in cost_details:
+            detail_group = 2
+            cost_mode_order = {"ref": 0, "live": 1, "pool": 2, "afts": 3}
+            value_order = cost_mode_order[mode] * 10 + detail_order[detail]
+        else:
+            detail_group = 1
+            value_order = mode_order[mode] * 100 + detail_order.get(detail, 99)
         return (
             1,
             family,
             speed,
-            {"ref": 0, "pool": 1, "afts": 2, "live": 3}[mode],
-            detail_order.get(detail, 99),
-            f"{int(ewmac_slow or 0):06d}_{name}",
+            int(ewmac_slow or 0),
+            detail_group,
+            value_order,
+            name,
         )
 
     rule_suffix.sort(key=rule_column_key)
@@ -4397,17 +4512,20 @@ def _order_market_public_columns(report: pl.DataFrame) -> pl.DataFrame:
     ]
     shared_ref = [
         name for name in (
+            "ref_comm",
+            "ref_spread_pts",
             "ref_ann_rolls",
             "ref_trade_sr",
             "ref_roll_sr",
         )
         if name in ref_suffix
     ]
+    other_ref = [name for name in ref_suffix if name not in shared_ref]
     audit_suffix = [
         *shared_ref,
+        *other_ref,
         *rule_suffix,
         *snap_suffix,
-        *(name for name in ref_suffix if name not in shared_ref),
     ]
     middle = [
         name for name in report.columns
@@ -4895,6 +5013,13 @@ def _market_snapshot_frame(
         ),
         "one_way_cost_bps_notional": "snap_ref_config_cost_bps_notional",
     }
+    if (
+        "commission_per_side" in snapshot.columns
+        and "ref_comm" not in snapshot.columns
+    ):
+        snapshot = snapshot.with_columns(
+            pl.col("commission_per_side").alias("ref_comm")
+        )
     snapshot = snapshot.rename({
         source: target
         for source, target in reference_renames.items()
@@ -5140,6 +5265,15 @@ def _restore_market_snapshot_columns(snapshot: pl.DataFrame) -> pl.DataFrame:
     calculations continue to use descriptive internal names. Older snapshots
     with internal names pass through unchanged.
     """
+    if (
+        "ref_comm" not in snapshot.columns
+        and "ref_config_comm_usd" in snapshot.columns
+    ):
+        # Older snapshots have only the verbose reference commission name.
+        # Add the concise alias while retaining the field existing readers use.
+        snapshot = snapshot.with_columns(
+            pl.col("ref_config_comm_usd").alias("ref_comm")
+        )
     source_candidates = (
         set(PUBLIC_REPORT_RENAMES)
         | set(CENTRAL_REPORT_RENAMES)

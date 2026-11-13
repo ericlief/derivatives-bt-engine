@@ -78,6 +78,10 @@ _vd_set_type(
     forecast_elig subsystem_elig forecast_valid fx_valid pnl_valid
     reference_return_valid ref_ret_valid
     pnl_fx_valid pnl_valid ret_valid is_roll roll_event feasible accepted
+    carry_5_ref_cost_elig carry_5_live_cost_elig
+    carry_20_ref_cost_elig carry_20_live_cost_elig
+    carry_60_ref_cost_elig carry_60_live_cost_elig
+    carry_120_ref_cost_elig carry_120_live_cost_elig
     tie_eligible tie_break_applied
     roll_cost_in_score buf_trade_to_edge rebalance_on_roll roll_rebalanced
     snap_use_rth
@@ -124,7 +128,7 @@ _vd_set_type(
     spread_pts spread_points comm comm_usd
     init_margin init_margin_usd maint_margin maint_margin_usd
     margin_fx_to_usd comm_native spread_cash_native cost_native cost_usd
-    roll_cost_native roll_cost_usd
+    roll_cost_native roll_cost_usd ref_comm
     trade_sr roll_sr rule_cost_lim_sr cost_lim_sr max_ann_dvol
     init_capital_usd target_vol cost_limit_sr
     risk_target daily_risk_pts ann_risk_pts
@@ -134,6 +138,22 @@ _vd_set_type(
     iter_best_score iter_score_best_score tie_score_floor min_accept_score
     idm weight limit_weight
     score_cost_sr ann_trade_cost_sr ann_roll_cost_sr ann_cost_sr
+    carry_5_ref_trade_ann_cost_sr carry_5_ref_roll_ann_cost_sr
+    carry_5_ref_tot_ann_cost_sr
+    carry_5_live_trade_ann_cost_sr carry_5_live_roll_ann_cost_sr
+    carry_5_live_tot_ann_cost_sr
+    carry_20_ref_trade_ann_cost_sr carry_20_ref_roll_ann_cost_sr
+    carry_20_ref_tot_ann_cost_sr
+    carry_20_live_trade_ann_cost_sr carry_20_live_roll_ann_cost_sr
+    carry_20_live_tot_ann_cost_sr
+    carry_60_ref_trade_ann_cost_sr carry_60_ref_roll_ann_cost_sr
+    carry_60_ref_tot_ann_cost_sr
+    carry_60_live_trade_ann_cost_sr carry_60_live_roll_ann_cost_sr
+    carry_60_live_tot_ann_cost_sr
+    carry_120_ref_trade_ann_cost_sr carry_120_ref_roll_ann_cost_sr
+    carry_120_ref_tot_ann_cost_sr
+    carry_120_live_trade_ann_cost_sr carry_120_live_roll_ann_cost_sr
+    carry_120_live_tot_ann_cost_sr
     base_net_sr net_sr size_penalty_sr
     low_con_penalty_sr high_con_penalty_sr con_band_penalty_sr
     low_con_penalty_scale high_con_penalty_scale

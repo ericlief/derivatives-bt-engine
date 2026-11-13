@@ -579,8 +579,10 @@ pysystemtrade histories + reviewed economic classification + local execution ove
 
 The rule-cache snapshot contains both live acquisition fields and frozen
 reference inputs. Public spread and commission names use `ref_` for the
-reference calibration (`ref_spread_pts` and `ref_config_comm_usd`) and `snap_`
-for point-in-time quotes. Newly generated reports must not expose legacy
+reference calibration (`ref_comm` and `ref_spread_pts`) and `snap_` for
+point-in-time quotes. Preserve the legacy `ref_config_comm_usd` field as an
+additive alias for existing readers, and keep generic reference fields together
+before rule-specific fields. Newly generated reports must not expose legacy
 `carver_*` spread columns; “Carver” may still appear in prose or a source
 description. A live IB what-if failure affects the live candidate screen, but
 does not suppress reference cost or rule-eligibility inputs used by a complete
@@ -589,14 +591,23 @@ spread, commission, pooled turnover, and reference roll frequency even when
 the account-specific live what-if failed. The selection reader performs the
 same calculation as a compatibility fallback for older caches.
 
-The EWMAC columns are grouped by ownership so a row does not make pooled,
-reference, and live values look interchangeable:
+Rule fields are grouped by numeric speed, with generic reference inputs before
+the rule groups so pooled, reference, and live values remain distinct:
 
 | Section | Example fields | Meaning |
 | --- | --- | --- |
-| `RULE_SPEED_MODE_VAR` | `ewmac_4_16_ref_turn`, `ewmac_4_16_pool_turn`, `ewmac_4_16_pool_instrs`, `ewmac_4_16_pool_mean_instr_pre_cost_sr`, `carry_5_ref_turn`, `carry_5_pool_turn`, `carry_5_afts_turn` | Per-instrument reference turnover, shared pooled turnover and pooled diagnostics, and the separately labeled published AFTS comparison. Pooled values repeat for every instrument. |
-| Shared reference inputs | `ref_ann_rolls`, `ref_trade_sr`, `ref_roll_sr` | Instrument-level reference inputs emitted once before the speed-specific rule fields. Roll frequency and cost rates are common across speeds and must not be repeated per rule. |
-| Rule cost results | `ewmac_4_16_ref_tot_ann_cost_sr`, `ewmac_4_16_ref_cost_eligible`, `ewmac_4_16_live_tot_ann_cost_sr`, `ewmac_4_16_live_cost_eligible` | Reference and point-in-time executable-cost calculations, grouped with the corresponding rule speed. |
+| `RULE_SPEED_MODE_VAR` | `ewmac_4_16_ref_turn`, `ewmac_4_16_pool_turn`, `ewmac_4_16_pool_instrs`, `ewmac_4_16_pool_mean_instr_pre_cost_sr`, `carry_5_ref_turn`, `carry_5_pool_turn`, `carry_5_afts_turn`, `carry_5_ref_tot_ann_cost_sr`, `carry_5_live_tot_ann_cost_sr` | Per-instrument reference turnover is an audit diagnostic; reference and live rule costs use pooled turnover. The AFTS value is a separately labeled comparison. Pooled values repeat for every instrument. |
+| Shared reference inputs | `ref_comm`, `ref_spread_pts`, `ref_ann_rolls`, `ref_trade_sr`, `ref_roll_sr` | Instrument-level reference inputs emitted together before the speed-specific rule fields. Legacy commission fields remain available as aliases. |
+| Rule cost results | `ewmac_4_16_ref_tot_ann_cost_sr`, `ewmac_4_16_live_tot_ann_cost_sr`, `carry_5_ref_trade_ann_cost_sr`, `carry_5_ref_roll_ann_cost_sr`, `carry_5_ref_tot_ann_cost_sr`, `carry_5_live_tot_ann_cost_sr` | Reference and point-in-time executable costs, grouped with the corresponding rule speed. |
+
+For Carry, `carry_<smooth>_ref_turn` is an instrument-level audit value.
+Both reference and live per-rule costs use `carry_<smooth>_pool_turn`, matching
+the pooled turnover used by the selection cost gate:
+
+```text
+ref_tot_ann_cost_sr  = ref_trade_sr × pool_turn + ref_roll_sr × ref_ann_rolls
+live_tot_ann_cost_sr = trade_sr     × pool_turn + roll_sr     × ref_ann_rolls
+```
 
 Each cost path also has an aggregate decision: `ref_elig_ewmac_rule_count`,
 `ref_elig_ewmac_rules`, and `ref_instr_has_elig_ewmac_rule` for a complete
@@ -1358,9 +1369,9 @@ identifier.
 The snapshot presents `commission_amount`, `commission_currency`,
 `commission_usd`, and `commission_source` beside the primary contract fields.
 An eligible account-specific preview therefore appears as
-`commission_source=ib_what_if`. The older configured amount is retained only
-as `ref_config_commission_usd` near the end of the snapshot, together with
-`snap_ref_config_cost_usd`; these are audit fallbacks and do not override a
+`commission_source=ib_what_if`. The configured reference amount is available
+as `ref_comm` alongside the legacy `ref_config_commission_usd` field, together
+with `snap_ref_config_cost_usd`; these are audit fallbacks and do not override a
 successful what-if preview. A failed attempted preview remains
 `ib_what_if_failed` rather than silently selecting the reference amount.
 
