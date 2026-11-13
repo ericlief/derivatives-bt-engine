@@ -124,6 +124,7 @@ _vd_set_type(
     spread_pts spread_points comm comm_usd
     init_margin init_margin_usd maint_margin maint_margin_usd
     margin_fx_to_usd comm_native spread_cash_native cost_native cost_usd
+    roll_cost_native roll_cost_usd
     trade_sr roll_sr rule_cost_lim_sr cost_lim_sr max_ann_dvol
     init_capital_usd target_vol cost_limit_sr
     risk_target daily_risk_pts ann_risk_pts

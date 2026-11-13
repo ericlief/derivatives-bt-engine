@@ -846,6 +846,8 @@ TWO_DECIMAL_MONEY_COLUMNS = {
     "spread_cash_native",
     "cost_native",
     "cost_usd",
+    "roll_cost_native",
+    "roll_cost_usd",
     "snap_spread_cash_usd",
     "ref_config_commission_usd",
     "snap_ref_config_cost_usd",
