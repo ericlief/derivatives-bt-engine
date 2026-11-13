@@ -3999,13 +3999,13 @@ def _ewmac_public_column_name(name: str) -> str:
     matched = re.match(r"^ref_ewmac_(\d+)_(\d+)_(.+)$", name)
     if matched is not None:
         fast_span, slow_span, suffix = matched.groups()
-        prefix = f"ewmac_{fast_span}-{slow_span}"
+        prefix = f"ewmac_{fast_span}_{slow_span}"
         return f"{prefix}_ref_{suffix}"
     matched = re.match(r"^ewmac_(\d+)_(\d+)_(.+)$", name)
     if matched is None:
         return name
     fast_span, slow_span, suffix = matched.groups()
-    prefix = f"ewmac_{fast_span}-{slow_span}"
+    prefix = f"ewmac_{fast_span}_{slow_span}"
     if suffix == "ann_trades":
         return f"{prefix}_pool_turn"
     if suffix == "ref_turn":
@@ -4308,7 +4308,7 @@ def _order_market_public_columns(report: pl.DataFrame) -> pl.DataFrame:
     rule_suffix = [
         name for name in report.columns
         if (
-            re.match(r"^(?:ewmac_\d+-\d+|carry_\d+)_(?:ref|pool|afts|live)_", name)
+            re.match(r"^(?:ewmac_\d+_\d+|carry_\d+)_(?:ref|pool|afts|live)_", name)
             or name.startswith("ref_elig_ewmac_")
             or name.startswith("live_elig_ewmac_")
             or name == "ref_instr_has_elig_ewmac_rule"
@@ -4317,7 +4317,7 @@ def _order_market_public_columns(report: pl.DataFrame) -> pl.DataFrame:
         and name not in selected_set
     ]
     speed_pattern = re.compile(
-        r"^(?:ewmac_(\d+)-(\d+)|carry_(\d+))_"
+        r"^(?:ewmac_(\d+)_(\d+)|carry_(\d+))_"
         r"(ref|pool|afts|live)_(.+)$"
     )
     detail_order = {
