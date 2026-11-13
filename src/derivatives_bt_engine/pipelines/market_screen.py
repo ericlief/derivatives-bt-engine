@@ -3462,6 +3462,7 @@ def parse_args(argv=None, *, rule_cache_only: bool = False):
         "--cache",
         type=Path,
         default=DEFAULT_FUTURES_CACHE_ROOT,
+        required=rule_cache_only,
         help="Root directory for source-history and derived rule caches.",
     )
     parser.add_argument(

@@ -21,7 +21,6 @@ from derivatives_bt_engine.calculations.volatility import (
     MIXED_VOL_SLOW_YEARS,
 )
 from derivatives_bt_engine.data.futures_history import (
-    DEFAULT_FUTURES_CACHE_ROOT,
     DEFAULT_PYSYSTEMTRADE_DB_PATH,
 )
 from derivatives_bt_engine.data.pysystemtrade_pooling import (
@@ -77,7 +76,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument(
         "--cache",
         type=Path,
-        default=DEFAULT_FUTURES_CACHE_ROOT,
+        required=True,
         help="Root directory for source-history and derived rule caches.",
     )
     parser.add_argument(

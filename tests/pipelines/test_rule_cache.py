@@ -12,9 +12,12 @@ def test_rule_cache_parser_exposes_no_selection_scenario_parameters():
     parser = rule_cache.parse_args([
         "--snapshot-input",
         "snapshot.parquet",
+        "--cache",
+        "cache/futures",
     ])
 
     assert parser.snapshot_input == Path("snapshot.parquet")
+    assert parser.cache == Path("cache/futures")
     assert parser.max_snapshot_age_days == 30
     assert not hasattr(parser, "initial_capital_usd")
     assert not hasattr(parser, "target_vol")
@@ -35,6 +38,8 @@ def test_rule_cache_forwards_only_historical_cache_inputs(monkeypatch):
     result = rule_cache.run([
         "--snapshot-input",
         "snapshot.parquet",
+        "--cache",
+        "cache/futures",
         "--rule-cost-limit-sr",
         "0.10",
     ])
