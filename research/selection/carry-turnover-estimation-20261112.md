@@ -146,6 +146,41 @@ missing `_resolve_globex_asset` import in `test_ewmac_notebook.py`. No saved
 market screen, rule cache, selection result, or backtest result was
 regenerated or overwritten as part of this correction.
 
+## Rule-cost cache follow-up
+
+The first corrected-turnover cache on 2026-11-13 was emitted 37 seconds before
+the per-rule Carry cost columns were committed, so it contained Carry turnover
+but not the reference and live Carry SR costs. A later audit also found that
+local execution overlays such as `MZM` had their own observed IB spread and
+commission but a null PST-configured spread. That null propagated through
+`ref_trade_sr`, `ref_roll_sr`, and every reference rule cost, excluding the
+micro from historical selection even though its execution cost was estimable.
+
+Execution overlays now freeze their own observed IB one-way spread as the
+reference fallback when no PST spread exists. They never inherit the signal
+parent's spread: `ZM` still supplies MZM's signal, PST history, and volatility,
+while `MZM` supplies its multiplier, commission, and observed execution spread.
+The cache records this distinction in `ref_spread_src`.
+
+The final pinned rebuild is
+`/home/dev/data/fin/misc/results/multi_speed_ewmac_rule_cache_20261113_131501.parquet`.
+It contains 215 rows and 354 columns, including 32 Carry reference/live
+cost-and-eligibility fields. For MZM it reports a 0.19-point observed reference
+spread, `ref_trade_sr=0.003795`, `ref_roll_sr=0.004879`, and total annual Carry
+cost SR of 0.111483, 0.074752, 0.062081, and 0.057641 for
+Carry5/20/60/120. Reference inputs and all reference rule fields are contiguous
+before the pooled, AFTS-comparison, and live sections.
+
+The public-to-calculation reader now restores both current EWMAC and Carry
+mode-first names. This fixes the initial end-to-end failure in which the
+selection CLI could write `carry_5_pool_turn` but only recognized the older
+`pool_carry_5_ann_trades` spelling when reading the same cache. Candidate-only
+checks against the pinned cache succeeded for both `carry` and `multi_ewmac`,
+accepting 113 of 215 instruments at 75k capital and 20% target volatility.
+MZM has all four Carry rules cost-eligible; it is excluded from that particular
+candidate set only by market-risk participation (`1.39%` versus the `1%`
+limit), not by missing costs.
+
 ## Reproduction
 
 Rebuild the rule cache after acquiring or copying a current market snapshot:
@@ -154,6 +189,7 @@ Rebuild the rule cache after acquiring or copying a current market snapshot:
 .venv/bin/futures-rule-cache \
   --snapshot-input /path/to/futures_market_snapshot_<timestamp>.parquet \
   --history-db /home/dev/fin/db/pysystemtrade_reference.duckdb \
+  --cache /home/dev/data/fin/misc/cache/futures \
   --rule-cost-limit-sr 0.15 \
   --output /home/dev/data/fin/misc/results/multi_speed_ewmac_rule_cache.parquet
 ```

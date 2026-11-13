@@ -8,6 +8,7 @@ from derivatives_bt_engine.data.futures_cost_rankings import (
     apply_phase2_selection_filters,
     find_latest_phase1_cost_report,
     load_latest_phase1_cost_report,
+    normalize_report_calculation_columns,
     override_phase2_selection_scenario,
     phase2_search_universe,
     phase2_step1_candidates,
@@ -71,6 +72,38 @@ def test_latest_report_prefers_rule_cache_over_legacy_selection_screen(tmp_path)
 def test_find_latest_market_report_raises_for_empty_directory(tmp_path):
     with pytest.raises(FileNotFoundError, match="No market-screen cost report"):
         find_latest_phase1_cost_report(tmp_path)
+
+
+def test_current_rule_cache_names_restore_ewmac_and_carry_calculations():
+    """A freshly emitted public cache is directly consumable by selection."""
+    report = pl.DataFrame({
+        "ewmac_4_16_pool_turn": [56.0],
+        "ewmac_4_16_live_tot_ann_cost_sr": [0.12],
+        "carry_5_pool_turn": [19.0933],
+        "carry_5_afts_turn": [5.75],
+        "carry_5_pool_minus_afts_turn": [13.3433],
+        "carry_5_pool_to_afts_turn_ratio": [3.3206],
+        "carry_5_pool_instrs": [171],
+        "carry_5_pool_reviewed_instrs": [228],
+        "carry_5_pool_hist_start": ["1969-12-02"],
+        "carry_5_pool_hist_end": ["2024-03-29"],
+        "carry_5_pool_turn_src": [CARRY_TURNOVER_SOURCE],
+        "carry_5_afts_turn_src": ["afts_table_40"],
+        "carry_5_ref_tot_ann_cost_sr": [0.11],
+        "carry_5_live_tot_ann_cost_sr": [0.12],
+        "carry_5_ref_cost_elig": [True],
+        "carry_5_live_cost_elig": [True],
+    })
+
+    normalized = normalize_report_calculation_columns(report)
+
+    assert normalized["ewmac_4_16_ann_trades"][0] == pytest.approx(56.0)
+    assert normalized["ewmac_4_16_tot_ann_cost_sr"][0] == pytest.approx(0.12)
+    assert normalized["pool_carry_5_ann_trades"][0] == pytest.approx(19.0933)
+    assert normalized["pool_carry_5_turn_src"][0] == CARRY_TURNOVER_SOURCE
+    assert normalized["ref_carry_5_ann_trades"][0] == pytest.approx(5.75)
+    assert normalized["ref_carry_5_tot_ann_cost_sr"][0] == pytest.approx(0.11)
+    assert normalized["live_carry_5_tot_ann_cost_sr"][0] == pytest.approx(0.12)
 
 
 def test_top_n_by_asset_class_supports_named_rankings():

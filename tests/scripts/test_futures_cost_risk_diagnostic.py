@@ -785,6 +785,101 @@ def test_configured_cost_uses_pooled_turnover_and_reference_rolls():
     assert estimate["eligible_ewmac_rules"] == "64/256"
 
 
+def test_execution_overlay_uses_observed_spread_for_reference_carry_costs():
+    """A micro backtest freezes its own IB spread instead of losing costs."""
+    annual_dvol = 700.9886115772172
+    estimate = _configured_cost_estimate(
+        {
+            "symbol": "MZM",
+            "instrument_code": "SOYMEAL",
+            "representative_instrument": "SOYMEAL",
+            "mapping_status": "local_execution_overlay",
+            "carver_spread_points": None,
+            "commission": 0.76,
+            "per_trade_cost": 0.0,
+            "percentage_cost": 0.0,
+        },
+        {
+            "multiplier": 10.0,
+            "price": 300.0,
+            "fx_to_usd": 1.0,
+            "currency": "USD",
+            "annual_dollar_vol_per_contract": annual_dvol,
+            "selected_one_way_spread_points": 0.19,
+            "selected_spread_source": "ib_dated_contract",
+            "commission_per_side": 0.76,
+            "strategy_ref_ann_rolls": 8.0,
+            "strategy_ref_roll_rate_source": "cached_snapshot",
+            "ib_whatif_attempted": False,
+        },
+        pooled_summaries=None,
+        strategy_metrics_by_rule=None,
+        carry_summaries={
+            5: {
+                "carry_pooled_forecast_turnover": 19.093329,
+                "carry_afts_forecast_turnover": 5.75,
+            }
+        },
+        carry_metrics_by_rule={
+            5: {"carry_forecast_turnover": 17.9817}
+        },
+        rule_cost_limit_sr=0.15,
+    )
+
+    trade_sr = (0.19 * 10.0 + 0.76) / annual_dvol
+    roll_sr = (0.19 * 10.0 + 2.0 * 0.76) / annual_dvol
+    total_cost_sr = trade_sr * 19.093329 + roll_sr * 8.0
+    assert estimate["reference_one_way_spread_points"] == pytest.approx(0.19)
+    assert estimate["reference_spread_source"] == (
+        "ib_dated_contract_execution_overlay_fallback"
+    )
+    assert estimate["ref_trade_sr"] == pytest.approx(trade_sr)
+    assert estimate["ref_roll_sr"] == pytest.approx(roll_sr)
+    assert estimate["carry_5_ref_tot_ann_cost_sr"] == pytest.approx(
+        total_cost_sr
+    )
+    assert estimate["carry_5_live_tot_ann_cost_sr"] == pytest.approx(
+        total_cost_sr
+    )
+    assert estimate["carry_5_ref_cost_eligible"]
+    assert estimate["carry_5_live_cost_eligible"]
+
+
+def test_non_overlay_does_not_promote_live_spread_to_reference_cost():
+    """Ordinary instruments still require their reviewed PST spread."""
+    estimate = _configured_cost_estimate(
+        {
+            "symbol": "TEST",
+            "instrument_code": "TEST",
+            "mapping_status": "pysystemtrade",
+            "carver_spread_points": None,
+            "commission": 1.0,
+            "per_trade_cost": 0.0,
+            "percentage_cost": 0.0,
+        },
+        {
+            "multiplier": 10.0,
+            "price": 100.0,
+            "fx_to_usd": 1.0,
+            "currency": "USD",
+            "annual_dollar_vol_per_contract": 1_000.0,
+            "selected_one_way_spread_points": 0.25,
+            "selected_spread_source": "ib_dated_contract",
+            "commission_per_side": 1.0,
+            "strategy_ref_ann_rolls": 4.0,
+            "ib_whatif_attempted": False,
+        },
+        pooled_summaries=None,
+        strategy_metrics_by_rule=None,
+        rule_cost_limit_sr=0.15,
+    )
+
+    assert estimate["reference_one_way_spread_points"] is None
+    assert estimate["reference_spread_source"] is None
+    assert estimate["ref_trade_sr"] is None
+    assert estimate["ref_roll_sr"] is None
+
+
 def test_configured_cost_uses_current_cycle_not_full_history_roll_rate():
     estimate = _configured_cost_estimate(
         {
@@ -1090,6 +1185,37 @@ def test_public_report_leads_with_primary_values_and_normalizes_spreads():
     )
     assert report.columns.index("daily_pt_vol") < report.columns.index(
         "ref_mixed_pt_vol"
+    )
+
+
+def test_public_report_exposes_reference_spread_provenance():
+    """The public cache distinguishes configured and overlay spread inputs."""
+    report = futures_cost_risk._public_report_schema(pl.DataFrame({
+        "symbol": ["MZM"],
+        "reference_one_way_spread_points": [0.19],
+        "reference_spread_source": [
+            "ib_dated_contract_execution_overlay_fallback"
+        ],
+        "ref_trade_sr": [0.003795],
+        "ref_roll_sr": [0.004879],
+        "carry_5_ref_trade_ann_cost_sr": [0.07246],
+        "carry_20_ref_trade_ann_cost_sr": [0.03572],
+        "carry_5_pooled_forecast_turnover": [19.0933],
+        "carry_5_live_trade_ann_cost_sr": [0.07246],
+    }))
+
+    assert report["ref_spread_pts"][0] == pytest.approx(0.19)
+    assert report["ref_spread_src"][0] == (
+        "ib_dated_contract_execution_overlay_fallback"
+    )
+    assert report.columns.index("ref_roll_sr") < report.columns.index(
+        "carry_5_ref_trade_ann_cost_sr"
+    )
+    assert report.columns.index(
+        "carry_20_ref_trade_ann_cost_sr"
+    ) < report.columns.index("carry_5_pool_turn")
+    assert report.columns.index("carry_5_pool_turn") < report.columns.index(
+        "carry_5_live_trade_ann_cost_sr"
     )
 
 

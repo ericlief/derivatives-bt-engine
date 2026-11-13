@@ -161,6 +161,7 @@ DEFAULT_VIEW_COLUMNS = (
     "pool_ewmac_64_256_stacked_observation_pre_cost_sr",
     *CARRY_TURNOVER_AUDIT_COLUMNS,
     "ref_spread_pts",
+    "ref_spread_src",
     "ref_config_comm_usd",
     "ref_trade_sr",
     "ref_roll_sr",
@@ -1209,6 +1210,95 @@ def normalize_report_calculation_columns(report: pl.DataFrame) -> pl.DataFrame:
         if legacy in report.columns and live not in report.columns
     )
     speed_patterns = (
+        # Canonical mode-first EWMAC report names.
+        (
+            re.compile(
+                r"^ewmac_(?P<fast>\d+)_(?P<slow>\d+)_pool_turn$"
+            ),
+            "ewmac_{fast}_{slow}_ann_trades",
+        ),
+        (
+            re.compile(
+                r"^ewmac_(?P<fast>\d+)_(?P<slow>\d+)_"
+                r"pool_median_instr_pre_cost_sr$"
+            ),
+            "ewmac_{fast}_{slow}_median_instr_pre_cost_sr",
+        ),
+        (
+            re.compile(
+                r"^ewmac_(?P<fast>\d+)_(?P<slow>\d+)_live_"
+                r"(?P<kind>trade|roll|tot)_ann_cost_sr$"
+            ),
+            "ewmac_{fast}_{slow}_{kind}_ann_cost_sr",
+        ),
+        (
+            re.compile(
+                r"^ewmac_(?P<fast>\d+)_(?P<slow>\d+)_live_cost_elig$"
+            ),
+            "ewmac_{fast}_{slow}_cost_elig",
+        ),
+        # Canonical Carry report names. Selection retains the older internal
+        # calculation vocabulary so cached reports remain backward compatible.
+        (
+            re.compile(r"^carry_(?P<smooth>\d+)_pool_turn$"),
+            "pool_carry_{smooth}_ann_trades",
+        ),
+        (
+            re.compile(r"^carry_(?P<smooth>\d+)_afts_turn$"),
+            "ref_carry_{smooth}_ann_trades",
+        ),
+        (
+            re.compile(
+                r"^carry_(?P<smooth>\d+)_pool_minus_afts_turn$"
+            ),
+            "pool_carry_{smooth}_minus_ref_ann_trades",
+        ),
+        (
+            re.compile(
+                r"^carry_(?P<smooth>\d+)_pool_to_afts_turn_ratio$"
+            ),
+            "pool_carry_{smooth}_to_ref_turn_ratio",
+        ),
+        (
+            re.compile(r"^carry_(?P<smooth>\d+)_pool_instrs$"),
+            "pool_carry_{smooth}_pool_instrs",
+        ),
+        (
+            re.compile(
+                r"^carry_(?P<smooth>\d+)_pool_reviewed_instrs$"
+            ),
+            "pool_carry_{smooth}_reviewed_instrs",
+        ),
+        (
+            re.compile(r"^carry_(?P<smooth>\d+)_pool_hist_start$"),
+            "pool_carry_{smooth}_hist_start",
+        ),
+        (
+            re.compile(r"^carry_(?P<smooth>\d+)_pool_hist_end$"),
+            "pool_carry_{smooth}_hist_end",
+        ),
+        (
+            re.compile(r"^carry_(?P<smooth>\d+)_pool_turn_src$"),
+            "pool_carry_{smooth}_turn_src",
+        ),
+        (
+            re.compile(r"^carry_(?P<smooth>\d+)_afts_turn_src$"),
+            "ref_carry_{smooth}_turn_src",
+        ),
+        (
+            re.compile(
+                r"^carry_(?P<smooth>\d+)_(?P<mode>ref|live)_"
+                r"(?P<kind>trade|roll|tot)_ann_cost_sr$"
+            ),
+            "{mode}_carry_{smooth}_{kind}_ann_cost_sr",
+        ),
+        (
+            re.compile(
+                r"^carry_(?P<smooth>\d+)_(?P<mode>ref|live)_cost_elig$"
+            ),
+            "{mode}_carry_{smooth}_cost_elig",
+        ),
+        # Legacy source-first EWMAC report names.
         (
             re.compile(
                 r"^pool_ewmac_(?P<fast>\d+)_(?P<slow>\d+)_ann_trades$"

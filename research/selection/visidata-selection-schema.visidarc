@@ -32,7 +32,7 @@ _vd_set_type(
     snap_hist_duration snap_spread_duration snap_volume_duration
     snap_req_market_data_type snap_vol_src snap_market_data_type
     snap_error_codes snap_selected_error_codes snap_spread_quality
-    ref_vol_source ref_spread_source ref_strategy_instrument
+    ref_vol_source ref_spread_source ref_spread_src ref_strategy_instrument
     ref_strategy_roll_policy ref_strategy_hold_roll_cycle
     ref_strategy_roll_rate_audit
     ib_fast_duration ib_fast_bar_size ib_fast_market_data_type

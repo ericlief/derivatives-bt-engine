@@ -144,6 +144,8 @@ PUBLIC_REPORT_RENAMES = {
     "initial_margin_to_annual_dollar_vol": "init_marg_ann_dvol_ratio",
     "initial_margin_to_ann_dvol": "init_marg_ann_dvol_ratio",
     "carver_spread_pts": "ref_spread_pts",
+    "reference_one_way_spread_points": "ref_spread_pts",
+    "reference_spread_source": "ref_spread_src",
     "commission_per_side": "ref_comm",
     "trade_cost_usd_per_con": "trade_cost_per_con",
     "roll_cost_usd_per_con": "roll_cost_per_con",

@@ -1182,9 +1182,10 @@ def _configured_cost_estimate(
     Pooled turnover and performance come from the reference rule universe.
     Per-instrument ``ref_turn`` is retained for audit; both reference and live
     rule costs use pooled turnover. Reference eligibility uses the reviewed
-    spread and configured commission; live eligibility uses the selected
-    snapshot spread and executable commission. Missing live inputs leave the
-    live decision null without
+    spread and configured commission; an execution overlay without a PST
+    spread uses its own observed IB spread as an explicitly sourced fallback.
+    Live eligibility uses the selected snapshot spread and executable
+    commission. Missing live inputs leave the live decision null without
     suppressing the reference section.
     """
     common: dict[str, object] = {
@@ -1391,22 +1392,38 @@ def _configured_cost_estimate(
 
     # Reference eligibility is independent of account-specific IB what-if.
     # The snapshot retains the configured commission in USD even when the
-    # live preview fails, while the configured reference spread comes from
-    # the reviewed instrument database.
+    # live preview fails. PST instruments use the reviewed configured spread;
+    # local execution overlays have no PST cost row, so freeze their own
+    # observed IB spread as the historical-backtest estimate once available.
     reference_commission_usd = _nonnegative_finite(
         report_row.get("commission_per_side")
     )
+    reference_spread_points = carver_spread_points
+    reference_spread_source = (
+        "pysystemtrade_config" if reference_spread_points is not None else None
+    )
+    if (
+        reference_spread_points is None
+        and instr.get("mapping_status") == "local_execution_overlay"
+        and spread_points is not None
+    ):
+        reference_spread_points = spread_points
+        reference_spread_source = (
+            f"{spread_source}_execution_overlay_fallback"
+            if spread_source
+            else "execution_overlay_observed_fallback"
+        )
     reference_trade_sr = None
     reference_roll_sr = None
     if (
-        carver_spread_points is not None
+        reference_spread_points is not None
         and reference_commission_usd is not None
         and multiplier is not None
         and fx_to_usd is not None
         and annual_dollar_vol is not None
     ):
         reference_spread_usd = (
-            carver_spread_points * multiplier * fx_to_usd
+            reference_spread_points * multiplier * fx_to_usd
         )
         reference_trade_sr = (
             reference_spread_usd + reference_commission_usd
@@ -1415,7 +1432,8 @@ def _configured_cost_estimate(
             reference_spread_usd + 2.0 * reference_commission_usd
         ) / annual_dollar_vol
     common.update({
-        "carver_configured_one_way_spread_points": carver_spread_points,
+        "reference_one_way_spread_points": reference_spread_points,
+        "reference_spread_source": reference_spread_source,
         "ref_trade_sr": reference_trade_sr,
         "ref_roll_sr": reference_roll_sr,
     })
@@ -1592,7 +1610,6 @@ def _configured_cost_estimate(
     roll_sr = roll_usd / annual_dollar_vol
     result: dict[str, object] = {
         **common,
-        "carver_configured_one_way_spread_points": carver_spread_points,
         "selected_one_way_spread_points": spread_points,
         "selected_spread_source": spread_source,
         "commission_amount": commission_amount,
@@ -3982,6 +3999,8 @@ PUBLIC_REPORT_RENAMES = {
     "carver_slow_return_vol": "ref_slow_return_vol",
     "carver_spread_points": "ref_spread_points",
     "carver_configured_one_way_spread_points": "ref_spread_points",
+    "reference_one_way_spread_points": "ref_spread_points",
+    "reference_spread_source": "ref_spread_source",
     "strategy_ref_instrument": "ref_strategy_instrument",
     "strategy_ref_history_start": "ref_strategy_history_start",
     "strategy_ref_history_end": "ref_strategy_history_end",
@@ -4234,6 +4253,7 @@ def _rename_market_public_columns(report: pl.DataFrame) -> pl.DataFrame:
     reference_spread_sources = [
         name for name in (
             "ref_spread_pts",
+            "reference_one_way_spread_points",
             "carver_configured_one_way_spread_points",
             "carver_spread_pts",
         )
@@ -4454,7 +4474,7 @@ def _order_market_public_columns(report: pl.DataFrame) -> pl.DataFrame:
     }
 
     def rule_column_key(name: str) -> tuple[int, int, int, int, int, int, str]:
-        """Order turnovers together, then diagnostics and per-rule costs."""
+        """Keep reference, pooled, AFTS, and live rule sections together."""
         matched = speed_pattern.match(name)
         if matched is None:
             aggregate_order = {
@@ -4462,16 +4482,24 @@ def _order_market_public_columns(report: pl.DataFrame) -> pl.DataFrame:
                 "ref_elig_ewmac_rules": 1,
                 "ref_instr_has_elig_ewmac_rule": 2,
                 "ref_spread_pts": 3,
-                "ref_config_comm_usd": 4,
-                "ref_trade_sr": 5,
-                "ref_roll_sr": 6,
+                "ref_spread_src": 4,
+                "ref_config_comm_usd": 5,
+                "ref_trade_sr": 6,
+                "ref_roll_sr": 7,
                 "live_elig_ewmac_rule_count": 0,
                 "live_elig_ewmac_rules": 1,
                 "live_instr_has_elig_ewmac_rule": 2,
             }
-            if name == "ref_ann_rolls":
-                return (-1, 0, 0, 0, 0, 0, name)
-            return (0, 0, 0, 0, 0, aggregate_order.get(name, 99), name)
+            mode = 0 if name.startswith("ref_") else 3
+            return (
+                mode,
+                -1,
+                0,
+                0,
+                0,
+                aggregate_order.get(name, 99),
+                name,
+            )
         ewmac_fast, ewmac_slow, carry_speed, mode, detail = matched.groups()
         family = 0 if ewmac_fast is not None else 1
         speed = int(ewmac_fast or carry_speed)
@@ -4487,7 +4515,7 @@ def _order_market_public_columns(report: pl.DataFrame) -> pl.DataFrame:
             detail_group = 1
             value_order = mode_order[mode] * 100 + detail_order.get(detail, 99)
         return (
-            1,
+            mode_order[mode],
             family,
             speed,
             int(ewmac_slow or 0),
@@ -4514,6 +4542,8 @@ def _order_market_public_columns(report: pl.DataFrame) -> pl.DataFrame:
         name for name in (
             "ref_comm",
             "ref_spread_pts",
+            "ref_spread_src",
+            "ref_config_comm_usd",
             "ref_ann_rolls",
             "ref_trade_sr",
             "ref_roll_sr",

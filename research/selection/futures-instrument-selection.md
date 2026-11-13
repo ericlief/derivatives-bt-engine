@@ -86,7 +86,11 @@ November/December policy. `MTN` follows the price-quoted Ultra 10-Year (`TN`),
 not standard 10-Year (`ZN`), while `MWN` follows Ultra Bond (`UB`). Because
 Carver has no observed spread for these micros, an overlay's spread stays
 unknown until IB supplies historical BID_ASK data or a snapshot; it never
-inherits the parent's spread silently.
+inherits the parent's spread silently. Once its own observed spread is
+available, the rule cache freezes that value as the overlay's reference-cost
+fallback and records its origin in `ref_spread_src`. The signal parent still
+supplies forecasts and volatility, while the selected micro supplies its own
+multiplier, commission, and spread economics.
 
 The default cost audit estimates separate Carver-style research baselines for
 EWMAC 4/16, 8/32, 16/64, 32/128, and 64/256 from the 228 reviewed
@@ -591,14 +595,15 @@ spread, commission, pooled turnover, and reference roll frequency even when
 the account-specific live what-if failed. The selection reader performs the
 same calculation as a compatibility fallback for older caches.
 
-Rule fields are grouped by numeric speed, with generic reference inputs before
-the rule groups so pooled, reference, and live values remain distinct:
+Rule fields are grouped first by source mode and then by numeric speed. Generic
+reference inputs and every reference rule cost remain contiguous before the
+pooled, AFTS-comparison, and live sections:
 
 | Section | Example fields | Meaning |
 | --- | --- | --- |
 | `RULE_SPEED_MODE_VAR` | `ewmac_4_16_ref_turn`, `ewmac_4_16_pool_turn`, `ewmac_4_16_pool_instrs`, `ewmac_4_16_pool_mean_instr_pre_cost_sr`, `carry_5_ref_turn`, `carry_5_pool_turn`, `carry_5_afts_turn`, `carry_5_ref_tot_ann_cost_sr`, `carry_5_live_tot_ann_cost_sr` | Per-instrument reference turnover is an audit diagnostic; reference and live rule costs use pooled turnover. The AFTS value is a separately labeled comparison. Pooled values repeat for every instrument. |
-| Shared reference inputs | `ref_comm`, `ref_spread_pts`, `ref_ann_rolls`, `ref_trade_sr`, `ref_roll_sr` | Instrument-level reference inputs emitted together before the speed-specific rule fields. Legacy commission fields remain available as aliases. |
-| Rule cost results | `ewmac_4_16_ref_tot_ann_cost_sr`, `ewmac_4_16_live_tot_ann_cost_sr`, `carry_5_ref_trade_ann_cost_sr`, `carry_5_ref_roll_ann_cost_sr`, `carry_5_ref_tot_ann_cost_sr`, `carry_5_live_tot_ann_cost_sr` | Reference and point-in-time executable costs, grouped with the corresponding rule speed. |
+| Shared reference inputs | `ref_comm`, `ref_spread_pts`, `ref_spread_src`, `ref_ann_rolls`, `ref_trade_sr`, `ref_roll_sr` | Instrument-level reference inputs emitted together before the speed-specific rule fields. Execution overlays use their own observed IB spread when no PST-configured spread exists; legacy commission fields remain available as aliases. |
+| Rule cost results | `ewmac_4_16_ref_tot_ann_cost_sr`, `ewmac_4_16_live_tot_ann_cost_sr`, `carry_5_ref_trade_ann_cost_sr`, `carry_5_ref_roll_ann_cost_sr`, `carry_5_ref_tot_ann_cost_sr`, `carry_5_live_tot_ann_cost_sr` | Reference and point-in-time executable costs, ordered within their contiguous source-mode sections. |
 
 For Carry, `carry_<smooth>_ref_turn` is an instrument-level audit value.
 Both reference and live per-rule costs use `carry_<smooth>_pool_turn`, matching
