@@ -100,6 +100,7 @@ class SelectionCandidate:
     initial_margin_usd: float | None = None
     roll_sr: float = 0.0
     ann_rolls: float = 0.0
+    rolling_mean_abs_forecast: float | None = None
 
     @property
     def annual_trade_cost_sr(self) -> float:
@@ -1180,6 +1181,13 @@ class GreedyInstrumentSelector:
                 "ann_roll_cost_sr": candidate.annual_roll_cost_sr,
                 "ann_cost_sr": candidate.annual_cost_sr,
                 "average_position": avg_position,
+                # Sizing positions are contracts; this explicit alias lets
+                # report readers compare the continuous average with rounded
+                # executable maximum contracts.
+                "average_cons": avg_position,
+                "rolling_mean_abs_forecast": (
+                    candidate.rolling_mean_abs_forecast
+                ),
                 "ann_trade_cons": ann_trade_cons,
                 "ann_roll_cons": ann_roll_cons,
                 "annual_contract_load": annual_contract_load,
@@ -2591,6 +2599,15 @@ class GreedyInstrumentSelector:
             "candidate_ref_max_position": candidate_detail[
                 "ref_max_position"
             ],
+            "candidate_max_position": candidate_detail["max_position"],
+            "candidate_average_position": candidate_detail[
+                "average_position"
+            ],
+            "candidate_max_cons": candidate_detail["max_cons"],
+            "candidate_average_cons": candidate_detail["average_cons"],
+            "rolling_mean_abs_forecast": candidate_detail[
+                "rolling_mean_abs_forecast"
+            ],
             "candidate_ref_contract_band_distance": candidate_detail[
                 "ref_contract_band_distance"
             ],
@@ -2716,6 +2733,10 @@ class GreedyInstrumentSelector:
                 ],
                 "scaled_contribution": detail["scaled_contribution"],
                 "average_position": detail["average_position"],
+                "average_cons": detail["average_cons"],
+                "rolling_mean_abs_forecast": detail[
+                    "rolling_mean_abs_forecast"
+                ],
                 "ann_trade_cons": detail["ann_trade_cons"],
                 "ann_roll_cons": detail["ann_roll_cons"],
                 "annual_contract_load": detail["annual_contract_load"],

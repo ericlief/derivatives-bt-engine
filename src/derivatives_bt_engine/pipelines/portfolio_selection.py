@@ -2577,6 +2577,9 @@ class _WalkForwardSelectionProvider:
                 initial_margin_usd=initial_margin,
                 roll_sr=roll_cost / annual_dollar_vol,
                 ann_rolls=ann_rolls,
+                rolling_mean_abs_forecast=(
+                    forecast_activity.get("rolling_mean_abs_forecast")
+                ),
             )
             candidates.append(candidate)
             histories[symbol] = history
@@ -4291,6 +4294,9 @@ def _run_complete_selection(
             ),
             roll_sr=float(row["roll_sr"]),
             ann_rolls=float(row["ref_ann_rolls"]),
+            rolling_mean_abs_forecast=(
+                audit.get("rolling_mean_abs_forecast")
+            ),
         ))
     selector = _greedy_selector(
         capital=float(run_config["init_cap_usd"]),

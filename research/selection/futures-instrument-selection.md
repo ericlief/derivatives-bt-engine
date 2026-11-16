@@ -1664,15 +1664,20 @@ baseline by default. The command writes:
   reference-position tie break. `candidate_ref_max_position`,
   `candidate_ref_con_band_distance`, `iter_best`, `iter_best_score`,
   `iter_score_best`, `iter_score_best_score`, `tie_score_floor`, and
-  `min_accept_score` make those comparisons directly auditable; and
+  `min_accept_score` make those comparisons directly auditable. Trial rows
+  also include candidate `roll_avg_abs_fcst`, `cand_max_pos`, `cand_avg_pos`,
+  `cand_max_con`, and `cand_avg_con`. Allocation rows carry
+  `roll_avg_abs_fcst`, `max_pos`, `avg_pos`, `max_con`, and `avg_con` for
+  each hypothetical book member, so forecast activity and sizing can be read
+  beside each trial decision; and
 - `multi_speed_ewmac_selection_review_trials_<timestamp>.parquet` and
   `multi_speed_ewmac_selection_review_trial_allocations_<timestamp>.parquet`,
   the same decision audits for every scheduled review, with `sel_date` and
-  `sel_equity` added. The latter carries the per-instrument rounded
-  `max_cons`, `ann_dvol`, sizing `risk_budget`, `marg_at_max`, portfolio
-  margin, instrument and book limits, trial feasibility, and instrument-level
-  rejection reason. `risk_budget` is review equity times target volatility
-  times `limit_weight` times IDM;
+  `sel_equity` added. The latter carries per-instrument `roll_avg_abs_fcst`,
+  `max_pos`, `avg_pos`, `max_con`, `avg_con`, `ann_dvol`, sizing
+  `risk_budget`, `marg_at_max`, portfolio margin, instrument and book limits,
+  trial feasibility, and instrument-level rejection reason. `risk_budget` is
+  review equity times target volatility times `limit_weight` times IDM;
 - `multi_speed_ewmac_selection_review_final_allocations_<timestamp>.parquet`,
   the final accepted trial at every scheduled review. It retains the full
   per-instrument trial-allocation schema, including `sel_date` and
