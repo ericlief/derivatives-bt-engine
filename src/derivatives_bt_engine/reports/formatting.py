@@ -687,10 +687,10 @@ def order_selection_review_instrument_report(
 ) -> pl.DataFrame:
     """Order the review instrument report from book identity through inputs.
 
-    Review status and instrument identity lead, allocation weights and their
-    limits follow, then score diagnostics. Remaining review diagnostics stay
-    ahead of the run-wide parameters, which are kept together at the right edge
-    for scanning and comparison across reports.
+    Instrument identity, status, score, and active state lead; allocation
+    weights and their limits follow, then score diagnostics. Remaining review
+    diagnostics stay ahead of the run-wide parameters, which are kept together
+    at the right edge for scanning and comparison across reports.
     """
     required = {"sel_instr_n", "symbol"}
     missing = sorted(required.difference(report.columns))
@@ -707,6 +707,9 @@ def order_selection_review_instrument_report(
             "sel_equity",
             "sel_cand_n",
             "sel_instr_n",
+            "symbol",
+            "sel_status",
+            "sel_score",
             "sel_active",
             "sel_elig_hyst_applied",
             "sel_elig_hyst_reason",
@@ -720,10 +723,8 @@ def order_selection_review_instrument_report(
             "fcst_activity_valid_n",
             "fcst_activity_start",
             "fcst_activity_end",
-            "symbol",
             "asset_cls",
             "econ_subcls",
-            "sel_status",
             "rank",
             "pref_rank",
         )
@@ -752,7 +753,6 @@ def order_selection_review_instrument_report(
     scores = [
         name
         for name in (
-            "sel_score",
             "sel_idm",
             "trade_sr",
             "roll_sr",
