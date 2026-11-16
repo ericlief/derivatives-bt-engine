@@ -144,6 +144,13 @@ the configured floor. Values of `1` and `2` are useful structural
 sensitivities; with the standard forecast-cap ratio of two, they correspond to
 average-position floors of `0.5` and `1` respectively.
 
+Scheduled reviews can also enable causal weak-signal probation with
+`--selection-forecast-activity-filter`. The default policy uses the last 256
+valid forecasts, marks rolling mean absolute forecast below `0.50` as
+probationary, excludes it after two consecutive weak reviews, and immediately
+excludes values below `0.25`. The filter is off unless explicitly enabled;
+the lookback and thresholds are configurable and persisted in review reports.
+
 This candidate tie-break is separate from `--low-con-penalty-scale` and
 `--high-con-penalty-scale`. Those optional settings subtract per-instrument
 SR penalties when an instrument's continuous maximum position lies outside

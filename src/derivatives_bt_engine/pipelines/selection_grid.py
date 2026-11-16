@@ -37,6 +37,10 @@ from derivatives_bt_engine.data.ib_futures_dataloader import (
     DEFAULT_MAX_SOURCE_GAP_DAYS,
 )
 from derivatives_bt_engine.pipelines.portfolio_selection import (
+    DEFAULT_FORECAST_ACTIVITY_LOOKBACK_SESSIONS,
+    DEFAULT_FORECAST_HARD_MIN,
+    DEFAULT_FORECAST_PROBATION_MIN,
+    DEFAULT_FORECAST_PROBATION_REVIEWS,
     DEFAULT_SELECTION_MAX_HISTORY_GAP_DAYS,
     SIGNAL_MODELS,
 )
@@ -78,6 +82,13 @@ class SelectionScenario:
     minimum_instruments_per_subclass: int | None = None
     minimum_book_count: int = 15
     minimum_max_position: float = 0.5
+    forecast_activity_filter: bool = False
+    forecast_activity_lookback_sessions: int = (
+        DEFAULT_FORECAST_ACTIVITY_LOOKBACK_SESSIONS
+    )
+    forecast_probation_min: float = DEFAULT_FORECAST_PROBATION_MIN
+    forecast_hard_min: float = DEFAULT_FORECAST_HARD_MIN
+    forecast_probation_reviews: int = DEFAULT_FORECAST_PROBATION_REVIEWS
     low_contract_penalty_scale: float = 0.0
     high_contract_penalty_scale: float = 0.0
     score_tie_tolerance_percent: float = 0.0
@@ -105,6 +116,20 @@ class SelectionScenario:
             raise ValueError(
                 "minimum maximum position must be finite and positive"
             )
+        if self.forecast_activity_lookback_sessions <= 0:
+            raise ValueError("forecast activity lookback must be positive")
+        if (
+            not math.isfinite(self.forecast_hard_min)
+            or not math.isfinite(self.forecast_probation_min)
+            or self.forecast_hard_min < 0
+            or self.forecast_hard_min > self.forecast_probation_min
+        ):
+            raise ValueError(
+                "forecast thresholds must satisfy "
+                "0 <= hard minimum <= probation minimum"
+            )
+        if self.forecast_probation_reviews <= 0:
+            raise ValueError("forecast probation reviews must be positive")
         if self.backtest_capital_mode not in BACKTEST_CAPITAL_MODES:
             raise ValueError(
                 "backtest capital mode must be one of: "
@@ -171,6 +196,13 @@ class SelectionScenario:
             tokens.append(
                 f"minmaxpos{_number_token(self.minimum_max_position)}"
             )
+        if self.forecast_activity_filter:
+            tokens.extend((
+                f"fal{self.forecast_activity_lookback_sessions}",
+                f"fap{_number_token(self.forecast_probation_min)}",
+                f"fah{_number_token(self.forecast_hard_min)}",
+                f"far{self.forecast_probation_reviews}",
+            ))
         if self.maximum_instruments_per_class is not None:
             tokens.append(f"ic{self.maximum_instruments_per_class}")
         if self.minimum_instruments_per_class is not None:
@@ -614,6 +646,36 @@ def parse_args(argv=None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--selection-forecast-activity-filter",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable causal forecast-activity probation in every scenario.",
+    )
+    parser.add_argument(
+        "--selection-forecast-lookback-sessions",
+        type=int,
+        default=DEFAULT_FORECAST_ACTIVITY_LOOKBACK_SESSIONS,
+        help="Trailing valid forecast sessions used by the activity gate.",
+    )
+    parser.add_argument(
+        "--selection-forecast-probation-min",
+        type=float,
+        default=DEFAULT_FORECAST_PROBATION_MIN,
+        help="Normalized rolling forecast minimum before probation.",
+    )
+    parser.add_argument(
+        "--selection-forecast-hard-min",
+        type=float,
+        default=DEFAULT_FORECAST_HARD_MIN,
+        help="Normalized rolling forecast minimum before immediate exclusion.",
+    )
+    parser.add_argument(
+        "--selection-forecast-probation-reviews",
+        type=int,
+        default=DEFAULT_FORECAST_PROBATION_REVIEWS,
+        help="Consecutive probation reviews before exclusion.",
+    )
+    parser.add_argument(
         "--score-thresholds",
         type=_score_threshold_list,
         default=(0.90,),
@@ -834,6 +896,17 @@ def build_scenarios(args: argparse.Namespace) -> list[SelectionScenario]:
             maximum_weight_idm=weight_idm,
             score_threshold=score_threshold,
             minimum_max_position=minimum_max_position,
+            forecast_activity_filter=(
+                args.selection_forecast_activity_filter
+            ),
+            forecast_activity_lookback_sessions=(
+                args.selection_forecast_lookback_sessions
+            ),
+            forecast_probation_min=args.selection_forecast_probation_min,
+            forecast_hard_min=args.selection_forecast_hard_min,
+            forecast_probation_reviews=(
+                args.selection_forecast_probation_reviews
+            ),
             low_contract_penalty_scale=low_contract_penalty_scale,
             high_contract_penalty_scale=high_contract_penalty_scale,
             score_tie_tolerance_percent=score_tie_tolerance_percent,
@@ -1013,6 +1086,18 @@ def _selection_command(
     ))
     if scenario.selection_prefer_full_contracts:
         command.append("--selection-prefer-full-contracts")
+    if scenario.forecast_activity_filter:
+        command.extend((
+            "--selection-forecast-activity-filter",
+            "--selection-forecast-lookback-sessions",
+            str(scenario.forecast_activity_lookback_sessions),
+            "--selection-forecast-probation-min",
+            str(scenario.forecast_probation_min),
+            "--selection-forecast-hard-min",
+            str(scenario.forecast_hard_min),
+            "--selection-forecast-probation-reviews",
+            str(scenario.forecast_probation_reviews),
+        ))
     if scenario.selection_rebalance != "static":
         command.extend((
             "--selection-rebalance",
@@ -1367,6 +1452,13 @@ def _summary_row(
         "maximum_weight_idm": scenario.maximum_weight_idm,
         "score_threshold": scenario.score_threshold,
         "min_max_position": scenario.minimum_max_position,
+        "forecast_activity_filter_enabled": scenario.forecast_activity_filter,
+        "forecast_activity_lookback_sessions": (
+            scenario.forecast_activity_lookback_sessions
+        ),
+        "forecast_probation_min": scenario.forecast_probation_min,
+        "forecast_hard_min": scenario.forecast_hard_min,
+        "forecast_probation_reviews": scenario.forecast_probation_reviews,
         "low_contract_penalty_scale": scenario.low_contract_penalty_scale,
         "high_contract_penalty_scale": scenario.high_contract_penalty_scale,
         "score_tie_tolerance_percent": scenario.score_tie_tolerance_percent,

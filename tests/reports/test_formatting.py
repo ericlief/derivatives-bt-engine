@@ -230,6 +230,9 @@ def test_public_report_compacts_selection_review_identity():
         "rank_count_ewma_state": [14.5],
         "rank_count_anchor": [14],
         "selection_book_score_buffer_percent": [2.0],
+        "forecast_activity_status": ["probation"],
+        "rolling_mean_abs_forecast": [0.456789],
+        "forecast_activity_hard_filter_count": [2],
         "switch_cost_usd": [12.34],
         "score_buffer_sr": [0.02],
     })
@@ -249,6 +252,9 @@ def test_public_report_compacts_selection_review_identity():
         "rank_n_ewma_state",
         "rank_n_anchor",
         "sel_book_score_buf_pct",
+        "fcst_activity_status",
+        "roll_avg_abs_fcst",
+        "fcst_hard_filter_n",
         "switch_cost",
         "score_buf_sr",
     ]

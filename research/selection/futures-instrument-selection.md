@@ -1040,6 +1040,38 @@ and class, subclass, family, and book-margin violations are also hard failures.
 The former `--selection-eligibility-exit-buffer-pct` spelling remains a CLI
 compatibility alias.
 
+##### Rolling forecast-activity probation
+
+`--selection-forecast-activity-filter` enables a causal weak-signal policy at
+scheduled reviews. For each market the selector takes the last 256 valid
+combined forecasts strictly before the review date and calculates their mean
+absolute value. Forecasts are normalized to a target mean absolute value of
+one across EWMAC, return TSMOM, Goulding, and Carry, so the default thresholds
+share one interpretation.
+
+The default probation minimum is `0.50` and the immediate hard minimum is
+`0.25`. A market below `0.50` remains eligible at its first weak review but is
+marked probationary. A second consecutive weak review hard-filters it. A
+market below `0.25` is hard-filtered immediately, while a review at or above
+`0.50` resets its weak-review count. Configure the policy with:
+
+```text
+--selection-forecast-activity-filter
+--selection-forecast-lookback-sessions 256
+--selection-forecast-probation-min .50
+--selection-forecast-hard-min .25
+--selection-forecast-probation-reviews 2
+```
+
+The feature is disabled by default so old runs reproduce unchanged. The
+review-instrument report persists the causal window, observation count,
+rolling mean absolute forecast, weak-review count, probation/hard flags, and
+reason. Hard-filtered rows are retained in that audit even though they do not
+enter the candidate universe. The static forecast audit also records the
+latest trailing diagnostic, but scheduled historical selection always
+recomputes it from the information available at each review; the latest value
+is never propagated backward.
+
 ##### Membership rank band
 
 `rank` and `rank_score` maintain a causal state estimate of normal book count.

@@ -188,6 +188,10 @@ from derivatives_bt_engine.logging_config import setup_logger
 logger = logging.getLogger(__name__)
 REPORT_TIMEZONE = ZoneInfo("America/New_York")
 DEFAULT_SELECTION_MAX_HISTORY_GAP_DAYS = 31
+DEFAULT_FORECAST_ACTIVITY_LOOKBACK_SESSIONS = 256
+DEFAULT_FORECAST_PROBATION_MIN = 0.50
+DEFAULT_FORECAST_HARD_MIN = 0.25
+DEFAULT_FORECAST_PROBATION_REVIEWS = 2
 
 # Bump the base version for changes shared by every selection artifact. Use an
 # artifact-specific identity version for narrower changes so stable expensive
@@ -211,6 +215,118 @@ EWMAC_SLOW_TILT_60_40 = {
 }
 SIGNAL_MODELS = ("multi_ewmac", RETURN_TSMOM_MODEL, GOULDING_MODEL, CARRY_MODEL)
 DIRECT_SIGNAL_MODELS = (RETURN_TSMOM_MODEL, GOULDING_MODEL, CARRY_MODEL)
+
+
+def _forecast_activity_at_review(
+    frame: pl.DataFrame | pl.LazyFrame,
+    review_date: date,
+    *,
+    enabled: bool,
+    lookback_sessions: int,
+    probation_min: float,
+    hard_min: float,
+    probation_reviews: int,
+    prior_weak_reviews: int = 0,
+) -> dict[str, object]:
+    """Measure causal trailing forecast strength and assign review status.
+
+    The metric is the mean absolute combined forecast over the last
+    ``lookback_sessions`` valid observations strictly before ``review_date``.
+    Forecasts are already normalized to a target mean absolute value of one,
+    so the thresholds are comparable across the supported signal families.
+
+    A value below ``hard_min`` is excluded immediately. A value below
+    ``probation_min`` remains eligible for its first weak review and is hard
+    filtered after ``probation_reviews`` consecutive weak reviews. A healthy
+    review resets the consecutive count. The returned mapping is suitable for
+    direct inclusion in forecast and scheduled-review audit reports.
+    """
+    base = {
+        "forecast_activity_lookback_sessions": lookback_sessions,
+        "forecast_activity_lookback_start": None,
+        "forecast_activity_lookback_end": None,
+        "forecast_activity_valid_observations": None,
+        "rolling_mean_abs_forecast": None,
+        "forecast_activity_weak_review_count": 0,
+        "forecast_activity_probation": False,
+        "forecast_activity_hard_filter": False,
+        "forecast_activity_status": "disabled" if not enabled else "",
+        "forecast_activity_reason": "",
+        "forecast_probation_min": probation_min,
+        "forecast_hard_min": hard_min,
+        "forecast_probation_reviews": probation_reviews,
+    }
+    if not enabled:
+        return base
+
+    lazy_frame = _lazy_frame(frame)
+    columns = set(lazy_frame.collect_schema().names())
+    forecast_column = (
+        "comb_fcst" if "comb_fcst" in columns else "combined_forecast"
+    )
+    validity_column = (
+        "fcst_valid" if "fcst_valid" in columns else "forecast_valid"
+    )
+    missing = {
+        "date", forecast_column, validity_column
+    }.difference(columns)
+    if missing:
+        raise ValueError(
+            "forecast activity input is missing columns: "
+            f"{sorted(missing)}"
+        )
+    trailing = (
+        lazy_frame.filter(
+            (pl.col("date") < review_date)
+            & pl.col(validity_column).fill_null(False)
+            & pl.col(forecast_column).is_not_null()
+            & pl.col(forecast_column).is_finite()
+        )
+        .select("date", pl.col(forecast_column).alias("forecast"))
+        .sort("date")
+        .tail(lookback_sessions)
+        .collect(engine="streaming")
+    )
+    base["forecast_activity_valid_observations"] = trailing.height
+    if trailing.height:
+        base["forecast_activity_lookback_start"] = trailing["date"][0]
+        base["forecast_activity_lookback_end"] = trailing["date"][-1]
+    if trailing.height < lookback_sessions:
+        base.update({
+            "forecast_activity_hard_filter": True,
+            "forecast_activity_status": "hard_filter",
+            "forecast_activity_reason": "insufficient_valid_forecast_activity",
+        })
+        return base
+
+    rolling_mean = float(
+        trailing.select(pl.col("forecast").abs().mean()).item()
+    )
+    weak = rolling_mean < probation_min
+    weak_reviews = prior_weak_reviews + 1 if weak else 0
+    direct_hard = rolling_mean < hard_min
+    consecutive_hard = weak and weak_reviews >= probation_reviews
+    hard_filter = direct_hard or consecutive_hard
+    probation = weak and not hard_filter
+    if direct_hard:
+        reason = "rolling_mean_abs_forecast_below_hard_min"
+    elif consecutive_hard:
+        reason = "consecutive_weak_forecast_reviews"
+    elif probation:
+        reason = "rolling_mean_abs_forecast_below_probation_min"
+    else:
+        reason = ""
+    base.update({
+        "rolling_mean_abs_forecast": rolling_mean,
+        "forecast_activity_weak_review_count": weak_reviews,
+        "forecast_activity_probation": probation,
+        "forecast_activity_hard_filter": hard_filter,
+        "forecast_activity_status": (
+            "hard_filter" if hard_filter else "probation" if probation else "eligible"
+        ),
+        "forecast_activity_reason": reason,
+    })
+    return base
 
 
 def _selection_pysystemtrade_identity(
@@ -1391,6 +1507,51 @@ def parse_args(argv=None, *, complete_default: bool = False):
         ),
     )
     parser.add_argument(
+        "--selection-forecast-activity-filter",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Enable causal rolling mean-absolute-forecast probation and hard "
+            "filtering at selection reviews (default: disabled)."
+        ),
+    )
+    parser.add_argument(
+        "--selection-forecast-lookback-sessions",
+        type=int,
+        default=DEFAULT_FORECAST_ACTIVITY_LOOKBACK_SESSIONS,
+        help=(
+            "Valid sessions in the trailing forecast activity window "
+            "(default: 256)."
+        ),
+    )
+    parser.add_argument(
+        "--selection-forecast-probation-min",
+        type=float,
+        default=DEFAULT_FORECAST_PROBATION_MIN,
+        help=(
+            "Rolling mean absolute normalized forecast below which a market "
+            "enters probation (default: 0.50)."
+        ),
+    )
+    parser.add_argument(
+        "--selection-forecast-hard-min",
+        type=float,
+        default=DEFAULT_FORECAST_HARD_MIN,
+        help=(
+            "Rolling mean absolute normalized forecast below which a market "
+            "is immediately excluded (default: 0.25)."
+        ),
+    )
+    parser.add_argument(
+        "--selection-forecast-probation-reviews",
+        type=int,
+        default=DEFAULT_FORECAST_PROBATION_REVIEWS,
+        help=(
+            "Consecutive weak reviews before a probationary market is hard "
+            "filtered (default: 2)."
+        ),
+    )
+    parser.add_argument(
         "--min-instr-per-class",
         type=int,
         help=(
@@ -1737,6 +1898,13 @@ def _selection_scenario_id(
         tokens.append(
             f"minmaxpos{_number_token(args.selection_min_max_position)}"
         )
+    if args.selection_forecast_activity_filter:
+        tokens.extend((
+            f"fal{args.selection_forecast_lookback_sessions}",
+            f"fap{_number_token(args.selection_forecast_probation_min)}",
+            f"fah{_number_token(args.selection_forecast_hard_min)}",
+            f"far{args.selection_forecast_probation_reviews}",
+        ))
     if args.max_instr_per_class is not None:
         tokens.append(f"ic{args.max_instr_per_class}")
     if args.min_instr_per_class is not None:
@@ -1987,6 +2155,14 @@ def _subsystem_reference_correlation(
     wide_frame = wide.sort("date").collect(engine="streaming")
     if wide_frame.is_empty():
         return np.eye(len(symbols)), np.zeros(len(symbols), dtype=bool), pl.DataFrame()
+    if len(symbols) == 1:
+        # A hard eligibility filter can legitimately leave one market. There
+        # is no pairwise correlation to estimate; self-correlation is one and
+        # coverage depends only on that market's usable return observations.
+        covered = np.array([
+            wide_frame.get_column(symbols[0]).drop_nulls().len() >= min_rows
+        ])
+        return np.eye(1), covered, wide_frame
     last = wide_frame.get_column("date").max()
     as_of = (last.date() if isinstance(last, datetime) else last) + timedelta(days=1)
     correlation, covered = bounded_pairwise_ewm_correlation_matrix(
@@ -2143,6 +2319,7 @@ class _WalkForwardSelectionProvider:
         self.review_final_allocation_rows: list[dict[str, object]] = []
         self.prior_selected: tuple[str, ...] = ()
         self.rank_count_ewma: float | None = None
+        self.forecast_weak_review_count: dict[str, int] = {}
 
     def _rank_count_anchor(self) -> tuple[float | None, int | None]:
         """Return the lagged EWMA state and its rounded causal rank anchor."""
@@ -2218,6 +2395,7 @@ class _WalkForwardSelectionProvider:
         candidates: list[SelectionCandidate] = []
         histories: dict[str, pl.DataFrame] = {}
         candidate_costs: dict[str, tuple[float, float]] = {}
+        forecast_activity_by_symbol: dict[str, dict[str, object]] = {}
         for symbol, row in self.source_rows.items():
             frame = self.reference_frames.get(symbol)
             audit = self.audit_by_symbol.get(symbol)
@@ -2225,6 +2403,40 @@ class _WalkForwardSelectionProvider:
                 continue
             lazy_frame = _lazy_frame(frame)
             frame_columns = lazy_frame.collect_schema().names()
+            forecast_activity = _forecast_activity_at_review(
+                lazy_frame,
+                review_date,
+                enabled=self.args.selection_forecast_activity_filter,
+                lookback_sessions=(
+                    self.args.selection_forecast_lookback_sessions
+                ),
+                probation_min=self.args.selection_forecast_probation_min,
+                hard_min=self.args.selection_forecast_hard_min,
+                probation_reviews=(
+                    self.args.selection_forecast_probation_reviews
+                ),
+                prior_weak_reviews=self.forecast_weak_review_count.get(
+                    symbol, 0
+                ),
+            )
+            forecast_activity_by_symbol[symbol] = forecast_activity
+            self.forecast_weak_review_count[symbol] = int(
+                forecast_activity["forecast_activity_weak_review_count"]
+            )
+            if forecast_activity["forecast_activity_hard_filter"]:
+                logger.debug(
+                    "walk_forward_selection candidate_rejected date=%s "
+                    "symbol=%s reason=%s rolling_mean_abs_forecast=%s "
+                    "weak_review_count=%s",
+                    review_date,
+                    symbol,
+                    forecast_activity["forecast_activity_reason"],
+                    forecast_activity["rolling_mean_abs_forecast"],
+                    forecast_activity[
+                        "forecast_activity_weak_review_count"
+                    ],
+                )
+                continue
             valid_return_column = (
                 "ref_return_valid"
                 if "ref_return_valid" in frame_columns
@@ -2714,6 +2926,14 @@ class _WalkForwardSelectionProvider:
             "backtest_capital_mode": self.args.backtest_capital_mode,
             "selection_candidate_count": len(candidates),
             "selection_instrument_count": len(selection.selected),
+            "forecast_activity_probation_count": sum(
+                bool(value["forecast_activity_probation"])
+                for value in forecast_activity_by_symbol.values()
+            ),
+            "forecast_activity_hard_filter_count": sum(
+                bool(value["forecast_activity_hard_filter"])
+                for value in forecast_activity_by_symbol.values()
+            ),
             "selection_score": selection.final_score.score,
             "selection_idm": selection.final_score.idm,
             "selection_symbols": ",".join(selection.selected),
@@ -2754,6 +2974,19 @@ class _WalkForwardSelectionProvider:
                 _active_book_score_buffer_percent(self.args)
             ),
             "min_max_position": self.args.selection_min_max_position,
+            "forecast_activity_filter_enabled": (
+                self.args.selection_forecast_activity_filter
+            ),
+            "forecast_activity_lookback_sessions": (
+                self.args.selection_forecast_lookback_sessions
+            ),
+            "forecast_probation_min": (
+                self.args.selection_forecast_probation_min
+            ),
+            "forecast_hard_min": self.args.selection_forecast_hard_min,
+            "forecast_probation_reviews": (
+                self.args.selection_forecast_probation_reviews
+            ),
             "prior_book_score": selection.prior_book_score,
             "unbuffered_book_score": selection.unbuffered_book_score,
             "rank_buffered_book_score": selection.rank_buffered_book_score,
@@ -2790,12 +3023,23 @@ class _WalkForwardSelectionProvider:
             "coverage_satisfied": selection.coverage_satisfied,
             "coverage_reason": selection.coverage_reason,
         })
-        for symbol in sorted(selected_symbols | removed_symbols):
+        forecast_activity_audit_symbols = {
+            symbol
+            for symbol, value in forecast_activity_by_symbol.items()
+            if value["forecast_activity_probation"]
+            or value["forecast_activity_hard_filter"]
+        }
+        for symbol in sorted(
+            selected_symbols
+            | removed_symbols
+            | forecast_activity_audit_symbols
+        ):
             active = symbol in selected_symbols
             candidate = candidate_by_symbol.get(symbol)
             allocation = allocations.get(symbol)
             source = self.source_rows[symbol]
             audit = self.audit_by_symbol[symbol]
+            forecast_activity = forecast_activity_by_symbol[symbol]
             eligibility_buffer_reasons = []
             if (
                 symbol in self.prior_selected
@@ -2833,7 +3077,13 @@ class _WalkForwardSelectionProvider:
                     else str(source.get("econ_fam_id") or "")
                 )
                 replacement = selected_route_by_family.get(family)
-                if replacement is not None:
+                if forecast_activity["forecast_activity_hard_filter"]:
+                    status = "ineligible"
+                    change_reason = (
+                        "forecast_activity_hard_filter:"
+                        f"{forecast_activity['forecast_activity_reason']}"
+                    )
+                elif replacement is not None:
                     status = "replaced"
                     change_reason = f"family_route_replaced_by:{replacement}"
                 elif symbol in hard_ineligible_by_symbol:
@@ -2868,7 +3118,17 @@ class _WalkForwardSelectionProvider:
                 "selection_note": (
                     "retained_eh"
                     if active and eligibility_buffer_reasons
+                    else (
+                        "forecast_probation:"
+                        f"{forecast_activity['forecast_activity_reason']}"
+                    )
+                    if active
+                    and forecast_activity["forecast_activity_probation"]
                     else change_reason
+                ),
+                **forecast_activity,
+                "forecast_activity_filter_enabled": (
+                    self.args.selection_forecast_activity_filter
                 ),
                 "minimum_instruments_per_class": self.args.min_instr_per_class,
                 "minimum_instruments_per_subclass": (
@@ -3078,6 +3338,44 @@ def _final_selection_frame(
             "minimum_instruments_per_subclass": args.min_instr_per_subclass,
             "minimum_book_count": _active_minimum_book_count(args),
             "min_max_position": args.selection_min_max_position,
+            "forecast_activity_filter_enabled": (
+                args.selection_forecast_activity_filter
+            ),
+            "forecast_activity_lookback_sessions": (
+                args.selection_forecast_lookback_sessions
+            ),
+            "forecast_probation_min": args.selection_forecast_probation_min,
+            "forecast_hard_min": args.selection_forecast_hard_min,
+            "forecast_probation_reviews": (
+                args.selection_forecast_probation_reviews
+            ),
+            "forecast_activity_lookback_start": audit_by_symbol[symbol].get(
+                "forecast_activity_lookback_start"
+            ),
+            "forecast_activity_lookback_end": audit_by_symbol[symbol].get(
+                "forecast_activity_lookback_end"
+            ),
+            "forecast_activity_valid_observations": audit_by_symbol[
+                symbol
+            ].get("forecast_activity_valid_observations"),
+            "rolling_mean_abs_forecast": audit_by_symbol[symbol].get(
+                "rolling_mean_abs_forecast"
+            ),
+            "forecast_activity_weak_review_count": audit_by_symbol[
+                symbol
+            ].get("forecast_activity_weak_review_count"),
+            "forecast_activity_probation": audit_by_symbol[symbol].get(
+                "forecast_activity_probation"
+            ),
+            "forecast_activity_hard_filter": audit_by_symbol[symbol].get(
+                "forecast_activity_hard_filter"
+            ),
+            "forecast_activity_status": audit_by_symbol[symbol].get(
+                "forecast_activity_status"
+            ),
+            "forecast_activity_reason": audit_by_symbol[symbol].get(
+                "forecast_activity_reason"
+            ),
             "maximum_instruments_per_class": args.max_instr_per_class,
             "maximum_instruments_per_subclass": args.max_instr_per_subclass,
             "maximum_asset_class_weight_percent": args.max_class_weight_pct,
@@ -3761,6 +4059,18 @@ def _run_complete_selection(
         fx_used = reference_frame.filter(pl.col("fx_to_usd").is_not_null())
         fx_pairs = fx_used.get_column("fx_pair").drop_nulls().unique().to_list()
         fx_sources = fx_used.get_column("fx_src").drop_nulls().unique().to_list()
+        latest_forecast_date = reference_frame.get_column("date").max()
+        if isinstance(latest_forecast_date, datetime):
+            latest_forecast_date = latest_forecast_date.date()
+        forecast_activity = _forecast_activity_at_review(
+            reference_frame,
+            latest_forecast_date + timedelta(days=1),
+            enabled=args.selection_forecast_activity_filter,
+            lookback_sessions=args.selection_forecast_lookback_sessions,
+            probation_min=args.selection_forecast_probation_min,
+            hard_min=args.selection_forecast_hard_min,
+            probation_reviews=args.selection_forecast_probation_reviews,
+        )
         subsystem_elig = bool(
             forecast_audit["forecast_elig"]
             and combined_turnover is not None
@@ -3844,6 +4154,7 @@ def _run_complete_selection(
             "fx_error": fx_error,
             "subsystem_elig": subsystem_elig,
             "subsystem_excl": subsystem_excl,
+            **forecast_activity,
             **forecast_audit,
         }
         audit_rows.append(audit)
@@ -3986,7 +4297,29 @@ def _run_complete_selection(
         run_config=run_config,
         args=args,
     )
-    selection = selector.select(candidate_list, correlation)
+    selection_candidate_indexes = [
+        index
+        for index, candidate in enumerate(candidate_list)
+        if not bool(
+            audit_by_symbol[candidate.symbol][
+                "forecast_activity_hard_filter"
+            ]
+        )
+    ]
+    selection_candidate_list = [
+        candidate_list[index] for index in selection_candidate_indexes
+    ]
+    if not selection_candidate_list:
+        raise ValueError(
+            "no instrument passed the rolling forecast activity hard filter"
+        )
+    selection_correlation = correlation[
+        np.ix_(selection_candidate_indexes, selection_candidate_indexes)
+    ]
+    selection = selector.select(
+        selection_candidate_list,
+        selection_correlation,
+    )
     for trial in selection.trials:
         logger.debug(
             "selection_trial iteration=%s candidate=%s book=%s score=%s "
@@ -4031,7 +4364,8 @@ def _run_complete_selection(
         )
     logger.info(
         "portfolio_selection complete selected=%d candidates=%d score=%s idm=%s book=%s",
-        len(selection.selected), len(candidate_list), selection.final_score.score,
+        len(selection.selected), len(selection_candidate_list),
+        selection.final_score.score,
         selection.final_score.idm, ",".join(selection.selected),
     )
 
@@ -4807,6 +5141,8 @@ def _run_complete_selection(
         {
             symbol: _lazy_frame(cash_reference_frames[symbol]).select(
                 "date",
+                "comb_fcst",
+                "fcst_valid",
                 "ref_return_valid",
                 "ref_net_pct",
                 "daily_dvol",
@@ -4878,6 +5214,13 @@ def _run_complete_selection(
         ),
         "selected_book": list(selection.selected),
     }
+    if args.selection_forecast_activity_filter:
+        selection_policy_identity["forecast_activity"] = {
+            "lookback_sessions": args.selection_forecast_lookback_sessions,
+            "probation_min": args.selection_forecast_probation_min,
+            "hard_min": args.selection_forecast_hard_min,
+            "probation_reviews": args.selection_forecast_probation_reviews,
+        }
     if args.signal_model == RETURN_TSMOM_MODEL:
         selection_policy_identity["return_tsmom"] = {
             "fast_window": args.fast_window,
@@ -5698,6 +6041,22 @@ def run(
         raise ValueError(
             "selection minimum maximum position must be finite and positive"
         )
+    if args.selection_forecast_lookback_sessions <= 0:
+        raise ValueError("selection forecast lookback sessions must be positive")
+    if (
+        not math.isfinite(args.selection_forecast_hard_min)
+        or not math.isfinite(args.selection_forecast_probation_min)
+        or args.selection_forecast_hard_min < 0
+        or args.selection_forecast_probation_min < 0
+        or args.selection_forecast_hard_min
+        > args.selection_forecast_probation_min
+    ):
+        raise ValueError(
+            "selection forecast thresholds must be finite and satisfy "
+            "0 <= hard minimum <= probation minimum"
+        )
+    if args.selection_forecast_probation_reviews <= 0:
+        raise ValueError("selection forecast probation reviews must be positive")
     if args.max_source_gap_days < 0:
         raise ValueError("max source gap days must be nonnegative")
     if args.selection_max_history_gap_days < 0:

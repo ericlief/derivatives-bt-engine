@@ -149,6 +149,16 @@ the portfolio's intended risk behavior.
 
 ## Recommended policy
 
+Implementation note (2026-11-16): the production trial uses the simpler
+causal rolling mean absolute forecast rather than the executable-entry replay
+originally proposed below. With
+`--selection-forecast-activity-filter`, the last 256 valid forecasts strictly
+before each review are averaged in absolute value. A normalized average below
+0.50 enters probation, a second consecutive weak review is hard-filtered, and
+an average below 0.25 is hard-filtered immediately. A review at or above 0.50
+resets the streak. The original entry-opportunity replay remains useful as
+research context, but it is not the wired selection rule.
+
 Use two separate controls.
 
 ### 1. Hard structural admission floor

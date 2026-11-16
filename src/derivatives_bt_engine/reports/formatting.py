@@ -111,6 +111,22 @@ PUBLIC_REPORT_RENAMES = {
     "selection_rank_buffer_percent": "sel_rank_buf_pct",
     "selection_rank_count_ewma_halflife_reviews": "sel_rank_n_ewma_hl",
     "selection_book_score_buffer_percent": "sel_book_score_buf_pct",
+    "forecast_activity_filter_enabled": "fcst_activity_filter",
+    "forecast_activity_lookback_sessions": "fcst_activity_lookback_n",
+    "forecast_activity_lookback_start": "fcst_activity_start",
+    "forecast_activity_lookback_end": "fcst_activity_end",
+    "forecast_activity_valid_observations": "fcst_activity_valid_n",
+    "rolling_mean_abs_forecast": "roll_avg_abs_fcst",
+    "forecast_activity_weak_review_count": "fcst_weak_review_n",
+    "forecast_activity_probation": "fcst_probation",
+    "forecast_activity_hard_filter": "fcst_hard_filter",
+    "forecast_activity_status": "fcst_activity_status",
+    "forecast_activity_reason": "fcst_activity_reason",
+    "forecast_activity_probation_count": "fcst_probation_n",
+    "forecast_activity_hard_filter_count": "fcst_hard_filter_n",
+    "forecast_probation_min": "fcst_probation_min",
+    "forecast_hard_min": "fcst_hard_min",
+    "forecast_probation_reviews": "fcst_probation_reviews",
     "selection_live_execution_overlay_count": "sel_live_exec_overlay_n",
     "preference_rank": "pref_rank",
     "selection_prefer_full_contracts": "sel_pref_full_cons",
@@ -537,6 +553,11 @@ SELECTION_REVIEW_ALLOCATION_REPORT_PARAMS = (
     "sel_rank_buf_pct",
     "sel_rank_n_ewma_hl",
     "sel_book_score_buf_pct",
+    "fcst_activity_filter",
+    "fcst_activity_lookback_n",
+    "fcst_probation_min",
+    "fcst_hard_min",
+    "fcst_probation_reviews",
 )
 
 
@@ -615,6 +636,8 @@ def order_selection_review_summary_report(report: pl.DataFrame) -> pl.DataFrame:
         "sel_hyst_cand_symbols",
         "sel_added",
         "sel_removed",
+        "fcst_probation_n",
+        "fcst_hard_filter_n",
     )
     params = (
         "cap_mode",
@@ -630,6 +653,11 @@ def order_selection_review_summary_report(report: pl.DataFrame) -> pl.DataFrame:
         "sel_rank_buf_pct",
         "sel_rank_n_ewma_hl",
         "sel_book_score_buf_pct",
+        "fcst_activity_filter",
+        "fcst_activity_lookback_n",
+        "fcst_probation_min",
+        "fcst_hard_min",
+        "fcst_probation_reviews",
     )
     leading = [name for name in priority if name in report.columns]
     leading_set = set(leading)
@@ -672,6 +700,15 @@ def order_selection_review_instrument_report(
             "sel_elig_hyst_applied",
             "sel_elig_hyst_reason",
             "sel_note",
+            "fcst_activity_status",
+            "fcst_activity_reason",
+            "fcst_probation",
+            "fcst_hard_filter",
+            "fcst_weak_review_n",
+            "roll_avg_abs_fcst",
+            "fcst_activity_valid_n",
+            "fcst_activity_start",
+            "fcst_activity_end",
             "symbol",
             "asset_cls",
             "econ_subcls",
@@ -730,6 +767,11 @@ def order_selection_review_instrument_report(
             "sel_rank_buf_pct",
             "sel_rank_n_ewma_hl",
             "sel_book_score_buf_pct",
+            "fcst_activity_filter",
+            "fcst_activity_lookback_n",
+            "fcst_probation_min",
+            "fcst_hard_min",
+            "fcst_probation_reviews",
         )
         if name in report.columns
     ]

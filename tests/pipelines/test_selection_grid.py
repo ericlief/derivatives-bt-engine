@@ -381,6 +381,40 @@ def test_grid_sweeps_minimum_maximum_positions():
     )
 
 
+def test_grid_forwards_forecast_activity_policy():
+    """A grid run records one shared causal weak-forecast policy."""
+    args = parse_args([
+        "--input",
+        "screen.parquet",
+        "--signal-model",
+        "multi_ewmac",
+        "--target-vols",
+        "0.20",
+        "--max-instr-margin-pcts",
+        "20",
+        "--roll-cost-modes",
+        "include",
+        "--selection-forecast-activity-filter",
+        "--selection-forecast-lookback-sessions",
+        "128",
+        "--selection-forecast-probation-min",
+        "0.6",
+        "--selection-forecast-hard-min",
+        "0.2",
+        "--selection-forecast-probation-reviews",
+        "3",
+    ])
+
+    scenario = build_scenarios(args)[0]
+
+    assert scenario.forecast_activity_filter is True
+    assert scenario.forecast_activity_lookback_sessions == 128
+    assert scenario.forecast_probation_min == pytest.approx(0.6)
+    assert scenario.forecast_hard_min == pytest.approx(0.2)
+    assert scenario.forecast_probation_reviews == 3
+    assert "_fal128_fap0p6_fah0p2_far3_" in scenario.scenario_id
+
+
 def test_grid_sweeps_rank_count_ewma_halflives_for_yearly_reviews():
     """Rank-count smoothing is an explicit scheduled-selection dimension."""
     args = parse_args([

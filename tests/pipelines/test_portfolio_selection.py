@@ -10,6 +10,7 @@ from derivatives_bt_engine.pipelines.portfolio_selection import (
     _carry_forecast_cache_spec,
     _carry_rule_smooths,
     _filter_backtest_period,
+    _forecast_activity_at_review,
     _greedy_selector,
     _is_micro_contract,
     _direct_ib_handoff_date,
@@ -264,7 +265,7 @@ def test_slow_tilt_ewmac_weights_reject_invalid_rule_sets(rules, message):
 
 
 def test_selection_defaults_to_reviewed_classification_weights():
-    args = parse_args([])
+    args = parse_args(["--signal-model", "multi_ewmac"])
 
     assert args.weight_policy == "topdown_classif"
     assert args.max_weight_idm == pytest.approx(0.20)
@@ -281,6 +282,11 @@ def test_selection_defaults_to_reviewed_classification_weights():
     assert args.fast_window == 64
     assert args.slow_window == 256
     assert args.forecast_fdm == pytest.approx(1.0)
+    assert args.selection_forecast_activity_filter is False
+    assert args.selection_forecast_lookback_sessions == 256
+    assert args.selection_forecast_probation_min == pytest.approx(0.50)
+    assert args.selection_forecast_hard_min == pytest.approx(0.25)
+    assert args.selection_forecast_probation_reviews == 2
     assert args.ib_prior_years == 3
     assert args.backtest_start_date is None
     assert args.backtest_end_date is None
@@ -306,6 +312,67 @@ def test_selection_min_max_position_reaches_greedy_config():
     )
 
     assert selector.config.min_max_position == pytest.approx(2.0)
+
+
+def test_forecast_activity_probates_then_hard_filters_causally():
+    """Weak trailing forecasts survive once, then fail the next review."""
+    frame = pl.DataFrame({
+        "date": [date(2024, 1, day) for day in range(1, 6)],
+        "comb_fcst": [2.0, 0.4, -0.4, 0.4, 2.0],
+        "fcst_valid": [True] * 5,
+    })
+
+    first = _forecast_activity_at_review(
+        frame,
+        date(2024, 1, 5),
+        enabled=True,
+        lookback_sessions=3,
+        probation_min=0.50,
+        hard_min=0.25,
+        probation_reviews=2,
+    )
+    second = _forecast_activity_at_review(
+        frame,
+        date(2024, 1, 5),
+        enabled=True,
+        lookback_sessions=3,
+        probation_min=0.50,
+        hard_min=0.25,
+        probation_reviews=2,
+        prior_weak_reviews=1,
+    )
+
+    assert first["rolling_mean_abs_forecast"] == pytest.approx(0.4)
+    assert first["forecast_activity_lookback_end"] == date(2024, 1, 4)
+    assert first["forecast_activity_status"] == "probation"
+    assert second["forecast_activity_status"] == "hard_filter"
+    assert second["forecast_activity_reason"] == (
+        "consecutive_weak_forecast_reviews"
+    )
+
+
+def test_forecast_activity_hard_min_excludes_immediately():
+    """The lower hard floor does not wait for a second weak review."""
+    frame = pl.DataFrame({
+        "date": [date(2024, 1, day) for day in range(1, 4)],
+        "combined_forecast": [0.1, -0.2, 0.15],
+        "forecast_valid": [True] * 3,
+    })
+
+    activity = _forecast_activity_at_review(
+        frame,
+        date(2024, 1, 4),
+        enabled=True,
+        lookback_sessions=3,
+        probation_min=0.50,
+        hard_min=0.25,
+        probation_reviews=2,
+    )
+
+    assert activity["forecast_activity_hard_filter"] is True
+    assert activity["forecast_activity_reason"] == (
+        "rolling_mean_abs_forecast_below_hard_min"
+    )
 
 
 def test_selection_rebalance_cadence_is_explicit():
@@ -540,6 +607,102 @@ def test_walk_forward_selection_uses_uniform_reference_eligibility():
     assert {row["selection_status"] for row in first_review_rows} == {"added"}
     assert all(row["selection_year"] == 2024 for row in first_review_rows)
     assert all(row["hist_instr_code"] is None for row in first_review_rows)
+
+
+def test_walk_forward_forecast_probation_excludes_on_second_weak_review():
+    """The provider advances weak-review state without using future forecasts."""
+    args = parse_args([
+        "--signal-model",
+        "multi_ewmac",
+        "--selection-rebalance",
+        "monthly",
+        "--min-forecast-obs",
+        "2",
+        "--corr-min-rows",
+        "2",
+        "--weight-policy",
+        "equal",
+        "--selection-forecast-activity-filter",
+        "--selection-forecast-lookback-sessions",
+        "2",
+        "--selection-forecast-probation-min",
+        "0.5",
+        "--selection-forecast-hard-min",
+        "0.25",
+        "--selection-forecast-probation-reviews",
+        "2",
+    ])
+    history_dates = [
+        date(2024, 1, 1),
+        date(2024, 1, 2),
+        date(2024, 1, 3),
+        date(2024, 1, 31),
+        date(2024, 2, 1),
+    ]
+    reference_frames = {
+        symbol: pl.DataFrame({
+            "date": history_dates,
+            "comb_fcst": forecasts,
+            "fcst_valid": [True] * 5,
+            "ref_return_valid": [True] * 5,
+            "ref_net_pct": returns,
+            "daily_dvol": [10.0] * 5,
+            "fx_to_usd": [1.0] * 5,
+        }).lazy()
+        for symbol, forecasts, returns in (
+            ("A", [1.0] * 5, [0.1, 0.2, -0.1, 0.1, 0.2]),
+            ("B", [0.4] * 5, [-0.1, 0.1, 0.2, -0.2, 0.1]),
+        )
+    }
+    source_rows = {
+        symbol: {
+            "symbol": symbol,
+            "asset_cls": "equity",
+            "econ_subcls": symbol.lower(),
+            "econ_fam_id": symbol,
+            "initial_margin_to_ann_dvol": 10.0 / 160.0,
+            "ref_ann_rolls": 4.0,
+            "ref_spread_pts": 0.1,
+            "ref_config_comm_usd": 0.2,
+            "mult": 5.0,
+        }
+        for symbol in ("A", "B")
+    }
+    provider = _WalkForwardSelectionProvider(
+        review_dates=[date(2024, 1, 4), date(2024, 2, 2)],
+        source_rows=source_rows,
+        audit_by_symbol={
+            symbol: {"comb_turnover": 1.0} for symbol in ("A", "B")
+        },
+        reference_frames=reference_frames,
+        live_tail_start_by_symbol={},
+        run_config={
+            "target_vol": 0.20,
+            "cost_lim_sr": 0.01,
+            "max_pct_mkt_volume": 1.0,
+            "liq_days": 256,
+        },
+        args=args,
+    )
+
+    first = provider(date(2024, 1, 4), 1_000.0)
+    second = provider(date(2024, 2, 2), 1_000.0)
+
+    assert first is not None and "B" in first
+    assert second is not None and "B" not in second
+    assert provider.review_rows[0]["forecast_activity_probation_count"] == 1
+    assert provider.review_rows[1]["forecast_activity_hard_filter_count"] == 1
+    b_second = next(
+        row
+        for row in provider.review_instrument_rows
+        if row["selection_date"] == date(2024, 2, 2)
+        and row["symbol"] == "B"
+    )
+    assert b_second["selection_status"] == "ineligible"
+    assert b_second["forecast_activity_weak_review_count"] == 2
+    assert b_second["selection_note"].startswith(
+        "forecast_activity_hard_filter:"
+    )
 
 
 def test_build_selection_entrypoint_defaults_to_complete_pipeline():
