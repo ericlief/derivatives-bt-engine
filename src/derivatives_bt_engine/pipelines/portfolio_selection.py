@@ -2838,6 +2838,15 @@ class _WalkForwardSelectionProvider:
             str(detail["symbol"]): detail
             for detail in selection.final_score.details
         }
+        trial_sizing_by_symbol = {
+            str(trial["candidate"]): {
+                "max_position": trial.get("candidate_max_position"),
+                "average_position": trial.get(
+                    "candidate_average_position"
+                ),
+            }
+            for trial in selection.trials
+        }
         allocations: dict[str, dict[str, float | int]] = {}
         for rank, symbol in enumerate(selection.selected, start=1):
             detail = detail_by_symbol[symbol]
@@ -3043,6 +3052,10 @@ class _WalkForwardSelectionProvider:
             source = self.source_rows[symbol]
             audit = self.audit_by_symbol[symbol]
             forecast_activity = forecast_activity_by_symbol[symbol]
+            sizing_detail = detail_by_symbol.get(
+                symbol,
+                trial_sizing_by_symbol.get(symbol, {}),
+            )
             eligibility_buffer_reasons = []
             if (
                 symbol in self.prior_selected
@@ -3111,6 +3124,10 @@ class _WalkForwardSelectionProvider:
                 "selection_score": selection.final_score.score,
                 "selection_idm": selection.final_score.idm,
                 "selection_status": status,
+                "max_position": sizing_detail.get("max_position"),
+                "average_position": sizing_detail.get(
+                    "average_position"
+                ),
                 "selection_active": active,
                 "selection_eligibility_hysteresis_applied": bool(
                     eligibility_buffer_reasons
