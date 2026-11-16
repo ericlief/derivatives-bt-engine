@@ -10,6 +10,7 @@ from derivatives_bt_engine.pipelines.portfolio_selection import (
     _carry_forecast_cache_spec,
     _carry_rule_smooths,
     _filter_backtest_period,
+    _greedy_selector,
     _is_micro_contract,
     _direct_ib_handoff_date,
     _label_forecast_output_frame,
@@ -283,6 +284,28 @@ def test_selection_defaults_to_reviewed_classification_weights():
     assert args.ib_prior_years == 3
     assert args.backtest_start_date is None
     assert args.backtest_end_date is None
+
+
+def test_selection_min_max_position_reaches_greedy_config():
+    """The CLI floor controls every member of each hypothetical trial book."""
+    args = parse_args([
+        "--signal-model",
+        "multi_ewmac",
+        "--selection-min-max-position",
+        "2",
+    ])
+
+    selector = _greedy_selector(
+        capital=75_000.0,
+        run_config={
+            "target_vol": 0.20,
+            "max_pct_mkt_volume": 1.0,
+            "liq_days": 250,
+        },
+        args=args,
+    )
+
+    assert selector.config.min_max_position == pytest.approx(2.0)
 
 
 def test_selection_rebalance_cadence_is_explicit():

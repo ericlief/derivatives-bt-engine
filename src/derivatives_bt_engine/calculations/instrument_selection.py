@@ -138,7 +138,8 @@ class GreedySelectionConfig:
     to half of the diversified book. Portfolio score and IDM still use the
     uncapped structural weights. ``forecast_cap_ratio`` is maximum forecast
     divided by average absolute forecast (20/10 = 2 in conventional Carver
-    units). ``min_max_position`` enforces the half-contract granularity rule.
+    units). ``min_max_position`` enforces a configurable forecast-cap
+    position floor; its default preserves the half-contract granularity rule.
     ``min_instruments_per_class`` and ``min_instruments_per_subclass``
     optionally make the greedy search cover each represented hierarchy group,
     class first and then subclass. Hard feasibility gates always remain
@@ -1018,7 +1019,7 @@ class GreedyInstrumentSelector:
                 1.0 + self.config.eligibility_hysteresis_percent / 100.0
                 if is_incumbent else 1.0
             )
-            # Contract granularity is a physical rounding boundary. Unlike
+            # Contract granularity is a physical sizing boundary. Unlike
             # cost and participation, it cannot receive a softer incumbent
             # exit threshold without retaining an instrument that may never
             # express one contract even at the forecast cap.
@@ -1036,8 +1037,8 @@ class GreedyInstrumentSelector:
             ref_contract_band_distance = self._contract_band_distance(
                 ref_max_position
             )
-            # Maximum contracts at the forecast cap. A value below 0.5 cannot
-            # reliably express even one signed contract after rounding.
+            # Maximum contracts at the forecast cap. The configurable floor
+            # can preserve the half-contract rule or require more capacity.
             max_position = (
                 self.config.capital
                 * self.config.target_vol
@@ -1110,7 +1111,11 @@ class GreedyInstrumentSelector:
             )
             reason = ""
             if not math.isfinite(size_penalty):
-                reason = "max_position_below_half_contract"
+                reason = (
+                    "max_position_below_minimum "
+                    f"max_position={max_position:.4f} "
+                    f"min_max_position={min_max_position:.4f}"
+                )
             elif candidate.enforce_market_participation and pct_market is None:
                 reason = "market_risk_volume_unavailable"
             elif (
@@ -1155,6 +1160,9 @@ class GreedyInstrumentSelector:
                 "group_limited_weight": group_limited_weights[symbol],
                 "unallocated_weight": unallocated_weight,
                 "limit_weight": allocation,
+                # This is the actual portfolio sizing share used by position,
+                # liquidity, and margin formulas after every cap is applied.
+                "weight_idm": allocation * idm,
                 "selection_incumbent": is_incumbent,
                 "min_max_position": min_max_position,
                 "max_market_volume_percent": max_market_volume_percent,
@@ -2671,6 +2679,7 @@ class GreedyInstrumentSelector:
                     "max_market_volume_percent"
                 ],
                 "idm": score.idm,
+                "weight_idm": detail["weight_idm"],
                 "annual_dollar_vol_per_contract": detail[
                     "annual_dollar_vol_per_contract"
                 ],

@@ -78,6 +78,7 @@ def test_selection_review_allocation_report_puts_run_params_at_right():
         "min_instr_per_cls": [1],
         "min_instr_per_subcls": [1],
         "min_book_n": [15],
+        "min_max_pos": [2.0],
         "sel_date": [date(2026, 1, 1)],
         "weight": [0.125],
         "sel_equity": [75_000.0],
@@ -92,6 +93,7 @@ def test_selection_review_allocation_report_puts_run_params_at_right():
         "unalloc_weight": [0.0],
         "limit_weight": [0.111],
         "idm": [1.8],
+        "weight_idm": [0.1998],
         "ann_dvol": [100.0],
         "risk_budget": [1_000.0],
         "net_sr": [0.4],
@@ -102,6 +104,8 @@ def test_selection_review_allocation_report_puts_run_params_at_right():
     ordered = order_selection_review_allocation_report(report)
 
     assert ordered.columns.index("weight") < ordered.columns.index("net_sr")
+    assert ordered.columns.index("idm") < ordered.columns.index("weight_idm")
+    assert ordered.columns.index("net_sr") < ordered.columns.index("min_max_pos")
     assert ordered.columns.index("net_sr") < ordered.columns.index(
         "max_instr_per_cls"
     )

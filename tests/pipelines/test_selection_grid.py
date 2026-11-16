@@ -324,6 +324,8 @@ def test_grid_accepts_secondary_constraint_lists():
     args = parse_args([
         "--input",
         "screen.parquet",
+        "--signal-model",
+        "multi_ewmac",
         "--target-vols",
         "0.20",
         "--max-instr-margin-pcts",
@@ -346,6 +348,37 @@ def test_grid_accepts_secondary_constraint_lists():
     } == {
         2, None
     }
+
+
+def test_grid_sweeps_minimum_maximum_positions():
+    """Contract-granularity floors are explicit construction scenarios."""
+    args = parse_args([
+        "--input",
+        "screen.parquet",
+        "--signal-model",
+        "multi_ewmac",
+        "--target-vols",
+        "0.20",
+        "--max-instr-margin-pcts",
+        "20",
+        "--roll-cost-modes",
+        "include",
+        "--selection-min-max-positions",
+        "0.5,1,2",
+    ])
+
+    scenarios = build_scenarios(args)
+
+    assert len(scenarios) == 3
+    assert {scenario.minimum_max_position for scenario in scenarios} == {
+        0.5, 1.0, 2.0
+    }
+    assert any(
+        "_minmaxpos1_" in scenario.scenario_id for scenario in scenarios
+    )
+    assert any(
+        "_minmaxpos2_" in scenario.scenario_id for scenario in scenarios
+    )
 
 
 def test_grid_sweeps_rank_count_ewma_halflives_for_yearly_reviews():
@@ -533,12 +566,16 @@ def test_dry_run_writes_reproducible_commands_without_running_selection(
         "include",
         "--cache",
         str(tmp_path / "cache"),
+        "--signal-model",
+        "multi_ewmac",
         "--selection-rebalance",
         "yearly",
         "--selection-membership-hysteresis",
         "rank",
         "--selection-prefer-full-contracts",
         "true",
+        "--selection-min-max-position",
+        "2",
         "--dry-run",
     ])
 
@@ -549,6 +586,7 @@ def test_dry_run_writes_reproducible_commands_without_running_selection(
     assert "--target-vol 0.2" in command_text
     assert "--max-instr-margin-pct 20.0" in command_text
     assert "--score-threshold 0.9" in command_text
+    assert "--selection-min-max-position 2.0" in command_text
     assert "--include-roll-cost-in-score" in command_text
     assert "--selection-rebalance yearly" in command_text
     assert "--selection-rank-buffer-pct 15.0" in command_text

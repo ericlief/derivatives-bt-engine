@@ -77,6 +77,7 @@ class SelectionScenario:
     minimum_instruments_per_class: int | None = None
     minimum_instruments_per_subclass: int | None = None
     minimum_book_count: int = 15
+    minimum_max_position: float = 0.5
     low_contract_penalty_scale: float = 0.0
     high_contract_penalty_scale: float = 0.0
     score_tie_tolerance_percent: float = 0.0
@@ -97,6 +98,13 @@ class SelectionScenario:
         """Reject internally contradictory hierarchy count bounds."""
         if self.minimum_book_count <= 0:
             raise ValueError("minimum book count must be positive")
+        if (
+            not math.isfinite(self.minimum_max_position)
+            or self.minimum_max_position <= 0
+        ):
+            raise ValueError(
+                "minimum maximum position must be finite and positive"
+            )
         if self.backtest_capital_mode not in BACKTEST_CAPITAL_MODES:
             raise ValueError(
                 "backtest capital mode must be one of: "
@@ -159,6 +167,10 @@ class SelectionScenario:
                 f"tie{_number_token(self.score_tie_tolerance_percent)}",
                 f"refn{self.tie_reference_book_count}",
             ))
+        if self.minimum_max_position != 0.5:
+            tokens.append(
+                f"minmaxpos{_number_token(self.minimum_max_position)}"
+            )
         if self.maximum_instruments_per_class is not None:
             tokens.append(f"ic{self.maximum_instruments_per_class}")
         if self.minimum_instruments_per_class is not None:
@@ -591,6 +603,17 @@ def parse_args(argv=None) -> argparse.Namespace:
         help="Comma-separated instrument weight-times-IDM caps (default: .20).",
     )
     parser.add_argument(
+        "--selection-min-max-positions",
+        "--selection-min-max-position",
+        dest="selection_min_max_positions",
+        type=_positive_float_list,
+        default=(0.5,),
+        help=(
+            "Comma-separated minimum continuous forecast-cap positions for "
+            "every trial-book member (default: .5; suggested: .5,1,2)."
+        ),
+    )
+    parser.add_argument(
         "--score-thresholds",
         type=_score_threshold_list,
         default=(0.90,),
@@ -810,6 +833,7 @@ def build_scenarios(args: argparse.Namespace) -> list[SelectionScenario]:
             maximum_book_margin_percent=book_margin,
             maximum_weight_idm=weight_idm,
             score_threshold=score_threshold,
+            minimum_max_position=minimum_max_position,
             low_contract_penalty_scale=low_contract_penalty_scale,
             high_contract_penalty_scale=high_contract_penalty_scale,
             score_tie_tolerance_percent=score_tie_tolerance_percent,
@@ -845,6 +869,7 @@ def build_scenarios(args: argparse.Namespace) -> list[SelectionScenario]:
             book_margin,
             weight_idm,
             score_threshold,
+            minimum_max_position,
             low_contract_penalty_scale,
             high_contract_penalty_scale,
             score_tie_tolerance_percent,
@@ -863,6 +888,7 @@ def build_scenarios(args: argparse.Namespace) -> list[SelectionScenario]:
             args.max_book_margin_pcts,
             args.max_weight_idms,
             args.score_thresholds,
+            args.selection_min_max_positions,
             args.low_contract_penalty_scales,
             args.high_contract_penalty_scales,
             args.score_tie_tolerance_percents,
@@ -960,6 +986,8 @@ def _selection_command(
         str(scenario.maximum_weight_idm),
         "--score-threshold",
         str(scenario.score_threshold),
+        "--selection-min-max-position",
+        str(scenario.minimum_max_position),
         "--low-con-penalty-scale",
         str(scenario.low_contract_penalty_scale),
         "--high-con-penalty-scale",
@@ -1338,6 +1366,7 @@ def _summary_row(
         "maximum_book_margin_percent": scenario.maximum_book_margin_percent,
         "maximum_weight_idm": scenario.maximum_weight_idm,
         "score_threshold": scenario.score_threshold,
+        "min_max_position": scenario.minimum_max_position,
         "low_contract_penalty_scale": scenario.low_contract_penalty_scale,
         "high_contract_penalty_scale": scenario.high_contract_penalty_scale,
         "score_tie_tolerance_percent": scenario.score_tie_tolerance_percent,
@@ -1544,6 +1573,7 @@ def _attach_baseline_overlap(summary: pl.DataFrame) -> pl.DataFrame:
             + (pl.col("maximum_book_margin_percent") - 75.0).abs() / 100.0
             + (pl.col("maximum_weight_idm") - 0.20).abs()
             + (pl.col("score_threshold") - 0.90).abs()
+            + (pl.col("min_max_position") - 0.5).abs()
             + pl.col("low_contract_penalty_scale").abs()
             + pl.col("high_contract_penalty_scale").abs()
             + pl.col("score_tie_tolerance_percent").abs() / 100.0

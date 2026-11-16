@@ -915,6 +915,9 @@ feasible trial in the active deficient groups. The ordinary relative
 `--score-threshold` stop is suspended during required coverage; score still
 ranks the alternatives and already deducts the configured cost SR. No hard
 granularity, margin, history, family, or live-execution gate is relaxed.
+`--selection-min-max-position` sets the granularity floor for every member of
+every hypothetical whole book. It defaults to `0.5`; grid runs can sweep the
+plural `--selection-min-max-positions`, for example `.5,1,2`.
 
 After hierarchy coverage, `--selection-min-book-count` defaults to 15 and
 continues through the least represented feasible subclasses until that breadth
@@ -1984,14 +1987,23 @@ Their realized cash P&L sizing uses the 8% `limit_weight`, not the 14.29%
 structural weight. Since capped weights are not renormalized, their sum can be
 less than one.
 
-Following Carver, assign an effectively infinite size penalty when `P_i < 0.5`
-contracts; otherwise:
+Following Carver, assign an effectively infinite size penalty when
+`P_i < selection_min_max_position` contracts; otherwise:
 
 ```text
 size_penalty_i = 0.125 / P_i**2
 base_net_SR_i = 0.5 - annual_trading_cost_SR_i - size_penalty_i
 portfolio_score(B) = (w . net_SR) / sqrt(w' H w)
 ```
+
+The default floor is `0.5`. Because the maximum position uses the standard
+forecast-cap ratio of two, a floor of `1` corresponds to an average-position
+floor of `0.5`, while a floor of `2` corresponds to an average-position floor
+of `1`. The floor applies to the recalculated `limit_weight * IDM` allocation
+of every trial-book member, not to the stable reference position used by the
+near-tie comparison. Public trial-allocation, accepted-pass, final-book, and
+annual allocation reports persist this product as `weight_idm` beside
+`limit_weight` and `idm`.
 
 Small-account construction can add separate penalties below and above a target
 continuous maximum-position band. With the default band `[2.5, 5.5)`, the
@@ -2214,6 +2226,12 @@ scenarios. To test the saved-path retention values, sweep
 `--score-thresholds 0.90,0.95,0.975,0.99,1.00`; this adds five threshold
 scenarios for each combination of the other selected settings. A value of
 `1.00` only admits a candidate if it matches the best score seen at that step.
+
+The hard continuous-position floor is another independent grid axis. Sweep
+`--selection-min-max-positions .5,1,2` to compare the existing half-contract
+rule with books requiring one contract at the forecast cap or approximately
+one contract at the average forecast. This floor changes feasibility before
+score ranking; it is not a soft contract-band penalty.
 
 An optional near-tie rule can change which candidate enters rather than only
 changing where the same greedy path stops. Set `--score-tie-tolerance-pct` to

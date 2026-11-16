@@ -1381,6 +1381,16 @@ def parse_args(argv=None, *, complete_default: bool = False):
         ),
     )
     parser.add_argument(
+        "--selection-min-max-position",
+        type=float,
+        default=0.5,
+        help=(
+            "Minimum continuous forecast-cap position required for every "
+            "member of each trial book (default: 0.5). Suggested structural "
+            "sensitivities: 1 and 2."
+        ),
+    )
+    parser.add_argument(
         "--min-instr-per-class",
         type=int,
         help=(
@@ -1723,6 +1733,10 @@ def _selection_scenario_id(
             f"tie{_number_token(args.score_tie_tolerance_percent)}",
             f"refn{args.tie_reference_book_count}",
         ))
+    if args.selection_min_max_position != 0.5:
+        tokens.append(
+            f"minmaxpos{_number_token(args.selection_min_max_position)}"
+        )
     if args.max_instr_per_class is not None:
         tokens.append(f"ic{args.max_instr_per_class}")
     if args.min_instr_per_class is not None:
@@ -2055,6 +2069,7 @@ def _greedy_selector(
             score_tie_tolerance_percent=args.score_tie_tolerance_percent,
             tie_reference_book_count=args.tie_reference_book_count,
             max_weight_idm=args.max_weight_idm,
+            min_max_position=args.selection_min_max_position,
             max_pct_market_volume=float(run_config["max_pct_mkt_volume"]),
             liquidity_days=int(run_config["liq_days"]),
             include_roll_cost_in_score=args.include_roll_cost_in_score,
@@ -2413,6 +2428,7 @@ class _WalkForwardSelectionProvider:
                         self.args.min_instr_per_subclass
                     ),
                     "minimum_book_count": _active_minimum_book_count(self.args),
+                    "min_max_position": self.args.selection_min_max_position,
                     "maximum_instruments_per_class": self.args.max_instr_per_class,
                     "maximum_instruments_per_subclass": (
                         self.args.max_instr_per_subclass
@@ -2478,6 +2494,7 @@ class _WalkForwardSelectionProvider:
                         self.args.min_instr_per_subclass
                     ),
                     "minimum_book_count": _active_minimum_book_count(self.args),
+                    "min_max_position": self.args.selection_min_max_position,
                     "maximum_instruments_per_class": (
                         self.args.max_instr_per_class
                     ),
@@ -2528,6 +2545,7 @@ class _WalkForwardSelectionProvider:
                     self.args.min_instr_per_subclass
                 ),
                 "minimum_book_count": _active_minimum_book_count(self.args),
+                "min_max_position": self.args.selection_min_max_position,
                 "maximum_instruments_per_class": self.args.max_instr_per_class,
                 "maximum_instruments_per_subclass": (
                     self.args.max_instr_per_subclass
@@ -2626,6 +2644,7 @@ class _WalkForwardSelectionProvider:
                 "unallocated_weight": float(detail["unallocated_weight"]),
                 "limit_weight": float(detail["limit_weight"]),
                 "idm": float(selection.final_score.idm),
+                "weight_idm": float(detail["weight_idm"]),
                 "trade_cost_per_con": trade_cost,
                 "roll_cost_per_con": roll_cost,
             }
@@ -2734,6 +2753,7 @@ class _WalkForwardSelectionProvider:
             "selection_book_score_buffer_percent": (
                 _active_book_score_buffer_percent(self.args)
             ),
+            "min_max_position": self.args.selection_min_max_position,
             "prior_book_score": selection.prior_book_score,
             "unbuffered_book_score": selection.unbuffered_book_score,
             "rank_buffered_book_score": selection.rank_buffered_book_score,
@@ -2923,6 +2943,9 @@ class _WalkForwardSelectionProvider:
                 "limit_weight": (
                     allocation.get("limit_weight") if allocation else None
                 ),
+                "weight_idm": (
+                    allocation.get("weight_idm") if allocation else None
+                ),
                 "ann_trade_cons": (
                     allocation.get("ann_trade_cons") if allocation else None
                 ),
@@ -3054,6 +3077,7 @@ def _final_selection_frame(
             "minimum_instruments_per_class": args.min_instr_per_class,
             "minimum_instruments_per_subclass": args.min_instr_per_subclass,
             "minimum_book_count": _active_minimum_book_count(args),
+            "min_max_position": args.selection_min_max_position,
             "maximum_instruments_per_class": args.max_instr_per_class,
             "maximum_instruments_per_subclass": args.max_instr_per_subclass,
             "maximum_asset_class_weight_percent": args.max_class_weight_pct,
@@ -4816,6 +4840,7 @@ def _run_complete_selection(
         "tie_reference_book_count": args.tie_reference_book_count,
         "include_roll_cost_in_score": args.include_roll_cost_in_score,
         "max_weight_idm": args.max_weight_idm,
+        "selection_min_max_position": args.selection_min_max_position,
         "min_instr_per_class": args.min_instr_per_class,
         "min_instr_per_subclass": args.min_instr_per_subclass,
         "selection_min_book_count": _active_minimum_book_count(args),
@@ -5275,6 +5300,9 @@ def _run_complete_selection(
                 pl.lit(_active_minimum_book_count(args), dtype=pl.Int64).alias(
                     "minimum_book_count"
                 ),
+                pl.lit(args.selection_min_max_position).alias(
+                    "min_max_position"
+                ),
                 pl.lit(args.max_instr_per_class, dtype=pl.Int64).alias(
                     "maximum_instruments_per_class"
                 ),
@@ -5430,6 +5458,7 @@ def _run_complete_selection(
             "ref_max_position",
             "ref_contract_band_distance",
             "idm",
+            "weight_idm",
             "score",
             "base_score",
             "low_contract_weight",
@@ -5441,6 +5470,7 @@ def _run_complete_selection(
             "contract_band_max",
             "score_tie_tolerance_percent",
             "tie_ref_book_count",
+            "min_max_position",
             "iter_score_best",
             "iter_score_best_score",
             "tie_score_floor",
@@ -5661,6 +5691,13 @@ def run(
         raise ValueError("score tie tolerance must be in [0, 100]")
     if args.tie_reference_book_count <= 0:
         raise ValueError("tie reference book count must be positive")
+    if (
+        not math.isfinite(args.selection_min_max_position)
+        or args.selection_min_max_position <= 0
+    ):
+        raise ValueError(
+            "selection minimum maximum position must be finite and positive"
+        )
     if args.max_source_gap_days < 0:
         raise ValueError("max source gap days must be nonnegative")
     if args.selection_max_history_gap_days < 0:

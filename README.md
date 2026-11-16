@@ -132,10 +132,17 @@ participation eligibility hysteresis through
 `--selection-eligibility-hysteresis-pct`; it is disabled by default and must
 be enabled explicitly. The legacy
 `--selection-eligibility-exit-buffer-pct` spelling remains a compatibility
-alias. The half-contract granularity floor, stale history, margin,
+alias. The continuous forecast-cap position floor, stale history, margin,
 classification, family, and book constraints remain hard failures. These
 controls are independent of the within-iteration score tie-break and daily
 executable-position buffer.
+
+`--selection-min-max-position` controls that whole-book position floor and
+defaults to `0.5`, preserving the half-contract rule. Every hypothetical
+addition recalculates every member and is rejected if any member falls below
+the configured floor. Values of `1` and `2` are useful structural
+sensitivities; with the standard forecast-cap ratio of two, they correspond to
+average-position floors of `0.5` and `1` respectively.
 
 This candidate tie-break is separate from `--low-con-penalty-scale` and
 `--high-con-penalty-scale`. Those optional settings subtract per-instrument

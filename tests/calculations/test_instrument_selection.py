@@ -891,7 +891,31 @@ def test_weight_idm_cap_applies_after_singleton_seed():
     for detail in score.details:
         assert detail["weight"] == pytest.approx(0.5)
         assert detail["limit_weight"] * score.idm == pytest.approx(0.20)
+        assert detail["weight_idm"] == pytest.approx(0.20)
         assert detail["max_position"] == pytest.approx(8.0)
+
+
+def test_configurable_minimum_max_position_rejects_small_trial():
+    """A stricter floor rejects a trial using its recalculated sizing share."""
+    candidate = _candidate("A", 0.0, ann_dvol=10.0)
+    selector = GreedyInstrumentSelector(
+        config=GreedySelectionConfig(
+            capital=100.0,
+            target_vol=0.20,
+            max_weight_idm=0.20,
+            min_max_position=1.0,
+        ),
+        weight_policy=EqualPortfolioWeights(),
+    )
+
+    score = selector.score(["A"], {"A": candidate}, ["A"], np.eye(1))
+
+    assert score.details[0]["max_position"] == pytest.approx(0.8)
+    assert not score.feasible
+    assert score.details[0]["reason"] == (
+        "max_position_below_minimum "
+        "max_position=0.8000 min_max_position=1.0000"
+    )
 
 
 def test_handcrafted_weights_expose_recursive_cluster_paths():
@@ -1055,3 +1079,8 @@ def test_greedy_selector_saves_member_weights_for_every_trial():
             for row in member_rows
         )
         assert {row["accepted"] for row in member_rows} == {trial["accepted"]}
+        assert all(
+            float(row["weight_idm"])
+            == pytest.approx(float(row["limit_weight"]) * float(row["idm"]))
+            for row in member_rows
+        )

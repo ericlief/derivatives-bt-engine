@@ -153,47 +153,38 @@ Use two separate controls.
 
 ### 1. Hard structural admission floor
 
-For the primary candidate universe, add a stable reference requirement:
+Make the existing whole-book physical floor configurable:
 
 ```text
-ref_max_pos >= 1.0
+max_position >= selection_min_max_position
 ```
 
-This must use the existing 15-market equal-weight reference, not the
-iteration-specific or final-book position. Under the conventional 20/10
-forecast ratio it is equivalent to a reference average position of at least
-0.5 contracts.
+The current default of `0.5` preserves the half-contract rule. Sensitivities
+of `1.0` and `2.0` correspond, under the conventional 20/10 forecast ratio,
+to average-position floors of `0.5` and `1.0` contracts. The calculation uses
+each trial member's recalculated `limit_weight * IDM`, not the stable
+15-market reference position.
 
-Keep the existing trial-book physical requirement separately:
+This allocation dependence is intentional: the policy asks whether every
+member remains usable in the proposed whole book after the new candidate is
+added. The selector must reject that trial and evaluate the remaining
+candidates, rather than cap the book at a fixed count or delete undersized
+members in a one-shot final pass. If no alternative clears the floor, the
+book stops or reports an unmet coverage target.
 
-```text
-max_position >= 0.5
-```
+On the saved accepted 2026 path, a floor of `1.0` rejects the proposed 11th
+member `MGC`, whose own maximum position is `0.637`. A floor of `2.0` changes
+the path earlier because the proposed fourth member `MHG` has a maximum
+position of `1.442`. These observations do not determine the new final book
+counts because each rejection reopens competition among the remaining
+candidates.
 
-The first rule asks whether a candidate is intrinsically usable for this
-account under a stable assumed book. The second ensures that every member of
-each actual trial book can express at least one contract at the forecast cap.
-Raising the second rule to 1.0 would make feasibility depend recursively on
-the current number and allocation of already selected members; it would
-incorrectly classify `RS` from its final 0.633 maximum despite its 2.659
-reference maximum.
-
-Applied to the saved 2026 final book, a `ref_max_pos >= 1.0` sensitivity flags
-only `MGC` at 0.595 and `HE` at 0.761. It correctly retains `RS` at 2.659,
-`MCH.HK` at 2.277, `SONIA.N` at 2.333, `BTS` at 3.194, `TSEMOTHR` at 4.510,
-and `SRFXON3` at 6.579.
-
-This floor must be applied before class/subclass coverage is calculated.
-Otherwise an unexecutable sole member, such as a coarse contract in a thin
-subclass, can satisfy nominal coverage while contributing no actual market
-risk. Coverage should describe the implementable candidate universe for this
-account, not every market in the reference database.
-
-The current `GreedySelectionConfig.min_max_position` default is 0.5 and checks
-actual trial allocations. A future implementation should leave that physical
-floor intact and introduce a distinct CLI setting such as
-`--selection-min-ref-max-position 1.0`. It should persist both floors in
-scenario metadata and every annual review report.
+The stable `ref_max_pos` remains useful for near-tie comparisons and audit,
+but it does not prevent later allocation dilution. It therefore cannot solve
+the inactive-slot problem by itself. The CLI setting is
+`--selection-min-max-position`; the grid form is
+`--selection-min-max-positions .5,1,2`. Persist the active floor in scenario,
+trial, accepted-pass, and annual-review reports.
 
 ### 2. Causal utilization probation
 
@@ -226,13 +217,14 @@ days, entry rate, status, consecutive-review count, and reason.
 An approximate audit using the 2026 final proposed average position and prior
 2025 forecasts gives 0% entry opportunity for `HE`, but 11% for `BTS`, 21%
 for `MCH.HK`, 41% for `TSEMOTHR`, and 72% for `SRFXON3`. This illustrates why
-the stable reference gate and allocation-utilization probation are
-complementary: the reference gate correctly retains `MCH.HK` and leaves its
-smaller final allocation visible to the utilization audit. At the proposed
+the structural whole-book floor and allocation-utilization probation are
+complementary: the floor controls achievable contract scale while probation
+measures whether the historical signal actually presented executable entry
+opportunities. At the proposed
 5% threshold, however, its 21% prior-year opportunity would not have predicted
 the 2026 dormancy; that dormancy is new signal behavior, not grounds for a
 retrospective eligibility label. `RS` is likewise a probation or
-allocation-efficiency question, not a structural candidate-eligibility
+allocation-efficiency question after applying the configured whole-book floor
 failure.
 
 ## Rules that should not be used
