@@ -50,14 +50,18 @@ probation overlay also reduced full-history fixed-cap results and created a
 large 2026 book-path cascade: three direct hard exclusions from the control
 book ultimately changed 15 symbols and reduced the final count from 19 to 10.
 
-The current result therefore supports two separate changes:
+The current result therefore supports one direct route-policy change and two
+probation sensitivities that need separate validation:
 
 1. Make an incumbent execution route sticky inside a continuously selected
    economic family. The 2.5-contract preferred band should choose a route when
    the family enters, rather than force annual full/micro substitutions.
-2. Add recovery hysteresis and a final-book fallback to probation. A weak
-   filter should not create a five-market minimum-book deficit through a
-   downstream greedy-path cascade.
+2. Test recovery hysteresis after a hard filter. This may reduce one-review
+   exits and reentries, but it also keeps markets excluded longer and is not
+   established as beneficial by this one saved path.
+3. Add a breadth-aware reconstruction pass when the greedy result misses the
+   configured minimum. This must search replacements while preserving every
+   hard gate; it must not simply re-admit hard-filtered markets.
 
 ## ES/MES audit
 
@@ -93,6 +97,53 @@ The behavior follows the implementation:
 This is internally consistent with the current documented policy, but it does
 not match the desired interpretation of full-contract *preference*. A soft
 preferred position band is acting as a recurring execution-route switch.
+
+### What is crossing, and would a larger band help?
+
+The configured contract target band is `[2.5, 5.5)`, but the current
+full/micro policy does **not** use that interval as route hysteresis. It uses
+only the lower edge as one two-way switch:
+
+- equivalent full-contract maximum position at or above 2.5: prefer full;
+- equivalent full-contract maximum position below 2.5: prefer micro.
+
+The 5.5 upper edge affects contract-size scoring diagnostics and optional
+penalties or tie-breaking, not the full/micro switch. Raising or lowering 2.5
+would therefore only move the crossing point. It would still permit annual
+churn around the new point, and changing 5.5 would not affect route selection.
+
+What is needed is a route *deadband* or fully sticky route, not a wider sizing
+target band. The strict sticky interpretation is:
+
+| State | Route decision |
+|---|---|
+| Family enters or reenters | Choose full only if its equivalent maximum position is at least 2.5; otherwise choose micro. |
+| Incumbent full, family remains selected | Keep full while it clears hard feasibility, including the run's 1.0-contract floor. |
+| Incumbent micro, family remains selected | Keep micro; do not promote merely because the full equivalent crosses 2.5. |
+| Incumbent route fails a hard gate | Switch to a feasible sibling route or remove the family. |
+
+This makes the effective full-route retention region between 1.0 and 2.5 a
+deadband: the incumbent route, rather than a fresh comparison, determines the
+result. If recurring promotions are desired, they need a separate higher and
+persistent promotion hurdle; that threshold should be tested rather than
+silently borrowing `con_band_max=5.5`.
+
+### Historical defaults
+
+The defaults and enabled behavior changed in distinct steps:
+
+| Code period | Full preference default | Behavior when enabled | Contract band role |
+|---|---|---|---|
+| Before 2026-11-07 | Option did not exist | No explicit full-over-micro policy | `[2.5, 5.5)` existed for sizing score, optional penalties, and tie diagnostics. |
+| 2026-11-07 through 2026-11-12 | Disabled | Any hard-feasible full route suppressed its micro sibling | The 2.5 edge did not control the family route. |
+| From 2026-11-13 | Disabled | Full suppresses micro only at or above 2.5; a completed full route below 2.5 is normalized to micro | The 2.5 lower edge became the recurring route crossing. |
+
+The audited runs explicitly enable full preference (`full1`), so the disabled
+CLI default is not their behavior. The project default structural floor is
+`min_max_position=0.5`; both compatible audited runs explicitly use 1.0. The
+forecast-activity feature is also disabled by default. This probation run
+explicitly enables it with a 256-session window, 0.50 probation threshold,
+0.25 immediate-hard threshold, and two consecutive weak reviews.
 
 ## Route churn and apparent reentries
 
@@ -200,6 +251,15 @@ control has no book-count deficit. The control already has class and subclass
 coverage deficits, but probation converts a 19-market book into a 10-market
 book without satisfying the configured breadth target.
 
+The saved terminal trial is also important: once the probation path has built
+that ten-market book, all 28 remaining first-review probation candidates fail
+as one-at-a-time additions under the hard one-contract or portfolio-margin
+constraints. They are already eligible under the probation policy. A simple
+"fill from probation" pass therefore cannot repair this result. Breadth
+protection would have to rebuild or backtrack to a different feasible
+combination, and report that the 15-market target is unattainable if no such
+combination exists.
+
 ## Hard-filter recovery and reentry
 
 There are 16 selected reentries across 13 symbols after at least one
@@ -227,7 +287,10 @@ reviews. The recoveries are:
 
 TSEMOTHR illustrates the present exit/reentry rule: hard-filtered in 2025, it
 returns immediately in 2026 when the rolling forecast rises to 0.5936. A
-separate recovery threshold or two healthy reviews would reduce this churn.
+separate recovery threshold or two healthy reviews would reduce this churn,
+but would also delay genuine recoveries and could worsen breadth. The audit
+therefore identifies recovery hysteresis as a sensitivity to test, not a
+settled default.
 
 ## Reduction in inactive selected markets
 
@@ -319,14 +382,23 @@ run, so this did not cause the observed substitutions. Family-level state is
 still the correct model and avoids double-counting probation and hard filters
 for execution variants of the same market.
 
-### Add recovery and breadth protection
+### Test recovery hysteresis and add breadth-aware reconstruction
 
-Require a stronger or persistent recovery before a hard-filtered family
-reenters, such as a 0.60 recovery threshold or two consecutive reviews above
-0.50. After applying hard filters, enforce the 15-market breadth target with
-an explicit reported fallback among first-review probation candidates. This
-would preserve the distinction between probation and hard exclusion while
-preventing the 2026 three-exclusion cascade from ending at 10 markets.
+The current recovery rule is immediate: after a hard-filter review, one value
+at or above 0.50 resets the state and permits reentry. Test, rather than assume,
+a stronger recovery rule such as 0.60 or two consecutive reviews above 0.50.
+Report exit, excluded duration, recovery state, and reentry by economic family
+so the churn and delayed-recovery tradeoff are visible.
+
+Breadth protection is a separate construction problem. If the primary greedy
+path finishes below `min_book_n`, run an explicit breadth-priority rebuild or
+backtracking pass over all activity-eligible candidates. It may replace members
+of the provisional book, but it must retain the forecast hard filters,
+one-contract floor, margin ceilings, history requirements, and hierarchy
+limits. Select the best feasible book that minimizes the coverage-deficit
+tuple, then apply score as a secondary objective. If 15 markets remain
+infeasible, retain the smaller book and persist that result as an unattainable
+target rather than weakening a hard gate.
 
 ## Source artifacts
 
