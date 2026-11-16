@@ -1,4 +1,4 @@
-# EWMAC inactive-contract and probation audit — 2026-11-13
+# EWMAC inactive-contract and probation audit — corrected 2026-11-16
 
 ## Scope
 
@@ -16,8 +16,15 @@ selection_run_20261113_153041
 tv0p2_im20_bm50_wi0p2_st0p85_fdm1_ic20_minc1_mins1_mb15_cw50_sw25_full1_cl3_roll1_topdown_classif_capfixed_selyearly_hg31_eh25_mhnone
 ```
 
-The audit reads the saved book, annual review, forecast audit, and daily cash
-P&L Parquet files. It does not rerun or overwrite the backtest.
+The audit reads the saved book, greedy trials, trial allocations, selection
+passes, annual review, forecast audit, and daily cash P&L Parquet files. It
+does not rerun or overwrite the backtest.
+
+This corrected version distinguishes the selector's stable 15-market
+`ref_max_pos` from the iteration-specific and final-book `max_position`.
+The original audit incorrectly used final-book positions as though they were
+candidate-admission positions; in particular, it incorrectly classified `RS`
+as structurally sub-one-contract.
 
 ## Finding
 
@@ -31,13 +38,18 @@ position, a positive target does not enter one contract while the lower edge
 of its no-trade band still rounds to zero; the negative case is symmetric.
 Merely crossing an unbuffered half contract is therefore insufficient.
 
-| Symbol | 2026-review average position | 2026-review forecast-cap position | 2026 mean absolute forecast | 2026 maximum absolute forecast | 2026 maximum absolute target | Held days / active days |
+| Symbol | 15-market reference maximum | Maximum when admitted | Final-book maximum | 2026 mean absolute forecast | 2026 maximum absolute target | Held days / active days |
 |---|---:|---:|---:|---:|---:|---:|
-| HE | 0.272 | 0.544 | 0.779 | 1.841 | 0.526 | 0 / 217 |
-| MCH.HK | 0.407 | 0.813 | 0.382 | 1.322 | 0.507 | 0 / 213 |
-| BTS | 0.570 | 1.141 | 0.704 | 1.563 | 0.531 | 0 / 221 |
-| TSEMOTHR | 0.805 | 1.611 | 0.404 | 0.850 | 0.558 | 0 / 224 |
-| SRFXON3 | 1.175 | 2.350 | 0.308 | 0.692 | 0.534 | 0 / 219 |
+| HE | 0.761 | 0.544 | 0.544 | 0.779 | 0.526 | 0 / 217 |
+| MCH.HK | 2.277 | 1.220 | 0.813 | 0.382 | 0.507 | 0 / 213 |
+| BTS | 3.194 | 1.141 | 1.141 | 0.704 | 0.531 | 0 / 221 |
+| TSEMOTHR | 4.510 | 4.833 | 1.611 | 0.404 | 0.558 | 0 / 224 |
+| SRFXON3 | 6.579 | 3.524 | 2.350 | 0.308 | 0.534 | 0 / 219 |
+
+The stable reference assumes `1 / 15` weight and caps weight times IDM at
+0.1667. The admitted maximum comes from the full trial book at the iteration
+where the candidate wins. The final maximum comes after all 23 members have
+entered and top-down weights and IDM have been recomputed.
 
 Examples from the saved daily cash report make the rounding boundary explicit:
 
@@ -52,33 +64,71 @@ Examples from the saved daily cash report make the rounding boundary explicit:
 This is not caused by missing price sessions: valid-day counts equal active-day
 counts for every row in the first table.
 
+## Greedy trial audit
+
+`RS` demonstrates why final-book `max_position` cannot define intrinsic
+candidate eligibility:
+
+- Singleton trial: reference maximum 2.659, actual singleton maximum 3.191;
+  it loses the seed decision to `M2K`.
+- Iteration 1: `RS` is admitted as the second member of `M2K,RS`, still with
+  an actual maximum of 3.191.
+- Final 23-member book: its allocation falls to a 0.317 average position and
+  a 0.633 forecast-cap maximum.
+
+The selected instruments follow the same entry-to-final mechanism:
+
+| Symbol | Entry step | Reference maximum | Entry maximum | Final maximum |
+|---|---:|---:|---:|---:|
+| RS | 1 | 2.659 | 3.191 | 0.633 |
+| TSEMOTHR | 7 | 4.510 | 4.833 | 1.611 |
+| SONIA.N | 9 | 2.333 | 2.500 | 0.833 |
+| MGC | 10 | 0.595 | 0.637 | 0.637 |
+| HE | 11 | 0.761 | 0.544 | 0.544 |
+| MCH.HK | 14 | 2.277 | 1.220 | 0.813 |
+| BTS | 18 | 3.194 | 1.141 | 1.141 |
+| SRFXON3 | 21 | 6.579 | 3.524 | 2.350 |
+
+Every addition rescales and checks the entire hypothetical book. There is no
+missing revalidation bug at the existing 0.5 physical floor. The conceptual
+error was treating the final allocation as the stable candidate reference.
+
 ## Structural granularity versus a dormant forecast
 
 The five names should not receive one common exclusion rule.
 
-### Structurally too coarse at this capital
+### Structurally too coarse under the stable candidate reference
 
-`HE` and `MCH.HK` have forecast-cap positions below one contract and average
-positions below half a contract. They can trade only during unusually large
-forecasts and favorable volatility. Their recent use confirms the structural
-problem:
+Of the five questioned instruments, only `HE` is below one forecast-cap
+contract under the stable 15-market candidate reference. `MCH.HK` is not:
+its reference maximum is 2.277 and it enters the greedy book with a 1.220
+maximum. Its maximum falls to 0.813 only after later additions reduce its
+final allocation.
+
+Recent use still shows that both names deserve attention, but for different
+reasons:
 
 | Symbol | Selected days since 2016 | Nonzero-held days | Held share | Interpretation |
 |---|---:|---:|---:|---|
-| HE | 972 | 0 | 0.0% | No executable use in four selected recent years |
-| MCH.HK | 439 | 7 | 1.6% | Almost never executable |
+| HE | 972 | 0 | 0.0% | Reference and actual allocation are both coarse |
+| MCH.HK | 439 | 7 | 1.6% | Viable reference candidate, underused after final allocation |
 
-The existing selector only hard-rejects a forecast-cap position below 0.5.
-It also applies the AFTS size penalty `0.125 / max_position^2`, but a penalized
-candidate can still enter for diversification or coverage. That lower bound
-proves that a contract is barely possible at the forecast cap; it does not
-prove that a normal forecast is executable.
+The existing selector checks an iteration-specific 0.5 minimum for every
+member of every proposed trial book. Consequently it does reprice and
+revalidate `RS` as the book grows; `RS` remains feasible because its final
+maximum is 0.633, still above 0.5. The selector also applies the AFTS size
+penalty `0.125 / max_position^2`.
+
+The stable reference position currently supports contract-band comparison
+and near-tie selection. It is not a hard candidate-universe gate. A new
+reference gate must therefore be a separate parameter from the existing
+iteration-specific physical floor.
 
 ### Usable contract, currently dormant signal
 
-`BTS`, `TSEMOTHR`, and `SRFXON3` have average positions above half a contract
-and forecast-cap positions above one. They have expressed contracts in prior
-selected years:
+`MCH.HK`, `BTS`, `TSEMOTHR`, and `SRFXON3` all have stable reference maxima
+above one contract. The latter three have expressed contracts materially in
+prior selected years:
 
 | Symbol | All selected days | Nonzero-held days | Held share | Relevant prior activity |
 |---|---:|---:|---:|---|
@@ -103,28 +153,35 @@ Use two separate controls.
 
 ### 1. Hard structural admission floor
 
-For the primary book, require:
+For the primary candidate universe, add a stable reference requirement:
 
 ```text
-average_position >= 0.5
+ref_max_pos >= 1.0
 ```
 
-which is equivalent under the conventional 20/10 forecast ratio to:
+This must use the existing 15-market equal-weight reference, not the
+iteration-specific or final-book position. Under the conventional 20/10
+forecast ratio it is equivalent to a reference average position of at least
+0.5 contracts.
+
+Keep the existing trial-book physical requirement separately:
 
 ```text
-forecast_cap_position >= 1.0
+max_position >= 0.5
 ```
 
-Keep the current 0.5 forecast-cap threshold only as a lower diagnostic bound.
-At the proposed book weight and IDM, the new one-contract floor means an
-ordinary forecast has a realistic chance to clear both integer rounding and
-the 10% buffer.
+The first rule asks whether a candidate is intrinsically usable for this
+account under a stable assumed book. The second ensures that every member of
+each actual trial book can express at least one contract at the forecast cap.
+Raising the second rule to 1.0 would make feasibility depend recursively on
+the current number and allocation of already selected members; it would
+incorrectly classify `RS` from its final 0.633 maximum despite its 2.659
+reference maximum.
 
-Applied only to the saved 2026 final book, this sensitivity would flag five of
-23 names: `HE`, `MCH.HK`, `RS`, `MGC`, and `SONIA.N`. Their 2026 held shares
-are respectively 0.0%, 0.0%, 0.5%, 8.8%, and 3.2%, so the rule targets the
-book's genuinely low-utilization tail. It would retain `BTS`, `TSEMOTHR`, and
-`SRFXON3`.
+Applied to the saved 2026 final book, a `ref_max_pos >= 1.0` sensitivity flags
+only `MGC` at 0.595 and `HE` at 0.761. It correctly retains `RS` at 2.659,
+`MCH.HK` at 2.277, `SONIA.N` at 2.333, `BTS` at 3.194, `TSEMOTHR` at 4.510,
+and `SRFXON3` at 6.579.
 
 This floor must be applied before class/subclass coverage is calculated.
 Otherwise an unexecutable sole member, such as a coarse contract in a thin
@@ -132,20 +189,21 @@ subclass, can satisfy nominal coverage while contributing no actual market
 risk. Coverage should describe the implementable candidate universe for this
 account, not every market in the reference database.
 
-The current `GreedySelectionConfig.min_max_position` default is 0.5 and is not
-exposed as a selection CLI parameter. A future implementation should expose a
-named CLI setting, persist it in scenario metadata and all annual review
-reports, and use 1.0 as the explicit small-account trial value before changing
-the general default.
+The current `GreedySelectionConfig.min_max_position` default is 0.5 and checks
+actual trial allocations. A future implementation should leave that physical
+floor intact and introduce a distinct CLI setting such as
+`--selection-min-ref-max-position 1.0`. It should persist both floors in
+scenario metadata and every annual review report.
 
 ### 2. Causal utilization probation
 
 Add a probation diagnostic for markets that pass the structural floor but
 still rarely offer an executable position. At each annual review:
 
-1. Build a provisional candidate allocation with that review's proposed
+1. Build the final provisional book and use each member's proposed final
    weight, IDM, dated dollar volatility, and forecast history available only
-   before the review date.
+   before the review date. Retain `ref_max_pos` beside this allocation metric
+   so structural and allocation-induced underuse remain distinguishable.
 2. Replay the same target, 10% buffer, whole-contract rounding, and
    trade-to-edge rule over the trailing 256 valid sessions, starting flat.
 3. Count a `flat_entry_day` when zero is outside the buffered integer band.
@@ -165,13 +223,17 @@ facts. They should be checked with narrow saved-run sensitivities before being
 adopted. The diagnostic must persist its lookback start/end, valid days, entry
 days, entry rate, status, consecutive-review count, and reason.
 
-An approximate audit using the 2026 proposed average position and the prior
+An approximate audit using the 2026 final proposed average position and prior
 2025 forecasts gives 0% entry opportunity for `HE`, but 11% for `BTS`, 21%
 for `MCH.HK`, 41% for `TSEMOTHR`, and 72% for `SRFXON3`. This illustrates why
-the hard structural rule and probation rule are complementary: the structural
-rule catches `MCH.HK` even when its prior forecast happened to be strong,
-while probation catches persistent dormancy without reacting to one current
-forecast observation.
+the stable reference gate and allocation-utilization probation are
+complementary: the reference gate correctly retains `MCH.HK` and leaves its
+smaller final allocation visible to the utilization audit. At the proposed
+5% threshold, however, its 21% prior-year opportunity would not have predicted
+the 2026 dormancy; that dormancy is new signal behavior, not grounds for a
+retrospective eligibility label. `RS` is likewise a probation or
+allocation-efficiency question, not a structural candidate-eligibility
+failure.
 
 ## Rules that should not be used
 
@@ -189,13 +251,15 @@ forecast observation.
 
 ## Conclusion
 
-For this USD 75,000 fixed-cap book, raise the trial structural floor from a
-0.5 to a 1.0 forecast-cap position, equivalently requiring an average position
-of at least 0.5 contracts. This directly addresses `HE`, `MCH.HK`, and the
-other nearly unused 2026 slots. Add causal utilization probation as an annual
-selection diagnostic with hysteresis, but do not remove `BTS`, `TSEMOTHR`, or
-SARONA solely because their 2026 forecasts are small. Their zero positions are
-currently valid signal outcomes, not evidence of broken data or execution.
+For this USD 75,000 fixed-cap book, keep the actual trial-book physical floor
+at 0.5 and add a separate stable `ref_max_pos >= 1.0` candidate gate based on
+the configured 15-market equal-weight reference. That reference gate flags
+`HE` and `MGC`, not `RS` or `MCH.HK`. Treat small final allocations such as
+`RS` and `MCH.HK` as utilization/probation diagnostics rather than intrinsic
+contract failures. Add causal probation with hysteresis, but do not remove
+`BTS`, `TSEMOTHR`, or SARONA solely because their 2026 forecasts are small.
+Their zero positions are valid signal outcomes, not evidence of broken data
+or execution.
 
 ## Source artifacts
 
@@ -212,5 +276,8 @@ Artifacts used:
 multi_speed_ewmac_selection_book_20261113_153041.parquet
 multi_speed_ewmac_selection_cash_pnl_20261113_153041.parquet
 multi_speed_ewmac_selection_forecast_audit_20261113_153041.parquet
+multi_speed_ewmac_selection_passes_20261113_153041.parquet
 multi_speed_ewmac_selection_review_instruments_20261113_153041.parquet
+multi_speed_ewmac_selection_trial_allocations_20261113_153041.parquet
+multi_speed_ewmac_selection_trials_20261113_153041.parquet
 ```
