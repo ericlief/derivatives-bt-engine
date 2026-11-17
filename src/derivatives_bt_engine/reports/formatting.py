@@ -698,7 +698,8 @@ def order_selection_review_instrument_report(
 ) -> pl.DataFrame:
     """Order the review instrument report from book identity through inputs.
 
-    Instrument identity, status, score, and active state lead; allocation
+    Instrument identity and status lead, with ``symbol`` immediately before
+    active state; allocation
     weights and their limits follow, then score diagnostics. Remaining review
     diagnostics stay ahead of the run-wide parameters, which are kept together
     at the right edge for scanning and comparison across reports.
@@ -718,12 +719,12 @@ def order_selection_review_instrument_report(
             "sel_equity",
             "sel_cand_n",
             "sel_instr_n",
-            "symbol",
             "sel_status",
             "roll_avg_abs_fcst",
             "max_pos",
             "avg_pos",
             "sel_score",
+            "symbol",
             "sel_active",
             "sel_elig_hyst_applied",
             "sel_elig_hyst_reason",

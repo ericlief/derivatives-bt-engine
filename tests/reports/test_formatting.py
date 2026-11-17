@@ -58,14 +58,14 @@ def test_selection_review_instrument_report_orders_identity_scores_and_params():
     assert ordered.columns[:10] == [
         "sel_date",
         "sel_instr_n",
-        "sel_active",
+        "sel_score",
         "symbol",
+        "sel_active",
         "asset_cls",
         "econ_subcls",
         "weight",
         "cls_lim_weight",
         "ann_dvol",
-        "sel_score",
     ]
     assert ordered.columns[-1] == "min_instr_per_cls"
 
