@@ -2211,14 +2211,29 @@ evidence to explain why it advanced to the next candidate instead of merely
 publishing a final rank.
 
 The exact greedy baseline and constrained coverage pass share one
-implementation. A small beam search retaining the best few partial books is a
-useful future validation check against greedy path dependence and temporary dips. A
-full mixed-integer subset optimizer is not the first choice: it adds substantial
-complexity and apparent precision around estimated correlations and costs,
-while moving away from the AFTS procedure. Integer position optimization belongs
-after static universe selection, where it can minimize tracking error for the
-chosen book rather than contaminating instrument selection with today's exact
-positions.
+implementation. `--selection-beam-width N` adds a bounded multi-path research
+sensitivity. Width 1 is the default and dispatches to that exact greedy code;
+it is not a one-state approximation of the beam. Widths above one expand every
+retained partial book through its hard-feasible family routes, deduplicate
+identical route books, and alternate score-leading and rounded-margin-efficient
+states when pruning. The terminal choice lexicographically minimizes class,
+subclass, and total-book deficits before maximizing score.
+
+Beam trials retain `beam_path_id`, `beam_parent_path_id`, `beam_rank`,
+`beam_decision`, and `beam_selected_path`. Review and book reports also retain
+the selected path and the minimum and maximum terminal book counts. Compact
+report mode omits the member-level allocation rows for every beam trial because
+their volume grows with width; it still saves summary trials and final
+allocations. Full mode preserves the complete member audit. The initial
+[beam test](ewmac-beam-search-test-20261116.md) finds width 4 useful for a
+stitched-history sensitivity but leaves width 1 as the production default.
+
+A full mixed-integer subset optimizer is not the first choice: it adds
+substantial complexity and apparent precision around estimated correlations
+and costs, while moving away from the AFTS procedure. Integer position
+optimization belongs after static universe selection, where it can minimize
+tracking error for the chosen book rather than contaminating instrument
+selection with today's exact positions.
 
 Validate first on a narrow synthetic and real subset. Tests should cover an
 uncorrelated candidate beating a duplicate, a micro beating its full-size

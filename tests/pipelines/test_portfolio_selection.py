@@ -314,6 +314,20 @@ def test_selection_min_max_position_reaches_greedy_config():
     assert selector.config.min_max_position == pytest.approx(2.0)
 
 
+def test_selection_beam_width_is_explicit():
+    """The CLI keeps exact greedy width one unless research opts into a beam."""
+    baseline = parse_args(["--signal-model", "multi_ewmac"])
+    beam = parse_args([
+        "--signal-model",
+        "multi_ewmac",
+        "--selection-beam-width",
+        "4",
+    ])
+
+    assert baseline.selection_beam_width == 1
+    assert beam.selection_beam_width == 4
+
+
 def test_forecast_activity_probates_then_hard_filters_causally():
     """Weak trailing forecasts survive once, then fail the next review."""
     frame = pl.DataFrame({

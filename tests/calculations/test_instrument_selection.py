@@ -1084,3 +1084,55 @@ def test_greedy_selector_saves_member_weights_for_every_trial():
             == pytest.approx(float(row["limit_weight"]) * float(row["idm"]))
             for row in member_rows
         )
+
+
+def test_beam_escapes_high_margin_greedy_dead_end():
+    """A margin-diverse beam can satisfy breadth after greedy gets trapped."""
+    candidates = [
+        SelectionCandidate(
+            symbol="A",
+            ann_dvol=1_000.0,
+            trade_sr=0.0,
+            combined_turnover=1.0,
+            asset_class="rates",
+            economic_subclass="high_margin",
+            initial_margin_usd=6_000.0,
+            enforce_market_participation=False,
+        ),
+        *[
+            SelectionCandidate(
+                symbol=symbol,
+                ann_dvol=1_000.0,
+                trade_sr=0.01,
+                combined_turnover=1.0,
+                asset_class="rates",
+                economic_subclass=f"low_margin_{symbol.lower()}",
+                initial_margin_usd=1_000.0,
+                enforce_market_participation=False,
+            )
+            for symbol in ("B", "C", "D", "E")
+        ],
+    ]
+    shared = dict(
+        capital=75_000.0,
+        min_instruments_per_class=1,
+        minimum_book_count=4,
+        max_book_margin_pct=50.0,
+        record_beam_trial_allocations=False,
+    )
+
+    greedy = GreedyInstrumentSelector(
+        config=GreedySelectionConfig(**shared, beam_width=1)
+    ).select(candidates, np.eye(len(candidates)))
+    beam = GreedyInstrumentSelector(
+        config=GreedySelectionConfig(**shared, beam_width=2)
+    ).select(candidates, np.eye(len(candidates)))
+
+    assert greedy.selected == ("A",)
+    assert greedy.final_book_count_deficit == 3
+    assert len(beam.selected) >= 4
+    assert "A" not in beam.selected
+    assert beam.final_book_count_deficit == 0
+    assert beam.beam_width == 2
+    assert beam.beam_terminal_book_count_min == 1
+    assert beam.beam_terminal_book_count_max >= 4

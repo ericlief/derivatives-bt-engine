@@ -1579,6 +1579,16 @@ def parse_args(argv=None, *, complete_default: bool = False):
         ),
     )
     parser.add_argument(
+        "--selection-beam-width",
+        type=int,
+        default=1,
+        help=(
+            "Partial books retained during construction (default: 1, exact "
+            "greedy baseline). Wider research beams retain both score-leading "
+            "and margin-efficient paths."
+        ),
+    )
+    parser.add_argument(
         "--max-instr-per-subclass",
         "--max-instr-per-cluster",
         dest="max_instr_per_subclass",
@@ -1916,6 +1926,8 @@ def _selection_scenario_id(
         or args.min_instr_per_subclass is not None
     ):
         tokens.append(f"mb{args.selection_min_book_count}")
+    if args.selection_beam_width != 1:
+        tokens.append(f"beam{args.selection_beam_width}")
     if args.max_class_weight_pct is not None:
         tokens.append(f"cw{_number_token(args.max_class_weight_pct)}")
     if args.max_subclass_weight_pct is not None:
@@ -2272,6 +2284,10 @@ def _greedy_selector(
             rank_count_anchor=rank_count_anchor,
             book_score_buffer_percent=args.selection_book_score_buffer_pct,
             prefer_full_contracts=args.selection_prefer_full_contracts,
+            beam_width=args.selection_beam_width,
+            record_beam_trial_allocations=(
+                args.selection_report_mode == "full"
+            ),
         ),
         weight_policy=weight_policy,
     )
@@ -2643,6 +2659,7 @@ class _WalkForwardSelectionProvider:
                         self.args.min_instr_per_subclass
                     ),
                     "minimum_book_count": _active_minimum_book_count(self.args),
+                    "selection_beam_width": self.args.selection_beam_width,
                     "min_max_position": self.args.selection_min_max_position,
                     "maximum_instruments_per_class": self.args.max_instr_per_class,
                     "maximum_instruments_per_subclass": (
@@ -2709,6 +2726,7 @@ class _WalkForwardSelectionProvider:
                         self.args.min_instr_per_subclass
                     ),
                     "minimum_book_count": _active_minimum_book_count(self.args),
+                    "selection_beam_width": self.args.selection_beam_width,
                     "min_max_position": self.args.selection_min_max_position,
                     "maximum_instruments_per_class": (
                         self.args.max_instr_per_class
@@ -2760,6 +2778,7 @@ class _WalkForwardSelectionProvider:
                     self.args.min_instr_per_subclass
                 ),
                 "minimum_book_count": _active_minimum_book_count(self.args),
+                "selection_beam_width": self.args.selection_beam_width,
                 "min_max_position": self.args.selection_min_max_position,
                 "maximum_instruments_per_class": self.args.max_instr_per_class,
                 "maximum_instruments_per_subclass": (
@@ -2948,6 +2967,15 @@ class _WalkForwardSelectionProvider:
             ),
             "selection_score": selection.final_score.score,
             "selection_idm": selection.final_score.idm,
+            "selection_beam_width": self.args.selection_beam_width,
+            "beam_selected_path_id": selection.beam_selected_path_id,
+            "beam_terminal_path_count": selection.beam_terminal_path_count,
+            "beam_terminal_book_count_min": (
+                selection.beam_terminal_book_count_min
+            ),
+            "beam_terminal_book_count_max": (
+                selection.beam_terminal_book_count_max
+            ),
             "selection_symbols": ",".join(selection.selected),
             "selection_unbuffered_symbols": ",".join(
                 selection.unbuffered_selected
@@ -3357,6 +3385,15 @@ def _final_selection_frame(
             "minimum_instruments_per_class": args.min_instr_per_class,
             "minimum_instruments_per_subclass": args.min_instr_per_subclass,
             "minimum_book_count": _active_minimum_book_count(args),
+            "selection_beam_width": args.selection_beam_width,
+            "beam_selected_path_id": selection.beam_selected_path_id,
+            "beam_terminal_path_count": selection.beam_terminal_path_count,
+            "beam_terminal_book_count_min": (
+                selection.beam_terminal_book_count_min
+            ),
+            "beam_terminal_book_count_max": (
+                selection.beam_terminal_book_count_max
+            ),
             "min_max_position": args.selection_min_max_position,
             "forecast_activity_filter_enabled": (
                 args.selection_forecast_activity_filter
@@ -5203,6 +5240,7 @@ def _run_complete_selection(
         "min_instr_per_class": args.min_instr_per_class,
         "min_instr_per_subclass": args.min_instr_per_subclass,
         "selection_min_book_count": _active_minimum_book_count(args),
+        "selection_beam_width": args.selection_beam_width,
         "max_instr_per_class": args.max_instr_per_class,
         "max_instr_per_subclass": args.max_instr_per_subclass,
         "max_class_weight_pct": args.max_class_weight_pct,
@@ -5235,6 +5273,14 @@ def _run_complete_selection(
         "selection_prefer_full_contracts": (
             args.selection_prefer_full_contracts
         ),
+        "beam_terminal_path_count": selection.beam_terminal_path_count,
+        "beam_terminal_book_count_min": (
+            selection.beam_terminal_book_count_min
+        ),
+        "beam_terminal_book_count_max": (
+            selection.beam_terminal_book_count_max
+        ),
+        "beam_selected_path_id": selection.beam_selected_path_id,
         "selected_book": list(selection.selected),
     }
     if args.selection_forecast_activity_filter:
@@ -6086,6 +6132,8 @@ def run(
         raise ValueError("selection max history gap days must be nonnegative")
     if args.selection_min_book_count <= 0:
         raise ValueError("selection minimum book count must be positive")
+    if args.selection_beam_width <= 0:
+        raise ValueError("selection beam width must be positive")
     if not 0 <= args.selection_eligibility_hysteresis_pct <= 100:
         raise ValueError("selection eligibility hysteresis must be in [0, 100]")
     if not 0 <= args.selection_rank_buffer_pct <= 100:

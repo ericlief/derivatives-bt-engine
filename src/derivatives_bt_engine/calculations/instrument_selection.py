@@ -193,6 +193,14 @@ class GreedySelectionConfig:
     feasible non-micro route for the same economic family reaches the lower
     edge of the configured contract band. It does not make an infeasible or
     poorly granular full contract displace an executable micro.
+    ``beam_width`` retains several partial books during construction. Width
+    one deliberately dispatches to the original greedy implementation so it
+    remains an exact baseline rather than an approximation of that baseline.
+    Wider beams preserve both score-leading and margin-efficient states before
+    choosing the terminal book with the smallest coverage deficit and highest
+    score. ``record_beam_trial_allocations`` can be disabled for compact
+    research runs because member-level rows grow with beam width; summary
+    trial rows and final allocations remain available.
     """
 
     capital: float = 100_000.0
@@ -229,6 +237,8 @@ class GreedySelectionConfig:
     rank_count_anchor: int | None = None
     book_score_buffer_percent: float = 0.0
     prefer_full_contracts: bool = False
+    beam_width: int = 1
+    record_beam_trial_allocations: bool = True
 
     def __post_init__(self) -> None:
         """Validate configuration ranges before any trial is evaluated."""
@@ -273,6 +283,8 @@ class GreedySelectionConfig:
             raise ValueError("rank_count_anchor must be positive when set")
         if not 0 <= self.book_score_buffer_percent <= 100:
             raise ValueError("book_score_buffer_percent must be in [0, 100]")
+        if self.beam_width <= 0:
+            raise ValueError("beam_width must be positive")
         if self.tie_reference_book_count <= 0:
             raise ValueError("tie_reference_book_count must be positive")
         if self.liquidity_days <= 0 or self.max_pct_market_volume <= 0:
@@ -613,6 +625,22 @@ class GreedySelectionResult:
     final_book_count_deficit: int = 0
     coverage_satisfied: bool = True
     coverage_reason: str = "coverage_disabled"
+    beam_width: int = 1
+    beam_selected_path_id: int | None = None
+    beam_terminal_path_count: int = 1
+    beam_terminal_book_count_min: int | None = None
+    beam_terminal_book_count_max: int | None = None
+
+
+@dataclass(frozen=True)
+class _BeamState:
+    """Keep one auditable partial book during bounded beam construction."""
+
+    path_id: int
+    parent_path_id: int | None
+    selected: tuple[str, ...]
+    score: PortfolioScore
+    best_seen: float
 
 
 class GreedyInstrumentSelector:
@@ -1811,6 +1839,572 @@ class GreedyInstrumentSelector:
         *,
         prior_selected: Iterable[str] = (),
     ) -> GreedySelectionResult:
+        """Select a book with the exact greedy baseline or a bounded beam.
+
+        Width one calls the long-standing greedy loop unchanged. Wider beams
+        retain several feasible partial books and are therefore an explicit
+        research sensitivity rather than a silent change to default results.
+        """
+        if self.config.beam_width == 1:
+            return self._select_greedy(
+                candidate_list,
+                correlation,
+                prior_selected=prior_selected,
+            )
+        return self._select_beam(
+            candidate_list,
+            correlation,
+            prior_selected=prior_selected,
+        )
+
+    @staticmethod
+    def _beam_margin(score: PortfolioScore) -> float:
+        """Return rounded maximum-position margin for beam pruning.
+
+        Missing margin is sorted behind observed margin but remains usable
+        when no margin gate is active, matching the selector's hard-feasibility
+        behavior.
+        """
+        if not score.details:
+            return math.inf
+        value = score.details[0].get("portfolio_margin_at_max_usd")
+        return float(value) if value is not None else math.inf
+
+    def _beam_deficits(
+        self,
+        state: _BeamState,
+        candidates: dict[str, SelectionCandidate],
+    ) -> tuple[int, int, int]:
+        """Return the lexicographic coverage objective for one beam state."""
+        return self._coverage_deficits(state.selected, candidates)
+
+    def _prune_beam_states(
+        self,
+        states: list[_BeamState],
+        candidates: dict[str, SelectionCandidate],
+    ) -> tuple[list[_BeamState], dict[int, tuple[int | None, str]]]:
+        """Retain score-leading and margin-efficient books up to beam width.
+
+        Books with identical family-route membership are deduplicated first.
+        The two deterministic rankings share the same lexicographic coverage
+        objective. Alternating between them prevents a top-score-only beam
+        from reproducing the high-margin local dead end that motivated this
+        sensitivity.
+        """
+        deduplicated: dict[frozenset[str], _BeamState] = {}
+        rejected: dict[int, tuple[int | None, str]] = {}
+        for state in states:
+            key = frozenset(state.selected)
+            incumbent = deduplicated.get(key)
+            if incumbent is None or (
+                state.score.score,
+                tuple(reversed(state.selected)),
+            ) > (
+                incumbent.score.score,
+                tuple(reversed(incumbent.selected)),
+            ):
+                if incumbent is not None:
+                    rejected[incumbent.path_id] = (
+                        None,
+                        f"duplicate_book:path_id={state.path_id}",
+                    )
+                deduplicated[key] = state
+            else:
+                rejected[state.path_id] = (
+                    None,
+                    f"duplicate_book:path_id={incumbent.path_id}",
+                )
+
+        unique = list(deduplicated.values())
+        score_order = sorted(
+            unique,
+            key=lambda state: (
+                self._beam_deficits(state, candidates),
+                -state.score.score,
+                state.selected,
+            ),
+        )
+        margin_order = sorted(
+            unique,
+            key=lambda state: (
+                self._beam_deficits(state, candidates),
+                self._beam_margin(state.score),
+                -state.score.score,
+                state.selected,
+            ),
+        )
+        retained: list[_BeamState] = []
+        retained_ids: set[int] = set()
+        for rank in range(max(len(score_order), len(margin_order))):
+            for ordered in (score_order, margin_order):
+                if rank >= len(ordered):
+                    continue
+                state = ordered[rank]
+                if state.path_id in retained_ids:
+                    continue
+                retained.append(state)
+                retained_ids.add(state.path_id)
+                if len(retained) == self.config.beam_width:
+                    break
+            if len(retained) == self.config.beam_width:
+                break
+        beam_rank = {
+            state.path_id: rank
+            for rank, state in enumerate(retained, start=1)
+        }
+        for state in unique:
+            if state.path_id not in retained_ids:
+                rejected[state.path_id] = (
+                    None,
+                    "beam_width_pruned",
+                )
+        decisions = {
+            state.path_id: (beam_rank[state.path_id], "beam_retained")
+            for state in retained
+        }
+        decisions.update(rejected)
+        return retained, decisions
+
+    @staticmethod
+    def _annotate_beam_rows(
+        rows: list[dict[str, object]],
+        *,
+        start: int,
+        end: int | None = None,
+        path_id: int,
+        parent_path_id: int | None,
+        beam_rank: int | None,
+        decision: str,
+        selected_path: bool = False,
+    ) -> None:
+        """Attach path identity and pruning outcome to newly recorded rows."""
+        for row in rows[start:end]:
+            row["beam_path_id"] = path_id
+            row["beam_parent_path_id"] = parent_path_id
+            row["beam_rank"] = beam_rank
+            row["beam_decision"] = decision
+            row["beam_selected_path"] = selected_path
+            row["accepted"] = decision == "beam_retained"
+
+    def _select_beam(
+        self,
+        candidate_list: list[SelectionCandidate],
+        correlation: np.ndarray,
+        *,
+        prior_selected: Iterable[str] = (),
+    ) -> GreedySelectionResult:
+        """Run bounded multi-path construction and choose its best terminal book.
+
+        Each retained parent expands through every hard-feasible family route.
+        The parent's normal hierarchy phase and score floor still apply. The
+        global beam then alternates score-leading and low-margin states. Once
+        no retained state can expand, terminal books are ranked by class,
+        subclass, and breadth deficits before score.
+        """
+        if not candidate_list:
+            raise ValueError("at least one selection candidate is required")
+        prior_selected_tuple = tuple(dict.fromkeys(prior_selected))
+        incumbent_symbols = frozenset(prior_selected_tuple)
+        full_symbols = [candidate.symbol for candidate in candidate_list]
+        if correlation.shape != (len(full_symbols), len(full_symbols)):
+            raise ValueError("candidate correlation matrix has the wrong shape")
+        candidates = {candidate.symbol: candidate for candidate in candidate_list}
+        trials: list[dict[str, object]] = []
+        trial_allocations: list[dict[str, object]] = []
+        row_locations: dict[int, tuple[int, int, int, int]] = {}
+        path_parent: dict[int, int | None] = {}
+        next_path_id = 1
+
+        singleton_trials: list[tuple[str, PortfolioScore]] = []
+        singleton_scores: list[PortfolioScore] = []
+        for symbol in full_symbols:
+            score = self.score(
+                [symbol],
+                candidates,
+                full_symbols,
+                correlation,
+                starting=True,
+                incumbent_symbols=incumbent_symbols,
+            )
+            singleton_scores.append(score)
+            if score.feasible and math.isfinite(score.score):
+                singleton_trials.append((symbol, score))
+        if not singleton_trials:
+            # Reuse the exact baseline's detailed rejection summary.
+            return self._select_greedy(
+                candidate_list,
+                correlation,
+                prior_selected=prior_selected_tuple,
+            )
+        preferred, preference_reasons = self._full_contract_preference_eligible(
+            singleton_trials, candidates
+        )
+        preferred_trials = [
+            item for item in singleton_trials if item[0] in preferred
+        ]
+        phase, coverage_eligible = self._coverage_competition(
+            (), candidates, preferred_trials
+        )
+        ranks = self._competition_ranks(
+            [(score.symbols[0], score) for score in singleton_scores],
+            candidates,
+        )
+        seed_states: list[_BeamState] = []
+        for symbol, score in ((value.symbols[0], value) for value in singleton_scores):
+            path_id = next_path_id
+            next_path_id += 1
+            path_parent[path_id] = None
+            trial_start = len(trials)
+            allocation_start = len(trial_allocations)
+            self._record_trial(
+                trials,
+                trial_allocations,
+                0,
+                symbol,
+                score,
+                accepted=False,
+                include_allocations=self.config.record_beam_trial_allocations,
+            )
+            row_locations[path_id] = (
+                trial_start,
+                len(trials),
+                allocation_start,
+                len(trial_allocations),
+            )
+            instr_rank, subclass_rank, class_rank, global_rank = ranks[symbol]
+            for row in (
+                trials[trial_start:] + trial_allocations[allocation_start:]
+            ):
+                row["coverage_phase"] = phase
+                row["coverage_eligible"] = symbol in coverage_eligible
+                row["instr_rank_in_subclass"] = instr_rank
+                row["subclass_rank_in_class"] = subclass_rank
+                row["class_rank"] = class_rank
+                row["global_trial_rank"] = global_rank
+            if symbol in preference_reasons:
+                for row in trials[trial_start:] + trial_allocations[allocation_start:]:
+                    if bool(row.get("candidate_row", True)):
+                        reason_key = "trial_reason" if "trial_reason" in row else "reason"
+                        row[reason_key] = preference_reasons[symbol]
+            if (
+                score.feasible
+                and symbol in preferred
+                and symbol in coverage_eligible
+            ):
+                seed_states.append(
+                    _BeamState(path_id, None, (symbol,), score, 0.0)
+                )
+
+        beam, seed_decisions = self._prune_beam_states(seed_states, candidates)
+        for path_id, (beam_rank, decision) in seed_decisions.items():
+            trial_start, trial_end, allocation_start, allocation_end = (
+                row_locations[path_id]
+            )
+            self._annotate_beam_rows(
+                trials,
+                start=trial_start,
+                end=trial_end,
+                path_id=path_id,
+                parent_path_id=None,
+                beam_rank=beam_rank,
+                decision=decision,
+            )
+            self._annotate_beam_rows(
+                trial_allocations,
+                start=allocation_start,
+                end=allocation_end,
+                path_id=path_id,
+                parent_path_id=None,
+                beam_rank=beam_rank,
+                decision=decision,
+            )
+        # Singleton rows that were infeasible or policy-ineligible are not beam
+        # states, but still receive complete path diagnostics.
+        for path_id, (
+            trial_start,
+            trial_end,
+            allocation_start,
+            allocation_end,
+        ) in row_locations.items():
+            if path_id in seed_decisions:
+                continue
+            symbol = str(trials[trial_start]["candidate"])
+            decision = (
+                preference_reasons.get(symbol)
+                or "outside_active_coverage_phase"
+                if singleton_scores[full_symbols.index(symbol)].feasible
+                else "hard_infeasible"
+            )
+            self._annotate_beam_rows(
+                trials,
+                start=trial_start,
+                end=trial_end,
+                path_id=path_id,
+                parent_path_id=None,
+                beam_rank=None,
+                decision=decision,
+            )
+            self._annotate_beam_rows(
+                trial_allocations,
+                start=allocation_start,
+                end=allocation_end,
+                path_id=path_id,
+                parent_path_id=None,
+                beam_rank=None,
+                decision=decision,
+            )
+
+        terminals: list[_BeamState] = []
+        depth = 1
+        while beam:
+            children: list[_BeamState] = []
+            child_locations: dict[int, tuple[int, int, int, int]] = {}
+            for parent in beam:
+                selected_families = {
+                    candidates[symbol].econ_family
+                    for symbol in parent.selected
+                    if candidates[symbol].econ_family
+                }
+                remaining = [
+                    symbol
+                    for symbol in full_symbols
+                    if symbol not in parent.selected
+                    and (
+                        not candidates[symbol].econ_family
+                        or candidates[symbol].econ_family not in selected_families
+                    )
+                ]
+                if not remaining:
+                    terminals.append(parent)
+                    continue
+                scored_trials = [
+                    (
+                        symbol,
+                        self.score(
+                            [*parent.selected, symbol],
+                            candidates,
+                            full_symbols,
+                            correlation,
+                            incumbent_symbols=incumbent_symbols,
+                        ),
+                    )
+                    for symbol in remaining
+                ]
+                preferred, preference_reasons = (
+                    self._full_contract_preference_eligible(
+                        scored_trials, candidates
+                    )
+                )
+                preferred_trials = [
+                    item for item in scored_trials if item[0] in preferred
+                ]
+                phase, coverage_eligible = self._coverage_competition(
+                    parent.selected,
+                    candidates,
+                    preferred_trials,
+                )
+                ranks = self._competition_ranks(scored_trials, candidates)
+                feasible = [
+                    item
+                    for item in preferred_trials
+                    if item[1].feasible and item[0] in coverage_eligible
+                ]
+                mandatory_phase = phase in {"class", "subclass", "breadth"}
+                min_accept_score = (
+                    None
+                    if mandatory_phase
+                    else self.config.score_threshold * parent.best_seen
+                )
+                leader_score = max(
+                    (score.score for _, score in feasible),
+                    default=-math.inf,
+                )
+                accepted_symbols = {
+                    symbol
+                    for symbol, score in feasible
+                    if min_accept_score is None or score.score >= min_accept_score
+                }
+                if not accepted_symbols:
+                    terminals.append(parent)
+                for symbol, score in scored_trials:
+                    path_id = next_path_id
+                    next_path_id += 1
+                    path_parent[path_id] = parent.path_id
+                    trial_start = len(trials)
+                    allocation_start = len(trial_allocations)
+                    self._record_trial(
+                        trials,
+                        trial_allocations,
+                        depth,
+                        symbol,
+                        score,
+                        accepted=False,
+                        include_allocations=(
+                            self.config.record_beam_trial_allocations
+                        ),
+                    )
+                    child_locations[path_id] = (
+                        trial_start,
+                        len(trials),
+                        allocation_start,
+                        len(trial_allocations),
+                    )
+                    instr_rank, subclass_rank, class_rank, global_rank = ranks[symbol]
+                    for row in trials[trial_start:] + trial_allocations[allocation_start:]:
+                        row["coverage_phase"] = phase
+                        row["coverage_eligible"] = symbol in coverage_eligible
+                        row["instr_rank_in_subclass"] = instr_rank
+                        row["subclass_rank_in_class"] = subclass_rank
+                        row["class_rank"] = class_rank
+                        row["global_trial_rank"] = global_rank
+                    decision = "hard_infeasible"
+                    if score.feasible:
+                        if symbol not in preferred:
+                            decision = preference_reasons[symbol]
+                        elif symbol not in coverage_eligible:
+                            decision = "outside_active_coverage_phase"
+                        elif symbol not in accepted_symbols:
+                            decision = (
+                                "score_below_acceptance_floor:"
+                                f"score={score.score:.8g},"
+                                f"min={min_accept_score:.8g}"
+                            )
+                    if symbol in accepted_symbols:
+                        child = _BeamState(
+                            path_id=path_id,
+                            parent_path_id=parent.path_id,
+                            selected=tuple(score.symbols),
+                            score=score,
+                            best_seen=max(parent.best_seen, leader_score),
+                        )
+                        children.append(child)
+                        decision = "beam_candidate"
+                    self._annotate_beam_rows(
+                        trials,
+                        start=trial_start,
+                        path_id=path_id,
+                        parent_path_id=parent.path_id,
+                        beam_rank=None,
+                        decision=decision,
+                    )
+                    self._annotate_beam_rows(
+                        trial_allocations,
+                        start=allocation_start,
+                        path_id=path_id,
+                        parent_path_id=parent.path_id,
+                        beam_rank=None,
+                        decision=decision,
+                    )
+            if not children:
+                break
+            beam, decisions = self._prune_beam_states(children, candidates)
+            for path_id, (beam_rank, decision) in decisions.items():
+                (
+                    trial_start,
+                    trial_end,
+                    allocation_start,
+                    allocation_end,
+                ) = child_locations[path_id]
+                parent_path_id = path_parent[path_id]
+                self._annotate_beam_rows(
+                    trials,
+                    start=trial_start,
+                    end=trial_end,
+                    path_id=path_id,
+                    parent_path_id=parent_path_id,
+                    beam_rank=beam_rank,
+                    decision=decision,
+                )
+                self._annotate_beam_rows(
+                    trial_allocations,
+                    start=allocation_start,
+                    end=allocation_end,
+                    path_id=path_id,
+                    parent_path_id=parent_path_id,
+                    beam_rank=beam_rank,
+                    decision=decision,
+                )
+            depth += 1
+
+        if not terminals:
+            terminals = beam
+        terminal_by_book: dict[frozenset[str], _BeamState] = {}
+        for terminal in terminals:
+            key = frozenset(terminal.selected)
+            incumbent = terminal_by_book.get(key)
+            if incumbent is None or terminal.score.score > incumbent.score.score:
+                terminal_by_book[key] = terminal
+        terminals = list(terminal_by_book.values())
+        selected_state = min(
+            terminals,
+            key=lambda state: (
+                self._beam_deficits(state, candidates),
+                -state.score.score,
+                self._beam_margin(state.score),
+                state.selected,
+            ),
+        )
+        selected = list(selected_state.selected)
+        current = selected_state.score
+        selected_path_ids: set[int] = set()
+        ancestor: int | None = selected_state.path_id
+        while ancestor is not None:
+            selected_path_ids.add(ancestor)
+            ancestor = path_parent.get(ancestor)
+        for rows in (trials, trial_allocations):
+            for row in rows:
+                row["beam_selected_path"] = row.get("beam_path_id") in selected_path_ids
+
+        selected, current, _ = self._normalize_full_contract_routes(
+            selected,
+            current,
+            candidates=candidates,
+            full_symbols=full_symbols,
+            correlation=correlation,
+            incumbent_symbols=incumbent_symbols,
+            trials=trials,
+            trial_allocations=trial_allocations,
+            iteration=depth,
+        )
+        deficits = self._coverage_deficits(selected, candidates)
+        terminal_counts = [len(state.selected) for state in terminals]
+        unbuffered = GreedySelectionResult(
+            selected=tuple(selected),
+            final_score=current,
+            trials=tuple(trials),
+            trial_allocations=tuple(trial_allocations),
+            unbuffered_selected=tuple(selected),
+            prior_selected=prior_selected_tuple,
+            unbuffered_book_score=current.score,
+            unbuffered_class_coverage_deficit=deficits[0],
+            unbuffered_subclass_coverage_deficit=deficits[1],
+            unbuffered_book_count_deficit=deficits[2],
+            final_class_coverage_deficit=deficits[0],
+            final_subclass_coverage_deficit=deficits[1],
+            final_book_count_deficit=deficits[2],
+            coverage_satisfied=deficits == (0, 0, 0),
+            coverage_reason=self._coverage_reason(deficits),
+            beam_width=self.config.beam_width,
+            beam_selected_path_id=selected_state.path_id,
+            beam_terminal_path_count=len(terminals),
+            beam_terminal_book_count_min=min(terminal_counts),
+            beam_terminal_book_count_max=max(terminal_counts),
+        )
+        return self._apply_membership_hysteresis(
+            unbuffered,
+            candidates=candidates,
+            full_symbols=full_symbols,
+            correlation=correlation,
+            incumbent_symbols=incumbent_symbols,
+        )
+
+    def _select_greedy(
+        self,
+        candidate_list: list[SelectionCandidate],
+        correlation: np.ndarray,
+        *,
+        prior_selected: Iterable[str] = (),
+    ) -> GreedySelectionResult:
         """Run the deterministic singleton seed and iterative addition loop.
 
         ``candidate_list`` order defines the correlation-matrix order.
@@ -2119,6 +2713,10 @@ class GreedyInstrumentSelector:
                 and not book_count_deficit
             ),
             coverage_reason=coverage_reason,
+            beam_width=1,
+            beam_terminal_path_count=1,
+            beam_terminal_book_count_min=len(selected),
+            beam_terminal_book_count_max=len(selected),
         )
         return self._apply_membership_hysteresis(
             unbuffered,
@@ -2561,14 +3159,16 @@ class GreedyInstrumentSelector:
         score: PortfolioScore,
         *,
         accepted: bool,
+        include_allocations: bool = True,
     ) -> None:
         """Persist summary and per-book-member state for one candidate trial."""
         trials.append(cls._trial_row(iteration, candidate, score, accepted=accepted))
-        trial_allocations.extend(
-            cls._trial_allocation_rows(
-                iteration, candidate, score, accepted=accepted
+        if include_allocations:
+            trial_allocations.extend(
+                cls._trial_allocation_rows(
+                    iteration, candidate, score, accepted=accepted
+                )
             )
-        )
 
     @staticmethod
     def _trial_row(
