@@ -1136,3 +1136,11 @@ def test_beam_escapes_high_margin_greedy_dead_end():
     assert beam.beam_width == 2
     assert beam.beam_terminal_book_count_min == 1
     assert beam.beam_terminal_book_count_max >= 4
+    assert beam.trial_allocations
+    assert {row["accepted"] for row in beam.trial_allocations} == {True}
+    assert {
+        row["book_symbol"] for row in beam.trial_allocations
+    } == set(beam.selected)
+    assert {
+        row["beam_selected_path"] for row in beam.trial_allocations
+    } == {True}

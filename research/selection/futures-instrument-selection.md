@@ -2223,8 +2223,9 @@ Beam trials retain `beam_path_id`, `beam_parent_path_id`, `beam_rank`,
 `beam_decision`, and `beam_selected_path`. Review and book reports also retain
 the selected path and the minimum and maximum terminal book counts. Compact
 report mode omits the member-level allocation rows for every beam trial because
-their volume grows with width; it still saves summary trials and final
-allocations. Full mode preserves the complete member audit. The initial
+their volume grows with width; it still saves summary trials, the selected
+terminal allocation as the accepted selection pass, and final allocations.
+Full mode preserves the complete member audit. The initial
 [beam test](ewmac-beam-search-test-20261116.md) finds width 4 useful for a
 stitched-history sensitivity but leaves width 1 as the production default.
 

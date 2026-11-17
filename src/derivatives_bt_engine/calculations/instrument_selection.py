@@ -200,7 +200,7 @@ class GreedySelectionConfig:
     choosing the terminal book with the smallest coverage deficit and highest
     score. ``record_beam_trial_allocations`` can be disabled for compact
     research runs because member-level rows grow with beam width; summary
-    trial rows and final allocations remain available.
+    trial rows and the selected terminal book's member rows remain available.
     """
 
     capital: float = 100_000.0
@@ -2366,6 +2366,38 @@ class GreedyInstrumentSelector:
             trial_allocations=trial_allocations,
             iteration=depth,
         )
+        if not self.config.record_beam_trial_allocations:
+            # Compact beam reports still need one accepted member-level pass.
+            # The complete pipeline derives ``selection_passes`` and its final
+            # construction score from these rows, so a truly empty allocation
+            # list would let selection finish and then fail during persistence.
+            terminal_trial = next(
+                row
+                for row in trials
+                if row.get("beam_path_id") == selected_state.path_id
+            )
+            trial_allocations = self._trial_allocation_rows(
+                int(terminal_trial["iteration"]),
+                str(terminal_trial["candidate"]),
+                current,
+                accepted=True,
+            )
+            shared_audit_keys = (
+                "coverage_phase",
+                "coverage_eligible",
+                "instr_rank_in_subclass",
+                "subclass_rank_in_class",
+                "class_rank",
+                "global_trial_rank",
+                "beam_path_id",
+                "beam_parent_path_id",
+                "beam_rank",
+                "beam_decision",
+            )
+            for row in trial_allocations:
+                for key in shared_audit_keys:
+                    row[key] = terminal_trial.get(key)
+                row["beam_selected_path"] = True
         deficits = self._coverage_deficits(selected, candidates)
         terminal_counts = [len(state.selected) for state in terminals]
         unbuffered = GreedySelectionResult(
