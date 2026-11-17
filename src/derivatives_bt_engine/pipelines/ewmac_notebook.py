@@ -388,6 +388,7 @@ def plot_selection_portfolio_overview(
     start: date | datetime | str | None = None,
     end: date | datetime | str | None = None,
     rolling_days: int = 256,
+    target_volatility: float | None = None,
     width: int = 1050,
     height: int = 240,
 ):
@@ -416,6 +417,10 @@ def plot_selection_portfolio_overview(
     rolling_days
         Valid return observations used for trailing return and realized
         volatility. The default 256 matches the selection annualization.
+    target_volatility
+        Optional annual volatility target as a decimal fraction. New portfolio
+        curves persist this value; pass it explicitly when plotting an older
+        curve that predates the metadata.
     width, height
         Width and height of each vertically stacked panel in pixels.
 
@@ -435,6 +440,28 @@ def plot_selection_portfolio_overview(
         end=end,
         rolling_days=rolling_days,
     )
+    if target_volatility is None:
+        target_column = next(
+            (
+                name for name in ("target_vol", "target_volatility")
+                if name in frame.columns
+            ),
+            None,
+        )
+        if target_column is not None:
+            target_values = (
+                frame.get_column(target_column).drop_nulls().unique().to_list()
+            )
+            if len(target_values) > 1:
+                raise ValueError(
+                    "selection portfolio curve must have one target volatility"
+                )
+            if target_values:
+                target_volatility = float(target_values[0])
+    if target_volatility is not None and (
+        not math.isfinite(target_volatility) or target_volatility <= 0
+    ):
+        raise ValueError("target_volatility must be finite and positive")
     cap_label = "Fixed-cap" if cap_mode == "fixed" else "Compounded"
     return_label = (
         "additive net return contribution"
@@ -445,6 +472,11 @@ def plot_selection_portfolio_overview(
         "return-contribution volatility"
         if cap_mode == "fixed"
         else "lagged-equity return volatility"
+    )
+    target_label = (
+        f" (target {target_volatility:.0%})"
+        if target_volatility is not None
+        else ""
     )
 
     tools = ["hover", "pan", "wheel_zoom", "box_zoom", "reset", "save"]
@@ -527,7 +559,7 @@ def plot_selection_portfolio_overview(
         y="rolling_realized_vol_pct",
         title=(
             f"{cap_label} trailing {rolling_days}-valid-observation "
-            f"annualized {volatility_label}"
+            f"annualized {volatility_label}{target_label}"
         ),
         ylabel="Annualized volatility (%)",
         width=width,
@@ -542,6 +574,16 @@ def plot_selection_portfolio_overview(
             ),
         ],
     )
+    if target_volatility is not None:
+        target_pct = target_volatility * 100.0
+        trailing_volatility = trailing_volatility * hv.HLine(
+            target_pct,
+            label=f"Target {target_volatility:.0%}",
+        ).opts(
+            color="black",
+            line_dash="dashed",
+            line_width=1.5,
+        )
     trailing_dollar_volatility = frame.hvplot.line(
         x="date",
         y="rolling_realized_dvol",
@@ -2087,6 +2129,11 @@ def plot_selection_grid_dashboard(
                 start=start,
                 end=end,
                 rolling_days=rolling_days,
+                target_volatility=(
+                    float(selected_row["target_vol"])
+                    if selected_row.get("target_vol") is not None
+                    else None
+                ),
                 width=width,
                 height=min(height, 260),
             )

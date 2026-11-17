@@ -1281,8 +1281,11 @@ additive sum of `port_net_pct` contributions against fixed sizing capital;
 compounded trailing return is the geometric product of lagged-equity returns.
 Percentage volatility is the annualized standard deviation of the
 corresponding daily return series, so its denominator also differs by capital
-mode. Legacy curves created before `cap_mode` was persisted retain their
-historical compounded interpretation. Rolling fields are computed before
+mode. The annualized volatility panel draws a dashed horizontal line at the
+run's persisted target volatility. For older curves without that setting, pass
+`target_volatility` explicitly to the plot helper. Legacy curves created
+before `cap_mode` was persisted retain their historical compounded
+interpretation. Rolling fields are computed before
 optional display-date bounds so a recent slice retains its warm-up history.
 
 `plot_selection_portfolio_concentration` measures each day's realized absolute

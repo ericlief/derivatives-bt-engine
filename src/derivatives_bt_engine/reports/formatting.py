@@ -520,7 +520,7 @@ PORTFOLIO_CURVE_REPORT_PRIORITY = (
     "port_net_equity",
     "ret_valid",
 )
-PORTFOLIO_CURVE_REPORT_PARAMS = ("cap_mode", "init_cap")
+PORTFOLIO_CURVE_REPORT_PARAMS = ("cap_mode", "init_cap", "target_vol")
 
 
 SELECTION_REVIEW_ALLOCATION_REPORT_PRIORITY = (

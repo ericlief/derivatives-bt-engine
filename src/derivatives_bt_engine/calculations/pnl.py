@@ -1786,6 +1786,7 @@ def build_portfolio_equity_curve(
     *,
     initial_capital_usd: float,
     capital_mode: str = "compounded",
+    target_volatility: float | None = None,
 ) -> pl.DataFrame:
     """Aggregate selected-book cash P&L into gross and net equity curves.
 
@@ -1802,6 +1803,10 @@ def build_portfolio_equity_curve(
         ``"compounded"`` divides daily cash flows by lagged portfolio equity.
         ``"fixed"`` divides every daily cash flow by initial capital. Equity is
         still reported as initial capital plus cumulative cash P&L.
+    target_volatility
+        Optional annual portfolio volatility target as a decimal fraction.
+        Persisting it lets notebook plots compare realized volatility with the
+        target used to size this run.
 
     Returns
     -------
@@ -1810,7 +1815,8 @@ def build_portfolio_equity_curve(
         on the configured capital policy, cumulative returns relative to initial
         capital, cost contributions, equity paths, and coverage counts. A
         portfolio return is valid only when every economically active row has
-        complete instrument P&L.
+        complete instrument P&L. When ``target_volatility`` is supplied, each
+        date also carries that constant annualized sizing target.
 
     Notes
     -----
@@ -1828,6 +1834,10 @@ def build_portfolio_equity_curve(
         raise ValueError(
             "capital_mode must be one of: " + ", ".join(BACKTEST_CAPITAL_MODES)
         )
+    if target_volatility is not None and (
+        not math.isfinite(target_volatility) or target_volatility <= 0
+    ):
+        raise ValueError("target_volatility must be finite and positive")
 
     cash_columns = (
         ("gross_pnl", "portfolio_cash_gross_pnl_usd"),
@@ -1909,6 +1919,11 @@ def build_portfolio_equity_curve(
         .with_columns(
             pl.lit(initial_capital_usd).alias("initial_capital_usd"),
             pl.lit(capital_mode).alias("backtest_capital_mode"),
+            *(
+                [pl.lit(target_volatility).alias("target_volatility")]
+                if target_volatility is not None
+                else []
+            ),
             (
                 (pl.col("portfolio_instrument_count") > 0)
                 & (pl.col("portfolio_invalid_pnl_instruments") == 0)

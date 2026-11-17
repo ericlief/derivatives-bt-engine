@@ -5687,6 +5687,7 @@ def _run_complete_selection(
         cash_pnl_long,
         initial_capital_usd=float(run_config["init_cap_usd"]),
         capital_mode=args.backtest_capital_mode,
+        target_volatility=float(run_config["target_vol"]),
     )
     audit_path = output_dir / f"{report_prefix}_selection_forecast_audit_{stamp}.parquet"
     trials_path = output_dir / f"{report_prefix}_selection_trials_{stamp}.parquet"
